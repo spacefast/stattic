@@ -1,0 +1,14 @@
+{
+  "name": "stattic",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build:routing": "bun --filter @stattic/routing build",
+    "test:routing": "bun --filter @stattic/routing test",
+    "typecheck:routing": "bun --filter @stattic/routing typecheck"
+  }
+}
+

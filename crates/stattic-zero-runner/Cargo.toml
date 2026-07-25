@@ -1,0 +1,16 @@
+[package]
+name = "stattic-zero-runner"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.22"
+mysql = "26"
+rquickjs = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

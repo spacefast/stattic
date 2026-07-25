@@ -1,0 +1,1691 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stattic Builder + Runtime — Spacefast-native delivery plan</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0a0c10;
+        --panel: #12161d;
+        --panel-2: #181e27;
+        --ink: #f2f5f8;
+        --muted: #a8b2c0;
+        --faint: #748093;
+        --line: #293241;
+        --accent: #ff6846;
+        --accent-2: #ff9b78;
+        --green: #66d69e;
+        --yellow: #f0c75e;
+        --red: #ff7d85;
+        --blue: #87b8ff;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 15% -10%, rgba(255, 104, 70, 0.13), transparent 34rem),
+          var(--bg);
+        color: var(--ink);
+        font: 16px/1.58 var(--sans);
+      }
+
+      main {
+        width: min(1120px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 54px 0 110px;
+      }
+
+      h1,
+      h2,
+      h3 {
+        line-height: 1.14;
+        letter-spacing: -0.025em;
+      }
+
+      h1 {
+        max-width: 920px;
+        margin: 10px 0 18px;
+        font-size: clamp(2.5rem, 7vw, 5.5rem);
+      }
+
+      h2 {
+        margin: 64px 0 18px;
+        padding-top: 24px;
+        border-top: 1px solid var(--line);
+        font-size: clamp(1.65rem, 4vw, 2.45rem);
+      }
+
+      h3 {
+        margin: 30px 0 10px;
+        font-size: 1.2rem;
+      }
+
+      p,
+      li,
+      td {
+        color: var(--muted);
+      }
+
+      p {
+        max-width: 86ch;
+      }
+
+      strong {
+        color: var(--ink);
+      }
+
+      a {
+        color: var(--blue);
+      }
+
+      code {
+        padding: 0.13em 0.36em;
+        border-radius: 5px;
+        background: var(--panel-2);
+        color: var(--accent-2);
+        font: 0.88em/1.4 var(--mono);
+        overflow-wrap: anywhere;
+      }
+
+      pre {
+        margin: 18px 0;
+        padding: 18px 20px;
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #0e1218;
+      }
+
+      pre code {
+        padding: 0;
+        background: none;
+        color: #c9d3df;
+        font-size: 13px;
+      }
+
+      table {
+        width: 100%;
+        margin: 18px 0 28px;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--faint);
+        font-size: 12px;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      ul,
+      ol {
+        padding-left: 24px;
+      }
+
+      li + li {
+        margin-top: 8px;
+      }
+
+      .eyebrow {
+        margin: 0;
+        color: var(--accent-2);
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+      }
+
+      .lede {
+        max-width: 820px;
+        color: var(--ink);
+        font-size: clamp(1.12rem, 2.4vw, 1.45rem);
+      }
+
+      .meta {
+        color: var(--faint);
+        font-size: 13px;
+      }
+
+      .card {
+        margin: 22px 0;
+        padding: 22px 24px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: linear-gradient(145deg, rgba(24, 30, 39, 0.92), rgba(18, 22, 29, 0.92));
+      }
+
+      .decision {
+        border-color: rgba(102, 214, 158, 0.5);
+        background: linear-gradient(145deg, rgba(23, 55, 43, 0.74), rgba(18, 22, 29, 0.96));
+      }
+
+      .warning {
+        border-left: 4px solid var(--yellow);
+      }
+
+      .danger {
+        border-left: 4px solid var(--red);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 14px;
+        margin: 20px 0;
+      }
+
+      .grid .card {
+        margin: 0;
+      }
+
+      .label {
+        margin: 0 0 6px;
+        color: var(--faint);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+      }
+
+      .metric {
+        margin: 0;
+        color: var(--ink);
+        font-size: 1.45rem;
+        font-weight: 760;
+      }
+
+      .good {
+        color: var(--green);
+      }
+
+      .bad {
+        color: var(--red);
+      }
+
+      .chip {
+        display: inline-block;
+        margin: 2px 5px 2px 0;
+        padding: 2px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(7, auto);
+        align-items: center;
+        gap: 10px;
+        margin: 28px 0;
+        overflow-x: auto;
+      }
+
+      .flow .node {
+        min-width: 150px;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        text-align: center;
+      }
+
+      .flow .arrow {
+        color: var(--faint);
+        font-size: 1.35rem;
+      }
+
+      .toc {
+        columns: 2;
+        gap: 32px;
+      }
+
+      .toc a {
+        text-decoration: none;
+      }
+
+      .small {
+        font-size: 13px;
+      }
+
+      .scroll {
+        overflow-x: auto;
+      }
+
+      .checklist li::marker {
+        color: var(--green);
+      }
+
+      footer {
+        margin-top: 70px;
+        padding-top: 22px;
+        border-top: 1px solid var(--line);
+        color: var(--faint);
+        font-size: 13px;
+      }
+
+      @media (max-width: 720px) {
+        main {
+          width: min(100% - 28px, 1120px);
+          padding-top: 32px;
+        }
+
+        .toc {
+          columns: 1;
+        }
+
+        th,
+        td {
+          padding: 10px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Architecture decision and delivery plan</p>
+      <h1>Stattic Builder builds. Stattic Runtime admits and serves.</h1>
+      <p class="lede">
+        Make the CLI the normal build environment, keep one Rust compilation authority, and make
+        the PHP Runtime fully useful without a Rust finalizer. Spacefast uses the same bundle
+        contract for direct publishes, Git builds, dashboard uploads, imports, and self-hosting.
+      </p>
+      <p class="meta">25 July 2026 · Status: adversarially reviewed and revised · Scope: Builder, CLI, Runtime, control plane, Zero, and wp.cloud delivery</p>
+
+      <section class="card decision">
+        <p class="label">Decision</p>
+        <p class="metric">
+          The canonical publish artifact is a verified Stattic deployment bundle, not an upload
+          session waiting to be compiled.
+        </p>
+        <p>
+          The Rust finalizer is assumed merged and is the starting point for this work. We factor
+          its compilation authority into <strong>Stattic Builder</strong>, run it from the CLI and
+          Spacefast Builder hosts, and replace runtime finalization with a compiler-free
+          <strong>admission</strong> operation.
+        </p>
+      </section>
+
+      <div class="grid">
+        <div class="card">
+          <p class="label">Default client path</p>
+          <p class="metric">Build locally</p>
+          <p>Embedded Rust/WASI bytes; no Cargo or Rust toolchain on the user's machine.</p>
+        </div>
+        <div class="card">
+          <p class="label">Default runtime path</p>
+          <p class="metric">PHP serve-only</p>
+          <p>No Rust finalizer binary and no opportunistic server compilation.</p>
+        </div>
+        <div class="card">
+          <p class="label">Spacefast path</p>
+          <p class="metric">Bind, admit, activate</p>
+          <p>The control plane preserves policy, durable receipts, placement, and route ownership.</p>
+        </div>
+        <div class="card">
+          <p class="label">Authoring</p>
+          <p class="metric">Markdown first</p>
+          <p>Markdown, Gutenberg, and compatible block themes compile through the same Builder.</p>
+        </div>
+      </div>
+
+      <nav class="card">
+        <p class="label">Contents</p>
+        <ol class="toc">
+          <li><a href="#baseline">Merged baseline</a></li>
+          <li><a href="#invariants">Non-negotiable invariants</a></li>
+          <li><a href="#architecture">Target architecture</a></li>
+          <li><a href="#artifacts">Artifact contract</a></li>
+          <li><a href="#spacefast">Native Spacefast integration</a></li>
+          <li><a href="#cli">CLI DX</a></li>
+          <li><a href="#runtime">Runtime profiles and signaling</a></li>
+          <li><a href="#zero">Zero and target binding</a></li>
+          <li><a href="#security">Security and trust</a></li>
+          <li><a href="#migration">Cutover sequence</a></li>
+          <li><a href="#tests">Acceptance gates</a></li>
+          <li><a href="#reviews">Adversarial review record</a></li>
+        </ol>
+      </nav>
+
+      <h2 id="baseline">1. Merged baseline</h2>
+      <div class="card warning">
+        <strong>Planning rule:</strong> the Rust finalizer has landed. It is not a prerequisite,
+        option, experiment, or future merge in this plan. Every change below is made on top of its
+        one-parser, one-finalizer ownership boundary.
+      </div>
+      <p>The merged baseline already provides the hard parts worth preserving:</p>
+      <ul>
+        <li>
+          Rust owns upload materialization, Markdown, Gutenberg, themes, layouts, routing artifacts,
+          HTML decoration, and Zero compilation.
+        </li>
+        <li>
+          The CLI and control plane already ship the same Rust core as an embedded WASI artifact.
+          Standalone CLI smoke tests exercise it.
+        </li>
+        <li>
+          PHP authenticates management calls, owns storage and atomic activation, invokes the native
+          finalizer, and serves the resulting immutable version.
+        </li>
+        <li>
+          Version finalization already has durable control-plane receipts, retry ownership, runtime
+          state reconciliation, activation CAS, and changed-path purge semantics.
+        </li>
+        <li>
+          Runtime import already validates archive structure and can install static compiled
+          versions without invoking the native binary. Zero import is the remaining target-rebind
+          exception.
+        </li>
+      </ul>
+      <p>
+        The cutover moves where compilation runs. It must not reimplement the finalizer in
+        TypeScript or PHP, weaken durable publication, or create a second artifact language.
+      </p>
+
+      <h2 id="invariants">2. Non-negotiable invariants</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Invariant</th>
+            <th>Consequence</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>One semantic compiler</td>
+            <td>Markdown, Gutenberg, block-theme, routing, and Zero semantics remain Rust-owned.</td>
+          </tr>
+          <tr>
+            <td>Prebuilt means no build</td>
+            <td>The Runtime admission path contains no Builder invocation and no fallback branch.</td>
+          </tr>
+          <tr>
+            <td>Artifacts prove their state</td>
+            <td>A request boolean such as <code>prebuilt: true</code> never bypasses validation.</td>
+          </tr>
+          <tr>
+            <td>Spacefast retains domain truth</td>
+            <td>Postgres owns version intent, receipts, desired channel, and terminal proof.</td>
+          </tr>
+          <tr>
+            <td>The Runtime owns serving truth</td>
+            <td>Admission and route activation are atomic, observable, and reconciled.</td>
+          </tr>
+          <tr>
+            <td>Secrets do not travel to the CLI</td>
+            <td>Secret-dependent binding runs in a trusted Spacefast Builder host.</td>
+          </tr>
+          <tr>
+            <td>No silent mode changes</td>
+            <td>Local build, remote build, admission, and Zero execution are explicit capabilities.</td>
+          </tr>
+          <tr>
+            <td>Markdown is first-class input</td>
+            <td>It is discovered, diagnosed, incrementally built, and represented in build receipts.</td>
+          </tr>
+          <tr>
+            <td>No compatibility maze</td>
+            <td>After cutover, delete source-upload runtime finalization instead of preserving two lanes.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="architecture">3. Target architecture</h2>
+      <div class="flow" aria-label="Build and publish flow">
+        <div class="node"><strong>Source</strong><br /><span class="small">files, Markdown, blocks</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Stattic Builder</strong><br /><span class="small">Rust via WASI/native</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Bundle</strong><br /><span class="small">content + binding</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>PHP Runtime</strong><br /><span class="small">verify, admit, serve</span></div>
+      </div>
+
+      <h3>3.1 Product boundaries</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Product/component</th>
+            <th>Owns</th>
+            <th>Does not own</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Stattic CLI</strong></td>
+            <td>Discovery, ignore rules, defaults, incremental cache, UX, upload orchestration.</td>
+            <td>Template, block, Markdown, or routing semantics.</td>
+          </tr>
+          <tr>
+            <td><strong>Stattic Builder</strong></td>
+            <td>Parsing, rendering, lowering, diagnostics, artifact graph, reproducible bundle output.</td>
+            <td>Space ownership, billing, placement, activation, or public serving.</td>
+          </tr>
+          <tr>
+            <td><strong>Stattic Runtime</strong></td>
+            <td>Bundle verification, safe materialization, immutable install, route pointers, serving.</td>
+            <td>Source interpretation, Markdown rendering, Gutenberg parsing, or target rebinding.</td>
+          </tr>
+          <tr>
+            <td><strong>Spacefast control plane</strong></td>
+            <td>Authorization, policy, target context, durable work, binding, placement, activation.</td>
+            <td>A second compiler implementation.</td>
+          </tr>
+          <tr>
+            <td><strong>Spacefast Builder host</strong></td>
+            <td>Trusted Builder execution for Git, browser uploads, public target context, and target-bound Zero.</td>
+            <td>Serving or channel truth.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>3.2 One core, multiple hosts</h3>
+      <p>
+        Extract the merged finalizer into a host-independent Rust core with explicit source and
+        artifact interfaces. The current WASI surface is not a full site builder: it exposes
+        in-memory preparation operations and deliberately rejects filesystem-rooted site
+        finalization. Phase 1 therefore adds one specific missing host contract rather than
+        pretending the existing artifact is sufficient.
+      </p>
+      <ul>
+        <li>
+          <strong>WASI host:</strong> a full static-site <code>build_bundle</code> operation with
+          sandboxed preopened source/output directories, embedded in npm and standalone CLI
+          releases. It has no network access and emits target-neutral Zero input only.
+        </li>
+        <li>
+          <strong>Spacefast host:</strong> the same Rust core exposes a separate
+          <code>bind_bundle</code> ABI operation through allowlisted WASI bytes or a thin native
+          adapter in an ephemeral tenant-isolated sandbox. It is never loaded inside the
+          control-plane or queue-worker process.
+        </li>
+        <li><strong>Native developer host:</strong> deterministic fixture runs, benchmarks, and debugging.</li>
+      </ul>
+      <p>
+        The filesystem-rooted finalizer becomes one host adapter rather than the architecture.
+        Protocol metadata and golden vectors prove all hosts use the same Builder ABI. Release
+        provenance records the SHA-256 of the actual WASI bytes; a claimed semantic version or Git
+        revision is not sufficient. Developer overrides are explicitly untrusted and cannot claim
+        Spacefast Builder provenance.
+      </p>
+
+      <h3>3.3 Two-stage output</h3>
+      <ol>
+        <li>
+          <strong>Portable content pack:</strong> locally compiled pages, blocks, theme output,
+          normalized routes, headers, static files, and non-target-bound Zero inputs.
+        </li>
+        <li>
+          <strong>Target binding pack:</strong> Spacefast policy, platform injection, channel
+          variants, target identity, opaque secret-handle references, and final Zero binding.
+        </li>
+      </ol>
+      <p>
+        A deployment bundle combines both digests. Most work is local; sensitive or
+        target-specific work stays trusted. Builder is secret-blind in both stages: target binding
+        receives opaque secret handles and monotonic handle revisions, never secret values or
+        deterministic value digests. A completely
+        portable static site has an empty binding pack and can be admitted by any compatible
+        self-hosted Runtime.
+      </p>
+
+      <h3>3.4 Dependency classes, not “config-only” guesses</h3>
+      <p>Builder emits a dependency receipt that classifies every input:</p>
+      <ul>
+        <li>
+          <strong>Content inputs:</strong> source bytes, Markdown/block/theme semantics,
+          redirects, headers, and compile-time public variables. Spacefast plan policy never changes
+          portable artifact identity.
+        </li>
+        <li>
+          <strong>Binding inputs:</strong> target identity, placement epoch, Runtime instance,
+          target-bound Zero graph, platform injection, and path-level replacement blobs.
+        </li>
+        <li>
+          <strong>Activation inputs:</strong> hostnames, channel ownership, mutable cloud policy,
+          secret-handle revisions, and expected serving generation.
+        </li>
+      </ul>
+      <p>
+        A binding pack is a path-level patch manifest anchored to one
+        <code>contentDigest</code>. It may replace named blobs but cannot contain semantic source
+        nodes or invoke Markdown, Gutenberg, theme, or routing parsers. Any change to a content
+        input rebuilds the content pack.
+      </p>
+
+      <h2 id="artifacts">4. Canonical artifact contract</h2>
+      <p>
+        Introduce <code>stattic.bundle.v1</code>. Do not overload
+        <code>spacefast_export_v1</code>: exports are multi-version migration archives with route
+        history, while bundles are one immutable build result.
+      </p>
+
+      <h3>4.1 Archive layout</h3>
+      <pre><code>site.stattic
+├── bundle.json
+├── manifests/
+│   ├── content.json
+│   ├── binding.json
+│   └── files.json
+├── blobs/&lt;sha256&gt;
+├── artifacts/
+│   ├── pages/
+│   ├── routing/
+│   ├── themes/
+│   └── zero/
+├── signatures/
+│   └── spacefast.json       # absent for local portable bundles
+└── provenance/
+    └── builder.json         # signed execution evidence, excluded from artifact identity</code></pre>
+
+      <h3>4.2 Root descriptor</h3>
+      <pre><code>{
+  "format": "stattic.bundle.v1",
+  "profile": "portable-static",
+  "runtimeAbi": "static-runtime-v2",
+  "builder": {
+    "abi": "stattic.builder.v1"
+  },
+  "securityEpoch": 1,
+  "contentDigest": "sha256:...",
+  "bindingDigest": null,
+  "deploymentDigest": "sha256:...",
+  "requirements": {
+    "serverBuild": false,
+    "targetBinding": false,
+    "executeZero": false
+  },
+  "target": null
+}</code></pre>
+
+      <h3>4.3 Profiles</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Profile</th>
+            <th>Meaning</th>
+            <th>Runtime requirement</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>portable-static</code></td>
+            <td>Complete static artifact with no target binding.</td>
+            <td>PHP serve-only Runtime.</td>
+          </tr>
+          <tr>
+            <td><code>spacefast-static</code></td>
+            <td>Static artifact plus signed Spacefast binding pack.</td>
+            <td>PHP serve-only Runtime.</td>
+          </tr>
+          <tr>
+            <td><code>portable-zero-input</code></td>
+            <td>CLI-built static content plus target-neutral Zero input; never directly admissible.</td>
+            <td>Spacefast <code>bind_bundle</code> must convert it to <code>spacefast-zero</code>.</td>
+          </tr>
+          <tr>
+            <td><code>spacefast-zero</code></td>
+            <td>Target-bound Zero graph plus static content.</td>
+            <td>PHP Runtime plus the separately declared Zero executor.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>4.4 Data, not executable PHP</h3>
+      <p>
+        The public bundle contract is language-neutral data. It must not require arbitrary PHP from
+        an uploaded archive. During admission, trusted Runtime code may emit optimized PHP array
+        caches from validated schemas. That is deterministic materialization, not semantic
+        compilation: it never parses source, renders Markdown, or changes routing meaning.
+      </p>
+      <p>
+        Builder emits the complete canonical Runtime IR. PHP may only perform
+        schema-preserving serialization or indexing whose decoded value is hash-equivalent to that
+        IR. It cannot normalize routes, apply defaults, lower themes, or reinterpret headers.
+        Cross-language serving vectors must prove that Builder IR and served behavior agree. If
+        this isomorphism cannot be proven, Runtime serves the validated neutral tables directly.
+      </p>
+
+      <h3>4.5 Verification</h3>
+      <p>The Runtime verifies every claim rather than trusting the descriptor:</p>
+      <ul>
+        <li>ZIP/path safety, decompressed size, entry count, and compression-ratio bounds.</li>
+        <li>Every file digest, aggregate manifest digest, and artifact graph reference.</li>
+        <li>Builder ABI and Runtime ABI compatibility.</li>
+        <li>Required artifact completeness for the declared profile.</li>
+        <li>Target identity, binding digest, expiry, and signature when a binding is present.</li>
+        <li>No source-only nodes or unresolved target placeholders when <code>serverBuild</code> is false.</li>
+      </ul>
+
+      <h3>4.6 Identity is separate from authorization</h3>
+      <p>
+        <code>contentDigest</code>, <code>bindingDigest</code>, and
+        <code>deploymentDigest</code> cover canonical artifact identity only. Nonces, expiry,
+        signatures, upload authorization, and operation IDs live in a separate admission envelope
+        so identical artifacts remain deduplicable.
+      </p>
+      <p>
+        Execution provenance is separate too. A signed provenance envelope records
+        <code>hostKind</code>, actual Builder artifact SHA-256, release revision, and security epoch,
+        but is excluded from content/deployment identity. Static CLI and hosted builds can therefore
+        prove different trusted hosts while producing one canonical artifact digest.
+      </p>
+      <ul>
+        <li>Expiry is enforced before first acceptance.</li>
+        <li>An exact accepted receipt may replay after envelope expiry with a fresh management JWT.</li>
+        <li>The same Space/version/receipt with a different deployment digest is a hard conflict.</li>
+        <li>Admission authorization binds the exact deployment digest, profile, target Space/version, and operation.</li>
+      </ul>
+
+      <h3>4.7 Strict parser budgets</h3>
+      <p>
+        The new bundle reader reuses lessons from import safety, not its legacy PHP parsing lane.
+        It rejects duplicate raw or normalized paths, Unicode/case collisions, links, devices,
+        unsupported compression, unknown records, and any non-bijective manifest/blob graph. It
+        enforces per-entry and aggregate compressed bytes, expanded bytes, file count, JSON depth,
+        collection cardinality, CPU, and staging-disk budgets. Bundle-supplied PHP is never
+        evaluated or included.
+      </p>
+
+      <h2 id="spacefast">5. Native Spacefast integration</h2>
+      <p>
+        Spacefast should not bolt a bundle endpoint beside the existing publish lifecycle. The
+        bundle becomes the lifecycle's artifact, while existing authorization, durable operations,
+        route CAS, provider locks, health probes, and reconciliation remain authoritative.
+      </p>
+
+      <h3>5.1 Direct CLI publish</h3>
+      <ol>
+        <li>
+          CLI completes the optional framework/app build, then invokes embedded Stattic Builder to
+          create the target-neutral portable content pack offline. A failed local build creates no
+          Space or cloud resource.
+        </li>
+        <li>
+          CLI resolves or creates the Space and requests a short-lived
+          <strong>build context</strong>. The response contains Runtime ABI, Builder ABI, plan
+          policy, public platform inputs, target-binding nonce, and input generations—never secrets.
+        </li>
+        <li>
+          CLI uploads missing bundle blobs under a publish-attempt/artifact-object identity, not a
+          version. Client digests are hints until verified; a known verified object may be reused.
+        </li>
+        <li>
+          Control plane universally consumes the build context and freezes an
+          <strong>artifact-acceptance receipt</strong>, fencing authorization owner, all input
+          generations, Builder allowlist epoch, placement, expiry, and verified artifact identity.
+        </li>
+        <li>
+          It then transactionally compares the complete desired artifact/activation identity with
+          exact observed Runtime state. A true no-op returns the current version and mints no
+          version. Otherwise it allocates the version and binds the verified artifact to it.
+        </li>
+        <li>
+          If binding is needed, the control plane freezes a durable
+          <strong>binding-build receipt</strong> before invoking the trusted Builder host. The
+          verified binding output advances the operation to the next phase; retries never rebuild
+          under a newer Builder or context.
+        </li>
+        <li>
+          Control plane freezes a separate <strong>admission receipt</strong> only after the full
+          deployment digest exists. Runtime admission installs the version but does not imply
+          channel activation.
+        </li>
+        <li>
+          Control plane freezes an <strong>activation receipt</strong> with an expected Runtime
+          serving generation. Runtime activates by generation CAS, then the control plane commits
+          ready/channel state and verifies exact public serving.
+        </li>
+      </ol>
+
+      <h3>5.2 API vocabulary</h3>
+      <p>
+        Stop using “finalize” for both compilation and business completion. Preserve
+        Spacefast's agent-friendly convenience publish action and keep granular APIs for resumable
+        CLI work:
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Surface</th>
+            <th>Action</th>
+            <th>Semantics</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>CLI</td>
+            <td><code>sf build</code>, <code>sf publish</code></td>
+            <td>Build locally, then publish the resulting artifact.</td>
+          </tr>
+          <tr>
+            <td>Spacefast API</td>
+            <td><code>POST /spaces/:id/build-context</code></td>
+            <td>Freeze non-secret target inputs and return their digests.</td>
+          </tr>
+          <tr>
+            <td>Spacefast API</td>
+            <td><code>POST /spaces/:id/versions</code></td>
+            <td>Create a version intent around a source or prebuilt bundle.</td>
+          </tr>
+          <tr>
+            <td>Spacefast API</td>
+            <td><code>POST /v1/publish</code></td>
+            <td>
+              Public convenience action: accepts source/archive for trusted remote build or
+              <code>application/vnd.stattic.bundle</code> for direct admission; returns the
+              existing Space/version/claim/operation receipt shape.
+            </td>
+          </tr>
+          <tr>
+            <td>Runtime API</td>
+            <td><code>POST /spaces/:id/versions/:id/admit</code></td>
+            <td>Verify and atomically install an already-built deployment bundle.</td>
+          </tr>
+          <tr>
+            <td>Runtime API</td>
+            <td><code>PUT /spaces/:id/routes/:route</code></td>
+            <td>Activate one immutable serving generation with expected-generation CAS.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        This is a pre-launch cutover: delete the old Runtime finalize route and its obsolete
+        contracts/tests once all publishers use admission. Do not keep a shadow compatibility lane.
+      </p>
+
+      <h3>5.3 Durable state</h3>
+      <p>Make artifact provenance first-class rather than burying it in source metadata:</p>
+      <ul>
+        <li><code>build_mode</code>: <code>local</code>, <code>spacefast</code>, or <code>import</code>.</li>
+        <li><code>builder_abi</code> and <code>builder_revision</code>.</li>
+        <li><code>content_digest</code>, <code>binding_digest</code>, and <code>deployment_digest</code>.</li>
+        <li><code>build_context_digest</code> and optional expiry.</li>
+        <li>A version-delivery phase ledger with monotonic epoch and exact receipt IDs.</li>
+      </ul>
+      <p>
+        Do not collapse bind, admit, activate, and public proof behind one opaque mutation. Each
+        external effect has a frozen input and a verified output:
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Phase</th>
+            <th>Frozen before effect</th>
+            <th>Observed output</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>artifact_acceptance</code></td>
+            <td>Verified artifact, authorization owner, all context generations, Builder allowlist epoch, placement, expiry.</td>
+            <td>Accepted artifact identity or exact no-op result before version allocation.</td>
+          </tr>
+          <tr>
+            <td><code>binding_build</code></td>
+            <td>Content digest, build-context digest, Builder byte digest, placement epoch, opaque secret handles and revisions.</td>
+            <td>Verified binding and deployment digests.</td>
+          </tr>
+          <tr>
+            <td><code>admission</code></td>
+            <td>Deployment digest, Runtime instance, ABI/security epoch, exact operation ID.</td>
+            <td>Runtime admission receipt with immutable version identity.</td>
+          </tr>
+          <tr>
+            <td><code>runtime_secret_stage</code></td>
+            <td>Version, deployment digest, Runtime/placement epoch, encrypted payload digest, handle revisions.</td>
+            <td>Idempotent Runtime secret-set receipt; staged values remain unreachable to serving requests.</td>
+          </tr>
+          <tr>
+            <td><code>zero_migration</code></td>
+            <td>Migration-plan digest, target database identity, secret-set receipt, Runtime/placement epoch.</td>
+            <td>Exact per-migration receipts and terminal schema proof.</td>
+          </tr>
+          <tr>
+            <td><code>activation</code></td>
+            <td>Ready projection, route config, policy/secret-handle revisions, expected serving generation.</td>
+            <td>Runtime activation receipt and new serving generation.</td>
+          </tr>
+          <tr>
+            <td><code>public_proof</code></td>
+            <td>Expected host, version, deployment digest, Runtime revision.</td>
+            <td>Observed HTTP/version headers and terminal domain success.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        The build context is stored server-side with one-time nonce, authorization owner,
+        config/policy/variable generations, placement generation, Builder allowlist epoch, and
+        expiry. It is consumed for every publish when artifact acceptance freezes, whether or not
+        binding is needed. Expiry blocks the first effect, but cannot strand an exact already-frozen
+        retry.
+      </p>
+      <p>
+        Every transition CASes
+        <code>(operation_id, phase, epoch, delivery_claim_id)</code> in one Postgres transaction
+        before effect dispatch. Builder and Runtime requests bind the resulting phase receipt ID
+        and epoch. A stale worker may replay an already accepted exact receipt, but cannot create or
+        dispatch the next phase.
+      </p>
+
+      <h3>5.4 Every publisher converges</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Publisher</th>
+            <th>Builder host</th>
+            <th>Shared terminal path</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>CLI directory publish</td>
+            <td>Local embedded WASI; remote binding only when required.</td>
+            <td rowspan="5">Version intent → bundle upload → durable admission → Runtime admit → activate → public proof.</td>
+          </tr>
+          <tr>
+            <td>Connected Git repository</td>
+            <td>
+              Framework executor → frozen output digest → allowlisted Builder host → signed bundle
+              digest. Retries do not rerun either build under a new revision.
+            </td>
+          </tr>
+          <tr>
+            <td>Dashboard/browser upload</td>
+            <td>Spacefast Builder host.</td>
+          </tr>
+          <tr>
+            <td>Anonymous inline publish</td>
+            <td>Spacefast Builder host with stricter caps.</td>
+          </tr>
+          <tr>
+            <td>Space import</td>
+            <td>None for portable static; Spacefast binding host for Zero/target changes.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>5.5 Config-only and dedupe</h3>
+      <p>
+        “Config-only” is user intent, not a cache boundary. Builder's dependency receipt decides
+        whether the change invalidates content, binding, or activation. Serve-only and binding-only
+        changes reuse the content pack; theme, routes, headers, template, public compile-time
+        variable, or entitlement changes rebuild it. A no-op is allowed only when complete desired
+        deployment and activation identity equals exact observed Runtime identity.
+      </p>
+      <p>
+        Unknown artifacts are verified under publish-attempt identity before this decision. Only a
+        non-no-op allocates a version row or version number.
+      </p>
+
+      <h3>5.6 Runtime generation transaction</h3>
+      <p>
+        A write lock prevents concurrent mutation but does not make several files crash-atomic.
+        Activation therefore writes one immutable record containing version, deployment digest,
+        route config, policy, secret-handle references, hostname intent, changed paths, and
+        activation epoch. Runtime builds every derived projection from that record and atomically
+        flips one serving-generation pointer last.
+      </p>
+      <ul>
+        <li>Runtime rejects a stale expected serving generation or route digest.</li>
+        <li>Exact receipt replay returns the same stored activation result.</li>
+        <li>Recovery reconstructs projections from the immutable activation record.</li>
+        <li>Crash injection after every subwrite must prove either the old or new generation serves, never a mixture.</li>
+      </ul>
+
+      <h3>5.7 Observed Runtime truth</h3>
+      <p>Authenticated Runtime state—not public health—reports:</p>
+      <ul>
+        <li>Admitted <code>(versionId, deploymentDigest, runtimeAbi, admissionReceiptId)</code>.</li>
+        <li>Active <code>(route, versionId, deploymentDigest, routeConfigDigest, bindingDigest, activationEpoch)</code>.</li>
+        <li>Runtime instance/revision, release-manifest digest, security epoch, and serving-generation ID.</li>
+      </ul>
+      <p>
+        Postgres owns desired/domain truth; Runtime reports observed serving truth. Terminal
+        success is their exact join. A matching version ID alone is insufficient for forward
+        completion.
+      </p>
+
+      <h3>5.8 Multi-version import</h3>
+      <p>
+        A Spacefast export remains an orchestration container holding portable version bundles and
+        channel/history topology. Import freezes the complete source→target version map before the
+        first admission, then gives every target version its own durable phase receipts. Partial
+        completion is resumable, not presented as an all-or-nothing rollback. Channels move only
+        after the required version set is observed admitted. Every destination binding/signature
+        is regenerated; same version/same deployment digest replays, while same version/different
+        digest conflicts.
+      </p>
+
+      <h2 id="cli">6. CLI DX</h2>
+      <h3>6.0 Product and configuration names</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Surface</th>
+            <th>Decision</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>stattic</code></td>
+            <td>Open-source Builder/Runtime CLI: portable build, inspect, and local serve.</td>
+          </tr>
+          <tr>
+            <td><code>sf</code> / <code>spacefast</code></td>
+            <td>Spacefast CLI: app build, embedded Stattic Builder, cloud publish, and hosting operations.</td>
+          </tr>
+          <tr>
+            <td><code>stattic.config.jsonc</code></td>
+            <td>Portable Builder inputs only: content roots, Markdown, blocks, layouts, theme, routes, and output policy.</td>
+          </tr>
+          <tr>
+            <td><code>sf.jsonc</code></td>
+            <td>Spacefast-only link, app-build, target, channel, and deployment overlay; it has no keys that reinterpret portable content.</td>
+          </tr>
+          <tr>
+            <td><code>bundle.json</code></td>
+            <td>Root descriptor inside <code>.stattic</code> archives; never a source-project config.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        CLI flags override the config owned by that CLI. Where <code>sf</code> invokes Builder, it
+        passes <code>stattic.config.jsonc</code> unchanged; overlapping configuration keys are
+        rejected rather than resolved by hidden precedence.
+      </p>
+
+      <h3>6.1 Commands</h3>
+      <pre><code>$ sf build
+✓ Ran app build
+✓ Read 42 output/source files
+✓ Rendered 18 Markdown pages
+✓ Rendered 7 Gutenberg documents
+✓ Compiled theme.json v3 and _layout.html
+✓ Wrote .spacefast/artifacts/site.stattic
+
+$ sf publish
+✓ Built locally
+✓ Uploaded 3 missing blobs
+✓ Spacefast bound deployment context
+✓ Runtime admitted sha256:4bc…
+✓ Published https://example.sf.localhost
+  Server build: not required</code></pre>
+      <ul>
+        <li>
+          <code>sf build</code> remains the whole pipeline: optional framework/app build, then
+          Stattic artifact compilation into <code>.spacefast/artifacts/site.stattic</code>.
+        </li>
+        <li>
+          <code>sf build --prebuilt &lt;dir&gt;</code> skips the app build but still compiles the
+          directory through Stattic Builder.
+        </li>
+        <li><code>sf publish [dir]</code> builds locally by default.</li>
+        <li>
+          <code>sf publish .spacefast/artifacts/site.stattic</code> detects the bundle by descriptor/magic and
+          publishes it without rebuilding.
+        </li>
+        <li>
+          <code>sf publish --remote</code> retains the established explicit Spacefast remote-build
+          selection.
+        </li>
+        <li><code>sf inspect .spacefast/artifacts/site.stattic</code> prints ABIs, profiles, digests, inputs, outputs, and unresolved requirements.</li>
+      </ul>
+      <p>
+        There is no implicit “try local, then send source” fallback. If local build cannot complete,
+        the CLI explains why and offers the explicit <code>--remote</code> path.
+      </p>
+      <p>
+        Bundle output must be outside the selected source/framework-output tree. The default
+        <code>.spacefast/artifacts/site.stattic</code> preserves the existing private state root;
+        custom paths inside the input tree are rejected. Builder writes a sibling temporary file,
+        verifies it, then atomically replaces the destination so a stale bundle cannot include
+        itself or poison a later build.
+      </p>
+
+      <h3>6.2 Distribution</h3>
+      <p>
+        Extend the already embedded Rust/WASI artifact with the full static
+        <code>build_bundle</code> operation. The user installs neither Cargo nor a separate native
+        compiler. Release smoke must execute a real Markdown + Gutenberg + theme bundle build on
+        npm and every standalone target with no environment override. It verifies the embedded WASI
+        digest against the signed Builder release manifest.
+      </p>
+
+      <h3>6.3 Project defaults</h3>
+      <pre><code># Minimal project
+content/
+  index.md
+_layout.html
+theme.json
+stattic.config.jsonc</code></pre>
+      <p>
+        Zero-config discovery remains useful, but defaults are recorded in the build receipt so a
+        new Builder release cannot silently reinterpret an old artifact. Markdown is a native
+        source type, not a plugin or preprocessing command.
+      </p>
+
+      <h3>6.4 First-class Markdown contract</h3>
+      <p>
+        Graduate Markdown from the hidden experimental Gutenberg switch before bundle work ships.
+        Stattic projects enable it by default through public portable configuration. The contract
+        defines root and nested <code>index.md</code> routes, extension removal, frontmatter,
+        drafts, layout selection, date behavior, collision errors, raw HTML policy, asset
+        dependencies, and incremental invalidation.
+      </p>
+      <p>
+        <code>sf dev</code> becomes the watch/preview host for the same Builder ABI and dependency
+        graph used by <code>sf build</code>; it is not a separate renderer. This is an intentional
+        cutover: the existing Spacefast-authored Pages preview moves to
+        <code>sf pages dev</code>, and the former root-only specialized behavior is deleted.
+      </p>
+
+      <h3>6.5 Honest Gutenberg and block-theme compatibility</h3>
+      <p>
+        The first release is described as
+        <strong>serialized Gutenberg + supported core blocks + theme.json v3 + _layout.html</strong>.
+        It does not claim generic WordPress Full Site Editing compatibility.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Surface</th>
+            <th>MVP contract</th>
+            <th>Not yet promised</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Blocks</td>
+            <td>Versioned allowlist of statically renderable core blocks; unsupported blocks produce path/line diagnostics.</td>
+            <td>Dynamic blocks, plugin blocks without registered static lowering, PHP render callbacks.</td>
+          </tr>
+          <tr>
+            <td>Themes</td>
+            <td>Root <code>theme.json</code> v3 token/style lowering plus Stattic <code>_layout.html</code>.</td>
+            <td>WordPress template hierarchy, <code>templates/</code>, <code>parts/</code>, PHP patterns, arbitrary theme functions.</td>
+          </tr>
+          <tr>
+            <td>Named themes</td>
+            <td>Only theme versions with passing fixture receipts and enumerated degradations.</td>
+            <td>“Twenty Twenty-Five compatible” until its full fixture passes.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="runtime">7. Runtime profiles and signaling</h2>
+      <h3>7.1 Installation profiles</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Profile</th>
+            <th>Contents</th>
+            <th>Use</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>serve-only</code></td>
+            <td>PHP engine and static admission support.</td>
+            <td>Default self-hosting and static Spacefast sites.</td>
+          </tr>
+          <tr>
+            <td><code>serve-zero</code></td>
+            <td>PHP engine plus separately packaged Zero executor.</td>
+            <td>Dynamic Spacefast sites. Still no server finalizer.</td>
+          </tr>
+          <tr>
+            <td><code>builder-host</code></td>
+            <td>Stattic Builder WASI/native host; no public serving.</td>
+            <td>Spacefast trusted remote builds.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>7.2 Health contract</h3>
+      <pre><code>{
+  "ok": true,
+  "runtime": "stattic-php",
+  "schema": "static-runtime-v2",
+  "engine_revision": "runtime-...",
+  "profile": "serve-only",
+  "capabilities": {
+    "serve": true,
+    "admitBundle": ["stattic.bundle.v1"],
+    "buildSource": false,
+    "rebindZero": false,
+    "executeZero": false
+  }
+}</code></pre>
+      <p>
+        Public health is informational only. Effective capability is derived from a verified,
+        signed Runtime release manifest plus startup file checks and is returned by authenticated
+        <code>/state</code> with release-manifest digest and security epoch. Spacefast pins that
+        state to the expected release before admission. Requests do not discover mode by probing
+        for an executable, and admission enforces the profile independently of health.
+      </p>
+
+      <h3>7.3 Admission receipt</h3>
+      <pre><code>{
+  "admission": "imported_prebuilt",
+  "buildStatus": "not_required",
+  "profile": "spacefast-static",
+  "builderRevision": "...",
+  "contentDigest": "sha256:...",
+  "bindingDigest": "sha256:...",
+  "deploymentDigest": "sha256:...",
+  "runtimeRevision": "..."
+}</code></pre>
+      <p>
+        <code>buildStatus</code> is derived from what occurred. It is never accepted as authority
+        from the caller.
+      </p>
+
+      <h2 id="zero">8. Zero and target binding</h2>
+      <div class="card danger">
+        <strong>Do not overstate the PHP-only promise.</strong> A prebuilt static site needs no Rust
+        process on the Runtime. A Zero site still needs the current Rust Zero executor unless Zero
+        adopts a different execution substrate. That executor is not the finalizer and must have a
+        separate capability bit.
+      </div>
+      <p>
+        Today, imported Zero artifacts are rebound on the destination Runtime. Move that work into
+        the trusted Builder host:
+      </p>
+      <ol>
+        <li>Control plane freezes target Space ID, exact Runtime instance and placement epoch, Runtime ABI/security epoch, Zero isolation mode, capabilities, opaque resource handles, and secret-handle revisions.</li>
+        <li>The trusted host invokes <code>bind_bundle</code> on the same Rust core to compile the target-bound Zero graph and emit a binding digest.</li>
+        <li>Spacefast signs the target binding envelope. Builder never receives secret values.</li>
+        <li>Runtime verifies target identity and signature, then installs the graph without rebinding.</li>
+      </ol>
+      <p>
+        A portable bundle containing Zero source but no target binding is incomplete. A serve-only
+        Runtime returns <code>422 target_binding_required</code> before staging any version. It
+        never invokes Builder or installs source-space executable artifacts.
+      </p>
+
+      <h3>8.1 Secret and callback contract</h3>
+      <p>
+        Secrets are not compile-time variables. Static templates cannot consume secret-scoped
+        values; use public build variables for static substitution or Zero for runtime secret use.
+        The bundle and externally readable build/admission receipts contain only opaque
+        secret-handle IDs and monotonic revisions. If the control plane needs secret change
+        detection, it keeps a keyed HMAC or encrypted fingerprint server-side only; no
+        deterministic unkeyed secret digest crosses an API or artifact boundary.
+      </p>
+      <ul>
+        <li>
+          Control plane stores encrypted, version-scoped secret bindings outside the bundle and
+          sends them through a separate authenticated Runtime configuration operation.
+        </li>
+        <li>
+          The durable <code>runtime_secret_stage</code> phase binds encrypted payload digest,
+          placement epoch, and exact handle revisions; response loss replays the same Runtime
+          secret-set receipt.
+        </li>
+        <li>
+          Staged secrets remain unreachable to serving requests. Only the authenticated migration
+          executor can use the exact staged set before activation; activation later pins that same
+          secret-set receipt and its handle revisions to the serving generation.
+        </li>
+        <li>
+          Runtime injects values into the Zero process at execution time; migration execution uses
+          the same authenticated handle resolution.
+        </li>
+        <li>Callback credentials are minted after admission and never become bundle content.</li>
+        <li>Rotation or revocation changes activation identity; Runtime relocation always produces a new target binding.</li>
+      </ul>
+
+      <h3>8.2 Zero migration phase</h3>
+      <p>
+        Zero migrations are an irreversible external database effect and cannot hide inside
+        admission or activation. After secret staging, the durable
+        <code>zero_migration</code> phase freezes migration-plan digest, target database identity,
+        exact secret-set receipt, Runtime/placement epoch, operation epoch, and delivery claim.
+        Each migration has an idempotency key and durable receipt; response loss probes exact schema
+        or migration-ledger state and forward-completes rather than rerunning blindly. Activation
+        requires successful exact migration proof, so new code never serves before its schema.
+      </p>
+
+      <h2 id="security">9. Security and trust boundaries</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Threat</th>
+            <th>Required control</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Caller labels source as prebuilt</td>
+            <td>Artifact graph validation; mode is derived, not trusted.</td>
+          </tr>
+          <tr>
+            <td>ZIP traversal/bomb</td>
+            <td>Existing import caps generalized into one admission reader; bounded staging.</td>
+          </tr>
+          <tr>
+            <td>Malicious executable PHP</td>
+            <td>Language-neutral bundle; Runtime emits its own caches from validated data.</td>
+          </tr>
+          <tr>
+            <td>Bundle tampering</td>
+            <td>Per-blob hashes, domain-separated aggregate digests, signed Spacefast binding.</td>
+          </tr>
+          <tr>
+            <td>Replay to another Space</td>
+            <td>Target Space, version, Runtime ABI, nonce, and expiry covered by binding signature.</td>
+          </tr>
+          <tr>
+            <td>Stale policy or platform injection</td>
+            <td>Server-stored context generations consumed atomically when artifact acceptance freezes.</td>
+          </tr>
+          <tr>
+            <td>Secret exfiltration</td>
+            <td>Builder is secret-blind; no secret values in context, artifact, provenance, diagnostics, receipts, caches, staging, stdout, or logs.</td>
+          </tr>
+          <tr>
+            <td>Partial install</td>
+            <td>Verify in unreachable staging, fsync where supported, atomic rename, then pointer CAS.</td>
+          </tr>
+          <tr>
+            <td>Compiler fallback on Runtime</td>
+            <td>Serve-only package excludes the binary; admission code has no invocation dependency.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>9.1 Three independent trust layers</h3>
+      <ul>
+        <li><strong>Content integrity:</strong> canonical manifests and digests prove exact bytes.</li>
+        <li><strong>Publisher authorization:</strong> management JWT binds deployment digest, profile, target, version, and operation.</li>
+        <li><strong>Builder provenance:</strong> optional dedicated artifact signature proves an allowlisted Builder byte digest and security epoch.</li>
+      </ul>
+      <p>
+        The artifact-signing key is separate from visitor and management JWT keys and has
+        <code>kid</code>, rotation, revocation, and minimum-security-epoch policy. Self-hosted
+        Runtime either trusts configured publisher keys or records an authenticated operator upload
+        as <code>unverified</code>; there is no unauthenticated unsigned admission mode.
+      </p>
+
+      <h3>9.2 Runtime release authenticity</h3>
+      <p>
+        Runtime distribution needs stronger authenticity than the current package. Every
+        <code>serve-only</code> or <code>serve-zero</code> release is a separately signed artifact
+        with an offline release-key envelope covering profile, security epoch, revision, complete
+        file list, per-file SHA-256, executable modes, and capability manifest. The installer pins
+        the trust root, performs bounded extraction into an immutable release directory, rejects
+        links/devices/duplicate or non-canonical paths before writing, verifies everything, then
+        atomically switches the active release pointer. Query-string installer credentials are
+        removed in favor of a header or CLI-only channel.
+      </p>
+
+      <h3>9.3 Downgrade and revocation</h3>
+      <p>
+        ABI compatibility is necessary but insufficient. Spacefast pins minimum Builder, bundle,
+        and Runtime security epochs; Builder byte digests and Runtime release digests are
+        allowlisted, and emergency revoked-digest lists fail closed before first admission.
+      </p>
+
+      <h3>9.4 Remote Builder isolation</h3>
+      <p>
+        Tenant-controlled source never executes in a control-plane or durable queue-worker
+        process. Every hosted build runs in an ephemeral unprivileged sandbox with a read-only
+        Builder runtime, explicit source/output mounts, no ambient environment, no network, and
+        CPU, wall-time, memory, PID, output, and filesystem quotas. Writable caches are isolated per
+        build or content-addressed and verified before reuse. WASI traps, native crashes, panics, and
+        quota kills become bounded build failures rather than worker deaths.
+      </p>
+
+      <h2 id="migration">10. Cutover sequence</h2>
+      <p>
+        Each phase ends in a shippable invariant. There is one migration on the implementation
+        branch; schema changes should be folded into it until the PR lands.
+      </p>
+
+      <h3>Phase 1 — Graduate the authoring and host contracts</h3>
+      <ul>
+        <li>Rename the public product boundary to Stattic Builder and Stattic Runtime.</li>
+        <li>Make Markdown a public default and specify routes, frontmatter, layouts, collisions, drafts, watch, and preview.</li>
+        <li>Publish the versioned Gutenberg/core-block and theme compatibility matrix.</li>
+        <li>Add the full static <code>build_bundle</code> WASI host with sandboxed preopens; keep target-bound Zero out of it.</li>
+        <li>Add trusted-host <code>bind_bundle</code> and the non-admissible <code>portable-zero-input</code> profile.</li>
+        <li>Generate one Builder ABI contract for Rust, TypeScript, and PHP consumers.</li>
+        <li>Define <code>stattic.bundle.v1</code>, profiles, digest rules, and canonical ordering.</li>
+        <li>Add cross-host golden vectors for Markdown, Gutenberg, themes, routing, and Zero inputs.</li>
+      </ul>
+
+      <h3>Phase 2 — Make Builder produce a real bundle</h3>
+      <ul>
+        <li>Factor filesystem writes out of the merged Rust finalizer core.</li>
+        <li>Add deterministic content-pack output and incremental dependency metadata.</li>
+        <li>Replace the CLI's compiler dry-run while retaining the existing app-build → artifact-compile meaning of <code>sf build</code>.</li>
+        <li>Ship the Builder WASI artifact in npm and every standalone target.</li>
+        <li>Make <code>sf dev</code> watch and preview through the same Builder dependency graph.</li>
+      </ul>
+
+      <h3>Phase 3 — Add compiler-free Runtime admission</h3>
+      <ul>
+        <li>Build a strict language-neutral bundle reader; do not inherit legacy PHP token/eval behavior.</li>
+        <li>Add staging, verification, cache materialization, and immutable admission commit.</li>
+        <li>Add immutable activation records, expected-generation CAS, and one serving-generation pointer.</li>
+        <li>Add signed profile-specific Runtime releases plus informational health and authoritative authenticated state.</li>
+        <li>Build and test a signed <code>serve-only</code> Runtime ZIP with the finalizer binary physically absent.</li>
+      </ul>
+
+      <h3>Phase 4 — Make Spacefast bundle-native</h3>
+      <ul>
+        <li>Add persisted build-context issuance and first-class artifact provenance columns.</li>
+        <li>Replace finalize receipts with the artifact acceptance → binding → admission → secret stage → Zero migration → activation → proof phase ledger.</li>
+        <li>Change direct CLI publish, Git builds, dashboard upload, and existing <code>/v1/publish</code> to converge on bundles.</li>
+        <li>Move target binding and Zero rebind into the secret-blind trusted Builder host.</li>
+        <li>Add the encrypted Runtime secret-handle store and execution-time Zero injection.</li>
+      </ul>
+
+      <h3>Phase 5 — Nuclear cutover</h3>
+      <ul>
+        <li>Remove Runtime source finalization, <code>rebind-import</code>, and finalizer executable packaging.</li>
+        <li>Remove old control-plane finalize commands, operation names, schemas, and source-upload assumptions.</li>
+        <li>Delete obsolete negative compatibility tests; retain only canonical admission behavior tests.</li>
+        <li>Keep Zero executor packaging separate and capability-driven.</li>
+      </ul>
+
+      <h3>Phase 6 — Distribution and documentation</h3>
+      <ul>
+        <li>Publish Builder releases for npm/standalone CLI and trusted Spacefast hosts from one revision.</li>
+        <li>Publish <code>serve-only</code> Runtime as the default self-host download.</li>
+        <li>Document Jekyll-like file conventions, Markdown behavior, supported Gutenberg blocks, and block-theme compatibility.</li>
+        <li>Document the exact difference between portable, Spacefast-bound, and Zero bundles.</li>
+      </ul>
+
+      <h3>Primary implementation seams</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Area</th>
+            <th>Current seam to evolve</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Rust core</td>
+            <td><code>crates/stattic-runtime-core/src/site_finalize.rs</code>, <code>model.rs</code>, <code>protocol.rs</code></td>
+          </tr>
+          <tr>
+            <td>Rust hosts</td>
+            <td><code>crates/stattic-runtime-compiler</code>, <code>crates/stattic-runtime-wasi</code></td>
+          </tr>
+          <tr>
+            <td>CLI</td>
+            <td><code>packages/cli/src/publish.ts</code>, <code>runtime-compiler.ts</code>, binary-release scripts</td>
+          </tr>
+          <tr>
+            <td>Shared contracts</td>
+            <td><code>packages/common/src/contracts/runtime-api.ts</code>, generated Builder protocol</td>
+          </tr>
+          <tr>
+            <td>Control plane</td>
+            <td><code>versions/lifecycle.ts</code>, <code>versions/routes.ts</code>, <code>builds/runner.ts</code>, operations</td>
+          </tr>
+          <tr>
+            <td>Runtime</td>
+            <td><code>runtime/engine/admin/finalize-rust.php</code>, <code>import.php</code>, health, installer, manifest</td>
+          </tr>
+          <tr>
+            <td>Space import/export</td>
+            <td><code>apps/control-plane/src/archives</code> and Runtime import jobs</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="tests">11. Acceptance gates</h2>
+      <ul class="checklist">
+        <li>
+          On a Runtime package with both the finalizer binary and its environment overrides absent,
+          <code>sf publish</code> successfully publishes Markdown, Gutenberg, a compatible block
+          theme, redirects, headers, and static assets.
+        </li>
+        <li>
+          A test trap fails if bundle admission calls <code>proc_open</code>, Builder, or a compiler
+          binary.
+        </li>
+        <li>
+          Two builds from the same source, Builder revision, and context produce identical content
+          and deployment digests on macOS and Linux.
+        </li>
+        <li>
+          npm and every standalone CLI target build a real Markdown + Gutenberg + theme
+          <code>.stattic</code> bundle without Cargo, a native compiler, or environment overrides.
+        </li>
+        <li>
+          A first anonymous publish builds portable content before creating the Space; a local
+          failure leaves no orphan cloud resource.
+        </li>
+        <li>
+          CLI WASI and trusted hosted Builder hosts produce one canonical artifact digest while
+          retaining distinct signed execution-provenance envelopes.
+        </li>
+        <li>
+          Bundle destinations inside the selected input tree are rejected, and repeated builds
+          cannot include a previous <code>.stattic</code> artifact.
+        </li>
+        <li>
+          Tampered blobs, missing artifacts, stale contexts, target mismatches, and unsupported ABIs
+          fail before immutable install or pointer mutation.
+        </li>
+        <li>
+          Secret-bearing templates and Zero environments leave no secret values in CLI build
+          context, bundles, Postgres receipts, Runtime staging, cache files, logs, diagnostics,
+          Builder stdout/stderr, exceptions, or version API output.
+        </li>
+        <li>
+          Git builds and direct CLI publishes produce the same bundle digest for the same framework
+          output and target context.
+        </li>
+        <li>
+          Dependency receipts prove whether a configuration change rebuilds content, rebinds paths,
+          or changes activation only; binding never invokes content parsers.
+        </li>
+        <li>
+          Zero bundles cannot be replayed to a different Space or admitted by a Runtime without
+          <code>executeZero</code>.
+        </li>
+        <li>
+          A crash before commit leaves no reachable version; a crash after Runtime commit resumes
+          from the same durable admission receipt without rebuilding.
+        </li>
+        <li>
+          Lost responses after binding, admission, and activation independently replay their exact
+          receipts without repeating prior effects.
+        </li>
+        <li>
+          A worker that loses its delivery claim cannot create or dispatch the next phase receipt;
+          exact already-accepted replay remains safe.
+        </li>
+        <li>
+          Context expiry before first effect fails; expiry after an accepted exact effect does not
+          strand its durable retry.
+        </li>
+        <li>
+          Runtime relocation between context, binding, and admission either rebinds under a new
+          phase epoch or fails without mutation.
+        </li>
+        <li>
+          Out-of-order competing activations and crash injection after every activation subwrite
+          serve either the old or new complete generation, never a mixed projection.
+        </li>
+        <li>
+          Same version/same digest returns the original admission receipt; same version/different
+          digest fails with a hard conflict.
+        </li>
+        <li>
+          Multi-version import resumes after a crash following each individual version admission
+          and moves no channel prematurely.
+        </li>
+        <li>
+          Zero restart, migration, rotation, revocation, and relocation work with no secret value in
+          the public bundle or durable public receipt.
+        </li>
+        <li>
+          Response loss after each Zero migration forward-completes from exact database/migration
+          proof; activation cannot precede the terminal migration receipt.
+        </li>
+        <li>
+          A four-digit test secret yields no bundle, API, receipt, log, or cache value that can
+          verify offline guesses.
+        </li>
+        <li>
+          Hostile Builder inputs covering memory growth, output explosion, expensive parsing,
+          panic/trap, cache poisoning, and filesystem/network access stay inside sandbox quotas and
+          cannot terminate a durable worker.
+        </li>
+        <li>
+          Production proof includes exact revision, bundle digest, Runtime revision, ready version,
+          route pointer, and public HTTP response—not deployment success alone.
+        </li>
+      </ul>
+
+      <h3>Behavioral test lanes</h3>
+      <ul>
+        <li>Rust golden corpus and host parity tests.</li>
+        <li>CLI end-to-end bundle build and standalone-binary smoke.</li>
+        <li>Runtime admission tests with real ZIPs and a physically missing compiler.</li>
+        <li>Bundle mutation fuzzing, duplicate-entry, decompression, OOM/timeout, and cross-PHP-version cache tests.</li>
+        <li>Control-plane route tests against real dev Postgres and the in-process wp.cloud fake.</li>
+        <li>Docker full-lane publish/serve tests for PHP-only static Runtime and Zero-enabled Runtime.</li>
+        <li>Exact-head PR Gate and E2E workflows before merge.</li>
+      </ul>
+
+      <h2>12. Explicit non-goals</h2>
+      <ul>
+        <li>No visual editor or WordPress admin replacement.</li>
+        <li>No PHP/Twig/Liquid second template language.</li>
+        <li>No requirement to execute arbitrary WordPress plugins.</li>
+        <li>No automatic upload of source when a local build fails.</li>
+        <li>No claim that a Zero-capable runtime contains no Rust process.</li>
+        <li>No reuse of Spacefast export archives as the public single-version build format.</li>
+      </ul>
+
+      <h2 id="reviews">13. Adversarial review record</h2>
+      <p>
+        Three independent reviews challenged the first draft. The blocking findings below were
+        accepted and changed the architecture; none were waived.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Review</th>
+            <th>Finding</th>
+            <th>Disposition</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Architecture · P0</td>
+            <td>One receipt was frozen before the binding artifact existed.</td>
+            <td>Replaced with monotonic binding, admission, activation, and public-proof phase receipts.</td>
+          </tr>
+          <tr>
+            <td>Architecture · P0</td>
+            <td>A write lock was incorrectly treated as crash-atomic route activation.</td>
+            <td>Added immutable activation records, derived projections, expected-generation CAS, and pointer-last activation.</td>
+          </tr>
+          <tr>
+            <td>Architecture · P1</td>
+            <td>Version ID alone was insufficient recovery proof; config-only and import were underspecified.</td>
+            <td>Added exact observed Runtime identity, Builder dependency classes, and per-version resumable import receipts.</td>
+          </tr>
+          <tr>
+            <td>Security · P0</td>
+            <td>A trusted Builder consuming secrets could still exfiltrate them.</td>
+            <td>Builder is now secret-blind; encrypted version-bound Runtime handles supply Zero values at execution.</td>
+          </tr>
+          <tr>
+            <td>Security · P0/P1</td>
+            <td>Hashes and public health were treated as stronger authority than they provide.</td>
+            <td>Added signed profile-specific Runtime releases, separate artifact keys, digest-bound JWTs, security epochs, and authenticated capability state.</td>
+          </tr>
+          <tr>
+            <td>Security · P2</td>
+            <td>“Reuse import checks” risked inheriting permissive legacy PHP parsing and weak budgets.</td>
+            <td>Specified a strict language-neutral parser, typed cache writers, fuzzing, and bounded resource budgets.</td>
+          </tr>
+          <tr>
+            <td>Product · P0</td>
+            <td>The existing embedded WASI artifact cannot yet execute a full site build.</td>
+            <td>Chose and gated a full static <code>build_bundle</code> WASI operation with sandboxed preopens.</td>
+          </tr>
+          <tr>
+            <td>Product · P0</td>
+            <td>Proposed commands conflicted with existing build/remote/prebuilt semantics.</td>
+            <td>Kept the whole app-build → artifact-compile pipeline, <code>--prebuilt</code>, <code>--remote</code>, and bundle auto-detection.</td>
+          </tr>
+          <tr>
+            <td>Product · P0</td>
+            <td>Markdown, block-theme compatibility, and Spacefast convenience publishing were overstated or omitted.</td>
+            <td>Added the Markdown graduation phase, an honest compatibility matrix, same-Builder dev mode, and preserved <code>/v1/publish</code>.</td>
+          </tr>
+          <tr>
+            <td>Architecture closure · P0</td>
+            <td>Portable publishes skipped context consumption; stale workers and secret staging lacked exact phase fences.</td>
+            <td>Added universal artifact acceptance, delivery-claim CAS on every phase, and idempotent Runtime secret staging.</td>
+          </tr>
+          <tr>
+            <td>Architecture closure · P0</td>
+            <td>Zero migrations were an irreversible effect hidden between secret staging and activation.</td>
+            <td>Added a fenced migration phase with plan/database identity, per-migration receipts, response-loss recovery, and activation dependency.</td>
+          </tr>
+          <tr>
+            <td>Security closure · P1</td>
+            <td>Secret value digests were offline guessing oracles and hosted Builder isolation was optional.</td>
+            <td>Removed value digests from external boundaries and required ephemeral quota-bounded tenant sandboxes.</td>
+          </tr>
+          <tr>
+            <td>Product closure · P0/P1</td>
+            <td>Cloud context preceded portable build; provenance polluted identity; names/output/dev behavior collided.</td>
+            <td>Made build offline-first, separated provenance, defined <code>stattic</code>/<code>sf</code> and their configs, moved output outside inputs, and moved Pages preview to <code>sf pages dev</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>14. Final definition of done</h2>
+      <div class="card decision">
+        <p>
+          A regular user can install the Spacefast/Stattic CLI, publish Markdown and Gutenberg
+          files with a documented supported-block/theme contract, and serve the result from a
+          PHP-only Stattic Runtime.
+          Spacefast adds policy, target binding, Zero, durable activation, and hosting without
+          changing the content compiler or inventing a second publish artifact.
+        </p>
+      </div>
+
+      <footer>
+        Evidence basis: merged Rust finalizer architecture, current CLI WASI packaging, current
+        control-plane version lifecycle and durable receipts, Runtime import/admission safety, and
+        current Zero target-rebind behavior. This plan intentionally treats the finalizer merge as
+        historical baseline.
+      </footer>
+    </main>
+  </body>
+</html>

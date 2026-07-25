@@ -1,0 +1,28 @@
+[workspace]
+members = [
+  "crates/stattic-cli",
+  "crates/stattic-runtime-compiler",
+  "crates/stattic-runtime-core",
+  "crates/stattic-runtime-wasi",
+  "crates/stattic-zero-runner",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+bcrypt = "0.19.2"
+lol_html = "3.0.0"
+mime_guess = "2"
+pulldown-cmark = "0.13.4"
+regex = "1"
+serde_yaml = "0.9"
+unicode-normalization = "0.1"
+url = "2"
+walkdir = "2"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

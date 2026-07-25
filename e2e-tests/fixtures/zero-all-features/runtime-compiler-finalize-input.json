@@ -1,0 +1,178 @@
+{
+  "format": "stattic.runtime.finalize.input.v1",
+  "versionRoot": "/tmp/stattic-zero-all-features",
+  "versionId": "ver_zero_all_features",
+  "files": [
+    {
+      "path": "index.html",
+      "size": 76,
+      "sha256": "sha256:zero-example-index",
+      "contentType": "text/html; charset=utf-8"
+    }
+  ],
+  "artifactMetadata": {
+    "runtime_schema": "static-runtime-v2",
+    "runtime_engine_version": "static-runtime-v2",
+    "generated_at": "2026-06-24T00:00:00+00:00"
+  },
+  "zeroEndpoints": [
+    {
+      "method": "GET",
+      "path": "/api/health",
+      "endpointId": "GET /api/health",
+      "source": "const request = globalThis.__statticZeroRequest;\nconst installed = { db: typeof globalThis.__statticDbHost === \"function\", fetch: typeof globalThis.__statticFetch === \"function\", auth: typeof globalThis.__statticAuth === \"object\", env: typeof globalThis.__statticEnv === \"object\", realtime: typeof globalThis.__statticRealtime === \"object\", logging: typeof globalThis.__statticLog === \"function\" };\nglobalThis.__statticZeroResult = JSON.stringify({ status: 200, headers: { \"content-type\": \"application/json; charset=utf-8\" }, body: JSON.stringify({ ok: true, method: request.method, installed }) });",
+      "capabilities": {
+        "db": false,
+        "fetch": false,
+        "auth": false,
+        "env": false,
+        "realtime": false,
+        "logging": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/items/:id",
+      "endpointId": "GET /api/items/:id",
+      "schemaHash": "sha256:zero-example-schema",
+      "source": "const endpoint = globalThis.__statticZeroEndpoint;\nconst params = globalThis.__statticZeroRequest.params;\nglobalThis.__statticZeroResult = JSON.stringify({ status: 200, headers: { \"content-type\": \"application/json; charset=utf-8\" }, body: JSON.stringify({ id: params.id, table: endpoint.db.tables.todos.quotedName }) });",
+      "capabilities": {
+        "db": true,
+        "fetch": false,
+        "auth": false,
+        "env": false,
+        "realtime": false,
+        "logging": false
+      },
+      "db": {
+        "schemaHash": "sha256:zero-example-schema",
+        "tables": {
+          "todos": {
+            "physicalName": "zero_example_todos",
+            "primaryKey": "id",
+            "columns": {
+              "id": "todo_id",
+              "title": {
+                "physicalName": "todo_title"
+              },
+              "completed": {
+                "physicalName": "todo_completed"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/items",
+      "endpointId": "POST /api/items",
+      "schemaHash": "sha256:zero-example-schema",
+      "source": "const endpoint = globalThis.__statticZeroEndpoint;\nconst installed = { db: typeof globalThis.__statticDbHost === \"function\", fetch: typeof globalThis.__statticFetch === \"function\", auth: typeof globalThis.__statticAuth === \"object\", env: typeof globalThis.__statticEnv === \"object\", realtime: typeof globalThis.__statticRealtime === \"object\", logging: typeof globalThis.__statticLog === \"function\" };\nconst realtime = globalThis.__statticRealtime.publish({ changedTables: [\"todos\"] });\nglobalThis.__statticLog(\"info\", \"todo created\", { table: \"todos\" });\nglobalThis.__statticZeroResult = JSON.stringify({ status: 201, headers: { \"content-type\": \"application/json; charset=utf-8\" }, body: JSON.stringify({ table: endpoint.db.tables.todos.quotedName, realtime, installed }) });",
+      "capabilities": {
+        "db": true,
+        "fetch": false,
+        "auth": false,
+        "env": false,
+        "realtime": true,
+        "logging": true
+      },
+      "db": {
+        "schemaHash": "sha256:zero-example-schema",
+        "tables": {
+          "todos": {
+            "physicalName": "zero_example_todos",
+            "primaryKey": "id",
+            "columns": {
+              "id": "todo_id",
+              "title": {
+                "physicalName": "todo_title"
+              },
+              "completed": {
+                "physicalName": "todo_completed"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/capabilities",
+      "endpointId": "GET /api/capabilities",
+      "source": "const auth = globalThis.__statticAuth.current();\nconst envKeys = Object.keys(globalThis.__statticEnv);\nconst installed = { db: typeof globalThis.__statticDbHost === \"function\", fetch: typeof globalThis.__statticFetch === \"function\", auth: typeof globalThis.__statticAuth === \"object\", env: typeof globalThis.__statticEnv === \"object\", realtime: typeof globalThis.__statticRealtime === \"object\", logging: typeof globalThis.__statticLog === \"function\" };\nglobalThis.__statticLog(\"info\", \"capabilities probed\", {});\nglobalThis.__statticZeroResult = JSON.stringify({ status: 200, headers: { \"content-type\": \"application/json; charset=utf-8\" }, body: JSON.stringify({ auth, envKeys, installed, capabilities: globalThis.__statticZeroCapabilities }) });",
+      "capabilities": {
+        "db": false,
+        "fetch": true,
+        "auth": true,
+        "env": true,
+        "realtime": false,
+        "logging": true
+      }
+    }
+  ],
+  "zeroRuns": [
+    {
+      "runId": "query_todos",
+      "schemaHash": "sha256:zero-example-schema",
+      "source": "const endpoint = globalThis.__statticZeroEndpoint;\nglobalThis.__statticZeroResult = JSON.stringify({ status: 200, body: JSON.stringify({ run: \"query_todos\", table: endpoint.db.tables.todos.quotedName }) });",
+      "capabilities": {
+        "db": true,
+        "fetch": false,
+        "auth": false,
+        "env": false,
+        "realtime": false,
+        "logging": false
+      },
+      "db": {
+        "schemaHash": "sha256:zero-example-schema",
+        "tables": {
+          "todos": {
+            "physicalName": "zero_example_todos",
+            "primaryKey": "id",
+            "columns": {
+              "id": "todo_id",
+              "title": {
+                "physicalName": "todo_title"
+              },
+              "completed": {
+                "physicalName": "todo_completed"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "runId": "mutation_addTodo",
+      "schemaHash": "sha256:zero-example-schema",
+      "source": "const installed = { db: typeof globalThis.__statticDbHost === \"function\", fetch: typeof globalThis.__statticFetch === \"function\", auth: typeof globalThis.__statticAuth === \"object\", env: typeof globalThis.__statticEnv === \"object\", realtime: typeof globalThis.__statticRealtime === \"object\", logging: typeof globalThis.__statticLog === \"function\" };\nconst realtime = globalThis.__statticRealtime.publish({ changedTables: [\"todos\"], mutationName: \"mutation_addTodo\" });\nglobalThis.__statticLog(\"info\", \"todo mutation run\", { run: \"mutation_addTodo\" });\nglobalThis.__statticZeroResult = JSON.stringify({ status: 200, body: JSON.stringify({ run: \"mutation_addTodo\", realtime, installed }) });",
+      "capabilities": {
+        "db": true,
+        "fetch": false,
+        "auth": false,
+        "env": false,
+        "realtime": true,
+        "logging": true
+      },
+      "db": {
+        "schemaHash": "sha256:zero-example-schema",
+        "tables": {
+          "todos": {
+            "physicalName": "zero_example_todos",
+            "primaryKey": "id",
+            "columns": {
+              "id": "todo_id",
+              "title": {
+                "physicalName": "todo_title"
+              },
+              "completed": {
+                "physicalName": "todo_completed"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

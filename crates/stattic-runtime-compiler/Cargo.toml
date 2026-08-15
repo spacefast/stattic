@@ -1,0 +1,15 @@
+[package]
+name = "stattic-runtime-compiler"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+stattic-runtime-core = { path = "../stattic-runtime-core" }
+stattic-zero-runner = { path = "../stattic-zero-runner" }
+
+[[bin]]
+name = "stattic-runtime"
+path = "src/main.rs"

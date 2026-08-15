@@ -1,0 +1,9 @@
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
+# The control plane runs the same core through WASI (crates/stattic-runtime-wasi
+# -> packages/routing). Pinning the target here keeps every checkout and CI
+# runner able to build it, so the WASI and native halves cannot drift apart
+# just because one machine lacked the std.
+targets = ["wasm32-wasip1"]
+profile = "minimal"

@@ -1,0 +1,683 @@
+//! The platform-service broker: Gravatar, spam checking, and mail.
+//!
+//! One implementation serves both execution tiers. Zero calls it in-process
+//! through a host function on the QuickJS context; the Functions relay spawns
+//! it as a one-shot executor over stdio, the same shape the DB broker already
+//! uses. Neither tier ships a second copy, so a tenant cannot observe a
+//! difference in behaviour between them — which is the whole promise of the
+//! shared client in `@spacefast/common/contracts/runtime-services`.
+//!
+//! Nothing here is reachable with a tenant-supplied URL. A frame names a
+//! service and an operation; this module owns every upstream it can contact,
+//! and [`SERVICE_UPSTREAM_HOSTS`] names them so the runtime's egress allowlist
+//! can be built from that list rather than a second copy of it.
+//!
+//! Credentials arrive in the process environment under the `SPACEFAST_` prefix
+//! the execution contract reserves, so tenant variables cannot shadow them, and
+//! they never cross back into JavaScript in any form.
+
+use std::cell::RefCell;
+use std::io::Read;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use serde::Deserialize;
+use serde_json::{json, Map, Value};
+
+use crate::db::BrokerRefusal;
+
+/// Every host this module can reach. Exported for the runtime egress allowlist
+/// to consume, so the set of upstreams is declared once.
+pub const SERVICE_UPSTREAM_HOSTS: &[&str] =
+    &["api.gravatar.com", "gravatar.com", "rest.akismet.com"];
+
+const GRAVATAR_PROFILE_BASE: &str = "https://api.gravatar.com/v3/profiles/";
+const AKISMET_BASE: &str = "https://rest.akismet.com/1.1/";
+
+/// Akismet asks integrators to identify themselves in this exact shape.
+const AKISMET_USER_AGENT: &str = "Spacefast/1.0 | Akismet/1.1";
+
+/// A visitor is waiting behind every one of these calls, on a PHP-FPM worker
+/// this space shares. A slow upstream must surface as a refusal quickly rather
+/// than hold the slot until the request itself times out.
+const SERVICE_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upstream bodies are small — a profile document or the literal `true`. A
+/// larger response means something other than the service we asked for.
+const SERVICE_RESPONSE_MAX_BYTES: u64 = 256 * 1024;
+
+/// The frame limit. Generous enough for a long comment plus its metadata, and
+/// far under what MySQL or the relay would accept.
+pub(crate) const SERVICE_FRAME_MAX_BYTES: usize = 1024 * 1024;
+
+thread_local! {
+    static SERVICE_GRANT: RefCell<ServiceGrant> = const { RefCell::new(ServiceGrant::NONE) };
+}
+
+/// Which services this invocation may reach.
+///
+/// The generated host only installs the clients a version declared, but that is
+/// convenience, not the boundary: this check runs inside the broker, on the
+/// frame itself, so an ungranted service is refused even if something upstream
+/// of it were wrong.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ServiceGrant {
+    pub gravatar: bool,
+    pub spam: bool,
+    pub email: bool,
+}
+
+impl ServiceGrant {
+    pub(crate) const NONE: Self = Self {
+        gravatar: false,
+        spam: false,
+        email: false,
+    };
+
+    /// Parses the comma-separated wire grant the relay passes to the executor.
+    /// Fails closed: an absent or unreadable grant reaches nothing.
+    pub(crate) fn from_wire(raw: &str) -> Self {
+        let granted = |name: &str| raw.split(',').any(|token| token.trim() == name);
+        Self {
+            gravatar: granted("gravatar.profile"),
+            spam: granted("spam.check"),
+            email: granted("email.send"),
+        }
+    }
+
+    fn permits(self, service: &str) -> bool {
+        match service {
+            "gravatar" => self.gravatar,
+            "spam" => self.spam,
+            "email" => self.email,
+            _ => false,
+        }
+    }
+}
+
+pub(crate) fn set_grant(grant: ServiceGrant) {
+    SERVICE_GRANT.with(|state| *state.borrow_mut() = grant);
+}
+
+fn grant() -> ServiceGrant {
+    SERVICE_GRANT.with(|state| *state.borrow())
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceFrame {
+    service: String,
+    operation: String,
+    #[serde(default)]
+    payload: Map<String, Value>,
+}
+
+/// Per-invocation identity and credentials, read once from the environment.
+///
+/// The blog URL is the space's own canonical origin and is supplied by the
+/// runtime, never by the caller: Akismet partitions reputation by it, so a
+/// tenant that could name it could spend — or poison — another space's standing.
+struct ServiceConfig {
+    akismet_key: Option<String>,
+    gravatar_key: Option<String>,
+    blog_url: Option<String>,
+    /// The addresses this space may send as, comma separated. Management state,
+    /// not version content: rolling a version back must not roll back who a
+    /// space has proven it owns.
+    email_senders: Vec<String>,
+    space_id: String,
+    version_id: String,
+    invocation_id: String,
+}
+
+impl ServiceConfig {
+    fn from_env() -> Self {
+        let value = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        Self {
+            akismet_key: value("SPACEFAST_SERVICE_AKISMET_KEY"),
+            gravatar_key: value("SPACEFAST_SERVICE_GRAVATAR_KEY"),
+            blog_url: value("SPACEFAST_SERVICE_BLOG_URL"),
+            email_senders: value("SPACEFAST_SERVICE_EMAIL_SENDERS")
+                .map(|raw| {
+                    raw.split(',')
+                        .map(|entry| entry.trim().to_ascii_lowercase())
+                        .filter(|entry| !entry.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            space_id: value("SPACEFAST_SERVICE_SPACE_ID").unwrap_or_default(),
+            version_id: value("SPACEFAST_SERVICE_VERSION_ID").unwrap_or_default(),
+            invocation_id: value("SPACEFAST_SERVICE_INVOCATION_ID").unwrap_or_default(),
+        }
+    }
+}
+
+/// One frame in, one JSON document out. Refusals are in-band and typed: the
+/// caller is tenant code that must be able to branch on a stable code, not read
+/// a transport status it never sees.
+pub(crate) fn handle_service_frame(raw: &str) -> String {
+    match execute_service_frame(raw) {
+        Ok(result) => json!({ "ok": true, "result": result }).to_string(),
+        Err(error) => error.refusal_json(),
+    }
+}
+
+fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
+    if raw.len() > SERVICE_FRAME_MAX_BYTES {
+        return Err(BrokerRefusal::new(
+            "service_payload_invalid",
+            "The service frame is too large.",
+        ));
+    }
+    let frame: ServiceFrame = serde_json::from_str(raw).map_err(|_| {
+        BrokerRefusal::new("service_payload_invalid", "The service frame is not valid.")
+    })?;
+    if !grant().permits(&frame.service) {
+        return Err(BrokerRefusal::new(
+            "service_capability_denied",
+            format!(
+                "This version did not declare the {} capability.",
+                frame.service
+            ),
+        ));
+    }
+    let config = ServiceConfig::from_env();
+    match (frame.service.as_str(), frame.operation.as_str()) {
+        ("gravatar", "profile") => gravatar_profile(&config, &frame.payload),
+        ("spam", "check") => spam_check(&config, &frame.payload),
+        ("spam", "report_spam") => spam_report(&config, &frame.payload, "submit-spam"),
+        ("spam", "report_ham") => spam_report(&config, &frame.payload, "submit-ham"),
+        ("email", "send") => email_send(&config, &frame.payload),
+        _ => Err(BrokerRefusal::new(
+            "service_operation_unknown",
+            format!(
+                "{}.{} is not a service operation.",
+                frame.service, frame.operation
+            ),
+        )),
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Gravatar                                                                    */
+/* -------------------------------------------------------------------------- */
+
+fn gravatar_profile(
+    config: &ServiceConfig,
+    payload: &Map<String, Value>,
+) -> Result<Value, BrokerRefusal> {
+    let hash = required_str(payload, "hash")?;
+    // The client hashes; this only proves the frame is a hash, so a malformed
+    // one cannot be pasted into a URL path.
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(BrokerRefusal::new(
+            "service_payload_invalid",
+            "A Gravatar identifier must be a SHA-256 hex digest.",
+        ));
+    }
+
+    let mut request = agent()
+        .get(format!("{GRAVATAR_PROFILE_BASE}{hash}"))
+        .header("accept", "application/json");
+    if let Some(key) = &config.gravatar_key {
+        request = request.header("authorization", &format!("Bearer {key}"));
+    }
+
+    let response = match request.call() {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(404)) => return Ok(Value::Null),
+        Err(ureq::Error::StatusCode(429)) => {
+            return Err(BrokerRefusal::new(
+                "service_rate_limited",
+                "Gravatar is rate limiting this space.",
+            ))
+        }
+        Err(ureq::Error::StatusCode(status)) => {
+            return Err(BrokerRefusal::new(
+                "service_upstream_refused",
+                format!("Gravatar answered {status}."),
+            ))
+        }
+        Err(_) => {
+            return Err(BrokerRefusal::new(
+                "service_upstream_unavailable",
+                "Gravatar could not be reached.",
+            ))
+        }
+    };
+
+    let document: Value = serde_json::from_str(&read_body(response)?).map_err(|_| {
+        BrokerRefusal::new(
+            "service_upstream_unavailable",
+            "Gravatar returned an unreadable profile.",
+        )
+    })?;
+
+    // Projected, never passed through: an upstream field addition must not
+    // silently become part of this contract.
+    Ok(json!({
+        "hash": hash,
+        "displayName": optional_field(&document, "display_name"),
+        "profileUrl": optional_field(&document, "profile_url"),
+        "avatarUrl": optional_field(&document, "avatar_url"),
+        "location": optional_field(&document, "location"),
+        "description": optional_field(&document, "description"),
+        "pronouns": optional_field(&document, "pronouns"),
+        "verifiedAccounts": verified_accounts(&document),
+    }))
+}
+
+fn optional_field(document: &Value, name: &str) -> Value {
+    match document.get(name) {
+        Some(Value::String(value)) if !value.is_empty() => Value::String(value.clone()),
+        _ => Value::Null,
+    }
+}
+
+fn verified_accounts(document: &Value) -> Value {
+    let Some(Value::Array(entries)) = document.get("verified_accounts") else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let service = entry.get("service_type")?.as_str()?;
+                let url = entry.get("url")?.as_str()?;
+                Some(json!({
+                    "service": service,
+                    "url": url,
+                    "label": optional_field(entry, "service_label"),
+                }))
+            })
+            .collect(),
+    )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Spam                                                                        */
+/* -------------------------------------------------------------------------- */
+
+fn spam_check(
+    config: &ServiceConfig,
+    payload: &Map<String, Value>,
+) -> Result<Value, BrokerRefusal> {
+    let response = akismet_call(config, payload, "comment-check")?;
+    let discard = response
+        .headers()
+        .get("x-akismet-pro-tip")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("discard"));
+    let body = read_body(response)?;
+    let verdict = body.trim();
+    // Akismet answers with the literal words. Anything else means the call was
+    // malformed or the key was refused, and guessing "not spam" there would
+    // silently disable the check.
+    match verdict {
+        "true" => Ok(json!({ "spam": true, "discard": discard })),
+        "false" => Ok(json!({ "spam": false, "discard": false })),
+        _ => Err(BrokerRefusal::new(
+            "service_upstream_refused",
+            "The spam service returned an unexpected verdict.",
+        )),
+    }
+}
+
+fn spam_report(
+    config: &ServiceConfig,
+    payload: &Map<String, Value>,
+    endpoint: &str,
+) -> Result<Value, BrokerRefusal> {
+    akismet_call(config, payload, endpoint)?;
+    Ok(Value::Null)
+}
+
+fn akismet_call(
+    config: &ServiceConfig,
+    payload: &Map<String, Value>,
+    endpoint: &str,
+) -> Result<ureq::http::Response<ureq::Body>, BrokerRefusal> {
+    let Some(key) = &config.akismet_key else {
+        return Err(BrokerRefusal::new(
+            "service_not_configured",
+            "Spam checking is not configured for this runtime.",
+        ));
+    };
+    let Some(blog) = &config.blog_url else {
+        return Err(BrokerRefusal::new(
+            "service_not_configured",
+            "This space has no canonical origin to check against.",
+        ));
+    };
+
+    let mut form: Vec<(String, String)> = vec![
+        ("api_key".to_string(), key.clone()),
+        // Runtime-owned, never from the payload: it is the reputation
+        // partition, and a caller that could set it could spend another
+        // space's standing.
+        ("blog".to_string(), blog.clone()),
+        ("blog_charset".to_string(), "UTF-8".to_string()),
+        (
+            "comment_content".to_string(),
+            required_str(payload, "content")?.to_string(),
+        ),
+        (
+            "user_ip".to_string(),
+            required_str(payload, "userIp")?.to_string(),
+        ),
+    ];
+    for (field, param) in [
+        ("userAgent", "user_agent"),
+        ("referrer", "referrer"),
+        ("permalink", "permalink"),
+        ("type", "comment_type"),
+        ("authorName", "comment_author"),
+        ("authorEmail", "comment_author_email"),
+        ("authorUrl", "comment_author_url"),
+        ("authorRole", "user_role"),
+        ("createdAt", "comment_date_gmt"),
+    ] {
+        if let Some(Value::String(value)) = payload.get(field) {
+            if !value.is_empty() {
+                form.push((param.to_string(), value.clone()));
+            }
+        }
+    }
+    if let Some(Value::Array(languages)) = payload.get("languages") {
+        let joined = languages
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        if !joined.is_empty() {
+            form.push(("blog_lang".to_string(), joined));
+        }
+    }
+
+    let pairs = form
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()));
+    agent()
+        .post(format!("{AKISMET_BASE}{endpoint}"))
+        .header("user-agent", AKISMET_USER_AGENT)
+        .send_form(pairs)
+        .map_err(|error| match error {
+            ureq::Error::StatusCode(status) => BrokerRefusal::new(
+                "service_upstream_refused",
+                format!("The spam service answered {status}."),
+            ),
+            _ => BrokerRefusal::new(
+                "service_upstream_unavailable",
+                "The spam service could not be reached.",
+            ),
+        })
+}
+
+/* -------------------------------------------------------------------------- */
+/* Email                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/// Accepts one email effect into the space's private outbox.
+///
+/// On the Zero path this insert joins whatever transaction the handler is
+/// already in, which is what makes "the row and the mail commit together" true
+/// rather than aspirational. Delivery is somebody else's job and happens later;
+/// nothing here contacts a mail transport.
+fn email_send(
+    config: &ServiceConfig,
+    payload: &Map<String, Value>,
+) -> Result<Value, BrokerRefusal> {
+    if config.space_id.is_empty() || config.invocation_id.is_empty() {
+        return Err(BrokerRefusal::new(
+            "service_not_configured",
+            "This runtime has no outbox identity.",
+        ));
+    }
+    // Refused before the row is written, not after.
+    //
+    // A queued message that no configured sender can carry would sit in the
+    // outbox looking accepted and never leave, and "accepted" is the one thing
+    // `send()` does promise. Better a refusal the author can see.
+    if config.email_senders.is_empty() {
+        return Err(BrokerRefusal::new(
+            "service_not_configured",
+            "This space has no verified sender, so mail cannot be accepted.",
+        ));
+    }
+    let from = payload
+        .get("from")
+        .and_then(|value| value.get("email"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !config.email_senders.contains(&from) {
+        return Err(BrokerRefusal::new(
+            "email_sender_unverified",
+            "The from address is not a verified sender for this space.",
+        ));
+    }
+    let normalized = serde_json::to_string(&Value::Object(payload.clone())).map_err(|_| {
+        BrokerRefusal::new("email_message_invalid", "The message could not be encoded.")
+    })?;
+
+    let effect_index = crate::db::next_email_effect_index();
+    // Deterministic rather than random: it is the idempotency identity, so a
+    // retried invocation must produce the same id and collide with the row it
+    // already wrote instead of sending twice.
+    let message_id = message_id(&config.space_id, &config.invocation_id, effect_index);
+
+    crate::db::insert_email_outbox_row(crate::db::EmailOutboxRow {
+        message_id: &message_id,
+        space_id: &config.space_id,
+        version_id: &config.version_id,
+        invocation_id: &config.invocation_id,
+        effect_index,
+        payload_json: &normalized,
+    })
+    .map_err(|error| BrokerRefusal::new("email_outbox_unavailable", error))?;
+
+    Ok(json!({ "messageId": message_id }))
+}
+
+fn message_id(space_id: &str, invocation_id: &str, effect_index: u32) -> String {
+    // The NUL separators are what stop (space "a", invocation "bc") and
+    // (space "ab", invocation "c") from hashing alike.
+    let mut input = Vec::with_capacity(space_id.len() + invocation_id.len() + 6);
+    input.extend_from_slice(space_id.as_bytes());
+    input.push(0);
+    input.extend_from_slice(invocation_id.as_bytes());
+    input.push(0);
+    input.extend_from_slice(&effect_index.to_be_bytes());
+    format!("msg_{}", &crate::artifacts::sha256_hex(&input)[..32])
+}
+
+/* -------------------------------------------------------------------------- */
+/* Shared plumbing                                                             */
+/* -------------------------------------------------------------------------- */
+
+/// One agent for the whole process. `ureq::get`/`ureq::post` build a use-once
+/// agent per call, which rebuilds the rustls config — a full copy of the webpki
+/// root store — on every connect and throws the connection pool away. An
+/// invocation that checks spam and resolves a few profiles would pay a fresh
+/// handshake each time, with a visitor waiting.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(SERVICE_HTTP_TIMEOUT))
+                .build(),
+        )
+    })
+}
+
+fn required_str<'a>(
+    payload: &'a Map<String, Value>,
+    field: &str,
+) -> Result<&'a str, BrokerRefusal> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            BrokerRefusal::new(
+                "service_payload_invalid",
+                format!("The {field} field is required."),
+            )
+        })
+}
+
+fn read_body(response: ureq::http::Response<ureq::Body>) -> Result<String, BrokerRefusal> {
+    let mut body = String::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(SERVICE_RESPONSE_MAX_BYTES)
+        .read_to_string(&mut body)
+        .map_err(|_| {
+            BrokerRefusal::new(
+                "service_upstream_unavailable",
+                "The service response could not be read.",
+            )
+        })?;
+    Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(service: &str, operation: &str, payload: Value) -> String {
+        set_grant(ServiceGrant {
+            gravatar: true,
+            spam: true,
+            email: true,
+        });
+        handle_service_frame(
+            &json!({ "service": service, "operation": operation, "payload": payload }).to_string(),
+        )
+    }
+
+    fn refusal(raw: &str) -> (String, String) {
+        let value: Value = serde_json::from_str(raw).expect("a JSON refusal");
+        assert_eq!(value["ok"], Value::Bool(false), "expected a refusal: {raw}");
+        (
+            value["code"].as_str().unwrap_or_default().to_string(),
+            value["message"].as_str().unwrap_or_default().to_string(),
+        )
+    }
+
+    #[test]
+    fn unknown_operations_are_refused_by_name() {
+        let (code, message) = refusal(&frame("spam", "delete_everything", json!({})));
+        assert_eq!(code, "service_operation_unknown");
+        assert!(message.contains("spam.delete_everything"));
+        // A service that does not exist cannot be granted either, and the grant
+        // is checked first — so it never reaches the operation table at all.
+        let (code, _) = refusal(&frame("sms", "send", json!({})));
+        assert_eq!(code, "service_capability_denied");
+    }
+
+    #[test]
+    fn malformed_frames_are_refused_before_any_upstream() {
+        let (code, _) = refusal(&handle_service_frame("not json"));
+        assert_eq!(code, "service_payload_invalid");
+        let oversized = "x".repeat(SERVICE_FRAME_MAX_BYTES + 1);
+        let (code, _) = refusal(&handle_service_frame(&oversized));
+        assert_eq!(code, "service_payload_invalid");
+    }
+
+    #[test]
+    fn a_gravatar_identifier_must_be_a_digest() {
+        // Anything that is not a digest would otherwise be pasted into a URL
+        // path, so this is refused before the request is built.
+        for identifier in ["../../admin", "", &"z".repeat(64), "abc"] {
+            let (code, _) = refusal(&frame("gravatar", "profile", json!({ "hash": identifier })));
+            assert_eq!(code, "service_payload_invalid", "for {identifier}");
+        }
+    }
+
+    #[test]
+    fn spam_refuses_before_calling_when_the_runtime_has_no_key() {
+        // No AKISMET key is set in the test environment, so this proves the
+        // order: configuration is checked before any network work.
+        let (code, _) = refusal(&frame(
+            "spam",
+            "check",
+            json!({ "content": "hi", "userIp": "203.0.113.9" }),
+        ));
+        assert_eq!(code, "service_not_configured");
+    }
+
+    #[test]
+    fn email_refuses_before_writing_a_row_it_could_not_deliver() {
+        // No identity and no verified sender are configured in the test
+        // environment, so both gates are reachable here — and both run before
+        // anything touches the outbox.
+        let (code, _) = refusal(&frame("email", "send", json!({ "subject": "Hi" })));
+        assert_eq!(code, "service_not_configured");
+    }
+
+    #[test]
+    fn message_ids_are_stable_per_effect_and_unique_across_them() {
+        let first = message_id("spc_1", "inv_1", 0);
+        assert_eq!(first, message_id("spc_1", "inv_1", 0));
+        assert_ne!(first, message_id("spc_1", "inv_1", 1));
+        assert_ne!(first, message_id("spc_2", "inv_1", 0));
+        // The separator is what stops (space "a", invocation "bc") and
+        // (space "ab", invocation "c") from hashing alike.
+        assert_ne!(message_id("a", "bc", 0), message_id("ab", "c", 0));
+        assert!(first.starts_with("msg_"));
+    }
+
+    #[test]
+    fn an_undeclared_service_is_refused_by_the_broker_itself() {
+        set_grant(ServiceGrant {
+            gravatar: true,
+            spam: false,
+            email: false,
+        });
+        let (code, message) = refusal(&handle_service_frame(
+            &json!({ "service": "spam", "operation": "check", "payload": {} }).to_string(),
+        ));
+        assert_eq!(code, "service_capability_denied");
+        assert!(message.contains("spam"));
+        // And the granted one still gets past the gate to its own validation.
+        let (code, _) = refusal(&handle_service_frame(
+            &json!({ "service": "gravatar", "operation": "profile", "payload": {} }).to_string(),
+        ));
+        assert_eq!(code, "service_payload_invalid");
+    }
+
+    #[test]
+    fn an_empty_wire_grant_reaches_nothing() {
+        assert_eq!(ServiceGrant::from_wire(""), ServiceGrant::NONE);
+        assert_eq!(ServiceGrant::from_wire("db.read,log"), ServiceGrant::NONE);
+        assert_eq!(
+            ServiceGrant::from_wire("spam.check, email.send"),
+            ServiceGrant {
+                gravatar: false,
+                spam: true,
+                email: true,
+            }
+        );
+    }
+
+    #[test]
+    fn every_upstream_is_a_declared_host() {
+        for base in [GRAVATAR_PROFILE_BASE, AKISMET_BASE] {
+            let host = base
+                .strip_prefix("https://")
+                .and_then(|rest| rest.split('/').next())
+                .expect("an https base URL");
+            assert!(
+                SERVICE_UPSTREAM_HOSTS.contains(&host),
+                "{host} is not a declared upstream"
+            );
+        }
+    }
+}

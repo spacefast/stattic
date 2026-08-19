@@ -1,0 +1,8 @@
+[package]
+name = "stattic-runtime-egress"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+url.workspace = true

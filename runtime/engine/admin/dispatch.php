@@ -1,21 +1,19 @@
 <?php
 declare(strict_types=1);
 
-// SSH management dispatcher: reads ONE JSON request envelope from stdin
-// ({method, path, authorization, body?}) and executes the SAME management
-// surface as HTTP (_stattic_runtime_admin_api) — identical routing, identical JWT
-// verification (the Authorization value from the envelope is staged into
-// $_SERVER exactly where the HTTP layer reads it), identical handlers. The
-// response is emitted on stdout as one {status, body} JSON envelope.
+// CLI management bypasses the HTTP loader, so it owns the same policy here.
+// PHP's configured error log is stderr for this process; stdout stays reserved
+// for the machine-readable dispatch envelope.
+error_reporting(E_ALL);
+ini_set('log_errors', '1');
+ini_set('display_errors', '0');
+
+// SSH management dispatcher: one {method, path, authorization, body?} JSON
+// envelope on stdin, one {status, body} envelope on stdout, running the same
+// routing, JWT verification and handlers as HTTP.
 //
-// This is the WP.Cloud provider-adapter transport for when the provider's
-// public edge re-arms 403/429 protection on /__spacefast/api.php/* (e2e
-// checkpoint 3); the runtime operator contract for self-hosting stays pure
-// HTTP and never requires this file.
-//
-// Invocation (WP.Cloud sites prepend a runtime bootstrap to every PHP
-// process; it must be disabled exactly like the engine installer run):
-//   php -d auto_prepend_file= htdocs/.stattic/engine/admin/dispatch.php < request.json
+// WP.Cloud prepends a runtime bootstrap to every PHP process — disable it:
+//   php -d auto_prepend_file= htdocs/.stattic/releases/<release>/engine/admin/dispatch.php < request.json
 
 const STATTIC_RUNTIME_DISPATCH_CLI = true;
 const STATTIC_RUNTIME_DISPATCH_MAX_ENVELOPE_BYTES = 67108864;
@@ -27,8 +25,6 @@ require_once __DIR__ . '/../shared/storage.php';
 if (PHP_SAPI !== 'cli') {
     _stattic_runtime_route_not_found();
 }
-// Keep handler notices/warnings off stdout — stdout carries only the envelope.
-ini_set('display_errors', 'stderr');
 
 $envInputPath = getenv('SPACEFAST_RUNTIME_DISPATCH_REQUEST_PATH');
 $inputPath = is_string($envInputPath) && trim($envInputPath) !== ''
@@ -36,9 +32,9 @@ $inputPath = is_string($envInputPath) && trim($envInputPath) !== ''
     : (isset($argv[1]) && is_string($argv[1]) ? trim($argv[1]) : '');
 $raw = $inputPath === ''
     ? stream_get_contents(STDIN, STATTIC_RUNTIME_DISPATCH_MAX_ENVELOPE_BYTES + 1)
-    : @file_get_contents($inputPath, false, null, 0, STATTIC_RUNTIME_DISPATCH_MAX_ENVELOPE_BYTES + 1);
+    : file_get_contents($inputPath, false, null, 0, STATTIC_RUNTIME_DISPATCH_MAX_ENVELOPE_BYTES + 1);
 if (!is_string($raw) || strlen($raw) > STATTIC_RUNTIME_DISPATCH_MAX_ENVELOPE_BYTES) {
-    _stattic_json_response(413, ['error' => ['code' => 'runtime_dispatch_request_too_large', 'message' => 'Dispatch request envelope is too large.']]);
+    _stattic_problem_response(413, 'runtime_dispatch_request_too_large', 'Dispatch request envelope is too large.');
 }
 $request = json_decode($raw, true);
 $method = is_array($request) && is_string($request['method'] ?? null) ? strtoupper(trim($request['method'])) : '';
@@ -63,43 +59,45 @@ if (
     || $authorization === ''
     || (array_key_exists('body', $request) && $request['body'] !== null && !is_string($request['body']))
 ) {
-    _stattic_json_response(400, ['error' => ['code' => 'runtime_dispatch_invalid_request', 'message' => 'Dispatch request envelope is invalid.']]);
+    _stattic_problem_response(400, 'runtime_dispatch_invalid_request', 'Dispatch request envelope is invalid.');
 }
 $isUploadDispatch = is_string($uploadRoutePath);
 if ($isUploadDispatch) {
     if (!in_array($method, ['POST', 'PUT'], true) || !is_string($request['body'] ?? null) || $bodyEncoding !== 'base64') {
-        _stattic_json_response(400, ['error' => ['code' => 'runtime_dispatch_invalid_upload_request', 'message' => 'Upload dispatch request envelope is invalid.']]);
+        _stattic_problem_response(400, 'runtime_dispatch_invalid_upload_request', 'Upload dispatch request envelope is invalid.');
     }
     $decodedBody = base64_decode((string) $request['body'], true);
     if (!is_string($decodedBody)) {
-        _stattic_json_response(400, ['error' => ['code' => 'runtime_dispatch_invalid_upload_body', 'message' => 'Upload dispatch body must be base64.']]);
+        _stattic_problem_response(400, 'runtime_dispatch_invalid_upload_body', 'Upload dispatch body must be base64.');
     }
-    _stattic_binary_body_override($decodedBody);
+    _stattic_request_body_override($decodedBody);
     $_SERVER['CONTENT_LENGTH'] = (string) strlen($decodedBody);
 }
 
 $engineRoot = dirname(__DIR__);
-$storageRoot = dirname($engineRoot) . '/storage';
+$storageRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
 if (!is_dir($storageRoot)) {
-    _stattic_json_response(503, ['error' => ['code' => 'runtime_dispatch_undeployed', 'message' => 'Runtime storage is not provisioned on this site.']]);
+    _stattic_problem_response(503, 'runtime_dispatch_undeployed', 'Runtime storage is not provisioned on this site.');
 }
 
-// Stage the request exactly where the HTTP handlers read it. The management
-// JWT is required and verified identically to HTTP; the hostname assertion
-// passes by construction (this process IS the management surface).
+// Stage the request exactly where the HTTP handlers read it; the management JWT
+// is still required and verified identically.
 $_SERVER['REQUEST_METHOD'] = $method;
-$_SERVER['HTTP_HOST'] = _stattic_management_hostname();
+// Fail loudly as a config error rather than staging a blank host, which the
+// api.php host assert would answer with the generic public 404 — masking the
+// misconfiguration as "no such route".
+$managementHostname = _stattic_management_hostname();
+if ($managementHostname === '') {
+    _stattic_problem_response(500, 'runtime_dispatch_management_hostname_unconfigured', 'SPACEFAST_MANAGEMENT_HOSTNAME is not configured; the dispatch transport cannot assert the management host.');
+}
+$_SERVER['HTTP_HOST'] = $managementHostname;
 $_SERVER['HTTP_AUTHORIZATION'] = $authorization;
 $_SERVER['REQUEST_URI'] = $path;
 $_SERVER['QUERY_STRING'] = is_string($requestQuery) ? $requestQuery : '';
 unset($_SERVER['HTTP_ORIGIN']);
 if (!$isUploadDispatch) {
-    _stattic_json_body_override(is_string($request['body'] ?? null) ? $request['body'] : '');
+    _stattic_request_body_override(is_string($request['body'] ?? null) ? $request['body'] : '');
 }
 
-// One dispatcher for both dispatchable surfaces. Rows flagged `binary`
-// (archive streams, file-fetch reads) stay HTTP-only: the dispatcher reads
-// the matched row's flag and answers runtime_dispatch_unsupported_path in
-// this CLI mode.
 require_once __DIR__ . '/api.php';
 _stattic_runtime_admin_api($storageRoot, $method, $requestPath, $isUploadDispatch ? 'upload' : 'management');

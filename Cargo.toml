@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "crates/stattic-cli",
+  "crates/stattic-runtime-egress",
   "crates/stattic-runtime-compiler",
   "crates/stattic-runtime-core",
   "crates/stattic-runtime-wasi",
@@ -12,15 +12,32 @@ resolver = "2"
 edition = "2021"
 
 [workspace.dependencies]
-bcrypt = "0.19.2"
+brotli = "8"
+flate2 = "1"
 lol_html = "3.0.0"
 mime_guess = "2"
 pulldown-cmark = "0.13.4"
 regex = "1"
 serde_yaml = "0.9"
+# PNG raster output only: no animation codecs, no rayon. `woff2` decodes the
+# embedded default face (crates/stattic-zero-runner/assets/fonts). `svg-source`
+# is not optional in practice — takumi-raster 0.4.13 fails to compile with the
+# feature off (`RenderedImage`/`draw_image` are used outside their
+# `#[cfg(feature = "svg")]` gates).
+takumi = { version = "2.6.0", default-features = false, features = [
+  "raster-backend",
+  "svg-source",
+  "woff2",
+] }
 unicode-normalization = "0.1"
 url = "2"
 walkdir = "2"
+
+[profile.dev]
+incremental = true
+
+[profile.test]
+incremental = true
 
 [profile.release]
 codegen-units = 1

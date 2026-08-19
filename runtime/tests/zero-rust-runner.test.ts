@@ -1,31 +1,83 @@
+// The real Rust lane, end to end: `stattic-runtime` compiles Zero endpoints and
+// runs their QuickJS bytecode, and finalize turns everything a version answers
+// into schema-v4 response-table entries (contracts §5). Redirect and `_headers`
+// SERVING behavior is not re-proven here — routing.test.ts and headers.test.ts
+// own it; what this file owns is that the compiler puts those answers, the Zero
+// actions, and the Zero pack into the artifacts the serve path reads.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import net from "node:net";
 import path from "node:path";
 
-import { ZERO_RUNTIME_HOST_SOURCE } from "../../packages/cli/src/zero-runtime-host.ts";
-import { deploy, finalizeRaw, get, sha256, type Runtime, startRuntime } from "./harness.ts";
+import { ZERO_RUNTIME_HOST_SOURCE } from "../../packages/zero-compile/src/runtime-host.ts";
+import {
+  blobPath,
+  deploy,
+  finalizeRaw,
+  get,
+  phpArtifact,
+  publicAccessConfig,
+  responseEntries,
+  type Runtime,
+  sha256,
+  spaceRoot,
+  startRuntime,
+  versionRoot,
+} from "./harness.ts";
+import {
+  type MysqlContainer,
+  startMysqlContainer,
+  stopMysqlContainers,
+} from "./mysql-container.ts";
 
 let rt: Runtime;
-let runnerPath: string;
-let runnerWrapperPath: string;
-let runnerCapturePath: string;
-let compilerPath: string;
-let compilerWrapperPath: string;
-let compilerMarkerPath: string;
+let runtimePath: string;
+let runtimeWrapperPath: string;
+let runtimeCapturePath: string;
+let runtimeMarkerPath: string;
 let endpointSource: string;
-let mysqlContainer: string;
-let mysqlUrl: string;
+let mysql: MysqlContainer;
 
 const HOST = "zero-rust-runner.test";
 const GENERATED_HOST = "zero-generated-rust-runner.test";
-const REDIRECT_ONLY_HOST = "zero-rust-redirect-only.test";
+const GENERATED_SPACE = "spc_zero_generated_rust";
+const GENERATED_VERSION = "ver_zero_generated_rust_1";
+const REPUBLISH_HOST = "zero-republish-rust-runner.test";
+const REPUBLISH_SPACE = "spc_zero_republish_rust";
+const REPUBLISH_TABLE = "sf_spc_zero_republish_todos";
 const REPO_ROOT = path.resolve(import.meta.dir, "../..");
 const MYSQL_ROOT_PASSWORD = "stattic";
 const MYSQL_DATABASE = "zero_test";
-const MYSQL_IMAGE =
-  "mirror.gcr.io/library/mysql:8.4@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af";
 const MYSQL_SETUP_TIMEOUT_MS = 180_000;
+const MYSQL_TODOS_DB = {
+  schemaHash: "sha256:mysql",
+  tables: {
+    todos: {
+      physicalName: "zero_items",
+      primaryKey: "id",
+      columns: {
+        id: "todo_id",
+        title: { physicalName: "todo_title" },
+      },
+    },
+  },
+} as const;
+const SHARED_ZERO_RUNS = [
+  {
+    run_id: "query_todos",
+    source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });",
+    schema_hash: "sha256:mysql",
+    capabilities: { db: true },
+    db: MYSQL_TODOS_DB,
+  },
+  {
+    run_id: "mutation_addTodo",
+    source:
+      'globalThis.__statticZeroResult = JSON.stringify({ status: 200, body: JSON.stringify(globalThis.__statticRealtime.publish("todos", {})) });',
+    schema_hash: "sha256:mysql",
+    capabilities: { db: true, realtime: true },
+    db: MYSQL_TODOS_DB,
+  },
+] as const;
 
 beforeAll(async () => {
   const build = Bun.spawnSync({
@@ -34,9 +86,9 @@ beforeAll(async () => {
       "build",
       "--locked",
       "-p",
-      "stattic-zero-runner",
-      "-p",
       "stattic-runtime-compiler",
+      "--bin",
+      "stattic-runtime",
     ],
     cwd: REPO_ROOT,
     stdout: "pipe",
@@ -45,26 +97,27 @@ beforeAll(async () => {
   if (build.exitCode !== 0) {
     throw new Error(`cargo build failed:\n${build.stdout.toString()}\n${build.stderr.toString()}`);
   }
-  runnerPath = path.join(REPO_ROOT, "target/debug/stattic-zero-runner");
-  compilerPath = path.join(REPO_ROOT, "target/debug/stattic-runtime-compiler");
+  runtimePath = path.join(REPO_ROOT, "target/debug/stattic-runtime");
   const bunPath = Bun.which("bun") ?? "/usr/bin/env bun";
-  const runnerWrapperRoot = path.join(
+  const runtimeWrapperRoot = path.join(
     "/tmp",
-    `stattic-zero-runner-wrapper-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    `stattic-runtime-wrapper-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   );
-  runnerWrapperPath = path.join(runnerWrapperRoot, "runner-wrapper.mjs");
-  runnerCapturePath = path.join(runnerWrapperRoot, "invoke-envelope.json");
-  await Bun.$`mkdir -p ${runnerWrapperRoot}`;
+  runtimeWrapperPath = path.join(runtimeWrapperRoot, "runtime-wrapper.mjs");
+  runtimeCapturePath = path.join(runtimeWrapperRoot, "invoke-envelope.json");
+  runtimeMarkerPath = path.join(runtimeWrapperRoot, "invocations.log");
+  await Bun.$`mkdir -p ${runtimeWrapperRoot}`;
   writeFileSync(
-    runnerWrapperPath,
+    runtimeWrapperPath,
     `#!${bunPath}
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 const input = readFileSync(0);
-if (process.argv.length === 2) {
-  writeFileSync(${JSON.stringify(runnerCapturePath)}, input);
+if (process.argv[2] === "invoke") {
+  writeFileSync(${JSON.stringify(runtimeCapturePath)}, input);
 }
-const result = spawnSync(${JSON.stringify(runnerPath)}, process.argv.slice(2), {
+appendFileSync(${JSON.stringify(runtimeMarkerPath)}, process.argv.slice(2).join(" ") + "\\n");
+const result = spawnSync(${JSON.stringify(runtimePath)}, process.argv.slice(2), {
   input,
   stdout: "pipe",
   stderr: "pipe",
@@ -75,25 +128,7 @@ writeFileSync(2, result.stderr);
 process.exit(result.status ?? 1);
 `,
   );
-  chmodSync(runnerWrapperPath, 0o755);
-  const compilerWrapperRoot = path.join(
-    "/tmp",
-    `stattic-runtime-compiler-wrapper-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  );
-  compilerWrapperPath = path.join(compilerWrapperRoot, "compiler-wrapper.mjs");
-  compilerMarkerPath = path.join(compilerWrapperRoot, "invocations.log");
-  await Bun.$`mkdir -p ${compilerWrapperRoot}`;
-  writeFileSync(
-    compilerWrapperPath,
-    `#!${bunPath}
-import { appendFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-appendFileSync(${JSON.stringify(compilerMarkerPath)}, process.argv.slice(2).join(" ") + "\\n");
-const result = spawnSync(${JSON.stringify(compilerPath)}, process.argv.slice(2), { stdio: "inherit" });
-process.exit(result.status ?? 1);
-`,
-  );
-  chmodSync(compilerWrapperPath, 0o755);
+  chmodSync(runtimeWrapperPath, 0o755);
 
   endpointSource = `
 const request = globalThis.__statticZeroRequest;
@@ -118,21 +153,23 @@ globalThis.__statticZeroResult = JSON.stringify({
   })
 });
 `;
-  mysqlUrl = await startMysql();
+  mysql = await startMysqlContainer({
+    namePrefix: "stattic-zero-mysql",
+    database: MYSQL_DATABASE,
+    rootPassword: MYSQL_ROOT_PASSWORD,
+  });
 
   rt = await startRuntime({
     env: {
-      SPACEFAST_ZERO_RUNNER: runnerWrapperPath,
-      SPACEFAST_ZERO_RUNNER_CAPTURE: runnerCapturePath,
-      SPACEFAST_RUNTIME_FINALIZER_BIN: compilerWrapperPath,
+      SPACEFAST_RUNTIME_BIN: runtimeWrapperPath,
+      SPACEFAST_ZERO_RUNNER_CAPTURE: runtimeCapturePath,
       SPACEFAST_ZERO_RUNNER_DEBUG: "1",
-      SPACEFAST_ZERO_DATABASE_URL: mysqlUrl,
+      SPACEFAST_ZERO_DATABASE_URL: mysql.url,
     },
   });
   await deploy(rt, {
     spaceId: "spc_zero_rust",
     versionId: "ver_zero_rust_1",
-    zeroMode: "active",
     metadata: { mode: "website", title: "Zero Rust Runner" },
     files: {
       "index.html": "<h1>zero rust runner</h1>\n",
@@ -146,51 +183,11 @@ globalThis.__statticZeroResult = JSON.stringify({
           capabilities: { db: false },
         },
       ],
-      zero_runs: [
-        {
-          run_id: "query_todos",
-          source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });",
-          schema_hash: "sha256:mysql",
-          capabilities: { db: true },
-          db: {
-            schemaHash: "sha256:mysql",
-            tables: {
-              todos: {
-                physicalName: "zero_items",
-                primaryKey: "id",
-                columns: {
-                  id: "todo_id",
-                  title: { physicalName: "todo_title" },
-                },
-              },
-            },
-          },
-        },
-        {
-          run_id: "mutation_addTodo",
-          source:
-            'globalThis.__statticZeroResult = JSON.stringify({ status: 200, body: JSON.stringify(globalThis.__statticRealtime.publish("todos", {})) });',
-          schema_hash: "sha256:mysql",
-          capabilities: { db: true, realtime: true },
-          db: {
-            schemaHash: "sha256:mysql",
-            tables: {
-              todos: {
-                physicalName: "zero_items",
-                primaryKey: "id",
-                columns: {
-                  id: "todo_id",
-                  title: { physicalName: "todo_title" },
-                },
-              },
-            },
-          },
-        },
-      ],
+      zero_runs: SHARED_ZERO_RUNS,
     },
     activate: {
       route_name: "production",
-      config: { mode: "website", site_title: "Zero Rust Runner" },
+      config: publicAccessConfig({ mode: "website", site_title: "Zero Rust Runner" }),
       production_hostnames: [HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
@@ -198,19 +195,14 @@ globalThis.__statticZeroResult = JSON.stringify({
   });
 
   await deploy(rt, {
-    spaceId: "spc_zero_generated_rust",
-    versionId: "ver_zero_generated_rust_1",
-    zeroMode: "active",
+    spaceId: GENERATED_SPACE,
+    versionId: GENERATED_VERSION,
     metadata: { mode: "website", title: "Zero Generated Rust Runner" },
     files: {
       "index.html": "<h1>zero generated rust runner</h1>\n",
+      _redirects: "/old-generated /api/generated 308\n",
     },
     serving: {
-      redirects_exact: {
-        "/old-generated": [
-          { destination: "/api/generated", status: 308, action: "redirect", order: 1 },
-        ],
-      },
       zero_endpoints: [
         {
           method: "POST",
@@ -225,14 +217,32 @@ globalThis.__statticZeroResult = JSON.stringify({
           capabilities: { db: true },
           db: {
             schemaHash: "sha256:generated",
+            migrationOperations: [
+              {
+                op: "drop_index",
+                table: "todos",
+                name: "by_title",
+                explicit: "drop",
+              },
+              {
+                op: "add_index",
+                table: "todos",
+                name: "by_title",
+                columns: ["title"],
+                unique: false,
+              },
+            ],
             tables: {
               todos: {
-                physicalName: "lb_spc_zero_generated_todos",
+                physicalName: "sf_spc_zero_generated_todos",
                 primaryKey: "id",
                 columns: {
                   id: "todo_id",
                   title: { physicalName: "todo_title" },
                   createdAt: {},
+                },
+                indexes: {
+                  by_title: { fields: ["title"] },
                 },
               },
             },
@@ -259,19 +269,7 @@ globalThis.__statticZeroResult = JSON.stringify({
 });
 `,
           capabilities: { db: true },
-          db: {
-            schemaHash: "sha256:mysql",
-            tables: {
-              todos: {
-                physicalName: "zero_items",
-                primaryKey: "id",
-                columns: {
-                  id: "todo_id",
-                  title: { physicalName: "todo_title" },
-                },
-              },
-            },
-          },
+          db: MYSQL_TODOS_DB,
         },
         {
           method: "POST",
@@ -305,19 +303,7 @@ globalThis.__statticZeroResult = JSON.stringify({
 });
 `,
           capabilities: { db: true },
-          db: {
-            schemaHash: "sha256:mysql",
-            tables: {
-              todos: {
-                physicalName: "zero_items",
-                primaryKey: "id",
-                columns: {
-                  id: "todo_id",
-                  title: { physicalName: "todo_title" },
-                },
-              },
-            },
-          },
+          db: MYSQL_TODOS_DB,
         },
         {
           method: "POST",
@@ -331,19 +317,22 @@ const capsule = {
   endpoints: {
     atomicRollback: {
       ...route,
-      handler(ctx) {
+      // Every db call is awaited: the host adapter's table API is async, so an
+      // unawaited insert reports its duplicate as an unhandled rejection and the
+      // transaction commits the first write regardless.
+      async handler(ctx) {
         let failure = "";
         try {
-          ctx.transaction(() => {
-            ctx.db.todos.insert({ id: "99001", title: "must-roll-back" });
-            ctx.db.todos.insert({ id: "99001", title: "duplicate" });
+          await ctx.transaction(async () => {
+            await ctx.db.todos.insert({ id: "99001", title: "must-roll-back" });
+            await ctx.db.todos.insert({ id: "99001", title: "duplicate" });
           });
         } catch (error) {
           failure = String(error && error.message ? error.message : error);
         }
         return {
           duplicateRejected: failure.length > 0,
-          row: ctx.db.todos.get("99001"),
+          row: await ctx.db.todos.get("99001"),
         };
       },
     },
@@ -352,15 +341,126 @@ const capsule = {
 await globalThis.__statticRunZeroEndpoint(capsule, route);`,
           schema_hash: "sha256:mysql",
           capabilities: { db: true, realtime: true },
+          db: MYSQL_TODOS_DB,
+        },
+        {
+          method: "POST",
+          path: "/api/generated/lakebed-db",
+          source: `${ZERO_RUNTIME_HOST_SOURCE}
+const route = {
+  method: "POST",
+  path: "/api/generated/lakebed-db",
+};
+const capsule = {
+  endpoints: {
+    lakebedDb: {
+      ...route,
+      async handler(ctx) {
+        const first = await ctx.db.messages.insert({ pinned: true, title: "first" });
+        const second = await ctx.db.messages.insert({ pinned: false, title: "second" });
+        const custom = await ctx.db.messages
+          .withIndex("by_title", (q) => q.eq("title", "first"))
+          .collect();
+        const pinned = await ctx.db.messages
+          .withIndex("by_pinned", (q) => q.eq("pinned", true))
+          .collect();
+        const collected = await ctx.db.messages
+          .withIndex("by_creation")
+          .order("desc")
+          .collect();
+        const pageOne = await ctx.db.messages
+          .withIndex("by_creation")
+          .order("asc")
+          .paginate({ cursor: null, numItems: 1 });
+        const deletedPageOne = await ctx.db.messages.delete(first.id);
+        const pageTwo = await ctx.db.messages
+          .withIndex("by_creation")
+          .order("asc")
+          .paginate({ cursor: pageOne.continueCursor, numItems: 1 });
+        let crossQueryRejected = false;
+        try {
+          await ctx.db.messages
+            .withIndex("by_title", (q) => q.eq("title", "second"))
+            .paginate({ cursor: pageOne.continueCursor, numItems: 1 });
+        } catch {
+          crossQueryRejected = true;
+        }
+        let tamperRejected = false;
+        try {
+          await ctx.db.messages
+            .withIndex("by_creation")
+            .order("asc")
+            .paginate({ cursor: pageOne.continueCursor.slice(0, -2) + "zz", numItems: 1 });
+        } catch {
+          tamperRejected = true;
+        }
+        const longTitle = "bounded-context-".padEnd(3200, "x");
+        const longFirst = await ctx.db.messages.insert({ pinned: false, title: longTitle });
+        const longSecond = await ctx.db.messages.insert({ pinned: false, title: longTitle });
+        const longPageOne = await ctx.db.messages
+          .where("title", longTitle)
+          .paginate({ cursor: null, numItems: 1 });
+        const longPageTwo = await ctx.db.messages
+          .where("title", longTitle)
+          .paginate({ cursor: longPageOne.continueCursor, numItems: 1 });
+        await ctx.db.messages.delete(longFirst.id);
+        await ctx.db.messages.delete(longSecond.id);
+        const updated = await ctx.db.messages.update(second.id, { title: "updated" });
+        const deleted = await ctx.db.messages.delete(second.id);
+        return {
+          collected: collected.map((row) => row.title),
+          crossQueryRejected,
+          custom: custom.map((row) => row.title),
+          deleted,
+          deletedPageOne,
+          first: { ...first, createdAt: typeof first.createdAt, updatedAt: typeof first.updatedAt },
+          longCursorLength: longPageOne.continueCursor.length,
+          longPageTwo: longPageTwo.page.map((row) => row.title.length),
+          pageOne: pageOne.page.map((row) => row.title),
+          pageTwo: pageTwo.page.map((row) => row.title),
+          pinned: pinned.map((row) => ({ pinned: row.pinned, title: row.title })),
+          tamperRejected,
+          updated: updated && updated.title,
+        };
+      },
+    },
+  },
+};
+await globalThis.__statticRunZeroEndpoint(capsule, route);`,
+          schema_hash: "sha256:lakebed",
+          capabilities: { db: true, realtime: true },
           db: {
-            schemaHash: "sha256:mysql",
+            schemaHash: "sha256:lakebed",
+            migrationOperations: [
+              {
+                op: "add_index",
+                table: "messages",
+                name: "by_title",
+                columns: ["title"],
+                unique: false,
+              },
+              {
+                op: "add_index",
+                table: "messages",
+                name: "by_pinned",
+                columns: ["pinned"],
+                unique: false,
+              },
+            ],
             tables: {
-              todos: {
-                physicalName: "zero_items",
+              messages: {
+                physicalName: "lakebed_items",
                 primaryKey: "id",
                 columns: {
-                  id: "todo_id",
-                  title: { physicalName: "todo_title" },
+                  id: "item_id",
+                  createdAt: "created_at",
+                  updatedAt: "updated_at",
+                  title: "item_title",
+                  pinned: { physicalName: "item_pinned", type: "boolean" },
+                },
+                indexes: {
+                  by_title: { fields: ["title"] },
+                  by_pinned: { fields: ["pinned"] },
                 },
               },
             },
@@ -387,104 +487,15 @@ globalThis.__statticZeroResult = JSON.stringify({ status: 200, headers, body: "{
           capabilities: { db: false },
         },
       ],
-      zero_runs: [
-        {
-          run_id: "query_todos",
-          source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });",
-          schema_hash: "sha256:mysql",
-          capabilities: { db: true },
-          db: {
-            schemaHash: "sha256:mysql",
-            tables: {
-              todos: {
-                physicalName: "zero_items",
-                primaryKey: "id",
-                columns: {
-                  id: "todo_id",
-                  title: { physicalName: "todo_title" },
-                },
-              },
-            },
-          },
-        },
-        {
-          run_id: "mutation_addTodo",
-          source:
-            'globalThis.__statticZeroResult = JSON.stringify({ status: 200, body: JSON.stringify(globalThis.__statticRealtime.publish("todos", {})) });',
-          schema_hash: "sha256:mysql",
-          capabilities: { db: true, realtime: true },
-          db: {
-            schemaHash: "sha256:mysql",
-            tables: {
-              todos: {
-                physicalName: "zero_items",
-                primaryKey: "id",
-                columns: {
-                  id: "todo_id",
-                  title: { physicalName: "todo_title" },
-                },
-              },
-            },
-          },
-        },
-      ],
+      zero_runs: SHARED_ZERO_RUNS,
     },
     activate: {
       route_name: "production",
-      config: { mode: "website", site_title: "Zero Generated Rust Runner" },
+      config: publicAccessConfig({
+        mode: "website",
+        site_title: "Zero Generated Rust Runner",
+      }),
       production_hostnames: [GENERATED_HOST],
-      noindex_production_hostnames: [],
-      version_hostnames: [],
-    },
-  });
-
-  await deploy(rt, {
-    spaceId: "spc_zero_redirect_only_rust",
-    versionId: "ver_zero_redirect_only_rust_1",
-    metadata: { mode: "website", title: "Zero Redirect Only Rust" },
-    files: {
-      "index.html": "<h1>zero redirect only rust</h1>\n",
-      "assets/app.js": "void 0;\n",
-    },
-    serving: {
-      headers_exact: {
-        "/": [
-          {
-            order: 1,
-            operations: [{ kind: "set", name: "X-Rust-Compiled-Header", value: "yes" }],
-            headers: { "X-Rust-Compiled-Header": "yes" },
-          },
-        ],
-      },
-      headers_pattern: [
-        {
-          path: "/assets/*",
-          regex: "^/assets/(?<file>[^/]+)$",
-          order: 2,
-          operations: [{ kind: "set", name: "X-Rust-Asset", value: "name=:file" }],
-          headers: { "X-Rust-Asset": "name=:file" },
-        },
-      ],
-      redirects_exact: {
-        "/old-redirect-only": [
-          { destination: "/new-redirect-only", status: 301, action: "redirect" },
-        ],
-      },
-      redirects_pattern: [
-        {
-          source: "/rust-rewrite/*",
-          regex: "^/rust-rewrite/(?<slug>.*)$",
-          destination: "/index.html",
-          status: 200,
-          action: "rewrite",
-          order: 2,
-        },
-      ],
-    },
-    activate: {
-      route_name: "production",
-      config: { mode: "website", site_title: "Zero Redirect Only Rust" },
-      production_hostnames: [REDIRECT_ONLY_HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
     },
@@ -493,115 +504,15 @@ globalThis.__statticZeroResult = JSON.stringify({ status: 200, headers, body: "{
 
 afterAll(() => {
   rt?.stop();
-  if (compilerWrapperPath) {
-    rmSync(path.dirname(compilerWrapperPath), { recursive: true, force: true });
+  if (runtimeWrapperPath) {
+    rmSync(path.dirname(runtimeWrapperPath), { recursive: true, force: true });
   }
-  if (runnerWrapperPath) {
-    rmSync(path.dirname(runnerWrapperPath), { recursive: true, force: true });
-  }
-  if (mysqlContainer) {
-    Bun.spawnSync({ cmd: ["docker", "rm", "-f", mysqlContainer] });
-  }
+  stopMysqlContainers();
 });
 
-async function startMysql(): Promise<string> {
-  mysqlContainer = `stattic-zero-mysql-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const port = await freeTcpPort();
-  const run = Bun.spawnSync({
-    cmd: [
-      "docker",
-      "run",
-      "-d",
-      "--rm",
-      "--name",
-      mysqlContainer,
-      "-e",
-      `MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}`,
-      "-e",
-      `MYSQL_DATABASE=${MYSQL_DATABASE}`,
-      "-p",
-      `127.0.0.1:${port}:3306`,
-      MYSQL_IMAGE,
-    ],
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (run.exitCode !== 0) {
-    throw new Error(
-      `mysql container failed to start:\n${run.stdout.toString()}\n${run.stderr.toString()}`,
-    );
-  }
-  await waitForMysql();
-  await waitForTcpPort(port);
-  return `mysql://root:${MYSQL_ROOT_PASSWORD}@127.0.0.1:${port}/${MYSQL_DATABASE}`;
-}
-
-async function freeTcpPort(): Promise<number> {
-  const server = net.createServer();
-  server.listen(0, "127.0.0.1");
-  await new Promise((resolve) => server.once("listening", resolve));
-  const port = (server.address() as net.AddressInfo).port;
-  server.close();
-  return port;
-}
-
-async function waitForMysql(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  for (;;) {
-    const ping = Bun.spawnSync({
-      cmd: [
-        "docker",
-        "exec",
-        mysqlContainer,
-        "mysqladmin",
-        "ping",
-        "-h",
-        "127.0.0.1",
-        "-uroot",
-        `-p${MYSQL_ROOT_PASSWORD}`,
-        "--silent",
-      ],
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    if (ping.exitCode === 0) {
-      return;
-    }
-    if (Date.now() > deadline) {
-      throw new Error(
-        `mysql container did not become ready:\n${ping.stdout.toString()}\n${ping.stderr.toString()}`,
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-}
-
-async function waitForTcpPort(port: number): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    const connected = await new Promise<boolean>((resolve) => {
-      const socket = net.createConnection({ host: "127.0.0.1", port });
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.once("error", () => {
-        socket.destroy();
-        resolve(false);
-      });
-      socket.setTimeout(500, () => {
-        socket.destroy();
-        resolve(false);
-      });
-    });
-    if (connected) {
-      return;
-    }
-    if (Date.now() > deadline) {
-      throw new Error(`mysql host port did not become ready: 127.0.0.1:${port}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+/** A file inside the generated space's version root (contracts §2 layout). */
+function generatedVersionFile(...segments: string[]): string {
+  return path.join(versionRoot(rt, GENERATED_SPACE, GENERATED_VERSION), ...segments);
 }
 
 test("invokes finalized QuickJS bytecode through the real Rust runner", async () => {
@@ -626,15 +537,15 @@ test("invokes finalized QuickJS bytecode through the real Rust runner", async ()
     dbInstalled: false,
     dbCapability: false,
   });
-  const envelope = JSON.parse(readFileSync(runnerCapturePath, "utf8"));
+  const envelope = JSON.parse(readFileSync(runtimeCapturePath, "utf8"));
   expect(Array.isArray(envelope.request.headers)).toBe(false);
   expect(Array.isArray(envelope.request.params)).toBe(false);
   expect(Array.isArray(envelope.variables)).toBe(false);
 });
 
 test("uses the Rust runtime compiler during PHP finalize", () => {
-  expect(existsSync(compilerMarkerPath)).toBe(true);
-  const invocations = readFileSync(compilerMarkerPath, "utf8");
+  expect(existsSync(runtimeMarkerPath)).toBe(true);
+  const invocations = readFileSync(runtimeMarkerPath, "utf8");
   expect(invocations).toContain("finalize");
   expect(invocations).toContain("--input");
   expect(invocations).toContain("--output");
@@ -663,7 +574,7 @@ test("surfaces Rust runtime compiler diagnostics during finalize", async () => {
   );
 
   expect(response.status).toBe(422);
-  expect((await response.json()).error.code).toBe("zero_endpoint_compile_failed");
+  expect((await response.json()).code).toBe("zero_endpoint_compile_failed");
 });
 
 test("Rust compiler rejects equal-score overlapping Zero patterns in either order", async () => {
@@ -696,21 +607,8 @@ test("Rust compiler rejects equal-score overlapping Zero patterns in either orde
     );
     expect(response.status).toBe(422);
     expect(await response.json()).toMatchObject({
-      error: { code: "zero_endpoint_duplicate" },
+      code: "zero_endpoint_duplicate",
     });
-  }
-});
-
-test("keeps bytecode/source/artifact private when using the Rust runner", async () => {
-  const slug = `post_api_status_${sha256("POST\n/api/status\n0").slice(0, 12)}`;
-  for (const artifactPath of [
-    `/zero/endpoints/${slug}.json`,
-    `/zero/endpoints/${slug}.source.js`,
-    `/zero/endpoints/${slug}.bytecode`,
-    "/zero/endpoints-index.json",
-  ]) {
-    const response = await get(rt, HOST, artifactPath);
-    expect(response.status).toBe(404);
   }
 });
 
@@ -732,30 +630,52 @@ test("compiles zero_endpoints during finalize and invokes generated bytecode", a
     path: "/api/generated",
     params: {},
     body: Buffer.from(JSON.stringify({ generated: true })).toString("base64"),
-    spaceId: "spc_zero_generated_rust",
+    spaceId: GENERATED_SPACE,
     dbInstalled: false,
     dbCapability: false,
   });
-  const envelope = JSON.parse(readFileSync(runnerCapturePath, "utf8"));
+  const envelope = JSON.parse(readFileSync(runtimeCapturePath, "utf8"));
   expect(envelope.endpointId).toBe("POST /api/generated");
   expect(envelope).not.toHaveProperty("artifactPath");
-  expect(envelope).not.toHaveProperty("filesRoot");
+});
 
-  const routesPath = path.join(
-    rt.storageRoot,
-    "spaces/spc_zero_generated_rust/versions/ver_zero_generated_rust_1/zero/routes.php",
-  );
-  const parsedRoutes = Bun.spawnSync({
-    cmd: [
-      Bun.which("php") ?? "/usr/bin/php",
-      "-r",
-      "echo json_encode(require $argv[1]);",
-      routesPath,
-    ],
+// Schema v4 deleted the per-version `redirects.php` / `headers.php` artifacts:
+// an exact publisher redirect is now a compiled response-table entry, and a Zero
+// endpoint at a static path is an action on the entry for that path (§5). Both
+// come out of the same finalize, into the same table, so this is where a
+// compiler that dropped one of them shows up. Whether the serve path then
+// answers them is routing.test.ts / headers.test.ts.
+test("compiles Zero actions and publisher redirects into one response table", () => {
+  const entries = responseEntries(rt, GENERATED_SPACE, GENERATED_VERSION);
+
+  expect(entries["/api/generated"]).toMatchObject({
+    s: 200,
+    a: { t: "zero", endpoint: "POST /api/generated" },
   });
-  expect(parsedRoutes.exitCode).toBe(0);
-  const zeroRoutes = JSON.parse(parsedRoutes.stdout.toString());
-  expect(zeroRoutes.exact).toContainEqual(
+  expect(entries["/old-generated"]).toMatchObject({
+    s: 308,
+    h: { location: "/api/generated" },
+  });
+  // A redirect has no body to send, so it never rides the accel lane.
+  expect(entries["/old-generated"]?.b).toBeNull();
+});
+
+test("writes compiler-produced Zero routes artifact when no base routes are merged", () => {
+  const routes = phpArtifact<{
+    runtime_schema: string;
+    runtime_engine_version: string;
+    format: string;
+    artifact_kind: string;
+    exact: Record<string, { endpoint_id: string; method: string; pattern: string }>;
+  }>(generatedVersionFile("zero/routes.php"));
+
+  expect(routes).toMatchObject({
+    runtime_schema: "static-runtime-v4",
+    runtime_engine_version: "static-runtime-v2",
+    format: "stattic.zero.routes.v1",
+    artifact_kind: "zero_routes",
+  });
+  expect(Object.values(routes?.exact ?? {})).toContainEqual(
     expect.objectContaining({
       endpoint_id: "POST /api/generated",
       method: "POST",
@@ -764,82 +684,11 @@ test("compiles zero_endpoints during finalize and invokes generated bytecode", a
   );
 });
 
-test("keeps exact redirects aligned with the Rust compiler manifest", async () => {
-  const response = await get(rt, GENERATED_HOST, "/old-generated?from=redirect");
-
-  expect(response.status).toBe(308);
-  expect(response.headers.get("location")).toBe("/api/generated?from=redirect");
-});
-
-test("uses the Rust compiler manifest for redirects without zero endpoints", async () => {
-  const response = await get(rt, REDIRECT_ONLY_HOST, "/old-redirect-only");
-
-  expect(response.status).toBe(301);
-  expect(response.headers.get("location")).toBe("/new-redirect-only");
-});
-
-test("keeps exact response headers aligned with the Rust compiler artifact", async () => {
-  const response = await get(rt, REDIRECT_ONLY_HOST, "/");
-
-  expect(response.status).toBe(200);
-  expect(response.headers.get("x-rust-compiled-header")).toBe("yes");
-});
-
-test("keeps pattern response headers aligned with the Rust compiler artifact", async () => {
-  const response = await get(rt, REDIRECT_ONLY_HOST, "/assets/app.js");
-
-  expect(response.status).toBe(200);
-  expect(response.headers.get("x-rust-asset")).toBe("name=app.js");
-});
-
-test("keeps pattern redirects aligned with the Rust compiler artifact", async () => {
-  const response = await get(rt, REDIRECT_ONLY_HOST, "/rust-rewrite/page");
-
-  expect(response.status).toBe(200);
-  expect(await response.text()).toBe("<h1>zero redirect only rust</h1>\n");
-});
-
-test("writes compiler-produced rule artifacts with runtime metadata", () => {
-  const versionRoot = path.join(
-    rt.storageRoot,
-    "spaces/spc_zero_redirect_only_rust/versions/ver_zero_redirect_only_rust_1",
-  );
-
-  for (const artifact of ["headers.php", "redirects.php"]) {
-    const contents = readFileSync(path.join(versionRoot, artifact), "utf8");
-    expect(contents).toContain("'runtime_schema' => 'static-runtime-v2'");
-    expect(contents).toContain("'runtime_engine_version' => 'static-runtime-v2'");
-    expect(contents).toContain("'generated_at' =>");
-  }
-});
-
-test("writes compiler-produced Zero routes artifact when no base routes are merged", () => {
-  const contents = readFileSync(
-    path.join(
-      rt.storageRoot,
-      "spaces/spc_zero_generated_rust/versions/ver_zero_generated_rust_1/zero/routes.php",
-    ),
-    "utf8",
-  );
-
-  expect(contents).toContain("'runtime_schema' => 'static-runtime-v2'");
-  expect(contents).toContain("'artifact_kind' => 'zero_routes'");
-  expect(contents).toContain("'format' => 'stattic.zero.routes.v1'");
-});
-
 test("writes compiler-produced Zero endpoint index", () => {
-  const index = JSON.parse(
-    readFileSync(
-      path.join(
-        rt.storageRoot,
-        "spaces/spc_zero_generated_rust/versions/ver_zero_generated_rust_1/zero/endpoints-index.json",
-      ),
-      "utf8",
-    ),
-  );
+  const index = JSON.parse(readFileSync(generatedVersionFile("zero/endpoints-index.json"), "utf8"));
 
   expect(index).toMatchObject({
-    runtime_schema: "static-runtime-v2",
+    runtime_schema: "static-runtime-v4",
     runtime_engine_version: "static-runtime-v2",
     format: "stattic.zero.endpoints-index.v1",
     artifact_kind: "zero_endpoints_index",
@@ -848,13 +697,9 @@ test("writes compiler-produced Zero endpoint index", () => {
 });
 
 test("writes compiler-produced Zero run artifacts", () => {
-  const versionRoot = path.join(
-    rt.storageRoot,
-    "spaces/spc_zero_generated_rust/versions/ver_zero_generated_rust_1",
-  );
-  const index = JSON.parse(readFileSync(path.join(versionRoot, "zero/runs-index.json"), "utf8"));
+  const index = JSON.parse(readFileSync(generatedVersionFile("zero/runs-index.json"), "utf8"));
   expect(index).toMatchObject({
-    runtime_schema: "static-runtime-v2",
+    runtime_schema: "static-runtime-v4",
     runtime_engine_version: "static-runtime-v2",
     format: "stattic.zero.runs-index.v1",
     artifact_kind: "zero_runs_index",
@@ -863,7 +708,7 @@ test("writes compiler-produced Zero run artifacts", () => {
   expect(index.runs.mutation_addTodo).toContain("zero/runs/mutation_addtodo_");
 
   const runArtifact = JSON.parse(
-    readFileSync(path.join(versionRoot, index.runs.mutation_addTodo), "utf8"),
+    readFileSync(generatedVersionFile(index.runs.mutation_addTodo), "utf8"),
   );
   expect(runArtifact).toMatchObject({
     format: "stattic.zero.run.v1",
@@ -871,33 +716,8 @@ test("writes compiler-produced Zero run artifacts", () => {
     runId: "mutation_addTodo",
     capabilities: { db: true, realtime: true },
   });
-  expect(existsSync(path.join(versionRoot, runArtifact.sourcePath))).toBe(true);
-  expect(existsSync(path.join(versionRoot, runArtifact.bytecodePath))).toBe(true);
-  const source = readFileSync(path.join(versionRoot, runArtifact.sourcePath), "utf8");
-  expect(source).toContain("Generated by stattic-zero-runner");
-  expect(source).toContain("__statticDbHost");
-  expect(source).toContain("__statticRealtime");
-});
-
-test("writes capability-specialized generated source during finalize", () => {
-  const exactSlug = `post_api_generated_${sha256("POST\n/api/generated\n0").slice(0, 12)}`;
-  const generatedSource = readFileSync(
-    path.join(
-      rt.storageRoot,
-      "spaces/spc_zero_generated_rust/versions/ver_zero_generated_rust_1",
-      `zero/endpoints/${exactSlug}.source.js`,
-    ),
-    "utf8",
-  );
-
-  expect(generatedSource).toContain("Generated by stattic-zero-runner");
-  expect(generatedSource).toContain("__statticZeroBootstrap");
-  expect(generatedSource).not.toContain("requestJson");
-  expect(generatedSource).not.toContain("__statticDbHost");
-  expect(generatedSource).toContain("__statticFetch");
-  expect(generatedSource).toContain("__statticAuth");
-  expect(generatedSource).toContain("__statticEnv");
-  expect(generatedSource).toContain("__statticRealtime");
+  expect(existsSync(generatedVersionFile(runArtifact.sourcePath))).toBe(true);
+  expect(existsSync(generatedVersionFile(runArtifact.bytecodePath))).toBe(true);
 });
 
 test("compiles generated dynamic zero_endpoints into the route artifact", async () => {
@@ -913,7 +733,7 @@ test("compiles generated dynamic zero_endpoints into the route artifact", async 
     path: "/api/generated/todo_42",
     params: { id: "todo_42" },
     body: "",
-    spaceId: "spc_zero_generated_rust",
+    spaceId: GENERATED_SPACE,
     dbInstalled: true,
     dbCapability: true,
   });
@@ -922,14 +742,7 @@ test("compiles generated dynamic zero_endpoints into the route artifact", async 
 test("precomputes compact DB metadata for generated DB endpoints", () => {
   const dynamicSlug = `get_api_generated_id_${sha256("GET\n/api/generated/:id\n1").slice(0, 12)}`;
   const artifact = JSON.parse(
-    readFileSync(
-      path.join(
-        rt.storageRoot,
-        "spaces/spc_zero_generated_rust/versions/ver_zero_generated_rust_1",
-        `zero/endpoints/${dynamicSlug}.json`,
-      ),
-      "utf8",
-    ),
+    readFileSync(generatedVersionFile(`zero/endpoints/${dynamicSlug}.json`), "utf8"),
   );
 
   expect(artifact.db).toMatchObject({
@@ -937,8 +750,8 @@ test("precomputes compact DB metadata for generated DB endpoints", () => {
     tables: {
       todos: {
         name: "todos",
-        physicalName: "lb_spc_zero_generated_todos",
-        quotedName: "`lb_spc_zero_generated_todos`",
+        physicalName: "sf_spc_zero_generated_todos",
+        quotedName: "`sf_spc_zero_generated_todos`",
         primaryKey: "id",
         columns: {
           id: { name: "id", physicalName: "todo_id", quotedName: "`todo_id`" },
@@ -954,19 +767,163 @@ test("precomputes compact DB metadata for generated DB endpoints", () => {
   });
 });
 
-test("applies compiler-produced Zero DB migrations during finalize", () => {
+/**
+ * One publish of the republish space. `withNote` is the schema change: the
+ * later versions carry a `note` field the first publish never had, planned the
+ * way the CLI plans it (an `add_column` op plus an index over the new field).
+ */
+async function publishRepublishSpace(versionId: string, withNote: boolean) {
+  const noteColumns = withNote
+    ? {
+        note: { physicalName: "todo_note" },
+      }
+    : {};
+  await deploy(rt, {
+    spaceId: REPUBLISH_SPACE,
+    versionId,
+    metadata: { mode: "website", title: "Zero Republish Rust Runner" },
+    files: { "index.html": "<h1>zero republish rust runner</h1>\n" },
+    serving: {
+      zero_endpoints: [
+        {
+          method: "POST",
+          path: "/api/republish/db",
+          source: `
+const endpoint = globalThis.__statticZeroEndpoint;
+const table = endpoint.db.tables.todos.quotedName;
+const note = endpoint.db.tables.todos.columns.note.quotedName;
+const insert = JSON.parse(globalThis.__statticDb(JSON.stringify({
+  mode: "execute",
+  sql: "INSERT INTO " + table + " (todo_title, " + note + ") VALUES (?, ?)",
+  params: ["republished", "added-field"]
+})));
+const rows = JSON.parse(globalThis.__statticDb(JSON.stringify({
+  sql: "SELECT todo_title, " + note + " AS note FROM " + table + " WHERE " + note + " IS NOT NULL ORDER BY todo_id"
+})));
+globalThis.__statticZeroResult = JSON.stringify({
+  status: 200,
+  headers: { "content-type": "application/json; charset=utf-8" },
+  body: JSON.stringify({ insert, rows: rows.rows })
+});
+`,
+          capabilities: { db: true },
+          db: {
+            schemaHash: withNote ? "sha256:republish-note" : "sha256:republish",
+            migrationOperations: withNote
+              ? [
+                  { op: "add_column", table: "todos", column: { name: "note", type: "string" } },
+                  {
+                    op: "add_index",
+                    table: "todos",
+                    name: "by_note",
+                    columns: ["note"],
+                    unique: false,
+                  },
+                ]
+              : [],
+            tables: {
+              todos: {
+                physicalName: REPUBLISH_TABLE,
+                primaryKey: "id",
+                columns: {
+                  id: "todo_id",
+                  title: { physicalName: "todo_title" },
+                  createdAt: {},
+                  ...noteColumns,
+                },
+                ...(withNote ? { indexes: { by_note: { fields: ["note"] } } } : {}),
+              },
+            },
+          },
+        },
+      ],
+    },
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig({
+        mode: "website",
+        site_title: "Zero Republish Rust Runner",
+      }),
+      production_hostnames: [REPUBLISH_HOST],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+}
+
+function republishColumns(): string {
+  const show = Bun.spawnSync({
+    cmd: [
+      "docker",
+      "exec",
+      mysql.name,
+      "mysql",
+      "-N",
+      "-uroot",
+      `-p${MYSQL_ROOT_PASSWORD}`,
+      MYSQL_DATABASE,
+      "-e",
+      `SHOW COLUMNS FROM ${REPUBLISH_TABLE}`,
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (show.exitCode !== 0) {
+    throw new Error(`SHOW COLUMNS failed: ${show.stderr.toString()}`);
+  }
+  return show.stdout.toString();
+}
+
+test("republishing with an added schema field adds the column and lets writes use it", async () => {
+  // Publish: the table is created with the fields this version knows about.
+  await publishRepublishSpace("ver_zero_republish_rust_1", false);
+  expect(republishColumns()).not.toContain("todo_note");
+
+  // Republish with the field added. `CREATE TABLE IF NOT EXISTS` is a no-op by
+  // now, so the ALTER is the only thing that can put the column in the database
+  // — and it has to land before the index that reads it.
+  await publishRepublishSpace("ver_zero_republish_rust_2", true);
   const migrations = JSON.parse(
     readFileSync(
       path.join(
-        rt.storageRoot,
-        "spaces/spc_zero_generated_rust/versions/ver_zero_generated_rust_1/zero/migrations.json",
+        versionRoot(rt, REPUBLISH_SPACE, "ver_zero_republish_rust_2"),
+        "zero/migrations.json",
       ),
       "utf8",
     ),
   );
+  const alter = `ALTER TABLE \`${REPUBLISH_TABLE}\` ADD COLUMN \`todo_note\` TEXT NULL`;
+  expect(migrations.statements).toContain(alter);
+  expect(migrations.statements.indexOf(alter)).toBeLessThan(
+    migrations.statements.indexOf(
+      `CREATE INDEX \`by_note\` ON \`${REPUBLISH_TABLE}\` (\`todo_note\`(191), \`createdAt\`(191), \`todo_id\`)`,
+    ),
+  );
+  expect(republishColumns()).toContain("todo_note");
+
+  const response = await get(rt, REPUBLISH_HOST, "/api/republish/db", { method: "POST" });
+  const text = await response.text();
+  if (response.status !== 200) {
+    throw new Error(`expected 200, got ${response.status}: ${text}`);
+  }
+  expect(JSON.parse(text)).toMatchObject({
+    insert: { ok: true, affectedRows: 1 },
+    rows: [{ note: "added-field", todo_title: "republished" }],
+  });
+
+  // MySQL has no `ADD COLUMN IF NOT EXISTS`: a later publish carrying the same
+  // planned ops replays the ALTER, and duplicate-column must be as survivable as
+  // a replayed index.
+  await publishRepublishSpace("ver_zero_republish_rust_3", true);
+  const replayed = await get(rt, REPUBLISH_HOST, "/api/republish/db", { method: "POST" });
+  expect(replayed.status).toBe(200);
+});
+
+test("applies compiler-produced Zero DB migrations during finalize", () => {
+  const migrations = JSON.parse(readFileSync(generatedVersionFile("zero/migrations.json"), "utf8"));
 
   expect(migrations).toMatchObject({
-    runtime_schema: "static-runtime-v2",
+    runtime_schema: "static-runtime-v4",
     runtime_engine_version: "static-runtime-v2",
     format: "stattic.zero.migrations.v1",
     artifact_kind: "zero_migrations",
@@ -974,6 +931,37 @@ test("applies compiler-produced Zero DB migrations during finalize", () => {
   expect(migrations.statements).toContain(
     "CREATE TABLE IF NOT EXISTS `zero_items` (`todo_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, `todo_title` TEXT NULL, PRIMARY KEY (`todo_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
   );
+  expect(migrations.statements).toContain(
+    "CREATE INDEX `by_title` ON `sf_spc_zero_generated_todos` (`todo_title`(191), `createdAt`(191), `todo_id`)",
+  );
+  expect(migrations.statements).toContain("DROP INDEX `by_title` ON `sf_spc_zero_generated_todos`");
+  expect(
+    migrations.statements.indexOf("DROP INDEX `by_title` ON `sf_spc_zero_generated_todos`"),
+  ).toBeLessThan(
+    migrations.statements.indexOf(
+      "CREATE INDEX `by_title` ON `sf_spc_zero_generated_todos` (`todo_title`(191), `createdAt`(191), `todo_id`)",
+    ),
+  );
+
+  const showIndex = Bun.spawnSync({
+    cmd: [
+      "docker",
+      "exec",
+      mysql.name,
+      "mysql",
+      "-N",
+      "-uroot",
+      `-p${MYSQL_ROOT_PASSWORD}`,
+      MYSQL_DATABASE,
+      "-e",
+      "SHOW INDEX FROM sf_spc_zero_generated_todos WHERE Key_name = 'by_title'",
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(showIndex.exitCode).toBe(0);
+  expect(showIndex.stdout.toString()).toContain("by_title");
+  expect(showIndex.stdout.toString()).toContain("todo_title");
 });
 
 test("executes Zero DB query and mutation through local MySQL", async () => {
@@ -998,6 +986,124 @@ test("executes Zero DB query and mutation through local MySQL", async () => {
   });
 });
 
+test("executes the Lakebed database v1 API through the real Rust runner", async () => {
+  const response = await get(rt, GENERATED_HOST, "/api/generated/lakebed-db", {
+    method: "POST",
+  });
+  const text = await response.text();
+
+  if (response.status !== 200) {
+    throw new Error(`expected 200, got ${response.status}: ${text}`);
+  }
+  const body = JSON.parse(text);
+  expect(body.longCursorLength).toBeLessThan(4_096);
+  expect(body).toMatchObject({
+    collected: ["second", "first"],
+    crossQueryRejected: true,
+    custom: ["first"],
+    deleted: true,
+    deletedPageOne: true,
+    first: {
+      createdAt: "string",
+      title: "first",
+      updatedAt: "string",
+    },
+    longPageTwo: [3200],
+    pageOne: ["first"],
+    pageTwo: ["second"],
+    pinned: [{ pinned: true, title: "first" }],
+    tamperRejected: true,
+    updated: "updated",
+  });
+});
+
+// Space storage (D38): a record in `spaces/<s>/uploads/objects/<id>.json`,
+// bytes in the CAS and nowhere else, and PHP serving them without ever entering
+// tenant code. Ranges/HEAD/206 and conditional 304s are the platform's, not
+// ours (§14, §16/C19) — PHP never sees Range or If-None-Match — so they are not
+// asserted here.
+test("serves space storage from the PHP runtime without invoking tenant code", async () => {
+  const markerBefore = existsSync(runtimeMarkerPath) ? readFileSync(runtimeMarkerPath, "utf8") : "";
+  const upload = await get(rt, GENERATED_HOST, "/storage", {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: "runtime object",
+  });
+  expect(upload.status).toBe(201);
+  const object = (await upload.json()) as {
+    id: string;
+    contentType: string;
+    size: number;
+    url: string;
+  };
+  expect(object).toMatchObject({ contentType: "text/plain", size: 14 });
+  expect(object.id).toMatch(/^[a-f0-9]{32}$/);
+  // Fresh at response time: the public URL carries the runtime read key.
+  expect(object.url).toMatch(new RegExp(`/__stattic/u/${object.id}\\?k=[a-f0-9]{32}$`));
+  const objectSha = sha256("runtime object");
+  const recordPath = path.join(
+    spaceRoot(rt, GENERATED_SPACE),
+    "uploads",
+    "objects",
+    `${object.id}.json`,
+  );
+  const casPath = blobPath(rt, GENERATED_SPACE, objectSha);
+  // The record is the authority and carries no path to the bytes; the CAS is
+  // the only byte store, so there is no companion body file to hardlink (§8).
+  expect(JSON.parse(readFileSync(recordPath, "utf8"))).toMatchObject({
+    contentType: "text/plain",
+    sha256: objectSha,
+    size: 14,
+  });
+  expect(readFileSync(casPath, "utf8")).toBe("runtime object");
+
+  const read = await get(rt, GENERATED_HOST, `/storage/${object.id}`);
+  expect(read.status).toBe(200);
+  expect(read.headers.get("content-security-policy")).toContain("sandbox");
+  // D132: the validator nginx would derive from the placed file, so a
+  // PHP-served and an accel-served copy answer identically.
+  const etag = read.headers.get("etag");
+  expect(etag).toMatch(/^"[0-9a-f]+-[0-9a-f]+"$/);
+  expect(await read.text()).toBe("runtime object");
+
+  const svg = await get(rt, GENERATED_HOST, "/storage", {
+    method: "POST",
+    headers: { "content-type": "image/svg+xml" },
+    body: '<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>',
+  });
+  expect(svg.status).toBe(201);
+
+  const blocked = await get(rt, GENERATED_HOST, "/storage", {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: Buffer.from([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 0]),
+  });
+  expect(blocked.status).toBe(415);
+  expect(await blocked.json()).toMatchObject({
+    code: "storage_content_blocked",
+  });
+
+  const removed = await get(rt, GENERATED_HOST, `/storage/${object.id}`, {
+    method: "DELETE",
+  });
+  expect(removed.status).toBe(204);
+  expect(
+    (
+      await get(rt, GENERATED_HOST, `/storage/${object.id}`, {
+        method: "DELETE",
+      })
+    ).status,
+  ).toBe(204);
+  expect((await get(rt, GENERATED_HOST, `/storage/${object.id}`)).status).toBe(404);
+  // The delete removes the record, never the blob: the bytes may back another
+  // record or a published version, and only the GC's live set releases them.
+  expect(existsSync(recordPath)).toBe(false);
+  expect(existsSync(casPath)).toBe(true);
+  expect(existsSync(runtimeMarkerPath) ? readFileSync(runtimeMarkerPath, "utf8") : "").toBe(
+    markerBefore,
+  );
+});
+
 test("applies the native response-header policy to every endpoint response", async () => {
   // Safe custom headers pass through unchanged.
   const clean = await get(rt, GENERATED_HOST, "/api/generated/response-headers");
@@ -1010,19 +1116,19 @@ test("applies the native response-header policy to every endpoint response", asy
   expect(forbidden.status).toBe(502);
   expect(forbidden.headers.get("x-spacefast-zero-injected")).toBeNull();
   expect(await forbidden.json()).toMatchObject({
-    error: { code: "zero_response_header_forbidden" },
+    code: "zero_response_header_forbidden",
   });
 
   // Oversized values and case-insensitive duplicates are rejected as invalid.
   const oversized = await get(rt, GENERATED_HOST, "/api/generated/response-headers?mode=oversized");
   expect(oversized.status).toBe(502);
   expect(await oversized.json()).toMatchObject({
-    error: { code: "zero_response_header_invalid" },
+    code: "zero_response_header_invalid",
   });
   const duplicate = await get(rt, GENERATED_HOST, "/api/generated/response-headers?mode=duplicate");
   expect(duplicate.status).toBe(502);
   expect(await duplicate.json()).toMatchObject({
-    error: { code: "zero_response_header_invalid" },
+    code: "zero_response_header_invalid",
   });
 });
 
@@ -1030,16 +1136,16 @@ test("the runner ignores ambient DATABASE_URL and requires the labeled URL", asy
   // Capture a real DB-endpoint envelope by making one request through PHP.
   const primed = await get(rt, GENERATED_HOST, "/api/generated/db", { method: "POST" });
   expect(primed.status).toBe(200);
-  const envelope = readFileSync(runnerCapturePath);
+  const envelope = readFileSync(runtimeCapturePath);
 
   // Ambient DATABASE_URL alone (the pre-hardening fallback) no longer feeds
   // the DB layer: the operation fails closed before any connection.
   const ambientOnly = Bun.spawnSync({
-    cmd: [runnerPath],
+    cmd: [runtimePath, "invoke"],
     stdin: envelope,
     stdout: "pipe",
     stderr: "pipe",
-    env: { DATABASE_URL: mysqlUrl },
+    env: { DATABASE_URL: mysql.url },
   });
   expect(ambientOnly.exitCode).toBe(0);
   const ambientResponse = JSON.parse(ambientOnly.stdout.toString());
@@ -1049,12 +1155,12 @@ test("the runner ignores ambient DATABASE_URL and requires the labeled URL", asy
 
   // A labeled URL with an unknown provenance label also fails closed.
   const mislabeled = Bun.spawnSync({
-    cmd: [runnerPath],
+    cmd: [runtimePath, "invoke"],
     stdin: envelope,
     stdout: "pipe",
     stderr: "pipe",
     env: {
-      SPACEFAST_ZERO_DATABASE_URL: mysqlUrl,
+      SPACEFAST_ZERO_DATABASE_URL: mysql.url,
       SPACEFAST_ZERO_DATABASE_URL_SOURCE: "ambient",
     },
   });
@@ -1064,12 +1170,12 @@ test("the runner ignores ambient DATABASE_URL and requires the labeled URL", asy
 
   // The labeled provider URL is the one accepted path.
   const labeled = Bun.spawnSync({
-    cmd: [runnerPath],
+    cmd: [runtimePath, "invoke"],
     stdin: envelope,
     stdout: "pipe",
     stderr: "pipe",
     env: {
-      SPACEFAST_ZERO_DATABASE_URL: mysqlUrl,
+      SPACEFAST_ZERO_DATABASE_URL: mysql.url,
       SPACEFAST_ZERO_DATABASE_URL_SOURCE: "provider",
     },
   });

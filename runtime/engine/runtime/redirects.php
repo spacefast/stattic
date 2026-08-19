@@ -2,25 +2,48 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/rules.php';
+// _sf_cache_control: one reading of a cache class, shared with the entry lane.
+require_once __DIR__ . '/serve-fast.php';
+require_once __DIR__ . '/../shared/cache-policy.php';
+
+// _stattic_redirect_is_same_origin_path lives in shared/context.php: the
+// query-carrying redirect helper there classifies targets with it too.
 
 function _stattic_rewrite_target(string $target, string $requestPath, int $status, bool $clearIncomingQuery = false): array
 {
-    $parts = parse_url($target);
-    $targetPath = is_array($parts) ? (string) ($parts['path'] ?? '') : '';
+    // Split literally rather than with parse_url(), which is not Unicode-safe:
+    // it replaces combining marks in an NFD target before the canonical path
+    // gate can normalize them.
+    $fragmentOffset = strpos($target, '#');
+    $withoutFragment = $fragmentOffset === false ? $target : substr($target, 0, $fragmentOffset);
+    $queryOffset = strpos($withoutFragment, '?');
+    $targetPath = $queryOffset === false ? $withoutFragment : substr($withoutFragment, 0, $queryOffset);
     if ($targetPath === '' || !str_starts_with($targetPath, '/')) {
         return ['path' => $requestPath, 'status' => 200];
     }
 
     $result = ['path' => $targetPath, 'status' => $status];
-    if ($clearIncomingQuery || (is_array($parts) && array_key_exists('query', $parts))) {
-        $result['query'] = (string) ($parts['query'] ?? '');
+    if ($clearIncomingQuery || $queryOffset !== false) {
+        $result['query'] = $queryOffset === false ? '' : substr($withoutFragment, $queryOffset + 1);
     }
     return $result;
 }
 
-function _stattic_apply_redirects(array $redirects, array $serving, array $version, string $requestHost, string $requestPath, bool $privateCache, int $initialStatus = 200, ?string $mountPrefix = null): array
+// $pathExists answers "does this version publish a response at this path" — a
+// response-table key probe, supplied by the caller so this module needs no
+// version metadata of its own.
+// A redirect answers before the access lane runs, so it carries no per-visitor
+// privacy verdict of its own: the same Location goes to every caller. Privacy is
+// left to cache-policy.php's sticky per-request flags, which is the one place
+// that decides it for every lane.
+function _stattic_apply_redirects(array $redirects, array $serving, callable $pathExists, string $requestHost, string $requestPath, string $requestMethod, int $initialStatus = 200): array
 {
-    $routeResult = _stattic_for_each_ordered_rule($redirects, $requestPath, function (array $rule, bool $useExact) use ($serving, $version, $requestHost, $requestPath, $privateCache, $mountPrefix): ?array {
+    $conditionalCandidate = _stattic_redirect_has_conditional_candidate(
+        $redirects,
+        $requestHost,
+        $requestPath
+    );
+    $routeResult = _stattic_for_each_ordered_rule($redirects, $requestPath, function (array $rule, bool $useExact) use ($serving, $pathExists, $requestHost, $requestPath, $requestMethod, $conditionalCandidate): ?array {
         $destination = (string) ($rule['destination'] ?? '');
         $status = (int) ($rule['status'] ?? 302);
         $action = (string) ($rule['action'] ?? 'redirect');
@@ -41,28 +64,33 @@ function _stattic_apply_redirects(array $redirects, array $serving, array $versi
             return null;
         }
 
+        // Only after a rule matches: otherwise a pattern elsewhere in the
+        // artifact makes an ordinary static path advertise methods it cannot
+        // serve.
+        if (!in_array($requestMethod, STATTIC_VISITOR_METHODS, true)) {
+            _stattic_render_method_not_allowed_lazy(
+                $action === 'redirect' ? STATTIC_VISITOR_METHODS : ['GET', 'HEAD']
+            );
+        }
+
         $target = $matches === [] ? $destination : _stattic_expand_template($destination, $matches);
         if ($action === 'proxy') {
-            // External 200-proxy exits the pipeline here, before the unified
-            // access enforcement that gates file serving — enforce on the
-            // visitor-requested path first (challenge/deny render inside; a
+            // This exits the pipeline before the access enforcement that gates
+            // file serving, so enforce on the visitor-requested path first (a
             // token-satisfied allow arms §3.2 identity forwarding).
             _stattic_enforce_access_for_proxy($serving, $requestHost, $requestPath, _stattic_runtime_effective_request_uri());
             require_once __DIR__ . '/proxy.php';
             $proxyAction = _stattic_redirect_proxy_action($target, $rule, $serving);
             if (!empty($rule['conditions'])) {
-                // Condition-matched dispatch is per-visitor; the relayed
-                // response must never enter a shared cache (proxy.php pins
-                // `private, no-store` and drops the origin's cache policy).
+                // Per-visitor: the relayed response must never enter a shared
+                // cache.
                 $proxyAction['conditional_match'] = true;
             }
-            _stattic_proxy_request($proxyAction, '/');
+            _stattic_proxy_request($proxyAction, '/', $serving);
         }
 
         if ($action === 'rewrite' || $action === 'notFound') {
-            $force = !empty($rule['force']);
-            $lookup = ltrim(rawurldecode($requestPath), '/');
-            if (!$force && _stattic_resolve_file($version, $lookup) !== null) {
+            if (empty($rule['force']) && $pathExists($requestPath)) {
                 return null;
             }
 
@@ -74,43 +102,99 @@ function _stattic_apply_redirects(array $redirects, array $serving, array $versi
                 is_array($queryRule) && count($queryRule) > 0
             );
             if (!empty($rule['conditions'])) {
-                // Serve-time consumers downgrade condition-matched rewrites to
-                // private/no-store: the served bytes are per-visitor (cookie /
-                // country / language / agent) at a shared URL, and the edge
-                // cannot key its cache on any of those inputs.
+                // Per-visitor bytes at a shared URL, and the edge cannot key its
+                // cache on cookie/country/language/agent.
                 $result['conditional'] = true;
             }
+            if ($conditionalCandidate) {
+                $result['conditional_candidate'] = true;
+            }
             return $result;
+        }
+
+        // Only the unexpanded template was origin-checked when the artifact was
+        // compiled. If it was same-origin, a capture must not turn the Location
+        // off-origin (a `/:splat` expanding to `//evil.example`). Proxy is a
+        // legitimate cross-origin feature and rewrite targets a local path, so
+        // neither reaches here — this constrains redirects only.
+        if (
+            _stattic_redirect_is_same_origin_path($destination)
+            && !_stattic_redirect_is_same_origin_path($target)
+        ) {
+            _stattic_render_platform_page_lazy(
+                'not-found',
+                404,
+                ['Cache-Control' => STATTIC_DEFAULT_EDGE_CACHE_CONTROL],
+                "Not Found\n"
+            );
         }
 
         $queryRule = $rule['query'] ?? null;
         if (!is_array($queryRule) || count($queryRule) === 0) {
             $target = _stattic_append_current_query_to_url($target);
         }
-        $target = _stattic_mount_local_location($target, $mountPrefix);
-
-        // Explicit edge policy on the artifact-lane redirect (the compiled
-        // exact-rule lane already emits one via _stattic_emit_redirect_response;
-        // this lane serves pattern/host/query/conditional rules). Unconditional
-        // rules are a pure function of the cache key (host+path+query) and take
-        // the short default edge TTL; a condition-matched rule (cookie /
-        // country / language / agent) is per-visitor and must never be stored.
+        // An EXACT unconditional rule names one URL a publish purge can
+        // enumerate, so it states the same `revalidate` class the compiler bakes
+        // into that rule's own table entry. A PATTERN expands to URLs no purge
+        // can name, so it keeps the bounded shared window instead.
         _stattic_send_cache_policy_headers(
-            $privateCache,
-            empty($rule['conditions']) ? STATTIC_DEFAULT_EDGE_CACHE_CONTROL : STATTIC_CACHE_CONTROL_NO_STORE
+            false,
+            empty($rule['conditions'])
+                ? ($useExact
+                    ? _sf_cache_control(STATTIC_RUNTIME_CACHE_CLASS_REVALIDATE, true)
+                    : STATTIC_DEFAULT_EDGE_CACHE_CONTROL)
+                : STATTIC_CACHE_CONTROL_NO_STORE
         );
         header('Location: ' . $target, true, $status);
         exit;
     }, true);
 
-    return is_array($routeResult) ? $routeResult : ['path' => $requestPath, 'status' => $initialStatus];
+    return is_array($routeResult)
+        ? $routeResult
+        : array_filter([
+            'path' => $requestPath,
+            'status' => $initialStatus,
+            'conditional_candidate' => $conditionalCandidate ? true : null,
+        ], static fn (mixed $value): bool => $value !== null);
 }
 
-function _stattic_redirect_exact_rule_exists(array $redirects, string $requestPath): bool
-{
-    $exactPath = _stattic_redirect_match_path($requestPath);
-    $rules = $redirects['exact'][$exactPath] ?? [];
-    return is_array($rules) && count($rules) > 0;
+// A condition that did not match this visitor still makes the URL
+// request-varying: caching the ordinary branch would stop later matching
+// visitors from reaching the origin at all.
+function _stattic_redirect_has_conditional_candidate(
+    array $redirects,
+    string $requestHost,
+    string $requestPath
+): bool {
+    // The compiler settles this over the whole artifact; a missing flag is a
+    // version compiled before it existed, which still has to be walked.
+    if (($redirects['has_conditions'] ?? true) === false) {
+        return false;
+    }
+    $candidate = _stattic_for_each_ordered_rule(
+        $redirects,
+        $requestPath,
+        function (array $rule, bool $useExact) use ($requestHost, $requestPath): ?bool {
+            if (empty($rule['conditions']) || (string) ($rule['destination'] ?? '') === '') {
+                return null;
+            }
+            $matches = [];
+            if (!_stattic_ordered_rule_request_matches(
+                $rule,
+                $useExact,
+                $requestPath,
+                $requestHost,
+                $matches
+            )) {
+                return null;
+            }
+            return _stattic_redirect_query_matches($rule['query'] ?? null, $matches)
+                ? true
+                : null;
+        },
+        true
+    );
+    return $candidate === true;
 }
 
 function _stattic_redirect_proxy_action(string $target, array $rule, array $serving): array
@@ -127,18 +211,9 @@ function _stattic_redirect_proxy_action(string $target, array $rule, array $serv
         'timeoutSeconds' => 30,
         'connectTimeoutSeconds' => 10,
     ];
-    // DUAL READ, two generations of plan gating (proxy-routes.md: "the rule
-    // stays in your config and activates the moment you upgrade — no redeploy
-    // needed"):
-    //  - `disabled` (BACK-COMPAT): already-finalized artifacts compiled the
-    //    plan verdict in at publish time. Still honored forever — those rules
-    //    only come back to life on a republish, exactly as before this change.
-    //  - `planGated` (CURRENT): the compiled artifact is plan-agnostic; the
-    //    verdict is decided HERE, against the live serving-state entitlements
-    //    doc synced independently of any publish. FAIL CLOSED — an absent or
-    //    stale entitlements doc (sync lag, never-synced space) always resolves
-    //    to "not entitled": a lagging sync can only withhold the capability,
-    //    never grant one that hasn't been confirmed.
+    // `disabled` is a verdict already compiled into the artifact; `planGated` is
+    // decided here against the live entitlements doc and FAILS CLOSED, so a
+    // lagging sync can only withhold the capability, never grant one.
     if (!empty($rule['disabled'])) {
         $action['disabled'] = true;
         if (is_string($rule['disabledReason'] ?? null) && $rule['disabledReason'] !== '') {
@@ -154,11 +229,8 @@ function _stattic_redirect_proxy_action(string $target, array $rule, array $serv
     return $action;
 }
 
-// Fail-closed local lookup against the per-request serving-state doc
-// ($serving['entitlements'], populated by shared/artifacts.php from the
-// space's synced entitlements — see admin/generate.php
-// _stattic_runtime_stored_entitlements). No control-plane call at request
-// time: this is exactly the local array lookup the architecture requires.
+// Fail-closed local lookup against the synced serving-state doc. No
+// control-plane call at request time.
 function _stattic_serving_entitlement_allows(array $serving, string $gate): bool
 {
     $entitlements = is_array($serving['entitlements'] ?? null) ? $serving['entitlements'] : [];
@@ -284,14 +356,9 @@ function _stattic_redirect_conditions_match(mixed $conditions): bool
     return true;
 }
 
-// Must stay in lockstep with isAgentRequest in packages/routing/src/match.ts —
-// the TS matcher is what the CLI validates and simulates against, this function
-// is what serves. Agent-like: an Accept that prefers text without asking for
-// HTML, or a known agent/script user agent (curl and wget count: on this
-// platform a shell fetch is an agent, not a person). The shared expectation
-// table lives in packages/routing/fixtures/agent-detection.json (replayed
-// against both twins, needle list parity-checked): widen there first, then
-// both implementations.
+// Must stay in lockstep with isAgentRequest in packages/routing/src/match.ts
+// (the twin the CLI validates against); the shared expectation table is
+// packages/routing/fixtures/agent-detection.json — widen there first.
 function _stattic_is_agent_request(): bool
 {
     $accept = strtolower((string) ($_SERVER['HTTP_ACCEPT'] ?? ''));

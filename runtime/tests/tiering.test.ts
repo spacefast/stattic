@@ -1,6 +1,32 @@
+// Storage tiering on the schema-v4 engine (contracts §8, D14–D21/D68–D74/
+// D90–D93/D117–D119, §15/§17).
+//
+// The model these tests hold, and nothing else:
+//   * the CAS is the only byte store. There is no version file tree, no
+//     file-shard entry carrying `local`/`remote`/`tier_class`, no per-file
+//     locator — a blob is `spaces/<s>/blobs/<aa>/<sha>` and the disk is the
+//     truth (D14/D15).
+//   * demote UPLOADS and MARKS. It never unlinks (D91); the GC releases a
+//     marked body after grace, so no reader can lose bytes under itself.
+//   * a released blob comes back through promote-on-read: admission, one S3
+//     GET, a digest check, a CAS install (D17/D68/D69). Failure or shed is a
+//     503 — never a partial body, never an install of unverified bytes.
+//   * collection orders by PUBLISH time only. §17 removed read recency
+//     entirely (no read-notes, no recency index, nothing on the hot path);
+//     §18 removed the local byte budget/eviction lane — demote is the ONLY
+//     thing that sends a live blob to S3, and only when explicitly asked.
+//     A wrongly demoted live blob self-heals with one promote.
+//   * a blob file's time is never written as bookkeeping — it is the accel-lane
+//     validator (§15/D132), so the one thing asserted about it is that PHP's
+//     install lands on exactly the stamp the Rust finalizer used.
+//
+// Deliberately NOT here (contracts §14): ranges, HEAD, 206 and 304. The
+// platform strips Range/If-None-Match before PHP and answers conditionals at
+// the edge (§16), so a local `php -S` proves nothing about them.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -10,36 +36,27 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { brotliCompressSync } from "node:zlib";
 
 import {
   api,
   apiJson,
+  blobPath,
   createDeclaredSession,
   deploy,
   get,
-  managementToken,
-  putFile,
+  journalRecords,
+  publicAccessConfig,
+  putBlob,
+  readBlob,
+  responseEntry,
+  responseTableFiles,
   sha256,
-  shardFiles,
   startRuntime,
-  uploadToken,
+  storagePath,
+  versionRoot,
   type Runtime,
 } from "./harness.ts";
 import { startFakeS3, type FakeS3 } from "./s3-fake.ts";
-
-type BucketRow = {
-  id: string;
-  endpoint: string;
-  region: string;
-  bucket: string;
-  urlStyle: "path";
-  getKeyId: string;
-  getKeySecret: string;
-  putKeyId: string;
-  putKeySecret: string;
-  integrity: "server_verified" | "unverified";
-};
 
 type JobRecord = {
   id: string;
@@ -48,73 +65,53 @@ type JobRecord = {
   progress?: { done: number; total: number };
 };
 
-type TickResponse = { lane: string; job: JobRecord | null; tick_status: string };
-
-// Staged callback envelope written under runtime/callbacks/pending/*.json
-// (see `_stattic_runtime_append_journal` callers in shared/storage.php): a
-// callback_token plus the arbitrary journal-shaped event it wraps.
-type PendingCallback = {
-  callback_token?: string;
-  event?: {
-    event?: string;
-    bucket?: string;
-    spaceId?: string;
-    inodes?: number;
-  };
-};
+type TickResponse = { job: JobRecord | null };
 
 let fake: FakeS3;
+/** GC grace 0: a marked body is released by the next maintenance pass. */
 let rt: Runtime;
-let bucket: BucketRow;
-let unverifiedBucket: BucketRow;
 let seq = 0;
 
-function writeAdmissionFileCounter(counterPath: string, count: number, updatedAt: number) {
-  const pointerPath = `${counterPath}.generation`;
-  const pointer = existsSync(pointerPath)
-    ? (JSON.parse(readFileSync(pointerPath, "utf8")) as { generation?: string })
-    : { generation: randomBytes(16).toString("hex") };
-  if (typeof pointer.generation !== "string") {
-    throw new Error(`admission counter ${counterPath} has no active generation`);
-  }
-  writeFileSync(pointerPath, JSON.stringify({ generation: pointer.generation }));
-  writeFileSync(
-    `${counterPath}.${pointer.generation}`,
-    JSON.stringify({ count, updated_at: updatedAt }),
-  );
+// One row, so `_stattic_s3_default_bucket_id()` resolves without a pin — the
+// shape the control plane pushes (exactly one active bucket per site). The
+// registry default is `unverified`, the row that makes no integrity promise and
+// therefore has to be read back before any local byte is released.
+function bucketsJson(): string {
+  return JSON.stringify([
+    {
+      id: "tier-bucket",
+      endpoint: fake.url,
+      region: "us-east-1",
+      bucket: fake.bucket,
+      urlStyle: "path",
+      getKeyId: "GETKEY",
+      getKeySecret: "get-secret",
+      putKeyId: "PUTKEY",
+      putKeySecret: "put-secret",
+      integrity: "unverified",
+    },
+  ]);
 }
 
 beforeAll(async () => {
   fake = await startFakeS3("tier-test-bucket");
-  bucket = {
-    id: "tier-bucket",
-    endpoint: fake.url,
-    region: "us-east-1",
-    bucket: fake.bucket,
-    urlStyle: "path",
-    getKeyId: "GETKEY",
-    getKeySecret: "get-secret",
-    putKeyId: "PUTKEY",
-    putKeySecret: "put-secret",
-    integrity: "server_verified",
-  };
-  // Same fake bucket, different registry row: exercises the ranged
-  // read-back verify lane (the shipped registry default is 'unverified').
-  unverifiedBucket = { ...bucket, id: "tier-bucket-unverified", integrity: "unverified" };
   rt = await startRuntime({
-    atomicData: {
-      SPACEFAST_STORAGE_BUCKETS_JSON: JSON.stringify([bucket, unverifiedBucket]),
-    },
+    atomicData: { SPACEFAST_STORAGE_BUCKETS_JSON: bucketsJson() },
     env: {
-      SPACEFAST_TIER_DEMOTE_GRACE_SECONDS: "0",
+      SPACEFAST_TIERING_ENABLED: "1",
+      // Collect on the spot: every maintenance pass in this suite is meant to
+      // finish the mark-then-delete cycle rather than leave it half-done.
       SPACEFAST_LOCAL_BLOB_GC_GRACE_SECONDS: "0",
-      SPACEFAST_TIER_FETCH_BREAKER_FAILURES: "3",
-      SPACEFAST_TIER_FETCH_MAX_IN_FLIGHT: "1",
-      // The in-flight cap assertions seed runtime/tier/inflight.json directly,
-      // so pin the file backend: on hosts whose php ships apcu with
-      // apc.enabled=1 (GitHub runners), _stattic_admission_backend() would
-      // otherwise pick apcu and silently ignore the seeded counter file.
+      // The undeclared lane keeps a grace floor of its own (it covers the
+      // finalizer's install-then-declare window, which grace=0 would otherwise
+      // close to nothing). This suite really does want same-tick collection, so
+      // it opts out explicitly.
+      SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS: "0",
+      // The shed test seeds the promote admission counter directly, so pin the
+      // file backend: on a host whose php ships apcu with apc.enabled=1 the
+      // acquire would read apcu and ignore the seeded file.
       SPACEFAST_ADMISSION_COUNTER_BACKEND: "file",
+      SPACEFAST_TIER_PROMOTE_CONC_PER_SPACE: "1",
     },
   });
 });
@@ -129,27 +126,56 @@ function nextId(prefix: string): string {
   return `${prefix}_${seq}`;
 }
 
-function bucketPayload(row: BucketRow = bucket): Record<string, string> {
-  return {
-    id: row.id,
-    endpoint: row.endpoint,
-    region: row.region,
-    bucket: row.bucket,
-    urlStyle: row.urlStyle,
-  };
+function hostFor(spaceId: string): string {
+  return `${spaceId.replaceAll("_", "-")}.test`;
 }
 
-function objectKey(spaceId: string, hash: string): string {
-  return `spaces/${spaceId}/blobs/${hash.slice(0, 2)}/${hash}`;
+/** D16: derived at every call site, never stored — not in an entry, not in a payload. */
+function objectKey(spaceId: string, sha: string): string {
+  return `spaces/${spaceId}/blobs/${sha.slice(0, 2)}/${sha}`;
+}
+
+function demoteMarkPath(runtime: Runtime, spaceId: string, sha: string): string {
+  return `${blobPath(runtime, spaceId, sha)}.demote`;
+}
+
+/** Every blob body this space currently holds locally (marks are not bodies). */
+function casBlobs(runtime: Runtime, spaceId: string): string[] {
+  const root = storagePath(runtime, "spaces", spaceId, "blobs");
+  if (!existsSync(root)) return [];
+  const shas: string[] = [];
+  for (const prefix of readdirSync(root)) {
+    for (const entry of readdirSync(path.join(root, prefix))) {
+      if (/^[a-f0-9]{64}$/.test(entry)) shas.push(entry);
+    }
+  }
+  return shas;
+}
+
+function casBytes(runtime: Runtime, spaceId: string): number {
+  return casBlobs(runtime, spaceId).reduce(
+    (total, sha) => total + statSync(blobPath(runtime, spaceId, sha)).size,
+    0,
+  );
+}
+
+/** The blob a compiled entry names — the only reference the serve path follows. */
+function entrySha(runtime: Runtime, spaceId: string, versionId: string, key: string): string {
+  const sha = responseEntry(runtime, spaceId, versionId, key)?.b;
+  if (typeof sha !== "string") {
+    throw new Error(`response entry ${key} of ${versionId} names no blob`);
+  }
+  return sha;
 }
 
 async function createJob(
+  runtime: Runtime,
   type: string,
   spaceId: string,
   payload: Record<string, unknown>,
 ): Promise<JobRecord> {
   const created = await apiJson<{ job: JobRecord }>(
-    rt,
+    runtime,
     "POST",
     "/__spacefast/api.php/jobs",
     "create_engine_job",
@@ -160,37 +186,20 @@ async function createJob(
   return created.job;
 }
 
-async function tick(scope: Record<string, unknown> = {}): Promise<TickResponse> {
+/** One bulk tick: claims a job if there is one, then runs the maintenance pass. */
+async function tick(runtime: Runtime): Promise<TickResponse> {
   return apiJson<TickResponse>(
-    rt,
+    runtime,
     "POST",
     "/__spacefast/api.php/jobs/tick?lane=bulk&budget_ms=50000",
-    "tick_engine_jobs",
-    scope,
-  );
-}
-
-async function tickInteractive(): Promise<TickResponse> {
-  return apiJson<TickResponse>(
-    rt,
-    "POST",
-    "/__spacefast/api.php/jobs/tick?lane=interactive&budget_ms=50000",
     "tick_engine_jobs",
     {},
   );
 }
 
-function journalEvents(): Array<Record<string, unknown>> {
-  const raw = readFileSync(path.join(rt.storageRoot, "runtime", "journal.jsonl"), "utf8");
-  return raw
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-}
-
-async function runJob(jobId: string, maxTicks = 30): Promise<JobRecord> {
+async function runJob(runtime: Runtime, jobId: string, maxTicks = 30): Promise<JobRecord> {
   for (let i = 0; i < maxTicks; i += 1) {
-    const response = await tick();
+    const response = await tick(runtime);
     if (response.job?.id === jobId && ["complete", "failed"].includes(response.job.status)) {
       return response.job;
     }
@@ -198,411 +207,322 @@ async function runJob(jobId: string, maxTicks = 30): Promise<JobRecord> {
   throw new Error(`job ${jobId} did not finish`);
 }
 
-async function deployTierFixture(
+/**
+ * The one demote operation (contracts §10). `shas` absent means "release this
+ * space's cold bytes"; a list targets exactly those blobs.
+ */
+async function demote(runtime: Runtime, spaceId: string, shas?: string[]): Promise<JobRecord> {
+  const job = await createJob(runtime, "tier_demote", spaceId, {
+    space_id: spaceId,
+    ...(shas ? { shas } : {}),
+  });
+  return runJob(runtime, job.id);
+}
+
+async function deployFixture(
+  runtime: Runtime,
   spaceId: string,
   versionId: string,
   host: string,
-  body = "x".repeat(40000),
-): Promise<string> {
-  await deploy(rt, {
+  files: Record<string, string>,
+): Promise<void> {
+  await deploy(runtime, {
     spaceId,
     versionId,
-    files: {
-      "index.html": `<html><body><script src="/__spacefast/sdk.js"></script>${body}</body></html>`,
-      "assets/big.txt": body,
-      "assets/small.txt": "small",
-    },
+    files: { "index.html": "<html><body>tier</body></html>", ...files },
     activate: {
       route_name: "production",
-      config: { mode: "website" },
+      config: publicAccessConfig({ mode: "website" }),
       production_hostnames: [host],
+      noindex_production_hostnames: [],
       version_hostnames: [],
     },
   });
-  return body;
 }
 
-async function demote(
-  spaceId: string,
-  versionId: string,
-  row: BucketRow = bucket,
-): Promise<JobRecord> {
-  const job = await createJob("tier_demote", spaceId, {
-    space_id: spaceId,
-    version_id: versionId,
-    bucket: bucketPayload(row),
-  });
-  return runJob(job.id);
+// The admission counter's on-disk layout (shared/admission.php): a generation
+// pointer plus one count file per generation. Seeding it is how a test holds a
+// slot without a second concurrent request.
+function writeAdmissionCounter(counterPath: string, count: number): void {
+  mkdirSync(path.dirname(counterPath), { recursive: true });
+  const pointerPath = `${counterPath}.generation`;
+  const pointer = existsSync(pointerPath)
+    ? (JSON.parse(readFileSync(pointerPath, "utf8")) as { generation?: string })
+    : {};
+  const generation =
+    typeof pointer.generation === "string" ? pointer.generation : randomBytes(16).toString("hex");
+  writeFileSync(pointerPath, `${JSON.stringify({ generation })}\n`);
+  writeFileSync(
+    `${counterPath}.${generation}`,
+    `${JSON.stringify({ count, updated_at: Math.floor(Date.now() / 1000) })}\n`,
+  );
 }
 
-test("finalize stores version files as per-space blob hardlinks and stamps tier_class", async () => {
-  const spaceId = nextId("spc_tier_finalize");
-  const versionA = nextId("ver_tier_finalize_a");
-  const versionB = nextId("ver_tier_finalize_b");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  const large = "shared-large-payload\n".repeat(2200);
-  await deployTierFixture(spaceId, versionA, host, large);
-  await deploy(rt, {
-    spaceId,
-    versionId: versionB,
-    files: {
-      "assets/big.txt": large,
-      "assets/other.txt": "other",
-      // tier_class is declared by the producer, never sniffed from the path:
-      // user files under a directory named zero/ or whose path merely contains
-      // "template-variant" are user files and stay demote-eligible.
-      "zero/big-user-file.txt": large,
-      "blog/template-variants-explained.html": large,
-    },
-    activate: {
-      route_name: "production",
-      config: { mode: "website" },
-      production_hostnames: [host],
-      version_hostnames: [],
-    },
-  });
+function promoteAdmissionCounterPath(runtime: Runtime, spaceId: string): string {
+  return storagePath(runtime, "runtime", "admission", `tier_promote-${spaceId}.json`);
+}
 
-  const a = path.join(
-    rt.storageRoot,
-    "spaces",
-    spaceId,
-    "versions",
-    versionA,
-    "files",
-    "assets",
-    "big.txt",
-  );
-  const b = path.join(
-    rt.storageRoot,
-    "spaces",
-    spaceId,
-    "versions",
-    versionB,
-    "files",
-    "assets",
-    "big.txt",
-  );
-  const statA = statSync(a);
-  const statB = statSync(b);
-  expect(statA.ino).toBe(statB.ino);
-  expect(statA.nlink).toBeGreaterThan(1);
+test("demote syncs every live blob to its derived key, unlinks it, and leaves the mark for lazy rehydration", async () => {
+  const spaceId = nextId("spc_tier_demote");
+  const versionId = nextId("ver_tier_demote");
+  const host = hostFor(spaceId);
+  const body = "x".repeat(40000);
+  await deployFixture(rt, spaceId, versionId, host, { "assets/big.txt": body });
 
-  const meta = shardFiles(rt, spaceId, versionB)["assets/big.txt"];
-  expect(meta.local).toBe(true);
-  expect(meta.tier_class).toBe("eligible");
-  expect(shardFiles(rt, spaceId, versionB)["assets/other.txt"].tier_class).toBe("small");
-  // Path-substring sniffing is gone: these user files were previously
-  // misclassified 'artifact' and excluded from tier demotion forever.
-  expect(shardFiles(rt, spaceId, versionB)["zero/big-user-file.txt"].tier_class).toBe("eligible");
-  expect(
-    shardFiles(rt, spaceId, versionB)["blog/template-variants-explained.html"].tier_class,
-  ).toBe("eligible");
-});
+  const sha = entrySha(rt, spaceId, versionId, "/assets/big.txt");
+  expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(body);
+  const before = casBlobs(rt, spaceId);
+  const bytesBefore = casBytes(rt, spaceId);
 
-// D21: the 32KB demote-eligibility floor is a real env knob, not just a
-// constant next to a comment claiming it's configurable.
-test("the demote-eligibility size floor is a real env knob (SPACEFAST_TIER_MIN_DEMOTE_BYTES)", async () => {
-  const shrunk = await startRuntime({
-    env: { SPACEFAST_TIER_MIN_DEMOTE_BYTES: "10" },
-  });
-  try {
-    const spaceId = "spc_tier_min_bytes_knob";
-    const versionId = "ver_tier_min_bytes_knob_1";
-    const host = "tier-min-bytes-knob.test";
-    await deploy(shrunk, {
-      spaceId,
-      versionId,
-      files: {
-        "index.html": "<html><body></body></html>",
-        // 20 bytes: below the shipped 32KB default (would stamp 'small'),
-        // above the lowered 10-byte knob (must stamp 'eligible').
-        "assets/tiny.txt": "twenty-byte-payload!",
-      },
-      activate: {
-        route_name: "production",
-        config: { mode: "website" },
-        production_hostnames: [host],
-        version_hostnames: [],
-      },
-    });
-    const tinyMeta = shardFiles(shrunk, spaceId, versionId)["assets/tiny.txt"];
-    expect(tinyMeta.tier_class).toBe("eligible");
-  } finally {
-    shrunk.stop();
-  }
-});
-
-test("declared sha mismatch is rejected before finalize commits bytes", async () => {
-  const spaceId = nextId("spc_tier_sha");
-  const versionId = nextId("ver_tier_sha");
-  const { uploadId, token } = await createDeclaredSession(rt, spaceId, versionId, {
-    "assets/big.txt": Buffer.from("declared"),
-  });
-  const response = await putFile(rt, uploadId, token, "assets/big.txt", Buffer.from("different"));
-  expect([200, 409, 422]).toContain(response.status);
-  if (response.status !== 200) {
-    return;
-  }
-  const finalized = await fetch(
-    `${rt.baseUrl}/__spacefast/api.php?${new URLSearchParams({ route: `/spaces/${spaceId}/versions/${versionId}/finalize` })}`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${managementToken("finalize_version", { space_id: spaceId, version_id: versionId })}`,
-      },
-      body: JSON.stringify({ upload_id: uploadId }),
-    },
-  );
-  expect(finalized.status).toBe(409);
-});
-
-test("demote rejects locally bit-rotted bytes on an unverified bucket instead of self-validating them", async () => {
-  const spaceId = nextId("spc_tier_bitrot");
-  const versionId = nextId("ver_tier_bitrot");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  const body = await deployTierFixture(spaceId, versionId, host);
-  const hash = sha256(body);
-  const filePath = path.join(
-    rt.storageRoot,
-    "spaces",
-    spaceId,
-    "versions",
-    versionId,
-    "files",
-    "assets",
-    "big.txt",
-  );
-  // Bit-rot AFTER finalize recorded the (still correct-looking) sha256 —
-  // the demoter must catch this against the RECORDED sha instead of
-  // read-back-comparing the bucket object to this same corrupt local file.
-  writeFileSync(filePath, "corrupted-bytes-do-not-match-the-recorded-sha");
-
-  const failed = await demote(spaceId, versionId, unverifiedBucket);
-  expect(failed.status).toBe("failed");
-  expect((failed as JobRecord & { error?: { code?: string } }).error?.code).toBe(
-    "transfer_source_corrupted",
-  );
-  expect(fake.getObject(objectKey(spaceId, hash))).toBeUndefined();
-});
-
-test("demote serves remote bytes, conditionals and HEAD avoid S3, range/416 are correct, and promote restores local bytes", async () => {
-  const spaceId = nextId("spc_tier_serve");
-  const versionId = nextId("ver_tier_serve");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  const body = await deployTierFixture(spaceId, versionId, host);
-  const hash = sha256(body);
-  const completed = await demote(spaceId, versionId);
+  fake.requests.splice(0);
+  const completed = await demote(rt, spaceId);
   expect(completed.status).toBe("complete");
-  expect(fake.getObject(objectKey(spaceId, hash))).toBeDefined();
+  // No `shas`, so the whole space is released: every local blob, counted once.
+  expect(completed.result).toEqual({ bytesMoved: bytesBefore, blobCount: before.length });
+
+  const key = objectKey(spaceId, sha);
+  expect(fake.getObject(key)?.body.toString("utf8")).toBe(body);
+  expect(fake.requests.filter((r) => r.method === "PUT" && r.path.endsWith(key))).toHaveLength(1);
+  // An `unverified` bucket makes no integrity promise, so the demoter reads the
+  // object back before any local byte is released.
+  expect(fake.requests.some((r) => r.method === "HEAD" && r.path.endsWith(key))).toBe(true);
+
+  // The explicit demote operation releases the site's disk immediately after
+  // the verified sync. The mark is the evidence that S3 holds these bytes.
+  expect(readBlob(rt, spaceId, sha)).toBeNull();
+  expect(existsSync(demoteMarkPath(rt, spaceId, sha))).toBe(true);
+  expect(casBlobs(rt, spaceId)).toEqual([]);
+
+  const events = journalRecords(rt);
+  expect(events.some((e) => e.event === "space.tier.demoted" && e.space_id === spaceId)).toBe(true);
   expect(
-    existsSync(
-      path.join(
-        rt.storageRoot,
-        "spaces",
-        spaceId,
-        "versions",
-        versionId,
-        "files",
-        "assets",
-        "big.txt",
-      ),
+    events.some(
+      (e) =>
+        e.event === "local_blob_gc" && [...(e.evicted ?? []), ...(e.collected ?? [])].includes(sha),
     ),
   ).toBe(false);
-  expect(shardFiles(rt, spaceId, versionId)["assets/small.txt"].local).toBe(true);
+});
+
+test("a demote larger than one chunk moves at most 200 blobs per step, persists the cursor, and finishes across ticks", async () => {
+  // The scan behind each step streams the CAS one prefix directory at a time
+  // (the 431k-blob website box OOM'd the old whole-space scan), so a fixture
+  // wider than STATTIC_TIER_DEMOTE_CHUNK proves both halves of the contract:
+  // one tick releases exactly one chunk, and the yielded cursor carries the
+  // stats forward until the target set drains.
+  const spaceId = nextId("spc_tier_demote_chunk");
+  const versionId = nextId("ver_tier_demote_chunk");
+  const host = hostFor(spaceId);
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 205; i += 1) {
+    files[`assets/f${i}.txt`] = `chunk-fixture-${i}\n`;
+  }
+  await deployFixture(rt, spaceId, versionId, host, files);
+
+  const before = casBlobs(rt, spaceId).length;
+  expect(before).toBeGreaterThan(200);
+
+  const job = await createJob(rt, "tier_demote", spaceId, { space_id: spaceId });
+  // budget_ms=0: the runner's deadline is already past after the first step,
+  // so this tick is exactly one stepper invocation.
+  const one = await apiJson<TickResponse>(
+    rt,
+    "POST",
+    "/__spacefast/api.php/jobs/tick?lane=bulk&budget_ms=0",
+    "tick_engine_jobs",
+    {},
+  );
+  expect(one.job?.id).toBe(job.id);
+  expect(one.job?.status).toBe("pending");
+  expect(one.job?.progress).toEqual({ done: 200, total: before });
+  expect(casBlobs(rt, spaceId)).toHaveLength(before - 200);
+
+  const completed = await runJob(rt, job.id);
+  expect(completed.status).toBe("complete");
+  expect(completed.result).toMatchObject({ blobCount: before });
+  expect(casBlobs(rt, spaceId)).toEqual([]);
+});
+
+test("a released blob promotes back on read at the finalizer's content-derived stamp, and the next read never dials", async () => {
+  const spaceId = nextId("spc_tier_promote");
+  const versionId = nextId("ver_tier_promote");
+  const host = hostFor(spaceId);
+  const body = "promote-me\n".repeat(4000);
+  await deployFixture(rt, spaceId, versionId, host, { "assets/big.txt": body });
+
+  const sha = entrySha(rt, spaceId, versionId, "/assets/big.txt");
+  // nginx derives `ETag: "<hex mtime>-<hex size>"` from the inode, so identical
+  // content must land on identical times whichever implementation installed it.
+  const finalizedMtimeMs = statSync(blobPath(rt, spaceId, sha)).mtimeMs;
+  expect((await demote(rt, spaceId, [sha])).status).toBe("complete");
+  expect(readBlob(rt, spaceId, sha)).toBeNull();
 
   fake.requests.splice(0);
   const served = await get(rt, host, "/assets/big.txt");
   expect(served.status).toBe(200);
   expect(await served.text()).toBe(body);
-  const etag = served.headers.get("etag") ?? "";
-  expect(fake.requests.some((r) => r.method === "GET")).toBe(true);
-
-  fake.requests.splice(0);
-  const conditional = await get(rt, host, "/assets/big.txt", {
-    headers: { "if-none-match": etag },
-  });
-  expect(conditional.status).toBe(304);
-  expect(fake.requests).toHaveLength(0);
-
-  const head = await get(rt, host, "/assets/big.txt", { method: "HEAD" });
-  expect(head.status).toBe(200);
-  expect(await head.text()).toBe("");
-  expect(fake.requests).toHaveLength(0);
-
-  const range = await get(rt, host, "/assets/big.txt", { headers: { range: "bytes=2-9" } });
-  expect(range.status).toBe(206);
-  expect(range.headers.get("content-range")).toBe(`bytes 2-9/${Buffer.byteLength(body)}`);
-  expect(await range.text()).toBe(body.slice(2, 10));
-
-  const unsatRemote = await get(rt, host, "/assets/big.txt", {
-    headers: { range: `bytes=${body.length + 100}-${body.length + 200}` },
-  });
-  expect(unsatRemote.status).toBe(416);
-  expect(unsatRemote.headers.get("content-range")).toBe(`bytes */${Buffer.byteLength(body)}`);
-
-  const multiRange = await get(rt, host, "/assets/big.txt", {
-    headers: { range: "bytes=0-1,4-5" },
-  });
-  expect(multiRange.status).toBe(200);
-  expect(await multiRange.text()).toBe(body);
-
-  const transformed = await get(rt, host, "/?spacefast_tag_preview=preview-token");
-  expect(transformed.status).toBe(200);
-  expect(await transformed.text()).toContain("/__spacefast/sdk.js?preview=preview-token");
-
-  // Confirmed finding F6: the dynamic-HTML-transform branch used to fetch
-  // (and for a tiered file, dial the bucket for) the body before its own
-  // HEAD check, even though a HEAD response never sends a body. HEAD on this
-  // same tiered tag-preview URL must answer from shard metadata alone.
-  fake.requests.splice(0);
-  const headTransformed = await get(rt, host, "/?spacefast_tag_preview=preview-token", {
-    method: "HEAD",
-  });
-  expect(headTransformed.status).toBe(200);
-  expect(await headTransformed.text()).toBe("");
-  expect(fake.requests).toHaveLength(0);
-
-  const promote = await createJob("tier_promote", spaceId, {
-    space_id: spaceId,
-    version_ids: [versionId],
-  });
-  const promoted = await runJob(promote.id);
-  expect(promoted.status).toBe("complete");
   expect(
-    readFileSync(
-      path.join(
-        rt.storageRoot,
-        "spaces",
-        spaceId,
-        "versions",
-        versionId,
-        "files",
-        "assets",
-        "big.txt",
-      ),
-      "utf8",
-    ),
-  ).toBe(body);
-  expect(shardFiles(rt, spaceId, versionId)["assets/big.txt"].remote).toBeDefined();
-});
+    fake.requests.some((r) => r.method === "GET" && r.path.endsWith(objectKey(spaceId, sha))),
+  ).toBe(true);
 
-test("a bucket-side 416 on a remote range fetch relays as a client 416 and never trips the breaker", async () => {
-  // Confirmed finding F7: tier.php's remote-range branch mapped ANY
-  // non-2xx bucket status (including a genuine 416) to a generic
-  // tier-fetch-failure — 503 + a breaker strike — instead of relaying the
-  // client-range problem it actually is. Reproduce a bucket-side 416 that
-  // survives serve.php's own local-satisfiability pre-check: shrink the
-  // ACTUAL bucket object (mimics drift/corruption) while the shard still
-  // records the original, larger size, so the local check lets the range
-  // through and the bucket then legitimately 416s against its real size.
-  const spaceId = nextId("spc_tier_416");
-  const versionId = nextId("ver_tier_416");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  const body = await deployTierFixture(spaceId, versionId, host);
-  const hash = sha256(body);
-  expect((await demote(spaceId, versionId)).status).toBe("complete");
-  rmSync(path.join(rt.storageRoot, "runtime", "tier", "breakers"), {
-    recursive: true,
-    force: true,
-  });
-
-  const truncated = Buffer.from(body).subarray(0, 10);
-  fake.putObject(objectKey(spaceId, hash), truncated);
+  // The bytes land in the CAS first — a promote is never a stream from S3 to
+  // the visitor — carrying the same stamp the Rust finalizer wrote.
+  expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(body);
+  expect(statSync(blobPath(rt, spaceId, sha)).mtimeMs).toBe(finalizedMtimeMs);
+  // The mark goes with the reinstall, or the next GC pass would collect these
+  // bytes again and every request would pay another S3 GET.
+  expect(existsSync(demoteMarkPath(rt, spaceId, sha))).toBe(false);
 
   fake.requests.splice(0);
-  const outOfRange = await get(rt, host, "/assets/big.txt", {
-    headers: { range: `bytes=${body.length - 5}-${body.length - 1}` },
-  });
-  expect(outOfRange.status).toBe(416);
-  expect(outOfRange.headers.get("content-range")).toBe(`bytes */${Buffer.byteLength(body)}`);
-
-  // A 416 is a client-range problem, not a bucket failure: it must not trip
-  // the breaker — the very next range request still dials and serves.
-  const stillServing = await get(rt, host, "/assets/big.txt", {
-    headers: { range: "bytes=0-3" },
-  });
-  expect(stillServing.status).toBe(206);
-  expect(await stillServing.text()).toBe(body.slice(0, 4));
+  const again = await get(rt, host, "/assets/big.txt");
+  expect(again.status).toBe(200);
+  expect(await again.text()).toBe(body);
+  expect(fake.requests).toHaveLength(0);
 });
 
-test("local fopen failure falls through to remote and breaker stops dialing after consecutive failures", async () => {
-  const spaceId = nextId("spc_tier_breaker");
-  const versionId = nextId("ver_tier_breaker");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  const body = await deployTierFixture(spaceId, versionId, host);
-  await demote(spaceId, versionId);
-  const localPath = path.join(
-    rt.storageRoot,
-    "spaces",
-    spaceId,
-    "versions",
-    versionId,
-    "files",
-    "assets",
-    "big.txt",
-  );
-  rmSync(localPath, { force: true });
-  const fromRemote = await get(rt, host, "/assets/big.txt");
-  expect(fromRemote.status).toBe(200);
-  expect(await fromRemote.text()).toBe(body);
+test("promote refuses a bucket object whose bytes do not match its key: 503, nothing installed, nothing served", async () => {
+  const spaceId = nextId("spc_tier_mismatch");
+  const versionId = nextId("ver_tier_mismatch");
+  const host = hostFor(spaceId);
+  const body = "verify-me\n".repeat(4000);
+  await deployFixture(rt, spaceId, versionId, host, { "assets/big.txt": body });
 
-  const tierRuntimeDir = path.join(rt.storageRoot, "runtime", "tier");
-  mkdirSync(tierRuntimeDir, { recursive: true });
-  const inflightCounterPath = path.join(tierRuntimeDir, "inflight.json");
-  writeAdmissionFileCounter(inflightCounterPath, 1, Math.floor(Date.now() / 1000));
+  const sha = entrySha(rt, spaceId, versionId, "/assets/big.txt");
+  expect((await demote(rt, spaceId, [sha])).status).toBe("complete");
+  // The bucket object drifts away from the key it is filed under. D69: the
+  // digest is computed while downloading and a mismatch is dropped, never
+  // installed and never served — the alternative is serving whatever an
+  // attacker or a corrupted bucket put at a derivable key.
+  fake.putObject(objectKey(spaceId, sha), Buffer.from("tampered"));
+
+  const shed = await get(rt, host, "/assets/big.txt");
+  expect(shed.status).toBe(503);
+  expect(shed.headers.get("retry-after")).toBe("5");
+  expect(readBlob(rt, spaceId, sha)).toBeNull();
+
+  // Not a one-request fluke: the entry stays unservable while the object is
+  // wrong, rather than degrading to the tampered bytes on a retry.
+  const retried = await get(rt, host, "/assets/big.txt");
+  expect(retried.status).toBe(503);
+  await retried.text();
+
+  const failure = journalRecords(rt).find(
+    (e) => e.event === "tier_promote_failed" && e.sha256 === sha,
+  );
+  expect(failure?.reason).toBe("blob_sha_mismatch");
+});
+
+test("promote sheds above the per-space concurrency cap: 503 without dialing the bucket", async () => {
+  const spaceId = nextId("spc_tier_shed");
+  const versionId = nextId("ver_tier_shed");
+  const host = hostFor(spaceId);
+  const body = "shed-me\n".repeat(4000);
+  await deployFixture(rt, spaceId, versionId, host, { "assets/big.txt": body });
+
+  const sha = entrySha(rt, spaceId, versionId, "/assets/big.txt");
+  expect((await demote(rt, spaceId, [sha])).status).toBe("complete");
+
+  // D68: admission IS the breaker. With the one slot of this suite's cap held,
+  // a cold space under load sheds instead of queueing every worker on the same
+  // bucket — and it sheds BEFORE the round trip, not after it times out.
+  const counterPath = promoteAdmissionCounterPath(rt, spaceId);
+  writeAdmissionCounter(counterPath, 1);
   fake.requests.splice(0);
   const capped = await get(rt, host, "/assets/big.txt");
   expect(capped.status).toBe(503);
-  expect(capped.headers.get("retry-after")).toBe("30");
+  expect(capped.headers.get("retry-after")).toBe("5");
   expect(fake.requests).toHaveLength(0);
-  writeAdmissionFileCounter(inflightCounterPath, 0, Math.floor(Date.now() / 1000));
-  const underCap = await get(rt, host, "/assets/big.txt");
-  expect(underCap.status).toBe(200);
-  expect(await underCap.text()).toBe(body);
+  await capped.text();
 
-  fake.requests.splice(0);
-  fake.failNext(3, 500);
-  for (let i = 0; i < 3; i += 1) {
-    const failed = await get(rt, host, "/assets/big.txt");
-    expect(failed.status).toBe(503);
-    await failed.text();
-  }
-  const dialed = fake.requests.length;
-  const shed = await get(rt, host, "/assets/big.txt");
-  expect(shed.status).toBe(503);
-  expect(shed.headers.get("retry-after")).toBe("30");
-  expect(fake.requests).toHaveLength(dialed);
+  writeAdmissionCounter(counterPath, 0);
+  const admitted = await get(rt, host, "/assets/big.txt");
+  expect(admitted.status).toBe(200);
+  expect(await admitted.text()).toBe(body);
+
+  expect(journalRecords(rt).some((e) => e.event === "tier_promote_shed" && e.sha256 === sha)).toBe(
+    true,
+  );
 });
 
-test("blob report, local blob GC, disk report, and pruning hook use shard truth and route re-checks", async () => {
-  const spaceId = nextId("spc_tier_house");
-  const versionOld = nextId("ver_tier_house_old");
-  const versionId = nextId("ver_tier_house_live");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  await deployTierFixture(spaceId, versionOld, host, "y".repeat(40000));
-  const body = await deployTierFixture(spaceId, versionId, host);
-  const hash = sha256(body);
-  await demote(spaceId, versionId);
+test("a publish session in flight keeps its declared bytes out of the GC's reach", async () => {
+  // D92: the bytes of a version that does not exist yet are named by nothing the
+  // GC's live-set walk would otherwise find. Without the session's declaration
+  // and its pin, a maintenance pass landing mid-publish collects them and
+  // finalize fails on bytes the uploader already delivered.
+  const spaceId = nextId("spc_tier_pin");
+  const versionId = nextId("ver_tier_pin");
+  const content = "pinned-bytes\n".repeat(3000);
+  const sha = sha256(content);
 
-  const report = await createJob("blob_report", spaceId, {
-    space_id: spaceId,
-    bucket_id: bucket.id,
+  const session = await createDeclaredSession(rt, spaceId, versionId, {
+    "assets/pinned.txt": content,
   });
-  expect((await runJob(report.id)).status).toBe("complete");
-  let journal = readFileSync(path.join(rt.storageRoot, "runtime", "journal.jsonl"), "utf8");
-  expect(journal).toContain('"event":"space.blob.report"');
-  expect(journal).toContain(hash);
+  const put = await putBlob(rt, spaceId, session.token, sha, content);
+  expect(put.status).toBe(200);
+  expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(content);
 
-  await tick();
-  const blobPath = path.join(rt.storageRoot, "spaces", spaceId, "blobs", hash.slice(0, 2), hash);
-  expect(existsSync(blobPath)).toBe(false);
-  journal = readFileSync(path.join(rt.storageRoot, "runtime", "journal.jsonl"), "utf8");
-  expect(journal).toContain('"event":"space.disk.report"');
+  await tick(rt);
 
-  // Retention policy arrives through the management write surface (never a
-  // raw file drop): invalid bodies are rejected, valid pushes land atomically
-  // in retention-policy.json for the housekeeping hook.
+  expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(content);
+  expect(
+    journalRecords(rt).some(
+      (e) =>
+        e.event === "local_blob_gc" && [...(e.collected ?? []), ...(e.evicted ?? [])].includes(sha),
+    ),
+  ).toBe(false);
+});
+
+test("the blob GC deletes nothing when a live response table cannot be read", async () => {
+  const spaceId = nextId("spc_tier_unreadable_table");
+  const versionId = nextId("ver_tier_unreadable_table");
+  const host = hostFor(spaceId);
+  const body = "still-live-through-the-table\n".repeat(1500);
+  await deployFixture(rt, spaceId, versionId, host, { "assets/live.txt": body });
+  const sha = entrySha(rt, spaceId, versionId, "/assets/live.txt");
+  const tableName = Object.values(responseTableFiles(rt, spaceId, versionId))[0];
+  if (tableName === undefined) throw new Error("version response table missing");
+  const tablePath = path.join(versionRoot(rt, spaceId, versionId), tableName);
+
+  chmodSync(tablePath, 0o000);
+  try {
+    await tick(rt);
+    expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(body);
+    expect(
+      journalRecords(rt).some(
+        (event) =>
+          event.event === "local_blob_gc" &&
+          [...(event.collected ?? []), ...(event.evicted ?? [])].includes(sha),
+      ),
+    ).toBe(false);
+  } finally {
+    chmodSync(tablePath, 0o644);
+  }
+
+  await tick(rt);
+  expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(body);
+});
+
+test("the maintenance tick refuses to prune a routed version, trashes the unrouted one, collects the blobs it alone referenced, and reports disk usage", async () => {
+  const spaceId = nextId("spc_tier_prune");
+  const versionOld = nextId("ver_tier_prune_old");
+  const versionLive = nextId("ver_tier_prune_live");
+  const host = hostFor(spaceId);
+  const oldBody = "only-in-the-old-version\n".repeat(1500);
+  // A private path: it answers no URL, so no response table names its bytes and
+  // the version's catalog is the ONLY thing keeping them alive. The sweep is
+  // shape-agnostic by design (tier.php `_stattic_tier_collect_shas`), and this
+  // is what proves it still reaches a source-only object.
+  const privateBody = "never served, still ours\n";
+  const privateSha = sha256(privateBody);
+  await deployFixture(rt, spaceId, versionOld, host, { "assets/old.txt": oldBody });
+  await deployFixture(rt, spaceId, versionLive, host, {
+    "assets/live.txt": "still routed",
+    ".hidden/notes.txt": privateBody,
+  });
+  const oldSha = entrySha(rt, spaceId, versionOld, "/assets/old.txt");
+  const liveSha = entrySha(rt, spaceId, versionLive, "/assets/live.txt");
+
+  // Retention policy arrives through the management write surface, never a raw
+  // file drop, and an invalid body never lands.
   const invalid = await api(
     rt,
     "PUT",
@@ -618,578 +538,119 @@ test("blob report, local blob GC, disk report, and pruning hook use shard truth 
     `/__spacefast/api.php/spaces/${spaceId}/retention-policy`,
     "update_retention_policy",
     { space_id: spaceId },
-    { prunable_version_ids: [versionOld, versionId] },
+    { prunable_version_ids: [versionOld, versionLive] },
   );
-  expect(policy).toEqual({ space_id: spaceId, prunable_count: 2 });
+  expect(policy.space_id).toBe(spaceId);
+  expect(policy.prunable_count).toBe(2);
 
-  const spaceRoot = path.join(rt.storageRoot, "spaces", spaceId);
-  await tick();
-  // The engine re-checks route pointers before rm: the routed (live) version
-  // is refused even though the control plane listed it; the unrouted one is
-  // pruned and its tree reclaimed.
-  expect(existsSync(path.join(spaceRoot, "versions", versionOld))).toBe(false);
-  expect(existsSync(path.join(spaceRoot, "versions", versionId))).toBe(true);
-  // The breaker test above deliberately left the bucket breaker open; clear
-  // it so this serve exercises the remote path, not the 60s open window.
-  rmSync(path.join(rt.storageRoot, "runtime", "tier", "breakers"), {
-    recursive: true,
-    force: true,
-  });
-  const served = await get(rt, host, "/assets/big.txt");
+  await tick(rt);
+
+  // The engine re-checks the space's route pointers before it moves anything:
+  // the control plane listed the routed version, and the engine refuses it.
+  expect(existsSync(versionRoot(rt, spaceId, versionOld))).toBe(false);
+  expect(existsSync(versionRoot(rt, spaceId, versionLive))).toBe(true);
+  const pruned = journalRecords(rt).find(
+    (e) => e.event === "space.versions.pruned" && e.spaceId === spaceId,
+  );
+  expect(pruned?.versionIds).toEqual([versionOld]);
+  expect(pruned?.refusedVersionIds).toEqual([versionLive]);
+
+  // The pruned version was the only declaration naming those bytes, so the same
+  // pass collects them as garbage. The routed version's blob is untouched and
+  // still serves — the live set is read from what survived, not from a list.
+  expect(readBlob(rt, spaceId, oldSha)).toBeNull();
+  const collected = journalRecords(rt).find(
+    (e) => e.event === "local_blob_gc" && (e.collected ?? []).includes(oldSha),
+  );
+  expect(collected).toBeDefined();
+  expect(readBlob(rt, spaceId, liveSha)?.toString("utf8")).toBe("still routed");
+  expect(readBlob(rt, spaceId, privateSha)?.toString("utf8")).toBe(privateBody);
+  const served = await get(rt, host, "/assets/live.txt");
   expect(served.status).toBe(200);
-  expect(await served.text()).toBe(body);
-  journal = readFileSync(path.join(rt.storageRoot, "runtime", "journal.jsonl"), "utf8");
-  expect(journal).toContain('"versionIds":["' + versionOld + '"]');
-  expect(journal).toContain('"refusedVersionIds":["' + versionId + '"]');
+  expect(await served.text()).toBe("still routed");
+
+  const report = journalRecords(rt).find(
+    (e) => e.event === "space.disk.report" && e.spaceId === spaceId,
+  );
+  expect(Number(report?.inodes)).toBeGreaterThan(0);
 });
 
-test("publish with retained files succeeds after the reusable version was demoted (re-warm, no 409)", async () => {
-  const spaceId = nextId("spc_tier_rewarm");
-  const versionA = nextId("ver_tier_rewarm_a");
-  const versionB = nextId("ver_tier_rewarm_b");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  const body = "w".repeat(40000);
-  const bodySha = sha256(body);
-  await deploy(rt, {
-    spaceId,
-    versionId: versionA,
-    files: { "index.html": "<html>rewarm</html>", "assets/big.txt": body },
-    activate: {
-      route_name: "production",
-      config: { mode: "website" },
-      production_hostnames: [host],
-      version_hostnames: [],
-    },
-  });
-  const demoted = await demote(spaceId, versionA);
-  expect(demoted.status).toBe("complete");
-  expect(
-    existsSync(
-      path.join(
-        rt.storageRoot,
-        "spaces",
-        spaceId,
-        "versions",
-        versionA,
-        "files",
-        "assets",
-        "big.txt",
-      ),
-    ),
-  ).toBe(false);
-  // Simulate the full Tier-B cold state: the local blob GC already reclaimed
-  // the space-store copy, so the ONLY remaining bytes are in the bucket.
-  const blobPath = path.join(
-    rt.storageRoot,
-    "spaces",
-    spaceId,
-    "blobs",
-    bodySha.slice(0, 2),
-    bodySha,
-  );
-  rmSync(blobPath, { force: true });
-  expect(fake.getObject(objectKey(spaceId, bodySha))).toBeDefined();
-
-  const indexB = "<html>rewarm v2</html>";
-  const created = await apiJson<{ upload_id: string }>(
-    rt,
-    "POST",
-    `/__spacefast/api.php/spaces/${spaceId}/versions`,
-    "create_version",
-    { space_id: spaceId },
-    {
-      version_id: versionB,
-      files: [{ path: "index.html", size: Buffer.byteLength(indexB), sha256: sha256(indexB) }],
-      retained_files: [{ path: "assets/big.txt", size: Buffer.byteLength(body), sha256: bodySha }],
-      reusable_version_id: versionA,
-    },
-    201,
-  );
-  const token = uploadToken(spaceId, created.upload_id, versionB, "declared");
-  const put = await putFile(rt, created.upload_id, token, "index.html", Buffer.from(indexB));
-  expect(put.status).toBe(200);
-  // apiJson throws on any non-200 — the OLD behavior was a hard 409
-  // version_reusable_file_missing here.
+test("version pruning skips a space whose live routes cannot be enumerated", async () => {
+  const spaceId = nextId("spc_tier_prune_unavailable");
+  const liveVersion = nextId("ver_tier_prune_unavailable_live");
+  const oldVersion = nextId("ver_tier_prune_unavailable_old");
+  const host = hostFor(spaceId);
+  await deployFixture(rt, spaceId, oldVersion, host, { "index.html": "old" });
+  await deployFixture(rt, spaceId, liveVersion, host, { "index.html": "live" });
   await apiJson(
     rt,
-    "POST",
-    `/__spacefast/api.php/spaces/${spaceId}/versions/${versionB}/finalize`,
-    "finalize_version",
-    { space_id: spaceId, version_id: versionB },
-    {
-      upload_id: created.upload_id,
-      activate: {
-        route_name: "production",
-        config: { mode: "website" },
-        production_hostnames: [host],
-        version_hostnames: [],
-      },
-    },
+    "PUT",
+    `/__spacefast/api.php/spaces/${spaceId}/retention-policy`,
+    "update_retention_policy",
+    { space_id: spaceId },
+    { prunable_version_ids: [oldVersion] },
   );
-  const rematerialized = path.join(
-    rt.storageRoot,
-    "spaces",
-    spaceId,
-    "versions",
-    versionB,
-    "files",
-    "assets",
-    "big.txt",
-  );
-  expect(readFileSync(rematerialized, "utf8")).toBe(body);
-  // The fetched bytes landed back in the space blob store (CAS), not as a loose copy.
-  expect(existsSync(blobPath)).toBe(true);
-  const served = await get(rt, host, "/assets/big.txt");
-  expect(served.status).toBe(200);
-  expect(await served.text()).toBe(body);
-  expect(served.headers.get("etag")).toBe(`"${bodySha}"`);
+
+  const routesRoot = storagePath(rt, "spaces", spaceId, "routes");
+  chmodSync(routesRoot, 0o000);
+  try {
+    await tick(rt);
+    expect(existsSync(versionRoot(rt, spaceId, oldVersion))).toBe(true);
+    expect(existsSync(versionRoot(rt, spaceId, liveVersion))).toBe(true);
+  } finally {
+    chmodSync(routesRoot, 0o775);
+  }
 });
 
-test("tier_cancel dead-letters queued tier jobs from the interactive lane and allows re-dispatch under the same idempotency key", async () => {
-  const spaceId = nextId("spc_tier_cancel");
-  const versionId = nextId("ver_tier_cancel");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  await deployTierFixture(spaceId, versionId, host);
+test("tiering is disabled by default: jobs and promote-on-read move no bytes", async () => {
+  const parked = await startRuntime({
+    atomicData: { SPACEFAST_STORAGE_BUCKETS_JSON: bucketsJson() },
+    env: {
+      SPACEFAST_LOCAL_BLOB_GC_GRACE_SECONDS: "0",
+    },
+  });
+  try {
+    const spaceId = nextId("spc_tiering_parked");
+    const versionId = nextId("ver_tiering_parked");
+    const host = hostFor(spaceId);
+    const body = "wp-cloud-local\n".repeat(4000);
+    await deployFixture(parked, spaceId, versionId, host, { "assets/local.txt": body });
+    const sha = entrySha(parked, spaceId, versionId, "/assets/local.txt");
+    const key = objectKey(spaceId, sha);
 
-  const idempotencyKey = `tier_demote:${spaceId}:${versionId}:fixed`;
-  const createDemote = async () =>
-    apiJson<{ job: JobRecord & { error?: { code?: string } } }>(
-      rt,
+    fake.requests.splice(0);
+    const rejected = await api(
+      parked,
       "POST",
       "/__spacefast/api.php/jobs",
       "create_engine_job",
       { space_id: spaceId },
       {
         type: "tier_demote",
-        idempotency_key: idempotencyKey,
-        payload: { space_id: spaceId, version_id: versionId, bucket: bucketPayload() },
+        idempotency_key: `tier-parked:${spaceId}`,
+        payload: { space_id: spaceId },
       },
-      201,
     );
-  const demoteJob = (await createDemote()).job;
-  expect(demoteJob.status).toBe("pending");
+    expect(rejected.status).toBe(422);
+    expect(((await rejected.json()) as { code?: string }).code).toBe("tiering_disabled");
 
-  const cancel = await createJob("tier_cancel", spaceId, { space_id: spaceId });
-  const cancelTick = await tickInteractive();
-  expect(cancelTick.job?.id).toBe(cancel.id);
-  expect(cancelTick.job?.status).toBe("complete");
+    await tick(parked);
+    expect(readBlob(parked, spaceId, sha)?.toString("utf8")).toBe(body);
+    expect(existsSync(demoteMarkPath(parked, spaceId, sha))).toBe(false);
+    expect(fake.getObject(key)).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
 
-  const afterCancel = await apiJson<{ job: JobRecord & { error?: { code?: string } } }>(
-    rt,
-    "GET",
-    `/__spacefast/api.php/jobs/${demoteJob.id}`,
-    "get_engine_job",
-    { job_id: demoteJob.id },
-  );
-  expect(afterCancel.job.status).toBe("failed");
-  expect(afterCancel.job.error?.code).toBe("tier_aborted");
-
-  // A canceled job is a cancellation, not a terminal failure: the same
-  // idempotency key must start FRESH work (the move-commit re-dispatch path).
-  const recreated = (await createDemote()).job;
-  expect(recreated.id).not.toBe(demoteJob.id);
-  expect(recreated.status).toBe("pending");
-
-  // Leave the lane clean for the rest of the suite.
-  await createJob("tier_cancel", spaceId, { space_id: spaceId });
-  await tickInteractive();
-  const afterSecondCancel = await apiJson<{ job: JobRecord & { error?: { code?: string } } }>(
-    rt,
-    "GET",
-    `/__spacefast/api.php/jobs/${recreated.id}`,
-    "get_engine_job",
-    { job_id: recreated.id },
-  );
-  expect(afterSecondCancel.job.status).toBe("failed");
-});
-
-test("demote retry reconciles a crash between shard rewrite and unlink (hardlinks released, bytes counted once)", async () => {
-  const spaceId = nextId("spc_tier_crash");
-  const versionId = nextId("ver_tier_crash");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  const body = "z".repeat(40000);
-  const bodySha = sha256(body);
-  await deploy(rt, {
-    spaceId,
-    versionId,
-    files: { "index.html": "<html>crash</html>", "assets/big.txt": body },
-    activate: {
-      route_name: "production",
-      config: { mode: "website" },
-      production_hostnames: [host],
-      version_hostnames: [],
-    },
-  });
-  // Simulate the §17 crash window: the shard rewrite (local:false + remote)
-  // landed but the process died before the unlink list reached the cursor —
-  // the hardlink is still on disk and NOTHING was emitted (the callback is
-  // the last step of the demote order).
-  const shard = sha256("assets/big.txt").slice(0, 2);
-  const shardPath = path.join(
-    rt.storageRoot,
-    "spaces",
-    spaceId,
-    "versions",
-    versionId,
-    "file-shards",
-    `${shard}.php`,
-  );
-  const rewrite = Bun.spawnSync([
-    "php",
-    "-r",
-    '$f=include $argv[1];$f["files"][$argv[2]]["local"]=false;$f["files"][$argv[2]]["remote"]=["bucket"=>$argv[3],"key"=>$argv[4],"enc"=>"identity"];file_put_contents($argv[1],"<?php\nreturn ".var_export($f,true).";\n");',
-    shardPath,
-    "assets/big.txt",
-    bucket.id,
-    objectKey(spaceId, bodySha),
-  ]);
-  expect(rewrite.exitCode).toBe(0);
-  const filePath = path.join(
-    rt.storageRoot,
-    "spaces",
-    spaceId,
-    "versions",
-    versionId,
-    "files",
-    "assets",
-    "big.txt",
-  );
-  expect(existsSync(filePath)).toBe(true);
-
-  const completed = await demote(spaceId, versionId);
-  expect(completed.status).toBe("complete");
-  const stats = completed.result as { bytesMoved: number; blobCount: number };
-  expect(stats.bytesMoved).toBe(Buffer.byteLength(body));
-  expect(stats.blobCount).toBe(1);
-  expect(existsSync(filePath)).toBe(false);
-});
-
-test("promote emits per-shard byte DELTAS, never the cumulative running total", async () => {
-  const spaceId = nextId("spc_tier_delta");
-  const versionId = nextId("ver_tier_delta");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  // Two eligible files in two DIFFERENT shards (shard = sha256(path)[0:2]).
-  let pathA = "assets/delta-a.txt";
-  let pathB = "assets/delta-b.txt";
-  for (let i = 0; sha256(pathA).slice(0, 2) === sha256(pathB).slice(0, 2); i += 1) {
-    pathB = `assets/delta-b-${i}.txt`;
-  }
-  const bodyA = "a".repeat(40000);
-  const bodyB = "b".repeat(50000);
-  await deploy(rt, {
-    spaceId,
-    versionId,
-    files: { "index.html": "<html>delta</html>", [pathA]: bodyA, [pathB]: bodyB },
-    activate: {
-      route_name: "production",
-      config: { mode: "website" },
-      production_hostnames: [host],
-      version_hostnames: [],
-    },
-  });
-  expect((await demote(spaceId, versionId)).status).toBe("complete");
-
-  const promote = await createJob("tier_promote", spaceId, {
-    space_id: spaceId,
-    version_ids: [versionId],
-  });
-  expect((await runJob(promote.id)).status).toBe("complete");
-
-  const promotedEvents = journalEvents().filter(
-    (event) => event.event === "space.tier.promoted" && event.spaceId === spaceId,
-  );
-  expect(promotedEvents.length).toBe(2);
-  const perShardBytes = promotedEvents
-    .map((event) => event.bytesPromoted as number)
-    .toSorted((a, b) => a - b);
-  expect(perShardBytes).toEqual([Buffer.byteLength(bodyA), Buffer.byteLength(bodyB)]);
-  for (const event of promotedEvents) {
-    expect(event.blobCount).toBe(1);
-  }
-});
-
-function readZipEntry(zipPath: string, entryName: string): string {
-  const proc = Bun.spawnSync([
-    "php",
-    "-r",
-    `$z = new ZipArchive();` +
-      `if ($z->open(${JSON.stringify(zipPath)}) !== true) { fwrite(STDERR, 'open failed'); exit(1); }` +
-      `$data = $z->getFromName(${JSON.stringify(entryName)});` +
-      `if ($data === false) { fwrite(STDERR, 'entry missing'); exit(2); }` +
-      `echo $data;`,
-  ]);
-  if (proc.exitCode !== 0) {
-    throw new Error(
-      `readZipEntry(${entryName}) failed: ${proc.stderr.toString() || proc.exitCode}`,
-    );
-  }
-  return proc.stdout.toString();
-}
-
-async function runExport(spaceId: string): Promise<string> {
-  let status = await apiJson<{ export_id?: string; status: string }>(
-    rt,
-    "POST",
-    `/__spacefast/api.php/spaces/${spaceId}/exports`,
-    "start_space_export",
-    { space_id: spaceId },
-    {},
-    201,
-  );
-  const exportId = status.export_id ?? "";
-  for (let steps = 0; status.status !== "complete"; steps += 1) {
-    if (steps > 20) {
-      throw new Error(`export did not complete: ${status.status}`);
-    }
-    status = await apiJson(
-      rt,
-      "POST",
-      `/__spacefast/api.php/exports/${exportId}/step`,
-      "step_space_export",
-      { space_id: spaceId, export_id: exportId },
-    );
-  }
-  const download = await api(
-    rt,
-    "GET",
-    `/__spacefast/api.php/exports/${exportId}/archive`,
-    "download_space_export",
-    { space_id: spaceId, export_id: exportId },
-  );
-  expect(download.status).toBe(200);
-  const zipPath = path.join(rt.root, `${exportId}.zip`);
-  writeFileSync(zipPath, Buffer.from(await download.arrayBuffer()));
-  return zipPath;
-}
-
-test("space export recovers real bytes for a demoted (tiered) file instead of silently dropping it", async () => {
-  const spaceId = nextId("spc_tier_export");
-  const versionId = nextId("ver_tier_export");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  const body = await deployTierFixture(spaceId, versionId, host);
-
-  const completed = await demote(spaceId, versionId);
-  expect(completed.status).toBe("complete");
-  const onDiskPath = path.join(
-    rt.storageRoot,
-    "spaces",
-    spaceId,
-    "versions",
-    versionId,
-    "files",
-    "assets",
-    "big.txt",
-  );
-  // Confirm the file genuinely left local disk before exporting — this test
-  // is only meaningful if the export has to recover the bytes from the
-  // bucket rather than finding them locally.
-  expect(existsSync(onDiskPath)).toBe(false);
-  expect(shardFiles(rt, spaceId, versionId)["assets/big.txt"].local).toBe(false);
-
-  const zipPath = await runExport(spaceId);
-  const exported = readZipEntry(
-    zipPath,
-    `spacefast_export_v1/versions/${versionId}/files/assets/big.txt`,
-  );
-  expect(exported).toBe(body);
-
-  // The small, never-demoted file must still be present too (regression
-  // guard: the remote-entry fold-in must not crowd out ordinary local files).
-  const exportedSmall = readZipEntry(
-    zipPath,
-    `spacefast_export_v1/versions/${versionId}/files/assets/small.txt`,
-  );
-  expect(exportedSmall).toBe("small");
-});
-
-test("precompressed sidecars demote with their base file: locators flip, bytes leave disk, br serving survives from the bucket", async () => {
-  const spaceId = nextId("spc_tier_sidecar");
-  const versionId = nextId("ver_tier_sidecar");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  // Incompressible-ish content so the .br sidecar itself clears the 32KB
-  // demote floor (representations are independent entries with independent
-  // eligibility).
-  const content = randomBytes(45000).toString("base64");
-  const br = brotliCompressSync(Buffer.from(content));
-  expect(br.length).toBeGreaterThanOrEqual(32768);
-  const contentSha = sha256(content);
-  const brSha = sha256(br);
-  await deploy(rt, {
-    spaceId,
-    versionId,
-    files: {
-      "index.html": "<html>sidecar</html>",
-      "assets/data.txt": content,
-      "assets/data.txt.br": br,
-    },
-    activate: {
-      route_name: "production",
-      config: { mode: "website" },
-      production_hostnames: [host],
-      version_hostnames: [],
-    },
-  });
-  const baseMetaBefore = shardFiles(rt, spaceId, versionId)["assets/data.txt"];
-  expect(baseMetaBefore.compressed?.br?.sha256).toBe(brSha);
-
-  const completed = await demote(spaceId, versionId);
-  expect(completed.status).toBe("complete");
-  const stats = completed.result as { bytesMoved: number };
-  expect(stats.bytesMoved).toBe(Buffer.byteLength(content) + br.length);
-
-  const files = shardFiles(rt, spaceId, versionId);
-  expect(files["assets/data.txt"].local).toBe(false);
-  expect(files["assets/data.txt"].compressed.br.local).toBe(false);
-  expect(files["assets/data.txt"].compressed.br.remote.key).toBe(objectKey(spaceId, brSha));
-  expect(files["assets/data.txt.br"].local).toBe(false);
-  expect(
-    existsSync(
-      path.join(
-        rt.storageRoot,
-        "spaces",
-        spaceId,
-        "versions",
-        versionId,
-        "files",
-        "assets",
-        "data.txt",
-      ),
-    ),
-  ).toBe(false);
-  expect(
-    existsSync(
-      path.join(
-        rt.storageRoot,
-        "spaces",
-        spaceId,
-        "versions",
-        versionId,
-        "files",
-        "assets",
-        "data.txt.br",
-      ),
-    ),
-  ).toBe(false);
-  expect(fake.getObject(objectKey(spaceId, contentSha))).toBeDefined();
-  expect(fake.getObject(objectKey(spaceId, brSha))).toBeDefined();
-
-  fake.requests.splice(0);
-  const served = await get(rt, host, "/assets/data.txt", { headers: { "accept-encoding": "br" } });
-  expect(served.status).toBe(200);
-  expect(served.headers.get("etag")).toBe(`"${brSha}"`);
-  const raw = Buffer.from(await served.arrayBuffer());
-  // Bun's fetch may or may not transparently decode br; either surface proves
-  // the br representation streamed intact from the bucket (the ETag + S3 key
-  // assertions pin WHICH representation it was).
-  expect(raw.equals(br) || raw.toString("utf8") === content).toBe(true);
-  expect(fake.requests.some((r) => r.method === "GET" && r.path.includes(brSha))).toBe(true);
-});
-
-test("dynamic HTML transform over a demoted page honors the breaker and the in-flight cap (503 without dialing)", async () => {
-  const spaceId = nextId("spc_tier_transform");
-  const versionId = nextId("ver_tier_transform");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  const body = await deployTierFixture(spaceId, versionId, host);
-  expect((await demote(spaceId, versionId)).status).toBe("complete");
-  const tierRuntimeDir = path.join(rt.storageRoot, "runtime", "tier");
-  const breakerDir = path.join(tierRuntimeDir, "breakers");
-  rmSync(breakerDir, { recursive: true, force: true });
-
-  const warm = await get(rt, host, "/?spacefast_tag_preview=preview-token");
-  expect(warm.status).toBe(200);
-  expect(await warm.text()).toContain(body);
-
-  // Open breaker: the transform read must 503 WITHOUT dialing the bucket.
-  mkdirSync(breakerDir, { recursive: true });
-  const now = Math.floor(Date.now() / 1000);
-  writeFileSync(
-    path.join(breakerDir, `${bucket.id}.json`),
-    JSON.stringify({ failures: 3, open_until: now + 60, updated_at: now }),
-  );
-  fake.requests.splice(0);
-  const tripped = await get(rt, host, "/?spacefast_tag_preview=preview-token");
-  expect(tripped.status).toBe(503);
-  expect(tripped.headers.get("retry-after")).toBe("30");
-  expect(fake.requests).toHaveLength(0);
-  rmSync(breakerDir, { recursive: true, force: true });
-
-  // In-flight cap (limit 1 in this suite): same guarantee.
-  mkdirSync(tierRuntimeDir, { recursive: true });
-  const inflightCounterPath = path.join(tierRuntimeDir, "inflight.json");
-  writeAdmissionFileCounter(inflightCounterPath, 1, now);
-  fake.requests.splice(0);
-  const capped = await get(rt, host, "/?spacefast_tag_preview=preview-token");
-  expect(capped.status).toBe(503);
-  expect(capped.headers.get("retry-after")).toBe("30");
-  expect(fake.requests).toHaveLength(0);
-  writeAdmissionFileCounter(inflightCounterPath, 0, now);
-
-  const recovered = await get(rt, host, "/?spacefast_tag_preview=preview-token");
-  expect(recovered.status).toBe(200);
-});
-
-test("bulk tick with callback claims ships spooled tier_fetch_failed and housekeeping reports as REAL pending callbacks", async () => {
-  const spaceId = nextId("spc_tier_canary");
-  const versionId = nextId("ver_tier_canary");
-  const host = `${spaceId.replaceAll("_", "-")}.test`;
-  await deployTierFixture(spaceId, versionId, host);
-  expect((await demote(spaceId, versionId)).status).toBe("complete");
-  rmSync(path.join(rt.storageRoot, "runtime", "tier", "breakers"), {
-    recursive: true,
-    force: true,
-  });
-
-  // One real bucket failure on the serve path → journaled AND spooled (the
-  // serve path has no callback claims of its own).
-  fake.failNext(1, 500);
-  const failed = await get(rt, host, "/assets/big.txt");
-  expect(failed.status).toBe(503);
-  await failed.text();
-  const spoolDir = path.join(rt.storageRoot, "runtime", "tier", "pending-events");
-  expect(readdirSync(spoolDir).length).toBeGreaterThan(0);
-  rmSync(path.join(rt.storageRoot, "runtime", "tier", "breakers"), {
-    recursive: true,
-    force: true,
-  });
-
-  // A fresh space whose disk-report marker does not exist yet: the claimed
-  // tick's housekeeping pass must stage its report as a pending callback too.
-  const freshSpace = nextId("spc_tier_canary_fresh");
-  const freshVersion = nextId("ver_tier_canary_fresh");
-  await deploy(rt, {
-    spaceId: freshSpace,
-    versionId: freshVersion,
-    files: { "index.html": "<html>fresh</html>" },
-    activate: {
-      route_name: "production",
-      config: { mode: "website" },
-      production_hostnames: [`${freshSpace.replaceAll("_", "-")}.test`],
-      version_hostnames: [],
-    },
-  });
-
-  // 127.0.0.1:9 refuses immediately: staged callbacks stay pending (retryable)
-  // where the test can observe them.
-  await tick({ callback_url: "http://127.0.0.1:9/", callback_token: "tok-canary" });
-
-  expect(readdirSync(spoolDir)).toHaveLength(0);
-  const pendingDir = path.join(rt.storageRoot, "runtime", "callbacks", "pending");
-  const pending = readdirSync(pendingDir).map(
-    (name) => JSON.parse(readFileSync(path.join(pendingDir, name), "utf8")) as PendingCallback,
-  );
-  const canaryEvents = pending.filter((entry) => entry.callback_token === "tok-canary");
-  const fetchFailed = canaryEvents.find((entry) => entry.event?.event === "tier_fetch_failed");
-  expect(fetchFailed?.event?.bucket).toBe(bucket.id);
-  const diskReport = canaryEvents.find(
-    (entry) => entry.event?.event === "space.disk.report" && entry.event?.spaceId === freshSpace,
-  );
-  expect(diskReport?.event?.inodes).toBeGreaterThan(0);
-
-  // Keep later ticks from retrying the unreachable receiver forever.
-  for (const name of readdirSync(pendingDir)) {
-    const entry = JSON.parse(readFileSync(path.join(pendingDir, name), "utf8")) as PendingCallback;
-    if (entry.callback_token === "tok-canary") {
-      rmSync(path.join(pendingDir, name), { force: true });
-    }
+    // Even a pre-existing remote-only reference cannot dial or install while
+    // the switch is off. Re-enabling later retains the original recovery path.
+    fake.putObject(key, Buffer.from(body));
+    rmSync(blobPath(parked, spaceId, sha));
+    writeFileSync(demoteMarkPath(parked, spaceId, sha), "{}\n");
+    fake.requests.splice(0);
+    const served = await get(parked, host, "/assets/local.txt");
+    expect(served.status).toBe(503);
+    expect(readBlob(parked, spaceId, sha)).toBeNull();
+    expect(fake.requests).toHaveLength(0);
+  } finally {
+    parked.stop();
   }
 });

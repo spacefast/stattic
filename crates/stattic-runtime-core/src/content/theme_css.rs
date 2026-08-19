@@ -8,6 +8,7 @@ use std::path::Path;
 
 use super::pipeline_text;
 use crate::finalize::{write_generated, FileMeta, Result};
+use crate::protocol::THEME_STYLESHEET_PATH;
 
 pub(super) fn compile_theme(
     files_root: &Path,
@@ -27,15 +28,14 @@ pub(super) fn compile_theme(
             return Ok(());
         }
     };
-    let Some(theme) = theme.as_object() else {
+    if !theme.is_object() {
         diagnostics.push(serde_json::json!({"code":"theme_json_invalid","severity":"warning","message":"theme.json must be an object with version 3; no theme stylesheet was generated.","path":"theme.json"}));
         return Ok(());
-    };
+    }
     if theme.get("version").and_then(Value::as_u64) != Some(3) {
         diagnostics.push(serde_json::json!({"code":"theme_json_invalid","severity":"warning","message":"theme.json must be an object with version 3; no theme stylesheet was generated.","path":"theme.json"}));
         return Ok(());
     }
-    let theme = Value::Object(theme.clone());
     let mut css = String::from(":root{\n  --wp--style--global--content-size:42rem;\n  --wp--style--global--wide-size:64rem;\n");
     append_theme_presets(
         &mut css,
@@ -163,7 +163,7 @@ pub(super) fn compile_theme(
     write_generated(
         files_root,
         files,
-        "__spacefast_generated/theme.css",
+        THEME_STYLESHEET_PATH,
         css.as_bytes(),
         Some("text/css; charset=utf-8"),
     )
@@ -451,7 +451,7 @@ fn append_theme_style_rule(
     styles: Option<&Value>,
     theme: &Value,
 ) {
-    let Some(styles) = styles.and_then(Value::as_object) else {
+    let Some(styles) = styles.filter(|value| value.is_object()) else {
         return;
     };
     let mappings = [
@@ -519,7 +519,6 @@ fn append_theme_style_rule(
         ("/typography/textTransform", "text-transform"),
         ("/typography/writingMode", "writing-mode"),
     ];
-    let styles = Value::Object(styles.clone());
     let has_uploaded_background = styles
         .pointer("/background/backgroundImage/id")
         .is_some_and(json_value_truthy);
@@ -527,16 +526,16 @@ fn append_theme_style_rule(
         .into_iter()
         .flat_map(|(pointer, property)| {
             let value = match property {
-                "background-image" => theme_background_image_value(&styles, theme),
+                "background-image" => theme_background_image_value(styles, theme),
                 "background-size" if has_uploaded_background && selector != "body" => {
-                    theme_style_value(&styles, pointer, theme)
+                    theme_style_value(styles, pointer, theme)
                         .and_then(Value::as_str)
                         .filter(|value| !value.is_empty())
                         .map(str::to_string)
                         .or_else(|| Some("cover".to_string()))
                 }
                 "background-position" if has_uploaded_background && selector != "body" => {
-                    theme_style_value(&styles, pointer, theme)
+                    theme_style_value(styles, pointer, theme)
                         .and_then(Value::as_str)
                         .filter(|value| !value.is_empty())
                         .map(str::to_string)
@@ -548,7 +547,7 @@ fn append_theme_style_rule(
                             .then(|| "50% 50%".to_string())
                         })
                 }
-                _ => theme_style_value(&styles, pointer, theme)
+                _ => theme_style_value(styles, pointer, theme)
                     .and_then(Value::as_str)
                     .map(str::to_string),
             };

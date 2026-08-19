@@ -46,7 +46,7 @@ export type FakeS3 = {
   stop(): void;
 };
 
-const AUTH_SHAPE =
+const AUTH_HEADER_PATTERN =
   /^AWS4-HMAC-SHA256 Credential=[^,]+,\s*SignedHeaders=[^,]+,\s*Signature=[0-9a-f]{64}$/;
 
 export async function startFakeS3(bucket = "test-bucket"): Promise<FakeS3> {
@@ -109,7 +109,7 @@ export async function startFakeS3(bucket = "test-bucket"): Promise<FakeS3> {
       }
 
       const authorization = headers["authorization"] ?? "";
-      if (!AUTH_SHAPE.test(authorization)) {
+      if (!AUTH_HEADER_PATTERN.test(authorization)) {
         return new Response(
           errorXml("InvalidArgument", "Authorization header is not a valid SigV4 header"),
           {

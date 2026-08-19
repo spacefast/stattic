@@ -1,17 +1,19 @@
 //! Validation and normalization for the current Spacefast config schema.
 
+use super::access::normalized_public_patterns;
 use super::diagnostics::{diagnostic, DiagnosticSeverity, PrepareDiagnostic};
 use super::jsonc::parse as parse_jsonc;
 use crate::protocol::{
-    CONFIG_ACCESS_RULE_LIMIT, CONFIG_BUILD_TIMEOUT_MAX_SECONDS, CONFIG_BUILD_TIMEOUT_MIN_SECONDS,
-    CONFIG_FALLBACK_STATUS_MAX, CONFIG_FALLBACK_STATUS_MIN, CONFIG_FILE_MAX_BYTES,
-    CONFIG_INJECT_SNIPPET_LIMIT, CONFIG_INJECT_SNIPPET_MAX_BYTES,
-    CONFIG_META_DESCRIPTION_MAX_CHARS, CONFIG_META_IMAGE_MAX_CHARS, CONFIG_META_TITLE_MAX_CHARS,
-    CONFIG_OVERLAY_MAX_BYTES, CONFIG_PAGES_COLOR_MAX_CHARS, CONFIG_PAGES_FONT_FAMILY_MAX_CHARS,
-    CONFIG_PAGES_LOGO_MAX_CHARS, CONFIG_PAGES_NAME_MAX_CHARS,
-    CONFIG_SUPERPOWERS_INTEGRATION_ID_MAX_CHARS, CONFIG_SUPERPOWERS_OVERRIDE_LIMIT,
-    CONFIG_SUPERPOWERS_OVERRIDE_REASON_MAX_CHARS, CONFIG_SUPERPOWERS_TAG_ID_MAX_CHARS,
-    CONFIG_SUPERPOWERS_TAG_NAME_MAX_CHARS, CONFIG_TEMPLATE_LIMIT,
+    CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT, CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS,
+    CONFIG_BUILD_TIMEOUT_MAX_SECONDS, CONFIG_BUILD_TIMEOUT_MIN_SECONDS, CONFIG_FALLBACK_STATUS_MAX,
+    CONFIG_FALLBACK_STATUS_MIN, CONFIG_FILE_MAX_BYTES, CONFIG_INJECT_SNIPPET_LIMIT,
+    CONFIG_INJECT_SNIPPET_MAX_BYTES, CONFIG_META_DESCRIPTION_MAX_CHARS,
+    CONFIG_META_IMAGE_MAX_CHARS, CONFIG_META_TITLE_MAX_CHARS, CONFIG_PAGES_COLOR_MAX_CHARS,
+    CONFIG_PAGES_FONT_FAMILY_MAX_CHARS, CONFIG_PAGES_LOGO_MAX_CHARS, CONFIG_PAGES_NAME_MAX_CHARS,
+    CONFIG_SPACE_NAME_MAX_CHARS, CONFIG_SUPERPOWERS_INTEGRATION_ID_MAX_CHARS,
+    CONFIG_SUPERPOWERS_OVERRIDE_LIMIT, CONFIG_SUPERPOWERS_OVERRIDE_REASON_MAX_CHARS,
+    CONFIG_SUPERPOWERS_TAG_ID_MAX_CHARS, CONFIG_SUPERPOWERS_TAG_NAME_MAX_CHARS,
+    CONFIG_TEMPLATE_LIMIT,
 };
 use regex::Regex;
 use serde_json::{json, Map, Value};
@@ -22,78 +24,38 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "access",
     "build",
     "cleanUrls",
+    "crons",
     "experimental_gutenberg",
     "fallback",
+    // Routing rules in the same grammar the `_redirects` / `_headers` files
+    // use. They pass through this lane untouched: the strict v1 compiler
+    // validates them and the routing compiler merges them behind the files.
+    "headers",
     "index",
     "inject",
     "listing",
     "markdownNegotiation",
     "meta",
+    "name",
     "placement",
+    "redirects",
+    "rewrites",
+    "runtime",
     "space",
     "superpowers",
     "templates",
     "theme",
 ];
 
-const ROUTING_CONFIG_KEYS: &[&str] = &[
-    "headers",
-    "proxies",
-    "proxy",
-    "redirects",
-    "rewrites",
-    "routes",
-];
+const RUNTIME_KINDS: &[&str] = &["zero", "functions"];
 
-pub fn normalize_overlay(config: Value) -> (Option<Value>, Vec<PrepareDiagnostic>) {
-    let mut diagnostics = Vec::new();
-    let raw = match serde_json::to_string(&config) {
-        Ok(raw) => raw,
-        Err(error) => {
-            diagnostics.push(diagnostic(
-                DiagnosticSeverity::Error,
-                "config_invalid",
-                format!("config could not be encoded: {error}"),
-                Some("config".into()),
-            ));
-            return (None, diagnostics);
-        }
-    };
-    if raw.len() > CONFIG_OVERLAY_MAX_BYTES {
-        let mut item = diagnostic(
-            DiagnosticSeverity::Error,
-            "config_file_too_large",
-            format!("Space config overlays support up to {CONFIG_OVERLAY_MAX_BYTES} bytes."),
-            Some("config".into()),
-        );
-        item.details.insert("size".into(), Value::from(raw.len()));
-        item.details
-            .insert("limit".into(), Value::from(CONFIG_OVERLAY_MAX_BYTES));
-        diagnostics.push(item);
-        return (None, diagnostics);
-    }
-    if let Some(object) = config.as_object() {
-        for key in ["$schema", "space", "access"] {
-            if object.contains_key(key) {
-                diagnostics.push(diagnostic(
-                    DiagnosticSeverity::Error,
-                    "config_invalid",
-                    format!("{key} is only valid in the committed config file."),
-                    Some(key.into()),
-                ));
-            }
-        }
-    }
-    let normalized = parse_config(&raw, "config", &mut diagnostics);
-    if diagnostics
-        .iter()
-        .any(|item| item.severity == DiagnosticSeverity::Error)
-    {
-        (None, diagnostics)
-    } else {
-        (normalized, diagnostics)
-    }
-}
+// Replaced by the `runtime` declaration; never silently ignored like other
+// unknown keys, because it is the one key whose loss changes what gets served.
+const REMOVED_FUNCTIONS_KEY: &str = "functions";
+
+/// Other platforms' routing vocabulary. We have one matcher grammar; naming it
+/// three more ways would be three more things to keep in sync.
+const ROUTING_CONFIG_KEYS: &[&str] = &["proxies", "proxy", "routes"];
 
 pub fn parse_config(
     raw: &str,
@@ -140,23 +102,31 @@ pub fn parse_config(
         if KNOWN_CONFIG_KEYS.contains(&key.as_str()) {
             continue;
         }
-        let (severity, message) = if ROUTING_CONFIG_KEYS.contains(&key.as_str()) {
+        let (severity, code, message) = if key == REMOVED_FUNCTIONS_KEY {
+            // The runtime declaration replaced this key outright: warning-and-
+            // strip would publish static files under a config that asked for a
+            // worker, so it blocks with its own code instead.
             (
                 DiagnosticSeverity::Error,
+                "config_functions_key_removed",
+                format!(
+                    "The \"{REMOVED_FUNCTIONS_KEY}\" key was removed from {path}; declare runtime.kind \"functions\" instead."
+                ),
+            )
+        } else if ROUTING_CONFIG_KEYS.contains(&key.as_str()) {
+            (
+                DiagnosticSeverity::Error,
+                "config_invalid",
                 format!("Routing never lives in {path}; move \"{key}\" into _redirects/_headers."),
             )
         } else {
             (
                 DiagnosticSeverity::Warning,
+                "config_invalid",
                 format!("Unknown {path} key \"{key}\" was ignored."),
             )
         };
-        diagnostics.push(diagnostic(
-            severity,
-            "config_invalid",
-            message,
-            Some(key.clone()),
-        ));
+        diagnostics.push(diagnostic(severity, code, message, Some(key.clone())));
         object.remove(&key);
     }
     validate_config_caps(&object, diagnostics);
@@ -187,11 +157,29 @@ fn validate_config_caps(object: &Map<String, Value>, diagnostics: &mut Vec<Prepa
             diagnostics.push(item);
         }
     }
+    if let Some(name) = object.get("name").and_then(Value::as_str) {
+        // JavaScript String.length over the trimmed value, matching the stored
+        // column and the shared contract's cap.
+        let length = js_len(name.trim());
+        if length > CONFIG_SPACE_NAME_MAX_CHARS {
+            let mut item = diagnostic(
+                DiagnosticSeverity::Error,
+                "config_name_too_long",
+                format!("name supports up to {CONFIG_SPACE_NAME_MAX_CHARS} characters."),
+                Some("name".into()),
+            );
+            item.details.insert("length".into(), Value::from(length));
+            item.details
+                .insert("limit".into(), Value::from(CONFIG_SPACE_NAME_MAX_CHARS));
+            diagnostics.push(item);
+        }
+    }
     if let Some(meta) = object.get("meta").and_then(Value::as_object) {
         for (key, limit) in [
             ("title", CONFIG_META_TITLE_MAX_CHARS),
             ("description", CONFIG_META_DESCRIPTION_MAX_CHARS),
             ("image", CONFIG_META_IMAGE_MAX_CHARS),
+            ("favicon", CONFIG_META_IMAGE_MAX_CHARS),
         ] {
             if let Some(value) = meta.get(key).and_then(Value::as_str) {
                 // Match JavaScript String.length used by the existing public
@@ -348,8 +336,10 @@ fn validate_config_shape(
     }
     if let Some(meta) = object.get_mut("meta") {
         if let Some(meta) = meta.as_object_mut() {
-            meta.retain(|key, _| matches!(key.as_str(), "title" | "description" | "image"));
-            for key in ["title", "description", "image"] {
+            meta.retain(|key, _| {
+                matches!(key.as_str(), "title" | "description" | "image" | "favicon")
+            });
+            for key in ["title", "description", "image", "favicon"] {
                 if meta.get(key).is_some_and(|value| {
                     value
                         .as_str()
@@ -362,14 +352,185 @@ fn validate_config_shape(
             invalid(diagnostics, "meta", "an object");
         }
     }
+    validate_space_name(object, diagnostics);
+    validate_crons_config(object, diagnostics);
+    validate_runtime_config(object, diagnostics);
     validate_build_config(object, diagnostics);
+    validate_access_config(object, diagnostics);
     validate_placement_config(object, diagnostics);
     validate_superpowers_config(object, diagnostics);
     validate_space_theme(object, diagnostics);
-    validate_access_config(object, diagnostics);
     if let Some(inject) = object.get_mut("inject").and_then(Value::as_object_mut) {
         inject
             .retain(|key, _| matches!(key.as_str(), "head" | "bodyStart" | "bodyEnd" | "noscript"));
+    }
+}
+
+/// File-owned space display name. The cap itself is reported by
+/// `validate_config_caps` with the stable `config_name_too_long` code; this
+/// only rejects shapes that can never name a space and stores the trimmed
+/// value so the compiled config carries exactly what gets stamped.
+fn validate_space_name(object: &mut Map<String, Value>, diagnostics: &mut Vec<PrepareDiagnostic>) {
+    let Some(value) = object.get_mut("name") else {
+        return;
+    };
+    let Some(raw) = value.as_str() else {
+        push_shape_error(diagnostics, "name", "a non-empty string");
+        return;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        push_shape_error(diagnostics, "name", "a non-empty string");
+        return;
+    }
+    *value = Value::String(trimmed.into());
+}
+
+/// Scheduled requests against this version's own paths. Blocking on purpose:
+/// a cron that cannot be compiled would publish a version whose declared
+/// schedule silently never runs.
+fn validate_crons_config(
+    object: &mut Map<String, Value>,
+    diagnostics: &mut Vec<PrepareDiagnostic>,
+) {
+    let Some(value) = object.get("crons") else {
+        return;
+    };
+    for issue in super::crons::validate(value).1 {
+        let path = match issue.location() {
+            Some((index, field)) => format!("crons.{index}.{field}"),
+            None => "crons".to_string(),
+        };
+        diagnostics.push(diagnostic(
+            DiagnosticSeverity::Error,
+            issue.code(),
+            issue.message(),
+            Some(path),
+        ));
+    }
+}
+
+/// The one runtime declaration. Blocking on purpose: once a version's config
+/// declares a runtime, publishing static files under it would be a silent lie,
+/// so an unusable declaration fails the publish instead of degrading.
+fn validate_runtime_config(
+    object: &mut Map<String, Value>,
+    diagnostics: &mut Vec<PrepareDiagnostic>,
+) {
+    let Some(value) = object.get_mut("runtime") else {
+        return;
+    };
+    let Some(runtime) = value.as_object_mut() else {
+        diagnostics.push(diagnostic(
+            DiagnosticSeverity::Error,
+            "config_runtime_invalid_kind",
+            "runtime must be an object declaring a kind of \"zero\" or \"functions\".".into(),
+            Some("runtime".into()),
+        ));
+        return;
+    };
+    let declared = runtime.get("kind").and_then(Value::as_str);
+    let Some(kind) = declared
+        .filter(|kind| RUNTIME_KINDS.contains(kind))
+        .map(str::to_owned)
+    else {
+        let mut item = diagnostic(
+            DiagnosticSeverity::Error,
+            "config_runtime_invalid_kind",
+            "runtime.kind must be \"zero\" or \"functions\".".into(),
+            Some("runtime.kind".into()),
+        );
+        if let Some(declared) = declared {
+            item.details.insert("kind".into(), Value::from(declared));
+        }
+        diagnostics.push(item);
+        return;
+    };
+
+    if kind == "zero" {
+        runtime.retain(|key, _| matches!(key.as_str(), "kind" | "server" | "client"));
+        // Zero is never inferred, so a declaration that names neither entry has
+        // nothing to compile.
+        for key in ["server", "client"] {
+            let trimmed = runtime
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned);
+            match trimmed {
+                Some(entry) => {
+                    runtime.insert(key.into(), Value::String(entry));
+                }
+                None => diagnostics.push(diagnostic(
+                    DiagnosticSeverity::Error,
+                    "config_runtime_entry_missing",
+                    format!(
+                        "runtime.{key} is required and must name a module when runtime.kind is \"zero\"."
+                    ),
+                    Some(format!("runtime.{key}")),
+                )),
+            }
+        }
+        return;
+    }
+
+    runtime.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "kind" | "entry" | "database" | "compatibilityDate"
+        )
+    });
+    // Functions keeps zero-config detection: `entry` is optional, but naming one
+    // that cannot be a module is an error rather than a silent static publish.
+    if runtime
+        .get("entry")
+        .is_some_and(|value| value.as_str().is_none_or(|entry| entry.trim().is_empty()))
+    {
+        diagnostics.push(diagnostic(
+            DiagnosticSeverity::Error,
+            "config_runtime_entry_missing",
+            "runtime.entry must name a module when present; omit it to detect the worker instead."
+                .into(),
+            Some("runtime.entry".into()),
+        ));
+    }
+    if runtime
+        .get("database")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        push_shape_error(diagnostics, "runtime.database", "a boolean");
+    }
+    if runtime.get("compatibilityDate").is_some_and(|value| {
+        value
+            .as_str()
+            .is_none_or(|date| !compatibility_date_pattern().is_match(date))
+    }) {
+        push_shape_error(
+            diagnostics,
+            "runtime.compatibilityDate",
+            "a YYYY-MM-DD date",
+        );
+    }
+}
+
+fn validate_access_config(
+    object: &mut Map<String, Value>,
+    diagnostics: &mut Vec<PrepareDiagnostic>,
+) {
+    let Some(access) = object.get_mut("access") else {
+        return;
+    };
+    match normalized_public_patterns(access) {
+        Ok(patterns) => {
+            *access = json!({ "public": patterns });
+        }
+        Err((path, message)) => diagnostics.push(diagnostic(
+            DiagnosticSeverity::Error,
+            "config_invalid",
+            message,
+            Some(path),
+        )),
     }
 }
 
@@ -844,20 +1005,19 @@ fn validate_trimmed_page_theme_string(
     }
 }
 
+const PAGES_COLOR_PATTERN: &str = r"^(?:#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|rgba?\([0-9.,\s%/]{1,64}\)|hsla?\([0-9.,\s%deg/]{1,64}\)|[a-zA-Z]{3,30})$";
+const PAGES_LOGO_PATTERN: &str = r#"^(?:https://[^\s\"'<>\\]+|/[^\s\"'<>\\]*)$"#;
+const PAGES_FONT_PATTERN: &str = r#"^[A-Za-z0-9 ,'\"-]+$"#;
+const COMPATIBILITY_DATE_PATTERN: &str = r"^\d{4}-\d{2}-\d{2}$";
+
 fn pages_color_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN.get_or_init(|| {
-        Regex::new(r"^(?:#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|rgba?\([0-9.,\s%/]{1,64}\)|hsla?\([0-9.,\s%deg/]{1,64}\)|[a-zA-Z]{3,30})$")
-            .expect("pages color regex compiles")
-    })
+    PATTERN.get_or_init(|| Regex::new(PAGES_COLOR_PATTERN).expect("pages color regex compiles"))
 }
 
 fn pages_logo_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN.get_or_init(|| {
-        Regex::new(r#"^(?:https://[^\s\"'<>\\]+|/[^\s\"'<>\\]*)$"#)
-            .expect("pages logo regex compiles")
-    })
+    PATTERN.get_or_init(|| Regex::new(PAGES_LOGO_PATTERN).expect("pages logo regex compiles"))
 }
 
 fn pages_name_pattern() -> &'static Regex {
@@ -867,312 +1027,14 @@ fn pages_name_pattern() -> &'static Regex {
 
 fn pages_font_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    PATTERN
-        .get_or_init(|| Regex::new(r#"^[A-Za-z0-9 ,'\"-]+$"#).expect("pages font regex compiles"))
+    PATTERN.get_or_init(|| Regex::new(PAGES_FONT_PATTERN).expect("pages font regex compiles"))
 }
 
-fn validate_access_config(
-    object: &mut Map<String, Value>,
-    diagnostics: &mut Vec<PrepareDiagnostic>,
-) {
-    let Some(access) = object.get_mut("access") else {
-        return;
-    };
-    let Some(access) = access.as_object_mut() else {
-        push_shape_error(diagnostics, "access", "an object");
-        return;
-    };
-    access.retain(|key, _| key == "rules");
-    if !access.contains_key("rules") {
-        access.insert("rules".into(), Value::Array(Vec::new()));
-    }
-    let Some(rules) = access.get_mut("rules").and_then(Value::as_array_mut) else {
-        push_shape_error(diagnostics, "access.rules", "an array");
-        return;
-    };
-    if rules.len() > CONFIG_ACCESS_RULE_LIMIT {
-        push_shape_error(diagnostics, "access.rules", "at most 100 rules");
-    }
-    for (index, rule) in rules.iter_mut().enumerate() {
-        validate_access_rule(rule, &format!("access.rules.{index}"), diagnostics);
-    }
-}
-
-fn validate_access_rule(value: &mut Value, path: &str, diagnostics: &mut Vec<PrepareDiagnostic>) {
-    let Some(rule) = value.as_object_mut() else {
-        push_shape_error(diagnostics, path, "an object");
-        return;
-    };
-    rule.retain(|key, _| {
-        matches!(
-            key.as_str(),
-            "id" | "match"
-                | "effect"
-                | "auth"
-                | "managedBy"
-                | "expiresAt"
-                | "reasonCode"
-                | "message"
-        )
-    });
-    if !rule.contains_key("match") {
-        rule.insert("match".into(), Value::Object(Map::new()));
-    }
-    if !matches!(
-        rule.get("effect").and_then(Value::as_str),
-        Some("allow" | "deny" | "challenge")
-    ) {
-        push_shape_error(
-            diagnostics,
-            &format!("{path}.effect"),
-            "allow, deny, or challenge",
-        );
-    }
-    if let Some(value) = rule.get_mut("match") {
-        validate_rule_match(value, &format!("{path}.match"), diagnostics);
-    }
-    if let Some(value) = rule.get_mut("auth") {
-        validate_rule_auth(value, &format!("{path}.auth"), diagnostics);
-    }
-    validate_optional_nonempty(rule, path, "id", diagnostics);
-    validate_optional_nonempty(rule, path, "reasonCode", diagnostics);
-    validate_optional_nonempty(rule, path, "message", diagnostics);
-    if rule.get("managedBy").is_some_and(|value| {
-        !matches!(
-            value.as_str(),
-            Some("sharing" | "firewall" | "file_share" | "cast_reviewer" | "team_default")
-        )
-    }) {
-        push_shape_error(diagnostics, &format!("{path}.managedBy"), "a managed owner");
-    }
-    if rule
-        .get("expiresAt")
-        .is_some_and(|value| nonnegative_integer(value).is_none())
-    {
-        push_shape_error(
-            diagnostics,
-            &format!("{path}.expiresAt"),
-            "a non-negative integer",
-        );
-    }
-}
-
-fn validate_rule_match(value: &mut Value, path: &str, diagnostics: &mut Vec<PrepareDiagnostic>) {
-    let Some(object) = value.as_object_mut() else {
-        push_shape_error(diagnostics, path, "an object");
-        return;
-    };
-    object.retain(|key, _| {
-        matches!(
-            key.as_str(),
-            "host"
-                | "hostPattern"
-                | "hostTemplate"
-                | "pathPattern"
-                | "channel"
-                | "ipCidrs"
-                | "agent"
-                | "country"
-                | "header"
-        )
-    });
-    for key in [
-        "host",
-        "hostPattern",
-        "hostTemplate",
-        "pathPattern",
-        "channel",
-        "agent",
-    ] {
-        validate_optional_nonempty(object, path, key, diagnostics);
-    }
-    if object
-        .get("country")
-        .is_some_and(|value| value.as_str().is_none_or(|value| js_len(value) != 2))
-    {
-        push_shape_error(
-            diagnostics,
-            &format!("{path}.country"),
-            "a two-character string",
-        );
-    }
-    if object.get("ipCidrs").is_some_and(|value| {
-        !value
-            .as_array()
-            .is_some_and(|values| values.len() <= 50 && values.iter().all(nonempty_string))
-    }) {
-        push_shape_error(
-            diagnostics,
-            &format!("{path}.ipCidrs"),
-            "up to 50 non-empty strings",
-        );
-    }
-    if let Some(value) = object.get_mut("header") {
-        let Some(header) = value.as_object_mut() else {
-            push_shape_error(
-                diagnostics,
-                &format!("{path}.header"),
-                "a name and string value",
-            );
-            return;
-        };
-        header.retain(|key, _| matches!(key.as_str(), "name" | "value"));
-        if !header.get("name").is_some_and(nonempty_string)
-            || !header.get("value").is_some_and(Value::is_string)
-        {
-            push_shape_error(
-                diagnostics,
-                &format!("{path}.header"),
-                "a name and string value",
-            );
-        }
-    }
-}
-
-fn validate_rule_auth(value: &mut Value, path: &str, diagnostics: &mut Vec<PrepareDiagnostic>) {
-    let Some(object) = value.as_object_mut() else {
-        push_shape_error(diagnostics, path, "an object");
-        return;
-    };
-    object.retain(|key, _| matches!(key.as_str(), "requiredGrants" | "issuers" | "acquire"));
-    let grants_valid = object
-        .get("requiredGrants")
-        .and_then(Value::as_array)
-        .is_some_and(|values| {
-            !values.is_empty()
-                && values.iter().all(|value| {
-                    value
-                        .as_str()
-                        .is_some_and(|value| !value.is_empty() && js_len(value) <= 255)
-                })
-        });
-    if !grants_valid {
-        push_shape_error(
-            diagnostics,
-            &format!("{path}.requiredGrants"),
-            "one or more grants",
-        );
-    }
-    if let Some(value) = object.get_mut("issuers") {
-        validate_issuers(value, &format!("{path}.issuers"), diagnostics);
-    }
-    let Some(value) = object.get_mut("acquire") else {
-        return;
-    };
-    let Some(values) = value.as_array_mut() else {
-        push_shape_error(
-            diagnostics,
-            &format!("{path}.acquire"),
-            "valid acquire entries",
-        );
-        return;
-    };
-    for (index, value) in values.iter_mut().enumerate() {
-        let entry_path = format!("{path}.acquire.{index}");
-        let Some(acquire) = value.as_object_mut() else {
-            push_shape_error(diagnostics, &entry_path, "an object");
-            continue;
-        };
-        match acquire.get("type").and_then(Value::as_str) {
-            Some("password") => {
-                acquire.retain(|key, _| {
-                    matches!(key.as_str(), "type" | "ref" | "transport" | "username")
-                });
-                if !acquire.get("ref").is_some_and(nonempty_string) {
-                    push_shape_error(
-                        diagnostics,
-                        &format!("{entry_path}.ref"),
-                        "a non-empty string",
-                    );
-                }
-                if !matches!(
-                    acquire.get("transport").and_then(Value::as_str),
-                    Some("basic" | "form")
-                ) {
-                    push_shape_error(
-                        diagnostics,
-                        &format!("{entry_path}.transport"),
-                        "basic or form",
-                    );
-                }
-                validate_optional_nonempty(acquire, &entry_path, "username", diagnostics);
-            }
-            Some("login") => {
-                acquire.retain(|key, _| matches!(key.as_str(), "type" | "url" | "label"));
-                if !acquire.get("url").is_some_and(nonempty_string) {
-                    push_shape_error(
-                        diagnostics,
-                        &format!("{entry_path}.url"),
-                        "a non-empty string",
-                    );
-                }
-                validate_optional_nonempty(acquire, &entry_path, "label", diagnostics);
-            }
-            _ => push_shape_error(
-                diagnostics,
-                &format!("{entry_path}.type"),
-                "password or login",
-            ),
-        }
-    }
-}
-
-fn validate_issuers(value: &mut Value, path: &str, diagnostics: &mut Vec<PrepareDiagnostic>) {
-    let Some(issuers) = value.as_array_mut() else {
-        push_shape_error(diagnostics, path, "an array");
-        return;
-    };
-    for (index, value) in issuers.iter_mut().enumerate() {
-        let issuer_path = format!("{path}.{index}");
-        let Some(issuer) = value.as_object_mut() else {
-            push_shape_error(diagnostics, &issuer_path, "an object");
-            continue;
-        };
-        issuer.retain(|key, _| {
-            matches!(
-                key.as_str(),
-                "kid" | "alg" | "publicKey" | "grantNamespaces"
-            )
-        });
-        for key in ["kid", "publicKey"] {
-            if !issuer.get(key).is_some_and(nonempty_string) {
-                push_shape_error(
-                    diagnostics,
-                    &format!("{issuer_path}.{key}"),
-                    "a non-empty string",
-                );
-            }
-        }
-        if issuer.get("alg").and_then(Value::as_str) != Some("EdDSA") {
-            push_shape_error(diagnostics, &format!("{issuer_path}.alg"), "EdDSA");
-        }
-        if !issuer
-            .get("grantNamespaces")
-            .and_then(Value::as_array)
-            .is_some_and(|values| !values.is_empty() && values.iter().all(nonempty_string))
-        {
-            push_shape_error(
-                diagnostics,
-                &format!("{issuer_path}.grantNamespaces"),
-                "one or more non-empty strings",
-            );
-        }
-    }
-}
-
-fn validate_optional_nonempty(
-    object: &Map<String, Value>,
-    path: &str,
-    key: &str,
-    diagnostics: &mut Vec<PrepareDiagnostic>,
-) {
-    if object.get(key).is_some_and(|value| !nonempty_string(value)) {
-        push_shape_error(diagnostics, &format!("{path}.{key}"), "a non-empty string");
-    }
-}
-
-fn nonempty_string(value: &Value) -> bool {
-    value.as_str().is_some_and(|value| !value.is_empty())
+fn compatibility_date_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(COMPATIBILITY_DATE_PATTERN).expect("compatibility date regex compiles")
+    })
 }
 
 fn nonnegative_integer(value: &Value) -> Option<u64> {
@@ -1279,17 +1141,17 @@ pub fn public_json_schema() -> Value {
         "accent": {
             "type": "string",
             "maxLength": CONFIG_PAGES_COLOR_MAX_CHARS,
-            "pattern": "^(?:#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|rgba?\\([0-9.,\\s%/]{1,64}\\)|hsla?\\([0-9.,\\s%deg/]{1,64}\\)|[a-zA-Z]{3,30})$"
+            "pattern": PAGES_COLOR_PATTERN
         },
         "background": {
             "type": "string",
             "maxLength": CONFIG_PAGES_COLOR_MAX_CHARS,
-            "pattern": "^(?:#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|rgba?\\([0-9.,\\s%/]{1,64}\\)|hsla?\\([0-9.,\\s%deg/]{1,64}\\)|[a-zA-Z]{3,30})$"
+            "pattern": PAGES_COLOR_PATTERN
         },
         "logo": {
             "type": "string",
             "maxLength": CONFIG_PAGES_LOGO_MAX_CHARS,
-            "pattern": "^(?:https://[^\\s\\\"'<>\\\\]+|/[^\\s\\\"'<>\\\\]*)$"
+            "pattern": PAGES_LOGO_PATTERN
         },
         "name": {
             "type": "string",
@@ -1300,7 +1162,7 @@ pub fn public_json_schema() -> Value {
             "type": "string",
             "minLength": 1,
             "maxLength": CONFIG_PAGES_FONT_FAMILY_MAX_CHARS,
-            "pattern": "^[A-Za-z0-9 ,'\\\"-]+$"
+            "pattern": PAGES_FONT_PATTERN
         },
         "hideSpacefastBranding": { "type": "boolean" }
     }));
@@ -1328,108 +1190,38 @@ pub fn public_json_schema() -> Value {
         "burstable": { "type": "boolean" }
     }));
 
-    let rule_match = closed_object(json!({
-        "host": { "type": "string", "minLength": 1 },
-        "hostPattern": { "type": "string", "minLength": 1 },
-        "hostTemplate": { "type": "string", "minLength": 1 },
-        "pathPattern": { "type": "string", "minLength": 1 },
-        "channel": { "type": "string", "minLength": 1 },
-        "ipCidrs": {
-            "type": "array",
-            "maxItems": 50,
-            "items": { "type": "string", "minLength": 1 }
-        },
-        "agent": { "type": "string", "minLength": 1 },
-        "country": { "type": "string", "minLength": 2, "maxLength": 2 },
-        "header": {
-            "type": "object",
-            "required": ["name", "value"],
-            "properties": {
-                "name": { "type": "string", "minLength": 1 },
-                "value": { "type": "string" }
+    // Runtime is a documented public key, not a hidden one: the published docs
+    // teach `sf.jsonc#runtime`, so editors and agents get it too.
+    let runtime = json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["kind", "server", "client"],
+                "properties": {
+                    "kind": { "const": "zero" },
+                    "server": { "type": "string", "minLength": 1 },
+                    "client": { "type": "string", "minLength": 1 }
+                },
+                "additionalProperties": false
             },
-            "additionalProperties": false
-        }
-    }));
-    let mut rule_auth = closed_object(json!({
-        "requiredGrants": {
-            "type": "array",
-            "minItems": 1,
-            "items": { "type": "string", "minLength": 1, "maxLength": 255 }
-        },
-        "issuers": {
-            "type": "array",
-            "items": {
+            {
                 "type": "object",
-                "required": ["kid", "alg", "publicKey", "grantNamespaces"],
+                "required": ["kind"],
                 "properties": {
-                    "kid": { "type": "string", "minLength": 1 },
-                    "alg": { "const": "EdDSA" },
-                    "publicKey": { "type": "string", "minLength": 1 },
-                    "grantNamespaces": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": { "type": "string", "minLength": 1 }
-                    }
+                    "kind": { "const": "functions" },
+                    "entry": { "type": "string", "minLength": 1 },
+                    "database": { "type": "boolean" },
+                    "compatibilityDate": { "type": "string", "pattern": COMPATIBILITY_DATE_PATTERN }
                 },
                 "additionalProperties": false
             }
-        },
-        "acquire": {
-            "type": "array",
-            "items": {
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "required": ["type", "ref", "transport"],
-                        "properties": {
-                            "type": { "const": "password" },
-                            "ref": { "type": "string", "minLength": 1 },
-                            "transport": { "enum": ["basic", "form"] },
-                            "username": { "type": "string", "minLength": 1 }
-                        },
-                        "additionalProperties": false
-                    },
-                    {
-                        "type": "object",
-                        "required": ["type", "url"],
-                        "properties": {
-                            "type": { "const": "login" },
-                            "url": { "type": "string", "minLength": 1 },
-                            "label": { "type": "string", "minLength": 1 }
-                        },
-                        "additionalProperties": false
-                    }
-                ]
-            }
-        }
-    }));
-    if let Some(rule_auth) = rule_auth.as_object_mut() {
-        rule_auth.insert("required".into(), json!(["requiredGrants"]));
-    }
-    let access = closed_object(json!({
-        "rules": {
-            "type": "array",
-            "maxItems": CONFIG_ACCESS_RULE_LIMIT,
-            "items": {
-                "type": "object",
-                "required": ["effect"],
-                "properties": {
-                    "id": { "type": "string", "minLength": 1 },
-                    "match": rule_match,
-                    "effect": { "enum": ["allow", "deny", "challenge"] },
-                    "auth": rule_auth,
-                    "managedBy": {
-                        "enum": ["sharing", "firewall", "file_share", "cast_reviewer", "team_default"]
-                    },
-                    "expiresAt": { "type": "integer", "minimum": 0 },
-                    "reasonCode": { "type": "string", "minLength": 1 },
-                    "message": { "type": "string", "minLength": 1 }
-                },
-                "additionalProperties": false
-            }
-        }
-    }));
+        ]
+    });
+
+    // Scheduled requests. Documented like `runtime`: the published docs teach
+    // `sf.jsonc#crons`, so editors and agents complete it too. The fragment
+    // lives next to its validator in `config::crons`.
+    let crons = super::crons::json_schema();
 
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -1439,6 +1231,32 @@ pub fn public_json_schema() -> Value {
         "properties": {
             "$schema": { "type": "string" },
             "space": { "type": "string", "minLength": 1 },
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": CONFIG_SPACE_NAME_MAX_CHARS
+            },
+            "runtime": runtime,
+            "access": {
+                "anyOf": [
+                    {
+                        "const": "public",
+                        "description": "Shorthand for { \"public\": [\"/**\"] }: the whole live space is public."
+                    },
+                    {
+                        "type": "object",
+                        "required": ["public"],
+                        "properties": {
+                            "public": {
+                                "type": "array",
+                                "maxItems": CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT,
+                                "items": { "type": "string", "minLength": 1, "maxLength": CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS + 1 }
+                            }
+                        },
+                        "additionalProperties": false
+                    }
+                ]
+            },
             "index": { "oneOf": [{ "type": "string", "minLength": 1 }, { "const": false }] },
             "fallback": {
                 "oneOf": [
@@ -1466,7 +1284,8 @@ pub fn public_json_schema() -> Value {
                 "properties": {
                     "title": { "type": "string", "minLength": 1, "maxLength": CONFIG_META_TITLE_MAX_CHARS },
                     "description": { "type": "string", "maxLength": CONFIG_META_DESCRIPTION_MAX_CHARS },
-                    "image": { "type": "string", "maxLength": CONFIG_META_IMAGE_MAX_CHARS }
+                    "image": { "type": "string", "maxLength": CONFIG_META_IMAGE_MAX_CHARS },
+                    "favicon": { "type": "string", "maxLength": CONFIG_META_IMAGE_MAX_CHARS }
                 },
                 "additionalProperties": false
             },
@@ -1475,11 +1294,11 @@ pub fn public_json_schema() -> Value {
                 "maxItems": CONFIG_TEMPLATE_LIMIT,
                 "items": { "type": "string", "minLength": 1 }
             },
+            "crons": crons,
             "superpowers": superpowers,
             "theme": theme,
             "build": build,
-            "placement": placement,
-            "access": access
+            "placement": placement
         },
         "additionalProperties": true
     })
@@ -1522,7 +1341,7 @@ export type SpaceConfig = {
   fallback?: string | { path: string; status: number };
   cleanUrls?: boolean;
   listing?: boolean;
-  meta?: { title?: string; description?: string; image?: string };
+  meta?: { title?: string; description?: string; image?: string; favicon?: string };
   superpowers?: {
     enabled?: boolean;
     disable_all_injection?: boolean;
@@ -1546,10 +1365,27 @@ export type SpaceConfig = {
   inject?: { head?: string[]; bodyStart?: string[]; bodyEnd?: string[]; noscript?: string[] };
 };
 
+export type SpaceRuntimeZeroConfig = {
+  kind: "zero";
+  server: string;
+  client: string;
+};
+
+export type SpaceRuntimeFunctionsConfig = {
+  kind: "functions";
+  entry?: string;
+  database?: boolean;
+  compatibilityDate?: string;
+};
+
+export type SpaceRuntimeConfig = SpaceRuntimeZeroConfig | SpaceRuntimeFunctionsConfig;
+
 export type SpaceConfigFile = SpaceConfig & {
   $schema?: string;
   space?: string;
-  access?: { rules?: unknown[] };
+  name?: string;
+  runtime?: SpaceRuntimeConfig;
+  access?: { public: string[] };
 };
 "#;
 
@@ -1564,8 +1400,12 @@ fn push_shape_error(diagnostics: &mut Vec<PrepareDiagnostic>, path: &str, expect
 
 #[cfg(test)]
 mod tests {
-    use super::public_json_schema;
-    use crate::protocol::{CONFIG_BUILD_TIMEOUT_MAX_SECONDS, CONFIG_SUPERPOWERS_OVERRIDE_LIMIT};
+    use super::DiagnosticSeverity;
+    use super::{parse_config, public_json_schema};
+    use crate::protocol::{
+        CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT, CONFIG_BUILD_TIMEOUT_MAX_SECONDS,
+        CONFIG_SPACE_NAME_MAX_CHARS, CONFIG_SUPERPOWERS_OVERRIDE_LIMIT,
+    };
     use serde_json::json;
 
     #[test]
@@ -1587,14 +1427,16 @@ mod tests {
             Some(&json!("boolean"))
         );
         assert_eq!(
-            schema.pointer(
-                "/properties/access/properties/rules/items/properties/auth/properties/acquire/items/oneOf/0/properties/transport/enum"
-            ),
-            Some(&json!(["basic", "form"]))
-        );
-        assert_eq!(
             schema.pointer("/properties/theme/properties/logo/type"),
             Some(&json!("string"))
+        );
+        assert_eq!(
+            schema.pointer("/properties/access/anyOf/0/const"),
+            Some(&json!("public"))
+        );
+        assert_eq!(
+            schema.pointer("/properties/access/anyOf/1/properties/public/maxItems"),
+            Some(&json!(CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT))
         );
     }
 
@@ -1608,5 +1450,314 @@ mod tests {
         assert!(!properties.contains_key("experimental_gutenberg"));
         assert!(!properties.contains_key("inject"));
         assert_eq!(schema["additionalProperties"], json!(true));
+    }
+
+    #[test]
+    fn public_schema_documents_file_owned_name_and_runtime() {
+        let schema = public_json_schema();
+
+        assert_eq!(
+            schema.pointer("/properties/name/maxLength"),
+            Some(&json!(CONFIG_SPACE_NAME_MAX_CHARS))
+        );
+        assert_eq!(
+            schema.pointer("/properties/runtime/oneOf/0/properties/kind/const"),
+            Some(&json!("zero"))
+        );
+        assert_eq!(
+            schema.pointer("/properties/runtime/oneOf/0/required"),
+            Some(&json!(["kind", "server", "client"]))
+        );
+        assert_eq!(
+            schema.pointer("/properties/runtime/oneOf/1/properties/kind/const"),
+            Some(&json!("functions"))
+        );
+        assert_eq!(
+            schema.pointer("/properties/runtime/oneOf/1/required"),
+            Some(&json!(["kind"]))
+        );
+    }
+
+    #[test]
+    fn committed_config_keeps_name_and_runtime_declarations() {
+        let mut diagnostics = Vec::new();
+        let config = parse_config(
+            r#"{
+                "name": "  guestbook  ",
+                "runtime": { "kind": "zero", "server": " server/index.ts ", "client": "client/index.tsx" },
+                "meta": { "title": "Guestbook", "favicon": "/favicon.svg" },
+                "listing": true
+            }"#,
+            "sf.jsonc",
+            &mut diagnostics,
+        );
+
+        assert_eq!(diagnostics, Vec::new());
+        assert_eq!(
+            config,
+            Some(json!({
+                "name": "guestbook",
+                "runtime": {
+                    "kind": "zero",
+                    "server": "server/index.ts",
+                    "client": "client/index.tsx"
+                },
+                "meta": { "title": "Guestbook", "favicon": "/favicon.svg" },
+                "listing": true
+            }))
+        );
+    }
+
+    #[test]
+    fn functions_runtime_keeps_optional_entries_and_drops_unknown_fields() {
+        let mut diagnostics = Vec::new();
+        let config = parse_config(
+            r#"{"runtime":{"kind":"functions","entry":"handler.ts","database":true,"compatibilityDate":"2026-07-01","bogus":1}}"#,
+            "sf.jsonc",
+            &mut diagnostics,
+        );
+
+        assert_eq!(diagnostics, Vec::new());
+        assert_eq!(
+            config.and_then(|value| value.pointer("/runtime").cloned()),
+            Some(json!({
+                "kind": "functions",
+                "entry": "handler.ts",
+                "database": true,
+                "compatibilityDate": "2026-07-01"
+            }))
+        );
+
+        let mut bare_diagnostics = Vec::new();
+        let bare = parse_config(
+            r#"{"runtime":{"kind":"functions"}}"#,
+            "sf.jsonc",
+            &mut bare_diagnostics,
+        );
+        assert_eq!(bare_diagnostics, Vec::new());
+        assert_eq!(
+            bare.and_then(|value| value.pointer("/runtime").cloned()),
+            Some(json!({ "kind": "functions" }))
+        );
+    }
+
+    /// The cron grammar is proven in `config::crons`; what this lane adds is
+    /// that `crons` survives as a known key and that a rejected entry blocks
+    /// the publish at the path the author can find it by.
+    #[test]
+    fn crons_survive_the_current_lane_and_a_bad_entry_blocks_the_publish() {
+        let mut diagnostics = Vec::new();
+        let config = parse_config(
+            r#"{"crons":[{"path":"/api/cron/digest","schedule":"twicedaily"}]}"#,
+            "sf.jsonc",
+            &mut diagnostics,
+        );
+        assert_eq!(diagnostics, Vec::new());
+        assert_eq!(
+            config.and_then(|value| value.pointer("/crons").cloned()),
+            Some(json!([{ "path": "/api/cron/digest", "schedule": "twicedaily" }]))
+        );
+
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            parse_config(
+                r#"{"crons":[{"path":"/api/cron/digest","schedule":"nightly"}]}"#,
+                "sf.jsonc",
+                &mut diagnostics,
+            ),
+            None
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|item| (item.code.as_str(), item.path.as_deref()))
+                .collect::<Vec<_>>(),
+            [("config_cron_invalid_schedule", Some("crons.0.schedule"))]
+        );
+    }
+
+    #[test]
+    fn invalid_runtime_and_name_declarations_block_the_publish() {
+        let cases = [
+            (
+                r#"{"runtime":{"kind":"zero"}}"#,
+                "config_runtime_entry_missing",
+            ),
+            (
+                r#"{"runtime":{"kind":"zero","server":"server.ts","client":"   "}}"#,
+                "config_runtime_entry_missing",
+            ),
+            (
+                r#"{"runtime":{"kind":"functions","entry":"  "}}"#,
+                "config_runtime_entry_missing",
+            ),
+            (
+                r#"{"runtime":{"kind":"wordpress"}}"#,
+                "config_runtime_invalid_kind",
+            ),
+            (r#"{"runtime":{}}"#, "config_runtime_invalid_kind"),
+            (r#"{"runtime":"functions"}"#, "config_runtime_invalid_kind"),
+            (
+                r#"{"runtime":["functions"]}"#,
+                "config_runtime_invalid_kind",
+            ),
+            (
+                r#"{"functions":{"entry":"handler.ts"}}"#,
+                "config_functions_key_removed",
+            ),
+        ];
+        for (raw, code) in cases {
+            let mut diagnostics = Vec::new();
+            assert_eq!(
+                parse_config(raw, "sf.jsonc", &mut diagnostics),
+                None,
+                "{raw}"
+            );
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|item| item.severity == DiagnosticSeverity::Error && item.code == code),
+                "{raw} -> {diagnostics:?}"
+            );
+        }
+
+        let long_name = "n".repeat(CONFIG_SPACE_NAME_MAX_CHARS + 1);
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            parse_config(
+                &format!(r#"{{"name":"{long_name}"}}"#),
+                "sf.jsonc",
+                &mut diagnostics
+            ),
+            None
+        );
+        let issue = diagnostics
+            .iter()
+            .find(|item| item.code == "config_name_too_long")
+            .expect("name cap reports config_name_too_long");
+        assert_eq!(issue.severity, DiagnosticSeverity::Error);
+        assert_eq!(
+            issue.details.get("limit"),
+            Some(&json!(CONFIG_SPACE_NAME_MAX_CHARS))
+        );
+
+        for raw in [r#"{"name":"   "}"#, r#"{"name":42}"#] {
+            let mut diagnostics = Vec::new();
+            assert_eq!(
+                parse_config(raw, "sf.jsonc", &mut diagnostics),
+                None,
+                "{raw}"
+            );
+            assert!(diagnostics
+                .iter()
+                .any(|item| item.severity == DiagnosticSeverity::Error
+                    && item.path.as_deref() == Some("name")));
+        }
+    }
+
+    #[test]
+    fn the_removed_functions_key_blocks_while_other_unknown_keys_still_warn() {
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            parse_config(
+                r#"{"functions":{"entry":"handler.ts"},"somethingElse":1}"#,
+                "sf.jsonc",
+                &mut diagnostics
+            ),
+            None
+        );
+
+        let removed = diagnostics
+            .iter()
+            .find(|item| item.path.as_deref() == Some("functions"))
+            .expect("the removed functions key is diagnosed");
+        assert_eq!(removed.severity, DiagnosticSeverity::Error);
+        assert_eq!(removed.code, "config_functions_key_removed");
+        assert_eq!(
+            removed.message,
+            "The \"functions\" key was removed from sf.jsonc; declare runtime.kind \"functions\" instead."
+        );
+
+        let unknown = diagnostics
+            .iter()
+            .find(|item| item.path.as_deref() == Some("somethingElse"))
+            .expect("unrelated unknown keys are still diagnosed");
+        assert_eq!(unknown.severity, DiagnosticSeverity::Warning);
+        assert_eq!(unknown.code, "config_invalid");
+    }
+
+    #[test]
+    fn runtime_functions_rejects_malformed_optional_fields() {
+        for raw in [
+            r#"{"runtime":{"kind":"functions","database":"yes"}}"#,
+            r#"{"runtime":{"kind":"functions","compatibilityDate":"2026-7-1"}}"#,
+            r#"{"runtime":{"kind":"functions","compatibilityDate":true}}"#,
+        ] {
+            let mut diagnostics = Vec::new();
+            assert_eq!(
+                parse_config(raw, "sf.jsonc", &mut diagnostics),
+                None,
+                "{raw}"
+            );
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|item| item.severity == DiagnosticSeverity::Error),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn committed_config_preserves_normalized_public_access_patterns() {
+        let mut diagnostics = Vec::new();
+        let config = parse_config(
+            r#"{"access":{"public":["/assets//**","!/assets/private/**"]}}"#,
+            "sf.jsonc",
+            &mut diagnostics,
+        );
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            config.and_then(|value| value.pointer("/access/public").cloned()),
+            Some(json!(["/assets/**", "!/assets/private/**"]))
+        );
+    }
+
+    #[test]
+    fn committed_config_normalizes_the_public_shorthand_to_everything() {
+        let mut diagnostics = Vec::new();
+        let config = parse_config(r#"{"access":"public"}"#, "sf.jsonc", &mut diagnostics);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            config.and_then(|value| value.pointer("/access/public").cloned()),
+            Some(json!(["/**"]))
+        );
+
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            parse_config(r#"{"access":"private"}"#, "sf.jsonc", &mut diagnostics),
+            None
+        );
+        assert!(diagnostics
+            .iter()
+            .any(|item| item.severity == DiagnosticSeverity::Error
+                && item.message.contains("shorthand")));
+    }
+
+    #[test]
+    fn public_access_rejects_ambiguous_patterns() {
+        for raw in [
+            r#"{"access":{"public":["!/private/**"]}}"#,
+            r#"{"access":{"public":["/docs/*.html"]}}"#,
+            r#"{"access":{"public":["/docs/**","/docs/**"]}}"#,
+        ] {
+            let mut diagnostics = Vec::new();
+            assert_eq!(parse_config(raw, "sf.jsonc", &mut diagnostics), None);
+            assert!(diagnostics
+                .iter()
+                .any(|item| item.severity == DiagnosticSeverity::Error));
+        }
     }
 }

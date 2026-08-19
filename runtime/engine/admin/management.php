@@ -2,26 +2,25 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../shared/context.php';
+require_once __DIR__ . '/../shared/bootstrap-config.php';
+require_once __DIR__ . '/../shared/pointers.php';
+require_once __DIR__ . '/../shared/purge.php';
+require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/safety.php';
+require_once __DIR__ . '/../shared/server-file.php';
 require_once __DIR__ . '/upload-policy.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/generate.php';
 require_once __DIR__ . '/finalize-rust.php';
-require_once __DIR__ . '/space-archive.php';
-require_once __DIR__ . '/export.php';
-require_once __DIR__ . '/import.php';
 require_once __DIR__ . '/upload.php';
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/jobs.php';
-require_once __DIR__ . '/transfer.php';
 require_once __DIR__ . '/tier.php';
-
-const SPACEFAST_RUNTIME_WRITE_LOCK_TIMEOUT_MS = 10000;
-const SPACEFAST_RUNTIME_WRITE_LOCK_RETRY_US = 100000;
-
-// Management route handlers + write-lock primitives. Routing lives in the
-// unified admin dispatcher (admin/api.php): its management-lane rows declare
-// action/scope/lock/binary and lazily require this module when one matches.
+require_once __DIR__ . '/retention.php';
+require_once __DIR__ . '/zero-db.php';
+require_once __DIR__ . '/storage.php';
+require_once __DIR__ . '/build-source.php';
+require_once __DIR__ . '/engine-update.php';
 
 function _stattic_runtime_with_write_lock(string $privateRoot, callable $callback): void
 {
@@ -30,31 +29,27 @@ function _stattic_runtime_with_write_lock(string $privateRoot, callable $callbac
     _stattic_runtime_acquire_write_lock($lockDir . '/write.lock', $callback);
 }
 
-// Per-space write lock (runtime hardening — production incident commit
-// a06d0571c: one site-wide flock serialized EVERY mutating management route
-// across every space on a many-space shared site). A route earns this ONLY
-// when every write its handler performs — including everything it calls
-// transitively — stays confined to that one space's own storage
-// (spaces/{spaceId}/...). See _stattic_runtime_space_write_lock_scope below
-// for the write-target evidence behind each route's classification. Same
-// timeout/retry/journaling semantics as the site-wide lock, just scoped to
-// spaces/{spaceId}/write.lock so unrelated spaces never contend.
+// A route earns this lock ONLY when every write it performs transitively stays
+// inside spaces/{spaceId}/ (see the route table in admin/api.php). The lock
+// file lives outside the space tree on purpose — that is what lets delete_space
+// hold it while unlinking the tree.
 function _stattic_runtime_with_space_write_lock(string $privateRoot, string $spaceId, callable $callback): void
 {
-    $lockDir = _spacefast_space_root($privateRoot, $spaceId);
-    _stattic_runtime_mkdir($lockDir);
-    _stattic_runtime_acquire_write_lock($lockDir . '/write.lock', $callback);
+    _stattic_space_write_lock_with(
+        $privateRoot,
+        $spaceId,
+        STATTIC_LOCK_WAIT,
+        _stattic_runtime_write_lock_unavailable(...),
+        static function () use ($callback): void {
+            $callback();
+        },
+    );
 }
 
-// The route index (routes/current.php + immutable generations) is the ONE
-// site-shared artifact per-space mutations still write. It takes its own
-// dedicated, always-innermost lock (acquired INSIDE
-// _stattic_runtime_update_route_index / _stattic_runtime_rebuild_route_index,
-// see generate.php) so a space-locked mutation (route PUT, finalize+activate)
-// and a site-locked one (space delete, import step) on another space serialize
-// their generation writes against each other without sharing the outer site
-// lock. Lock ordering is strictly site -> space -> index; every acquire path
-// follows it, so no cycle exists.
+// The route index is the one site-shared artifact per-space mutations write, so
+// it takes this always-innermost lock (acquired inside
+// _stattic_runtime_update_route_index / _rebuild_route_index). Lock ordering is
+// strictly site -> space -> index; every acquire path must follow it.
 function _stattic_runtime_with_route_index_lock(string $privateRoot, callable $callback): void
 {
     $lockDir = $privateRoot . '/routes';
@@ -62,242 +57,119 @@ function _stattic_runtime_with_route_index_lock(string $privateRoot, callable $c
     _stattic_runtime_acquire_write_lock($lockDir . '/index.lock', $callback);
 }
 
-// Per-request re-entrancy tracking: flock() calls on two handles to the SAME
-// file conflict even within one process, so a handler that already holds a
-// lock and reaches a nested acquire of that same lock (a space-locked route
-// PUT whose config carries revocations reaches
-// _stattic_runtime_store_revocations_replace, which takes the same space
-// lock; an index update falling back to a full rebuild re-enters the index
-// lock) would self-deadlock into the 10s timeout 503. Held paths are tracked
-// per request (statics reset per request under FPM and the CLI server; a
-// handler exiting mid-callback releases the flock with the request anyway).
-function &_stattic_runtime_held_write_lock_paths(): array
+// apps/control-plane treats the 503 runtime_write_lock_unavailable code as
+// retryable.
+function _stattic_runtime_write_lock_unavailable(): never
 {
-    static $held = [];
-    return $held;
+    _stattic_problem_response(
+        503,
+        'runtime_write_lock_unavailable',
+        'Runtime write lock is unavailable.',
+        ['details' => ['timeout_ms' => STATTIC_LOCK_DEADLINE_MS]],
+    );
 }
 
-// Shared flock-with-timeout body for the site-wide, per-space, and
-// route-index write locks: identical retry cadence, identical 503
-// runtime_write_lock_unavailable contract (apps/control-plane treats this
-// code as retryable), identical exclusive-then-unlock discipline. Re-entrant
-// per request: an acquire of an already-held path runs the callback inline.
 function _stattic_runtime_acquire_write_lock(string $lockPath, callable $callback): void
 {
-    _stattic_runtime_assert_private_path($lockPath);
-    $held = &_stattic_runtime_held_write_lock_paths();
-    if (isset($held[$lockPath])) {
-        $callback();
-        return;
-    }
-    $handle = @fopen($lockPath, 'c');
-    if ($handle === false) {
-        _stattic_json_response(503, ['error' => ['code' => 'runtime_write_lock_unavailable', 'message' => 'Runtime write lock is unavailable.']]);
-    }
-
-    $deadline = microtime(true) + (SPACEFAST_RUNTIME_WRITE_LOCK_TIMEOUT_MS / 1000);
-    while (!flock($handle, LOCK_EX | LOCK_NB)) {
-        if (microtime(true) >= $deadline) {
-            fclose($handle);
-            _stattic_json_response(503, [
-                'error' => [
-                    'code' => 'runtime_write_lock_unavailable',
-                    'message' => 'Runtime write lock is unavailable.',
-                    'details' => ['timeout_ms' => SPACEFAST_RUNTIME_WRITE_LOCK_TIMEOUT_MS],
-                ],
-            ]);
-        }
-        usleep(SPACEFAST_RUNTIME_WRITE_LOCK_RETRY_US);
-    }
-
-    $held[$lockPath] = true;
-    try {
-        $callback();
-    } finally {
-        unset($held[$lockPath]);
-        flock($handle, LOCK_UN);
-        fclose($handle);
-    }
+    _stattic_lock_with(
+        $lockPath,
+        STATTIC_LOCK_WAIT,
+        _stattic_runtime_write_lock_unavailable(...),
+        static function () use ($callback): void {
+            $callback();
+        },
+    );
 }
 
-// Per-space vs site-wide write-lock classification. A route earns the
-// per-space lock ONLY when every write its handler performs — including
-// everything it calls transitively — is confined to that one space's own
-// storage (plus the two self-serialized shared artifacts below), AND the
-// space id the dispatcher would lock on is guaranteed to be the space the
-// handler actually mutates. Two shared artifacts no longer force a route onto
-// the site lock, because they serialize themselves:
-//   - the journal (runtime/journal.jsonl): appended via
-//     file_put_contents(FILE_APPEND | LOCK_EX) — atomic without any outer
-//     lock (see _stattic_runtime_append_journal);
-//   - the route index (routes/current.php + generations): every writer goes
-//     through _stattic_runtime_update_route_index /
-//     _stattic_runtime_rebuild_route_index, which take their own innermost
-//     routes/index.lock (see _stattic_runtime_with_route_index_lock).
-// Callback spool files are content-addressed one-shot writes and need no
-// lock. Verified against actual write targets (not the route's name):
-//
-//   revoke_grant / unrevoke_grant (_stattic_runtime_update_access_revocations)
-//     -> write only spaces/{spaceId}/revocations.json for the URL/JWT-scoped
-//        space, never touch the route index. SPACE-SCOPED. This is exactly
-//        the pair behind the production contention (a06d0571c): instant
-//        sharing revokes racing same-site CI deploys.
-//   update_route (_stattic_runtime_put_route) -> route pointer json, unified
-//     access policy/secrets/entitlements json, revocations (nested space-lock
-//     RMW — re-entrant no-op now that the dispatcher already holds it),
-//     hostname intent json: all spaces/{spaceId}/-confined; then journal +
-//     index (self-serialized above). SPACE-SCOPED. This is the "tiny config
-//     PUT" that used to queue for minutes behind another space's finalize on
-//     the same shared site.
-//   update_hostname_intent, update_tombstones, update_retention_policy ->
-//     spaces/{spaceId}/hostname-intent.json / tombstones.json /
-//     retention-policy.json + journal (+ index for the first two).
-//     SPACE-SCOPED for the same reason.
-//   finalize_version (_stattic_runtime_finalize_version) -> write-audited
-//     end-to-end: version-tree writes (files/, files-original/, files-variants/,
-//     pages/, zero/ incl. the .runtime-compiler-* temp dir, metadata.json,
-//     serving/php-manifest/headers/redirects artifacts, file-shards) are all
-//     spaces/{spaceId}/versions/{versionId}/-confined; the per-space blob CAS
-//     (spaces/{spaceId}/blobs/, race-safe content-addressed rename — the
-//     local blob GC in tier.php keys its per-blob exclusion on THIS
-//     per-space lock, so finalize's blob_has -> blob_put -> blob_link and
-//     delete_version's nlink teardown stay atomic against reclamation) and the
-//     finalize+activate pointer flip (route pointer + unified access +
-//     hostname intent, all space files; nested space-lock RMW for revocations
-//     is a re-entrant no-op) are space-confined too. The shared writes are
-//     exactly the self-serialized artifacts above (journal, route index) plus
-//     one-shot randomly/content-addressed-named files (runtime/blob-staging/*,
-//     runtime/link-probe/*, runtime/callbacks/pending/{eventId}.json) and the
-//     upload-session teardown (runtime/uploads/{uploadId} — owned by exactly
-//     this space's session, validated against the URL space_id; upload-lane
-//     writers never held the management lock anyway). The idempotent-retry
-//     path re-runs only the pointer flip. Nothing downstream ever acquires
-//     the site lock (ordering invariant holds). SPACE-SCOPED — this was the
-//     minutes-long site-lock hold that queued every other space's config PUT.
-//   delete_version (_stattic_runtime_delete_version) -> shard reads, then
-//     rm of spaces/{spaceId}/versions/{versionId}, journal + callback spool
-//     (self-serialized), index update (index lock). SPACE-SCOPED.
-//   map_space_import / step_space_import (import.php) -> their writes are
-//     space-confined, but the space they mutate is the job's owning space
-//     from runtime/space-imports/{importId}/status.json, which the URL/JWT
-//     space_id of the space-nested route variants is NOT validated against —
-//     locking on the request's space id could lock the WRONG space. Imports
-//     are rare, heavyweight operations, so they keep the SITE-WIDE lock
-//     rather than duplicating the handler's owner resolution here.
-//   delete_space -> stays SITE-WIDE: its rm_recursive of the space root
-//     deletes spaces/{spaceId}/write.lock itself. Under a per-space lock a
-//     later same-space request would fopen() a FRESH inode and lock that,
-//     while an in-flight holder still holds the unlinked inode's flock — two
-//     "holders" at once. The site lock file lives outside the space tree, so
-//     deletes keep it.
-//   repair_space -> stays SITE-WIDE: the recovery hammer. It rebuilds the
-//     full cross-space index and clears the site-wide runtime/repair-state.json;
-//     serializing it against every mutation is the point of running a repair.
-//   transfer_bundle / transfer_commit / transfer_abort -> stay SITE-WIDE:
-//     their space id rides the request BODY (job payload), not the URL scope
-//     the dispatcher locks on ($required carries no space_id), and commit
-//     installs whole version trees plus transfer-staging state.
-//
-// Same-space overlap between a SPACE-SCOPED route and a same-space SITE-WIDE
-// route (e.g. finalize_version racing delete_space on the same space) is not
-// excluded by these locks — but the control plane already serializes runtime
-// work per space (runtime-delivery capabilities), every store here is an
-// atomic full-replace (last-writer-wins, no torn reads), the one true RMW
-// (revocations) keeps its own space lock on BOTH paths, and both paths end by
-// recompiling the index from on-disk state under the index lock, so the last
-// writer converges it.
-//
-// Returns the space id to lock on, or null for the site-wide lock. Any
-// unresolvable scope (should not happen for the classified actions) also
-// falls back to null — correctness over concurrency.
-const STATTIC_RUNTIME_SPACE_SCOPED_LOCK_ACTIONS = [
-    'revoke_grant',
-    'unrevoke_grant',
-    'update_route',
-    'update_hostname_intent',
-    'update_tombstones',
-    'update_retention_policy',
-    'finalize_version',
-    'delete_version',
-];
-
-function _stattic_runtime_space_write_lock_scope(string $action, array $required): ?string
+function _stattic_runtime_upload_session_for_version(string $privateRoot, string $spaceId, string $versionId): ?array
 {
-    if (!in_array($action, STATTIC_RUNTIME_SPACE_SCOPED_LOCK_ACTIONS, true)) {
-        return null;
-    }
-    if (isset($required['space_id']) && is_string($required['space_id']) && $required['space_id'] !== '') {
-        return $required['space_id'];
+    $now = time();
+    foreach (_stattic_record_store_records(_stattic_runtime_publish_sessions_store($privateRoot, $spaceId)) as $candidateId => $candidate) {
+        if (($candidate['space_id'] ?? null) !== $spaceId || ($candidate['version_id'] ?? null) !== $versionId) {
+            continue;
+        }
+        $expiresAt = strtotime((string) ($candidate['expires_at'] ?? ''));
+        if ($expiresAt !== false && $expiresAt < $now) {
+            continue;
+        }
+        return ['upload_id' => $candidateId, 'session' => $candidate];
     }
     return null;
 }
 
 function _stattic_runtime_create_version(string $privateRoot, string $spaceId, array $claims): void
 {
-    _stattic_runtime_cleanup_stale_uploads($privateRoot);
     $body = _stattic_json_body();
     $versionId = isset($body['version_id']) && is_string($body['version_id'])
         ? _stattic_runtime_id($body['version_id'], 'version_id')
         : _stattic_runtime_new_id('dep');
-    if (is_dir(_spacefast_version_root($privateRoot, $spaceId, $versionId))) {
-        _stattic_json_response(409, ['error' => ['code' => 'version_already_committed', 'message' => 'Version already exists.']]);
+    if (is_dir(_stattic_version_root($privateRoot, $spaceId, $versionId))) {
+        _stattic_problem_response(409, 'version_already_committed', 'Version already exists.');
     }
     $files = _stattic_runtime_manifest_files($body['files'] ?? []);
     $retainedFiles = _stattic_runtime_manifest_files($body['retained_files'] ?? []);
     $reusableVersionId = isset($body['reusable_version_id']) && is_string($body['reusable_version_id'])
         ? _stattic_runtime_id($body['reusable_version_id'], 'reusable_version_id')
         : null;
-    if ($retainedFiles !== [] && $reusableVersionId === null) {
-        _stattic_json_response(422, ['error' => ['code' => 'reusable_version_required', 'message' => 'Retained files require a reusable version.']]);
-    }
-    $sessionMode = isset($body['session_mode']) && is_string($body['session_mode']) ? $body['session_mode'] : 'declared';
-    if (!in_array($sessionMode, ['declared', 'open'], true)) {
-        _stattic_json_response(422, ['error' => ['code' => 'invalid_session_mode', 'message' => 'session_mode must be "declared" or "open".']]);
-    }
-    if ($sessionMode === 'open' && ($files !== [] || $retainedFiles !== [] || $reusableVersionId !== null)) {
-        _stattic_json_response(422, ['error' => ['code' => 'open_session_manifest_not_allowed', 'message' => 'Open upload sessions do not declare a file manifest.']]);
-    }
-    // Open-session plan-policy caps live in session state, never in the upload JWT.
-    $sessionCaps = [];
-    foreach (['max_total_bytes', 'max_file_count'] as $cap) {
-        if (!array_key_exists($cap, $body)) {
-            continue;
-        }
-        if ($sessionMode !== 'open' || !is_int($body[$cap]) || $body[$cap] <= 0) {
-            _stattic_json_response(422, ['error' => ['code' => 'invalid_session_cap', 'message' => 'Session caps are positive integers and apply only to open sessions.']]);
-        }
-        $sessionCaps[$cap] = $body[$cap];
-    }
-    $conventionFiles = _stattic_runtime_management_convention_files($body['convention_files'] ?? null);
+    $retention = _stattic_runtime_retention_mode($body['retention'] ?? null, $reusableVersionId, $retainedFiles);
     $uploadId = _stattic_runtime_new_id('upl');
     $createdAt = gmdate('c');
-    // Session state stores the full runtime truth (spec "Upload Contract"): runtime
-    // instance id, manifest hash, and expiry ride alongside the declared files so
-    // resume can be answered from this state alone.
     $expiresAt = isset($body['expires_at']) && is_string($body['expires_at']) && strtotime($body['expires_at']) !== false
         ? gmdate('c', (int) strtotime($body['expires_at']))
-        : gmdate('c', time() + 86400);
+        : gmdate('c', time() + STATTIC_RUNTIME_UPLOAD_SESSION_DEFAULT_TTL_SECONDS);
     $manifestHash = isset($body['manifest_hash']) && is_string($body['manifest_hash']) ? $body['manifest_hash'] : null;
-    $uploadRoot = $privateRoot . '/runtime/uploads/' . $uploadId;
-    _stattic_runtime_mkdir($uploadRoot . '/files');
-    _stattic_runtime_write_json_atomic($uploadRoot . '/session.json', [
-        'upload_id' => $uploadId,
-        'space_id' => $spaceId,
+    $requestedExpiresAt = isset($body['expires_at']) && is_string($body['expires_at']) && strtotime($body['expires_at']) !== false
+        ? gmdate('c', (int) strtotime($body['expires_at']))
+        : null;
+    $metadata = is_array($body['metadata'] ?? null) ? $body['metadata'] : [];
+    $requestDigest = _stattic_runtime_canonical_request_digest([
         'version_id' => $versionId,
-        'runtime_instance_id' => is_string($claims['runtime_instance_id'] ?? null) ? $claims['runtime_instance_id'] : null,
-        'session_mode' => $sessionMode,
-        ...$sessionCaps,
-        'created_at' => $createdAt,
-        'expires_at' => $expiresAt,
-        'manifest_hash' => $manifestHash,
         'files' => $files,
         'retained_files' => $retainedFiles,
         'reusable_version_id' => $reusableVersionId,
-        'metadata' => is_array($body['metadata'] ?? null) ? $body['metadata'] : [],
-        'convention_files' => $conventionFiles,
+        'retention' => $retention,
+        'manifest_hash' => $manifestHash,
+        'expires_at' => $requestedExpiresAt,
+        'metadata' => $metadata,
     ]);
+    $existing = _stattic_runtime_upload_session_for_version($privateRoot, $spaceId, $versionId);
+    if ($existing !== null) {
+        $session = $existing['session'];
+        if (($session['create_request_digest'] ?? null) !== $requestDigest) {
+            _stattic_problem_response(
+                409,
+                'version_create_conflict',
+                'Version upload session already exists with a different create request.',
+            );
+        }
+        _stattic_json_response(200, [
+            'space_id' => $spaceId,
+            'version_id' => $versionId,
+            'upload_id' => $existing['upload_id'],
+            'created_at' => (string) ($session['created_at'] ?? ''),
+        ]);
+    }
+    $session = _stattic_runtime_publish_session_create($privateRoot, $spaceId, $uploadId, [
+        'upload_id' => $uploadId,
+        'space_id' => $spaceId,
+        'version_id' => $versionId,
+        'manifest' => $files,
+        'accepted' => (object) [],
+        'created_at' => $createdAt,
+        'expires_at' => $expiresAt,
+        'runtime_instance_id' => is_string($claims['runtime_instance_id'] ?? null) ? $claims['runtime_instance_id'] : null,
+        'manifest_hash' => $manifestHash,
+        'retained_files' => $retainedFiles,
+        'reusable_version_id' => $reusableVersionId,
+        'retention' => $retention,
+        'metadata' => $metadata,
+        'create_request_digest' => $requestDigest,
+    ]);
+    if (($session['space_id'] ?? null) !== $spaceId || ($session['version_id'] ?? null) !== $versionId) {
+        _stattic_problem_response(500, 'upload_session_create_failed', 'Could not create the publish session.');
+    }
 
-    _stattic_runtime_record_management_event($privateRoot, $claims, [
+    _stattic_runtime_journal_management_diagnostic($privateRoot, $claims, [
         'event' => 'version_created',
         'space_id' => $spaceId,
         'version_id' => $versionId,
@@ -309,199 +181,197 @@ function _stattic_runtime_create_version(string $privateRoot, string $spaceId, a
         'space_id' => $spaceId,
         'version_id' => $versionId,
         'upload_id' => $uploadId,
-        'session_mode' => $sessionMode,
         'created_at' => $createdAt,
     ]);
 }
 
 function _stattic_runtime_upload_session_not_found(): never
 {
-    _stattic_json_response(404, ['error' => [
-        'code' => 'version_upload_not_found',
-        'message' => 'Version upload session not found: sessions are deleted after finalize and expire (default 24h). Create a new version (POST /spaces/{spaceId}/versions) to obtain a fresh upload_id.',
-    ]]);
+    _stattic_problem_response(
+        404,
+        'version_upload_not_found',
+        'Version upload session not found: sessions are deleted after finalize and expire (default 24h). Create a new version (POST /spaces/{spaceId}/versions) to obtain a fresh upload_id.',
+        ['details' => ['create_replay_safe' => true]],
+    );
     exit;
 }
 
-// Runtime-truth upload session state (spec "Upload Contract" resume): which declared
-// files are committed, which are still missing, and which chunked uploads have staged
-// parts. The control plane's resume endpoint consumes this instead of guessing from
-// its own pending-upload state.
 function _stattic_runtime_get_upload_session(string $privateRoot, string $spaceId, string $versionId): void
 {
-    $session = null;
-    $uploadId = null;
-    foreach (glob($privateRoot . '/runtime/uploads/*/session.json') ?: [] as $sessionPath) {
-        $candidate = _stattic_runtime_read_json($sessionPath);
-        if (is_array($candidate) && ($candidate['space_id'] ?? null) === $spaceId && ($candidate['version_id'] ?? null) === $versionId) {
-            $session = $candidate;
-            $uploadId = basename(dirname((string) $sessionPath));
-            break;
-        }
-    }
-    if (!is_array($session) || !is_string($uploadId)) {
+    // A lock='none' read: expired records are skipped, never released. Reclaiming
+    // a record drops its GC pin too, and that write belongs to the retention
+    // sweep, which holds the per-space lock the GC and finalize also take.
+    $found = _stattic_runtime_upload_session_for_version($privateRoot, $spaceId, $versionId);
+    if ($found === null) {
         _stattic_runtime_upload_session_not_found();
     }
-    $uploaded = _stattic_runtime_uploaded_files($privateRoot, $uploadId);
+    $session = $found['session'];
+    $uploadId = $found['upload_id'];
+    $accepted = is_array($session['accepted'] ?? null) ? $session['accepted'] : [];
     $files = [];
     $pending = [];
-    if (_stattic_runtime_upload_session_mode($session) === 'open') {
-        foreach ($uploaded as $path => $entry) {
-            $files[] = ['path' => $path, 'size' => (int) ($entry['size'] ?? 0), 'uploaded' => true];
-        }
-    } else {
-        foreach ((is_array($session['files'] ?? null) ? $session['files'] : []) as $declared) {
-            if (!is_array($declared) || !is_string($declared['path'] ?? null)) {
-                continue;
-            }
-            $entry = [
-                'path' => $declared['path'],
-                'size' => (int) ($declared['size'] ?? 0),
-                'uploaded' => isset($uploaded[$declared['path']]),
-            ];
-            if (is_string($declared['sha256'] ?? null)) {
-                $entry['sha256'] = $declared['sha256'];
-            }
-            $files[] = $entry;
-            if (!$entry['uploaded']) {
-                $pending[] = $declared['path'];
-            }
-        }
-    }
-    $chunks = [];
-    foreach (glob($privateRoot . '/runtime/uploads/' . $uploadId . '/parts/*', GLOB_ONLYDIR) ?: [] as $partRoot) {
-        $pathRecord = _stattic_runtime_read_json($partRoot . '/path.json');
-        $partPath = is_array($pathRecord) && is_string($pathRecord['path'] ?? null) ? $pathRecord['path'] : null;
-        if ($partPath === null) {
+    foreach ((is_array($session['manifest'] ?? null) ? $session['manifest'] : []) as $declared) {
+        if (!is_array($declared) || !is_string($declared['path'] ?? null)) {
             continue;
         }
-        $partNumbers = [];
-        foreach (glob($partRoot . '/*.part') ?: [] as $part) {
-            $partNumbers[] = (int) basename((string) $part, '.part');
+        $sha = is_string($declared['sha256'] ?? null) ? strtolower($declared['sha256']) : '';
+        $uploaded = $sha !== '' && array_key_exists($sha, $accepted) && (int) $accepted[$sha] === (int) ($declared['size'] ?? -1);
+        $entry = [
+            'path' => $declared['path'],
+            'size' => (int) ($declared['size'] ?? 0),
+            'uploaded' => $uploaded,
+        ];
+        if ($sha !== '') {
+            $entry['sha256'] = $sha;
         }
-        sort($partNumbers, SORT_NUMERIC);
-        $chunks[$partPath] = $partNumbers;
+        $files[] = $entry;
+        if (!$uploaded) {
+            $pending[] = $declared['path'];
+        }
     }
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'version_id' => $versionId,
         'upload_id' => $uploadId,
-        'session_mode' => _stattic_runtime_upload_session_mode($session),
         'created_at' => is_string($session['created_at'] ?? null) ? $session['created_at'] : null,
         'expires_at' => is_string($session['expires_at'] ?? null) ? $session['expires_at'] : null,
         'manifest_hash' => is_string($session['manifest_hash'] ?? null) ? $session['manifest_hash'] : null,
         'files' => $files,
         'pending_paths' => $pending,
-        'chunks' => _stattic_runtime_json_object($chunks),
     ]);
 }
 
 function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId, string $versionId, array $claims): void
 {
     $body = _stattic_json_body();
-    $bodyConventionFiles = _stattic_runtime_management_convention_files($body['convention_files'] ?? null);
-    $zeroMode = _stattic_runtime_zero_mode($body['zero_mode'] ?? null);
     $uploadId = isset($body['upload_id']) && is_string($body['upload_id'])
         ? _stattic_runtime_id($body['upload_id'], 'upload_id')
         : '';
-    $sessionPath = $privateRoot . '/runtime/uploads/' . $uploadId . '/session.json';
-    $session = $uploadId !== '' ? _stattic_runtime_read_json($sessionPath) : null;
-    if (!is_array($session) || ($session['space_id'] ?? null) !== $spaceId || ($session['version_id'] ?? null) !== $versionId) {
-        _stattic_runtime_finalize_idempotent_ready_response($privateRoot, $spaceId, $versionId, $body, $claims);
-        _stattic_runtime_upload_session_not_found();
+    $session = $uploadId !== '' ? _stattic_runtime_publish_session_load($privateRoot, $spaceId, $uploadId) : null;
+    if ($session === null || ($session['space_id'] ?? null) !== $spaceId || ($session['version_id'] ?? null) !== $versionId) {
+        $descriptor = $body['session'] ?? null;
+        $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
+        if (is_array($descriptor) && !is_dir($versionRoot)) {
+            $session = _stattic_runtime_materialize_lazy_upload_session($privateRoot, $uploadId, [
+                'space_id' => $spaceId,
+                'version_id' => $versionId,
+                'runtime_instance_id' => $claims['runtime_instance_id'] ?? null,
+            ], $descriptor, true);
+            // Materialize hands back a pre-existing record untouched, so a
+            // colliding upload_id created under another space/version would
+            // return a foreign session. Bind it to this request's scope first.
+            if (($session['space_id'] ?? null) !== $spaceId || ($session['version_id'] ?? null) !== $versionId) {
+                _stattic_problem_response(403, 'upload_scope_forbidden', 'Upload session does not match this space and version.');
+            }
+        } else {
+            // A replayed receipt still carries `session`: never recreate one once
+            // the version root exists, that would overwrite the committed version.
+            _stattic_runtime_finalize_idempotent_ready_response($privateRoot, $spaceId, $versionId, $body, $claims);
+            _stattic_runtime_upload_session_not_found();
+        }
+    }
+    if (($session['lazy'] ?? false) === true && is_array($body['session'] ?? null)) {
+        $descriptor = $body['session'];
+        if (($descriptor['upload_id'] ?? null) === $uploadId && ($descriptor['space_id'] ?? null) === $spaceId && ($descriptor['version_id'] ?? null) === $versionId) {
+            if (array_key_exists('retained_files', $descriptor)) {
+                $session['retained_files'] = _stattic_runtime_manifest_files($descriptor['retained_files']);
+            }
+            if (array_key_exists('reusable_version_id', $descriptor)) {
+                $session['reusable_version_id'] = is_string($descriptor['reusable_version_id'])
+                    ? _stattic_runtime_id($descriptor['reusable_version_id'], 'reusable_version_id')
+                    : null;
+            }
+            $session['retention'] = _stattic_runtime_retention_mode(
+                $descriptor['retention'] ?? null,
+                is_string($session['reusable_version_id'] ?? null) ? $session['reusable_version_id'] : null,
+                is_array($session['retained_files'] ?? null) ? $session['retained_files'] : [],
+            );
+            $session = _stattic_runtime_publish_session_replace($privateRoot, $spaceId, $uploadId, static function (array $current) use ($session): array {
+                $current['retained_files'] = $session['retained_files'];
+                $current['reusable_version_id'] = $session['reusable_version_id'];
+                $current['retention'] = $session['retention'];
+                return $current;
+            });
+        }
     }
 
-    // Rust owns the whole structural build — file commit, transforms,
-    // conventions, Zero compile, artifacts, and validation. PHP keeps only
-    // activation, event, and response orchestration.
-    {
-        $finalized = _stattic_runtime_finalize_with_rust($privateRoot, $spaceId, $versionId, $uploadId, $session, $body);
-        $versionRoot = $privateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId;
-        $zeroFinalize = is_array($body['zero'] ?? null) ? $body['zero'] : null;
-        if ($zeroFinalize !== null) {
-            _stattic_runtime_write_zero_config_artifact($versionRoot, $zeroFinalize);
-        }
-        if ($zeroMode !== 'active') {
-            _stattic_runtime_deactivate_imported_zero_dispatch($versionRoot);
-        }
-        _stattic_runtime_apply_zero_migrations($versionRoot);
-        $finalizedEvent = [
-            'event' => 'version_finalized',
-            'space_id' => $spaceId,
-            'version_id' => $versionId,
-            'upload_id' => $uploadId,
-            'file_count' => (int) $finalized['fileCount'],
-        ];
-        if (isset($body['activate']) && is_array($body['activate'])) {
-            $activation = _stattic_runtime_activation_with_finalized_access($body['activate'], $finalized);
-            $routeName = _stattic_runtime_activation_route_name($activation);
-            $pointer = _stattic_runtime_write_route_pointer($privateRoot, $spaceId, $routeName, $versionId, $activation, $claims, true);
-            $changedPaths = is_array($pointer['changed_paths'] ?? null) ? $pointer['changed_paths'] : [];
-            $finalizedEvent['route_name'] = $routeName;
-            if ($changedPaths !== []) {
-                $finalizedEvent['changed_paths'] = $changedPaths;
-            }
-            if (is_string($activation['previous_version_id'] ?? null) && $activation['previous_version_id'] !== '') {
-                $finalizedEvent['previous_version_id'] = $activation['previous_version_id'];
-            }
-        }
-        _stattic_runtime_record_management_event($privateRoot, $claims, $finalizedEvent);
-        _stattic_runtime_rm_recursive($privateRoot . '/runtime/uploads/' . $uploadId);
-        _stattic_runtime_finalize_ready_response(
-            $spaceId,
-            $versionId,
-            $versionRoot,
-            is_array($finalized['manifest'] ?? null) ? $finalized['manifest'] : null
-        );
+    _stattic_runtime_publish_session_require_complete($session);
+    $finalized = _stattic_runtime_finalize_with_rust(
+        $privateRoot,
+        $spaceId,
+        $versionId,
+        $uploadId,
+        $session,
+        $body,
+    );
+    _stattic_runtime_publish_session_release($privateRoot, $spaceId, $uploadId);
+    $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    $zeroFinalize = is_array($body['zero'] ?? null) ? $body['zero'] : null;
+    // The config artifact is the marker that turns the pattern-route lane on,
+    // so it follows the compiled Zero pack, not the caller's `zero` block.
+    if ($zeroFinalize !== null || _stattic_runtime_version_has_zero_pack($versionRoot)) {
+        _stattic_runtime_write_zero_config_artifact($versionRoot, $zeroFinalize ?? []);
     }
+    $functionsFinalize = is_array($body['functions'] ?? null) ? $body['functions'] : null;
+    if ($functionsFinalize !== null) {
+        _stattic_runtime_write_functions_config_artifact($versionRoot, $functionsFinalize);
+    }
+    _stattic_runtime_apply_zero_migrations($versionRoot);
+    $finalizedEvent = [
+        'event' => 'version_finalized',
+        'space_id' => $spaceId,
+        'version_id' => $versionId,
+        'upload_id' => $uploadId,
+        'file_count' => (int) $finalized['fileCount'],
+    ];
+    if (isset($body['activate']) && is_array($body['activate'])) {
+        $activation = $body['activate'];
+        $routeName = _stattic_runtime_activation_route_name($activation);
+        $pointer = _stattic_runtime_write_route_pointer($privateRoot, $spaceId, $routeName, $versionId, $activation, $claims, true);
+        $activationEventId = is_string($pointer['activation_event_id'] ?? null)
+            ? $pointer['activation_event_id']
+            : null;
+        $purge = is_array($pointer['purge'] ?? null) ? $pointer['purge'] : null;
+        $changedPaths = is_array($pointer['changed_paths'] ?? null) ? $pointer['changed_paths'] : [];
+        $finalizedEvent['route_name'] = $routeName;
+        if ($changedPaths !== []) {
+            $finalizedEvent['changed_paths'] = $changedPaths;
+        }
+        if (is_string($activation['previous_version_id'] ?? null) && $activation['previous_version_id'] !== '') {
+            $finalizedEvent['previous_version_id'] = $activation['previous_version_id'];
+        }
+    }
+    _stattic_runtime_journal_management_diagnostic($privateRoot, $claims, $finalizedEvent);
+    _stattic_runtime_finalize_ready_response(
+        $privateRoot,
+        $spaceId,
+        $versionId,
+        $versionRoot,
+        $activationEventId ?? null,
+        null,
+        $purge ?? null,
+        // The one field that CANNOT come from immutable metadata: what this run
+        // cost. It describes the run, not the version, so it rides the
+        // finalizer's envelope and stops here on a replay.
+        is_array($finalized['telemetry'] ?? null) ? $finalized['telemetry'] : null,
+    );
 }
 
-// Native finalize only: when finalize and activation share one runtime
-// request, the Rust-generated file-lane Basic Auth rules and verifier hashes
-// must enter the same unified policy write as the route pointer
-// (config.policy/config.secrets -> policy.json/policy-secrets.json). Authored
-// rules stay first so an explicit allow carve-out wins before a broader
-// generated challenge; a generated rule id replaces a stale caller copy of
-// that same rule — the Rust-produced rule + hash are authoritative.
-function _stattic_runtime_activation_with_finalized_access(array $activation, array $finalized): array
+function _stattic_runtime_apply_version_zero_migrations(string $privateRoot, string $spaceId, string $versionId): void
 {
-    $generatedRules = is_array($finalized['accessRules'] ?? null)
-        ? array_values($finalized['accessRules'])
-        : [];
-    $generatedSecrets = is_array($finalized['accessSecrets'] ?? null)
-        ? $finalized['accessSecrets']
-        : [];
-    if ($generatedRules === [] && $generatedSecrets === []) {
-        return $activation;
+    $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    if (!is_dir($versionRoot)) {
+        _stattic_problem_response(404, 'version_not_found', 'Version not found.');
     }
-
-    $config = is_array($activation['config'] ?? null) ? $activation['config'] : [];
-    $policy = is_array($config['policy'] ?? null) ? $config['policy'] : [];
-    $existingRules = is_array($policy['rules'] ?? null) ? array_values($policy['rules']) : [];
-    $generatedIds = [];
-    foreach ($generatedRules as $rule) {
-        if (is_array($rule) && is_string($rule['id'] ?? null) && $rule['id'] !== '') {
-            $generatedIds[$rule['id']] = true;
-        }
+    if (!is_file($versionRoot . '/zero/migrations.json')) {
+        _stattic_problem_response(409, 'zero_migrations_not_found', 'This version has no stored Zero migration plan.');
     }
-    if ($generatedIds !== []) {
-        $existingRules = array_values(array_filter(
-            $existingRules,
-            static fn (mixed $rule): bool => !is_array($rule)
-                || !is_string($rule['id'] ?? null)
-                || !isset($generatedIds[$rule['id']])
-        ));
-    }
-    if ($generatedRules !== []) {
-        $policy['rules'] = array_merge($existingRules, $generatedRules);
-        $config['policy'] = $policy;
-    }
-    if ($generatedSecrets !== []) {
-        $existingSecrets = is_array($config['secrets'] ?? null) ? $config['secrets'] : [];
-        $config['secrets'] = array_replace($existingSecrets, $generatedSecrets);
-    }
-    $activation['config'] = $config;
-    return $activation;
+    _stattic_runtime_apply_zero_migrations($versionRoot);
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'version_id' => $versionId,
+        'applied' => true,
+    ]);
 }
 
 function _stattic_runtime_activation_route_name(array $activation): string
@@ -511,80 +381,137 @@ function _stattic_runtime_activation_route_name(array $activation): string
         : 'production';
 }
 
-// $manifest is the manifest the caller just committed into metadata.json — pass
-// it to skip reading the (largest) artifact straight back off disk. Callers
-// without it (the idempotent retry) recover it from the stored metadata.
-function _stattic_runtime_finalize_ready_response(string $spaceId, string $versionId, string $versionRoot, ?array $manifest = null): never
+/**
+ * The finalize receipt. `manifest` is read from the version's catalog on both
+ * the first answer and every replay, so a retried finalize returns byte-identical
+ * files to the one that committed them — and so the control plane holds ONE
+ * file identity, the runtime's.
+ */
+function _stattic_runtime_finalize_ready_response(string $privateRoot, string $spaceId, string $versionId, string $versionRoot, ?string $activationEventId = null, ?array $metadata = null, ?array $purge = null, ?array $telemetry = null): never
 {
-    $metadata = _stattic_runtime_read_json($versionRoot . '/metadata.json');
-    if ($manifest === null) {
-        $manifest = is_array($metadata) && is_array($metadata['manifest'] ?? null)
-            ? $metadata['manifest']
-            : (
-                is_array($metadata) && is_array($metadata['files'] ?? null)
-                    ? _stattic_runtime_finalize_manifest($metadata['files'])
-                    : []
-            );
+    $metadata ??= _stattic_runtime_read_json($versionRoot . '/metadata.json');
+    $readinessTarget = is_array($metadata) && is_array($metadata['readinessTarget'] ?? null)
+        ? $metadata['readinessTarget']
+        : null;
+    $readinessStatuses = is_array($readinessTarget)
+        ? ($readinessTarget['expected_statuses'] ?? null)
+        : null;
+    $allowedReadinessStatuses = [200, 301, 302, 303, 307, 308, 401, 403, 404];
+    if (
+        !is_array($readinessTarget)
+        || !is_string($readinessTarget['path'] ?? null)
+        || !str_starts_with($readinessTarget['path'], '/')
+        || !is_array($readinessStatuses)
+        || count($readinessStatuses) === 0
+        || !array_is_list($readinessStatuses)
+        || array_filter($readinessStatuses, static fn ($status): bool => !is_int($status) || !in_array($status, $allowedReadinessStatuses, true)) !== []
+    ) {
+        _stattic_problem_response(
+            500,
+            'runtime_readiness_target_missing',
+            'The runtime-authored readiness target is unavailable.',
+        );
     }
+    $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
+    if ($catalog === null) {
+        _stattic_problem_response(
+            500,
+            'runtime_file_catalog_invalid',
+            'The finalized version wrote no readable file catalog.',
+        );
+    }
+    // Everything below is read from immutable metadata rather than from the
+    // finalizer's return envelope, because a replayed finalize never re-runs the
+    // finalizer: the version's compiled truth has to answer identically the
+    // second time. The control plane stores these verbatim — it no longer
+    // compiles the version a second time to guess at them.
+    $digests = is_array($metadata['catalogDigests'] ?? null) ? $metadata['catalogDigests'] : null;
+    $delta = is_array($metadata['catalogDelta'] ?? null) ? $metadata['catalogDelta'] : null;
+    $previewImagePath = is_string($metadata['previewImagePath'] ?? null) && $metadata['previewImagePath'] !== ''
+        ? $metadata['previewImagePath']
+        : null;
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'version_id' => $versionId,
         'status' => 'ready',
         'zero_endpoint_count' => _stattic_runtime_zero_endpoint_count($versionRoot),
-        'access_rules' => is_array($metadata) && is_array($metadata['accessRules'] ?? null)
-            ? array_values($metadata['accessRules'])
-            : [],
-        'access_secrets' => is_array($metadata) && is_array($metadata['accessSecrets'] ?? null)
-            ? _stattic_runtime_json_object($metadata['accessSecrets'])
-            : _stattic_runtime_json_object([]),
-        'manifest' => $manifest,
+        'manifest' => _stattic_runtime_catalog_manifest($catalog),
+        'preview_image_path' => $previewImagePath,
+        'readiness_target' => $readinessTarget,
+        ...($digests !== null ? ['catalog_digests' => $digests] : []),
+        ...($delta !== null ? ['delta' => [
+            'added' => (int) ($delta['added'] ?? 0),
+            'changed' => (int) ($delta['changed'] ?? 0),
+            'removed' => (int) ($delta['removed'] ?? 0),
+        ]] : []),
+        'diagnostics' => _stattic_runtime_metadata_list($metadata, 'diagnostics'),
+        'variable_digests' => is_array($metadata['variableDigests'] ?? null) ? (object) $metadata['variableDigests'] : (object) [],
+        'system_variable_dependencies' => _stattic_runtime_metadata_list($metadata, 'systemVariableDependencies'),
+        'routing' => _stattic_runtime_finalize_routing($metadata),
+        // Stage timings and counts for the run that just happened. Absent on a
+        // replay, which finalizes nothing.
+        ...($telemetry !== null ? ['telemetry' => $telemetry] : []),
+        ...($activationEventId !== null ? ['activation_event_id' => $activationEventId] : []),
+        ...($purge !== null ? ['purge' => $purge] : []),
     ]);
 }
 
-function _stattic_runtime_finalize_manifest(array $filesByPath): array
+function _stattic_runtime_metadata_list(?array $metadata, string $key): array
 {
-    $manifest = [];
-    foreach ($filesByPath as $path => $file) {
-        if (!is_string($path) || !is_array($file)) {
+    $value = $metadata[$key] ?? null;
+    return is_array($value) && array_is_list($value) ? $value : [];
+}
+
+/**
+ * The version's compiled rule counts and its proxy rules. The counts are the
+ * control plane's version-row projection; the proxy rules are what it overlays
+ * the publishing team's plan onto. The artifact itself stays plan-agnostic —
+ * this is a report of what compiled, never a verdict on it.
+ */
+function _stattic_runtime_finalize_routing(?array $metadata): array
+{
+    $routing = is_array($metadata['routing'] ?? null) ? $metadata['routing'] : [];
+    $proxyRules = [];
+    foreach (_stattic_runtime_metadata_list($routing, 'proxyRules') as $rule) {
+        if (!is_array($rule) || !is_string($rule['source'] ?? null) || !is_string($rule['destination'] ?? null)) {
             continue;
         }
-        $manifest[] = [
-            'path' => $path,
-            'size' => max(0, (int) ($file['size'] ?? 0)),
-            'sha256' => is_string($file['sha256'] ?? null) ? $file['sha256'] : '',
-            'contentType' => is_string($file['mime'] ?? null)
-                ? $file['mime']
-                : 'application/octet-stream',
-        ];
+        $proxyRules[] = ['source' => $rule['source'], 'destination' => $rule['destination']];
     }
-    usort($manifest, static fn (array $left, array $right): int => strcmp($left['path'], $right['path']));
-    return $manifest;
+    return [
+        'redirect_rule_count' => (int) ($routing['redirectRuleCount'] ?? 0),
+        'header_rule_count' => (int) ($routing['headerRuleCount'] ?? 0),
+        'proxy_rule_count' => (int) ($routing['proxyRuleCount'] ?? 0),
+        'proxy_rules' => $proxyRules,
+    ];
 }
 
 function _stattic_runtime_finalize_idempotent_ready_response(string $privateRoot, string $spaceId, string $versionId, array $body = [], array $claims = []): void
 {
-    $versionRoot = _spacefast_version_root($privateRoot, $spaceId, $versionId);
+    $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
     $metadata = _stattic_runtime_read_json($versionRoot . '/metadata.json');
     if (
         !is_array($metadata)
         || ($metadata['spaceId'] ?? null) !== $spaceId
         || ($metadata['versionId'] ?? null) !== $versionId
-        || !is_file($versionRoot . '/serving.php')
+        || !_stattic_runtime_version_finalized($versionRoot)
     ) {
         return;
     }
 
     // A retried finalize+activate must still converge the route pointer: the
-    // first attempt may have died after finalizing artifacts (upload session
-    // already removed) but before the pointer write. The conditional write
-    // no-ops when the pointer already landed with the same config_digest and
-    // hostname intent, so a pure duplicate retry journals nothing.
+    // first attempt may have died after finalizing artifacts but before the
+    // pointer write. The conditional write makes a pure duplicate retry a no-op.
     if (isset($body['activate']) && is_array($body['activate'])) {
-        $activation = _stattic_runtime_activation_with_finalized_access($body['activate'], $metadata);
-        _stattic_runtime_write_route_pointer($privateRoot, $spaceId, _stattic_runtime_activation_route_name($activation), $versionId, $activation, $claims, true);
+        $activation = $body['activate'];
+        $pointer = _stattic_runtime_write_route_pointer($privateRoot, $spaceId, _stattic_runtime_activation_route_name($activation), $versionId, $activation, $claims, true);
+        $activationEventId = is_string($pointer['activation_event_id'] ?? null)
+            ? $pointer['activation_event_id']
+            : null;
+        $purge = is_array($pointer['purge'] ?? null) ? $pointer['purge'] : null;
     }
 
-    _stattic_runtime_finalize_ready_response($spaceId, $versionId, $versionRoot);
+    _stattic_runtime_finalize_ready_response($privateRoot, $spaceId, $versionId, $versionRoot, $activationEventId ?? null, $metadata, $purge ?? null);
 }
 
 function _stattic_runtime_zero_endpoint_count(string $versionRoot): int
@@ -593,215 +520,111 @@ function _stattic_runtime_zero_endpoint_count(string $versionRoot): int
     return is_array($index) && is_array($index['endpoints'] ?? null) ? count($index['endpoints']) : 0;
 }
 
-// Recovers the bytes of a retained file whose reusable-version hardlink is
-// gone (the version was demoted and its tree unlinked). Resolution order:
-// the space's own blob store (Tier A demote before local blob GC), then the
-// cold bucket via the reusable version's shard locator. Returns a readable
-// path inside private storage (the blob-store file) or null when the bytes
-// genuinely cannot be recovered — the caller then 409s exactly as before.
-// The returned blob path stays alive only because the caller (finalize,
-// space-scoped dispatch) holds spaces/{spaceId}/write.lock — the local blob
-// GC's per-blob barrier — until it hardlinks the blob into the version tree.
-function _stattic_runtime_retained_file_fallback_source(string $privateRoot, string $spaceId, string $reusableVersionId, string $path, array $file): ?string
+function _stattic_runtime_route_intent_hostnames(string $spaceRoot, ?array $intent = null): array
 {
-    $shardPath = _spacefast_version_root($privateRoot, $spaceId, $reusableVersionId)
-        . '/file-shards/' . substr(hash('sha256', $path), 0, 2) . '.php';
-    $loaded = is_file($shardPath) ? @include $shardPath : null;
-    $meta = is_array($loaded) && is_array($loaded['files'] ?? null) && is_array($loaded['files'][$path] ?? null)
-        ? $loaded['files'][$path]
-        : null;
-    $shardSha = is_array($meta) && is_string($meta['sha256'] ?? null) ? strtolower($meta['sha256']) : '';
-    $declaredSha = is_string($file['sha256'] ?? null) ? strtolower($file['sha256']) : '';
-    $sha = $declaredSha !== '' ? $declaredSha : $shardSha;
-    if (preg_match('/^[a-f0-9]{64}$/', $sha) !== 1) {
-        return null;
-    }
-    // Shard metadata is immutable after finalize; a declared sha that
-    // contradicts it means the dedupe request is stale — let the caller 409.
-    if ($declaredSha !== '' && $shardSha !== '' && !hash_equals($shardSha, $declaredSha)) {
-        return null;
-    }
-    if (_stattic_runtime_blob_has($privateRoot, $spaceId, $sha)) {
-        return _stattic_runtime_blob_path($privateRoot, $spaceId, $sha);
-    }
-    $remote = is_array($meta) && is_array($meta['remote'] ?? null) ? $meta['remote'] : null;
-    $bucketId = is_array($remote) && is_string($remote['bucket'] ?? null) ? $remote['bucket'] : '';
-    if ($bucketId === '' || _stattic_s3_bucket_row($bucketId) === null) {
-        return null;
-    }
-    $dest = $privateRoot . '/runtime/blob-staging/retained-' . bin2hex(random_bytes(12));
-    _stattic_runtime_mkdir(dirname($dest));
-    // Key derived from the sha (per-space CAS keyspace), never trusted from
-    // the shard verbatim; the streamed GET verifies the sha as it downloads.
-    $results = _stattic_s3_multi_get([[
-        'id' => $sha,
-        'bucket' => $bucketId,
-        'key' => _stattic_transfer_blob_key($spaceId, $sha),
-        'dest_path' => $dest,
-        'sha256' => $sha,
-    ]], 1);
-    if ((($results[$sha]['ok'] ?? false) !== true) || !is_file($dest)) {
-        @unlink($dest);
-        return null;
-    }
-    // Land it in the blob store (verifies the sha again, dedupes) so repeated
-    // retained paths with the same content fetch once.
-    _stattic_runtime_blob_put($privateRoot, $spaceId, $dest, $sha);
-    return _stattic_runtime_blob_has($privateRoot, $spaceId, $sha)
-        ? _stattic_runtime_blob_path($privateRoot, $spaceId, $sha)
-        : null;
-}
-
-// Commits one source file into a version's files tree: verify/hash, store in
-// the per-space blob CAS, hardlink into the version tree, mime detection
-// (declared contentType wins), and the file metadata.
-//
-// Lock contract with the local blob GC: this blob_has -> blob_put ->
-// blob_link sequence is only race-safe because the caller (finalize_version,
-// dispatched space-scoped) holds THIS space's spaces/{spaceId}/write.lock
-// throughout, and _stattic_tier_local_blob_gc_run takes that same per-space
-// lock (non-blocking) around each stat/unlink of this space's blobs. Do not
-// call this outside the owning space's write lock.
-function _stattic_runtime_commit_version_file(string $privateRoot, string $spaceId, string $source, string $versionFilesRoot, string $path, array $file, string $hashFailCode, string $hashFailMessage, array $hashFailDetails): array
-{
-    _stattic_runtime_assert_private_path($source);
-    if (!is_file($source)) {
-        _stattic_json_response(409, ['error' => ['code' => $hashFailCode, 'message' => $hashFailMessage, 'details' => $hashFailDetails]]);
-    }
-    // The declared sha is shape-checked before the file is read so a malformed
-    // manifest entry costs no hashing pass; the bytes are then hashed exactly
-    // once and that single hash is both the CAS key and the integrity gate.
-    $declared = is_string($file['sha256'] ?? null) ? strtolower($file['sha256']) : null;
-    if ($declared !== null && preg_match('/^[a-f0-9]{64}$/', $declared) !== 1) {
-        _stattic_json_response(409, ['error' => ['code' => $hashFailCode, 'message' => $hashFailMessage, 'details' => $hashFailDetails]]);
-    }
-    $actualSha = hash_file('sha256', $source);
-    if (!is_string($actualSha)) {
-        _stattic_json_response(409, ['error' => ['code' => $hashFailCode, 'message' => $hashFailMessage, 'details' => $hashFailDetails]]);
-    }
-    $sha256 = strtolower($actualSha);
-    if ($declared !== null && !hash_equals($declared, $sha256)) {
-        _stattic_json_response(409, ['error' => ['code' => $hashFailCode, 'message' => $hashFailMessage, 'details' => $hashFailDetails]]);
-    }
-
-    $target = $versionFilesRoot . '/' . $path;
-    if (!_stattic_runtime_blob_has($privateRoot, $spaceId, $sha256)) {
-        $staging = $privateRoot . '/runtime/blob-staging/' . bin2hex(random_bytes(12));
-        _stattic_runtime_mkdir(dirname($staging));
-        _stattic_runtime_copy_private_file($source, $staging);
-        _stattic_runtime_blob_put($privateRoot, $spaceId, $staging, $sha256);
-    }
-    _stattic_runtime_mkdir(dirname($target));
-    _stattic_runtime_blob_link($privateRoot, $spaceId, $sha256, $target);
-    $mime = _stattic_runtime_detect_file_mime(
-        $path,
-        $source,
-        is_string($file['contentType'] ?? null) ? $file['contentType'] : null
-    );
-    return _stattic_runtime_build_file_meta($path, (int) $file['size'], $mime, $sha256);
-}
-
-// Template substitution output (internal-docs/platform.md "Variable rules"):
-// the finalize compiler resolves {{ vars.NAME }} into declared template files
-// and ships the substituted contents here. The served bytes are replaced; the
-// pre-substitution original moves to `files-original/` so retained-file
-// dedup (declared sha = upload identity) still verifies for later versions.
-function _stattic_runtime_management_convention_files(mixed $value): array
-{
-    if (!is_array($value)) {
-        return [];
-    }
-    if (array_key_exists('routes', $value)) {
-        _stattic_json_response(422, ['error' => ['code' => 'routes_input_retired', 'message' => 'Runtime reads .stattic/routes.json from staged deploy files. Management convention_files may only contain redirects and headers.']]);
-    }
-    $conventionFiles = [];
-    foreach (['redirects', 'headers'] as $key) {
-        if (is_string($value[$key] ?? null)) {
-            $conventionFiles[$key] = $value[$key];
-        }
-    }
-    return $conventionFiles;
-}
-
-function _stattic_runtime_cleanup_stale_uploads(string $privateRoot): void
-{
-    $uploadsRoot = $privateRoot . '/runtime/uploads';
-    if (!is_dir($uploadsRoot)) {
-        return;
-    }
-    // Uploads are per-SITE, so on a shared site every publish would otherwise
-    // read every space's open session. Session TTL has no other enforcement
-    // point, but reclaiming an expired session directory up to an hour late is
-    // within the same best-effort contract.
-    if (!_spacefast_marker_throttle($uploadsRoot . '/.last-cleanup', 3600)) {
-        return;
-    }
-    $deadline = time() - 86400;
-    foreach (glob($uploadsRoot . '/*/session.json') ?: [] as $sessionPath) {
-        if (!is_string($sessionPath)) {
-            continue;
-        }
-        $session = _stattic_runtime_read_json($sessionPath);
-        $expiresAt = is_array($session) && is_string($session['expires_at'] ?? null)
-            ? strtotime($session['expires_at'])
-            : false;
-        if ($expiresAt !== false) {
-            if ($expiresAt < time()) {
-                _stattic_runtime_rm_recursive(dirname($sessionPath));
+    $hostnames = [];
+    $intent ??= _stattic_runtime_read_json($spaceRoot . '/hostname-intent.json');
+    if (is_array($intent) && is_array($intent['routes'] ?? null)) {
+        foreach ($intent['routes'] as $route) {
+            if (is_array($route) && is_string($route['hostname'] ?? null)) {
+                $hostnames[$route['hostname']] = true;
             }
-            continue;
-        }
-        $createdAt = is_array($session) && is_string($session['created_at'] ?? null)
-            ? strtotime($session['created_at'])
-            : false;
-        if ($createdAt === false || $createdAt < $deadline) {
-            _stattic_runtime_rm_recursive(dirname($sessionPath));
         }
     }
+    return array_keys($hostnames);
 }
 
-// Per-space route-pointer/generation state for the authenticated state endpoint:
-// the control plane's reconciliation sweep compares this against its own
-// expectations (space liveVersionId) and repairs targeted mismatches.
+// The whole-domain purge every space mutation owes the edge. `$hostnames` is
+// supplied only when the caller already narrowed the set (a tombstone push);
+// otherwise it is the space's full event hostname set.
+function _stattic_runtime_purge_space_now(string $privateRoot, string $spaceId, string $reason, array $paths = [], ?array $hostnames = null): array
+{
+    return _stattic_runtime_purge_now($privateRoot, [
+        'hostnames' => $hostnames ?? _stattic_runtime_space_event_hostnames(_stattic_space_root($privateRoot, $spaceId)),
+        'paths' => $paths,
+        'reason' => $reason,
+    ]);
+}
+
+// The exact hostname set a space_deleted event carries — the control plane signs
+// this set before asking the runtime to delete the space, so the state preflight
+// and the mutation must keep deriving it here, together.
+function _stattic_runtime_space_event_hostnames(string $spaceRoot, ?array $intent = null, ?array $tombstones = null): array
+{
+    $hostnames = array_fill_keys(_stattic_runtime_route_intent_hostnames($spaceRoot, $intent), true);
+    $tombstones ??= _stattic_runtime_read_json($spaceRoot . '/tombstones.json');
+    if (is_array($tombstones) && is_array($tombstones['hostnames'] ?? null)) {
+        foreach ($tombstones['hostnames'] as $hostname) {
+            if (is_string($hostname)) {
+                $hostnames[$hostname] = true;
+            }
+        }
+    }
+    return array_keys($hostnames);
+}
+
 function _stattic_runtime_state_summary(string $privateRoot): array
 {
-    $current = is_file($privateRoot . '/routes/current.php')
-        ? @include $privateRoot . '/routes/current.php'
-        : null;
-    $generation = is_array($current) && is_string($current['generation'] ?? null)
-        ? $current['generation']
+    // The reconcile handshake compares generations as opaque strings, so the
+    // pointer's int gen is stringified rather than widening that contract.
+    $currentRead = _sf_pointer_read('routes', $privateRoot . '/routes/current.json');
+    if ($currentRead['kind'] === 'unavailable') {
+        throw new RuntimeException('runtime state pointer unavailable');
+    }
+    $current = $currentRead['value'];
+    if ($currentRead['kind'] === 'present' && (!is_array($current) || !is_int($current['gen'] ?? null))) {
+        throw new RuntimeException('runtime state pointer invalid');
+    }
+    $generation = is_array($current) && is_int($current['gen'] ?? null)
+        ? (string) $current['gen']
         : null;
     $spaces = [];
-    foreach (glob($privateRoot . '/spaces/*', GLOB_ONLYDIR) ?: [] as $spaceRoot) {
-        $routes = [];
-        foreach (glob($spaceRoot . '/routes/*.json') ?: [] as $pointerPath) {
-            $pointer = _stattic_runtime_read_json($pointerPath);
-            if (
-                is_array($pointer)
-                && is_string($pointer['route_name'] ?? null)
-                && is_string($pointer['version_id'] ?? null)
-            ) {
-                $routes[$pointer['route_name']] = $pointer['version_id'];
-            }
+    foreach (_stattic_runtime_directory_entries_strict($privateRoot . '/spaces') as $spaceRoot) {
+        if (!is_dir($spaceRoot)) {
+            continue;
         }
-        $tombstones = _stattic_runtime_read_json($spaceRoot . '/tombstones.json');
+        $routes = [];
+        foreach (_stattic_runtime_directory_entries_strict($spaceRoot . '/routes') as $pointerPath) {
+            if (!is_file($pointerPath) || !str_ends_with($pointerPath, '.json')) {
+                continue;
+            }
+            $pointer = _stattic_runtime_read_json_strict($pointerPath);
+            if (!is_array($pointer) || !is_string($pointer['route_name'] ?? null) || !is_string($pointer['version_id'] ?? null)) {
+                throw new RuntimeException('runtime state route pointer invalid: ' . $pointerPath);
+            }
+            $routes[$pointer['route_name']] = $pointer['version_id'];
+        }
+        $intentDoc = _stattic_runtime_read_json_strict($spaceRoot . '/hostname-intent.json');
+        if ($intentDoc !== null && (!is_array($intentDoc) || !is_array($intentDoc['routes'] ?? null))) {
+            throw new RuntimeException('runtime state hostname intent invalid: ' . $spaceRoot);
+        }
+        $intent = is_array($intentDoc) ? $intentDoc : [];
+        $tombstonesDoc = _stattic_runtime_read_json_strict($spaceRoot . '/tombstones.json');
+        if ($tombstonesDoc !== null && (!is_array($tombstonesDoc) || !is_array($tombstonesDoc['hostnames'] ?? null))) {
+            throw new RuntimeException('runtime state tombstones invalid: ' . $spaceRoot);
+        }
+        $tombstones = is_array($tombstonesDoc) ? $tombstonesDoc : [];
         $spaces[] = [
             'space_id' => basename($spaceRoot),
             'routes' => (object) $routes,
-            'tombstone_count' => is_array($tombstones) && is_array($tombstones['hostnames'] ?? null)
+            'tombstone_count' => is_array($tombstones['hostnames'] ?? null)
                 ? count($tombstones['hostnames'])
                 : 0,
+            'intent_hostnames' => _stattic_runtime_route_intent_hostnames($spaceRoot, $intent),
+            'hostnames' => _stattic_runtime_space_event_hostnames($spaceRoot, $intent, $tombstones),
         ];
     }
     return ['routes_generation' => $generation, 'spaces' => $spaces];
 }
 
-// Generation-state handshake (spec "Cache Management"): the control plane's
-// reconciliation sweep compares these route pointers against its expectations
-// and repairs targeted mismatches after callback gaps.
 function _stattic_runtime_state_route(string $privateRoot): void
 {
-    $summary = _stattic_runtime_state_summary($privateRoot);
+    try {
+        $summary = _stattic_runtime_state_summary($privateRoot);
+    } catch (Throwable $error) {
+        error_log('spacefast runtime state unavailable message=' . $error->getMessage());
+        _stattic_problem_response(503, 'runtime_management_unavailable', 'Runtime state is unavailable.');
+    }
     _stattic_json_response(200, [
         'ok' => true,
         'runtime' => 'stattic-php',
@@ -811,278 +634,404 @@ function _stattic_runtime_state_route(string $privateRoot): void
     ]);
 }
 
-// Callback-journal retention (spec "Cache Management"): delivered callbacks
-// are kept long enough that any budget-deferred purge still has its event to
-// replay from — the deferral bound is the reconcile sweep interval (minutes),
-// so 7 days is safely beyond the longest possible delay window.
-const STATTIC_RUNTIME_CALLBACK_RETENTION_SECONDS = 7 * 86400;
+// The journal IS the event sink and the cursor is the only delivery state. A
+// cursor is not deduplication: the control plane must commit it together with
+// the side effects of the page it just processed.
+const STATTIC_RUNTIME_EVENT_DRAIN_MAX = 100;
 
-// Undeliverable callbacks must not poison the journal: each pending file
-// retries on every drain, so an unreachable callback origin made one drain
-// O(pending × connect timeout) — e2e checkpoint 4 found 483 never-deliverable
-// callbacks turning every drain into minutes of blocking I/O while operation
-// chains timed out behind it. Two bounds keep drain O(reachable work):
-// callbacks past the attempt cap are dropped, and the FIRST failed delivery to
-// an origin marks it dead for the remainder of that drain pass (remaining
-// events for it stay pending, untouched, with no connect wait).
-const STATTIC_RUNTIME_CALLBACK_MAX_ATTEMPTS = 10;
-
-// Cap on events handed back in one drain response (pull fallback below):
-// bounds the response body; the next drain returns the rest.
-const STATTIC_RUNTIME_CALLBACK_RETURN_MAX = 100;
-
-// Core delivery loop, split out so the job runner's bulk-lane self-drain
-// (admin/jobs.php, §22) can call the SAME mechanism proactively instead of
-// only when a control-plane /events/drain request arrives — no new delivery
-// path, just a new caller with no claims/journal-summary side effects of its
-// own (the HTTP route below owns those). $allowPullFallback must be false for
-// the self-drain caller: the pull fallback hands unreachable-origin events
-// back in the HTTP response for the control plane to take over delivery of —
-// a self-drain tick has no caller to hand them to, so treat a push failure
-// there like the return-cap-exceeded case (stays pending/, retried on a
-// later drain) instead of moving it to delivered/ and losing it.
-function _stattic_runtime_drain_callback_events_core(string $privateRoot, bool $allowPullFallback = true): array
+function _stattic_runtime_journal_cursor_path(string $privateRoot): string
 {
-    $pendingRoot = $privateRoot . '/runtime/callbacks/pending';
-    $deliveredRoot = $privateRoot . '/runtime/callbacks/delivered';
-    _stattic_runtime_mkdir($pendingRoot);
-    _stattic_runtime_mkdir($deliveredRoot);
+    return $privateRoot . '/runtime/journal-cursor.json';
+}
 
-    $retentionDeadline = time() - STATTIC_RUNTIME_CALLBACK_RETENTION_SECONDS;
-    foreach (glob($deliveredRoot . '/*.json') ?: [] as $deliveredPath) {
-        $mtime = @filemtime($deliveredPath);
-        if (is_int($mtime) && $mtime < $retentionDeadline) {
-            @unlink($deliveredPath);
-        }
-    }
-
-    $delivered = 0;
-    $failed = 0;
-    $expired = 0;
-    $deadUrls = [];
-    $returnedEvents = [];
-    foreach (glob($pendingRoot . '/*.json') ?: [] as $path) {
-        if (!is_string($path)) {
-            continue;
-        }
-        _stattic_runtime_assert_private_path($path);
-        $callback = _stattic_runtime_read_json($path);
-        if (!is_array($callback)) {
-            @unlink($path);
-            continue;
-        }
-        $url = isset($callback['callback_url']) && is_string($callback['callback_url'])
-            ? $callback['callback_url']
-            : '';
-        $token = isset($callback['callback_token']) && is_string($callback['callback_token'])
-            ? $callback['callback_token']
-            : '';
-        $event = is_array($callback['event'] ?? null) ? $callback['event'] : [];
-        if ($url === '' || $token === '' || $event === []) {
-            @unlink($path);
-            continue;
-        }
-        if (max(0, (int) ($callback['attempts'] ?? 0)) >= STATTIC_RUNTIME_CALLBACK_MAX_ATTEMPTS) {
-            @unlink($path);
-            $expired += 1;
-            continue;
-        }
-
-        if (!isset($deadUrls[$url])) {
-            $ok = _stattic_runtime_send_callback_event($url, $token, $event);
-            if ($ok) {
-                $callback['status'] = 'delivered';
-                $callback['delivered_at'] = gmdate('c');
-                $target = $deliveredRoot . '/' . basename($path);
-                _stattic_runtime_write_json_atomic($target, $callback);
-                @unlink($path);
-                $delivered += 1;
-                continue;
-            }
-            $deadUrls[$url] = true;
-        }
-
-        // Pull fallback (same graceful-degradation pattern as the SSH
-        // management dispatch): the drain CALLER is the control plane itself,
-        // so events whose push origin is unreachable are handed back in the
-        // drain response instead of rotting in the journal. Replays are no-ops
-        // on (event_id, hostname); the reconcile sweep backstops a lost
-        // response.
-        if ($allowPullFallback && count($returnedEvents) < STATTIC_RUNTIME_CALLBACK_RETURN_MAX) {
-            $returnedEvents[] = [
-                'operation_id' => isset($callback['operation_id']) && is_string($callback['operation_id'])
-                    ? $callback['operation_id']
-                    : '',
-                'event' => $event,
-            ];
-            $callback['status'] = 'returned';
-            $callback['returned_at'] = gmdate('c');
-            $target = $deliveredRoot . '/' . basename($path);
-            _stattic_runtime_write_json_atomic($target, $callback);
-            @unlink($path);
-            continue;
-        }
-
-        $callback['attempts'] = max(0, (int) ($callback['attempts'] ?? 0)) + 1;
-        $callback['last_failed_at'] = gmdate('c');
-        _stattic_runtime_write_json_atomic($path, $callback);
-        $failed += 1;
-    }
-
+/** @return array{file: string, offset: int, inode: int} */
+function _stattic_runtime_journal_cursor_normalize(mixed $cursor): array
+{
+    $cursor = is_array($cursor) ? $cursor : [];
     return [
-        'delivered_count' => $delivered,
-        'failed_count' => $failed,
-        'expired_count' => $expired,
-        'returned_count' => count($returnedEvents),
-        'events' => $returnedEvents,
+        // basename() so a stored cursor can never point the reader outside
+        // runtime/ — the file name is data that survived a round trip.
+        'file' => is_string($cursor['file'] ?? null) ? basename($cursor['file']) : '',
+        'offset' => is_int($cursor['offset'] ?? null) ? max(0, $cursor['offset']) : 0,
+        // The generation's inode. Rotation renames `journal.jsonl` out from
+        // under a name-only cursor, so the name alone does not identify which
+        // bytes an offset belongs to; shared/storage.php resolves by this and
+        // never compares offsets across files. 0 = a pre-upgrade cursor.
+        'inode' => is_int($cursor['inode'] ?? null) ? max(0, $cursor['inode']) : 0,
     ];
+}
+
+/** @return array{file: string, offset: int, inode: int} */
+function _stattic_runtime_journal_cursor_read(string $privateRoot): array
+{
+    return _stattic_runtime_journal_cursor_normalize(
+        _stattic_runtime_read_json(_stattic_runtime_journal_cursor_path($privateRoot))
+    );
+}
+
+function _stattic_runtime_journal_cursor_write(string $privateRoot, array $cursor): void
+{
+    _stattic_runtime_mkdir($privateRoot . '/runtime');
+    _stattic_runtime_write_json_atomic(
+        _stattic_runtime_journal_cursor_path($privateRoot),
+        _stattic_runtime_journal_cursor_normalize($cursor) + ['updated_at' => gmdate('c')]
+    );
+}
+
+// Opaque to the client: the per-event `cursor` on the drain response is the
+// published coordinate. This token carries the same position so `deliveries`
+// acks stay self-describing, and only this file ever encodes or decodes it.
+function _stattic_runtime_journal_cursor_token(array $cursor): string
+{
+    $encoded = (string) json_encode(
+        _stattic_runtime_journal_cursor_normalize($cursor),
+        JSON_UNESCAPED_SLASHES
+    );
+    return _stattic_base64url_encode($encoded);
+}
+
+/** @return array{file: string, offset: int, inode: int}|null */
+function _stattic_runtime_journal_cursor_from_token(string $token): ?array
+{
+    $cursor = json_decode(_stattic_base64url_decode($token), true);
+    if (!is_array($cursor) || !is_string($cursor['file'] ?? null) || !is_int($cursor['offset'] ?? null)) {
+        return null;
+    }
+    return _stattic_runtime_journal_cursor_normalize($cursor);
+}
+
+// Cursors order by generation age then byte offset — the journal's own read
+// order (shared/storage.php `_stattic_runtime_journal_files`), never by file
+// name: after a rotation a stored `journal.jsonl` names the ROTATED generation,
+// and ranking it by name would put it ahead of that generation's own ack.
+function _stattic_runtime_journal_cursor_rank(string $privateRoot, array $cursor): array
+{
+    return _stattic_runtime_journal_cursor_position(
+        $privateRoot,
+        _stattic_runtime_journal_files($privateRoot),
+        (string) ($cursor['file'] ?? ''),
+        (int) ($cursor['offset'] ?? 0),
+        (int) ($cursor['inode'] ?? 0)
+    );
+}
+
+function _stattic_runtime_journal_cursor_advances(string $privateRoot, array $from, array $to): bool
+{
+    return _stattic_runtime_journal_cursor_rank($privateRoot, $to)
+        > _stattic_runtime_journal_cursor_rank($privateRoot, $from);
+}
+
+/**
+ * One page of journal records, each paired with the cursor that resumes AFTER it.
+ * Read one record at a time: the per-record coordinate is what a partial
+ * acknowledgement needs, and the batch reader only reports the page end.
+ *
+ * @return array{records: list<array{entry: array, cursor: array}>, cursor: array}
+ */
+function _stattic_runtime_journal_page(string $privateRoot, array $cursor, int $max): array
+{
+    $records = [];
+    for ($read = 0; $read < $max; $read += 1) {
+        $next = _stattic_runtime_journal_read($privateRoot, $cursor, 1);
+        if (($next['entries'] ?? []) === []) {
+            break;
+        }
+        $cursor = _stattic_runtime_journal_cursor_normalize($next['cursor']);
+        $records[] = ['entry' => $next['entries'][0], 'cursor' => $cursor];
+    }
+    return ['records' => $records, 'cursor' => $cursor];
+}
+
+function _stattic_runtime_drained_event(array $entry, array $cursor): array
+{
+    $eventId = (string) ($entry['event_id'] ?? '');
+    return [
+        'delivery_id' => _stattic_runtime_journal_cursor_token($cursor),
+        // The position to ack THROUGH this event: a client that stops here
+        // commits exactly this cursor. The page cursor is the last one.
+        'cursor' => _stattic_runtime_journal_cursor_normalize($cursor),
+        'event_id' => $eventId,
+        ...(is_string($entry['operation_id'] ?? null) ? ['operation_id' => $entry['operation_id']] : []),
+        'event' => $entry,
+    ];
+}
+
+function _stattic_runtime_event_drain_invalid(): never
+{
+    _stattic_problem_response(422, 'runtime_event_drain_invalid', 'Runtime event drain request is invalid.');
 }
 
 function _stattic_runtime_drain_callback_events(string $privateRoot, array $claims): void
 {
-    $result = _stattic_runtime_drain_callback_events_core($privateRoot);
-    _stattic_runtime_record_management_event($privateRoot, $claims, [
-        'event' => 'runtime_callbacks_drained',
-        'delivered_count' => $result['delivered_count'],
-        'failed_count' => $result['failed_count'],
-        'expired_count' => $result['expired_count'],
-        'returned_count' => $result['returned_count'],
-    ]);
-    _stattic_json_response(200, $result);
+    $body = _stattic_json_body();
+    if (!is_string($body['session_id'] ?? null)) {
+        _stattic_runtime_event_drain_invalid();
+    }
+    _stattic_runtime_id($body['session_id'], 'session_id');
+    $finishSession = $body['finish_session'] ?? false;
+    if (!is_bool($finishSession)) {
+        _stattic_runtime_event_drain_invalid();
+    }
+    if (!$finishSession && !is_string($body['page_id'] ?? null)) {
+        _stattic_runtime_event_drain_invalid();
+    }
+    $targetEventId = null;
+    if (array_key_exists('target_event_id', $body)) {
+        if (!is_string($body['target_event_id'])) {
+            _stattic_runtime_event_drain_invalid();
+        }
+        $targetEventId = _stattic_runtime_id($body['target_event_id'], 'target_event_id');
+    }
+    // session_id/page_id/exclude_deliveries are accepted and unused, so finishing
+    // a session is a no-op that reports an empty page.
+    $cursor = _stattic_runtime_journal_cursor_read($privateRoot);
+    if ($finishSession) {
+        _stattic_runtime_drain_response($privateRoot, $cursor, [], 0);
+    }
+
+    $page = _stattic_runtime_journal_page($privateRoot, $cursor, STATTIC_RUNTIME_EVENT_DRAIN_MAX);
+    $events = [];
+    foreach ($page['records'] as $record) {
+        $entry = $record['entry'];
+        // Only management events carry an event_id. Everything else in the
+        // journal is operator diagnostics (job lifecycle, GC, purge receipts) and
+        // is skipped over — the cursor still advances past it.
+        if (!is_array($entry) || !is_string($entry['event_id'] ?? null) || $entry['event_id'] === '') {
+            continue;
+        }
+        if ($targetEventId !== null && $entry['event_id'] !== $targetEventId) {
+            continue;
+        }
+        $events[] = _stattic_runtime_drained_event($entry, $record['cursor']);
+    }
+
+    // The control plane only compares pending_count against zero, so probe for
+    // "is there more" rather than counting.
+    $more = _stattic_runtime_journal_read($privateRoot, $page['cursor'], 1);
+    _stattic_runtime_drain_response(
+        $privateRoot,
+        $page['cursor'],
+        $events,
+        ($more['entries'] ?? []) === [] ? 0 : 1
+    );
 }
 
-// Cap on events handed back by one access-event pull; the cursor returns the
-// rest on the next call.
-const STATTIC_RUNTIME_ACCESS_EVENTS_RETURN_MAX = 1000;
-const STATTIC_RUNTIME_ACCESS_EVENTS_RETURN_DEFAULT = 500;
-
-// Access-event journal pull (access-plan X-37 / §5.6b): the cloud reads the
-// runtime-local NDJSON journal written by the serve-path enforcer
-// (runtime/access-rules.php) through this management action — the runtime
-// never pushes. Cursor-advance contract (the non-destructive sibling of the
-// callback drain's pull fallback): the caller sends the {file, offset} it
-// stopped at and receives everything appended since, across day-file
-// rotations; day files age out via the writer's retention prune, so no
-// truncate call exists. Replays are safe — reading never mutates the journal.
-//
-//   GET /access-events?file={YYYY-MM-DD.ndjson}&offset={int}&limit={int}
-//     (no file => start at the oldest day file, offset 0)
-//   200 {"events": [accessEventSchema...], "cursor": {"file", "offset"},
-//        "done": bool, "dropped": int}
-//
-// `cursor` is the position after the last returned event (feed it back
-// verbatim); a cursor pointing at a pruned file resumes at the next existing
-// day file. `done` is false only when this response was truncated by `limit`.
-// `dropped` totals the writer's `.dropped` sidecars (events skipped past the
-// per-file byte cap) across the retained window.
-function _stattic_runtime_read_access_events(string $privateRoot): void
+function _stattic_runtime_drain_response(string $privateRoot, array $cursor, array $events, int $pending): never
 {
-    $dir = $privateRoot . '/' . SPACEFAST_ACCESS_EVENTS_DIR;
+    _stattic_json_response(200, [
+        // Permanently zero; they stay in the envelope until the control-plane
+        // response schema drops them.
+        'delivered_count' => 0,
+        'failed_count' => 0,
+        'expired_count' => 0,
+        'returned_count' => count($events),
+        'pending_count' => $pending,
+        'cursor' => _stattic_runtime_journal_cursor_normalize($cursor),
+        'events' => $events,
+    ]);
+}
 
-    $cursorFile = null;
-    if (isset($_GET['file'])) {
-        $cursorFile = is_string($_GET['file']) ? trim($_GET['file']) : '';
-        if (preg_match('/^\d{4}-\d{2}-\d{2}\.ndjson$/', $cursorFile) !== 1) {
-            _stattic_json_response(422, ['error' => ['code' => 'invalid_access_event_cursor', 'message' => 'Cursor file must be a day-file name (YYYY-MM-DD.ndjson).']]);
-        }
-    }
-    $offsetRaw = $_GET['offset'] ?? '0';
-    if (!is_string($offsetRaw) || ($offsetRaw !== '' && !ctype_digit($offsetRaw))) {
-        _stattic_json_response(422, ['error' => ['code' => 'invalid_access_event_cursor', 'message' => 'Cursor offset must be a non-negative integer.']]);
-    }
-    $offset = (int) $offsetRaw;
-    $limitRaw = $_GET['limit'] ?? null;
-    $limit = is_string($limitRaw) && ctype_digit($limitRaw) && (int) $limitRaw > 0
-        ? min((int) $limitRaw, STATTIC_RUNTIME_ACCESS_EVENTS_RETURN_MAX)
-        : STATTIC_RUNTIME_ACCESS_EVENTS_RETURN_DEFAULT;
-
-    $files = [];
-    $dropped = 0;
-    foreach (is_dir($dir) ? (scandir($dir) ?: []) : [] as $entry) {
-        if (preg_match('/^\d{4}-\d{2}-\d{2}\.ndjson$/', (string) $entry) === 1) {
-            $files[] = (string) $entry;
-        } elseif (preg_match('/^\d{4}-\d{2}-\d{2}\.ndjson\.dropped$/', (string) $entry) === 1) {
-            $dropped += (int) trim((string) @file_get_contents($dir . '/' . $entry));
-        }
-    }
-    sort($files);
-
-    // Resolve the start position: the cursor's file when it still exists, else
-    // the next existing day file (offset 0); no cursor starts at the oldest.
-    $startIndex = 0;
-    if ($cursorFile !== null) {
-        $startIndex = count($files);
-        foreach ($files as $index => $name) {
-            if ($name >= $cursorFile) {
-                $startIndex = $index;
-                if ($name !== $cursorFile) {
-                    $offset = 0;
-                }
-                break;
-            }
-        }
+/**
+ * Advances the persisted cursor. `{cursor: …}` is authoritative; `{deliveries:
+ * […]}` is the same commit per event and the furthest one wins. On a delivery
+ * acknowledgement the persisted cursor never moves BACKWARDS, so a replayed page
+ * cannot re-deliver everything after it.
+ */
+function _stattic_runtime_ack_callback_events(string $privateRoot): void
+{
+    $reject = static function (): never {
+        _stattic_problem_response(422, 'runtime_event_ack_invalid', 'Runtime event acknowledgements are invalid.');
+    };
+    $body = _stattic_json_body();
+    if (isset($body['session_id']) && !is_string($body['session_id'])) {
+        $reject();
     }
 
-    $events = [];
-    $positionFile = $cursorFile;
-    $positionOffset = $offset;
-    $hitLimit = false;
-    for ($index = $startIndex; $index < count($files); $index += 1) {
-        $name = $files[$index];
-        $readFrom = $index === $startIndex ? $offset : 0;
-        $positionFile = $name;
-        $positionOffset = $readFrom;
-        $handle = @fopen($dir . '/' . $name, 'rb');
-        if ($handle === false) {
-            continue;
+    $stored = _stattic_runtime_journal_cursor_read($privateRoot);
+    $cursor = null;
+    if (array_key_exists('cursor', $body)) {
+        if (!is_array($body['cursor'])) {
+            $reject();
         }
-        if ($readFrom > 0 && @fseek($handle, $readFrom) !== 0) {
-            fclose($handle);
-            continue;
+        $cursor = _stattic_runtime_journal_cursor_normalize($body['cursor']);
+    }
+
+    $acknowledged = 0;
+    $stale = 0;
+    if (array_key_exists('deliveries', $body)) {
+        $deliveries = $body['deliveries'];
+        if (
+            !is_array($deliveries)
+            || !array_is_list($deliveries)
+            || count($deliveries) > STATTIC_RUNTIME_EVENT_DRAIN_MAX
+        ) {
+            $reject();
         }
-        while (count($events) < $limit) {
-            $lineStart = ftell($handle);
-            $line = fgets($handle);
-            if ($line === false) {
-                break;
+        $furthest = $stored;
+        foreach ($deliveries as $delivery) {
+            if (!is_array($delivery) || !is_string($delivery['delivery_id'] ?? null)) {
+                $reject();
             }
-            if (!str_ends_with($line, "\n")) {
-                // In-flight tail of a LOCK_EX append: stop BEFORE it so the
-                // cursor re-reads the completed line next pull.
-                fseek($handle, is_int($lineStart) ? $lineStart : 0);
-                break;
+            $candidate = _stattic_runtime_journal_cursor_from_token($delivery['delivery_id']);
+            if ($candidate === null) {
+                $stale += 1;
+                continue;
             }
-            $positionOffset = (int) ftell($handle);
-            $decoded = json_decode($line, true);
-            if (is_array($decoded)) {
-                $events[] = $decoded;
+            $acknowledged += 1;
+            if (_stattic_runtime_journal_cursor_advances($privateRoot, $furthest, $candidate)) {
+                $furthest = $candidate;
             }
         }
-        fclose($handle);
-        if (count($events) >= $limit) {
-            $hitLimit = true;
-            break;
+        if ($cursor === null && $acknowledged > 0) {
+            $cursor = $furthest;
         }
     }
+
+    if ($cursor === null) {
+        $reject();
+    }
+    _stattic_runtime_journal_cursor_write($privateRoot, $cursor);
 
     _stattic_json_response(200, [
-        'events' => $events,
-        'cursor' => $positionFile === null ? null : ['file' => $positionFile, 'offset' => $positionOffset],
-        'done' => !$hitLimit,
-        'dropped' => $dropped,
+        'acknowledged_count' => $acknowledged,
+        'idempotent_count' => 0,
+        'stale_count' => $stale,
+        'cursor' => $cursor,
     ]);
 }
 
-function _stattic_runtime_send_callback_event(string $url, string $token, array $event): bool
+// The one authority for "this version HAS Zero" during finalize: a Space with
+// no Zero must not acquire the pattern-route lane.
+function _stattic_runtime_version_has_zero_pack(string $versionRoot): bool
 {
-    $status = _spacefast_post_callback_event($url, $token, $event, 5);
-    return $status >= 200 && $status < 300;
+    return is_file($versionRoot . '/zero/routes.php')
+        || is_file($versionRoot . '/zero/endpoints-index.json')
+        || is_file($versionRoot . '/zero/runs-index.json');
 }
 
 function _stattic_runtime_write_zero_config_artifact(string $versionRoot, array $zero): void
 {
     _stattic_runtime_mkdir($versionRoot . '/zero');
     _stattic_runtime_write_json_atomic($versionRoot . '/zero/config.json', _stattic_runtime_zero_config_artifact($zero));
+}
+
+// Security: this artifact names the execution host, granted capabilities, and
+// the worker's broker credential, so it lives BESIDE the version's file tree —
+// a publish reaches `files/` and nothing else, so no upload can forge it. Fields
+// are copied one by one so an unrecognised key cannot land in it either.
+function _stattic_runtime_write_functions_config_artifact(string $versionRoot, array $functions): void
+{
+    _stattic_runtime_mkdir($versionRoot . '/functions');
+    _stattic_runtime_write_json_atomic(
+        $versionRoot . '/functions/config.json',
+        _stattic_runtime_functions_config_artifact($functions)
+    );
+    $artifact = is_array($functions['artifact'] ?? null) ? $functions['artifact'] : [];
+    _stattic_runtime_write_php_atomic(
+        $versionRoot . '/functions/routes.php',
+        _stattic_runtime_functions_routes_artifact(
+            is_array($artifact['routes'] ?? null) ? $artifact['routes'] : []
+        )
+    );
+}
+
+/**
+ * The compiled dispatch route table serve time reads: a request matching no
+ * entry never wakes the worker. A `subtree` route expands into the path itself
+ * plus its `:splat` descendant pattern; an entry failing validation is dropped,
+ * which fails closed.
+ */
+function _stattic_runtime_functions_routes_artifact(array $routes): array
+{
+    $exact = [];
+    $byFirstSegment = [];
+    $fallback = [];
+    $seen = [];
+    $append = static function (?string $method, string $pattern) use (&$exact, &$byFirstSegment, &$fallback, &$seen): void {
+        $key = ($method ?? '*') . ' ' . $pattern;
+        if (isset($seen[$key])) {
+            return;
+        }
+        $seen[$key] = true;
+        $entry = ['method' => $method, 'pattern' => $pattern];
+        if (!str_contains($pattern, ':')) {
+            $exact[] = $entry;
+            return;
+        }
+        $first = explode('/', trim($pattern, '/'), 2)[0];
+        if ($first !== '' && !str_starts_with($first, ':')) {
+            $byFirstSegment[$first][] = $entry;
+        } else {
+            $fallback[] = $entry;
+        }
+    };
+    foreach ($routes as $route) {
+        if (!is_array($route)) {
+            continue;
+        }
+        $path = $route['path'] ?? null;
+        if (!_stattic_runtime_route_pattern_valid($path)) {
+            continue;
+        }
+        $method = is_string($route['method'] ?? null) && $route['method'] !== ''
+            ? strtoupper($route['method'])
+            : null;
+        $append($method, $path);
+        if (($route['subtree'] ?? false) === true) {
+            $base = rtrim($path, '/');
+            $append($method, $base === '' ? '/:splat' : $base . '/:splat');
+        }
+    }
+    ksort($byFirstSegment, SORT_STRING);
+
+    return [
+        'runtime_schema' => STATTIC_RUNTIME_SCHEMA,
+        'runtime_engine_version' => SPACEFAST_RUNTIME_ENGINE_VERSION,
+        'generated_at' => gmdate('Y-m-d\TH:i:s\Z'),
+        'format' => 'stattic.functions.routes.v1',
+        'artifact_kind' => 'functions_routes',
+        'exact' => $exact,
+        'by_first_segment' => $byFirstSegment,
+        'fallback' => $fallback,
+    ];
+}
+
+function _stattic_runtime_functions_config_artifact(array $functions): array
+{
+    return [
+        'runtimeKind' => 'functions',
+        'artifact' => is_array($functions['artifact'] ?? null) ? $functions['artifact'] : [],
+        'host' => is_array($functions['host'] ?? null) ? $functions['host'] : [],
+        // Fail closed at the relay: a grant the control plane did not send is no
+        // grant, so a malformed or truncated config must default to empty.
+        'grantedCapabilities' => _stattic_runtime_functions_capabilities($functions['grantedCapabilities'] ?? null),
+        'relay' => is_array($functions['relay'] ?? null) ? $functions['relay'] : null,
+        // Where invocation counts go, which is the control plane and not this
+        // origin. Absent means uncounted, never unserved.
+        'usage' => is_array($functions['usage'] ?? null) ? $functions['usage'] : null,
+        // The credential the purge intake compares (`purge.token`, presented as
+        // `sf-purge-token`) and dispatch forwards as `sf-fx-purge-token`. Absent
+        // means no purge channel: the worker's revalidates wait out the CDN's
+        // own TTL, never a refused dispatch.
+        'purge' => is_array($functions['purge'] ?? null) ? $functions['purge'] : null,
+        'variables' => is_array($functions['variables'] ?? null) ? $functions['variables'] : [],
+        'variableValues' => is_array($functions['variableValues'] ?? null) ? _stattic_zero_string_map($functions['variableValues']) : [],
+        'inspect' => is_array($functions['inspect'] ?? null) ? $functions['inspect'] : [],
+    ];
+}
+
+function _stattic_runtime_functions_capabilities($value): array
+{
+    if (!is_array($value)) {
+        return [];
+    }
+    $capabilities = [];
+    foreach ($value as $capability) {
+        if (is_string($capability) && $capability !== '') {
+            $capabilities[] = $capability;
+        }
+    }
+    return $capabilities;
 }
 
 function _stattic_runtime_zero_config_artifact(array $zero): array
@@ -1097,48 +1046,15 @@ function _stattic_runtime_zero_config_artifact(array $zero): array
         'realtime' => is_array($zero['realtime'] ?? null) ? $zero['realtime'] : [],
         'inspect' => is_array($zero['inspect'] ?? null) ? $zero['inspect'] : [],
     ];
+    if (in_array($zero['databaseUrlSource'] ?? null, ['application', 'provider'], true)) {
+        // Only ever from the authenticated control-plane finalize request; never
+        // inferred from tenant variable contents.
+        $artifact['databaseUrlSource'] = $zero['databaseUrlSource'];
+    }
     if (array_key_exists('migrations', $zero)) {
         $artifact['migrations'] = $zero['migrations'];
     }
     return $artifact;
-}
-
-function _stattic_runtime_zero_control_lookup_actions(): array
-{
-    $actions = [];
-    foreach (SPACEFAST_ZERO_CONTROL_ROUTES as $path => $route) {
-        $actions[$path] = _stattic_runtime_zero_control_lookup_action($route['operation'], $route['methods']);
-    }
-    return $actions;
-}
-
-function _stattic_runtime_zero_control_lookup_action(string $operation, array $methods): array
-{
-    return [
-        'action' => 'invoke_zero',
-        'operation' => $operation,
-        'methods' => $methods,
-    ];
-}
-
-function _stattic_runtime_assert_static_mount_routes_scope(array $body, array $claims): void
-{
-    $mountRoutes = $body['static_mount_routes'] ?? [];
-    if (!is_array($mountRoutes) || $mountRoutes === []) {
-        return;
-    }
-    $encodedMountRoutes = json_encode(
-        $mountRoutes,
-        JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
-    );
-    $claimedDigest = $claims['static_mount_routes_sha256'] ?? null;
-    if (
-        !is_string($encodedMountRoutes)
-        || !is_string($claimedDigest)
-        || !hash_equals(hash('sha256', $encodedMountRoutes), $claimedDigest)
-    ) {
-        _stattic_json_response(403, ['error' => ['code' => 'runtime_scope_forbidden', 'message' => 'Runtime token is not scoped to these static mount routes.']]);
-    }
 }
 
 function _stattic_runtime_put_route(string $privateRoot, string $spaceId, string $routeName, array $claims): void
@@ -1147,116 +1063,354 @@ function _stattic_runtime_put_route(string $privateRoot, string $spaceId, string
     $versionId = isset($body['version_id']) && is_string($body['version_id'])
         ? _stattic_runtime_id($body['version_id'], 'version_id')
         : '';
-    if ($versionId === '' || !is_file(_spacefast_version_root($privateRoot, $spaceId, $versionId) . '/serving.php')) {
-        _stattic_json_response(404, ['error' => ['code' => 'version_not_found', 'message' => 'Version not found.']]);
+    if ($versionId === '' || !_stattic_runtime_version_finalized(_stattic_version_root($privateRoot, $spaceId, $versionId))) {
+        _stattic_problem_response(404, 'version_not_found', 'Version not found.');
     }
     if (array_key_exists('routes', $body)) {
-        _stattic_json_response(422, ['error' => ['code' => 'routes_input_retired', 'message' => 'Runtime compiles routes from hostname intent. Send production_hostnames and version_hostnames.']]);
+        _stattic_problem_response(422, 'routes_input_retired', 'Runtime compiles routes from hostname intent. Send production_hostnames and version_hostnames.');
     }
-    _stattic_runtime_assert_static_mount_routes_scope($body, $claims);
     $storeIntent = array_key_exists('production_hostnames', $body)
         || array_key_exists('version_hostnames', $body)
-        || array_key_exists('proxy_host_routes', $body)
-        || array_key_exists('static_mount_routes', $body);
+        || array_key_exists('proxy_host_routes', $body);
     $pointer = _stattic_runtime_write_route_pointer($privateRoot, $spaceId, $routeName, $versionId, $body, $claims, $storeIntent);
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'route_name' => $routeName,
         'version_id' => $versionId,
         ...($pointer['unchanged'] ? ['unchanged' => true] : []),
+        ...(is_string($pointer['activation_event_id'] ?? null)
+            ? ['activation_event_id' => $pointer['activation_event_id']]
+            : []),
+        ...(is_array($pointer['purge'] ?? null) ? ['purge' => $pointer['purge']] : []),
     ]);
 }
 
 function _stattic_runtime_put_hostname_intent(string $privateRoot, string $spaceId, array $claims): void
 {
     $body = _stattic_json_body();
-    if (array_key_exists('routes', $body)) {
-        _stattic_json_response(422, ['error' => ['code' => 'routes_input_retired', 'message' => 'Runtime compiles routes from hostname intent. Send production_hostnames and version_hostnames.']]);
-    }
-    _stattic_runtime_assert_static_mount_routes_scope($body, $claims);
     $routes = _stattic_runtime_routes_from_hostname_intent('production', $body);
     _stattic_runtime_store_hostname_intent($privateRoot, $spaceId, $routes, $claims);
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
-    _stattic_json_response(200, ['space_id' => $spaceId, 'route_count' => count($routes)]);
+    // Whole-domain: an intent change re-points hostnames, so which paths changed
+    // is not a question this mutation can answer.
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'route_count' => count($routes),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'hostname_intent_updated'),
+    ]);
 }
 
-// One route-pointer flip (route PUT and finalize+activate alike): write the
-// pointer, store the unified access policy and hostname intent, journal the
-// route_updated event, and rebuild the route index. Changed-path purge
-// contract (spec "Cache Management"): the diff rides the journal so the
-// control plane purges changed request paths, never blanket when a diff
-// exists. Returns ['changed_paths' => string[], 'unchanged' => bool].
-//
-// Conditional write: when the request carries `config_digest` and the stored
-// route already has the same version_id + config_digest + hostname intent,
-// the whole write is skipped — no policy store, no journal event (so no edge
-// purge), no index rebuild. Re-pushes from reconcile sweeps and claim/plan
-// syncs used to journal a host-wide purge on every touch; now an unchanged
-// push costs nothing.
+function _stattic_runtime_route_updated_event(string $spaceId, string $routeName, string $versionId, array $hostnames, array $changedPaths, bool $changedPathsKnown, array $body): array
+{
+    $event = [
+        'event' => 'route_updated',
+        'space_id' => $spaceId,
+        'route_name' => $routeName,
+        'version_id' => $versionId,
+        'hostnames' => $hostnames,
+        'changed_paths' => $changedPaths,
+        'changed_paths_known' => $changedPathsKnown,
+    ];
+    if (is_string($body['previous_version_id'] ?? null) && $body['previous_version_id'] !== '') {
+        $event['previous_version_id'] = $body['previous_version_id'];
+    }
+    return $event;
+}
+
+// The one route-pointer flip, for route PUT and finalize+activate alike. An
+// unchanged conditional write must stay fully silent — no journal event means no
+// edge purge for reconcile-sweep and plan-sync re-pushes.
 function _stattic_runtime_write_route_pointer(string $privateRoot, string $spaceId, string $routeName, string $versionId, array $body, array $claims, bool $storeIntent): array
 {
     $configDigest = is_string($body['config_digest'] ?? null) && $body['config_digest'] !== ''
         ? $body['config_digest']
         : null;
-    // Compiled once for both consumers below (the unchanged-check and the
-    // store). Guarded on $storeIntent because compiling also validates the
-    // intent body, and a route write that carries no intent must not start
-    // rejecting bodies it never inspected.
+    $routePath = _stattic_route_pointer_path($privateRoot, $spaceId, $routeName);
+    // Snapshot every document that can change the write or its purge before
+    // mutating anything. The space lock prevents a concurrent writer from
+    // changing these snapshots underneath this activation.
+    $previousRoute = _stattic_runtime_read_json_strict($routePath);
+    if ($previousRoute !== null && (!is_array($previousRoute) || !is_string($previousRoute['route_name'] ?? null) || !is_string($previousRoute['version_id'] ?? null))) {
+        throw new RuntimeException('runtime route pointer is invalid: ' . $routePath);
+    }
+    $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
+    $previousIntentDoc = _stattic_runtime_read_json_strict($spaceRoot . '/hostname-intent.json');
+    if ($previousIntentDoc !== null && (!is_array($previousIntentDoc) || !is_array($previousIntentDoc['routes'] ?? null))) {
+        throw new RuntimeException('runtime hostname intent is invalid: ' . $spaceRoot);
+    }
+    $previousIntent = is_array($previousIntentDoc) ? $previousIntentDoc : [];
+    $tombstonesDoc = _stattic_runtime_read_json_strict($spaceRoot . '/tombstones.json');
+    if ($tombstonesDoc !== null && (!is_array($tombstonesDoc) || !is_array($tombstonesDoc['hostnames'] ?? null))) {
+        throw new RuntimeException('runtime tombstones are invalid: ' . $spaceRoot);
+    }
+    $tombstones = is_array($tombstonesDoc) ? $tombstonesDoc : [];
+    // Guarded on $storeIntent because compiling also validates the intent body,
+    // and a route write carrying no intent must not start rejecting bodies it
+    // never inspected.
     $intentRoutes = $storeIntent ? _stattic_runtime_routes_from_hostname_intent($routeName, $body) : [];
+    $operationId = is_string($claims['operation_id'] ?? null)
+        ? trim($claims['operation_id'])
+        : '';
+    $requestDigest = _stattic_runtime_canonical_request_digest($body);
+    $storedActivationEventId = is_string($previousRoute['activation_event_id'] ?? null)
+        && preg_match('/\A[a-f0-9]{64}\z/', $previousRoute['activation_event_id']) === 1
+        ? $previousRoute['activation_event_id']
+        : null;
+    // The authenticated operation is the idempotency key for the irreversible
+    // pointer flip: a finalize retry carries changed_paths by design, so the
+    // config-digest no-op below cannot identify it.
+    if (
+        $storedActivationEventId !== null
+        && $operationId !== ''
+        && ($previousRoute['activation_operation_id'] ?? null) === $operationId
+        && ($previousRoute['activation_request_digest'] ?? null) === $requestDigest
+        && ($previousRoute['version_id'] ?? null) === $versionId
+        && (!$storeIntent || !_stattic_runtime_hostname_intent_changed($previousIntent, $intentRoutes))
+    ) {
+        // Repair a receipt persisted before the route-index generation was
+        // published, before claiming the activation is already complete.
+        _stattic_runtime_update_route_index($privateRoot, $spaceId);
+        return [
+            'changed_paths' => [],
+            'unchanged' => true,
+            'activation_event_id' => $storedActivationEventId,
+        ];
+    }
     if (
         $configDigest !== null
         && !array_key_exists('changed_paths', $body)
-        && _stattic_runtime_route_pointer_unchanged($privateRoot, $spaceId, $routeName, $versionId, $configDigest)
-        && (!$storeIntent || !_stattic_runtime_hostname_intent_changed($privateRoot, $spaceId, $intentRoutes))
+        && _stattic_runtime_route_pointer_unchanged($privateRoot, $spaceId, $routeName, $versionId, $configDigest, is_array($previousRoute) ? $previousRoute : [])
+        && (!$storeIntent || !_stattic_runtime_hostname_intent_changed($previousIntent, $intentRoutes))
     ) {
-        return ['changed_paths' => [], 'unchanged' => true];
+        $previousIntentRoutes = is_array($previousIntent['routes'] ?? null)
+            ? $previousIntent['routes']
+            : [];
+        $routeEvent = _stattic_runtime_route_updated_event(
+            $spaceId,
+            $routeName,
+            $versionId,
+            _stattic_runtime_affected_intent_hostnames_from_routes($previousIntentRoutes, $routeName),
+            [],
+            false,
+            $body
+        );
+        return [
+            'changed_paths' => [],
+            'unchanged' => true,
+            'activation_event_id' => $storedActivationEventId
+                ?? _stattic_runtime_management_event_id($claims, $routeEvent),
+        ];
     }
+    $config = _stattic_runtime_route_config($body['config'] ?? null);
     _stattic_runtime_write_route(
         $privateRoot,
         $spaceId,
         $routeName,
         $versionId,
-        _stattic_runtime_route_config($body['config'] ?? null),
+        $config,
         $configDigest
     );
     _stattic_runtime_store_unified_access_from_config($privateRoot, $spaceId, $body['config'] ?? null);
     if ($storeIntent) {
-        _stattic_runtime_store_hostname_intent($privateRoot, $spaceId, $intentRoutes, $claims);
+        _stattic_runtime_store_hostname_intent_from_snapshot(
+            $privateRoot,
+            $spaceId,
+            $intentRoutes,
+            $previousIntentDoc,
+            $claims,
+        );
     }
     $changedPathsKnown = false;
     $changedPaths = _stattic_runtime_changed_path_list($body['changed_paths'] ?? null, $changedPathsKnown);
-    $routeEvent = [
-        'event' => 'route_updated',
-        'space_id' => $spaceId,
-        'route_name' => $routeName,
-        'version_id' => $versionId,
-        'hostnames' => _stattic_runtime_affected_intent_hostnames($privateRoot, $spaceId, $routeName),
-        'changed_paths' => $changedPaths,
-        'changed_paths_known' => $changedPathsKnown,
-    ];
-    if (is_string($body['previous_version_id'] ?? null) && $body['previous_version_id'] !== '') {
-        $routeEvent['previous_version_id'] = $body['previous_version_id'];
+    // The same hostname set feeds the journal event and the purge: a path purge
+    // that missed a hostname the event named would leave that host stale.
+    $effectiveIntentRoutes = $storeIntent
+        ? $intentRoutes
+        : (is_array($previousIntent['routes'] ?? null) ? $previousIntent['routes'] : []);
+    $hostnames = _stattic_runtime_affected_intent_hostnames_from_routes($effectiveIntentRoutes, $routeName);
+    $routeEvent = _stattic_runtime_route_updated_event(
+        $spaceId,
+        $routeName,
+        $versionId,
+        $hostnames,
+        $changedPaths,
+        $changedPathsKnown,
+        $body
+    );
+    // A config-only access change keeps the same version pointer, so version ids
+    // cannot say whether cached anonymous bytes just became private — the
+    // before/after exposure digests answer that. Presence of the previous field
+    // means a route existed; null means treat it conservatively.
+    $previousExposure = null;
+    if (is_array($previousRoute)) {
+        $previousConfig = is_array($previousRoute['config'] ?? null)
+            ? $previousRoute['config']
+            : [];
+        $previousExposure = _stattic_runtime_public_exposure_descriptor($previousConfig);
+        $routeEvent['previous_public_exposure_digest'] =
+            _stattic_runtime_public_exposure_digest($previousConfig);
+        $routeEvent['public_exposure_digest'] =
+            _stattic_runtime_public_exposure_digest($config);
+        $routeEvent['previous_public_exposure'] = $previousExposure;
+        $routeEvent['public_exposure'] =
+            _stattic_runtime_public_exposure_descriptor($config);
     }
-    _stattic_runtime_record_management_event($privateRoot, $claims, $routeEvent);
+    // The index/pointer publish happens BEFORE the journal record that announces
+    // it: that record is a promise the activation is already SERVING. The
+    // activation event id is the response's and the pointer's receipt — the
+    // journal copy is a diagnostic, never a delivery.
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
-    return ['changed_paths' => $changedPaths, 'unchanged' => false];
+    $activationEventId = _stattic_runtime_management_event_id($claims, $routeEvent);
+    _stattic_runtime_journal_management_diagnostic($privateRoot, $claims, $routeEvent);
+    _stattic_runtime_store_route_activation_event_id(
+        $routePath,
+        $spaceId,
+        $routeName,
+        $versionId,
+        $activationEventId,
+        $operationId,
+        $requestDigest
+    );
+    // Access flipping public→private owes EVERY hostname the space has ever
+    // answered on (route intent + tombstones) a full sweep: the edge holds
+    // year-TTL copies of the formerly-public HTML on every alias, including
+    // the immutable version hosts a content activation deliberately skips
+    // (their bytes never change, so a publish must NOT purge them). Every
+    // other write purges only the route's own serving hostnames.
+    $sweepIntent = $storeIntent ? ['routes' => $intentRoutes] : $previousIntent;
+    $purge = _stattic_runtime_purge_now(
+        $privateRoot,
+        _stattic_runtime_exposure_became_private(
+            $previousExposure,
+            _stattic_runtime_public_exposure_descriptor($config),
+        )
+            ? [
+                'hostnames' => _stattic_runtime_access_sweep_hostnames(
+                    $sweepIntent,
+                    $tombstones,
+                ),
+                'reason' => 'space_access_privatized',
+            ]
+            : [
+                'hostnames' => $hostnames,
+                'paths' => $changedPathsKnown ? $changedPaths : [],
+                'reason' => 'route_updated',
+            ],
+    );
+    return [
+        'changed_paths' => $changedPaths,
+        'unchanged' => false,
+        'activation_event_id' => $activationEventId,
+        'purge' => $purge,
+    ];
 }
 
-// True when the stored route pointer already matches version + config digest.
-function _stattic_runtime_route_pointer_unchanged(string $privateRoot, string $spaceId, string $routeName, string $versionId, string $configDigest): bool
+function _stattic_runtime_store_route_activation_event_id(string $routePath, string $spaceId, string $routeName, string $versionId, string $activationEventId, string $operationId, string $requestDigest): void
 {
-    $stored = _stattic_runtime_read_json(_spacefast_space_root($privateRoot, $spaceId) . '/routes/' . $routeName . '.json');
-    return is_array($stored)
-        && ($stored['version_id'] ?? null) === $versionId
-        && ($stored['config_digest'] ?? null) === $configDigest;
+    $stored = _stattic_runtime_read_json($routePath);
+    if (
+        !is_array($stored)
+        || ($stored['space_id'] ?? null) !== $spaceId
+        || ($stored['route_name'] ?? null) !== $routeName
+        || ($stored['version_id'] ?? null) !== $versionId
+    ) {
+        _stattic_problem_response(
+            500,
+            'runtime_route_pointer_missing',
+            'The runtime route pointer could not retain its activation receipt.',
+        );
+    }
+    $stored['activation_event_id'] = $activationEventId;
+    $stored['activation_operation_id'] = $operationId;
+    $stored['activation_request_digest'] = $requestDigest;
+    _stattic_runtime_write_json_atomic($routePath, $stored);
 }
 
-// True when the request's hostname intent differs from the stored intent
-// (normalized route-by-route). Order-sensitive: a differing order just means
-// a normal write, never a wrongly skipped one.
-function _stattic_runtime_hostname_intent_changed(string $privateRoot, string $spaceId, array $incomingRoutes): bool
+function _stattic_runtime_canonical_request_digest(array $body): string
 {
-    $stored = _stattic_runtime_read_json(_spacefast_space_root($privateRoot, $spaceId) . '/hostname-intent.json');
+    $canonicalize = static function (mixed $value) use (&$canonicalize): mixed {
+        if (!is_array($value)) {
+            return $value;
+        }
+        if (array_is_list($value)) {
+            return array_map($canonicalize, $value);
+        }
+        ksort($value, SORT_STRING);
+        foreach ($value as $key => $entry) {
+            $value[$key] = $canonicalize($entry);
+        }
+        return $value;
+    };
+    return hash(
+        'sha256',
+        (string) json_encode($canonicalize($body), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+    );
+}
+
+function _stattic_runtime_public_exposure_digest(array $config): ?string
+{
+    $digest = is_string($config['public_exposure_digest'] ?? null)
+        ? strtolower($config['public_exposure_digest'])
+        : '';
+    return preg_match('/\A[a-f0-9]{64}\z/', $digest) === 1 ? $digest : null;
+}
+
+function _stattic_runtime_public_exposure_descriptor(array $config): ?array
+{
+    $descriptor = $config['public_exposure'] ?? null;
+    if (
+        !is_array($descriptor)
+        || !is_int($descriptor['v'] ?? null)
+        || $descriptor['v'] < 1
+        || !is_bool($descriptor['public'] ?? null)
+        || !is_string($descriptor['authorizationDigest'] ?? null)
+        || preg_match('/\A[a-f0-9]{64}\z/', $descriptor['authorizationDigest']) !== 1
+        || !array_key_exists('contentTypes', $descriptor)
+        || (
+            !is_null($descriptor['contentTypes'])
+            && (!is_array($descriptor['contentTypes']) || !array_is_list($descriptor['contentTypes']))
+        )
+        || !is_bool($descriptor['externalProxy'] ?? null)
+        || !is_string($descriptor['unmodeled'] ?? null)
+    ) {
+        return null;
+    }
+    if (is_array($descriptor['contentTypes'])) {
+        foreach ($descriptor['contentTypes'] as $contentType) {
+            if (!is_string($contentType)) {
+                return null;
+            }
+        }
+    }
+    return $descriptor;
+}
+
+function _stattic_runtime_route_pointer_unchanged(string $privateRoot, string $spaceId, string $routeName, string $versionId, string $configDigest, ?array $stored = null): bool
+{
+    $stored ??= _stattic_runtime_read_json(_stattic_route_pointer_path($privateRoot, $spaceId, $routeName));
+    if (
+        !is_array($stored)
+        || ($stored['version_id'] ?? null) !== $versionId
+        || ($stored['config_digest'] ?? null) !== $configDigest
+    ) {
+        return false;
+    }
+    $config = is_array($stored['config'] ?? null) ? $stored['config'] : [];
+    if (!array_key_exists('authorization', $config)) {
+        return true;
+    }
+    $authorization = $config['authorization'];
+    if (!is_array($authorization)) {
+        return false;
+    }
+    require_once __DIR__ . '/../runtime/access-rules.php';
+    return _stattic_authorization_projection_compiled($authorization);
+}
+
+// Deliberately order-sensitive: a differing order costs a normal write, never a
+// wrongly skipped one.
+function _stattic_runtime_hostname_intent_changed(array $stored, array $incomingRoutes): bool
+{
     $storedRoutes = is_array($stored) && is_array($stored['routes'] ?? null) ? $stored['routes'] : null;
     if ($storedRoutes === null) {
         return true;
@@ -1270,9 +1424,8 @@ function _stattic_runtime_hostname_intent_changed(string $privateRoot, string $s
 
 function _stattic_runtime_write_route(string $privateRoot, string $spaceId, string $routeName, string $versionId, array $config, ?string $configDigest = null): void
 {
-    $routesRoot = _spacefast_space_root($privateRoot, $spaceId) . '/routes';
-    _stattic_runtime_mkdir($routesRoot);
-    _stattic_runtime_write_json_atomic($routesRoot . '/' . $routeName . '.json', [
+    _stattic_runtime_mkdir(_stattic_space_routes_root($privateRoot, $spaceId));
+    _stattic_runtime_write_json_atomic(_stattic_route_pointer_path($privateRoot, $spaceId, $routeName), [
         'space_id' => $spaceId,
         'route_name' => $routeName,
         'version_id' => $versionId,
@@ -1282,69 +1435,17 @@ function _stattic_runtime_write_route(string $privateRoot, string $spaceId, stri
     ]);
 }
 
-// THE unified policy lane (firewall ⊂ access): the runtime enforcer
-// (runtime/access-rules.php) reads serving['policy'] = { rules: RuntimeRule[] }.
-// Stored per space; an explicit null clears it, absence leaves it untouched.
-// The unified Rule has no version literal — its shape is { match, effect,
-// auth? }.
-function _stattic_runtime_store_unified_policy(string $privateRoot, string $spaceId, mixed $raw): void
-{
-    $path = _spacefast_space_root($privateRoot, $spaceId) . '/policy.json';
-    if ($raw === null) {
-        _stattic_runtime_rm_recursive($path);
-        return;
-    }
-    _stattic_runtime_write_json_atomic($path, [
-        'space_id' => $spaceId,
-        'policy' => _stattic_runtime_unified_policy($raw),
-        'updated_at' => gmdate('c'),
-    ]);
-}
-
-// Serving-secret map (name -> value) the unified policy's password rules resolve
-// by `auth.password.ref` = "secret:<name>". Stored per space beside policy.json;
-// an explicit null clears it, absence leaves it untouched. Values are stored
-// verifier hashes / shared secrets, never plaintext a visitor types.
-function _stattic_runtime_store_policy_secrets(string $privateRoot, string $spaceId, mixed $raw): void
-{
-    $path = _spacefast_space_root($privateRoot, $spaceId) . '/policy-secrets.json';
-    if ($raw === null) {
-        _stattic_runtime_rm_recursive($path);
-        return;
-    }
-    if (!is_array($raw)) {
-        _stattic_json_response(422, ['error' => ['code' => 'invalid_policy', 'message' => 'Policy secrets must be an object.']]);
-    }
-    $secrets = [];
-    foreach ($raw as $name => $value) {
-        if (!is_string($name) || $name === '' || !is_string($value) || $value === '') {
-            _stattic_json_response(422, ['error' => ['code' => 'invalid_policy', 'message' => 'Policy secret entries must be non-empty name/value strings.']]);
-        }
-        $secrets[$name] = $value;
-    }
-    _stattic_runtime_write_json_atomic($path, [
-        'space_id' => $spaceId,
-        'secrets' => $secrets,
-        'updated_at' => gmdate('c'),
-    ]);
-}
-
-// Serve-time plan entitlements (proxy-routes.md gating; ARCHITECTURE decision:
-// local lookup only, fail closed): stored per space beside policy.json, read
-// fresh by admin/generate.php on every route compile so
-// runtime/redirects.php's $serving['entitlements'] always reflects the LATEST
-// synced plan — a `planGated` proxy rule activates the moment this doc says
-// so, no republish. An explicit null clears the stored doc (falls back to
-// fail-closed defaults); absence leaves it untouched.
+// Serve-time plan entitlements, read fresh on every route compile. An explicit
+// null clears the doc back to fail-closed defaults; absence leaves it untouched.
 function _stattic_runtime_store_entitlements(string $privateRoot, string $spaceId, mixed $raw): void
 {
-    $path = _spacefast_space_root($privateRoot, $spaceId) . '/entitlements.json';
+    $path = _stattic_space_root($privateRoot, $spaceId) . '/entitlements.json';
     if ($raw === null) {
         _stattic_runtime_rm_recursive($path);
         return;
     }
     if (!is_array($raw)) {
-        _stattic_json_response(422, ['error' => ['code' => 'invalid_entitlements', 'message' => 'Entitlements must be an object.']]);
+        _stattic_problem_response(422, 'invalid_entitlements', 'Entitlements must be an object.');
     }
     _stattic_runtime_write_json_atomic($path, [
         'space_id' => $spaceId,
@@ -1355,89 +1456,6 @@ function _stattic_runtime_store_entitlements(string $privateRoot, string $spaceI
     ]);
 }
 
-// THE writer for a space's revocation tombstones: the atomic file write and the
-// per-request memo invalidation must always happen together, and both writers
-// below hold the space's write lock while calling this.
-function _stattic_runtime_store_revocation_records(string $privateRoot, string $spaceId, array $grants, array $subs, int $now): void
-{
-    _stattic_runtime_write_json_atomic(_spacefast_revocations_path($privateRoot, $spaceId), [
-        'grants' => _stattic_runtime_json_object($grants),
-        'subs' => _stattic_runtime_json_object($subs),
-        'updatedAt' => $now,
-    ]);
-    _spacefast_forget_revocation_state($privateRoot, $spaceId);
-}
-
-// Durable revocation SET (access-plan revocation hardening): the control
-// plane's Postgres projection of every currently-revoked link:/invite:/svc:
-// grant, ridden on the SAME route-pointer config channel as `policy`/
-// `secrets` (config.revocations, an array of grant ids). REPLACES the
-// `grants` bucket of revocations.json wholesale on every runtime.sync — the
-// backstop that converges the tombstone store even when the instant
-// best-effort revoke_grant/unrevoke_grant call (below) was dropped. `subs`
-// (JWT-subject revocations — a management-only primitive with no
-// control-plane projection today) is left untouched. Invalid/malformed
-// entries are silently dropped, mirroring `_spacefast_normalize_revocation_records`.
-//
-// Grace window (never-fail-open): `config.revocations` is a snapshot the
-// control plane read from Postgres BEFORE this request was sent, and two
-// syncs for the same space can land out of order (independent operations —
-// e.g. a version-publish route push racing a sharing revoke — with no
-// ordering guarantee between their HTTP requests). A snapshot taken before a
-// revoke's Postgres commit can arrive here AFTER the instant best-effort
-// revoke_grant call already tombstoned that grant; a blind wholesale replace
-// would then erase the newer tombstone and the grant would work again until
-// the next sync. So a currently-stored grant absent from `$raw` is only
-// dropped once it has survived past the grace window — long enough that any
-// snapshot racing a concurrent revoke has resolved (worst case a single
-// route-config HTTP attempt: RUNTIME_REQUEST_TIMEOUT_MS = 120s on the
-// control-plane side). Recently-touched absentees are carried over instead,
-// and the very next sync (racy or not) resolves them for good either way.
-const STATTIC_REVOCATIONS_REPLACE_GRACE_SECONDS = 600;
-
-function _stattic_runtime_store_revocations_replace(string $privateRoot, string $spaceId, mixed $raw): void
-{
-    if (!is_array($raw)) {
-        _stattic_json_response(422, ['error' => ['code' => 'invalid_revocations', 'message' => 'config.revocations must be an array of grant ids.']]);
-    }
-    $now = time();
-    $grants = [];
-    foreach ($raw as $entry) {
-        if (!is_string($entry)) {
-            continue;
-        }
-        $grant = trim($entry);
-        if (!_spacefast_revocation_grant_valid($grant)) {
-            continue;
-        }
-        $grants[$grant] = $now;
-    }
-    // Lock invariant: EVERY writer of spaces/{spaceId}/revocations.json holds
-    // that space's per-space write lock. Today every caller (revoke_grant/
-    // unrevoke_grant, update_route, finalize+activate incl. its idempotent
-    // retry) already holds it via the dispatch loop, making this nested
-    // acquire a re-entrant no-op — but it stays as the invariant's local
-    // enforcement point: a future SITE-locked caller (an import variant, a
-    // transfer install) without it could interleave its load-merge-write with
-    // a concurrent revoke_grant holding only the space lock and silently drop
-    // the fresh tombstone (the grace window can't save a tombstone written
-    // AFTER this function's load). Ordering is always site -> space and the
-    // per-space handlers never take the site lock, so no deadlock cycle exists.
-    _stattic_runtime_with_space_write_lock($privateRoot, $spaceId, static function () use ($privateRoot, $spaceId, $grants, $now): void {
-        $current = _spacefast_load_revocation_records($privateRoot, $spaceId);
-        $graceCutoff = $now - STATTIC_REVOCATIONS_REPLACE_GRACE_SECONDS;
-        foreach ($current['grants'] as $grant => $ts) {
-            if (isset($grants[$grant])) {
-                continue;
-            }
-            if ($ts > $graceCutoff) {
-                $grants[$grant] = $ts;
-            }
-        }
-        _stattic_runtime_store_revocation_records($privateRoot, $spaceId, $grants, $current['subs'], $now);
-    });
-}
-
 function _stattic_runtime_put_tombstones(string $privateRoot, string $spaceId, array $claims): void
 {
     $body = _stattic_json_body();
@@ -1445,47 +1463,43 @@ function _stattic_runtime_put_tombstones(string $privateRoot, string $spaceId, a
     $mode = isset($body['mode']) && is_string($body['mode']) && in_array($body['mode'], ['replace', 'add', 'remove'], true)
         ? $body['mode']
         : 'replace';
-    // Reason-differentiated tombstone metadata (C10): the control plane sends why
-    // the space was retired so the served tombstone page differs by disabled
-    // reason/category (generic-unavailable vs plain-404 for CSAM vs 451 for
-    // DMCA/copyright vs a neutral suspended page for a suspended tenant). Both are optional
-    // and ignored on `remove`; absence preserves the generic tombstone.
+    // The served page differs by reason. Both are ignored on `remove`; absence
+    // preserves the generic tombstone.
     $reason = isset($body['reason']) && is_string($body['reason']) ? $body['reason'] : null;
     $category = isset($body['category']) && is_string($body['category']) ? $body['category'] : null;
     $tombstoneCount = _stattic_runtime_store_space_tombstones($privateRoot, $spaceId, $hostnames, $mode, $reason, $category);
+    _stattic_runtime_update_route_index($privateRoot, $spaceId);
     _stattic_runtime_record_management_event($privateRoot, $claims, [
         'event' => 'space_tombstones_updated',
         'space_id' => $spaceId,
         'tombstone_count' => $tombstoneCount,
         'hostnames' => $hostnames,
     ]);
-    _stattic_runtime_update_route_index($privateRoot, $spaceId);
-    _stattic_json_response(200, ['space_id' => $spaceId, 'tombstone_count' => $tombstoneCount]);
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'tombstone_count' => $tombstoneCount,
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_tombstones_updated', [], $hostnames),
+    ]);
 }
 
-// Retention/pruning policy push (plan §8/§26 A4, wave-5 contract B1): the
-// control plane computes the prunable version ids (V1: versions already
-// deleted in the DB whose trees may still hold inodes on disk, plus explicit
-// superadmin-pruned ids) and pushes them here as the policy artifact. The
-// engine only STORES the policy — deletion happens on the bulk housekeeping
-// tick (_stattic_runtime_job_housekeeping_prune_versions), which re-checks
-// every id against live route pointers before any rm. Pushing an empty list
-// clears the policy.
+// The engine only STORES the policy — deletion happens on the housekeeping tick,
+// which re-checks every id against live route pointers before any rm. An empty
+// list clears the policy.
 function _stattic_runtime_put_retention_policy(string $privateRoot, string $spaceId, array $claims): void
 {
     $body = _stattic_json_body();
     $raw = $body['prunable_version_ids'] ?? null;
     if (!is_array($raw)) {
-        _stattic_json_response(422, ['error' => ['code' => 'runtime_retention_policy_invalid', 'message' => 'prunable_version_ids must be an array of version ids.']]);
+        _stattic_problem_response(422, 'runtime_retention_policy_invalid', 'prunable_version_ids must be an array of version ids.');
     }
     $versionIds = [];
     foreach ($raw as $versionId) {
         if (!is_string($versionId)) {
-            _stattic_json_response(422, ['error' => ['code' => 'runtime_retention_policy_invalid', 'message' => 'prunable_version_ids must be an array of version ids.']]);
+            _stattic_problem_response(422, 'runtime_retention_policy_invalid', 'prunable_version_ids must be an array of version ids.');
         }
         $versionIds[_stattic_runtime_id($versionId, 'version_id')] = true;
     }
-    _stattic_runtime_write_json_atomic(_spacefast_space_root($privateRoot, $spaceId) . '/retention-policy.json', [
+    _stattic_runtime_write_json_atomic(_stattic_space_root($privateRoot, $spaceId) . '/retention-policy.json', [
         'space_id' => $spaceId,
         'prunable_version_ids' => array_keys($versionIds),
         'updated_at' => gmdate('c'),
@@ -1495,144 +1509,86 @@ function _stattic_runtime_put_retention_policy(string $privateRoot, string $spac
         'space_id' => $spaceId,
         'prunable_count' => count($versionIds),
     ]);
-    _stattic_json_response(200, ['space_id' => $spaceId, 'prunable_count' => count($versionIds)]);
-}
-
-function _stattic_runtime_update_access_revocations(string $privateRoot, string $spaceId, array $claims, bool $revoke): void
-{
-    $body = _stattic_json_body();
-    $hasGrant = array_key_exists('grant', $body);
-    $hasSub = array_key_exists('sub', $body);
-    if ($hasGrant === $hasSub) {
-        _stattic_json_response(422, ['error' => ['code' => 'invalid_revocation_target', 'message' => 'Exactly one of grant or sub is required.']]);
-    }
-
-    $kind = $hasGrant ? 'grants' : 'subs';
-    $field = $hasGrant ? 'grant' : 'sub';
-    $target = $body[$field] ?? null;
-    if (!is_string($target)) {
-        _stattic_json_response(422, ['error' => ['code' => 'invalid_revocation_target', 'message' => $field . ' must be a string.']]);
-    }
-    $target = trim($target);
-    if ($kind === 'grants' && !_spacefast_revocation_grant_valid($target)) {
-        _stattic_json_response(422, ['error' => ['code' => 'invalid_revocation_grant', 'message' => 'grant must be a link:, invite:, or svc: row id.']]);
-    }
-    if ($kind === 'subs' && !_spacefast_revocation_sub_valid($target)) {
-        _stattic_json_response(422, ['error' => ['code' => 'invalid_revocation_sub', 'message' => 'sub is invalid.']]);
-    }
-
-    $now = time();
-    // A tombstone can outlive the fixed 30-day window: service JWTs remain
-    // valid for years, and subject revocations have no durable replacement
-    // projection. Only explicit unrevoke or the authoritative grant snapshot
-    // may remove records; elapsed time alone cannot prove a bearer expired.
-    $records = _spacefast_load_revocation_records($privateRoot, $spaceId);
-
-    if ($revoke) {
-        $records[$kind][$target] = $now;
-    } else {
-        unset($records[$kind][$target]);
-    }
-
-    _stattic_runtime_store_revocation_records($privateRoot, $spaceId, $records['grants'], $records['subs'], $now);
-    _stattic_runtime_record_management_event($privateRoot, $claims, [
-        'event' => $revoke ? 'access_revocation_added' : 'access_revocation_removed',
-        'space_id' => $spaceId,
-        'target_type' => $field,
-        $field => $target,
-    ]);
     _stattic_json_response(200, [
         'space_id' => $spaceId,
-        'target_type' => $field,
-        $field => $target,
-        'revoked' => $revoke,
+        'prunable_count' => count($versionIds),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_retention_policy_updated'),
     ]);
 }
 
 function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, array $claims): void
 {
-    $spaceRoot = _spacefast_space_root($privateRoot, $spaceId);
-    // Every hostname the space served or tombstoned: the purge set the delete
-    // event carries to the control plane.
-    $hostnames = [];
-    $intent = _stattic_runtime_read_json($spaceRoot . '/hostname-intent.json');
-    if (is_array($intent) && is_array($intent['routes'] ?? null)) {
-        foreach ($intent['routes'] as $route) {
-            if (is_array($route) && is_string($route['hostname'] ?? null)) {
-                $hostnames[$route['hostname']] = true;
-            }
-        }
+    $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
+    // Snapshot every purge/tombstone input before removing any bytes. An
+    // unavailable input aborts the delete instead of producing an incomplete
+    // purge set or silently dropping retired-host state.
+    $intentDoc = _stattic_runtime_read_json_strict($spaceRoot . '/hostname-intent.json');
+    if ($intentDoc !== null && (!is_array($intentDoc) || !is_array($intentDoc['routes'] ?? null))) {
+        throw new RuntimeException('runtime hostname intent is invalid: ' . $spaceRoot);
     }
-    $tombstones = _stattic_runtime_read_json($spaceRoot . '/tombstones.json');
-    if (is_array($tombstones) && is_array($tombstones['hostnames'] ?? null)) {
-        foreach ($tombstones['hostnames'] as $hostname) {
-            if (is_string($hostname)) {
-                $hostnames[$hostname] = true;
-            }
-        }
+    $intent = is_array($intentDoc) ? $intentDoc : [];
+    $tombstonesDoc = _stattic_runtime_read_json_strict($spaceRoot . '/tombstones.json');
+    if ($tombstonesDoc !== null && (!is_array($tombstonesDoc) || !is_array($tombstonesDoc['hostnames'] ?? null))) {
+        throw new RuntimeException('runtime tombstones are invalid: ' . $spaceRoot);
     }
+    $tombstones = is_array($tombstonesDoc) ? $tombstonesDoc : [];
+    $hostnames = _stattic_runtime_space_event_hostnames($spaceRoot, $intent, $tombstones);
     _stattic_runtime_rm_recursive($spaceRoot);
-    // Tombstones survive space deletion: deletion ordering compiles tombstones
-    // BEFORE the delete so retired hostnames keep serving the tombstone page
-    // after the content is gone (spec "Space" deletion ordering; e2e
-    // checkpoint 2: the recursive rm used to take tombstones.json with it,
-    // degrading retired hostnames to the generic undeployed 503).
+    // Tombstones must survive the rm: retired hostnames keep serving the
+    // tombstone page rather than degrading to the generic undeployed 503.
     if (is_array($tombstones) && is_array($tombstones['hostnames'] ?? null) && $tombstones['hostnames'] !== []) {
         _stattic_runtime_mkdir($spaceRoot);
         _stattic_runtime_write_json_atomic($spaceRoot . '/tombstones.json', $tombstones);
     }
+    _stattic_runtime_update_route_index($privateRoot, $spaceId);
     _stattic_runtime_record_management_event($privateRoot, $claims, [
         'event' => 'space_deleted',
         'space_id' => $spaceId,
-        'hostnames' => array_keys($hostnames),
+        'hostnames' => $hostnames,
     ]);
-    _stattic_runtime_update_route_index($privateRoot, $spaceId);
-    _stattic_json_response(200, ['space_id' => $spaceId, 'status' => 'deleted']);
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'status' => 'deleted',
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_deleted', [], $hostnames),
+    ]);
 }
 
 function _stattic_runtime_delete_version(string $privateRoot, string $spaceId, string $versionId, array $claims): void
 {
-    $versionRoot = _spacefast_version_root($privateRoot, $spaceId, $versionId);
+    $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
     if (!is_dir($versionRoot)) {
-        _stattic_json_response(404, ['error' => ['code' => 'version_not_found', 'message' => 'Version not found.']]);
+        _stattic_problem_response(404, 'version_not_found', 'Version not found.');
     }
-    // Shard truth read BEFORE the rm: the shas THIS version holds remote
-    // locators for. The control plane decrements remote-blob refcounts for
-    // exactly this set (never the whole manifest — a hot version deleted
-    // while a sibling's demoted blob shares a sha must not zero the sibling's
-    // refcount).
-    $remoteShas = [];
-    foreach (glob($versionRoot . '/file-shards/*.php') ?: [] as $shardPath) {
-        if (!is_string($shardPath)) {
-            continue;
-        }
-        // Lenient include (not _stattic_transfer_file_entries_from_shard's
-        // strict reader): a corrupt shard here just contributes no shas rather
-        // than fatally blocking the delete route with a job-runner exception.
-        $loaded = @include $shardPath;
-        $files = is_array($loaded) && is_array($loaded['files'] ?? null) ? $loaded['files'] : [];
-        foreach (_stattic_transfer_shard_remote_shas($files) as $sha => $bucket) {
-            $remoteShas[$sha] = true;
-        }
-    }
-    $remoteShas = array_keys($remoteShas);
-    sort($remoteShas, SORT_STRING);
+    // The intent is purge state, so prove it before making deletion irreversible.
+    $hostnames = _stattic_runtime_affected_intent_hostnames($privateRoot, $spaceId, null, $versionId);
     _stattic_runtime_rm_recursive($versionRoot);
+    // The bytes stay in the space's shared CAS until the collector runs, so
+    // removing the directory alone does not stop a link minted a moment ago:
+    // the pool still holds this version's catalog and gate sha map for the rest
+    // of their TTL and would keep resolving them. Retire both now.
+    _stattic_runtime_forget_version_caches($spaceId, $versionId);
+    _stattic_runtime_update_route_index($privateRoot, $spaceId);
     _stattic_runtime_record_management_event($privateRoot, $claims, [
         'event' => 'version_deleted',
         'space_id' => $spaceId,
         'version_id' => $versionId,
-        'hostnames' => _stattic_runtime_affected_intent_hostnames($privateRoot, $spaceId, null, $versionId),
-        'remote_shas' => $remoteShas,
+        'hostnames' => $hostnames,
+        // Kept in the event because the control plane still reads it, and
+        // honestly empty: remote-blob refcounts are the demote lane's to report.
+        'remote_shas' => [],
     ]);
-    _stattic_runtime_update_route_index($privateRoot, $spaceId);
-    _stattic_json_response(200, ['space_id' => $spaceId, 'version_id' => $versionId, 'status' => 'deleted']);
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'version_id' => $versionId,
+        'status' => 'deleted',
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'version_deleted', [], $hostnames),
+    ]);
 }
 
 function _stattic_runtime_repair_space(string $privateRoot, string $spaceId, array $claims): void
 {
-    if (!is_dir(_spacefast_space_root($privateRoot, $spaceId))) {
-        _stattic_json_response(404, ['error' => ['code' => 'space_not_found', 'message' => 'Space not found.']]);
+    if (!is_dir(_stattic_space_root($privateRoot, $spaceId))) {
+        _stattic_problem_response(404, 'space_not_found', 'Space not found.');
     }
     _stattic_runtime_rebuild_route_index($privateRoot);
     _stattic_runtime_rm_recursive($privateRoot . '/runtime/repair-state.json');
@@ -1640,29 +1596,62 @@ function _stattic_runtime_repair_space(string $privateRoot, string $spaceId, arr
         'event' => 'space_repaired',
         'space_id' => $spaceId,
     ]);
-    _stattic_json_response(200, ['space_id' => $spaceId, 'status' => 'repaired']);
+    // A repair exists because the projection was wrong, so what the edge cached
+    // while it was wrong is suspect: purge the whole domain rather than guess.
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'status' => 'repaired',
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_repaired'),
+    ]);
 }
 
-// Route-pointer config is pure serving policy. Space passwords are NOT a separate
-// config channel — they ride inside the unified policy.rules as a password
-// challenge rule (one access model); the policy itself is stored per space, not
-// in the pointer file.
 function _stattic_runtime_route_config(mixed $raw): array
 {
     if (!is_array($raw)) {
         return [];
     }
     $config = [];
+    if (array_key_exists('public_exposure_digest', $raw)) {
+        $config['public_exposure_digest'] = _stattic_runtime_public_exposure_digest($raw);
+    }
+    if (array_key_exists('public_exposure', $raw)) {
+        $config['public_exposure'] = _stattic_runtime_public_exposure_descriptor($raw);
+    }
+    if (array_key_exists('authorization', $raw)) {
+        require_once __DIR__ . '/../runtime/access-rules.php';
+        $authorization = _stattic_authorization_projection_compiled($raw['authorization'])
+            ? $raw['authorization']
+            : _stattic_compile_authorization_projection($raw['authorization']);
+        if ($raw['authorization'] !== null && $authorization === null) {
+            _stattic_problem_response(422, 'authorization_projection_invalid', 'Authorization projection is invalid.');
+        }
+        $config['authorization'] = $authorization;
+    }
+    if (array_key_exists('visitor_issuer', $raw)) {
+        $config['visitor_issuer'] = is_string($raw['visitor_issuer'])
+            && $raw['visitor_issuer'] !== ''
+            ? $raw['visitor_issuer']
+            : null;
+    }
+    if (array_key_exists('visitor_jwks', $raw)) {
+        $config['visitor_jwks'] = is_array($raw['visitor_jwks'])
+            ? $raw['visitor_jwks']
+            : null;
+    }
+    if (array_key_exists('projection_generation', $raw)) {
+        $config['projection_generation'] = is_int($raw['projection_generation'])
+            && $raw['projection_generation'] >= 0
+            ? $raw['projection_generation']
+            : null;
+    }
     if (array_key_exists('anonymous_expires_at', $raw)) {
         $config['anonymous_expires_at'] = is_string($raw['anonymous_expires_at']) && $raw['anonymous_expires_at'] !== ''
             ? $raw['anonymous_expires_at']
             : null;
     }
     if (array_key_exists('content_types', $raw)) {
-        // Generic serve-time content-type allowlist (exact types or `prefix/*`
-        // wildcards). The engine enforces whatever list rides the config —
-        // WHY a space is restricted is control-plane policy. Explicit null (or
-        // a malformed doc) clears it.
+        // Exact types or `prefix/*` wildcards; explicit null (or a malformed
+        // doc) clears the list.
         $contentTypes = $raw['content_types'];
         $allowed = is_array($contentTypes) && is_array($contentTypes['allowed'] ?? null)
             ? array_values(array_filter($contentTypes['allowed'], static fn ($value): bool => is_string($value) && $value !== ''))
@@ -1680,58 +1669,421 @@ function _stattic_runtime_route_config(mixed $raw): array
             $config['admission'] = ['concurrency' => max(1, (int) $concurrency)];
         }
     }
+    if (array_key_exists('sdk', $raw)) {
+        // `config` is carried verbatim (the serve path validates each field it
+        // reads); only the envelope and the body ceiling are enforced here.
+        $sdk = $raw['sdk'];
+        $body = is_array($sdk) ? ($sdk['body'] ?? null) : null;
+        $config['sdk'] = is_array($sdk)
+            && is_array($sdk['config'] ?? null)
+            && ($body === null || (is_string($body) && strlen($body) <= 5242880))
+            ? [
+                'revision' => is_string($sdk['revision'] ?? null) ? $sdk['revision'] : null,
+                'config' => $sdk['config'],
+                'body' => is_string($body) ? $body : null,
+            ]
+            : null;
+    }
     return $config;
 }
 
-// THE unified access policy rides inside route config per the runtime contract:
-// `policy` ({ rules }) and the `secrets` its password rules resolve. An explicit
-// null clears the stored value, absence leaves it untouched. Travels on the same
-// host-entry config (finalize+activate and route-update alike).
 function _stattic_runtime_store_unified_access_from_config(string $privateRoot, string $spaceId, mixed $config): void
 {
-    if (is_array($config) && array_key_exists('policy', $config)) {
-        _stattic_runtime_store_unified_policy($privateRoot, $spaceId, $config['policy']);
-    }
-    if (is_array($config) && array_key_exists('secrets', $config)) {
-        _stattic_runtime_store_policy_secrets($privateRoot, $spaceId, $config['secrets']);
-    }
-    if (is_array($config) && array_key_exists('revocations', $config)) {
-        _stattic_runtime_store_revocations_replace($privateRoot, $spaceId, $config['revocations']);
-    }
+    // Canonical Grants are the sole owner-configurable access policy, so every
+    // apply removes both retired runtime policy documents.
+    $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
+    _stattic_runtime_rm_recursive($spaceRoot . '/policy.json');
+    _stattic_runtime_rm_recursive($spaceRoot . '/policy-secrets.json');
     if (is_array($config) && array_key_exists('entitlements', $config)) {
         _stattic_runtime_store_entitlements($privateRoot, $spaceId, $config['entitlements']);
     }
 }
 
-function _stattic_runtime_manifest_files(mixed $files): array
+// root.json is the LAST byte a finalize writes, which is what makes it the
+// finalized marker: a version root without one is mid-finalize or never was.
+function _stattic_runtime_version_finalized(string $versionRoot): bool
 {
-    if (!is_array($files)) {
-        _stattic_json_response(422, ['error' => ['code' => 'invalid_files', 'message' => 'Version files must be an array.']]);
+    return is_file($versionRoot . '/' . STATTIC_RUNTIME_VERSION_ROOT_POINTER_FILE);
+}
+
+// One page of the catalog. Bounded because this route answers both the
+// dashboard's file browser and the abuse scanner's enumeration, and a
+// hundred-thousand-file version must not decide either one's memory ceiling.
+const STATTIC_RUNTIME_VERSION_FILES_PAGE_DEFAULT = 1000;
+const STATTIC_RUNTIME_VERSION_FILES_PAGE_MAX = 2000;
+
+/**
+ * Replace the provider's inherited response status line for a raw source body.
+ *
+ * wp.cloud enters direct PHP entrypoints with its own not-found status line.
+ * `http_response_code()` updates PHP's numeric code but does not replace that
+ * already-staged line, so the edge can pair the right bytes with 404/problem
+ * headers. Emit the complete line last, the same way WordPress `status_header`
+ * does, so the response is one coherent status + header + body tuple.
+ */
+function _stattic_runtime_version_source_status(int $status): void
+{
+    $reason = match ($status) {
+        200 => 'OK',
+        204 => 'No Content',
+        default => throw new InvalidArgumentException('Unsupported version source status.'),
+    };
+    $protocol = is_string($_SERVER['SERVER_PROTOCOL'] ?? null)
+        ? (string) $_SERVER['SERVER_PROTOCOL']
+        : '';
+    if (!in_array($protocol, ['HTTP/1.1', 'HTTP/2', 'HTTP/2.0', 'HTTP/3'], true)) {
+        $protocol = 'HTTP/1.0';
     }
-    $normalized = [];
-    $seenPaths = [];
-    foreach ($files as $file) {
-        if (!is_array($file) || !is_string($file['path'] ?? null) || !isset($file['size'])) {
-            _stattic_json_response(422, ['error' => ['code' => 'invalid_file', 'message' => 'Each version file requires path and size.']]);
-        }
-        $entry = [
-            'path' => _stattic_runtime_file_path($file['path']),
-            'size' => max(0, (int) $file['size']),
-        ];
-        _stattic_runtime_assert_static_upload_path($entry['path']);
-        // Entries byte-identical after canonicalization (including NFC/NFD pairs)
-        // are duplicate-path errors (spec canonical path form).
-        if (isset($seenPaths[$entry['path']])) {
-            _stattic_json_response(422, ['error' => ['code' => 'manifest_duplicate_path', 'message' => 'Version manifest declares the same canonical path twice.', 'details' => ['path' => $entry['path']]]]);
-        }
-        $seenPaths[$entry['path']] = true;
-        if (is_string($file['sha256'] ?? null)) {
-            $entry['sha256'] = $file['sha256'];
-        }
-        if (is_string($file['contentType'] ?? null)) {
-            $entry['contentType'] = $file['contentType'];
-        }
-        $normalized[] = $entry;
+    header($protocol . ' ' . $status . ' ' . $reason, true, $status);
+}
+
+function _stattic_runtime_version_source_reset_headers(): void
+{
+    foreach (['Content-Type', 'Content-Length', 'Cache-Control', 'Pragma', 'Expires'] as $name) {
+        header_remove($name);
     }
-    return $normalized;
+}
+
+/**
+ * Read one bounded source object through the instance-pinned management lane.
+ *
+ * Finalize needs a handful of private compile inputs before the version catalog
+ * exists. Those bytes must not round-trip through the public blob/download
+ * surface: provider X-Accel handling is a serving concern, and a failure there
+ * must not make an already accepted upload unreadable to its own finalizer.
+ *
+ * A fresh path is selected by upload_id + sha256. A retained path is selected
+ * by path against this route's finalized version. Absence is a 204 because the
+ * caller's source-reader contract treats a missing optional file as null.
+ */
+function _stattic_runtime_read_version_source_route(
+    string $privateRoot,
+    string $spaceId,
+    string $versionId,
+    array $_claims
+): void {
+    $uploadId = _stattic_runtime_version_files_param('upload_id');
+    $sha256 = _stattic_runtime_version_files_param('sha256');
+    $path = _stattic_runtime_version_files_param('path');
+    $rawMaxBytes = _stattic_runtime_version_files_param('max_bytes');
+    if (
+        $rawMaxBytes === null
+        || preg_match('/\A[1-9][0-9]{0,7}\z/', $rawMaxBytes) !== 1
+        || (int) $rawMaxBytes > STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES
+    ) {
+        _stattic_problem_response(
+            422,
+            'runtime_version_source_request_invalid',
+            'max_bytes must be a positive integer within the runtime file-size limit.'
+        );
+    }
+    $maxBytes = (int) $rawMaxBytes;
+    $resolved = null;
+    if ($uploadId !== null || $sha256 !== null) {
+        if (
+            $uploadId === null
+            || $sha256 === null
+            || $path !== null
+            || !_stattic_id_valid($uploadId)
+            || preg_match('/\A[a-f0-9]{64}\z/', strtolower($sha256)) !== 1
+        ) {
+            _stattic_problem_response(
+                422,
+                'runtime_version_source_request_invalid',
+                'Fresh source reads require exactly upload_id and sha256.'
+            );
+        }
+        $session = _stattic_runtime_publish_session_load($privateRoot, $spaceId, $uploadId);
+        if (!is_array($session) || ($session['version_id'] ?? null) !== $versionId) {
+            _stattic_runtime_version_source_reset_headers();
+            header('Cache-Control: private, no-store', true);
+            _stattic_runtime_version_source_status(204);
+            exit;
+        }
+        $resolved = _stattic_runtime_publish_session_blob(
+            $privateRoot,
+            $spaceId,
+            $uploadId,
+            strtolower($sha256)
+        );
+    } elseif ($path !== null) {
+        $resolved = _stattic_runtime_resolve_version_file(
+            $privateRoot,
+            $spaceId,
+            $versionId,
+            $path,
+            'source'
+        );
+    } else {
+        _stattic_problem_response(
+            422,
+            'runtime_version_source_request_invalid',
+            'Source reads require upload_id + sha256 or path.'
+        );
+    }
+    if (!is_array($resolved)) {
+        _stattic_runtime_version_source_reset_headers();
+        header('Cache-Control: private, no-store', true);
+        _stattic_runtime_version_source_status(204);
+        exit;
+    }
+    $blobPath = _stattic_runtime_blob_path($privateRoot, $spaceId, (string) $resolved['sha']);
+    $size = filesize($blobPath);
+    if (!is_file($blobPath) || !is_int($size)) {
+        _stattic_problem_response(
+            503,
+            'runtime_version_source_unavailable',
+            'Version source bytes are unavailable on this runtime instance.'
+        );
+    }
+    if ($size > $maxBytes) {
+        _stattic_runtime_version_source_reset_headers();
+        header('Cache-Control: private, no-store', true);
+        _stattic_runtime_version_source_status(204);
+        exit;
+    }
+    $stream = fopen($blobPath, 'rb');
+    if ($stream === false) {
+        _stattic_problem_response(
+            503,
+            'runtime_version_source_unavailable',
+            'Version source bytes are unavailable on this runtime instance.'
+        );
+    }
+    _stattic_runtime_version_source_reset_headers();
+    header('Content-Type: ' . (string) ($resolved['mime'] ?? 'application/octet-stream'), true);
+    header('Content-Length: ' . $size, true);
+    header('Cache-Control: private, no-store', true);
+    header('X-Content-Type-Options: nosniff', true);
+    _stattic_runtime_version_source_status(200);
+    _stattic_stream_file($stream, $size);
+    fclose($stream);
+    exit;
+}
+
+function _stattic_runtime_version_files_request_invalid(string $message): never
+{
+    _stattic_problem_response(422, 'runtime_version_files_request_invalid', $message);
+}
+
+/**
+ * THE version file list: one bounded catalog page, both views, for every reader
+ * that used to reconstruct a file list from its own projection.
+ *
+ * `view=source` is the uploaded, pre-substitution object — what the file browser
+ * shows. `view=served` is the immutable byte a visitor receives, which is what
+ * the scanner enumerates; private compile inputs have no served object and drop
+ * out of that view entirely. `channel` adds a template-variant route's own bytes
+ * as extra rows carrying `variant_route`, so the scanner still sees the exact
+ * bytes that channel can serve — it is a served-view dimension and nothing else.
+ *
+ * `public` comes from the catalog, the single visibility implementation.
+ *
+ * `path` narrows the page to one exact entry, so a per-file lookup costs one
+ * bounded round trip instead of a full drain. A path the view does not hold is
+ * an EMPTY page, not a 404: absence is the answer the caller asked for.
+ */
+function _stattic_runtime_list_version_files_route(string $privateRoot, string $spaceId, string $versionId): void
+{
+    $view = _stattic_runtime_version_files_param('view') ?? 'source';
+    if (!in_array($view, STATTIC_RUNTIME_VERSION_FILE_VIEWS, true)) {
+        _stattic_runtime_version_files_request_invalid('view must be "source" or "served".');
+    }
+    $channel = _stattic_runtime_version_files_param('channel');
+    if ($channel !== null) {
+        if ($view !== 'served') {
+            _stattic_runtime_version_files_request_invalid('channel selects template-variant bytes and requires view=served.');
+        }
+        $channel = _stattic_runtime_id($channel, 'channel');
+    }
+    $exactPath = _stattic_runtime_version_files_param('path');
+    if ($exactPath !== null) {
+        $exactPath = _stattic_runtime_file_path_or_null($exactPath);
+        if ($exactPath === null) {
+            _stattic_runtime_version_files_request_invalid('path is not a canonical version path.');
+        }
+    }
+    $publicOnly = _stattic_runtime_version_files_flag('public_only');
+    $prefix = _stattic_runtime_version_files_param('prefix') ?? '';
+    $query = _stattic_runtime_version_files_param('q') ?? '';
+    $limit = STATTIC_RUNTIME_VERSION_FILES_PAGE_DEFAULT;
+    $rawLimit = _stattic_runtime_version_files_param('limit');
+    if ($rawLimit !== null) {
+        if (preg_match('/\A[1-9][0-9]{0,5}\z/', $rawLimit) !== 1) {
+            _stattic_runtime_version_files_request_invalid('limit must be a positive integer.');
+        }
+        $limit = min(STATTIC_RUNTIME_VERSION_FILES_PAGE_MAX, (int) $rawLimit);
+    }
+    $after = null;
+    $rawCursor = _stattic_runtime_version_files_param('cursor');
+    if ($rawCursor !== null) {
+        $after = _stattic_runtime_version_files_cursor_decode($rawCursor);
+        if ($after === null) {
+            _stattic_runtime_version_files_request_invalid('cursor is invalid.');
+        }
+    }
+
+    if (!_stattic_runtime_version_finalized(_stattic_version_root($privateRoot, $spaceId, $versionId))) {
+        _stattic_problem_response(404, 'version_not_found', 'Version not found.');
+    }
+    $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
+    if ($catalog === null) {
+        // A committed version with no readable catalog is a repair job, not a
+        // degraded read: there is no second projection to reconstruct it from.
+        _stattic_problem_response(
+            409,
+            'runtime_file_catalog_invalid',
+            'This version has no readable file catalog.',
+        );
+    }
+
+    $rows = [];
+    foreach ($catalog['paths'] as $path => $entry) {
+        if (!is_string($path) || $path === '' || !is_array($entry)) {
+            continue;
+        }
+        $public = ($entry['public'] ?? false) === true;
+        if ($publicOnly && !$public) {
+            continue;
+        }
+        $object = _stattic_runtime_catalog_object($entry[$view] ?? null);
+        if ($object === null) {
+            continue;
+        }
+        $rows[] = _stattic_runtime_version_files_row($path, $object, $public, null);
+    }
+    if ($channel !== null) {
+        $variant = is_array($catalog['variants'][$channel] ?? null) ? $catalog['variants'][$channel] : [];
+        foreach ($variant as $path => $object) {
+            if (!is_string($path) || $path === '') {
+                continue;
+            }
+            // A variant substitutes bytes for a path the base already carries,
+            // so the base entry owns the visibility bit.
+            $base = is_array($catalog['paths'][$path] ?? null) ? $catalog['paths'][$path] : [];
+            $public = ($base['public'] ?? false) === true;
+            if ($publicOnly && !$public) {
+                continue;
+            }
+            $normalized = _stattic_runtime_catalog_object($object);
+            if ($normalized === null) {
+                continue;
+            }
+            $rows[] = _stattic_runtime_version_files_row($path, $normalized, $public, $channel);
+        }
+    }
+
+    $rows = array_values(array_filter(
+        $rows,
+        static fn (array $row): bool => _stattic_runtime_version_files_matches($row['path'], $exactPath, $prefix, $query)
+    ));
+    usort($rows, static fn (array $left, array $right): int => strcmp(
+        _stattic_runtime_version_files_sort_key($left),
+        _stattic_runtime_version_files_sort_key($right)
+    ));
+    if ($after !== null) {
+        $rows = array_values(array_filter(
+            $rows,
+            static fn (array $row): bool => strcmp(_stattic_runtime_version_files_sort_key($row), $after) > 0
+        ));
+    }
+    $page = array_slice($rows, 0, $limit);
+    $nextCursor = count($rows) > $limit && $page !== []
+        ? _stattic_runtime_version_files_cursor_encode(
+            _stattic_runtime_version_files_sort_key($page[count($page) - 1])
+        )
+        : null;
+
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'version_id' => $versionId,
+        'view' => $view,
+        'files' => $page,
+        'next_cursor' => $nextCursor,
+    ]);
+}
+
+/** @return array{path: string, size: int, sha256: string, content_type: string, public: bool, variant_route?: string} */
+function _stattic_runtime_version_files_row(string $path, array $object, bool $public, ?string $variantRoute): array
+{
+    return [
+        'path' => $path,
+        'size' => $object['size'],
+        'sha256' => $object['sha'],
+        'content_type' => $object['mime'],
+        'public' => $public,
+        ...($variantRoute !== null ? ['variant_route' => $variantRoute] : []),
+    ];
+}
+
+// Base rows before their variant rows, then by path — the same order the cursor
+// walks, so a page boundary never re-delivers or skips a row.
+function _stattic_runtime_version_files_sort_key(array $row): string
+{
+    return (string) ($row['variant_route'] ?? '') . "\0" . (string) $row['path'];
+}
+
+function _stattic_runtime_version_files_matches(string $path, ?string $exactPath, string $prefix, string $query): bool
+{
+    if ($exactPath !== null && $path !== $exactPath) {
+        return false;
+    }
+    if ($prefix !== '' && !str_starts_with($path, $prefix)) {
+        return false;
+    }
+    return $query === '' || stripos($path, $query) !== false;
+}
+
+// A query parameter as a non-empty string, or null when absent. A repeated or
+// array-shaped parameter is a caller bug and says so rather than being coerced
+// into a value the caller never sent.
+function _stattic_runtime_version_files_param(string $name): ?string
+{
+    $raw = $_GET[$name] ?? null;
+    if ($raw === null) {
+        return null;
+    }
+    if (!is_string($raw)) {
+        _stattic_runtime_version_files_request_invalid($name . ' must be a single value.');
+    }
+    $raw = trim($raw);
+    return $raw === '' ? null : $raw;
+}
+
+function _stattic_runtime_version_files_flag(string $name): bool
+{
+    $raw = _stattic_runtime_version_files_param($name);
+    if ($raw === null) {
+        return false;
+    }
+    if (!in_array($raw, ['1', '0', 'true', 'false'], true)) {
+        _stattic_runtime_version_files_request_invalid($name . ' must be one of "1", "0", "true", "false".');
+    }
+    return $raw === '1' || $raw === 'true';
+}
+
+// Opaque to the caller and self-describing to us: the sort key of the last row
+// already delivered.
+function _stattic_runtime_version_files_cursor_encode(string $sortKey): string
+{
+    return _stattic_base64url_encode($sortKey);
+}
+
+function _stattic_runtime_version_files_cursor_decode(string $cursor): ?string
+{
+    $decoded = _stattic_base64url_decode($cursor);
+    return $decoded !== '' ? $decoded : null;
+}
+
+function _stattic_runtime_purge_space_route(string $privateRoot, string $spaceId, array $claims): void
+{
+    $body = _stattic_json_body();
+    $paths = $body['urls'] ?? null;
+    if ($paths !== null && (!is_array($paths) || !array_is_list($paths))) {
+        _stattic_problem_response(422, 'runtime_purge_request_invalid', 'urls must be a list of request paths.');
+    }
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'control_plane_purge', $paths ?? []),
+    ]);
 }

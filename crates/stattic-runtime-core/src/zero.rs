@@ -1,12 +1,14 @@
 use serde_json::{json, Value};
 use stattic_zero_runner::{
-    compile_endpoint_program, compile_finalized_endpoint_program, CompiledEndpointProgram,
-    ZeroEndpointCapabilities,
+    compile_endpoint_program, ZeroEndpointCapabilities, QUICKJS_ABI, RUNNER_ABI,
+    ZERO_ENDPOINTS_INDEX_FORMAT, ZERO_ENDPOINTS_INDEX_KIND, ZERO_ENDPOINT_FORMAT,
+    ZERO_MIGRATIONS_FORMAT, ZERO_RUN_FORMAT,
 };
 use std::collections::BTreeMap;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::hash::{sha256_hex, sha256_prefixed, stable_json_sha256};
+use crate::finalize::sha256;
+use crate::hash::{sha256_prefixed, stable_json_sha256};
 use crate::metadata::artifact_metadata_fields;
 use crate::model::*;
 
@@ -39,7 +41,7 @@ pub(crate) fn zero_pack_sha256(compiled_zero: &CompiledZeroEndpoints) -> Option<
         .map(|file| {
             json!({
                 "path": file.path,
-                "sha256": sha256_hex(&file.bytes),
+                "sha256": sha256(&file.bytes),
             })
         })
         .collect();
@@ -56,35 +58,82 @@ pub(crate) fn zero_pack_sha256(compiled_zero: &CompiledZeroEndpoints) -> Option<
     })))
 }
 
-/// How an endpoint/run `source` field is turned into a program:
-/// - `Raw`: publish-time source; render the ABI-v2 prelude around it, then
-///   compile (`compile_endpoint_program`).
-/// - `Finalized`: an already-finalized generated program (import rebind);
-///   compile the source verbatim without rendering another prelude
-///   (`compile_finalized_endpoint_program`).
-#[derive(Clone, Copy)]
-pub(crate) enum ZeroProgramSource {
-    Raw,
-    Finalized,
+/// The two things the shared compile core cannot derive: where a lane's
+/// artifacts live, and how it names a compile failure.
+struct ZeroProgramLane {
+    base: &'static str,
+    diagnostic_code: &'static str,
+    label: &'static str,
 }
 
-impl ZeroProgramSource {
-    fn compile(
-        self,
-        source: &str,
-        name: &str,
-        capabilities: &ZeroEndpointCapabilities,
-    ) -> Result<CompiledEndpointProgram, String> {
-        match self {
-            Self::Raw => compile_endpoint_program(source, name, capabilities),
-            Self::Finalized => compile_finalized_endpoint_program(source, name).map(|bytecode| {
-                CompiledEndpointProgram {
-                    generated_source: source.to_string(),
-                    bytecode,
-                }
-            }),
-        }
-    }
+const ZERO_ENDPOINT_LANE: ZeroProgramLane = ZeroProgramLane {
+    base: "zero/endpoints",
+    diagnostic_code: "zero_endpoint_compile_failed",
+    label: "Zero endpoint",
+};
+
+const ZERO_RUN_LANE: ZeroProgramLane = ZeroProgramLane {
+    base: "zero/runs",
+    diagnostic_code: "zero_run_compile_failed",
+    label: "Zero run handler",
+};
+
+struct CompiledZeroProgram {
+    source_path: String,
+    bytecode_path: String,
+    artifact_path: String,
+    source_sha256: String,
+    bytecode_sha256: String,
+}
+
+/// Compiles one validated entry into its generated source and bytecode files,
+/// pushing both into `generated_files`, and returns the paths and digests its
+/// artifact carries. `None` means the compile failed and said so.
+fn compile_zero_program(
+    lane: &ZeroProgramLane,
+    slug: &str,
+    source: &str,
+    capabilities: &ZeroCapabilities,
+    diagnostic_path: &str,
+    diagnostics: &mut Vec<RuntimeDiagnostic>,
+    generated_files: &mut Vec<GeneratedRuntimeFile>,
+) -> Option<CompiledZeroProgram> {
+    let base_path = format!("{}/{slug}", lane.base);
+    let source_path = format!("{base_path}.source.js");
+    let bytecode_path = format!("{base_path}.bytecode");
+    let artifact_path = format!("{base_path}.json");
+    let runner_capabilities = runner_capabilities(capabilities);
+    let compiled_program =
+        match compile_endpoint_program(source, &source_path, &runner_capabilities) {
+            Ok(compiled_program) => compiled_program,
+            Err(error) => {
+                diagnostics.push(RuntimeDiagnostic {
+                    severity: RuntimeDiagnosticSeverity::Error,
+                    code: lane.diagnostic_code.to_string(),
+                    message: format!("{} bytecode compilation failed: {error}", lane.label),
+                    path: Some(diagnostic_path.to_string()),
+                    details: None,
+                });
+                return None;
+            }
+        };
+    let source_sha256 = sha256_prefixed(compiled_program.generated_source.as_bytes());
+    let bytecode_sha256 = sha256_prefixed(&compiled_program.bytecode);
+    generated_files.push(GeneratedRuntimeFile {
+        path: source_path.clone(),
+        bytes: compiled_program.generated_source.into_bytes(),
+    });
+    generated_files.push(GeneratedRuntimeFile {
+        path: bytecode_path.clone(),
+        bytes: compiled_program.bytecode,
+    });
+    Some(CompiledZeroProgram {
+        source_path,
+        bytecode_path,
+        artifact_path,
+        source_sha256,
+        bytecode_sha256,
+    })
 }
 
 pub(crate) fn compile_zero_endpoints(
@@ -92,41 +141,6 @@ pub(crate) fn compile_zero_endpoints(
     endpoints: &[RuntimeZeroEndpoint],
     runs: &[RuntimeZeroRun],
     diagnostics: &mut Vec<RuntimeDiagnostic>,
-) -> CompiledZeroEndpoints {
-    compile_zero_endpoints_with(
-        artifact_metadata,
-        endpoints,
-        runs,
-        diagnostics,
-        ZeroProgramSource::Raw,
-    )
-}
-
-/// Recompiles previously-finalized Zero programs (exported from another space)
-/// against this runner build: same route/index/artifact pipeline as a fresh
-/// compile, but the sources are trusted-shape generated programs and get
-/// bytecode-only compilation — no second prelude.
-pub(crate) fn recompile_finalized_zero_endpoints(
-    artifact_metadata: Option<&Value>,
-    endpoints: &[RuntimeZeroEndpoint],
-    runs: &[RuntimeZeroRun],
-    diagnostics: &mut Vec<RuntimeDiagnostic>,
-) -> CompiledZeroEndpoints {
-    compile_zero_endpoints_with(
-        artifact_metadata,
-        endpoints,
-        runs,
-        diagnostics,
-        ZeroProgramSource::Finalized,
-    )
-}
-
-fn compile_zero_endpoints_with(
-    artifact_metadata: Option<&Value>,
-    endpoints: &[RuntimeZeroEndpoint],
-    runs: &[RuntimeZeroRun],
-    diagnostics: &mut Vec<RuntimeDiagnostic>,
-    program_source: ZeroProgramSource,
 ) -> CompiledZeroEndpoints {
     let mut compiled = CompiledZeroEndpoints {
         php_routes: Vec::new(),
@@ -147,6 +161,7 @@ fn compile_zero_endpoints_with(
             code: "zero_endpoints_too_many".to_string(),
             message: "Zero endpoints support up to 128 entries.".to_string(),
             path: None,
+            details: None,
         });
         return compiled;
     }
@@ -156,6 +171,7 @@ fn compile_zero_endpoints_with(
             code: "zero_runs_too_many".to_string(),
             message: "Zero run handlers support up to 128 entries.".to_string(),
             path: None,
+            details: None,
         });
         return compiled;
     }
@@ -184,6 +200,7 @@ fn compile_zero_endpoints_with(
                 code: "zero_endpoint_conflict".to_string(),
                 message: format!("Zero endpoint {path} conflicts with a generated control route."),
                 path: Some(endpoint.path.clone()),
+                details: None,
             });
             continue;
         }
@@ -198,6 +215,7 @@ fn compile_zero_endpoints_with(
                 code: "zero_endpoint_invalid".to_string(),
                 message: "Zero endpoint entry is invalid.".to_string(),
                 path: Some(endpoint.path.clone()),
+                details: None,
             });
             continue;
         }
@@ -211,6 +229,7 @@ fn compile_zero_endpoints_with(
                 message: "Zero endpoint routes must not have equal-priority overlapping matches."
                     .to_string(),
                 path: Some(path.clone()),
+                details: None,
             });
             continue;
         }
@@ -224,43 +243,37 @@ fn compile_zero_endpoints_with(
                 code: "zero_endpoint_id_duplicate".to_string(),
                 message: "Zero endpoint ids must be unique.".to_string(),
                 path: Some(path.clone()),
+                details: None,
             });
             continue;
         }
 
         let slug = zero_endpoint_slug(&method, &path, index);
-        let base_path = format!("zero/endpoints/{slug}");
-        let source_path = format!("{base_path}.source.js");
-        let bytecode_path = format!("{base_path}.bytecode");
-        let artifact_path = format!("{base_path}.json");
-        let runner_capabilities = runner_capabilities(&endpoint.capabilities);
-        let compiled_program =
-            match program_source.compile(&endpoint.source, &source_path, &runner_capabilities) {
-                Ok(compiled_program) => compiled_program,
-                Err(error) => {
-                    diagnostics.push(RuntimeDiagnostic {
-                        severity: RuntimeDiagnosticSeverity::Error,
-                        code: "zero_endpoint_compile_failed".to_string(),
-                        message: format!("Zero endpoint bytecode compilation failed: {error}"),
-                        path: Some(path.clone()),
-                    });
-                    continue;
-                }
-            };
+        let Some(program) = compile_zero_program(
+            &ZERO_ENDPOINT_LANE,
+            &slug,
+            &endpoint.source,
+            &endpoint.capabilities,
+            &path,
+            diagnostics,
+            &mut compiled.generated_files,
+        ) else {
+            continue;
+        };
+        let artifact_path = program.artifact_path;
         let db = zero_endpoint_db_metadata(endpoint.db.as_ref(), endpoint.schema_hash.as_ref());
         let artifact = ZeroEndpointArtifact {
-            format: "stattic.zero.endpoint.v1".to_string(),
+            format: ZERO_ENDPOINT_FORMAT.to_string(),
             endpoint_id: endpoint_id.clone(),
             kind: "endpoint".to_string(),
             method: method.clone(),
             path: path.clone(),
-            source_path: source_path.clone(),
-            bytecode_path: bytecode_path.clone(),
-            source_sha256: sha256_prefixed(compiled_program.generated_source.as_bytes()),
-            bytecode_sha256: sha256_prefixed(&compiled_program.bytecode),
-            runner_abi: "stattic-zero-runner-abi-v2".to_string(),
-            quickjs_abi: "rquickjs-0.12".to_string(),
-            source_fallback: false,
+            source_path: program.source_path,
+            bytecode_path: program.bytecode_path,
+            source_sha256: program.source_sha256,
+            bytecode_sha256: program.bytecode_sha256,
+            runner_abi: RUNNER_ABI.to_string(),
+            quickjs_abi: QUICKJS_ABI.to_string(),
             capabilities: endpoint.capabilities.clone(),
             db,
         };
@@ -270,7 +283,7 @@ fn compile_zero_endpoints_with(
             .and_then(Value::as_str)
             .map(str::to_string);
         for statement in zero_db_migration_statements(&artifact.db) {
-            migration_statements.insert(statement.clone(), statement);
+            migration_statements.insert(zero_migration_statement_sort_key(&statement), statement);
         }
         endpoint_index.insert(endpoint_id.clone(), artifact_path.clone());
         compiled.php_routes.push(PhpActionRecord::InvokeZero {
@@ -298,14 +311,6 @@ fn compile_zero_endpoints_with(
         } else {
             exact.push(route_entry);
         }
-        compiled.generated_files.push(GeneratedRuntimeFile {
-            path: source_path,
-            bytes: compiled_program.generated_source.into_bytes(),
-        });
-        compiled.generated_files.push(GeneratedRuntimeFile {
-            path: bytecode_path,
-            bytes: compiled_program.bytecode,
-        });
         compiled.endpoint_artifacts.push(artifact);
     }
 
@@ -321,6 +326,7 @@ fn compile_zero_endpoints_with(
                 code: "zero_run_invalid".to_string(),
                 message: "Zero run handler entry is invalid.".to_string(),
                 path: Some(run.run_id.clone()),
+                details: None,
             });
             continue;
         }
@@ -330,56 +336,41 @@ fn compile_zero_endpoints_with(
                 code: "zero_run_duplicate".to_string(),
                 message: "Zero run handler ids must be unique.".to_string(),
                 path: Some(run_id.to_string()),
+                details: None,
             });
             continue;
         }
 
         let slug = zero_run_slug(run_id, index);
-        let base_path = format!("zero/runs/{slug}");
-        let source_path = format!("{base_path}.source.js");
-        let bytecode_path = format!("{base_path}.bytecode");
-        let artifact_path = format!("{base_path}.json");
-        let runner_capabilities = runner_capabilities(&run.capabilities);
-        let compiled_program =
-            match program_source.compile(&run.source, &source_path, &runner_capabilities) {
-                Ok(compiled_program) => compiled_program,
-                Err(error) => {
-                    diagnostics.push(RuntimeDiagnostic {
-                        severity: RuntimeDiagnosticSeverity::Error,
-                        code: "zero_run_compile_failed".to_string(),
-                        message: format!("Zero run handler bytecode compilation failed: {error}"),
-                        path: Some(run_id.to_string()),
-                    });
-                    continue;
-                }
-            };
+        let Some(program) = compile_zero_program(
+            &ZERO_RUN_LANE,
+            &slug,
+            &run.source,
+            &run.capabilities,
+            run_id,
+            diagnostics,
+            &mut compiled.generated_files,
+        ) else {
+            continue;
+        };
         let db = zero_endpoint_db_metadata(run.db.as_ref(), run.schema_hash.as_ref());
         for statement in zero_db_migration_statements(&db) {
-            migration_statements.insert(statement.clone(), statement);
+            migration_statements.insert(zero_migration_statement_sort_key(&statement), statement);
         }
-        run_index.insert(run_id.to_string(), artifact_path.clone());
+        run_index.insert(run_id.to_string(), program.artifact_path);
         let artifact = ZeroRunArtifact {
-            format: "stattic.zero.run.v1".to_string(),
+            format: ZERO_RUN_FORMAT.to_string(),
             run_id: run_id.to_string(),
             kind: "run".to_string(),
-            source_path: source_path.clone(),
-            bytecode_path: bytecode_path.clone(),
-            source_sha256: sha256_prefixed(compiled_program.generated_source.as_bytes()),
-            bytecode_sha256: sha256_prefixed(&compiled_program.bytecode),
-            runner_abi: "stattic-zero-runner-abi-v2".to_string(),
-            quickjs_abi: "rquickjs-0.12".to_string(),
-            source_fallback: false,
+            source_path: program.source_path,
+            bytecode_path: program.bytecode_path,
+            source_sha256: program.source_sha256,
+            bytecode_sha256: program.bytecode_sha256,
+            runner_abi: RUNNER_ABI.to_string(),
+            quickjs_abi: QUICKJS_ABI.to_string(),
             capabilities: run.capabilities.clone(),
             db,
         };
-        compiled.generated_files.push(GeneratedRuntimeFile {
-            path: source_path,
-            bytes: compiled_program.generated_source.into_bytes(),
-        });
-        compiled.generated_files.push(GeneratedRuntimeFile {
-            path: bytecode_path,
-            bytes: compiled_program.bytecode,
-        });
         compiled.run_artifacts.push(artifact);
     }
 
@@ -402,7 +393,7 @@ fn compile_zero_endpoints_with(
             runtime_schema: metadata.runtime_schema,
             runtime_engine_version: metadata.runtime_engine_version,
             generated_at: metadata.generated_at,
-            format: "stattic.zero.migrations.v1".to_string(),
+            format: ZERO_MIGRATIONS_FORMAT.to_string(),
             artifact_kind: "zero_migrations".to_string(),
             statements: migration_statements.into_values().collect(),
         });
@@ -413,8 +404,8 @@ fn compile_zero_endpoints_with(
             runtime_schema: metadata.runtime_schema,
             runtime_engine_version: metadata.runtime_engine_version,
             generated_at: metadata.generated_at,
-            format: "stattic.zero.endpoints-index.v1".to_string(),
-            artifact_kind: "zero_endpoints_index".to_string(),
+            format: ZERO_ENDPOINTS_INDEX_FORMAT.to_string(),
+            artifact_kind: ZERO_ENDPOINTS_INDEX_KIND.to_string(),
             endpoints: endpoint_index,
         });
     }
@@ -442,7 +433,7 @@ fn zero_method_valid(method: &str) -> bool {
 const ZERO_CONTROL_PATHS: &[&str] = &[
     "/__spacefast/zero/config",
     "/__spacefast/zero/run",
-    "/__spacefast/zero/auth/wpcom/start",
+    "/__spacefast/zero/auth/gravatar/start",
     "/__spacefast/zero/auth/sign-out",
     "/__spacefast/zero/realtime/events",
 ];
@@ -486,7 +477,7 @@ fn zero_endpoint_id(method: &str, path: &str) -> String {
     if readable.len() <= 256 {
         return readable;
     }
-    let digest = sha256_hex(format!("{method}\0{path}").as_bytes());
+    let digest = sha256(format!("{method}\0{path}").as_bytes());
     format!("endpoint_{}_{}", method.to_ascii_lowercase(), digest)
 }
 
@@ -569,13 +560,13 @@ fn zero_endpoint_slug(method: &str, path: &str, index: usize) -> String {
         base = "endpoint".to_string();
     }
     let prefix = if base.len() > 64 { &base[..64] } else { &base };
-    let digest = sha256_hex(format!("{method}\n{path}\n{index}").as_bytes());
+    let digest = sha256(format!("{method}\n{path}\n{index}").as_bytes());
     format!("{prefix}_{}", &digest[..12])
 }
 
 fn zero_run_slug(run_id: &str, index: usize) -> String {
     let base = sanitize_slug(run_id);
-    let digest = sha256_hex(format!("{run_id}\n{index}").as_bytes());
+    let digest = sha256(format!("{run_id}\n{index}").as_bytes());
     format!("{base}_{}", &digest[..12])
 }
 
@@ -620,6 +611,9 @@ fn runner_capabilities(capabilities: &ZeroCapabilities) -> ZeroEndpointCapabilit
         env: capabilities.env,
         realtime: capabilities.realtime,
         logging: capabilities.logging,
+        gravatar: capabilities.gravatar,
+        spam: capabilities.spam,
+        email: capabilities.email,
     }
 }
 
@@ -646,14 +640,31 @@ fn zero_endpoint_db_metadata(input: Option<&Value>, schema_hash: Option<&String>
                                 .unwrap_or(column_name),
                             _ => column_name,
                         };
+                        let column_type = raw_column
+                            .as_object()
+                            .and_then(|object| object.get("type"))
+                            .and_then(Value::as_str)
+                            .unwrap_or(if column_name == "id" { "id" } else { "string" });
                         columns.insert(
                             column_name.clone(),
                             json!({
                                 "name": column_name,
                                 "physicalName": physical_column,
                                 "quotedName": quote_mysql_identifier(physical_column),
+                                "type": column_type,
                             }),
                         );
+                    }
+                }
+                let mut indexes = serde_json::Map::new();
+                if let Some(raw_indexes) = table.get("indexes").and_then(Value::as_object) {
+                    for (index_name, raw_index) in raw_indexes {
+                        let fields = raw_index
+                            .get("fields")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        indexes.insert(index_name.clone(), json!({ "fields": fields }));
                     }
                 }
                 tables.insert(
@@ -664,6 +675,7 @@ fn zero_endpoint_db_metadata(input: Option<&Value>, schema_hash: Option<&String>
                         "quotedName": quote_mysql_identifier(physical_name),
                         "primaryKey": table.get("primaryKey").and_then(Value::as_str).unwrap_or("id"),
                         "columns": Value::Object(columns),
+                        "indexes": Value::Object(indexes),
                     }),
                 );
             }
@@ -676,6 +688,10 @@ fn zero_endpoint_db_metadata(input: Option<&Value>, schema_hash: Option<&String>
         .or_else(|| schema_hash.cloned());
     json!({
         "schemaHash": resolved_schema_hash,
+        "migrationOperations": input
+            .and_then(|value| value.get("migrationOperations"))
+            .cloned()
+            .unwrap_or_else(|| json!([])),
         "tables": Value::Object(tables),
     })
 }
@@ -742,7 +758,128 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
             column_definitions.join(", ")
         ));
     }
+    if let Some(operations) = db.get("migrationOperations").and_then(Value::as_array) {
+        for operation in operations {
+            let Some(op) = operation.get("op").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(table_name) = operation.get("table").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(table) = tables.get(table_name).and_then(Value::as_object) else {
+                continue;
+            };
+            let Some(physical_name) = table.get("physicalName").and_then(Value::as_str) else {
+                continue;
+            };
+            if op == "add_column" {
+                // `CREATE TABLE IF NOT EXISTS` is a no-op once the table exists, so a
+                // schema that gains a field only ever reaches the database through this
+                // ALTER. The primary key is part of the CREATE and is never added here.
+                let primary_key = table
+                    .get("primaryKey")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("id");
+                let columns = table.get("columns").and_then(Value::as_object);
+                let primary_physical = columns
+                    .and_then(|columns| columns.get(primary_key))
+                    .and_then(|column| column.get("physicalName"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(primary_key);
+                let Some(column_name) = operation
+                    .get("column")
+                    .and_then(|column| column.get("name"))
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let Some(column_physical) = columns
+                    .and_then(|columns| columns.get(column_name))
+                    .and_then(|column| column.get("physicalName"))
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                if column_name == primary_key || column_physical == primary_physical {
+                    continue;
+                }
+                statements.push(format!(
+                    "ALTER TABLE {} ADD COLUMN {} TEXT NULL",
+                    quote_mysql_identifier(physical_name),
+                    quote_mysql_identifier(column_physical)
+                ));
+                continue;
+            }
+            let Some(index_name) = operation.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if op == "drop_index" {
+                statements.push(format!(
+                    "DROP INDEX {} ON {}",
+                    quote_mysql_identifier(index_name),
+                    quote_mysql_identifier(physical_name)
+                ));
+                continue;
+            }
+            if op != "add_index" {
+                continue;
+            }
+            let Some(column_names) = operation.get("columns").and_then(Value::as_array) else {
+                continue;
+            };
+            let columns = table.get("columns").and_then(Value::as_object);
+            let mut traversal_names: Vec<&str> =
+                column_names.iter().filter_map(Value::as_str).collect();
+            for managed in ["createdAt", "id"] {
+                if columns.is_some_and(|columns| columns.contains_key(managed))
+                    && !traversal_names.contains(&managed)
+                {
+                    traversal_names.push(managed);
+                }
+            }
+            let physical_columns: Vec<String> = traversal_names
+                .iter()
+                .filter_map(|name| {
+                    let physical = columns
+                        .and_then(|columns| columns.get(*name))
+                        .and_then(|column| column.get("physicalName"))
+                        .and_then(Value::as_str)?;
+                    Some(if *name == "id" {
+                        quote_mysql_identifier(physical)
+                    } else {
+                        format!("{}(191)", quote_mysql_identifier(physical))
+                    })
+                })
+                .collect();
+            if physical_columns.len() != traversal_names.len() || physical_columns.is_empty() {
+                continue;
+            }
+            statements.push(format!(
+                "CREATE INDEX {} ON {} ({})",
+                quote_mysql_identifier(index_name),
+                quote_mysql_identifier(physical_name),
+                physical_columns.join(", ")
+            ));
+        }
+    }
     statements
+}
+
+fn zero_migration_statement_sort_key(statement: &str) -> String {
+    // Tables exist before their columns; columns exist before any index over them.
+    let priority = if statement.starts_with("CREATE TABLE ") {
+        0
+    } else if statement.starts_with("ALTER TABLE ") {
+        1
+    } else if statement.starts_with("DROP INDEX ") {
+        2
+    } else if statement.starts_with("CREATE INDEX ") {
+        3
+    } else {
+        4
+    };
+    format!("{priority}:{statement}")
 }
 
 fn quote_mysql_identifier(identifier: &str) -> String {
@@ -775,5 +912,97 @@ mod tests {
         let metadata =
             zero_endpoint_db_metadata(Some(&json!({"schemaHash":"sha256:db"})), Some(&fallback));
         assert_eq!(metadata["schemaHash"], json!("sha256:db"));
+    }
+
+    /// The route grammar is a boundary, not a preference: a path that escapes
+    /// its prefix, hides a NUL, or shadows the reserved `/__spacefast/zero`
+    /// namespace has to be refused here, before anything compiles it into an
+    /// artifact the serve path will route on.
+    #[test]
+    fn route_structure_is_validated_before_compilation() {
+        let compile = |paths: &[&str]| {
+            let endpoints = paths
+                .iter()
+                .map(|path| RuntimeZeroEndpoint {
+                    method: "GET".to_string(),
+                    path: (*path).to_string(),
+                    source: "globalThis.__statticZeroResult = '{}';".to_string(),
+                    endpoint_id: None,
+                    schema_hash: None,
+                    capabilities: ZeroCapabilities::default(),
+                    db: None,
+                })
+                .collect::<Vec<_>>();
+            let mut diagnostics = Vec::new();
+            compile_zero_endpoints(None, &endpoints, &[], &mut diagnostics);
+            diagnostics
+        };
+        let refused = |diagnostics: &[RuntimeDiagnostic], code: &str| {
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == RuntimeDiagnosticSeverity::Error && diagnostic.code == code
+            })
+        };
+
+        let long_segment = "a".repeat(2_049);
+        for path in [
+            "/api/\0nul",
+            "/api/../escape",
+            "/api//empty",
+            "/api/:",
+            "/api/:splat/tail",
+            long_segment.as_str(),
+        ] {
+            let diagnostics = compile([path].as_slice());
+            assert!(
+                refused(&diagnostics, "zero_endpoint_invalid"),
+                "expected zero_endpoint_invalid for {path:?}"
+            );
+        }
+
+        assert!(refused(
+            &compile(["/__spacefast/zero/config"].as_slice()),
+            "zero_endpoint_conflict"
+        ));
+
+        let valid = compile(["/api/users/:id", "/api/:bad-name", "/files/:splat"].as_slice());
+        assert!(
+            !valid
+                .iter()
+                .any(|diagnostic| diagnostic.severity == RuntimeDiagnosticSeverity::Error),
+            "structurally valid routes must not be rejected: {valid:?}"
+        );
+    }
+
+    /// An endpoint that declares no capabilities, or only some, gets every
+    /// undeclared one granted. The runner enforces exactly what lands here, so
+    /// a serde default flipping to `false` would silently disarm a live
+    /// endpoint rather than fail anything.
+    #[test]
+    fn absent_and_partial_capability_declarations_grant_the_rest() {
+        let endpoint = |value: Value| -> RuntimeZeroEndpoint {
+            serde_json::from_value(value).expect("endpoint")
+        };
+        assert_eq!(
+            endpoint(json!({
+                "method": "GET",
+                "path": "/api/defaults",
+                "source": "globalThis.__statticZeroResult = '{}';"
+            }))
+            .capabilities,
+            ZeroCapabilities::default()
+        );
+        assert_eq!(
+            endpoint(json!({
+                "method": "GET",
+                "path": "/api/partial",
+                "source": "globalThis.__statticZeroResult = '{}';",
+                "capabilities": { "db": false }
+            }))
+            .capabilities,
+            ZeroCapabilities {
+                db: false,
+                ..ZeroCapabilities::default()
+            }
+        );
     }
 }

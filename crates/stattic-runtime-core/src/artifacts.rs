@@ -3,18 +3,28 @@
 //! the exact-path lookup map, and the PHP route manifest. Zero artifact
 //! emission is excluded: trunk `zero.rs` is authoritative for that output.
 
+use regex::Regex;
 use serde_json::{json, Map, Value};
+#[cfg(not(target_family = "wasm"))]
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 
+#[cfg(not(target_family = "wasm"))]
 use crate::content::{escape_attr, escape_html};
-use crate::finalize::{invalid, php_like, sha256, write_generated, FileMeta, Result};
+#[cfg(not(target_family = "wasm"))]
+use crate::finalize::read_bounded;
+use crate::finalize::{invalid, php_like, sha256, FileMeta, Result};
+#[cfg(not(target_family = "wasm"))]
+use crate::protocol::{LISTING_ROWS_MARKER, PAGE_MAX_BYTES};
 use crate::serving_paths::{is_private_serving_path as is_private, is_public_serving_path};
+#[cfg(not(target_family = "wasm"))]
+use crate::storage::put_blob;
 use crate::transforms::{resolve_effective_config, ResolveEffectiveInput};
 
 pub(crate) const DEFAULT_EDGE_CACHE_CONTROL: &str =
-    "public, max-age=0, s-maxage=60, must-revalidate";
+    "public, max-age=0, s-maxage=600, stale-while-revalidate=60";
 
 /// The committed paths that are publicly served: not convention/config files,
 /// not dotfiles, and not precompressed sidecars of another committed file.
@@ -28,23 +38,57 @@ pub fn public_files(files: &BTreeMap<String, FileMeta>, private: &BTreeSet<Strin
         .collect()
 }
 
-pub fn generate_listing_artifacts(
-    files_root: &Path,
-    files: &mut BTreeMap<String, FileMeta>,
+/// One compiled directory listing.
+///
+/// A listing is a page shell plus one row fragment per entry. The public case
+/// is joined here and stored as a single blob, so it costs the same as any
+/// static file. A protected case is joined per request from the rows the
+/// visitor is admitted to — which needs no compile, no variant store, and no
+/// audience class in a cache key.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug, Clone)]
+pub struct CompiledListing {
+    /// `""` for the root listing.
+    pub directory: String,
+    pub shell_sha: String,
+    pub rows: Vec<ListingRow>,
+    pub page_sha: String,
+    pub page_length: u64,
+}
+
+/// One row of a listing. `path` is the committed path (or the subdirectory with
+/// a trailing slash) — the key the access check needs, not the display name,
+/// which is already inside the fragment.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug, Clone)]
+pub struct ListingRow {
+    pub path: String,
+    pub sha: String,
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[allow(clippy::too_many_arguments)] // Compilation needs each immutable input explicitly.
+pub fn compile_listings(
+    blob_root: &Path,
+    page_artifacts_root: &Path,
+    files: &BTreeMap<String, FileMeta>,
     config: &Map<String, Value>,
     metadata: &Map<String, Value>,
     viewer: &Map<String, Value>,
     serving: &Map<String, Value>,
     private: &BTreeSet<String>,
-) -> Result<BTreeSet<String>> {
+) -> Result<Vec<CompiledListing>> {
     if !config
         .get("listing")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Ok(BTreeSet::new());
+        return Ok(Vec::new());
     }
     let public = public_files(files, private);
+    if public.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut directories = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
     directories.entry(String::new()).or_default();
     for path in &public {
@@ -72,13 +116,16 @@ pub fn generate_listing_artifacts(
                 .insert((*name).into());
         }
     }
-    let mut generated = BTreeSet::new();
+    let mut compiled = Vec::new();
     let single_viewer_path = (public.len() == 1
         && config
             .get("viewer")
             .and_then(Value::as_bool)
             .unwrap_or(false))
     .then(|| public[0].clone());
+    let theme = validated_theme_css(serving.get("theme_css"))
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default();
     for (directory, (dirs, names)) in directories {
         let index = if directory.is_empty() {
             "index.html".into()
@@ -90,15 +137,31 @@ pub fn generate_listing_artifacts(
         } else {
             format!("/{directory}/")
         };
-        let has_compiled_listing = config
+        let compiled_listing = config
             .get("pages")
             .and_then(Value::as_object)
             .and_then(|pages| pages.get("routes"))
             .and_then(Value::as_object)
             .and_then(|routes| routes.get(&route_path))
             .and_then(Value::as_object)
-            .is_some_and(|route| route.get("index").and_then(Value::as_str).is_some());
-        if files.contains_key(&index) || has_compiled_listing {
+            .and_then(|route| route.get("index"))
+            .and_then(Value::as_str);
+        if files.contains_key(&index) {
+            continue;
+        }
+        if let Some(artifact) = compiled_listing {
+            let page = read_bounded(
+                &page_artifacts_root.join(format!("{artifact}.html")),
+                PAGE_MAX_BYTES,
+            )?;
+            let sha = put_blob(blob_root, &page)?;
+            compiled.push(CompiledListing {
+                directory,
+                shell_sha: sha.clone(),
+                rows: Vec::new(),
+                page_sha: sha,
+                page_length: page.len() as u64,
+            });
             continue;
         }
         let heading = if directory.is_empty() {
@@ -115,9 +178,6 @@ pub fn generate_listing_artifacts(
         } else {
             format!("{directory}/")
         };
-        let theme = validated_theme_css(serving.get("theme_css"))
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_default();
         if directory.is_empty() {
             if let Some(path) = single_viewer_path.as_deref() {
                 let html = render_file_viewer(
@@ -127,53 +187,66 @@ pub fn generate_listing_artifacts(
                     viewer,
                     &theme,
                 );
-                write_generated(
-                    files_root,
-                    files,
-                    &index,
-                    html.as_bytes(),
-                    Some("text/html; charset=utf-8"),
-                )?;
-                generated.insert(index);
+                let sha = put_blob(blob_root, html.as_bytes())?;
+                compiled.push(CompiledListing {
+                    directory,
+                    shell_sha: sha.clone(),
+                    rows: Vec::new(),
+                    page_sha: sha,
+                    page_length: html.len() as u64,
+                });
                 continue;
             }
         }
-        let mut items = String::new();
+        let mut rows = Vec::new();
+        let mut fragments = Vec::new();
         let mut dirs: Vec<_> = dirs.into_iter().collect();
         dirs.sort_by(|left, right| natural_case_cmp(left, right));
         for name in dirs {
-            items.push_str(&format!(
+            let fragment = format!(
                 "<li><a href=\"/{}{}/\">{}/</a></li>",
                 escape_attr(&prefix),
                 escape_attr(&name),
                 escape_html(&name)
-            ));
+            );
+            rows.push(ListingRow {
+                path: format!("{prefix}{name}/"),
+                sha: put_blob(blob_root, fragment.as_bytes())?,
+            });
+            fragments.push(fragment);
         }
         let mut names: Vec<_> = names.into_iter().collect();
         names.sort_by(|left, right| natural_case_cmp(left, right));
         for name in names {
-            if name != "index.html" {
-                items.push_str(&format!(
-                    "<li><a href=\"/{}{}\">{}</a></li>",
-                    escape_attr(&prefix),
-                    escape_attr(&name),
-                    escape_html(&name)
-                ));
+            if name == "index.html" {
+                continue;
             }
+            let fragment = format!(
+                "<li><a href=\"/{}{}\">{}</a></li>",
+                escape_attr(&prefix),
+                escape_attr(&name),
+                escape_html(&name)
+            );
+            rows.push(ListingRow {
+                path: format!("{prefix}{name}"),
+                sha: put_blob(blob_root, fragment.as_bytes())?,
+            });
+            fragments.push(fragment);
         }
-        let html = format!("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title><style>:root{{{}}}body{{font-family:system-ui;margin:2rem;line-height:1.5}}</style></head><body><main><h1>{}</h1><ul>{}</ul></main></body></html>", escape_html(heading), theme, escape_html(heading), items);
-        write_generated(
-            files_root,
-            files,
-            &index,
-            html.as_bytes(),
-            Some("text/html; charset=utf-8"),
-        )?;
-        generated.insert(index);
+        let shell = format!("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title><style>:root{{{}}}body{{font-family:system-ui;margin:2rem;line-height:1.5}}</style></head><body><main><h1>{}</h1><ul>{LISTING_ROWS_MARKER}</ul></main></body></html>", escape_html(heading), theme, escape_html(heading));
+        let page = shell.replace(LISTING_ROWS_MARKER, &fragments.join(""));
+        compiled.push(CompiledListing {
+            directory,
+            shell_sha: put_blob(blob_root, shell.as_bytes())?,
+            rows,
+            page_length: page.len() as u64,
+            page_sha: put_blob(blob_root, page.as_bytes())?,
+        });
     }
-    Ok(generated)
+    Ok(compiled)
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn natural_case_cmp(left: &str, right: &str) -> Ordering {
     let left = left.as_bytes();
     let right = right.as_bytes();
@@ -214,6 +287,7 @@ fn natural_case_cmp(left: &str, right: &str) -> Ordering {
     left.len().cmp(&right.len()).then_with(|| left.cmp(right))
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn trim_zeroes(digits: &[u8]) -> &[u8] {
     let first_nonzero = digits
         .iter()
@@ -222,6 +296,7 @@ fn trim_zeroes(digits: &[u8]) -> &[u8] {
     &digits[first_nonzero..]
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn render_file_viewer(
     path: &str,
     meta: &FileMeta,
@@ -253,11 +328,15 @@ fn render_file_viewer(
     )
 }
 
+/// `has_worker` is the version's Functions signal: a worker owns every
+/// unresolved request, `/` included, so a Functions version with no inferable
+/// root HTML serves neither an index nor a directory listing.
 pub fn resolve_serving_config(
     config: &Map<String, Value>,
     files: &BTreeMap<String, FileMeta>,
     private: &BTreeSet<String>,
     metadata: &Map<String, Value>,
+    has_worker: bool,
 ) -> Result<Map<String, Value>> {
     if config.get("index").is_some_and(|index| match index {
         Value::String(path) => path.trim().trim_start_matches('/').is_empty(),
@@ -321,6 +400,7 @@ pub fn resolve_serving_config(
         file_config: Some(file_config),
         overlay: None,
         template_entries: Vec::new(),
+        has_worker,
     });
     if effective
         .issues
@@ -362,9 +442,9 @@ pub fn resolve_serving_config(
 pub fn build_lookup_map<'a>(
     paths: impl Iterator<Item = &'a String>,
     exact_redirects: &Map<String, Value>,
+    pattern_redirects: &[Value],
     private: &BTreeSet<String>,
     index: &Value,
-    generated: &BTreeSet<String>,
 ) -> Map<String, Value> {
     let mut lookup = Map::new();
     let index_name = index
@@ -380,25 +460,35 @@ pub fn build_lookup_map<'a>(
         if path == "index.html" {
             lookup.insert(String::new(), action.clone());
         }
-        let effective = if generated.contains(path) {
-            Some("index.html")
-        } else {
-            index_name
-        };
-        if let Some(name) = effective {
+        if let Some(name) = index_name {
             if let Some(dir) = path.strip_suffix(&format!("/{name}")) {
                 lookup.insert(dir.into(), action.clone());
                 lookup.insert(format!("{dir}/"), action.clone());
             }
         }
     }
+    // Compiling a regex costs orders of magnitude more than matching one, and
+    // every exact key would otherwise recompile the whole pattern list: 100
+    // dynamic rules against 2,000 static ones is 200,000 compilations for one
+    // version. Compile the pattern lane once and match it 2,000 times.
+    let compiled_patterns = compile_pattern_matchers(pattern_redirects);
     for (request_path, rules) in exact_redirects {
-        let Some(action) = rules
+        let Some((action, order)) = rules
             .as_array()
             .and_then(|rules| first_exact_redirect_action(rules))
         else {
             continue;
         };
+        // Redirects are first-match-wins over ONE ordered list. This map answers
+        // before that list is ever walked, so it may only carry a rule nothing
+        // earlier could have claimed: an earlier pattern rule that matches this
+        // path keeps its turn, and the request falls through to the ordered walk
+        // that resolves it correctly. Without this, `/docs/:slug` in `_redirects`
+        // would lose to a later exact `/docs/intro` — from the file or, since
+        // sf.jsonc routes too, from the config that is supposed to be additive.
+        if pattern_shadows_path(&compiled_patterns, request_path, order) {
+            continue;
+        }
         lookup.insert(request_path.trim_start_matches('/').into(), action);
     }
     for path in private {
@@ -407,93 +497,38 @@ pub fn build_lookup_map<'a>(
     lookup
 }
 
-/// Builds the PHP route manifest from the sorted lookup map, followed by the
-/// dynamic routes that cannot be represented by exact lookup keys.
-pub fn php_manifest(
-    version_id: &str,
-    lookup: &Map<String, Value>,
-    compiled_routes: &[Value],
-) -> Value {
-    let mut routes = Vec::new();
-    let mut keys: Vec<_> = lookup.keys().collect();
-    keys.sort();
-    for key in keys {
-        let action = &lookup[key];
-        let pattern = if key.is_empty() {
-            "/".into()
-        } else {
-            format!("/{}", key.trim_start_matches('/'))
-        };
-        if let Some("file") = action.get("action").and_then(Value::as_str) {
-            routes.push(json!({"action":"serve_static","pattern":pattern,"file":action.get("path").cloned().unwrap_or(Value::Null)}));
-        } else if let Some("redirect") = action.get("action").and_then(Value::as_str) {
-            routes.push(json!({
-                "action": "redirect",
-                "pattern": pattern,
-                "destination": action.get("destination").cloned().unwrap_or(Value::Null),
-                "status": action.get("status").cloned().unwrap_or(Value::Null),
-                "cacheControl": action.get("cache_control").cloned().unwrap_or(Value::Null),
-            }));
-        } else if let Some("invoke_zero") = action.get("action").and_then(Value::as_str) {
-            let Some(method) = action.get("methods").and_then(manifest_zero_method) else {
-                continue;
-            };
-            if let Some(operation) = action.get("operation").and_then(Value::as_str) {
-                routes.push(json!({
-                    "action": "invoke_zero",
-                    "pattern": pattern,
-                    "method": method,
-                    "operation": operation,
-                }));
-            } else if let (Some(endpoint_id), Some(zero_artifact)) = (
-                action.get("endpoint_id").and_then(Value::as_str),
-                action.get("zero_artifact").and_then(Value::as_str),
-            ) {
-                let mut route = json!({
-                    "action": "invoke_zero",
-                    "pattern": pattern,
-                    "method": method,
-                    "endpointId": endpoint_id,
-                    "zeroArtifact": zero_artifact,
-                    "capabilities": action.get("capabilities").cloned().unwrap_or_else(|| json!({
-                        "db": true,
-                        "fetch": true,
-                        "auth": true,
-                        "env": true,
-                        "realtime": true,
-                        "logging": true,
-                    })),
-                });
-                if let Some(schema_hash) = action.get("schema_hash").and_then(Value::as_str) {
-                    route["schemaHash"] = json!(schema_hash);
-                }
-                routes.push(route);
-            }
-        }
-    }
-    for route in compiled_routes {
-        let pattern = route.get("pattern").and_then(Value::as_str);
-        if pattern.is_some_and(|pattern| {
-            routes
-                .iter()
-                .any(|existing| existing.get("pattern").and_then(Value::as_str) == Some(pattern))
-        }) {
-            continue;
-        }
-        routes.push(route.clone());
-    }
-    json!({"format":"stattic.php.manifest.v1","versionId":version_id,"routes":routes})
-}
-
-fn manifest_zero_method(methods: &Value) -> Option<&str> {
-    methods
-        .as_array()?
+/// The pattern lane's matchers, compiled once, each paired with the rule's
+/// position in the ordered redirect list. Rules without a usable regex drop out
+/// here: they can never claim a request path, so they can never shadow one.
+fn compile_pattern_matchers(pattern_redirects: &[Value]) -> Vec<(i64, Regex)> {
+    pattern_redirects
         .iter()
-        .filter_map(Value::as_str)
-        .find(|method| *method != "HEAD")
+        .filter_map(|rule| {
+            let regex = rule
+                .get("regex")
+                .and_then(Value::as_str)
+                .filter(|regex| !regex.is_empty())
+                .and_then(|regex| Regex::new(regex).ok())?;
+            let order = rule
+                .get("order")
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MAX);
+            Some((order, regex))
+        })
+        .collect()
 }
 
-fn first_exact_redirect_action(rules: &[Value]) -> Option<Value> {
+/// Whether an earlier pattern rule can claim this request path. Host-qualified
+/// and conditional rules count as "can": whether they actually fire depends on
+/// the request, which is exactly why that decision belongs to the ordered walk
+/// and not to a precomputed answer.
+fn pattern_shadows_path(patterns: &[(i64, Regex)], request_path: &str, order: i64) -> bool {
+    patterns
+        .iter()
+        .any(|(pattern_order, regex)| *pattern_order < order && regex.is_match(request_path))
+}
+
+fn first_exact_redirect_action(rules: &[Value]) -> Option<(Value, i64)> {
     let rule = rules.iter().min_by_key(|rule| {
         rule.get("order")
             .and_then(Value::as_i64)
@@ -519,13 +554,18 @@ fn first_exact_redirect_action(rules: &[Value]) -> Option<Value> {
         return None;
     }
     let status = rule.get("status").and_then(Value::as_u64).unwrap_or(302);
-    Some(json!({
-        "action": "redirect",
-        "destination": destination,
-        "status": status,
-        "cache_control": redirect_cache_control(status),
-        "methods": ["GET", "HEAD"],
-    }))
+    Some((
+        json!({
+            "action": "redirect",
+            "destination": destination,
+            "status": status,
+            "cache_control": DEFAULT_EDGE_CACHE_CONTROL,
+            "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        }),
+        rule.get("order")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MAX),
+    ))
 }
 
 fn value_is_nonempty(value: &Value) -> bool {
@@ -536,14 +576,6 @@ fn value_is_nonempty(value: &Value) -> bool {
         Value::String(value) => !value.is_empty(),
         Value::Array(value) => !value.is_empty(),
         Value::Object(value) => !value.is_empty(),
-    }
-}
-
-fn redirect_cache_control(status: u64) -> &'static str {
-    if matches!(status, 301 | 308) {
-        "public, max-age=31536000, immutable"
-    } else {
-        DEFAULT_EDGE_CACHE_CONTROL
     }
 }
 
@@ -567,23 +599,13 @@ pub(crate) fn not_found_action() -> Value {
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn validated_theme_css(value: Option<&Value>) -> Option<Value> {
     value
         .and_then(Value::as_str)
         .filter(|s| {
-            s.len() <= 16384
-                && !s.contains('<')
-                && !s.contains('>')
-                && ![
-                    "url(",
-                    "url (",
-                    "@import",
-                    "expression(",
-                    "expression (",
-                    "data:",
-                ]
-                .iter()
-                .any(|token| s.to_ascii_lowercase().contains(token))
+            s.len() <= crate::protocol::SPACE_THEME_CSS_MAX_BYTES
+                && !crate::policy::style_value_forbidden(s)
         })
         .map(|s| json!(s.trim()))
 }
@@ -592,22 +614,31 @@ pub(crate) fn validated_theme_css(value: Option<&Value>) -> Option<Value> {
 mod tests {
     use super::*;
     use crate::finalize::{file_meta, FinalizeError};
-    use std::fs;
     use tempfile::tempdir;
 
+    /// A blob read back out of the CAS the compilation wrote it to.
+    fn fragment_source(blob_root: &Path, sha: &str) -> Result<String> {
+        let path = crate::storage::blob_path(blob_root, sha);
+        std::fs::read_to_string(&path)
+            .map_err(|source| crate::finalize::FinalizeError::Io { path, source })
+    }
+
+    /// Compiles listings into a throwaway CAS and returns the joined public
+    /// body of the root listing — the bytes a visitor of an open space gets.
     fn listing_fixture(
         entries: &[(&str, &[u8])],
         config: Value,
         viewer: Value,
     ) -> (tempfile::TempDir, String) {
         let temp = tempdir().unwrap();
-        let mut files: BTreeMap<String, FileMeta> = entries
+        let files: BTreeMap<String, FileMeta> = entries
             .iter()
             .map(|(path, bytes)| ((*path).to_string(), file_meta(path, bytes, None)))
             .collect();
-        generate_listing_artifacts(
+        let listings = compile_listings(
             temp.path(),
-            &mut files,
+            temp.path(),
+            &files,
             config.as_object().unwrap(),
             &Map::new(),
             viewer.as_object().unwrap(),
@@ -615,8 +646,84 @@ mod tests {
             &BTreeSet::new(),
         )
         .unwrap();
-        let html = fs::read_to_string(temp.path().join("index.html")).unwrap();
+        let root = listings
+            .iter()
+            .find(|listing| listing.directory.is_empty())
+            .expect("root listing");
+        let html = fragment_source(temp.path(), &root.page_sha).unwrap();
         (temp, html)
+    }
+
+    #[test]
+    fn empty_file_set_does_not_generate_a_listing() {
+        let temp = tempdir().unwrap();
+        let config = json!({"listing":true,"viewer":true});
+
+        let listings = compile_listings(
+            temp.path(),
+            temp.path(),
+            &BTreeMap::new(),
+            config.as_object().unwrap(),
+            &Map::new(),
+            &Map::new(),
+            &Map::new(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert!(listings.is_empty());
+    }
+
+    /// A listing publishes both halves: the joined public page AND the shell
+    /// plus per-row fragments a protected space joins at request time. The rows
+    /// carry the committed path, because that is what the access check needs.
+    #[test]
+    fn a_listing_publishes_a_shell_and_one_fragment_for_each_row() {
+        let temp = tempdir().unwrap();
+        let files: BTreeMap<String, FileMeta> = [
+            ("notes.txt", &b"notes"[..]),
+            ("docs/guide.txt", &b"guide"[..]),
+        ]
+        .into_iter()
+        .map(|(path, bytes)| (path.to_string(), file_meta(path, bytes, None)))
+        .collect();
+        let config = json!({"listing":true,"viewer":false});
+
+        let listings = compile_listings(
+            temp.path(),
+            temp.path(),
+            &files,
+            config.as_object().unwrap(),
+            &Map::new(),
+            &Map::new(),
+            &Map::new(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        let root = listings
+            .iter()
+            .find(|listing| listing.directory.is_empty())
+            .expect("root listing");
+        assert_eq!(
+            root.rows
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs/", "notes.txt"]
+        );
+        let shell = fragment_source(temp.path(), &root.shell_sha).unwrap();
+        assert!(shell.contains(LISTING_ROWS_MARKER));
+        let joined: String = root
+            .rows
+            .iter()
+            .map(|row| fragment_source(temp.path(), &row.sha).unwrap())
+            .collect();
+        assert_eq!(
+            shell.replace(LISTING_ROWS_MARKER, &joined),
+            fragment_source(temp.path(), &root.page_sha).unwrap()
+        );
+        assert!(listings.iter().any(|listing| listing.directory == "docs"));
     }
 
     // Adapted from the donor's finalize-level
@@ -657,7 +764,7 @@ mod tests {
     #[test]
     fn compiled_pages_listing_takes_precedence_over_a_generated_index() {
         let temp = tempdir().unwrap();
-        let mut files = BTreeMap::from([(
+        let files = BTreeMap::from([(
             "report.txt".to_string(),
             file_meta("report.txt", b"report", None),
         )]);
@@ -671,9 +778,15 @@ mod tests {
                 "previews": {}
             }
         });
-        let generated = generate_listing_artifacts(
+        std::fs::write(
+            temp.path().join("page-index.html"),
+            "<h1>Compiled listing</h1>",
+        )
+        .unwrap();
+        let listings = compile_listings(
             temp.path(),
-            &mut files,
+            temp.path(),
+            &files,
             config.as_object().unwrap(),
             &Map::new(),
             &Map::new(),
@@ -682,9 +795,14 @@ mod tests {
         )
         .unwrap();
 
-        assert!(generated.is_empty());
-        assert!(!files.contains_key("index.html"));
-        assert!(!temp.path().join("index.html").exists());
+        let root = listings
+            .iter()
+            .find(|listing| listing.directory.is_empty())
+            .expect("compiled root listing");
+        assert_eq!(
+            fragment_source(temp.path(), &root.page_sha).unwrap(),
+            "<h1>Compiled listing</h1>"
+        );
     }
 
     // Adapted from the donor's finalize-level
@@ -707,29 +825,25 @@ mod tests {
             ("public.txt", b"public"),
         ];
         let temp = tempdir().unwrap();
-        let mut files: BTreeMap<String, FileMeta> = entries
+        let files: BTreeMap<String, FileMeta> = entries
             .iter()
             .map(|(path, bytes)| ((*path).to_string(), file_meta(path, bytes, None)))
             .collect();
         let private = BTreeSet::new();
         let config = json!({"listing":true,"viewer":false});
-        generate_listing_artifacts(
+        let listing = compile_listings(
             temp.path(),
-            &mut files,
+            temp.path(),
+            &files,
             config.as_object().unwrap(),
             &Map::new(),
             &Map::new(),
             &Map::new(),
             &private,
         )
-        .unwrap();
-        let listing = [
-            "index.html",
-            ".well-known/index.html",
-            ".well-known/acme-challenge/index.html",
-        ]
-        .into_iter()
-        .filter_map(|path| fs::read_to_string(temp.path().join(path)).ok())
+        .unwrap()
+        .iter()
+        .map(|compiled| fragment_source(temp.path(), &compiled.page_sha).unwrap())
         .collect::<String>();
         let public = public_files(&files, &private);
         for private_path in [
@@ -770,6 +884,7 @@ mod tests {
                 &files,
                 &private,
                 &Map::new(),
+                false,
             ),
             Err(FinalizeError::Invalid {
                 code: "invalid_serving_config",
@@ -780,21 +895,33 @@ mod tests {
 
     #[test]
     fn native_serving_defaults_use_the_shared_effective_resolver() {
-        for (paths, private, expected_index, expected_listing) in [
+        for (paths, private, has_worker, expected_index, expected_listing) in [
             (
                 vec!["docs/page.html"],
                 vec![],
+                false,
                 json!("docs/page.html"),
                 false,
             ),
-            (vec!["asset.txt"], vec![], json!(false), true),
-            (vec!["index.html"], vec![], json!("index.html"), false),
+            (vec!["asset.txt"], vec![], false, json!(false), true),
+            (
+                vec!["index.html"],
+                vec![],
+                false,
+                json!("index.html"),
+                false,
+            ),
             (
                 vec!["_layout.html", "docs/page/index.html"],
                 vec!["_layout.html"],
+                false,
                 json!("docs/page/index.html"),
                 false,
             ),
+            // The worker signal has to survive the hop into the resolver: the
+            // same tree that lists as files for a static version answers
+            // nothing but the worker for a Functions one.
+            (vec!["asset.txt"], vec![], true, json!(false), false),
         ] {
             let files = paths
                 .iter()
@@ -802,7 +929,8 @@ mod tests {
                 .collect::<BTreeMap<_, _>>();
             let private = private.into_iter().map(str::to_string).collect();
             let resolved =
-                resolve_serving_config(&Map::new(), &files, &private, &Map::new()).unwrap();
+                resolve_serving_config(&Map::new(), &files, &private, &Map::new(), has_worker)
+                    .unwrap();
             assert_eq!(resolved.get("index"), Some(&expected_index));
             assert_eq!(resolved.get("listing"), Some(&json!(expected_listing)));
             assert_eq!(resolved.get("fallback"), Some(&Value::Null));
@@ -817,6 +945,7 @@ mod tests {
             &files,
             &BTreeSet::new(),
             &Map::from_iter([("spa".into(), Value::Bool(true))]),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -830,13 +959,7 @@ mod tests {
     fn lookup_conceals_absent_private_paths_and_maps_directory_indexes() {
         let paths = ["index.html".to_string(), "docs/index.html".to_string()];
         let private = BTreeSet::from(["_headers".to_string()]);
-        let lookup = build_lookup_map(
-            paths.iter(),
-            &Map::new(),
-            &private,
-            &json!(false),
-            &BTreeSet::new(),
-        );
+        let lookup = build_lookup_map(paths.iter(), &Map::new(), &[], &private, &json!(false));
 
         assert_eq!(
             lookup
@@ -857,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_redirects_override_files_and_manifest_precedes_dynamic_routes() {
+    fn exact_redirects_override_files_in_the_lookup_map() {
         let paths = ["index.html".to_string(), "old.html".to_string()];
         let redirects = Map::from_iter([(
             "/old.html".into(),
@@ -871,67 +994,55 @@ mod tests {
         let lookup = build_lookup_map(
             paths.iter(),
             &redirects,
+            &[],
             &BTreeSet::new(),
             &json!("index.html"),
-            &BTreeSet::new(),
         );
         assert_eq!(lookup["old.html"]["action"], json!("redirect"));
         assert_eq!(
             lookup["old.html"]["cache_control"],
             json!(DEFAULT_EDGE_CACHE_CONTROL)
         );
-
-        let manifest = php_manifest(
-            "v",
-            &lookup,
-            &[json!({
-                "action": "invoke_zero",
-                "pattern": "/api/:id",
-                "method": "GET",
-            })],
+        assert_eq!(
+            lookup["old.html"]["methods"],
+            json!(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
         );
-        assert_eq!(manifest["routes"][2]["action"], json!("redirect"));
-        assert_eq!(manifest["routes"][3]["action"], json!("invoke_zero"));
     }
 
     #[test]
-    fn zero_lookup_records_emit_in_sorted_lookup_order_before_zero_routes() {
-        let lookup = Map::from_iter([
+    fn an_earlier_pattern_rule_keeps_an_exact_redirect_out_of_the_lookup_map() {
+        // The lookup answers before the ordered rule walk runs, so it may only
+        // carry a rule nothing earlier could claim. `/docs/:slug` at order 0
+        // owns `/docs/intro`; folding the order-1 exact rule in would let it
+        // answer first and quietly invert first-match-wins — including for a
+        // sf.jsonc rule that is supposed to be purely additive.
+        let redirects = Map::from_iter([
             (
-                "__spacefast/zero/run".into(),
-                json!({"action":"invoke_zero","operation":"run","methods":["POST"]}),
+                "/docs/intro".into(),
+                json!([{"action":"redirect","destination":"/start","status":301,"order":1}]),
             ),
             (
-                "api/status".into(),
-                json!({
-                    "action":"invoke_zero",
-                    "endpoint_id":"GET /api/status",
-                    "zero_artifact":"zero/endpoints/status.json",
-                    "methods":["GET","HEAD"],
-                    "capabilities": {"db":false,"fetch":false,"auth":false,"env":false,"realtime":false,"logging":false},
-                }),
+                "/other".into(),
+                json!([{"action":"redirect","destination":"/elsewhere","status":301,"order":2}]),
             ),
         ]);
-        let manifest = php_manifest(
-            "v",
-            &lookup,
-            &[
-                json!({
-                    "action":"invoke_zero",
-                    "pattern":"/api/status",
-                    "method":"GET",
-                    "endpointId":"GET /api/status",
-                    "zeroArtifact":"zero/endpoints/status.json"
-                }),
-                json!({"action":"invoke_zero","pattern":"/api/:id","method":"GET"}),
-            ],
+        let patterns = [json!({
+            "action": "redirect",
+            "destination": "/guides/:slug",
+            "regex": "^/docs/(?P<slug>[^/]+)/?$",
+            "status": 301,
+            "order": 0,
+        })];
+        let lookup = build_lookup_map(
+            [].iter(),
+            &redirects,
+            &patterns,
+            &BTreeSet::new(),
+            &json!("index.html"),
         );
-        assert_eq!(manifest["routes"][0]["operation"], json!("run"));
-        assert_eq!(
-            manifest["routes"][1]["endpointId"],
-            json!("GET /api/status")
-        );
-        assert_eq!(manifest["routes"][2]["pattern"], json!("/api/:id"));
-        assert_eq!(manifest["routes"].as_array().map(Vec::len), Some(3));
+
+        assert!(!lookup.contains_key("docs/intro"));
+        // A path no earlier pattern claims still gets the fast path.
+        assert_eq!(lookup["other"]["destination"], json!("/elsewhere"));
     }
 }

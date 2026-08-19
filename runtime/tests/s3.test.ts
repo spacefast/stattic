@@ -3,12 +3,10 @@
 // (s3-cli.php) against the in-process fake S3 fixture (s3-fake.ts) — no
 // source-text assertions, only real HTTP round trips and real PHP output.
 //
-// shared/s3.php is not yet in engine-manifest.json (a later integrator wires
-// the tiered-serve/moves-V2 call sites and adds it there), so this suite
-// bypasses the manifest-driven startRuntime() harness and spawns s3-cli.php
-// directly against its real repo path instead. See s3-cli.php's header.
+// The suite spawns s3-cli.php directly against the engine file so it can drive
+// individual signer/client operations without booting the full HTTP runtime.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -48,7 +46,21 @@ function resolveEntry(fake: FakeS3, host: string): string {
   return `${host}:${new URL(fake.url).port}:127.0.0.1`;
 }
 
-async function runS3Cli(request: Record<string, unknown>, manifest: BucketRow[]): Promise<any> {
+type S3CliResult = {
+  a: { ok: boolean };
+  b: { ok: boolean };
+  body_base64: string;
+  corrupt: { error: string; ok: boolean };
+  error: string;
+  headers: Record<string, string>;
+  ok: boolean;
+  status: number;
+};
+
+async function runS3Cli(
+  request: Record<string, unknown>,
+  manifest: BucketRow[],
+): Promise<S3CliResult> {
   const proc = Bun.spawn(["php", S3_CLI_PATH, JSON.stringify(request)], {
     env: { ...process.env, SPACEFAST_STORAGE_BUCKETS_JSON: JSON.stringify(manifest) },
     stdout: "pipe",
@@ -74,7 +86,7 @@ async function runS3Cli(request: Record<string, unknown>, manifest: BucketRow[])
 async function runS3CliPutWrongHash(
   request: Record<string, unknown>,
   manifest: BucketRow[],
-): Promise<any> {
+): Promise<S3CliResult> {
   return runS3Cli({ ...request, op: "put_wrong_hash" }, manifest);
 }
 
@@ -257,7 +269,7 @@ describe("shared/s3.php SigV4 signer + client", () => {
     expect(Buffer.from(result.body_base64, "base64").length).toBe(0);
   });
 
-  test("_stattic_s3_open streams a signed GET via write/header callbacks", async () => {
+  test("_stattic_s3_stream_get streams a signed GET via write/header callbacks", async () => {
     const body = Buffer.from("streamed via curl write callback\n");
     fake.putObject("spaces/spc_1/blobs/55/streamed", body);
     const manifest = [bucketRow(fake, "path", "s3.fake.test")];
@@ -277,7 +289,7 @@ describe("shared/s3.php SigV4 signer + client", () => {
     expect(Buffer.from(result.body_base64, "base64").toString()).toBe(body.toString());
   });
 
-  test("_stattic_s3_open relays a 206 Range response through the header callback", async () => {
+  test("_stattic_s3_stream_get relays a 206 Range response through the header callback", async () => {
     const body = Buffer.from("abcdefghij");
     fake.putObject("spaces/spc_1/blobs/66/streamed-range", body);
     const manifest = [bucketRow(fake, "path", "s3.fake.test")];
@@ -296,66 +308,6 @@ describe("shared/s3.php SigV4 signer + client", () => {
     expect(result.status).toBe(206);
     expect(Buffer.from(result.body_base64, "base64").toString()).toBe("abc");
     expect(result.headers["content-range"]).toBe("bytes 0-2/10");
-  });
-
-  test("parallel multi-GET: happy path across items respects the stream cap", async () => {
-    // multi_get has no per-item `options`/resolve bag (unlike the single-item
-    // get/put/head/stream_get ops above, which already cover vhost/path-style
-    // DNS-override plumbing) — point the endpoint straight at the loopback IP
-    // so this test isolates the parallel-transfer behavior itself.
-    const ipManifest = [{ ...bucketRow(fake, "path", "s3.fake.test"), endpoint: fake.url }];
-    const items = ["a", "b", "c", "d", "e"].map((letter) => {
-      const key = `spaces/spc_1/blobs/multi/${letter}`;
-      const body = Buffer.from(`multi-get payload ${letter}\n`);
-      const object = fake.putObject(key, body);
-      return {
-        id: letter,
-        bucket: "test-bucket",
-        key,
-        dest_path: path.join(tmpDir, `multi-ok-${letter}`),
-        sha256: object.sha256,
-      };
-    });
-
-    const result = await runS3Cli({ op: "multi_get", items, streams: 2 }, ipManifest);
-
-    for (const letter of ["a", "b", "c", "d", "e"]) {
-      expect(result[letter].ok).toBe(true);
-      expect(result[letter].bytes).toBeGreaterThan(0);
-      const written = readFileSync(path.join(tmpDir, `multi-ok-${letter}`), "utf8");
-      expect(written).toBe(`multi-get payload ${letter}\n`);
-    }
-  });
-
-  test("parallel multi-GET: sha mismatch is caught and no corrupted file is left behind", async () => {
-    const key = "spaces/spc_1/blobs/multi/corrupt";
-    fake.putObject(key, Buffer.from("the real bytes\n"));
-    const ipManifest = [{ ...bucketRow(fake, "path", "s3.fake.test"), endpoint: fake.url }];
-    const destPath = path.join(tmpDir, "multi-corrupt");
-
-    const result = await runS3Cli(
-      {
-        op: "multi_get",
-        items: [
-          {
-            id: "corrupt",
-            bucket: "test-bucket",
-            key,
-            dest_path: destPath,
-            // Deliberately wrong expected digest — simulates a corrupted
-            // download (bytes changed in flight) being caught by the
-            // hash_update-in-the-write-callback verification.
-            sha256: "0".repeat(64),
-          },
-        ],
-      },
-      ipManifest,
-    );
-
-    expect(result.corrupt.ok).toBe(false);
-    expect(result.corrupt.error).toBe("s3_integrity_mismatch");
-    expect(() => readFileSync(destPath)).toThrow();
-    expect(() => readFileSync(`${destPath}.part`)).toThrow();
   });
 
   test("parallel multi-PUT: uploads local files and verifies fixture receipt", async () => {

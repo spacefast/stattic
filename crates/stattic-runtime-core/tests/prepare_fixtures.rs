@@ -25,9 +25,8 @@ fn config_selection_and_jsonc_parsing_are_canonical() {
     let output = analyze(AnalyzeInput {
         format: ANALYZE_INPUT_FORMAT.into(),
         config_candidates: map([
-            ("sf.jsonc", r#"{"templates":["legacy.js"],"listing":true}"#),
             (
-                "spacefast.jsonc",
+                "sf.jsonc",
                 r#"{
                   // comments and trailing commas are JSONC, not JSON5
                   "templates": ["app.js",],
@@ -35,15 +34,17 @@ fn config_selection_and_jsonc_parsing_are_canonical() {
                   "unknown": true,
                 }"#,
             ),
+            (
+                "spacefast.jsonc",
+                r#"{"templates":["legacy.js"],"listing":true}"#,
+            ),
         ]),
         convention_files: ConventionFiles::default(),
+        routing_config: None,
         template_sources: map([("app.js", "const value = '{{ vars.NAME }}';")]),
     });
 
-    assert_eq!(
-        output.selected_config_path.as_deref(),
-        Some("spacefast.jsonc")
-    );
+    assert_eq!(output.selected_config_path.as_deref(), Some("sf.jsonc"));
     assert_eq!(output.template_paths, ["app.js"]);
     assert_eq!(
         output
@@ -60,32 +61,12 @@ fn config_selection_and_jsonc_parsing_are_canonical() {
         Some(&json!("https://example.test//literal"))
     );
     assert!(output.diagnostics.iter().any(|item| {
-        item.code == "config_file_ignored" && item.path.as_deref() == Some("sf.jsonc")
+        item.code == "config_file_ignored" && item.path.as_deref() == Some("spacefast.jsonc")
     }));
     assert!(output.diagnostics.iter().any(|item| {
         item.code == "config_invalid"
             && item.severity == DiagnosticSeverity::Warning
             && item.path.as_deref() == Some("unknown")
-    }));
-}
-
-#[test]
-fn invalid_access_rules_fail_the_rust_config_parser() {
-    let output = analyze(AnalyzeInput {
-        format: ANALYZE_INPUT_FORMAT.into(),
-        config_candidates: map([(
-            "spacefast.jsonc",
-            r#"{"access":{"rules":[{"effect":"block"}]}}"#,
-        )]),
-        convention_files: ConventionFiles::default(),
-        template_sources: BTreeMap::new(),
-    });
-
-    assert!(output.config.is_none());
-    assert!(output.diagnostics.iter().any(|item| {
-        item.severity == DiagnosticSeverity::Error
-            && item.code == "config_invalid"
-            && item.path.as_deref() == Some("access.rules.0.effect")
     }));
 }
 
@@ -97,11 +78,11 @@ fn integral_decimal_json_numbers_match_the_published_integer_contract() {
             "spacefast.jsonc",
             r#"{
               "fallback":{"path":"404.html","status":404.0},
-              "build":{"timeoutSeconds":60.0},
-              "access":{"rules":[{"effect":"deny","expiresAt":1.0}]}
+              "build":{"timeoutSeconds":60.0}
             }"#,
         )]),
         convention_files: ConventionFiles::default(),
+        routing_config: None,
         template_sources: BTreeMap::new(),
     });
 
@@ -121,6 +102,7 @@ fn analysis_returns_only_references_from_selected_inputs() {
             redirects: Some("/old /{{ vars.SLUG }} 301".into()),
             headers: Some("/*\n  X-Site: {{ vars.SPACEFAST_HOST }}".into()),
         },
+        routing_config: None,
         template_sources: map([
             ("app.js", "{{vars.NAME}} {{ vars.SLUG }}"),
             ("undeclared.js", "{{ vars.MUST_NOT_LEAK }}"),
@@ -150,6 +132,7 @@ fn preparation_substitutes_conventions_templates_and_channel_variants_once() {
                         .into(),
                 ),
             },
+            routing_config: None,
             template_sources: map([(
                 "app.js",
                 "export const name='{{ vars.NAME }}'; export const slug='{{ vars.SLUG }}';",
@@ -244,6 +227,7 @@ fn secret_and_unresolved_values_fail_closed_without_partial_substitution() {
                 redirects: Some("/old /{{ vars.MISSING }} 301".into()),
                 headers: None,
             },
+            routing_config: None,
             template_sources: map([("app.js", "before {{ vars.SECRET }} after")]),
         },
         variable_scopes: vec![VariableScope {

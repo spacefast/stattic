@@ -13,6 +13,11 @@ pub struct Document {
     pub value: Value,
     pub key_offsets: BTreeMap<String, usize>,
     pub object_keys: BTreeMap<String, Vec<String>>,
+    /// Byte range of every string VALUE literal, quotes included, keyed by the
+    /// path that holds it. Editing a document in place (variable substitution
+    /// writes into rule strings and nothing else) needs the span, not the
+    /// decoded value.
+    pub string_spans: BTreeMap<String, (usize, usize)>,
 }
 
 pub fn parse(source: &str) -> Result<Value, String> {
@@ -28,6 +33,7 @@ pub fn parse_document(source: &str) -> Result<Document, ParseError> {
         value,
         key_offsets: reader.key_offsets,
         object_keys: reader.object_keys,
+        string_spans: reader.string_spans,
     })
 }
 
@@ -36,6 +42,7 @@ struct Reader<'a> {
     offset: usize,
     key_offsets: BTreeMap<String, usize>,
     object_keys: BTreeMap<String, Vec<String>>,
+    string_spans: BTreeMap<String, (usize, usize)>,
 }
 
 impl<'a> Reader<'a> {
@@ -45,6 +52,7 @@ impl<'a> Reader<'a> {
             offset: 0,
             key_offsets: BTreeMap::new(),
             object_keys: BTreeMap::new(),
+            string_spans: BTreeMap::new(),
         }
     }
 
@@ -62,7 +70,12 @@ impl<'a> Reader<'a> {
         match self.byte() {
             Some(b'{') => self.object(path),
             Some(b'[') => self.array(path),
-            Some(b'"') => self.string().map(Value::String),
+            Some(b'"') => {
+                let start = self.offset;
+                let value = self.string().map(Value::String)?;
+                self.string_spans.insert(path.into(), (start, self.offset));
+                Ok(value)
+            }
             _ => self.token(),
         }
     }

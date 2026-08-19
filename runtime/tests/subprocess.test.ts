@@ -1,5 +1,5 @@
 // Behavioral coverage for the shared subprocess runner in
-// engine/shared/artifacts.php (_stattic_runtime_run_subprocess), which both
+// engine/shared/native-process.php (_stattic_runtime_run_subprocess), which both
 // the serve-time Zero runner (runtime/zero.php) and the finalize/compile lane
 // (admin/generate.php) go through.
 //
@@ -16,10 +16,13 @@
 // the real PHP function through subprocess-cli.php against its real repo
 // path, the same way s3.test.ts drives s3-cli.php.
 import { describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const SUBPROCESS_CLI_PATH = path.resolve(import.meta.dir, "subprocess-cli.php");
+const NATIVE_PROCESS_PATH = path.resolve(import.meta.dir, "../engine/shared/native-process.php");
 
 // Comfortably past the ~64KB pipe buffer on both Linux and macOS.
 const OVER_PIPE_BUFFER = 300_000;
@@ -40,6 +43,7 @@ type SubprocessRequest = {
   stdin_bytes?: number;
   missing_binary?: boolean;
   env?: Record<string, string>;
+  detached?: boolean;
 };
 
 async function runSubprocessCli(request: SubprocessRequest): Promise<SubprocessResult> {
@@ -62,6 +66,23 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function resolveNativeBinary(env: Record<string, string>): string {
+  const result = Bun.spawnSync({
+    cmd: [
+      "php",
+      "-r",
+      `require ${JSON.stringify(NATIVE_PROCESS_PATH)}; echo _stattic_runtime_native_binary();`,
+    ],
+    env: { ...process.env, ...env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(`native binary resolution probe failed: ${result.stderr.toString()}`);
+  }
+  return result.stdout.toString();
+}
+
 // Mirrors subprocess_cli_payload() in subprocess-cli.php so the test can
 // predict the digest of what it asked the driver to feed the child.
 function expectedStdinSha(bytes: number): string {
@@ -74,6 +95,53 @@ function expectedStdinSha(bytes: number): string {
 }
 
 describe("shared/artifacts.php subprocess runner", () => {
+  test("a detached child outlives the request that started it", async () => {
+    const markerBase = path.join(os.tmpdir(), `spacefast-detached-${randomUUID()}`);
+    const started = `${markerBase}-started`;
+    const release = `${markerBase}-release`;
+    const finished = `${markerBase}-finished`;
+    try {
+      const result = await runSubprocessCli({
+        detached: true,
+        child: `file_put_contents(${JSON.stringify(started)}, "started"); while (!is_file(${JSON.stringify(release)})) { usleep(10000); } file_put_contents(${JSON.stringify(finished)}, "finished");`,
+      });
+      expect(result.spawned).toBe(true);
+
+      const deadline = Date.now() + 2_000;
+      while (!existsSync(started) && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      }
+      expect(existsSync(started)).toBe(true);
+      expect(existsSync(finished)).toBe(false);
+
+      writeFileSync(release, "release");
+      const finishDeadline = Date.now() + 2_000;
+      while (!existsSync(finished) && Date.now() < finishDeadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      }
+      expect(existsSync(finished)).toBe(true);
+    } finally {
+      rmSync(started, { force: true });
+      rmSync(release, { force: true });
+      rmSync(finished, { force: true });
+    }
+  });
+
+  test("uses the immutable active release binary before an explicit override", () => {
+    expect(
+      resolveNativeBinary({
+        SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT: "/srv/spacefast/releases/current",
+        SPACEFAST_RUNTIME_BIN: "/tmp/test-runtime-override",
+      }),
+    ).toBe("/srv/spacefast/releases/current/bin/stattic-runtime");
+    expect(
+      resolveNativeBinary({
+        SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT: "",
+        SPACEFAST_RUNTIME_BIN: "/tmp/test-runtime-override",
+      }),
+    ).toBe("/tmp/test-runtime-override");
+  });
+
   test("captures a stderr flood larger than the pipe buffer without stalling stdout", async () => {
     const result = await runSubprocessCli({
       child: `fwrite(STDERR, str_repeat("e", ${OVER_PIPE_BUFFER})); fwrite(STDOUT, "done");`,

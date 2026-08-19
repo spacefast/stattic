@@ -41,7 +41,6 @@ pub struct RunnerStageMetrics {
     pub endpoint_index_ms: f64,
     pub artifact_read_ms: f64,
     pub bytecode_read_ms: f64,
-    pub source_read_ms: f64,
     pub js_runtime_init_ms: f64,
     pub js_module_load_ms: f64,
     pub js_execution_ms: f64,
@@ -53,7 +52,6 @@ impl RunnerStageMetrics {
             || self.endpoint_index_ms > 0.0
             || self.artifact_read_ms > 0.0
             || self.bytecode_read_ms > 0.0
-            || self.source_read_ms > 0.0
             || self.js_runtime_init_ms > 0.0
             || self.js_module_load_ms > 0.0
             || self.js_execution_ms > 0.0
@@ -117,12 +115,6 @@ pub(crate) fn record_bytecode_read(started: Instant) {
     });
 }
 
-pub(crate) fn record_source_read(started: Instant) {
-    record_stage(started, |metrics, elapsed| {
-        metrics.source_read_ms += elapsed;
-    });
-}
-
 pub(crate) fn record_js_runtime_init(started: Instant) {
     record_stage(started, |metrics, elapsed| {
         metrics.js_runtime_init_ms += elapsed;
@@ -147,16 +139,34 @@ fn record_stage(started: Instant, update: impl FnOnce(&mut RunnerStageMetrics, f
 }
 
 pub(crate) fn error_response(status: u16, code: &str, message: &str) -> RunnerResponse {
-    json_response(
+    // RFC 9457 problem details: the runner's error bodies are forwarded verbatim
+    // to the visitor by the serving engine, so they carry the platform wire shape.
+    let mut response = json_response(
         status,
         json!({
-            "error": {
-                "code": code,
-                "docsUrl": format!("https://spacefast.com/docs/errors/{code}"),
-                "message": message,
-            }
+            "type": format!("https://spacefast.com/docs/errors/{code}"),
+            "title": title_for_code(code),
+            "status": status,
+            "detail": message,
+            "code": code,
         }),
-    )
+    );
+    response.headers.insert(
+        "content-type".to_string(),
+        "application/problem+json; charset=utf-8".to_string(),
+    );
+    response
+}
+
+/// Problem `title` derivation rule: the snake_case code as a sentence
+/// ("zero_js_execution_failed" -> "Zero js execution failed").
+fn title_for_code(code: &str) -> String {
+    let words = code.replace('_', " ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => words,
+    }
 }
 
 pub(crate) fn json_response(status: u16, body: Value) -> RunnerResponse {

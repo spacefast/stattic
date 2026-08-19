@@ -1,19 +1,15 @@
-//! Version-scoped auxiliary files: embedded access/layout pages, template
-//! variants, sharded file metadata, artifact presence validation, and the
-//! convention-file / viewer metadata carried into `metadata.json`.
+//! Version-scoped auxiliary files: embedded access/layout pages, artifact
+//! presence validation, and the convention-file / viewer metadata carried into
+//! `metadata.json`.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use crate::finalize::{
-    artifact_metadata, file_meta, invalid, remove_any, sha256, validate_id, validate_relative_path,
-    write_bytes, write_php, FileMeta, FinalizeError, Result,
-};
-use crate::protocol::{
-    PAGE_MAX_BYTES, TEMPLATE_MAX_BYTES, TEMPLATE_VARIANT_FILE_LIMIT, TEMPLATE_VARIANT_ROUTE_LIMIT,
-};
+use crate::catalog::read_version_catalog;
+use crate::finalize::{invalid, remove_any, write_bytes, FinalizeError, Result};
+use crate::protocol::{PAGE_MAX_BYTES, VERSION_ROOT_POINTER_FILE};
 use crate::transforms::html::{
     validate_installed_page, AccessSlot, InstalledPageError, InstalledPageKind,
 };
@@ -155,109 +151,16 @@ pub fn apply_access_pages(body: &Value, stage_root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn apply_template_variants(
-    body: &Value,
-    stage_root: &Path,
-    files: &BTreeMap<String, FileMeta>,
-) -> Result<Map<String, Value>> {
-    let mut routes = Map::new();
-    let Some(raw_variants) = body.get("template_variants") else {
-        return Ok(routes);
-    };
-    let variants = raw_variants
-        .as_object()
-        .ok_or_else(|| FinalizeError::Invalid {
-            code: "invalid_template_variants",
-            message: "template_variants must be an object.".into(),
-            details: None,
-        })?;
-    if variants.len() > TEMPLATE_VARIANT_ROUTE_LIMIT {
-        return invalid(
-            "invalid_template_variants",
-            "Too many template variant routes.",
-        );
-    }
-    for (route, values) in variants {
-        validate_id(route, "route_name")?;
-        let values = values.as_object().ok_or_else(|| FinalizeError::Invalid {
-            code: "invalid_template_variants",
-            message: "Variant values must be objects.".into(),
-            details: None,
-        })?;
-        if values.is_empty() || values.len() > TEMPLATE_VARIANT_FILE_LIMIT {
-            return invalid(
-                "invalid_template_variants",
-                "Each template variant route requires 1 to 100 files.",
-            );
-        }
-        let mut route_files = Map::new();
-        for (path, content) in values {
-            validate_relative_path(path)?;
-            if !files.contains_key(path) {
-                return invalid(
-                    "template_not_in_version",
-                    format!("Variant path {path} is not committed."),
-                );
-            }
-            let content = content.as_str().ok_or_else(|| FinalizeError::Invalid {
-                code: "invalid_template_variants",
-                message: "Variant contents must be strings.".into(),
-                details: None,
-            })?;
-            if content.len() > TEMPLATE_MAX_BYTES {
-                return invalid(
-                    "invalid_template_variants",
-                    format!("Variant contents for {path} exceed 2 MiB."),
-                );
-            }
-            let bytes = content.as_bytes();
-            let relative = format!("files-variants/{route}/{path}");
-            write_bytes(&stage_root.join(&relative), bytes)?;
-            route_files.insert(path.clone(), json!(file_meta(path, bytes, None)));
-        }
-        routes.insert(route.clone(), Value::Object(route_files));
-    }
-    Ok(routes)
-}
-
-pub fn write_file_shards(
-    root: &Path,
-    files: &BTreeMap<String, FileMeta>,
-    generated_at: &str,
-) -> Result<()> {
-    let shard_root = root.join("file-shards");
-    remove_any(&shard_root)?;
-    let mut shards = BTreeMap::<String, Map<String, Value>>::new();
-    for (path, meta) in files {
-        let shard = &sha256(path.as_bytes())[..2];
-        let entry = shards.entry(shard.into()).or_default();
-        entry.insert(
-            path.clone(),
-            serde_json::to_value(meta).unwrap_or(Value::Null),
-        );
-    }
-    for (shard, values) in shards {
-        let mut root_value = artifact_metadata(generated_at);
-        root_value.insert("files".into(), Value::Object(values));
-        write_php(
-            &shard_root.join(format!("{shard}.php")),
-            &Value::Object(root_value),
-        )?;
-    }
-    Ok(())
-}
-
-// stage-2b: zero artifact presence (`zero/config.json`, endpoint/run indexes)
-// is validated by the trunk zero writer (`validate_zero_artifacts`); the lead
-// wires that in alongside this check in the finalize orchestration.
-pub fn validate_artifacts(root: &Path, files: &BTreeMap<String, FileMeta>) -> Result<()> {
-    for name in [
-        "metadata.json",
-        "serving.php",
-        "php-manifest.php",
-        "headers.php",
-        "redirects.php",
-    ] {
+/// Zero artifact presence is validated by the trunk zero writer
+/// (`validate_zero_artifacts`); this is the schema-v4 version surface.
+///
+/// There is no file tree to walk any more: a version is its root
+/// pointer, the root it names, and the tables the root names. The bytes live in
+/// the CAS, and a demoted blob is legitimately absent from local disk, so
+/// "every committed path exists here" stopped being a truth a publish could
+/// assert.
+pub fn validate_artifacts(root: &Path, published: &PublishedArtifacts<'_>) -> Result<()> {
+    for name in ["metadata.json", VERSION_ROOT_POINTER_FILE] {
         if !root.join(name).is_file() {
             return invalid(
                 "runtime_artifact_validation_failed",
@@ -265,42 +168,49 @@ pub fn validate_artifacts(root: &Path, files: &BTreeMap<String, FileMeta>) -> Re
             );
         }
     }
-    for path in files.keys() {
-        if !root.join("files").join(path).is_file() {
+    // The catalog is load-bearing, not a projection: the resolver, the list
+    // route and the finalize receipt all read it and none of them has a
+    // fallback. A version published without one answers nothing.
+    if read_version_catalog(root)?.is_none() {
+        return invalid(
+            "runtime_artifact_validation_failed",
+            "metadata.json embeds no file catalog.",
+        );
+    }
+    if !root.join(published.root_file).is_file() {
+        return invalid(
+            "runtime_artifact_validation_failed",
+            format!("Missing {}.", published.root_file),
+        );
+    }
+    if published.tables.is_empty() {
+        return invalid(
+            "runtime_artifact_validation_failed",
+            "The version root names no response table.",
+        );
+    }
+    for table in published.tables.values() {
+        if !root.join(table).is_file() {
             return invalid(
                 "runtime_artifact_validation_failed",
-                format!("Missing committed file {path}."),
+                format!("Missing response table {table}."),
             );
         }
     }
     Ok(())
 }
 
-/// Resolves the convention files recorded in immutable version metadata from
-/// the session and body payloads plus any committed `.stattic/routes.json`.
-pub fn convention_files(
-    session: &Value,
-    body: &Value,
-    stage_root: &Path,
-    precompiled: bool,
-) -> Result<Value> {
-    // A precompiled body is authoritative, including the empty object. This
-    // prevents stale session convention text (and historical plaintext
-    // Basic-Auth operations) from crossing into immutable metadata.
-    let mut result = if precompiled {
-        Map::new()
-    } else {
-        session
-            .get("convention_files")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default()
-    };
-    if let Some(body) = body.get("convention_files").and_then(Value::as_object) {
-        for (key, value) in body {
-            result.insert(key.clone(), value.clone());
-        }
-    }
+/// What a finalize published, for the presence check above.
+pub struct PublishedArtifacts<'a> {
+    pub root_file: &'a str,
+    pub tables: &'a BTreeMap<String, String>,
+}
+
+/// The convention text this version records in immutable metadata beyond
+/// `_redirects`/`_headers` — those two are staged files the finalizer reads and
+/// substitutes for itself. `.stattic/routes.json` is committed, never sent.
+pub fn convention_files(stage_root: &Path) -> Result<Map<String, Value>> {
+    let mut result = Map::new();
     let routes = stage_root.join("files/.stattic/routes.json");
     if routes.is_file() {
         result.insert(
@@ -313,7 +223,7 @@ pub fn convention_files(
             ),
         );
     }
-    Ok(Value::Object(result))
+    Ok(result)
 }
 
 pub fn resolved_viewer(
@@ -345,45 +255,14 @@ pub fn resolved_viewer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tempfile::tempdir;
-
-    #[test]
-    fn template_variant_metadata_is_directly_servable() {
-        let temp = tempdir().unwrap();
-        let mut files = BTreeMap::new();
-        files.insert(
-            "config.js".to_string(),
-            file_meta("config.js", b"base", None),
-        );
-        let routes = apply_template_variants(
-            &json!({"template_variants":{"production":{"config.js":"variant"}}}),
-            temp.path(),
-            &files,
-        )
-        .unwrap();
-        let meta = routes
-            .get("production")
-            .and_then(Value::as_object)
-            .and_then(|files| files.get("config.js"))
-            .unwrap();
-
-        assert_eq!(meta.get("disk_path"), Some(&json!("config.js")));
-        assert_eq!(
-            meta.pointer("/headers/Content-Type"),
-            Some(&json!("text/javascript; charset=utf-8"))
-        );
-        assert!(meta.pointer("/headers/ETag").is_some());
-        assert!(temp
-            .path()
-            .join("files-variants/production/config.js")
-            .is_file());
-    }
 
     // Adapted from the donor's finalize-level
     // `finalize_rejects_invalid_access_and_variant_shapes`: the validators are
     // exercised directly; the rejected shapes and codes are donor-verbatim.
     #[test]
-    fn embedded_page_and_variant_shapes_are_rejected() {
+    fn embedded_page_shapes_are_rejected() {
         for (body, code) in [
             (
                 json!({"access_pages":{"other":"x"}}),
@@ -411,43 +290,5 @@ mod tests {
             fs::read_to_string(pages.path().join("pages/page-home.html")).unwrap(),
             "<h1>Home</h1>"
         );
-        let temp = tempdir().unwrap();
-        assert!(matches!(
-            apply_template_variants(
-                &json!({"template_variants":{"production":{}}}),
-                temp.path(),
-                &BTreeMap::new(),
-            ),
-            Err(FinalizeError::Invalid {
-                code: "invalid_template_variants",
-                ..
-            })
-        ));
-    }
-
-    // Adapted from the donor's finalize-level
-    // `precompiled_conventions_use_body_buckets_and_drop_stale_session_credentials`
-    // (first half): a precompiled body drops stale session convention text so
-    // plaintext Basic-Auth never reaches immutable metadata. The finalize half
-    // (body redirect buckets winning in redirects.php) needs the orchestration
-    // stage.
-    #[test]
-    fn precompiled_conventions_drop_stale_session_credentials() {
-        let temp = tempdir().unwrap();
-        let stage = temp.path().join("stage");
-        fs::create_dir_all(stage.join("files")).unwrap();
-        let session = json!({
-            "convention_files": {
-                "headers": "/*\n  Basic-Auth: admin:correct-horse"
-            }
-        });
-        let body = json!({
-            "convention_files": {"redirects": "/raw /wrong 301"},
-            "convention_files_precompiled": true
-        });
-        let metadata_conventions = convention_files(&session, &body, &stage, true).unwrap();
-        let serialized = serde_json::to_string(&metadata_conventions).unwrap();
-        assert!(!serialized.contains("correct-horse"));
-        assert!(!serialized.to_ascii_lowercase().contains("basic-auth"));
     }
 }

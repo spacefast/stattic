@@ -1,9 +1,9 @@
-# Stattic Runtime
+# Spacefast Engine
 
-Stattic Runtime is the PHP serving engine for precomputed Stattic bundles. Spacefast uses
-it as its managed serving plane, but the Runtime and its compiled artifact contract are
-portable. It serves versions, route pointers, redirects, headers, access policy and proxy
-routes without parsing source on the public request path.
+Spacefast Engine is the open-source PHP runtime that serves static spaces from precomputed
+artifacts: versions, route pointers, redirects, headers, access policy, and proxy routes.
+It is the local half of the Spacefast product — it runs anywhere PHP runs, and a committed
+version tree plus this engine is a complete self-hosted site. Exit is real.
 
 External PRs are welcome. Supporting freedom on the web is the point.
 
@@ -12,16 +12,14 @@ External PRs are welcome. Supporting freedom on the web is the point.
 
 ## How It Serves
 
-The runtime has three modes:
+The runtime has two modes:
 
 - **Serving**: route requests for a hostname to the active committed version using only
   local compiled artifacts. The public hot path never calls the Spacefast API, never parses
   `_redirects`/`_headers`/`sf.jsonc` at request time, and never scans directories.
-- **Bundle admission**: verify and install a `stattic.bundle.v1` payload without Rust,
-  `proc_open`, or any server-side build.
 - **Management**: accept scoped version create/finalize/delete, route pointer updates,
-  tombstones, repair, delete, import/export, and journal drain from a trusted control
-  plane, authenticated with EdDSA (Ed25519) JWTs.
+  tombstones, repair, delete, and journal drain from a trusted control plane,
+  authenticated with EdDSA (Ed25519) JWTs.
 
 The runtime vocabulary is only **versions and routes**. A route pointer
 (`spaces/<spaceId>/routes/<routeName>.json`) points at a version; cloud concepts like
@@ -32,33 +30,34 @@ learns about users, teams, plans, billing, or domain ownership.
 
 ### WP.Cloud (first-party)
 
-The control plane builds the engine bundle (`runtime-engine.zip`, served at
-`/v1/internal/runtime-engine.zip`) and installs it through `installer.php`. The bundle
-contents are defined by `engine-manifest.json`, never by scanning directories. Engine
-install never touches committed space storage or route indexes.
+Runtime archives are published as GitHub release assets; the control plane never serves
+their bytes. Provisioning resolves the latest promoted release, lands the CLI-only resident
+`installer.php` over SSH, and installs it immediately. Existing post-migration boxes update
+through their authenticated `/engine/update` management route. Calls from the removed
+pre-migration pull updater receive inert `200` responses while
+`SPACEFAST_LEGACY_RUNTIME_UPDATES_FROZEN=true`; those responses contain no release metadata.
+The installer is not an HTTP entrypoint. Bundle contents are defined by
+`engine-manifest.json`, never by scanning directories. Engine install never touches committed
+space storage or route indexes.
 
 ### Self-host
 
-`portable-static` bundle admission requires PHP 8.2+ and no native executable. Source
-finalization and Zero are separate optional capabilities during the pre-1.0 extraction.
+Requirements: PHP 8.2+ with `sodium`, `curl`, and `zip` extensions, plus the bundled Linux native executable (`stattic-runtime`). The official engine ZIP includes it with executable permissions. Local development may override it with `SPACEFAST_RUNTIME_BIN`. Unicode paths work without `ext-intl`; when available, the runtime uses it as the NFC fast path and otherwise uses its bundled normalizer.
 
-```sh
-php -d disable_functions=proc_open,exec,shell_exec,system,passthru \
-  runtime/bin/admit.php --bundle ./site.stattic --storage ./.stattic/storage
-```
-
-1. Copy the engine into your web root: engine files live under `htdocs/.stattic/engine`,
-   private storage under `htdocs/.stattic/storage` (create it empty).
-2. Route ordinary requests to the entrypoint shim. `index.php` is an alias of
-   `entrypoint-shim.php`, which requires `.stattic/engine/init.php`.
-   `custom-redirects.php` also loads that engine, but returns for the canonical
-   `/__spacefast/*.php` entrypoints so WP.Cloud can execute those files directly
-   after its own environment bootstrap finishes.
+1. Run `installer.php` against an engine ZIP. It stores the complete engine under an immutable
+   `htdocs/.stattic/releases/<release>/` directory and atomically publishes the relative path
+   in `.stattic/active-release`. The loader reads this small data file once per request, so an
+   atomic rename becomes visible without depending on PHP OPcache or realpath-cache timing.
+2. Route ordinary requests through the installed `index.php`. Every installed public PHP
+   entrypoint is the same loader: it pins the active release once, then executes only that
+   release. WP.Cloud's `custom-redirects.php` loader returns for the canonical direct
+   `/__spacefast/*.php` entrypoints after its environment bootstrap finishes. The loader is
+   reinstalled whenever the payload's loader bytes differ from the installed ones
+   (`.stattic/loader-version` holds their sha256), so a loader fix reaches a converged box.
 3. Deny direct web access to `.stattic/**` at the webserver level. The engine also
    denies it itself, defense in depth is still good practice.
 4. Provide configuration (see below).
-5. Serve committed versions: either import an export archive through the management API
-   or push versions through the normal create → upload → finalize flow.
+5. Serve committed versions: push them through the create → upload → finalize flow.
 
 Public serving needs only committed versions, the engine, and route pointers. It never
 depends on the Spacefast API.
@@ -73,7 +72,8 @@ inject the same Atomic shape before runtime PHP is loaded.
 
 | Key                             | Purpose                                                                                                                                                                                                                      |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SPACEFAST_API_BASE_URL`        | Control-plane base URL. Used for JWKS refresh and callbacks only; never for public serving.                                                                                                                                  |
+| `SPACEFAST_API_BASE_URL`        | Private control-plane transport. Used for JWKS refresh and callbacks only; never emitted to public pages.                                                                                                                    |
+| `SPACEFAST_BROWSER_API_URL`     | Browser-safe public API origin for the same-host SDK. HTTPS in production; loopback HTTP is accepted for local development.                                                                                                  |
 | `SPACEFAST_MANAGEMENT_HOSTNAME` | The only hostname that accepts `/__spacefast/api.php?route=...` and `/__spacefast/upload.php?op=...`. Public hosts reject management paths before JWT parsing; ordinary public paths on the management hostname fail closed. |
 | `SPACEFAST_RUNTIME_INSTANCE_ID` | This runtime's identity. Every management/upload JWT must be scoped to it.                                                                                                                                                   |
 | `SPACEFAST_RUNTIME_JWKS_PATH`   | Optional. Path to a local JWKS file for self-hosted runtimes that should never call the API.                                                                                                                                 |
@@ -81,6 +81,16 @@ inject the same Atomic shape before runtime PHP is loaded.
 
 When no local JWKS is provisioned, the runtime fetches and caches
 `<SPACEFAST_API_BASE_URL>/.well-known/spacefast-runtime-jwks.json`.
+
+### PHP error reporting
+
+Every engine entrypoint and the installer enforce `error_reporting(E_ALL)` and
+`log_errors=On`. The provider or self-hosted PHP configuration still owns the
+error-log destination. `display_errors` stays off so warnings, paths, and stack
+details never become part of a visitor response or a machine-readable CLI
+receipt. Runtime PHP does not use the `@` error-control operator: recoverable
+failures may still return a structured fallback, but their PHP diagnostics are
+always available in the configured error log.
 
 ## Management API
 
@@ -96,62 +106,46 @@ POST /__spacefast/api.php?route=/spaces/{spaceId}/versions/{versionId}/finalize
 POST /__spacefast/api.php?route=/spaces/{spaceId}/versions/{versionId}/delete
 GET  /__spacefast/api.php?route=/spaces/{spaceId}/versions/{versionId}/file&path={path}
 GET  /__spacefast/api.php?route=/spaces/{spaceId}/versions/{versionId}/files/by-hash/{sha256}
-GET  /__spacefast/api.php?route=/spaces/{spaceId}/versions/{versionId}/scan-manifest
+GET  /__spacefast/api.php?route=/spaces/{spaceId}/versions/{versionId}/files&view=source|served&path=&public_only=&channel=&prefix=&q=&cursor=&limit=
 PUT  /__spacefast/api.php?route=/spaces/{spaceId}/routes/{routeName}
 PUT  /__spacefast/api.php?route=/spaces/{spaceId}/tombstones
 POST /__spacefast/api.php?route=/spaces/{spaceId}/repair
 POST /__spacefast/api.php?route=/spaces/{spaceId}/delete
 
-PUT  /__spacefast/upload.php?op=file&upload_id={deploySessionId}&path={canonicalObjectPath}
-PUT  /__spacefast/upload.php?op=file&upload_id={deploySessionId}&path={canonicalObjectPath}&part_number={partNumber}
-POST /__spacefast/upload.php?op=file&upload_id={deploySessionId}&path={canonicalObjectPath}&complete=1
+PUT  /__spacefast/upload.php?route=/spaces/{spaceId}/blobs/{sha256}
 POST /__spacefast/upload.php?op=fetch&upload_id={deploySessionId}&path={canonicalObjectPath}   stage a file fetched from an HTTPS URL
-POST /__spacefast/upload.php?op=batch&upload_id={deploySessionId}
 ```
 
 Management JWTs (`aud = "stattic-runtime-management"`) carry `runtime_instance_id`,
 `operation_id`, `action`, `exp`, `nbf`, `jti`, and action-specific scope (`space_id`,
 `version_id`, `route_name`). Upload JWTs (`aud = "stattic-runtime-upload"`) are
-session-scoped; each `PUT` is authorized against the session's declared manifest, not a
-per-file token. The two `.../versions/{versionId}/file*` routes are the read-only
+session-scoped; each content-addressed `PUT` is authorized against the session's declared
+manifest, while source URL fetch retains its session/path route. The two
+`.../versions/{versionId}/file*` routes are the read-only
 file-fetch surface for the scan pipeline; they take a short-TTL
 `aud = "stattic-runtime-file-fetch"` JWT pinned to the space, version, and path or hash.
 
 `PUT .../routes/{routeName}` accepts `version_id`, optional `config`, and optional
 hostname intent (`production_hostnames`, `noindex_production_hostnames`,
-`version_hostnames`, `host_canonical_redirects`). Access rules live in the unified
-`config.policy` document; password verifier maps live in `config.secrets`.
-
-## Export And Import
-
-Exports and imports are chunked management jobs, so large spaces move without long
-blocking requests:
-
-- `POST .../exports` creates an export job; `POST .../exports/{id}/step` advances it;
-  `GET .../exports/{id}/archive` downloads the finished ZIP.
-- `POST .../imports` creates an import job (optionally with a control-plane-minted
-  `version_id_map`); `PUT .../imports/{id}/archive` attaches the archive;
-  `POST .../imports/{id}/step` materializes versions.
-
-The archive contains `spacefast_export_v1/spacefast.json` (format, runtime schema, source
-space id, export id, created time, version ids) plus the committed version trees under
-`spacefast_export_v1/versions/<versionId>/`. That is the only layout imports accept.
-Exports carry no ownership, billing, or
-domain data — a downloaded export plus this engine is a complete self-hosted site.
+`version_hostnames`, `host_canonical_redirects`). Canonical access is projected in
+`config.authorization`. Owner access has no separate deny/firewall policy; platform
+safety and provider takedown controls remain operator-owned.
 
 ## Storage Layout
 
 ```text
-htdocs/.stattic/engine                      engine code (replaced atomically on install)
+htdocs/.stattic/active-release              atomic relative path to the active release
+htdocs/.stattic/loader-version              sha256 of the installed public loader payload
+htdocs/.stattic/releases/<release>/         immutable managed engine, native binary, manifest
 htdocs/.stattic/storage
   runtime/uploads/                          staged upload sessions
   runtime/jwks.json                         JWKS cache
   runtime/jti/                              management JWT replay cache
-  runtime/callbacks/                        local callback journal
-  runtime/journal.jsonl                     management event journal
+  runtime/journal.jsonl                     management event journal (rolls aside
+                                            to journal-<stamp>.jsonl at 8 MiB)
   spaces/<spaceId>/versions/<versionId>/    committed files + compiled serving artifacts
   spaces/<spaceId>/routes/<routeName>.json  mutable route pointers
-  spaces/<spaceId>/access-policy.json       compiled space access policy
+  spaces/<spaceId>/policy.json              deny-only Firewall policy
   routes/current.php, routes/generations/   active route generations
 ```
 
@@ -183,11 +177,10 @@ The entry script gates in order:
    JWTs minted by the harness (`tests/harness.ts`).
 
 Coverage: routing precedence (redirects/rewrites/SPA/nearest-404/directories/robots
-classes), access policy (password, basic auth, immutable-version hosts, plan
-restrictions, reason codes), upload sessions (declared + open, caps, path policy,
-batch tar, chunked parts/complete, finalize-derived manifests), export/import
-(roundtrip, ID remap, access-policy carry, zip-bomb and inert-PHP guards), header
-operations, and proxy egress pinning at finalize.
+classes), canonical access (private/team/public roots, path overrides, Links,
+People, claim preview, immutable-version hosts), declared upload sessions (manifest validation, path
+policy, batch tar, chunked parts/complete), header operations, and proxy egress pinning
+at finalize.
 
 Requirements: PHP 8.2+ with `sodium` and `zip`, and bun. Deterministic; no network
 beyond localhost. Safe for CI.

@@ -2,29 +2,18 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/context.php';
+require_once __DIR__ . '/lock.php';
 require_once __DIR__ . '/storage.php';
 
 const STATTIC_ADMISSION_DEFAULT_LIMIT = 6;
 const STATTIC_ADMISSION_RETRY_AFTER_SECONDS = 2;
-// Crash-recovery self-heal window ONLY — not the accounting lifetime (I-8).
-// apcu_add/apcu_inc set the key's TTL once, at creation, and apcu_inc never
-// refreshes it; a legitimately in-flight uncacheable request (or the tier
-// fetch in-flight cap, which shares this same primitive) that holds its slot
-// longer than this window has its key silently purged mid-request, so a
-// fresh request re-creates the key at 0 and the per-space cap is bypassed
-// while the original holder's FPM slot is still occupied (confirmed finding
-// F4). Sized to request-timeout scale (minutes) so it can't expire under a
-// genuinely in-flight holder; configurable for tests via the same
-// _stattic_config_int seam every other engine timeout uses.
-//
-// Known residual (apcu backend): the window is anchored at generation
-// creation and never refreshed (apcu has no atomic inc-and-touch), so its
-// age is shared by every holder — one admitted near the end of the window is
-// forgotten at rollover, allowing up to `limit` extra admissions for the
-// life of those holders, once per window at worst. Accepted crash-recovery
-// trade-off (it predates the generation scheme); what generation scoping
-// guarantees is that a forgotten holder's release can never decrement the
-// replacement generation.
+// Crash-recovery self-heal window, NOT the accounting lifetime: apcu sets the
+// TTL once at creation and never refreshes it, so a holder outliving this window
+// has its key purged mid-request and the per-space cap is bypassed. Must stay at
+// request-timeout scale. Residual (apcu): the window is anchored at generation
+// creation and shared by every holder, so one admitted near rollover is
+// forgotten — up to `limit` extra admissions once per window. Generation scoping
+// still guarantees a forgotten holder's release cannot decrement its successor.
 const STATTIC_ADMISSION_STALE_SECONDS_DEFAULT = 120;
 
 function _stattic_admission_stale_seconds(): int
@@ -43,16 +32,10 @@ function _stattic_admission_configured_limit(array $serving): int
     return max(1, $limit);
 }
 
-// Backend picked ONCE per process (function-static), so a request never mixes
-// an apcu acquire with a file release or vice versa. APCu state is per-FPM-pool
-// and resets on pool restart/reload — acceptable for admission: the worst case
-// is brief over-admission right after a restart while counters rebuild, never a
-// lost release (a fresh pool has no holders to release). Feature-detect via
-// apcu_enabled(), not the apc.enabled ini flag: under CLI / `php -S` the apcu
-// functions exist and the ini flag reads on, but the cache is dead without
-// apc.enable_cli — apcu_enabled() reports the truth for the current SAPI, so
-// tests keep full coverage through the file lane instead of a per-request
-// apcu-miss fallback.
+// Picked once per process so a request never mixes an apcu acquire with a file
+// release. Feature-detect via apcu_enabled(), not the apc.enabled ini flag:
+// under CLI / `php -S` the functions exist and the flag reads on while the
+// cache is dead without apc.enable_cli.
 function _stattic_admission_backend(): string
 {
     static $backend = null;
@@ -75,9 +58,8 @@ function _stattic_admission_backend(): string
     return $backend;
 }
 
-// Shared apcu-key / file-path sanitizer: every counter key derived from
-// caller-controlled input (space id, bucket id) runs through this same
-// allowlist so it's safe as both an apcu key and a filesystem path segment.
+// Counter keys carry caller-controlled input (space id, bucket id): this
+// allowlist makes them safe as both an apcu key and a filesystem path segment.
 function _stattic_admission_sanitize_key(string $value): string
 {
     return preg_replace('/[^A-Za-z0-9._-]/', '_', $value);
@@ -95,16 +77,14 @@ function _stattic_admission_fallback_path(string $privateRoot, string $spaceId):
 
 function _stattic_admission_journal_fallback_once(string $privateRoot): void
 {
-    // Throttle stat first so the steady-state cost is one filemtime; the mkdir
-    // only runs on the very first call (whose touch inside the throttle fails
-    // while the directory is still missing).
+    // Throttle stat first so the steady-state cost is one filemtime.
     $marker = $privateRoot . '/runtime/admission/file-fallback-journaled';
-    if (!_spacefast_marker_throttle($marker, PHP_INT_MAX)) {
+    if (!_stattic_marker_throttle($marker, PHP_INT_MAX)) {
         return;
     }
     _stattic_runtime_mkdir(dirname($marker));
-    if (!@touch($marker)) {
-        return; // storage unwritable: stay silent instead of journaling per request.
+    if (!touch($marker)) {
+        return;
     }
     _stattic_runtime_append_journal($privateRoot, [
         'event' => 'admission_counter_fallback',
@@ -112,184 +92,171 @@ function _stattic_admission_journal_fallback_once(string $privateRoot): void
     ]);
 }
 
-// Generic apcu counter acquire: a TTL'd generation selects its own count key,
-// so a killed worker's slot self-heals without letting an old release touch a
-// replacement generation. Returns null (not false) when apcu itself is
-// unavailable/failed THIS call, so callers fall back to the file backend
-// instead of treating an apcu hiccup as a real over-limit rejection.
-function _stattic_admission_apcu_counter_acquire(string $key, int $limit, int $windowSeconds): callable|false|null
+// A TTL'd generation selects its own count key, so a killed worker's slot
+// self-heals without letting an old release touch a replacement generation.
+function _stattic_admission_apcu_generation(string $key, int $windowSeconds): ?string
 {
     $generationKey = $key . ':generation';
-    @apcu_add($generationKey, bin2hex(random_bytes(16)), $windowSeconds);
-    $generation = @apcu_fetch($generationKey, $generationFound);
-    if (!$generationFound || !is_string($generation)) {
-        return null;
-    }
+    apcu_add($generationKey, bin2hex(random_bytes(16)), $windowSeconds);
+    $generation = apcu_fetch($generationKey, $found);
+    return $found && is_string($generation) ? $generation : null;
+}
 
-    $countKey = $key . ':' . $generation;
-    @apcu_add($countKey, 0, $windowSeconds);
-    $count = @apcu_inc($countKey, 1, $ok, $windowSeconds);
-    if (!$ok || !is_int($count)) {
+// Null (not a count) means apcu itself failed: callers must fall back rather
+// than treat it as a real reading.
+function _stattic_admission_apcu_counter_increment(string $key, int $windowSeconds): ?array
+{
+    $generation = _stattic_admission_apcu_generation($key, $windowSeconds);
+    if ($generation === null) {
         return null;
     }
-    if ($count > $limit) {
-        @apcu_dec($countKey, 1);
+    $countKey = $key . ':' . $generation;
+    apcu_add($countKey, 0, $windowSeconds);
+    $count = apcu_inc($countKey, 1, $ok, $windowSeconds);
+    return $ok && is_int($count) ? ['count' => $count, 'count_key' => $countKey] : null;
+}
+
+function _stattic_admission_apcu_counter_acquire(string $key, int $limit, int $windowSeconds): callable|false|null
+{
+    $incremented = _stattic_admission_apcu_counter_increment($key, $windowSeconds);
+    if ($incremented === null) {
+        return null;
+    }
+    $countKey = $incremented['count_key'];
+    if ($incremented['count'] > $limit) {
+        apcu_dec($countKey, 1);
         return false;
     }
     return static function () use ($countKey): void {
-        // An expired generation gets a new count key, so a late release can
-        // only touch the generation that admitted it.
+        // A late release may only touch the generation that admitted it.
         if (!apcu_exists($countKey)) {
             return;
         }
-        $value = @apcu_dec($countKey, 1, $ok);
+        $value = apcu_dec($countKey, 1, $ok);
         if ($ok && is_int($value) && $value < 0) {
-            @apcu_cas($countKey, $value, 0);
+            apcu_cas($countKey, $value, 0);
         }
     };
 }
 
-// Generic flock+JSON file counter acquire (the apcu-unavailable fallback
-// backend): a pointer file selects a generation-scoped count file.
-function _stattic_admission_file_counter_acquire(string $path, int $limit, int $staleSeconds): callable|false
-{
+// THE file-backed windowed counter. Every mutation serializes on the generation
+// pointer's lock, so concurrent increments cannot lose each other. $decide gets
+// the in-window count and returns the delta to persist. $requireGeneration
+// binds a caller to the window it joined — a rotated-away generation makes the
+// update a no-op instead of landing on its successor.
+function _stattic_admission_file_counter_update(
+    string $path,
+    int $staleSeconds,
+    callable $decide,
+    ?string $requireGeneration = null
+): ?array {
     _stattic_runtime_mkdir(dirname($path));
     _stattic_runtime_assert_private_path($path);
     $pointerPath = $path . '.generation';
-    _stattic_runtime_assert_private_path($pointerPath);
-    $pointerHandle = @fopen($pointerPath, 'c+');
-    if (!is_resource($pointerHandle)) {
-        return false;
-    }
-    if (!flock($pointerHandle, LOCK_EX)) {
-        fclose($pointerHandle);
-        return false;
+    $pointerHandle = _stattic_lock_acquire($pointerPath, STATTIC_LOCK_WAIT);
+    if ($pointerHandle === false) {
+        return null;
     }
 
+    rewind($pointerHandle);
     $pointerRaw = stream_get_contents($pointerHandle);
-    $pointer = is_string($pointerRaw) && $pointerRaw !== '' ? json_decode($pointerRaw, true) : null;
-    $generation = is_array($pointer)
-        && is_string($pointer['generation'] ?? null)
-        && preg_match('/^[a-f0-9]{32}$/', $pointer['generation']) === 1
-            ? $pointer['generation']
-            : null;
-    $initializing = $generation === null;
+    $generation = _stattic_admission_file_counter_generation($pointerRaw);
+    if ($requireGeneration !== null && ($generation === null || !hash_equals($requireGeneration, $generation))) {
+        _stattic_lock_release($pointerHandle);
+        return null;
+    }
 
-    $decoded = null;
-    if (!$initializing) {
+    $updatedAt = 0;
+    $count = 0;
+    if ($generation !== null) {
         $countPath = $path . '.' . $generation;
         _stattic_runtime_assert_private_path($countPath);
-        $raw = is_file($countPath) ? @file_get_contents($countPath) : false;
+        $raw = is_file($countPath) ? file_get_contents($countPath) : false;
         $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
+        $updatedAt = is_array($decoded) && is_int($decoded['updated_at'] ?? null) ? $decoded['updated_at'] : 0;
+        $count = is_array($decoded) && is_int($decoded['count'] ?? null) ? max(0, $decoded['count']) : 0;
     }
 
-    $updatedAt = is_array($decoded) && is_int($decoded['updated_at'] ?? null) ? $decoded['updated_at'] : 0;
-    $count = is_array($decoded) && is_int($decoded['count'] ?? null) ? max(0, $decoded['count']) : 0;
-    if ($initializing || $updatedAt < time() - $staleSeconds) {
+    $rotating = $requireGeneration === null && ($generation === null || $updatedAt < time() - $staleSeconds);
+    if ($rotating) {
         $count = 0;
         $generation = bin2hex(random_bytes(16));
-        $initializing = true;
     }
 
-    $admitted = $count < $limit;
-    if ($admitted) {
-        $count++;
-        $updatedAt = time();
-    }
-
-    if ($initializing || $admitted) {
-        $countPath = $path . '.' . $generation;
-        _stattic_runtime_assert_private_path($countPath);
-        $countHandle = @fopen($countPath, 'c+');
-        if (!is_resource($countHandle) || !flock($countHandle, LOCK_EX)) {
-            if (is_resource($countHandle)) {
-                fclose($countHandle);
-            }
-            flock($pointerHandle, LOCK_UN);
-            fclose($pointerHandle);
-            return false;
+    $delta = (int) $decide($count);
+    $next = max(0, $count + $delta);
+    if ($rotating || $delta !== 0) {
+        $countHandle = _stattic_lock_acquire($path . '.' . $generation, STATTIC_LOCK_WAIT);
+        if ($countHandle === false) {
+            _stattic_lock_release($pointerHandle);
+            return null;
         }
         ftruncate($countHandle, 0);
         rewind($countHandle);
-        fwrite($countHandle, json_encode(['count' => $count, 'updated_at' => $updatedAt], JSON_UNESCAPED_SLASHES) . "\n");
+        fwrite($countHandle, json_encode([
+            'count' => $next,
+            'updated_at' => $delta === 0 ? $updatedAt : time(),
+        ], JSON_UNESCAPED_SLASHES) . "\n");
         fflush($countHandle);
-        flock($countHandle, LOCK_UN);
-        fclose($countHandle);
+        _stattic_lock_release($countHandle);
 
-        if ($initializing) {
+        if ($rotating) {
             ftruncate($pointerHandle, 0);
             rewind($pointerHandle);
             fwrite($pointerHandle, json_encode(['generation' => $generation], JSON_UNESCAPED_SLASHES) . "\n");
             fflush($pointerHandle);
 
-            // Reap superseded artifacts under the pointer lock: every prior
-            // generation's count file — including crash-orphaned ones whose
+            // Under the pointer lock: reaps crash-orphaned generations whose
             // pointer publish or unlink never completed.
             foreach (glob($path . '.*') ?: [] as $stalePath) {
                 $suffix = substr($stalePath, strlen($path));
                 if (preg_match('/^\.[a-f0-9]{32}$/', $suffix) === 1 && $suffix !== '.' . $generation) {
-                    @unlink($stalePath);
+                    unlink($stalePath);
                 }
             }
-            @unlink($path); // pre-generation counter file; inert, reaped once on rotation.
+            unlink($path);
         }
     }
-    flock($pointerHandle, LOCK_UN);
-    fclose($pointerHandle);
+    _stattic_lock_release($pointerHandle);
 
-    if (!$admitted) {
-        return false;
-    }
+    return ['count' => $next, 'generation' => (string) $generation];
+}
 
-    return static function () use ($path, $pointerPath, $generation): void {
-        $pointerHandle = @fopen($pointerPath, 'c+');
-        if (!is_resource($pointerHandle) || !flock($pointerHandle, LOCK_EX)) {
-            if (is_resource($pointerHandle)) {
-                fclose($pointerHandle);
-            }
-            return;
-        }
-        $pointerRaw = stream_get_contents($pointerHandle);
-        $pointer = is_string($pointerRaw) && $pointerRaw !== '' ? json_decode($pointerRaw, true) : null;
-        $storedGeneration = is_array($pointer) && is_string($pointer['generation'] ?? null)
+function _stattic_admission_file_counter_generation(mixed $pointerRaw): ?string
+{
+    $pointer = is_string($pointerRaw) && $pointerRaw !== '' ? json_decode($pointerRaw, true) : null;
+    return is_array($pointer)
+        && is_string($pointer['generation'] ?? null)
+        && preg_match('/^[a-f0-9]{32}$/', $pointer['generation']) === 1
             ? $pointer['generation']
             : null;
-        if ($storedGeneration === null || !hash_equals($generation, $storedGeneration)) {
-            flock($pointerHandle, LOCK_UN);
-            fclose($pointerHandle);
-            return;
-        }
+}
 
-        $countPath = $path . '.' . $generation;
-        $countHandle = @fopen($countPath, 'c+');
-        if (!is_resource($countHandle) || !flock($countHandle, LOCK_EX)) {
-            if (is_resource($countHandle)) {
-                fclose($countHandle);
-            }
-            flock($pointerHandle, LOCK_UN);
-            fclose($pointerHandle);
-            return;
-        }
-        $raw = stream_get_contents($countHandle);
-        $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
-        $count = is_array($decoded) && is_int($decoded['count'] ?? null) ? max(0, $decoded['count'] - 1) : 0;
-        ftruncate($countHandle, 0);
-        rewind($countHandle);
-        fwrite($countHandle, json_encode(['count' => $count, 'updated_at' => time()], JSON_UNESCAPED_SLASHES) . "\n");
-        fflush($countHandle);
-        flock($countHandle, LOCK_UN);
-        fclose($countHandle);
-        flock($pointerHandle, LOCK_UN);
-        fclose($pointerHandle);
+function _stattic_admission_file_counter_acquire(string $path, int $limit, int $staleSeconds): callable|false
+{
+    $admitted = false;
+    $result = _stattic_admission_file_counter_update(
+        $path,
+        $staleSeconds,
+        static function (int $count) use ($limit, &$admitted): int {
+            $admitted = $count < $limit;
+            return $admitted ? 1 : 0;
+        },
+    );
+    if ($result === null || !$admitted) {
+        return false;
+    }
+    $generation = $result['generation'];
+    return static function () use ($path, $staleSeconds, $generation): void {
+        _stattic_admission_file_counter_update(
+            $path,
+            $staleSeconds,
+            static fn (int $count): int => -1,
+            $generation,
+        );
     };
 }
 
-// Single acquire entry point shared by the per-space uncacheable-concurrency
-// gate AND the tier fetch in-flight cap (runtime/tier.php): picks apcu vs.
-// file per _stattic_admission_backend() (itself honoring the
-// SPACEFAST_ADMISSION_COUNTER_BACKEND force-override), journals the
-// file-fallback marker once, and falls back to the file backend on any apcu
-// miss.
 function _stattic_admission_counter_acquire(
     string $privateRoot,
     string $key,
@@ -337,11 +304,38 @@ function _stattic_admission_acquire_or_shed(string $privateRoot, array $serving,
     if ($release === false) {
         require_once __DIR__ . '/errors.php';
         _stattic_admission_record_shed($privateRoot, $spaceId, $limit, $reason);
-        _stattic_render_admission_shed(STATTIC_ADMISSION_RETRY_AFTER_SECONDS);
+        // Ingest gets its own stable code (D25); every other lane keeps the
+        // generic visitor-facing rate_limited.
+        _stattic_render_admission_shed(
+            STATTIC_ADMISSION_RETRY_AFTER_SECONDS,
+            $reason === 'ingest' ? 'ingest_admission_exceeded' : 'rate_limited'
+        );
     }
     if (is_callable($release)) {
         register_shutdown_function($release);
     }
+}
+
+// One slot per request, whichever lane charges it first. Callers reach this
+// from wherever the "this request needs a slot" verdict is known, so the
+// once-guard lives here instead of at each of them.
+function _stattic_admission_acquire_once(string $privateRoot, array $serving, string $lane): void
+{
+    if (!empty($GLOBALS['SPACEFAST_ADMISSION_ACQUIRED'])) {
+        return;
+    }
+    _stattic_admission_acquire_or_shed($privateRoot, $serving, $lane);
+    $GLOBALS['SPACEFAST_ADMISSION_ACQUIRED'] = true;
+    _stattic_admission_test_hold_if_requested();
+}
+
+// The access lane exempts OPTIONS: a preflight never runs identity work.
+function _stattic_admission_acquire_access_lane(string $privateRoot, array $serving): void
+{
+    if (_stattic_runtime_request_method() === 'OPTIONS') {
+        return;
+    }
+    _stattic_admission_acquire_once($privateRoot, $serving, 'access_rule');
 }
 
 function _stattic_admission_test_hold_if_requested(): void

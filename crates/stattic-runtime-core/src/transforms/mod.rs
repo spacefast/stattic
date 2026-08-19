@@ -8,15 +8,9 @@ mod effective;
 pub(crate) mod html;
 mod theme;
 
-pub use conventions::{
-    apply_routing_plan_policy, lower_runtime_conventions, merge_preview_loader_csp,
-    PreviewLoaderCspInput, RoutingPlanInput, RuntimeConventionsInput,
-};
+pub use conventions::{lower_runtime_conventions, RuntimeConventionsInput};
 pub use effective::{
     build_runtime_payload, resolve_effective_config, ResolveEffectiveInput, RuntimePayloadInput,
 };
-pub use html::{compile_page, transform_html, HtmlTransformInput, PageCompileInput};
-pub use theme::{
-    compile_space_theme, merge_gate_theme, validate_theme_json, CompileSpaceThemeInput,
-    MergeGateThemeInput, ValidateThemeJsonInput,
-};
+pub use html::{compile_page, PageCompileInput};
+pub use theme::{validate_theme_json, ValidateThemeJsonInput};

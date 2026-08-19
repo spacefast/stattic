@@ -1,6 +1,6 @@
 ---
-name: stattic-runtime-operator
-description: Install, configure, and operate a self-hosted Spacefast Engine — the open-source PHP runtime. Serve exported spaces locally, run management/upload APIs, and migrate spaces in or out.
+name: spacefast-runtime-operator
+description: "Install, configure, and operate a self-hosted Spacefast Engine — the open-source PHP runtime. Use for local serving, management-token setup, version uploads, activation, repair, and runtime troubleshooting."
 ---
 
 # Operating Spacefast Engine
@@ -12,11 +12,10 @@ You are operating Spacefast Engine, the open-source PHP runtime (this directory)
 
 1. Verify PHP: `php -v` (8.2+), extensions `sodium`, `curl`, `zip`.
 2. Lay out a web root:
-   - copy `runtime/engine/` → `<webroot>/.stattic/engine/`
-   - copy `runtime/engine-manifest.json` → `<webroot>/.stattic/engine-manifest.json`
-   - copy `runtime/entrypoint-shim.php` → `<webroot>/index.php` and
-     `<webroot>/custom-redirects.php`
-   - `mkdir -p <webroot>/.stattic/storage`
+   - build or obtain the engine ZIP
+   - run `runtime/installer.php <zip>` with the expected revision and digests
+   - the installer creates `.stattic/releases/<release>/`, `.stattic/storage`, and the
+     public loader aliases, then atomically publishes `.stattic/active-release`
 3. Configure via environment variables:
 
 ```bash
@@ -44,42 +43,22 @@ the JWKS. Management claims: `aud=stattic-runtime-management`, `runtime_instance
 
 Deploy flow:
 
-1. `POST /__spacefast/api.php?route=/spaces/{spaceId}/versions` -> returns `upload_id`. Either
-   declare a file manifest (`files: [{path, size, sha256?}]`) or send
-   `session_mode: "open"` with no manifest (optional `max_total_bytes` /
-   `max_file_count` caps; runtime fail-safe defaults apply when absent).
+1. `POST /__spacefast/api.php?route=/spaces/{spaceId}/versions` -> returns `upload_id` for a
+   declared file manifest. `sha256` is optional.
 2. Upload bytes with the session-scoped upload JWT
    (`aud=stattic-runtime-upload`, `deploy_session_id=upload_id`,
-   `session_mode="declared"|"open"` matching the session):
-   - small files: `PUT /__spacefast/upload.php?op=file&upload_id={uploadId}&path={path}`
-   - large files: `PUT ...&part_number={n}` (1-based, contiguous) then
-     `POST ...&complete=1`
-   - many small files: `POST /__spacefast/upload.php?op=batch&upload_id={uploadId}` with a tar body
+   manifest scope matching the session):
+   - local bytes with `sha256`: `PUT /__spacefast/upload.php?route=/spaces/{spaceId}/blobs/{sha256}`
+   - local bytes without `sha256`: `PUT /__spacefast/upload.php?op=file&upload_id={uploadId}&path={path}`;
+     the runtime streams, hashes, and binds the bytes to the declared path
    - URL-sourced files: `POST /__spacefast/upload.php?op=fetch&upload_id={uploadId}&path={path}`
      with `{"url": "https://..."}` — the runtime fetches the bytes itself
-     Declared sessions require every path to be in the manifest; open sessions accept any
-     policy-valid path within the session byte/count caps, and finalize derives the
-     manifest from the uploaded files.
+     Every uploaded path must appear in the manifest and match its declared bytes.
 3. `POST .../versions/{versionId}/finalize` with `upload_id` and optional `activate`
    (`route_name`, `production_hostnames`, `version_hostnames`, `config`; access
-   rules are `config.policy`, password verifier maps are `config.secrets`).
+   admission is the single Grant projection in `config.authorization`; owner
+   access has no separate deny/firewall lane).
 4. Point a route later: `PUT .../routes/{routeName}` with `version_id` + hostnames.
-
-## Migrate A Space In (import)
-
-1. `POST .../spaces/{spaceId}/imports` (optional `version_id_map` to mint new ids)
-2. `PUT .../imports/{importId}/archive` with the export ZIP body
-3. `POST .../imports/{importId}/step` repeatedly until `status: complete`
-4. Activate with `PUT .../routes/production`
-
-## Migrate A Space Out (export)
-
-1. `POST .../spaces/{spaceId}/exports` (optional `version_ids`)
-2. `POST .../exports/{exportId}/step` until `status: complete`
-3. `GET .../exports/{exportId}/archive` → ZIP with `spacefast_export_v1/spacefast.json`,
-   `space/access-policy.json` (when set), and committed version trees (per-version
-   `manifest.json` plus `files/` and compiled artifacts). No ownership/billing/domain
-   data is included.
 
 ## Troubleshooting
 

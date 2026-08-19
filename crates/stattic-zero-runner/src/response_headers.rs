@@ -20,11 +20,12 @@ pub struct ResponseHeaderPolicyError {
 ///
 /// The platform-managed list below intentionally duplicates
 /// `stattic-runtime-core/src/policy.rs::platform_managed_response_header` (the
-/// `_headers` compile/apply authority, itself generated-parity-checked against
-/// the TS policy source): runtime-core depends on this crate, so the runner
-/// cannot import it without inverting the dependency. Keep the two lists in
-/// sync. The runner additionally forbids `x-spacefast-*`/`x-stattic-*` and the
-/// hop-by-hop names below, which never apply to static `_headers` rules.
+/// `_headers` compile/apply authority): runtime-core depends on this crate, so
+/// the runner cannot import it without inverting the dependency. Both are ports
+/// of one TypeScript definition
+/// (`packages/common/src/utils/static-runtime-policy.ts`);
+/// `apps/control-plane/src/runtime/php-policy-parity.test.ts` fails if any of
+/// them drift apart.
 #[must_use]
 pub fn platform_managed_response_header(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
@@ -59,9 +60,18 @@ pub fn platform_managed_response_header(name: &str) -> bool {
                 | "transfer-encoding"
                 | "upgrade"
                 | "vary"
+                // The internal-redirect/sendfile family, every vendor spelling: these
+                // instruct the web server to serve a different file instead of
+                // describing this response.
                 | "x-accel-buffering"
+                | "x-accel-charset"
+                | "x-accel-expires"
+                | "x-accel-limit-rate"
                 | "x-accel-redirect"
                 | "x-lighttpd-send-file"
+                | "x-lighttpd-sendfile"
+                | "x-lighttpd-sendfile2"
+                | "x-reproxy-url"
                 | "x-sendfile"
         )
 }

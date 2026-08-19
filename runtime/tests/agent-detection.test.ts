@@ -10,7 +10,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { deploy, get, startRuntime, type Runtime } from "./harness.ts";
+import { deploy, get, publicAccessConfig, startRuntime, type Runtime } from "./harness.ts";
 
 type AgentDetectionCase = {
   note: string;
@@ -49,25 +49,11 @@ beforeAll(async () => {
       "index.html": "<h1>home</h1>\n",
       "probe/index.html": HTML,
       "probe.md": MARKDOWN,
-    },
-    serving: {
-      redirects_exact: {
-        "/probe": [
-          {
-            destination: "/probe.md",
-            status: 200,
-            action: "rewrite",
-            force: true,
-            conditions: [{ kind: "agent", values: ["true"] }],
-            order: 1,
-          },
-        ],
-      },
-      redirects_pattern: [],
+      _redirects: "/probe /probe.md 200! Agent=true\n",
     },
     activate: {
       route_name: "production",
-      config: { mode: "website", site_title: "Agent detection" },
+      config: publicAccessConfig({ mode: "website", site_title: "Agent detection" }),
       production_hostnames: [SITE],
       noindex_production_hostnames: [],
       version_hostnames: [],
@@ -83,7 +69,10 @@ async function servedBody(accept: string, userAgent: string): Promise<string> {
   // Bun/x.y) and the table's empty-header cases would never reach PHP's
   // missing-header paths. Bun preserves explicitly supplied empty values.
   const headers: Record<string, string> = { accept, "user-agent": userAgent };
-  const response = await get(rt, SITE, "/probe", { headers });
+  // The canonical URL of `probe/index.html`: `/probe` is a 308 to this (W7.2),
+  // so this is the URL every visitor actually lands on, and the exact rule
+  // written for `/probe` has to reach it — the walk strips the trailing slash.
+  const response = await get(rt, SITE, "/probe/", { headers });
   expect(response.status).toBe(200);
   return response.text();
 }
@@ -101,30 +90,3 @@ for (const needle of table.needles) {
     expect(await servedBody("*/*", `Mozilla/5.0 (compatible; ${needle}-probe/1.0)`)).toBe(MARKDOWN);
   });
 }
-
-// Runtime-lane copy of the needle/accept-token parity guard: a runtime-only PR
-// never runs the packages/routing suite, so the check that redirects.php
-// enumerates exactly the shared table's constants must also live here.
-const phpSource = readFileSync(
-  path.resolve(import.meta.dir, "../engine/runtime/redirects.php"),
-  "utf8",
-);
-
-const byCodePoint = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
-
-test("PHP needle list matches the shared table", () => {
-  const start = phpSource.indexOf("function _stattic_is_agent_request");
-  expect(start).toBeGreaterThanOrEqual(0);
-  const body = phpSource.slice(start, phpSource.indexOf("\n}", start));
-  const listStart = body.indexOf("foreach ([");
-  const listEnd = body.indexOf("] as $needle", listStart);
-  expect(listStart).toBeGreaterThanOrEqual(0);
-  expect(listEnd).toBeGreaterThan(listStart);
-  const needles = (body.slice(listStart, listEnd).match(/'([a-z0-9]+)'/g) ?? []).map((literal) =>
-    literal.slice(1, -1),
-  );
-  expect(needles.toSorted(byCodePoint)).toEqual(table.needles);
-  expect([...new Set(body.match(/text\/[a-z-]+/g) ?? [])].toSorted(byCodePoint)).toEqual(
-    table.acceptTokens,
-  );
-});

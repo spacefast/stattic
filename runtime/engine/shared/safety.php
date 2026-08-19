@@ -7,20 +7,14 @@ declare(strict_types=1);
 // Parity is enforced by static-runtime-policy.fixtures.json.
 
 const SPACEFAST_PHP_LIKE_EXTENSIONS = ['php', 'php3', 'php4', 'php5', 'php7', 'php8', 'phtml', 'phar'];
-const SPACEFAST_NON_IMMUTABLE_EXTENSIONS = ['html' => true, 'htm' => true, 'php' => true, 'txt' => true, 'xml' => true];
-// Build-output dirs where the framework guarantees every emitted asset is content-hashed
-// (Next `_next/static/`, SvelteKit `_app/immutable/`, Nuxt `_nuxt/`, Astro `_astro/`).
-// Anything under these is immutable regardless of filename. These prefixes and user
-// `_headers` Cache-Control rules are the ONLY immutable signals — there is deliberately
-// no filename-entropy guessing (bundler hashes and short human names are
-// indistinguishable; see the TS source of truth for the full rationale).
-const SPACEFAST_GUARANTEED_IMMUTABLE_PREFIXES = ['_next/static/', '_app/immutable/', '_nuxt/', '_astro/'];
-
 // Rejected/platform-managed response headers: user _headers rules can never set or
 // remove these. The X-Accel-Redirect/X-Sendfile family is here because under
-// nginx+php-fpm those headers are a server-side file-disclosure primitive. The native
-// Rust compiler filters them at publish; the runtime refuses them again at artifact
-// validation and apply time.
+// nginx+php-fpm those headers are a server-side file-disclosure primitive. The
+// `x-spacefast-`/`x-stattic-` prefixes are the runtime's own response signature
+// (X-Spacefast-Runtime, X-Spacefast-Version, …) and can never be forged by user rules.
+// The compilers reject both at publish; the runtime refuses them again at artifact
+// validation and apply time. Always ask _stattic_platform_managed_header() — the
+// literal map alone is only half the policy.
 const SPACEFAST_PLATFORM_MANAGED_HEADERS = [
     'accept-ranges' => true,
     'age' => true,
@@ -35,21 +29,64 @@ const SPACEFAST_PLATFORM_MANAGED_HEADERS = [
     'cookie' => true,
     'date' => true,
     'host' => true,
+    'keep-alive' => true,
     'location' => true,
     'netlify-cdn-cache-control' => true,
+    'proxy-authenticate' => true,
+    'proxy-authorization' => true,
     'server' => true,
     'set-cookie' => true,
     'strict-transport-security' => true,
     'surrogate-control' => true,
+    'te' => true,
     'trailer' => true,
     'transfer-encoding' => true,
     'upgrade' => true,
     'vary' => true,
     'x-accel-buffering' => true,
+    'x-accel-charset' => true,
+    'x-accel-expires' => true,
+    'x-accel-limit-rate' => true,
     'x-accel-redirect' => true,
     'x-lighttpd-send-file' => true,
+    'x-lighttpd-sendfile' => true,
+    'x-lighttpd-sendfile2' => true,
+    'x-reproxy-url' => true,
     'x-sendfile' => true,
 ];
+const SPACEFAST_PLATFORM_MANAGED_HEADER_PREFIXES = ['x-spacefast-', 'x-stattic-'];
+
+// The internal-redirect/sendfile subset of the map above: headers that make the web
+// server produce a different response instead of describing this one. The proxy relay
+// (runtime/runtime/proxy.php) drops exactly these from an untrusted upstream while still
+// relaying ordinary response headers the managed map also lists (location,
+// content-encoding, content-range, allow).
+const SPACEFAST_INTERNAL_REDIRECT_HEADERS = [
+    'x-accel-buffering' => true,
+    'x-accel-charset' => true,
+    'x-accel-expires' => true,
+    'x-accel-limit-rate' => true,
+    'x-accel-redirect' => true,
+    'x-lighttpd-send-file' => true,
+    'x-lighttpd-sendfile' => true,
+    'x-lighttpd-sendfile2' => true,
+    'x-reproxy-url' => true,
+    'x-sendfile' => true,
+];
+
+function _stattic_platform_managed_header(string $name): bool
+{
+    $lower = strtolower(trim($name));
+    if (isset(SPACEFAST_PLATFORM_MANAGED_HEADERS[$lower])) {
+        return true;
+    }
+    foreach (SPACEFAST_PLATFORM_MANAGED_HEADER_PREFIXES as $prefix) {
+        if (str_starts_with($lower, $prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 function _stattic_policy_extension(string $path): string
 {
@@ -64,33 +101,3 @@ function _stattic_path_is_php_like(string $path): bool
     return in_array(_stattic_policy_extension($path), SPACEFAST_PHP_LIKE_EXTENSIONS, true);
 }
 
-function _stattic_safe_content_type(string $path, string $mime): string
-{
-    if (!_stattic_path_is_php_like($path)) {
-        return $mime;
-    }
-    return _stattic_policy_extension($path) === 'phar'
-        ? 'application/octet-stream'
-        : 'text/plain; charset=utf-8';
-}
-
-function _stattic_runtime_is_under_guaranteed_immutable_prefix(string $path): bool
-{
-    $normalized = $path !== '' && $path[0] === '/' ? substr($path, 1) : $path;
-    foreach (SPACEFAST_GUARANTEED_IMMUTABLE_PREFIXES as $prefix) {
-        if (str_starts_with($normalized, $prefix)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-function _stattic_runtime_is_immutable_asset_path(string $path): bool
-{
-    if (isset(SPACEFAST_NON_IMMUTABLE_EXTENSIONS[_stattic_policy_extension($path)])) {
-        return false;
-    }
-    // Path-convention layer: assets under a guaranteed-content-hashed framework build
-    // dir are immutable regardless of filename. Extension gate above still applies.
-    return _stattic_runtime_is_under_guaranteed_immutable_prefix($path);
-}

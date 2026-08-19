@@ -1,14 +1,14 @@
 //! `_headers` block grammar: matcher lines, set/remove operations, CSP and
 //! platform-managed header policy (first-wins semantics are enforced by the
-//! shared `crate::policy::platform_managed_response_header` list), and the
-//! recognition of `Basic-Auth` operations for later lowering.
+//! shared `crate::policy::platform_managed_response_header` list).
 
-use crate::policy::platform_managed_response_header;
+use crate::policy::{never_removable_response_header, platform_managed_response_header};
 
 use super::{
-    basic_auth_regex, canonical_header_name, cdn_headers, compile_pattern, diagnostic,
-    escape_regex_literal, header_name_regex, normalize_hostname, parse_absolute_url,
-    HeaderOperation, HeaderRule, RoutingDiagnostic, HEADER_LINE_LIMIT,
+    canonical_header_name, cdn_headers, compile_pattern, declaration_length, diagnostic,
+    escape_regex_literal, header_name_regex, normalize_hostname, normalize_path,
+    parse_absolute_url, routing_trim, HeaderOperation, HeaderRule, RoutingDiagnostic, RuleField,
+    RuleIssue, HEADER_LINE_LIMIT,
 };
 
 #[derive(Debug)]
@@ -18,7 +18,22 @@ struct HeaderSourceOperation {
     source: String,
 }
 
-type HeaderMatcher = (String, Option<String>, Option<String>, Option<String>);
+pub(super) type HeaderMatcher = (String, Option<String>, Option<String>, Option<String>);
+
+/// What the shared header-name policy decided. Callers attach the location: a
+/// `_headers` line, or a `sf.jsonc` key path.
+pub(super) enum HeaderNameVerdict {
+    Accepted {
+        canonical: String,
+        advisory: Option<HeaderNameNote>,
+    },
+    Rejected(HeaderNameNote),
+}
+
+pub(super) struct HeaderNameNote {
+    pub code: &'static str,
+    pub message: String,
+}
 
 pub(super) fn compile_headers(
     content: &str,
@@ -35,7 +50,21 @@ pub(super) fn compile_headers(
             operations.clear();
             return;
         };
-        let matcher = compile_header_matcher(&path, line, &source, diagnostics);
+        let matcher = match compile_header_matcher(&path) {
+            Ok(matcher) => Some(matcher),
+            Err(issue) => {
+                diagnostic(
+                    diagnostics,
+                    "_headers",
+                    line,
+                    issue.severity,
+                    issue.code,
+                    &issue.message,
+                    &source,
+                );
+                None
+            }
+        };
         let normalized: Vec<HeaderOperation> = operations
             .drain(..)
             .filter_map(|item| normalize_header_operation(item, diagnostics))
@@ -53,14 +82,16 @@ pub(super) fn compile_headers(
                 host_regex,
                 operations: normalized,
                 headers,
+                origin: "file",
             });
         }
     };
     for (index, raw_line) in content.lines().enumerate() {
         let line = index + 1;
-        let source_line = raw_line.trim_end_matches('\r');
-        let trimmed = source_line.trim();
-        if source_line.len() > HEADER_LINE_LIMIT {
+        // One trailing CR, the way `/\r$/` strips it — not every trailing CR.
+        let source_line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let trimmed = routing_trim(source_line);
+        if declaration_length(source_line) > HEADER_LINE_LIMIT {
             if !source_line.starts_with([' ', '\t']) {
                 flush(&mut current, &mut operations, &mut rules, diagnostics);
             }
@@ -96,7 +127,7 @@ pub(super) fn compile_headers(
             continue;
         }
         if let Some(name) = trimmed.strip_prefix('!') {
-            if name.trim().is_empty() {
+            if routing_trim(name).is_empty() {
                 diagnostic(
                     diagnostics,
                     "_headers",
@@ -110,7 +141,7 @@ pub(super) fn compile_headers(
                 operations.push(HeaderSourceOperation {
                     operation: HeaderOperation {
                         kind: "remove",
-                        name: name.trim().to_string(),
+                        name: routing_trim(name).to_string(),
                         value: None,
                         line: None,
                         source: None,
@@ -133,7 +164,7 @@ pub(super) fn compile_headers(
             );
             continue;
         };
-        if name.trim().is_empty() {
+        if routing_trim(name).is_empty() {
             diagnostic(
                 diagnostics,
                 "_headers",
@@ -148,8 +179,8 @@ pub(super) fn compile_headers(
         operations.push(HeaderSourceOperation {
             operation: HeaderOperation {
                 kind: "set",
-                name: name.trim().to_string(),
-                value: Some(value.trim().to_string()),
+                name: routing_trim(name).to_string(),
+                value: Some(routing_trim(value).to_string()),
                 line: None,
                 source: None,
             },
@@ -161,51 +192,39 @@ pub(super) fn compile_headers(
     rules
 }
 
-fn compile_header_matcher(
-    path: &str,
-    line: usize,
-    source: &str,
-    diagnostics: &mut Vec<RoutingDiagnostic>,
-) -> Option<HeaderMatcher> {
+/// The header matcher grammar shared by `_headers` blocks and `sf.jsonc`
+/// header rules: one matcher syntax, one set of diagnostic codes.
+pub(super) fn compile_header_matcher(path: &str) -> Result<HeaderMatcher, RuleIssue> {
     if let Some(url) = parse_absolute_url(path) {
         if !url.port.is_empty() {
-            diagnostic(
-                diagnostics,
-                "_headers",
-                line,
-                "error",
+            return Err(RuleIssue::error(
+                RuleField::Source,
                 "header_port_unsupported",
                 "Header URL matchers cannot include ports.",
-                source,
-            );
-            return None;
+            ));
         }
         let host = normalize_hostname(&url.host);
+        let normalized_path = normalize_path(&url.path);
         let host_compiled = compile_pattern(&host, '.', true, false);
-        let path_compiled = compile_pattern(&url.path, '/', true, false);
+        let path_compiled = compile_pattern(&normalized_path, '/', true, false);
         if host_compiled.error.is_some() || path_compiled.error.is_some() {
-            diagnostic(
-                diagnostics,
-                "_headers",
-                line,
-                "error",
+            return Err(RuleIssue::error(
+                RuleField::Source,
                 "header_pattern_invalid",
                 host_compiled
                     .error
                     .as_deref()
                     .or(path_compiled.error.as_deref())
                     .unwrap_or("This header matcher is not valid."),
-                source,
-            );
-            return None;
+            ));
         }
-        return Some((
-            url.path.clone(),
+        return Ok((
+            normalized_path.clone(),
             Some(host.clone()),
             Some(
                 path_compiled
                     .regex
-                    .unwrap_or_else(|| format!("^{}$", escape_regex_literal(&url.path))),
+                    .unwrap_or_else(|| format!("^{}$", escape_regex_literal(&normalized_path))),
             ),
             Some(
                 host_compiled
@@ -215,40 +234,76 @@ fn compile_header_matcher(
         ));
     }
     if !path.starts_with('/') {
-        diagnostic(
-            diagnostics,
-            "_headers",
-            line,
-            "error",
+        return Err(RuleIssue::error(
+            RuleField::Source,
             "header_path_invalid",
             "The header matcher must start with / or use an absolute URL.",
-            source,
-        );
-        return None;
+        ));
     }
-    let compiled = compile_pattern(path, '/', false, false);
+    let normalized_path = normalize_path(path);
+    let compiled = compile_pattern(&normalized_path, '/', false, false);
     if let Some(error) = compiled.error {
-        diagnostic(
-            diagnostics,
-            "_headers",
-            line,
-            "error",
+        return Err(RuleIssue::error(
+            RuleField::Source,
             "header_pattern_invalid",
-            &error,
-            source,
-        );
-        return None;
+            error,
+        ));
     }
-    Some((
-        path.to_string(),
+    Ok((
+        normalized_path.clone(),
         None,
         Some(
             compiled
                 .regex
-                .unwrap_or_else(|| format!("^{}$", escape_regex_literal(path))),
+                .unwrap_or_else(|| format!("^{}$", escape_regex_literal(&normalized_path))),
         ),
         None,
     ))
+}
+
+/// Which header names a rule may set, shared by both grammars: Basic-Auth is
+/// never a response header, names are syntax-checked, platform-managed headers
+/// stay ours, and Cache-Control only advises.
+pub(super) fn check_header_name(name: &str) -> HeaderNameVerdict {
+    let trimmed = routing_trim(name);
+    let lower = trimmed.to_lowercase();
+    if lower == "basic-auth" {
+        return HeaderNameVerdict::Rejected(HeaderNameNote {
+            code: "header_basic_auth_unsupported",
+            message:
+                "Basic-Auth is not a response header. Use Spacefast sharing to control access."
+                    .into(),
+        });
+    }
+    if !header_name_regex().is_match(trimmed) {
+        return HeaderNameVerdict::Rejected(HeaderNameNote {
+            code: "header_name_invalid",
+            message: "This header name is not valid.".into(),
+        });
+    }
+    let canonical = canonical_header_name(trimmed);
+    if platform_managed_response_header(&lower) {
+        return HeaderNameVerdict::Rejected(if cdn_headers().contains(lower.as_str()) {
+            HeaderNameNote {
+                code: "header_cdn_cache_unsupported",
+                message: format!("The \"{canonical}\" header does not have Spacefast semantics."),
+            }
+        } else {
+            HeaderNameNote {
+                code: "header_name_unsupported",
+                message: format!(
+                    "The \"{canonical}\" header is managed by the platform and cannot be changed."
+                ),
+            }
+        });
+    }
+    HeaderNameVerdict::Accepted {
+        canonical,
+        advisory: (lower == "cache-control").then(|| HeaderNameNote {
+            code: "header_cache_control_platform_managed",
+            message: "Cache-Control applies to browser responses; platform edge caching is managed by Spacefast.".into(),
+        }),
+    }
 }
 
 fn normalize_header_operation(
@@ -256,83 +311,60 @@ fn normalize_header_operation(
     diagnostics: &mut Vec<RoutingDiagnostic>,
 ) -> Option<HeaderOperation> {
     let mut operation = item.operation;
-    let lower = operation.name.trim().to_ascii_lowercase();
-    if lower == "basic-auth" {
-        let value = operation.value.as_deref().unwrap_or("").trim();
-        if operation.kind != "set"
-            || value.is_empty()
-            || value
-                .split_whitespace()
-                .any(|credential| !basic_auth_regex().is_match(credential))
-        {
+    match check_header_name(&operation.name) {
+        HeaderNameVerdict::Rejected(note) => {
             diagnostic(
                 diagnostics,
                 "_headers",
                 item.line,
                 "error",
-                "header_basic_auth_invalid",
-                "Basic-Auth credentials must use username:password.",
-                "[redacted]",
+                note.code,
+                &note.message,
+                // A rejected Basic-Auth line carries credentials; echo the
+                // line back for every other name, never for that one.
+                if note.code == "header_basic_auth_unsupported" {
+                    "[redacted]"
+                } else {
+                    &item.source
+                },
             );
-            return None;
+            None
         }
-        diagnostic(
-            diagnostics,
-            "_headers",
-            item.line,
-            "warning",
-            "header_basic_auth_never_emitted",
-            "Basic-Auth protects matching paths and is not sent as a response header.",
-            "[redacted]",
-        );
-        return Some(HeaderOperation {
-            kind: "basicAuth",
-            name: "Basic-Auth".into(),
-            value: Some(value.to_string()),
-            line: None,
-            source: None,
-        });
+        HeaderNameVerdict::Accepted {
+            canonical,
+            advisory,
+        } => {
+            // Setting one is publisher metadata; deleting the platform's own is
+            // not a rule we can honor (see `never_removable_response_header`).
+            if operation.kind == "remove" && never_removable_response_header(&canonical) {
+                diagnostic(
+                    diagnostics,
+                    "_headers",
+                    item.line,
+                    "error",
+                    "header_name_unsupported",
+                    &format!(
+                        "The \"{canonical}\" header is set by Spacefast for every response and cannot be removed."
+                    ),
+                    &item.source,
+                );
+                return None;
+            }
+            if let Some(note) = advisory {
+                diagnostic(
+                    diagnostics,
+                    "_headers",
+                    item.line,
+                    "warning",
+                    note.code,
+                    &note.message,
+                    &item.source,
+                );
+            }
+            operation.name = canonical;
+            operation.line = Some(item.line);
+            operation.source = Some(item.source);
+            Some(operation)
+        }
     }
-    if !header_name_regex().is_match(operation.name.trim()) {
-        diagnostic(
-            diagnostics,
-            "_headers",
-            item.line,
-            "error",
-            "header_name_invalid",
-            "This header name is not valid.",
-            &item.source,
-        );
-        return None;
-    }
-    let canonical = canonical_header_name(&operation.name);
-    if platform_managed_response_header(&lower) {
-        diagnostic(
-            diagnostics,
-            "_headers",
-            item.line,
-            "error",
-            if cdn_headers().contains(lower.as_str()) {
-                "header_cdn_cache_unsupported"
-            } else {
-                "header_name_unsupported"
-            },
-            &if cdn_headers().contains(lower.as_str()) {
-                format!("The \"{canonical}\" header does not have Spacefast semantics.")
-            } else {
-                format!(
-                    "The \"{canonical}\" header is managed by the platform and cannot be changed."
-                )
-            },
-            &item.source,
-        );
-        return None;
-    }
-    if lower == "cache-control" {
-        diagnostic(diagnostics, "_headers", item.line, "warning", "header_cache_control_platform_managed", "Cache-Control applies to browser responses; platform edge caching is managed by Spacefast.", &item.source);
-    }
-    operation.name = canonical;
-    operation.line = Some(item.line);
-    operation.source = Some(item.source);
-    Some(operation)
 }

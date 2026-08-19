@@ -1,161 +1,14 @@
 <?php
 declare(strict_types=1);
 
-function _stattic_load_lazy_serving_config(string $privateRoot, string $requestHost, string $requestPath = '/', string $requestMethod = 'GET'): ?array
+require_once __DIR__ . '/context.php';
+require_once __DIR__ . '/pointers.php';
+require_once __DIR__ . '/finalizer-protocol.generated.php';
+
+function _stattic_render_runtime_invariant_error_lazy(string $code, string $message): void
 {
-    $current = @include $privateRoot . '/routes/current.php';
-    if (!is_array($current) || !is_string($current['generation'] ?? null)) {
-        return null;
-    }
-    if (!_stattic_runtime_current_route_pointer_valid_lazy($current)) {
-        _stattic_render_runtime_invariant_error_lazy('artifact-schema-mismatch', 'Runtime artifact schema does not match this runtime.');
-    }
-
-    $generationRoot = $privateRoot . '/routes/generations/' . $current['generation'];
-    $hasWildcardFallback = !empty($current['has_wildcards']);
-    $exactShard = _stattic_route_shard_for_host($generationRoot, $current, $requestHost);
-    $wildcardShard = null;
-    $hostEntry = null;
-    $hostnames = is_array($exactShard['hostnames'] ?? null) ? $exactShard['hostnames'] : [];
-    if ($requestHost !== '' && is_array($hostnames) && isset($hostnames[$requestHost]) && is_array($hostnames[$requestHost])) {
-        $hostEntry = $hostnames[$requestHost];
-    } elseif ($requestHost !== '' && $hasWildcardFallback) {
-        $wildcardShard = _stattic_load_wildcard_route_shard($generationRoot, $current);
-        $wildcardHostnames = is_array($wildcardShard['hostnames'] ?? null) ? $wildcardShard['hostnames'] : [];
-        $hostEntry = _stattic_match_wildcard_host_entry($wildcardHostnames, $requestHost);
-    }
-    $routeAction = is_array($hostEntry) ? _stattic_host_route_action($hostEntry) : null;
-    $hostResponseHeaders = is_array($hostEntry) && is_array($hostEntry['response_headers'] ?? null)
-        ? _stattic_valid_response_headers($hostEntry['response_headers'])
-        : [];
-    if (
-        is_array($routeAction)
-        && in_array(($routeAction['action'] ?? null), ['tombstone', 'platform_error'], true)
-    ) {
-        return _stattic_platform_action_serving_config(
-            $routeAction,
-            is_string($routeAction['space_id'] ?? null) ? $routeAction['space_id'] : '',
-            $hostResponseHeaders
-        );
-    }
-    $hostRoutes = is_array($exactShard['host_routes'] ?? null) ? $exactShard['host_routes'] : [];
-    $requestHostRoutes = _stattic_routes_for_host($hostRoutes, $requestHost);
-    if ($hasWildcardFallback && $wildcardShard === null && !is_array($hostEntry) && $requestHostRoutes === []) {
-        $wildcardShard = _stattic_load_wildcard_route_shard($generationRoot, $current);
-    }
-    if (is_array($wildcardShard)) {
-        $wildcardRoutes = is_array($wildcardShard['host_routes'] ?? null) ? $wildcardShard['host_routes'] : [];
-        foreach (_stattic_wildcard_routes_for_host($wildcardRoutes, $requestHost) as $route) {
-            $requestHostRoutes[] = $route;
-        }
-    }
-    if (!is_array($hostEntry) && $requestHostRoutes === []) {
-        return null;
-    }
-
-    $matchedHostRoute = _stattic_lazy_match_host_route($requestHostRoutes, $requestPath, $requestMethod);
-    $matchedRouteAction = is_array($matchedHostRoute) && is_array($matchedHostRoute['route_action'] ?? null)
-        ? $matchedHostRoute['route_action']
-        : null;
-    $routeActionCanReturnWithoutVersion = is_array($matchedRouteAction)
-        && in_array(($matchedRouteAction['action'] ?? null), ['redirect', 'proxy', 'robots_txt', 'platform_error', 'tombstone'], true);
-
-    $versionId = is_array($routeAction) && ($routeAction['action'] ?? null) === 'serve' && is_string($routeAction['version_id'] ?? null)
-        ? $routeAction['version_id']
-        : null;
-    $actionSpaceId = is_array($routeAction) && ($routeAction['action'] ?? null) === 'serve' && is_string($routeAction['space_id'] ?? null)
-        ? $routeAction['space_id']
-        : '';
-    $version = null;
-    $versions = [];
-    if (!$routeActionCanReturnWithoutVersion && $versionId !== null && _spacefast_id_valid($versionId)) {
-        $loadedVersion = _stattic_load_version_manifest($privateRoot, $actionSpaceId, $versionId);
-        if (is_array($loadedVersion)) {
-            $version = $loadedVersion;
-            $versions[$versionId] = $loadedVersion;
-        }
-    }
-    if (
-        !$routeActionCanReturnWithoutVersion
-        && is_array($matchedRouteAction)
-        && ($matchedRouteAction['action'] ?? null) === 'serve'
-        && is_string($matchedRouteAction['version_id'] ?? null)
-        && !isset($versions[$matchedRouteAction['version_id']])
-    ) {
-        if (is_string($matchedRouteAction['space_id'] ?? null)) {
-            $matchedVersion = _stattic_load_version_manifest($privateRoot, $matchedRouteAction['space_id'], $matchedRouteAction['version_id']);
-            if (is_array($matchedVersion)) {
-                $versions[$matchedRouteAction['version_id']] = $matchedVersion;
-            }
-        }
-        if (!isset($versions[$matchedRouteAction['version_id']])) {
-            return _stattic_platform_action_serving_config(_stattic_version_pending_action());
-        }
-    }
-    if (!$routeActionCanReturnWithoutVersion && $versionId !== null && !is_array($version)) {
-        return _stattic_platform_action_serving_config(_stattic_version_pending_action());
-    }
-
-    $runtimeConfig = is_array($hostEntry) && is_array($hostEntry['runtime_config'] ?? null)
-        ? $hostEntry['runtime_config']
-        : [];
-    return [
-        'version_id' => $versionId,
-        'space_id' => $actionSpaceId,
-        // THE unified policy lane ({ rules }) for runtime/access-rules.php; absent
-        // or malformed host entries degrade to no access control. The serving
-        // secrets the password rules resolve ride beside it.
-        'policy' => is_array($hostEntry) && is_array($hostEntry['policy'] ?? null) ? $hostEntry['policy'] : [],
-        'secrets' => is_array($hostEntry) && is_array($hostEntry['secrets'] ?? null) ? $hostEntry['secrets'] : [],
-        'admission' => is_array($hostEntry) && is_array($hostEntry['admission'] ?? null) ? $hostEntry['admission'] : [],
-        'route_name' => is_array($hostEntry) && is_string($hostEntry['route_name'] ?? null) ? $hostEntry['route_name'] : null,
-        'immutable' => is_array($hostEntry) && !empty($hostEntry['immutable']),
-        // Unix timestamp the served version became ready (version-host entries only);
-        // access rules with windowDays compare against it locally.
-        'ready_at' => is_array($hostEntry) && isset($hostEntry['ready_at']) ? (int) $hostEntry['ready_at'] : null,
-        // Anonymous claim-window countdown for the expiry-rescue banner session.
-        'anonymous_expires_at' => is_string($runtimeConfig['anonymous_expires_at'] ?? null) ? $runtimeConfig['anonymous_expires_at'] : null,
-        // Generic serve-time content-type allowlist; absent/malformed -> no
-        // restriction (the policy is opt-in per space via route config).
-        'content_types' => is_array($runtimeConfig['content_types'] ?? null) && is_array($runtimeConfig['content_types']['allowed'] ?? null)
-            ? $runtimeConfig['content_types']
-            : null,
-        // Serve-time plan entitlements (proxy-routes.md gating): read by
-        // runtime/redirects.php against a `planGated` compiled rule. Absent/
-        // malformed host entry -> {} -> every entitlement check fails closed
-        // (runtime/redirects.php _stattic_serving_entitlement_allows).
-        'entitlements' => is_array($hostEntry) && is_array($hostEntry['entitlements'] ?? null)
-            ? $hostEntry['entitlements']
-            : [],
-        'host_routes' => $requestHostRoutes,
-        'matched_host_route' => $matchedHostRoute,
-        'response_headers' => $hostResponseHeaders,
-        'versions' => $versions,
-    ];
-}
-
-function _stattic_platform_action_serving_config(array $action, string $spaceId = '', array $responseHeaders = []): array
-{
-    return [
-        'version_id' => null,
-        'space_id' => $spaceId,
-        'host_routes' => [],
-        'response_headers' => $responseHeaders,
-        'versions' => [],
-        'platform_action' => $action,
-    ];
-}
-
-function _stattic_valid_response_headers(array $headers): array
-{
-    $valid = [];
-    foreach ($headers as $name => $value) {
-        if (!is_string($name) || !is_string($value) || $name === '' || $value === '' || preg_match('/[^A-Za-z0-9-]/', $name) === 1) {
-            continue;
-        }
-        $valid[$name] = $value;
-    }
-    return $valid;
+    require_once __DIR__ . '/errors.php';
+    _stattic_render_runtime_invariant_error($code, $message);
 }
 
 function _stattic_platform_error_action(string $pageId, int $status, string $message, string $cacheControl = 'no-store', array $responseHeaders = []): array
@@ -166,7 +19,7 @@ function _stattic_platform_error_action(string $pageId, int $status, string $mes
         'status' => $status,
         'cache_control' => $cacheControl,
         'message' => $message,
-        'methods' => ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        'methods' => STATTIC_VISITOR_METHODS,
     ];
     if ($responseHeaders !== []) {
         $action['response_headers'] = $responseHeaders;
@@ -189,389 +42,45 @@ function _stattic_runtime_artifact_metadata_valid_lazy(mixed $artifact): bool
         && $artifact['generated_at'] !== '';
 }
 
-function _stattic_runtime_current_route_pointer_valid_lazy(mixed $artifact): bool
+function _stattic_version_files_root(string $privateRoot, string $spaceId, string $versionId): string
 {
-    return _stattic_runtime_artifact_metadata_valid_lazy($artifact)
-        && is_array($artifact)
-        && ($artifact['artifact_kind'] ?? null) === 'route_current'
-        && is_string($artifact['generation'] ?? null)
-        && $artifact['generation'] !== ''
-        && is_bool($artifact['has_wildcards'] ?? null);
+    return _stattic_version_root($privateRoot, $spaceId, $versionId) . '/files';
 }
 
-function _stattic_runtime_route_artifact_metadata_valid_lazy(mixed $artifact, string $generation, string $kind): bool
+// The config lives beside the version's files (`../functions/`), not inside
+// them, so a publish can never write it.
+function _stattic_version_has_functions(string $versionRoot): bool
 {
-    return _stattic_runtime_artifact_metadata_valid_lazy($artifact)
-        && is_array($artifact)
-        && ($artifact['artifact_kind'] ?? null) === $kind
-        && ($artifact['generation'] ?? null) === $generation;
+    return is_file(dirname($versionRoot) . '/functions/config.json');
 }
 
-function _stattic_lazy_match_host_route(array $routes, string $requestPath, string $requestMethod): ?array
-{
-    foreach ($routes as $route) {
-        if (!is_array($route)) {
-            continue;
-        }
-
-        $method = isset($route['method']) && is_string($route['method']) ? strtoupper($route['method']) : null;
-        if ($method !== null && $method !== $requestMethod) {
-            continue;
-        }
-
-        $location = (string) ($route['location'] ?? '/');
-        $remainder = _stattic_lazy_match_path_prefix($location, $requestPath);
-        if ($remainder === null) {
-            continue;
-        }
-
-        $route['_remainder'] = $remainder;
-        return $route;
-    }
-
-    return null;
-}
-
-function _stattic_lazy_match_path_prefix(string $prefix, string $requestPath): ?string
-{
-    $normalized = rtrim($prefix, '/');
-    if ($normalized === '') {
-        $normalized = '/';
-    }
-    if ($normalized === '/') {
-        return $requestPath;
-    }
-    if ($requestPath === $normalized) {
-        return '/';
-    }
-    if (str_starts_with($requestPath, $normalized . '/')) {
-        return substr($requestPath, strlen($normalized));
-    }
-    return null;
-}
-
-// Host shards may be hardlinked forward from older generations (incremental
-// route-index updates); current.php's `shards` manifest records the generation
-// each shard was BUILT in, and that is the stamp validated here. A shard absent
-// from the manifest holds no hosts and is never read.
-function _stattic_route_shard_for_host(string $generationRoot, array $current, string $requestHost): array
-{
-    if ($requestHost === '') {
-        return [];
-    }
-    $shard = substr(hash('sha256', $requestHost), 0, 2);
-    $manifest = is_array($current['shards'] ?? null) ? $current['shards'] : null;
-    $expectedGeneration = $manifest === null
-        ? (string) $current['generation']
-        : ($manifest[$shard] ?? null);
-    if ($expectedGeneration === null) {
-        return [];
-    }
-    if (!is_string($expectedGeneration) || $expectedGeneration === '') {
-        _stattic_render_runtime_invariant_error_lazy('artifact-schema-mismatch', 'Runtime host shard schema does not match this runtime.');
-    }
-    $loaded = @include $generationRoot . '/hosts/' . $shard . '.php';
-    if (!is_array($loaded)) {
-        return [];
-    }
-    if (!_stattic_runtime_route_artifact_metadata_valid_lazy($loaded, $expectedGeneration, 'route_host_shard')) {
-        _stattic_render_runtime_invariant_error_lazy('artifact-schema-mismatch', 'Runtime host shard schema does not match this runtime.');
-    }
-    return $loaded;
-}
-
-function _stattic_load_wildcard_route_shard(string $generationRoot, array $current): array
-{
-    $expectedGeneration = is_string($current['wildcards_generation'] ?? null)
-        ? $current['wildcards_generation']
-        : (string) $current['generation'];
-    $loaded = @include $generationRoot . '/wildcards.php';
-    if (!is_array($loaded)) {
-        return [];
-    }
-    if (!_stattic_runtime_route_artifact_metadata_valid_lazy($loaded, $expectedGeneration, 'route_wildcards')) {
-        _stattic_render_runtime_invariant_error_lazy('artifact-schema-mismatch', 'Runtime wildcard shard schema does not match this runtime.');
-    }
-    return $loaded;
-}
-
-function _stattic_version_root(string $privateRoot, string $spaceId, string $versionId): string
-{
-    return _spacefast_version_root($privateRoot, $spaceId, $versionId) . '/files';
-}
-
-function _stattic_load_version_manifest(string $privateRoot, string $spaceId, string $versionId): ?array
-{
-    if (!_spacefast_id_valid($spaceId) || !_spacefast_id_valid($versionId)) {
-        return null;
-    }
-
-    $loaded = @include _spacefast_version_root($privateRoot, $spaceId, $versionId) . '/serving.php';
-    if (is_array($loaded)) {
-        if (!_stattic_runtime_artifact_metadata_valid_lazy($loaded)) {
-            _stattic_render_runtime_invariant_error_lazy('artifact-schema-mismatch', 'Runtime serving artifact schema does not match this runtime.');
-        }
-        return $loaded;
-    }
-
-    return null;
-}
-
-function _stattic_host_route_action(array $hostEntry): ?array
-{
-    $action = $hostEntry['route_action'] ?? null;
-    if (is_array($action) && is_string($action['action'] ?? null)) {
-        if (
-            $action['action'] === 'tombstone'
-            // Reason-differentiated tombstones (C10): generic/CSAM are 404, DMCA
-            // 451, suspended tenant state 402. page_id is mandatory.
-            && in_array((int) ($action['status'] ?? 0), [402, 404, 451], true)
-            && is_string($action['page_id'] ?? null)
-            && is_string($action['cache_control'] ?? null)
-            && is_string($action['space_id'] ?? null)
-            && ($action['methods'] ?? null) === ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
-        ) {
-            return $action;
-        }
-        if (
-            $action['action'] === 'platform_error'
-            && ($action['page_id'] ?? null) === 'version-pending'
-            && (int) ($action['status'] ?? 0) === 503
-            && is_string($action['cache_control'] ?? null)
-            && $action['cache_control'] !== ''
-            && is_string($action['message'] ?? null)
-            && $action['message'] !== ''
-            && ($action['methods'] ?? null) === ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
-        ) {
-            return $action;
-        }
-        if (
-            $action['action'] === 'serve'
-            && is_string($action['version_id'] ?? null)
-            && is_string($action['space_id'] ?? null)
-            && is_string($action['target_prefix'] ?? null)
-        ) {
-            return $action;
-        }
-        _stattic_render_runtime_invariant_error_lazy('route-action-metadata-missing', 'Runtime route action metadata is malformed.');
-    }
-    _stattic_render_runtime_invariant_error_lazy('route-action-metadata-missing', 'Runtime host route action metadata is missing.');
-}
-
-function _stattic_match_wildcard_host_entry(array $entries, string $requestHost): ?array
-{
-    foreach ($entries as $hostname => $entry) {
-        if (is_string($hostname) && is_array($entry) && _stattic_wildcard_host_matches($hostname, $requestHost)) {
-            return $entry;
-        }
-    }
-
-    return null;
-}
-
-function _stattic_routes_for_host(array $routesByHost, string $requestHost): array
-{
-    if ($requestHost !== '' && isset($routesByHost[$requestHost]) && is_array($routesByHost[$requestHost])) {
-        return $routesByHost[$requestHost];
-    }
-
-    return [];
-}
-
-function _stattic_wildcard_routes_for_host(array $routesByHost, string $requestHost): array
-{
-    $routes = [];
-    foreach ($routesByHost as $hostname => $hostRoutes) {
-        if (!is_string($hostname) || !is_array($hostRoutes) || !_stattic_wildcard_host_matches($hostname, $requestHost)) {
-            continue;
-        }
-        foreach ($hostRoutes as $route) {
-            $routes[] = $route;
-        }
-    }
-
-    return $routes;
-}
-
-// The one wildcard-hostname rule shared by the host-entry and host-routes
-// lookups: a '*.suffix' pattern matches any host that ends in '.suffix' with
-// at least one extra label's worth of bytes before it.
-function _stattic_wildcard_host_matches(string $hostname, string $host): bool
-{
-    if (!str_starts_with($hostname, '*.')) {
-        return false;
-    }
-    $suffix = substr($hostname, 1);
-    return str_ends_with($host, $suffix) && strlen($host) > strlen($suffix);
-}
-
-function _stattic_resolve_file(array $version, string $lookup): ?string
-{
-    $action = _stattic_resolve_lookup_action($version, $lookup);
-    return _stattic_file_path_from_lookup_action($action);
-}
-
-function _stattic_file_path_from_lookup_action(?array $action): ?string
-{
-    return is_array($action) && in_array(($action['action'] ?? null), ['file', 'fallback', 'nearest_404'], true) ? (string) $action['path'] : null;
-}
-
-function _stattic_status_from_lookup_action(?array $action): int
-{
-    if (!is_array($action) || !in_array(($action['action'] ?? null), ['file', 'fallback', 'nearest_404'], true)) {
-        _stattic_render_runtime_invariant_error_lazy('lookup-metadata-missing', 'Runtime lookup action status metadata is malformed.');
-    }
-    $status = (int) ($action['status'] ?? 0);
-    if (!in_array($status, _stattic_lookup_valid_statuses((string) $action['action']), true)) {
-        _stattic_render_runtime_invariant_error_lazy('lookup-metadata-missing', 'Runtime lookup action status metadata is malformed.');
-    }
-
-    return $status;
-}
-
-// The per-action valid-status policy for the file-reference lookup actions,
-// shared by _stattic_status_from_lookup_action and _stattic_lookup_action.
-function _stattic_lookup_valid_statuses(string $action): array
-{
-    return match ($action) {
-        'nearest_404' => [404],
-        default => [200, 404],
-    };
-}
-
-function _stattic_resolve_lookup_action(array $version, string $lookup): ?array
-{
-    $lookupMap = $version['lookup'] ?? null;
-    if (!is_array($lookupMap)) {
-        _stattic_render_runtime_invariant_error_lazy('lookup-metadata-missing', 'Runtime lookup metadata is missing.');
-    }
-
-    return _stattic_lookup_action($lookupMap[trim($lookup, '/')] ?? null);
-}
-
-function _stattic_lookup_action(mixed $action): ?array
-{
-    if ($action === null) {
-        return null;
-    }
-    if (!is_array($action) || !is_string($action['action'] ?? null)) {
-        _stattic_render_runtime_invariant_error_lazy('lookup-metadata-missing', 'Runtime lookup action metadata is malformed.');
-    }
-    if (
-        $action['action'] === 'file'
-        || $action['action'] === 'fallback'
-        || $action['action'] === 'nearest_404'
-    ) {
-        if (
-            _stattic_lookup_file_reference_valid($action)
-            && in_array((int) ($action['status'] ?? 0), _stattic_lookup_valid_statuses($action['action']), true)
-            && ($action['methods'] ?? null) === ['GET', 'HEAD']
-            && is_bool($action['forced_download_or_text'] ?? null)
-        ) {
-            return $action;
-        }
-        _stattic_render_runtime_invariant_error_lazy('lookup-metadata-missing', 'Runtime lookup action metadata is malformed.');
-    }
-    if (
-        $action['action'] === 'redirect'
-        && is_string($action['destination'] ?? null)
-        && $action['destination'] !== ''
-        && isset($action['status'])
-        && is_string($action['cache_control'] ?? null)
-        && $action['cache_control'] !== ''
-        && ($action['methods'] ?? null) === ['GET', 'HEAD']
-    ) {
-        return $action;
-    }
-    if (
-        $action['action'] === 'invoke_zero'
-        && _stattic_lookup_zero_action_valid($action)
-    ) {
-        return $action;
-    }
-    if (
-        $action['action'] === 'zero_activating'
-        && _stattic_lookup_zero_action_valid($action)
-    ) {
-        return $action;
-    }
-    if (
-        $action['action'] === 'not_found'
-        && (int) ($action['status'] ?? 0) === 404
-        && is_string($action['cache_control'] ?? null)
-        && $action['cache_control'] !== ''
-        && ($action['methods'] ?? null) === ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
-    ) {
-        return $action;
-    }
-    _stattic_render_runtime_invariant_error_lazy('lookup-metadata-missing', 'Runtime lookup action metadata is malformed.');
-}
-
-function _stattic_lookup_zero_action_valid(array $action): bool
-{
-    if (array_key_exists('operation', $action)) {
-        return _stattic_lookup_zero_control_operation_valid($action['operation'] ?? null)
-            && _stattic_lookup_zero_methods_valid($action['methods'] ?? null)
-            && !array_key_exists('endpoint_id', $action)
-            && !array_key_exists('zero_artifact', $action);
-    }
-    if (
-        !is_string($action['endpoint_id'] ?? null)
-        || $action['endpoint_id'] === ''
-        || strlen($action['endpoint_id']) > 256
-        || !is_string($action['zero_artifact'] ?? null)
-        || !_stattic_runtime_relative_artifact_path_valid($action['zero_artifact'])
-        || !_stattic_lookup_zero_methods_valid($action['methods'] ?? null)
-    ) {
-        return false;
-    }
-
-    if (array_key_exists('schema_hash', $action) && !(is_string($action['schema_hash']) || $action['schema_hash'] === null)) {
-        return false;
-    }
-    if (array_key_exists('zero_indexed', $action) && !is_bool($action['zero_indexed'])) {
-        return false;
-    }
-
-    if (array_key_exists('params', $action)) {
-        if (!is_array($action['params'])) {
-            return false;
-        }
-        foreach ($action['params'] as $name => $value) {
-            if (!is_string($name) || !is_string($value)) {
-                return false;
-            }
-        }
-    }
-
-    return true;
-}
-
-function _stattic_lookup_zero_control_operation_valid(mixed $operation): bool
-{
-    return is_string($operation)
-        && in_array($operation, array_column(SPACEFAST_ZERO_CONTROL_ROUTES, 'operation'), true);
-}
-
-// Tombstone page variants (C10) — ONE table mapping the baked page_id to its
-// serve-time identity/status/body and compile-time robots posture. The native
-// Rust compiler resolves disabled reason/category → page_id
-// and bakes {page_id, status}; the server (runtime/serve.php) renders from
-// this same table — a new tombstone class is added here once. CSAM serves the
-// exact undeployed response, byte-identical to a host that has never been
-// deployed: no body, page identity, or robots header that signals the host
-// ever existed ('robots' => false suppresses the noindex marker every other
-// variant advertises).
-const SPACEFAST_TOMBSTONE_VARIANTS = [
-    'tombstone-csam' => ['page_id' => 'undeployed', 'status' => 503, 'body' => "This site has not been deployed yet.\n", 'robots' => false],
-    'tombstone-dmca' => ['page_id' => 'tombstone-dmca', 'status' => 451, 'body' => "This content is unavailable for legal reasons.\n", 'robots' => true],
-    'tombstone-suspended' => ['page_id' => 'tombstone-suspended', 'status' => 402, 'body' => "This site is suspended.\n", 'robots' => true],
-    'tombstone-visit-cap' => ['page_id' => 'tombstone-visit-cap', 'status' => 402, 'body' => "This site hit the visitor limit for unclaimed sites. Claim it to bring it back.\n", 'robots' => true],
-    'tombstone-generic' => ['page_id' => 'tombstone-generic', 'status' => 404, 'body' => "This site is no longer available.\n", 'robots' => true],
+// Tombstone page variants (C10). The CSAM variant must stay byte-identical to a
+// never-deployed host — same 503 body, no page identity, and 'robots' => false
+// suppressing the noindex marker every other variant advertises.
+const STATTIC_TOMBSTONE_VARIANTS = [
+    'tombstone-csam' => ['template_id' => 'undeployed', 'status' => 503, 'body' => "This space hasn't been published yet.\n", 'robots' => false, 'cache_control' => STATTIC_CACHE_CONTROL_NO_STORE],
+    'tombstone-dmca' => ['template_id' => 'tombstone-dmca', 'status' => 451, 'body' => "This content is unavailable for legal reasons.\n", 'robots' => true, 'cache_control' => STATTIC_DEFAULT_EDGE_CACHE_CONTROL],
+    'tombstone-suspended' => ['template_id' => 'tombstone-suspended', 'status' => 402, 'body' => "This space is paused.\n", 'robots' => true, 'cache_control' => STATTIC_DEFAULT_EDGE_CACHE_CONTROL],
+    'tombstone-generic' => ['template_id' => 'tombstone-generic', 'status' => 404, 'body' => "This space is no longer available.\n", 'robots' => true, 'cache_control' => STATTIC_DEFAULT_EDGE_CACHE_CONTROL],
 ];
 
-// Zero-route entry shape used by the PHP import/transfer validator and the
-// serve-time reader. The native Rust compiler is the only writer.
+function _stattic_runtime_tombstone_route_action_valid(mixed $action): bool
+{
+    if (!is_array($action) || ($action['action'] ?? null) !== 'tombstone') {
+        return false;
+    }
+    $pageId = $action['page_id'] ?? null;
+    $variant = is_string($pageId) ? (STATTIC_TOMBSTONE_VARIANTS[$pageId] ?? null) : null;
+    return is_array($variant)
+        && (int) ($action['status'] ?? 0) === $variant['status']
+        && is_string($action['cache_control'] ?? null)
+        && $action['cache_control'] === $variant['cache_control']
+        && is_string($action['space_id'] ?? null)
+        && preg_match('/^[A-Za-z0-9._-]{1,128}$/', $action['space_id']) === 1
+        && !str_contains($action['space_id'], '..')
+        && ($action['methods'] ?? null) === STATTIC_VISITOR_METHODS;
+}
+
 function _stattic_zero_route_entry_shape_valid(mixed $entry): bool
 {
     return is_array($entry)
@@ -585,41 +94,76 @@ function _stattic_zero_route_entry_shape_valid(mixed $entry): bool
         && is_string($entry['artifact'] ?? null)
         && _stattic_runtime_relative_artifact_path_valid($entry['artifact'])
         && (!array_key_exists('schema_hash', $entry) || is_string($entry['schema_hash']) || $entry['schema_hash'] === null)
-        && (!array_key_exists('zero_indexed', $entry) || is_bool($entry['zero_indexed']))
-        && (!array_key_exists('activating', $entry) || is_bool($entry['activating']));
+        && (!array_key_exists('zero_indexed', $entry) || is_bool($entry['zero_indexed']));
 }
 
-// Zero-runner invocation contract, shared by finalize-time DB migration
-// application and the serve-time runner (runtime/zero.php) so both sides
-// launch the same native binary with the same base environment.
-function _stattic_zero_runner_binary(): string
+// The invocation half of the outbox key. The bound matches the outbox's
+// VARCHAR(96) invocation_id column; anything else yields an empty identity.
+function _stattic_service_invocation_id(mixed $raw): string
 {
-    $binary = _stattic_config_value('SPACEFAST_ZERO_RUNNER');
-    if ($binary !== '') {
-        return $binary;
+    return is_string($raw) && preg_match('/^[A-Za-z0-9_-]{1,96}$/', $raw) === 1 ? $raw : '';
+}
+
+/**
+ * The environment the platform-service broker runs with.
+ *
+ * Every value here is the runtime's, never the caller's. The Akismet key and
+ * the Gravatar token are credentials that must not exist inside tenant code in
+ * any form, and the blog URL is the space's own canonical origin — Akismet
+ * partitions reputation by it, so a caller that could name it could spend
+ * another space's standing. Each space is its own site with its own generated
+ * config, which is what makes a site-level constant a per-space value.
+ *
+ * The identity triple is the outbox's idempotency key. A replayed invocation
+ * has to arrive at the same key, or it sends the mail twice.
+ */
+function _stattic_service_broker_env(array $identity): array
+{
+    $env = [];
+    foreach ([
+        'SPACEFAST_SERVICE_AKISMET_KEY',
+        'SPACEFAST_SERVICE_GRAVATAR_KEY',
+        'SPACEFAST_SERVICE_BLOG_URL',
+        'SPACEFAST_SERVICE_EMAIL_SENDERS',
+    ] as $name) {
+        $value = _stattic_config_value($name);
+        if ($value !== '') {
+            $env[$name] = $value;
+        }
     }
-    $releaseRoot = _stattic_config_value('SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT');
-    if ($releaseRoot !== '') {
-        return rtrim($releaseRoot, '/') . '/bin/stattic-zero-runner';
+    foreach ([
+        'SPACEFAST_SERVICE_SPACE_ID' => 'spaceId',
+        'SPACEFAST_SERVICE_VERSION_ID' => 'versionId',
+        'SPACEFAST_SERVICE_INVOCATION_ID' => 'invocationId',
+    ] as $name => $key) {
+        $value = is_string($identity[$key] ?? null) ? trim($identity[$key]) : '';
+        if ($value !== '') {
+            $env[$name] = $value;
+        }
     }
-    return dirname(__DIR__, 2) . '/bin/stattic-zero-runner';
+    return $env;
 }
 
 function _stattic_zero_runner_base_env(array $config = []): array
 {
-    // Tenant variables stay inside the invocation envelope. DATABASE_URL is
-    // the one explicit native-process authority, transported under a reserved
-    // name with provenance so the runner can reject ambient configuration.
+    $env = _stattic_zero_internal_hosts_env(
+        _stattic_config_value('SPACEFAST_MANAGEMENT_HOSTNAME'),
+        _stattic_config_value('SPACEFAST_API_BASE_URL')
+    );
+    // DATABASE_URL travels under a reserved name with explicit provenance so the
+    // runner can tell an application URL from the provider database and reject
+    // ambient configuration.
     $variables = is_array($config['variableValues'] ?? null) ? $config['variableValues'] : [];
-    $applicationDatabaseUrl = is_string($variables['DATABASE_URL'] ?? null)
+    $selectedDatabaseUrl = is_string($variables['DATABASE_URL'] ?? null)
         ? trim($variables['DATABASE_URL'])
         : '';
-    if ($applicationDatabaseUrl !== '') {
-        return [
-            'SPACEFAST_ZERO_DATABASE_URL' => $applicationDatabaseUrl,
-            'SPACEFAST_ZERO_DATABASE_URL_SOURCE' => ($config['databaseUrlSource'] ?? null) === 'provider'
-                ? 'provider'
-                : 'application',
+    if ($selectedDatabaseUrl !== '') {
+        $databaseUrlSource = ($config['databaseUrlSource'] ?? null) === 'provider'
+            ? 'provider'
+            : 'application';
+        return $env + [
+            'SPACEFAST_ZERO_DATABASE_URL' => $selectedDatabaseUrl,
+            'SPACEFAST_ZERO_DATABASE_URL_SOURCE' => $databaseUrlSource,
         ];
     }
 
@@ -628,114 +172,75 @@ function _stattic_zero_runner_base_env(array $config = []): array
         $providerDatabaseUrl = _stattic_config_value('DATABASE_URL');
     }
     if ($providerDatabaseUrl === '') {
-        return [];
+        // The provider-owned DB_* tuple is translated at the native-process
+        // boundary so tenant code never receives the credential.
+        $providerDatabaseUrl = _stattic_zero_mysql_database_url_from_config();
     }
-    return [
+    if ($providerDatabaseUrl === '') {
+        return $env;
+    }
+    return $env + [
         'SPACEFAST_ZERO_DATABASE_URL' => $providerDatabaseUrl,
         'SPACEFAST_ZERO_DATABASE_URL_SOURCE' => 'provider',
     ];
 }
 
-// Shared subprocess launch mechanics (spawn, optional stdin payload, collect
-// stdout/stderr, close), used by finalize-time DB migration application and the
-// serve-time runner (runtime/zero.php). Returns
-// ['spawned' => bool, 'exitCode' => int, 'stdout' => string, 'stderr' => string];
-// spawned === false means proc_open itself failed (exitCode is meaningless).
-// Error rendering stays lane-specific at the call sites: the serve lane 502s,
-// the migration lane 500s.
-//
-// All three pipes are pumped together through stream_select. Doing this
-// sequentially deadlocks in two real ways: a single blocking fwrite() stalls
-// forever once stdin exceeds the ~64KB pipe buffer and the child is not
-// draining it yet, and draining stdout to EOF before touching stderr stalls
-// forever once the child fills the stderr pipe (it blocks writing stderr, so it
-// never closes stdout). Both are reachable here — the serve lane pipes whole
-// request bodies into the Zero runner, and the migration lane's runner is
-// chatty on stderr.
-function _stattic_runtime_run_subprocess(array $cmd, ?array $env, ?string $stdin = null): array
+/**
+ * Spacefast-owned hosts that tenant fetch must never reach.
+ *
+ * The native runner owns DNS resolution and address pinning. PHP only supplies
+ * the environment-specific hostnames that cannot live in its compiled policy.
+ */
+function _stattic_zero_internal_hosts_env(string $managementHostname, string $apiBaseUrl): array
 {
-    $descriptors = [
-        0 => ['pipe', 'r'],
-        1 => ['pipe', 'w'],
-        2 => ['pipe', 'w'],
-    ];
-    $process = @proc_open($cmd, $descriptors, $pipes, null, $env);
-    if (!is_resource($process)) {
-        return ['spawned' => false, 'exitCode' => -1, 'stdout' => '', 'stderr' => ''];
+    $hosts = [];
+    $managementHostname = strtolower(trim($managementHostname, "[] \t\n\r\0\x0B."));
+    if ($managementHostname !== '') {
+        $hosts[] = $managementHostname;
     }
-
-    $input = $stdin ?? '';
-    $inputLength = strlen($input);
-    $written = 0;
-    $stdinPipe = $pipes[0];
-    if ($inputLength === 0) {
-        fclose($stdinPipe);
-        $stdinPipe = null;
-    } else {
-        stream_set_blocking($stdinPipe, false);
+    $apiHostname = strtolower((string) parse_url($apiBaseUrl, PHP_URL_HOST));
+    if ($apiHostname !== '') {
+        $hosts[] = $apiHostname;
     }
-
-    // Keyed by pipe index so the select-ready resources map back to the right
-    // buffer without identity games once entries start dropping out.
-    $outputPipes = [1 => $pipes[1], 2 => $pipes[2]];
-    stream_set_blocking($outputPipes[1], false);
-    stream_set_blocking($outputPipes[2], false);
-    $buffers = [1 => '', 2 => ''];
-
-    while ($stdinPipe !== null || $outputPipes !== []) {
-        $read = array_values($outputPipes);
-        $write = $stdinPipe !== null ? [$stdinPipe] : [];
-        $except = null;
-        if (@stream_select($read, $write, $except, 1) === false) {
-            break;
-        }
-
-        if ($write !== [] && $stdinPipe !== null) {
-            $chunk = substr($input, $written, 65536);
-            $sent = @fwrite($stdinPipe, $chunk);
-            if ($sent === false) {
-                // Child closed stdin (or died) — stop feeding it, keep reading.
-                fclose($stdinPipe);
-                $stdinPipe = null;
-            } else {
-                $written += $sent;
-                if ($written >= $inputLength) {
-                    fclose($stdinPipe);
-                    $stdinPipe = null;
-                }
-            }
-        }
-
-        foreach ($read as $ready) {
-            $index = array_search($ready, $outputPipes, true);
-            if ($index === false) {
-                continue;
-            }
-            $chunk = fread($ready, 65536);
-            if (is_string($chunk) && $chunk !== '') {
-                $buffers[$index] .= $chunk;
-                continue;
-            }
-            if (feof($ready)) {
-                fclose($ready);
-                unset($outputPipes[$index]);
-            }
-        }
-    }
-
-    if ($stdinPipe !== null) {
-        fclose($stdinPipe);
-    }
-    foreach ($outputPipes as $pipe) {
-        fclose($pipe);
-    }
-
-    return ['spawned' => true, 'exitCode' => proc_close($process), 'stdout' => $buffers[1], 'stderr' => $buffers[2]];
+    $hosts = array_values(array_unique($hosts));
+    return $hosts === [] ? [] : ['SPACEFAST_ZERO_INTERNAL_HOSTS' => implode(',', $hosts)];
 }
 
-// Appends a truncated diagnostic detail (typically subprocess stderr/stdout) to
-// an error message when SPACEFAST_ZERO_RUNNER_DEBUG is on; the bare message
-// otherwise. Shared by both subprocess lanes.
+function _stattic_zero_mysql_database_url_from_config(): string
+{
+    $host = _stattic_config_value('DB_HOST');
+    $database = _stattic_config_value('DB_NAME');
+    $user = _stattic_config_value('DB_USER');
+    $password = _stattic_config_value('DB_PASSWORD');
+    if ($database === '' || $user === '' || $password === '') {
+        return '';
+    }
+    // DB_* convention: an omitted host means local. The native runner cannot
+    // inherit PHP's implicit socket/localhost default, so make it explicit.
+    if ($host === '') {
+        $host = '127.0.0.1';
+    }
+
+    $socket = '';
+    if (preg_match('/^([A-Za-z0-9._-]+):(\/.*)$/', $host, $socketMatch) === 1) {
+        $host = $socketMatch[1];
+        $socket = $socketMatch[2];
+    }
+    if (preg_match('/^(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9._-]+)(?::[1-9][0-9]{0,4})?$/', $host) !== 1) {
+        return '';
+    }
+
+    return 'mysql://'
+        . rawurlencode($user)
+        . ':'
+        . rawurlencode($password)
+        . '@'
+        . $host
+        . '/'
+        . rawurlencode($database)
+        . ($socket !== '' ? '?socket=' . rawurlencode($socket) : '');
+}
+
 function _stattic_zero_debug_message(string $message, mixed $detail): string
 {
     if (_stattic_config_value('SPACEFAST_ZERO_RUNNER_DEBUG') !== '1' || !is_string($detail) || $detail === '') {
@@ -745,10 +250,6 @@ function _stattic_zero_debug_message(string $message, mixed $detail): string
     return $message . ' ' . substr($detail, 0, 2048);
 }
 
-// String-keyed string-value map filter — the variableValues sanitization
-// contract, shared by the compile-side zero/config.json writer
-// (admin/management.php) and the serve-time reader (runtime/zero.php) so the
-// value contract cannot drift.
 function _stattic_zero_string_map(array $values): array
 {
     $out = [];
@@ -760,13 +261,17 @@ function _stattic_zero_string_map(array $values): array
     return $out;
 }
 
-// Shared relative-artifact-path traversal guard: a path is valid only if it is a
-// non-empty string <=512 bytes, is not absolute, contains no NUL or backslash,
-// and has no parent traversal segment. Literal consecutive dots inside a normal
-// segment are safe. One definition so the path-escape rules cannot drift between the
-// lookup-zero artifact path and the PHP-manifest relative path. (Not hosted in
-// shared/safety.php, which is generated from the TS policy and must not be edited
-// by hand; this guard is runtime-only and not part of that policy surface.)
+// THE segment-escape rule behind both the relative-artifact-path and
+// route-pattern guards; literal consecutive dots inside a segment are safe.
+function _stattic_runtime_path_segments_safe(string $value): bool
+{
+    return !str_contains($value, "\0")
+        && !str_contains($value, '\\')
+        && !in_array('..', explode('/', $value), true);
+}
+
+// Relative-artifact-path traversal guard. Deliberately not in shared/safety.php:
+// that file is generated from the TS policy and must not be hand-edited.
 function _stattic_runtime_relative_artifact_path_valid(mixed $path): bool
 {
     if (
@@ -774,18 +279,11 @@ function _stattic_runtime_relative_artifact_path_valid(mixed $path): bool
         || $path === ''
         || strlen($path) > 512
         || $path[0] === '/'
-        || str_contains($path, "\0")
-        || str_contains($path, '\\')
     ) {
         return false;
     }
-    foreach (explode('/', $path) as $segment) {
-        if ($segment === '..') {
-            return false;
-        }
-    }
 
-    return true;
+    return _stattic_runtime_path_segments_safe($path);
 }
 
 function _stattic_lookup_zero_methods_valid(mixed $methods): bool
@@ -793,9 +291,8 @@ function _stattic_lookup_zero_methods_valid(mixed $methods): bool
     if (!is_array($methods) || $methods === []) {
         return false;
     }
-    $allowed = ['GET' => true, 'HEAD' => true, 'POST' => true, 'PUT' => true, 'PATCH' => true, 'DELETE' => true, 'OPTIONS' => true];
     foreach ($methods as $method) {
-        if (!is_string($method) || !isset($allowed[$method])) {
+        if (!is_string($method) || !in_array($method, STATTIC_VISITOR_METHODS, true)) {
             return false;
         }
     }
@@ -803,207 +300,63 @@ function _stattic_lookup_zero_methods_valid(mixed $methods): bool
     return true;
 }
 
-function _stattic_lookup_file_reference_valid(array $action): bool
-{
-    return is_string($action['path'] ?? null)
-        && $action['path'] !== ''
-        && is_string($action['file_shard'] ?? null)
-        && preg_match('/^[a-f0-9]{2}$/', $action['file_shard']) === 1;
-}
-
-// Compiled fallback action ({path, status}; SPA is the 200/index.html shape) — the
-// serving-resolution step between exact lookup and the nearest-404 chain.
-function _stattic_resolve_fallback_action(array $version): ?array
-{
-    if (!array_key_exists('fallback', $version)) {
-        _stattic_render_runtime_invariant_error_lazy('lookup-metadata-missing', 'Runtime fallback metadata is missing.');
-    }
-    return _stattic_lookup_action($version['fallback']);
-}
-
-// W7.1 clean-URL knob (SpaceConfig `cleanUrls` -> serving_config.clean_urls): an
-// explicit boolean wins; absent (versions finalized before the knob existed)
-// resolves to the smart default — ON for plain static sites, OFF when a
-// 200-status SPA fallback is configured, because an SPA owns its extensionless
-// routes and the fallback answers them instead.
-function _stattic_serving_clean_urls_enabled(array $version): bool
-{
-    $config = is_array($version['serving_config'] ?? null) ? $version['serving_config'] : [];
-    $explicit = $config['clean_urls'] ?? null;
-    if (is_bool($explicit)) {
-        return $explicit;
-    }
-    $fallback = $config['fallback'] ?? null;
-    return !(is_array($fallback) && (int) ($fallback['status'] ?? 0) === 200);
-}
-
-function _stattic_find_nearest_404_action(array $version, string $lookup): ?array
-{
-    $nearest = $version['nearest_404'] ?? null;
-    if (!is_array($nearest)) {
-        _stattic_render_runtime_invariant_error_lazy('lookup-metadata-missing', 'Runtime 404 lookup metadata is missing.');
-    }
-    $segments = trim($lookup, '/') === '' ? [] : explode('/', trim($lookup, '/'));
-    while (!empty($segments)) {
-        array_pop($segments);
-        $directory = implode('/', $segments);
-        $action = _stattic_lookup_action($nearest[$directory] ?? null);
-        if (is_array($action)) {
-            return $action;
-        }
-    }
-
-    return _stattic_lookup_action($nearest[''] ?? null);
-}
-
-function _stattic_resolve_not_found_action(array $version): array
-{
-    if (!array_key_exists('not_found', $version)) {
-        _stattic_render_runtime_invariant_error_lazy('lookup-metadata-missing', 'Runtime not-found metadata is missing.');
-    }
-    $action = _stattic_lookup_action($version['not_found']);
-    if (!is_array($action) || ($action['action'] ?? null) !== 'not_found') {
-        _stattic_render_runtime_invariant_error_lazy('lookup-metadata-missing', 'Runtime not-found metadata is malformed.');
-    }
-
-    return $action;
-}
-
-function _stattic_load_file_metadata(string $versionRoot, string $path, array $lookupAction, array $version): array
-{
-    if (empty($version['file_shards'])) {
-        _stattic_render_runtime_invariant_error_lazy('file-shard-metadata-missing', 'Runtime file shard metadata is missing.');
-    }
-
-    $shard = $lookupAction['file_shard'] ?? null;
-    if (!is_string($shard) || preg_match('/^[a-f0-9]{2}$/', $shard) !== 1) {
-        _stattic_render_runtime_invariant_error_lazy('file-shard-metadata-missing', 'Runtime file shard metadata is missing.');
-    }
-    $loaded = @include dirname($versionRoot) . '/file-shards/' . $shard . '.php';
-    if (!is_array($loaded) || !_stattic_runtime_artifact_metadata_valid_lazy($loaded) || !is_array($loaded['files'] ?? null)) {
-        _stattic_render_runtime_invariant_error_lazy('file-shard-metadata-missing', 'Runtime file metadata shard is missing.');
-    }
-
-    $meta = $loaded['files'][$path] ?? null;
-    if (!is_array($meta)) {
-        _stattic_render_runtime_invariant_error_lazy('file-metadata-missing', 'Runtime file metadata is incomplete.');
-    }
-
-    return $meta;
-}
-
-// Route patterns are URL paths, not filesystem paths. Reject a traversal
-// segment, while preserving ordinary literal names that happen to contain two
-// dots (for example Astro's `[...slug].astro`).
+// Rejects traversal segments while preserving literal names that contain two
+// dots (Astro's `[...slug].astro`).
 function _stattic_runtime_route_pattern_valid(mixed $pattern): bool
 {
     if (
         !is_string($pattern)
         || $pattern === ''
         || $pattern[0] !== '/'
-        || str_contains($pattern, "\0")
-        || str_contains($pattern, '\\')
     ) {
         return false;
     }
-    foreach (explode('/', trim($pattern, '/')) as $segment) {
-        if ($segment === '..') {
-            return false;
-        }
-    }
 
-    return true;
+    return _stattic_runtime_path_segments_safe($pattern);
 }
 
-// Shared segment route-pattern matcher used by both the Zero-route resolver
-// (runtime/zero-routes.php) and the PHP-manifest resolver (runtime/php-manifest.php)
-// so the :splat / :name / exact scoring can never drift between the two paths.
-// Pure: trims and splits both inputs on '/', scores an exact segment +10, a named
-// param (:name) +2 after rawurldecoding, and a trailing :splat +1 capturing the
-// remainder; returns null on any mismatch or a leftover lookup segment.
 function _stattic_match_route_pattern_segments(string $pattern, string $lookup): ?array
 {
-    $p = trim($pattern, '/');
-    $patternSegments = $p === '' ? [] : explode('/', $p);
+    $shape = _stattic_zero_route_match_shape($pattern);
     $l = trim($lookup, '/');
     $pathSegments = $l === '' ? [] : explode('/', $l);
     $params = [];
-    $score = 0;
     $pathIndex = 0;
-    foreach ($patternSegments as $segment) {
-        if ($segment === ':splat') {
-            $params['splat'] = implode('/', array_slice($pathSegments, $pathIndex));
-            return ['params' => $params, 'score' => $score + 1];
-        }
+    foreach ($shape['segments'] as $index => $segment) {
         if (!array_key_exists($pathIndex, $pathSegments)) {
             return null;
         }
         $pathSegment = $pathSegments[$pathIndex];
-        if (str_starts_with($segment, ':')) {
-            $name = substr($segment, 1);
+        if ($segment === null) {
+            $name = $shape['names'][$index];
             if ($name === '') {
                 return null;
             }
             $params[$name] = rawurldecode($pathSegment);
-            $score += 2;
-        } elseif ($segment === $pathSegment) {
-            $score += 10;
-        } else {
+        } elseif ($segment !== $pathSegment) {
             return null;
         }
         $pathIndex++;
+    }
+    if ($shape['splat']) {
+        $params['splat'] = implode('/', array_slice($pathSegments, $pathIndex));
+        return ['params' => $params, 'score' => $shape['score']];
     }
     if ($pathIndex !== count($pathSegments)) {
         return null;
     }
 
-    return ['params' => $params, 'score' => $score];
+    return ['params' => $params, 'score' => $shape['score']];
 }
 
-// Two routes are ambiguous only when the runtime can match the same request to
-// both with the same score. Parameter names do not constrain the path, and a
-// :splat terminates matching exactly as _stattic_match_route_pattern_segments
-// does. GET and explicit HEAD also share the HEAD request domain.
-function _stattic_zero_route_patterns_ambiguous(string $leftMethod, string $leftPattern, string $rightMethod, string $rightPattern): bool
-{
-    if (!(
-        $leftMethod === $rightMethod
-        || ($leftMethod === 'GET' && $rightMethod === 'HEAD')
-        || ($leftMethod === 'HEAD' && $rightMethod === 'GET')
-    )) {
-        return false;
-    }
-
-    $left = _stattic_zero_route_match_shape($leftPattern);
-    $right = _stattic_zero_route_match_shape($rightPattern);
-    if ($left['score'] !== $right['score']) {
-        return false;
-    }
-
-    $leftCount = count($left['segments']);
-    $rightCount = count($right['segments']);
-    if (!$left['splat'] && $leftCount < $rightCount) {
-        return false;
-    }
-    if (!$right['splat'] && $rightCount < $leftCount) {
-        return false;
-    }
-    for ($index = 0; $index < min($leftCount, $rightCount); $index += 1) {
-        $leftLiteral = $left['segments'][$index];
-        $rightLiteral = $right['segments'][$index];
-        if (is_string($leftLiteral) && is_string($rightLiteral) && $leftLiteral !== $rightLiteral) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
+// THE route-pattern parser and score table: the runtime matcher above reads a
+// pattern through here so scoring lives in exactly one place.
 function _stattic_zero_route_match_shape(string $pattern): array
 {
     $trimmed = trim($pattern, '/');
     $segments = $trimmed === '' ? [] : explode('/', $trimmed);
     $constraints = [];
+    $names = [];
     $score = 0;
     $splat = false;
     foreach ($segments as $segment) {
@@ -1014,12 +367,272 @@ function _stattic_zero_route_match_shape(string $pattern): array
         }
         if (str_starts_with($segment, ':')) {
             $constraints[] = null;
+            $names[] = substr($segment, 1);
             $score += 2;
             continue;
         }
         $constraints[] = $segment;
+        $names[] = null;
         $score += 10;
     }
 
-    return ['segments' => $constraints, 'splat' => $splat, 'score' => $score];
+    return ['segments' => $constraints, 'names' => $names, 'splat' => $splat, 'score' => $score];
+}
+
+// ---------------------------------------------------------------------------
+// schema-v4 route/space resolution (contracts §3, §4)
+//
+// Where the visitor path starts: route pointer -> host shard -> space pointer ->
+// overlay -> the legacy `$serving` array the modules outside the serve path
+// still read. runtime/serve.php walks these in order.
+// ---------------------------------------------------------------------------
+
+function _stattic_v4_assert_schema(mixed $schema, string $what): void
+{
+    if (
+        !is_int($schema)
+        || $schema < STATTIC_RUNTIME_ARTIFACT_SCHEMA_MIN
+        || $schema > STATTIC_RUNTIME_ARTIFACT_SCHEMA_MAX
+    ) {
+        _stattic_render_runtime_invariant_error_lazy(
+            'artifact-schema-mismatch',
+            'Runtime ' . $what . ' schema does not match this runtime.'
+        );
+    }
+}
+
+/**
+ * false = a shard this host may live in exists but could not be read — the
+ * host's existence is UNKNOWN, which must never collapse into "undeployed".
+ *
+ * @return array{entry: array, routes: array}|false|null
+ */
+function _stattic_v4_host_lookup(string $privateRoot, array $routes, string $requestHost): array|false|null
+{
+    if ($requestHost === '') {
+        return null;
+    }
+    $shardName = is_array($routes['shards'] ?? null)
+        ? ($routes['shards'][substr(hash('sha256', $requestHost), 0, 2)] ?? null)
+        : null;
+    $shard = is_string($shardName) ? _stattic_v4_include_artifact($privateRoot . '/routes/' . $shardName) : null;
+    if ($shard === false) {
+        return false;
+    }
+    $entry = null;
+    $hostRoutes = [];
+    if (is_array($shard)) {
+        $candidate = $shard['hostnames'][$requestHost] ?? null;
+        if (is_array($candidate)) {
+            $entry = $candidate;
+        }
+        $routeList = $shard['host_routes'][$requestHost] ?? null;
+        if (is_array($routeList)) {
+            $hostRoutes = $routeList;
+        }
+    }
+    if ($entry === null && !empty($routes['has_wildcards']) && is_string($routes['wildcards'] ?? null)) {
+        $wildcards = _stattic_v4_include_artifact($privateRoot . '/routes/' . $routes['wildcards']);
+        if ($wildcards === false) {
+            return false;
+        }
+        if (is_array($wildcards)) {
+            $entry = _stattic_v4_wildcard_match(
+                is_array($wildcards['hostnames'] ?? null) ? $wildcards['hostnames'] : [],
+                $requestHost
+            );
+            if ($hostRoutes === []) {
+                $matchedRoutes = _stattic_v4_wildcard_match(
+                    is_array($wildcards['host_routes'] ?? null) ? $wildcards['host_routes'] : [],
+                    $requestHost
+                );
+                $hostRoutes = is_array($matchedRoutes) ? $matchedRoutes : [];
+            }
+        }
+    }
+    if (!is_array($entry)) {
+        return null;
+    }
+    return ['entry' => $entry, 'routes' => $hostRoutes];
+}
+
+// D49: `*` matches exactly one label, and the most specific pattern wins —
+// specificity being the number of literal labels. `*.a.example` and
+// `*.*.example` both match `x.a.example`; the first one takes it.
+function _stattic_v4_wildcard_match(array $entries, string $requestHost): ?array
+{
+    $hostLabels = explode('.', $requestHost);
+    $hostLabelCount = count($hostLabels);
+    $best = null;
+    $bestScore = -1;
+    foreach ($entries as $pattern => $entry) {
+        if (!is_string($pattern) || !is_array($entry) || !str_contains($pattern, '*')) {
+            continue;
+        }
+        $patternLabels = explode('.', $pattern);
+        if (count($patternLabels) !== $hostLabelCount) {
+            continue;
+        }
+        $score = 0;
+        $matches = true;
+        foreach ($patternLabels as $index => $label) {
+            if ($label === '*') {
+                continue;
+            }
+            if ($label !== $hostLabels[$index]) {
+                $matches = false;
+                break;
+            }
+            $score += 1;
+        }
+        if ($matches && $score > $bestScore) {
+            $bestScore = $score;
+            $best = $entry;
+        }
+    }
+    return $best;
+}
+
+// false = the overlay artifact exists but could not be read; the caller must
+// answer unavailable, not denied — a failure is not an access decision either.
+function _stattic_v4_overlay(string $privateRoot, string $spaceId, mixed $space): array|false|null
+{
+    if ($spaceId === '' || !is_array($space) || !is_string($space['overlay'] ?? null)) {
+        return null;
+    }
+    _stattic_v4_assert_schema($space['schema'] ?? null, 'space pointer');
+    $overlay = _stattic_v4_include_artifact(
+        _stattic_space_root($privateRoot, $spaceId) . '/' . $space['overlay']
+    );
+    if ($overlay === false) {
+        return false;
+    }
+    if (!is_array($overlay) || !is_bool($overlay['open'] ?? null)) {
+        return null;
+    }
+    _stattic_v4_assert_schema($overlay['schema'] ?? null, 'space overlay');
+    return $overlay;
+}
+
+function _stattic_v4_version_for_host(array $hostEntry, array $overlay): ?string
+{
+    // A version-pinned host names its version outright; a route-following host
+    // reads the overlay, so repointing a route is one overlay swap.
+    $versionId = $hostEntry['version_id'] ?? null;
+    if (is_string($versionId) && $versionId !== '' && _stattic_id_valid($versionId)) {
+        return $versionId;
+    }
+    $routeName = is_string($hostEntry['route_name'] ?? null) ? $hostEntry['route_name'] : 'live';
+    $versions = is_array($overlay['versions'] ?? null) ? $overlay['versions'] : [];
+    $resolved = $versions[$routeName] ?? null;
+    return is_string($resolved) && $resolved !== '' && _stattic_id_valid($resolved) ? $resolved : null;
+}
+
+// null = the artifact verifiably does not exist; false = it exists but this
+// include failed (I/O). Failures are never memoized — the next call re-reads —
+// and callers must route false to the unavailable 503, never fold it into the
+// absent answer (undeployed / version-pending / 404 / denied).
+function _stattic_v4_include_artifact(string $path): array|false|null
+{
+    static $cache = [];
+    if (array_key_exists($path, $cache)) {
+        return $cache[$path];
+    }
+    error_clear_last();
+    $loaded = include $path;
+    if (is_array($loaded)) {
+        return $cache[$path] = $loaded;
+    }
+    clearstatcache(true, $path);
+    if (_sf_path_verifiably_absent($path)) {
+        return $cache[$path] = null;
+    }
+    _sf_runtime_log_read_failure('artifact_include_failed', $path);
+    $loaded = include $path;
+    if (is_array($loaded)) {
+        return $cache[$path] = $loaded;
+    }
+    return false;
+}
+
+// A pointer or artifact that EXISTS could not be read this instant. Never a
+// deployment or access claim: 503 + no-store + Retry-After, so the edge holds
+// nothing and the retry lands on a healed read.
+function _stattic_render_runtime_unavailable_lazy(string $code): never
+{
+    require_once __DIR__ . '/errors.php';
+    _stattic_render_runtime_unavailable($code);
+}
+
+
+// Overlay -> the compiled projection access-rules.php reads today. Deleted with
+// the seam body once E2 lands.
+function _stattic_v4_authorization_projection(array $overlay): ?array
+{
+    $grants = is_array($overlay['grants'] ?? null) ? $overlay['grants'] : null;
+    $exchange = is_array($overlay['exchange'] ?? null) ? $overlay['exchange'] : [];
+    $compiledVersion = $overlay['compiled_version'] ?? null;
+    if ($grants === null || $compiledVersion === null || !is_string($exchange['acquire_url'] ?? null)) {
+        // Fail closed: null is the canonical "no usable projection" marker.
+        return null;
+    }
+    return [
+        // Carried by the overlay, not read from access-rules.php: an open Space
+        // must be able to build this without loading any access code (D34).
+        'compiledVersion' => $compiledVersion,
+        'generation' => is_int($overlay['access_gen'] ?? null) ? $overlay['access_gen'] : 0,
+        'sessionVersion' => is_int($overlay['session_ver'] ?? null) ? $overlay['session_ver'] : 0,
+        'fence' => is_string($overlay['fence'] ?? null) ? $overlay['fence'] : 'none',
+        'acquireUrl' => $exchange['acquire_url'],
+        // Without this the sfv2_/sfa1_ HMAC key cannot be derived at all
+        // (access-rules.php `_stattic_access_session_hmac_key` reads
+        // `accessPage.exchange.credential`), so a protected Space could neither
+        // mint nor verify a session: permanently deny-only. The overlay carries
+        // the descriptor verbatim under `access_page`; access-rules.php
+        // re-validates every field of it before use.
+        'accessPage' => is_array($overlay['access_page'] ?? null)
+            ? $overlay['access_page']
+            : null,
+        'spaceClaimed' => ($overlay['space_claimed'] ?? null) === true,
+        'grantIndex' => $grants,
+    ];
+}
+
+// The legacy `$serving` array every module outside the serve path still reads
+// (access-rules, zero, proxy, spacefast-sdk, errors' custom pages). Built once
+// from the v4 host entry + overlay so those modules need no edit.
+function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $hostEntry, array $overlay): array
+{
+    $exchange = is_array($overlay['exchange'] ?? null) ? $overlay['exchange'] : [];
+    return [
+        'version_id' => $versionId,
+        'space_id' => $spaceId,
+        'authorization' => _stattic_v4_authorization_projection($overlay),
+        'visitor_issuer' => is_string($exchange['issuer'] ?? null) ? $exchange['issuer'] : null,
+        'visitor_jwks' => is_array($exchange['jwks'] ?? null) ? $exchange['jwks'] : null,
+        'projection_generation' => is_int($overlay['access_gen'] ?? null) ? $overlay['access_gen'] : null,
+        'admission' => is_array($overlay['admission'] ?? null) ? $overlay['admission'] : [],
+        'route_name' => is_string($hostEntry['route_name'] ?? null) ? $hostEntry['route_name'] : null,
+        'immutable' => !empty($hostEntry['immutable']),
+        // Absent/malformed -> null -> no restriction: the policy is opt-in.
+        'content_types' => is_array($overlay['content_types'] ?? null) && is_array($overlay['content_types']['allowed'] ?? null)
+            ? $overlay['content_types']
+            : null,
+        // Fail closed: [] makes every entitlement check in redirects.php false.
+        'entitlements' => is_array($overlay['entitlements'] ?? null) ? $overlay['entitlements'] : [],
+        // The Space's current live version, straight off the overlay's route
+        // map. Comments needs it to tell a preview visitor what is live now.
+        'live_version_id' => is_array($overlay['versions'] ?? null)
+            && is_string($overlay['versions']['live'] ?? null)
+            ? $overlay['versions']['live']
+            : null,
+        'pages' => is_array($overlay['pages'] ?? null) ? $overlay['pages'] : [],
+        // ONE SDK section (§4): {revision, config, body|body_sha256}. The
+        // loader, its Comments configuration and the production tag bytes all
+        // come from here — there is no second SDK artifact and no serve-time
+        // configuration call back to the control plane.
+        'sdk' => is_array($overlay['sdk'] ?? null) && is_array($overlay['sdk']['config'] ?? null)
+            ? $overlay['sdk']
+            : null,
+    ];
 }

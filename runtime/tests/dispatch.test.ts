@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { rmSync, writeFileSync } from "node:fs";
+import { chmodSync, rmSync, writeFileSync } from "node:fs";
 // SSH management dispatcher (engine/admin/dispatch.php): one JSON request
 // envelope on stdin, one {status, body} envelope on stdout, the SAME handlers
 // and JWT verification as the HTTP management surface. This is the WP.Cloud
@@ -8,14 +8,12 @@ import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
-  createDeclaredSession,
-  RUNTIME_UPLOAD_API_BASE,
   deploy,
   dispatchCli,
   get,
   managementToken,
+  publicAccessConfig,
   runtimeHttpPath,
-  runtimeUploadHttpPath,
   signToken,
   startRuntime,
   type Runtime,
@@ -31,7 +29,7 @@ beforeAll(async () => {
     files: { "index.html": "one" },
     activate: {
       route_name: "production",
-      config: {},
+      config: publicAccessConfig(),
       production_hostnames: ["dispatch.test"],
       version_hostnames: [],
     },
@@ -49,8 +47,8 @@ afterAll(() => {
 
 type DispatchEnvelope = { status: number; body: Record<string, unknown> };
 
-// Surfaces PHP notices/warnings (log_errors + E_ALL) so a broken handler shows
-// up as stderr in the failure message rather than a silent bad envelope.
+// The dispatcher itself owns E_ALL + log_errors, so a broken handler surfaces
+// on stderr without each caller remembering process flags.
 function dispatchRaw(
   stdin: string,
   env: Record<string, string | undefined> = {
@@ -58,10 +56,7 @@ function dispatchRaw(
     HOME: process.env.HOME,
   },
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return dispatchCli(rt, stdin, {
-    env,
-    phpFlags: ["-d log_errors=1", "-d error_reporting=E_ALL"],
-  });
+  return dispatchCli(rt, stdin, { env });
 }
 
 async function dispatch(request: Record<string, unknown>): Promise<DispatchEnvelope> {
@@ -87,7 +82,7 @@ async function dispatchWithoutRuntimeEnv(
 }
 
 function errorCode(envelope: DispatchEnvelope): string {
-  return (envelope.body.error as { code?: string } | undefined)?.code ?? "";
+  return (envelope.body as { code?: string }).code ?? "";
 }
 
 test("state over dispatch runs the same handler as HTTP", async () => {
@@ -103,7 +98,37 @@ test("state over dispatch runs the same handler as HTTP", async () => {
   expect(Array.isArray(envelope.body.spaces)).toBe(true);
 });
 
+test("state reports unavailable instead of erasing state after a failed read", async () => {
+  const currentPath = path.join(rt.storageRoot, "routes", "current.json");
+  chmodSync(currentPath, 0o000);
+  try {
+    const unavailable = await dispatch({
+      method: "GET",
+      path: runtimeHttpPath("/__spacefast/api.php/state"),
+      authorization: `Bearer ${managementToken("read_state")}`,
+    });
+    expect(unavailable.status).toBe(503);
+    expect(errorCode(unavailable)).toBe("runtime_management_unavailable");
+  } finally {
+    chmodSync(currentPath, 0o644);
+  }
+
+  const recovered = await dispatch({
+    method: "GET",
+    path: runtimeHttpPath("/__spacefast/api.php/state"),
+    authorization: `Bearer ${managementToken("read_state")}`,
+  });
+  expect(recovered.status).toBe(200);
+  expect(recovered.body.spaces).toEqual(
+    expect.arrayContaining([expect.objectContaining({ space_id: "spc_dsp" })]),
+  );
+});
+
 test("dispatch runs through the fake Atomic top-level without runtime config env", async () => {
+  // No SPACEFAST_* in the environment: the config the handler runs on has to
+  // come from the installed top-level bootstrap the fake Atomic prepends, not
+  // from the shell. Reading back the deployed space proves it resolved the real
+  // storage root rather than merely booting.
   const state = await dispatchWithoutRuntimeEnv({
     method: "GET",
     path: runtimeHttpPath("/__spacefast/api.php/state"),
@@ -111,22 +136,8 @@ test("dispatch runs through the fake Atomic top-level without runtime config env
   });
   expect(state.status).toBe(200);
   expect(state.body.ok).toBe(true);
-
-  const content = "uploaded through fake Atomic\n";
-  const { uploadId, token } = await createDeclaredSession(
-    rt,
-    "spc_dsp",
-    "ver_dsp_installed_config",
-    { "config.html": content },
-  );
-  const upload = await dispatchWithoutRuntimeEnv({
-    method: "PUT",
-    path: runtimeUploadHttpPath(`${RUNTIME_UPLOAD_API_BASE}/${uploadId}/files/config.html`),
-    authorization: `Bearer ${token}`,
-    body: Buffer.from(content).toString("base64"),
-    bodyEncoding: "base64",
-  });
-  expect(upload.status).toBe(200);
+  const spaces = state.body.spaces as Array<{ space_id: string }>;
+  expect(spaces.map((space) => space.space_id)).toContain("spc_dsp");
 });
 
 test("a route PUT over dispatch mutates serving exactly like HTTP", async () => {
@@ -139,6 +150,7 @@ test("a route PUT over dispatch mutates serving exactly like HTTP", async () => 
     })}`,
     body: JSON.stringify({
       version_id: "ver_dsp_2",
+      config: publicAccessConfig(),
       production_hostnames: ["dispatch.test"],
       version_hostnames: [],
     }),
@@ -226,14 +238,20 @@ test("replay-guard storage failure answers 503 retryable, never a false 403 repl
   expect(recovered.status).toBe(200);
 });
 
-test("binary archive endpoints and malformed envelopes are rejected", async () => {
-  const archive = await dispatch({
+test("binary endpoints and malformed envelopes are rejected", async () => {
+  // The version-source row streams bytes rather than a JSON body, so it carries
+  // binary => true and is rejected before auth on the JSON-envelope-only
+  // dispatch transport.
+  const binaryRoute = await dispatch({
     method: "GET",
-    path: runtimeHttpPath("/__spacefast/api.php/exports/sex_x/archive"),
-    authorization: `Bearer ${managementToken("download_space_export", { export_id: "sex_x" })}`,
+    path: runtimeHttpPath("/__spacefast/api.php/spaces/spc_dispatch/versions/ver_dispatch/source"),
+    authorization: `Bearer ${managementToken("read_version_source", {
+      space_id: "spc_dispatch",
+      version_id: "ver_dispatch",
+    })}`,
   });
-  expect(archive.status).toBe(400);
-  expect(errorCode(archive)).toBe("runtime_dispatch_unsupported_path");
+  expect(binaryRoute.status).toBe(400);
+  expect(errorCode(binaryRoute)).toBe("runtime_dispatch_unsupported_path");
 
   await Promise.all(
     [

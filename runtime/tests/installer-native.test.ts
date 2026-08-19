@@ -6,12 +6,15 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+import { readActiveReleaseTarget } from "./active-release.ts";
 
 const roots: string[] = [];
 
@@ -37,12 +40,8 @@ test("clean installer replaces stale native tools and preserves executable manif
   mkdirSync(path.join(payload, "bin"), { recursive: true });
   mkdirSync(path.join(payload, "engine/shared"), { recursive: true });
   writeFileSync(
-    path.join(payload, "bin/stattic-runtime-compiler"),
-    "#!/bin/sh\nprintf '%s\\n' 'compiler diagnostic' >&2\nprintf '%s\\n' '{\"format\":\"stattic.runtime.compiler.self-test.v1\"}'\n",
-  );
-  writeFileSync(
-    path.join(payload, "bin/stattic-zero-runner"),
-    "#!/bin/sh\nprintf '%s\\n' 'runner diagnostic' >&2\nprintf '%s\\n' '{\"format\":\"stattic.zero.runner.self-test.v1\"}'\n",
+    path.join(payload, "bin/stattic-runtime"),
+    "#!/bin/sh\nprintf '%s\\n' 'runtime diagnostic' >&2\nprintf '%s\\n' '{\"format\":\"stattic.runtime.self-test.v1\"}'\n",
   );
   writeFileSync(
     path.join(payload, "engine/shared/context.php"),
@@ -51,13 +50,8 @@ test("clean installer replaces stale native tools and preserves executable manif
   writeFileSync(
     path.join(payload, "engine-manifest.json"),
     `${JSON.stringify({
-      files: [
-        "bin/stattic-runtime-compiler",
-        "bin/stattic-zero-runner",
-        "engine-manifest.json",
-        "engine/shared/context.php",
-      ],
-      executables: ["bin/stattic-runtime-compiler", "bin/stattic-zero-runner"],
+      files: ["bin/stattic-runtime", "engine-manifest.json", "engine/shared/context.php"],
+      executables: ["bin/stattic-runtime"],
       aliases: [],
     })}\n`,
   );
@@ -69,14 +63,7 @@ test("clean installer replaces stale native tools and preserves executable manif
   const zipPath = path.join(root, "runtime-engine.zip");
   execFileSync(
     "zip",
-    [
-      "-qr",
-      zipPath,
-      "bin/stattic-runtime-compiler",
-      "bin/stattic-zero-runner",
-      "engine-manifest.json",
-      "engine/shared/context.php",
-    ],
+    ["-qr", zipPath, "bin/stattic-runtime", "engine-manifest.json", "engine/shared/context.php"],
     { cwd: payload },
   );
   const md5 = createHash("md5")
@@ -101,11 +88,10 @@ test("clean installer replaces stale native tools and preserves executable manif
     engine_revision: revision,
   });
   expect(existsSync(path.join(staleBin, "obsolete"))).toBe(false);
-  expect(statSync(path.join(staleBin, "stattic-runtime-compiler")).mode & 0o777).toBe(0o755);
-  expect(statSync(path.join(staleBin, "stattic-zero-runner")).mode & 0o777).toBe(0o755);
-  expect(statSync(path.join(publicRoot, ".stattic/engine/shared/context.php")).mode & 0o777).toBe(
-    0o644,
-  );
+  const installRoot = path.join(publicRoot, ".stattic");
+  const activeRelease = path.join(installRoot, readActiveReleaseTarget(installRoot));
+  expect(statSync(path.join(activeRelease, "bin/stattic-runtime")).mode & 0o777).toBe(0o755);
+  expect(statSync(path.join(activeRelease, "engine/shared/context.php")).mode & 0o777).toBe(0o644);
 });
 
 test("installer rejects a hung native self-test within its deadline", async () => {
@@ -123,11 +109,7 @@ test("installer rejects a hung native self-test within its deadline", async () =
   );
   mkdirSync(path.join(payload, "bin"), { recursive: true });
   mkdirSync(path.join(payload, "engine/shared"), { recursive: true });
-  writeFileSync(path.join(payload, "bin/stattic-runtime-compiler"), "#!/bin/sh\nexec sleep 60\n");
-  writeFileSync(
-    path.join(payload, "bin/stattic-zero-runner"),
-    "#!/bin/sh\nprintf '%s\\n' '{\"format\":\"stattic.zero.runner.self-test.v1\"}'\n",
-  );
+  writeFileSync(path.join(payload, "bin/stattic-runtime"), "#!/bin/sh\nexec sleep 60\n");
   writeFileSync(
     path.join(payload, "engine/shared/context.php"),
     `<?php\nconst SPACEFAST_RUNTIME_ENGINE_REVISION = '${revision}';\n`,
@@ -135,27 +117,15 @@ test("installer rejects a hung native self-test within its deadline", async () =
   writeFileSync(
     path.join(payload, "engine-manifest.json"),
     `${JSON.stringify({
-      files: [
-        "bin/stattic-runtime-compiler",
-        "bin/stattic-zero-runner",
-        "engine-manifest.json",
-        "engine/shared/context.php",
-      ],
-      executables: ["bin/stattic-runtime-compiler", "bin/stattic-zero-runner"],
+      files: ["bin/stattic-runtime", "engine-manifest.json", "engine/shared/context.php"],
+      executables: ["bin/stattic-runtime"],
       aliases: [],
     })}\n`,
   );
   const zipPath = path.join(root, "runtime-engine.zip");
   execFileSync(
     "zip",
-    [
-      "-qr",
-      zipPath,
-      "bin/stattic-runtime-compiler",
-      "bin/stattic-zero-runner",
-      "engine-manifest.json",
-      "engine/shared/context.php",
-    ],
+    ["-qr", zipPath, "bin/stattic-runtime", "engine-manifest.json", "engine/shared/context.php"],
     { cwd: payload },
   );
   const md5 = createHash("md5")
@@ -182,8 +152,6 @@ test("installer rejects a hung native self-test within its deadline", async () =
   }
 
   expect(failure?.status).toBe(1);
-  expect(String(failure?.stderr)).toContain(
-    "runtime_native_self_test_failed:bin/stattic-runtime-compiler",
-  );
+  expect(String(failure?.stderr)).toContain("runtime_native_self_test_failed:bin/stattic-runtime");
   expect(Date.now() - started).toBeLessThan(9_000);
 }, 12_000);

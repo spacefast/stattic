@@ -3,24 +3,22 @@
 // flock serialized every mutating management route across every space on a
 // many-space shared site (production incident: commit a06d0571c "ride out
 // write-lock contention; serialize same-site CI deploys"). Exactly
-// revoke_grant/unrevoke_grant — the instant-revoke-racing-deploys pair the
-// incident was about — take a per-space lock file so unrelated spaces stop
-// contending; the config-shaped routes (update_route, update_hostname_intent,
-// update_tombstones, update_retention_policy) joined them, and after the
+// Config-shaped routes (update_route, update_hostname_intent,
+// update_tombstones, update_retention_policy) take a per-space lock file so
+// unrelated spaces stop contending, and after the
 // finalize-family write-audit so did finalize_version and delete_version:
 // their writes are space-confined (version trees, per-space blob CAS, pointer
 // flip) or independently serialized (journal append, the always-innermost
-// routes/index.lock, one-shot content/randomly-addressed spool files). The
-// delete_space/repair_space/transfer family keeps the site-wide lock (space
-// delete removes its own lock file, repair is the site-wide recovery hammer,
-// transfers carry their space in the body not the lockable URL scope), and
-// the import steps' owning space comes from the job record, not the request
-// scope the dispatcher could lock on — see management.php's lock-scope
-// classification comment. Handlers that replace config.revocations
-// additionally take the target space's per-space lock around the
-// revocations.json read-modify-write, so every writer of that file serializes
-// on the same lock (the lost-revocation race: a revoke_grant landing between
-// a replace's load and store would otherwise be silently dropped).
+// routes/index.lock, one-shot content/randomly-addressed spool files).
+// repair_space is now the ONLY site-wide row (see admin/api.php's lock-scope
+// classification comment): it rebuilds the full cross-space route index, and
+// serializing it against every mutation is the point. delete_space moved to a
+// per-space lock file outside the tree it deletes, so it no longer contends on
+// the site-wide lock. The event drain/ack pair took the site lock back when it
+// was a push lane with leases to hand out; it is now a cursor read over
+// journal.jsonl (D53), whose two inputs — the append-only journal and the
+// cursor file — serialize themselves, so it takes no write lock at all and must
+// not queue behind a publish.
 //
 // Behavioral only: every assertion races real management requests against a
 // REAL flock held externally on the exact lock file path, each request run
@@ -34,19 +32,19 @@
 // timings unrelated to the runtime's own locking).
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 
 import {
-  api,
-  apiJson,
   createDeclaredSession,
   deploy,
   dispatchCli,
-  managementToken,
-  putFile,
-  runtimeHttpPath,
+  dispatchEnvelope,
+  publicAccessConfig,
+  RUNTIME_HTTP_API_BASE,
   startRuntime,
+  storagePath,
+  uploadSessionBlobs,
   type Runtime,
 } from "./harness.ts";
 
@@ -55,8 +53,8 @@ let rt: Runtime;
 const SPACE_A = "spc_lock_a";
 const SPACE_B = "spc_lock_b";
 const HOLD_MS = 700;
-// Slack below HOLD_MS accounts for the runtime's own retry poll interval
-// (SPACEFAST_RUNTIME_WRITE_LOCK_RETRY_US = 100ms).
+// Slack below HOLD_MS accounts for the runtime's own retry backoff
+// (shared/lock.php, capped at SPACEFAST_LOCK_RETRY_MAX_US = 100ms).
 const BLOCKED_FLOOR_MS = HOLD_MS - 150;
 
 const PHP_BINARY = process.env.PHP_BINARY ?? "php";
@@ -78,11 +76,19 @@ beforeAll(async () => {
 afterAll(() => rt?.stop());
 
 function siteLockPath(): string {
-  return path.join(rt.storageRoot, "runtime", "write.lock");
+  return storagePath(rt, "runtime", "write.lock");
 }
 
+// Mirrors `_stattic_space_write_lock_path`: outside the space tree, so
+// `delete_space`'s recursive removal cannot unlink the lock it depends on.
 function spaceLockPath(spaceId: string): string {
-  return path.join(rt.storageRoot, "spaces", spaceId, "write.lock");
+  return storagePath(rt, "runtime", "locks", "spaces", `${spaceId}.lock`);
+}
+
+// The one site-wide artifact a space-scoped write still touches, and the
+// always-innermost lock in the ordering.
+function routeIndexLockPath(): string {
+  return storagePath(rt, "routes", "index.lock");
 }
 
 // Acquires a real, blocking, exclusive flock on `lockPath` in a detached PHP
@@ -186,7 +192,7 @@ function holdFlockUntilReleased(lockPath: string): Promise<() => Promise<void>> 
 // measured around the child, which the contention-window assertions below need.
 async function dispatchTimed(
   request: Record<string, unknown>,
-): Promise<{ status: number; body: Record<string, unknown>; elapsedMs: number }> {
+): Promise<{ status: number; body: Record<string, unknown>; elapsedMs: number; stderr: string }> {
   const result = await dispatchCli(rt, JSON.stringify(request));
   if (result.exitCode !== 0) {
     throw new Error(`dispatch exited ${result.exitCode} with stderr:\n${result.stderr}`);
@@ -195,176 +201,56 @@ async function dispatchTimed(
     status: number;
     body: Record<string, unknown>;
   };
-  return { status: envelope.status, body: envelope.body, elapsedMs: result.elapsedMs };
+  return {
+    status: envelope.status,
+    body: envelope.body,
+    elapsedMs: result.elapsedMs,
+    stderr: result.stderr,
+  };
 }
 
 // On a status mismatch surface the dispatch envelope body too — a bare status
 // diff (like this suite's CI-only 404s) is undebuggable from CI logs alone.
 function expectDispatchStatus(
-  result: { status: number; body: Record<string, unknown> },
+  result: { status: number; body: Record<string, unknown>; stderr?: string },
   expected: number,
 ): void {
   if (result.status !== expected) {
     throw new Error(
-      `dispatch returned ${result.status} (expected ${expected}): ${JSON.stringify(result.body)}`,
+      [
+        `dispatch returned ${result.status} (expected ${expected}): ${JSON.stringify(result.body)}`,
+        result.stderr?.trim(),
+      ]
+        .filter(Boolean)
+        .join("\n"),
     );
   }
 }
 
-function revokeGrantDispatch(spaceId: string, grant: string) {
-  return dispatchTimed({
-    method: "POST",
-    path: runtimeHttpPath(`/__spacefast/api.php/spaces/${spaceId}/access/revocations`),
-    authorization: `Bearer ${managementToken("revoke_grant", { space_id: spaceId })}`,
-    body: JSON.stringify({ grant }),
-  });
+function updateTombstonesDispatch(spaceId: string) {
+  return dispatchTimed(
+    dispatchEnvelope(
+      "PUT",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/tombstones`,
+      "update_tombstones",
+      { space_id: spaceId },
+      { hostnames: [] },
+    ),
+  );
 }
 
 test("a per-space write lock does not serialize mutations on a different space", async () => {
   const releaseSpaceALock = await holdFlockUntilReleased(spaceLockPath(SPACE_A));
-  const resultAPromise = revokeGrantDispatch(SPACE_A, "link:lock_cross_a");
+  const resultAPromise = updateTombstonesDispatch(SPACE_A);
 
-  // Space B's write.lock is a different file entirely: its mutation completes
+  // Space B's lock is a different file entirely: its mutation completes
   // while A's lock is still held. Release only after that real completion
   // signal, avoiding process-startup timing as a proxy for lock independence.
-  const resultB = await revokeGrantDispatch(SPACE_B, "link:lock_cross_b").finally(
-    releaseSpaceALock,
-  );
+  const resultB = await updateTombstonesDispatch(SPACE_B).finally(releaseSpaceALock);
   const resultA = await resultAPromise;
 
   expectDispatchStatus(resultA, 200);
   expectDispatchStatus(resultB, 200);
-});
-
-test("same-space mutations still serialize on the shared per-space lock", async () => {
-  await holdFlockExternally(spaceLockPath(SPACE_A), HOLD_MS);
-
-  const [first, second] = await Promise.all([
-    revokeGrantDispatch(SPACE_A, "link:lock_same_1"),
-    revokeGrantDispatch(SPACE_A, "link:lock_same_2"),
-  ]);
-
-  // Both requests target space A's write.lock — the same file the external
-  // holder locked — so both must wait out the hold, proving revoke_grant
-  // really does acquire a stable, shared-by-space lock file rather than (say)
-  // a unique-per-request path that would let concurrent same-space writes
-  // race each other.
-  expectDispatchStatus(first, 200);
-  expect(first.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
-  expectDispatchStatus(second, 200);
-  expect(second.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
-});
-
-test("revoke_grant is unaffected by the site-wide write lock", async () => {
-  const releaseSiteLock = await holdFlockUntilReleased(siteLockPath());
-
-  // revoke_grant is space-scoped: it completes while runtime/write.lock stays
-  // held, proving it never acquires the site-wide lock.
-  const result = await revokeGrantDispatch(SPACE_A, "link:lock_site_unrelated").finally(
-    releaseSiteLock,
-  );
-
-  expectDispatchStatus(result, 200);
-});
-
-function replaceRevocationsDispatch(spaceId: string, versionId: string, grants: string[]) {
-  return dispatchTimed({
-    method: "PUT",
-    path: runtimeHttpPath(`/__spacefast/api.php/spaces/${spaceId}/routes/production`),
-    authorization: `Bearer ${managementToken("update_route", {
-      space_id: spaceId,
-      route_name: "production",
-    })}`,
-    body: JSON.stringify({ version_id: versionId, config: { revocations: grants } }),
-  });
-}
-
-function storedRevocations(spaceId: string): {
-  grants: Record<string, number>;
-  subs: Record<string, number>;
-} {
-  return JSON.parse(
-    readFileSync(path.join(rt.storageRoot, "spaces", spaceId, "revocations.json"), "utf8"),
-  ) as { grants: Record<string, number>; subs: Record<string, number> };
-}
-
-test("incremental revocation updates retain old tombstones until explicit unrevoke", async () => {
-  const oldTimestamp = Math.floor(Date.now() / 1000) - 40 * 24 * 60 * 60;
-  const revocationsPath = path.join(rt.storageRoot, "spaces", SPACE_A, "revocations.json");
-  writeFileSync(
-    revocationsPath,
-    JSON.stringify({
-      grants: { "svc:stk_long_lived": oldTimestamp },
-      subs: { "user:departed": oldTimestamp },
-      updatedAt: oldTimestamp,
-    }),
-  );
-
-  const unrelatedRevoke = await revokeGrantDispatch(SPACE_A, "link:lnk_unrelated");
-  expectDispatchStatus(unrelatedRevoke, 200);
-  const retained = storedRevocations(SPACE_A);
-  expect(retained.grants["svc:stk_long_lived"]).toBe(oldTimestamp);
-  expect(retained.subs["user:departed"]).toBe(oldTimestamp);
-
-  const explicitUnrevoke = await api(
-    rt,
-    "DELETE",
-    `/__spacefast/api.php/spaces/${SPACE_A}/access/revocations`,
-    "unrevoke_grant",
-    { space_id: SPACE_A },
-    { sub: "user:departed" },
-  );
-  expect(explicitUnrevoke.status).toBe(200);
-  const afterUnrevoke = storedRevocations(SPACE_A);
-  expect(afterUnrevoke.grants["svc:stk_long_lived"]).toBe(oldTimestamp);
-  expect(afterUnrevoke.subs["user:departed"]).toBeUndefined();
-});
-
-test("a config.revocations replace serializes on the same per-space lock as revoke_grant", async () => {
-  // The lost-revocation race: update_route holds the SITE lock while its
-  // config.revocations path read-modify-writes the same revocations.json a
-  // concurrent revoke_grant mutates under the per-space lock. The fix nests
-  // the per-space acquire inside the site-locked replace — proven here by
-  // holding space A's per-space lock externally and observing the route PUT
-  // block on it (it acquires the free site lock instantly; only the nested
-  // per-space acquire can make it wait).
-  await holdFlockExternally(spaceLockPath(SPACE_A), HOLD_MS);
-
-  const result = await replaceRevocationsDispatch(SPACE_A, "ver_lock_a1", [
-    "link:lock_replace_gate",
-  ]);
-
-  expectDispatchStatus(result, 200);
-  expect(result.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
-});
-
-test("a concurrent revoke_grant is never lost under a racing config.revocations replace (both orderings)", async () => {
-  for (const revokeFirst of [true, false]) {
-    const suffix = revokeFirst ? "rf" : "pf";
-    const revokedGrant = `link:lock_race_revoked_${suffix}`;
-    const replacedGrant = `link:lock_race_replaced_${suffix}`;
-    rmSync(path.join(rt.storageRoot, "spaces", SPACE_A, "revocations.json"), { force: true });
-
-    // Two independent OS processes racing the same space's revocations.json:
-    // whichever wins the per-space lock, the final file must contain BOTH the
-    // instant revoke (fresh timestamp — the replace's grace window carries it
-    // when the replace runs second; the revoke merges on top when it runs
-    // second) and the replace's own authoritative grant.
-    const launches = [
-      () => revokeGrantDispatch(SPACE_A, revokedGrant),
-      () => replaceRevocationsDispatch(SPACE_A, "ver_lock_a1", [replacedGrant]),
-    ];
-    if (!revokeFirst) {
-      launches.reverse();
-    }
-    const [first, second] = await Promise.all([launches[0](), launches[1]()]);
-    expectDispatchStatus(first, 200);
-    expectDispatchStatus(second, 200);
-
-    const stored = storedRevocations(SPACE_A);
-    expect(typeof stored.grants[revokedGrant]).toBe("number");
-    expect(typeof stored.grants[replacedGrant]).toBe("number");
-  }
 });
 
 test("update_tombstones takes the per-space lock: free of the site lock, serialized on its own space", async () => {
@@ -374,62 +260,104 @@ test("update_tombstones takes the per-space lock: free of the site lock, seriali
   // no longer rides the site-wide lock. A held SITE lock must not delay it; a
   // held lock on ITS OWN space still serializes it.
   const releaseSiteLock = await holdFlockUntilReleased(siteLockPath());
-  const underSiteLock = await dispatchTimed({
-    method: "PUT",
-    path: runtimeHttpPath(`/__spacefast/api.php/spaces/${SPACE_A}/tombstones`),
-    authorization: `Bearer ${managementToken("update_tombstones", { space_id: SPACE_A })}`,
-    body: JSON.stringify({ hostnames: [] }),
-  }).finally(releaseSiteLock);
+  const underSiteLock = await updateTombstonesDispatch(SPACE_A).finally(releaseSiteLock);
   expectDispatchStatus(underSiteLock, 200);
 
   await holdFlockExternally(spaceLockPath(SPACE_A), HOLD_MS);
-  const underOwnSpaceLock = await dispatchTimed({
-    method: "PUT",
-    path: runtimeHttpPath(`/__spacefast/api.php/spaces/${SPACE_A}/tombstones`),
-    authorization: `Bearer ${managementToken("update_tombstones", { space_id: SPACE_A })}`,
-    body: JSON.stringify({ hostnames: [] }),
-  });
+  const underOwnSpaceLock = await updateTombstonesDispatch(SPACE_A);
   expectDispatchStatus(underOwnSpaceLock, 200);
   expect(underOwnSpaceLock.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
 });
 
-// Stages a finalizable version: declared session + the one uploaded file.
-// Returns the upload id the finalize call must present.
+function updateRouteDispatch(
+  spaceId: string,
+  versionId: string,
+  changedPaths?: string[],
+  hostnames: string[] = [],
+) {
+  return dispatchTimed(
+    dispatchEnvelope(
+      "PUT",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/routes/production`,
+      "update_route",
+      { space_id: spaceId, route_name: "production" },
+      {
+        version_id: versionId,
+        config: publicAccessConfig({ mode: "website" }),
+        production_hostnames: hostnames,
+        version_hostnames: [],
+        ...(changedPaths ? { changed_paths: changedPaths } : {}),
+      },
+    ),
+  );
+}
+
+// update_route is the Config-shaped route the incident was actually about: the
+// deploy that could not flip its pointer because an unrelated space held the
+// site-wide lock.
+test("update_route takes the per-space lock: free of the site lock, serialized on its own space", async () => {
+  const releaseSiteLock = await holdFlockUntilReleased(siteLockPath());
+  const underSiteLock = await updateRouteDispatch(SPACE_A, "ver_lock_a1").finally(releaseSiteLock);
+  expectDispatchStatus(underSiteLock, 200);
+
+  await holdFlockExternally(spaceLockPath(SPACE_A), HOLD_MS);
+  const underOwnSpaceLock = await updateRouteDispatch(SPACE_A, "ver_lock_a1");
+  expectDispatchStatus(underOwnSpaceLock, 200);
+  expect(underOwnSpaceLock.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
+});
+
+test("a foreign space's lock leaves update_route alone; the shared route index still gates it", async () => {
+  const releaseForeignLock = await holdFlockUntilReleased(spaceLockPath(SPACE_A));
+  const underForeignLock = await updateRouteDispatch(SPACE_B, "ver_lock_b1").finally(
+    releaseForeignLock,
+  );
+  expectDispatchStatus(underForeignLock, 200);
+
+  // `changed_paths` forces a real pointer write: an unchanged replay returns
+  // before it ever reaches the shared index, and would pass this vacuously.
+  await holdFlockExternally(routeIndexLockPath(), HOLD_MS);
+  const underIndexLock = await updateRouteDispatch(
+    SPACE_B,
+    "ver_lock_b1",
+    ["/index.html"],
+    ["lock-b.test"],
+  );
+  expectDispatchStatus(underIndexLock, 200);
+  expect(underIndexLock.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
+});
+
+// Stages a finalizable version: declared session + every blob negotiated and
+// PUT by sha (the ingest half of a v4 publish, §9). Returns the upload id the
+// finalize call must present. Deliberately NOT the harness's deploy(): finalize
+// is the call under test and has to be dispatched separately, timed.
 async function stageFinalizableVersion(spaceId: string, versionId: string): Promise<string> {
   const files = { "index.html": `${spaceId}/${versionId}` };
   const session = await createDeclaredSession(rt, spaceId, versionId, files);
-  const uploaded = await putFile(
-    rt,
-    session.uploadId,
-    session.token,
-    "index.html",
-    files["index.html"],
-  );
-  expect(uploaded.status).toBe(200);
+  await uploadSessionBlobs(rt, session, files);
   return session.uploadId;
 }
 
 function finalizeDispatch(spaceId: string, versionId: string, uploadId: string) {
-  return dispatchTimed({
-    method: "POST",
-    path: runtimeHttpPath(`/__spacefast/api.php/spaces/${spaceId}/versions/${versionId}/finalize`),
-    authorization: `Bearer ${managementToken("finalize_version", {
-      space_id: spaceId,
-      version_id: versionId,
-    })}`,
-    body: JSON.stringify({ upload_id: uploadId }),
-  });
+  return dispatchTimed(
+    dispatchEnvelope(
+      "POST",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/versions/${versionId}/finalize`,
+      "finalize_version",
+      { space_id: spaceId, version_id: versionId },
+      { upload_id: uploadId },
+    ),
+  );
 }
 
 function deleteVersionDispatch(spaceId: string, versionId: string) {
-  return dispatchTimed({
-    method: "POST",
-    path: runtimeHttpPath(`/__spacefast/api.php/spaces/${spaceId}/versions/${versionId}/delete`),
-    authorization: `Bearer ${managementToken("delete_version", {
-      space_id: spaceId,
-      version_id: versionId,
-    })}`,
-  });
+  return dispatchTimed(
+    dispatchEnvelope(
+      "POST",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/versions/${versionId}/delete`,
+      "delete_version",
+      { space_id: spaceId, version_id: versionId },
+    ),
+  );
 }
 
 test("finalize_version takes the per-space lock: free of the site lock, serialized on its own space", async () => {
@@ -499,7 +427,7 @@ test("delete_version takes the per-space lock: free of the site lock, serialized
   expect(underOwnSpaceLock.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
 });
 
-test("space delete, repair, and import mutations serialize on the site-wide write lock", async () => {
+test("repair alone serializes on the site-wide write lock; space delete and the event drain do not", async () => {
   const deleteSpace = "spc_lock_delete_space";
   await deploy(rt, {
     spaceId: deleteSpace,
@@ -507,100 +435,62 @@ test("space delete, repair, and import mutations serialize on the site-wide writ
     files: { "index.html": "delete space" },
   });
 
-  let exportStatus = await apiJson<{ status: string; export_id?: string }>(
-    rt,
-    "POST",
-    `/__spacefast/api.php/spaces/${SPACE_A}/exports`,
-    "start_space_export",
-    { space_id: SPACE_A },
-    {},
-    201,
-  );
-  expect(typeof exportStatus.export_id).toBe("string");
-  if (typeof exportStatus.export_id !== "string") {
-    throw new Error("space export response omitted export_id");
-  }
-  for (let steps = 0; exportStatus.status !== "complete"; steps += 1) {
-    if (steps > 20) throw new Error(`space export did not complete: ${exportStatus.status}`);
-    exportStatus = await apiJson<{ status: string; export_id?: string }>(
-      rt,
-      "POST",
-      `/__spacefast/api.php/exports/${exportStatus.export_id}/step`,
-      "step_space_export",
-      { space_id: SPACE_A, export_id: exportStatus.export_id },
-    );
-  }
-  const downloadedExport = await api(
-    rt,
-    "GET",
-    `/__spacefast/api.php/exports/${exportStatus.export_id}/archive`,
-    "download_space_export",
-    { space_id: SPACE_A, export_id: exportStatus.export_id },
-  );
-  expect(downloadedExport.status).toBe(200);
-  const exportArchive = Buffer.from(await downloadedExport.arrayBuffer());
-
-  const importSpace = "spc_lock_import";
-  const startedImport = await api(
-    rt,
-    "POST",
-    `/__spacefast/api.php/spaces/${importSpace}/imports`,
-    "start_space_import",
-    { space_id: importSpace },
-    {
-      install_access_policy: false,
-      version_id_map: { ver_lock_a1: "ver_lock_import_1" },
-    },
-  );
-  expect(startedImport.status).toBe(201);
-  const importStatus = (await startedImport.json()) as { import_id?: unknown };
-  expect(typeof importStatus.import_id).toBe("string");
-  if (typeof importStatus.import_id !== "string") {
-    throw new Error("space import response omitted import_id");
-  }
-  const uploadedImport = await fetch(
-    `${rt.baseUrl}${runtimeHttpPath(
-      `/__spacefast/api.php/imports/${importStatus.import_id}/archive`,
-    )}`,
-    {
-      method: "PUT",
-      headers: {
-        authorization: `Bearer ${managementToken("upload_space_import", {
-          space_id: importSpace,
-          import_id: importStatus.import_id,
-        })}`,
-      },
-      body: exportArchive,
-    },
-  );
-  expect(uploadedImport.status).toBe(200);
-
   await holdFlockExternally(siteLockPath(), HOLD_MS);
-  const results = await Promise.all([
-    dispatchTimed({
-      method: "POST",
-      path: runtimeHttpPath(`/__spacefast/api.php/spaces/${deleteSpace}/delete`),
-      authorization: `Bearer ${managementToken("delete_space", { space_id: deleteSpace })}`,
-    }),
-    dispatchTimed({
-      method: "POST",
-      path: runtimeHttpPath(`/__spacefast/api.php/spaces/${SPACE_A}/repair`),
-      authorization: `Bearer ${managementToken("repair_space", { space_id: SPACE_A })}`,
-    }),
-    dispatchTimed({
-      method: "POST",
-      path: runtimeHttpPath(`/__spacefast/api.php/imports/${importStatus.import_id}/step`),
-      authorization: `Bearer ${managementToken("step_space_import", {
-        space_id: importSpace,
-        import_id: importStatus.import_id,
-      })}`,
-    }),
+  const [repair, deleted, drained] = await Promise.all([
+    // repair_space is the last site-wide row: the recovery hammer rebuilds the
+    // whole cross-space route index, so serializing it against every mutation
+    // on the site is the point.
+    dispatchTimed(
+      dispatchEnvelope(
+        "POST",
+        `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE_A}/repair`,
+        "repair_space",
+        {
+          space_id: SPACE_A,
+        },
+      ),
+    ),
+    // Space deletion is NOT on that list any more. Its lock file used to live
+    // inside the tree it deletes, which made a per-space lock unsafe and forced
+    // it onto the site lock; the lock now lives at
+    // runtime/locks/spaces/{spaceId}.lock, so the delete contends with its OWN
+    // space's finalize (which is the pairing that matters) and with nothing
+    // else. Held site lock, unrelated space: it must go straight through.
+    dispatchTimed(
+      dispatchEnvelope(
+        "POST",
+        `${RUNTIME_HTTP_API_BASE}/spaces/${deleteSpace}/delete`,
+        "delete_space",
+        { space_id: deleteSpace },
+      ),
+    ),
+    // Neither is the event drain, any more. It took the site lock as a push
+    // lane handing out leases; the pull lane (D53) only reads journal.jsonl
+    // from the persisted cursor, and both of those serialize themselves — so it
+    // holds no write lock and a site-locked repair must never queue it.
+    dispatchTimed(
+      dispatchEnvelope(
+        "POST",
+        `${RUNTIME_HTTP_API_BASE}/events/drain`,
+        "drain_events",
+        {},
+        {
+          session_id: "ses_lock_drain",
+          page_id: "page_lock_drain",
+        },
+      ),
+    ),
   ]);
 
-  expect(results.map((result) => result.status)).toEqual([200, 200, 200]);
-  for (const result of results) {
-    expect(result.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
-  }
-  expect(results[1]?.body).toMatchObject({ space_id: SPACE_A, status: "repaired" });
-  expect(results[2]?.body).toMatchObject({ import_id: importStatus.import_id });
+  expectDispatchStatus(repair, 200);
+  expectDispatchStatus(deleted, 200);
+  expectDispatchStatus(drained, 200);
+  expect(repair?.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
+  expect(deleted?.elapsedMs).toBeLessThan(BLOCKED_FLOOR_MS);
+  expect(drained?.elapsedMs).toBeLessThan(BLOCKED_FLOOR_MS);
+  expect(repair?.body).toMatchObject({ space_id: SPACE_A, status: "repaired" });
+  expect(deleted?.body).toMatchObject({ space_id: deleteSpace, status: "deleted" });
+  // The drain really ran the journal read rather than short-circuiting: it hands
+  // back a page-end cursor over runtime/journal.jsonl.
+  expect(drained?.body.cursor).toMatchObject({ offset: expect.any(Number) });
 });

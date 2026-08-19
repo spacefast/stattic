@@ -23,14 +23,6 @@ fn badge_fragment() -> String {
     )
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum HtmlTransformInput {
-    BakeAccess { html: String, slot: AccessSlot },
-    BakeLayout { html: String },
-    InjectAccessBadge { html: String },
-}
-
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessSlot {
@@ -107,34 +99,6 @@ pub enum InstalledPageError {
     MissingMarker,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HtmlTransformOutput {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub html: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<&'static str>,
-}
-
-pub fn transform_html(input: HtmlTransformInput) -> HtmlTransformOutput {
-    match input {
-        HtmlTransformInput::BakeAccess { html, slot } => {
-            let (slot_name, marker) = match slot {
-                AccessSlot::Challenge => ("challenge", CHALLENGE_MARKER),
-                AccessSlot::Deny => ("deny", DENY_MARKER),
-            };
-            bake_slot(&html, slot_name, marker)
-        }
-        HtmlTransformInput::BakeLayout { html } => bake_slot(&html, "content", LAYOUT_MARKER),
-        HtmlTransformInput::InjectAccessBadge { html } => HtmlTransformOutput {
-            ok: true,
-            html: Some(inject_badge(&html)),
-            reason: None,
-        },
-    }
-}
-
 /// Owns the complete deterministic gate-page/layout compilation policy. File
 /// discovery and reads stay with the caller; byte caps, diagnostics, badge
 /// selection, baking, and the install decision are identical in native and
@@ -174,13 +138,9 @@ fn compile_access_page(html: String, slot: AccessSlot, white_label: bool) -> Pag
         return page_failure(access_too_large(file, slot, false));
     }
     let marker = slot.marker();
-    let baked = bake_slot(&html, slot.name(), marker);
-    let Some(mut output) = baked.html else {
-        return page_failure(access_bake_diagnostic(
-            file,
-            slot,
-            baked.reason.expect("failed bake has a reason"),
-        ));
+    let mut output = match bake_slot(&html, slot.name(), marker) {
+        Ok(baked) => baked,
+        Err(failure) => return page_failure(access_bake_diagnostic(file, slot, failure)),
     };
     if !white_label {
         output = inject_badge(&output);
@@ -208,11 +168,9 @@ fn compile_layout_page(html: String) -> PageCompileOutput {
             details: Some(json!({"limit": PAGE_MAX_BYTES})),
         });
     }
-    let baked = bake_slot(&html, "content", LAYOUT_MARKER);
-    let Some(output) = baked.html else {
-        return page_failure(layout_bake_diagnostic(
-            baked.reason.expect("failed bake has a reason"),
-        ));
+    let output = match bake_slot(&html, "content", LAYOUT_MARKER) {
+        Ok(baked) => baked,
+        Err(failure) => return page_failure(layout_bake_diagnostic(failure)),
     };
     debug_assert_eq!(
         validate_installed_page(&output, InstalledPageKind::Layout),
@@ -269,84 +227,83 @@ fn access_too_large(file: &'static str, slot: AccessSlot, baked: bool) -> PageCo
     }
 }
 
-fn access_bake_diagnostic(
+/// The closed reason set `bake_slot` fails with.
+#[derive(Clone, Copy)]
+enum BakeFailure {
+    SlotMissing,
+    SlotUnclosed,
+    SlotInForm,
+    MarkerConflict,
+}
+
+fn bake_diagnostic(
     file: &'static str,
-    slot: AccessSlot,
-    reason: &'static str,
+    code: &'static str,
+    slot: &str,
+    consequence: &str,
+    failure: BakeFailure,
+    details: Option<Value>,
 ) -> PageCompileDiagnostic {
-    let name = slot.name();
-    let (code, message) = match reason {
-        "slot_missing" => (
-            "access_page_slot_missing",
-            format!(
-                "{file} has no <div data-sf=\"{name}\"> slot element; the default {name} page will render."
-            ),
+    let message = match failure {
+        BakeFailure::SlotMissing => {
+            format!("{file} has no <div data-sf=\"{slot}\"> slot element; {consequence}")
+        }
+        BakeFailure::SlotUnclosed => {
+            format!("{file}'s <div data-sf=\"{slot}\"> element never closes; {consequence}")
+        }
+        BakeFailure::SlotInForm => format!(
+            "{file}'s <div data-sf=\"{slot}\"> slot sits inside a <form> element; {consequence}"
         ),
-        "slot_unclosed" => (
-            "access_page_slot_unclosed",
-            format!(
-                "{file}'s <div data-sf=\"{name}\"> element never closes; the default {name} page will render."
-            ),
-        ),
-        "slot_in_form" => (
-            "access_page_slot_in_form",
-            format!(
-                "{file}'s <div data-sf=\"{name}\"> slot sits inside a <form> element; the default {name} page will render."
-            ),
-        ),
-        "marker_conflict" => (
-            "access_page_marker_conflict",
-            format!(
-                "{file} already contains the {name} slot marker text; the default {name} page will render."
-            ),
-        ),
-        _ => unreachable!("bake_slot returns a closed reason set"),
+        BakeFailure::MarkerConflict => {
+            format!("{file} already contains the {slot} slot marker text; {consequence}")
+        }
     };
     PageCompileDiagnostic {
         severity: "warning",
         code,
         message,
         path: file,
-        details: Some(json!({"slot": name})),
+        details,
     }
 }
 
-fn layout_bake_diagnostic(reason: &'static str) -> PageCompileDiagnostic {
-    const FILE: &str = LAYOUT_FILE;
-    let (code, message) = match reason {
-        "slot_missing" => (
-            "layout_template_slot_missing",
-            format!(
-                "{FILE} has no <div data-sf=\"content\"> slot element; gate pages render without custom chrome."
-            ),
-        ),
-        "slot_unclosed" => (
-            "layout_template_slot_unclosed",
-            format!(
-                "{FILE}'s <div data-sf=\"content\"> element never closes; gate pages render without custom chrome."
-            ),
-        ),
-        "slot_in_form" => (
-            "layout_template_slot_in_form",
-            format!(
-                "{FILE}'s <div data-sf=\"content\"> slot sits inside a <form> element; gate pages render without custom chrome."
-            ),
-        ),
-        "marker_conflict" => (
-            "layout_template_marker_conflict",
-            format!(
-                "{FILE} already contains the content slot marker text; gate pages render without custom chrome."
-            ),
-        ),
-        _ => unreachable!("bake_slot returns a closed reason set"),
+fn access_bake_diagnostic(
+    file: &'static str,
+    slot: AccessSlot,
+    failure: BakeFailure,
+) -> PageCompileDiagnostic {
+    let name = slot.name();
+    let code = match failure {
+        BakeFailure::SlotMissing => "access_page_slot_missing",
+        BakeFailure::SlotUnclosed => "access_page_slot_unclosed",
+        BakeFailure::SlotInForm => "access_page_slot_in_form",
+        BakeFailure::MarkerConflict => "access_page_marker_conflict",
     };
-    PageCompileDiagnostic {
-        severity: "warning",
+    bake_diagnostic(
+        file,
         code,
-        message,
-        path: FILE,
-        details: None,
-    }
+        name,
+        &format!("the default {name} page will render."),
+        failure,
+        Some(json!({"slot": name})),
+    )
+}
+
+fn layout_bake_diagnostic(failure: BakeFailure) -> PageCompileDiagnostic {
+    let code = match failure {
+        BakeFailure::SlotMissing => "layout_template_slot_missing",
+        BakeFailure::SlotUnclosed => "layout_template_slot_unclosed",
+        BakeFailure::SlotInForm => "layout_template_slot_in_form",
+        BakeFailure::MarkerConflict => "layout_template_marker_conflict",
+    };
+    bake_diagnostic(
+        LAYOUT_FILE,
+        code,
+        "content",
+        "gate pages render without custom chrome.",
+        failure,
+        None,
+    )
 }
 
 fn page_success(html: String) -> PageCompileOutput {
@@ -363,7 +320,12 @@ fn page_failure(diagnostic: PageCompileDiagnostic) -> PageCompileOutput {
     }
 }
 
-fn bake_slot(html: &str, slot_name: &'static str, marker: &'static str) -> HtmlTransformOutput {
+/// Replaces the first author slot's contents with the runtime marker.
+fn bake_slot(
+    html: &str,
+    slot_name: &'static str,
+    marker: &'static str,
+) -> Result<String, BakeFailure> {
     let source = Rc::new(html.to_string());
     let first_slot = Rc::new(Cell::new(None::<usize>));
     let form_slots = Rc::new(RefCell::new(BTreeSet::<usize>::new()));
@@ -422,19 +384,19 @@ fn bake_slot(html: &str, slot_name: &'static str, marker: &'static str) -> HtmlT
             })),
     );
     if analysis.is_err() {
-        return failure("slot_unclosed");
+        return Err(BakeFailure::SlotUnclosed);
     }
     if marker_conflict.get() {
-        return failure("marker_conflict");
+        return Err(BakeFailure::MarkerConflict);
     }
     let Some(target) = first_slot.get() else {
-        return failure("slot_missing");
+        return Err(BakeFailure::SlotMissing);
     };
     if form_slots.borrow().contains(&target) {
-        return failure("slot_in_form");
+        return Err(BakeFailure::SlotInForm);
     }
     if !closed_slots.borrow().contains(&target) {
-        return failure("slot_unclosed");
+        return Err(BakeFailure::SlotUnclosed);
     }
 
     let rewritten = rewrite_str(
@@ -448,14 +410,7 @@ fn bake_slot(html: &str, slot_name: &'static str, marker: &'static str) -> HtmlT
             Ok(())
         })),
     );
-    match rewritten {
-        Ok(html) => HtmlTransformOutput {
-            ok: true,
-            html: Some(html),
-            reason: None,
-        },
-        Err(_) => failure("slot_unclosed"),
-    }
+    rewritten.map_err(|_| BakeFailure::SlotUnclosed)
 }
 
 fn marker_comment_text(marker: &str) -> &str {
@@ -487,39 +442,31 @@ fn inject_badge(html: &str) -> String {
     }
 }
 
-fn failure(reason: &'static str) -> HtmlTransformOutput {
-    HtmlTransformOutput {
-        ok: false,
-        html: None,
-        reason: Some(reason),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn access_slot_and_badge_are_baked() {
-        let baked = transform_html(HtmlTransformInput::BakeAccess {
+        let compiled = compile_page(PageCompileInput::Access {
             html: "<body><div data-sf='challenge'><div>old</div></div></body>".into(),
             slot: AccessSlot::Challenge,
+            white_label: false,
         });
-        assert_eq!(
-            baked.html.as_deref(),
-            Some("<body><div data-sf='challenge'><!--spacefast:slot:challenge:v1--></div></body>")
-        );
-        let badged = inject_badge(baked.html.as_deref().expect("baked HTML"));
-        assert!(badged.contains("<!--spacefast:slot:badge:v1-->"));
-        assert!(badged.ends_with("</body>"));
+        assert!(compiled.diagnostics.is_empty());
+        let html = compiled.html.expect("access page compiles");
+        assert!(html.contains("<div data-sf='challenge'><!--spacefast:slot:challenge:v1--></div>"));
+        assert!(html.contains("<!--spacefast:slot:badge:v1-->"));
+        assert!(html.ends_with("</body>"));
     }
 
     #[test]
     fn nested_author_form_is_rejected() {
-        let output = transform_html(HtmlTransformInput::BakeLayout {
+        let output = compile_page(PageCompileInput::Layout {
             html: "<form><div data-sf=content></div></form>".into(),
         });
-        assert_eq!(output.reason, Some("slot_in_form"));
+        assert!(output.html.is_none());
+        assert_eq!(output.diagnostics[0].code, "layout_template_slot_in_form");
     }
 
     #[test]
@@ -584,14 +531,18 @@ mod tests {
             .expect("layout compiles")
             .ends_with(&format!("<div data-sf=content>{LAYOUT_MARKER}</div>")));
 
-        let unclosed = transform_html(HtmlTransformInput::BakeLayout {
-            html: "<div data-sf=content>".into(),
-        });
-        assert_eq!(unclosed.reason, Some("slot_unclosed"));
-
-        let unclosed_before_body = transform_html(HtmlTransformInput::BakeLayout {
-            html: "<html><body><div data-sf=content><p>never closes</body></html>".into(),
-        });
-        assert_eq!(unclosed_before_body.reason, Some("slot_unclosed"));
+        for unclosed in [
+            "<div data-sf=content>",
+            "<html><body><div data-sf=content><p>never closes</body></html>",
+        ] {
+            let output = compile_page(PageCompileInput::Layout {
+                html: unclosed.into(),
+            });
+            assert!(output.html.is_none(), "{unclosed}");
+            assert_eq!(
+                output.diagnostics[0].code, "layout_template_slot_unclosed",
+                "{unclosed}"
+            );
+        }
     }
 }

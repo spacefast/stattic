@@ -1,9 +1,0 @@
-[package]
-name = "stattic"
-version = "0.1.0"
-edition.workspace = true
-publish = false
-
-[dependencies]
-serde_json = "1"
-stattic-runtime-core = { path = "../stattic-runtime-core" }

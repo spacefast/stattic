@@ -1,16 +1,17 @@
-//! Convention-file compilation into runtime buckets and unified access
-//! rules: raw `_redirects`/`_headers` text becomes redirect/header buckets,
-//! `Basic-Auth` operations become file-lane access rules with bcrypt verifier
-//! secrets (the hashing itself lives in `crate::routing`), and legacy
-//! Basic-Auth response-header shapes are stripped before artifacts are
-//! written. Ported from the donor finalizer's root `conventions.rs`.
+//! Convention-file compilation into runtime redirect and response-header
+//! buckets. Authorization is configured through Spacefast sharing, never
+//! through uploaded convention files.
 
+use serde::Serialize;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
 
-use crate::finalize::{invalid, Result};
-use crate::routing::{compile_routing_files, RoutingInput};
+use crate::csp::{merge_platform_csp_value, PlatformCspSources};
+use crate::finalize::Result;
+use crate::protocol::{PLATFORM_OWNED_HEADERS, PLATFORM_OWNED_HEADER_PREFIXES};
+use crate::routing::{compile_routing_files, HeaderRule, RoutingInput};
 use crate::transforms::{lower_runtime_conventions, RuntimeConventionsInput};
+
+const CSP_HEADER_NAME: &str = "content-security-policy";
 
 #[derive(Default)]
 pub struct CompiledConventions {
@@ -18,26 +19,50 @@ pub struct CompiledConventions {
     pub redirects_pattern: Option<Vec<Value>>,
     pub headers_exact: Option<Map<String, Value>>,
     pub headers_pattern: Option<Vec<Value>>,
-    pub access_rules: Vec<Value>,
-    pub access_secrets: BTreeMap<String, String>,
     pub metadata_convention_files: Option<Value>,
+    pub routing: ConventionRoutingSummary,
 }
 
-pub fn convention_files_precompiled(body: &Value) -> Result<bool> {
-    match body.get("convention_files_precompiled") {
-        None => Ok(false),
-        Some(Value::Bool(value)) => Ok(*value),
-        Some(_) => invalid(
-            "invalid_convention_files_precompiled",
-            "convention_files_precompiled must be a boolean.",
-        ),
-    }
+/// What the version's routing compiled TO, counted before the rules are lowered
+/// into serving buckets. The control plane stores these counts on the version
+/// row and overlays its plan on `proxy_rules` — the compiled artifact itself
+/// stays plan-agnostic, so this is a report, never a verdict.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConventionRoutingSummary {
+    pub redirect_rule_count: usize,
+    pub header_rule_count: usize,
+    pub proxy_rule_count: usize,
+    pub proxy_rules: Vec<ProxyRuleSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRuleSummary {
+    pub source: String,
+    pub destination: String,
+}
+
+/// Everything one conventions compile needs beyond the staged bytes it reads
+/// for itself.
+#[derive(Default)]
+pub struct ConventionCompileInput {
+    /// This space's hostnames, which tell an internal redirect from an external
+    /// proxy. Only the control plane knows the assignment.
+    pub assigned_hostnames: Vec<String>,
+    /// Origins the platform's own browser code must be allowed to reach,
+    /// resolved and audience-checked by the control plane. Merged into every
+    /// CSP this version sets, from `_headers` and config rules alike — a policy
+    /// that works in one grammar and blocks the platform overlay in the other
+    /// is a trap, not a feature.
+    pub platform_csp_sources: PlatformCspSources,
 }
 
 pub fn compile_conventions(
     raw: &Value,
-    assigned_hostnames: Vec<String>,
-    basic_auth_salt_context: String,
+    config_source: Option<String>,
+    config_path: Option<String>,
+    input: &ConventionCompileInput,
     diagnostics: &mut Vec<Value>,
 ) -> Result<CompiledConventions> {
     let Some(raw) = raw.as_object() else {
@@ -45,10 +70,10 @@ pub fn compile_conventions(
     };
     let has_redirects = raw.get("redirects").and_then(Value::as_str).is_some();
     let has_headers = raw.get("headers").and_then(Value::as_str).is_some();
-    if !has_redirects && !has_headers {
+    if !has_redirects && !has_headers && config_source.is_none() {
         return Ok(CompiledConventions::default());
     }
-    let compilation = compile_routing_files(&RoutingInput {
+    let mut compilation = compile_routing_files(&RoutingInput {
         redirects: raw
             .get("redirects")
             .and_then(Value::as_str)
@@ -59,26 +84,21 @@ pub fn compile_conventions(
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
-        assigned_hostnames,
-        basic_auth_allowed: None,
-        basic_auth_salt_context: Some(basic_auth_salt_context),
+        assigned_hostnames: input.assigned_hostnames.clone(),
+        config_source,
+        config_path,
     });
+    merge_platform_csp_sources(&mut compilation.headers, &input.platform_csp_sources);
+    // `has_headers` stays the FILE flag: the sanitized text written back below
+    // is the `_headers` file, and config rules are not part of it.
+    let serves_redirects = has_redirects || !compilation.redirects.is_empty();
+    let serves_headers = has_headers || !compilation.headers.is_empty();
     diagnostics.extend(
         compilation
             .diagnostics
             .iter()
             .filter_map(|item| serde_json::to_value(item).ok()),
     );
-    let access_rules = compilation
-        .basic_auth
-        .iter()
-        .filter_map(|plan| serde_json::to_value(&plan.rule).ok())
-        .collect();
-    let access_secrets = compilation
-        .basic_auth
-        .iter()
-        .flat_map(|plan| plan.secret_values.clone())
-        .collect();
     let mut metadata_convention_files = raw.clone();
     if has_headers {
         metadata_convention_files.insert(
@@ -99,54 +119,96 @@ pub fn compile_conventions(
             .collect(),
     });
     Ok(CompiledConventions {
-        redirects_exact: has_redirects.then_some(lowered.redirects_exact),
-        redirects_pattern: has_redirects.then_some(lowered.redirects_pattern),
-        headers_exact: has_headers.then_some(lowered.headers_exact),
-        headers_pattern: has_headers.then_some(lowered.headers_pattern),
-        access_rules,
-        access_secrets,
+        redirects_exact: serves_redirects.then_some(lowered.redirects_exact),
+        redirects_pattern: serves_redirects.then_some(lowered.redirects_pattern),
+        headers_exact: serves_headers.then_some(lowered.headers_exact),
+        headers_pattern: serves_headers.then_some(lowered.headers_pattern),
         metadata_convention_files: Some(Value::Object(metadata_convention_files)),
+        routing: ConventionRoutingSummary {
+            redirect_rule_count: compilation.stats.redirect_rule_count,
+            header_rule_count: compilation.stats.header_rule_count,
+            proxy_rule_count: compilation.stats.proxy_rule_count,
+            proxy_rules: compilation
+                .redirects
+                .iter()
+                .filter(|rule| rule.action == "proxy")
+                .map(|rule| ProxyRuleSummary {
+                    source: rule.source.clone(),
+                    destination: rule.destination.clone(),
+                })
+                .collect(),
+        },
     })
 }
 
-pub fn header_manifest(
-    meta: &Map<String, Value>,
-    exact: &Map<String, Value>,
-    pattern: &[Value],
-) -> Value {
-    let mut root = meta.clone();
-    root.insert(
-        "headers".into(),
-        json!({"exact":exact,"pattern":bucket_pattern_rules(pattern, "path")}),
-    );
-    // Basic-Auth never reaches this writer: Rust lowers it to unified access
-    // rules before native or WASM callers cross the boundary. New artifacts
-    // contain only the canonical response-header lane; the reader retains
-    // compatibility with historical artifacts that still include `auth`.
-    Value::Object(root)
+/// Adds the platform's sources to every CSP this version sets, before the rules
+/// are lowered into the buckets the origin serves from. Nothing is created
+/// where the publisher set no policy: an absent CSP is already permissive.
+fn merge_platform_csp_sources(rules: &mut [HeaderRule], sources: &PlatformCspSources) {
+    if sources.is_empty() {
+        return;
+    }
+    for rule in rules {
+        for operation in &mut rule.operations {
+            if operation.kind != "set" || !operation.name.eq_ignore_ascii_case(CSP_HEADER_NAME) {
+                continue;
+            }
+            let Some(value) = operation.value.as_ref() else {
+                continue;
+            };
+            let merged = merge_platform_csp_value(value, sources);
+            rule.headers.insert(operation.name.clone(), merged.clone());
+            operation.value = Some(merged);
+        }
+    }
 }
 
-pub fn strip_legacy_basic_auth(exact: &mut Map<String, Value>, pattern: &mut Vec<Value>) {
+pub fn retain_response_header_operations(exact: &mut Map<String, Value>, pattern: &mut Vec<Value>) {
     exact.retain(|_, bucket| {
         let Some(rules) = bucket.as_array_mut() else {
             return false;
         };
-        rules.retain_mut(strip_basic_auth_from_rule);
+        rules.retain_mut(retain_response_headers_in_rule);
         !rules.is_empty()
     });
-    pattern.retain_mut(strip_basic_auth_from_rule);
+    pattern.retain_mut(retain_response_headers_in_rule);
 }
 
-fn strip_basic_auth_from_rule(rule: &mut Value) -> bool {
+/// A response header only the platform may set (`A8C-*`, `x-ac`, `x-sc`,
+/// `x-nc`). Setting one from `_headers` would let a publisher opt private bytes
+/// into the shared edge cache, or forge the edge's own cache verdict; removing
+/// one would let them opt out of a purge-backed policy. Neither is theirs.
+fn platform_owned_header(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    PLATFORM_OWNED_HEADER_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || PLATFORM_OWNED_HEADERS.contains(&name.as_str())
+}
+
+fn retain_response_headers_in_rule(rule: &mut Value) -> bool {
     let Some(rule) = rule.as_object_mut() else {
         return false;
     };
     if let Some(operations) = rule.get_mut("operations").and_then(Value::as_array_mut) {
-        operations
-            .retain(|operation| operation.get("kind").and_then(Value::as_str) != Some("basicAuth"));
+        operations.retain(|operation| {
+            if operation
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(platform_owned_header)
+            {
+                return false;
+            }
+            matches!(
+                operation.get("kind").and_then(Value::as_str),
+                Some("set" | "remove")
+            )
+        });
     }
     if let Some(headers) = rule.get_mut("headers").and_then(Value::as_object_mut) {
-        headers.retain(|name, _| !name.eq_ignore_ascii_case("basic-auth"));
+        headers.retain(|name, _| {
+            !name.eq_ignore_ascii_case("basic-auth") && !platform_owned_header(name)
+        });
     }
     rule.get("operations")
         .and_then(Value::as_array)
@@ -157,18 +219,30 @@ fn strip_basic_auth_from_rule(rule: &mut Value) -> bool {
             .is_some_and(|headers| !headers.is_empty())
 }
 
-pub fn redirect_manifest(
-    meta: &Map<String, Value>,
-    exact: &Map<String, Value>,
-    pattern: &[Value],
-) -> Value {
-    let mut root = meta.clone();
-    root.insert("exact".into(), Value::Object(exact.clone()));
-    root.insert("pattern".into(), bucket_pattern_rules(pattern, "source"));
-    Value::Object(root)
+/// Whether a lowered rule field carries anything at all.
+pub(crate) fn rule_value_is_set(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Number(value)) => value.as_i64() != Some(0),
+        Some(Value::String(value)) => !value.is_empty(),
+        Some(Value::Array(value)) => !value.is_empty(),
+        Some(Value::Object(value)) => !value.is_empty(),
+    }
 }
 
-fn bucket_pattern_rules(rules: &[Value], field: &str) -> Value {
+/// Whether a lowered redirect rule can decline a request that its path matcher
+/// claims — a host qualifier, a query requirement or a condition. Such a rule
+/// can never be answered at compile time, in either the response-table compiler
+/// or the readiness projection.
+pub(crate) fn rule_is_request_dependent(rule: &Value) -> bool {
+    rule_value_is_set(rule.get("hostRegex"))
+        || rule_value_is_set(rule.get("host"))
+        || rule_value_is_set(rule.get("query"))
+        || rule_value_is_set(rule.get("conditions"))
+}
+
+pub(crate) fn bucket_pattern_rules(rules: &[Value], field: &str) -> Value {
     if rules.is_empty() {
         return Value::Array(Vec::new());
     }
@@ -195,111 +269,12 @@ fn bucket_pattern_rules(rules: &[Value], field: &str) -> Value {
     json!({"fallback": fallback, "by_first_segment": by_first_segment})
 }
 
-pub fn inherit_redirect_metadata(
-    exact: &mut Map<String, Value>,
-    pattern: &mut [Value],
-    source_exact: &Map<String, Value>,
-    source_pattern: &[Value],
-) {
-    let source_rules = source_exact
-        .values()
-        .flat_map(|value| value.as_array().into_iter().flatten())
-        .chain(source_pattern.iter());
-    let metadata = source_rules
-        .filter_map(|rule| Some((redirect_identity(rule)?, rule.clone())))
-        .collect::<BTreeMap<_, _>>();
-    for rule in exact
-        .values_mut()
-        .flat_map(|value| value.as_array_mut().into_iter().flatten())
-        .chain(pattern.iter_mut())
-    {
-        let Some(key) = redirect_identity(rule) else {
-            continue;
-        };
-        let Some(source) = metadata.get(&key) else {
-            continue;
-        };
-        for field in ["planGated", "disabled", "disabledReason"] {
-            if let Some(value) = source.get(field) {
-                rule[field] = value.clone();
-            }
-        }
-    }
-}
-
-fn redirect_identity(rule: &Value) -> Option<(u64, String)> {
-    let order = rule.get("order")?.as_u64()?;
-    let shape = [
-        "source",
-        "destination",
-        "action",
-        "status",
-        "match",
-        "regex",
-        "host",
-        "hostRegex",
-        "force",
-        "query",
-        "conditions",
-    ]
-    .into_iter()
-    .map(|field| rule.get(field).cloned().unwrap_or(Value::Null))
-    .collect::<Vec<_>>();
-    serde_json::to_string(&shape)
-        .ok()
-        .map(|shape| (order, shape))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn metadata_inheritance_distinguishes_same_target_proxy_and_redirect_rules() {
-        let proxy = json!({
-            "source":"/same",
-            "destination":"https://api.example.test",
-            "action":"proxy",
-            "status":200,
-            "match":"exact",
-            "regex":null,
-            "host":null,
-            "hostRegex":null,
-            "force":false,
-            "query":null,
-            "conditions":[],
-            "order":0,
-            "planGated":"external_proxy"
-        });
-        let redirect = json!({
-            "source":"/same",
-            "destination":"https://api.example.test",
-            "action":"redirect",
-            "status":301,
-            "match":"exact",
-            "regex":null,
-            "host":null,
-            "hostRegex":null,
-            "force":false,
-            "query":null,
-            "conditions":[],
-            "order":1
-        });
-        let mut exact = Map::from_iter([(
-            "/same".into(),
-            Value::Array(vec![without_metadata(&proxy), without_metadata(&redirect)]),
-        )]);
-        let source_exact = Map::from_iter([("/same".into(), Value::Array(vec![proxy, redirect]))]);
-
-        inherit_redirect_metadata(&mut exact, &mut [], &source_exact, &[]);
-
-        let rules = exact["/same"].as_array().expect("exact redirect bucket");
-        assert_eq!(rules[0]["planGated"], json!("external_proxy"));
-        assert!(rules[1].get("planGated").is_none());
-    }
-
-    #[test]
-    fn legacy_basic_auth_never_enters_response_header_artifacts() {
+    fn non_response_operations_never_enter_response_header_artifacts() {
         let mut exact = Map::from_iter([(
             "/protected".into(),
             json!([{
@@ -312,7 +287,7 @@ mod tests {
             }]),
         )]);
 
-        strip_legacy_basic_auth(&mut exact, &mut Vec::new());
+        retain_response_header_operations(&mut exact, &mut Vec::new());
 
         let rule = &exact["/protected"][0];
         assert_eq!(rule["operations"].as_array().map(Vec::len), Some(1));
@@ -321,74 +296,81 @@ mod tests {
         assert_eq!(rule["headers"]["x-safe"], "yes");
     }
 
-    // Adapted from the donor's finalize-level
-    // `raw_basic_auth_compiles_to_unified_access_without_plaintext_output`:
-    // the convention compiler is exercised directly (the donor additionally
-    // compared native finalize output against the WASM `compile_routing_files`
-    // shape and inspected metadata.json; both need the orchestration stage).
-    // The verifier and no-plaintext assertions are donor-verbatim.
     #[test]
-    fn raw_basic_auth_compiles_to_unified_access_without_plaintext_output() {
+    fn authorization_directives_are_rejected_while_response_headers_compile() {
         let mut diagnostics = Vec::new();
         let compiled = compile_conventions(
             &json!({"headers":"/private\n  Basic-Auth: user:pass\n  X-Frame-Options: DENY"}),
-            Vec::new(),
-            "s/v".into(),
+            None,
+            None,
+            &ConventionCompileInput::default(),
             &mut diagnostics,
         )
         .unwrap();
-        assert_eq!(compiled.access_rules.len(), 1);
-        let hash = compiled
-            .access_secrets
-            .get("headers-basic-auth-1")
-            .expect("compiled verifier");
-        let wasm_shape = compile_routing_files(&RoutingInput {
-            headers: "/private\n  Basic-Auth: user:pass\n  X-Frame-Options: DENY".into(),
-            basic_auth_salt_context: Some("s/v".into()),
-            ..RoutingInput::default()
-        });
-        assert_eq!(
-            wasm_shape.basic_auth[0].secret_values["headers-basic-auth-1"],
-            *hash
-        );
-        assert!(bcrypt::verify("pass", hash).unwrap());
-        assert!(!bcrypt::verify("wrong", hash).unwrap());
-        let serialized = format!(
-            "{}{}{}",
-            serde_json::to_string(&compiled.access_rules).unwrap(),
-            serde_json::to_string(&compiled.metadata_convention_files).unwrap(),
-            serde_json::to_string(&diagnostics).unwrap(),
-        );
+        let serialized = serde_json::to_string(&compiled.metadata_convention_files).unwrap();
         assert!(!serialized.contains("user:pass"));
-        assert!(!serialized.contains("\"password\":\"pass\""));
-        let metadata = serde_json::to_string(&compiled.metadata_convention_files).unwrap();
-        assert!(!metadata.contains("user:pass"));
-        assert!(metadata.contains("X-Frame-Options"));
+        assert!(serialized.contains("X-Frame-Options"));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.get("code").and_then(Value::as_str) == Some("header_basic_auth_unsupported")
+        }));
     }
 
-    // Adapted from the donor's finalize-level
-    // `precompiled_convention_marker_must_be_boolean`.
+    /// One policy pass over both grammars: a CSP written in `_headers` and a CSP
+    /// written as a config rule both end up able to reach the platform origins,
+    /// and a proxy rule carries the entitlement key the origin checks at serve
+    /// time no matter which grammar declared it.
     #[test]
-    fn precompiled_convention_marker_must_be_boolean() {
-        assert!(matches!(
-            convention_files_precompiled(&json!({"convention_files_precompiled": "true"})),
-            Err(crate::finalize::FinalizeError::Invalid {
-                code: "invalid_convention_files_precompiled",
-                ..
-            })
-        ));
-        assert!(!convention_files_precompiled(&json!({})).unwrap());
-        assert!(
-            convention_files_precompiled(&json!({"convention_files_precompiled": true})).unwrap()
-        );
-    }
+    fn platform_sources_and_plan_gating_reach_both_routing_grammars() {
+        let mut diagnostics = Vec::new();
+        let compiled = compile_conventions(
+            &json!({
+                "redirects": "/file-api https://upstream.test/ 200",
+                "headers": "/file\n  Content-Security-Policy: default-src 'self'"
+            }),
+            Some(
+                r#"{
+                  "version": 1,
+                  "rewrites": [
+                    { "source": "/config-api", "destination": "https://other.test/" }
+                  ],
+                  "headers": [
+                    {
+                      "source": "/config",
+                      "headers": [
+                        { "key": "Content-Security-Policy", "value": "default-src 'self'" }
+                      ]
+                    }
+                  ]
+                }"#
+                .into(),
+            ),
+            Some("sf.jsonc".into()),
+            &ConventionCompileInput {
+                assigned_hostnames: Vec::new(),
+                platform_csp_sources: PlatformCspSources::from([(
+                    "connect-src".to_string(),
+                    vec!["https://api.spacefast.test".to_string()],
+                )]),
+            },
+            &mut diagnostics,
+        )
+        .unwrap();
 
-    fn without_metadata(value: &Value) -> Value {
-        let mut value = value.clone();
-        value
-            .as_object_mut()
-            .expect("redirect rule")
-            .remove("planGated");
-        value
+        let headers = compiled.headers_exact.expect("header rules");
+        for path in ["/file", "/config"] {
+            let policy = headers[path][0]["headers"]["Content-Security-Policy"]
+                .as_str()
+                .expect("a set policy");
+            assert_eq!(
+                policy, "default-src 'self'; connect-src 'self' https://api.spacefast.test",
+                "{path} keeps its own policy and gains the platform source"
+            );
+        }
+        let redirects = serde_json::to_string(&compiled.redirects_exact).unwrap();
+        assert_eq!(
+            redirects.matches(r#""planGated":"external_proxy""#).count(),
+            2,
+            "both proxies are gated at serve time, not at compile time: {redirects}"
+        );
     }
 }

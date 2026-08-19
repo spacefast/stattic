@@ -3,7 +3,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::serving_paths::{is_private_serving_path, is_public_serving_path};
+use crate::serving_paths::is_public_serving_path;
 
 const CONFIG_KEYS: &[&str] = &[
     "index",
@@ -34,6 +34,11 @@ pub struct ResolveEffectiveInput {
     pub overlay: Option<Map<String, Value>>,
     #[serde(default)]
     pub template_entries: Vec<String>,
+    /// Whether the published tree carries a Functions worker. Derived from the
+    /// version's compiled metadata, never from a declared kind — and
+    /// independent of whether the same tree also carries a capsule.
+    #[serde(default)]
+    pub has_worker: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +112,13 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
             .as_ref()
             .is_some_and(has_explicit_serving_shape);
 
+    // Content-inferred defaults. A Functions version is an application even
+    // when it carries no root HTML: unresolved requests, `/` included, belong
+    // to its worker, so it never falls back to a directory listing. Static
+    // versions keep the content inference — a root index.html means website
+    // mode, any other single root HTML becomes the homepage rewrite, and no
+    // inferable index means files mode.
+    let listing_default = inferred_index.is_none() && !input.has_worker;
     let mut config = Map::new();
     config.insert(
         "index".into(),
@@ -114,7 +126,8 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
             .clone()
             .map_or(Value::Bool(false), Value::String),
     );
-    config.insert("listing".into(), Value::Bool(inferred_index.is_none()));
+    // `listing` is defaulted AFTER the merge (below), because the inferred
+    // default depends on the merged `fallback`.
     for layer in [input.file_config.as_ref(), input.overlay.as_ref()]
         .into_iter()
         .flatten()
@@ -145,10 +158,25 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
             });
         }
     }
+    // A 200 fallback is a homepage declaration: it names the shell that owns
+    // every unresolved application route, `/` first among them. Inferring a
+    // directory listing there would compile a real `/` entry that shadows the
+    // shell and turns the app into a file browser. A 404 fallback is a custom
+    // not-found page, not SPA routing (same reading as the cleanUrls default
+    // below), so it leaves files mode alone. An explicit `listing` still wins —
+    // this only changes the inferred default.
+    let spa_fallback = fallback
+        .as_ref()
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_u64)
+        == Some(200);
     let listing = config
         .get("listing")
         .and_then(Value::as_bool)
-        .unwrap_or(inferred_index.is_none());
+        .unwrap_or(listing_default && !spa_fallback);
+    config
+        .entry("listing")
+        .or_insert_with(|| Value::Bool(listing));
     let index = config.get("index").cloned().unwrap_or_else(|| {
         inferred_index
             .clone()
@@ -221,6 +249,29 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
             message,
             path: "listing",
             details: Some(details),
+        });
+    }
+    // The inferred default above never produces this pair any more, so reaching
+    // here means the publisher asked for both. They still contradict each other:
+    // a listing compiles a real `/` entry, and the runtime answers an exact key
+    // before it ever consults the fallback — so the shell that was named as the
+    // homepage silently never serves as one. Say so rather than let a homepage
+    // quietly become a file browser.
+    if listing && spa_fallback {
+        let path = fallback
+            .as_ref()
+            .and_then(|value| value.get("path"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        issues.push(EffectiveIssue {
+            severity: "warning",
+            code: "listing_shadows_fallback",
+            message: format!(
+                "listing is on and fallback \"/{path}\" is configured, so the directory listing answers / and the fallback never serves as the homepage. Turn listing off to make /{path} the homepage, or drop the fallback to keep the file listing."
+            ),
+            path: "listing",
+            details: Some(json!({ "fallbackPath": path })),
         });
     }
 
@@ -329,6 +380,9 @@ pub fn build_runtime_payload(input: RuntimePayloadInput) -> Value {
         }
         if let Some(value) = trimmed(sdk.get("castResourceKey")) {
             lowered.insert("cast_resource_key".into(), Value::String(value.into()));
+        }
+        if let Some(value) = sdk.get("publishedComments").and_then(Value::as_bool) {
+            lowered.insert("published_comments".into(), Value::Bool(value));
         }
         if !lowered.is_empty() {
             payload.insert("spacefast_sdk".into(), Value::Object(lowered));
@@ -516,10 +570,10 @@ fn has_explicit_serving_shape(config: &Map<String, Value>) -> bool {
 }
 
 fn html_path(path: &str) -> bool {
-    !path.is_empty()
-        && !is_private_serving_path(path)
-        && (path.to_ascii_lowercase().ends_with(".html")
-            || path.to_ascii_lowercase().ends_with(".htm"))
+    !path.is_empty() && {
+        let lower = path.to_ascii_lowercase();
+        lower.ends_with(".html") || lower.ends_with(".htm")
+    }
 }
 
 #[cfg(test)]
@@ -533,6 +587,7 @@ mod tests {
             file_config: None,
             overlay: None,
             template_entries: Vec::new(),
+            has_worker: false,
         });
         assert_eq!(output.serving["index"], "landing.html");
         assert_eq!(output.runtime_payload_base["clean_urls"], true);
@@ -578,20 +633,75 @@ mod tests {
             )])),
             overlay: None,
             template_entries: Vec::new(),
+            has_worker: false,
         });
         assert_eq!(output.serving["cleanUrls"], false);
     }
 
+    /// Two root HTML files and no `index.html` leave no inferable homepage, so
+    /// the version serves in files mode — UNLESS the publisher already declared
+    /// one. A 200 fallback names the shell that owns `/`, and inferring a
+    /// listing over it compiles a real `/` entry that shadows the shell and
+    /// turns an app into a file browser. A 404 fallback is a custom not-found
+    /// page, not SPA routing, so a genuine file drop that ships one still lists.
     #[test]
     fn multiple_root_html_files_without_index_use_files_mode() {
-        let output = resolve_effective_config(ResolveEffectiveInput {
-            manifest_paths: vec!["home.html".into(), "about.html".into()],
-            file_config: None,
-            overlay: None,
-            template_entries: Vec::new(),
-        });
-        assert_eq!(output.serving["index"], false);
-        assert_eq!(output.serving["listing"], true);
+        let manifest = || {
+            vec![
+                "home.html".to_string(),
+                "about.html".to_string(),
+                "404.html".to_string(),
+            ]
+        };
+        let resolve = |file_config: Option<Map<String, Value>>| {
+            resolve_effective_config(ResolveEffectiveInput {
+                manifest_paths: manifest(),
+                file_config,
+                overlay: None,
+                template_entries: Vec::new(),
+                has_worker: false,
+            })
+        };
+
+        let inferred = resolve(None);
+        assert_eq!(inferred.serving["index"], false);
+        assert_eq!(inferred.serving["listing"], true);
+        assert!(inferred
+            .issues
+            .iter()
+            .any(|issue| issue.code == "files_mode_inferred"));
+
+        let spa = resolve(Some(Map::from_iter([(
+            "fallback".into(),
+            Value::String("/home.html".into()),
+        )])));
+        assert_eq!(spa.serving["listing"], false);
+        assert_eq!(spa.config["listing"], false);
+        assert!(!spa
+            .issues
+            .iter()
+            .any(|issue| issue.code == "files_mode_inferred"));
+
+        let custom_not_found = resolve(Some(Map::from_iter([(
+            "fallback".into(),
+            json!({ "path": "/404.html", "status": 404 }),
+        )])));
+        assert_eq!(custom_not_found.serving["listing"], true);
+
+        // An explicit `listing` still wins — the fallback only moves the
+        // inferred default. The publisher gets a warning instead, because the
+        // listing they asked for will shadow the shell at `/`.
+        let explicit = resolve(Some(Map::from_iter([
+            ("fallback".into(), Value::String("/home.html".into())),
+            ("listing".into(), Value::Bool(true)),
+        ])));
+        assert_eq!(explicit.serving["listing"], true);
+        let warning = explicit
+            .issues
+            .iter()
+            .find(|issue| issue.code == "listing_shadows_fallback")
+            .expect("listing/fallback contradiction is reported");
+        assert_eq!(warning.severity, "warning");
     }
 
     #[test]
@@ -601,6 +711,7 @@ mod tests {
             file_config: None,
             overlay: None,
             template_entries: Vec::new(),
+            has_worker: false,
         });
         assert_eq!(output.serving["index"], "page.html");
         assert_eq!(output.serving["listing"], false);
@@ -613,9 +724,49 @@ mod tests {
             file_config: None,
             overlay: None,
             template_entries: Vec::new(),
+            has_worker: false,
         });
         assert_eq!(output.serving["index"], "page.html");
         assert_eq!(output.serving["listing"], false);
+    }
+
+    /// A Functions version is an application: its worker owns every unresolved
+    /// request, `/` included, so a tree with no inferable root HTML must serve
+    /// neither an index nor a directory listing. The same tree without a worker
+    /// keeps files mode.
+    #[test]
+    fn a_functions_version_without_root_html_serves_no_index_and_no_listing() {
+        let manifest = || vec!["assets/app.js".to_string(), "data/items.json".to_string()];
+
+        let worker = resolve_effective_config(ResolveEffectiveInput {
+            manifest_paths: manifest(),
+            file_config: None,
+            overlay: None,
+            template_entries: Vec::new(),
+            has_worker: true,
+        });
+        assert_eq!(worker.serving["index"], false);
+        assert_eq!(worker.serving["listing"], false);
+        assert_eq!(worker.serving["viewer"], false);
+        assert_eq!(worker.config["listing"], false);
+        assert!(
+            !worker
+                .issues
+                .iter()
+                .any(|issue| issue.code == "files_mode_inferred"),
+            "a worker version never falls back to files mode"
+        );
+
+        let static_version = resolve_effective_config(ResolveEffectiveInput {
+            manifest_paths: manifest(),
+            file_config: None,
+            overlay: None,
+            template_entries: Vec::new(),
+            has_worker: false,
+        });
+        assert_eq!(static_version.serving["index"], false);
+        assert_eq!(static_version.serving["listing"], true);
+        assert_eq!(static_version.issues[0].code, "files_mode_inferred");
     }
 
     #[test]
@@ -626,6 +777,7 @@ mod tests {
                 file_config: None,
                 overlay: None,
                 template_entries: Vec::new(),
+                has_worker: false,
             });
             assert_eq!(output.serving["index"], "docs/page.html", "{companion}");
             assert_eq!(output.serving["listing"], false, "{companion}");
@@ -636,6 +788,7 @@ mod tests {
             file_config: None,
             overlay: None,
             template_entries: Vec::new(),
+            has_worker: false,
         });
         assert_eq!(uppercase_convention.serving["index"], false);
         assert_eq!(uppercase_convention.serving["listing"], true);

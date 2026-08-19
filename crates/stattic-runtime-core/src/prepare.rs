@@ -47,10 +47,24 @@ pub struct AnalyzeInput {
     pub config_candidates: BTreeMap<String, String>,
     #[serde(default)]
     pub convention_files: ConventionFiles,
+    /// The `sf.jsonc` this version publishes. Its routing sections state rules
+    /// in the same grammar the convention files do, so they resolve the same
+    /// `{{ vars.NAME }}` references at the same stage.
+    #[serde(default)]
+    pub routing_config: Option<RoutingConfig>,
     /// Source bytes keyed by committed path. Only paths declared by the
     /// selected config's `templates` array participate.
     #[serde(default)]
     pub template_sources: BTreeMap<String, String>,
+}
+
+/// A `sf.jsonc` as staged: the committed path it was read from (so diagnostics
+/// name the file the publisher wrote) and its bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingConfig {
+    pub path: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,6 +111,10 @@ pub struct Channel {
     /// Product channel name used to select a channel value.
     pub name: String,
     /// Runtime route name under which variant bytes are stored.
+    // The runtime HTTP contract is snake_case; the in-process/WASI prepare
+    // protocol historically used camelCase. Accept both at this shared type
+    // without asking either boundary to translate the other one's wire.
+    #[serde(rename = "route_name", alias = "routeName")]
     pub route_name: String,
 }
 
@@ -124,6 +142,8 @@ pub struct AnalyzeInputFields {
     #[serde(default)]
     pub convention_files: ConventionFiles,
     #[serde(default)]
+    pub routing_config: Option<RoutingConfig>,
+    #[serde(default)]
     pub template_sources: BTreeMap<String, String>,
 }
 
@@ -145,6 +165,10 @@ pub struct PrepareOutput {
     /// crosses the native finalizer boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_convention_files: Option<ConventionFiles>,
+    /// The `sf.jsonc` source with its routing rules substituted, ready for the
+    /// routing compiler. Absent when the caller handed over no config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_config_source: Option<String>,
     /// Base substituted bytes, present only when different from source.
     pub template_files: BTreeMap<String, String>,
     /// Runtime route name -> path -> substituted bytes.
@@ -169,6 +193,7 @@ pub fn analyze(input: AnalyzeInput) -> AnalyzeOutput {
     analyze_fields(AnalyzeInputFields {
         config_candidates: input.config_candidates,
         convention_files: input.convention_files,
+        routing_config: input.routing_config,
         template_sources: input.template_sources,
     })
     .output
@@ -185,6 +210,7 @@ pub fn prepare(input: PrepareInput) -> PrepareOutput {
             variable_requirements: analysis.variable_requirements,
             convention_files: None,
             runtime_convention_files: None,
+            routing_config_source: None,
             template_files: BTreeMap::new(),
             template_variants: BTreeMap::new(),
             substituted_paths: Vec::new(),
@@ -203,6 +229,16 @@ pub fn prepare(input: PrepareInput) -> PrepareOutput {
         &mut sink,
     );
     let runtime_convention_files = convention_files.as_ref().and_then(runtime_safe_conventions);
+    let routing_config_source = input.analysis.routing_config.as_ref().map(|config| {
+        substitute_routing_config(
+            &config.source,
+            &config.path,
+            &input.variable_scopes,
+            &input.system_variables,
+            &mut sink,
+        )
+        .unwrap_or_else(|| config.source.clone())
+    });
     let mut template_files = BTreeMap::new();
     let mut template_variants: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut substituted_paths = BTreeSet::new();
@@ -270,6 +306,7 @@ pub fn prepare(input: PrepareInput) -> PrepareOutput {
         variable_requirements: state.output.variable_requirements,
         convention_files,
         runtime_convention_files,
+        routing_config_source,
         template_files,
         template_variants,
         substituted_paths: substituted_paths.into_iter().collect(),
@@ -324,6 +361,14 @@ fn analyze_fields(input: AnalyzeInputFields) -> AnalysisState {
         if let Some(value) = value {
             collect_requirements(value, &mut requirements);
             sources.push((path.to_string(), value.clone()));
+        }
+    }
+    // A `sf.jsonc` routing rule or cron path needs the same variable a
+    // `_redirects` line needs. Markers elsewhere in the document are not
+    // substituted, so they are not requirements either.
+    if let Some(config) = &input.routing_config {
+        for (start, end) in crate::config::strict::routing_string_spans(&config.source) {
+            collect_requirements(&config.source[start..end], &mut requirements);
         }
     }
     let mut template_sources = Vec::new();
@@ -511,69 +556,161 @@ fn substitute_text(
     let replaced = variable_pattern().replace_all(content, |captures: &regex::Captures<'_>| {
         let whole = captures.get(0).expect("whole variable match");
         let name = captures.get(1).expect("variable name").as_str();
-        if name.to_ascii_uppercase().starts_with(SYSTEM_VARIABLE_PREFIX) {
-            let Some(value) = system.get(name) else {
-                failed = true;
-                sink.diagnostics.push(variable_diagnostic(
-                    "template_variable_unresolved",
-                    format!(
-                        "{path} references {{{{ vars.{name} }}}}, which is not a platform-provided value here."
-                    ),
-                    path,
-                    name,
-                    content,
-                    whole.start(),
-                    channel,
-                ));
-                return whole.as_str().to_string();
-            };
-            sink.system_dependencies.insert(name.to_string());
-            return value.clone();
-        }
-        for scope in scopes {
-            let Some(variable) = scope.values.get(name) else {
-                continue;
-            };
-            if variable.secret || variable.value.is_none() {
-                failed = true;
-                sink.diagnostics.push(variable_diagnostic(
-                    "secret_variable_in_template",
-                    format!(
-                        "{path} references secret variable {name}; secret values never reach served bytes."
-                    ),
-                    path,
-                    name,
-                    content,
-                    whole.start(),
-                    channel,
-                ));
-                return whole.as_str().to_string();
-            }
-            let value = channel
-                .and_then(|channel| variable.channel_values.get(channel))
-                .or(variable.value.as_ref())
-                .expect("non-secret variable has a value");
-            let dependency = channel
-                .map(|channel| format!("{name}@{channel}"))
-                .unwrap_or_else(|| name.to_string());
-            sink.dependencies.insert(dependency, sha256(value));
-            return value.clone();
-        }
-        failed = true;
-        sink.diagnostics.push(variable_diagnostic(
-            "template_variable_unresolved",
-            format!(
-                "{path} references {{{{ vars.{name} }}}}, which is not defined at any scope."
-            ),
-            path,
+        match resolve_variable(
             name,
+            path,
+            channel,
             content,
             whole.start(),
-            channel,
-        ));
-        whole.as_str().to_string()
+            scopes,
+            system,
+            sink,
+        ) {
+            Some(value) => value,
+            None => {
+                failed = true;
+                whole.as_str().to_string()
+            }
+        }
     });
     (!failed).then(|| replaced.into_owned())
+}
+
+/// One `{{ vars.NAME }}` reference, resolved. Scope walk, secret refusal, system
+/// prefix, dependency recording and the failure diagnostics all live here so
+/// that every surface that substitutes — declared templates, `_redirects` /
+/// `_headers` text, and the `sf.jsonc` routing rules that spell the same
+/// grammar in JSON — resolves a name the same way.
+#[allow(clippy::too_many_arguments)]
+fn resolve_variable(
+    name: &str,
+    path: &str,
+    channel: Option<&str>,
+    content: &str,
+    offset: usize,
+    scopes: &[VariableScope],
+    system: &BTreeMap<String, String>,
+    sink: &mut SubstitutionSink,
+) -> Option<String> {
+    if name
+        .to_ascii_uppercase()
+        .starts_with(SYSTEM_VARIABLE_PREFIX)
+    {
+        let Some(value) = system.get(name) else {
+            sink.diagnostics.push(variable_diagnostic(
+                "template_variable_unresolved",
+                format!(
+                    "{path} references {{{{ vars.{name} }}}}, which is not a platform-provided value here."
+                ),
+                path,
+                name,
+                content,
+                offset,
+                channel,
+            ));
+            return None;
+        };
+        sink.system_dependencies.insert(name.to_string());
+        return Some(value.clone());
+    }
+    for scope in scopes {
+        let Some(variable) = scope.values.get(name) else {
+            continue;
+        };
+        if variable.secret || variable.value.is_none() {
+            sink.diagnostics.push(variable_diagnostic(
+                "secret_variable_in_template",
+                format!(
+                    "{path} references secret variable {name}; secret values never reach served bytes."
+                ),
+                path,
+                name,
+                content,
+                offset,
+                channel,
+            ));
+            return None;
+        }
+        let value = channel
+            .and_then(|channel| variable.channel_values.get(channel))
+            .or(variable.value.as_ref())
+            .expect("non-secret variable has a value");
+        let dependency = channel
+            .map(|channel| format!("{name}@{channel}"))
+            .unwrap_or_else(|| name.to_string());
+        sink.dependencies.insert(dependency, sha256(value));
+        return Some(value.clone());
+    }
+    sink.diagnostics.push(variable_diagnostic(
+        "template_variable_unresolved",
+        format!("{path} references {{{{ vars.{name} }}}}, which is not defined at any scope."),
+        path,
+        name,
+        content,
+        offset,
+        channel,
+    ));
+    None
+}
+
+/// The substitutable `sf.jsonc` strings, resolved the way `_redirects` text is.
+///
+/// The file lane substitutes the whole convention file because every byte of it
+/// is rule text. A config file is not: it is a JSON document whose routing
+/// sections and cron paths happen to hold template strings, and a value carrying
+/// a quote or a backslash would rewrite the document around it. So the pass
+/// writes into those string literals and nothing else, JSON-escaping each
+/// resolved value on the way in. The result is still `sf.jsonc` text on the same
+/// lines, which is what keeps rule diagnostics addressable after substitution.
+fn substitute_routing_config(
+    source: &str,
+    path: &str,
+    scopes: &[VariableScope],
+    system: &BTreeMap<String, String>,
+    sink: &mut SubstitutionSink,
+) -> Option<String> {
+    let spans = crate::config::strict::routing_string_spans(source);
+    if spans.is_empty() {
+        return Some(source.to_string());
+    }
+    let mut failed = false;
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for captures in variable_pattern().captures_iter(source) {
+        let whole = captures.get(0).expect("whole variable match");
+        if !spans
+            .iter()
+            .any(|(start, end)| whole.start() >= *start && whole.end() <= *end)
+        {
+            continue;
+        }
+        let name = captures.get(1).expect("variable name").as_str();
+        let Some(value) = resolve_variable(
+            name,
+            path,
+            None,
+            source,
+            whole.start(),
+            scopes,
+            system,
+            sink,
+        ) else {
+            failed = true;
+            continue;
+        };
+        output.push_str(&source[cursor..whole.start()]);
+        output.push_str(&json_string_body(&value));
+        cursor = whole.end();
+    }
+    output.push_str(&source[cursor..]);
+    (!failed).then_some(output)
+}
+
+/// A resolved value as it appears INSIDE a JSON string literal: what
+/// `serde_json` would write, minus the quotes it wraps around it.
+fn json_string_body(value: &str) -> String {
+    let encoded = serde_json::to_string(value).expect("string encodes as JSON");
+    encoded[1..encoded.len() - 1].to_string()
 }
 
 fn variable_diagnostic(
@@ -615,7 +752,9 @@ fn valid_route_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn variable_pattern() -> &'static Regex {
+/// The ONE `{{ vars.NAME }}` syntax. Everything that substitutes, collects a
+/// requirement, or decides that a value is not knowable yet reads it from here.
+pub(crate) fn variable_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
         Regex::new(r"\{\{\s*vars\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
@@ -644,7 +783,83 @@ fn invalid_format(operation: &str, actual: &str) -> AnalyzeOutput {
 
 #[cfg(test)]
 mod tests {
-    use super::{runtime_safe_conventions, ConventionFiles};
+    use super::{
+        runtime_safe_conventions, substitute_routing_config, ConventionFiles, ScopedVariable,
+        SubstitutionSink, VariableScope,
+    };
+    use std::collections::BTreeMap;
+
+    fn space_scope(name: &str, value: &str) -> Vec<VariableScope> {
+        vec![VariableScope {
+            kind: "space".into(),
+            values: BTreeMap::from([(
+                name.into(),
+                ScopedVariable {
+                    value: Some(value.into()),
+                    secret: false,
+                    channel_values: BTreeMap::new(),
+                },
+            )]),
+        }]
+    }
+
+    // The routing sections get values written into them; the rest of the
+    // document is not a template and keeps its markers. The substituted text is
+    // still `sf.jsonc` on the same lines, which is what lets a rule diagnostic
+    // reported after substitution point at the rule the publisher wrote.
+    #[test]
+    fn substitution_writes_into_routing_strings_only_and_escapes_them_as_json() {
+        let source = r#"{
+  "version": 1,
+  "metadata": { "title": "{{ vars.HOST }}" },
+  "rewrites": [
+    { "source": "/api/*", "destination": "https://{{ vars.HOST }}/:splat" }
+  ],
+  "crons": [
+    { "path": "/jobs/{{ vars.HOST }}", "schedule": "daily" }
+  ]
+}
+"#;
+        let mut sink = SubstitutionSink::default();
+        let output = substitute_routing_config(
+            source,
+            "sf.jsonc",
+            &space_scope("HOST", r#"api."x".test\"#),
+            &BTreeMap::new(),
+            &mut sink,
+        )
+        .expect("substitution succeeds");
+
+        assert!(output.contains(r#""destination": "https://api.\"x\".test\\/:splat""#));
+        assert!(output.contains(r#""path": "/jobs/api.\"x\".test\\""#));
+        assert!(output.contains(r#""title": "{{ vars.HOST }}""#));
+        assert_eq!(output.lines().count(), source.lines().count());
+        assert!(sink.diagnostics.is_empty());
+        assert_eq!(sink.dependencies.keys().collect::<Vec<_>>(), vec!["HOST"]);
+    }
+
+    // Same fail-closed rule the convention files get: an unresolved name fails
+    // the operation instead of publishing a rule with a literal marker in it.
+    #[test]
+    fn an_unresolved_routing_variable_fails_the_pass() {
+        let mut sink = SubstitutionSink::default();
+        let output = substitute_routing_config(
+            r#"{"redirects":[{"source":"/a","destination":"{{ vars.MISSING }}/b"}]}"#,
+            "sf.jsonc",
+            &[],
+            &BTreeMap::new(),
+            &mut sink,
+        );
+
+        assert!(output.is_none());
+        assert_eq!(
+            sink.diagnostics
+                .iter()
+                .map(|item| item.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["template_variable_unresolved"]
+        );
+    }
 
     #[test]
     fn runtime_headers_strip_valid_and_malformed_basic_auth_source_lines() {

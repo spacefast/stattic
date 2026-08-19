@@ -2,13 +2,20 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/context.php';
+require_once __DIR__ . '/finalizer-protocol.generated.php';
 
-// Proxy egress policy: one invariant for all proxy surfaces (_redirects 200 external
-// proxy, domain proxy bindings, and runtime proxy route actions). Upstreams must never
-// reach loopback, link-local, cloud-metadata, RFC1918/ULA/private ranges, or
-// Spacefast-internal hosts. The denylist is generic infrastructure policy and carries no
-// tenant data.
+// SSRF policy for every proxy surface: upstreams must never reach loopback,
+// link-local, cloud-metadata, RFC1918/ULA/private ranges, or Spacefast-internal
+// hosts. Policy tables are generated from stattic-runtime-core.
 
+// PARTIAL check — a name/literal-level screen only, NOT the SSRF verdict. It
+// rejects empty/localhost, Spacefast-internal hosts, and non-public IP literals,
+// but returns true for every resolvable hostname WITHOUT resolving it: a name
+// that resolves to a private address still passes here. The binding check is
+// _stattic_egress_resolve_public_ips (which pins the connect IPs); callers must
+// gate the actual connection on that, not on this predicate alone. (This name
+// overstates the guarantee; a rename to state the partiality needs to land
+// atomically with its out-of-lane callers — see the deferred-rename note.)
 function _stattic_egress_host_allowed(string $host, ?int $port = null): bool
 {
     $normalized = strtolower(trim($host, "[] \t\n\r\0\x0B."));
@@ -27,11 +34,47 @@ function _stattic_egress_host_allowed(string $host, ?int $port = null): bool
     return true;
 }
 
+// The inverse problem to the tenant policy above, and why there are two: a
+// tenant-named upstream must never be a Spacefast host, while a callback,
+// exchange or dispatch destination must be exactly that. Platform URLs arrive
+// from the control plane, so this checks the shape and an optional operator
+// allowlist and never resolves DNS.
+function _stattic_platform_destination_allowed(string $url): bool
+{
+    if ($url === '' || preg_match('/[\x00-\x20\x7f]/', $url) === 1) {
+        return false;
+    }
+    $parts = parse_url($url);
+    if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
+        return false;
+    }
+    $host = strtolower((string) $parts['host']);
+    if ($host === '' || isset($parts['user']) || isset($parts['pass']) || isset($parts['fragment'])) {
+        return false;
+    }
+    $scheme = strtolower((string) $parts['scheme']);
+    $loopback = in_array(trim($host, '[]'), ['localhost', '127.0.0.1', '::1'], true);
+    if ($scheme !== 'https' && !($scheme === 'http' && $loopback)) {
+        return false;
+    }
+    $allowed = array_filter(array_map(
+        static fn (string $entry): string => strtolower(trim($entry)),
+        explode(',', _stattic_config_value('SPACEFAST_ZERO_CALLBACK_ALLOWED_HOSTS')),
+    ));
+    if ($allowed === []) {
+        return true;
+    }
+    foreach ($allowed as $allowedHost) {
+        if ($host === $allowedHost || str_ends_with($host, '.' . $allowedHost)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function _stattic_egress_host_is_stattic_internal(string $host): bool
 {
-    // Spacefast-internal host patterns: runtime provider hosts, control-plane hosts,
-    // this runtime's own management hostname, and the configured API host.
-    foreach (['view.fast', 'atomicsites.net'] as $internal) {
+    foreach (STATTIC_RUNTIME_EGRESS_INTERNAL_HOSTS as $internal) {
         if ($host === $internal || str_ends_with($host, '.' . $internal)) {
             return true;
         }
@@ -49,60 +92,28 @@ function _stattic_egress_host_is_stattic_internal(string $host): bool
 
 function _stattic_egress_ip_public(string $ip): bool
 {
-    $packed = @inet_pton(strtolower(trim($ip, '[]')));
+    $packed = inet_pton(strtolower(trim($ip, '[]')));
     if (!is_string($packed)) {
         return false;
     }
     if (strlen($packed) === 16) {
         // IPv4-mapped IPv6 must pass the IPv4 policy for the inner address.
         if (substr($packed, 0, 12) === str_repeat("\0", 10) . "\xff\xff") {
-            return _stattic_egress_ipv4_public(substr($packed, 12));
+            return _stattic_egress_ip_outside_denylist(substr($packed, 12), STATTIC_RUNTIME_EGRESS_DENIED_IPV4);
         }
-        return _stattic_egress_ipv6_public($packed);
+        return _stattic_egress_ip_outside_denylist($packed, STATTIC_RUNTIME_EGRESS_DENIED_IPV6);
     }
     if (strlen($packed) === 4) {
-        return _stattic_egress_ipv4_public($packed);
+        return _stattic_egress_ip_outside_denylist($packed, STATTIC_RUNTIME_EGRESS_DENIED_IPV4);
     }
     return false;
 }
 
-function _stattic_egress_ipv4_public(string $packed): bool
+function _stattic_egress_ip_outside_denylist(string $packed, array $deniedCidrs): bool
 {
-    foreach ([
-        ['0.0.0.0', 8],        // "this network"
-        ['10.0.0.0', 8],       // RFC1918
-        ['100.64.0.0', 10],    // CGNAT
-        ['127.0.0.0', 8],      // loopback
-        ['169.254.0.0', 16],   // link-local incl. cloud metadata 169.254.169.254
-        ['172.16.0.0', 12],    // RFC1918
-        ['192.0.0.0', 24],     // IETF protocol assignments
-        ['192.0.2.0', 24],     // TEST-NET-1
-        ['192.168.0.0', 16],   // RFC1918
-        ['198.18.0.0', 15],    // benchmarking
-        ['198.51.100.0', 24],  // TEST-NET-2
-        ['203.0.113.0', 24],   // TEST-NET-3
-        ['224.0.0.0', 3],      // multicast + reserved + broadcast
-    ] as [$network, $bits]) {
-        if (_stattic_egress_ip_in_cidr($packed, (string) inet_pton($network), $bits)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-function _stattic_egress_ipv6_public(string $packed): bool
-{
-    foreach ([
-        ['::', 96],           // unspecified + loopback + deprecated IPv4-compatible ::a.b.c.d
-        ['::ffff:0:0', 96],   // IPv4-mapped (handled separately; deny raw)
-        ['64:ff9b::', 96],    // NAT64 well-known prefix
-        ['100::', 64],        // discard-only
-        ['2001:db8::', 32],   // documentation
-        ['fc00::', 7],        // ULA incl. cloud metadata fd00:ec2::254
-        ['fe80::', 10],       // link-local
-        ['ff00::', 8],        // multicast
-    ] as [$network, $bits]) {
-        if (_stattic_egress_ip_in_cidr($packed, (string) inet_pton($network), $bits)) {
+    foreach ($deniedCidrs as $cidr) {
+        [$network, $bits] = explode('/', $cidr, 2);
+        if (_stattic_egress_ip_in_cidr($packed, (string) inet_pton($network), (int) $bits)) {
             return false;
         }
     }
@@ -126,11 +137,8 @@ function _stattic_egress_ip_in_cidr(string $packedIp, string $packedNetwork, int
     return (ord($packedIp[$bytes]) & $mask) === (ord($packedNetwork[$bytes]) & $mask);
 }
 
-// Proxy route policy shape — ONE validator shared by the compile-time writer
-// (admin/generate.php) and the serve-time enforcer (runtime/proxy.php) so
-// acceptance and enforcement cannot drift. The field limits ARE the contract:
-// body <= 10 MiB, timeout 1-60s, connect timeout 1-10s, token-shaped header
-// names, the fixed method allowlist.
+// Shared by the compile-time writer (admin/generate.php) and the serve-time
+// enforcer (runtime/proxy.php) so acceptance and enforcement cannot drift.
 function _stattic_egress_proxy_policy_shape_valid(array $route): bool
 {
     if (!is_string($route['upstream'] ?? null) || $route['upstream'] === '') {
@@ -177,7 +185,7 @@ function _stattic_egress_proxy_policy_shape_valid(array $route): bool
 
 function _stattic_egress_proxy_method_valid(mixed $method): bool
 {
-    return is_string($method) && in_array(strtoupper($method), ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], true);
+    return is_string($method) && in_array(strtoupper($method), STATTIC_VISITOR_METHODS, true);
 }
 
 function _stattic_egress_proxy_header_name_valid(string $name): bool
@@ -190,11 +198,49 @@ function _stattic_egress_int_range(mixed $value, int $min, int $max): bool
     return is_int($value) && $value >= $min && $value <= $max;
 }
 
-// Resolve every address for the upstream host and validate each against the public-IP
-// policy. Returns the validated address list, or null when resolution fails or any
-// resolved address is non-public. Callers must connect only to these pinned addresses
-// (CURLOPT_RESOLVE), which defeats DNS rebinding between validation and connect.
+// How long a resolved verdict may be reused. The connect-IP pin already defeats
+// rebinding within one request; this caps how long the cache can mask a genuine
+// DNS change, so it is deliberately a few seconds, not minutes.
+const STATTIC_EGRESS_RESOLVE_TTL_SECONDS = 5;
+
+// Callers must connect only to the returned addresses (CURLOPT_RESOLVE), which
+// defeats DNS rebinding between validation and connect. Null when resolution
+// fails or ANY resolved address is non-public.
+//
+// Memoized per (host,port): a process-local TTL cache plus a best-effort APCu
+// entry, so repeated resolves in one request (and briefly across requests) skip
+// DNS. The whole verdict — including the "any non-public => null" decision — is
+// what gets cached, so a denied host is never re-derived from raw IPs, and the
+// TTL bounds the rebinding window the cache opens.
 function _stattic_egress_resolve_public_ips(string $host, ?int $port = null): ?array
+{
+    static $memo = [];
+    $key = strtolower(trim($host, '[]')) . '|' . ($port ?? '');
+    $now = time();
+    if (isset($memo[$key]) && $memo[$key]['exp'] > $now) {
+        return $memo[$key]['ips'];
+    }
+
+    $apcuKey = 'stattic_egress_resolve|' . $key;
+    $apcuOn = function_exists('apcu_fetch') && function_exists('apcu_enabled') && apcu_enabled();
+    if ($apcuOn) {
+        $cached = apcu_fetch($apcuKey, $found);
+        if ($found === true && is_array($cached) && array_key_exists('ips', $cached)) {
+            $memo[$key] = ['exp' => $now + STATTIC_EGRESS_RESOLVE_TTL_SECONDS, 'ips' => $cached['ips']];
+            return $cached['ips'];
+        }
+    }
+
+    $ips = _stattic_egress_resolve_public_ips_compute($host, $port);
+    $memo[$key] = ['exp' => $now + STATTIC_EGRESS_RESOLVE_TTL_SECONDS, 'ips' => $ips];
+    if ($apcuOn) {
+        // ['ips' => null] is a real cached verdict (denied), distinct from a miss.
+        apcu_store($apcuKey, ['ips' => $ips], STATTIC_EGRESS_RESOLVE_TTL_SECONDS);
+    }
+    return $ips;
+}
+
+function _stattic_egress_resolve_public_ips_compute(string $host, ?int $port = null): ?array
 {
     $normalized = strtolower(trim($host, '[]'));
     if (_stattic_egress_test_target_allowlisted($normalized, $port) && filter_var($normalized, FILTER_VALIDATE_IP)) {
@@ -205,12 +251,12 @@ function _stattic_egress_resolve_public_ips(string $host, ?int $port = null): ?a
     }
 
     $ips = [];
-    foreach (@dns_get_record($normalized, DNS_A) ?: [] as $record) {
+    foreach (dns_get_record($normalized, DNS_A) ?: [] as $record) {
         if (is_array($record) && is_string($record['ip'] ?? null)) {
             $ips[] = $record['ip'];
         }
     }
-    foreach (@dns_get_record($normalized, DNS_AAAA) ?: [] as $record) {
+    foreach (dns_get_record($normalized, DNS_AAAA) ?: [] as $record) {
         if (is_array($record) && is_string($record['ipv6'] ?? null)) {
             $ips[] = $record['ipv6'];
         }
@@ -226,9 +272,8 @@ function _stattic_egress_resolve_public_ips(string $host, ?int $port = null): ?a
     return array_values(array_unique($ips));
 }
 
-// Exact host:port escape used only by the real-upstream PHP integration test.
-// Production does not set this process env var; a tenant cannot supply it, and
-// every non-matching target still passes the unchanged SSRF policy above.
+// Test-only escape: production does not set this process env var and a tenant
+// cannot supply it; non-matching targets still face the full SSRF policy.
 function _stattic_egress_test_target_allowlisted(string $host, ?int $port): bool
 {
     if ($host === '' || $port === null || $port < 1 || $port > 65535) {

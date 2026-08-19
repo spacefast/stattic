@@ -1,31 +1,10 @@
 <?php
 declare(strict_types=1);
 
-// The shared jti replay cache below uses the private-storage helpers.
 require_once __DIR__ . '/storage.php';
+require_once __DIR__ . '/record-store.php';
 
-// The one JWT verifier for the runtime — access-plan §3.1. Both the browser
-// (visitor) lane and the management/upload lane parse, alg-pin, select the key
-// by kid, verify the signature, and run their time checks through THIS file.
-// Claim profiles are data (the caller passes options); the crypto and the
-// base64url codec exist exactly once.
-//
-// Two key types, one verifier:
-//   - Ed25519 (`sodium_crypto_sign_verify_detached`, length-guarded) for the
-//     platform issuer and any BYO/external issuers registered on a rule.
-//   - A space-local HS256 key (kid `spacefast-local-pw-v1`) whose material is
-//     derived from a password secret verifier hash + the space `sessionVersion`
-//     and may ONLY ever sign `pw:` grants. The key is never published; the
-//     verifier re-derives it. Rotating the password or bumping `sessionVersion`
-//     changes the derivation and invalidates every outstanding wall pass.
-
-const SPACEFAST_LOCAL_PW_TOKEN_KID = 'spacefast-local-pw-v1';
-// Domain-separation label for the space-local HS256 key derivation. Bound to the
-// rule id and the session version so a pass minted for one wall/one session
-// version can never satisfy another.
-const SPACEFAST_LOCAL_PW_KEY_LABEL = 'spacefast-pw-key:v1';
-
-function _spacefast_base64url_decode(string $value): string
+function _stattic_base64url_decode(string $value): string
 {
     $padded = strtr($value, '-_', '+/');
     $padded .= str_repeat('=', (4 - strlen($padded) % 4) % 4);
@@ -33,21 +12,20 @@ function _spacefast_base64url_decode(string $value): string
     return is_string($decoded) ? $decoded : '';
 }
 
-function _spacefast_base64url_encode(string $value): string
+function _stattic_base64url_encode(string $value): string
 {
     return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
 }
 
-// Splits and JSON-decodes a compact JWS. Returns null on any structural fault.
-function _spacefast_jwt_parse(string $token): ?array
+function _stattic_jwt_parse(string $token): ?array
 {
     $parts = explode('.', $token);
     if (count($parts) !== 3) {
         return null;
     }
     [$encodedHeader, $encodedClaims, $encodedSignature] = $parts;
-    $header = json_decode(_spacefast_base64url_decode($encodedHeader), true);
-    $claims = json_decode(_spacefast_base64url_decode($encodedClaims), true);
+    $header = json_decode(_stattic_base64url_decode($encodedHeader), true);
+    $claims = json_decode(_stattic_base64url_decode($encodedClaims), true);
     if (!is_array($header) || !is_array($claims)) {
         return null;
     }
@@ -55,14 +33,13 @@ function _spacefast_jwt_parse(string $token): ?array
         'header' => $header,
         'claims' => $claims,
         'signing_input' => $encodedHeader . '.' . $encodedClaims,
-        'signature' => _spacefast_base64url_decode($encodedSignature),
+        'signature' => _stattic_base64url_decode($encodedSignature),
     ];
 }
 
-// Ed25519 detached verify, length-guarded on BOTH the key and the signature:
-// sodium throws on a wrong-length argument, which would crash instead of
-// failing closed, so an attacker-supplied malformed token must be rejected here.
-function _spacefast_jwt_ed25519_valid(string $signingInput, string $signatureRaw, string $publicKeyRaw): bool
+// Length-guard both key and signature: sodium throws on a wrong-length argument,
+// which would crash instead of failing closed.
+function _stattic_jwt_ed25519_valid(string $signingInput, string $signatureRaw, string $publicKeyRaw): bool
 {
     if (!function_exists('sodium_crypto_sign_verify_detached')) {
         return false;
@@ -76,209 +53,418 @@ function _spacefast_jwt_ed25519_valid(string $signingInput, string $signatureRaw
     return sodium_crypto_sign_verify_detached($signatureRaw, $signingInput, $publicKeyRaw);
 }
 
-function _spacefast_jwt_hs256_valid(string $signingInput, string $signatureRaw, string $key): bool
+function _stattic_runtime_instance_id(): string
 {
-    if ($key === '') {
-        return false;
-    }
-    $expected = hash_hmac('sha256', $signingInput, $key, true);
-    return hash_equals($expected, $signatureRaw);
+    return _stattic_config_value('SPACEFAST_RUNTIME_INSTANCE_ID');
 }
 
-// ---------------------------------------------------------------------------
-// Per-request verification memo. A multi-rule access policy verifies the same
-// Bearer token once per matched rule — repeated Ed25519 verification of
-// identical input dominates that cost, and its outcome is pure per
-// (token, verifying key material). Only the PURE outcomes are memoized here:
-// the compact-JWS parse (keyed by token) and the signature verdict (keyed by
-// token + the key's fingerprint). Everything time-dependent or stateful —
-// exp/nbf against time(), aud/sv checks, revocation lookups, the
-// _spacefast_revocations_unavailable_flag path, and jti consumption — stays
-// OUTSIDE the memo in _spacefast_visitor_verify and runs on every call.
-// Function-static per request (house style: _spacefast_revocation_state_memo
-// in shared/storage.php); deliberately NOT APCu — a signature verdict must
-// never outlive the request that computed it, and key material derived per
-// space must not land in pool-shared storage.
-// ---------------------------------------------------------------------------
+function _stattic_runtime_api_base_url(): string
+{
+    $value = rtrim(_stattic_config_value('SPACEFAST_API_BASE_URL'), '/');
+    return filter_var($value, FILTER_VALIDATE_URL) ? $value : '';
+}
 
-const SPACEFAST_JWT_VERIFY_MEMO_MAX = 256;
+// Local JWKS first so verification needs no call back to the API: self-hosted
+// sets SPACEFAST_RUNTIME_JWKS_PATH; WP.Cloud pushes SPACEFAST_RUNTIME_JWKS_B64
+// through Atomic persistent data. `$allowFetch` is the management lane's own
+// flag — the public serving lane must never make a visitor request wait on an
+// outbound HTTPS round trip to resolve a key, so it reads local/cached only and
+// denies when neither answers.
+function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$reason = null): ?array
+{
+    $cachePath = $privateRoot . '/runtime/jwks.json';
+    $jwksPath = _stattic_config_value('SPACEFAST_RUNTIME_JWKS_PATH');
+    if ($jwksPath !== '' && is_file($jwksPath)) {
+        $decoded = _stattic_runtime_read_json($jwksPath);
+        if (is_array($decoded) && is_array($decoded['keys'] ?? null)) {
+            return $decoded;
+        }
+    }
+    $configuredB64 = _stattic_config_value('SPACEFAST_RUNTIME_JWKS_B64');
+    if ($configuredB64 !== '') {
+        $raw = base64_decode($configuredB64, true);
+        $decoded = is_string($raw) ? json_decode($raw, true) : null;
+        if (_stattic_runtime_jwks_usable($decoded)) {
+            // Provider persistent data is available on management/bootstrap
+            // requests, not on the no-WordPress public serving lane. Persist
+            // that trusted configured source so the extensionless blob gate
+            // can verify later scan requests without decrypting provider data
+            // or fetching a key over the network.
+            $cached = _stattic_runtime_read_json($cachePath);
+            $persistentRuntimeRoot = str_ends_with(
+                rtrim(str_replace('\\', '/', $privateRoot), '/'),
+                '/.stattic/storage'
+            );
+            if (
+                $persistentRuntimeRoot
+                && (($cached['source'] ?? null) !== 'configured' || ($cached['jwks'] ?? null) !== $decoded)
+            ) {
+                if (_stattic_runtime_mkdir_soft(dirname($cachePath))) {
+                    _stattic_runtime_write_json_atomic($cachePath, [
+                        'source' => 'configured',
+                        'jwks' => $decoded,
+                    ]);
+                }
+            }
+            return $decoded;
+        }
+    }
+    $cached = _stattic_runtime_read_json($cachePath);
+    // Only a usable key set is honoured: a doc that was garbage when written must
+    // not keep answering 401 for the full cache window.
+    if (
+        is_array($cached)
+        && (
+            ($cached['source'] ?? null) === 'configured'
+            || (isset($cached['fetched_at']) && (time() - (int) $cached['fetched_at']) < 300)
+        )
+        && _stattic_runtime_jwks_usable($cached['jwks'] ?? null)
+    ) {
+        return $cached['jwks'];
+    }
+    if (!$allowFetch) {
+        $reason = 'key_missing';
+        return null;
+    }
 
-function &_spacefast_jwt_verify_memo(): array
+    require_once __DIR__ . '/http.php';
+
+    $apiBaseUrl = _stattic_runtime_api_base_url();
+    if ($apiBaseUrl === '') {
+        $reason = 'api_base_url_missing';
+        return null;
+    }
+    // https only: the JWKS is the runtime's trust anchor, so a cleartext fetch it
+    // could be tampered in flight is never accepted, even if the API base is http.
+    $result = _stattic_http_request([
+        'url' => $apiBaseUrl . '/.well-known/spacefast-runtime-jwks.json',
+        'schemes' => ['https'],
+        'max_body_bytes' => 262144,
+    ]);
+    $jwks = $result['ok'] ? json_decode($result['body'], true) : null;
+    // A malformed or empty response is a retryable fetch failure (500), never a
+    // doc worth persisting: caching garbage here 401s every privileged request
+    // for the next 300s. Only a well-formed Ed25519 OKP key set is cached.
+    if (!_stattic_runtime_jwks_usable($jwks)) {
+        $reason = 'jwks_fetch_failed';
+        return null;
+    }
+    if (_stattic_runtime_mkdir_soft(dirname($cachePath))) {
+        _stattic_runtime_write_json_atomic($cachePath, ['fetched_at' => time(), 'jwks' => $jwks]);
+    }
+    return $jwks;
+}
+
+// Usable = at least one Ed25519 OKP signing key with a public component. The
+// local-file and base64 lanes are operator-provided and keep their looser
+// is_array(keys) check; this gate is for the untrusted network doc.
+function _stattic_runtime_jwks_usable(mixed $jwks): bool
+{
+    if (!is_array($jwks) || !is_array($jwks['keys'] ?? null) || $jwks['keys'] === []) {
+        return false;
+    }
+    foreach ($jwks['keys'] as $key) {
+        if (
+            is_array($key)
+            && ($key['kty'] ?? null) === 'OKP'
+            && ($key['crv'] ?? null) === 'Ed25519'
+            && is_string($key['x'] ?? null)
+            && trim($key['x']) !== ''
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @return list<array> every Ed25519 key for this kid; a kid-less token matches
+ *         them all — the caller tries each and stops at the first that verifies.
+ */
+function _stattic_runtime_signing_jwks(string $privateRoot, string $kid, bool $allowFetch, ?string &$reason = null): array
+{
+    $jwks = _stattic_runtime_jwks($privateRoot, $allowFetch, $reason);
+    $candidates = [];
+    foreach (($jwks['keys'] ?? []) as $key) {
+        if (is_array($key) && ($key['kty'] ?? null) === 'OKP' && ($key['crv'] ?? null) === 'Ed25519' && ($kid === '' || ($key['kid'] ?? null) === $kid)) {
+            $candidates[] = $key;
+        }
+    }
+    if ($candidates === []) {
+        $reason ??= 'key_missing';
+    }
+    return $candidates;
+}
+
+// The ONE control-plane-token verifier, for every aud. It returns claims or null
+// and never writes a response, so the serving lane cannot leak which spaces,
+// versions and digests exist; the admin lane maps `$rejection` through its own
+// vocabulary (admin/auth.php).
+//
+// `$profile` is the lane's data: `claims` (ordered claim => ['equals' => …] |
+// ['present' => true] | ['absent' => true]), `scope_valid`, `state_valid`,
+// `allow_jwks_fetch`, `instance_pinned`.
+//
+// Check order is load-bearing. `scope_valid` runs before the runtime pin so an
+// invalid public request never reaches mounted storage, and `state_valid` before
+// the key lookup so a bad token costs zero lookups; both compare only
+// caller-supplied values against the token's own, so neither is an oracle. The
+// `claims` profile runs LAST, after the signature: pinning a claim is only
+// meaningful once the token is proven authentic.
+function _stattic_runtime_token_claims(
+    string $privateRoot,
+    string $token,
+    string $aud,
+    array $profile = [],
+    ?array &$rejection = null
+): ?array {
+    $reject = static function (string $reason, string $claim = '', string $rule = '') use (&$rejection): ?array {
+        $rejection = ['reason' => $reason, 'claim' => $claim, 'rule' => $rule];
+        return null;
+    };
+    if ($token === '') {
+        return $reject('token_missing');
+    }
+    $parsed = _stattic_jwt_parse($token);
+    if ($parsed === null || ($parsed['header']['alg'] ?? null) !== 'EdDSA') {
+        return $reject('malformed');
+    }
+    $claims = $parsed['claims'];
+    if (($claims['aud'] ?? null) !== $aud) {
+        return $reject('audience');
+    }
+    $scopeValid = $profile['scope_valid'] ?? null;
+    if (is_callable($scopeValid) && $scopeValid($claims) !== true) {
+        return $reject('scope');
+    }
+
+    // Pinned to this runtime so a token lifted from one origin cannot be replayed
+    // against another; a space move re-runs finalize and re-mints. Opting out is
+    // for a lane whose token names its own Space and resolves nothing outside it
+    // (the blob gate): such a token is already only usable on the host holding
+    // that Space, and the minter has no placement to pin at mint time.
+    $runtimeInstanceId = _stattic_runtime_instance_id();
+    if (
+        ($profile['instance_pinned'] ?? true) === true
+        && (
+            $runtimeInstanceId === ''
+            || !is_string($claims['runtime_instance_id'] ?? null)
+            || !hash_equals($runtimeInstanceId, (string) $claims['runtime_instance_id'])
+        )
+    ) {
+        return $reject('instance');
+    }
+
+    // `exp` is a backstop (the scope claims are the boundary) but stays required
+    // so an unbounded token cannot be minted by omission.
+    $now = time();
+    if (!isset($claims['exp']) || (int) $claims['exp'] < $now) {
+        return $reject('expired');
+    }
+    if (isset($claims['nbf']) && (int) $claims['nbf'] > $now + 30) {
+        return $reject('expired');
+    }
+    $stateValid = $profile['state_valid'] ?? null;
+    if (is_callable($stateValid) && $stateValid($claims) !== true) {
+        return $reject('state');
+    }
+
+    $keyReason = null;
+    $jwks = _stattic_runtime_signing_jwks(
+        $privateRoot,
+        is_string($parsed['header']['kid'] ?? null) ? $parsed['header']['kid'] : '',
+        ($profile['allow_jwks_fetch'] ?? false) === true,
+        $keyReason,
+    );
+    if ($jwks === []) {
+        return $reject((string) $keyReason);
+    }
+    $signatureValid = false;
+    foreach ($jwks as $jwk) {
+        $publicKey = _stattic_base64url_decode((string) ($jwk['x'] ?? ''));
+        if (_stattic_jwt_ed25519_valid($parsed['signing_input'], $parsed['signature'], $publicKey)) {
+            $signatureValid = true;
+            break;
+        }
+    }
+    if (!$signatureValid) {
+        return $reject('signature');
+    }
+
+    foreach (is_array($profile['claims'] ?? null) ? $profile['claims'] : [] as $claim => $rule) {
+        if (($rule['absent'] ?? false) === true) {
+            if (array_key_exists($claim, $claims)) {
+                return $reject('claim', (string) $claim, 'absent');
+            }
+            continue;
+        }
+        $value = $claims[$claim] ?? null;
+        if (($rule['present'] ?? false) === true) {
+            if (!is_string($value) || trim($value) === '') {
+                return $reject('claim', (string) $claim, 'present');
+            }
+            continue;
+        }
+        $expected = (string) ($rule['equals'] ?? '');
+        if (!is_string($value) || !hash_equals($expected, $value)) {
+            return $reject('claim', (string) $claim, 'equals');
+        }
+    }
+
+    return $claims;
+}
+
+// The blob token gate's audience entry (contracts §7).
+//
+// Claim schema, minted by the control plane with EdDSA. `aud`, `space_id` and
+// `exp` are always required; the rest select EXACTLY ONE of four resolvers:
+//
+//   record lane   record + sha256          an uploads-store object; the record's
+//                                          own sha must equal the claim's
+//   upload lane   upload + sha256          a blob an OPEN publish session has
+//                                          accepted, for a version whose catalog
+//                                          does not exist yet
+//   sha lane      version_id + sha256      a blob the version's manifest lists,
+//                 [+ route_name]           optionally that of a variant channel
+//   path lane     version_id + path + view a path the version's CATALOG carries
+//                                          in `source` or `served`
+//
+//   exp        control-plane TTLs: download 10 min, scan 60 min
+//
+// The path lane deliberately carries no `route_name`: per-channel bytes are a
+// content-addressed concern (the scanner enumerates a channel and fetches by
+// sha), and no customer-facing read names a channel.
+//
+// Returns the claims or null; never writes a response — every rejection is the
+// caller's uniform 404.
+function _stattic_runtime_blob_gate_claims(string $privateRoot, string $token): ?array
+{
+    $claims = _stattic_runtime_token_claims($privateRoot, $token, 'spacefast-blob-gate', [
+        // Its own Space is the entire scope, so there is nothing to pin a
+        // placement against; see _stattic_runtime_token_claims.
+        'instance_pinned' => false,
+        // The serving lane never waits on an outbound JWKS fetch.
+        'allow_jwks_fetch' => false,
+        'scope_valid' => static function (array $claims): bool {
+            $nonEmpty = static fn (mixed $value): bool => is_string($value) && $value !== '';
+            if (!$nonEmpty($claims['space_id'] ?? null)) {
+                return false;
+            }
+            $record = $claims['record'] ?? null;
+            $upload = $claims['upload'] ?? null;
+            $versionId = $claims['version_id'] ?? null;
+            $path = $claims['path'] ?? null;
+            $hasSha = $nonEmpty($claims['sha256'] ?? null)
+                && preg_match('/\A[a-f0-9]{64}\z/', strtolower((string) $claims['sha256'])) === 1;
+            // Exactly one resolver: two would let a deleted record be laundered
+            // through a version, or a path claim borrow a sha claim's answer.
+            $lanes = (int) $nonEmpty($record) + (int) $nonEmpty($upload) + (int) $nonEmpty($path);
+            if ($lanes > 1) {
+                return false;
+            }
+            if ($nonEmpty($record) || $nonEmpty($upload)) {
+                // A record resolves in the uploads store and an upload id in the
+                // open publish session; a version scope, a channel or a view on
+                // either would name something neither can answer.
+                return $hasSha
+                    && $versionId === null
+                    && !array_key_exists('route_name', $claims)
+                    && !array_key_exists('view', $claims);
+            }
+            if (!$nonEmpty($versionId)) {
+                return false;
+            }
+            if ($nonEmpty($path)) {
+                // The gate never receives a filesystem path: `path` is a version
+                // path, normalized and looked up by the shared resolver.
+                return !$hasSha
+                    && !array_key_exists('sha256', $claims)
+                    && !array_key_exists('route_name', $claims)
+                    && in_array($claims['view'] ?? null, STATTIC_RUNTIME_VERSION_FILE_VIEWS, true);
+            }
+            $routeName = $claims['route_name'] ?? null;
+            if ($routeName !== null && (!$nonEmpty($routeName) || strlen($routeName) > 128)) {
+                return false;
+            }
+            return $hasSha && !array_key_exists('view', $claims);
+        },
+    ]);
+    return is_array($claims) ? $claims : null;
+}
+
+// Only pure outcomes may be memoized: time-dependent and stateful checks
+// (exp/nbf, aud, jti consumption) stay outside in _stattic_visitor_verify.
+// Never APCu — a signature verdict must not outlive its request, and per-space
+// key material must not land in pool-shared storage.
+
+const STATTIC_JWT_VERIFY_MEMO_MAX = 256;
+
+function &_stattic_jwt_verify_memo(): array
 {
     static $memo = [];
     return $memo;
 }
 
-// Pathological guard only (a request presenting hundreds of distinct tokens):
-// dropping the memo re-verifies, never mis-verifies.
-function _spacefast_jwt_verify_memo_reserve(array &$memo): void
+function _stattic_jwt_verify_memo_reserve(array &$memo): void
 {
-    if (count($memo) >= SPACEFAST_JWT_VERIFY_MEMO_MAX) {
+    if (count($memo) >= STATTIC_JWT_VERIFY_MEMO_MAX) {
         $memo = [];
     }
 }
 
-function _spacefast_jwt_parse_memo(string $token): ?array
+function _stattic_jwt_parse_memo(string $token): ?array
 {
-    $memo = &_spacefast_jwt_verify_memo();
+    $memo = &_stattic_jwt_verify_memo();
     $key = 'parse:' . hash('sha256', $token);
     if (!array_key_exists($key, $memo)) {
-        _spacefast_jwt_verify_memo_reserve($memo);
-        $memo[$key] = _spacefast_jwt_parse($token);
+        _stattic_jwt_verify_memo_reserve($memo);
+        $memo[$key] = _stattic_jwt_parse($token);
     }
     return $memo[$key];
 }
 
-// Memoized signature verdict. `$keyFingerprint` identifies the verifying key
-// material — the issuer fingerprint for Ed25519, the derived-key hash for the
-// space-local HS256 lane — so the same token checked against two different
-// keys can never share a verdict (and a key rotation mid-request changes the
-// fingerprint, forcing a fresh verify). Both verdicts memoize: a forged token
-// is rejected exactly as many times as it is presented, just cheaper.
-function _spacefast_jwt_signature_valid_memo(string $keyFingerprint, string $token, callable $verify): bool
+// `$keyFingerprint` is part of the memo key so a rotation mid-request forces a
+// fresh verification.
+function _stattic_jwt_signature_valid_memo(string $keyFingerprint, string $token, callable $verify): bool
 {
-    $memo = &_spacefast_jwt_verify_memo();
+    $memo = &_stattic_jwt_verify_memo();
     $key = 'sig:' . hash('sha256', $keyFingerprint . "\0" . $token);
     if (!array_key_exists($key, $memo)) {
-        _spacefast_jwt_verify_memo_reserve($memo);
+        _stattic_jwt_verify_memo_reserve($memo);
         $memo[$key] = $verify() === true;
     }
     return $memo[$key] === true;
 }
 
-// Derives the space-local HS256 key for one password wall. `$secret` is the
-// resolved verifier hash (or shared secret) the acquire's ref points at. The
-// session version folds in so logout-all (an `sv` bump) re-keys every wall.
-function _spacefast_local_pw_key(string $ruleId, string $secret, int $sessionVersion): string
+// Every issuer a token with this kid could have been signed by. A kid-less token
+// (or issuer) matches every key, so a rotation cannot sign a visitor out.
+function _stattic_jwt_issuers_for_kid(array $issuers, string $kid): array
 {
-    if ($ruleId === '' || $secret === '') {
-        return '';
-    }
-    return hash_hmac(
-        'sha256',
-        SPACEFAST_LOCAL_PW_KEY_LABEL . ':' . $ruleId . ':' . $sessionVersion,
-        $secret,
-        true
-    );
-}
-
-// Mints a space-local HS256 visitor token carrying exactly `pw:{ruleId}`.
-function _spacefast_mint_local_pw_token(string $ruleId, string $key, string $host, int $sessionVersion, int $ttlSeconds): string
-{
-    $now = time();
-    $header = _spacefast_base64url_encode(json_encode([
-        'alg' => 'HS256',
-        'typ' => 'JWT',
-        'kid' => SPACEFAST_LOCAL_PW_TOKEN_KID,
-    ], JSON_UNESCAPED_SLASHES));
-    $claims = _spacefast_base64url_encode(json_encode([
-        'sub' => 'pw:anon',
-        'grants' => ['pw:' . $ruleId],
-        'aud' => strtolower($host),
-        'sv' => $sessionVersion,
-        'iat' => $now,
-        'nbf' => $now,
-        'exp' => $now + $ttlSeconds,
-    ], JSON_UNESCAPED_SLASHES));
-    $signingInput = $header . '.' . $claims;
-    $signature = _spacefast_base64url_encode(hash_hmac('sha256', $signingInput, $key, true));
-    return $signingInput . '.' . $signature;
-}
-
-// Selects an Ed25519 issuer by kid. A rule may register several issuer keys
-// (mixed audiences / BYO); an empty kid or empty issuer kid matches the first
-// Ed25519 issuer so a single-issuer rule needs no kid pinning.
-function _spacefast_jwt_issuer_for_kid(array $issuers, string $kid): ?array
-{
+    $candidates = [];
     foreach ($issuers as $issuer) {
         if (!is_array($issuer) || ($issuer['alg'] ?? 'EdDSA') !== 'EdDSA') {
             continue;
         }
         $issuerKid = is_string($issuer['kid'] ?? null) ? $issuer['kid'] : '';
         if ($kid === '' || $issuerKid === '' || $issuerKid === $kid) {
-            return $issuer;
+            $candidates[] = $issuer;
         }
     }
-    return null;
+    return $candidates;
 }
 
-// Drops every grant not prefixed by one of the signing key's namespaces — the
-// blast-radius bound for both BYO keys and the space-local key.
-function _spacefast_jwt_filter_grants(array $grants, array $namespaces): array
-{
-    $kept = [];
-    foreach ($grants as $grant) {
-        if (!is_string($grant) || $grant === '') {
-            continue;
-        }
-        foreach ($namespaces as $namespace) {
-            if (is_string($namespace) && $namespace !== '' && str_starts_with($grant, $namespace)) {
-                $kept[] = $grant;
-                break;
-            }
-        }
-    }
-    return $kept;
-}
-
-function _spacefast_jwt_issuer_fingerprint(array $issuer): string
+function _stattic_jwt_issuer_fingerprint(array $issuer): string
 {
     return hash('sha256', json_encode([
         'alg' => is_string($issuer['alg'] ?? null) ? (string) $issuer['alg'] : 'EdDSA',
         'kid' => is_string($issuer['kid'] ?? null) ? (string) $issuer['kid'] : '',
         'publicKey' => is_string($issuer['publicKey'] ?? null) ? (string) $issuer['publicKey'] : '',
-        'grantNamespaces' => array_values(is_array($issuer['grantNamespaces'] ?? null) ? $issuer['grantNamespaces'] : []),
     ], JSON_UNESCAPED_SLASHES));
 }
 
-function _spacefast_jwt_issuer_requires_audience(array $namespaces): bool
+function _stattic_visitor_verify(string $token, array $options): ?array
 {
-    $hasNamespace = false;
-    foreach ($namespaces as $namespace) {
-        if (!is_string($namespace) || $namespace === '') {
-            continue;
-        }
-        $hasNamespace = true;
-        if (!str_starts_with($namespace, 'ext:')) {
-            return false;
-        }
-    }
-    return $hasNamespace;
-}
-
-// THE visitor verify. Returns ['sub','grants','exp','claims'] on success, null
-// on any failure (fail closed). Options:
-//   issuers          Ed25519 issuer keys for this rule (default []).
-//   host             request host for optional `aud` pinning.
-//   sessionVersion   the policy session version; `sv` (absent = 0) must equal it.
-//   localPwResolver  callable(string $ruleId): ?string returning the derived
-//                    HS256 key, or null. Enables the space-local `pw:` lane.
-//   requireJti       when true (callback handoffs, X-29), `jti` + `iat` are
-//                    required, `iat` must be within `iatMaxAge`, and the jti is
-//                    consumed single-use in the shared replay cache.
-//   iatMaxAge        max age (seconds) of `iat` when requireJti (default 300).
-//   privateRoot      private storage root for the jti replay cache (requireJti).
-//                    Also used with `spaceId` to load visitor revocation tombstones.
-//   spaceId          current space id for local revocation tombstones.
-//   revocations      optional preloaded ['grants' => set, 'subs' => set].
-// Sticky "revocation state was unavailable while a presented token was being
-// verified" fault flag, owned here next to the verifier that raises it. The
-// enforcer (access-rules.php) resets it once per evaluation and polls it at
-// both loop levels to hard-deny the whole request; only token-presenting
-// verifications ever raise it, so public/no-token requests are unaffected.
-// Pass a bool to set, no argument to read.
-function _spacefast_revocations_unavailable_flag(?bool $set = null): bool
-{
-    static $unavailable = false;
-    if ($set !== null) {
-        $unavailable = $set;
-    }
-    return $unavailable;
-}
-
-function _spacefast_visitor_verify(string $token, array $options): ?array
-{
-    $parsed = _spacefast_jwt_parse_memo($token);
+    $parsed = _stattic_jwt_parse_memo($token);
     if ($parsed === null) {
         return null;
     }
@@ -289,122 +475,76 @@ function _spacefast_visitor_verify(string $token, array $options): ?array
 
     $now = time();
     $claimExp = isset($claims['exp']) ? (int) $claims['exp'] : null;
-    if ($claimExp !== null && $claimExp < $now - 300) {
-        return null; // expired (±5-min leeway).
+    if ($claimExp === null || $claimExp < $now - 300) {
+        return null;
     }
     if (isset($claims['nbf']) && (int) $claims['nbf'] > $now + 300) {
-        return null; // not yet valid.
+        return null;
     }
+    // The audience names the Space, so a handoff keeps its identity across
+    // claim, rename and custom domains. Host binding did not go away with it:
+    // the mint records the serving host in its own claim and it must equal the
+    // host this request arrived on, so a token lifted from one origin is still
+    // refused on every other.
     $host = strtolower((string) ($options['host'] ?? ''));
-    if (isset($claims['aud']) && strtolower((string) $claims['aud']) !== $host) {
-        return null; // audience-bound token targets another host.
+    $expectedSpaceId = is_string($options['spaceId'] ?? null) ? $options['spaceId'] : '';
+    $audience = is_string($claims['aud'] ?? null) ? $claims['aud'] : '';
+    if ($host === '' || $audience === '' || $expectedSpaceId === '') {
+        return null;
     }
-    $sessionVersion = (int) ($options['sessionVersion'] ?? 0);
-    $sv = isset($claims['sv']) ? (int) $claims['sv'] : 0;
-    if ($sv !== $sessionVersion) {
-        return null; // logout-all / password rotation revoked this token.
+    if (!hash_equals($expectedSpaceId, $audience)) {
+        return null;
+    }
+    $hostClaim = is_string($claims['host'] ?? null) ? strtolower($claims['host']) : '';
+    if ($hostClaim === '' || !hash_equals($host, $hostClaim)) {
+        return null;
+    }
+    $expectedIssuer = is_string($options['issuer'] ?? null) ? $options['issuer'] : '';
+    if (
+        $expectedIssuer === ''
+        || !is_string($claims['iss'] ?? null)
+        || !hash_equals($expectedIssuer, $claims['iss'])
+    ) {
+        return null;
+    }
+    $generation = (int) ($options['generation'] ?? 0);
+    $tokenGeneration = isset($claims['generation']) ? (int) $claims['generation'] : -1;
+    if ($tokenGeneration !== $generation) {
+        return null;
+    }
+    $spaceId = is_string($options['spaceId'] ?? null) ? $options['spaceId'] : '';
+    if (
+        $spaceId === ''
+        || !is_string($claims['spaceId'] ?? null)
+        || !hash_equals($spaceId, $claims['spaceId'])
+    ) {
+        return null;
     }
 
-    $rawGrants = is_array($claims['grants'] ?? null) ? $claims['grants'] : [];
-    $issuerFingerprint = null;
-
-    if ($alg === 'EdDSA') {
-        $issuers = is_array($options['issuers'] ?? null) ? $options['issuers'] : [];
-        $issuer = _spacefast_jwt_issuer_for_kid($issuers, $kid);
-        if ($issuer === null) {
-            return null;
-        }
-        // Fingerprint first (pure, derived from the issuer row alone) so it can
-        // key the memoized signature verdict.
-        $issuerFingerprint = _spacefast_jwt_issuer_fingerprint($issuer);
-        $publicKey = _spacefast_base64url_decode((string) ($issuer['publicKey'] ?? ''));
-        $signatureValid = _spacefast_jwt_signature_valid_memo(
+    if ($alg !== 'EdDSA') {
+        return null;
+    }
+    $issuers = is_array($options['issuers'] ?? null) ? $options['issuers'] : [];
+    $candidates = _stattic_jwt_issuers_for_kid($issuers, $kid);
+    if ($candidates === []) {
+        return null;
+    }
+    $signatureValid = false;
+    foreach ($candidates as $issuer) {
+        $issuerFingerprint = _stattic_jwt_issuer_fingerprint($issuer);
+        $publicKey = _stattic_base64url_decode((string) ($issuer['publicKey'] ?? ''));
+        if (_stattic_jwt_signature_valid_memo(
             $issuerFingerprint,
             $token,
-            static fn (): bool => _spacefast_jwt_ed25519_valid($parsed['signing_input'], $parsed['signature'], $publicKey),
-        );
-        if (!$signatureValid) {
-            return null;
+            static fn (): bool => _stattic_jwt_ed25519_valid($parsed['signing_input'], $parsed['signature'], $publicKey),
+        )) {
+            $signatureValid = true;
+            break;
         }
-        $namespaces = is_array($issuer['grantNamespaces'] ?? null) ? $issuer['grantNamespaces'] : [];
-        if (_spacefast_jwt_issuer_requires_audience($namespaces) && !isset($claims['aud'])) {
-            return null;
-        }
-    } elseif ($alg === 'HS256' && $kid === SPACEFAST_LOCAL_PW_TOKEN_KID) {
-        $resolver = $options['localPwResolver'] ?? null;
-        if (!is_callable($resolver)) {
-            return null;
-        }
-        // Extract the rule id from the (still-unverified) grant. If an attacker
-        // rewrites it, the derived key won't match the signature; an unknown
-        // rule id resolves to null and fails closed.
-        $ruleId = _spacefast_pw_grant_rule_id($rawGrants);
-        if ($ruleId === null) {
-            return null;
-        }
-        $key = $resolver($ruleId);
-        if (!is_string($key) || $key === '') {
-            return null;
-        }
-        // The derived-key hash keys the memo, so a password rotation or `sv`
-        // bump (both change the derivation) always forces a fresh verify.
-        $issuerFingerprint = 'local-pw:' . hash('sha256', $ruleId . "\0" . $key);
-        $signatureValid = _spacefast_jwt_signature_valid_memo(
-            $issuerFingerprint,
-            $token,
-            static fn (): bool => _spacefast_jwt_hs256_valid($parsed['signing_input'], $parsed['signature'], $key),
-        );
-        if (!$signatureValid) {
-            return null;
-        }
-        // The space-local key is namespace-locked to `pw:` — it can never sign
-        // team:/user:/email: grants.
-        $namespaces = ['pw:'];
-    } else {
-        return null; // unknown alg/kid.
     }
-
-    $grants = _spacefast_jwt_filter_grants($rawGrants, $namespaces);
-    $sub = is_string($claims['sub'] ?? null) ? $claims['sub'] : '';
-    // A durable share URL is the sole visitor credential allowed to omit exp.
-    // Decide only after signature verification + issuer namespace filtering:
-    // the token must be audience-bound, replayable (no jti), and carry exactly
-    // one `link:` grant identical to its `link:` subject. Every other visitor
-    // token remains fail-closed on a missing exp.
-    $durableShare = $claimExp === null
-        && $alg === 'EdDSA'
-        && is_string($claims['aud'] ?? null)
-        && trim((string) $claims['aud']) !== ''
-        && !isset($claims['jti'])
-        && str_starts_with($sub, 'link:')
-        && count($grants) === 1
-        && ($grants[0] ?? null) === $sub;
-    if ($claimExp === null && !$durableShare) {
+    if (!$signatureValid) {
         return null;
     }
-    // The raw durable token never expires, but its browser cookie remains a
-    // bounded 30-day session. Reusing the URL trades it for a fresh cookie;
-    // structural grant removal or an sv bump revokes both immediately.
-    $verifiedExp = $claimExp ?? ($now + 2592000);
-    $revocations = _spacefast_visitor_revocations($options);
-    if (($revocations['available'] ?? true) === false) {
-        // Revocation state unavailable (corrupt/unreadable revocations.json —
-        // the read layer already journaled the engine-health event). Never
-        // honor a token whose revoked status we could not confirm: fail
-        // closed. The enforcement side (access-rules.php: _spacefast_apply_rule,
-        // directly after the only verification call) reads this flag to
-        // hard-deny the whole request — no later rule and no fall-through may
-        // override it — instead of an ordinary re-challenge.
-        _spacefast_revocations_unavailable_flag(true);
-        return null;
-    }
-    if ($sub !== '' && isset($revocations['subs'][$sub])) {
-        return null;
-    }
-    if ($grants !== [] && $revocations['grants'] !== []) {
-        $grants = array_values(array_filter($grants, static fn (string $grant): bool => !isset($revocations['grants'][$grant])));
-    }
-
     if (!empty($options['requireJti'])) {
         $jti = $claims['jti'] ?? null;
         if (!is_string($jti) || trim($jti) === '') {
@@ -419,172 +559,93 @@ function _spacefast_visitor_verify(string $token, array $options): ?array
         if ($privateRoot === '') {
             return null;
         }
-        // Fail closed on the visitor lane: a replayed OR unstorable jti both
-        // reject verification, which re-challenges the visitor (they bounce back
-        // through authorize and mint a fresh token). No access is handed out when
-        // the replay guard cannot record the id.
-        if (_spacefast_jwt_consume_jti($privateRoot, 'visitor', $jti, $verifiedExp, $now) !== 'ok') {
-            return null; // replayed or unstorable callback token.
+        // Fail closed: a replayed OR unstorable jti both reject — no access is
+        // handed out when the replay guard cannot record the id.
+        if (_stattic_jwt_consume_jti($privateRoot, 'visitor', $jti, $claimExp, $now) !== 'ok') {
+            return null;
         }
     }
 
     return [
-        'sub' => $sub,
-        'grants' => $grants,
-        'exp' => $verifiedExp,
+        'sub' => is_string($claims['sub'] ?? null) ? $claims['sub'] : '',
+        'exp' => $claimExp,
         'claims' => $claims,
         'issuerFingerprint' => $issuerFingerprint,
     ];
 }
 
-function _spacefast_visitor_revocations(array $options): array
+// Replay markers expire at the token's own exp, which the claim stamps as the
+// marker's mtime; the sweep is throttled because unthrottled it would run
+// inside every token consume — quadratic across a deploy burst. Markers also
+// reclaim lazily on collision, so the cadence bounds disk usage only, never
+// correctness.
+function _stattic_jwt_replay_store(string $privateRoot): array
 {
-    $empty = ['grants' => [], 'subs' => [], 'available' => true];
-    if (is_array($options['revocations'] ?? null)) {
-        $revocations = $options['revocations'];
-        return [
-            'grants' => is_array($revocations['grants'] ?? null) ? $revocations['grants'] : [],
-            'subs' => is_array($revocations['subs'] ?? null) ? $revocations['subs'] : [],
-            'available' => ($revocations['available'] ?? true) !== false,
-        ];
-    }
-    $privateRoot = is_string($options['privateRoot'] ?? null) ? $options['privateRoot'] : '';
-    $spaceId = is_string($options['spaceId'] ?? null) ? $options['spaceId'] : '';
-    if ($privateRoot === '' || $spaceId === '') {
-        return $empty;
-    }
-    return _spacefast_load_revocations($privateRoot, $spaceId);
+    $root = $privateRoot . '/runtime/jti';
+    return _stattic_record_store($root, [
+        'retention' => [
+            'mtime_seconds' => 0,
+            'field' => 'exp',
+            'throttle_seconds' => 300,
+            'marker' => $root . '/.last-cleanup',
+        ],
+    ]);
 }
 
-function _spacefast_pw_grant_rule_id(array $grants): ?string
+// Returns 'ok' (first to claim), 'replayed' (live marker exists), or
+// 'unavailable' (the write failed with no marker on disk). A replay verdict
+// requires evidence — reporting a storage outage as a replay turns a full disk
+// into a permanent-looking auth failure; callers answer retryable instead.
+// `$namespace` keeps the visitor and management id spaces from colliding.
+function _stattic_jwt_consume_jti(string $privateRoot, string $namespace, string $jti, int $exp, int $now): string
 {
-    foreach ($grants as $grant) {
-        if (is_string($grant) && str_starts_with($grant, 'pw:') && strlen($grant) > 3) {
-            return substr($grant, 3);
-        }
-    }
-    return null;
-}
-
-// ---------------------------------------------------------------------------
-// Shared single-use replay cache (file-based, private storage). The management
-// lane (admin/auth.php) and the visitor callback (X-29) both consume `jti` here
-// so a lifted token is dead after first use with zero request-path network.
-// ---------------------------------------------------------------------------
-
-// Consumes a jti. Returns one of:
-//   'ok'          — this call is the first to claim the jti.
-//   'replayed'    — a live marker already exists (genuine replay).
-//   'unavailable' — the marker write itself failed with no marker on disk
-//                   (disk quota, permissions, read-only mount). A replay verdict
-//                   requires evidence: reporting a storage outage as "replayed"
-//                   turns a full disk into a permanent-looking auth failure and
-//                   hides the real problem (and blocks the rescue ops that would
-//                   free the disk). Callers translate this into a retryable
-//                   status rather than a hard deny. `$namespace` separates the
-//                   visitor and management caches so their id spaces never collide.
-//
-// Exclusive-create claim of one marker: the ONLY writer of these files, so the
-// record shape and the mtime-as-exp invariant the cleanup sweep reads live here.
-// Returns false when the marker could not be claimed (already present, or the
-// write itself failed) — callers fall through to the on-disk evidence check.
-function _spacefast_jwt_claim_jti_marker(string $path, array $record, int $exp): bool
-{
-    $handle = @fopen($path, 'x');
-    if ($handle === false) {
-        return false;
-    }
-    fwrite($handle, json_encode($record, JSON_UNESCAPED_SLASHES) . "\n");
-    fclose($handle);
-    @touch($path, $exp);
-    return true;
-}
-
-function _spacefast_jwt_consume_jti(string $privateRoot, string $namespace, string $jti, int $exp, int $now): string
-{
-    $dir = $privateRoot . '/runtime/jti';
-    // Soft mkdir, NOT _stattic_runtime_mkdir: that helper hard-fails 500 on a
-    // missing directory, but the replay guard's whole contract is that its own
-    // storage failing must surface as 'unavailable' (-> retryable 503), never
-    // as a generic runtime error a caller can't distinguish from an outage.
-    if (!_stattic_runtime_mkdir_soft($dir)) {
+    // Soft mkdir, NOT _stattic_runtime_mkdir: that helper hard-fails 500, which
+    // would hide a storage outage behind a generic runtime error.
+    if (!_stattic_runtime_mkdir_soft($privateRoot . '/runtime/jti')) {
         return 'unavailable';
     }
-    // Housekeeping only — expired markers are also reclaimed inline on
-    // collision below, so the sweep can run post-response.
-    _spacefast_defer(static function () use ($dir, $now): void {
-        _spacefast_jwt_cleanup_replay_cache($dir, $now);
+    $store = _stattic_jwt_replay_store($privateRoot);
+    _stattic_defer(static function () use ($store, $now): void {
+        _stattic_record_store_sweep($store, $now);
     });
 
-    $path = $dir . '/' . hash('sha256', $namespace . ':' . $jti) . '.json';
-    _stattic_runtime_assert_private_path($path);
+    $id = hash('sha256', $namespace . ':' . $jti);
     $record = ['ns' => $namespace, 'jti' => $jti, 'exp' => $exp];
-    if (_spacefast_jwt_claim_jti_marker($path, $record, $exp)) {
+    if (_stattic_record_store_claim($store, $id, $record, $exp)) {
         return 'ok';
     }
 
-    // The file exists: a live record is a replay, an expired one may be reclaimed.
-    $mtime = @filemtime($path);
+    $path = _stattic_record_store_path($store, $id);
+    $mtime = filemtime($path);
     if ($mtime === false || $mtime < $now) {
-        $existing = _stattic_runtime_read_json($path);
-        if (is_array($existing) && isset($existing['exp']) && (int) $existing['exp'] < $now) {
-            @unlink($path);
-            if (_spacefast_jwt_claim_jti_marker($path, $record, $exp)) {
+        $existing = _stattic_record_store_get($store, $id);
+        if ($existing !== null && isset($existing['exp']) && (int) $existing['exp'] < $now) {
+            _stattic_record_store_delete($store, $id);
+            if (_stattic_record_store_claim($store, $id, $record, $exp)) {
                 return 'ok';
             }
         }
     }
 
-    // No marker on disk means the write failed, not that the id was replayed.
     if (!file_exists($path)) {
         return 'unavailable';
     }
     return 'replayed';
 }
 
-function _spacefast_jwt_cleanup_replay_cache(string $dir, int $now): void
-{
-    // At most once per 5 minutes per box: the full glob+stat sweep is
-    // O(markers seen within the exp window) and otherwise runs inside every
-    // single token consume — quadratic across a deploy burst. Markers reclaim
-    // lazily on collision anyway (see the expired-record path in
-    // _spacefast_jwt_consume_jti), so cleanup cadence only bounds disk usage,
-    // not correctness.
-    if (!_spacefast_marker_throttle($dir . '/.last-cleanup', 300, $now)) {
-        return;
-    }
-    foreach (glob($dir . '/*.json') ?: [] as $path) {
-        if (!is_string($path)) {
-            continue;
-        }
-        _stattic_runtime_assert_private_path($path);
-        $mtime = @filemtime($path);
-        if ($mtime !== false && $mtime >= $now) {
-            continue;
-        }
-        $record = _stattic_runtime_read_json($path);
-        if (!is_array($record) || !isset($record['exp']) || (int) $record['exp'] < $now) {
-            @unlink($path);
-        }
-    }
-}
-
-// Management-lane jti replay guard: same cache, fatal on replay (the management
-// entrypoints answer JSON). Preserves the admin lane's error contract.
-function _spacefast_jwt_reject_replayed_jti(string $privateRoot, string $audience, array $claims, int $now): void
+function _stattic_jwt_reject_replayed_jti(string $privateRoot, string $audience, array $claims, int $now): void
 {
     $jti = $claims['jti'] ?? null;
     if (!is_string($jti) || trim($jti) === '') {
-        _stattic_json_response(403, ['error' => ['code' => 'runtime_jti_missing', 'message' => 'Runtime token id is required.']]);
+        _stattic_problem_response(403, 'runtime_jti_missing', 'Runtime token id is required.');
     }
     $exp = isset($claims['exp']) ? (int) $claims['exp'] : $now;
-    $status = _spacefast_jwt_consume_jti($privateRoot, $audience, $jti, $exp, $now);
+    $status = _stattic_jwt_consume_jti($privateRoot, $audience, $jti, $exp, $now);
     if ($status === 'unavailable') {
-        // Storage outage, not a replay — answer retryable so a full disk does not
-        // masquerade as a permanent auth failure (and block the rescue ops).
-        _stattic_json_response(503, ['error' => ['code' => 'runtime_replay_guard_unavailable', 'message' => 'Runtime token replay guard storage is unavailable (disk full or not writable).']]);
+        // Storage outage, not a replay: retryable, never a permanent auth failure.
+        _stattic_problem_response(503, 'runtime_replay_guard_unavailable', 'Runtime token replay guard storage is unavailable (disk full or not writable).');
     }
     if ($status !== 'ok') {
-        _stattic_json_response(403, ['error' => ['code' => 'runtime_jti_replayed', 'message' => 'Runtime token id was already used.']]);
+        _stattic_problem_response(403, 'runtime_jti_replayed', 'Runtime token id was already used.');
     }
 }

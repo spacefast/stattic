@@ -4,7 +4,6 @@ globalThis.__statticZeroRequest = __statticZeroBootstrap.request || {};
 globalThis.__statticZeroContext = __statticZeroBootstrap.context || {};
 globalThis.__statticZeroCapabilities = __statticZeroBootstrap.capabilities || {};
 globalThis.__statticZeroEndpoint = __statticZeroBootstrap.endpoint || {};
-globalThis.__statticZeroTemplateCapabilities = __statticZeroBootstrap.capabilities || {};
 globalThis.__statticZeroEvents = [];
 globalThis.__statticZeroResult = "";
 
@@ -29,10 +28,64 @@ if (typeof globalThis.__statticDbHost === "function") {
 }
 // @stattic-endif
 
+// @stattic-if services
+// The bridge only. The author-facing gravatar/spam/email clients are the shared
+// source from @spacefast/common, installed over this by the generated host —
+// the same source the Functions binding uses, so neither tier can drift.
+if (typeof globalThis.__statticServiceHost === "function") {
+  globalThis.__statticService = function __statticService(service, operation, payload) {
+    const answer = JSON.parse(
+      globalThis.__statticServiceHost(
+        JSON.stringify({ service: service, operation: operation, payload: payload || {} }),
+      ),
+    );
+    if (answer.ok !== true) {
+      const error = new Error(answer.message || "The service refused the call.");
+      error.name = "SpacefastServiceError";
+      error.code = answer.code || "service_upstream_unavailable";
+      throw error;
+    }
+    return answer.result === undefined ? null : answer.result;
+  };
+}
+// @stattic-endif
+
 // @stattic-if fetch
-globalThis.__statticFetch = async function __statticFetch() {
-  throw new Error("zero_fetch_unavailable");
+globalThis.__statticFetch = async function __statticFetch(input, init = {}) {
+  if (typeof globalThis.__statticFetchHost !== "function") {
+    throw new Error("zero_fetch_unavailable");
+  }
+  const url =
+    typeof input === "string" || (typeof URL !== "undefined" && input instanceof URL)
+      ? String(input)
+      : String(input?.url || "");
+  const method = String(init.method || input?.method || "GET").toUpperCase();
+  const headers = Object.fromEntries(
+    new globalThis.Headers(init.headers || input?.headers).entries(),
+  );
+  const body = init.body === undefined ? input?.body : init.body;
+  const answer = JSON.parse(
+    globalThis.__statticFetchHost(
+      JSON.stringify({
+        url,
+        method,
+        headers,
+        bodyBase64: endpointEncodeBase64(endpointResponseBodyBytes(body)),
+      }),
+    ),
+  );
+  if (answer.ok !== true) {
+    const error = new Error(answer.message || "The fetch target could not be reached.");
+    error.name = "SpacefastFetchError";
+    error.code = answer.code || "zero_fetch_upstream_unavailable";
+    throw error;
+  }
+  return new globalThis.Response(decodeBase64Bytes(answer.result.bodyBase64 || ""), {
+    status: answer.result.status,
+    headers: answer.result.headers,
+  });
 };
+globalThis.fetch = globalThis.__statticFetch;
 // @stattic-endif
 
 // @stattic-if auth

@@ -3,26 +3,34 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { deploy, get, startRuntime, type Runtime } from "./harness.ts";
+import { deploy, get, publicAccessConfig, startRuntime, type Runtime } from "./harness.ts";
 
 const HOST = "zero-atomic-config.test";
-const DATABASE_URL = "mysql://zero-atomic-config.test/db";
+const DATABASE_URL = "mysql://zero%3Auser:p%40ss%2Fword%3F%23@127.0.0.1/zero%20database";
 const CALLBACK_TOKEN = "atomic-callback-token";
 const REALTIME_TOKEN = "atomic-realtime-token";
+const REAL_RUNTIME_PATH = path.resolve(
+  process.env.SPACEFAST_RUNTIME_BIN ??
+    path.join(import.meta.dir, "../../target/debug/stattic-runtime"),
+);
 
 type ReceivedCallback = {
   authorization: string;
   body: unknown;
 };
 
+type ReceivedReplay = {
+  authorization: string;
+  realtimeToken: string;
+};
+
 let rt: Runtime;
-let runnerRoot: string;
+let runtimeRoot: string;
 let receiver: ReturnType<typeof Bun.serve>;
 let resolveCallback: (callback: ReceivedCallback) => void;
 let callbackReceived: Promise<ReceivedCallback>;
 const callbacks: ReceivedCallback[] = [];
-const legacyCallbacks: ReceivedCallback[] = [];
-const replayTokens: string[] = [];
+const replays: ReceivedReplay[] = [];
 
 function receiveCallbackWithin(timeoutMs: number): Promise<ReceivedCallback> {
   return new Promise((resolve, reject) => {
@@ -54,38 +62,35 @@ beforeAll(async () => {
         resolveCallback(callback);
         return new Response(null, { status: 204 });
       }
-      if (requestUrl.pathname === "/legacy-events") {
-        legacyCallbacks.push({
-          authorization: request.headers.get("authorization") ?? "",
-          body: await request.json().catch(() => null),
-        });
-        return new Response(null, { status: 204 });
-      }
       if (requestUrl.pathname === "/replay") {
-        replayTokens.push(request.headers.get("x-spacefast-zero-realtime-token") ?? "");
+        replays.push({
+          authorization: request.headers.get("authorization") ?? "",
+          realtimeToken: request.headers.get("x-spacefast-runtime-realtime-token") ?? "",
+        });
         return Response.json({ events: [{ id: "evt_atomic_config" }] });
       }
       return new Response("not found", { status: 404 });
     },
   });
 
-  runnerRoot = mkdtempSync(path.join(os.tmpdir(), "spacefast-zero-atomic-config-"));
-  const runnerPath = path.join(runnerRoot, "fake-zero-runner.php");
+  runtimeRoot = mkdtempSync(path.join(os.tmpdir(), "spacefast-runtime-atomic-config-"));
+  const runtimePath = path.join(runtimeRoot, "fake-runtime.php");
   const phpPath = Bun.which("php") ?? "/usr/bin/php";
+  // One binary serves the finalize and Zero lanes. Only `invoke` is faked here
+  // (so the runner's env and its emitted events are observable); every other
+  // subcommand — `finalize` above all — delegates to the real binary.
   writeFileSync(
-    runnerPath,
+    runtimePath,
     `#!${phpPath}
 <?php
-if (($argv[1] ?? '') === 'compile') {
-    $source = $argv[2] ?? '';
-    $bytecode = $argv[3] ?? '';
-    $generated = $argv[5] ?? $source;
-    if ($source === '' || $bytecode === '' || !is_file($source)) {
-        exit(2);
-    }
-    file_put_contents($generated, file_get_contents($source));
-    file_put_contents($bytecode, 'fake-bytecode');
-    exit(0);
+$real = ${JSON.stringify(REAL_RUNTIME_PATH)};
+if (($argv[1] ?? '') !== 'invoke') {
+    $process = proc_open(
+        array_merge([$real], array_slice($argv, 1)),
+        [0 => STDIN, 1 => STDOUT, 2 => STDERR],
+        $pipes
+    );
+    exit(is_resource($process) ? proc_close($process) : 1);
 }
 $envelope = json_decode(stream_get_contents(STDIN), true);
 $body = json_encode([
@@ -101,33 +106,39 @@ echo json_encode([
     ],
     'body' => $body,
     'events' => [[
-        'event' => 'zero.log',
-        'level' => 'info',
-        'message' => 'Atomic config loaded',
+        'event' => 'zero.realtime',
+        'payload' => [
+            'eventId' => 'evt_atomic_config',
+            'changedTables' => ['comments'],
+            'changedQueries' => ['commentsByPage'],
+        ],
     ]],
 ], JSON_UNESCAPED_SLASHES);
 `,
   );
-  chmodSync(runnerPath, 0o755);
+  chmodSync(runtimePath, 0o755);
 
   const receiverUrl = `http://127.0.0.1:${receiver.port}`;
   rt = await startRuntime({
     atomicData: {
-      SPACEFAST_ZERO_RUNNER: runnerPath,
-      SPACEFAST_ZERO_DATABASE_URL: DATABASE_URL,
+      SPACEFAST_RUNTIME_BIN: runtimePath,
+      // Fleet secret for the replay lane: used only when the version carries no
+      // eventCallback token of its own.
       SPACEFAST_ZERO_REALTIME_TOKEN: REALTIME_TOKEN,
       SPACEFAST_ZERO_CALLBACK_ALLOWED_HOSTS: "127.0.0.1",
-      // Poison values for the retired global callback vars: per-version
-      // config is the only legitimate source, so any delivery to
-      // /legacy-events means the sender regressed to the old env fallback.
-      SPACEFAST_ZERO_EVENT_CALLBACK_URL: `${receiverUrl}/legacy-events`,
-      SPACEFAST_ZERO_EVENT_CALLBACK_TOKEN: "legacy-poison-token",
+    },
+    // Provider-owned DB_* values are ordinary process configuration, not
+    // duplicated Spacefast persistent data. An omitted DB_HOST exercises the
+    // standard local-MySQL default observed on the public runtime lane.
+    env: {
+      DB_NAME: "zero database",
+      DB_USER: "zero:user",
+      DB_PASSWORD: "p@ss/word?#",
     },
   });
   await deploy(rt, {
     spaceId: "spc_zero_atomic_config",
     versionId: "ver_zero_atomic_config_1",
-    zeroMode: "active",
     metadata: { mode: "website", title: "Zero Atomic Config" },
     files: { "index.html": "<h1>Zero Atomic Config</h1>\n" },
     serving: {
@@ -152,7 +163,7 @@ echo json_encode([
     },
     activate: {
       route_name: "production",
-      config: { mode: "website", site_title: "Zero Atomic Config" },
+      config: publicAccessConfig({ mode: "website", site_title: "Zero Atomic Config" }),
       production_hostnames: [HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
@@ -163,15 +174,21 @@ echo json_encode([
 afterAll(() => {
   rt?.stop();
   receiver?.stop(true);
-  if (runnerRoot) {
-    rmSync(runnerRoot, { recursive: true, force: true });
+  if (runtimeRoot) {
+    rmSync(runtimeRoot, { recursive: true, force: true });
   }
 });
 
-test("Zero callbacks use per-version config, wrap events, and stay disabled without config", async () => {
+// Zero realtime is the one live push lane the runtime keeps (contracts §10 —
+// everything else drains from the journal). This pins where its credentials and
+// destinations come from: the per-version `zero.realtime` config, never a
+// global, and never at all when the version declares none.
+test("Zero realtime uses per-version config and stays silent without it", async () => {
   const endpoint = await get(rt, HOST, "/api/atomic-config");
   expect(endpoint.status).toBe(201);
   expect(endpoint.headers.get("x-zero-runner")).toBe("atomic-config");
+  // The provider DB_* tuple is assembled into a percent-encoded URL under the
+  // reserved name; the tenant runner never sees DB_USER/DB_PASSWORD.
   expect(await endpoint.json()).toEqual({
     ok: true,
     endpointId: "GET /api/atomic-config",
@@ -183,9 +200,12 @@ test("Zero callbacks use per-version config, wrap events, and stay disabled with
     authorization: `Bearer ${CALLBACK_TOKEN}`,
     body: {
       event: {
-        event: "zero.log",
-        level: "info",
-        message: "Atomic config loaded",
+        event: "zero.realtime",
+        payload: {
+          eventId: "evt_atomic_config",
+          changedTables: ["comments"],
+          changedQueries: ["commentsByPage"],
+        },
         space_id: "spc_zero_atomic_config",
         version_id: "ver_zero_atomic_config_1",
         created_at: expect.any(String),
@@ -196,12 +216,13 @@ test("Zero callbacks use per-version config, wrap events, and stay disabled with
   const replay = await get(rt, HOST, "/__spacefast/zero/realtime/events");
   expect(replay.status).toBe(200);
   expect(await replay.json()).toEqual({ events: [{ id: "evt_atomic_config" }] });
-  expect(replayTokens).toEqual([REALTIME_TOKEN]);
+  // The version's own callback token authenticates the replay; the fleet secret
+  // is not also leaked upstream.
+  expect(replays).toEqual([{ authorization: `Bearer ${CALLBACK_TOKEN}`, realtimeToken: "" }]);
 
   await deploy(rt, {
     spaceId: "spc_zero_atomic_config",
     versionId: "ver_zero_atomic_config_2",
-    zeroMode: "active",
     metadata: { mode: "website", title: "Zero Atomic Config Without Callback" },
     files: { "index.html": "<h1>Zero Atomic Config Without Callback</h1>\n" },
     serving: {
@@ -220,7 +241,10 @@ test("Zero callbacks use per-version config, wrap events, and stay disabled with
     },
     activate: {
       route_name: "production",
-      config: { mode: "website", site_title: "Zero Atomic Config Without Callback" },
+      config: publicAccessConfig({
+        mode: "website",
+        site_title: "Zero Atomic Config Without Callback",
+      }),
       production_hostnames: [HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
@@ -234,9 +258,13 @@ test("Zero callbacks use per-version config, wrap events, and stay disabled with
     endpointId: "GET /api/atomic-config",
     databaseUrl: DATABASE_URL,
   });
+  // The runner emitted an event again, but this version declares no callback
+  // destination: nothing is delivered anywhere.
   expect(callbacks).toHaveLength(1);
-  // Neither version delivered to the poisoned legacy env-var target: without
-  // per-version eventCallback config the sender stays silent instead of
-  // falling back to the retired globals.
-  expect(legacyCallbacks).toHaveLength(0);
+
+  // Replay still works without a per-version token — it falls back to the fleet
+  // secret from process config, presented under its own header.
+  const fallbackReplay = await get(rt, HOST, "/__spacefast/zero/realtime/events");
+  expect(fallbackReplay.status).toBe(200);
+  expect(replays[1]).toEqual({ authorization: "", realtimeToken: REALTIME_TOKEN });
 });

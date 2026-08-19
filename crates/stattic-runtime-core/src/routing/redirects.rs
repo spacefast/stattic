@@ -4,10 +4,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    absolute_url_regex, compile_pattern, diagnostic, escape_regex_literal, has_host_pattern,
-    normalize_hostname, parse_absolute_url, pattern_matches_value, query_token_regex, status_regex,
+    absolute_url_regex, compile_pattern, declaration_length, diagnostic, escape_regex_literal,
+    has_host_pattern, normalize_hostname, normalize_path, parse_absolute_url,
+    pattern_matches_value, query_token_regex, routing_tokens, routing_trim, status_regex,
     strip_trailing_slash, RedirectCondition, RedirectRule, RoutingDiagnostic, RoutingInput,
-    SourceMatcher, REDIRECT_LINE_LIMIT, REDIRECT_STATUSES,
+    RuleField, RuleIssue, SourceMatcher, REDIRECT_LINE_LIMIT, REDIRECT_STATUSES,
 };
 
 pub(super) fn compile_redirects(
@@ -17,11 +18,11 @@ pub(super) fn compile_redirects(
     let mut rules = Vec::new();
     for (index, raw_line) in input.redirects.lines().enumerate() {
         let line_number = index + 1;
-        let source_line = raw_line.trim();
+        let source_line = routing_trim(raw_line);
         if source_line.is_empty() || source_line.starts_with('#') {
             continue;
         }
-        if source_line.len() > REDIRECT_LINE_LIMIT {
+        if declaration_length(source_line) > REDIRECT_LINE_LIMIT {
             diagnostic(
                 diagnostics,
                 "_redirects",
@@ -33,7 +34,7 @@ pub(super) fn compile_redirects(
             );
             continue;
         }
-        let tokens: Vec<&str> = source_line.split_whitespace().collect();
+        let tokens: Vec<&str> = routing_tokens(source_line);
         let Some(raw_source) = tokens.first().copied() else {
             continue;
         };
@@ -94,36 +95,23 @@ pub(super) fn compile_redirects(
             );
             continue;
         }
-        let Some(source) =
-            normalize_source(raw_source, input, line_number, source_line, diagnostics)
-        else {
-            continue;
-        };
-        if redirect_loop(&source, destination) {
-            diagnostic(
-                diagnostics,
-                "_redirects",
-                line_number,
-                "error",
-                "redirect_loop_invalid",
-                "This rule points back to the same path and could create a loop.",
-                source_line,
-            );
-            continue;
-        }
-        let compiled = compile_pattern(&source.path, '/', false, true);
-        if let Some(error) = compiled.error {
-            diagnostic(
-                diagnostics,
-                "_redirects",
-                line_number,
-                "error",
-                "redirect_pattern_invalid",
-                &error,
-                source_line,
-            );
-            continue;
-        }
+        let mut rule =
+            match compile_redirect_rule(raw_source, destination, status, &input.assigned_hostnames)
+            {
+                Ok(rule) => rule,
+                Err(issue) => {
+                    diagnostic(
+                        diagnostics,
+                        "_redirects",
+                        line_number,
+                        issue.severity,
+                        issue.code,
+                        &issue.message,
+                        source_line,
+                    );
+                    continue;
+                }
+            };
         let query = if query_tokens.is_empty() {
             None
         } else {
@@ -136,22 +124,100 @@ pub(super) fn compile_redirects(
             }
             Some(values)
         };
-        if (status == 200
-            && !destination.starts_with('/')
-            && !absolute_url_regex().is_match(destination))
-            || (status == 404 && !destination.starts_with('/'))
-        {
-            diagnostic(diagnostics, "_redirects", line_number, "error", "redirect_rewrite_destination_invalid", "A rewrite destination must be a path or an absolute URL. A custom 404 destination must be a path.", source_line);
-            continue;
+        let directive_start = destination_index + if status_capture.is_some() { 2 } else { 1 };
+        let mut condition_tokens: Vec<&str> = Vec::new();
+        let mut cache: Option<&'static str> = None;
+        let mut invalid_cache_directive = false;
+        for token in tokens[directive_start..].iter().copied() {
+            let separator = token.find('=');
+            let name = separator.map_or(token, |index| &token[..index]);
+            if name.to_lowercase() != "cache" {
+                condition_tokens.push(token);
+                continue;
+            }
+            let value = separator.map_or("", |index| &token[index + 1..]);
+            if value != "shared" {
+                invalid_cache_directive = true;
+                diagnostic(
+                    diagnostics,
+                    "_redirects",
+                    line_number,
+                    "error",
+                    "redirect_cache_directive_invalid",
+                    "Proxy cache directives must use \"cache=shared\".",
+                    source_line,
+                );
+                continue;
+            }
+            cache = Some("shared");
         }
-        let condition_start = destination_index + if status_capture.is_some() { 2 } else { 1 };
-        let conditions = parse_conditions(
-            &tokens[condition_start..],
-            line_number,
-            source_line,
-            diagnostics,
-        );
-        let action = if status == 404 {
+        if invalid_cache_directive {
+            cache = None;
+        }
+        if cache == Some("shared") && rule.action != "proxy" {
+            cache = None;
+            diagnostic(
+                diagnostics,
+                "_redirects",
+                line_number,
+                "warning",
+                "redirect_cache_not_proxy",
+                "The \"cache=shared\" directive only applies to absolute-URL 200 proxy rules.",
+                source_line,
+            );
+        }
+        rule.force = force;
+        rule.query = query;
+        rule.cache = cache;
+        rule.conditions =
+            parse_conditions(&condition_tokens, line_number, source_line, diagnostics);
+        rules.push(rule);
+    }
+    rules
+}
+
+/// The rule core both grammars share: source normalization, matcher
+/// compilation, loop detection and the destination rules. A `_redirects` line
+/// and a `sf.jsonc` entry differ only in how they spell a rule, so they compile
+/// through here and report the same diagnostic codes. Callers attach the extras
+/// their own grammar carries (force, query captures, conditions, cache).
+pub(super) fn compile_redirect_rule(
+    raw_source: &str,
+    destination: &str,
+    status: u16,
+    assigned_hostnames: &[String],
+) -> Result<RedirectRule, RuleIssue> {
+    let source = normalize_source(raw_source, assigned_hostnames)?;
+    if redirect_loop(&source, destination) {
+        return Err(RuleIssue::error(
+            RuleField::Destination,
+            "redirect_loop_invalid",
+            "This rule points back to the same path and could create a loop.",
+        ));
+    }
+    let compiled = compile_pattern(&source.path, '/', false, true);
+    if let Some(error) = compiled.error {
+        return Err(RuleIssue::error(
+            RuleField::Source,
+            "redirect_pattern_invalid",
+            error,
+        ));
+    }
+    if (status == 200
+        && !destination.starts_with('/')
+        && !absolute_url_regex().is_match(destination))
+        || (status == 404 && !destination.starts_with('/'))
+    {
+        return Err(RuleIssue::error(
+            RuleField::Destination,
+            "redirect_rewrite_destination_invalid",
+            "A rewrite destination must be a path or an absolute URL. A custom 404 destination must be a path.",
+        ));
+    }
+    Ok(RedirectRule {
+        source: source.path,
+        destination: destination.to_string(),
+        action: if status == 404 {
             "notFound"
         } else if status == 200 && absolute_url_regex().is_match(destination) {
             "proxy"
@@ -159,65 +225,44 @@ pub(super) fn compile_redirects(
             "rewrite"
         } else {
             "redirect"
-        };
-        rules.push(RedirectRule {
-            source: source.path,
-            destination: destination.to_string(),
-            action,
-            status,
-            match_kind: compiled.match_kind,
-            regex: compiled.regex,
-            host: source.host,
-            host_regex: source.host_regex,
-            force,
-            query,
-            conditions,
-        });
-    }
-    rules
+        },
+        status,
+        match_kind: compiled.match_kind,
+        regex: compiled.regex,
+        host: source.host,
+        host_regex: source.host_regex,
+        force: false,
+        query: None,
+        conditions: Vec::new(),
+        cache: None,
+        plan_gated: None,
+    })
 }
 
-fn normalize_source(
-    raw: &str,
-    input: &RoutingInput,
-    line: usize,
-    source_line: &str,
-    diagnostics: &mut Vec<RoutingDiagnostic>,
-) -> Option<SourceMatcher> {
+fn normalize_source(raw: &str, assigned_hostnames: &[String]) -> Result<SourceMatcher, RuleIssue> {
     if let Some(url) = parse_absolute_url(raw) {
         let host = normalize_hostname(&url.host);
         let compiled = compile_pattern(&host, '.', false, false);
         if let Some(error) = compiled.error {
-            diagnostic(
-                diagnostics,
-                "_redirects",
-                line,
-                "error",
+            return Err(RuleIssue::error(
+                RuleField::Source,
                 "redirect_host_invalid",
-                &error,
-                source_line,
-            );
-            return None;
+                error,
+            ));
         }
-        let assigned: BTreeSet<String> = input
-            .assigned_hostnames
+        let assigned: BTreeSet<String> = assigned_hostnames
             .iter()
             .map(|host| normalize_hostname(host))
             .collect();
         if !assigned.is_empty() && !has_host_pattern(&host) && !assigned.contains(&host) {
-            diagnostic(
-                diagnostics,
-                "_redirects",
-                line,
-                "error",
+            return Err(RuleIssue::error(
+                RuleField::Source,
                 "redirect_hostname_unassigned",
-                &format!("The hostname \"{host}\" is not assigned to this space."),
-                source_line,
-            );
-            return None;
+                format!("The hostname \"{host}\" is not assigned to this space."),
+            ));
         }
-        return Some(SourceMatcher {
-            path: strip_trailing_slash(&url.path),
+        return Ok(SourceMatcher {
+            path: strip_trailing_slash(&normalize_path(&url.path)),
             host_regex: Some(
                 compiled
                     .regex
@@ -227,19 +272,14 @@ fn normalize_source(
         });
     }
     if !raw.starts_with('/') {
-        diagnostic(
-            diagnostics,
-            "_redirects",
-            line,
-            "error",
+        return Err(RuleIssue::error(
+            RuleField::Source,
             "redirect_source_invalid",
             "The source must start with / or use an absolute URL.",
-            source_line,
-        );
-        return None;
+        ));
     }
-    Some(SourceMatcher {
-        path: strip_trailing_slash(raw),
+    Ok(SourceMatcher {
+        path: strip_trailing_slash(&normalize_path(raw)),
         host: None,
         host_regex: None,
     })
@@ -264,7 +304,7 @@ fn redirect_loop(source: &SourceMatcher, destination: &str) -> bool {
         .as_ref()
         .map(|url| url.path.as_str())
         .unwrap_or_else(|| destination.split('?').next().unwrap_or(destination));
-    strip_trailing_slash(&source.path) == strip_trailing_slash(destination_path)
+    strip_trailing_slash(&source.path) == strip_trailing_slash(&normalize_path(destination_path))
 }
 
 fn parse_conditions(
@@ -287,13 +327,19 @@ fn parse_conditions(
             );
             continue;
         };
-        let name = raw_name.to_ascii_lowercase();
+        let name = raw_name.to_lowercase();
+        // Only the segment between the first and second `=` is the value list: a
+        // `Cookie=nf_ab=alpha` token names the cookie `nf_ab`, which is all the
+        // matcher ever compares.
         let values: Vec<String> = raw_value
+            .split('=')
+            .next()
+            .unwrap_or_default()
             .split(',')
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .collect();
-        if values.is_empty() {
+        if name.is_empty() || values.is_empty() {
             diagnostic(
                 diagnostics,
                 "_redirects",
@@ -315,7 +361,7 @@ fn parse_conditions(
                     kind: name,
                     values: values
                         .into_iter()
-                        .map(|value| value.to_ascii_lowercase())
+                        .map(|value| value.to_lowercase())
                         .collect(),
                 })
             }
@@ -332,20 +378,20 @@ fn parse_conditions(
                 kind: name,
                 values: values
                     .into_iter()
-                    .map(|value| value.to_ascii_lowercase())
+                    .map(|value| value.to_lowercase())
                     .collect(),
             }),
             "cookie" => conditions.push(RedirectCondition { kind: name, values }),
             "agent"
-                if values.iter().all(|value| {
-                    matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
-                }) =>
+                if values
+                    .iter()
+                    .all(|value| matches!(value.to_lowercase().as_str(), "1" | "true" | "yes")) =>
             {
                 conditions.push(RedirectCondition {
                     kind: name,
                     values: values
                         .into_iter()
-                        .map(|value| value.to_ascii_lowercase())
+                        .map(|value| value.to_lowercase())
                         .collect(),
                 })
             }

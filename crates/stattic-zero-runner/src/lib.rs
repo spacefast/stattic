@@ -6,13 +6,15 @@
 mod artifacts;
 mod constants;
 mod db;
+mod fetch;
+mod image;
 mod js;
 mod protocol;
 mod response;
 mod response_headers;
+mod services;
 mod templates;
 
-use std::env;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -23,79 +25,111 @@ use artifacts::{
     EndpointCapabilities,
 };
 use constants::{PROTOCOL, ZERO_INVOKE_ENVELOPE_MAX_BYTES};
-use js::{compile_endpoint_source, execute_endpoint_module, EndpointProgram};
+use js::{compile_endpoint_source, execute_endpoint_module};
 use protocol::InvokeEnvelope;
 use response::{
     attach_runner_metrics, error_response, record_artifact_read, record_bytecode_read,
-    record_endpoint_index, record_envelope_parse, record_source_read, reset_stage_metrics,
-    write_response, RunnerResponse,
+    record_endpoint_index, record_envelope_parse, reset_stage_metrics, write_response,
+    RunnerResponse,
 };
 
 pub use artifacts::EndpointCapabilities as ZeroEndpointCapabilities;
 
+/// Every upstream the platform-service broker can contact. Re-exported so
+/// the runtime compiler can source its egress allowlist from this crate
+/// without this crate depending on it — the dependency only runs the other way.
+pub use services::SERVICE_UPSTREAM_HOSTS;
+
 /// Runner/QuickJS ABI identifiers, re-exported for protocol codegen so the
 /// generated PHP constants stay sourced from this crate.
-pub const RUNNER_ABI: &str = constants::RUNNER_ABI;
-pub const QUICKJS_ABI: &str = constants::QUICKJS_ABI;
+pub use constants::{QUICKJS_ABI, RUNNER_ABI};
+
+/// The on-disk artifact identifiers this runner refuses a request over,
+/// re-exported so the compiler that writes them spells them once — here, where
+/// they are read.
+pub use constants::{
+    ENDPOINTS_INDEX_FORMAT as ZERO_ENDPOINTS_INDEX_FORMAT,
+    ENDPOINTS_INDEX_KIND as ZERO_ENDPOINTS_INDEX_KIND, ENDPOINT_FORMAT as ZERO_ENDPOINT_FORMAT,
+    MIGRATIONS_FORMAT as ZERO_MIGRATIONS_FORMAT, RUN_FORMAT as ZERO_RUN_FORMAT,
+};
 
 pub struct CompiledEndpointProgram {
     pub generated_source: String,
     pub bytecode: Vec<u8>,
 }
 
-pub fn main_entry() {
-    let args = env::args().skip(1).collect::<Vec<_>>();
-    if matches!(args.as_slice(), [arg] if arg == "--self-test") {
-        let status = match compile_endpoint_source(
-            "export default async function () { return { status: 204 }; }",
-            "self-test.js",
-        ) {
-            Ok(bytecode) if !bytecode.is_empty() => {
-                println!(
-                    "{{\"format\":\"stattic.zero.runner.self-test.v1\",\"abi\":\"{}\"}}",
-                    RUNNER_ABI
-                );
-                0
-            }
-            Ok(_) => {
-                eprintln!("stattic-zero-runner self-test produced empty bytecode");
-                1
-            }
-            Err(error) => {
-                eprintln!("stattic-zero-runner self-test failed: {error}");
-                1
-            }
-        };
-        std::process::exit(status);
+pub fn self_test() -> Result<(), String> {
+    match compile_endpoint_source(
+        "export default async function () { return { status: 204 }; }",
+        "self-test.js",
+    ) {
+        Ok(bytecode) if !bytecode.is_empty() => Ok(()),
+        Ok(_) => Err("self-test produced empty endpoint bytecode".to_string()),
+        Err(error) => Err(format!("self-test endpoint compile failed: {error}")),
     }
-    if args.first().map(String::as_str) == Some("compile") {
-        let status = match args.as_slice() {
-            [_, source, bytecode] => compile_command(source, bytecode, None, None),
-            [_, source, bytecode, capabilities] => {
-                compile_command(source, bytecode, Some(capabilities), None)
-            }
-            [_, source, bytecode, capabilities, generated_source] => {
-                compile_command(source, bytecode, Some(capabilities), Some(generated_source))
-            }
-            _ => {
-                eprintln!("usage: stattic-zero-runner compile <source.js> <bytecode> [capabilities-json] [generated-source.js]");
-                2
-            }
-        };
-        std::process::exit(status);
-    }
-    if args.first().map(String::as_str) == Some("migrate") {
-        let status = match args.as_slice() {
-            [_, version_root] => migrate_command(version_root),
-            _ => {
-                eprintln!("usage: stattic-zero-runner migrate <version-root>");
-                2
-            }
-        };
-        std::process::exit(status);
-    }
+}
 
-    run_stdio();
+/// The Functions relay's per-request DB executor: one operation JSON document
+/// on stdin, one result JSON line on stdout. The grant arrives in
+/// `SPACEFAST_DB_BROKER_GRANT` (comma-separated capability names) and fails
+/// closed — an absent or empty grant denies every statement. The database URL
+/// arrives via the same labeled env contract the Zero path uses. Errors are
+/// in-band (`{"ok":false,"code":…,"message":…}`); the exit code stays 0 so the
+/// transport treats protocol refusals and driver failures identically.
+pub fn run_db_broker_stdio() {
+    db::set_grant(Some(env_db_broker_grant()));
+    run_broker_stdio(
+        db::DB_OPERATION_MAX_BYTES,
+        "{\"ok\":false,\"code\":\"zero_db_operation_invalid\",\"message\":\"Zero DB operation could not be read.\"}",
+        db::handle_db_operation,
+    );
+}
+
+/// The Functions relay's per-request platform-service executor: one frame JSON
+/// document on stdin, one result JSON line on stdout — the same shape and the
+/// same lifetime as the DB broker above, and the same reason for both. Which
+/// services the frame may name is decided by the relay from the version's
+/// grant before this process is ever spawned; by the time a frame arrives the
+/// authority question is already answered.
+pub fn run_service_broker_stdio() {
+    services::set_grant(services::ServiceGrant::from_wire(
+        &std::env::var("SPACEFAST_SERVICE_BROKER_GRANT").unwrap_or_default(),
+    ));
+    run_broker_stdio(
+        services::SERVICE_FRAME_MAX_BYTES,
+        "{\"ok\":false,\"code\":\"service_payload_invalid\",\"message\":\"The service frame could not be read.\"}",
+        services::handle_service_frame,
+    );
+}
+
+/// The stdio shape both brokers run under: one JSON document in, one JSON line
+/// out, exit 0 either way.
+///
+/// Reading one byte past the limit is enough — the handler turns the overrun
+/// into its own typed refusal without buffering the rest. The rollback happens
+/// before the answer is printed: a client that vanishes mid-transaction, or an
+/// email effect on the DB broker's own connection, must not leave row locks
+/// behind for the lifetime of the connection pool.
+fn run_broker_stdio(limit: usize, read_refusal: &'static str, handle: impl FnOnce(&str) -> String) {
+    let mut input = String::new();
+    let outcome = io::stdin()
+        .take(limit as u64 + 1)
+        .read_to_string(&mut input);
+    let response = match outcome {
+        Ok(_) => handle(&input),
+        Err(_) => read_refusal.to_string(),
+    };
+    db::rollback_open_transaction();
+    println!("{response}");
+}
+
+fn env_db_broker_grant() -> db::DbGrant {
+    let raw = std::env::var("SPACEFAST_DB_BROKER_GRANT").unwrap_or_default();
+    let granted = |name: &str| raw.split(',').any(|token| token.trim() == name);
+    db::DbGrant {
+        read: granted("db.read"),
+        write: granted("db.write"),
+    }
 }
 
 pub fn run_stdio() {
@@ -116,6 +150,9 @@ pub fn run_stdio() {
 pub fn handle_invoke(input: &str) -> Result<RunnerResponse, RunnerResponse> {
     let started = Instant::now();
     db::reset_metrics();
+    // Effect positions are the outbox's idempotency key and count within one
+    // invocation, so they reset with the rest of the per-invocation state.
+    db::reset_email_effect_index();
     reset_stage_metrics();
     handle_invoke_inner(input)
         .map(|mut response| {
@@ -126,15 +163,6 @@ pub fn handle_invoke(input: &str) -> Result<RunnerResponse, RunnerResponse> {
             attach_runner_metrics(&mut response, started);
             response
         })
-}
-
-pub fn compile_file(source_path: &Path, bytecode_path: &Path) -> Result<(), String> {
-    compile_file_with_capabilities(
-        source_path,
-        bytecode_path,
-        None,
-        &EndpointCapabilities::conservative(),
-    )
 }
 
 pub(crate) fn compile_file_with_capabilities(
@@ -175,22 +203,13 @@ pub fn compile_endpoint_program(
     })
 }
 
-/// Recompiles an already-finalized endpoint program: the source is the
-/// previously generated ABI-v2 program and is compiled to bytecode verbatim,
-/// without rendering another prelude. Used by import rebind, where finalized
-/// sources from an exported space are rebound to a new target space.
-pub fn compile_finalized_endpoint_program(
-    generated_source: &str,
-    name: &str,
-) -> Result<Vec<u8>, String> {
-    compile_endpoint_source(generated_source, name).map_err(|error| error.to_string())
-}
-
-fn compile_command(
+/// Compiles one endpoint source to bytecode ahead of serving. The argument
+/// grammar belongs to the CLI that spells it; this takes the resolved values.
+pub fn prepare(
     source: &str,
     bytecode: &str,
-    capabilities_json: Option<&String>,
-    generated_source: Option<&String>,
+    capabilities_json: Option<&str>,
+    generated_source: Option<&str>,
 ) -> i32 {
     let capabilities = match capabilities_json {
         Some(raw) => match serde_json::from_str::<EndpointCapabilities>(raw) {
@@ -216,7 +235,7 @@ fn compile_command(
     }
 }
 
-fn migrate_command(version_root: &str) -> i32 {
+pub fn migrate(version_root: &str) -> i32 {
     let migrations_path = match resolve_version_path(version_root, "zero/migrations.json") {
         Ok(path) => path,
         Err(error) => {
@@ -285,53 +304,10 @@ fn handle_invoke_inner(input: &str) -> Result<RunnerResponse, RunnerResponse> {
     let bytecode_path = resolve_version_path(&envelope.version_root, &artifact.bytecode_path)
         .map_err(|message| error_response(422, "zero_bytecode_path_invalid", &message))?;
     let bytecode_started = Instant::now();
-    let program = match artifact.read_verified_bytecode(&bytecode_path) {
-        Ok(bytecode) => {
-            record_bytecode_read(bytecode_started);
-            EndpointProgram::Bytecode(bytecode)
-        }
-        Err(_) if artifact.source_fallback => {
-            record_bytecode_read(bytecode_started);
-            fallback_source_program(&envelope, &artifact)?
-        }
-        Err(response) => {
-            record_bytecode_read(bytecode_started);
-            return Err(response);
-        }
-    };
+    let bytecode = artifact.read_verified_bytecode(&bytecode_path);
+    record_bytecode_read(bytecode_started);
 
-    match execute_endpoint_module(&envelope, &artifact, &program) {
-        Err(response) => {
-            if artifact.source_fallback
-                && response_error_code_is(&response, "zero_bytecode_invalid")
-            {
-                let fallback = fallback_source_program(&envelope, &artifact)?;
-                execute_endpoint_module(&envelope, &artifact, &fallback)
-            } else {
-                Err(response)
-            }
-        }
-        result => result,
-    }
-}
-
-fn fallback_source_program(
-    envelope: &InvokeEnvelope,
-    artifact: &artifacts::EndpointArtifact,
-) -> Result<EndpointProgram, RunnerResponse> {
-    let source_path = resolve_version_path(&envelope.version_root, &artifact.source_path)
-        .map_err(|message| error_response(422, "zero_source_path_invalid", &message))?;
-    let source_started = Instant::now();
-    let source = artifact.read_verified_source(&source_path);
-    record_source_read(source_started);
-    source.map(EndpointProgram::Source)
-}
-
-fn response_error_code_is(response: &RunnerResponse, expected: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(&response.body)
-        .ok()
-        .and_then(|body| body.get("error")?.get("code")?.as_str().map(str::to_string))
-        .is_some_and(|code| code == expected)
+    execute_endpoint_module(&envelope, &artifact, &bytecode?)
 }
 
 #[cfg(test)]

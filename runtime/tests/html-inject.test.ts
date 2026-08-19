@@ -1,20 +1,20 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 
-import { deploy, get, startRuntime, type Runtime } from "./harness.ts";
+import { deploy, get, publicAccessConfig, sha256, startRuntime, type Runtime } from "./harness.ts";
 
 const HOST = "html-inject.test";
+const META_HOST = "platform-meta.test";
 
-let runtimes: Runtime[] = [];
+let rt: Runtime;
 
-afterAll(() => {
-  for (const runtime of runtimes) runtime.stop();
-});
+beforeAll(async () => {
+  rt = await startRuntime();
+}, 30000);
+
+afterAll(() => rt?.stop());
 
 test("runtime splices static inject placements into served HTML", async () => {
-  const runtime = await startRuntime();
-  runtimes.push(runtime);
-
-  await deploy(runtime, {
+  await deploy(rt, {
     spaceId: "spc_html_inject",
     versionId: "ver_html_inject_1",
     files: {
@@ -37,14 +37,14 @@ test("runtime splices static inject placements into served HTML", async () => {
     },
     activate: {
       route_name: "production",
-      config: { mode: "website" },
+      config: publicAccessConfig({ mode: "website" }),
       production_hostnames: [HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
     },
   });
 
-  const response = await get(runtime, HOST, "/");
+  const response = await get(rt, HOST, "/");
   expect(response.status).toBe(200);
   const html = await response.text();
 
@@ -66,4 +66,54 @@ test("runtime splices static inject placements into served HTML", async () => {
   expect(heading).toBeGreaterThan(bodyStart);
   expect(bodyEnd).toBeGreaterThan(heading);
   expect(bodyClose).toBeGreaterThan(bodyEnd);
+});
+
+test("platform_meta renders the space's meta into <head> and cache-busts local assets", async () => {
+  const ogImage = "fake-png-bytes\n";
+  const favicon = "fake-svg-bytes\n";
+  await deploy(rt, {
+    spaceId: "spc_platform_meta",
+    versionId: "ver_platform_meta_1",
+    files: {
+      "index.html": "<!doctype html><html><head></head><body><h1>Plain site</h1></body></html>\n",
+      "og.png": { content: ogImage, contentType: "image/png" },
+      "favicon.svg": { content: favicon, contentType: "image/svg+xml" },
+    },
+    serving: {
+      config: {
+        index: "index.html",
+        listing: false,
+        viewer: false,
+        fallback: null,
+        meta: {
+          title: "Platform title",
+          description: "Platform description",
+          image: "/og.png",
+          favicon: "/favicon.svg",
+        },
+        platform_meta: true,
+      },
+    },
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig({ mode: "website" }),
+      production_hostnames: [META_HOST],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+
+  const html = await (await get(rt, META_HOST, "/")).text();
+
+  expect(html).toContain("<title>Platform title</title>");
+  expect(html).toContain('<meta name="description" content="Platform description">');
+  expect(html).toContain('<meta property="og:title" content="Platform title">');
+  expect(html).toContain('<meta property="og:description" content="Platform description">');
+  expect(html).toContain('<meta name="twitter:card" content="summary_large_image">');
+  // Scraper caches key on the URL, so the emitted og:image has to carry the
+  // image's own content hash -- otherwise unfurls pin to the first upload.
+  expect(html).toContain(
+    `<meta property="og:image" content="/og.png?v=${sha256(ogImage).slice(0, 12)}">`,
+  );
+  expect(html).toContain(`<link rel="icon" href="/favicon.svg?v=${sha256(favicon).slice(0, 12)}">`);
 });

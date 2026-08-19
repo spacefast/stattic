@@ -5,7 +5,10 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::constants::{ENDPOINT_FORMAT, QUICKJS_ABI, RUNNER_ABI};
+use crate::constants::{
+    ENDPOINTS_INDEX_FORMAT, ENDPOINTS_INDEX_KIND, ENDPOINT_FORMAT, QUICKJS_ABI, RUNNER_ABI,
+    RUN_FORMAT,
+};
 use crate::protocol::InvokeEnvelope;
 use crate::response::{error_response, RunnerResponse};
 
@@ -28,8 +31,6 @@ pub(crate) struct EndpointArtifact {
     pub bytecode_sha256: String,
     pub runner_abi: String,
     pub quickjs_abi: String,
-    #[serde(default)]
-    pub source_fallback: bool,
     #[serde(default)]
     pub capabilities: EndpointCapabilities,
     #[serde(default)]
@@ -59,6 +60,12 @@ pub struct EndpointCapabilities {
     pub realtime: bool,
     #[serde(default = "default_true")]
     pub logging: bool,
+    #[serde(default = "default_true")]
+    pub gravatar: bool,
+    #[serde(default = "default_true")]
+    pub spam: bool,
+    #[serde(default = "default_true")]
+    pub email: bool,
 }
 
 impl Default for EndpointCapabilities {
@@ -76,7 +83,16 @@ impl EndpointCapabilities {
             env: true,
             realtime: true,
             logging: true,
+            gravatar: true,
+            spam: true,
+            email: true,
         }
+    }
+
+    /// Whether this handler reaches any brokered platform service. The prelude
+    /// installs one bridge for all three, so this is what gates it.
+    pub(crate) fn any_service(&self) -> bool {
+        self.gravatar || self.spam || self.email
     }
 }
 
@@ -121,9 +137,7 @@ pub(crate) fn resolve_endpoint_artifact_path(
     let index: EndpointIndexArtifact = serde_json::from_str(&raw).map_err(|error| {
         error_response(422, "zero_endpoint_index_malformed", &error.to_string())
     })?;
-    if index.format != "stattic.zero.endpoints-index.v1"
-        || index.artifact_kind != "zero_endpoints_index"
-    {
+    if index.format != ENDPOINTS_INDEX_FORMAT || index.artifact_kind != ENDPOINTS_INDEX_KIND {
         return Err(error_response(
             422,
             "zero_endpoint_index_invalid",
@@ -144,7 +158,7 @@ pub(crate) fn resolve_endpoint_artifact_path(
 impl EndpointArtifact {
     pub(crate) fn validate_for(&self, envelope: &InvokeEnvelope) -> Result<(), RunnerResponse> {
         if self.kind == "run" {
-            if self.format != "stattic.zero.run.v1" {
+            if self.format != RUN_FORMAT {
                 return Err(error_response(
                     422,
                     "zero_artifact_invalid",
@@ -203,15 +217,6 @@ impl EndpointArtifact {
         verify_sha256(&bytecode, &self.bytecode_sha256)
             .map_err(|message| error_response(422, "zero_bytecode_hash_mismatch", &message))?;
         Ok(bytecode)
-    }
-
-    pub(crate) fn read_verified_source(&self, path: &Path) -> Result<String, RunnerResponse> {
-        let source = fs::read(path)
-            .map_err(|error| error_response(503, "zero_source_unreadable", &error.to_string()))?;
-        verify_sha256(&source, &self.source_sha256)
-            .map_err(|message| error_response(422, "zero_source_hash_mismatch", &message))?;
-        String::from_utf8(source)
-            .map_err(|error| error_response(422, "zero_source_invalid", &error.to_string()))
     }
 }
 

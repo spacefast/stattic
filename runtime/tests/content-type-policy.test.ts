@@ -6,7 +6,14 @@
 // restriction (what a claim's route sync does).
 import { afterAll, beforeAll, expect, test } from "bun:test";
 
-import { deploy, get, putRoute, type Runtime, startRuntime } from "./harness.ts";
+import {
+  deploy,
+  get,
+  publicAccessConfig,
+  putRoute,
+  type Runtime,
+  startRuntime,
+} from "./harness.ts";
 
 let rt: Runtime;
 
@@ -29,7 +36,7 @@ const ANON_ALLOWED = [
   "application/atom+xml",
 ];
 const BLOCKED_MESSAGE =
-  "This file type is not served on unclaimed sites. Claim the site to serve it.";
+  "This file type isn't served on unclaimed spaces. Claim the space to serve it.";
 
 beforeAll(async () => {
   rt = await startRuntime();
@@ -39,6 +46,7 @@ beforeAll(async () => {
     metadata: { mode: "website", title: "Anon Content Types" },
     files: {
       "index.html": "<h1>anon</h1>\n",
+      "docs/index.html": "<h1>anon docs</h1>\n",
       "assets/app.js": "console.log('anon');\n",
       "assets/logo.png": Buffer.from([0x89, 0x50, 0x4e, 0x47]),
       // .bin has no mime mapping: stored as application/octet-stream.
@@ -50,10 +58,10 @@ beforeAll(async () => {
     },
     activate: {
       route_name: "production",
-      config: {
+      config: publicAccessConfig({
         mode: "website",
         content_types: { allowed: ANON_ALLOWED, blocked_message: BLOCKED_MESSAGE },
-      },
+      }),
       production_hostnames: [SITE],
       noindex_production_hostnames: [],
       version_hostnames: [],
@@ -74,6 +82,13 @@ test("web content types keep serving under the allowlist", async () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe(contentType);
   }
+
+  const directory = await get(rt, SITE, "/docs/");
+  expect(directory.status).toBe(200);
+  expect(await directory.text()).toBe("<h1>anon docs</h1>\n");
+  const canonical = await get(rt, SITE, "/docs");
+  expect(canonical.status).toBe(308);
+  expect(canonical.headers.get("location")).toBe("/docs/");
 });
 
 test("octet-stream payloads are refused with the pushed message", async () => {
@@ -89,7 +104,7 @@ test("octet-stream payloads are refused with the pushed message", async () => {
 test("a null content_types push clears the restriction (the claim transition)", async () => {
   await putRoute(rt, SPACE, "production", {
     version_id: VERSION,
-    config: { content_types: null },
+    config: publicAccessConfig({ content_types: null }),
   });
   const response = await get(rt, SITE, "/downloads/payload.bin");
   expect(response.status).toBe(200);

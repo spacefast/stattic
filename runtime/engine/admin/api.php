@@ -5,40 +5,29 @@ require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/auth.php';
 
-// The ONE admin-API dispatcher. Every admin surface — management, file-fetch
-// (scanner reads), and upload — dispatches through the same table-driven
-// primitive: route rows declare their methods, pattern, auth lane, write-lock
-// scope, and whether they stream binary bytes; the dispatcher owns route-path
-// derivation, the management-hostname assert, CORS, OPTIONS 204, per-lane JWT
-// verification, write-lock acquisition, and the error envelope.
-//
-// Auth lanes are hard security boundaries. Each lane verifies its own JWT
-// audience and nothing else:
-//   management — aud stattic-runtime-management: action + operation_id +
-//     URL-scope claims, single-use jti replay guard.
-//   file_fetch — aud stattic-runtime-file-fetch: READ-ONLY, multi-use within
-//     its short TTL (deliberately NO jti replay cache — see
-//     _stattic_runtime_require_file_fetch_jwt), token accepted from the
-//     Authorization header or (per row) the ?access= query fallback.
-//   upload — aud stattic-runtime-upload: Authorization: Bearer required, the
-//     session-scope claims are asserted by the handlers against session state.
-// A token minted for one lane can never authorize another lane's row: the
-// lane's verifier pins its own `aud` before any claim is trusted.
-//
-// Handler modules load lazily per matched row, so each surface keeps exactly
-// its pre-unification module set (the upload hot path never parses the
-// management module tree and vice versa; the public serve path loads none of
-// this file).
-//
-// Surfaces map to lanes: the management entrypoint (/__spacefast/api.php and
-// the SSH dispatch transport) hosts the management + file_fetch lanes; the
-// upload entrypoint (/__spacefast/upload.php) hosts the upload lane. The
-// surface also picks the route-path derivation and the per-lane 404 code
-// (runtime_route_not_found vs runtime_upload_route_not_found;
-// runtime_file_fetch_route_not_found stays with the file-fetch rows).
+// Auth lanes are hard security boundaries: a token minted for one lane can never
+// authorize another's row, because each lane's verifier pins its own `aud` before
+// any claim is trusted.
 function _stattic_runtime_admin_api(string $privateRoot, string $method, string $requestPath, string $surface): void
 {
-    _stattic_runtime_api_register_error_envelope();
+    _stattic_runtime_admin_register_error_envelope();
+    // Host gate BEFORE route resolution: a public hostname must get the
+    // deliberately-generic runtime_api_not_found, never a route-specific 404
+    // that would confirm the management/upload API lives here.
+    _stattic_runtime_assert_api_hostname();
+    // CORS BEFORE route resolution, and the preflight answered before it too.
+    // A browser only ever sees a response it is allowed to read: a 404 emitted
+    // without these headers reaches the caller as an opaque CORS failure that
+    // names the wrong problem, and a preflight that 404s blocks the real
+    // request outright. A preflight carries no credentials and asserts nothing
+    // about the route, so answering it ahead of resolution is the contract, not
+    // a shortcut — the actual request is still resolved and authorized below.
+    _stattic_runtime_cors_headers();
+    if ($method === 'OPTIONS') {
+        http_response_code(204);
+        exit;
+    }
+
     if ($surface === 'upload') {
         $routePath = _stattic_runtime_upload_api_route_path($requestPath);
         if (!is_string($routePath)) {
@@ -50,31 +39,25 @@ function _stattic_runtime_admin_api(string $privateRoot, string $method, string 
             _stattic_runtime_route_not_found();
         }
     }
-    _stattic_runtime_assert_api_hostname();
-    _stattic_runtime_cors_headers();
 
-    if ($method === 'OPTIONS') {
-        http_response_code(204);
-        exit;
-    }
-
-    foreach (_stattic_runtime_admin_routes($privateRoot, $method, $surface) as $route) {
+    foreach (_stattic_runtime_admin_routes($surface) as $route) {
         if (preg_match($route['pattern'], $routePath, $matches) !== 1) {
             continue;
-        }
-        // SSH dispatch (admin/dispatch.php) carries one JSON envelope on
-        // stdout; rows that stream binary bytes (or write raw responses)
-        // stay HTTP-only regardless of request method.
-        if ($route['binary'] && defined('STATTIC_RUNTIME_DISPATCH_CLI')) {
-            _stattic_json_response(400, ['error' => ['code' => 'runtime_dispatch_unsupported_path', 'message' => 'Binary endpoints are not dispatchable over this transport.']]);
         }
         if (!in_array($method, $route['methods'], true)) {
             $mismatch = $route['method_mismatch'];
             if ($mismatch === null) {
                 continue;
             }
-            header('Allow: ' . $mismatch['allow'], false);
-            _stattic_json_response(405, ['error' => ['code' => $mismatch['code'], 'message' => $mismatch['message']]]);
+            _stattic_method_not_allowed($mismatch['allow'], [
+                'code' => $mismatch['code'],
+                'message' => $mismatch['message'],
+            ]);
+        }
+        // SSH dispatch (admin/dispatch.php) carries one JSON envelope on stdout,
+        // so rows that stream bytes or write raw responses stay HTTP-only.
+        if ($route['binary'] && defined('STATTIC_RUNTIME_DISPATCH_CLI')) {
+            _stattic_problem_response(400, 'runtime_dispatch_unsupported_path', 'Binary endpoints are not dispatchable over this transport.');
         }
         _stattic_runtime_admin_run_route($privateRoot, $route, $matches);
     }
@@ -85,340 +68,223 @@ function _stattic_runtime_admin_api(string $privateRoot, string $method, string 
     _stattic_runtime_route_not_found();
 }
 
-// Applies the matched row's lane: lazy module load, the lane's exact JWT
-// verification, and (management only) write-lock acquisition. Handlers respond
-// and exit; a handler that returns falls back into the dispatch loop exactly
-// like the pre-unification if-chains did.
+// Error envelope for the admin API. It is armed before the host gate and JWT,
+// so an unauthenticated caller reaches these handlers: they must answer a fixed
+// generic 500 carrying only a correlation id, and send the real Throwable /
+// fatal text (paths, include chains) to error_log alone. The correlation id is
+// minted once per request and shared by both handlers so an operator can match
+// the response the caller saw to the logged cause.
+function _stattic_runtime_admin_register_error_envelope(): void
+{
+    static $registered = false;
+    if ($registered) {
+        return;
+    }
+    $registered = true;
+
+    $correlationId = bin2hex(random_bytes(8));
+
+    set_exception_handler(static function (Throwable $error) use ($correlationId): void {
+        error_log(sprintf(
+            'spacefast admin api uncaught %s [%s]: %s',
+            get_debug_type($error),
+            $correlationId,
+            $error->getMessage()
+        ));
+        _stattic_problem_response(
+            500,
+            'runtime_internal_error',
+            'The runtime API hit an unexpected error.',
+            ['details' => ['correlation_id' => $correlationId]]
+        );
+    });
+
+    register_shutdown_function(static function () use ($correlationId): void {
+        $error = error_get_last();
+        if (!is_array($error)) {
+            return;
+        }
+        $type = is_int($error['type'] ?? null) ? $error['type'] : 0;
+        if (!in_array($type, [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+            return;
+        }
+        if (!defined('STATTIC_RUNTIME_DISPATCH_CLI') && headers_sent()) {
+            return;
+        }
+        error_log(sprintf(
+            'spacefast admin api fatal type=%d [%s]: %s',
+            $type,
+            $correlationId,
+            isset($error['message']) && is_string($error['message']) ? $error['message'] : ''
+        ));
+        _stattic_problem_response(
+            500,
+            'runtime_fatal_error',
+            'The runtime API hit a fatal error.',
+            ['details' => ['correlation_id' => $correlationId]]
+        );
+    });
+}
+
+// Handlers respond and exit; a handler that RETURNS falls back into the dispatch
+// loop and keeps matching later rows.
 function _stattic_runtime_admin_run_route(string $privateRoot, array $route, array $matches): void
 {
     $handler = $route['handler'];
 
     if ($route['lane'] === 'management') {
         require_once __DIR__ . '/management.php';
-        // Management mutations on a many-space shared site can exceed the
-        // default PHP execution budget (the route-index rebuild walks every
-        // space); a mid-rebuild kill surfaces as a provider-edge 504 with the
-        // work half done (e2e checkpoint 2). Management requests are
-        // JWT-authed, low-volume and never on the public hot path, so lift
-        // the limit.
-        @set_time_limit(0);
+        // A route-index rebuild on a many-space site can exceed the default PHP
+        // execution budget, and a mid-rebuild kill leaves the work half done
+        // behind a provider-edge 504. These requests are JWT-authed, low-volume
+        // and never on the public hot path.
+        set_time_limit(0);
         $required = [];
         foreach ($route['scope'] as $field => $captureIndex) {
             $required[$field] = _stattic_runtime_id($matches[$captureIndex], $field);
         }
         $claims = _stattic_runtime_require_management_jwt($privateRoot, $route['action'], $required);
-        // Handlers trust the dispatcher's scope validation and never re-run it:
-        // they receive the validated (trimmed) ids positionally.
+        // Handlers trust this scope validation and never re-run it: they receive
+        // the validated (trimmed) ids positionally.
         $args = [$privateRoot, ...array_values($required), $claims];
-        if ($route['locked']) {
-            $spaceLockId = _stattic_runtime_space_write_lock_scope($route['action'], $required);
-            if ($spaceLockId !== null) {
-                _stattic_runtime_with_space_write_lock($privateRoot, $spaceLockId, static function () use ($handler, $args): void {
-                    $handler(...$args);
-                });
-            } else {
-                _stattic_runtime_with_write_lock($privateRoot, static function () use ($handler, $args): void {
-                    $handler(...$args);
-                });
-            }
+        $spaceLockId = null;
+        if ($route['lock'] === 'space') {
+            // An unresolvable scope falls back to the site lock: correctness
+            // over concurrency.
+            $spaceLockId = isset($required['space_id']) && is_string($required['space_id']) && $required['space_id'] !== ''
+                ? $required['space_id']
+                : null;
+        }
+        if ($spaceLockId !== null) {
+            _stattic_runtime_with_space_write_lock($privateRoot, $spaceLockId, static function () use ($handler, $args): void {
+                $handler(...$args);
+            });
+        } elseif ($route['lock'] !== 'none') {
+            _stattic_runtime_with_write_lock($privateRoot, static function () use ($handler, $args): void {
+                $handler(...$args);
+            });
         } else {
             $handler(...$args);
         }
         return;
     }
 
-    if ($route['lane'] === 'file_fetch') {
-        require_once __DIR__ . '/file-fetch.php';
-        // Row-declared scope resolver: validates request inputs (422/404
-        // before any token is read) and returns the exact claim profile the
-        // file-fetch JWT must carry.
-        $auth = ($route['auth'])($matches);
-        $claims = _stattic_runtime_require_file_fetch_jwt($privateRoot, $auth['required'], $auth['bearer_only'] ?? false);
-        _stattic_runtime_assert_file_fetch_claims_absent($claims, $auth['absent']);
-        $handler($matches, $claims, $auth);
-        return;
-    }
-
     require_once __DIR__ . '/upload.php';
     _stattic_runtime_reject_s3_control_operation($route['methods'][0]);
-    $claims = _stattic_runtime_require_upload_authorization($privateRoot);
-    $handler($matches, $claims);
+    $claims = _stattic_runtime_require_upload_jwt($privateRoot);
+    $args = [$privateRoot, ...array_slice($matches, 1, $route['captures']), $claims];
+    $handler(...$args);
 }
 
-// The unified route table, built per surface. Row fields: lane, methods,
-// pattern, binary (streams bytes / writes a raw response — never dispatchable
-// over the SSH envelope transport), method_mismatch (null = keep scanning,
-// otherwise the 405 answered when the pattern matches but the method does
-// not), and the lane-specific auth inputs (management: action/scope/locked;
-// file_fetch: the scope-resolver closure; upload: the Allow method for the
-// S3-control-operation guard).
-function _stattic_runtime_admin_routes(string $privateRoot, string $method, string $surface): array
+// Row fields: lane, methods, pattern, binary (streams bytes / writes a raw
+// response — never dispatchable over the SSH envelope transport),
+// method_mismatch (null = keep scanning, otherwise the 405 answered when the
+// pattern matches but the method does not), plus the lane-specific auth inputs.
+function _stattic_runtime_admin_routes(string $surface): array
 {
     if ($surface === 'upload') {
-        return _stattic_runtime_admin_upload_routes($privateRoot);
+        return _stattic_runtime_admin_upload_routes();
     }
-    return array_merge(
-        _stattic_runtime_admin_file_fetch_routes($privateRoot, $method),
-        _stattic_runtime_admin_management_routes()
-    );
+    return _stattic_runtime_admin_management_routes();
 }
 
 // Management lane rows: [method, pattern, action, scope (claim key => capture
-// index, ascending), locked, binary, handler]. The dispatcher validates the
-// scope ids (422 before auth), verifies the management JWT for the action, and
-// calls the handler as ($privateRoot, ...$scopeIds, $claims) — inside the
-// private write lock when the route mutates runtime state. Handlers that do
-// not need the claims simply omit the trailing parameter (PHP ignores the extra
-// positional argument), so never widen one of those without declaring the
-// `array $claims` it would otherwise silently receive.
+// index, ascending), lock, binary, handler]. Handlers are called as
+// ($privateRoot, ...$scopeIds, $claims); ones that omit the trailing parameter
+// still receive it positionally, so never widen such a signature without
+// declaring the `array $claims` it would silently pick up.
+//
+// A route earns lock='space' ONLY when every write it performs transitively is
+// confined to that one space's storage. delete_space MUST share
+// finalize_version's per-space lock: a publish writing into the space tree while
+// the delete unlinks it recreates a deleted Space.
 function _stattic_runtime_admin_management_routes(): array
 {
     $rows = [
-        ['GET', '#^/state$#', 'read_state', [], false, false, '_stattic_runtime_state_route'],
-        ['POST', '#^/events/drain$#', 'drain_events', [], false, false, '_stattic_runtime_drain_callback_events'],
-        // Job runner (§22): create/tick are site-wide (no URL-scoped space —
-        // space_id rides the JWT claim instead) and tick holds only its own
-        // lane lock, never the global write lock — locked=false throughout.
-        ['POST', '#^/jobs$#', 'create_engine_job', [], false, false, '_stattic_runtime_jobs_create_route'],
-        ['POST', '#^/jobs/tick$#', 'tick_engine_jobs', [], false, false, '_stattic_runtime_jobs_tick_route'],
-        ['GET', '#^/jobs/([^/]+)$#', 'get_engine_job', ['job_id' => 1], false, false, '_stattic_runtime_jobs_get_route'],
-        ['POST', '#^/transfer/bundle$#', 'transfer_bundle', [], true, false, '_stattic_runtime_transfer_bundle_route'],
-        ['POST', '#^/transfer/commit$#', 'transfer_commit', [], true, false, '_stattic_runtime_transfer_commit_route'],
-        ['POST', '#^/transfer/abort$#', 'transfer_abort', [], true, false, '_stattic_runtime_transfer_abort_route'],
-        ['GET', '#^/access-events$#', 'access_events', [], false, false, '_stattic_runtime_read_access_events'],
-        ['POST', '#^/spaces/([^/]+)/versions$#', 'create_version', ['space_id' => 1], false, false, '_stattic_runtime_create_version'],
-        ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/uploads$#', 'get_upload_session', ['space_id' => 1, 'version_id' => 2], false, false, '_stattic_runtime_get_upload_session'],
-        ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/finalize$#', 'finalize_version', ['space_id' => 1, 'version_id' => 2], true, false, '_stattic_runtime_finalize_version'],
-        ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/delete$#', 'delete_version', ['space_id' => 1, 'version_id' => 2], true, false, '_stattic_runtime_delete_version'],
-        ['PUT', '#^/spaces/([^/]+)/routes/([^/]+)$#', 'update_route', ['space_id' => 1, 'route_name' => 2], true, false, '_stattic_runtime_put_route'],
-        ['PUT', '#^/spaces/([^/]+)/hostname-intent$#', 'update_hostname_intent', ['space_id' => 1], true, false, '_stattic_runtime_put_hostname_intent'],
-        ['PUT', '#^/spaces/([^/]+)/tombstones$#', 'update_tombstones', ['space_id' => 1], true, false, '_stattic_runtime_put_tombstones'],
-        ['PUT', '#^/spaces/([^/]+)/retention-policy$#', 'update_retention_policy', ['space_id' => 1], true, false, '_stattic_runtime_put_retention_policy'],
-        ['POST', '#^/spaces/([^/]+)/access/revocations$#', 'revoke_grant', ['space_id' => 1], true, false,
-            static fn (string $privateRoot, string $spaceId, array $claims) => _stattic_runtime_update_access_revocations($privateRoot, $spaceId, $claims, true)],
-        ['DELETE', '#^/spaces/([^/]+)/access/revocations$#', 'unrevoke_grant', ['space_id' => 1], true, false,
-            static fn (string $privateRoot, string $spaceId, array $claims) => _stattic_runtime_update_access_revocations($privateRoot, $spaceId, $claims, false)],
-        ['POST', '#^/spaces/([^/]+)/delete$#', 'delete_space', ['space_id' => 1], true, false, '_stattic_runtime_delete_space'],
-        ['POST', '#^/spaces/([^/]+)/repair$#', 'repair_space', ['space_id' => 1], true, false, '_stattic_runtime_repair_space'],
-        ['POST', '#^/spaces/([^/]+)/exports$#', 'start_space_export', ['space_id' => 1], false, false, '_stattic_runtime_start_space_export'],
-        // Export/import handles are top-level resources (spec route table): the create call
-        // is space-nested, but every step/archive/map call addresses the handle id and the
-        // per-step JWT is scoped by export_id/import_id, not space_id.
-        ['POST', '#^/exports/([^/]+)/step$#', 'step_space_export', ['export_id' => 1], false, false, '_stattic_runtime_step_space_export'],
-        ['GET', '#^/exports/([^/]+)/archive$#', 'download_space_export', ['export_id' => 1], false, true, '_stattic_runtime_download_space_export'],
-        ['POST', '#^/spaces/([^/]+)/imports$#', 'start_space_import', ['space_id' => 1], false, false, '_stattic_runtime_start_space_import'],
-        ['PUT', '#^/imports/([^/]+)/archive$#', 'upload_space_import', ['import_id' => 1], false, true, '_stattic_runtime_upload_space_import_archive'],
-        ['GET', '#^/imports/([^/]+)/archive$#', 'download_space_import_archive', ['import_id' => 1], false, true, '_stattic_runtime_download_space_import_archive'],
-        ['PUT', '#^/imports/([^/]+)/map$#', 'map_space_import', ['import_id' => 1], true, false, '_stattic_runtime_map_space_import'],
-        ['GET', '#^/imports/([^/]+)$#', 'get_space_import', ['import_id' => 1], false, false, '_stattic_runtime_get_space_import'],
-        ['POST', '#^/imports/([^/]+)/step$#', 'step_space_import', ['import_id' => 1], true, false, '_stattic_runtime_step_space_import'],
+        ['GET', '#^/state$#', 'read_state', [], 'none', false, '_stattic_runtime_state_route'],
+        ['POST', '#^/events/drain$#', 'drain_events', [], 'none', false, '_stattic_runtime_drain_callback_events'],
+        ['POST', '#^/events/ack$#', 'ack_events', [], 'none', false, '_stattic_runtime_ack_callback_events'],
+        ['POST', '#^/jobs$#', 'create_engine_job', [], 'none', false, '_stattic_runtime_jobs_create_route'],
+        ['POST', '#^/jobs/tick$#', 'tick_engine_jobs', [], 'none', false, '_stattic_runtime_jobs_tick_route'],
+        ['GET', '#^/jobs/([^/]+)$#', 'get_engine_job', ['job_id' => 1], 'none', false, '_stattic_runtime_jobs_get_route'],
+        ['POST', '#^/engine/update$#', 'update_engine', [], 'none', false, '_stattic_engine_update_route'],
+        ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/dump$#', 'zero_db_dump', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_zero_db_dump'],
+        ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/export$#', 'zero_db_export', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_zero_db_export'],
+        ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/import$#', 'zero_db_import', ['space_id' => 1, 'version_id' => 2], 'space', false, '_stattic_zero_db_import'],
+        ['GET', '#^/spaces/([^/]+)/storage$#', 'storage_list', ['space_id' => 1], 'none', false, '_stattic_storage_list'],
+        ['DELETE', '#^/spaces/([^/]+)/storage/([a-f0-9]{32})$#', 'storage_delete', ['space_id' => 1, 'storage_object_id' => 2], 'space', false, '_stattic_storage_object_delete'],
+        ['GET', '#^/storage/read-key$#', 'storage_read_key', [], 'none', false, '_stattic_storage_read_key_get'],
+        ['POST', '#^/storage/read-key/rotate$#', 'rotate_storage_read_key', [], 'site', false, '_stattic_storage_read_key_rotate'],
+        ['PUT', '#^/spaces/([^/]+)/build-sources/([^/]+)$#', 'build_source_put', ['space_id' => 1, 'build_id' => 2], 'space', true, '_stattic_build_source_put'],
+        ['GET', '#^/spaces/([^/]+)/build-sources/([^/]+)$#', 'build_source_get', ['space_id' => 1, 'build_id' => 2], 'none', false, '_stattic_build_source_get'],
+        ['GET', '#^/spaces/([^/]+)/build-sources/([^/]+)/body$#', 'build_source_read', ['space_id' => 1, 'build_id' => 2], 'none', true, '_stattic_build_source_read'],
+        ['DELETE', '#^/spaces/([^/]+)/build-sources/([^/]+)$#', 'build_source_delete', ['space_id' => 1, 'build_id' => 2], 'space', false, '_stattic_build_source_delete'],
+        ['POST', '#^/spaces/([^/]+)/versions$#', 'create_version', ['space_id' => 1], 'space', false, '_stattic_runtime_create_version'],
+        ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/uploads$#', 'get_upload_session', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_runtime_get_upload_session'],
+        ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/source$#', 'read_version_source', ['space_id' => 1, 'version_id' => 2], 'none', true, '_stattic_runtime_read_version_source_route'],
+        ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/files$#', 'list_version_files', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_runtime_list_version_files_route'],
+        ['POST', '#^/spaces/([^/]+)/purge$#', 'purge_space', ['space_id' => 1], 'none', false, '_stattic_runtime_purge_space_route'],
+        ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/finalize$#', 'finalize_version', ['space_id' => 1, 'version_id' => 2], 'space', false, '_stattic_runtime_finalize_version'],
+        ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/zero/migrate$#', 'apply_zero_migrations', ['space_id' => 1, 'version_id' => 2], 'space', false, '_stattic_runtime_apply_version_zero_migrations'],
+        ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/delete$#', 'delete_version', ['space_id' => 1, 'version_id' => 2], 'space', false, '_stattic_runtime_delete_version'],
+        ['PUT', '#^/spaces/([^/]+)/routes/([^/]+)$#', 'update_route', ['space_id' => 1, 'route_name' => 2], 'space', false, '_stattic_runtime_put_route'],
+        ['PUT', '#^/spaces/([^/]+)/hostname-intent$#', 'update_hostname_intent', ['space_id' => 1], 'space', false, '_stattic_runtime_put_hostname_intent'],
+        ['PUT', '#^/spaces/([^/]+)/tombstones$#', 'update_tombstones', ['space_id' => 1], 'space', false, '_stattic_runtime_put_tombstones'],
+        ['PUT', '#^/spaces/([^/]+)/retention-policy$#', 'update_retention_policy', ['space_id' => 1], 'space', false, '_stattic_runtime_put_retention_policy'],
+        ['POST', '#^/spaces/([^/]+)/delete$#', 'delete_space', ['space_id' => 1], 'space', false, '_stattic_runtime_delete_space'],
+        ['POST', '#^/spaces/([^/]+)/repair$#', 'repair_space', ['space_id' => 1], 'site', false, '_stattic_runtime_repair_space'],
     ];
 
     $routes = [];
-    foreach ($rows as [$routeMethod, $pattern, $action, $scope, $locked, $binary, $handler]) {
+    foreach ($rows as [$routeMethod, $pattern, $action, $scope, $lock, $binary, $handler]) {
         $routes[] = [
             'lane' => 'management',
             'methods' => [$routeMethod],
             'pattern' => $pattern,
             'binary' => $binary,
-            // Management routes never 405: a method mismatch keeps scanning
-            // and falls through to the surface 404, exactly as before.
+            // Management routes never 405: a method mismatch keeps scanning and
+            // falls through to the surface 404.
             'method_mismatch' => null,
             'action' => $action,
             'scope' => $scope,
-            'locked' => $locked,
+            'lock' => $lock,
             'handler' => $handler,
         ];
     }
     return $routes;
 }
 
-// File-fetch lane rows (the read-only scanner surface, C2). Every row streams
-// raw bytes or writes its response outside the JSON envelope, so all rows are
-// binary (HTTP-only). The scope resolvers validate request inputs before any
-// token is read and pin the exact claim profile per request shape.
-function _stattic_runtime_admin_file_fetch_routes(string $privateRoot, string $method): array
+// Upload lane rows: [method, pattern, binary (streams bytes / writes a raw
+// response), captures (how many pattern groups the handler takes), the 405
+// message answered when the pattern matches but the method does not — null
+// keeps scanning and falls through to the surface 404]. Handlers are called as
+// ($privateRoot, ...$captures, $claims), the same shape the management lane
+// uses; the upload JWT resolves the session from its OWN claims, so a capture
+// is never the authorization.
+function _stattic_runtime_admin_upload_routes(): array
 {
-    $methodMismatch = [
-        'allow' => 'GET, HEAD',
-        'code' => 'runtime_file_fetch_method_not_allowed',
-        'message' => 'Runtime file fetch only supports GET and HEAD.',
+    $rows = [
+        ['POST', '#^/spaces/([^/]+)/blobs/have$#', false, 1, 'Blob negotiation only supports POST.', '_stattic_runtime_upload_blobs_have'],
+        ['PUT', '#^/([^/]+)/files/(.+)$#', true, 2, 'File upload only supports PUT.', '_stattic_runtime_upload_file'],
+        ['PUT', '#^/spaces/([^/]+)/blobs/([^/]+)$#', true, 2, 'Blob upload only supports PUT.', '_stattic_runtime_upload_blob'],
+        ['POST', '#^/([^/]+)/fetch/files/(.+)$#', false, 2, null, '_stattic_runtime_upload_file_from_url'],
     ];
 
-    return [
-        // .../versions/{versionId}/scan-manifest?variant_route=production
-        //
-        // This is deliberately derived only when the background scanner asks for
-        // it. Finalize remains unaware of scanning and cannot fail publication.
-        // File metadata shards are the serving path's authoritative map of
-        // substituted/generated base bytes; template-variants.php carries the
-        // selected live route's overlay.
-        [
-            'lane' => 'file_fetch',
-            'methods' => ['GET', 'HEAD'],
-            'pattern' => '#^/spaces/([^/]+)/versions/([^/]+)/scan-manifest$#',
-            'binary' => true,
-            'method_mismatch' => $methodMismatch,
-            'auth' => static function (array $matches): array {
-                $spaceId = _stattic_runtime_id($matches[1], 'space_id');
-                $versionId = _stattic_runtime_id($matches[2], 'version_id');
-                if (!isset($_GET['variant_route']) || !is_string($_GET['variant_route']) || $_GET['variant_route'] === '') {
-                    _stattic_json_response(422, ['error' => ['code' => 'runtime_scan_manifest_variant_route_required', 'message' => 'A scan manifest variant route is required.']]);
-                }
-                $variantRoute = _stattic_runtime_id($_GET['variant_route'], 'variant_route');
-                return [
-                    'required' => [
-                        'space_id' => $spaceId,
-                        'version_id' => $versionId,
-                        'scope' => 'scan_manifest',
-                        'variant_route' => $variantRoute,
-                    ],
-                    'absent' => ['path', 'sha256'],
-                    'bearer_only' => true,
-                ];
-            },
-            'handler' => static function (array $matches, array $claims, array $auth) use ($privateRoot, $method): void {
-                $required = $auth['required'];
-                _stattic_runtime_scan_manifest_response($privateRoot, $required['space_id'], $required['version_id'], $required['variant_route'], $method);
-            },
-        ],
-        // .../versions/{versionId}/file?path=...
-        [
-            'lane' => 'file_fetch',
-            'methods' => ['GET', 'HEAD'],
-            'pattern' => '#^/spaces/([^/]+)/versions/([^/]+)/file$#',
-            'binary' => true,
-            'method_mismatch' => $methodMismatch,
-            'auth' => static function (array $matches): array {
-                $spaceId = _stattic_runtime_id($matches[1], 'space_id');
-                $versionId = _stattic_runtime_id($matches[2], 'version_id');
-                $path = isset($_GET['path']) && is_string($_GET['path']) ? $_GET['path'] : '';
-                if ($path === '') {
-                    _stattic_json_response(422, ['error' => ['code' => 'runtime_file_fetch_path_required', 'message' => 'A file path is required.']]);
-                }
-                return [
-                    'required' => [
-                        'space_id' => $spaceId,
-                        'version_id' => $versionId,
-                        'path' => _stattic_runtime_file_path($path),
-                    ],
-                    'absent' => ['scope', 'sha256', 'variant_route'],
-                ];
-            },
-            'handler' => static function (array $matches, array $claims, array $auth) use ($privateRoot, $method): void {
-                $required = $auth['required'];
-                _stattic_runtime_stream_version_file($privateRoot, $required['space_id'], $required['version_id'], $required['path'], $method);
-            },
-        ],
-        // .../versions/{versionId}/files/by-hash/{sha256}
-        [
-            'lane' => 'file_fetch',
-            'methods' => ['GET', 'HEAD'],
-            // The hash segment is matched loosely so a malformed hash still
-            // answers the lane's own 404 (the scope resolver enforces the
-            // 64-hex shape before any token is read, exactly like the old
-            // strict pattern falling through to the lane 404).
-            'pattern' => '#^/spaces/([^/]+)/versions/([^/]+)/files/by-hash/([^/]+)$#',
-            'binary' => true,
-            'method_mismatch' => $methodMismatch,
-            'auth' => static function (array $matches): array {
-                if (preg_match('/^[0-9a-f]{64}$/', $matches[3]) !== 1) {
-                    _stattic_json_response(404, ['error' => ['code' => 'runtime_file_fetch_route_not_found', 'message' => 'Runtime file fetch route not found.']]);
-                }
-                $spaceId = _stattic_runtime_id($matches[1], 'space_id');
-                $versionId = _stattic_runtime_id($matches[2], 'version_id');
-                $sha256 = strtolower($matches[3]);
-                $variantRoute = isset($_GET['variant_route']) && is_string($_GET['variant_route']) && $_GET['variant_route'] !== ''
-                    ? _stattic_runtime_id($_GET['variant_route'], 'variant_route')
-                    : null;
-                $required = [
-                    'space_id' => $spaceId,
-                    'version_id' => $versionId,
-                    'sha256' => $sha256,
-                ];
-                if ($variantRoute !== null) {
-                    $required['variant_route'] = $variantRoute;
-                }
-                return [
-                    'required' => $required,
-                    'absent' => $variantRoute === null ? ['scope', 'path', 'variant_route'] : ['scope', 'path'],
-                ];
-            },
-            'handler' => static function (array $matches, array $claims, array $auth) use ($privateRoot, $method): void {
-                $required = $auth['required'];
-                $variantRoute = $required['variant_route'] ?? null;
-                $location = _stattic_runtime_version_location_for_hash($privateRoot, $required['space_id'], $required['version_id'], $required['sha256'], $variantRoute);
-                if ($location === null) {
-                    _stattic_json_response(404, ['error' => ['code' => 'runtime_file_fetch_not_found', 'message' => 'No file in this version matches the requested hash.']]);
-                }
-                _stattic_runtime_stream_version_file(
-                    $privateRoot,
-                    $required['space_id'],
-                    $required['version_id'],
-                    $location['path'],
-                    $method,
-                    $location['variant_route']
-                );
-            },
-        ],
-    ];
-}
-
-// Upload lane rows (the S3-shaped ingest surface). Row order preserves the
-// pre-unification if-chain: batch first (any method answers its 405), then the
-// method-gated parts/complete/fetch shapes that fall through to the generic
-// file PUT — a PUT whose literal path ends in /complete or /fetch is stored as
-// that file, exactly as before.
-function _stattic_runtime_admin_upload_routes(string $privateRoot): array
-{
-    return [
-        [
+    $routes = [];
+    foreach ($rows as [$routeMethod, $pattern, $binary, $captures, $mismatch, $handler]) {
+        $routes[] = [
             'lane' => 'upload',
-            'methods' => ['POST'],
-            'pattern' => '#^/([^/]+)/batch$#',
-            'binary' => false,
-            'method_mismatch' => [
-                'allow' => 'POST',
+            'methods' => [$routeMethod],
+            'pattern' => $pattern,
+            'binary' => $binary,
+            'method_mismatch' => $mismatch === null ? null : [
+                'allow' => $routeMethod,
                 'code' => 'runtime_upload_operation_not_supported',
-                'message' => 'Runtime batch upload only supports POST.',
+                'message' => $mismatch,
             ],
-            'handler' => static fn (array $matches, array $claims) => _stattic_runtime_upload_batch($privateRoot, $matches[1], $claims),
-        ],
-        [
-            'lane' => 'upload',
-            'methods' => ['PUT'],
-            'pattern' => '#^/([^/]+)/parts/([0-9]{1,5})/files/(.+)$#',
-            'binary' => false,
-            'method_mismatch' => null,
-            'handler' => static fn (array $matches, array $claims) => _stattic_runtime_upload_file_part($privateRoot, $matches[1], $matches[3], (int) $matches[2], $claims),
-        ],
-        [
-            'lane' => 'upload',
-            'methods' => ['POST'],
-            'pattern' => '#^/([^/]+)/complete/files/(.+)$#',
-            'binary' => false,
-            'method_mismatch' => null,
-            'handler' => static fn (array $matches, array $claims) => _stattic_runtime_complete_chunked_upload($privateRoot, $matches[1], $matches[2], $claims),
-        ],
-        [
-            'lane' => 'upload',
-            'methods' => ['POST'],
-            'pattern' => '#^/([^/]+)/fetch/files/(.+)$#',
-            'binary' => false,
-            'method_mismatch' => null,
-            'handler' => static fn (array $matches, array $claims) => _stattic_runtime_upload_file_from_url($privateRoot, $matches[1], $matches[2], $claims),
-        ],
-        [
-            'lane' => 'upload',
-            'methods' => ['PUT'],
-            'pattern' => '#^/([^/]+)/files/(.+)$#',
-            'binary' => false,
-            'method_mismatch' => [
-                'allow' => 'PUT',
-                'code' => 'runtime_upload_operation_not_supported',
-                'message' => 'Runtime file upload only supports PUT.',
-            ],
-            'handler' => static fn (array $matches, array $claims) => _stattic_runtime_upload_file($privateRoot, $matches[1], $matches[2], $claims),
-        ],
-    ];
+            'captures' => $captures,
+            'handler' => $handler,
+        ];
+    }
+    return $routes;
 }

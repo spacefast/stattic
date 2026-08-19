@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-// Dedicated CLI entry point for exercising shared/artifacts.php's real
+// Dedicated CLI entry point for exercising shared/native-process.php's real
 // subprocess runner (_stattic_runtime_run_subprocess) from the bun test
 // runner. The runner is a pure process-plumbing helper with no HTTP surface,
 // so there is nothing for the manifest-driven startRuntime() harness to hit;
@@ -12,7 +12,7 @@ declare(strict_types=1);
 // response line. Captured bytes are reported as length + sha256 rather than
 // echoed, so a megabyte round trip stays cheap to assert on.
 require_once __DIR__ . '/../engine/shared/context.php';
-require_once __DIR__ . '/../engine/shared/artifacts.php';
+require_once __DIR__ . '/../engine/shared/native-process.php';
 
 $request = json_decode((string) ($argv[1] ?? ''), true);
 if (!is_array($request)) {
@@ -41,6 +41,16 @@ if (($request['missing_binary'] ?? false) === true) {
     $cmd = [__DIR__ . '/does-not-exist-spacefast-subprocess-probe'];
 } else {
     $cmd = [PHP_BINARY, '-r', (string) ($request['child'] ?? '')];
+}
+
+if (($request['detached'] ?? false) === true) {
+    echo json_encode([
+        'spawned' => _stattic_runtime_start_detached_subprocess(
+            $cmd,
+            is_array($request['env'] ?? null) ? $request['env'] : null,
+        ),
+    ]) . "\n";
+    exit(0);
 }
 
 $result = _stattic_runtime_run_subprocess($cmd, is_array($request['env'] ?? null) ? $request['env'] : null, $stdin);

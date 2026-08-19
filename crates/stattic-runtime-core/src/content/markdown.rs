@@ -15,7 +15,6 @@ pub(super) fn markdown_page(
     path: &str,
     source: &str,
     site_meta: Option<&Map<String, Value>>,
-    _metadata: &Map<String, Value>,
     diagnostics: &mut Vec<Value>,
 ) -> std::result::Result<Page, String> {
     let (frontmatter, body) = split_frontmatter(source, path, diagnostics);

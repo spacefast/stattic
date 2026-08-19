@@ -5,7 +5,6 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-bcrypt.workspace = true
 lol_html.workspace = true
 mime_guess.workspace = true
 pulldown-cmark.workspace = true
@@ -17,9 +16,17 @@ sha2 = "0.10"
 unicode-normalization.workspace = true
 url.workspace = true
 walkdir.workspace = true
+stattic-runtime-egress = { path = "../stattic-runtime-egress" }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 stattic-zero-runner = { path = "../stattic-zero-runner" }
+
+# utimensat(2), to stamp a placed file's mtime by path. std can only set times
+# through an open File, and that open needs write access a read-only CAS blob
+# does not grant — while opening retained blobs at all is exactly the cost the
+# retained path exists to avoid.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

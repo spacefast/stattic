@@ -1,11 +1,32 @@
-// Shared harness for the runtime test suite. Self-contained: it installs the engine
-// from runtime/engine-manifest.json into a temp web root, serves it with `php -S`,
-// and signs management/upload JWTs with a per-process Ed25519 key delivered
-// through the same Atomic_Persistent_Data surface WP.Cloud exposes before
-// direct PHP entrypoints run. No imports from outside runtime/.
+// Shared harness for the runtime test suite, on the schema-v4 engine.
+//
+// Self-contained: it installs the engine from runtime/engine-manifest.json into
+// a temp web root, serves it with `php -S`, and signs management/upload/blob-gate
+// JWTs with a per-process Ed25519 key delivered through the same
+// Atomic_Persistent_Data surface WP.Cloud exposes before direct PHP entrypoints
+// run.
+//
+// The only imports from outside runtime/ are single-authority contracts the
+// engine mirrors rather than owns: the platform's problem-document derivation
+// (packages/common) and the generated finalizer protocol (packages/routing,
+// same codegen that writes shared/finalizer-protocol.generated.php). Re-declaring
+// either here would create a second reading of a wire contract.
+//
+// v4 shapes this file speaks (private-notes:internal-docs/runtime-rewrite-contracts-2026-08-07):
+//   * every admin route rides `?route=<path>` on /__spacefast/api.php and
+//     /__spacefast/upload.php — no path suffixes, no op=/upload_id= forms;
+//   * publish is content-addressed: POST /spaces/{s}/versions declares the
+//     manifest, POST /spaces/{s}/blobs/have negotiates, PUT /spaces/{s}/blobs/{sha}
+//     streams bytes, POST .../finalize consumes the session. There is no
+//     path-addressed file upload, no multipart/parts lane, no tar batch lane;
+//   * artifacts are pointer + content-addressed PHP: routes/current.json ->
+//     routes/shards/hosts-<xx>-<h16>.php, spaces/<s>/space.json ->
+//     overlays/overlay-<h16>.php, versions/<v>/root.json -> root-<h16>.php ->
+//     responses-<h16>.php. The readers below are how a test inspects them;
+//   * bytes live only in the CAS at spaces/<s>/blobs/<aa>/<sha>.
 import { setDefaultTimeout } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { once } from "node:events";
 import {
   chmodSync,
@@ -23,7 +44,9 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-import { strToU8, zipSync } from "fflate";
+import { errorDocsUrl, errorTitle } from "../../packages/common/src/contracts/error-codes.ts";
+import { FINALIZER_PROTOCOL } from "../../packages/routing/src/protocol.generated.ts";
+import { writeActiveReleasePointer } from "./active-release.ts";
 
 // The canonical runner (tests/run.sh) passes `--timeout 30000`; encode the
 // same default here so direct `bun test tests/<suite>.test.ts` invocations
@@ -41,9 +64,33 @@ export const RUNTIME_INSTANCE_ID = "rti_test";
 export const MANAGEMENT_HOST = "127.0.0.1";
 export const RUNTIME_HTTP_API_BASE = "/__spacefast/api.php";
 export const RUNTIME_UPLOAD_API_BASE = "/__spacefast/upload.php";
-const PHP_BINARY = process.env.PHP_BINARY ?? "php";
+/** The blob token gate (contracts §7): GET /__stattic/blob/<jwt>. */
+export const RUNTIME_BLOB_GATE_PREFIX = "/__stattic/blob/";
+export const PHP_BINARY = process.env.PHP_BINARY ?? "php";
+
+/**
+ * The generated response-table contract (entry keys, lanes, cache classes,
+ * reserved keys, the accel survivor set). Same codegen as
+ * shared/finalizer-protocol.generated.php, so a protocol change lands on both
+ * sides at once and never has to be restated in a test.
+ */
+export const RESPONSES = FINALIZER_PROTOCOL.responses;
+
 const REPO_ROOT = path.resolve(RUNTIME_DIR, "..");
 const nativeBinaryPaths = new Map<string, string>();
+let runtimeStartTail = Promise.resolve();
+
+function noOpRuntimeStartRelease() {}
+
+export async function acquireRuntimeStartLock(): Promise<() => void> {
+  const previous = runtimeStartTail;
+  let release = noOpRuntimeStartRelease;
+  runtimeStartTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  return release;
+}
 
 function cargoDebugBinary(binary: string) {
   const metadata = spawnSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], {
@@ -89,8 +136,15 @@ function runtimeNativeBinaryPath(binary: string, packageName: string, configured
     nativeBinaryPaths.set(binary, configured);
     return configured;
   }
+  // `runtime/bin` is a CI bootstrap artifact: built in the same workflow run,
+  // from the same commit, so reusing it there is free and correct. It is also
+  // gitignored, which means a developer host can hold one from any earlier
+  // build — and preferring it made the suite silently test a stale compiler
+  // against fresh PHP. Outside CI the checkout is the only trustworthy source;
+  // cargo makes an unchanged rebuild a no-op anyway. `configured` above still
+  // lets anyone point at a specific binary deliberately.
   const packaged = path.join(RUNTIME_DIR, "bin", binary);
-  if (existsSync(packaged) && packagedBinaryRuns(binary, packaged)) {
+  if (process.env.CI && existsSync(packaged) && packagedBinaryRuns(binary, packaged)) {
     nativeBinaryPaths.set(binary, packaged);
     return packaged;
   }
@@ -109,19 +163,11 @@ function runtimeNativeBinaryPath(binary: string, packageName: string, configured
   return candidate;
 }
 
-function runtimeFinalizerPath() {
+function runtimeBinaryPath() {
   return runtimeNativeBinaryPath(
+    "stattic-runtime",
     "stattic-runtime-compiler",
-    "stattic-runtime-compiler",
-    process.env.SPACEFAST_RUNTIME_FINALIZER_BIN,
-  );
-}
-
-function zeroRunnerPath() {
-  return runtimeNativeBinaryPath(
-    "stattic-zero-runner",
-    "stattic-zero-runner",
-    process.env.SPACEFAST_ZERO_RUNNER,
+    process.env.SPACEFAST_RUNTIME_BIN,
   );
 }
 
@@ -132,8 +178,14 @@ const JWKS = JSON.stringify({
 });
 // The entrypoint bootstrap turns this fake Atomic payload into the same
 // constants used on WP.Cloud.
+export const DASHBOARD_ORIGIN = "https://my.spacefast.com";
+
 export const RUNTIME_ATOMIC_DATA = {
   SPACEFAST_API_BASE_URL: "https://api.spacefast.com",
+  SPACEFAST_BROWSER_API_URL: "https://api.spacefast.com",
+  // The one origin allowed to READ a blob-gate response with fetch(). Pushed as
+  // provider persistent data like every other runtime config value.
+  SPACEFAST_DASHBOARD_ORIGIN: DASHBOARD_ORIGIN,
   SPACEFAST_MANAGEMENT_HOSTNAME: MANAGEMENT_HOST,
   SPACEFAST_RUNTIME_INSTANCE_ID: RUNTIME_INSTANCE_ID,
   SPACEFAST_RUNTIME_JWKS_B64: Buffer.from(JWKS, "utf8").toString("base64"),
@@ -148,7 +200,55 @@ export const RUNTIME_ATOMIC_DATA = {
 // per-runtime with `startRuntime({ env: { SPACEFAST_INSECURE_COOKIES: "" } })`.
 export const DEFAULT_ENV: Record<string, string> = {
   SPACEFAST_INSECURE_COOKIES: "1",
+  SPACEFAST_RUNTIME_TEST_MODE: "1",
 };
+
+/**
+ * The route config for a publicly readable Space.
+ *
+ * `public_exposure` is the control plane's own exposure descriptor and is the
+ * ONLY authority generate.php accepts for the overlay's `open` flag (D34) —
+ * "zero grants" is the most protected projection there is, never an open one.
+ * Omitting it left every fixture Space closed, so the whole no-access-code fast
+ * lane went unexercised. `open` additionally needs unconditional `live` AND
+ * `all_versions` public grants, so only `live_and_all_versions` opens a Space.
+ */
+export function publicAccessConfig(
+  config: Record<string, unknown> = {},
+  target: "live" | "all_versions" | "live_and_all_versions" = "live",
+): Record<string, unknown> {
+  const targets = target === "live_and_all_versions" ? ["live", "all_versions"] : [target];
+  return {
+    ...config,
+    public_exposure: {
+      v: 1,
+      public: true,
+      authorizationDigest: "0".repeat(64),
+      contentTypes: null,
+      externalProxy: false,
+      unmodeled: "",
+    },
+    projection_generation: 1,
+    authorization: {
+      generation: 1,
+      sessionVersion: 0,
+      fence: "none",
+      acquireUrl: "https://access.spacefast.test/acquire/runtime-public",
+      spaceClaimed: true,
+      grants: targets.map((kind) => ({
+        id: `grt_runtime_public_${kind}`,
+        generation: 1,
+        name: "Public",
+        audience: { kind: "public" },
+        resources: { include: ["/**"], exclude: [] },
+        capabilities: ["page.view"],
+        constraints: {},
+        target: { kind },
+        source: { kind: "managed", reference: "test:runtime-public" },
+      })),
+    },
+  };
+}
 // A second, untrusted key for bad-signature tests.
 const rogue = generateKeyPairSync("ed25519");
 
@@ -157,8 +257,8 @@ export function base64url(data: string | Uint8Array): string {
 }
 
 // The one compact-JWS (EdDSA) encoder for the suite. The harness's own
-// management/upload minters and every test-local visitor-token factory build
-// on it instead of re-rolling header/payload/sign per file.
+// management/upload/blob-gate minters and every test-local visitor-token factory
+// build on it instead of re-rolling header/payload/sign per file.
 export function signEd25519Jwt(
   signingKey: Parameters<typeof sign>[2],
   kid: string,
@@ -170,14 +270,14 @@ export function signEd25519Jwt(
   return `${header}.${payload}.${base64url(signature)}`;
 }
 
-// The issuer descriptor a route policy's `issuers` entry carries for a
-// test-owned visitor-token keypair (kid matches the platform signer's).
-export function visitorIssuer(
-  issuerKey: { export(options: { format: "jwk" }): JsonWebKey },
-  grantNamespaces: string[],
-): { kid: string; alg: string; publicKey: string; grantNamespaces: string[] } {
+// The internal verification-key descriptor for a test-owned visitor keypair.
+export function visitorIssuer(issuerKey: { export(options: { format: "jwk" }): JsonWebKey }): {
+  kid: string;
+  alg: string;
+  publicKey: string;
+} {
   const jwk = issuerKey.export({ format: "jwk" });
-  return { kid: "spacefast-runtime-v1", alg: "EdDSA", publicKey: jwk.x ?? "", grantNamespaces };
+  return { kid: "spacefast-runtime-v1", alg: "EdDSA", publicKey: jwk.x ?? "" };
 }
 
 export function signToken(
@@ -207,7 +307,6 @@ export function uploadToken(
   spaceId: string,
   uploadId: string,
   versionId: string,
-  sessionMode: "declared" | "open",
   overrides: Record<string, unknown> = {},
 ): string {
   return signToken({
@@ -216,86 +315,99 @@ export function uploadToken(
     space_id: spaceId,
     deploy_session_id: uploadId,
     version_id: versionId,
-    session_mode: sessionMode,
     ...overrides,
   });
 }
 
+/**
+ * The blob token gate audience (contracts §7, D35→D75/D36/D37).
+ *
+ * Exactly one resolver: an uploads-store `record` id, an OPEN publish session's
+ * `upload` id (the only thing that can authorize bytes for a version whose
+ * catalog does not exist yet), or a `versionId` whose catalog lists the sha.
+ * Deliberately unpinned to a runtime instance — the gate's own scope_valid
+ * rejects a token carrying two resolvers or none, and that rejection is part of
+ * what tests exercise.
+ */
+export function blobGateToken(
+  spaceId: string,
+  sha256Hex: string,
+  resolver: { record: string } | { upload: string } | { versionId: string; variantRoute?: string },
+  { ttlSeconds = 600, rogueKey = false }: { ttlSeconds?: number; rogueKey?: boolean } = {},
+): string {
+  return signToken(
+    {
+      aud: "spacefast-blob-gate",
+      space_id: spaceId,
+      sha256: sha256Hex,
+      ...("record" in resolver ? { record: resolver.record } : {}),
+      ...("upload" in resolver ? { upload: resolver.upload } : {}),
+      ...("versionId" in resolver
+        ? {
+            version_id: resolver.versionId,
+            ...(resolver.variantRoute ? { route_name: resolver.variantRoute } : {}),
+          }
+        : {}),
+    },
+    { ttlSeconds, rogueKey },
+  );
+}
+
+export type VersionFileView = "source" | "served";
+
+/**
+ * The gate's path lane: the same audience, resolved through the version catalog
+ * instead of a sha. Carries no `sha256` and no `route_name` on purpose — those
+ * belong to the content-addressed lane above, and the gate rejects a token that
+ * mixes them.
+ */
+export function blobGatePathToken(
+  spaceId: string,
+  versionId: string,
+  filePath: string,
+  view: VersionFileView,
+  { ttlSeconds = 600, rogueKey = false }: { ttlSeconds?: number; rogueKey?: boolean } = {},
+): string {
+  return signToken(
+    {
+      aud: "spacefast-blob-gate",
+      space_id: spaceId,
+      version_id: versionId,
+      path: filePath,
+      view,
+    },
+    { ttlSeconds, rogueKey },
+  );
+}
+
+/**
+ * Every admin path rides `?route=` on its entrypoint alias (contracts §3 route
+ * table; shared/context.php `_stattic_runtime_*_api_route_path`). Both surfaces
+ * use the identical convention for route-addressed operations. Path-addressed
+ * file and URL uploads also accept their compact op=/upload_id=/path spelling.
+ *
+ * The upload surface accepts `route` or the compact `op`, `upload_id`, and
+ * `path` parameters. Other query parameters remain deliberate 405 probes.
+ */
 export function runtimeHttpPath(apiPath: string): string {
-  if (apiPath === RUNTIME_HTTP_API_BASE || apiPath.startsWith(`${RUNTIME_HTTP_API_BASE}/`)) {
-    const route =
-      apiPath === RUNTIME_HTTP_API_BASE ? "/" : apiPath.slice(RUNTIME_HTTP_API_BASE.length);
-    if (route === "/") {
-      return RUNTIME_HTTP_API_BASE;
-    }
+  for (const base of [RUNTIME_HTTP_API_BASE, RUNTIME_UPLOAD_API_BASE]) {
+    if (apiPath !== base && !apiPath.startsWith(`${base}/`)) continue;
+    const route = apiPath === base ? "/" : apiPath.slice(base.length);
+    if (route === "/") return base;
     const [pathname = "/", query = ""] = route.split("?", 2);
     const params = new URLSearchParams(query);
     params.set("route", pathname);
-    return `${RUNTIME_HTTP_API_BASE}?${params.toString()}`;
-  }
-  if (apiPath === RUNTIME_UPLOAD_API_BASE || apiPath.startsWith(`${RUNTIME_UPLOAD_API_BASE}/`)) {
-    return runtimeUploadHttpPath(apiPath);
+    return `${base}?${params.toString()}`;
   }
   return apiPath;
-}
-
-export function runtimeUploadHttpPath(apiPath: string): string {
-  if (!apiPath.startsWith(`${RUNTIME_UPLOAD_API_BASE}/`)) {
-    return apiPath;
-  }
-  const [suffix = "", query = ""] = apiPath.slice(RUNTIME_UPLOAD_API_BASE.length + 1).split("?", 2);
-  const batch = suffix.match(/^([^/]+)\/batch$/);
-  if (batch) {
-    return appendRuntimeUploadQuery(
-      `${RUNTIME_UPLOAD_API_BASE}?${new URLSearchParams({ op: "batch", upload_id: batch[1] ?? "" })}`,
-      query,
-    );
-  }
-  const part = suffix.match(/^([^/]+)\/files\/(.+)\/parts\/([0-9]{1,5})$/);
-  if (part) {
-    return appendRuntimeUploadQuery(
-      runtimeUploadQueryPath(part[1] ?? "", part[2] ?? "", { part_number: part[3] ?? "" }),
-      query,
-    );
-  }
-  const complete = suffix.match(/^([^/]+)\/files\/(.+)\/complete$/);
-  if (complete) {
-    return appendRuntimeUploadQuery(
-      runtimeUploadQueryPath(complete[1] ?? "", complete[2] ?? "", { complete: "1" }),
-      query,
-    );
-  }
-  const fetch = suffix.match(/^([^/]+)\/files\/(.+)\/fetch$/);
-  if (fetch) {
-    return appendRuntimeUploadQuery(
-      runtimeUploadQueryPath(fetch[1] ?? "", fetch[2] ?? "", { op: "fetch" }),
-      query,
-    );
-  }
-  const file = suffix.match(/^([^/]+)\/files\/(.+)$/);
-  if (file) {
-    return appendRuntimeUploadQuery(runtimeUploadQueryPath(file[1] ?? "", file[2] ?? ""), query);
-  }
-  return apiPath;
-}
-
-function appendRuntimeUploadQuery(basePath: string, query: string): string {
-  return query === "" ? basePath : `${basePath}&${query}`;
-}
-
-function runtimeUploadQueryPath(
-  uploadId: string,
-  encodedPath: string,
-  extra: Record<string, string> = {},
-): string {
-  const params = new URLSearchParams({ op: "file", upload_id: uploadId, ...extra });
-  return `${RUNTIME_UPLOAD_API_BASE}?${params.toString()}&path=${encodedPath}`;
 }
 
 export type Runtime = {
   baseUrl: string;
   root: string;
+  engineRoot: string;
   storageRoot: string;
+  processId: number;
   stop: () => void;
 };
 
@@ -303,6 +415,7 @@ export type RuntimeOptions = {
   env?: Record<string, string>;
   atomicData?: Record<string, string>;
   autoPrependInit?: boolean;
+  phpBinary?: string;
   phpIni?: Record<string, string>;
 };
 
@@ -319,15 +432,26 @@ function installEngine(root: string): void {
   const manifest = JSON.parse(
     readFileSync(path.join(RUNTIME_DIR, "engine-manifest.json"), "utf8"),
   ) as { files: string[]; aliases: Array<{ source: string; path: string }> };
+  // The manifest is the single authority for what ships, and it is edited by
+  // the orchestrator at commit time rather than by the streams that add or
+  // delete engine files. A drifted manifest therefore fails here first — report
+  // it as drift naming the entries, not as a bare ENOENT from cpSync.
+  const missing = manifest.files.filter(
+    (file) => file !== "bin/stattic-runtime" && !existsSync(path.join(RUNTIME_DIR, file)),
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `engine-manifest.json names files that do not exist: ${missing.join(", ")} — ` +
+        "the manifest is stale relative to the engine tree",
+    );
+  }
+  const release = "releases/test";
+  const releaseRoot = path.join(root, ".stattic", release);
   for (const file of manifest.files) {
-    const target = path.join(root, ".stattic", file);
+    const target = path.join(releaseRoot, file);
     mkdirSync(path.dirname(target), { recursive: true });
     const source =
-      file === "bin/stattic-runtime-compiler"
-        ? runtimeFinalizerPath()
-        : file === "bin/stattic-zero-runner"
-          ? zeroRunnerPath()
-          : path.join(RUNTIME_DIR, file);
+      file === "bin/stattic-runtime" ? runtimeBinaryPath() : path.join(RUNTIME_DIR, file);
     cpSync(source, target);
   }
   for (const alias of manifest.aliases) {
@@ -335,7 +459,31 @@ function installEngine(root: string): void {
     mkdirSync(path.dirname(target), { recursive: true });
     cpSync(path.join(RUNTIME_DIR, alias.source), target);
   }
+  writeActiveReleasePointer(path.join(root, ".stattic"), release);
   mkdirSync(path.join(root, ".stattic", "storage"), { recursive: true });
+}
+
+// D7 / contracts §2: the installer writes `storage/config.generated.php` — plain
+// constants, no getenv, no decrypt — because the visitor lane must answer
+// "is this the management hostname?" (serve.php) without loading
+// shared/bootstrap-config.php, whose Atomic_Persistent_Data decrypt is exactly
+// what the D34 module pin forbids on the serve path. `.atomic-persistent-data.json`
+// above is the raw provider input; only the management/upload entrypoints read it.
+// Staging one without the other left every serve-path config lookup empty.
+const GENERATED_CONFIG_KEYS = [
+  "SPACEFAST_MANAGEMENT_HOSTNAME",
+  "SPACEFAST_MANAGEMENT_HOST_PATTERN",
+] as const;
+
+function writeGeneratedConfig(root: string, atomicData: Record<string, string>): void {
+  const lines = GENERATED_CONFIG_KEYS.filter((key) => (atomicData[key] ?? "") !== "").map((key) => {
+    const value = (atomicData[key] ?? "").replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+    return `const ${key} = '${value}';`;
+  });
+  writeFileSync(
+    path.join(root, ".stattic/storage/config.generated.php"),
+    ["<?php", "declare(strict_types=1);", "", ...lines, ""].join("\n"),
+  );
 }
 
 export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtime> {
@@ -347,20 +495,16 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
   // in-server requests get this for free because getcwd() resolves symlinks.
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "stattic-runtime-test-")));
   installEngine(root);
-  writeFileSync(
-    path.join(root, ".atomic-persistent-data.json"),
-    `${JSON.stringify({ ...RUNTIME_ATOMIC_DATA, ...options.atomicData })}\n`,
-  );
-  const port = await freePort();
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const atomicData = { ...RUNTIME_ATOMIC_DATA, ...options.atomicData };
+  writeFileSync(path.join(root, ".atomic-persistent-data.json"), `${JSON.stringify(atomicData)}\n`);
+  writeGeneratedConfig(root, atomicData);
   if (options.autoPrependInit) {
     writeFileSync(
       path.join(root, ".stattic/test-prepend.php"),
       [
         "<?php",
         `require ${JSON.stringify(RUNTIME_TEST_ATOMIC_PREPEND)};`,
-        `require ${JSON.stringify(path.join(root, ".stattic/engine/shared/bootstrap-config.php"))};`,
-        `require ${JSON.stringify(path.join(root, ".stattic/engine/init.php"))};`,
+        `require ${JSON.stringify(path.join(root, ".stattic/releases/test/engine/init.php"))};`,
         "",
       ].join("\n"),
     );
@@ -377,44 +521,73 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
   for (const [name, value] of Object.entries(options.phpIni ?? {})) {
     phpArgs.push("-d", `${name}=${value}`);
   }
+  // freePort() necessarily closes its reservation before PHP can bind. Tests in
+  // one Bun process can call startRuntime concurrently, so serialize only the
+  // allocate+bind window; once health responds, every fixture runs in parallel.
+  const releaseStartLock = await acquireRuntimeStartLock();
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
   phpArgs.push("-S", `127.0.0.1:${port}`, RUNTIME_TEST_ROUTER);
-  const server = spawn("php", phpArgs, {
+  const server = spawn(options.phpBinary ?? PHP_BINARY, phpArgs, {
     cwd: root,
-    stdio: "pipe",
+    // The CLI server logs every request. Nobody consumes these streams, so
+    // pipes eventually fill and can reset an otherwise valid long-running
+    // fixture request. Keep the harness silent instead of backpressuring PHP.
+    stdio: "ignore",
+    // PHP_CLI_SERVER_WORKERS forks children. Give the fixture its own process
+    // group so stop() can reap the whole server instead of leaking listeners
+    // after killing only the parent process.
+    detached: process.platform !== "win32",
     env: {
       ...process.env,
       ...DEFAULT_ENV,
-      SPACEFAST_RUNTIME_FINALIZER_BIN:
-        options.env?.SPACEFAST_RUNTIME_FINALIZER_BIN ?? runtimeFinalizerPath(),
-      SPACEFAST_ZERO_RUNNER: options.env?.SPACEFAST_ZERO_RUNNER ?? zeroRunnerPath(),
+      SPACEFAST_RUNTIME_BIN: options.env?.SPACEFAST_RUNTIME_BIN ?? runtimeBinaryPath(),
       ...options.env,
     },
   });
+  const stopServer = () => {
+    if (process.platform !== "win32" && server.pid !== undefined) {
+      try {
+        process.kill(-server.pid, "SIGKILL");
+        return;
+      } catch {
+        // The parent may have exited before cleanup; fall back to the handle.
+      }
+    }
+    server.kill("SIGKILL");
+  };
 
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    if (server.exitCode !== null) {
-      throw new Error(`php_exited:${server.exitCode}`);
+  try {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      if (server.exitCode !== null) {
+        throw new Error(`php_exited:${server.exitCode}`);
+      }
+      // oxlint-disable-next-line no-await-in-loop -- readiness poll: each probe depends on the previous one failing
+      const response = await fetch(`${baseUrl}/__spacefast/health.php`).catch(() => null);
+      if (response?.ok) {
+        break;
+      }
+      if (Date.now() > deadline) {
+        stopServer();
+        throw new Error("php_server_start_timeout");
+      }
+      // oxlint-disable-next-line no-await-in-loop -- readiness poll backoff
+      await new Promise((resolve) => setTimeout(resolve, 25));
     }
-    // oxlint-disable-next-line no-await-in-loop -- readiness poll: each probe depends on the previous one failing
-    const response = await fetch(`${baseUrl}/__spacefast/health.php`).catch(() => null);
-    if (response?.ok) {
-      break;
-    }
-    if (Date.now() > deadline) {
-      server.kill();
-      throw new Error("php_server_start_timeout");
-    }
-    // oxlint-disable-next-line no-await-in-loop -- readiness poll backoff
-    await new Promise((resolve) => setTimeout(resolve, 25));
+  } finally {
+    releaseStartLock();
   }
 
+  if (server.pid === undefined) throw new Error("php_server_pid_missing");
   return {
     baseUrl,
     root,
+    engineRoot: path.join(root, ".stattic/releases/test/engine"),
     storageRoot: path.join(root, ".stattic", "storage"),
+    processId: server.pid,
     stop: () => {
-      server.kill();
+      stopServer();
       rmSync(root, { recursive: true, force: true });
     },
   };
@@ -458,7 +631,7 @@ export function dispatchCli(
         "-d display_errors=stderr",
         ...(options.phpFlags ?? []),
         `-d auto_prepend_file=${shellQuote(RUNTIME_TEST_ATOMIC_PREPEND)}`,
-        shellQuote(path.join(rt.root, ".stattic/engine/admin/dispatch.php")),
+        shellQuote(path.join(rt.engineRoot, "admin/dispatch.php")),
         ">",
         shellQuote(stdoutPath),
         "2>",
@@ -479,6 +652,27 @@ export function dispatchCli(
   }));
 }
 
+/**
+ * The dispatch envelope for a management route, with the `?route=` spelling and
+ * the action-scoped JWT already applied. dispatch.php derives its route from
+ * `path`'s query exactly like HTTP does, so a hand-built envelope that forgets
+ * `?route=` is a 400 rather than the route under test.
+ */
+export function dispatchEnvelope(
+  method: string,
+  apiPath: string,
+  action: string,
+  scope: Record<string, unknown> = {},
+  body?: unknown,
+): Record<string, unknown> {
+  return {
+    method,
+    path: runtimeHttpPath(apiPath),
+    authorization: `Bearer ${managementToken(action, scope)}`,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  };
+}
+
 // Management API request. `scope` becomes action-scoped JWT claims.
 export async function api(
   rt: Runtime,
@@ -488,27 +682,11 @@ export async function api(
   scope: Record<string, unknown> = {},
   body?: unknown,
 ): Promise<Response> {
-  const staticMountRoutes =
-    body &&
-    typeof body === "object" &&
-    "static_mount_routes" in body &&
-    Array.isArray(body.static_mount_routes) &&
-    body.static_mount_routes.length > 0
-      ? body.static_mount_routes
-      : null;
-  const boundScope = staticMountRoutes
-    ? {
-        ...scope,
-        static_mount_routes_sha256: createHash("sha256")
-          .update(JSON.stringify(staticMountRoutes))
-          .digest("hex"),
-      }
-    : scope;
   return fetch(`${rt.baseUrl}${runtimeHttpPath(apiPath)}`, {
     method,
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${managementToken(action, boundScope)}`,
+      authorization: `Bearer ${managementToken(action, scope)}`,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -541,7 +719,40 @@ export async function get(
   return fetch(`${rt.baseUrl}${runtimeHttpPath(requestPath)}`, {
     redirect: "manual",
     ...init,
-    headers: { Host: host, ...init.headers },
+    // PHP's CLI server closes some bodyless responses (notably 304) in a way
+    // that can leave Bun's Linux fetch pool holding a stale HTTP/1.1 socket.
+    // The next behavioral probe then sees ECONNRESET before it reaches PHP.
+    // This fixture is not a connection-pooling test, so make every request own
+    // its transport and keep the assertions focused on runtime behavior.
+    headers: { Connection: "close", Host: host, ...init.headers },
+  });
+}
+
+/** One blob-gate fetch. The token IS the path segment (contracts §7). */
+export async function getBlob(
+  rt: Runtime,
+  host: string,
+  token: string,
+  init: Omit<RequestInit, "headers"> & { headers?: Record<string, string> } = {},
+): Promise<Response> {
+  return get(rt, host, `${RUNTIME_BLOB_GATE_PREFIX}${token}`, init);
+}
+
+export async function postAccessCallback(
+  rt: Runtime,
+  host: string,
+  token: string,
+  returnTo = "/",
+  cookie?: string,
+): Promise<Response> {
+  return get(rt, host, "/__sf/redeem", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${host}`,
+      ...(cookie ? { cookie } : {}),
+    },
+    body: new URLSearchParams({ token, return: returnTo }),
   });
 }
 
@@ -550,108 +761,189 @@ export function sha256(content: string | Uint8Array): string {
 }
 
 export async function errorCode(response: Response): Promise<string> {
-  const body = (await response.json()) as { error?: { code?: string } };
-  return body.error?.code ?? "";
+  const body = (await response.json()) as { code?: string };
+  return body.code ?? "";
 }
 
-// Mirrors the shard entry shape stamped by
-// `_stattic_runtime_build_file_meta`/`_stattic_tier_remote_for` in
-// runtime/engine/shared/storage.php + runtime/engine/admin/tier.php.
-export type TierRemoteLocator = { bucket: string; key: string; enc: string };
-export type TierCompressedEntry = {
-  disk_path: string;
-  size: number;
-  sha256: string;
-  local: boolean;
-  tier_class: string;
-  remote?: TierRemoteLocator;
-};
-export type ShardFileEntry = {
-  disk_path: string;
-  size: number;
-  mime: string;
-  sha256: string;
-  local: boolean;
-  tier_class: string;
-  remote?: TierRemoteLocator;
-  compressed?: Partial<Record<"br" | "gzip", TierCompressedEntry>>;
-};
-export type ShardFiles = Record<string, ShardFileEntry>;
-
-export function shardFiles(runtime: Runtime, spaceId: string, versionId: string): ShardFiles {
-  const root = path.join(
-    runtime.storageRoot,
-    "spaces",
-    spaceId,
-    "versions",
-    versionId,
-    "file-shards",
-  );
-  const files: ShardFiles = {};
-  for (const name of readdirSync(root)) {
-    if (!name.endsWith(".php")) continue;
-    const file = path.join(root, name);
-    if (!existsSync(file)) continue;
-    const proc = Bun.spawnSync([
-      "php",
-      "-r",
-      `echo json_encode(include ${JSON.stringify(file)}, JSON_UNESCAPED_SLASHES);`,
-    ]);
-    const shard = JSON.parse(proc.stdout.toString()) as { files: ShardFiles };
-    Object.assign(files, shard.files);
-  }
-  return files;
+// The RFC 9457 body the engine emits, derived the same way
+// runtime/engine/shared/problem.php derives it. Building expectations from the
+// TypeScript rules is what keeps the PHP mirror honest; `detail` is optional
+// there, so a code with nothing to add beyond its title omits it here too.
+export function problemDocument(
+  status: number,
+  code: string,
+  detail?: string,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    type: errorDocsUrl(code),
+    title: errorTitle(code),
+    status,
+    ...(detail ? { detail } : {}),
+    code,
+    ...extra,
+  };
 }
 
-export type DeploySpec = {
+// ---------------------------------------------------------------------------
+// Publish: declared session -> path or content-addressed blobs -> finalize (contracts §9)
+// ---------------------------------------------------------------------------
+
+export type DeployFile =
+  | string
+  | Uint8Array
+  | { content: string | Uint8Array; contentType?: string };
+
+export type DeployFiles = Record<string, DeployFile>;
+
+export type ManifestEntry = {
+  path: string;
+  size: number;
+  sha256: string;
+  contentType?: string;
+};
+
+export type PublishSession = {
   spaceId: string;
   versionId: string;
-  files: Record<string, string | Uint8Array>;
-  metadata?: Record<string, unknown>;
-  serving?: Record<string, unknown>;
-  /** Finalize-rendered Pages documents stored outside the public file tree. */
-  pageArtifacts?: Record<string, string>;
-  zero?: Record<string, unknown>;
-  zeroMode?: "active" | "activating";
-  activate?: Record<string, unknown>;
+  uploadId: string;
+  /** The `stattic-runtime-upload` bearer for this session's blob routes. */
+  token: string;
+  manifest: ManifestEntry[];
 };
 
+function fileBytes(file: DeployFile): Uint8Array {
+  const content = typeof file === "object" && "content" in file ? file.content : file;
+  return typeof content === "string" ? Buffer.from(content, "utf8") : content;
+}
+
+function fileContentType(file: DeployFile): string | undefined {
+  return typeof file === "object" && "content" in file ? file.contentType : undefined;
+}
+
+/** The declared manifest a publish session is created with (path + size + sha). */
+export function manifestFor(files: DeployFiles): ManifestEntry[] {
+  return Object.entries(files).map(([filePath, file]) => {
+    const bytes = fileBytes(file);
+    const contentType = fileContentType(file);
+    const entry: ManifestEntry = {
+      path: filePath,
+      size: bytes.byteLength,
+      sha256: sha256(bytes),
+    };
+    if (contentType) entry.contentType = contentType;
+    return entry;
+  });
+}
+
+export type CreateSessionOptions = {
+  metadata?: Record<string, unknown>;
+  retainedFiles?: ManifestEntry[];
+  reusableVersionId?: string;
+  /** Explicit retention mode; required whenever `reusableVersionId` is set. */
+  retention?: "all" | "list" | "none";
+  manifestHash?: string;
+  expiresAt?: string;
+  /** Extra top-level fields on the create-version body. */
+  extra?: Record<string, unknown>;
+};
+
+/**
+ * POST /spaces/{spaceId}/versions — declares the manifest ONCE (path policy is
+ * validated here, D26) and returns the durable publish session that holds the GC
+ * pin (D92). A declared digest uses the CAS lane; an omitted digest uploads by
+ * path and is bound to the runtime-computed digest.
+ */
 export async function createDeclaredSession(
   rt: Runtime,
   spaceId: string,
   versionId: string,
-  files: Record<string, string | Uint8Array>,
-  metadata?: Record<string, unknown>,
-): Promise<{ uploadId: string; token: string }> {
-  const manifest = Object.entries(files).map(([filePath, content]) => ({
-    path: filePath,
-    size: Buffer.byteLength(content),
-    sha256: sha256(content),
-  }));
+  files: DeployFiles,
+  options: CreateSessionOptions = {},
+): Promise<PublishSession> {
+  const manifest = manifestFor(files);
   const created = await apiJson<{ upload_id: string }>(
     rt,
     "POST",
-    `/__spacefast/api.php/spaces/${spaceId}/versions`,
+    `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/versions`,
     "create_version",
     { space_id: spaceId },
-    { version_id: versionId, files: manifest, ...(metadata ? { metadata } : {}) },
+    {
+      version_id: versionId,
+      files: manifest,
+      ...(options.metadata ? { metadata: options.metadata } : {}),
+      ...(options.retention ? { retention: options.retention } : {}),
+      ...(options.retainedFiles ? { retained_files: options.retainedFiles } : {}),
+      ...(options.reusableVersionId ? { reusable_version_id: options.reusableVersionId } : {}),
+      ...(options.manifestHash ? { manifest_hash: options.manifestHash } : {}),
+      ...(options.expiresAt ? { expires_at: options.expiresAt } : {}),
+      ...options.extra,
+    },
     201,
   );
   return {
+    spaceId,
+    versionId,
     uploadId: created.upload_id,
-    token: uploadToken(spaceId, created.upload_id, versionId, "declared"),
+    token: uploadToken(spaceId, created.upload_id, versionId),
+    manifest,
   };
 }
 
-export async function putFile(
+/**
+ * POST /spaces/{spaceId}/blobs/have — the path-blind negotiation (D22). Returns
+ * the raw Response so a test can assert its own rejection; `blobsHaveMissing`
+ * is the happy-path reader.
+ *
+ * Side effect worth knowing: every sha the CAS already holds AND the session
+ * declared is marked accepted by this call, which is how a retained/deduped file
+ * completes without a PUT.
+ */
+export async function blobsHave(
   rt: Runtime,
-  uploadId: string,
+  session: Pick<PublishSession, "spaceId" | "token">,
+  shas: string[],
+): Promise<Response> {
+  return fetch(
+    `${rt.baseUrl}${runtimeHttpPath(`${RUNTIME_UPLOAD_API_BASE}/spaces/${session.spaceId}/blobs/have`)}`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${session.token}`,
+      },
+      body: JSON.stringify({ shas }),
+    },
+  );
+}
+
+export async function blobsHaveMissing(
+  rt: Runtime,
+  session: Pick<PublishSession, "spaceId" | "token">,
+  shas: string[],
+): Promise<string[]> {
+  const response = await blobsHave(rt, session, shas);
+  const text = await response.text();
+  if (response.status !== 200) {
+    throw new Error(`blobs/have -> ${response.status}: ${text}`);
+  }
+  return (JSON.parse(text) as { missing: string[] }).missing;
+}
+
+/**
+ * PUT /spaces/{spaceId}/blobs/{sha} — raw streamed body, sha verified during
+ * streaming (D23). The engine caps concurrency at 4 per space and answers 429
+ * above it (D25).
+ */
+export async function putBlob(
+  rt: Runtime,
+  spaceId: string,
   token: string,
-  filePath: string,
+  shaHex: string,
   content: string | Uint8Array,
 ): Promise<Response> {
   return fetch(
-    `${rt.baseUrl}${runtimeUploadHttpPath(`${RUNTIME_UPLOAD_API_BASE}/${uploadId}/files/${filePath}`)}`,
+    `${rt.baseUrl}${runtimeHttpPath(`${RUNTIME_UPLOAD_API_BASE}/spaces/${spaceId}/blobs/${shaHex}`)}`,
     {
       method: "PUT",
       headers: { authorization: `Bearer ${token}` },
@@ -660,69 +952,132 @@ export async function putFile(
   );
 }
 
-// Full declared deploy: create session, upload every file, finalize (+activate).
-export async function deploy(rt: Runtime, spec: DeploySpec): Promise<void> {
-  const { uploadId, token } = await createDeclaredSession(
-    rt,
-    spec.spaceId,
-    spec.versionId,
-    spec.files,
-    spec.metadata,
-  );
-  for (const [filePath, content] of Object.entries(spec.files)) {
-    // oxlint-disable-next-line no-await-in-loop -- uploads stay sequential so a failure names the exact file
-    const response = await putFile(rt, uploadId, token, filePath, content);
+// `_stattic_runtime_upload_blobs_have` caps one negotiation at 2048 shas.
+const BLOBS_HAVE_MAX = 2048;
+
+/**
+ * The full ingest half of a publish: negotiate, then PUT exactly the missing
+ * blobs, deduplicated by sha. Throws naming the failing sha (and the paths that
+ * carry it) so a broken upload does not surface as an opaque finalize 409.
+ */
+export async function uploadSessionBlobs(
+  rt: Runtime,
+  session: PublishSession,
+  files: DeployFiles,
+): Promise<void> {
+  const bytesBySha = new Map<string, Uint8Array>();
+  const pathsBySha = new Map<string, string[]>();
+  for (const [filePath, file] of Object.entries(files)) {
+    const bytes = fileBytes(file);
+    const sha = sha256(bytes);
+    bytesBySha.set(sha, bytes);
+    pathsBySha.set(sha, [...(pathsBySha.get(sha) ?? []), filePath]);
+  }
+  const shas = [...bytesBySha.keys()];
+  const missing: string[] = [];
+  for (let index = 0; index < shas.length; index += BLOBS_HAVE_MAX) {
+    // oxlint-disable-next-line eslint/no-await-in-loop -- one negotiation per chunk, sequential so a failure names its chunk
+    const chunkMissing = await blobsHaveMissing(
+      rt,
+      session,
+      shas.slice(index, index + BLOBS_HAVE_MAX),
+    );
+    missing.push(...chunkMissing);
+  }
+  for (const sha of missing) {
+    const bytes = bytesBySha.get(sha);
+    if (bytes === undefined) {
+      throw new Error(`blobs/have reported a sha the session never declared: ${sha}`);
+    }
+    // oxlint-disable-next-line no-await-in-loop -- uploads stay sequential so a failure names the exact blob
+    const response = await putBlob(rt, session.spaceId, session.token, sha, bytes);
     if (response.status !== 200) {
       // oxlint-disable-next-line no-await-in-loop -- error path reads the failing response body
-      throw new Error(`upload ${filePath} -> ${response.status}: ${await response.text()}`);
+      const body = await response.text();
+      throw new Error(
+        `PUT blob ${sha} (${(pathsBySha.get(sha) ?? []).join(", ")}) -> ${response.status}: ${body}`,
+      );
     }
   }
+}
+
+/** POST /spaces/{s}/versions/{v}/finalize — raw, no status assertion. */
+export async function finalize(
+  rt: Runtime,
+  spaceId: string,
+  versionId: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  return api(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/versions/${versionId}/finalize`,
+    "finalize_version",
+    { space_id: spaceId, version_id: versionId },
+    body,
+  );
+}
+
+export type DeploySpec = {
+  spaceId: string;
+  versionId: string;
+  files: DeployFiles;
+  metadata?: Record<string, unknown>;
+  serving?: Record<string, unknown>;
+  /** Finalize-rendered Pages documents stored outside the CAS manifest. */
+  pageArtifacts?: Record<string, string>;
+  zero?: Record<string, unknown>;
+  functions?: Record<string, unknown>;
+  activate?: Record<string, unknown>;
+  /** Passed to the create-version call (retained files, convention files, ...). */
+  session?: CreateSessionOptions;
+  /** Extra top-level fields on the finalize body. */
+  finalize?: Record<string, unknown>;
+};
+
+/** Full declared publish: declare -> negotiate -> upload blobs -> finalize (+activate). */
+export async function deploy(rt: Runtime, spec: DeploySpec): Promise<void> {
+  const session = await createDeclaredSession(rt, spec.spaceId, spec.versionId, spec.files, {
+    ...spec.session,
+    metadata: spec.metadata ?? spec.session?.metadata,
+  });
+  await uploadSessionBlobs(rt, session, spec.files);
   await apiJson(
     rt,
     "POST",
-    `/__spacefast/api.php/spaces/${spec.spaceId}/versions/${spec.versionId}/finalize`,
+    `${RUNTIME_HTTP_API_BASE}/spaces/${spec.spaceId}/versions/${spec.versionId}/finalize`,
     "finalize_version",
     { space_id: spec.spaceId, version_id: spec.versionId },
     {
-      upload_id: uploadId,
-      ...(spec.zeroMode ? { zero_mode: spec.zeroMode } : {}),
+      upload_id: session.uploadId,
       ...(spec.serving ? { serving: spec.serving } : {}),
       ...(spec.pageArtifacts ? { page_artifacts: spec.pageArtifacts } : {}),
       ...(spec.zero ? { zero: spec.zero } : {}),
+      ...(spec.functions ? { functions: spec.functions } : {}),
       ...(spec.activate ? { activate: spec.activate } : {}),
+      ...spec.finalize,
     },
   );
 }
 
-// Negative-path finalize: create a declared session, upload every file
-// (throwing on a non-200 upload — a precondition every reject-at-finalize test
-// already assumes) and POST finalize with the caller's raw body, returning the
-// Response WITHOUT asserting its status. The happy path lives in deploy();
-// this exists for the tests that need to inspect the finalize rejection.
+/**
+ * Negative-path finalize: declare a session, upload every blob (throwing on a
+ * failed upload — a precondition every reject-at-finalize test already assumes)
+ * and POST finalize with the caller's raw body, returning the Response WITHOUT
+ * asserting its status. The happy path lives in deploy(); this exists for the
+ * tests that need to inspect the finalize rejection.
+ */
 export async function finalizeRaw(
   rt: Runtime,
   spaceId: string,
   versionId: string,
-  files: Record<string, string | Uint8Array>,
+  files: DeployFiles,
   finalizeBody: Record<string, unknown>,
+  sessionOptions: CreateSessionOptions = {},
 ): Promise<Response> {
-  const { uploadId, token } = await createDeclaredSession(rt, spaceId, versionId, files);
-  for (const [filePath, content] of Object.entries(files)) {
-    // oxlint-disable-next-line no-await-in-loop -- uploads stay sequential so a failure names the exact file
-    const response = await putFile(rt, uploadId, token, filePath, content);
-    if (response.status !== 200) {
-      // oxlint-disable-next-line no-await-in-loop -- error path reads the failing response body
-      throw new Error(`upload ${filePath} -> ${response.status}: ${await response.text()}`);
-    }
-  }
-  return api(
-    rt,
-    "POST",
-    `/__spacefast/api.php/spaces/${spaceId}/versions/${versionId}/finalize`,
-    "finalize_version",
-    { space_id: spaceId, version_id: versionId },
-    { upload_id: uploadId, ...finalizeBody },
-  );
+  const session = await createDeclaredSession(rt, spaceId, versionId, files, sessionOptions);
+  await uploadSessionBlobs(rt, session, files);
+  return finalize(rt, spaceId, versionId, { upload_id: session.uploadId, ...finalizeBody });
 }
 
 export async function putRoute(
@@ -735,7 +1090,7 @@ export async function putRoute(
   const response = await api(
     rt,
     "PUT",
-    `/__spacefast/api.php/spaces/${spaceId}/routes/${routeName}`,
+    `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/routes/${routeName}`,
     "update_route",
     { space_id: spaceId, route_name: routeName },
     body,
@@ -748,47 +1103,361 @@ export async function putRoute(
   return response;
 }
 
-// Minimal ustar archive for batch-upload tests.
-export function tarArchive(files: Array<{ path: string; content: string; type?: string }>): Buffer {
-  const blocks: Buffer[] = [];
-  for (const file of files) {
-    const content = Buffer.from(file.content);
-    const header = Buffer.alloc(512);
-    header.write(file.path, 0, "utf8");
-    header.write("0000644\0", 100, "utf8");
-    header.write("0000000\0", 108, "utf8");
-    header.write("0000000\0", 116, "utf8");
-    header.write(`${content.length.toString(8).padStart(11, "0")}\0`, 124, "utf8");
-    header.write("00000000000\0", 136, "utf8");
-    header.write("        ", 148, "utf8");
-    header.write(file.type ?? "0", 156, "utf8");
-    let checksum = 0;
-    for (const byte of header) {
-      checksum += byte;
-    }
-    header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, "utf8");
-    blocks.push(header, content);
-    const padding = (512 - (content.length % 512)) % 512;
-    if (padding > 0) {
-      blocks.push(Buffer.alloc(padding));
-    }
-  }
-  blocks.push(Buffer.alloc(1024));
-  return Buffer.concat(blocks);
+// ---------------------------------------------------------------------------
+// Journal pull lane (contracts §10, D53)
+// ---------------------------------------------------------------------------
+
+export type JournalCursor = { file: string; offset: number; inode: number };
+
+export type DrainedEvent = {
+  delivery_id: string;
+  /** The position to ack through this event; the page cursor is the last one. */
+  cursor: JournalCursor;
+  event_id: string;
+  operation_id?: string;
+  event: Record<string, unknown>;
+};
+
+export type DrainResponse = {
+  delivered_count: number;
+  failed_count: number;
+  expired_count: number;
+  returned_count: number;
+  pending_count: number;
+  cursor: JournalCursor;
+  events: DrainedEvent[];
+};
+
+/** POST /events/drain — reads journal.jsonl from the persisted {file, offset}. */
+export async function drainEvents(
+  rt: Runtime,
+  body: Record<string, unknown> = {},
+): Promise<DrainResponse> {
+  return apiJson<DrainResponse>(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/events/drain`,
+    "drain_events",
+    {},
+    { session_id: `ses_${randomUUID().replace(/-/g, "")}`, page_id: "page_1", ...body },
+  );
 }
 
-// Builds crafted ZIP archives in-process. Entries with `zeros` are filled with
-// that many zero bytes (highly compressible).
-export function buildZip(
-  targetPath: string,
-  entries: Array<{ name: string; content?: string; zeros?: number }>,
-): void {
-  const archiveEntries: Record<string, Uint8Array> = {};
-  for (const entry of entries) {
-    archiveEntries[entry.name] =
-      entry.zeros === undefined
-        ? strToU8(entry.content ?? "")
-        : new Uint8Array(Math.max(0, entry.zeros));
+/** POST /events/ack — commits a read position; the cursor never moves backwards. */
+export async function ackEvents(
+  rt: Runtime,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return apiJson(rt, "POST", `${RUNTIME_HTTP_API_BASE}/events/ack`, "ack_events", {}, body);
+}
+
+// ---------------------------------------------------------------------------
+// Artifact readers (contracts §1–§5)
+//
+// Pointers are JSON and read directly. PHP artifacts are `return`-ing arrays, so
+// they are decoded by running PHP — the only way to read one without
+// re-implementing var_export. Keys AND string values ride base64 because table
+// keys are deliberately NUL-prefixed ("\0spa", "\0404:<dir>") and would not
+// survive JSON.
+// ---------------------------------------------------------------------------
+
+const DUMP_PHP = `
+$file = (string) getenv('SF_DUMP_FILE');
+$value = is_file($file) ? (@include $file) : null;
+$encode = function ($node) use (&$encode) {
+    if (is_array($node)) {
+        $pairs = [];
+        foreach ($node as $key => $child) {
+            $pairs[] = [is_string($key) ? base64_encode($key) : $key, $encode($child)];
+        }
+        return ['a', $pairs];
+    }
+    if (is_string($node)) {
+        return ['s', base64_encode($node)];
+    }
+    return ['v', $node];
+};
+echo json_encode($encode($value));
+`;
+
+type DumpNode = ["a", Array<[string | number, DumpNode]>] | ["s", string] | ["v", unknown];
+
+function decodeDump(node: DumpNode): unknown {
+  if (node[0] === "v") return node[1];
+  if (node[0] === "s") return Buffer.from(node[1], "base64").toString("binary");
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of node[1]) {
+    const name =
+      typeof key === "number" ? String(key) : Buffer.from(key, "base64").toString("binary");
+    out[name] = decodeDump(child);
   }
-  writeFileSync(targetPath, zipSync(archiveEntries, { level: 6 }));
+  return out;
+}
+
+/**
+ * Decode one content-addressed PHP artifact into a plain object. Returns null
+ * when the file is absent or does not `return` an array.
+ *
+ * Strings come back as latin-1/binary-safe JS strings so a NUL-prefixed table
+ * key round-trips exactly; a UTF-8 path key therefore reads as its raw bytes —
+ * compare against `Buffer.from(key, "utf8").toString("binary")` when a test uses
+ * non-ASCII paths.
+ */
+export function phpArtifact(file: string): unknown {
+  const proc = Bun.spawnSync([PHP_BINARY, "-d", "opcache.enable_cli=0", "-r", DUMP_PHP], {
+    env: { ...process.env, SF_DUMP_FILE: file },
+  });
+  const stdout = proc.stdout.toString();
+  if (proc.exitCode !== 0) {
+    throw new Error(`php artifact dump failed (${file}):\n${stdout}\n${proc.stderr.toString()}`);
+  }
+  const decoded = decodeDump(JSON.parse(stdout) as DumpNode);
+  return decoded !== null && typeof decoded === "object" ? decoded : null;
+}
+
+function readJsonFile(file: string): unknown {
+  if (!existsSync(file)) return null;
+  return JSON.parse(readFileSync(file, "utf8"));
+}
+
+export function storagePath(rt: Runtime, ...segments: string[]): string {
+  return path.join(rt.storageRoot, ...segments);
+}
+
+/** The slice of a durable purge record (shared/purge.php) the tests assert on. */
+export type PurgeQueueRecord = {
+  reason?: string;
+  scope?: string;
+  hostnames?: string[];
+  urls?: string[];
+};
+
+/** Every durable edge-purge record the runtime has journaled (shared/purge.php). */
+export function purgeQueueRecords(rt: Runtime): PurgeQueueRecord[] {
+  const root = storagePath(rt, "runtime", "purges");
+  if (!existsSync(root)) return [];
+  return readdirSync(root)
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => {
+      // SAFETY: runtime-written JSON; a field mismatch fails the reading assertion.
+      return JSON.parse(readFileSync(path.join(root, name), "utf8")) as PurgeQueueRecord;
+    });
+}
+
+export function spaceRoot(rt: Runtime, spaceId: string): string {
+  return storagePath(rt, "spaces", spaceId);
+}
+
+export function versionRoot(rt: Runtime, spaceId: string, versionId: string): string {
+  return storagePath(rt, "spaces", spaceId, "versions", versionId);
+}
+
+/** The one CAS layout: spaces/<s>/blobs/<aa>/<sha> (contracts §8, derived never stored). */
+export function blobPath(rt: Runtime, spaceId: string, shaHex: string): string {
+  return storagePath(rt, "spaces", spaceId, "blobs", shaHex.slice(0, 2), shaHex);
+}
+
+export function readBlob(rt: Runtime, spaceId: string, shaHex: string): Buffer | null {
+  const file = blobPath(rt, spaceId, shaHex);
+  return existsSync(file) ? readFileSync(file) : null;
+}
+
+export type RoutePointer = {
+  schema: number;
+  gen: number;
+  has_wildcards: boolean;
+  shards: Record<string, string>;
+  wildcards: string;
+  owners?: string;
+};
+
+export function routePointer(rt: Runtime): RoutePointer | null {
+  return readJsonFile<RoutePointer>(storagePath(rt, "routes", "current.json"));
+}
+
+export function previousRoutePointer(rt: Runtime): RoutePointer | null {
+  return readJsonFile<RoutePointer>(storagePath(rt, "routes", "previous.json"));
+}
+
+export type HostEntry = {
+  space_id?: string;
+  version_id?: string;
+  route_name?: string;
+  route_action?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+export type HostShard = {
+  hostnames: Record<string, HostEntry>;
+  host_routes: Record<string, unknown>;
+};
+
+/** The host shard that owns `host`: shards[sha256(host)[0:2]] (contracts §3). */
+export function routeShard(rt: Runtime, host: string): HostShard | null {
+  const pointer = routePointer(rt);
+  const name = pointer?.shards?.[sha256(host).slice(0, 2)];
+  return name ? phpArtifact<HostShard>(storagePath(rt, "routes", name)) : null;
+}
+
+export function wildcardShard(rt: Runtime): HostShard | null {
+  const pointer = routePointer(rt);
+  return pointer?.wildcards
+    ? phpArtifact<HostShard>(storagePath(rt, "routes", pointer.wildcards))
+    : null;
+}
+
+/** The exact-host entry (no wildcard fallback — assert that shard directly). */
+export function hostEntry(rt: Runtime, host: string): HostEntry | null {
+  return routeShard(rt, host)?.hostnames?.[host] ?? null;
+}
+
+export type SpacePointer = { schema: number; gen: number; overlay: string };
+
+export function spacePointer(rt: Runtime, spaceId: string): SpacePointer | null {
+  return readJsonFile<SpacePointer>(path.join(spaceRoot(rt, spaceId), "space.json"));
+}
+
+export type SpaceOverlay = {
+  schema: number;
+  open: boolean;
+  fence: string | null;
+  access_gen: number;
+  session_ver: number;
+  versions: Record<string, string>;
+  grants: Record<string, unknown> | null;
+  exchange: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+export function spaceOverlay(rt: Runtime, spaceId: string): SpaceOverlay | null {
+  const pointer = spacePointer(rt, spaceId);
+  return pointer?.overlay
+    ? phpArtifact<SpaceOverlay>(path.join(spaceRoot(rt, spaceId), pointer.overlay))
+    : null;
+}
+
+export type VersionRootPointer = { root: string };
+
+export function versionRootPointer(
+  rt: Runtime,
+  spaceId: string,
+  versionId: string,
+): VersionRootPointer | null {
+  return readJsonFile<VersionRootPointer>(
+    path.join(versionRoot(rt, spaceId, versionId), "root.json"),
+  );
+}
+
+export type VersionRootArtifact = {
+  schema: number;
+  compiler?: string;
+  /** `{"*": "responses-<h16>.php"}`, or `{"<xx>": "responses-<xx>-<h16>.php"}` when split. */
+  tables: Record<string, string>;
+};
+
+export function versionRootArtifact(
+  rt: Runtime,
+  spaceId: string,
+  versionId: string,
+): VersionRootArtifact | null {
+  const pointer = versionRootPointer(rt, spaceId, versionId);
+  return pointer?.root
+    ? phpArtifact<VersionRootArtifact>(path.join(versionRoot(rt, spaceId, versionId), pointer.root))
+    : null;
+}
+
+/** The response-table files this version's root names (one, or the split set). */
+export function responseTableFiles(
+  rt: Runtime,
+  spaceId: string,
+  versionId: string,
+): Record<string, string> {
+  return versionRootArtifact(rt, spaceId, versionId)?.tables ?? {};
+}
+
+export type ResponseEntry = {
+  /** status */ s?: number;
+  /** headers, lower-case keys */ h?: Record<string, string>;
+  /** body blob sha256, absent for pure-header responses */ b?: string;
+  /** precomputed ETag payload, no quotes */ et?: string;
+  /** body length */ len?: number;
+  /** 0 = accel, 1 = php-body */ lane?: number;
+  /** cache class: "imm" | "html" | "no" */ cc?: string;
+  /** action */ a?: Record<string, unknown> | null;
+  /** rules-first marker */ r?: unknown;
+  /** provider-allowlisted client-URL extension */ xa?: unknown;
+  [key: string]: unknown;
+};
+
+/**
+ * Every compiled entry of a version, merged across its response tables. Keys are
+ * raw byte strings, so the reserved ones are exactly RESPONSES.specialKeys
+ * ("\0spa", "\0404", "\0404:<dir>", "\0rules", "\0robots").
+ */
+export function responseEntries(
+  rt: Runtime,
+  spaceId: string,
+  versionId: string,
+): Record<string, ResponseEntry> {
+  const dir = versionRoot(rt, spaceId, versionId);
+  const entries: Record<string, ResponseEntry> = {};
+  for (const file of Object.values(responseTableFiles(rt, spaceId, versionId))) {
+    Object.assign(entries, phpArtifact<Record<string, ResponseEntry>>(path.join(dir, file)) ?? {});
+  }
+  return entries;
+}
+
+export function responseEntry(
+  rt: Runtime,
+  spaceId: string,
+  versionId: string,
+  key: string,
+): ResponseEntry | null {
+  return responseEntries(rt, spaceId, versionId)[key] ?? null;
+}
+
+/** The management-lane version manifest the scan lane and GC read (contracts §2). */
+export function versionMetadata(
+  rt: Runtime,
+  spaceId: string,
+  versionId: string,
+): Record<string, unknown> | null {
+  return readJsonFile<Record<string, unknown>>(
+    path.join(versionRoot(rt, spaceId, versionId), "metadata.json"),
+  );
+}
+
+export type CatalogObject = { sha256: string; size: number; contentType: string };
+
+export type VersionCatalog = {
+  format: string;
+  spaceId: string;
+  versionId: string;
+  paths: Record<string, { source: CatalogObject; served: CatalogObject | null; public: boolean }>;
+  variants?: Record<string, Record<string, CatalogObject>>;
+};
+
+/**
+ * The finalizer-written file catalog. It rides INSIDE metadata.json so the blob
+ * collector's shape-agnostic sweep reaches every hash it names. Nothing in the
+ * test suite writes one — a missing catalog is a real finalize defect, not a
+ * fixture gap.
+ */
+export function versionCatalog(
+  rt: Runtime,
+  spaceId: string,
+  versionId: string,
+): VersionCatalog | null {
+  const metadata = versionMetadata(rt, spaceId, versionId);
+  return (metadata?.catalog as VersionCatalog | undefined) ?? null;
+}
+
+/** The one event sink (D53): runtime/journal.jsonl, decoded line by line. */
+export function journalRecords(rt: Runtime): Array<Record<string, unknown>> {
+  const file = storagePath(rt, "runtime", "journal.jsonl");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }

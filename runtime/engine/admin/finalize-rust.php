@@ -3,81 +3,125 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../shared/native-process.php';
 
-// Finalize-time ownership boundary: PHP authenticates the management request,
-// hydrates retained bytes into the per-space CAS, invokes the native Rust
-// finalizer (`stattic-runtime-compiler finalize` with a
-// stattic.runtime.finalize.input.v2 file), then performs the
-// activation/route-pointer/event side effects. Rust owns every immutable
-// version byte and artifact — this file validates only the result envelope,
-// never the artifacts themselves.
+// Ownership boundary: Rust owns every immutable version byte and artifact —
+// this file validates only the result envelope, never the artifacts themselves.
 
-function _stattic_runtime_native_session_payload(array $session, array $body): array
+function _stattic_runtime_native_session_payload(array $session): array
 {
-    // The precompiled body is authoritative. Do not copy stale raw convention
-    // text from resumable upload state into the native input file: historical
-    // sessions may contain plaintext Basic-Auth credentials that Rust neither
-    // needs nor persists for this path.
-    if (($body['convention_files_precompiled'] ?? null) === true) {
-        unset($session['convention_files']);
-    }
+    // A session reloaded from disk decodes `accepted: {}` to an empty PHP
+    // array, which re-encodes as `[]` — the finalizer requires an object. The
+    // lazy path normalizes on write (upload.php); this is the choke point for
+    // every path, including a zero-upload retain-all created by create_version.
+    $session['accepted'] = _stattic_runtime_json_object(
+        is_array($session['accepted'] ?? null) ? $session['accepted'] : []
+    );
     return $session;
 }
 
-// Storage boundary for Rust: every retained byte must sit in the per-space
-// content-addressed store (`spaces/<spaceId>/blobs/<aa>/<sha>`) before the
-// finalizer starts — Rust reads retained files from the CAS only and never
-// touches the network. Resolution order mirrors the PHP finalize path: the
-// reusable version's original bytes, its current tree, then the blob-store /
-// cold-bucket fallback.
-function _stattic_runtime_prepare_retained_blobs(string $privateRoot, string $spaceId, array $session): void
+function _stattic_runtime_native_body_payload(array $body): array
+{
+    // json_decode(..., true) collapses every empty JSON object into a PHP
+    // array, which json_encode writes back as `[]`. Rust intentionally models
+    // these fields as maps, so preserve their wire identity at the one PHP ->
+    // native boundary. Values are already resolved by the control plane; this
+    // changes only container shape, never variable contents.
+    $scopes = $body['variable_scopes'] ?? null;
+    if (is_array($scopes)) {
+        foreach ($scopes as $scopeIndex => $scope) {
+            if (!is_array($scope)) {
+                continue;
+            }
+            $values = is_array($scope['values'] ?? null) ? $scope['values'] : [];
+            foreach ($values as $name => $variable) {
+                if (!is_array($variable) || !array_key_exists('channelValues', $variable)) {
+                    continue;
+                }
+                $variable['channelValues'] = _stattic_runtime_json_object(
+                    is_array($variable['channelValues']) ? $variable['channelValues'] : []
+                );
+                $values[$name] = $variable;
+            }
+            $scope['values'] = _stattic_runtime_json_object($values);
+            $scopes[$scopeIndex] = $scope;
+        }
+        $body['variable_scopes'] = $scopes;
+    }
+    if (array_key_exists('system_variables', $body)) {
+        $body['system_variables'] = _stattic_runtime_json_object(
+            is_array($body['system_variables']) ? $body['system_variables'] : []
+        );
+    }
+    return $body;
+}
+
+// Storage boundary for Rust: every retained byte must sit in the per-space CAS
+// (`spaces/<spaceId>/blobs/<aa>/<sha>`) before the finalizer starts — Rust reads
+// retained files from the CAS only and never touches the network.
+//
+// This runs under the space lock (finalize_version's row), which is what makes
+// reading the reusable version's catalog safe against a concurrent finalize or
+// GC sweep of that space.
+function _stattic_runtime_prepare_retained_blobs(string $privateRoot, string $spaceId, array $session): array
 {
     $entries = is_array($session['retained_files'] ?? null) ? $session['retained_files'] : [];
-    if ($entries === []) {
-        return;
-    }
     $reusableVersionId = is_string($session['reusable_version_id'] ?? null)
         ? _stattic_runtime_id($session['reusable_version_id'], 'reusable_version_id')
-        : '';
-    if ($reusableVersionId === '') {
-        _stattic_json_response(422, ['error' => ['code' => 'reusable_version_required', 'message' => 'Retained files require a reusable version.']]);
+        : null;
+    // Re-validated here, not trusted: a session record written before this
+    // engine version carries no mode, and reading that as retain-nothing would
+    // drop files silently. It fails loudly instead.
+    $retention = _stattic_runtime_retention_mode($session['retention'] ?? null, $reusableVersionId, $entries);
+    // "Retain everything from version X" carries no list and gets none: Rust
+    // materializes the path set from that version's catalog inside the same pass
+    // that stages it, so a version of any size costs one catalog read here
+    // instead of a per-path loop and a multi-megabyte envelope.
+    if ($retention === 'all' || $entries === []) {
+        return $session;
     }
-    $reusableRoot = $privateRoot . '/spaces/' . $spaceId . '/versions/' . $reusableVersionId;
-    foreach ($entries as $entry) {
+    // A caller-supplied list still needs the reusable version to be readable:
+    // without its catalog there is no telling a path that moved from a version
+    // that is gone, and the recovery branch below reads the same document.
+    if (_stattic_runtime_version_catalog($privateRoot, $spaceId, $reusableVersionId) === null) {
+        _stattic_problem_response(
+            409,
+            'runtime_file_catalog_invalid',
+            'The reusable version has no readable file catalog.',
+            ['details' => ['version_id' => $reusableVersionId]],
+        );
+    }
+    $missing = static function (string $path) use ($reusableVersionId): never {
+        _stattic_problem_response(409, 'version_reusable_file_missing', 'A retained file was missing from the reusable version.', ['details' => ['path' => $path, 'version_id' => $reusableVersionId]]);
+    };
+    foreach ($entries as $index => $entry) {
         if (!is_array($entry)) {
             continue;
         }
         $path = _stattic_runtime_file_path((string) ($entry['path'] ?? ''));
         _stattic_runtime_assert_static_upload_path($path);
-        $sha = strtolower(trim((string) ($entry['sha256'] ?? '')));
-        if (preg_match('/^[a-f0-9]{64}$/', $sha) !== 1) {
-            _stattic_json_response(422, ['error' => ['code' => 'invalid_blob_sha', 'message' => 'Retained file sha256 is invalid.', 'details' => ['path' => $path]]]);
+        $hasDeclaredSha = array_key_exists('sha256', $entry);
+        $sha = is_string($entry['sha256'] ?? null) ? strtolower(trim($entry['sha256'])) : '';
+        if ($hasDeclaredSha && preg_match('/^[a-f0-9]{64}$/', $sha) !== 1) {
+            _stattic_problem_response(422, 'invalid_blob_sha', 'Retained file sha256 is invalid.', ['details' => ['path' => $path]]);
         }
-        if (_stattic_runtime_blob_has($privateRoot, $spaceId, $sha)) {
-            continue;
-        }
-        // Template-substituted versions keep their pre-substitution bytes in
-        // `files-original/`; prefer them so the declared sha (the upload
-        // identity) verifies against original bytes.
-        $local = null;
-        foreach ([$reusableRoot . '/files-original/' . $path, $reusableRoot . '/files/' . $path] as $candidate) {
-            if (is_file($candidate)) {
-                $local = $candidate;
-                break;
+        if ($sha === '') {
+            // A ready manifest may carry no digest; the reusable version's own
+            // catalog is authoritative, so recover the source identity from
+            // there rather than blocking a settings-only re-finalize forever.
+            $source = _stattic_runtime_resolve_version_file($privateRoot, $spaceId, $reusableVersionId, $path, 'source');
+            if ($source === null) {
+                $missing($path);
             }
+            $sha = $source['sha'];
+            $entries[$index]['sha256'] = $sha;
         }
-        if ($local !== null) {
-            $staging = $privateRoot . '/runtime/blob-staging/retained-' . bin2hex(random_bytes(12));
-            _stattic_runtime_copy_private_file($local, $staging);
-            _stattic_runtime_blob_put($privateRoot, $spaceId, $staging, $sha);
-            continue;
-        }
-        // Tier-aware dedupe: a demoted reusable version has no version-tree
-        // hardlink — re-materialize from the blob store or the cold bucket
-        // (the fallback lands recovered bytes in the CAS itself).
-        if (_stattic_runtime_retained_file_fallback_source($privateRoot, $spaceId, $reusableVersionId, $path, $entry) === null) {
-            _stattic_json_response(409, ['error' => ['code' => 'version_reusable_file_missing', 'message' => 'A retained file was missing from the reusable version.', 'details' => ['path' => $path, 'version_id' => $reusableVersionId]]]);
+        // v4 keeps retained bytes in the CAS and nowhere else: a version root
+        // has no file tree to re-materialize them from.
+        if (!_stattic_runtime_blob_has($privateRoot, $spaceId, $sha)) {
+            $missing($path);
         }
     }
+    $session['retained_files'] = $entries;
+    return $session;
 }
 
 function _stattic_runtime_finalize_with_rust(
@@ -88,141 +132,104 @@ function _stattic_runtime_finalize_with_rust(
     array $session,
     array $body
 ): array {
-    $binary = _stattic_runtime_native_compiler_binary();
-    // Fail before retained-byte hydration or input staging. Native Rust is the
-    // sole finalizer in this mode; an unavailable process is never a signal to
-    // execute the PHP implementation or partially prepare a replacement.
+    $binary = _stattic_runtime_native_binary();
     if ($binary === '' || !is_file($binary) || !is_executable($binary)) {
-        _stattic_json_response(503, [
-            'error' => [
-                'code' => 'finalize_unavailable',
-                'message' => 'The native runtime finalizer is not installed.',
-            ],
-        ]);
+        _stattic_problem_response(503, 'finalize_unavailable', 'The native runtime finalizer is not installed.');
     }
     if (!function_exists('proc_open')) {
-        _stattic_json_response(503, [
-            'error' => [
-                'code' => 'finalize_unavailable',
-                'message' => 'The runtime cannot start the native finalizer process.',
-            ],
-        ]);
+        _stattic_problem_response(
+            503,
+            'finalize_unavailable',
+            'The runtime cannot start the native finalizer process.',
+        );
     }
     $canonicalPrivateRoot = realpath($privateRoot);
     if (!is_string($canonicalPrivateRoot) || $canonicalPrivateRoot === '') {
-        _stattic_json_response(500, [
-            'error' => [
-                'code' => 'runtime_finalizer_storage_invalid',
-                'message' => 'The runtime private storage root is unavailable.',
-            ],
-        ]);
+        _stattic_problem_response(
+            500,
+            'runtime_finalizer_storage_invalid',
+            'The runtime private storage root is unavailable.',
+        );
     }
-    $versionRoot = $canonicalPrivateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId;
+    $versionRoot = _stattic_version_root($canonicalPrivateRoot, $spaceId, $versionId);
 
     $serving = is_array($body['serving'] ?? null) ? $body['serving'] : [];
     $zeroEndpointsInput = $serving['zero_endpoints'] ?? [];
     if (!is_array($zeroEndpointsInput)) {
-        _stattic_json_response(422, ['error' => ['code' => 'zero_endpoints_invalid', 'message' => 'Zero endpoints must be an array.']]);
+        _stattic_problem_response(422, 'zero_endpoints_invalid', 'Zero endpoints must be an array.');
     }
     $zeroRunsInput = $serving['zero_runs'] ?? [];
     if (!is_array($zeroRunsInput)) {
-        _stattic_json_response(422, ['error' => ['code' => 'zero_runs_invalid', 'message' => 'Zero run handlers must be an array.']]);
+        _stattic_problem_response(422, 'zero_runs_invalid', 'Zero run handlers must be an array.');
     }
-    // Ready stamp for the immutable public-access window: the control plane's
-    // value wins, an existing stamp survives re-finalize (read BEFORE the
-    // replacement move-aside), and a first finalize stamps once.
-    $existingMetadata = _stattic_runtime_read_json($versionRoot . '/metadata.json');
-    $existingReadyAt = is_array($existingMetadata) && is_int($existingMetadata['readyAt'] ?? null)
-        ? $existingMetadata['readyAt']
-        : null;
-    $bodyReadyAt = is_int($body['ready_at'] ?? null) && $body['ready_at'] > 0
-        ? $body['ready_at']
-        : null;
-    $readyAt = $bodyReadyAt ?? $existingReadyAt ?? time();
-
-    _stattic_runtime_prepare_retained_blobs($canonicalPrivateRoot, $spaceId, $session);
+    $session = _stattic_runtime_prepare_retained_blobs($canonicalPrivateRoot, $spaceId, $session);
 
     $input = [
         'format' => 'stattic.runtime.finalize.input.v2',
-        // v2 is filesystem-rooted: versionRoot is the PRIVATE STORAGE ROOT
-        // (the directory holding spaces/<spaceId>/... and runtime/uploads/...).
+        // v2 is filesystem-rooted: `versionRoot` is the PRIVATE STORAGE ROOT,
+        // not a version directory.
         'versionRoot' => $canonicalPrivateRoot,
         'spaceId' => $spaceId,
         'versionId' => $versionId,
         'generatedAt' => gmdate('c'),
-        'readyAt' => $readyAt,
-        'session' => _stattic_runtime_json_object(_stattic_runtime_native_session_payload($session, $body)),
-        'body' => _stattic_runtime_json_object($body),
+        'session' => _stattic_runtime_json_object(_stattic_runtime_native_session_payload($session)),
+        'body' => _stattic_runtime_json_object(_stattic_runtime_native_body_payload($body)),
         'zeroEndpoints' => _stattic_runtime_zero_compiler_entries($zeroEndpointsInput, 'endpoint_id', 'endpointId'),
         'zeroRuns' => _stattic_runtime_zero_compiler_entries($zeroRunsInput, 'run_id', 'runId'),
     ];
     if ($uploadId !== '') {
         $input['uploadId'] = $uploadId;
     }
-    if (is_string($body['previous_pack'] ?? null) && $body['previous_pack'] !== '') {
-        $input['previousPack'] = $body['previous_pack'];
-    }
 
     $incomingRoot = $canonicalPrivateRoot . '/runtime/finalizer-inputs';
     _stattic_runtime_mkdir($incomingRoot);
     $inputPath = $incomingRoot . '/' . ($uploadId !== '' ? $uploadId : 'refinalize') . '-' . bin2hex(random_bytes(6)) . '.json';
     $outputPath = $inputPath . '.output.json';
-    $manifestOutputPath = $outputPath . '.manifest.json';
     _stattic_runtime_write_json_atomic($inputPath, $input);
 
-    // Replacement backup: an existing immutable version moves aside before the
-    // binary starts, so an interruption anywhere in the native run leaves a
-    // recoverable `.rust-previous`. Rust owns the recovery semantics from
-    // there — it restores the backup when the version dir is missing and
-    // answers idempotently (or rejects mismatched input) for the restored dir.
+    // Move an existing immutable version aside BEFORE the binary starts, so an
+    // interruption anywhere in the native run leaves a recoverable
+    // `.rust-previous`; Rust owns the recovery semantics from there.
     if (is_dir($versionRoot)) {
         $backup = dirname($versionRoot) . '/.' . $versionId . '.rust-previous';
         if (is_dir($backup)) {
             _stattic_runtime_rm_recursive($backup);
         }
-        if (!@rename($versionRoot, $backup)) {
-            @unlink($inputPath);
-            _stattic_json_response(500, [
-                'error' => [
-                    'code' => 'runtime_finalizer_storage_invalid',
-                    'message' => 'The previous immutable version could not be staged for replacement.',
-                ],
-            ]);
+        if (!rename($versionRoot, $backup)) {
+            unlink($inputPath);
+            _stattic_problem_response(
+                500,
+                'runtime_finalizer_storage_invalid',
+                'The previous immutable version could not be staged for replacement.',
+            );
         }
     }
 
     $command = [$binary, 'finalize', '--input', $inputPath, '--output', $outputPath];
-    $result = _stattic_runtime_run_finalizer_process($command, $canonicalPrivateRoot, 310000);
-    if ($result === null) {
+    $result = _stattic_runtime_run_subprocess($command, null, null, $canonicalPrivateRoot, 310000, 8 * 1024 * 1024, 64 * 1024);
+    if (!$result['spawned']) {
         _stattic_runtime_restore_interrupted_version($versionRoot);
-        @unlink($inputPath);
-        @unlink($outputPath);
-        @unlink($manifestOutputPath);
-        _stattic_json_response(503, [
-            'error' => [
-                'code' => 'finalize_unavailable',
-                'message' => 'The native runtime finalizer could not be started.',
-            ],
-        ]);
+        unlink($inputPath);
+        unlink($outputPath);
+        _stattic_problem_response(503, 'finalize_unavailable', 'The native runtime finalizer could not be started.');
     }
-    [$exitCode, , $stderr, $timedOut] = $result;
-    @unlink($inputPath);
+    $exitCode = $result['exitCode'];
+    $stderr = $result['stderr'];
+    $timedOut = $result['timedOut'];
+    unlink($inputPath);
     if ($timedOut) {
         _stattic_runtime_restore_interrupted_version($versionRoot);
-        @unlink($outputPath);
-        @unlink($manifestOutputPath);
-        _stattic_json_response(503, [
-            'error' => [
-                'code' => 'runtime_finalizer_timeout',
-                'message' => 'The native runtime finalizer exceeded its execution deadline.',
-            ],
-        ]);
+        unlink($outputPath);
+        _stattic_problem_response(
+            503,
+            'runtime_finalizer_timeout',
+            'The native runtime finalizer exceeded its execution deadline.',
+        );
     }
     if ($exitCode !== 0) {
         $structuredError = _stattic_runtime_read_finalizer_output($outputPath);
         _stattic_runtime_restore_interrupted_version($versionRoot);
-        @unlink($outputPath);
-        @unlink($manifestOutputPath);
+        unlink($outputPath);
         $safeReason = is_string($stderr)
             ? preg_replace('/[^A-Za-z0-9_.:\/ -]+/', '', substr(trim($stderr), 0, 500))
             : '';
@@ -235,27 +242,26 @@ function _stattic_runtime_finalize_with_rust(
         $rustCode = $structuredValid ? $structuredError['code'] : 'runtime_finalizer_failed';
         $conflictCodes = [
             'version_upload_incomplete',
-            'version_file_hash_mismatch',
-            'version_file_size_mismatch',
             'version_reusable_file_missing',
             'version_existing_mismatch',
+            // The state of a version this publish reuses, not of the request:
+            // same 409 the PHP-side check answered with before the retained set
+            // was materialized natively.
+            'runtime_file_catalog_invalid',
         ];
         $status = in_array($rustCode, $conflictCodes, true) ? 409 : 422;
         error_log('spacefast finalizer failed code=' . $rustCode . ' exit=' . $exitCode . ' reason=' . $safeReason);
         $errorDetails = $structuredValid ? $structuredError['details'] : ['exit_code' => $exitCode];
-        _stattic_json_response($status, [
-            'error' => [
-                'code' => $rustCode,
-                'message' => $structuredValid ? $structuredError['message'] : 'The native runtime finalizer rejected the version.',
-                'details' => _stattic_runtime_json_object($errorDetails),
-            ],
-        ]);
+        _stattic_problem_response(
+            $status,
+            $rustCode,
+            $structuredValid ? $structuredError['message'] : 'The native runtime finalizer rejected the version.',
+            ['details' => _stattic_runtime_json_object($errorDetails)],
+        );
     }
     $output = _stattic_runtime_read_finalizer_output($outputPath);
-    @unlink($outputPath);
-    // Envelope validation only: format, identity, and the access artifact
-    // container shapes. Rust self-validates every immutable artifact it wrote;
-    // re-validating them here would duplicate the authority.
+    unlink($outputPath);
+    // Envelope only — Rust self-validates every immutable artifact it wrote.
     if (
         !is_array($output)
         || ($output['format'] ?? null) !== 'stattic.runtime.finalize.output.v2'
@@ -263,62 +269,19 @@ function _stattic_runtime_finalize_with_rust(
         || ($output['versionId'] ?? null) !== $versionId
         || !is_int($output['fileCount'] ?? null)
         || !is_int($output['zeroEndpointCount'] ?? null)
-        || !is_array($output['accessRules'] ?? null)
-        || !is_array($output['accessSecrets'] ?? null)
     ) {
         _stattic_runtime_restore_interrupted_version($versionRoot);
-        @unlink($manifestOutputPath);
-        _stattic_json_response(500, [
-            'error' => [
-                'code' => 'runtime_finalizer_output_invalid',
-                'message' => 'The native runtime finalizer returned an invalid result.',
-            ],
-        ]);
+        _stattic_problem_response(
+            500,
+            'runtime_finalizer_output_invalid',
+            'The native runtime finalizer returned an invalid result.',
+        );
     }
-    // Open-session manifests spill to the exact side-car path derived above so
-    // the bounded result envelope stays small. Carry that Rust-derived truth
-    // through to the control plane; it persists the manifest for additive
-    // publish, archive, scanning, and file accounting.
-    $sessionMode = _stattic_runtime_upload_session_mode($session);
-    if ($sessionMode === 'open') {
-        $manifest = ($output['manifestPath'] ?? null) === $manifestOutputPath
-            ? _stattic_runtime_read_finalizer_output($manifestOutputPath)
-            : null;
-        $manifestValid = is_array($manifest);
-        foreach ($manifest ?? [] as $entry) {
-            if (
-                !is_array($entry)
-                || !is_string($entry['path'] ?? null)
-                || !is_int($entry['size'] ?? null)
-                || $entry['size'] < 0
-                || !is_string($entry['sha256'] ?? null)
-                || preg_match('/^[a-f0-9]{64}$/', $entry['sha256']) !== 1
-                || (isset($entry['contentType']) && !is_string($entry['contentType']))
-            ) {
-                $manifestValid = false;
-                break;
-            }
-        }
-        if (!$manifestValid) {
-            _stattic_runtime_restore_interrupted_version($versionRoot);
-            @unlink($manifestOutputPath);
-            _stattic_json_response(500, [
-                'error' => [
-                    'code' => 'runtime_finalizer_output_invalid',
-                    'message' => 'The native runtime finalizer returned an invalid open-session manifest.',
-                ],
-            ]);
-        }
-        $output['manifest'] = array_values($manifest);
-    }
-    @unlink($manifestOutputPath);
-    unset($output['manifestPath']);
     return $output;
 }
 
-// A `.rust-previous` sibling means a replacement was in flight. Put the
-// previous immutable version back and quarantine whatever the failed run left
-// behind so serving never sees a half-written tree.
+// A `.rust-previous` sibling means a replacement was in flight; the failed run's
+// leftovers are quarantined so serving never sees a half-written tree.
 function _stattic_runtime_restore_interrupted_version(string $versionRoot): void
 {
     $backup = dirname($versionRoot) . '/.' . basename($versionRoot) . '.rust-previous';
@@ -326,13 +289,13 @@ function _stattic_runtime_restore_interrupted_version(string $versionRoot): void
         return;
     }
     $failed = dirname($versionRoot) . '/.' . basename($versionRoot) . '.rust-failed-' . bin2hex(random_bytes(4));
-    if (is_dir($versionRoot) && !@rename($versionRoot, $failed)) {
+    if (is_dir($versionRoot) && !rename($versionRoot, $failed)) {
         error_log('spacefast finalizer could not quarantine the failed replacement');
         return;
     }
-    if (!@rename($backup, $versionRoot)) {
+    if (!rename($backup, $versionRoot)) {
         if (is_dir($failed)) {
-            @rename($failed, $versionRoot);
+            rename($failed, $versionRoot);
         }
         error_log('spacefast finalizer could not restore the previous immutable version');
         return;
@@ -348,90 +311,6 @@ function _stattic_runtime_read_finalizer_output(string $path): ?array
     if (!is_int($size) || $size < 2 || $size > 128 * 1024 * 1024) {
         return null;
     }
-    $json = file_get_contents($path);
-    if (!is_string($json)) {
-        return null;
-    }
-    $decoded = json_decode($json, true);
+    $decoded = _stattic_runtime_read_json($path);
     return is_array($decoded) ? $decoded : null;
-}
-
-/**
- * Run the native finalizer without a shell, drain both output pipes
- * concurrently, and enforce a wall-clock ceiling. Output is bounded because
- * only one JSON result is valid.
- *
- * @return array{int,string,string,bool}|null
- */
-function _stattic_runtime_run_finalizer_process(array $command, string $cwd, int $timeoutMs): ?array
-{
-    $pipes = [];
-    $process = @proc_open($command, [
-        0 => ['pipe', 'r'],
-        1 => ['pipe', 'w'],
-        2 => ['pipe', 'w'],
-    ], $pipes, $cwd, null, ['bypass_shell' => true]);
-    if (!is_resource($process)) {
-        return null;
-    }
-    fclose($pipes[0]);
-    stream_set_blocking($pipes[1], false);
-    stream_set_blocking($pipes[2], false);
-    $stdout = '';
-    $stderr = '';
-    $deadline = microtime(true) + ($timeoutMs / 1000);
-    $timedOut = false;
-    $exitCode = -1;
-    while (true) {
-        $read = [];
-        if (!feof($pipes[1])) {
-            $read[] = $pipes[1];
-        }
-        if (!feof($pipes[2])) {
-            $read[] = $pipes[2];
-        }
-        if ($read !== []) {
-            $write = null;
-            $except = null;
-            @stream_select($read, $write, $except, 0, 200000);
-            foreach ($read as $pipe) {
-                $chunk = fread($pipe, 65536);
-                if (!is_string($chunk) || $chunk === '') {
-                    continue;
-                }
-                if ($pipe === $pipes[1]) {
-                    $stdout = substr($stdout . $chunk, 0, 8 * 1024 * 1024);
-                } else {
-                    $stderr = substr($stderr . $chunk, 0, 64 * 1024);
-                }
-            }
-        }
-        // EOF on both child pipes is the portable completion signal. Calling
-        // proc_get_status() here reaps the child on some PHP/Linux builds and
-        // makes the later proc_close() lose the real exit code.
-        if (feof($pipes[1]) && feof($pipes[2])) {
-            break;
-        }
-        if (microtime(true) >= $deadline) {
-            $timedOut = true;
-            @proc_terminate($process, 9);
-            break;
-        }
-    }
-    foreach ([$pipes[1], $pipes[2]] as $pipe) {
-        $remaining = stream_get_contents($pipe);
-        if (is_string($remaining) && $remaining !== '') {
-            if ($pipe === $pipes[1]) {
-                $stdout = substr($stdout . $remaining, 0, 8 * 1024 * 1024);
-            } else {
-                $stderr = substr($stderr . $remaining, 0, 64 * 1024);
-            }
-        }
-        fclose($pipe);
-    }
-    $closed = _stattic_reap_native_process($process, $timedOut);
-    if (is_int($closed)) {
-        $exitCode = $closed;
-    }
-    return [$exitCode, $stdout, $stderr, $timedOut];
 }

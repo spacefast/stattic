@@ -8,8 +8,6 @@ use serde_json::Value;
 pub(crate) struct InvokeEnvelope {
     pub protocol: String,
     pub version_root: String,
-    #[serde(default)]
-    pub files_root: Option<String>,
     pub endpoint_id: String,
     #[serde(default)]
     pub artifact_path: Option<String>,
@@ -44,6 +42,11 @@ pub(crate) struct InvokeContext {
     pub version_id: String,
     #[serde(default)]
     pub schema_hash: Option<String>,
+    /// The visitor address asserted by trusted ingress. It is intentionally
+    /// not read from request headers, which are browser-controlled at the PHP
+    /// boundary.
+    #[serde(default)]
+    pub visitor_ip: Option<String>,
     pub auth_ref: String,
     pub variables_ref: String,
 }

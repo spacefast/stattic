@@ -1,6 +1,4 @@
-/target/
-**/node_modules/
-/packages/*/dist/
-*.tsbuildinfo
-/.DS_Store
-*.log
+target/
+**/dist/
+**/.artifacts/
+runtime/bin/stattic-runtime

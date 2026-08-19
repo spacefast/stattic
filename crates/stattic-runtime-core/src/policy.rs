@@ -7,7 +7,10 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-use crate::finalize::{invalid, FileMeta, Result};
+use crate::egress::{
+    target_allowed, EgressDenial, EgressProfile, InternalHosts, SERVING_INTERNAL_HOSTS,
+};
+use crate::finalize::{invalid, invalid_with_details, FileMeta, Result};
 use crate::protocol::SPACE_THEME_CSS_MAX_BYTES;
 use crate::serving_paths::is_private_serving_path as is_private;
 
@@ -121,11 +124,25 @@ pub fn validate_finalize_policy(context: FinalizePolicyContext<'_>) -> Result<()
                 );
             }
         }
-        if action == "proxy" && !public_proxy_destination(destination) {
-            return invalid(
-                "runtime_artifact_validation_failed",
-                "Proxy destinations must use a public HTTP or HTTPS upstream.",
-            );
+        if action == "proxy" {
+            // Egress safety is one decision made in one place, and it is this
+            // one — the publish never reaches serving state with an upstream
+            // policy refuses. The refusal names the host and the reason, so the
+            // publisher can fix the line instead of rereading the docs.
+            if let Err(denial) = public_proxy_destination(destination) {
+                let reason = egress_denial_reason(denial);
+                let hostname = proxy_destination_hostname(destination);
+                return invalid_with_details(
+                    "proxy_upstream_denied",
+                    format!("Proxy upstream {hostname} is denied: {reason}."),
+                    serde_json::json!({
+                        "path": "_redirects",
+                        "hostname": hostname,
+                        "destination": destination,
+                        "reason": reason,
+                    }),
+                );
+            }
         }
     }
     for rule in headers_exact
@@ -147,7 +164,7 @@ pub fn validate_finalize_policy(context: FinalizePolicyContext<'_>) -> Result<()
                 .to_ascii_lowercase();
             let value = operation.get("value");
             let valid_value = match kind {
-                "set" | "basicAuth" => value
+                "set" => value
                     .and_then(Value::as_str)
                     .is_some_and(|value| !value.contains(['\r', '\n', '\0'])),
                 "remove" => value.is_none_or(Value::is_null),
@@ -163,6 +180,12 @@ pub fn validate_finalize_policy(context: FinalizePolicyContext<'_>) -> Result<()
                 return invalid(
                     "runtime_artifact_validation_failed",
                     format!("The {name} header is managed by the platform."),
+                );
+            }
+            if kind == "remove" && never_removable_response_header(&name) {
+                return invalid(
+                    "runtime_artifact_validation_failed",
+                    format!("The {name} header cannot be removed."),
                 );
             }
         }
@@ -189,6 +212,12 @@ pub fn validate_finalize_policy(context: FinalizePolicyContext<'_>) -> Result<()
 /// The finalizer uses this policy when compiling and validating `_headers`;
 /// the Zero runner applies the same list to endpoint responses. Ported from
 /// the donor Zero compiler so this stage stays self-contained.
+///
+/// The policy is defined once in TypeScript
+/// (`packages/common/src/utils/static-runtime-policy.ts`), which the `_headers`
+/// compiler imports and the PHP runtime is generated from. This list is a port,
+/// not a variant: `apps/control-plane/src/runtime/php-policy-parity.test.ts`
+/// fails if the prefixes or the literal set drift apart.
 #[must_use]
 pub fn platform_managed_response_header(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
@@ -223,11 +252,35 @@ pub fn platform_managed_response_header(name: &str) -> bool {
                 | "transfer-encoding"
                 | "upgrade"
                 | "vary"
+                // The internal-redirect/sendfile family, every vendor spelling: these
+                // instruct the web server to serve a different file instead of
+                // describing this response.
                 | "x-accel-buffering"
+                | "x-accel-charset"
+                | "x-accel-expires"
+                | "x-accel-limit-rate"
                 | "x-accel-redirect"
                 | "x-lighttpd-send-file"
+                | "x-lighttpd-sendfile"
+                | "x-lighttpd-sendfile2"
+                | "x-reproxy-url"
                 | "x-sendfile"
         )
+}
+
+/// Response headers a publisher may SET but never REMOVE.
+///
+/// `Content-Type` is platform-managed in the direction that matters. The
+/// compiler derives it per file and pairs it with `nosniff` — and with
+/// `Content-Disposition: attachment` for anything PHP-like — because that pair
+/// is what stops a browser executing tenant bytes as a page. A `! Content-Type`
+/// line deletes the entry's own header at send time and leaves the response
+/// with whatever the interpreter defaults to, which is the sniffing surface
+/// those two headers exist to close. Overriding it with a real value stays
+/// allowed: that is publisher metadata, and Netlify parity.
+#[must_use]
+pub fn never_removable_response_header(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case("content-type")
 }
 
 fn redirect_destination_path(destination: &str) -> Option<Cow<'_, str>> {
@@ -342,7 +395,7 @@ fn validate_style_value(value: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
-fn style_value_forbidden(value: &str) -> bool {
+pub(crate) fn style_value_forbidden(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     value.contains(['<', '>'])
         || lower.contains("url(")
@@ -353,49 +406,47 @@ fn style_value_forbidden(value: &str) -> bool {
         || lower.contains("data:")
 }
 
-fn public_proxy_destination(destination: &str) -> bool {
+fn public_proxy_destination(destination: &str) -> std::result::Result<(), EgressDenial> {
     let test_allowlist = std::env::var("SPACEFAST_EGRESS_TEST_ALLOWLIST").ok();
     if proxy_destination_test_allowlisted(destination, test_allowlist.as_deref()) {
-        return true;
+        return Ok(());
     }
-    let Some(rest) = destination
-        .strip_prefix("https://")
-        .or_else(|| destination.strip_prefix("http://"))
-    else {
-        return false;
-    };
-    let authority = rest.split('/').next().unwrap_or("");
-    let host = authority
-        .rsplit('@')
-        .next()
-        .unwrap_or("")
-        .trim_matches(['[', ']'])
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if host.is_empty()
-        || host == "localhost"
-        || host.ends_with(".localhost")
-        || host == "api.spacefast.com"
-        || host.ends_with(".view.fast")
-    {
-        return false;
+    target_allowed(
+        EgressProfile::ProxyRoute,
+        destination,
+        proxy_internal_hosts(),
+    )
+    .map(|_| ())
+}
+
+fn egress_denial_reason(denial: EgressDenial) -> &'static str {
+    match denial {
+        EgressDenial::Scheme => "proxy upstreams must be http or https",
+        EgressDenial::Credentials => "upstream URL credentials are not allowed",
+        EgressDenial::Host => "loopback or malformed hostname",
+        EgressDenial::InternalHost => "internal infrastructure endpoint",
+        EgressDenial::Address => "denied IP address range",
+        EgressDenial::RedirectLimit => "too many redirect hops",
     }
-    match host.parse::<std::net::IpAddr>() {
-        Ok(address) => {
-            !address.is_loopback()
-                && !address.is_unspecified()
-                && !address.is_multicast()
-                && match address {
-                    std::net::IpAddr::V4(value) => {
-                        !value.is_private() && !value.is_link_local() && !value.is_broadcast()
-                    }
-                    std::net::IpAddr::V6(value) => !value.is_unique_local(),
-                }
-        }
-        Err(_) => true,
-    }
+}
+
+fn proxy_destination_hostname(destination: &str) -> String {
+    url::Url::parse(destination)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_else(|| destination.to_string())
+}
+
+fn proxy_internal_hosts() -> &'static InternalHosts {
+    static HOSTS: OnceLock<InternalHosts> = OnceLock::new();
+    HOSTS.get_or_init(|| {
+        InternalHosts::from_hosts(
+            SERVING_INTERNAL_HOSTS
+                .iter()
+                .copied()
+                .chain(["api.spacefast.com"]),
+        )
+    })
 }
 
 fn proxy_destination_test_allowlisted(destination: &str, allowlist: Option<&str>) -> bool {
@@ -564,26 +615,56 @@ mod tests {
             }),
             "runtime_artifact_validation_failed",
         );
-        for destination in [
-            "http://localhost/api",
-            "https://api.spacefast.com/internal",
-            "http://10.0.0.8/private",
-            "ftp://example.com/files",
+        // A denied upstream is refused with the host and the reason attached:
+        // this failure is what the publisher reads, so it has to name the line
+        // they need to change rather than the policy that ran.
+        for (destination, hostname, reason) in [
+            (
+                "http://localhost/api",
+                "localhost",
+                "loopback or malformed hostname",
+            ),
+            (
+                "https://api.spacefast.com/internal",
+                "api.spacefast.com",
+                "internal infrastructure endpoint",
+            ),
+            (
+                "http://10.0.0.8/private",
+                "10.0.0.8",
+                "denied IP address range",
+            ),
+            (
+                "ftp://example.com/files",
+                "example.com",
+                "proxy upstreams must be http or https",
+            ),
         ] {
             let redirects_pattern = [json!({"action":"proxy","destination":destination})];
-            assert_invalid(
-                validate_finalize_policy(FinalizePolicyContext {
-                    config: &Map::new(),
-                    files: &BTreeMap::new(),
-                    redirects_exact: &Map::new(),
-                    redirects_pattern: &redirects_pattern,
-                    headers_exact: &Map::new(),
-                    headers_pattern: &[],
-                    body: &json!({}),
-                    private: &BTreeSet::new(),
-                }),
-                "runtime_artifact_validation_failed",
-            );
+            let result = validate_finalize_policy(FinalizePolicyContext {
+                config: &Map::new(),
+                files: &BTreeMap::new(),
+                redirects_exact: &Map::new(),
+                redirects_pattern: &redirects_pattern,
+                headers_exact: &Map::new(),
+                headers_pattern: &[],
+                body: &json!({}),
+                private: &BTreeSet::new(),
+            });
+            match result {
+                Err(FinalizeError::Invalid {
+                    code,
+                    details: Some(details),
+                    ..
+                }) => {
+                    assert_eq!(code, "proxy_upstream_denied", "{destination}");
+                    assert_eq!(details["hostname"], json!(hostname), "{destination}");
+                    assert_eq!(details["destination"], json!(destination));
+                    assert_eq!(details["reason"], json!(reason), "{destination}");
+                    assert_eq!(details["path"], json!("_redirects"));
+                }
+                other => panic!("expected a located proxy_upstream_denied, got {other:?}"),
+            }
         }
         let redirects_pattern = [json!({
             "action":"proxy",
@@ -615,6 +696,53 @@ mod tests {
             private: &BTreeSet::new(),
         })
         .unwrap();
+    }
+
+    #[test]
+    fn proxy_destinations_match_the_shared_egress_corpus() {
+        let corpus: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/common/src/utils/egress-policy.fixtures.json"
+        )))
+        .expect("the shared egress corpus must be valid JSON");
+
+        for (section, target, verdict) in [("ips", "ip", "public"), ("hosts", "host", "allowed")] {
+            for entry in corpus[section]
+                .as_array()
+                .expect("the shared egress corpus section must be an array")
+            {
+                let host = entry[target]
+                    .as_str()
+                    .expect("the shared egress corpus entry must contain its host");
+                let host = if host.contains(':') {
+                    format!("[{host}]")
+                } else {
+                    host.to_string()
+                };
+                let redirects_pattern = [json!({
+                    "action": "proxy",
+                    "destination": format!("https://{host}/x"),
+                })];
+                let result = validate_finalize_policy(FinalizePolicyContext {
+                    config: &Map::new(),
+                    files: &BTreeMap::new(),
+                    redirects_exact: &Map::new(),
+                    redirects_pattern: &redirects_pattern,
+                    headers_exact: &Map::new(),
+                    headers_pattern: &[],
+                    body: &json!({}),
+                    private: &BTreeSet::new(),
+                });
+                assert_eq!(
+                    result.is_ok(),
+                    entry[verdict]
+                        .as_bool()
+                        .expect("the shared egress corpus entry must contain its verdict"),
+                    "{section} {host} {}",
+                    entry["reason"].as_str().unwrap_or_default(),
+                );
+            }
+        }
     }
 
     #[test]

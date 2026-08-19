@@ -72,18 +72,6 @@ pub unsafe extern "C" fn sf_compile_routing(pointer: *const u8, length: usize) -
     pack_output(bytes)
 }
 
-/// Filesystem-rooted site finalization is native-only: Zero endpoint
-/// compilation needs the native QuickJS runner, which is compiled out of the
-/// wasm build. The export exists so the ABI surface is stable across targets;
-/// invoking it traps with an explicit unsupported error.
-#[no_mangle]
-pub extern "C" fn sf_finalize() {
-    panic!(
-        "site finalize is unavailable in the wasm build: Zero endpoint compilation \
-         requires the native stattic-runtime-compiler binary"
-    );
-}
-
 #[cfg(target_pointer_width = "32")]
 fn pack_output(bytes: Vec<u8>) -> u64 {
     let bytes = bytes.into_boxed_slice();

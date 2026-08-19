@@ -1,43 +1,22 @@
 <?php
 declare(strict_types=1);
 
-// Dependency-free SigV4 signer + minimal S3-compatible client for the engine
-// (plan §10/§26, DECISIONS I-12/I-13). Ported from the proven HMAC-chain
-// pattern in .upstream/wpcom/.../class.aws-call.php (date/region/service/
-// request key derivation, credential-scope + string-to-sign shape) into the
-// engine's object canonicalization needs: S3 GET/PUT/HEAD, path-style AND
-// virtual-host addressing, Range/If-None-Match pass-through as signed
-// headers, and a real (never UNSIGNED-PAYLOAD) payload hash on every write.
-// No SDK, no presigned URLs — static keys delivered via persist-data
-// (SPACEFAST_STORAGE_BUCKETS_JSON), read through _stattic_config_value()
-// (context.php) exactly like every other SPACEFAST_* runtime setting.
-//
-// Callers (later waves): runtime/serve.php's tiered-serve branch, the
-// demote/promote bulk-lane jobs, and the moves-V2 ensure-blobs/install
-// steppers. This file only signs and moves bytes; it never decides
-// eligibility/policy and never touches the private-storage path-safety
-// helpers in shared/storage.php (kept dependency-free) — callers are
-// responsible for their own destination-path safety before handing a
-// dest_path to _stattic_s3_multi_get().
+// Dependency-free SigV4 signer + minimal S3 client. Deliberately does not depend
+// on shared/storage.php: callers own destination-path safety.
 require_once __DIR__ . '/context.php';
+require_once __DIR__ . '/streaming.php';
+require_once __DIR__ . '/http.php';
 
-// Every PUT path in this file computes and signs the real payload hash
-// (DECISIONS I-12: "PUT always signs the real payload hash; never
-// UNSIGNED-PAYLOAD on writes") — never the S3 dialect's UNSIGNED-PAYLOAD sentinel.
-// hash('sha256', '') — literal so no function call is needed at const-eval time.
+// hash('sha256', ''), literal for const-eval. A PUT always signs the real payload
+// hash, never the UNSIGNED-PAYLOAD sentinel.
 const STATTIC_S3_EMPTY_PAYLOAD_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const STATTIC_S3_CONNECT_TIMEOUT_SECONDS = 10;
 const STATTIC_S3_TOTAL_TIMEOUT_SECONDS = 30;
 const STATTIC_S3_DEFAULT_PARALLEL_STREAMS = 4;
 
-// ---------------------------------------------------------------------------
-// Bucket registry / manifest (DECISIONS I-13)
-// ---------------------------------------------------------------------------
-
-// SPACEFAST_STORAGE_BUCKETS_JSON: array of
+// SPACEFAST_STORAGE_BUCKETS_JSON rows:
 // {id, endpoint, region, bucket, urlStyle, getKeyId, getKeySecret, putKeyId,
-//  putKeySecret, integrity}. Cached per-process; pass $forceReload to re-read
-// after a stale-key failure (the manifest may have rotated).
+//  putKeySecret, integrity}. $forceReload re-reads after a stale-key failure.
 function _stattic_s3_bucket_manifest(bool $forceReload = false): array
 {
     static $cached = null;
@@ -68,8 +47,63 @@ function _stattic_s3_bucket_row(string $bucketId, bool $forceReload = false): ?a
     return $manifest[$bucketId] ?? null;
 }
 
-// Two credentials per bucket (DECISIONS I-13): a GET-only key for the serve
-// path, a PUT-capable key for the demote/transfer lane. $mode is 'get'|'put'.
+// The control plane pushes exactly one active bucket per site;
+// SPACEFAST_STORAGE_BUCKET_ID pins a choice if a site is ever handed more.
+function _stattic_s3_default_bucket_id(): ?string
+{
+    $pinned = _stattic_config_value('SPACEFAST_STORAGE_BUCKET_ID');
+    if ($pinned !== '') {
+        return _stattic_s3_bucket_row($pinned) === null ? null : $pinned;
+    }
+    $manifest = _stattic_s3_bucket_manifest();
+    if (count($manifest) !== 1) {
+        return null;
+    }
+    return (string) array_key_first($manifest);
+}
+
+// The object key is DERIVED from (space, sha) at every call site and never
+// stored — not in a shard, not in a metadata record, not in a job payload. That
+// is what makes a space move a pure prefix operation and a stale stored key
+// impossible.
+function _stattic_s3_blob_key(string $spaceId, string $sha256): ?string
+{
+    $sha256 = strtolower(trim($sha256));
+    if (
+        preg_match('/^[A-Za-z0-9._-]{1,128}$/', $spaceId) !== 1
+        || preg_match('/^[a-f0-9]{64}$/', $sha256) !== 1
+    ) {
+        return null;
+    }
+    return 'spaces/' . $spaceId . '/blobs/' . substr($sha256, 0, 2) . '/' . $sha256;
+}
+
+function _stattic_s3_blob_locator(string $bucketId, string $spaceId, string $sha256): ?array
+{
+    $key = _stattic_s3_blob_key($spaceId, $sha256);
+    return $key === null ? null : ['bucket' => $bucketId, 'key' => $key];
+}
+
+// Object size when the blob is in the bucket, null when it is not (or the HEAD
+// could not be answered). The demote lane's upload verification for buckets
+// whose PUTs are not server-verified.
+function _stattic_s3_blob_head(string $spaceId, string $sha256, ?string $bucketId = null): ?int
+{
+    $bucketId ??= _stattic_s3_default_bucket_id();
+    $key = $bucketId === null ? null : _stattic_s3_blob_key($spaceId, $sha256);
+    if ($key === null) {
+        return null;
+    }
+    $result = _stattic_s3_request_by_bucket_id((string) $bucketId, 'put', 'HEAD', $key);
+    if (!$result['ok'] || (int) $result['status'] !== 200) {
+        return null;
+    }
+    $length = $result['headers']['content-length'] ?? null;
+    return is_string($length) && preg_match('/^[0-9]+$/', $length) === 1 ? (int) $length : 0;
+}
+
+// A GET-only key for the serve path, a PUT-capable key for the demote/transfer
+// lane.
 function _stattic_s3_credentials(array $bucketRow, string $mode): array
 {
     if ($mode === 'put') {
@@ -84,20 +118,11 @@ function _stattic_s3_credentials(array $bucketRow, string $mode): array
     ];
 }
 
-// ---------------------------------------------------------------------------
-// URL / canonicalization
-// ---------------------------------------------------------------------------
-
 function _stattic_s3_uri_encode(string $value): string
 {
-    // rawurlencode() already leaves unreserved chars (A-Za-z0-9-_.~) intact,
-    // matching AWS's URI-encode rule (RFC 3986); no further fixup needed.
     return rawurlencode($value);
 }
 
-// Encodes an object key as a canonical request path: each '/'-delimited
-// segment is percent-encoded independently, the '/' separators are kept
-// literal (S3 object keys are themselves path-shaped).
 function _stattic_s3_canonical_object_path(string $key): string
 {
     $key = ltrim($key, '/');
@@ -108,9 +133,8 @@ function _stattic_s3_canonical_object_path(string $key): string
     return '/' . implode('/', $segments);
 }
 
-// Builds the request URL/host/path for one bucket + key, honoring the
-// registry's urlStyle ('vhost' or 'path'; anything else falls back to path
-// style, the safer default — every provider supports it).
+// urlStyle other than 'vhost' falls back to path style: every provider
+// supports it.
 function _stattic_s3_locator(array $bucketRow, string $key): ?array
 {
     $endpoint = trim((string) ($bucketRow['endpoint'] ?? ''));
@@ -142,8 +166,6 @@ function _stattic_s3_locator(array $bucketRow, string $key): ?array
     ];
 }
 
-// Sorted, lowercase "name:value\n" canonical header block + the matching
-// ';'-joined SignedHeaders list (SigV4 canonicalization).
 function _stattic_s3_canonical_headers(array $headers): array
 {
     $normalized = [];
@@ -159,9 +181,6 @@ function _stattic_s3_canonical_headers(array $headers): array
     return [$canonical, implode(';', array_keys($normalized))];
 }
 
-// Readable "Name-Value" header casing for the actual HTTP wire (case is
-// cosmetic — HTTP header names are case-insensitive — but this keeps
-// CURLOPT_HTTPHEADER lines matching AWS's own convention).
 function _stattic_s3_header_lines(array $headers): array
 {
     $lines = [];
@@ -172,21 +191,21 @@ function _stattic_s3_header_lines(array $headers): array
     return $lines;
 }
 
-// ---------------------------------------------------------------------------
-// Signing (HMAC-chain derivation ported from the wpcom AWS_Call pattern)
-// ---------------------------------------------------------------------------
-
 function _stattic_s3_signing_key(string $secretAccessKey, string $dateStamp, string $region, string $service): string
 {
+    static $cache = [];
+    $cacheKey = $secretAccessKey . "\0" . $dateStamp . "\0" . $region . "\0" . $service;
+    if (isset($cache[$cacheKey])) {
+        return $cache[$cacheKey];
+    }
+
     $dateKey = hash_hmac('sha256', $dateStamp, 'AWS4' . $secretAccessKey, true);
     $regionKey = hash_hmac('sha256', $region, $dateKey, true);
     $serviceKey = hash_hmac('sha256', $service, $regionKey, true);
-    return hash_hmac('sha256', 'aws4_request', $serviceKey, true);
+    return $cache[$cacheKey] = hash_hmac('sha256', 'aws4_request', $serviceKey, true);
 }
 
-// Returns the full header set to send on the wire: $extraHeaders plus Host,
-// X-Amz-Date, X-Amz-Content-Sha256, and Authorization. $payloadHash must be
-// the real body hash for writes (never the S3 dialect's UNSIGNED-PAYLOAD sentinel).
+// $payloadHash must be the real body hash for writes, never UNSIGNED-PAYLOAD.
 function _stattic_s3_sign(
     array $bucketRow,
     array $credentials,
@@ -211,8 +230,6 @@ function _stattic_s3_sign(
     $canonicalRequest = implode("\n", [
         strtoupper($method),
         $path,
-        // No signed request carries a query string; the runtime addresses S3
-        // objects by path only.
         '',
         $canonicalHeaders,
         $signedHeaders,
@@ -238,52 +255,14 @@ function _stattic_s3_sign(
     return $headers;
 }
 
-// ---------------------------------------------------------------------------
-// Transport primitives
-// ---------------------------------------------------------------------------
-
-// One curl handle reused across calls within the current process instead of
-// curl_init()/curl_close() per request: libcurl's connection cache is tied
-// to the handle, so successive calls in the same script run (breaker
-// retries, sequential ops) can reuse a warm connection. PHP-FPM tears down
-// static state between requests like any other request-scoped globals, so
-// this does not persist a connection *across* separate HTTP requests to the
-// engine — it is "one handle for the life of the current request/script",
-// which is what ext-curl can actually offer; there is no persistent-curl API.
-function _stattic_s3_curl_handle(): \CurlHandle
-{
-    static $handle = null;
-    if ($handle === null) {
-        $handle = curl_init();
-    } else {
-        curl_reset($handle);
-    }
-    return $handle;
-}
-
-function _stattic_s3_header_collector(array &$headers): callable
-{
-    return static function ($ch, string $line) use (&$headers): int {
-        $trimmed = rtrim($line, "\r\n");
-        if ($trimmed !== '' && str_contains($trimmed, ':')) {
-            [$name, $value] = explode(':', $trimmed, 2);
-            $headers[strtolower(trim($name))] = trim($value);
-        }
-        return strlen($line);
-    };
-}
-
 function _stattic_s3_payload_hash(string $body): string
 {
     return hash('sha256', $body);
 }
 
-// THE credential/locator gate in front of every signed request: a bucket row
-// missing either half of its $mode credential pair can only produce an
-// unsignable request, so it fails closed here rather than at the provider.
-// Returns ['credentials' => array, 'locator' => array], or
-// ['error' => 's3_credentials_missing'|'s3_bucket_config_invalid'] — callers
-// map that onto their own failure shape.
+// Fails closed before the wire: an incomplete credential pair could only
+// produce an unsignable request. Returns ['credentials', 'locator'] or
+// ['error' => 's3_credentials_missing'|'s3_bucket_config_invalid'].
 function _stattic_s3_prepare(array $bucketRow, string $mode, string $key): array
 {
     $credentials = _stattic_s3_credentials($bucketRow, $mode);
@@ -297,16 +276,63 @@ function _stattic_s3_prepare(array $bucketRow, string $mode, string $key): array
     return ['credentials' => $credentials, 'locator' => $locator];
 }
 
-// Buffered small-op request: GET (small bodies)/PUT/HEAD. $options:
-//   body            (PUT) request body — hashed for real (never unsigned).
-//   content_type    (PUT) optional Content-Type header.
-//   range           signed Range header pass-through.
-//   if_none_match   signed If-None-Match header pass-through.
-//   resolve         optional list of "host:port:ip" CURLOPT_RESOLVE entries
-//                    (pins a hostname to an IP without touching system DNS —
-//                    used by the fixture test harness for vhost-style
-//                    addressing against a loopback fake; also useful
-//                    operationally to bypass DNS during an incident).
+// A signed request as a transport policy record. $options carries the extra
+// transport fields a caller may set: resolve (a list of "host:port:ip"
+// CURLOPT_RESOLVE pins), sink and on_headers.
+function _stattic_s3_transport_request(
+    array $bucketRow,
+    array $credentials,
+    array $locator,
+    string $method,
+    array $extraHeaders,
+    string $payloadHash,
+    array $options = []
+): array {
+    $signedHeaders = _stattic_s3_sign(
+        $bucketRow,
+        $credentials,
+        $method,
+        $locator['host'],
+        $locator['path'],
+        $extraHeaders,
+        $payloadHash
+    );
+    $request = [
+        'url' => $locator['url'],
+        'method' => $method,
+        'headers' => _stattic_s3_header_lines($signedHeaders),
+        'connect_timeout' => STATTIC_S3_CONNECT_TIMEOUT_SECONDS,
+        'timeout' => STATTIC_S3_TOTAL_TIMEOUT_SECONDS,
+        'schemes' => [$locator['scheme']],
+    ];
+    foreach (['resolve', 'sink', 'on_headers', 'body', 'body_stream', 'body_size'] as $field) {
+        if (isset($options[$field])) {
+            $request[$field] = $options[$field];
+        }
+    }
+    return $request;
+}
+
+function _stattic_s3_signed_headers(string $method, string $body, array $options): array
+{
+    $headers = [];
+    if (isset($options['range']) && is_string($options['range']) && $options['range'] !== '') {
+        $headers['range'] = $options['range'];
+    }
+    if (isset($options['if_none_match']) && is_string($options['if_none_match']) && $options['if_none_match'] !== '') {
+        $headers['if-none-match'] = $options['if_none_match'];
+    }
+    if ($method === 'PUT') {
+        $headers['content-length'] = (string) strlen($body);
+        if (isset($options['content_type']) && is_string($options['content_type']) && $options['content_type'] !== '') {
+            $headers['content-type'] = $options['content_type'];
+        }
+    }
+    return $headers;
+}
+
+// Buffered small-op request (GET/PUT/HEAD). $options: body, content_type,
+// range, if_none_match, resolve.
 function _stattic_s3_request(array $bucketRow, string $mode, string $method, string $key, array $options = []): array
 {
     $prepared = _stattic_s3_prepare($bucketRow, $mode, $key);
@@ -321,63 +347,26 @@ function _stattic_s3_request(array $bucketRow, string $mode, string $method, str
         ? _stattic_s3_payload_hash($body)
         : STATTIC_S3_EMPTY_PAYLOAD_SHA256;
 
-    $extraHeaders = [];
-    if (isset($options['range']) && is_string($options['range']) && $options['range'] !== '') {
-        $extraHeaders['range'] = $options['range'];
-    }
-    if (isset($options['if_none_match']) && is_string($options['if_none_match']) && $options['if_none_match'] !== '') {
-        $extraHeaders['if-none-match'] = $options['if_none_match'];
-    }
+    $transportOptions = ['resolve' => $options['resolve'] ?? []];
     if ($method === 'PUT') {
-        $extraHeaders['content-length'] = (string) strlen($body);
-        if (isset($options['content_type']) && is_string($options['content_type']) && $options['content_type'] !== '') {
-            $extraHeaders['content-type'] = $options['content_type'];
-        }
+        $transportOptions['body'] = $body;
     }
+    $result = _stattic_http_request(_stattic_s3_transport_request(
+        $bucketRow,
+        $credentials,
+        $locator,
+        $method,
+        _stattic_s3_signed_headers($method, $body, $options),
+        $payloadHash,
+        $transportOptions
+    ));
 
-    $signedHeaders = _stattic_s3_sign($bucketRow, $credentials, $method, $locator['host'], $locator['path'], $extraHeaders, $payloadHash);
-
-    $ch = _stattic_s3_curl_handle();
-    $curlOptions = [
-        CURLOPT_URL => $locator['url'],
-        CURLOPT_CUSTOMREQUEST => $method,
-        CURLOPT_NOBODY => $method === 'HEAD',
-        CURLOPT_HTTPHEADER => _stattic_s3_header_lines($signedHeaders),
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HEADER => false,
-        CURLOPT_CONNECTTIMEOUT => STATTIC_S3_CONNECT_TIMEOUT_SECONDS,
-        CURLOPT_TIMEOUT => STATTIC_S3_TOTAL_TIMEOUT_SECONDS,
-    ];
-    if ($method === 'PUT') {
-        $curlOptions[CURLOPT_POSTFIELDS] = $body;
-    }
-    if (isset($options['resolve']) && is_array($options['resolve']) && $options['resolve'] !== []) {
-        $curlOptions[CURLOPT_RESOLVE] = array_values(array_map('strval', $options['resolve']));
-    }
-    curl_setopt_array($ch, $curlOptions);
-
-    $responseHeaders = [];
-    curl_setopt($ch, CURLOPT_HEADERFUNCTION, _stattic_s3_header_collector($responseHeaders));
-
-    $responseBody = curl_exec($ch);
-    $errno = curl_errno($ch);
-    if ($responseBody === false || $errno !== 0) {
-        return [
-            'ok' => false,
-            'status' => 0,
-            'headers' => $responseHeaders,
-            'body' => '',
-            'error' => 's3_transport_error:' . curl_error($ch),
-        ];
-    }
-
-    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     return [
-        'ok' => $status >= 200 && $status < 300,
-        'status' => $status,
-        'headers' => $responseHeaders,
-        'body' => is_string($responseBody) ? $responseBody : '',
-        'error' => null,
+        'ok' => $result['ok'],
+        'status' => $result['status'],
+        'headers' => _stattic_http_header_map($result['headers']),
+        'body' => $result['body'],
+        'error' => $result['error'] === null ? null : 's3_transport_error:' . $result['error'],
     ];
 }
 
@@ -391,17 +380,7 @@ function _stattic_s3_head(array $bucketRow, string $key, array $options = []): a
     return _stattic_s3_request($bucketRow, 'get', 'HEAD', $key, $options);
 }
 
-function _stattic_s3_exists(array $bucketRow, string $key, string $mode = 'get'): bool
-{
-    $result = _stattic_s3_request($bucketRow, $mode, 'HEAD', $key);
-    return $result['ok'] && $result['status'] === 200;
-}
-
-// Looks the bucket up by id (retrying once against a freshly-read manifest
-// on an auth failure — DECISIONS I-13: "stale-key failures fail closed to
-// the breaker, then retry with a freshly-read manifest") before delegating
-// to _stattic_s3_request(). The caller's breaker/error-surfacing decision
-// still runs off this function's returned ['ok','status','error'] shape.
+// Stale-key failures retry once against a freshly-read manifest.
 function _stattic_s3_request_by_bucket_id(string $bucketId, string $mode, string $method, string $key, array $options = []): array
 {
     $bucketRow = _stattic_s3_bucket_row($bucketId);
@@ -418,119 +397,51 @@ function _stattic_s3_request_by_bucket_id(string $bucketId, string $mode, string
     return $result;
 }
 
-// ---------------------------------------------------------------------------
-// Streaming GET (serve-path seam consumed by a later wave's tiered-serve
-// branch in runtime/serve.php — see plan §26 pseudocode). Returns a curl
-// handle pre-configured for a signed streamed GET; the caller curl_exec()s
-// it. $onHeaders(int $status, array $headers) fires once, after the full
-// header block for the final response is parsed and before any body bytes
-// arrive — this is the correct (and only) point at which the caller can
-// translate the bucket's status/Content-Range into the client's HTTP
-// response before streaming starts. $onChunk(string $chunk) fires per body
-// chunk; returning false aborts the transfer (curl semantics: a write
-// callback that doesn't report having consumed all bytes stops the
-// transfer). With no callbacks the default behavior is a direct
-// pass-through stream to output — never buffered. $curlOptions carries rare
-// per-call curl overrides; today only 'resolve' (a list of "host:port:ip"
-// CURLOPT_RESOLVE entries — see _stattic_s3_request()'s matching option for
-// why this exists: pin a hostname to an IP without touching system DNS).
-// ---------------------------------------------------------------------------
-
-function _stattic_s3_open(
+// Runs a signed streamed GET. $onHeaders(int $status, array $headers) fires
+// once, after the final response's header block and before any body byte — the
+// only point where the caller can still set its own status/headers; $headers is
+// the lowercase name => value map. $onChunk(string) fires per chunk and
+// returning false aborts the transfer; with no $onChunk the body streams
+// straight to output. Returns the transport envelope without a buffered body.
+function _stattic_s3_stream_get(
     array $remoteLocator,
     ?string $rangeHeader = null,
     ?callable $onHeaders = null,
     ?callable $onChunk = null,
-    array $curlOptions = []
-): array|false {
+    array $options = []
+): array {
     $bucketId = (string) ($remoteLocator['bucket'] ?? '');
     $key = (string) ($remoteLocator['key'] ?? '');
-    if ($bucketId === '' || $key === '') {
-        return false;
-    }
-
-    $bucketRow = _stattic_s3_bucket_row($bucketId);
-    if ($bucketRow === null) {
-        return false;
-    }
-    $prepared = _stattic_s3_prepare($bucketRow, 'get', $key);
+    $bucketRow = $bucketId === '' ? null : _stattic_s3_bucket_row($bucketId);
+    $prepared = $bucketRow === null || $key === ''
+        ? ['error' => 's3_open_failed']
+        : _stattic_s3_prepare($bucketRow, 'get', $key);
     if (isset($prepared['error'])) {
-        return false;
+        return ['ok' => false, 'status' => 0, 'headers' => [], 'body' => '', 'error' => $prepared['error']];
     }
     ['credentials' => $credentials, 'locator' => $locator] = $prepared;
 
-    $extraHeaders = [];
-    if ($rangeHeader !== null && $rangeHeader !== '') {
-        $extraHeaders['range'] = $rangeHeader;
-    }
-    $signedHeaders = _stattic_s3_sign(
+    return _stattic_http_request(_stattic_s3_transport_request(
         $bucketRow,
         $credentials,
+        $locator,
         'GET',
-        $locator['host'],
-        $locator['path'],
-        $extraHeaders,
-        STATTIC_S3_EMPTY_PAYLOAD_SHA256
-    );
-
-    $state = (object) ['status' => null, 'headers' => []];
-    $handle = _stattic_s3_curl_handle();
-    $opts = [
-        CURLOPT_URL => $locator['url'],
-        CURLOPT_HTTPGET => true,
-        CURLOPT_HTTPHEADER => _stattic_s3_header_lines($signedHeaders),
-        CURLOPT_CONNECTTIMEOUT => STATTIC_S3_CONNECT_TIMEOUT_SECONDS,
-        CURLOPT_TIMEOUT => STATTIC_S3_TOTAL_TIMEOUT_SECONDS,
-        CURLOPT_RETURNTRANSFER => false,
-    ];
-    if (isset($curlOptions['resolve']) && is_array($curlOptions['resolve']) && $curlOptions['resolve'] !== []) {
-        $opts[CURLOPT_RESOLVE] = array_values(array_map('strval', $curlOptions['resolve']));
-    }
-    curl_setopt_array($handle, $opts + [
-        CURLOPT_HEADERFUNCTION => static function ($ch, string $line) use ($state, $onHeaders): int {
-            $trimmed = rtrim($line, "\r\n");
-            if (preg_match('#^HTTP/\S+\s+(\d{3})#', $trimmed, $m) === 1) {
-                // A new status line (initial response, or a 100-continue
-                // preamble) starts a fresh header block.
-                $state->status = (int) $m[1];
-                $state->headers = [];
-                return strlen($line);
-            }
-            if ($trimmed === '') {
-                // Blank line = end of the current header block. Fire once
-                // per real (non-1xx) response, before any body bytes.
-                if ($onHeaders !== null && $state->status !== null && $state->status >= 200) {
-                    $onHeaders($state->status, $state->headers);
-                }
-                return strlen($line);
-            }
-            if (str_contains($trimmed, ':')) {
-                [$name, $value] = explode(':', $trimmed, 2);
-                $state->headers[strtolower(trim($name))] = trim($value);
-            }
-            return strlen($line);
-        },
-        CURLOPT_WRITEFUNCTION => static function ($ch, string $chunk) use ($onChunk): int {
-            if ($onChunk !== null) {
-                return $onChunk($chunk) === false ? 0 : strlen($chunk);
-            }
-            echo $chunk;
-            return strlen($chunk);
-        },
-    ]);
-
-    return ['handle' => $handle, 'state' => $state];
+        $rangeHeader !== null && $rangeHeader !== '' ? ['range' => $rangeHeader] : [],
+        STATTIC_S3_EMPTY_PAYLOAD_SHA256,
+        [
+            'resolve' => $options['resolve'] ?? [],
+            'sink' => $onChunk === null ? 'output' : $onChunk,
+            'on_headers' => $onHeaders === null
+                ? null
+                : static fn (int $status, array $headerPairs): mixed => $onHeaders($status, _stattic_http_header_map($headerPairs)),
+        ]
+    ));
 }
 
-// ---------------------------------------------------------------------------
-// curl-multi parallel transfer (DECISIONS I-12: native curl_multi_*, 4
-// streams default; sha256 verified via hash_update in the stream callbacks).
-// ---------------------------------------------------------------------------
-
-// Generic bounded-concurrency curl-multi driver. $jobs: list of
+// $jobs: list of
 // ['id' => string, 'handle' => CurlHandle]. Returns a map keyed by job id of
-// ['status' => int, 'error' => ?string] (transport-level; HTTP status only,
-// callers apply their own 2xx/expected-status check).
+// ['status' => int, 'error' => ?string] — transport level only, callers apply
+// their own status check.
 function _stattic_s3_multi_run(array $jobs, int $streams = STATTIC_S3_DEFAULT_PARALLEL_STREAMS): array
 {
     $streams = max(1, $streams);
@@ -569,9 +480,8 @@ function _stattic_s3_multi_run(array $jobs, int $streams = STATTIC_S3_DEFAULT_PA
                     'error' => $result === CURLE_OK ? null : curl_strerror($result),
                 ];
             }
-            // No curl_close(): deprecated since PHP 8.5 and a no-op since 8.0
-            // — CurlHandle objects since PHP 8.0 are freed by normal GC once
-            // curl_multi_remove_handle() drops the multi handle's reference.
+            // No curl_close(): deprecated in PHP 8.5, a no-op since 8.0 — GC
+            // frees the handle once curl_multi_remove_handle() drops its ref.
             $fill();
         }
     } while ($running > 0 || $active !== [] || $queue !== []);
@@ -580,121 +490,11 @@ function _stattic_s3_multi_run(array $jobs, int $streams = STATTIC_S3_DEFAULT_PA
     return $results;
 }
 
-// Parallel GET into local files, sha256-verified on stream (single pass:
-// hash_update happens in the same write callback that pipes bytes to disk,
-// never a second buffered read). $items: list of
-//   {id?, bucket, key, dest_path, sha256?}   -- sha256 is the expected digest
-//                                                (known ahead of time: blobs
-//                                                are content-addressed by
-//                                                their key), checked after
-//                                                the transfer completes.
-// Writes to "{dest_path}.part" and renames into place only on a verified,
-// 2xx-status transfer; leaves no partial file behind on any failure.
-// Returns a map keyed by item id: {ok, status, error, sha256, bytes}.
-function _stattic_s3_multi_get(array $items, int $streams = STATTIC_S3_DEFAULT_PARALLEL_STREAMS): array
-{
-    $jobs = [];
-    $contexts = [];
-
-    foreach ($items as $item) {
-        $itemId = (string) ($item['id'] ?? $item['key'] ?? bin2hex(random_bytes(6)));
-        $bucketRow = _stattic_s3_bucket_row((string) ($item['bucket'] ?? ''));
-        $key = (string) ($item['key'] ?? '');
-        $destPath = (string) ($item['dest_path'] ?? '');
-
-        if ($bucketRow === null || $key === '' || $destPath === '') {
-            $contexts[$itemId] = ['error' => 's3_invalid_item'];
-            continue;
-        }
-        $prepared = _stattic_s3_prepare($bucketRow, 'get', $key);
-        if (isset($prepared['error'])) {
-            $contexts[$itemId] = ['error' => $prepared['error']];
-            continue;
-        }
-        ['credentials' => $credentials, 'locator' => $locator] = $prepared;
-        $fh = @fopen($destPath . '.part', 'wb');
-        if ($fh === false) {
-            $contexts[$itemId] = ['error' => 's3_dest_open_failed'];
-            continue;
-        }
-
-        $signedHeaders = _stattic_s3_sign($bucketRow, $credentials, 'GET', $locator['host'], $locator['path'], [], STATTIC_S3_EMPTY_PAYLOAD_SHA256);
-        $hashContext = hash_init('sha256');
-        $state = (object) ['bytes' => 0];
-
-        $handle = curl_init();
-        curl_setopt_array($handle, [
-            CURLOPT_URL => $locator['url'],
-            CURLOPT_HTTPGET => true,
-            CURLOPT_HTTPHEADER => _stattic_s3_header_lines($signedHeaders),
-            CURLOPT_CONNECTTIMEOUT => STATTIC_S3_CONNECT_TIMEOUT_SECONDS,
-            CURLOPT_TIMEOUT => STATTIC_S3_TOTAL_TIMEOUT_SECONDS,
-            CURLOPT_WRITEFUNCTION => static function ($ch, string $chunk) use ($fh, $hashContext, $state): int {
-                hash_update($hashContext, $chunk);
-                $state->bytes += strlen($chunk);
-                $written = fwrite($fh, $chunk);
-                return $written === false ? 0 : $written;
-            },
-        ]);
-
-        $jobs[] = ['id' => $itemId, 'handle' => $handle];
-        $contexts[$itemId] = [
-            'fh' => $fh,
-            'hash' => $hashContext,
-            'state' => $state,
-            'dest_path' => $destPath,
-            'expected_sha256' => isset($item['sha256']) && is_string($item['sha256']) && $item['sha256'] !== ''
-                ? $item['sha256']
-                : null,
-        ];
-    }
-
-    $transferResults = _stattic_s3_multi_run($jobs, $streams);
-
-    $results = [];
-    foreach ($contexts as $itemId => $context) {
-        if (isset($context['error'])) {
-            $results[$itemId] = ['ok' => false, 'status' => 0, 'error' => $context['error'], 'sha256' => null, 'bytes' => 0];
-            continue;
-        }
-        fclose($context['fh']);
-        $transfer = $transferResults[$itemId] ?? ['status' => 0, 'error' => 's3_multi_missing_result'];
-        $digest = hash_final($context['hash']);
-        $ok = $transfer['error'] === null && $transfer['status'] >= 200 && $transfer['status'] < 300;
-        $error = $transfer['error'];
-
-        if ($ok && $context['expected_sha256'] !== null && !hash_equals($context['expected_sha256'], $digest)) {
-            $ok = false;
-            $error = 's3_integrity_mismatch';
-        }
-        if ($ok) {
-            rename($context['dest_path'] . '.part', $context['dest_path']);
-        } else {
-            @unlink($context['dest_path'] . '.part');
-        }
-
-        $results[$itemId] = [
-            'ok' => $ok,
-            'status' => $transfer['status'],
-            'error' => $error,
-            'sha256' => $digest,
-            'bytes' => $context['state']->bytes,
-        ];
-    }
-    return $results;
-}
-
-// Parallel PUT from local files. SigV4 requires the payload hash in a signed
-// header sent before the body, so (unlike the GET side) the hash cannot be
-// computed in the same pass as the network write when it isn't already
-// known: $items may supply 'sha256' directly (the common case — blobs are
-// content-addressed, so the sha is already the source of truth for the
-// filename/key) or omit it, in which case one hash_file() pass over the
-// local blob computes it up front. Either way the actual upload body is
-// streamed from disk via CURLOPT_UPLOAD/CURLOPT_INFILE — never buffered
-// into a single in-memory string. $items: list of
-//   {id?, bucket, key, source_path, sha256?, content_type?}
-// Returns a map keyed by item id: {ok, status, error, sha256}.
+// $items: list of {id?, bucket, key, source_path, sha256?, content_type?};
+// returns a map keyed by item id of {ok, status, error, sha256}. SigV4 signs
+// the payload hash in a header sent before the body, so an omitted 'sha256'
+// costs a separate hash_file() pass; the body itself is still streamed from
+// disk, never buffered.
 function _stattic_s3_multi_put(array $items, int $streams = STATTIC_S3_DEFAULT_PARALLEL_STREAMS): array
 {
     $jobs = [];
@@ -725,7 +525,7 @@ function _stattic_s3_multi_put(array $items, int $streams = STATTIC_S3_DEFAULT_P
             $contexts[$itemId] = ['error' => 's3_source_unreadable'];
             continue;
         }
-        $fh = @fopen($sourcePath, 'rb');
+        $fh = fopen($sourcePath, 'rb');
         if ($fh === false) {
             $contexts[$itemId] = ['error' => 's3_source_open_failed'];
             continue;
@@ -735,20 +535,26 @@ function _stattic_s3_multi_put(array $items, int $streams = STATTIC_S3_DEFAULT_P
         if (isset($item['content_type']) && is_string($item['content_type']) && $item['content_type'] !== '') {
             $extraHeaders['content-type'] = $item['content_type'];
         }
-        $signedHeaders = _stattic_s3_sign($bucketRow, $credentials, 'PUT', $locator['host'], $locator['path'], $extraHeaders, $payloadHash);
+        $job = _stattic_http_prepare(_stattic_s3_transport_request(
+            $bucketRow,
+            $credentials,
+            $locator,
+            'PUT',
+            $extraHeaders,
+            $payloadHash,
+            [
+                'body_stream' => $fh,
+                'body_size' => $size,
+                'sink' => static fn (string $chunk): bool => true,
+            ]
+        ));
+        if ($job === false) {
+            fclose($fh);
+            $contexts[$itemId] = ['error' => 's3_transport_unavailable'];
+            continue;
+        }
 
-        $handle = curl_init();
-        curl_setopt_array($handle, [
-            CURLOPT_URL => $locator['url'],
-            CURLOPT_UPLOAD => true,
-            CURLOPT_INFILE => $fh,
-            CURLOPT_INFILESIZE => $size,
-            CURLOPT_HTTPHEADER => _stattic_s3_header_lines($signedHeaders),
-            CURLOPT_CONNECTTIMEOUT => STATTIC_S3_CONNECT_TIMEOUT_SECONDS,
-            CURLOPT_TIMEOUT => STATTIC_S3_TOTAL_TIMEOUT_SECONDS,
-        ]);
-
-        $jobs[] = ['id' => $itemId, 'handle' => $handle];
+        $jobs[] = ['id' => $itemId, 'handle' => $job['handle']];
         $contexts[$itemId] = ['fh' => $fh, 'sha256' => $payloadHash];
     }
 

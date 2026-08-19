@@ -1,28 +1,34 @@
+use sha2::{Digest, Sha256};
 use stattic_runtime_core::{
-    compile_build, compile_finalize, finalize_site, finalize_site_dry_run, read_build_input,
-    read_finalize_input, read_import_rebind_input, read_input_format, read_site_finalize_input,
-    rebind_imported_version, write_import_rebind_output, write_output, write_site_finalize_error,
-    write_site_finalize_output, FinalizeError, RuntimeCompileError, RuntimeCompileOutput,
+    finalize_site, read_site_finalize_input, transform_private_root, write_site_finalize_error,
+    write_site_finalize_output, FinalizeError, RuntimeDiagnosticSeverity, SiteFinalizeInput,
     SITE_FINALIZE_INPUT_FORMAT,
 };
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 enum Command {
-    Build(CompileArgs),
-    Finalize(CompileArgs),
-    RebindImport { input: PathBuf, output: PathBuf },
+    Finalize(FinalizeArgs),
+    Prepare {
+        source: String,
+        bytecode: String,
+        capabilities: Option<String>,
+        generated_source: Option<String>,
+    },
+    Migrate(String),
+    CatalogTransform(PathBuf),
+    Invoke,
+    DbBroker,
+    ServiceBroker,
     SelfTest,
 }
 
 #[derive(Debug, Default)]
-struct CompileArgs {
+struct FinalizeArgs {
     input: PathBuf,
-    source_root: Option<String>,
     version_root: Option<String>,
-    previous_pack: Option<String>,
-    out_dir: Option<PathBuf>,
     output: Option<PathBuf>,
     dry_run: bool,
 }
@@ -30,29 +36,23 @@ struct CompileArgs {
 #[derive(Debug)]
 enum CliError {
     Usage(String),
-    Compile(RuntimeCompileError),
     Finalize(FinalizeError),
     Json(serde_json::Error),
+    SelfTest(String),
 }
 
 impl std::fmt::Display for CliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Usage(message) => f.write_str(message),
-            Self::Compile(error) => write!(f, "{error}"),
             Self::Finalize(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
+            Self::SelfTest(message) => f.write_str(message),
         }
     }
 }
 
 impl std::error::Error for CliError {}
-
-impl From<RuntimeCompileError> for CliError {
-    fn from(error: RuntimeCompileError) -> Self {
-        Self::Compile(error)
-    }
-}
 
 impl From<FinalizeError> for CliError {
     fn from(error: FinalizeError) -> Self {
@@ -68,7 +68,7 @@ impl From<serde_json::Error> for CliError {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("stattic-runtime-compiler: {error}");
+        eprintln!("stattic-runtime: {error}");
         std::process::exit(2);
     }
 }
@@ -76,78 +76,47 @@ fn main() {
 fn run() -> Result<(), CliError> {
     let command = parse_args(env::args().skip(1))?;
     match command {
-        Command::Build(args) => {
-            let mut input = read_build_input(&args.input)?;
-            if let Some(source_root) = args.source_root {
-                input.source_root = source_root;
-            }
-            emit_output(compile_build(input), args.out_dir, args.dry_run)?;
+        Command::Finalize(args) => finalize_site_command(args)?,
+        Command::Prepare {
+            source,
+            bytecode,
+            capabilities,
+            generated_source,
+        } => exit_with_status(stattic_zero_runner::prepare(
+            &source,
+            &bytecode,
+            capabilities.as_deref(),
+            generated_source.as_deref(),
+        )),
+        Command::Migrate(version_root) => {
+            exit_with_status(stattic_zero_runner::migrate(&version_root))
         }
-        Command::Finalize(args) => {
-            if read_input_format(&args.input)? == SITE_FINALIZE_INPUT_FORMAT {
-                finalize_v2(args)?;
-            } else {
-                // `read_finalize_input` rejects anything but the v1 format.
-                if args.output.is_some() {
-                    return Err(CliError::Usage(
-                        "--output requires a v2 finalize input; v1 uses --out-dir".to_string(),
-                    ));
-                }
-                let mut input = read_finalize_input(&args.input)?;
-                if let Some(version_root) = args.version_root {
-                    input.version_root = version_root;
-                }
-                if args.previous_pack.is_some() {
-                    input.previous_pack = args.previous_pack;
-                }
-                emit_output(compile_finalize(input), args.out_dir, args.dry_run)?;
-            }
-        }
-        Command::RebindImport { input, output } => rebind_import(&input, &output)?,
+        Command::CatalogTransform(private_root) => catalog_transform_command(&private_root)?,
+        Command::Invoke => stattic_zero_runner::run_stdio(),
+        Command::DbBroker => stattic_zero_runner::run_db_broker_stdio(),
+        Command::ServiceBroker => stattic_zero_runner::run_service_broker_stdio(),
         Command::SelfTest => self_test()?,
     }
     Ok(())
 }
 
-/// Rebinds an imported version's Zero executable graph to its target space.
-/// Failures write the stable v2 error envelope to `--output` (the same shape
-/// the PHP native adapter reads for finalize) before exiting nonzero.
-fn rebind_import(input: &std::path::Path, output: &std::path::Path) -> Result<(), CliError> {
-    let result = (|| -> Result<(), FinalizeError> {
-        let rebound = rebind_imported_version(read_import_rebind_input(input)?)?;
-        write_import_rebind_output(&rebound, output)
-    })();
-    if let Err(error) = result {
-        write_site_finalize_error(&error, output)?;
-        return Err(error.into());
+fn exit_with_status(status: i32) {
+    if status != 0 {
+        std::process::exit(status);
     }
-    Ok(())
 }
 
-/// Runs the v2 filesystem-rooted site finalize. `--dry-run` executes the
+/// Runs the filesystem-rooted site finalize. `--dry-run` executes the
 /// complete pipeline but discards the stage instead of publishing the
-/// immutable version; the output JSON goes to `--output` (with any open
-/// manifest spilled to a side-car) or stdout.
-fn finalize_v2(args: CompileArgs) -> Result<(), CliError> {
-    if args.out_dir.is_some() {
-        return Err(CliError::Usage(
-            "--out-dir applies to v1 inputs; v2 finalize writes into the version root and reports via --output".to_string(),
-        ));
-    }
+/// immutable version; the output JSON goes to `--output` or stdout.
+fn finalize_site_command(args: FinalizeArgs) -> Result<(), CliError> {
     let output_path = args.output.clone();
     let result = (|| -> Result<(), FinalizeError> {
         let mut input = read_site_finalize_input(&args.input)?;
         if let Some(version_root) = args.version_root {
             input.version_root = version_root;
         }
-        if args.previous_pack.is_some() {
-            input.previous_pack = args.previous_pack;
-        }
-        let output = if args.dry_run {
-            finalize_site_dry_run(input)?
-        } else {
-            finalize_site(input)?
-        };
+        let output = finalize_site(input, args.dry_run)?;
         write_site_finalize_output(output, output_path.as_deref())
     })();
     if let Err(error) = result {
@@ -159,43 +128,106 @@ fn finalize_v2(args: CompileArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Proves the binary can execute a compile end to end before printing the
-/// probe line installers and image builds assert on.
-fn self_test() -> Result<(), CliError> {
-    let output = compile_build(serde_json::from_value(serde_json::json!({
-        "format": "stattic.runtime.build.input.v1",
-        "sourceRoot": "/tmp/self-test",
-        "versionId": "ver_self_test",
-        "files": [{ "path": "index.html", "size": 1, "sha256": "00", "contentType": "text/html" }]
-    }))?);
-    if output.diagnostics.iter().any(|diagnostic| {
-        matches!(
-            diagnostic.severity,
-            stattic_runtime_core::RuntimeDiagnosticSeverity::Error
-        )
-    }) {
-        return Err(CliError::Usage("self-test compile failed".to_string()));
+/// The one-time `metadata.json → catalog` migration for versions finalized
+/// before the catalog existed. Sweeps every retained version under the private
+/// storage root, prints the coverage report the release gate reads, and exits
+/// nonzero when any version could not be projected — a catalog-less version
+/// must stop the cutover, never reach a runtime that cannot answer for it.
+fn catalog_transform_command(private_root: &std::path::Path) -> Result<(), CliError> {
+    let report = transform_private_root(private_root)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if report.failed > 0 {
+        std::process::exit(1);
     }
+    Ok(())
+}
+
+/// The one document the self-test finalizes: enough HTML for the decoration
+/// pass to have real work to do, small enough to stay well inside the five
+/// second deadline `installer.php` allows the probe.
+const SELF_TEST_DOCUMENT: &[u8] = b"<!doctype html>\n<title>self test</title>\n<p>ok</p>\n";
+
+/// Proves the binary can run its real job — a site finalize — end to end
+/// before printing the probe line installers and image builds assert on.
+///
+/// The finalize is a dry run in a throwaway directory: it walks the whole
+/// pipeline (CAS staging, the HTML decoration pass, response tables, catalog,
+/// version artifacts) and discards the stage instead of publishing a version.
+/// Nothing outside the temporary root is read or written.
+fn self_test() -> Result<(), CliError> {
+    let root = env::temp_dir().join(format!("stattic-runtime-self-test-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let result = self_test_finalize(&root);
+    let _ = fs::remove_dir_all(&root);
+    result?;
+    stattic_zero_runner::self_test().map_err(CliError::SelfTest)?;
     println!(
-        "{{\"format\":\"stattic.runtime.compiler.self-test.v1\",\"version\":\"{}\"}}",
-        env!("CARGO_PKG_VERSION")
+        "{{\"format\":\"stattic.runtime.self-test.v1\",\"version\":\"{}\",\"abi\":\"{}\"}}",
+        env!("CARGO_PKG_VERSION"),
+        stattic_zero_runner::RUNNER_ABI
     );
     Ok(())
 }
 
-fn emit_output(
-    output: RuntimeCompileOutput,
-    out_dir: Option<PathBuf>,
-    dry_run: bool,
-) -> Result<(), CliError> {
-    let print_stdout = dry_run || out_dir.is_none();
-    if let Some(out_dir) = out_dir {
-        write_output(out_dir, &output)?;
+/// Stages one document in a throwaway per-space CAS the way ingest does, then
+/// finalizes it as a dry run and checks the result the way the control plane
+/// does: one file published, no error diagnostic.
+fn self_test_finalize(root: &Path) -> Result<(), CliError> {
+    let sha256 = format!("{:x}", Sha256::digest(SELF_TEST_DOCUMENT));
+    let private = root.join("storage");
+    let blobs = private.join(format!("spaces/s/blobs/{}", &sha256[..2]));
+    fs::create_dir_all(&blobs).map_err(|error| self_test_io(&blobs, &error))?;
+    let blob = blobs.join(&sha256);
+    fs::write(&blob, SELF_TEST_DOCUMENT).map_err(|error| self_test_io(&blob, &error))?;
+
+    let output = finalize_site(
+        SiteFinalizeInput {
+            format: SITE_FINALIZE_INPUT_FORMAT.to_string(),
+            version_root: private.to_string_lossy().into_owned(),
+            space_id: "s".to_string(),
+            version_id: "v".to_string(),
+            upload_id: None,
+            generated_at: "1970-01-01T00:00:00Z".to_string(),
+            session: serde_json::json!({
+                "manifest": [{
+                    "path": "index.html",
+                    "size": SELF_TEST_DOCUMENT.len(),
+                    "sha256": sha256,
+                    "contentType": "text/html",
+                }],
+                "accepted": { sha256: SELF_TEST_DOCUMENT.len() },
+                "metadata": { "mode": "website" },
+            }),
+            body: serde_json::json!({ "serving": { "config": {} } }),
+            zero_endpoints: Vec::new(),
+            zero_runs: Vec::new(),
+        },
+        true,
+    )?;
+    if output.file_count != 1 {
+        return Err(CliError::SelfTest(format!(
+            "self-test finalize published {} files, expected 1",
+            output.file_count
+        )));
     }
-    if print_stdout {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+    if let Some(diagnostic) = output
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.severity == RuntimeDiagnosticSeverity::Error)
+    {
+        return Err(CliError::SelfTest(format!(
+            "self-test finalize reported {}: {}",
+            diagnostic.code, diagnostic.message
+        )));
     }
     Ok(())
+}
+
+fn self_test_io(path: &Path, error: &std::io::Error) -> CliError {
+    CliError::SelfTest(format!(
+        "self-test could not use {}: {error}",
+        path.display()
+    ))
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliError> {
@@ -206,13 +238,37 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliErro
     if command == "--self-test" {
         return Ok(Command::SelfTest);
     }
-    if command == "--rebind-import" {
-        return parse_rebind_import_args(args);
-    }
-    let compile_args = parse_compile_args(args)?;
     match command.as_str() {
-        "build" => Ok(Command::Build(compile_args)),
-        "finalize" => Ok(Command::Finalize(compile_args)),
+        "finalize" => Ok(Command::Finalize(parse_finalize_args(args)?)),
+        "prepare" => {
+            let values = args.collect::<Vec<_>>();
+            match values.as_slice() {
+                [source, bytecode, optional @ ..] if optional.len() <= 2 => Ok(Command::Prepare {
+                    source: source.clone(),
+                    bytecode: bytecode.clone(),
+                    capabilities: optional.first().cloned(),
+                    generated_source: optional.get(1).cloned(),
+                }),
+                _ => Err(CliError::Usage(usage())),
+            }
+        }
+        "migrate" => {
+            let values = args.collect::<Vec<_>>();
+            match values.as_slice() {
+                [version_root] => Ok(Command::Migrate(version_root.clone())),
+                _ => Err(CliError::Usage(usage())),
+            }
+        }
+        "catalog-transform" => {
+            let values = args.collect::<Vec<_>>();
+            match values.as_slice() {
+                [private_root] => Ok(Command::CatalogTransform(PathBuf::from(private_root))),
+                _ => Err(CliError::Usage(usage())),
+            }
+        }
+        "invoke" => no_operands(args, Command::Invoke),
+        "db-broker" => no_operands(args, Command::DbBroker),
+        "service-broker" => no_operands(args, Command::ServiceBroker),
         "--help" | "-h" | "help" => Err(CliError::Usage(usage())),
         _ => Err(CliError::Usage(format!(
             "unknown command {command:?}\n\n{}",
@@ -221,55 +277,31 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliErro
     }
 }
 
-/// The rebind lane accepts exactly `--input <file> --output <file>`. The
-/// compile-lane flags (`--out-dir`, `--source-root`, `--version-root`,
-/// `--previous-pack`, `--dry-run`) are rejected as unknown arguments.
-fn parse_rebind_import_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliError> {
-    let mut input: Option<PathBuf> = None;
-    let mut output: Option<PathBuf> = None;
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--input" => input = Some(next_path(&mut args, "--input")?),
-            "--output" => output = Some(next_path(&mut args, "--output")?),
-            "--help" | "-h" => return Err(CliError::Usage(usage())),
-            _ => {
-                return Err(CliError::Usage(format!(
-                    "unknown argument {arg:?} for --rebind-import\n\n{}",
-                    usage()
-                )))
-            }
-        }
+fn no_operands(
+    mut args: impl Iterator<Item = String>,
+    command: Command,
+) -> Result<Command, CliError> {
+    if args.next().is_some() {
+        return Err(CliError::Usage(usage()));
     }
-    match (input, output) {
-        (Some(input), Some(output)) => Ok(Command::RebindImport { input, output }),
-        _ => Err(CliError::Usage(format!(
-            "--rebind-import requires --input and --output\n\n{}",
-            usage()
-        ))),
-    }
+    Ok(command)
 }
 
-fn parse_compile_args(args: impl IntoIterator<Item = String>) -> Result<CompileArgs, CliError> {
-    let mut parsed = CompileArgs::default();
+fn parse_finalize_args(args: impl IntoIterator<Item = String>) -> Result<FinalizeArgs, CliError> {
+    let mut parsed = FinalizeArgs::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--input" => parsed.input = next_path(&mut args, "--input")?,
-            "--source-root" => parsed.source_root = Some(next_value(&mut args, "--source-root")?),
             "--version-root" => {
                 parsed.version_root = Some(next_value(&mut args, "--version-root")?)
             }
-            "--previous-pack" => {
-                parsed.previous_pack = Some(next_value(&mut args, "--previous-pack")?)
-            }
-            "--out-dir" => parsed.out_dir = Some(next_path(&mut args, "--out-dir")?),
             "--output" => parsed.output = Some(next_path(&mut args, "--output")?),
             "--dry-run" => parsed.dry_run = true,
             "--help" | "-h" => return Err(CliError::Usage(usage())),
             _ => {
                 return Err(CliError::Usage(format!(
-                    "unknown argument {arg:?}\n\n{}",
+                    "unknown argument {arg:?} for finalize\n\n{}",
                     usage()
                 )))
             }
@@ -292,16 +324,40 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
 
 fn usage() -> String {
     "usage:
-  stattic-runtime-compiler build --input <input.json> [--source-root <dir>] [--out-dir <dir>] [--dry-run]
-  stattic-runtime-compiler finalize --input <input.json> [--version-root <dir>] [--previous-pack <pack>] [--out-dir <dir>] [--output <file>] [--dry-run]
-  stattic-runtime-compiler --rebind-import --input <input.json> --output <output.json>
-  stattic-runtime-compiler --self-test
+  stattic-runtime finalize --input <input.json> [--version-root <dir>] [--output <file>] [--dry-run]
+  stattic-runtime prepare <source.js> <bytecode> [capabilities-json] [generated-source.js]
+  stattic-runtime migrate <version-root>
+  stattic-runtime catalog-transform <private-root>
+  stattic-runtime invoke
+  stattic-runtime db-broker
+  stattic-runtime service-broker
+  stattic-runtime --self-test
 
-finalize dispatches on the input file's format: v1 inputs
-(stattic.runtime.finalize.input.v1) compile artifacts into --out-dir; v2
-inputs (stattic.runtime.finalize.input.v2) run the filesystem-rooted site
-finalize and report to --output or stdout. --rebind-import rebinds an
-imported version's Zero executable graph to its target space
-(spacefast.finalizer.import-rebind.input.v1)."
+finalize takes a `stattic.runtime.finalize.input.v2` payload, runs the
+filesystem-rooted site finalize, and reports to --output or stdout."
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The install gate is only as real as this probe: `installer.php` accepts
+    /// an engine because the staged binary answered `--self-test`, so the
+    /// self-test has to run the finalize for real and leave nothing behind.
+    #[test]
+    fn self_test_finalizes_a_real_document_and_cleans_up() {
+        let root = env::temp_dir().join("stattic-runtime-self-test-unit");
+        let _ = fs::remove_dir_all(&root);
+        self_test_finalize(&root).expect("self-test finalize");
+        let versions = root.join("storage/spaces/s/versions");
+        assert!(versions.is_dir(), "the finalize ran under the probe's root");
+        assert!(!versions.join("v").exists(), "a dry run publishes nothing");
+        let _ = fs::remove_dir_all(&root);
+
+        self_test().expect("self-test");
+        assert!(!env::temp_dir()
+            .join(format!("stattic-runtime-self-test-{}", std::process::id()))
+            .exists());
+    }
 }

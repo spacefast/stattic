@@ -19,13 +19,20 @@ while IFS= read -r -d '' file; do
 done < <(find "$RUNTIME_DIR" -name '*.php' -print0)
 
 echo "==> php unit tests"
-php "$RUNTIME_DIR/tests/unit.php"
+# apc.enable_cli: with the APCu extension present but CLI-disabled (the GitHub
+# runner image), apcu_store() exists yet silently drops writes, failing the
+# pool-wide cache checks. Enabling it makes CLI behave like php-fpm; the flag
+# is inert where APCu is absent and unit.php falls back to its in-process fake.
+php -d apc.enable_cli=1 "$RUNTIME_DIR/tests/unit.php"
 
 echo "==> native runtime test tools"
 cd "$REPO_ROOT"
-cargo build --locked -p stattic-runtime-compiler -p stattic-zero-runner
-export SPACEFAST_RUNTIME_FINALIZER_BIN="$REPO_ROOT/target/debug/stattic-runtime-compiler"
-export SPACEFAST_ZERO_RUNNER="$REPO_ROOT/target/debug/stattic-zero-runner"
+cargo build --locked -p stattic-runtime-compiler --bin stattic-runtime
+runtime_target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+if [[ "$runtime_target_dir" != /* ]]; then
+  runtime_target_dir="$REPO_ROOT/$runtime_target_dir"
+fi
+export SPACEFAST_RUNTIME_BIN="$runtime_target_dir/debug/stattic-runtime"
 
 echo "==> runtime integration tests"
 # Scoped to the runtime dir on purpose: from the repo root, `bun test
@@ -33,4 +40,21 @@ echo "==> runtime integration tests"
 # under apps/handbook-web/public/generated/src/runtime/tests/, which cannot
 # resolve their imports and fail as phantom tests once the handbook is built.
 cd "$RUNTIME_DIR"
-exec bun test tests --timeout 30000
+test_args=(test)
+if [[ -n "${SPACEFAST_BUN_COVERAGE_DIR:-}" ]]; then
+  mkdir -p "$SPACEFAST_BUN_COVERAGE_DIR"
+  test_args+=(
+    --coverage
+    --coverage-reporter=lcov
+    "--coverage-dir=$SPACEFAST_BUN_COVERAGE_DIR"
+  )
+fi
+if [[ -n "${SPACEFAST_RUNTIME_TEST_SHARD:-}" ]]; then
+  [[ "$SPACEFAST_RUNTIME_TEST_SHARD" =~ ^[1-9][0-9]*/[1-9][0-9]*$ ]] || {
+    echo "invalid SPACEFAST_RUNTIME_TEST_SHARD: $SPACEFAST_RUNTIME_TEST_SHARD" >&2
+    exit 2
+  }
+  test_args+=("--shard=$SPACEFAST_RUNTIME_TEST_SHARD")
+fi
+test_args+=(tests --timeout 30000)
+exec bun "${test_args[@]}"

@@ -1,44 +1,9 @@
 <?php
 declare(strict_types=1);
 
-function _stattic_load_rule_artifact(string $versionRoot, string $name, string $errorCode, string $message): array
-{
-    // Per-request memoization keyed by the artifact path (constant within a
-    // request); mirrors _stattic_load_php_manifest_artifact. The error path
-    // renders and exits, so only validated arrays are ever cached.
-    static $cache = [];
-    $path = dirname($versionRoot) . '/' . $name . '.php';
-    if (array_key_exists($path, $cache)) {
-        return $cache[$path];
-    }
-    $loaded = @include $path;
-    if (!is_array($loaded) || !_stattic_runtime_artifact_metadata_valid_lazy($loaded)) {
-        _stattic_render_runtime_invariant_error_lazy($errorCode, $message);
-    }
-    return $cache[$path] = $loaded;
-}
-
-// Loads an ordered-rule artifact (redirects, headers) into the {exact, pattern}
-// shape the ordered-rule visitors expect. $section descends one level first for
-// artifacts that nest their rules under a named key; a missing or malformed
-// section is an invariant failure, never an empty rule set.
-function _stattic_load_ordered_rule_artifact(string $versionRoot, string $name, string $errorCode, string $message, ?string $section = null): array
-{
-    $loaded = _stattic_load_rule_artifact($versionRoot, $name, $errorCode, $message);
-    if ($section !== null) {
-        $inner = is_array($loaded[$section] ?? null) ? $loaded[$section] : null;
-        if ($inner === null) {
-            _stattic_render_runtime_invariant_error_lazy($errorCode, $message);
-        }
-        $loaded = $inner;
-    }
-    $exact = $loaded['exact'] ?? [];
-    $pattern = $loaded['pattern'] ?? [];
-    return [
-        'exact' => is_array($exact) ? $exact : [],
-        'pattern' => is_array($pattern) ? $pattern : [],
-    ];
-}
+// The ordered-rule evaluator, and nothing else. Its input is the residue the
+// compiler could not decide, which rides the response table under "\0rules"
+// (contracts §5).
 
 function _stattic_for_each_ordered_rule(array $rules, string $requestPath, callable $visit, bool $normalizeTrailingSlash = false): mixed
 {
@@ -70,22 +35,59 @@ function _stattic_for_each_ordered_rule(array $rules, string $requestPath, calla
     return null;
 }
 
-// Shared per-rule request-match preamble for the ordered-rule visitors: the
-// path regex (pattern rules only; an empty regex never matches) and the
-// case-insensitive hostRegex. Fills the capture out-params from the matches.
+// The compiled `regex`/`hostRegex` is a bare PCRE body: the routing compilers
+// escape `| \ { } ( ) [ ] ^ $ + ? .` and nothing else, so a literal `#` from a
+// source like `/a#b/:id` arrives unescaped and would close the delimiter — PCRE
+// then reads the rest as modifiers and the rule silently never matches. This is
+// also the only side that can fix versions already published, whose artifacts
+// are immutable. If the compilers ever start escaping `#`, this must change with
+// them: `\#` would become `\\#` here.
+function _stattic_rule_pattern(string $regex, string $modifiers = ''): string
+{
+    return '#' . str_replace('#', '\\#', $regex) . '#' . $modifiers;
+}
+
+// Most compiled path patterns are `^<literal>$` — a route with no placeholder
+// and no wildcard. Recognising that spelling costs one strpbrk over the body,
+// where running it costs a pattern-string build plus a PCRE match, and every
+// rule in the walk pays that on every request.
+function _stattic_rule_literal_path(string $regex): ?string
+{
+    return strlen($regex) >= 2
+        && $regex[0] === '^'
+        && $regex[strlen($regex) - 1] === '$'
+        && strpbrk(substr($regex, 1, -1), '\\^$.[]|()?*+{}') === false
+            ? substr($regex, 1, -1)
+            : null;
+}
+
 function _stattic_ordered_rule_request_matches(array $rule, bool $useExact, string $requestPath, string $requestHost, array &$pathMatches = [], array &$hostMatches = []): bool
 {
     $pathMatches = [];
     $hostMatches = [];
     if (!$useExact) {
         $regex = (string) ($rule['regex'] ?? '');
-        if ($regex === '' || !preg_match('#' . $regex . '#', $requestPath, $pathMatches)) {
+        if ($regex === '') {
+            return false;
+        }
+        // The trailing-newline exclusion is what makes equality and PCRE agree
+        // on exactly the same set of matches: an unanchored-by-`D` `$` also
+        // matches before a final newline. A canonical request path can never
+        // carry one, so this only ever costs the check.
+        $literal = str_ends_with($requestPath, "\n") ? null : _stattic_rule_literal_path($regex);
+        if ($literal !== null) {
+            if ($literal !== $requestPath) {
+                return false;
+            }
+            // What preg_match would have written: the whole match, no groups.
+            $pathMatches = [$requestPath];
+        } elseif (!preg_match(_stattic_rule_pattern($regex), $requestPath, $pathMatches)) {
             return false;
         }
     }
 
     $hostRegex = (string) ($rule['hostRegex'] ?? '');
-    if ($hostRegex !== '' && !preg_match('#' . $hostRegex . '#i', $requestHost, $hostMatches)) {
+    if ($hostRegex !== '' && !preg_match(_stattic_rule_pattern($hostRegex, 'i'), $requestHost, $hostMatches)) {
         return false;
     }
 
@@ -140,10 +142,22 @@ function _stattic_merge_ordered_rules(array $left, array $right): array
     $leftCount = count($left);
     $rightCount = count($right);
     while ($leftIndex < $leftCount || $rightIndex < $rightCount) {
-        $leftRule = $left[$leftIndex] ?? null;
-        $rightRule = $right[$rightIndex] ?? null;
-        $useLeft = is_array($leftRule) && (!is_array($rightRule) || _stattic_rule_order($leftRule) <= _stattic_rule_order($rightRule));
-        if ($useLeft) {
+        // Skip a non-array element by advancing its OWN cursor: a frozen index
+        // would spin here forever, growing $merged until the worker is killed.
+        if ($leftIndex < $leftCount && !is_array($left[$leftIndex])) {
+            $leftIndex += 1;
+            continue;
+        }
+        if ($rightIndex < $rightCount && !is_array($right[$rightIndex])) {
+            $rightIndex += 1;
+            continue;
+        }
+        $leftRule = $leftIndex < $leftCount ? $left[$leftIndex] : null;
+        $rightRule = $rightIndex < $rightCount ? $right[$rightIndex] : null;
+        if ($leftRule === null) {
+            $merged[] = $rightRule;
+            $rightIndex += 1;
+        } elseif ($rightRule === null || _stattic_rule_order($leftRule) <= _stattic_rule_order($rightRule)) {
             $merged[] = $leftRule;
             $leftIndex += 1;
         } else {
@@ -159,14 +173,18 @@ function _stattic_redirect_match_path(string $path): string
     return $path === '/' ? '/' : rtrim($path, '/');
 }
 
+// Single pass over every `:name` placeholder, mirroring the JS twin `expand` in
+// packages/routing/src/match.ts: a longer name (`:idx`) must not be corrupted by
+// an earlier substitution of a prefix (`:id`), and an unmatched placeholder
+// resolves to the empty string rather than leaking its literal `:name`.
 function _stattic_expand_template(string $template, array $matches): string
 {
-    $expanded = $template;
-    foreach ($matches as $name => $value) {
-        if (is_int($name)) {
-            continue;
-        }
-        $expanded = str_replace(':' . $name, (string) $value, $expanded);
-    }
-    return $expanded;
+    return (string) preg_replace_callback(
+        '/:([A-Za-z][A-Za-z0-9_]*)/',
+        static function (array $match) use ($matches): string {
+            $value = $matches[$match[1]] ?? '';
+            return is_array($value) ? '' : (string) $value;
+        },
+        $template
+    );
 }

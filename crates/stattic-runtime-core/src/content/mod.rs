@@ -1,6 +1,6 @@
 //! The content pipeline: markdown and Gutenberg documents rendered to HTML,
 //! the `_layout.html` cascade, `theme.json` compilation, and structural HTML
-//! decoration (meta tags, injected snippets) for finalized versions.
+//! decoration (meta tags, favicons, injected snippets) for finalized versions.
 
 mod frontmatter;
 mod gutenberg;
@@ -13,11 +13,16 @@ use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use crate::finalize::{invalid, read_bounded, write_generated, FileMeta, FinalizeError, Result};
+use crate::finalize::{
+    file_meta_from_parts, invalid, read_bounded, write_generated, AdoptablePath, FileMeta,
+    FinalizeError, Result,
+};
+use crate::protocol::{THEME_STYLESHEET_PATH, THEME_STYLESHEET_URL};
 use gutenberg::{block_page, gutenberg_document_shell, render_files_mode_gutenberg};
 use markdown::markdown_page;
 use support::{
@@ -45,17 +50,32 @@ pub(crate) struct Page {
     pub(crate) layout_rendered: bool,
 }
 
+/// What one content-pipeline run produced.
+pub struct HtmlPipelineOutcome {
+    /// The source paths that must stay private.
+    pub private: BTreeSet<String>,
+    /// The distinct paths the pipeline wrote.
+    pub generated: BTreeSet<String>,
+    /// How many of them the decoration pass rewrote.
+    pub decorated: usize,
+    /// The paths whose previous served identity was adopted verbatim: proven
+    /// source-unchanged under a matching context digest, so no byte of theirs
+    /// was read, rendered, decorated or installed this run.
+    pub adopted: BTreeSet<String>,
+}
+
 /// Runs the content pipeline over the committed files, writing generated
 /// output through `files`, and returns the source paths that must stay
-/// private.
+/// private plus what it wrote.
 pub fn materialize_html_pipeline(
     files_root: &Path,
     files: &mut BTreeMap<String, FileMeta>,
     serving: &Map<String, Value>,
     metadata: &Map<String, Value>,
     viewer: &Map<String, Value>,
+    adoptable: &BTreeMap<String, AdoptablePath>,
     diagnostics: &mut Vec<Value>,
-) -> Result<BTreeSet<String>> {
+) -> Result<HtmlPipelineOutcome> {
     let config = serving
         .get("config")
         .and_then(Value::as_object)
@@ -69,12 +89,6 @@ pub fn materialize_html_pipeline(
         .get("platform_meta")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let inject = config.get("inject").and_then(Value::as_object);
-    let has_inject = inject.is_some_and(|value| {
-        value
-            .values()
-            .any(|v| v.as_array().is_some_and(|a| !a.is_empty()))
-    });
     let files_mode_gutenberg = metadata.get("mode").and_then(Value::as_str) == Some("files")
         && [
             metadata
@@ -88,11 +102,9 @@ pub fn materialize_html_pipeline(
         .into_iter()
         .flatten()
         .any(|value| value == "gutenberg-blocks");
-    if !enabled && !platform_meta && !has_inject && !files_mode_gutenberg {
-        return Ok(BTreeSet::new());
-    }
-
     let mut private = BTreeSet::new();
+    let mut generated = BTreeSet::new();
+    let mut decorated = 0usize;
     let mut pages = Vec::new();
     let site_title = config
         .get("meta")
@@ -145,6 +157,7 @@ pub fn materialize_html_pipeline(
                 document.as_bytes(),
                 Some("text/html; charset=utf-8"),
             )?;
+            generated.insert(path);
         }
     }
     if enabled {
@@ -164,7 +177,7 @@ pub fn materialize_html_pipeline(
                 let Some(source) = pipeline_text(files_root, path, diagnostics)? else {
                     continue;
                 };
-                match markdown_page(path, &source, config.get("meta").and_then(Value::as_object), metadata, diagnostics) {
+                match markdown_page(path, &source, config.get("meta").and_then(Value::as_object), diagnostics) {
                     Ok(page) if page.draft => diagnostics.push(json!({"code":"page_draft_skipped","severity":"info","message":"A draft page was skipped.","path":path})),
                     Ok(page) => pages.push(page),
                     Err(message) => diagnostics.push(json!({"code":"markdown_render_failed","severity":"warning","message":message,"path":path})),
@@ -180,7 +193,6 @@ pub fn materialize_html_pipeline(
                         path,
                         &source,
                         config.get("meta").and_then(Value::as_object),
-                        metadata,
                         diagnostics,
                     ));
                 }
@@ -201,8 +213,13 @@ pub fn materialize_html_pipeline(
                 document.as_bytes(),
                 Some("text/html; charset=utf-8"),
             )?;
+            generated.insert(page.output_path.clone());
         }
+        let had_theme_stylesheet = files.contains_key(THEME_STYLESHEET_PATH);
         compile_theme(files_root, files, diagnostics)?;
+        if !had_theme_stylesheet && files.contains_key(THEME_STYLESHEET_PATH) {
+            generated.insert(THEME_STYLESHEET_PATH.to_string());
+        }
     }
 
     let page_by_output: BTreeMap<String, &Page> = pages
@@ -220,11 +237,53 @@ pub fn materialize_html_pipeline(
         })
         .cloned()
         .collect();
+    // Adoption trusts the caller's context digest for everything decoration
+    // reads EXCEPT an asset reference whose target this very run generated:
+    // the digest hashed that target's pre-pipeline sha while the cache-busted
+    // URL derives from the post-pipeline one. Rare, and the safe answer is
+    // cheap — keep every page on the full path for this publish.
+    let decoration_meta = config.get("meta").and_then(Value::as_object);
+    let adoption_enabled = !adoptable.is_empty()
+        && [
+            decoration_meta.and_then(|meta| meta.get("image")),
+            decoration_meta.and_then(|meta| meta.get("favicon")),
+            viewer.get("og_image_path"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|reference| reference.strip_prefix('/'))
+        .all(|path| !generated.contains(path));
+    let mut adopted = BTreeSet::new();
     for path in targets {
+        // A rendered page's decoration also reads frontmatter that never
+        // reaches the rendered bytes (description, image), so byte equality
+        // cannot prove its meta tags — pages always take the full path.
+        if adoption_enabled && !page_by_output.contains_key(&path) {
+            if let Some(prior) = adoptable.get(&path) {
+                if files
+                    .get(&path)
+                    .is_some_and(|meta| meta.sha256 == prior.source_sha256)
+                {
+                    files.insert(
+                        path.clone(),
+                        file_meta_from_parts(
+                            &path,
+                            prior.served_size,
+                            prior.served_sha256.clone(),
+                            &[],
+                            Some(&prior.served_content_type),
+                        ),
+                    );
+                    adopted.insert(path);
+                    continue;
+                }
+            }
+        }
         let Some(source) = pipeline_text(files_root, &path, diagnostics)? else {
             continue;
         };
-        let decorated = decorate_html(
+        let document = decorate_html(
             &source,
             HtmlDecorationContext {
                 page: page_by_output.get(&path).copied(),
@@ -232,22 +291,29 @@ pub fn materialize_html_pipeline(
                 viewer,
                 files,
                 meta_tags: enabled || platform_meta,
-                theme_available: files.contains_key("__spacefast_generated/theme.css"),
+                theme_available: files.contains_key(THEME_STYLESHEET_PATH),
                 path: &path,
             },
             diagnostics,
         )?;
-        if decorated != source {
+        if document != source {
             write_generated(
                 files_root,
                 files,
                 &path,
-                decorated.as_bytes(),
+                document.as_bytes(),
                 Some("text/html; charset=utf-8"),
             )?;
+            decorated += 1;
+            generated.insert(path);
         }
     }
-    Ok(private)
+    Ok(HtmlPipelineOutcome {
+        private,
+        generated,
+        decorated,
+        adopted,
+    })
 }
 
 fn apply_layouts(
@@ -257,11 +323,11 @@ fn apply_layouts(
     site_title: &str,
     diagnostics: &mut Vec<Value>,
 ) -> Result<String> {
-    let mut layouts = layout_chain(page, files);
+    let mut layouts = layout_cascade(path_dir(&page.source_path), files, None);
     if let Some(override_path) = &page.layout {
         let resolved = resolve_layout_override(&page.source_path, override_path);
         if files.contains_key(&resolved) {
-            layouts = ancestor_layouts_for_override(&resolved, files);
+            layouts = layout_cascade(path_dir(path_dir(&resolved)), files, Some(&resolved));
             layouts.push(resolved);
         } else {
             diagnostics.push(json!({"code":"layout_missing","severity":"warning","message":"The requested layout was not found; the normal layout cascade was used.","path":page.source_path}));
@@ -280,36 +346,13 @@ fn apply_layouts(
     Ok(document)
 }
 
-fn ancestor_layouts_for_override(
-    resolved: &str,
+fn layout_cascade(
+    start_dir: &str,
     files: &BTreeMap<String, FileMeta>,
+    exclude: Option<&str>,
 ) -> Vec<String> {
-    let mut directories = Vec::new();
-    let mut current = path_dir(path_dir(resolved)).to_string();
-    loop {
-        directories.push(current.clone());
-        if current.is_empty() {
-            break;
-        }
-        current = path_dir(&current).to_string();
-    }
-    directories.reverse();
-    directories
-        .into_iter()
-        .map(|directory| {
-            if directory.is_empty() {
-                "_layout.html".into()
-            } else {
-                format!("{directory}/_layout.html")
-            }
-        })
-        .filter(|path| path != resolved && files.contains_key(path))
-        .collect()
-}
-
-fn layout_chain(page: &Page, files: &BTreeMap<String, FileMeta>) -> Vec<String> {
     let mut dirs = Vec::new();
-    let mut current = path_dir(&page.source_path).to_string();
+    let mut current = start_dir.to_string();
     loop {
         dirs.push(current.clone());
         if current.is_empty() {
@@ -326,7 +369,7 @@ fn layout_chain(page: &Page, files: &BTreeMap<String, FileMeta>) -> Vec<String> 
                 format!("{dir}/_layout.html")
             }
         })
-        .filter(|path| files.contains_key(path))
+        .filter(|path| exclude != Some(path.as_str()) && files.contains_key(path))
         .collect()
 }
 
@@ -413,21 +456,70 @@ struct HtmlDecorationContext<'a> {
     path: &'a str,
 }
 
-fn cache_busted_local_image(image: &str, files: &BTreeMap<String, FileMeta>) -> String {
-    if image.contains('?') || image.contains('#') {
-        return image.to_string();
+fn cache_busted_local_asset(asset: &str, files: &BTreeMap<String, FileMeta>) -> String {
+    if asset.contains('?') || asset.contains('#') {
+        return asset.to_string();
     }
-    let Some(path) = image.strip_prefix('/') else {
-        return image.to_string();
+    let Some(path) = asset.strip_prefix('/') else {
+        return asset.to_string();
     };
     let Some(file) = files.get(path) else {
-        return image.to_string();
+        return asset.to_string();
     };
     let digest = file.sha256.strip_prefix("sha256:").unwrap_or(&file.sha256);
     let Some(short) = digest.get(..12) else {
-        return image.to_string();
+        return asset.to_string();
     };
-    format!("{image}?v={short}")
+    format!("{asset}?v={short}")
+}
+
+/// Standard 32-bit FNV-1a offset keeps title-derived hues stable across Rust
+/// and platform versions instead of depending on a process-randomized hasher.
+const FAVICON_HASH_OFFSET: u32 = 2_166_136_261;
+/// Standard 32-bit FNV-1a prime provides an even, deterministic hue spread for
+/// short capsule titles without storing any favicon state.
+const FAVICON_HASH_PRIME: u32 = 16_777_619;
+
+/// Path browsers probe for a site icon when a document declares no `<link>`.
+/// A version that ships this file has declared an icon just as surely as one
+/// that writes the tag, so the generated placeholder must stand down.
+pub(crate) const IMPLICIT_FAVICON_PATH: &str = "favicon.ico";
+
+/// `rel` tokens that mark an author-supplied site icon. `shortcut icon` parses
+/// as two tokens, so plain `icon` covers it. The Apple variants address the
+/// home-screen slot rather than the tab, but a version carrying one has a real
+/// brand icon, and stamping a generated letter tile over it is exactly the
+/// branding we must not do.
+fn is_icon_rel_token(token: &str) -> bool {
+    token.eq_ignore_ascii_case("icon")
+        || token.eq_ignore_ascii_case("apple-touch-icon")
+        || token.eq_ignore_ascii_case("apple-touch-icon-precomposed")
+}
+
+fn generated_favicon(title: &str) -> String {
+    let title = title.trim();
+    let hash = title
+        .as_bytes()
+        .iter()
+        .fold(FAVICON_HASH_OFFSET, |hash, byte| {
+            (hash ^ u32::from(*byte)).wrapping_mul(FAVICON_HASH_PRIME)
+        });
+    let hue = hash % 360;
+    let initial = title
+        .chars()
+        .find(|character| !character.is_whitespace())
+        .map(|character| character.to_uppercase().collect::<String>())
+        .filter(|initial| !initial.is_empty())
+        .unwrap_or_else(|| "S".into());
+    let svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\"><rect width=\"64\" height=\"64\" rx=\"14\" fill=\"hsl({hue} 65% 32%)\"/><text x=\"32\" y=\"43\" text-anchor=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"36\" font-weight=\"700\" fill=\"white\">{}</text></svg>",
+        escape_html(&initial)
+    );
+    let mut encoded = String::with_capacity(svg.len() * 3);
+    for byte in svg.bytes() {
+        write!(&mut encoded, "%{byte:02X}").expect("writing to a String cannot fail");
+    }
+    format!("data:image/svg+xml,{encoded}")
 }
 
 fn decorate_html(
@@ -452,6 +544,7 @@ fn decorate_html(
     let has_head = Rc::new(Cell::new(false));
     let has_body = Rc::new(Cell::new(false));
     let has_title = Rc::new(Cell::new(false));
+    let has_favicon = Rc::new(Cell::new(false));
     let title_text = Rc::new(RefCell::new(String::new()));
     let meta_names = Rc::new(RefCell::new(BTreeSet::<String>::new()));
     let meta_properties = Rc::new(RefCell::new(BTreeSet::<String>::new()));
@@ -523,6 +616,18 @@ fn decorate_html(
                     }
                     Ok(())
                 }
+            }))
+            .append_element_content_handler(element!("head link", {
+                let has_favicon = Rc::clone(&has_favicon);
+                move |element| {
+                    if element
+                        .get_attribute("rel")
+                        .is_some_and(|rel| rel.split_ascii_whitespace().any(is_icon_rel_token))
+                    {
+                        has_favicon.set(true);
+                    }
+                    Ok(())
+                }
             })),
     );
     if analysis.is_err() {
@@ -547,8 +652,36 @@ fn decorate_html(
         .and_then(|p| p.image.clone())
         .or_else(|| string_in_opt(meta, "image"))
         .or_else(|| string_in(viewer, "og_image_path"))
-        .map(|image| cache_busted_local_image(&image, files));
+        .map(|image| cache_busted_local_asset(&image, files));
+    let favicon =
+        string_in_opt(meta, "favicon").map(|favicon| cache_busted_local_asset(&favicon, files));
     let mut head = Vec::new();
+    // The author's icon always wins. A declared `<link rel="icon">` needs no
+    // help, a configured `meta.favicon` is compiled in, and a shipped
+    // `/favicon.ico` is left to the browser's own probe. Only a version that
+    // declares no icon at all gets the generated placeholder.
+    if !has_favicon.get() {
+        let href = match favicon {
+            Some(favicon) => Some(favicon),
+            None if files.contains_key(IMPLICIT_FAVICON_PATH) => None,
+            None => {
+                let fallback_title;
+                let favicon_title = if let Some(title) = title.as_deref() {
+                    title
+                } else {
+                    fallback_title = title_from_path(path);
+                    &fallback_title
+                };
+                Some(generated_favicon(favicon_title))
+            }
+        };
+        if let Some(href) = href {
+            head.push(format!(
+                "<link rel=\"icon\" href=\"{}\">",
+                escape_attr(&href)
+            ));
+        }
+    }
     if meta_tags {
         if !has_title.get() {
             if let Some(value) = &title {
@@ -606,7 +739,9 @@ fn decorate_html(
             ));
         }
         if theme_available && page.is_some_and(|p| p.layout_rendered) {
-            head.push("<link rel=\"stylesheet\" href=\"/__spacefast_generated/theme.css\">".into());
+            head.push(format!(
+                "<link rel=\"stylesheet\" href=\"{THEME_STYLESHEET_URL}\">"
+            ));
         }
     }
     head.extend(inject_snippets(config, "head"));
@@ -713,7 +848,7 @@ mod tests {
         _temp: TempDir,
         files_root: std::path::PathBuf,
         files: BTreeMap<String, FileMeta>,
-        result: Result<BTreeSet<String>>,
+        result: Result<HtmlPipelineOutcome>,
         diagnostics: Vec<Value>,
     }
 
@@ -737,6 +872,7 @@ mod tests {
             &serving,
             &metadata,
             &viewer,
+            &BTreeMap::new(),
             &mut diagnostics,
         );
         PipelineRun {
@@ -785,7 +921,86 @@ mod tests {
             "property=\"og:image\" content=\"/cover.png?v={}\"",
             &crate::finalize::sha256(cover)[..12]
         )));
+        assert_eq!(html.matches("rel=\"icon\"").count(), 1);
+        assert!(html.contains("href=\"data:image/svg+xml,"));
+        assert!(html.contains("%3E%52%3C%2F%74%65%78%74%3E"));
         assert!(!html.contains("/__spacefast_generated/theme.css"));
+
+        let favicon = b"author icon";
+        let run = run_pipeline(
+            &[("index.html", source), ("favicon.svg", favicon)],
+            json!({"mode":"website"}),
+            json!({"config":{
+                "platform_meta":true,
+                "meta":{"title":"Real title","favicon":"/favicon.svg"}
+            }}),
+        );
+        run.result.as_ref().unwrap();
+        let html = read(&run, "index.html");
+        assert_eq!(html.matches("rel=\"icon\"").count(), 1);
+        assert!(html.contains(&format!(
+            "href=\"/favicon.svg?v={}\"",
+            &crate::finalize::sha256(favicon)[..12]
+        )));
+        assert!(!html.contains("data:image/svg+xml"));
+
+        let authored = br#"<html><head><title>Mine</title><link rel="shortcut icon" href="/mine.ico"></head><body></body></html>"#;
+        let run = run_pipeline(
+            &[("index.html", authored)],
+            json!({"mode":"website"}),
+            json!({"config":{"platform_meta":true,"meta":{"favicon":"/configured.svg"}}}),
+        );
+        run.result.as_ref().unwrap();
+        let html = read(&run, "index.html");
+        assert_eq!(html.matches("rel=\"icon\"").count(), 0);
+        assert!(html.contains("rel=\"shortcut icon\" href=\"/mine.ico\""));
+        assert!(!html.contains("/configured.svg"));
+
+        // An apple-touch-icon is a real brand icon; the placeholder stands down.
+        let apple = br#"<html><head><title>Mine</title><link rel="apple-touch-icon" href="/touch.png"></head><body></body></html>"#;
+        let run = run_pipeline(
+            &[("index.html", apple)],
+            json!({"mode":"website"}),
+            json!({"config":{"platform_meta":true}}),
+        );
+        run.result.as_ref().unwrap();
+        let html = read(&run, "index.html");
+        assert_eq!(html.matches("rel=\"icon\"").count(), 0);
+        assert!(!html.contains("data:image/svg+xml"));
+
+        // A shipped /favicon.ico is a declaration: inject nothing and let the
+        // browser's own probe find it, rather than overriding it with a tile.
+        let undeclared = br#"<html><head><title>Mine</title></head><body></body></html>"#;
+        let run = run_pipeline(
+            &[("index.html", undeclared), ("favicon.ico", b"author icon")],
+            json!({"mode":"website"}),
+            json!({"config":{"platform_meta":true}}),
+        );
+        run.result.as_ref().unwrap();
+        let html = read(&run, "index.html");
+        assert_eq!(html.matches("rel=\"icon\"").count(), 0);
+        assert!(!html.contains("data:image/svg+xml"));
+
+        // No icon anywhere earns exactly one generated placeholder, and
+        // re-finalizing that output must not accumulate a second.
+        let run = run_pipeline(
+            &[("index.html", undeclared)],
+            json!({"mode":"website"}),
+            json!({"config":{"platform_meta":true}}),
+        );
+        run.result.as_ref().unwrap();
+        let once = read(&run, "index.html");
+        assert_eq!(once.matches("rel=\"icon\"").count(), 1);
+        assert!(once.contains("href=\"data:image/svg+xml,"));
+        let run = run_pipeline(
+            &[("index.html", once.as_bytes())],
+            json!({"mode":"website"}),
+            json!({"config":{"platform_meta":true}}),
+        );
+        run.result.as_ref().unwrap();
+        let twice = read(&run, "index.html");
+        assert_eq!(twice.matches("rel=\"icon\"").count(), 1);
+        assert_eq!(once, twice);
     }
 
     #[test]
@@ -1087,7 +1302,7 @@ mod tests {
             json!({"mode":"website"}),
             json!({"config":{"experimental_gutenberg":true,"listing":true,"viewer":false}}),
         );
-        let private = run.result.as_ref().unwrap();
+        let private = &run.result.as_ref().unwrap().private;
         assert!(has_diagnostic(&run, "page_draft_skipped"));
         for private_path in ["page.md", "draft.md", "_layout.html", "theme.json"] {
             assert!(private.contains(private_path), "{private_path} not private");

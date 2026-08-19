@@ -1,271 +1,200 @@
 <?php
 declare(strict_types=1);
 
-// Tiered (remote-blob) serving machinery — plan §8/§26. This module is loaded
-// LAZILY from serve.php (the _stattic_serve_remote_* wrappers), the same
-// convention as proxy.php: a tiered request is a slow path by construction
-// (one bucket RTT), so the local hot path never parses the SigV4 client, the
-// per-bucket breaker, or the in-flight cap. Keep every curl_/json_decode/
-// config dependency HERE, not in serve.php — the public-runtime boundary
-// suite enforces that split.
+// Promote-on-read (contracts §8): a stat miss on a CAS blob resolves here, and
+// either the bytes are local when this returns or the caller renders 503.
 //
-// bootstrap-config.php runs here (not in init.php) so Atomic persistent data
-// (SPACEFAST_STORAGE_BUCKETS_JSON and the tier knobs) is only materialized
-// when a tiered file is actually being served.
+// Loaded LAZILY from serve-fast.php — nothing here may be reachable from the
+// local hot path. That laziness is what makes bootstrap-config safe to require:
+// bucket credentials live in Atomic_Persistent_Data, so the miss branch pays a
+// decrypt the hot path must never pay (§6, §11).
 require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/storage.php';
-require_once __DIR__ . '/../shared/errors.php';
 require_once __DIR__ . '/../shared/s3.php';
 require_once __DIR__ . '/../shared/admission.php';
 
-const STATTIC_TIER_BREAKER_FAILURE_THRESHOLD = 3;
-const STATTIC_TIER_BREAKER_WINDOW_SECONDS = 60;
-const STATTIC_TIER_RETRY_AFTER_SECONDS = 30;
-const STATTIC_TIER_DEFAULT_IN_FLIGHT_LIMIT = 8;
+// Small on purpose: a cold space under a traffic spike sheds most of the spike
+// instead of holding every worker on the same bucket.
+const STATTIC_TIER_PROMOTE_LANE = 'tier_promote';
+const STATTIC_TIER_PROMOTE_CONCURRENCY = 2;
 
-function _stattic_tier_key(string $prefix, string $bucketId): string
-{
-    return 'spacefast:tier:' . $prefix . ':' . _stattic_admission_sanitize_key($bucketId);
-}
+// A promoted blob is a cache fill, not an upload: the ceiling exists so a
+// corrupt or hostile object cannot fill the disk before the digest check gets
+// to reject it.
+const STATTIC_TIER_PROMOTE_MAX_BYTES = 1073741824; // 1 GiB
 
-function _stattic_tier_breaker_path(string $privateRoot, string $bucketId): string
+function _stattic_tier_promote_admit(string $privateRoot, string $spaceId): callable|false
 {
-    return $privateRoot . '/runtime/tier/breakers/' . _stattic_admission_sanitize_key($bucketId) . '.json';
-}
-
-// Per-bucket circuit breaker, stored in the admission backend: apcu when
-// available (atomic, no serve-path flock), the JSON file otherwise — the
-// backend is picked once per process by _stattic_admission_backend(), so
-// tripped/success/failure never mix lanes within a request. APCu state is
-// per-FPM-pool and vanishes on pool restart: the breaker simply closes and
-// re-probes the bucket after a restart, which is the desired default (a
-// stale open verdict outliving its window would be worse). All keys are
-// TTL'd to the breaker window, so both lanes are self-expiring.
-function _stattic_tier_breaker_tripped(string $privateRoot, string $bucketId): bool
-{
-    $now = time();
-    if (_stattic_admission_backend() === 'apcu') {
-        $until = @apcu_fetch(_stattic_tier_key('open_until', $bucketId), $ok);
-        return $ok && is_int($until) && $until > $now;
-    }
-    $path = _stattic_tier_breaker_path($privateRoot, $bucketId);
-    if (!is_file($path)) {
-        return false;
-    }
-    $state = _stattic_runtime_read_json($path);
-    return is_array($state) && (int) ($state['open_until'] ?? 0) > $now;
-}
-
-function _stattic_tier_breaker_success(string $privateRoot, string $bucketId): void
-{
-    if (_stattic_admission_backend() === 'apcu') {
-        @apcu_delete(_stattic_tier_key('failures', $bucketId));
-        @apcu_delete(_stattic_tier_key('open_until', $bucketId));
-        return;
-    }
-    $path = _stattic_tier_breaker_path($privateRoot, $bucketId);
-    if (is_file($path)) {
-        @unlink($path);
-    }
-}
-
-function _stattic_tier_breaker_failure(string $privateRoot, string $bucketId): void
-{
-    $threshold = _stattic_config_int('SPACEFAST_TIER_FETCH_BREAKER_FAILURES', STATTIC_TIER_BREAKER_FAILURE_THRESHOLD);
-    $now = time();
-    if (_stattic_admission_backend() === 'apcu') {
-        $key = _stattic_tier_key('failures', $bucketId);
-        @apcu_add($key, 0, STATTIC_TIER_BREAKER_WINDOW_SECONDS);
-        $count = @apcu_inc($key, 1, $ok, STATTIC_TIER_BREAKER_WINDOW_SECONDS);
-        if ($ok && is_int($count) && $count >= $threshold) {
-            @apcu_store(_stattic_tier_key('open_until', $bucketId), $now + STATTIC_TIER_BREAKER_WINDOW_SECONDS, STATTIC_TIER_BREAKER_WINDOW_SECONDS);
-        }
-        return;
-    }
-    $path = _stattic_tier_breaker_path($privateRoot, $bucketId);
-    $state = is_file($path) ? _stattic_runtime_read_json($path) : null;
-    $count = is_array($state) && (int) ($state['updated_at'] ?? 0) >= $now - STATTIC_TIER_BREAKER_WINDOW_SECONDS
-        ? (int) ($state['failures'] ?? 0)
-        : 0;
-    $count++;
-    _stattic_runtime_write_json_atomic($path, [
-        'failures' => $count,
-        'open_until' => $count >= $threshold ? $now + STATTIC_TIER_BREAKER_WINDOW_SECONDS : 0,
-        'updated_at' => $now,
-    ]);
-}
-
-// Per-box tier-fetch concurrency cap, backed by the same apcu+flock counter
-// primitive as the per-space uncacheable admission gate (shared/admission.php)
-// — this used to hand-roll its own copy (~60 duplicated LOC, no
-// backend-force-override support). See _stattic_admission_counter_acquire.
-function _stattic_tier_in_flight_acquire(string $privateRoot): callable|false
-{
-    $limit = _stattic_config_int('SPACEFAST_TIER_FETCH_MAX_IN_FLIGHT', STATTIC_TIER_DEFAULT_IN_FLIGHT_LIMIT);
+    $lane = STATTIC_TIER_PROMOTE_LANE . ':' . _stattic_admission_sanitize_key($spaceId);
     return _stattic_admission_counter_acquire(
         $privateRoot,
-        _stattic_tier_key('inflight', 'box'),
-        $privateRoot . '/runtime/tier/inflight.json',
-        $limit,
-        STATTIC_TIER_BREAKER_WINDOW_SECONDS,
+        'spacefast:adm:' . $lane,
+        $privateRoot . '/runtime/admission/' . str_replace(':', '-', $lane) . '.json',
+        _stattic_config_int('SPACEFAST_TIER_PROMOTE_CONC_PER_SPACE', STATTIC_TIER_PROMOTE_CONCURRENCY),
+        _stattic_admission_stale_seconds(),
     );
 }
 
-function _stattic_tier_fetch_failed(string $privateRoot, array $remote, int $status = 0, ?string $error = null): void
+// Post-response and non-blocking: no visitor waits on the journal lock.
+function _stattic_tier_journal(string $privateRoot, array $entry): void
 {
-    $bucketId = (string) ($remote['bucket'] ?? '');
-    if ($bucketId !== '') {
-        _stattic_tier_breaker_failure($privateRoot, $bucketId);
-    }
-    $entry = [
-        'event' => 'tier_fetch_failed',
-        'bucket' => $bucketId,
-        'key' => (string) ($remote['key'] ?? ''),
-        'status' => $status,
-        'error' => $error,
-    ];
-    _stattic_runtime_append_journal($privateRoot, $entry);
-    _stattic_tier_spool_failure_event($privateRoot, $entry);
+    _stattic_defer(static function () use ($privateRoot, $entry): void {
+        _stattic_runtime_append_journal($privateRoot, $entry, false);
+    });
 }
 
-// Spools a bucket-fetch failure for the bulk tick to ship as a real callback
-// (the control plane's auto-pause canary counts these per bucket). The serve
-// path has no callback claims, so the spool file is the hand-off. Bounded:
-// the breaker already caps failure frequency, and we stop writing past 500
-// undrained events. `failure_id` keeps each occurrence's event_id distinct —
-// the CP dedupe table would otherwise collapse identical failures into one
-// and the rolling threshold could never trip.
-function _stattic_tier_spool_failure_event(string $privateRoot, array $entry): void
+/**
+ * The pinned seam serve-fast.php calls. Returns the local CAS path once the
+ * bytes are on disk, or null when the caller must render 503 — shed, bucket
+ * failure, or a digest that did not match: an object that fails verification is
+ * dropped, never installed and never served.
+ *
+ * No lock: the CAS is content-addressed and the install is a rename, so two
+ * workers promoting the same sha race to the same bytes and both win.
+ */
+function _stattic_tier_promote_blob(string $privateRoot, string $spaceId, string $sha256): ?string
 {
-    $dir = $privateRoot . '/runtime/tier/pending-events';
-    _stattic_runtime_mkdir($dir);
-    $existing = glob($dir . '/*.json') ?: [];
-    if (count($existing) >= 500) {
-        return;
+    if (!_stattic_tiering_enabled()) {
+        return null;
     }
-    $entry['failure_id'] = bin2hex(random_bytes(8));
-    $entry['occurred_at'] = gmdate('c');
-    _stattic_runtime_write_json_atomic($dir . '/' . $entry['failure_id'] . '.json', $entry);
-}
+    $sha256 = strtolower(trim($sha256));
+    // Checked before _stattic_runtime_blob_path(), which renders a 422 problem
+    // document — the wrong emitter entirely for a visitor request.
+    if (preg_match('/^[a-f0-9]{64}$/', $sha256) !== 1 || !_stattic_runtime_id_valid($spaceId)) {
+        _stattic_tier_journal($privateRoot, [
+            'event' => 'tier_promote_failed',
+            'space_id' => $spaceId,
+            'sha256' => $sha256,
+            'reason' => 'invalid_blob_reference',
+        ]);
+        return null;
+    }
 
-function _stattic_tier_stream_remote(string $privateRoot, array $servedMeta, array $headers, int $status, int $size, ?array $range, string $spaceId, string $path): void
-{
-    $remote = _stattic_tier_remote_locator($servedMeta);
-    if ($remote === null) {
-        _stattic_render_runtime_invariant_error_lazy('file-missing', 'Runtime file metadata points to a missing file.');
+    $localPath = _stattic_runtime_blob_path($privateRoot, $spaceId, $sha256);
+    if (is_file($localPath)) {
+        return $localPath;
     }
-    $bucketId = (string) $remote['bucket'];
-    if (_stattic_tier_breaker_tripped($privateRoot, $bucketId)) {
-        _stattic_render_tier_fetch_unavailable(STATTIC_TIER_RETRY_AFTER_SECONDS);
+
+    $bucketId = _stattic_s3_default_bucket_id();
+    $locator = $bucketId === null ? null : _stattic_s3_blob_locator($bucketId, $spaceId, $sha256);
+    if ($locator === null) {
+        _stattic_tier_journal($privateRoot, [
+            'event' => 'tier_promote_failed',
+            'space_id' => $spaceId,
+            'sha256' => $sha256,
+            'reason' => 'storage_bucket_unavailable',
+        ]);
+        return null;
     }
-    $release = _stattic_tier_in_flight_acquire($privateRoot);
+
+    $release = _stattic_tier_promote_admit($privateRoot, $spaceId);
     if ($release === false) {
-        _stattic_runtime_append_journal($privateRoot, ['event' => 'tier_fetch_failed', 'bucket' => $bucketId, 'key' => (string) $remote['key'], 'error' => 'in_flight_cap']);
-        _stattic_render_tier_fetch_unavailable(STATTIC_TIER_RETRY_AFTER_SECONDS);
+        _stattic_tier_journal($privateRoot, [
+            'event' => 'tier_promote_shed',
+            'space_id' => $spaceId,
+            'sha256' => $sha256,
+        ]);
+        return null;
     }
 
-    $rangeHeader = is_array($range) ? (string) $range['header'] : null;
-    $sentHeaders = false;
-    $remoteStatus = 0;
-    $remoteHeaders = [];
-    $open = _stattic_s3_open(
-        $remote,
-        $rangeHeader,
-        static function (int $bucketStatus, array $bucketHeaders) use (&$sentHeaders, &$remoteStatus, &$remoteHeaders, $headers, $status, $size, $range): void {
-            $remoteStatus = $bucketStatus;
-            $remoteHeaders = $bucketHeaders;
-            if ($bucketStatus >= 200 && $bucketStatus < 300) {
-                _stattic_send_file_headers($headers);
-                header('Accept-Ranges: bytes');
-                if (is_array($range) && $bucketStatus === 206 && is_string($bucketHeaders['content-range'] ?? null)) {
-                    header('Content-Range: ' . $bucketHeaders['content-range']);
-                    $length = (int) $range['end'] - (int) $range['start'] + 1;
-                    header('Content-Length: ' . $length);
-                    http_response_code(206);
-                } else {
-                    header('Content-Length: ' . $size);
-                    http_response_code($status);
-                }
-                $sentHeaders = true;
-            }
-        }
-    );
-    if ($open === false) {
+    try {
+        $fetched = _stattic_tier_promote_fetch($privateRoot, $locator);
+    } finally {
         if (is_callable($release)) {
             $release();
         }
-        _stattic_tier_fetch_failed($privateRoot, $remote, 0, 's3_open_failed');
-        _stattic_render_tier_fetch_unavailable(STATTIC_TIER_RETRY_AFTER_SECONDS);
     }
-    $exec = curl_exec($open['handle']);
-    $errno = curl_errno($open['handle']);
-    if (is_callable($release)) {
-        $release();
+
+    if (!is_string($fetched['tmp_path'] ?? null)) {
+        _stattic_tier_journal($privateRoot, [
+            'event' => 'tier_promote_failed',
+            'space_id' => $spaceId,
+            'sha256' => $sha256,
+            'status' => (int) ($fetched['status'] ?? 0),
+            'reason' => (string) ($fetched['reason'] ?? 's3_get_failed'),
+        ]);
+        return null;
     }
-    if ($errno === 0 && $remoteStatus === 416) {
-        // The bucket disagreeing with our locally-computed range (e.g. its
-        // stored object size drifted from our stamped $size) is a CLIENT
-        // range problem, not a bucket/breaker failure — relay it as a real
-        // 416 and never count it against the breaker (confirmed finding F7).
-        // serve.php:1226-1229 already 416s locally-unsatisfiable ranges
-        // before ever dialing, so this is edge-hardening for the rest.
-        _stattic_tier_send_416($headers, $size);
+
+    // The digest is computed WHILE downloading, so a mismatch costs one unlink
+    // and never a second pass over the bytes.
+    if (!hash_equals($sha256, (string) ($fetched['sha256'] ?? ''))) {
+        unlink($fetched['tmp_path']);
+        _stattic_tier_journal($privateRoot, [
+            'event' => 'tier_promote_failed',
+            'space_id' => $spaceId,
+            'sha256' => $sha256,
+            'actual_sha256' => (string) ($fetched['sha256'] ?? ''),
+            'reason' => 'blob_sha_mismatch',
+        ]);
+        return null;
     }
-    if ($exec === false || $errno !== 0 || $remoteStatus < 200 || $remoteStatus >= 300) {
-        _stattic_tier_fetch_failed($privateRoot, $remote, $remoteStatus, $errno !== 0 ? curl_error($open['handle']) : 's3_status_' . $remoteStatus);
-        if (!$sentHeaders) {
-            _stattic_render_tier_fetch_unavailable(STATTIC_TIER_RETRY_AFTER_SECONDS);
-        }
-        exit;
+
+    // Stamps the content-derived mtime before the commit rename, so the
+    // promoted inode answers with exactly the ETag the compiler recorded.
+    _stattic_runtime_blob_commit_verified($privateRoot, $spaceId, $fetched['tmp_path'], $sha256);
+    if (!is_file($localPath)) {
+        _stattic_tier_journal($privateRoot, [
+            'event' => 'tier_promote_failed',
+            'space_id' => $spaceId,
+            'sha256' => $sha256,
+            'reason' => 'blob_install_failed',
+        ]);
+        return null;
     }
-    _stattic_tier_breaker_success($privateRoot, $bucketId);
-    // Post-response and non-blocking: tier_hit is telemetry, and this runs on
-    // the visitor serve path — the append happens after the response is
-    // flushed, and never queues on the shared journal lock even then.
-    $tierHit = [
-        'event' => 'tier_hit',
+    _stattic_tier_journal($privateRoot, [
+        'event' => 'tier_promoted',
         'space_id' => $spaceId,
-        'path' => $path,
-        'bucket' => $bucketId,
-        'key' => (string) $remote['key'],
-        'status' => is_array($range) ? 206 : $status,
-    ];
-    _spacefast_defer(static function () use ($privateRoot, $tierHit): void {
-        _stattic_runtime_append_journal($privateRoot, $tierHit, false);
-    });
-    exit;
+        'sha256' => $sha256,
+        'bytes' => (int) ($fetched['size'] ?? 0),
+    ]);
+    return $localPath;
 }
 
-function _stattic_tier_read_remote_body(string $privateRoot, array $servedMeta, int $size): string
+/**
+ * One signed streamed GET into a staged temp file, hashed as it arrives.
+ *
+ * @return array{tmp_path?: string, sha256?: string, size?: int, status?: int, reason?: string}
+ */
+function _stattic_tier_promote_fetch(string $privateRoot, array $locator): array
 {
-    if ($size > 2097152) {
-        _stattic_render_runtime_invariant_error_lazy('file-too-large', 'Runtime file is too large to transform.');
+    $stagingRoot = $privateRoot . '/runtime/blob-staging';
+    if (!_stattic_runtime_mkdir_soft($stagingRoot)) {
+        return ['reason' => 'staging_unavailable'];
     }
-    $remote = _stattic_tier_remote_locator($servedMeta);
-    if ($remote === null) {
-        _stattic_render_runtime_invariant_error_lazy('file-missing', 'Runtime file metadata points to a missing file.');
+    $tmpPath = $stagingRoot . '/promote-' . bin2hex(random_bytes(12)) . '.tmp';
+    $sink = _stattic_runtime_stream_sink_open($tmpPath, STATTIC_TIER_PROMOTE_MAX_BYTES, 0, 'wb');
+    if ($sink === false) {
+        return ['reason' => 'staging_unavailable'];
     }
-    // Same protections as the streaming path: an open breaker means 503
-    // WITHOUT dialing, and the buffered transform read still occupies an FPM
-    // slot, so it counts against the per-box in-flight cap too.
-    $bucketId = (string) $remote['bucket'];
-    if (_stattic_tier_breaker_tripped($privateRoot, $bucketId)) {
-        _stattic_render_tier_fetch_unavailable(STATTIC_TIER_RETRY_AFTER_SECONDS);
+
+    $status = 0;
+    $result = _stattic_s3_stream_get(
+        $locator,
+        null,
+        static function (int $bucketStatus, array $bucketHeaders) use (&$status): void {
+            $status = $bucketStatus;
+        },
+        static fn (string $chunk): bool => _stattic_runtime_stream_sink_write($sink, $chunk) !== false,
+    );
+
+    if ($result['error'] !== null || $status < 200 || $status >= 300) {
+        _stattic_runtime_stream_sink_abort($sink, 's3_get_failed');
+        return [
+            'status' => $status !== 0 ? $status : (int) $result['status'],
+            'reason' => $result['error'] ?? ('s3_status_' . $status),
+        ];
     }
-    $release = _stattic_tier_in_flight_acquire($privateRoot);
-    if ($release === false) {
-        _stattic_runtime_append_journal($privateRoot, ['event' => 'tier_fetch_failed', 'bucket' => $bucketId, 'key' => (string) $remote['key'], 'error' => 'in_flight_cap']);
-        _stattic_render_tier_fetch_unavailable(STATTIC_TIER_RETRY_AFTER_SECONDS);
+
+    $staged = _stattic_runtime_stream_sink_finish($sink);
+    if (($staged['ok'] ?? false) !== true) {
+        return ['status' => $status, 'reason' => (string) ($staged['reason'] ?? 'staging_write_failed')];
     }
-    $result = _stattic_s3_request_by_bucket_id($bucketId, 'get', 'GET', (string) $remote['key']);
-    if (is_callable($release)) {
-        $release();
-    }
-    if (!$result['ok'] || (int) $result['status'] !== 200 || strlen((string) $result['body']) !== $size) {
-        _stattic_tier_fetch_failed($privateRoot, $remote, (int) ($result['status'] ?? 0), (string) ($result['error'] ?? 's3_read_failed'));
-        _stattic_render_tier_fetch_unavailable(STATTIC_TIER_RETRY_AFTER_SECONDS);
-    }
-    _stattic_tier_breaker_success($privateRoot, $bucketId);
-    return (string) $result['body'];
+    return [
+        'tmp_path' => (string) $staged['tmp_path'],
+        'sha256' => (string) $staged['sha256'],
+        'size' => (int) $staged['size'],
+        'status' => $status,
+    ];
 }

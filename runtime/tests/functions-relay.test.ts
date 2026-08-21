@@ -319,7 +319,7 @@ test("a burst of relay operations does not open a connection per operation", asy
   for (let index = 0; index < 8; index++) {
     const response = await relay({ mode: "query", sql: "SELECT 1 AS budget" }, relayToken());
     expect(response.status).toBe(200);
-    expect((await response.json()) as { ok?: boolean }).toMatchObject({ ok: true });
+    expect(await response.json()).toMatchObject({ ok: true });
   }
   expect(accepted() - before).toBeLessThanOrEqual(4);
 });

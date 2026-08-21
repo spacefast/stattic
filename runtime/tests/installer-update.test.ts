@@ -196,7 +196,13 @@ async function runInstaller(
   },
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const child = Bun.spawn({
-    cmd: ["php", "-d", "auto_prepend_file=", fixture.installerPath, options?.zipUrl ?? fixture.zipUrl],
+    cmd: [
+      "php",
+      "-d",
+      "auto_prepend_file=",
+      fixture.installerPath,
+      options?.zipUrl ?? fixture.zipUrl,
+    ],
     stdout: "pipe",
     stderr: "pipe",
     env: {
@@ -522,4 +528,3 @@ test("serves only complete old or new revisions while the real installer flips t
     await php.exited;
   }
 }, 20_000);
-

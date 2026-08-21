@@ -181,9 +181,10 @@ test("invalidates exactly the rewritten-in-place aliases: the loader copies and 
       env: process.env,
     });
     expect(result.exitCode, result.stderr.toString()).toBe(0);
-    const paths = JSON.parse(result.stdout.toString()) as string[];
-    expect(new Set(paths)).toEqual(
-      new Set([
+    const paths: unknown = JSON.parse(result.stdout.toString());
+    expect(paths).toHaveLength(6);
+    expect(paths).toEqual(
+      expect.arrayContaining([
         `${root}/custom-redirects.php`,
         `${root}/index.php`,
         `${root}/__spacefast/engine-update.php`,

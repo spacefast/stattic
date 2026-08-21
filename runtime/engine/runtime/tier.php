@@ -26,11 +26,8 @@ const STATTIC_TIER_PROMOTE_MAX_BYTES = 1073741824; // 1 GiB
 
 function _stattic_tier_promote_admit(string $privateRoot, string $spaceId): callable|false
 {
-    $lane = STATTIC_TIER_PROMOTE_LANE . ':' . _stattic_admission_sanitize_key($spaceId);
     return _stattic_admission_counter_acquire(
-        $privateRoot,
-        'spacefast:adm:' . $lane,
-        $privateRoot . '/runtime/admission/' . str_replace(':', '-', $lane) . '.json',
+        _stattic_admission_counter_path($privateRoot, STATTIC_TIER_PROMOTE_LANE . '-' . $spaceId),
         _stattic_config_int('SPACEFAST_TIER_PROMOTE_CONC_PER_SPACE', STATTIC_TIER_PROMOTE_CONCURRENCY),
         _stattic_admission_stale_seconds(),
     );
@@ -61,7 +58,7 @@ function _stattic_tier_promote_blob(string $privateRoot, string $spaceId, string
     $sha256 = strtolower(trim($sha256));
     // Checked before _stattic_runtime_blob_path(), which renders a 422 problem
     // document — the wrong emitter entirely for a visitor request.
-    if (preg_match('/^[a-f0-9]{64}$/', $sha256) !== 1 || !_stattic_runtime_id_valid($spaceId)) {
+    if (!_stattic_is_sha256_hex($sha256) || !_stattic_runtime_id_valid($spaceId)) {
         _stattic_tier_journal($privateRoot, [
             'event' => 'tier_promote_failed',
             'space_id' => $spaceId,

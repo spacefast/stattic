@@ -64,23 +64,19 @@ function _stattic_invoke_zero(
         _stattic_zero_send_run_response($config, $parentRoot, $serving, $requestMethod, $requestHost);
     }
 
-    $body = _stattic_request_body_contents();
-    if (!is_string($body)) {
-        $body = '';
-    }
-    if (strlen($body) > STATTIC_ZERO_REQUEST_BODY_MAX_BYTES) {
-        _stattic_zero_error(413, 'zero_request_body_too_large', 'Zero request body is too large.');
+    $body = _stattic_bounded_request_body(STATTIC_ZERO_REQUEST_BODY_MAX_BYTES);
+    if ($body === null) {
+        _stattic_problem_refused(413, 'zero_request_body_too_large', 'Zero request body is too large.');
     }
 
-    $artifactPath = _stattic_zero_endpoint_index_matches(
-        $parentRoot,
-        (string) $action['endpoint_id'],
-        (string) $action['zero_artifact']
-    ) ? null : (string) $action['zero_artifact'];
+    // Always explicit: the runner validates the artifact's own endpoint_id
+    // against the envelope after reading it, which is the check that matters —
+    // consulting zero/endpoints-index.json here only re-derived the same path.
+    $artifactPath = (string) $action['artifact'];
     $envelope = _stattic_zero_envelope(
         $parentRoot,
         $serving,
-        (string) $action['endpoint_id'],
+        (string) $action['endpoint'],
         is_string($action['schema_hash'] ?? null) ? $action['schema_hash'] : null,
         [
             'method' => $requestMethod,
@@ -106,12 +102,11 @@ function _stattic_invoke_zero(
         _stattic_html_insert_snippets($serving)
     );
 }
-
 function _stattic_zero_execute_envelope(array $envelope, array $config, string $encodeFailureMessage): array
 {
     $payload = json_encode($envelope, JSON_UNESCAPED_SLASHES);
     if (!is_string($payload)) {
-        _stattic_zero_error(500, 'zero_envelope_encode_failed', $encodeFailureMessage);
+        _stattic_problem_refused(500, 'zero_envelope_encode_failed', $encodeFailureMessage);
     }
 
     $runnerResponse = _stattic_zero_run_process($payload, $config, _stattic_zero_service_identity($envelope));
@@ -119,20 +114,6 @@ function _stattic_zero_execute_envelope(array $envelope, array $config, string $
     _stattic_zero_send_callback_events($runnerResponse, $envelope, $config);
 
     return [$runnerResponse, $runnerBody];
-}
-
-function _stattic_zero_endpoint_index_matches(string $versionRoot, string $endpointId, string $artifactPath): bool
-{
-    static $indexes = [];
-    $path = $versionRoot . '/zero/endpoints-index.json';
-    if (!array_key_exists($path, $indexes)) {
-        $decoded = _stattic_runtime_read_json($path);
-        $indexes[$path] = is_array($decoded) && is_array($decoded['endpoints'] ?? null)
-            ? $decoded['endpoints']
-            : [];
-    }
-
-    return ($indexes[$path][$endpointId] ?? null) === $artifactPath;
 }
 
 /**
@@ -167,16 +148,16 @@ function _stattic_zero_run_process(string $payload, array $config, array $identi
         STATTIC_ZERO_RUNNER_STDERR_MAX_BYTES
     );
     if (!$result['spawned']) {
-        _stattic_zero_error(502, 'zero_runner_unavailable', 'Zero runner is unavailable.');
+        _stattic_problem_refused(502, 'zero_runner_unavailable', 'Zero runner is unavailable.');
     }
     $stdout = $result['stdout'];
     if ($result['exitCode'] !== 0 || !is_string($stdout) || $stdout === '') {
-        _stattic_zero_error(502, 'zero_runner_failed', _stattic_zero_debug_message('Zero runner failed. Exit code: ' . (string) $result['exitCode'] . '.', $result['stderr']));
+        _stattic_problem_refused(502, 'zero_runner_failed', _stattic_zero_debug_message('Zero runner failed. Exit code: ' . (string) $result['exitCode'] . '.', $result['stderr']));
     }
 
     $decoded = json_decode($stdout, true);
     if (!is_array($decoded)) {
-        _stattic_zero_error(502, 'zero_runner_invalid_response', _stattic_zero_debug_message('Zero runner returned an invalid response.', $stdout));
+        _stattic_problem_refused(502, 'zero_runner_invalid_response', _stattic_zero_debug_message('Zero runner returned an invalid response.', $stdout));
     }
 
     return $decoded;
@@ -186,7 +167,7 @@ function _stattic_zero_validated_runner_body(array $runnerResponse): string
 {
     $status = $runnerResponse['status'] ?? null;
     if (!is_int($status) || $status < 100 || $status > 599) {
-        _stattic_zero_error(502, 'zero_runner_invalid_status', 'Zero runner returned an invalid status.');
+        _stattic_problem_refused(502, 'zero_runner_invalid_status', 'Zero runner returned an invalid status.');
     }
     if (array_key_exists('bodyBase64', $runnerResponse)) {
         $body = is_string($runnerResponse['bodyBase64'])
@@ -196,7 +177,7 @@ function _stattic_zero_validated_runner_body(array $runnerResponse): string
         $body = $runnerResponse['body'] ?? '';
     }
     if (!is_string($body)) {
-        _stattic_zero_error(502, 'zero_runner_invalid_body', 'Zero runner returned an invalid body.');
+        _stattic_problem_refused(502, 'zero_runner_invalid_body', 'Zero runner returned an invalid body.');
     }
     return $body;
 }
@@ -254,6 +235,10 @@ function _stattic_zero_send_headers(array $headers, array $suppressLowerNames = 
             $lower === 'content-length'
             || in_array($lower, $suppressLowerNames, true)
             || _stattic_platform_managed_header($lower)
+            // The send-time boundary, not just the publisher-input one: a
+            // runner must not emit platform-owned headers (a8c-*, x-ac, …)
+            // regardless of what the cache-policy sender clears afterwards.
+            || _stattic_platform_owns_header($lower)
         ) {
             continue;
         }
@@ -273,23 +258,8 @@ function _stattic_zero_send_headers(array $headers, array $suppressLowerNames = 
 
 function _stattic_zero_request_headers(): array
 {
-    $headers = [];
-    foreach ($_SERVER as $key => $value) {
-        if (!is_string($value)) {
-            continue;
-        }
-        if (str_starts_with($key, 'HTTP_')) {
-            $name = strtolower(str_replace('_', '-', substr($key, 5)));
-            $headers[$name] = $value;
-        }
-    }
-    foreach (['CONTENT_TYPE' => 'content-type', 'CONTENT_LENGTH' => 'content-length'] as $serverKey => $headerName) {
-        if (is_string($_SERVER[$serverKey] ?? null)) {
-            $headers[$headerName] = $_SERVER[$serverKey];
-        }
-    }
-
-    return $headers;
+    require_once __DIR__ . '/../shared/upstream-relay.php';
+    return _stattic_relay_inbound_headers(true);
 }
 
 function _stattic_zero_runtime_config(string $versionRoot): array
@@ -339,8 +309,11 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
             'message' => 'Zero run route requires POST.',
         ]);
     }
-    $body = _stattic_request_body_contents();
-    $decoded = is_string($body) ? json_decode($body, true) : null;
+    $body = _stattic_bounded_request_body(STATTIC_ZERO_REQUEST_BODY_MAX_BYTES);
+    if ($body === null) {
+        _stattic_problem_refused(413, 'zero_request_body_too_large', 'Zero request body is too large.');
+    }
+    $decoded = json_decode($body, true);
     $op = is_array($decoded) && is_string($decoded['op'] ?? null) ? $decoded['op'] : '';
     if ($op === 'auth.get') {
         _stattic_zero_json_response(200, [
@@ -433,7 +406,7 @@ function _stattic_zero_run_artifact(string $versionRoot, string $artifactPath): 
 {
     $artifact = _stattic_runtime_read_json($versionRoot . '/' . $artifactPath);
     if (!is_array($artifact) || ($artifact['format'] ?? null) !== 'stattic.zero.run.v1') {
-        _stattic_zero_error(422, 'zero_artifact_invalid', 'Zero run artifact is malformed.');
+        _stattic_problem_refused(422, 'zero_artifact_invalid', 'Zero run artifact is malformed.');
     }
     return $artifact;
 }
@@ -481,7 +454,7 @@ function _stattic_zero_envelope(
             'path' => (string) ($request['path'] ?? ''),
             'uri' => (string) ($request['uri'] ?? ''),
             'host' => (string) ($request['host'] ?? ''),
-            'origin' => _stattic_zero_request_origin((string) ($request['host'] ?? '')),
+            'origin' => 'https://' . (string) ($request['host'] ?? ''),
             'query' => (string) ($request['query'] ?? ''),
             'headers' => _stattic_runtime_json_object(_stattic_zero_request_headers()),
             'params' => _stattic_runtime_json_object(is_array($request['params'] ?? null) ? $request['params'] : []),
@@ -569,19 +542,17 @@ function _stattic_zero_run_changed_values(array $runnerResponse): array
         if (!is_array($event)) {
             continue;
         }
-        $payload = is_array($event['payload'] ?? null) ? $event['payload'] : $event;
-        foreach (['changedTables', 'tables'] as $key) {
-            foreach (is_array($payload[$key] ?? null) ? $payload[$key] : [] as $value) {
-                if (is_string($value) && $value !== '') {
-                    $tables[$value] = $value;
-                }
+        // The runner's template normalizes handler input before emitting, so
+        // only the canonical keys ever arrive.
+        $payload = is_array($event['payload'] ?? null) ? $event['payload'] : [];
+        foreach (is_array($payload['changedTables'] ?? null) ? $payload['changedTables'] : [] as $value) {
+            if (is_string($value) && $value !== '') {
+                $tables[$value] = $value;
             }
         }
-        foreach (['changedQueries', 'invalidate'] as $key) {
-            foreach (is_array($payload[$key] ?? null) ? $payload[$key] : [] as $value) {
-                if (is_string($value) && $value !== '') {
-                    $queries[$value] = $value;
-                }
+        foreach (is_array($payload['changedQueries'] ?? null) ? $payload['changedQueries'] : [] as $value) {
+            if (is_string($value) && $value !== '') {
+                $queries[$value] = $value;
             }
         }
     }
@@ -607,7 +578,7 @@ function _stattic_zero_send_auth_redirect(
     if ($operation === 'auth_sign_out') {
         // The one runtime logout route: it clears the single host session
         // cookie. There is no Zero-specific cookie.
-        $redirect = _stattic_zero_request_origin($requestHost) . STATTIC_ACCESS_LOGOUT_PATH . '?return=' . rawurlencode($returnPath);
+        $redirect = 'https://' . $requestHost . STATTIC_ACCESS_LOGOUT_PATH . '?return=' . rawurlencode($returnPath);
     } else {
         $descriptor = _stattic_access_page_descriptor($serving);
         $accountUrl = is_array($descriptor) && is_string($descriptor['accountUrl'] ?? null)
@@ -621,7 +592,7 @@ function _stattic_zero_send_auth_redirect(
         } else {
             $target = is_string($auth['signInUrl'] ?? null) ? trim((string) $auth['signInUrl']) : '';
             if (!_stattic_platform_destination_allowed($target)) {
-                _stattic_zero_error(404, 'zero_auth_unavailable', 'Zero hosted auth is not configured.');
+                _stattic_problem_refused(404, 'zero_auth_unavailable', 'Zero hosted auth is not configured.');
             }
             $redirect = _stattic_zero_auth_url_with_return_to($target, $returnToParam, $requestHost);
         }
@@ -718,7 +689,7 @@ function _stattic_zero_auth_return_to(string $requestHost, string $returnToParam
             return $safe;
         }
     }
-    return _stattic_zero_request_origin($requestHost) . '/';
+    return 'https://' . $requestHost . '/';
 }
 
 function _stattic_zero_safe_return_to(string $value, string $requestHost): ?string
@@ -726,7 +697,7 @@ function _stattic_zero_safe_return_to(string $value, string $requestHost): ?stri
     if (strlen($value) > 2048 || str_contains($value, "\0")) {
         return null;
     }
-    $origin = _stattic_zero_request_origin($requestHost);
+    $origin = 'https://' . $requestHost;
     if (str_starts_with($value, '/') && !str_starts_with($value, '//')) {
         return $origin . $value;
     }
@@ -768,18 +739,7 @@ function _stattic_zero_hostname_without_port(string $host): string
         return $end === false ? $host : substr($host, 1, $end - 1);
     }
     $parts = explode(':', $host, 2);
-    return $parts[0] ?? $host;
-}
-
-function _stattic_zero_request_origin(string $requestHost): string
-{
-    $proto = is_string($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? null)
-        ? strtolower(trim((string) $_SERVER['HTTP_X_FORWARDED_PROTO']))
-        : '';
-    if ($proto !== 'http' && $proto !== 'https') {
-        $proto = 'https';
-    }
-    return $proto . '://' . $requestHost;
+    return array_first($parts) ?? $host;
 }
 
 function _stattic_zero_send_realtime_events(array $config, string $requestMethod): void
@@ -789,7 +749,7 @@ function _stattic_zero_send_realtime_events(array $config, string $requestMethod
     $realtime = is_array($config['realtime'] ?? null) ? $config['realtime'] : [];
     $replayUrl = is_string($realtime['replayUrl'] ?? null) ? trim($realtime['replayUrl']) : '';
     if (!_stattic_platform_destination_allowed($replayUrl)) {
-        _stattic_zero_error(404, 'zero_replay_unavailable', 'Zero realtime replay is unavailable.');
+        _stattic_problem_refused(404, 'zero_replay_unavailable', 'Zero realtime replay is unavailable.');
     }
     $query = _stattic_zero_replay_query_string($requestMethod);
     $result = _stattic_http_request([
@@ -800,7 +760,7 @@ function _stattic_zero_send_realtime_events(array $config, string $requestMethod
         'schemes' => ['https', 'http'],
     ]);
     if (!$result['ok']) {
-        _stattic_zero_error(502, 'zero_replay_failed', 'Zero realtime replay failed.');
+        _stattic_problem_refused(502, 'zero_replay_failed', 'Zero realtime replay failed.');
     }
     _stattic_response_send(200, $result['body'], 'application/json; charset=utf-8', ['Cache-Control' => 'no-store']);
 }
@@ -810,7 +770,7 @@ function _stattic_zero_send_realtime_events(array $config, string $requestMethod
 // only from process config: a visitor-supplied request header is untrusted (not
 // in the edge strip list) and must never be replayed upstream as a platform
 // credential.
-function _stattic_zero_replay_headers(array $config = []): array
+function _stattic_zero_replay_headers(array $config): array
 {
     $headers = ['Accept: application/json'];
     $realtime = is_array($config['realtime'] ?? null) ? $config['realtime'] : [];
@@ -842,20 +802,20 @@ function _stattic_zero_replay_query_string(string $requestMethod): string
 {
     $rawQuery = (string) ($_SERVER['QUERY_STRING'] ?? '');
     if (strlen($rawQuery) > STATTIC_ZERO_REPLAY_QUERY_MAX_BYTES) {
-        _stattic_zero_error(400, 'zero_replay_query_invalid', 'Zero replay query is too large.');
+        _stattic_problem_refused(400, 'zero_replay_query_invalid', 'Zero replay query is too large.');
     }
     $query = [];
     $afterEventId = $_GET['afterEventId'] ?? null;
     if ($afterEventId !== null) {
         if (!is_string($afterEventId) || $afterEventId === '' || strlen($afterEventId) > STATTIC_ZERO_REPLAY_EVENT_ID_MAX_BYTES || !preg_match('/^[A-Za-z0-9._:-]+$/', $afterEventId)) {
-            _stattic_zero_error(400, 'zero_replay_query_invalid', 'Zero replay cursor is invalid.');
+            _stattic_problem_refused(400, 'zero_replay_query_invalid', 'Zero replay cursor is invalid.');
         }
         $query['afterEventId'] = $afterEventId;
     }
     $limit = $_GET['limit'] ?? null;
     if ($limit !== null) {
         if (is_array($limit) || !preg_match('/^[0-9]+$/', (string) $limit)) {
-            _stattic_zero_error(400, 'zero_replay_query_invalid', 'Zero replay limit is invalid.');
+            _stattic_problem_refused(400, 'zero_replay_query_invalid', 'Zero replay limit is invalid.');
         }
         $query['limit'] = (string) max(1, min(100, (int) $limit));
     }
@@ -865,10 +825,10 @@ function _stattic_zero_replay_query_string(string $requestMethod): string
 function _stattic_zero_send_callback_events(
     array $runnerResponse,
     array $envelope,
-    array $config,
-    float $callbackBudgetSeconds = STATTIC_ZERO_CALLBACK_TOTAL_BUDGET_SECONDS
+    array $config
 ): void
 {
+    $callbackBudgetSeconds = STATTIC_ZERO_CALLBACK_TOTAL_BUDGET_SECONDS;
     if (!is_array($runnerResponse['events'] ?? null) || $runnerResponse['events'] === []) {
         return;
     }
@@ -962,14 +922,13 @@ function _stattic_zero_send_callback_events(
 function _stattic_zero_post_callback_event(string $url, string $token, array $event, int $timeoutMs): void
 {
     require_once __DIR__ . '/../shared/http.php';
-    if (!_stattic_http_available()) {
-        return;
-    }
     $payload = json_encode(['event' => $event], JSON_UNESCAPED_SLASHES);
     if (!is_string($payload) || strlen($payload) > STATTIC_ZERO_CALLBACK_EVENT_MAX_BYTES) {
         return;
     }
-    _stattic_http_request([
+    // The callback is deliberately best effort, but PHP 8.5's NoDiscard
+    // contract requires the caller to acknowledge the transport receipt.
+    $receipt = _stattic_http_request([
         'url' => $url,
         'method' => 'POST',
         'headers' => [
@@ -984,6 +943,7 @@ function _stattic_zero_post_callback_event(string $url, string $token, array $ev
         // worker hold a body it will discard.
         'max_body_bytes' => 4096,
     ]);
+    unset($receipt);
 }
 
 // The zero lane's whole contribution to the shared emitter is its cache policy
@@ -991,12 +951,7 @@ function _stattic_zero_post_callback_event(string $url, string $token, array $ev
 // RFC 9457 problem documents; the run lane instead keeps `ok:false` frames
 // (_stattic_zero_send_run_frame) because its reader discriminates on `ok`, not
 // on status.
-function _stattic_zero_json_response(int $status, array $body, string $mediaType = 'application/json'): never
+function _stattic_zero_json_response(int $status, array $body): never
 {
-    _stattic_json_response($status, $body, $mediaType, ['Cache-Control' => 'no-store']);
-}
-
-function _stattic_zero_error(int $status, string $code, string $message): never
-{
-    _stattic_problem_response($status, $code, $message, [], ['Cache-Control' => 'no-store']);
+    _stattic_json_response($status, $body, 'application/json', ['Cache-Control' => 'no-store']);
 }

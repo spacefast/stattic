@@ -19,6 +19,7 @@
  * state and resolves no content: authority travels in the presented token.
  */
 
+require_once __DIR__ . '/../shared/artifacts.php';
 require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/response.php';
 // Config reads answer empty until this has run, which for the purge kick means
@@ -52,11 +53,11 @@ const STATTIC_FUNCTIONS_PURGE_COALESCE_SECONDS = 10;
  */
 function _stattic_functions_purge_expected_token(string $versionRoot): ?string
 {
-    $config = _stattic_runtime_read_json(dirname($versionRoot) . '/functions/config.json');
-    if (!is_array($config) || ($config['runtimeKind'] ?? null) !== 'functions') {
+    $read = _stattic_functions_config_read($versionRoot);
+    if ($read['kind'] !== 'present') {
         return null;
     }
-    $purge = is_array($config['purge'] ?? null) ? $config['purge'] : [];
+    $purge = is_array($read['value']['purge'] ?? null) ? $read['value']['purge'] : [];
     $token = $purge['token'] ?? null;
     return is_string($token) && $token !== '' ? $token : null;
 }
@@ -74,44 +75,6 @@ function _stattic_functions_purge_bearer(): string
 {
     $token = $_SERVER['HTTP_SF_PURGE_TOKEN'] ?? '';
     return is_string($token) ? trim($token) : '';
-}
-
-// Same declared-then-read guard the relay uses: an over-declared body is
-// refused before the read, an under-declared one after it.
-function _stattic_functions_purge_body(int $limit): ?string
-{
-    $declared = isset($_SERVER['CONTENT_LENGTH']) ? (int) $_SERVER['CONTENT_LENGTH'] : 0;
-    if ($declared > $limit) {
-        return null;
-    }
-    $body = _stattic_request_body_contents($limit + 1);
-    if ($body === false || strlen($body) > $limit) {
-        return null;
-    }
-    return $body;
-}
-
-/**
- * The hosts this purge addresses: every hostname the space's route intent
- * names. Mirrors admin/management.php's `_stattic_runtime_route_intent_hostnames`
- * against the same document — the admin surface cannot load on the visitor
- * lane, so the read is restated here. Tombstoned hostnames are deliberately
- * absent: a tombstone serves no function bytes to purge.
- *
- * @return list<string>
- */
-function _stattic_functions_purge_hostnames(string $privateRoot, string $spaceId): array
-{
-    $intent = _stattic_runtime_read_json(_stattic_space_root($privateRoot, $spaceId) . '/hostname-intent.json');
-    $hostnames = [];
-    if (is_array($intent) && is_array($intent['routes'] ?? null)) {
-        foreach ($intent['routes'] as $route) {
-            if (is_array($route) && is_string($route['hostname'] ?? null) && $route['hostname'] !== '') {
-                $hostnames[$route['hostname']] = true;
-            }
-        }
-    }
-    return array_keys($hostnames);
 }
 
 // The per-space admission ledger: one record per space, quota window plus the
@@ -197,20 +160,20 @@ function _stattic_functions_purge_serve(string $privateRoot, string $spaceId, st
         _stattic_functions_purge_refused();
     }
 
-    $body = _stattic_functions_purge_body(STATTIC_FUNCTIONS_PURGE_MAX_BODY_BYTES);
+    $body = _stattic_bounded_request_body(STATTIC_FUNCTIONS_PURGE_MAX_BODY_BYTES);
     if ($body === null) {
-        _stattic_problem_response(413, 'purge_payload_too_large', 'Purge request exceeds the size limit.', [], ['Cache-Control' => 'no-store']);
+        _stattic_problem_refused(413, 'purge_payload_too_large', 'Purge request exceeds the size limit.');
     }
     $decoded = json_decode($body, true);
     if (!is_array($decoded)) {
-        _stattic_problem_response(422, 'purge_invalid_body', 'Purge body must be a JSON object with a paths array.', [], ['Cache-Control' => 'no-store']);
+        _stattic_problem_refused(422, 'purge_invalid_body', 'Purge body must be a JSON object with a paths array.');
     }
     $paths = _stattic_runtime_purge_path_list($decoded['paths'] ?? null);
     if ($paths === []) {
-        _stattic_problem_response(422, 'purge_empty', 'Purge names no valid paths.', [], ['Cache-Control' => 'no-store']);
+        _stattic_problem_refused(422, 'purge_empty', 'Purge names no valid paths.');
     }
 
-    $hostnames = _stattic_functions_purge_hostnames($privateRoot, $spaceId);
+    $hostnames = _stattic_runtime_route_intent_hostnames(_stattic_space_root($privateRoot, $spaceId));
     $signature = hash('sha256', (string) json_encode([$hostnames, $paths], JSON_UNESCAPED_SLASHES));
     $store = _stattic_functions_purge_admission_store($privateRoot);
     $decision = _stattic_functions_purge_admit($store, $spaceId, $signature, time());
@@ -223,22 +186,16 @@ function _stattic_functions_purge_serve(string $privateRoot, string $spaceId, st
 
     // A space whose intent names no hostname is unaddressable at the provider
     // (shared/purge.php requires hostnames); accepting and doing nothing is the
-    // honest answer — there is no edge entry to drop.
+    // honest answer — there is no edge entry to drop. 202 is the contract:
+    // accepted, never edge-confirmed. purge_now defers the loopback provider
+    // call past fastcgi_finish_request, so the caller gets its 202 immediately.
     if (($decision['verdict'] ?? null) === 'accepted' && $hostnames !== []) {
-        _stattic_runtime_purge_enqueue($privateRoot, [
+        _stattic_runtime_purge_now($privateRoot, [
             'hostnames' => $hostnames,
             'paths' => $paths,
             'reason' => 'functions_purge',
-            // 202 is the contract: accepted, never edge-confirmed, so no
-            // synchronous receipt — a failed kick leaves the durable record for
-            // the maintenance tick, like every other queued purge.
-            'receipt' => false,
         ]);
-        // The drain pays the WordPress bootstrap in-process, post-response (the
-        // visitor lane already flushes before deferred work), so the caller
-        // gets its 202 at queue-write speed.
-        _stattic_defer(static function () use ($privateRoot, $store): void {
-            _stattic_runtime_purge_drain($privateRoot);
+        _stattic_defer(static function () use ($store): void {
             _stattic_record_store_sweep($store);
         });
     }

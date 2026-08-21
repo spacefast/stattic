@@ -679,9 +679,8 @@ test("an unreadable route pointer answers unavailable even when stat cannot trav
       activate: productionActivation(host),
     });
 
-    // The route swap's apcu_delete leaves the pointer cache cold. Remove
-    // traversal permission from its parent so both the read and stat fail: that
-    // still means unknown, not verified ENOENT.
+    // Remove traversal permission from the pointer's parent so both the read
+    // and stat fail: that still means unknown, not verified ENOENT.
     chmodSync(storagePath(rt, "routes"), 0o000);
     try {
       const failed = await get(rt, host, "/");

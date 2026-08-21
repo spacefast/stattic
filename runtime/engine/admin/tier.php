@@ -19,28 +19,6 @@ const STATTIC_TIER_GC_DELETE_BATCH = 200;
 const STATTIC_TIER_PUT_STREAMS = 4;
 const STATTIC_TIER_TRASH_RETENTION_SECONDS = 7 * 86400;
 
-/**
- * @return list<string>|null absolute child paths, or null when unavailable
- */
-function _stattic_tier_directory_entries(string $root): ?array
-{
-    clearstatcache(true, $root);
-    if (!is_dir($root)) {
-        return _sf_path_verifiably_absent($root) ? [] : null;
-    }
-    $entries = scandir($root);
-    if (!is_array($entries)) {
-        return null;
-    }
-    $paths = [];
-    foreach ($entries as $entry) {
-        if ($entry !== '.' && $entry !== '..') {
-            $paths[] = $root . '/' . $entry;
-        }
-    }
-    return $paths;
-}
-
 function _stattic_tier_gc_grace_seconds(): int
 {
     // min=0: tests and ops pin this to 0 to collect on the spot.
@@ -83,7 +61,7 @@ function _stattic_tier_record_time(mixed $decoded, string $path): int
 function _stattic_tier_collect_shas(mixed $value, array &$shas, int $at, int $depth = 0): void
 {
     if (is_string($value)) {
-        if (preg_match('/^[a-f0-9]{64}$/', $value) === 1) {
+        if (_stattic_is_sha256_hex($value)) {
             $shas[$value] = max($shas[$value] ?? 0, $at);
         }
         return;
@@ -92,7 +70,7 @@ function _stattic_tier_collect_shas(mixed $value, array &$shas, int $at, int $de
         return;
     }
     foreach ($value as $key => $child) {
-        if (is_string($key) && preg_match('/^[a-f0-9]{64}$/', $key) === 1) {
+        if (is_string($key) && _stattic_is_sha256_hex($key)) {
             $shas[$key] = max($shas[$key] ?? 0, $at);
         }
         _stattic_tier_collect_shas($child, $shas, $at, $depth + 1);
@@ -146,7 +124,7 @@ function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId): ?a
 {
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
     $shas = [];
-    $versionRoots = _stattic_tier_directory_entries($spaceRoot . '/versions');
+    $versionRoots = _stattic_runtime_directory_entries($spaceRoot . '/versions');
     if ($versionRoots === null) {
         return null;
     }
@@ -165,7 +143,7 @@ function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId): ?a
             ]);
             return null;
         }
-        $versionEntries = _stattic_tier_directory_entries($versionRoot);
+        $versionEntries = _stattic_runtime_directory_entries($versionRoot);
         if ($versionEntries === null) {
             return null;
         }
@@ -196,7 +174,7 @@ function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId): ?a
         }
     }
     foreach ([$spaceRoot . '/uploads', $spaceRoot . '/publish-sessions'] as $declarationsRoot) {
-        $declarationEntries = _stattic_tier_directory_entries($declarationsRoot);
+        $declarationEntries = _stattic_runtime_directory_entries($declarationsRoot);
         if ($declarationEntries === null) {
             return null;
         }
@@ -207,7 +185,7 @@ function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId): ?a
             if (!is_dir($path)) {
                 continue;
             }
-            $nestedEntries = _stattic_tier_directory_entries($path);
+            $nestedEntries = _stattic_runtime_directory_entries($path);
             if ($nestedEntries === null) {
                 return null;
             }
@@ -232,7 +210,7 @@ function _stattic_tier_space_pinned_shas(string $privateRoot, string $spaceId, i
 {
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
     $pinned = [];
-    $pinEntries = _stattic_tier_directory_entries($spaceRoot . '/pins');
+    $pinEntries = _stattic_runtime_directory_entries($spaceRoot . '/pins');
     if ($pinEntries === null) {
         return null;
     }
@@ -258,7 +236,7 @@ function _stattic_tier_space_pinned_shas(string $privateRoot, string $spaceId, i
             continue;
         }
         foreach (is_array($pin['shas'] ?? null) ? $pin['shas'] : [] as $sha) {
-            if (is_string($sha) && preg_match('/^[a-f0-9]{64}$/', $sha) === 1) {
+            if (is_string($sha) && _stattic_is_sha256_hex($sha)) {
                 $pinned[$sha] = true;
             }
         }
@@ -287,7 +265,7 @@ function _stattic_tier_space_blobs_root(string $privateRoot, string $spaceId): s
 function _stattic_tier_space_blob_prefixes(string $privateRoot, string $spaceId): ?array
 {
     $blobsRoot = _stattic_tier_space_blobs_root($privateRoot, $spaceId);
-    $entries = _stattic_tier_directory_entries($blobsRoot);
+    $entries = _stattic_runtime_directory_entries($blobsRoot);
     if ($entries === null) {
         return null;
     }
@@ -320,7 +298,7 @@ function _stattic_tier_prefix_blobs(string $blobsRoot, string $prefix): ?array
     foreach ($entries as $entry) {
         $isMark = str_ends_with($entry, STATTIC_BLOB_DEMOTE_MARK_SUFFIX);
         $sha = $isMark ? substr($entry, 0, -strlen(STATTIC_BLOB_DEMOTE_MARK_SUFFIX)) : $entry;
-        if (preg_match('/^[a-f0-9]{64}$/', $sha) !== 1 || !str_starts_with($sha, $prefix)) {
+        if (!_stattic_is_sha256_hex($sha) || !str_starts_with($sha, $prefix)) {
             continue;
         }
         $path = $blobsRoot . '/' . $prefix . '/' . $sha;
@@ -520,16 +498,15 @@ function _stattic_tier_space_blob_gc(string $privateRoot, string $spaceId, int $
 
 function _stattic_tier_space_ids(string $privateRoot): array|false
 {
-    $spacesRoot = $privateRoot . '/spaces';
-    _stattic_runtime_assert_private_path($spacesRoot);
-    $entries = _stattic_tier_directory_entries($spacesRoot);
-    if ($entries === null) {
+    _stattic_runtime_assert_private_path($privateRoot . '/spaces');
+    $roots = _stattic_runtime_space_roots($privateRoot);
+    if ($roots === null) {
         return false;
     }
     $spaceIds = [];
-    foreach ($entries as $path) {
+    foreach ($roots as $path) {
         $entry = basename($path);
-        if (_stattic_runtime_id_valid($entry) && is_dir($path)) {
+        if (_stattic_runtime_id_valid($entry)) {
             $spaceIds[] = $entry;
         }
     }
@@ -608,7 +585,7 @@ function _stattic_tier_upload_blobs(string $privateRoot, string $spaceId, array 
     $items = [];
     $sizes = [];
     foreach ($blobs as $sha => $path) {
-        $key = _stattic_s3_blob_key($spaceId, (string) $sha);
+        $key = _stattic_blob_relative_key($spaceId, (string) $sha);
         if ($key === null || !is_file($path)) {
             return false;
         }
@@ -694,7 +671,7 @@ function _stattic_runtime_job_step_tier_demote(string $privateRoot, array $job):
     if (isset($payload['shas']) && is_array($payload['shas'])) {
         $requested = [];
         foreach ($payload['shas'] as $sha) {
-            if (is_string($sha) && preg_match('/^[a-f0-9]{64}$/', strtolower($sha)) === 1) {
+            if (is_string($sha) && _stattic_is_sha256_hex(strtolower($sha))) {
                 $requested[strtolower($sha)] = true;
             }
         }
@@ -826,10 +803,8 @@ const STATTIC_TIER_DISK_REPORT_INTERVAL_SECONDS = 21600;
 function _stattic_runtime_job_housekeeping_disk_report(string $privateRoot, array $claims = []): void
 {
     $now = time();
-    foreach (glob($privateRoot . '/spaces/*', GLOB_ONLYDIR) ?: [] as $spaceRoot) {
-        if (!is_string($spaceRoot) || !is_dir($spaceRoot)) {
-            continue;
-        }
+    // null = unenumerable this tick; report nothing rather than "no spaces".
+    foreach (_stattic_runtime_space_roots($privateRoot) ?? [] as $spaceRoot) {
         _stattic_runtime_assert_private_path($spaceRoot);
         $spaceId = basename($spaceRoot);
         _stattic_sweep_throttled(
@@ -857,7 +832,7 @@ function _stattic_runtime_job_housekeeping_disk_report(string $privateRoot, arra
 function _stattic_tier_live_route_versions(string $privateRoot, string $spaceId): ?array
 {
     $live = [];
-    $entries = _stattic_tier_directory_entries(_stattic_space_root($privateRoot, $spaceId) . '/routes');
+    $entries = _stattic_runtime_directory_entries(_stattic_space_root($privateRoot, $spaceId) . '/routes');
     if ($entries === null) {
         return null;
     }

@@ -5,6 +5,20 @@ require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/auth.php';
 
+// The one bootstrap for the two direct admin entrypoints (entrypoints/
+// management.php, entrypoints/upload.php): identity on the wire, the
+// undeployed 503, then dispatch onto the surface's route table.
+function _stattic_runtime_admin_entrypoint(string $engineRoot, string $surface): void
+{
+    $storageRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
+    _stattic_emit_runtime_identity();
+    if (!is_dir($storageRoot)) {
+        _stattic_problem_response(503, 'runtime_undeployed', 'Runtime storage is not provisioned on this site.');
+    }
+    [$requestMethod, $requestPath] = _stattic_runtime_entrypoint_request();
+    _stattic_runtime_admin_api($storageRoot, $requestMethod, $requestPath, $surface);
+}
+
 // Auth lanes are hard security boundaries: a token minted for one lane can never
 // authorize another's row, because each lane's verifier pins its own `aud` before
 // any claim is trusted.
@@ -28,16 +42,13 @@ function _stattic_runtime_admin_api(string $privateRoot, string $method, string 
         exit;
     }
 
-    if ($surface === 'upload') {
-        $routePath = _stattic_runtime_upload_api_route_path($requestPath);
-        if (!is_string($routePath)) {
-            _stattic_runtime_upload_route_not_found();
-        }
-    } else {
-        $routePath = _stattic_runtime_management_api_route_path($requestPath);
-        if (!is_string($routePath)) {
-            _stattic_runtime_route_not_found();
-        }
+    [$resolveRoutePath, $routeNotFound] = $surface === 'upload'
+        ? [_stattic_runtime_upload_api_route_path(...), _stattic_runtime_upload_route_not_found(...)]
+        : [_stattic_runtime_management_api_route_path(...), _stattic_runtime_route_not_found(...)];
+
+    $routePath = $resolveRoutePath($requestPath);
+    if (!is_string($routePath)) {
+        $routeNotFound();
     }
 
     foreach (_stattic_runtime_admin_routes($surface) as $route) {
@@ -62,10 +73,7 @@ function _stattic_runtime_admin_api(string $privateRoot, string $method, string 
         _stattic_runtime_admin_run_route($privateRoot, $route, $matches);
     }
 
-    if ($surface === 'upload') {
-        _stattic_runtime_upload_route_not_found();
-    }
-    _stattic_runtime_route_not_found();
+    $routeNotFound();
 }
 
 // Error envelope for the admin API. It is armed before the host gate and JWT,
@@ -210,7 +218,6 @@ function _stattic_runtime_admin_management_routes(): array
         ['POST', '#^/engine/update$#', 'update_engine', [], 'none', false, '_stattic_engine_update_route'],
         ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/dump$#', 'zero_db_dump', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_zero_db_dump'],
         ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/export$#', 'zero_db_export', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_zero_db_export'],
-        ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/import$#', 'zero_db_import', ['space_id' => 1, 'version_id' => 2], 'space', false, '_stattic_zero_db_import'],
         ['GET', '#^/spaces/([^/]+)/storage$#', 'storage_list', ['space_id' => 1], 'none', false, '_stattic_storage_list'],
         ['DELETE', '#^/spaces/([^/]+)/storage/([a-f0-9]{32})$#', 'storage_delete', ['space_id' => 1, 'storage_object_id' => 2], 'space', false, '_stattic_storage_object_delete'],
         ['GET', '#^/storage/read-key$#', 'storage_read_key', [], 'none', false, '_stattic_storage_read_key_get'],

@@ -8,7 +8,16 @@ const STATTIC_SERVER_FILE_PREFIX = '/.stattic/storage/';
 
 function _stattic_server_file_uri(string $absolutePath, string $privateRoot): ?string
 {
-    $root = realpath($privateRoot);
+    // The resolved private root cannot change within a worker: memoize the
+    // successful answer, this runs on every X-Accel response.
+    static $roots = [];
+    $root = $roots[$privateRoot] ?? null;
+    if (!is_string($root)) {
+        $root = realpath($privateRoot);
+        if (is_string($root)) {
+            $roots[$privateRoot] = $root;
+        }
+    }
     $path = realpath($absolutePath);
     if (!is_string($root) || !is_string($path) || !is_file($path)) {
         return null;
@@ -41,8 +50,7 @@ function _stattic_send_server_file(
     string $absolutePath,
     string $privateRoot,
     array $headers,
-    int $status = 200,
-    ?callable $sendHeaders = null
+    int $status = 200
 ): bool {
     // X-Accel-Redirect is a FastCGI response contract. CLI and php -S have no
     // upstream server to consume it, so they keep the ordinary PHP body path.
@@ -55,11 +63,7 @@ function _stattic_send_server_file(
         return false;
     }
 
-    if ($sendHeaders !== null) {
-        $sendHeaders($headers);
-    } else {
-        _stattic_send_file_headers($headers);
-    }
+    _stattic_send_response_headers($headers);
     http_response_code($status);
     header('X-Accel-Redirect: ' . $uri, true);
     exit;

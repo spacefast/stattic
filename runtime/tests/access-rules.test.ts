@@ -20,6 +20,8 @@ import path from "node:path";
 
 import {
   deploy,
+  type EdgePurgeCall,
+  edgePurgeCalls,
   get,
   journalRecords,
   PHP_BINARY,
@@ -623,6 +625,7 @@ beforeAll(async () => {
   });
   logoutOrigin = `http://${logoutServer.hostname}:${logoutServer.port}`;
   runtime = await startRuntime({
+    captureEdgePurges: true,
     env: {
       PHP_CLI_SERVER_WORKERS: "8",
       SPACEFAST_RUNTIME_TEST_ACCESS_SESSION_CLOCK: "1",
@@ -1348,34 +1351,18 @@ test("an IP network constraint admits nobody and is journaled once", async () =>
   }
 });
 
-// The durable edge-purge records under runtime/purges, keyed by id. The php -S
-// harness has no fastcgi_finish_request, so the engine's post-response purge
-// falls back to synchronous execution: by the time a mutation's response
-// returns, its journaled record is on disk with its final hostname scope.
-function purgeRecordsById(rt: Runtime): Map<string, Record<string, unknown>> {
-  const root = storagePath(rt, "runtime", "purges");
-  const records = new Map<string, Record<string, unknown>>();
-  if (!existsSync(root)) return records;
-  for (const file of readdirSync(root)) {
-    if (!file.endsWith(".json")) continue;
-    records.set(
-      file.slice(0, -".json".length),
-      JSON.parse(readFileSync(path.join(root, file), "utf8")) as Record<string, unknown>,
-    );
-  }
-  return records;
-}
-
-async function purgeRecordJournaledBy(
+// The edge-cache purge POSTs the runtime made for one mutation, captured by the
+// loopback stand-in. The php -S harness has no fastcgi_finish_request, so the
+// engine's post-response purge falls back to synchronous execution: by the time
+// a mutation's response returns, its purge calls are already recorded. Each
+// call is one hostname; a multi-host sweep is several calls in serving order.
+async function edgePurgeCallsBy(
   rt: Runtime,
   mutate: () => Promise<unknown>,
-): Promise<Record<string, unknown>> {
-  const before = purgeRecordsById(rt);
+): Promise<EdgePurgeCall[]> {
+  const before = edgePurgeCalls(rt).length;
   await mutate();
-  const added = [...purgeRecordsById(rt)].filter(([id]) => !before.has(id));
-  expect(added.length).toBe(1);
-  const [, record] = added[0];
-  return record;
+  return edgePurgeCalls(rt).slice(before);
 }
 
 test("a Public path becoming Private announces both exposure digests and denies the cached URL", async () => {
@@ -1401,7 +1388,7 @@ test("a Public path becoming Private announces both exposure digests and denies 
   };
   // Still public: a content-shaped route write purges only the live serving
   // hostname — the version-pinned alias never changes bytes on activation.
-  const activationPurge = await purgeRecordJournaledBy(runtime, () =>
+  const activationPurge = await edgePurgeCallsBy(runtime, () =>
     putRoute(runtime, CACHE_SPACE, "production", {
       version_id: CACHE_VERSION,
       config: {
@@ -1412,12 +1399,12 @@ test("a Public path becoming Private announces both exposure digests and denies 
       config_digest: publicConfigDigest,
     }),
   );
-  expect(activationPurge.reason).toBe("route_updated");
-  expect(activationPurge.hostnames).toEqual([CACHE_HOST]);
+  expect(activationPurge.map((call) => call.hostname)).toEqual([CACHE_HOST]);
+  expect(activationPurge[0]?.reason).toBe("route_updated");
   // Public→private: the one transition that owes EVERY alias a sweep — the
   // edge holds long-TTL copies of the formerly-public HTML on all of them,
   // live host first, version-pinned aliases behind it.
-  const sweepPurge = await purgeRecordJournaledBy(runtime, () =>
+  const sweepPurge = await edgePurgeCallsBy(runtime, () =>
     putRoute(runtime, CACHE_SPACE, "production", {
       version_id: CACHE_VERSION,
       config: {
@@ -1428,9 +1415,11 @@ test("a Public path becoming Private announces both exposure digests and denies 
       config_digest: privateConfigDigest,
     }),
   );
-  expect(sweepPurge.reason).toBe("space_access_privatized");
-  expect(sweepPurge.scope).toBe("domain");
-  expect(sweepPurge.hostnames).toEqual([CACHE_HOST, CACHE_VERSION_HOST]);
+  // Every named host in full (domain scope: no purge_uris), live host first,
+  // version-pinned alias behind it — one POST each.
+  expect(sweepPurge.every((call) => call.reason === "space_access_privatized")).toBe(true);
+  expect(sweepPurge.every((call) => call.uris.length === 0)).toBe(true);
+  expect(sweepPurge.map((call) => call.hostname)).toEqual([CACHE_HOST, CACHE_VERSION_HOST]);
 
   // Version ids cannot say whether cached anonymous bytes just became private —
   // a config-only access change keeps the same pointer — so the before/after

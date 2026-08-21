@@ -43,7 +43,7 @@ function _stattic_artifact_parse_bundle_path(string $requestPath): ?array
         return null;
     }
     [$digest, $token] = $segments;
-    if (preg_match('/^[a-f0-9]{64}$/', $digest) !== 1) {
+    if (!_stattic_is_sha256_hex($digest)) {
         return null;
     }
     if (preg_match('/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/', $token) !== 1) {
@@ -108,11 +108,12 @@ function _stattic_artifact_serve(
     // hold it (§16 opt-in): the execution edge re-fetches bundles on cold
     // starts and verifies the digest itself, so a CDN copy of the tokened,
     // content-addressed URL is the point of this policy.
-    $headers = _stattic_apply_platform_header_policy([
+    // The platform policy applies inside _stattic_send_response_headers.
+    $headers = [
         'Cache-Control' => 'public, max-age=31536000, immutable',
         'X-Robots-Tag' => 'noindex, nofollow',
         'X-Content-Type-Options' => 'nosniff',
-    ]);
+    ];
 
     if ($requestMethod === 'GET') {
         _stattic_send_server_file(
@@ -131,7 +132,9 @@ function _stattic_artifact_serve(
         200,
         $contents,
         'application/json; charset=utf-8',
-        $headers + ['Content-Length' => (string) $length]
+        // The PHP-body fallback (non-FPM) bypasses the accel emitter, so it
+        // runs the platform policy itself.
+        _stattic_apply_platform_header_policy($headers + ['Content-Length' => (string) $length])
     );
 }
 

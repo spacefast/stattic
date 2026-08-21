@@ -29,7 +29,7 @@ function _stattic_resolve_zero_route_action(string $versionRoot, string $lookup,
             if (!is_array($match)) {
                 continue;
             }
-            if (!_stattic_zero_route_method_matches($entry['method'], $requestMethod)) {
+            if (!_stattic_functions_route_method_matches($entry['method'], $requestMethod)) {
                 $pathMatchedOtherMethod = true;
                 continue;
             }
@@ -48,16 +48,13 @@ function _stattic_resolve_zero_route_action(string $versionRoot, string $lookup,
     $methods = $entry['method'] === 'GET' ? ['GET', 'HEAD'] : [$entry['method']];
     $action = [
         'action' => 'invoke_zero',
-        'endpoint_id' => $entry['endpoint_id'],
-        'zero_artifact' => $entry['artifact'],
+        'endpoint' => $entry['endpoint_id'],
+        'artifact' => $entry['artifact'],
         'methods' => $methods,
         'params' => $params,
     ];
     if (array_key_exists('schema_hash', $entry)) {
         $action['schema_hash'] = $entry['schema_hash'];
-    }
-    if (!empty($entry['zero_indexed'])) {
-        $action['zero_indexed'] = true;
     }
 
     return ['action' => $action, 'method_not_allowed' => false];
@@ -82,9 +79,4 @@ function _stattic_load_zero_routes_artifact(string $versionRoot): array
     }
 
     return $cache[$path] = $loaded;
-}
-
-function _stattic_zero_route_method_matches(string $routeMethod, string $requestMethod): bool
-{
-    return $routeMethod === $requestMethod || ($routeMethod === 'GET' && $requestMethod === 'HEAD');
 }

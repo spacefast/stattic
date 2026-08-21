@@ -498,10 +498,10 @@ pub(crate) fn compile_response_table(
         } else {
             format!("{RESPONSE_KEY_NOT_FOUND_PREFIX}{directory}")
         };
-        table.insert(
-            key,
-            file_entry(&request_key(path), path, meta, input, &rules, 404),
-        );
+        let source_key = request_key(path);
+        let mut entry = file_entry(&source_key, path, meta, input, &rules, 404);
+        rules.bind(&mut entry, &source_key);
+        table.insert(key, entry);
     }
 
     if let Some(fallback) = input
@@ -516,10 +516,10 @@ pub(crate) fn compile_response_table(
             .unwrap_or(200);
         if let Some(meta) = input.files.get(path) {
             if !input.private.contains(path) && !is_private_serving_path(path) {
-                table.insert(
-                    RESPONSE_KEY_SPA.into(),
-                    file_entry(&request_key(path), path, meta, input, &rules, status),
-                );
+                let source_key = request_key(path);
+                let mut entry = file_entry(&source_key, path, meta, input, &rules, status);
+                rules.bind(&mut entry, &source_key);
+                table.insert(RESPONSE_KEY_SPA.into(), entry);
             }
         }
     }
@@ -549,14 +549,13 @@ pub(crate) fn compile_response_table(
     // the finished table is the only shape that cannot forget a kind.
     //
     // `\0`-prefixed keys are skipped: they answer at a client URL the compiler
-    // cannot see, so `file_entry` already resolved them against the published
+    // cannot see, so their call site already bound them against the published
     // path they were built from, and the serve path never reads `r` off one.
     for (key, entry) in &mut table {
         if key.starts_with('\0') {
             continue;
         }
-        entry.rules_first = rules.claims(key);
-        entry.rule_header_names = rules.settable_header_names(key);
+        rules.bind(entry, key);
     }
 
     table
@@ -696,24 +695,18 @@ fn file_entry(
         headers.insert("x-content-type-options".into(), "nosniff".into());
     }
     apply_noindex(&mut headers, input.noindex_host && is_html);
-    let rule_header_names = rules.settable_header_names(key);
 
-    let cache_class = compiled_cache_class(
-        key,
-        path,
-        Some(&mime),
-        rule_header_names.contains("cache-control"),
-    );
+    let cache_class = compiled_cache_class(key, path, Some(&mime), rules.sets_cache_control(key));
 
     ResponseEntry {
         status,
         headers,
-        rule_header_names,
+        rule_header_names: BTreeSet::new(),
         blob: Some(meta.sha256.clone()),
         length: meta.size,
         cache_class,
         action: None,
-        rules_first: rules.claims(key),
+        rules_first: false,
         html: is_html,
     }
 }
@@ -874,6 +867,23 @@ impl<'a> RuleIndex<'a> {
             .filter(|(matcher, _)| matcher.matches(key))
             .flat_map(|(_, names)| names.iter().cloned())
             .collect()
+    }
+
+    /// The single bit of [`settable_header_names`](Self::settable_header_names)
+    /// the cache-class ladder needs before an entry exists to record the rest
+    /// on, answered without building the set.
+    fn sets_cache_control(&self, key: &str) -> bool {
+        self.header_setters
+            .iter()
+            .any(|(matcher, names)| names.contains("cache-control") && matcher.matches(key))
+    }
+
+    /// Records on one entry what the ordered rules make of `key`: whether a
+    /// redirect can still move the request off it, and the header names the
+    /// residue could set on it.
+    fn bind(&self, entry: &mut ResponseEntry, key: &str) {
+        entry.rules_first = self.claims(key);
+        entry.rule_header_names = self.settable_header_names(key);
     }
 
     /// The exact redirects that can answer without the ordered walk. A rule only
@@ -1880,8 +1890,16 @@ mod tests {
     #[test]
     fn every_key_an_ordered_rule_can_claim_is_marked_rules_first() {
         let table = compile(
-            &[("docs/index.html", b"docs"), ("guide.html", b"guide")],
-            json!({"index": "index.html", "clean_urls": true}),
+            &[
+                ("docs/index.html", b"docs"),
+                ("guide.html", b"guide"),
+                ("404.html", b"missing"),
+            ],
+            json!({
+                "index": "index.html",
+                "clean_urls": true,
+                "fallback": {"path": "404.html", "status": 200}
+            }),
             json!({}),
             json!([{
                 "source": "/*",
@@ -1894,7 +1912,17 @@ mod tests {
             json!({}),
             json!([]),
         );
-        for key in ["/docs/index.html", "/docs/", "/docs", "/guide", "/guide/"] {
+        for key in [
+            "/docs/index.html",
+            "/docs/",
+            "/docs",
+            "/guide",
+            "/guide/",
+            // The `\0` specials answer at a client URL the compiler cannot see,
+            // so they carry the verdict for the published path behind them.
+            RESPONSE_KEY_NOT_FOUND,
+            RESPONSE_KEY_SPA,
+        ] {
             assert!(table[key].rules_first, "{key} must run the rules first");
         }
         assert_eq!(table["/docs"].status, 308);

@@ -42,7 +42,7 @@ space storage or route indexes.
 
 ### Self-host
 
-Requirements: PHP 8.2+ with `sodium`, `curl`, and `zip` extensions, plus the bundled Linux native executable (`stattic-runtime`). The official engine ZIP includes it with executable permissions. Local development may override it with `SPACEFAST_RUNTIME_BIN`. Unicode paths work without `ext-intl`; when available, the runtime uses it as the NFC fast path and otherwise uses its bundled normalizer.
+Requirements: PHP 8.5 with `sodium`, `curl`, and `zip` extensions, plus the bundled Linux native executable (`stattic-runtime`). The engine rejects every other PHP minor: Spacefast owns one runtime platform and uses PHP 8.5 APIs directly. The official engine ZIP includes the native executable with executable permissions. Local development may override it with `SPACEFAST_RUNTIME_BIN`. Unicode paths work without `ext-intl`; when available, the runtime uses it as the NFC fast path and otherwise uses its bundled normalizer.
 
 1. Run `installer.php` against an engine ZIP. It stores the complete engine under an immutable
    `htdocs/.stattic/releases/<release>/` directory and atomically publishes the relative path
@@ -182,7 +182,7 @@ People, claim preview, immutable-version hosts), declared upload sessions (manif
 policy, batch tar, chunked parts/complete), header operations, and proxy egress pinning
 at finalize.
 
-Requirements: PHP 8.2+ with `sodium` and `zip`, and bun. Deterministic; no network
+Requirements: PHP 8.5 with `sodium` and `zip`, and bun. Deterministic; no network
 beyond localhost. Safe for CI.
 
 ## Safety Invariants

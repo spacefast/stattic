@@ -895,22 +895,9 @@ fn collect_config_redirects(
         let source = required_string(object, &path, "redirects", "source", locations, issues);
         let destination =
             required_string(object, &path, "redirects", "destination", locations, issues);
-        let status = match object.get("status") {
-            None => None,
-            Some(value) => match value.as_u64() {
-                Some(status) => Some(status),
-                None => {
-                    push_issue(
-                        issues,
-                        locations,
-                        "config_invalid",
-                        &format!("{path}.status"),
-                        "redirects[].status must be a number.",
-                        None,
-                    );
-                    continue;
-                }
-            },
+        let Some(status) = optional_u64(object, &path, "redirects", "status", locations, issues)
+        else {
+            continue;
         };
         let Some(force) = optional_bool(object, &path, "redirects", "force", locations, issues)
         else {
@@ -955,6 +942,64 @@ fn optional_bool(
                     "config_invalid",
                     &format!("{path}.{key}"),
                     &format!("{section}[].{key} must be boolean."),
+                    None,
+                );
+                None
+            }
+        },
+    }
+}
+
+/// An optional numeric rule field. `None` means the key was present with the
+/// wrong type and the entry has already been reported.
+fn optional_u64(
+    object: &Map<String, Value>,
+    path: &str,
+    section: &str,
+    key: &str,
+    locations: &BTreeMap<String, Location>,
+    issues: &mut Vec<Issue>,
+) -> Option<Option<u64>> {
+    match object.get(key) {
+        None => Some(None),
+        Some(value) => match value.as_u64() {
+            Some(number) => Some(Some(number)),
+            None => {
+                push_issue(
+                    issues,
+                    locations,
+                    "config_invalid",
+                    &format!("{path}.{key}"),
+                    &format!("{section}[].{key} must be a number."),
+                    None,
+                );
+                None
+            }
+        },
+    }
+}
+
+/// An optional string rule field. `None` means the key was present with the
+/// wrong type and the entry has already been reported.
+fn optional_str<'a>(
+    object: &'a Map<String, Value>,
+    path: &str,
+    section: &str,
+    key: &str,
+    locations: &BTreeMap<String, Location>,
+    issues: &mut Vec<Issue>,
+) -> Option<Option<&'a str>> {
+    match object.get(key) {
+        None => Some(None),
+        Some(value) => match value.as_str() {
+            Some(text) => Some(Some(text)),
+            None => {
+                push_issue(
+                    issues,
+                    locations,
+                    "config_invalid",
+                    &format!("{path}.{key}"),
+                    &format!("{section}[].{key} must be a string."),
                     None,
                 );
                 None
@@ -1040,22 +1085,9 @@ fn collect_config_rewrites(
         let source = required_string(object, &path, "rewrites", "source", locations, issues);
         let destination =
             required_string(object, &path, "rewrites", "destination", locations, issues);
-        let cache = match object.get("cache") {
-            None => None,
-            Some(value) => match value.as_str() {
-                Some(cache) => Some(cache),
-                None => {
-                    push_issue(
-                        issues,
-                        locations,
-                        "config_invalid",
-                        &format!("{path}.cache"),
-                        "rewrites[].cache must be a string.",
-                        None,
-                    );
-                    continue;
-                }
-            },
+        let Some(cache) = optional_str(object, &path, "rewrites", "cache", locations, issues)
+        else {
+            continue;
         };
         let Some(force) = optional_bool(object, &path, "rewrites", "force", locations, issues)
         else {

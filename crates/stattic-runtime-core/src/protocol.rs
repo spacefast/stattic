@@ -46,8 +46,10 @@ pub const CONFIG_SUPERPOWERS_TAG_ID_MAX_CHARS: usize = 128;
 pub const CONFIG_SUPERPOWERS_TAG_NAME_MAX_CHARS: usize = 160;
 pub const CONFIG_SUPERPOWERS_OVERRIDE_LIMIT: usize = 128;
 pub const CONFIG_SUPERPOWERS_OVERRIDE_REASON_MAX_CHARS: usize = 500;
-pub const CONFIG_CANONICAL_FILE: &str = "sf.jsonc";
-pub const CONFIG_ALIAS_FILES: &[&str] = &[
+/// Highest-precedence first. This is the product contract, not filesystem
+/// discovery order.
+const CONFIG_FILES: [&str; 7] = [
+    "sf.jsonc",
     "spacefast.jsonc",
     "spacefast.json",
     "sf.json",
@@ -55,15 +57,9 @@ pub const CONFIG_ALIAS_FILES: &[&str] = &[
     ".sf/config.jsonc",
     ".sf/config.json",
 ];
-pub const CONFIG_ACCEPTED_FILES: &[&str] = &[
-    CONFIG_CANONICAL_FILE,
-    "spacefast.jsonc",
-    "spacefast.json",
-    "sf.json",
-    ".sf/sf.json",
-    ".sf/config.jsonc",
-    ".sf/config.json",
-];
+pub const CONFIG_CANONICAL_FILE: &str = CONFIG_FILES[0];
+pub const CONFIG_ALIAS_FILES: &[&str] = CONFIG_FILES.split_at(1).1;
+pub const CONFIG_ACCEPTED_FILES: &[&str] = &CONFIG_FILES;
 
 pub const TEMPLATE_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const TEMPLATE_VARIANT_FILE_LIMIT: usize = 100;

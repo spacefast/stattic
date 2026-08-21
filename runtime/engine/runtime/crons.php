@@ -101,7 +101,7 @@ function _stattic_cron_manifest(string $privateRoot, string $spaceId, string $ve
     $sha = is_array($entry['source'] ?? null) && is_string($entry['source']['sha256'] ?? null)
         ? $entry['source']['sha256']
         : null;
-    if ($sha === null || preg_match('/^[a-f0-9]{64}$/', $sha) !== 1) {
+    if ($sha === null || !_stattic_is_sha256_hex($sha)) {
         return null;
     }
 
@@ -211,54 +211,16 @@ function _stattic_cron_signature(string $privateRoot, string $key, int $minute):
         . hash_hmac('sha256', $key . "\0" . $minute, _stattic_cron_signing_key($privateRoot));
 }
 
-/**
- * The box's cron signing key, minted lazily under the site write lock — the
- * same shape and the same race-free mint `_stattic_storage_read_key()` uses, so
- * provisioning never has to learn about it and two concurrent first crons agree.
- */
+// The box's cron signing key, lazily minted (`_stattic_lazy_minted_secret`).
 function _stattic_cron_signing_key(string $privateRoot): string
 {
     static $memo = null;
     if (is_string($memo)) {
         return $memo;
     }
-    $read = static function () use ($privateRoot): array {
-        $record = _sf_pointer_read('cron-key', $privateRoot . '/runtime/cron-key.json');
-        if ($record['kind'] === 'absent') {
-            return ['state' => 'absent', 'key' => null];
-        }
-        $key = is_array($record['value']) ? ($record['value']['key'] ?? null) : null;
-        return is_string($key) && preg_match('/^[a-f0-9]{64}$/', $key) === 1
-            ? ['state' => 'present', 'key' => $key]
-            : ['state' => 'unavailable', 'key' => null];
-    };
-    $state = $read();
-    if ($state['key'] !== null) {
-        return $memo = $state['key'];
-    }
-    if ($state['state'] === 'unavailable') {
+    $key = _stattic_lazy_minted_secret($privateRoot, 'cron-key', 32);
+    if ($key === null) {
         throw new RuntimeException('cron signing key is unavailable');
     }
-    _stattic_runtime_mkdir_soft($privateRoot . '/runtime');
-    $minted = _stattic_lock_with(
-        $privateRoot . '/runtime/write.lock',
-        STATTIC_LOCK_WAIT,
-        null,
-        static function () use ($read, $privateRoot): string {
-            $existing = $read();
-            if ($existing['key'] !== null) {
-                return $existing['key'];
-            }
-            if ($existing['state'] !== 'absent') {
-                throw new RuntimeException('cron signing key is unavailable');
-            }
-            $key = bin2hex(random_bytes(32));
-            _sf_pointer_swap($privateRoot . '/runtime/cron-key.json', [
-                'key' => $key,
-                'minted_at' => gmdate('c'),
-            ]);
-            return $key;
-        },
-    );
-    return $memo = (is_string($minted) ? $minted : '');
+    return $memo = $key;
 }

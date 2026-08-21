@@ -70,6 +70,13 @@ function _stattic_problem_response(int $status, string $code, string $message, a
     );
 }
 
+// The no-store problem refusal every visitor-facing lane (Zero, storage,
+// functions relay) answers errors with.
+function _stattic_problem_refused(int $status, string $code, string $message): never
+{
+    _stattic_problem_response($status, $code, $message, [], ['Cache-Control' => 'no-store']);
+}
+
 /**
  * The one 405. Allow is not optional — a refusal that does not name the methods
  * it would accept is unusable to every client, human or agent.
@@ -96,18 +103,7 @@ function _stattic_method_not_allowed(string $allow, array $options = []): never
 }
 
 // --- file bodies -----------------------------------------------------------
-
-function _stattic_send_file_headers(array $headers): void
-{
-    // Nothing in the header map names these, so a value set earlier in the
-    // request would otherwise survive next to the canonical Cache-Control.
-    header_remove('Pragma');
-    header_remove('Expires');
-    foreach ($headers as $name => $value) {
-        header_remove($name);
-        header($name . ': ' . $value);
-    }
-}
+// Header maps go out through _stattic_send_response_headers (context.php).
 
 // Never readfile()/fpassthru(): they buffer the whole body before the first byte.
 //

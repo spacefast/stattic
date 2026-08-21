@@ -34,7 +34,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -402,12 +401,21 @@ export function runtimeHttpPath(apiPath: string): string {
   return apiPath;
 }
 
+/** One edge-cache purge POST the runtime made, as the capture server saw it. */
+export type EdgePurgeCall = {
+  hostname: string;
+  reason: string;
+  uris: string[];
+};
+
 export type Runtime = {
   baseUrl: string;
   root: string;
   engineRoot: string;
   storageRoot: string;
   processId: number;
+  /** Present only when startRuntime({ captureEdgePurges: true }): the purge POSTs the runtime made. */
+  edgePurges?: EdgePurgeCall[];
   stop: () => void;
 };
 
@@ -417,6 +425,14 @@ export type RuntimeOptions = {
   autoPrependInit?: boolean;
   phpBinary?: string;
   phpIni?: Record<string, string>;
+  /**
+   * Stand up a loopback capture server for the edge-cache purge API and point
+   * the runtime at it (shared/purge.php `SPACEFAST_EDGE_CACHE_API_BASE`), so a
+   * mutation's provider purge is observable as `rt.edgePurges`. Off by default:
+   * without it the platform site env is absent and a purge is a no-op, so tests
+   * that don't assert on purges pay nothing.
+   */
+  captureEdgePurges?: boolean;
 };
 
 async function freePort(): Promise<number> {
@@ -470,10 +486,7 @@ function installEngine(root: string): void {
 // what the D34 module pin forbids on the serve path. `.atomic-persistent-data.json`
 // above is the raw provider input; only the management/upload entrypoints read it.
 // Staging one without the other left every serve-path config lookup empty.
-const GENERATED_CONFIG_KEYS = [
-  "SPACEFAST_MANAGEMENT_HOSTNAME",
-  "SPACEFAST_MANAGEMENT_HOST_PATTERN",
-] as const;
+const GENERATED_CONFIG_KEYS = ["SPACEFAST_MANAGEMENT_HOSTNAME"] as const;
 
 function writeGeneratedConfig(root: string, atomicData: Record<string, string>): void {
   const lines = GENERATED_CONFIG_KEYS.filter((key) => (atomicData[key] ?? "") !== "").map((key) => {
@@ -524,6 +537,19 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
   // freePort() necessarily closes its reservation before PHP can bind. Tests in
   // one Bun process can call startRuntime concurrently, so serialize only the
   // allocate+bind window; once health responds, every fixture runs in parallel.
+  const edgePurges: EdgePurgeCall[] = [];
+  const edgeCapture = options.captureEdgePurges ? startEdgePurgeCapture(edgePurges) : null;
+  // Point the runtime's purge lane at the capture server (shared/purge.php reads
+  // these three). Only when capture is on: otherwise the platform env is absent
+  // and a purge is a no-op, which is what off-box (dev/CI) sees anyway.
+  const edgeCaptureEnv: Record<string, string> = edgeCapture
+    ? {
+        ATOMIC_SITE_ID: "152088120",
+        ATOMIC_SITE_API_KEY: "test-edge-cache-key",
+        SPACEFAST_EDGE_CACHE_API_BASE: edgeCapture.apiBase,
+      }
+    : {};
+
   const releaseStartLock = await acquireRuntimeStartLock();
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -542,6 +568,7 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
       ...process.env,
       ...DEFAULT_ENV,
       SPACEFAST_RUNTIME_BIN: options.env?.SPACEFAST_RUNTIME_BIN ?? runtimeBinaryPath(),
+      ...edgeCaptureEnv,
       ...options.env,
     },
   });
@@ -586,10 +613,53 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
     engineRoot: path.join(root, ".stattic/releases/test/engine"),
     storageRoot: path.join(root, ".stattic", "storage"),
     processId: server.pid,
+    edgePurges: edgeCapture ? edgePurges : undefined,
     stop: () => {
       stopServer();
+      edgeCapture?.stop();
       rmSync(root, { recursive: true, force: true });
     },
+  };
+}
+
+// A loopback stand-in for the wp.cloud edge-cache purge gateway. It records each
+// POST the runtime makes — hostname (path segment), reason (wp_action), and any
+// purge_uris — into `sink`, and answers the gateway's `{"message":"OK"}` so the
+// runtime counts the purge accepted. The live wire is covered by the
+// credential-gated e2e suite; this only proves the runtime's own decisions.
+type EdgePurgeCapture = { apiBase: string; stop: () => void };
+
+function startEdgePurgeCapture(sink: EdgePurgeCall[]): EdgePurgeCapture {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      const match = url.pathname.match(/\/edge-cache\/\d+\/purge\/([^/]+)$/);
+      if (request.method !== "POST" || match === null) {
+        return new Response('{"message":"Invalid action","data":[]}', { status: 400 });
+      }
+      const form = new URLSearchParams(await request.text());
+      const uris: string[] = [];
+      for (const [key, value] of form) {
+        if (key.startsWith("purge_uris")) {
+          uris.push(value);
+        }
+      }
+      const action = form.get("wp_action") ?? "";
+      sink.push({
+        hostname: decodeURIComponent(match[1] ?? ""),
+        reason: action.startsWith("spacefast:") ? action.slice("spacefast:".length) : action,
+        uris,
+      });
+      return new Response('{"message":"OK","data":[]}', {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  return {
+    apiBase: `http://127.0.0.1:${server.port}/api/v1.0`,
+    stop: () => void server.stop(true),
   };
 }
 
@@ -1224,24 +1294,17 @@ export function storagePath(rt: Runtime, ...segments: string[]): string {
   return path.join(rt.storageRoot, ...segments);
 }
 
-/** The slice of a durable purge record (shared/purge.php) the tests assert on. */
-export type PurgeQueueRecord = {
-  reason?: string;
-  scope?: string;
-  hostnames?: string[];
-  urls?: string[];
-};
-
-/** Every durable edge-purge record the runtime has journaled (shared/purge.php). */
-export function purgeQueueRecords(rt: Runtime): PurgeQueueRecord[] {
-  const root = storagePath(rt, "runtime", "purges");
-  if (!existsSync(root)) return [];
-  return readdirSync(root)
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => {
-      // SAFETY: runtime-written JSON; a field mismatch fails the reading assertion.
-      return JSON.parse(readFileSync(path.join(root, name), "utf8")) as PurgeQueueRecord;
-    });
+/**
+ * The edge-cache purge POSTs the runtime has made, captured by the loopback
+ * stand-in (startRuntime({ captureEdgePurges: true })). Throws if the runtime
+ * was not started with capture on, so a silent empty array can't read as
+ * "nothing purged".
+ */
+export function edgePurgeCalls(rt: Runtime): EdgePurgeCall[] {
+  if (rt.edgePurges === undefined) {
+    throw new Error("edgePurgeCalls requires startRuntime({ captureEdgePurges: true })");
+  }
+  return rt.edgePurges;
 }
 
 export function spaceRoot(rt: Runtime, spaceId: string): string {

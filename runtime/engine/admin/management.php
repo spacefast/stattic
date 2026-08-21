@@ -520,20 +520,6 @@ function _stattic_runtime_zero_endpoint_count(string $versionRoot): int
     return is_array($index) && is_array($index['endpoints'] ?? null) ? count($index['endpoints']) : 0;
 }
 
-function _stattic_runtime_route_intent_hostnames(string $spaceRoot, ?array $intent = null): array
-{
-    $hostnames = [];
-    $intent ??= _stattic_runtime_read_json($spaceRoot . '/hostname-intent.json');
-    if (is_array($intent) && is_array($intent['routes'] ?? null)) {
-        foreach ($intent['routes'] as $route) {
-            if (is_array($route) && is_string($route['hostname'] ?? null)) {
-                $hostnames[$route['hostname']] = true;
-            }
-        }
-    }
-    return array_keys($hostnames);
-}
-
 // The whole-domain purge every space mutation owes the edge. `$hostnames` is
 // supplied only when the caller already narrowed the set (a tombstone push);
 // otherwise it is the space's full event hostname set.
@@ -579,10 +565,7 @@ function _stattic_runtime_state_summary(string $privateRoot): array
         ? (string) $current['gen']
         : null;
     $spaces = [];
-    foreach (_stattic_runtime_directory_entries_strict($privateRoot . '/spaces') as $spaceRoot) {
-        if (!is_dir($spaceRoot)) {
-            continue;
-        }
+    foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
         $routes = [];
         foreach (_stattic_runtime_directory_entries_strict($spaceRoot . '/routes') as $pointerPath) {
             if (!is_file($pointerPath) || !str_ends_with($pointerPath, '.json')) {
@@ -1066,9 +1049,6 @@ function _stattic_runtime_put_route(string $privateRoot, string $spaceId, string
     if ($versionId === '' || !_stattic_runtime_version_finalized(_stattic_version_root($privateRoot, $spaceId, $versionId))) {
         _stattic_problem_response(404, 'version_not_found', 'Version not found.');
     }
-    if (array_key_exists('routes', $body)) {
-        _stattic_problem_response(422, 'routes_input_retired', 'Runtime compiles routes from hostname intent. Send production_hostnames and version_hostnames.');
-    }
     $storeIntent = array_key_exists('production_hostnames', $body)
         || array_key_exists('version_hostnames', $body)
         || array_key_exists('proxy_host_routes', $body);
@@ -1153,7 +1133,7 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
         : '';
     $requestDigest = _stattic_runtime_canonical_request_digest($body);
     $storedActivationEventId = is_string($previousRoute['activation_event_id'] ?? null)
-        && preg_match('/\A[a-f0-9]{64}\z/', $previousRoute['activation_event_id']) === 1
+        && _stattic_is_sha256_hex($previousRoute['activation_event_id'])
         ? $previousRoute['activation_event_id']
         : null;
     // The authenticated operation is the idempotency key for the irreversible
@@ -1352,7 +1332,7 @@ function _stattic_runtime_public_exposure_digest(array $config): ?string
     $digest = is_string($config['public_exposure_digest'] ?? null)
         ? strtolower($config['public_exposure_digest'])
         : '';
-    return preg_match('/\A[a-f0-9]{64}\z/', $digest) === 1 ? $digest : null;
+    return _stattic_is_sha256_hex($digest) ? $digest : null;
 }
 
 function _stattic_runtime_public_exposure_descriptor(array $config): ?array
@@ -1364,7 +1344,7 @@ function _stattic_runtime_public_exposure_descriptor(array $config): ?array
         || $descriptor['v'] < 1
         || !is_bool($descriptor['public'] ?? null)
         || !is_string($descriptor['authorizationDigest'] ?? null)
-        || preg_match('/\A[a-f0-9]{64}\z/', $descriptor['authorizationDigest']) !== 1
+        || !_stattic_is_sha256_hex($descriptor['authorizationDigest'])
         || !array_key_exists('contentTypes', $descriptor)
         || (
             !is_null($descriptor['contentTypes'])
@@ -1561,12 +1541,11 @@ function _stattic_runtime_delete_version(string $privateRoot, string $spaceId, s
     }
     // The intent is purge state, so prove it before making deletion irreversible.
     $hostnames = _stattic_runtime_affected_intent_hostnames($privateRoot, $spaceId, null, $versionId);
+    // Removing the directory IS the cache retirement: the catalog and gate
+    // sidecars live inside it, and their readers stat before including, so a
+    // link minted a moment ago stops resolving on its next request even though
+    // the bytes stay in the space's shared CAS until the collector runs.
     _stattic_runtime_rm_recursive($versionRoot);
-    // The bytes stay in the space's shared CAS until the collector runs, so
-    // removing the directory alone does not stop a link minted a moment ago:
-    // the pool still holds this version's catalog and gate sha map for the rest
-    // of their TTL and would keep resolving them. Retire both now.
-    _stattic_runtime_forget_version_caches($spaceId, $versionId);
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
     _stattic_runtime_record_management_event($privateRoot, $claims, [
         'event' => 'version_deleted',
@@ -1591,7 +1570,6 @@ function _stattic_runtime_repair_space(string $privateRoot, string $spaceId, arr
         _stattic_problem_response(404, 'space_not_found', 'Space not found.');
     }
     _stattic_runtime_rebuild_route_index($privateRoot);
-    _stattic_runtime_rm_recursive($privateRoot . '/runtime/repair-state.json');
     _stattic_runtime_record_management_event($privateRoot, $claims, [
         'event' => 'space_repaired',
         'space_id' => $spaceId,
@@ -1737,11 +1715,38 @@ function _stattic_runtime_version_source_status(int $status): void
     header($protocol . ' ' . $status . ' ' . $reason, true, $status);
 }
 
+// These emitters deliberately bypass _stattic_send_response_headers: the
+// instance-pinned source lane answers the finalizer, not a visitor, and its
+// reset + explicit status protocol must not pick up the platform edge policy.
 function _stattic_runtime_version_source_reset_headers(): void
 {
     foreach (['Content-Type', 'Content-Length', 'Cache-Control', 'Pragma', 'Expires'] as $name) {
         header_remove($name);
     }
+}
+
+// Absence answered as an empty private response — the caller's source-reader
+// contract treats a missing optional file as null.
+function _stattic_runtime_version_source_empty(): never
+{
+    _stattic_runtime_version_source_reset_headers();
+    header('Cache-Control: ' . STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
+    _stattic_runtime_version_source_status(204);
+    exit;
+}
+
+/** @param resource $stream */
+function _stattic_runtime_version_source_send($stream, int $size, string $contentType): never
+{
+    _stattic_runtime_version_source_reset_headers();
+    header('Content-Type: ' . $contentType, true);
+    header('Content-Length: ' . $size, true);
+    header('Cache-Control: ' . STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
+    header('X-Content-Type-Options: nosniff', true);
+    _stattic_runtime_version_source_status(200);
+    _stattic_stream_file($stream, $size);
+    fclose($stream);
+    exit;
 }
 
 /**
@@ -1785,7 +1790,7 @@ function _stattic_runtime_read_version_source_route(
             || $sha256 === null
             || $path !== null
             || !_stattic_id_valid($uploadId)
-            || preg_match('/\A[a-f0-9]{64}\z/', strtolower($sha256)) !== 1
+            || !_stattic_is_sha256_hex(strtolower($sha256))
         ) {
             _stattic_problem_response(
                 422,
@@ -1795,10 +1800,7 @@ function _stattic_runtime_read_version_source_route(
         }
         $session = _stattic_runtime_publish_session_load($privateRoot, $spaceId, $uploadId);
         if (!is_array($session) || ($session['version_id'] ?? null) !== $versionId) {
-            _stattic_runtime_version_source_reset_headers();
-            header('Cache-Control: private, no-store', true);
-            _stattic_runtime_version_source_status(204);
-            exit;
+            _stattic_runtime_version_source_empty();
         }
         $resolved = _stattic_runtime_publish_session_blob(
             $privateRoot,
@@ -1822,10 +1824,7 @@ function _stattic_runtime_read_version_source_route(
         );
     }
     if (!is_array($resolved)) {
-        _stattic_runtime_version_source_reset_headers();
-        header('Cache-Control: private, no-store', true);
-        _stattic_runtime_version_source_status(204);
-        exit;
+        _stattic_runtime_version_source_empty();
     }
     $blobPath = _stattic_runtime_blob_path($privateRoot, $spaceId, (string) $resolved['sha']);
     $size = filesize($blobPath);
@@ -1837,10 +1836,7 @@ function _stattic_runtime_read_version_source_route(
         );
     }
     if ($size > $maxBytes) {
-        _stattic_runtime_version_source_reset_headers();
-        header('Cache-Control: private, no-store', true);
-        _stattic_runtime_version_source_status(204);
-        exit;
+        _stattic_runtime_version_source_empty();
     }
     $stream = fopen($blobPath, 'rb');
     if ($stream === false) {
@@ -1850,15 +1846,7 @@ function _stattic_runtime_read_version_source_route(
             'Version source bytes are unavailable on this runtime instance.'
         );
     }
-    _stattic_runtime_version_source_reset_headers();
-    header('Content-Type: ' . (string) ($resolved['mime'] ?? 'application/octet-stream'), true);
-    header('Content-Length: ' . $size, true);
-    header('Cache-Control: private, no-store', true);
-    header('X-Content-Type-Options: nosniff', true);
-    _stattic_runtime_version_source_status(200);
-    _stattic_stream_file($stream, $size);
-    fclose($stream);
-    exit;
+    _stattic_runtime_version_source_send($stream, $size, (string) ($resolved['mime'] ?? 'application/octet-stream'));
 }
 
 function _stattic_runtime_version_files_request_invalid(string $message): never
@@ -1990,7 +1978,7 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
     $page = array_slice($rows, 0, $limit);
     $nextCursor = count($rows) > $limit && $page !== []
         ? _stattic_runtime_version_files_cursor_encode(
-            _stattic_runtime_version_files_sort_key($page[count($page) - 1])
+            _stattic_runtime_version_files_sort_key(array_last($page))
         )
         : null;
 

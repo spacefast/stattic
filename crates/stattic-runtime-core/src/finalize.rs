@@ -43,12 +43,16 @@ impl std::error::Error for FinalizeError {}
 
 pub type Result<T> = std::result::Result<T, FinalizeError>;
 
-pub fn invalid<T>(code: &'static str, message: impl Into<String>) -> Result<T> {
-    Err(FinalizeError::Invalid {
+pub fn invalid_error(code: &'static str, message: impl Into<String>) -> FinalizeError {
+    FinalizeError::Invalid {
         code,
         message: message.into(),
         details: None,
-    })
+    }
+}
+
+pub fn invalid<T>(code: &'static str, message: impl Into<String>) -> Result<T> {
+    Err(invalid_error(code, message))
 }
 
 pub fn invalid_with_details<T>(

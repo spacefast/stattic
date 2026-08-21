@@ -84,14 +84,16 @@ function _stattic_page_artifact(array $context, string $pageId): ?string
     return is_string($html) ? $html : null;
 }
 
+const STATTIC_PAGE_STATUS_REASONS = [
+    200 => 'OK', 401 => 'Unauthorized', 402 => 'Payment Required', 403 => 'Forbidden',
+    404 => 'Not Found', 405 => 'Method Not Allowed', 413 => 'Content Too Large',
+    429 => 'Too Many Requests', 451 => 'Unavailable For Legal Reasons',
+    500 => 'Internal Server Error', 502 => 'Bad Gateway', 503 => 'Service Unavailable',
+];
+
 function _stattic_page_status_reason(int $status): string
 {
-    return [
-        200 => 'OK', 401 => 'Unauthorized', 402 => 'Payment Required', 403 => 'Forbidden',
-        404 => 'Not Found', 405 => 'Method Not Allowed', 413 => 'Content Too Large',
-        429 => 'Too Many Requests', 451 => 'Unavailable For Legal Reasons',
-        500 => 'Internal Server Error', 502 => 'Bad Gateway', 503 => 'Service Unavailable',
-    ][$status] ?? 'Error';
+    return STATTIC_PAGE_STATUS_REASONS[$status] ?? 'Error';
 }
 
 // `optional` never swaps mid-view: a cold visitor keeps the fallback for that
@@ -134,28 +136,30 @@ function _stattic_spacefast_wordmark(): string
     return '<svg class="sf-wordmark" viewBox="0 0 326 62" role="img" aria-label="Spacefast"><rect x="14" y="12" width="306" height="48" fill="#ff4217"/><rect x="10" y="8" width="306" height="48" fill="#141419"/><path fill="#fbf8f1" d="' . $path . '"/></svg>';
 }
 
+const STATTIC_PLATFORM_PAGE_COPY = [
+    '404' => ['Page not found', ''],
+    'login' => ['This space is for members', 'Sign in to continue — you’ll come right back here.'],
+    'denied' => ['This page is private', ''],
+    'access' => ['This space is private', ''],
+    'index' => ['Files unavailable', 'The directory listing could not be loaded.'],
+    'preview' => ['Preview unavailable', 'This file preview could not be loaded.'],
+    'collab' => ['Review room unavailable', 'This space’s review room could not be loaded.'],
+    'undeployed' => ['Waiting for launch', 'This space hasn’t been published yet. Check back soon.'],
+    'suspended' => ['This space is paused', 'Serving is on hold until billing is sorted out.'],
+    'legal' => ['Unavailable for legal reasons', 'This space is blocked in response to a legal demand.'],
+    'gone' => ['Nothing here', 'This space is no longer available.'],
+    'rate-limited' => ['Slow down a second', 'Too many requests hit this space at once. Give it a moment and try again.'],
+    'tier-unavailable' => ['Back in a bit', 'This space is temporarily unavailable.'],
+    'method-not-allowed' => ['That method won’t work here', 'Try the request another way.'],
+    'content-too-large' => ['That request is too large', 'Send a smaller request and try again.'],
+    'proxy-error' => ['The upstream missed the connection', 'Try again in a moment.'],
+    'runtime-error' => ['Something broke on our side', 'The runtime hit an error serving this page. Try again in a moment.'],
+];
+
 function _stattic_platform_page_html(string $pageId, int $status, string $message, string $fragment = '', string $requestPath = '', string $titleOverride = ''): string
 {
-    $definitions = [
-        '404' => ['Page not found', ''],
-        'login' => ['This space is for members', 'Sign in to continue — you’ll come right back here.'],
-        'denied' => ['This page is private', ''],
-        'access' => ['This space is private', ''],
-        'index' => ['Files unavailable', 'The directory listing could not be loaded.'],
-        'preview' => ['Preview unavailable', 'This file preview could not be loaded.'],
-        'collab' => ['Review room unavailable', 'This space’s review room could not be loaded.'],
-        'undeployed' => ['Waiting for launch', 'This space hasn’t been published yet. Check back soon.'],
-        'suspended' => ['This space is paused', 'Serving is on hold until billing is sorted out.'],
-        'legal' => ['Unavailable for legal reasons', 'This space is blocked in response to a legal demand.'],
-        'gone' => ['Nothing here', 'This space is no longer available.'],
-        'rate-limited' => ['Slow down a second', 'Too many requests hit this space at once. Give it a moment and try again.'],
-        'tier-unavailable' => ['Back in a bit', 'This space is temporarily unavailable.'],
-        'method-not-allowed' => ['That method won’t work here', 'Try the request another way.'],
-        'content-too-large' => ['That request is too large', 'Send a smaller request and try again.'],
-        'proxy-error' => ['The upstream missed the connection', 'Try again in a moment.'],
-        'runtime-error' => ['Something broke on our side', 'The runtime hit an error serving this page. Try again in a moment.'],
-    ];
-    $copy = $definitions[$pageId] ?? ['Spacefast could not serve this page', $message !== '' ? trim($message) : 'Try again in a moment.'];
+    $copy = STATTIC_PLATFORM_PAGE_COPY[$pageId]
+        ?? ['Spacefast could not serve this page', $message !== '' ? trim($message) : 'Try again in a moment.'];
     $title = _stattic_html_escape($titleOverride !== '' ? $titleOverride : $copy[0]);
     $description = $copy[1] === '' ? '' : '<p class="sf-copy">' . _stattic_html_escape($copy[1]) . '</p>';
     $sitePage = in_array($pageId, ['404', 'denied', 'access', 'index', 'preview', 'collab'], true);

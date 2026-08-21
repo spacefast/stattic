@@ -321,9 +321,7 @@ fn validate_config_shape(
         "markdownNegotiation",
         "experimental_gutenberg",
     ] {
-        if object.get(key).is_some_and(|value| !value.is_boolean()) {
-            invalid(diagnostics, key, "a boolean");
-        }
+        validate_optional_bool(object, key, key, diagnostics);
     }
     if let Some(values) = object.get("templates") {
         if !values.as_array().is_some_and(|values| {
@@ -495,12 +493,7 @@ fn validate_runtime_config(
             Some("runtime.entry".into()),
         ));
     }
-    if runtime
-        .get("database")
-        .is_some_and(|value| !value.is_boolean())
-    {
-        push_shape_error(diagnostics, "runtime.database", "a boolean");
-    }
+    validate_optional_bool(runtime, "database", "runtime.database", diagnostics);
     if runtime.get("compatibilityDate").is_some_and(|value| {
         value
             .as_str()
@@ -555,21 +548,10 @@ fn validate_build_config(
         "frameworkPreset",
         "platformPreset",
     ];
-    const KNOWN_KEYS: [&str; 10] = [
-        "rootDirectory",
-        "installDirectory",
-        "installCommand",
-        "buildCommand",
-        "outputDirectory",
-        "ignoredBuildCommand",
-        "frameworkPreset",
-        "platformPreset",
-        "allowUnsupportedPlatformFeatures",
-        "timeoutSeconds",
-    ];
+    const EXTRA_KEYS: [&str; 2] = ["allowUnsupportedPlatformFeatures", "timeoutSeconds"];
     for key in build
         .keys()
-        .filter(|key| !KNOWN_KEYS.contains(&key.as_str()))
+        .filter(|key| !STRING_KEYS.contains(&key.as_str()) && !EXTRA_KEYS.contains(&key.as_str()))
         .cloned()
         .collect::<Vec<_>>()
     {
@@ -597,16 +579,12 @@ fn validate_build_config(
             build.insert(key.into(), Value::String(value));
         }
     }
-    if build
-        .get("allowUnsupportedPlatformFeatures")
-        .is_some_and(|value| !value.is_boolean())
-    {
-        push_shape_error(
-            diagnostics,
-            "build.allowUnsupportedPlatformFeatures",
-            "a boolean",
-        );
-    }
+    validate_optional_bool(
+        build,
+        "allowUnsupportedPlatformFeatures",
+        "build.allowUnsupportedPlatformFeatures",
+        diagnostics,
+    );
     if build.get("timeoutSeconds").is_some_and(|value| {
         !nonnegative_integer(value).is_some_and(|value| {
             (CONFIG_BUILD_TIMEOUT_MIN_SECONDS..=CONFIG_BUILD_TIMEOUT_MAX_SECONDS).contains(&value)
@@ -662,12 +640,7 @@ fn validate_placement_config(
     {
         push_shape_error(diagnostics, "placement.mode", "shared or dedicated");
     }
-    if placement
-        .get("burstable")
-        .is_some_and(|value| !value.is_boolean())
-    {
-        push_shape_error(diagnostics, "placement.burstable", "a boolean");
-    }
+    validate_optional_bool(placement, "burstable", "placement.burstable", diagnostics);
 }
 
 fn validate_superpowers_config(
@@ -693,12 +666,7 @@ fn validate_superpowers_config(
         )
     });
     for key in ["enabled", "disable_all_injection"] {
-        if superpowers
-            .get(key)
-            .is_some_and(|value| !value.is_boolean())
-        {
-            push_shape_error(diagnostics, &format!("superpowers.{key}"), "a boolean");
-        }
+        validate_optional_bool(superpowers, key, &format!("superpowers.{key}"), diagnostics);
     }
     for (key, id) in [
         ("googleAnalytics", "measurementId"),
@@ -712,16 +680,12 @@ fn validate_superpowers_config(
             continue;
         };
         integration.retain(|field, _| field == "enabled" || field == id);
-        if integration
-            .get("enabled")
-            .is_some_and(|value| !value.is_boolean())
-        {
-            push_shape_error(
-                diagnostics,
-                &format!("superpowers.{key}.enabled"),
-                "a boolean",
-            );
-        }
+        validate_optional_bool(
+            integration,
+            "enabled",
+            &format!("superpowers.{key}.enabled"),
+            diagnostics,
+        );
         trim_optional_string(
             integration,
             id,
@@ -767,9 +731,7 @@ fn validate_superpowers_config(
                 &format!("{path}.name"),
                 diagnostics,
             );
-            if tag.get("enabled").is_some_and(|value| !value.is_boolean()) {
-                push_shape_error(diagnostics, &format!("{path}.enabled"), "a boolean");
-            }
+            validate_optional_bool(tag, "enabled", &format!("{path}.enabled"), diagnostics);
             if tag
                 .get("code")
                 .and_then(Value::as_str)
@@ -792,12 +754,12 @@ fn validate_superpowers_config(
         return;
     };
     tags.retain(|key, _| matches!(key.as_str(), "inheritance" | "requireReview"));
-    if tags
-        .get("requireReview")
-        .is_some_and(|value| !value.is_boolean())
-    {
-        push_shape_error(diagnostics, "superpowers.tags.requireReview", "a boolean");
-    }
+    validate_optional_bool(
+        tags,
+        "requireReview",
+        "superpowers.tags.requireReview",
+        diagnostics,
+    );
     let Some(value) = tags.get_mut("inheritance") else {
         return;
     };
@@ -806,16 +768,12 @@ fn validate_superpowers_config(
         return;
     };
     inheritance.retain(|key, _| matches!(key.as_str(), "inherited" | "overrides"));
-    if inheritance
-        .get("inherited")
-        .is_some_and(|value| !value.is_boolean())
-    {
-        push_shape_error(
-            diagnostics,
-            "superpowers.tags.inheritance.inherited",
-            "a boolean",
-        );
-    }
+    validate_optional_bool(
+        inheritance,
+        "inherited",
+        "superpowers.tags.inheritance.inherited",
+        diagnostics,
+    );
     let Some(value) = inheritance.get_mut("overrides") else {
         return;
     };
@@ -971,12 +929,12 @@ fn validate_space_theme(object: &mut Map<String, Value>, diagnostics: &mut Vec<P
         pages_font_pattern(),
         diagnostics,
     );
-    if theme
-        .get("hideSpacefastBranding")
-        .is_some_and(|value| !value.is_boolean())
-    {
-        push_shape_error(diagnostics, "theme.hideSpacefastBranding", "a boolean");
-    }
+    validate_optional_bool(
+        theme,
+        "hideSpacefastBranding",
+        "theme.hideSpacefastBranding",
+        diagnostics,
+    );
 }
 
 fn validate_trimmed_page_theme_string(
@@ -1388,6 +1346,17 @@ export type SpaceConfigFile = SpaceConfig & {
   access?: { public: string[] };
 };
 "#;
+
+fn validate_optional_bool(
+    object: &Map<String, Value>,
+    key: &str,
+    path: &str,
+    diagnostics: &mut Vec<PrepareDiagnostic>,
+) {
+    if object.get(key).is_some_and(|value| !value.is_boolean()) {
+        push_shape_error(diagnostics, path, "a boolean");
+    }
+}
 
 fn push_shape_error(diagnostics: &mut Vec<PrepareDiagnostic>, path: &str, expected: &str) {
     diagnostics.push(diagnostic(

@@ -100,7 +100,7 @@ function _stattic_runtime_prepare_retained_blobs(string $privateRoot, string $sp
         _stattic_runtime_assert_static_upload_path($path);
         $hasDeclaredSha = array_key_exists('sha256', $entry);
         $sha = is_string($entry['sha256'] ?? null) ? strtolower(trim($entry['sha256'])) : '';
-        if ($hasDeclaredSha && preg_match('/^[a-f0-9]{64}$/', $sha) !== 1) {
+        if ($hasDeclaredSha && !_stattic_is_sha256_hex($sha)) {
             _stattic_problem_response(422, 'invalid_blob_sha', 'Retained file sha256 is invalid.', ['details' => ['path' => $path]]);
         }
         if ($sha === '') {

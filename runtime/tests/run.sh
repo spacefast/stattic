@@ -9,7 +9,11 @@ set -euo pipefail
 RUNTIME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$RUNTIME_DIR/.." && pwd)"
 
-command -v php >/dev/null || { echo "php is required (8.2+ with sodium and zip)" >&2; exit 1; }
+command -v php >/dev/null || { echo "php is required (8.5 with sodium, curl and zip)" >&2; exit 1; }
+php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 5 ? 0 : 1);' || {
+  echo "PHP 8.5.x is required; found $(php -r 'echo PHP_VERSION;')" >&2
+  exit 1
+}
 command -v bun >/dev/null || { echo "bun is required" >&2; exit 1; }
 command -v cargo >/dev/null || { echo "cargo is required" >&2; exit 1; }
 
@@ -19,11 +23,7 @@ while IFS= read -r -d '' file; do
 done < <(find "$RUNTIME_DIR" -name '*.php' -print0)
 
 echo "==> php unit tests"
-# apc.enable_cli: with the APCu extension present but CLI-disabled (the GitHub
-# runner image), apcu_store() exists yet silently drops writes, failing the
-# pool-wide cache checks. Enabling it makes CLI behave like php-fpm; the flag
-# is inert where APCu is absent and unit.php falls back to its in-process fake.
-php -d apc.enable_cli=1 "$RUNTIME_DIR/tests/unit.php"
+php "$RUNTIME_DIR/tests/unit.php"
 
 echo "==> native runtime test tools"
 cd "$REPO_ROOT"

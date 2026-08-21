@@ -63,17 +63,24 @@ function _stattic_blob_gate_dashboard_fetch(): bool
     return $configured !== '' && is_string($requested) && hash_equals($configured, $requested);
 }
 
+// The one refusal/unavailable emitter for this gate: fixed private headers,
+// the CORS grant, a plain-text body — through the shared emitter, so even a
+// refusal never skips the platform header policy.
+function _stattic_blob_gate_refuse(int $status, string $message, array $extra = []): never
+{
+    http_response_code($status);
+    _stattic_send_response_headers($extra + _stattic_blob_gate_cors_headers() + [
+        'Cache-Control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
+        'Content-Type' => 'text/plain; charset=utf-8',
+        'Referrer-Policy' => 'no-referrer',
+    ]);
+    echo $message;
+    exit;
+}
+
 function _stattic_blob_gate_not_found(): never
 {
-    http_response_code(404);
-    header('Cache-Control: private, no-store', true);
-    header('Content-Type: text/plain; charset=utf-8', true);
-    header('Referrer-Policy: no-referrer', true);
-    foreach (_stattic_blob_gate_cors_headers() as $name => $value) {
-        header($name . ': ' . $value, true);
-    }
-    echo "Not found.\n";
-    exit;
+    _stattic_blob_gate_refuse(404, "Not found.\n");
 }
 
 function _stattic_blob_gate_token(string $requestPath): ?string
@@ -86,31 +93,6 @@ function _stattic_blob_gate_token(string $requestPath): ?string
     return preg_match('/\A[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\z/', $token) === 1
         ? $token
         : null;
-}
-
-/**
- * sha256 => content type for the lane this token addresses: the version's own
- * objects, or one channel's variant overrides when `$routeName` is given. The
- * whole map is built and cached once per (space, version) in
- * `_stattic_runtime_version_blob_shas()` — a 100k-file scan pulls one blob per
- * request, and re-walking the catalog each time would make the scan quadratic.
- *
- * @return array<string,string>|null null when the version has no readable
- *         catalog, or overrides nothing for the named channel.
- */
-function _stattic_blob_gate_version_manifest(
-    string $privateRoot,
-    string $spaceId,
-    string $versionId,
-    ?string $routeName = null
-): ?array
-{
-    $lanes = _stattic_runtime_version_blob_shas($privateRoot, $spaceId, $versionId);
-    if ($lanes === null) {
-        return null;
-    }
-    $lane = $lanes[$routeName ?? STATTIC_RUNTIME_VERSION_BLOB_BASE_LANE] ?? null;
-    return is_array($lane) ? $lane : null;
 }
 
 /**
@@ -169,14 +151,17 @@ function _stattic_blob_gate_resolve(string $privateRoot, array $claims): ?array
     }
     $sha256 = strtolower((string) $claims['sha256']);
     $routeName = is_string($claims['route_name'] ?? null) ? $claims['route_name'] : null;
-    $manifest = _stattic_blob_gate_version_manifest(
+    // Resolved sha-scoped: a 100k-file scan pulls one blob per request, and the
+    // gate sidecars keep each lookup O(1) instead of re-walking the catalog.
+    $mime = _stattic_runtime_version_blob_mime(
         $privateRoot,
         $spaceId,
         $versionId,
+        $sha256,
         $routeName
     );
-    return is_array($manifest) && is_string($manifest[$sha256] ?? null)
-        ? ['sha' => $sha256, 'mime' => $manifest[$sha256]]
+    return is_string($mime)
+        ? ['sha' => $sha256, 'mime' => $mime]
         : null;
 }
 
@@ -219,15 +204,7 @@ function _stattic_blob_gate_serve(string $privateRoot, string $requestMethod, st
             // Never a 404: authorization succeeded and the object exists, the
             // bytes are momentarily unreachable. A scan that read this as "file
             // gone" would report a version's files as deleted.
-            http_response_code(503);
-            header('Cache-Control: private, no-store', true);
-            header('Retry-After: 5', true);
-            header('Content-Type: text/plain; charset=utf-8', true);
-            foreach (_stattic_blob_gate_cors_headers() as $name => $value) {
-                header($name . ': ' . $value, true);
-            }
-            echo "Blob bytes are unavailable.\n";
-            exit;
+            _stattic_blob_gate_refuse(503, "Blob bytes are unavailable.\n", ['Retry-After' => '5']);
         }
         $blobPath = $promoted;
     }
@@ -235,7 +212,7 @@ function _stattic_blob_gate_serve(string $privateRoot, string $requestMethod, st
     $size = filesize($blobPath);
     $headers = [
         'Content-Type' => $contentType,
-        'Cache-Control' => 'private, no-store',
+        'Cache-Control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
         'Referrer-Policy' => 'no-referrer',
         'X-Content-Type-Options' => 'nosniff',
         // On every response, not a type list: this is a download and scan gate,
@@ -251,12 +228,7 @@ function _stattic_blob_gate_serve(string $privateRoot, string $requestMethod, st
     ];
 
     if ($requestMethod === 'HEAD') {
-        foreach ($headers as $name => $value) {
-            header($name . ': ' . $value, true);
-        }
-        if ($size !== false) {
-            header('Content-Length: ' . $size, true);
-        }
+        _stattic_send_response_headers($size === false ? $headers : $headers + ['Content-Length' => (string) $size]);
         http_response_code(200);
         exit;
     }
@@ -270,12 +242,7 @@ function _stattic_blob_gate_serve(string $privateRoot, string $requestMethod, st
     if ($stream === false) {
         _stattic_blob_gate_not_found();
     }
-    foreach ($headers as $name => $value) {
-        header($name . ': ' . $value, true);
-    }
-    if ($size !== false) {
-        header('Content-Length: ' . $size, true);
-    }
+    _stattic_send_response_headers($size === false ? $headers : $headers + ['Content-Length' => (string) $size]);
     http_response_code(200);
     // Chunked, never fpassthru: these are whole version blobs, the largest
     // bodies the runtime sends, and fpassthru buffers all of it into the worker.

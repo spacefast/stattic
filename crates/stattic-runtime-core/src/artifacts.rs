@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 
+use crate::access::rule_value_is_set;
 #[cfg(not(target_family = "wasm"))]
 use crate::content::{escape_attr, escape_html};
 #[cfg(not(target_family = "wasm"))]
@@ -548,8 +549,8 @@ fn first_exact_redirect_action(rules: &[Value]) -> Option<(Value, i64)> {
             .get("hostRegex")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.is_empty())
-        || rule.get("query").is_some_and(value_is_nonempty)
-        || rule.get("conditions").is_some_and(value_is_nonempty)
+        || rule_value_is_set(rule.get("query"))
+        || rule_value_is_set(rule.get("conditions"))
     {
         return None;
     }
@@ -566,17 +567,6 @@ fn first_exact_redirect_action(rules: &[Value]) -> Option<(Value, i64)> {
             .and_then(Value::as_i64)
             .unwrap_or(i64::MAX),
     ))
-}
-
-fn value_is_nonempty(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(value) => *value,
-        Value::Number(value) => value.as_i64() != Some(0),
-        Value::String(value) => !value.is_empty(),
-        Value::Array(value) => !value.is_empty(),
-        Value::Object(value) => !value.is_empty(),
-    }
 }
 
 pub(crate) fn static_lookup_action(action: &str, path: &str, status: u64) -> Value {

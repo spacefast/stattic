@@ -27,8 +27,43 @@ function _stattic_engine_release_layout_active(string $privateRoot): bool
         && str_starts_with($releaseReal, $installRoot . '/releases/');
 }
 
+// The alias files — the loader copies (custom-redirects.php, index.php, the
+// entrypoint aliases) plus the resident installer — are the ONLY engine bytes
+// reinstalled under an unchanged path; releases get fresh directories opcache
+// has never seen. Absolute box paths, derived from the private root the route
+// already holds.
+//
+// @return list<string>
+function _stattic_engine_update_alias_paths(string $privateRoot): array
+{
+    $publicRoot = dirname($privateRoot, 2);
+    $aliases = ['/custom-redirects.php', '/index.php', '/__spacefast/engine-update.php'];
+    foreach (array_keys(SPACEFAST_RUNTIME_ENTRYPOINT_PATHS) as $entrypoint) {
+        $aliases[] = $entrypoint;
+    }
+    return array_map(static fn (string $alias): string => $publicRoot . $alias, $aliases);
+}
+
+// Drop the rewritten-in-place aliases from THIS process's opcache. The fleet
+// runs opcache.validate_timestamps=Off, so FPM keeps executing an alias's OLD
+// compiled module forever unless something inside FPM invalidates it — and a
+// CLI invalidation cannot, since CLI opcache is a different SHM. This request
+// IS inside FPM (it is the receipt lane the control plane calls after every
+// converge), so it invalidates here. Idempotent and cheap; invalidating an
+// unchanged alias just recompiles ~one file.
+function _stattic_engine_update_invalidate_aliases(string $privateRoot): void
+{
+    if (!function_exists('opcache_invalidate')) {
+        return;
+    }
+    foreach (_stattic_engine_update_alias_paths($privateRoot) as $path) {
+        opcache_invalidate($path, true);
+    }
+}
+
 function _stattic_engine_update_route(string $privateRoot, array $_claims): void
 {
+    _stattic_engine_update_invalidate_aliases($privateRoot);
     $body = _stattic_json_body();
     $revision = $body['revision'] ?? null;
     $zipUrl = $body['zip_url'] ?? null;

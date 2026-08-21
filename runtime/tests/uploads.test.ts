@@ -50,11 +50,7 @@ const ADMISSION_SPACE = "spc_up_adm";
 const INGEST_LIMIT = 4;
 
 beforeAll(async () => {
-  rt = await startRuntime({
-    // php -S has no APCu, so the admission counter already falls back to the
-    // file backend; pin it so the seeding below is not backend-dependent.
-    env: { SPACEFAST_ADMISSION_COUNTER_BACKEND: "file" },
-  });
+  rt = await startRuntime();
 });
 
 afterAll(() => rt?.stop());

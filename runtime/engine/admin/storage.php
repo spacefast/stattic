@@ -45,7 +45,7 @@ function _stattic_storage_list(string $privateRoot, string $spaceId): void
         $objects[] = _stattic_uploads_owner_object($id, $record, $readKey);
     }
 
-    $lastObject = $objects === [] ? null : $objects[array_key_last($objects)];
+    $lastObject = array_last($objects);
     $lastId = is_array($lastObject) && is_string($lastObject['id'] ?? null) ? $lastObject['id'] : null;
 
     _stattic_json_response(200, [
@@ -70,13 +70,20 @@ function _stattic_storage_read_key_rotate(string $privateRoot): void
 {
     $key = bin2hex(random_bytes(16));
     $rotatedAt = gmdate('c');
-    _sf_pointer_swap($privateRoot . '/runtime/storage-read-key.json', [
+    _sf_json_write($privateRoot . '/runtime/storage-read-key.json', [
         'key' => $key,
         'rotated_at' => $rotatedAt,
     ]);
 
+    // An unenumerable space tree must fail the rotation loudly: completing it
+    // while purging nothing would leave every old-key URL live in the edge with
+    // the rotated key already active.
+    $spaceRoots = _stattic_runtime_space_roots($privateRoot);
+    if ($spaceRoots === null) {
+        _stattic_problem_response(503, 'storage_rotation_purge_unavailable', 'Space enumeration failed; the rotation purge could not be planned.');
+    }
     $hostnames = [];
-    foreach (glob($privateRoot . '/spaces/*', GLOB_ONLYDIR) ?: [] as $spaceRoot) {
+    foreach ($spaceRoots as $spaceRoot) {
         foreach (_stattic_runtime_space_event_hostnames($spaceRoot) as $hostname) {
             $hostnames[$hostname] = true;
         }
@@ -124,30 +131,17 @@ function _stattic_storage_object_delete(string $privateRoot, string $spaceId, st
 
 function _stattic_uploads_owner_limit(): int
 {
-    $raw = $_GET['limit'] ?? null;
-    if ($raw === null || $raw === '') {
-        return STATTIC_UPLOADS_OWNER_PAGE_DEFAULT;
-    }
-    if (!is_string($raw) || !ctype_digit($raw) || (int) $raw < 1 || (int) $raw > STATTIC_UPLOADS_OWNER_PAGE_MAX) {
-        _stattic_problem_response(422, 'validation_error', 'Limit must be between 1 and 100.');
-    }
-    return (int) $raw;
+    return _stattic_query_limit(STATTIC_UPLOADS_OWNER_PAGE_DEFAULT, STATTIC_UPLOADS_OWNER_PAGE_MAX, 'Limit must be between 1 and 100.');
 }
 
 function _stattic_uploads_owner_cursor(): ?string
 {
-    $raw = $_GET['cursor'] ?? null;
-    if ($raw === null || $raw === '') {
+    $payload = _stattic_query_cursor_payload(2048, '_stattic_uploads_owner_bad_cursor');
+    if ($payload === null) {
         return null;
     }
-    if (!is_string($raw) || strlen($raw) > 2048 || preg_match('/^[A-Za-z0-9_-]+$/', $raw) !== 1) {
-        _stattic_uploads_owner_bad_cursor();
-    }
-    $decoded = _stattic_base64url_decode($raw);
-    $payload = json_decode($decoded, true);
     if (
-        !is_array($payload)
-        || ($payload['v'] ?? null) !== 3
+        ($payload['v'] ?? null) !== 3
         || !is_string($payload['after'] ?? null)
         || !_stattic_uploads_id_valid($payload['after'])
     ) {
@@ -158,8 +152,7 @@ function _stattic_uploads_owner_cursor(): ?string
 
 function _stattic_uploads_owner_encode_cursor(string $after): string
 {
-    $json = json_encode(['v' => 3, 'after' => $after], JSON_UNESCAPED_SLASHES);
-    return _stattic_base64url_encode(is_string($json) ? $json : '{}');
+    return _stattic_query_cursor_encode(['v' => 3, 'after' => $after]);
 }
 
 function _stattic_uploads_owner_bad_cursor(): never

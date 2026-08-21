@@ -44,19 +44,20 @@ function _stattic_runtime_retention_stores(string $privateRoot): array
     $stores = [
         _stattic_runtime_jobs_queue_store($privateRoot),
         _stattic_runtime_jobs_dead_store($privateRoot),
-        // Dead purge records only — a queued one is still owed to the edge and is
-        // never swept (shared/purge.php pins that in the descriptor).
-        _stattic_runtime_purge_store($privateRoot),
     ];
     // Per-space stores: publish sessions and GC pins both carry their own
     // expires_at. A pin outlives its session whenever the release call never
     // arrived (a dead mover, or a deferred release), so it is swept here too.
-    foreach (glob($privateRoot . '/spaces/*', GLOB_ONLYDIR) ?: [] as $spaceRoot) {
-        if (is_string($spaceRoot)) {
-            $spaceId = basename($spaceRoot);
-            $stores[] = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
-            $stores[] = _stattic_runtime_publish_pins_store($privateRoot, $spaceId);
-        }
+    // An unenumerable space tree aborts the sweep — silently seeing zero
+    // spaces would complete retention without doing its per-space half.
+    $spaceRoots = _stattic_runtime_space_roots($privateRoot);
+    if ($spaceRoots === null) {
+        throw new RuntimeException('runtime document enumeration failed: ' . $privateRoot . '/spaces');
+    }
+    foreach ($spaceRoots as $spaceRoot) {
+        $spaceId = basename($spaceRoot);
+        $stores[] = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
+        $stores[] = _stattic_runtime_publish_pins_store($privateRoot, $spaceId);
     }
     return $stores;
 }

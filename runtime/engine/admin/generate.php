@@ -11,9 +11,6 @@ require_once __DIR__ . '/../shared/native-process.php';
 
 function _stattic_runtime_routes_from_hostname_intent(string $routeName, array $intent): array
 {
-    if (array_key_exists('routes', $intent)) {
-        _stattic_problem_response(422, 'routes_input_retired', 'Runtime compiles routes from hostname intent. Send production_hostnames and version_hostnames.');
-    }
     $productionHostnames = _stattic_runtime_hostname_list($intent['production_hostnames'] ?? []);
     $noindexProductionHostnames = array_fill_keys(_stattic_runtime_hostname_list($intent['noindex_production_hostnames'] ?? []), true);
     $versionHostnames = _stattic_runtime_version_hostname_entries($intent['version_hostnames'] ?? []);
@@ -479,10 +476,7 @@ function _stattic_runtime_rebuild_route_index(string $privateRoot): void
 function _stattic_runtime_rebuild_route_index_unlocked(string $privateRoot): void
 {
     $contributions = [];
-    foreach (_stattic_runtime_directory_entries_strict($privateRoot . '/spaces') as $spaceRoot) {
-        if (!is_dir($spaceRoot)) {
-            continue;
-        }
+    foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
         $spaceId = basename((string) $spaceRoot);
         _stattic_runtime_sync_space_overlay($privateRoot, $spaceId);
         $contribution = _stattic_runtime_space_index_contribution($privateRoot, $spaceId);
@@ -658,29 +652,16 @@ function _stattic_runtime_read_json_strict(string $path): mixed
  */
 function _stattic_runtime_directory_entries_strict(string $root): array
 {
-    clearstatcache(true, $root);
-    if (!is_dir($root)) {
-        if (_sf_path_verifiably_absent($root)) {
-            return [];
-        }
+    $paths = _stattic_runtime_directory_entries($root);
+    if ($paths === null) {
         throw new RuntimeException('runtime document enumeration failed: ' . $root);
-    }
-    $entries = scandir($root);
-    if (!is_array($entries)) {
-        throw new RuntimeException('runtime document enumeration failed: ' . $root);
-    }
-    $paths = [];
-    foreach ($entries as $entry) {
-        if ($entry !== '.' && $entry !== '..') {
-            $paths[] = $root . '/' . $entry;
-        }
     }
     return $paths;
 }
 
-// Read under the index lock, from disk, never through the APCu pointer cache:
-// this is the read half of a read-modify-write. false = current.json exists
-// but could not be read — the caller must abort, never treat it as gen 0.
+// Read under the index lock: this is the read half of a read-modify-write.
+// false = current.json exists but could not be read — the caller must abort,
+// never treat it as gen 0.
 function _stattic_runtime_read_route_pointer(string $privateRoot): array|false|null
 {
     $pointer = _stattic_runtime_read_json($privateRoot . '/routes/current.json');
@@ -758,16 +739,13 @@ function _stattic_runtime_space_index_contribution(string $privateRoot, string $
         throw new RuntimeException('runtime hostname intent is invalid: ' . $spaceRoot);
     }
     if (is_array($routesConfig) && ($routesConfig['space_id'] ?? null) === $spaceId && is_array($routesConfig['routes'] ?? null)) {
-        // Serve-time plan gating (proxy-routes.md: "activates the moment you
-        // upgrade — no redeploy needed"); refreshed on every runtime.sync.
-        $entitlements = _stattic_runtime_stored_entitlements($privateRoot, $spaceId);
         // Safe to memoize: nothing writes pointers while a contribution is built.
         $pointerCache = [];
         foreach ($routesConfig['routes'] as $route) {
             if (!is_array($route)) {
                 continue;
             }
-            $compiled = _stattic_runtime_compile_route($privateRoot, $spaceId, $route, $entitlements, $pointerCache);
+            $compiled = _stattic_runtime_compile_route($privateRoot, $spaceId, $route, $pointerCache);
             if (!is_array($compiled)) {
                 continue;
             }
@@ -959,7 +937,7 @@ function _stattic_runtime_noindex_robots_route(): array
     ];
 }
 
-function _stattic_runtime_compile_route(string $privateRoot, string $spaceId, array $route, array $entitlements = [], array &$pointerCache = []): ?array
+function _stattic_runtime_compile_route(string $privateRoot, string $spaceId, array $route, array &$pointerCache = []): ?array
 {
     $hostname = is_string($route['hostname'] ?? null) ? $route['hostname'] : '';
     $target = is_array($route['target'] ?? null) ? $route['target'] : [];
@@ -1299,7 +1277,7 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
     if (is_array($previous)) {
         _sf_json_write($routesRoot . '/previous.json', $previous);
     }
-    _sf_pointer_swap($routesRoot . '/current.json', $pointer);
+    _sf_json_write($routesRoot . '/current.json', $pointer);
 
     // D71/D93: the unlink-candidacy stamp. A shard that just fell out of both
     // pointers gets its mtime set here, which is when its grace period starts —
@@ -1558,28 +1536,24 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
         return;
     }
 
-    $routesRoot = $spaceRoot . '/routes';
-    $routeEntries = scandir($routesRoot);
-    if (!is_array($routeEntries)) {
-        if (!_sf_path_verifiably_absent($routesRoot)) {
-            throw new RuntimeException('runtime document enumeration failed: ' . $routesRoot);
-        }
-        $routeEntries = [];
-    }
     $versions = [];
-    foreach ($routeEntries as $routeEntry) {
-        if (!is_string($routeEntry) || !str_ends_with($routeEntry, '.json')) {
+    $production = null;
+    foreach (_stattic_runtime_directory_entries_strict($spaceRoot . '/routes') as $pointerPath) {
+        if (!str_ends_with($pointerPath, '.json')) {
             continue;
         }
-        $pointer = _stattic_runtime_read_json_strict($routesRoot . '/' . $routeEntry);
+        $pointer = _stattic_runtime_read_json_strict($pointerPath);
         if (
             !is_array($pointer)
             || !is_string($pointer['route_name'] ?? null)
             || !is_string($pointer['version_id'] ?? null)
         ) {
-            throw new RuntimeException('runtime route pointer is invalid: ' . $routesRoot . '/' . $routeEntry);
+            throw new RuntimeException('runtime route pointer is invalid: ' . $pointerPath);
         }
         $versions[$pointer['route_name']] = $pointer['version_id'];
+        if ($pointer['route_name'] === 'production') {
+            $production = $pointer;
+        }
     }
     // `live` is the name the shard uses when a host follows the Space's current
     // version without naming a route.
@@ -1588,7 +1562,6 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
     }
     ksort($versions);
 
-    $production = _stattic_runtime_read_json_strict(_stattic_route_pointer_path($privateRoot, $spaceId, 'production'));
     $config = is_array($production) && is_array($production['config'] ?? null) ? $production['config'] : [];
     // The route config and the live VERSION's compiled serving config are two
     // different documents, and reading a version-owned key off the route
@@ -1681,7 +1654,8 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
 }
 
 // The §4 swap protocol: write the content-addressed overlay -> include it back
-// as a self-check -> swap space.json -> apcu_delete (inside _sf_pointer_swap).
+// as a self-check -> swap space.json (tmp + rename; the next request's fresh
+// pointer read is the visibility protocol).
 // An overlay whose content is unchanged keeps its name, and the pointer is left
 // alone so `gen` only moves when something actually changed.
 function _stattic_runtime_write_space_overlay(string $privateRoot, string $spaceId, array $overlay): void
@@ -1711,7 +1685,7 @@ function _stattic_runtime_write_space_overlay(string $privateRoot, string $space
         _stattic_runtime_route_index_validation_failed('overlay');
     }
 
-    _sf_pointer_swap($pointerPath, [
+    _sf_json_write($pointerPath, [
         'schema' => STATTIC_RUNTIME_ARTIFACT_SCHEMA,
         'gen' => is_int($current['gen'] ?? null) ? $current['gen'] + 1 : 1,
         'overlay' => $name,
@@ -1736,17 +1710,11 @@ function _stattic_runtime_route_entries_valid(array $hostnames, array $hostRoute
             return false;
         }
     }
-    foreach ($hostRoutes as $hostname => $routes) {
-        if (!is_string($hostname) || !is_array($routes)) {
-            return false;
-        }
-        foreach ($routes as $route) {
-            if (!is_array($route) || !_stattic_runtime_route_entry_valid($route)) {
-                return false;
-            }
-        }
-    }
-    return true;
+    return array_all($hostRoutes, static fn (mixed $routes, mixed $hostname): bool =>
+        is_string($hostname)
+        && is_array($routes)
+        && array_all($routes, static fn (mixed $route): bool =>
+            is_array($route) && _stattic_runtime_route_entry_valid($route)));
 }
 
 function _stattic_runtime_route_entry_valid(array $route): bool

@@ -24,13 +24,11 @@ function _stattic_proxy_cache_request_eligible(
     array $routeHeaders,
     array $forwardHeaders,
     string $requestMethod,
-    string $upstreamMethod,
     bool $privateResponse
 ): bool
 {
     return $cacheMode === 'shared'
         && in_array(strtoupper($requestMethod), ['GET', 'HEAD'], true)
-        && in_array(strtoupper($upstreamMethod), ['GET', 'HEAD'], true)
         && !$privateResponse
         && $routeHeaders === []
         && $forwardHeaders === [];
@@ -80,10 +78,6 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy route metadata is malformed.\n");
     }
 
-    if (!_stattic_http_available()) {
-        _stattic_render_platform_page('runtime-unavailable', 503, [], "Proxy runtime requires curl.\n");
-    }
-
     if (!empty($route['disabled'])) {
         _stattic_render_platform_page('proxy-disabled', 403, [], (string) ($route['disabledReason'] ?? "Proxy route is disabled.\n"));
     }
@@ -118,7 +112,9 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
     if (!in_array($requestMethod, $allowedMethods, true)) {
         _stattic_render_platform_page('method-not-allowed', 405, ['Allow' => implode(', ', $allowedMethods)], "Proxy route does not allow this method.\n");
     }
-    $method = isset($route['method']) && is_string($route['method']) ? strtoupper($route['method']) : $requestMethod;
+    // The upstream request rides the visitor's own method: no producer of a
+    // proxy action writes a per-route method override.
+    $method = $requestMethod;
     // A condition-matched rule is per-visitor, so never shared-cacheable.
     $privateResponse = _stattic_access_private_cache_flag() || !empty($route['conditional_match']);
     $sharedCacheRequest = _stattic_proxy_cache_request_eligible(
@@ -126,7 +122,6 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
         $route['headers'],
         $route['forwardHeaders'],
         $requestMethod,
-        $method,
         $privateResponse
     );
     $headers = _stattic_collect_proxy_request_headers(

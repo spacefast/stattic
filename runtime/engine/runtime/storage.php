@@ -21,7 +21,6 @@ require_once __DIR__ . '/../shared/errors.php';
 const STATTIC_UPLOADS_PROMOTE_RETRY_AFTER_SECONDS = 5;
 
 const STATTIC_UPLOADS_ID_PATTERN = '/^[a-f0-9]{32}$/';
-const STATTIC_STORAGE_READ_KEY_PATTERN = '/^[a-f0-9]{32}$/';
 
 // A stored type a browser could execute as a page rides `Content-Disposition:
 // attachment`, always with the record's exact declared type, never a sniffable
@@ -67,7 +66,7 @@ function _stattic_uploads_record(mixed $record): ?array
         !is_string($contentType) || $contentType === '' || strlen($contentType) > 255
         || !is_string($createdAt) || strtotime($createdAt) === false
         || !is_int($size) || $size < 0
-        || !is_string($sha256) || preg_match('/^[a-f0-9]{64}$/', strtolower($sha256)) !== 1
+        || !is_string($sha256) || !_stattic_is_sha256_hex(strtolower($sha256))
         || !is_string($uploaderId) || $uploaderId === '' || strlen($uploaderId) > 255
     ) {
         return null;
@@ -82,61 +81,18 @@ function _stattic_uploads_record(mixed $record): ?array
     ];
 }
 
-// The one revocable secret behind every public object URL, minted lazily so
-// provisioning never learns about it. Rotation swaps the pointer and purges the
-// edge; a rotated key makes every previously handed-out URL answer 404.
+// The one revocable secret behind every public object URL, lazily minted
+// (`_stattic_lazy_minted_secret`) under the site write lock — rotate runs under
+// that same lock via the management route table, so a lazy mint can never race
+// a rotation. Rotation swaps the pointer and purges the edge; a rotated key
+// makes every previously handed-out URL answer 404.
 function _stattic_storage_read_key(string $privateRoot): string
 {
-    // Minting is key ROTATION for anyone holding a URL, so it may only follow
-    // a verified absence: a failed read of an existing record (or a record
-    // that fails the pattern) must 503, never rotate.
-    $read = static function () use ($privateRoot): array {
-        $record = _sf_pointer_read('storage-read-key', $privateRoot . '/runtime/storage-read-key.json');
-        if ($record['kind'] === 'absent') {
-            return ['state' => 'absent', 'key' => null];
-        }
-        $key = is_array($record['value']) ? ($record['value']['key'] ?? null) : null;
-        return is_string($key) && preg_match(STATTIC_STORAGE_READ_KEY_PATTERN, $key) === 1
-            ? ['state' => 'present', 'key' => $key]
-            : ['state' => 'unavailable', 'key' => null];
-    };
-    $state = $read();
-    if ($state['key'] !== null) {
-        return $state['key'];
+    $key = _stattic_lazy_minted_secret($privateRoot, 'storage-read-key', 16);
+    if ($key === null) {
+        _stattic_problem_refused(503, 'storage_unavailable', 'Storage is temporarily unavailable.');
     }
-    if ($state['state'] === 'unavailable') {
-        _stattic_storage_error(503, 'storage_unavailable', 'Storage is temporarily unavailable.');
-    }
-    if (!_stattic_runtime_mkdir_soft($privateRoot . '/runtime')) {
-        _stattic_storage_error(503, 'storage_unavailable', 'Storage is temporarily unavailable.');
-    }
-    // The site write lock, so a lazy mint can never race a rotation: rotate
-    // runs under this same lock via the management route table.
-    $minted = _stattic_lock_with(
-        $privateRoot . '/runtime/write.lock',
-        STATTIC_LOCK_WAIT,
-        null,
-        static function () use ($read, $privateRoot): ?string {
-            // The loser of the mint race reads the winner's key.
-            $existing = $read();
-            if ($existing['key'] !== null) {
-                return $existing['key'];
-            }
-            if ($existing['state'] !== 'absent') {
-                return null;
-            }
-            $key = bin2hex(random_bytes(16));
-            _sf_pointer_swap($privateRoot . '/runtime/storage-read-key.json', [
-                'key' => $key,
-                'rotated_at' => gmdate('c'),
-            ]);
-            return $key;
-        },
-    );
-    if (!is_string($minted)) {
-        _stattic_storage_error(503, 'storage_unavailable', 'Storage is temporarily unavailable.');
-    }
-    return $minted;
+    return $key;
 }
 
 // The only spelling of an object's URL: origin + public prefix + id + read key.
@@ -249,10 +205,9 @@ function _stattic_uploads_send(
 {
     // §16: the edge stores only on the explicit opt-in, derived from the
     // Cache-Control composed above — the keyed public URL may be held (deletes
-    // and key rotations purge it), the authenticated keyless URL never.
-    $headers = _stattic_apply_platform_header_policy(
-        _stattic_uploads_headers($record, $publicCache)
-    );
+    // and key rotations purge it), the authenticated keyless URL never. The
+    // platform policy applies inside _stattic_send_response_headers.
+    $headers = _stattic_uploads_headers($record, $publicCache);
     $size = $record['size'];
     $blobPath = _stattic_runtime_blob_path($privateRoot, $spaceId, $record['sha256']);
     if (!is_file($blobPath)) {
@@ -269,7 +224,7 @@ function _stattic_uploads_send(
 
     // HEAD advertises what the matching GET would send, without opening the file.
     if ($requestMethod === 'HEAD') {
-        _stattic_send_file_headers($headers);
+        _stattic_send_response_headers($headers);
         header('Content-Length: ' . $size);
         http_response_code(200);
         exit;
@@ -284,7 +239,7 @@ function _stattic_uploads_send(
         );
         exit;
     }
-    _stattic_send_file_headers($headers);
+    _stattic_send_response_headers($headers);
     header('Content-Length: ' . $size);
     http_response_code(200);
     // Chunked, never fpassthru: a 128 MB object would otherwise buffer whole
@@ -303,12 +258,11 @@ function _stattic_storage_handle(
     array $serving,
     string $requestHost,
     string $requestPath,
-    string $requestMethod,
-    string $publicRequestPath
+    string $requestMethod
 ): void {
     $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : '';
     if ($spaceId === '') {
-        _stattic_storage_error(503, 'storage_unavailable', 'Storage is unavailable for this space.');
+        _stattic_problem_refused(503, 'storage_unavailable', 'Storage is unavailable for this space.');
     }
     $spaceId = _stattic_runtime_id($spaceId, 'space_id');
     $auth = _stattic_storage_auth_context($serving, $requestHost);
@@ -333,7 +287,7 @@ function _stattic_storage_handle(
             _stattic_method_not_allowed('POST');
         }
         if (!$admitted) {
-            _stattic_storage_error(401, 'storage_auth_required', 'Sign in before uploading objects.');
+            _stattic_problem_refused(401, 'storage_auth_required', 'Sign in before uploading objects.');
         }
         _stattic_uploads_upload(
             $privateRoot,
@@ -347,10 +301,10 @@ function _stattic_storage_handle(
 
     $id = rawurldecode(substr($requestPath, strlen('/storage/')));
     if (!_stattic_uploads_id_valid($id)) {
-        _stattic_storage_error(404, 'storage_object_not_found', 'Storage object not found.');
+        _stattic_problem_refused(404, 'storage_object_not_found', 'Storage object not found.');
     }
     if (!$admitted) {
-        _stattic_storage_error(401, 'storage_auth_required', 'Sign in before reading objects.');
+        _stattic_problem_refused(401, 'storage_auth_required', 'Sign in before reading objects.');
     }
     if ($requestMethod === 'DELETE') {
         $record = _stattic_uploads_get($privateRoot, $spaceId, $id);
@@ -358,13 +312,13 @@ function _stattic_storage_handle(
             _stattic_uploads_deleted_response();
         }
         if ($record['uploaderId'] !== $uploaderId) {
-            _stattic_storage_error(403, 'storage_delete_forbidden', 'Only the uploader can delete this object.');
+            _stattic_problem_refused(403, 'storage_delete_forbidden', 'Only the uploader can delete this object.');
         }
         _stattic_uploads_delete($privateRoot, $spaceId, $id);
     }
     $record = _stattic_uploads_get($privateRoot, $spaceId, $id);
     if ($record === null) {
-        _stattic_storage_error(404, 'storage_object_not_found', 'Storage object not found.');
+        _stattic_problem_refused(404, 'storage_object_not_found', 'Storage object not found.');
     }
     if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
         _stattic_method_not_allowed('GET, HEAD, DELETE');
@@ -398,12 +352,12 @@ function _stattic_uploads_upload(
     $staged = _stattic_storage_stage_upload($privateRoot);
     if (($staged['ok'] ?? false) !== true) {
         if (($staged['reason'] ?? null) === 'too_large') {
-            _stattic_storage_error(413, 'storage_file_too_large', 'Storage uploads are limited to 5 MiB.');
+            _stattic_problem_refused(413, 'storage_file_too_large', 'Storage uploads are limited to 5 MiB.');
         }
         if (($staged['reason'] ?? null) === 'empty') {
-            _stattic_storage_error(400, 'storage_empty_file', 'Storage uploads cannot be empty.');
+            _stattic_problem_refused(400, 'storage_empty_file', 'Storage uploads cannot be empty.');
         }
-        _stattic_storage_error(503, 'storage_unavailable', 'Storage could not persist this object.');
+        _stattic_problem_refused(503, 'storage_unavailable', 'Storage could not persist this object.');
     }
     $size = is_int($staged['size'] ?? null) ? $staged['size'] : 0;
     $tmpPath = is_string($staged['tmp_path'] ?? null) ? $staged['tmp_path'] : '';
@@ -417,7 +371,7 @@ function _stattic_uploads_upload(
     }
     if (_stattic_storage_content_blocked($contentType, $prefix)) {
         unlink($tmpPath);
-        _stattic_storage_error(415, 'storage_content_blocked', 'Executable and active web content cannot be uploaded.');
+        _stattic_problem_refused(415, 'storage_content_blocked', 'Executable and active web content cannot be uploaded.');
     }
 
     $committed = _stattic_space_write_lock_with(
@@ -426,7 +380,7 @@ function _stattic_uploads_upload(
         STATTIC_LOCK_WAIT,
         static function () use ($tmpPath): never {
             unlink($tmpPath);
-            _stattic_storage_error(503, 'storage_unavailable', 'Storage is temporarily unavailable.');
+            _stattic_problem_refused(503, 'storage_unavailable', 'Storage is temporarily unavailable.');
         },
         static function () use (
             $privateRoot,
@@ -473,7 +427,7 @@ function _stattic_uploads_upload(
     }
     if ($committed['status'] !== 'committed') {
         unlink($tmpPath);
-        _stattic_storage_error(503, 'storage_unavailable', 'Storage is unavailable for this space.');
+        _stattic_problem_refused(503, 'storage_unavailable', 'Storage is unavailable for this space.');
     }
     $id = $committed['id'];
 
@@ -485,7 +439,7 @@ function _stattic_uploads_upload(
         // until the key rotates, independent of the route the upload arrived on.
         'url' => _stattic_uploads_public_url(
             $privateRoot,
-            _stattic_storage_request_origin($requestHost),
+            'https://' . $requestHost,
             $id
         ),
     ]);
@@ -601,7 +555,7 @@ function _stattic_uploads_delete_record(
         $spaceId,
         STATTIC_LOCK_WAIT,
         static function (): never {
-            _stattic_storage_error(503, 'storage_unavailable', 'Storage is temporarily unavailable.');
+            _stattic_problem_refused(503, 'storage_unavailable', 'Storage is temporarily unavailable.');
         },
         $delete,
     );
@@ -707,21 +661,6 @@ function _stattic_storage_function_request_authorized(
     return true;
 }
 
-function _stattic_storage_request_origin(string $requestHost): string
-{
-    $proto = is_string($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? null)
-        ? strtolower(trim((string) $_SERVER['HTTP_X_FORWARDED_PROTO']))
-        : '';
-    if ($proto !== 'http' && $proto !== 'https') {
-        $proto = 'https';
-    }
-    return $proto . '://' . $requestHost;
-}
-
-function _stattic_storage_error(int $status, string $code, string $message): never
-{
-    _stattic_problem_response($status, $code, $message, [], ['Cache-Control' => 'no-store']);
-}
 
 function _stattic_uploads_deleted_response(): never
 {

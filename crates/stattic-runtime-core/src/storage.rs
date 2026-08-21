@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 
 use crate::catalog::read_version_catalog;
 use crate::finalize::{
-    create_dir_all, file_meta_from_parts, invalid, invalid_with_details, mime_for_path, sha256,
-    stamp_content_mtime, validate_id, validate_relative_path, write_generated, FileMeta,
-    FinalizeError, Result,
+    create_dir_all, file_meta_from_parts, invalid, invalid_error, invalid_with_details,
+    mime_for_path, sha256, stamp_content_mtime, validate_id, validate_relative_path,
+    write_generated, FileMeta, FinalizeError, Result,
 };
 use crate::protocol::{TEMPLATE_MAX_BYTES, TEMPLATE_VARIANT_FILE_LIMIT};
 
@@ -156,10 +156,11 @@ fn retained_files(
                     "Retained files require retention mode \"list\".",
                 );
             }
-            let reusable = reusable.ok_or_else(|| FinalizeError::Invalid {
-                code: "reusable_version_required",
-                message: "Retention requires a reusable version.".into(),
-                details: None,
+            let reusable = reusable.ok_or_else(|| {
+                invalid_error(
+                    "reusable_version_required",
+                    "Retention requires a reusable version.",
+                )
             })?;
             validate_id(reusable, "reusable_version_id")?;
             retained_from_catalog(private_root, space_id, reusable)
@@ -219,10 +220,11 @@ fn plan_retained_files<'a>(
     if retained.is_empty() {
         return Ok(Vec::new());
     }
-    let reusable = reusable.ok_or_else(|| FinalizeError::Invalid {
-        code: "reusable_version_required",
-        message: "Retained files require a reusable version.".into(),
-        details: None,
+    let reusable = reusable.ok_or_else(|| {
+        invalid_error(
+            "reusable_version_required",
+            "Retained files require a reusable version.",
+        )
     })?;
     validate_id(reusable, "reusable_version_id")?;
     let mut planned = Vec::with_capacity(retained.len());
@@ -424,11 +426,7 @@ fn file_entry_path(entry: &Value) -> Result<String> {
     let path = entry
         .get("path")
         .and_then(Value::as_str)
-        .ok_or_else(|| FinalizeError::Invalid {
-            code: "invalid_file",
-            message: "File path is missing.".into(),
-            details: None,
-        })?;
+        .ok_or_else(|| invalid_error("invalid_file", "File path is missing."))?;
     validate_relative_path(path)?;
     Ok(path.into())
 }

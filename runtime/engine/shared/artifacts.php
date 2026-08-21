@@ -48,10 +48,54 @@ function _stattic_version_files_root(string $privateRoot, string $spaceId, strin
 }
 
 // The config lives beside the version's files (`../functions/`), not inside
-// them, so a publish can never write it.
+// them, so a publish can never write it. Verified absence is the only state
+// that proves "no worker" — an unreadable or malformed config keeps the
+// Functions lanes engaged so a transient failure never collapses into 404.
 function _stattic_version_has_functions(string $versionRoot): bool
 {
-    return is_file(dirname($versionRoot) . '/functions/config.json');
+    return _stattic_functions_config_read($versionRoot)['kind'] !== 'absent';
+}
+
+// The ONE reader of the version-adjacent functions/config.json: the static
+// bypass probe (serve.php), the dispatch lane (functions-dispatch.php) and the
+// purge credential (functions-purge.php) all answer from this memo. Stored
+// beside the version's file tree, never inside it: a publish reaches `files/`
+// and nothing else, so no upload can create or amend this document. Settled
+// outcomes — present, verified absent, malformed — are memoized; `unavailable`
+// is transient and every caller gets its own retry.
+/** @return array{kind: 'present', value: array}|array{kind: 'absent'|'unavailable'|'malformed'} */
+function _stattic_functions_config_read(string $versionRoot): array
+{
+    static $cache = [];
+    $path = dirname($versionRoot) . '/functions/config.json';
+    if (array_key_exists($path, $cache)) {
+        return $cache[$path];
+    }
+    // Absence is the common case (every static version): answer it from one
+    // stat before the pointer reader's warning-emitting open.
+    if (!is_file($path) && _sf_path_verifiably_absent($path)) {
+        return $cache[$path] = ['kind' => 'absent'];
+    }
+    $read = _sf_pointer_read('functions-config', $path);
+    if ($read['kind'] === 'absent') {
+        return $cache[$path] = ['kind' => 'absent'];
+    }
+    if ($read['kind'] === 'unavailable') {
+        return ['kind' => 'unavailable'];
+    }
+    $decoded = $read['value'];
+    $host = is_array($decoded['host'] ?? null) ? $decoded['host'] : [];
+    $artifact = is_array($decoded['artifact'] ?? null) ? $decoded['artifact'] : [];
+    if (
+        ($decoded['runtimeKind'] ?? null) !== 'functions'
+        || !is_string($host['hostname'] ?? null) || $host['hostname'] === ''
+        || !is_string($host['bundleUrl'] ?? null) || $host['bundleUrl'] === ''
+        || !is_string($artifact['mainModule'] ?? null) || $artifact['mainModule'] === ''
+        || !is_string($artifact['compatibilityDate'] ?? null) || $artifact['compatibilityDate'] === ''
+    ) {
+        return $cache[$path] = ['kind' => 'malformed'];
+    }
+    return $cache[$path] = ['kind' => 'present', 'value' => $decoded];
 }
 
 // Tombstone page variants (C10). The CSAM variant must stay byte-identical to a
@@ -85,7 +129,7 @@ function _stattic_zero_route_entry_shape_valid(mixed $entry): bool
 {
     return is_array($entry)
         && is_string($entry['method'] ?? null)
-        && _stattic_lookup_zero_methods_valid([$entry['method']])
+        && in_array($entry['method'], STATTIC_VISITOR_METHODS, true)
         && is_string($entry['pattern'] ?? null)
         && $entry['pattern'] !== ''
         && $entry['pattern'][0] === '/'
@@ -93,8 +137,7 @@ function _stattic_zero_route_entry_shape_valid(mixed $entry): bool
         && $entry['endpoint_id'] !== ''
         && is_string($entry['artifact'] ?? null)
         && _stattic_runtime_relative_artifact_path_valid($entry['artifact'])
-        && (!array_key_exists('schema_hash', $entry) || is_string($entry['schema_hash']) || $entry['schema_hash'] === null)
-        && (!array_key_exists('zero_indexed', $entry) || is_bool($entry['zero_indexed']));
+        && (!array_key_exists('schema_hash', $entry) || is_string($entry['schema_hash']) || $entry['schema_hash'] === null);
 }
 
 // The invocation half of the outbox key. The bound matches the outbox's
@@ -286,20 +329,6 @@ function _stattic_runtime_relative_artifact_path_valid(mixed $path): bool
     return _stattic_runtime_path_segments_safe($path);
 }
 
-function _stattic_lookup_zero_methods_valid(mixed $methods): bool
-{
-    if (!is_array($methods) || $methods === []) {
-        return false;
-    }
-    foreach ($methods as $method) {
-        if (!is_string($method) || !in_array($method, STATTIC_VISITOR_METHODS, true)) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
 // Rejects traversal segments while preserving literal names that contain two
 // dots (Astro's `[...slug].astro`).
 function _stattic_runtime_route_pattern_valid(mixed $pattern): bool
@@ -313,6 +342,15 @@ function _stattic_runtime_route_pattern_valid(mixed $pattern): bool
     }
 
     return _stattic_runtime_path_segments_safe($pattern);
+}
+
+// THE method rule for both compiled route tables: HEAD is served by the GET
+// route, and a null method (Functions-only) claims every verb.
+function _stattic_functions_route_method_matches(?string $routeMethod, string $requestMethod): bool
+{
+    return $routeMethod === null
+        || $routeMethod === $requestMethod
+        || ($routeMethod === 'GET' && $requestMethod === 'HEAD');
 }
 
 function _stattic_match_route_pattern_segments(string $pattern, string $lookup): ?array

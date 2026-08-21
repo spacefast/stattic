@@ -38,12 +38,14 @@ function _stattic_rewrite_target(string $target, string $requestPath, int $statu
 // that decides it for every lane.
 function _stattic_apply_redirects(array $redirects, array $serving, callable $pathExists, string $requestHost, string $requestPath, string $requestMethod, int $initialStatus = 200): array
 {
-    $conditionalCandidate = _stattic_redirect_has_conditional_candidate(
-        $redirects,
-        $requestHost,
-        $requestPath
-    );
-    $routeResult = _stattic_for_each_ordered_rule($redirects, $requestPath, function (array $rule, bool $useExact) use ($serving, $pathExists, $requestHost, $requestPath, $requestMethod, $conditionalCandidate): ?array {
+    // One walk answers both questions: the winning rule, and whether any
+    // conditional rule's path/host/query matched on the way to it. A condition
+    // that did not match this visitor still makes the URL request-varying —
+    // caching the ordinary branch would stop later matching visitors from
+    // reaching the origin at all. A conditional rule ordered after the winner
+    // needs no mark: the winner already answers every visitor at this URL.
+    $conditionalCandidate = false;
+    $routeResult = _stattic_for_each_ordered_rule($redirects, $requestPath, function (array $rule, bool $useExact) use ($serving, $pathExists, $requestHost, $requestPath, $requestMethod, &$conditionalCandidate): ?array {
         $destination = (string) ($rule['destination'] ?? '');
         $status = (int) ($rule['status'] ?? 302);
         $action = (string) ($rule['action'] ?? 'redirect');
@@ -58,6 +60,10 @@ function _stattic_apply_redirects(array $redirects, array $serving, callable $pa
 
         if (!_stattic_redirect_query_matches($rule['query'] ?? null, $matches)) {
             return null;
+        }
+
+        if (!empty($rule['conditions'])) {
+            $conditionalCandidate = true;
         }
 
         if (!_stattic_redirect_conditions_match($rule['conditions'] ?? [])) {
@@ -106,9 +112,6 @@ function _stattic_apply_redirects(array $redirects, array $serving, callable $pa
                 // cache on cookie/country/language/agent.
                 $result['conditional'] = true;
             }
-            if ($conditionalCandidate) {
-                $result['conditional_candidate'] = true;
-            }
             return $result;
         }
 
@@ -149,52 +152,17 @@ function _stattic_apply_redirects(array $redirects, array $serving, callable $pa
         exit;
     }, true);
 
-    return is_array($routeResult)
-        ? $routeResult
-        : array_filter([
-            'path' => $requestPath,
-            'status' => $initialStatus,
-            'conditional_candidate' => $conditionalCandidate ? true : null,
-        ], static fn (mixed $value): bool => $value !== null);
-}
-
-// A condition that did not match this visitor still makes the URL
-// request-varying: caching the ordinary branch would stop later matching
-// visitors from reaching the origin at all.
-function _stattic_redirect_has_conditional_candidate(
-    array $redirects,
-    string $requestHost,
-    string $requestPath
-): bool {
-    // The compiler settles this over the whole artifact; a missing flag is a
-    // version compiled before it existed, which still has to be walked.
-    if (($redirects['has_conditions'] ?? true) === false) {
-        return false;
+    if (is_array($routeResult)) {
+        if ($conditionalCandidate && isset($routeResult['path'])) {
+            $routeResult['conditional_candidate'] = true;
+        }
+        return $routeResult;
     }
-    $candidate = _stattic_for_each_ordered_rule(
-        $redirects,
-        $requestPath,
-        function (array $rule, bool $useExact) use ($requestHost, $requestPath): ?bool {
-            if (empty($rule['conditions']) || (string) ($rule['destination'] ?? '') === '') {
-                return null;
-            }
-            $matches = [];
-            if (!_stattic_ordered_rule_request_matches(
-                $rule,
-                $useExact,
-                $requestPath,
-                $requestHost,
-                $matches
-            )) {
-                return null;
-            }
-            return _stattic_redirect_query_matches($rule['query'] ?? null, $matches)
-                ? true
-                : null;
-        },
-        true
-    );
-    return $candidate === true;
+    return array_filter([
+        'path' => $requestPath,
+        'status' => $initialStatus,
+        'conditional_candidate' => $conditionalCandidate ? true : null,
+    ], static fn (mixed $value): bool => $value !== null);
 }
 
 function _stattic_redirect_proxy_action(string $target, array $rule, array $serving): array

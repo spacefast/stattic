@@ -23,7 +23,6 @@
     "engine/entrypoints/invoke.php",
     "engine/entrypoints/management.php",
     "engine/entrypoints/prepend.php",
-    "engine/entrypoints/purge.php",
     "engine/entrypoints/upload.php",
     "engine/init.php",
     "engine/runtime/access-rules.php",

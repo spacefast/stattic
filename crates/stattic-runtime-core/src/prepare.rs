@@ -24,10 +24,6 @@ pub const PREPARE_INPUT_FORMAT: &str = "spacefast.finalizer.prepare.input.v1";
 
 const SYSTEM_VARIABLE_PREFIX: &str = "SPACEFAST_";
 
-/// Highest-precedence first. This is the product contract, not filesystem
-/// discovery order.
-pub const CONFIG_PRECEDENCE: &[&str] = CONFIG_ACCEPTED_FILES;
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConventionFiles {
@@ -413,7 +409,7 @@ fn select_and_parse_config(
     candidates: &BTreeMap<String, String>,
     diagnostics: &mut Vec<PrepareDiagnostic>,
 ) -> (Option<String>, Option<Value>) {
-    let present = CONFIG_PRECEDENCE
+    let present = CONFIG_ACCEPTED_FILES
         .iter()
         .copied()
         .filter(|path| candidates.contains_key(*path))
@@ -421,19 +417,19 @@ fn select_and_parse_config(
     let Some(selected) = present.first().copied() else {
         return (None, None);
     };
-    if selected != CONFIG_PRECEDENCE[0] {
+    if selected != CONFIG_ACCEPTED_FILES[0] {
         let mut item = diagnostic(
             DiagnosticSeverity::Info,
             "config_alias_used",
             format!(
                 "{selected} was accepted as a Spacefast config alias. Use {} as the canonical config file.",
-                CONFIG_PRECEDENCE[0]
+                CONFIG_ACCEPTED_FILES[0]
             ),
             Some(selected.into()),
         );
         item.details.insert(
             "canonical".into(),
-            Value::String(CONFIG_PRECEDENCE[0].into()),
+            Value::String(CONFIG_ACCEPTED_FILES[0].into()),
         );
         item.details
             .insert("selected".into(), Value::String(selected.into()));
@@ -445,13 +441,13 @@ fn select_and_parse_config(
             "config_file_ignored",
             format!(
                 "{ignored} was ignored because {selected} is the selected Spacefast config file. Use {}.",
-                CONFIG_PRECEDENCE[0]
+                CONFIG_ACCEPTED_FILES[0]
             ),
             Some(ignored.into()),
         );
         item.details.insert(
             "canonical".into(),
-            Value::String(CONFIG_PRECEDENCE[0].into()),
+            Value::String(CONFIG_ACCEPTED_FILES[0].into()),
         );
         item.details
             .insert("selected".into(), Value::String(selected.into()));

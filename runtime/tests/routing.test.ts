@@ -202,7 +202,6 @@ beforeAll(async () => {
     },
   });
 });
-
 afterAll(() => {
   rt?.stop();
   redirectReceiver?.stop(true);
@@ -1457,95 +1456,5 @@ test("public requests load only the modules their request class needs", async ()
     instrumentedServer?.kill();
     if (instrumentedRoot) rmSync(instrumentedRoot, { recursive: true, force: true });
     moduleRuntime.stop();
-  }
-});
-
-// Response tables, roots, host shards and overlays are content-addressed (§1):
-// a name is never reused, so a stale OPcache entry for one is impossible and
-// nothing on that path records repair state. What is left writing a PHP file IN
-// PLACE is the per-version `functions/routes.php` artifact, so that is the
-// publish this test has to make to reach the repair-state branch at all.
-test("repair-space clears the opcache invalidation repair state a publish recorded", async () => {
-  const phpIniRoot = mkdtempSync(path.join(os.tmpdir(), "stattic-opcache-api-denied-"));
-  const opcacheProbePath = path.join(phpIniRoot, "probe.php");
-  const deniedApiPrefix = "/__spacefast_opcache_api_denied__/";
-  // PHP does not guarantee that opcache_invalidate() returns false merely
-  // because OPcache is disabled. Deny the API by caller path so every PHP build
-  // exercises the repair-state branch deterministically.
-  writeFileSync(
-    opcacheProbePath,
-    "<?php echo function_exists('opcache_invalidate') && @opcache_invalidate(__FILE__, true) === false ? 'denied' : 'available';\n",
-  );
-  const opcacheProbe = Bun.spawnSync({
-    cmd: ["php", "-d", `opcache.restrict_api=${deniedApiPrefix}`, opcacheProbePath],
-    env: process.env,
-  });
-  expect(
-    opcacheProbe.stdout.toString(),
-    "PHP must load Zend OPcache and deny its API for this test to exercise invalidation failure",
-  ).toBe("denied");
-  let repairRuntime: Runtime | undefined;
-  const spaceId = "spc_opcache_repair";
-  try {
-    repairRuntime = await startRuntime({ phpIni: { "opcache.restrict_api": deniedApiPrefix } });
-    await deploy(repairRuntime, {
-      spaceId,
-      versionId: "ver_opcache_repair_1",
-      files: { "index.html": "repair me" },
-      functions: {
-        artifact: {
-          appName: "opcache-repair",
-          entry: "worker.js",
-          mainModule: "index.js",
-          compatibilityDate: "2026-07-01",
-          compatibilityFlags: [],
-          routes: [{ method: null, path: "/api", subtree: true }],
-        },
-        host: { hostname: "functions.invalid", bundleUrl: "https://example.test/bundle.json" },
-        grantedCapabilities: [],
-      },
-      activate: {
-        route_name: "production",
-        config: publicAccessConfig(),
-        production_hostnames: ["opcache-repair.test"],
-        version_hostnames: [],
-      },
-    });
-
-    const repairStatePath = path.join(repairRuntime.storageRoot, "runtime/repair-state.json");
-    const repairState = JSON.parse(readFileSync(repairStatePath, "utf8")) as {
-      code?: unknown;
-      details?: { path?: unknown };
-    };
-    expect(repairState.code).toBe("opcache_invalidation_failed");
-    expect(typeof repairState.details?.path).toBe("string");
-
-    // The durable file is the signal, and the journal carries the same record
-    // for the fleet drain — a repair that clears one without the other having
-    // ever been written is a silent recovery.
-    const journalPath = path.join(repairRuntime.storageRoot, "runtime/journal.jsonl");
-    const invalidationFailures = readFileSync(journalPath, "utf8")
-      .trim()
-      .split("\n")
-      .filter((line) => {
-        const entry = JSON.parse(line) as { code?: unknown; event?: unknown };
-        return (
-          entry.event === "runtime_repair_required" && entry.code === "opcache_invalidation_failed"
-        );
-      });
-    expect(invalidationFailures.length).toBeGreaterThan(0);
-
-    const repaired = await api(
-      repairRuntime,
-      "POST",
-      `/__spacefast/api.php/spaces/${spaceId}/repair`,
-      "repair_space",
-      { space_id: spaceId },
-    );
-    expect(repaired.status).toBe(200);
-    expect(existsSync(repairStatePath)).toBe(false);
-  } finally {
-    repairRuntime?.stop();
-    rmSync(phpIniRoot, { recursive: true, force: true });
   }
 });

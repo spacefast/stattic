@@ -47,6 +47,12 @@ const visitorJwk = visitorKeyPair.publicKey.export({ format: "jwk" });
 const visitor = visitorIssuer(visitorKeyPair.publicKey);
 const visitorCookies = new Map<string, string>();
 
+interface AdmissionCounterFile {
+  count?: number;
+  started_at?: number;
+  updated_at?: number;
+}
+
 function accessProjection(input?: {
   mode?: "private" | "public";
   memberRefs?: string[];
@@ -239,12 +245,9 @@ function readFileCounter(counterPath: string) {
     };
     if (typeof pointer.generation !== "string") return null;
     const generationPath = `${counterPath}.${pointer.generation}`;
-    return existsSync(generationPath)
-      ? (JSON.parse(readFileSync(generationPath, "utf8")) as {
-          count?: number;
-          updated_at?: number;
-        })
-      : null;
+    if (!existsSync(generationPath)) return null;
+    const counter: AdmissionCounterFile = JSON.parse(readFileSync(generationPath, "utf8"));
+    return counter;
   } catch (error) {
     // PHP updates both snapshots under flock by truncating and rewriting them.
     // This lock-free poller can observe that brief empty-file window; let its
@@ -282,9 +285,14 @@ function seedCounter(runtime: Runtime, spaceId: string, count: number) {
   if (!existsSync(generationPath)) {
     throw new Error(`admission counter ${counterPath} has no active generation file`);
   }
+  const current: AdmissionCounterFile = JSON.parse(readFileSync(generationPath, "utf8"));
   writeFileSync(
     generationPath,
-    `${JSON.stringify({ count, updated_at: Math.floor(Date.now() / 1000) })}\n`,
+    `${JSON.stringify({
+      count,
+      started_at: current.started_at ?? Math.floor(Date.now() / 1000),
+      updated_at: Math.floor(Date.now() / 1000),
+    })}\n`,
   );
 }
 
@@ -344,7 +352,6 @@ echo json_encode([
       // php -S workers, and a fill pair that lands on a single free worker
       // serializes — the counter then never reaches capacity.
       PHP_CLI_SERVER_WORKERS: "32",
-      SPACEFAST_ADMISSION_COUNTER_BACKEND: "file",
       SPACEFAST_RUNTIME_TEST_ADMISSION_HOLD: "1",
       SPACEFAST_RUNTIME_BIN: runtimePath,
     },
@@ -630,7 +637,6 @@ test("admission stale window is a real config knob: a held slot counts within it
   const shrunk = await startRuntime({
     env: {
       PHP_CLI_SERVER_WORKERS: "32",
-      SPACEFAST_ADMISSION_COUNTER_BACKEND: "file",
       SPACEFAST_ADMISSION_STALE_SECONDS: String(windowSeconds),
       SPACEFAST_RUNTIME_TEST_ADMISSION_HOLD: "1",
     },
@@ -725,40 +731,33 @@ test("admission stale window is a real config knob: a held slot counts within it
   }
 });
 
-for (const backend of ["file", "apcu"]) {
-  test(`${backend} admission releases stay within their acquire generation`, () => {
-    const result = Bun.spawnSync({
-      cmd: [PHP_BINARY, "-d", "apc.enable_cli=1", GENERATION_FIXTURE],
-      env: { ...process.env, SPACEFAST_ADMISSION_COUNTER_BACKEND: backend },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+test("admission releases stay within their acquire generation", () => {
+  const result = Bun.spawnSync({
+    cmd: [PHP_BINARY, GENERATION_FIXTURE],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
 
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
-    const output: unknown = JSON.parse(result.stdout.toString());
-    expect(output).toEqual({
-      backend,
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  const output: unknown = JSON.parse(result.stdout.toString());
+  expect(output).toEqual({
+    request_b_admitted: true,
+    generation_file_count_after_rotation: 1,
+    count_after_stale_release: 1,
+    fresh_results: [true, false],
+    persisted_count_at_limit: 2,
+    count_after_current_releases: 0,
+    admitted_after_slots_freed: true,
+    final_persisted_count: 0,
+    generation_file_counts_after_rotations: [1, 1, 1, 1, 1],
+    mixed_file_cutover: {
       request_b_admitted: true,
-      generation_file_count_after_rotation: backend === "file" ? 1 : null,
-      count_after_stale_release: 1,
+      legacy_path_exists_after_cutover: false,
+      count_after_cutover: 1,
+      count_after_legacy_release: 1,
       fresh_results: [true, false],
       persisted_count_at_limit: 2,
-      count_after_current_releases: 0,
-      admitted_after_slots_freed: true,
       final_persisted_count: 0,
-      generation_file_counts_after_rotations: backend === "file" ? [1, 1, 1, 1, 1] : null,
-      mixed_file_cutover:
-        backend === "file"
-          ? {
-              request_b_admitted: true,
-              legacy_path_exists_after_cutover: false,
-              count_after_cutover: 1,
-              count_after_legacy_release: 1,
-              fresh_results: [true, false],
-              persisted_count_at_limit: 2,
-              final_persisted_count: 0,
-            }
-          : null,
-    });
+    },
   });
-}
+});

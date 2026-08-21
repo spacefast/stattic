@@ -63,7 +63,7 @@ function _stattic_runtime_stream_sink_finish(object $sink): array
         if ($sink->reason === null && !fflush($sink->output)) {
             $sink->reason = 'output_flush_failed';
         }
-        if ($sink->reason === null && function_exists('fsync') && !fsync($sink->output)) {
+        if ($sink->reason === null && !fsync($sink->output)) {
             $sink->reason = 'output_sync_failed';
         }
         fclose($sink->output);

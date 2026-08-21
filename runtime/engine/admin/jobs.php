@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/record-store.php';
 
-const STATTIC_RUNTIME_JOB_LANES = ['interactive', 'bulk'];
+const STATTIC_RUNTIME_JOB_LANES = ['bulk'];
 
 const STATTIC_RUNTIME_JOB_DEFAULT_MAX_ATTEMPTS = 5;
 const STATTIC_RUNTIME_JOB_HEARTBEAT_TIMEOUT_SECONDS = 120;
@@ -204,10 +204,12 @@ function _stattic_runtime_job_create(
 function _stattic_runtime_job_find_by_idempotency_key(string $privateRoot, string $idempotencyKey): ?array
 {
     foreach ([_stattic_runtime_jobs_queue_store($privateRoot), _stattic_runtime_jobs_dead_store($privateRoot)] as $store) {
-        foreach (_stattic_runtime_job_records($store) as $job) {
-            if (($job['idempotency_key'] ?? null) === $idempotencyKey) {
-                return $job;
-            }
+        $job = array_find(
+            _stattic_runtime_job_records($store),
+            static fn (array $job): bool => ($job['idempotency_key'] ?? null) === $idempotencyKey
+        );
+        if ($job !== null) {
+            return $job;
         }
     }
     return null;
@@ -507,7 +509,6 @@ function _stattic_runtime_job_maintenance_steps(): array
         'blob_gc' => '_stattic_runtime_job_housekeeping_local_blob_gc',
         'trash_cleanup' => '_stattic_runtime_job_housekeeping_trash_cleanup',
         'route_shard_gc' => '_stattic_runtime_job_housekeeping_route_shard_gc',
-        'purge_requeue' => '_stattic_runtime_job_housekeeping_purge_requeue',
         'disk_report' => '_stattic_runtime_job_housekeeping_disk_report',
     ];
 }
@@ -549,14 +550,6 @@ function _stattic_runtime_job_housekeeping_route_shard_gc(string $privateRoot, a
     }
 }
 
-// A purge whose deferred drain never ran is still owed to the edge. When the
-// queue holds anything, the tick re-arms one in-process drain deferred past its
-// own response — the tick's receipt never carries the WordPress bootstrap.
-function _stattic_runtime_job_housekeeping_purge_requeue(string $privateRoot, array $claims = []): void
-{
-    require_once __DIR__ . '/../shared/purge.php';
-    _stattic_runtime_purge_requeue_drain($privateRoot);
-}
 
 function _stattic_runtime_job_tick(string $privateRoot, string $lane, int $budgetMs = STATTIC_RUNTIME_JOB_DEFAULT_BUDGET_MS, array $claims = [], ?string $jobId = null): array
 {

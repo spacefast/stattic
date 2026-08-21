@@ -24,14 +24,6 @@ const STATTIC_ZERO_DB_DUMP_ARTIFACT_SCAN_MAX = 256;
 const STATTIC_ZERO_DB_EXPORT_ROWS_DEFAULT = 500;
 const STATTIC_ZERO_DB_EXPORT_ROWS_MAX = 1000;
 const STATTIC_ZERO_DB_EXPORT_PAGE_MAX_BYTES = 16777216; // 16 MiB
-const STATTIC_ZERO_DB_IMPORT_ROWS_MAX = 1000;
-// The native broker binds at most 256 positional parameters per statement
-// (crates/stattic-zero-runner/src/db.rs DB_PARAM_MAX_COUNT), so an import page
-// is chunked to fit rather than refused.
-const STATTIC_ZERO_DB_IMPORT_PARAMS_MAX = 256;
-// And at most 64 KiB of operation JSON on stdin (DB_OPERATION_MAX_BYTES); stay a
-// little under it so the broker never sees the overrun refusal.
-const STATTIC_ZERO_DB_IMPORT_OPERATION_MAX_BYTES = 60000;
 
 function _stattic_zero_db_dump(string $privateRoot, string $spaceId, string $versionId): void
 {
@@ -166,7 +158,7 @@ function _stattic_zero_db_export(string $privateRoot, string $spaceId, string $v
     $rows = array_values($decoded['rows']);
     $hasMore = count($rows) > $limit;
     $rows = array_slice($rows, 0, $limit);
-    $last = $rows === [] ? null : $rows[array_key_last($rows)];
+    $last = array_last($rows);
     $table = $scoped['tables'][$tableName];
     $lastCreatedAt = is_array($last)
         ? _stattic_zero_db_export_row_cursor_value($last, $table['createdAt'], 64)
@@ -183,242 +175,6 @@ function _stattic_zero_db_export(string $privateRoot, string $spaceId, string $v
             ? _stattic_zero_db_export_encode_cursor($tableName, $schemaHash, $lastCreatedAt, $lastId)
             : null,
     ]);
-}
-
-/**
- * Replays an exported page against a schema the target already migrated: this
- * route creates nothing, and is idempotent on primary key so the mover may retry.
- *
- * Column identifiers are never taken from the request. The physical column set
- * comes from the DATABASE (`SHOW COLUMNS`), and a row key outside it is refused —
- * so no caller-supplied text ever reaches the SQL text, only the parameters.
- */
-function _stattic_zero_db_import(string $privateRoot, string $spaceId, string $versionId): void
-{
-    $versionRoot = _stattic_zero_db_require_capsule_version($privateRoot, $spaceId, $versionId, 'imported');
-
-    $resolved = _stattic_zero_db_resolve_scoped($versionRoot, $spaceId);
-    $schemaHash = _stattic_zero_db_dump_schema_hash($resolved['config'], $resolved['artifacts']);
-    if ($schemaHash === null) {
-        _stattic_problem_response(
-            409,
-            'zero_db_import_schema_unavailable',
-            'This capsule has no stable schema hash, so an import cannot be fenced safely.',
-        );
-    }
-
-    $body = _stattic_json_body();
-    if (($body['schema_hash'] ?? null) !== $schemaHash) {
-        _stattic_problem_response(
-            409,
-            'zero_db_import_schema_changed',
-            'Database schema does not match the export being replayed. Start a fresh export.',
-        );
-    }
-    $tableName = $body['table'] ?? null;
-    if (!is_string($tableName) || !_stattic_zero_db_logical_name_valid($tableName)) {
-        _stattic_problem_response(422, 'zero_db_table_invalid', 'Table name is not a Zero table identifier.');
-    }
-    if (!isset($resolved['scoped']['tables'][$tableName])) {
-        _stattic_problem_response(
-            404,
-            'zero_db_table_not_found',
-            'Table is not part of this version\'s Zero database.',
-            ['details' => ['table' => $tableName]],
-        );
-    }
-    $rows = $body['rows'] ?? null;
-    if (!is_array($rows) || !array_is_list($rows) || count($rows) > STATTIC_ZERO_DB_IMPORT_ROWS_MAX) {
-        _stattic_problem_response(422, 'zero_db_import_rows_invalid', 'rows must be a list of at most 1000 row objects.');
-    }
-    if (!is_bool($body['done'] ?? null)) {
-        _stattic_problem_response(422, 'zero_db_import_rows_invalid', 'done must be a boolean.');
-    }
-
-    $physical = $resolved['scoped']['tables'][$tableName]['physical'];
-    $imported = $rows === []
-        ? 0
-        : _stattic_zero_db_import_rows($resolved['config'], $physical, $tableName, $rows);
-
-    _stattic_json_response(200, [
-        'space_id' => $spaceId,
-        'version_id' => $versionId,
-        'table' => $tableName,
-        'imported' => $imported,
-    ]);
-}
-
-/**
- * @param list<mixed> $rows
- * @return int rows sent to the database (the import's own count, not affectedRows:
- *             MySQL reports 2 for an ON DUPLICATE KEY update and 0 for a no-op
- *             update, neither of which is a row the mover replayed).
- */
-function _stattic_zero_db_import_rows(array $config, string $physical, string $tableName, array $rows): int
-{
-    $columns = _stattic_zero_db_physical_columns($config, $physical);
-    if ($columns === []) {
-        _stattic_problem_response(
-            409,
-            'zero_db_import_table_unavailable',
-            'The target table has no readable columns; migrate the target before importing.',
-            ['details' => ['table' => $tableName]],
-        );
-    }
-
-    // Every row in one statement must name the SAME columns — the VALUES tuples
-    // are positional — so rows are grouped by their exact column set.
-    $groups = [];
-    foreach ($rows as $row) {
-        if (!is_array($row) || $row === [] || array_is_list($row)) {
-            _stattic_problem_response(422, 'zero_db_import_rows_invalid', 'Each import row must be a non-empty object.');
-        }
-        $names = [];
-        foreach ($row as $column => $value) {
-            if (!is_string($column) || !isset($columns[$column])) {
-                _stattic_problem_response(
-                    422,
-                    'zero_db_import_column_unknown',
-                    'An import row names a column the target table does not have.',
-                    ['details' => ['table' => $tableName, 'column' => is_string($column) ? $column : null]],
-                );
-            }
-            if (is_array($value) || is_object($value)) {
-                _stattic_problem_response(
-                    422,
-                    'zero_db_import_rows_invalid',
-                    'Import row values must be scalars or null.',
-                    ['details' => ['table' => $tableName, 'column' => $column]],
-                );
-            }
-            $names[] = $column;
-        }
-        sort($names, SORT_STRING);
-        $key = implode(',', $names);
-        $groups[$key] ??= ['columns' => $names, 'rows' => []];
-        $ordered = [];
-        foreach ($names as $column) {
-            $ordered[] = $row[$column];
-        }
-        $groups[$key]['rows'][] = $ordered;
-    }
-
-    $imported = 0;
-    foreach ($groups as $group) {
-        $perRow = max(1, count($group['columns']));
-        $chunkRows = max(1, intdiv(STATTIC_ZERO_DB_IMPORT_PARAMS_MAX, $perRow));
-        $pending = array_chunk($group['rows'], $chunkRows);
-        while ($pending !== []) {
-            $chunk = array_shift($pending);
-            $operation = _stattic_zero_db_import_operation($physical, $group['columns'], $chunk);
-            if (strlen($operation) > STATTIC_ZERO_DB_IMPORT_OPERATION_MAX_BYTES) {
-                if (count($chunk) === 1) {
-                    _stattic_problem_response(
-                        413,
-                        'zero_db_import_row_too_large',
-                        'A single import row exceeds the database operation size limit.',
-                        ['details' => ['table' => $tableName]],
-                    );
-                }
-                $half = intdiv(count($chunk), 2);
-                array_unshift($pending, array_slice($chunk, 0, $half), array_slice($chunk, $half));
-                continue;
-            }
-            $decoded = json_decode(_stattic_zero_db_write_operation($config, $operation), true, 512, JSON_BIGINT_AS_STRING);
-            if (!is_array($decoded) || ($decoded['ok'] ?? null) !== true) {
-                _stattic_problem_response(
-                    500,
-                    'zero_db_import_failed',
-                    'Zero database import failed.',
-                    ['details' => [
-                        'table' => $tableName,
-                        'zero_db_code' => is_array($decoded) && is_string($decoded['code'] ?? null) ? $decoded['code'] : null,
-                    ]],
-                );
-            }
-            $imported += count($chunk);
-        }
-    }
-
-    return $imported;
-}
-
-/**
- * The target's own column set, read from the database rather than the request or
- * the artifact: that is what makes every identifier in the SQL below
- * database-supplied.
- *
- * @return array<string,true>
- */
-function _stattic_zero_db_physical_columns(array $config, string $physical): array
-{
-    $operation = json_encode(
-        ['sql' => 'SHOW COLUMNS FROM ' . _stattic_zero_db_quote($physical)],
-        JSON_UNESCAPED_SLASHES
-    );
-    $decoded = json_decode(
-        _stattic_zero_db_read_operation($config, is_string($operation) ? $operation : '{}'),
-        true
-    );
-    if (!is_array($decoded) || ($decoded['ok'] ?? null) !== true || !is_array($decoded['rows'] ?? null)) {
-        return [];
-    }
-    $columns = [];
-    foreach ($decoded['rows'] as $row) {
-        $name = is_array($row) ? ($row['Field'] ?? null) : null;
-        if (is_string($name) && _stattic_zero_db_identifier_valid($name)) {
-            $columns[$name] = true;
-        }
-    }
-    return $columns;
-}
-
-/**
- * @param list<string> $columns database-supplied identifiers
- * @param list<list<mixed>> $rows values positionally aligned to $columns
- */
-function _stattic_zero_db_import_operation(string $physical, array $columns, array $rows): string
-{
-    $quoted = array_map('_stattic_zero_db_quote', $columns);
-    $tuple = '(' . implode(', ', array_fill(0, count($columns), '?')) . ')';
-    $params = [];
-    foreach ($rows as $row) {
-        foreach ($row as $value) {
-            $params[] = $value;
-        }
-    }
-    $assignments = [];
-    foreach ($quoted as $column) {
-        $assignments[] = $column . ' = VALUES(' . $column . ')';
-    }
-    $sql = 'INSERT INTO ' . _stattic_zero_db_quote($physical)
-        . ' (' . implode(', ', $quoted) . ') VALUES '
-        . implode(', ', array_fill(0, count($rows), $tuple))
-        . ' ON DUPLICATE KEY UPDATE ' . implode(', ', $assignments);
-    $encoded = json_encode(['sql' => $sql, 'params' => $params, 'mode' => 'execute'], JSON_UNESCAPED_SLASHES);
-
-    return is_string($encoded) ? $encoded : '{}';
-}
-
-// The ONLY place in this file that grants db.write: the read lanes stay
-// structurally incapable of changing tenant data.
-function _stattic_zero_db_write_operation(array $config, string $operation): string
-{
-    $env = _stattic_zero_runner_base_env($config);
-    $env['SPACEFAST_DB_BROKER_GRANT'] = 'db.write';
-    $result = _stattic_runtime_run_subprocess(
-        [_stattic_runtime_native_binary(), 'db-broker'],
-        $env,
-        $operation,
-        null,
-        30000,
-        65536,
-        65536
-    );
-    if (!$result['spawned'] || $result['timedOut'] || $result['exitCode'] !== 0) {
-        return '';
-    }
-    return trim($result['stdout']);
 }
 
 function _stattic_zero_db_require_capsule_version(
@@ -506,31 +262,18 @@ function _stattic_zero_db_export_row_cursor_value(array $row, string $column, in
 
 function _stattic_zero_db_export_limit(): int
 {
-    $raw = $_GET['limit'] ?? null;
-    if ($raw === null || $raw === '') {
-        return STATTIC_ZERO_DB_EXPORT_ROWS_DEFAULT;
-    }
-    if (!is_string($raw) || !ctype_digit($raw) || (int) $raw < 1 || (int) $raw > STATTIC_ZERO_DB_EXPORT_ROWS_MAX) {
-        _stattic_problem_response(422, 'validation_error', 'Export page size must be between 1 and 1000.');
-    }
-    return (int) $raw;
+    return _stattic_query_limit(STATTIC_ZERO_DB_EXPORT_ROWS_DEFAULT, STATTIC_ZERO_DB_EXPORT_ROWS_MAX, 'Export page size must be between 1 and 1000.');
 }
 
 /** @return array{createdAt:string,id:string}|null */
 function _stattic_zero_db_export_cursor(string $tableName, string $schemaHash): ?array
 {
-    $raw = $_GET['cursor'] ?? null;
-    if ($raw === null || $raw === '') {
+    $payload = _stattic_query_cursor_payload(4096, '_stattic_zero_db_export_bad_cursor');
+    if ($payload === null) {
         return null;
     }
-    if (!is_string($raw) || strlen($raw) > 4096 || preg_match('/^[A-Za-z0-9_-]+$/', $raw) !== 1) {
-        _stattic_zero_db_export_bad_cursor();
-    }
-    $decoded = _stattic_base64url_decode($raw);
-    $payload = json_decode($decoded, true);
     if (
-        !is_array($payload)
-        || ($payload['v'] ?? null) !== 1
+        ($payload['v'] ?? null) !== 1
         || ($payload['table'] ?? null) !== $tableName
         || ($payload['schemaHash'] ?? null) !== $schemaHash
         || !is_string($payload['createdAt'] ?? null)
@@ -552,14 +295,13 @@ function _stattic_zero_db_export_encode_cursor(
     string $id
 ): string
 {
-    $json = json_encode([
+    return _stattic_query_cursor_encode([
         'v' => 1,
         'table' => $tableName,
         'schemaHash' => $schemaHash,
         'createdAt' => $createdAt,
         'id' => $id,
-    ], JSON_UNESCAPED_SLASHES);
-    return _stattic_base64url_encode(is_string($json) ? $json : '{}');
+    ]);
 }
 
 function _stattic_zero_db_export_bad_cursor(): never
@@ -816,7 +558,7 @@ function _stattic_zero_db_dump_schema_hash(array $config, array $artifacts): ?st
 
 function _stattic_zero_db_schema_hash_valid(string $value): bool
 {
-    return preg_match('/^sha256:[a-f0-9]{64}$/', $value) === 1;
+    return str_starts_with($value, 'sha256:') && _stattic_is_sha256_hex(substr($value, 7));
 }
 
 function _stattic_zero_db_logical_name_valid(string $value): bool

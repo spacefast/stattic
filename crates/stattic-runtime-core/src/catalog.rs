@@ -30,7 +30,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::finalize::{
-    invalid, mime_for_path, rewrite_json_compact, FileMeta, FinalizeError, Result,
+    invalid, invalid_error, mime_for_path, rewrite_json_compact, FileMeta, FinalizeError, Result,
 };
 use crate::hash::stable_json_sha256;
 use crate::protocol::CACHE_CLASS_IMMUTABLE;
@@ -139,6 +139,14 @@ pub struct CatalogDigests {
     pub served: String,
 }
 
+/// The shape the served digest is taken over: path → served sha (absent for a
+/// private path) plus the per-channel overrides.
+#[derive(Serialize)]
+struct ServedDigestInput<'a> {
+    paths: BTreeMap<&'a str, Option<&'a str>>,
+    variants: BTreeMap<&'a str, BTreeMap<&'a str, &'a str>>,
+}
+
 impl FileCatalog {
     pub fn digests(&self) -> CatalogDigests {
         CatalogDigests {
@@ -149,27 +157,31 @@ impl FileCatalog {
                     .map(|(path, entry)| (path.as_str(), entry.source.sha256.as_str()))
                     .collect::<BTreeMap<_, _>>(),
             ),
-            served: stable_json_sha256(&serde_json::json!({
-                "paths": self
+            served: stable_json_sha256(&ServedDigestInput {
+                paths: self
                     .paths
                     .iter()
-                    .map(|(path, entry)| (
-                        path.clone(),
-                        entry.served.as_ref().map(|served| served.sha256.clone()),
-                    ))
-                    .collect::<BTreeMap<_, _>>(),
-                "variants": self
+                    .map(|(path, entry)| {
+                        (
+                            path.as_str(),
+                            entry.served.as_ref().map(|served| served.sha256.as_str()),
+                        )
+                    })
+                    .collect(),
+                variants: self
                     .variants
                     .iter()
-                    .map(|(channel, overrides)| (
-                        channel.clone(),
-                        overrides
-                            .iter()
-                            .map(|(path, object)| (path.clone(), object.sha256.clone()))
-                            .collect::<BTreeMap<_, _>>(),
-                    ))
-                    .collect::<BTreeMap<_, _>>(),
-            })),
+                    .map(|(channel, overrides)| {
+                        (
+                            channel.as_str(),
+                            overrides
+                                .iter()
+                                .map(|(path, object)| (path.as_str(), object.sha256.as_str()))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            }),
         }
     }
 }
@@ -569,12 +581,12 @@ pub fn read_version_catalog(version_root: &Path) -> Result<Option<FileCatalog>> 
     let Some(embedded) = metadata.get(VERSION_CATALOG_METADATA_KEY) else {
         return Ok(None);
     };
-    let catalog: FileCatalog =
-        serde_json::from_value(embedded.clone()).map_err(|_| FinalizeError::Invalid {
-            code: "runtime_file_catalog_invalid",
-            message: format!("{} does not embed a readable catalog.", path.display()),
-            details: None,
-        })?;
+    let catalog: FileCatalog = serde_json::from_value(embedded.clone()).map_err(|_| {
+        invalid_error(
+            "runtime_file_catalog_invalid",
+            format!("{} does not embed a readable catalog.", path.display()),
+        )
+    })?;
     if catalog.format != FILE_CATALOG_FORMAT {
         return invalid(
             "runtime_file_catalog_invalid",
@@ -651,10 +663,11 @@ pub fn catalog_from_metadata(metadata: &Value, blobs: &Path) -> Result<FileCatal
     let files = metadata
         .get("files")
         .and_then(Value::as_object)
-        .ok_or_else(|| FinalizeError::Invalid {
-            code: "runtime_file_catalog_invalid",
-            message: format!("Version {version_id} records no file map."),
-            details: None,
+        .ok_or_else(|| {
+            invalid_error(
+                "runtime_file_catalog_invalid",
+                format!("Version {version_id} records no file map."),
+            )
         })?;
     let recorded_public: Option<BTreeSet<&str>> = metadata
         .get("publicFiles")
@@ -676,12 +689,13 @@ pub fn catalog_from_metadata(metadata: &Value, blobs: &Path) -> Result<FileCatal
                 .is_none_or(|recorded| recorded.contains(path.as_str()));
         let source = match originals.get(path).and_then(Value::as_str) {
             Some(sha) => ObjectIdentity {
-                size: cas_object_size(blobs, sha).ok_or_else(|| FinalizeError::Invalid {
-                    code: "runtime_file_catalog_invalid",
-                    message: format!(
-                        "Version {version_id} names an uploaded object for {path} that is not in the CAS."
-                    ),
-                    details: None,
+                size: cas_object_size(blobs, sha).ok_or_else(|| {
+                    invalid_error(
+                        "runtime_file_catalog_invalid",
+                        format!(
+                            "Version {version_id} names an uploaded object for {path} that is not in the CAS."
+                        ),
+                    )
                 })?,
                 content_type: served.content_type.clone(),
                 sha256: sha.to_string(),
@@ -769,18 +783,20 @@ fn required_str<'a>(metadata: &'a Map<String, Value>, key: &str) -> Result<&'a s
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| FinalizeError::Invalid {
-            code: "runtime_file_catalog_invalid",
-            message: format!("Version metadata records no {key}."),
-            details: None,
+        .ok_or_else(|| {
+            invalid_error(
+                "runtime_file_catalog_invalid",
+                format!("Version metadata records no {key}."),
+            )
         })
 }
 
 fn metadata_identity(path: &str, entry: &Value, version_id: &str) -> Result<ObjectIdentity> {
-    let invalid_entry = || FinalizeError::Invalid {
-        code: "runtime_file_catalog_invalid",
-        message: format!("Version {version_id} records an unreadable entry for {path}."),
-        details: None,
+    let invalid_entry = || {
+        invalid_error(
+            "runtime_file_catalog_invalid",
+            format!("Version {version_id} records an unreadable entry for {path}."),
+        )
     };
     let sha256 = entry
         .get("sha256")

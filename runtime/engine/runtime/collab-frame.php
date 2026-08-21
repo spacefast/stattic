@@ -17,6 +17,9 @@ declare(strict_types=1);
 require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/response.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
+// The SDK lane owns every Comments accessor (config, surface predicate, theme);
+// this frame reads the same projection through the same helpers.
+require_once __DIR__ . '/spacefast-sdk.php';
 
 function _stattic_serve_collab_frame(
     array $serving,
@@ -51,15 +54,12 @@ function _stattic_serve_collab_frame(
         ]);
     }
 
-    $comments = _stattic_collab_frame_comments($serving);
-    $castBase = _stattic_collab_frame_cast_base($serving);
+    $sdkConfig = _stattic_spacefast_sdk_config($serving);
+    $comments = is_array($sdkConfig['comments'] ?? null) ? $sdkConfig['comments'] : [];
+    $castBase = _stattic_spacefast_sdk_base_url($sdkConfig);
     // The frame is a Comments surface, not a bypass: the lane that decides
     // whether this Space speaks on this host decides whether the shell exists.
-    // Preview lane on an immutable version host, live lane otherwise — the same
-    // predicate the config lane uses, because the request reaching this host is
-    // itself the proof of which surface it is.
-    $lane = !empty($serving['immutable']) ? 'preview' : 'live';
-    if (($comments[$lane] ?? null) !== true || $castBase === null) {
+    if (!_stattic_comments_enabled_for_surface($serving) || $castBase === null) {
         _stattic_problem_response(
             404,
             'collab_frame_not_found',
@@ -75,29 +75,6 @@ function _stattic_serve_collab_frame(
         'text/html; charset=utf-8',
         ['Cache-Control' => $policy['cache_control']],
     );
-}
-
-/**
- * The space-level Comments block of the overlay, read directly rather than
- * through the SDK lane: the frame and the SDK bootstrap answer different
- * questions off the same projection.
- */
-function _stattic_collab_frame_comments(array $serving): array
-{
-    $sdk = is_array($serving['sdk'] ?? null) ? $serving['sdk'] : [];
-    $config = is_array($sdk['config'] ?? null) ? $sdk['config'] : [];
-    return is_array($config['comments'] ?? null) ? $config['comments'] : [];
-}
-
-function _stattic_collab_frame_cast_base(array $serving): ?string
-{
-    $sdk = is_array($serving['sdk'] ?? null) ? $serving['sdk'] : [];
-    $config = is_array($sdk['config'] ?? null) ? $sdk['config'] : [];
-    $base = is_string($config['cast_api_base'] ?? null) && trim($config['cast_api_base']) !== ''
-        ? trim($config['cast_api_base'])
-        : _stattic_config_value('SPACEFAST_CAST_API_URL');
-    $base = rtrim($base, '/');
-    return $base !== '' && filter_var($base, FILTER_VALIDATE_URL) ? $base : null;
 }
 
 /**
@@ -119,8 +96,6 @@ function _stattic_collab_frame_path(): ?string
 
 function _stattic_collab_frame_document(array $serving, array $comments, string $castBase): string
 {
-    $theme = is_array($comments['theme'] ?? null) ? $comments['theme'] : [];
-    $accent = $theme['accent'] ?? null;
     $descriptor = _stattic_access_page_descriptor($serving);
     $name = is_array($descriptor) && is_string($descriptor['displayName'] ?? null)
         ? $descriptor['displayName']
@@ -131,12 +106,7 @@ function _stattic_collab_frame_document(array $serving, array $comments, string 
         // Null = the requested page was not a same-origin path.
         'path' => $path,
         'space' => ['name' => $name],
-        'theme' => [
-            'accent' => is_string($accent) && preg_match('/\A#[0-9a-fA-F]{6}\z/', $accent) === 1
-                ? $accent
-                : null,
-            'hide_branding' => ($theme['hide_branding'] ?? null) === true,
-        ],
+        'theme' => _stattic_comments_overlay_theme($comments),
     ];
     // JSON_HEX_TAG is what keeps `</script` out of the inline block.
     $json = (string) json_encode($manifest, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);

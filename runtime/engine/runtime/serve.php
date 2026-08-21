@@ -43,7 +43,7 @@ function _stattic_private_file_alias_source(string $path): string|false|null
 
 function _stattic_private_file_alias_not_found(): never
 {
-    _sf_send_headers(['cache-control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE]);
+    _stattic_send_response_headers(['cache-control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE]);
     http_response_code(404);
     exit;
 }
@@ -53,7 +53,7 @@ function _stattic_private_file_alias_redirect(string $sourcePath): never
     $query = _stattic_strip_access_query_token((string) ($_SERVER['QUERY_STRING'] ?? ''));
     $location = $sourcePath . STATTIC_PRIVATE_FILE_ALIAS_SUFFIX
         . ($query === '' ? '' : '?' . $query);
-    _sf_send_headers([
+    _stattic_send_response_headers([
         'cache-control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
         'referrer-policy' => 'no-referrer',
     ]);
@@ -174,7 +174,6 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     }
     $tagPreviewToken = _stattic_spacefast_tag_preview_token($requestMethod);
 
-    $GLOBALS['SPACEFAST_ADMISSION_ACQUIRED'] = false;
     // The Allow union of every lane that declined this request for its METHOD
     // alone (a static entry, a Zero pattern, a Functions route at other verbs).
     // A non-empty union at the end of the ladder is a 405 naming it — never a
@@ -240,8 +239,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
                 $serving,
                 $requestHost,
                 $requestPath,
-                $requestMethod,
-                $originalRequestPath
+                $requestMethod
             );
         }
     }
@@ -320,7 +318,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         $result = _stattic_apply_redirects(
             $redirectRules,
             $serving,
-            static fn (string $candidate): bool => _stattic_v4_entry($versionDir, $root, $candidate) !== null,
+            // The request path's own entry is already resolved above — reuse it
+            // instead of re-hashing the same table key per matching rule.
+            static fn (string $candidate): bool => $candidate === $requestPath
+                ? $entry !== null
+                : _stattic_v4_entry($versionDir, $root, $candidate) !== null,
             $requestHost,
             $requestPath,
             $requestMethod,
@@ -361,13 +363,10 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             ? _stattic_spacefast_sdk_access_path($serving, $requestHost, $requestPath)
             : $requestPath;
         _stattic_access_enforce_v4(
-            $overlay,
             $requestHost,
             $accessPath,
-            $requestMethod,
             $accessPath === $requestPath ? $originalRequestPath : $accessPath
         );
-        $serving = is_array($GLOBALS['SPACEFAST_PAGE_SERVING'] ?? null) ? $GLOBALS['SPACEFAST_PAGE_SERVING'] : $serving;
     }
     // The enforcement verdict, not the overlay flag: a Space that HAS grants but
     // admits this URL anonymously and unconditionally is still URL-stable, and
@@ -387,8 +386,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             $serving,
             $requestHost,
             $requestPath,
-            $requestMethod,
-            $originalRequestPath
+            $requestMethod
         );
     }
 
@@ -423,20 +421,13 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         && in_array($requestMethod, ['GET', 'HEAD'], true)) {
         $collabPages = is_array($serving['pages'] ?? null) ? $serving['pages'] : [];
         if (is_string($collabPages['collab'] ?? null)) {
-            require_once __DIR__ . '/../shared/errors.php';
-            _stattic_serve_page('collab', [
-                'status' => 200,
-                'customizable' => true,
-                'artifact' => $collabPages['collab'],
-                'request_path' => $originalRequestPath,
-                'serving' => $serving,
-                'private' => $privateCache,
-                'headers' => [
-                    'Cache-Control' => $privateCache
-                        ? STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE
-                        : STATTIC_DEFAULT_EDGE_CACHE_CONTROL,
-                ],
-            ]);
+            _stattic_v4_serve_artifact_page(
+                'collab',
+                $collabPages['collab'],
+                $originalRequestPath,
+                $serving,
+                $privateCache
+            );
         }
     }
 
@@ -472,20 +463,13 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // the artifact reader binds it back to that same version root.
     $previewArtifact = _stattic_v4_preview_artifact($serving, $requestPath, $requestMethod);
     if ($previewArtifact !== null) {
-        require_once __DIR__ . '/../shared/errors.php';
-        _stattic_serve_page('preview', [
-            'status' => 200,
-            'customizable' => true,
-            'artifact' => $previewArtifact,
-            'request_path' => $requestPath,
-            'serving' => $serving,
-            'private' => $privateCache,
-            'headers' => [
-                'Cache-Control' => $privateCache
-                    ? STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE
-                    : STATTIC_DEFAULT_EDGE_CACHE_CONTROL,
-            ],
-        ]);
+        _stattic_v4_serve_artifact_page(
+            'preview',
+            $previewArtifact,
+            $requestPath,
+            $serving,
+            $privateCache
+        );
     }
 
     // The platform's deny-all robots.txt outranks a published file at that path
@@ -573,7 +557,8 @@ function _stattic_v4_version_root_artifact(string $versionDir, ?string $routeNam
 {
     // A finalized version is immutable. Cache only its tiny mutable pointer;
     // the content-addressed PHP artifact remains OPcache's responsibility.
-    $pointerRead = _sf_pointer_read('version-root:' . hash('sha256', $versionDir), $versionDir . '/root.json');
+    // The name only labels failure log lines — no reason to hash the path.
+    $pointerRead = _sf_pointer_read('version-root:' . basename($versionDir), $versionDir . '/root.json');
     if ($pointerRead['kind'] === 'unavailable') {
         // Terminal here, not a null return: null means version-pending, whose
         // s-maxage=30 would park this failure in the shared edge cache.
@@ -612,6 +597,32 @@ function _stattic_v4_preview_artifact(array $serving, string $requestPath, strin
     return is_string($artifact) && preg_match('/^[a-z0-9-]{1,240}$/', $artifact) === 1
         ? $artifact
         : null;
+}
+
+// The reserved pages the Space publishes but the table never routes: the
+// finalized document answers the URL directly, with this response's own
+// privacy deciding whether the edge may hold it.
+function _stattic_v4_serve_artifact_page(
+    string $pageId,
+    string $artifact,
+    string $requestPath,
+    array $serving,
+    bool $privateCache
+): never {
+    require_once __DIR__ . '/../shared/errors.php';
+    _stattic_serve_page($pageId, [
+        'status' => 200,
+        'customizable' => true,
+        'artifact' => $artifact,
+        'request_path' => $requestPath,
+        'serving' => $serving,
+        'private' => $privateCache,
+        'headers' => [
+            'Cache-Control' => $privateCache
+                ? STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE
+                : STATTIC_DEFAULT_EDGE_CACHE_CONTROL,
+        ],
+    ]);
 }
 
 // A single table by default; sharded by sha256(key)[0:2] once the one file
@@ -662,73 +673,32 @@ function _stattic_v4_nearest_not_found(string $versionDir, array $root, string $
 // cacheability question WITHOUT requiring a cookie on this request: the normal
 // response must never warm a shared edge cache that would hide a later cookie
 // from PHP altogether.
-/** @return array{kind: 'present', value: mixed}|array{kind: 'absent'|'unavailable'} */
-function _stattic_v4_functions_config_read(string $path): array
-{
-    // Request-scoped: this runs before every static send, and the bypass path
-    // reads the same document again. Only the settled outcomes — present and
-    // verified absent — are memoized; `unavailable` is transient and every
-    // caller must get its own retry.
-    static $cache = [];
-    if (array_key_exists($path, $cache)) {
-        return $cache[$path];
-    }
-    if (!is_file($path) && _sf_path_verifiably_absent($path)) {
-        return $cache[$path] = ['kind' => 'absent'];
-    }
-    error_clear_last();
-    $raw = file_get_contents($path);
-    if (!is_string($raw)) {
-        clearstatcache(true, $path);
-        if (_sf_path_verifiably_absent($path)) {
-            return $cache[$path] = ['kind' => 'absent'];
-        }
-        _sf_runtime_log_read_failure('functions_config_read_failed', $path);
-        return ['kind' => 'unavailable'];
-    }
-    $decoded = json_decode($raw, true);
-    if ($decoded === null && trim($raw) !== 'null') {
-        _sf_runtime_log_read_failure('functions_config_decode_failed', $path);
-        return ['kind' => 'unavailable'];
-    }
-    return $cache[$path] = ['kind' => 'present', 'value' => $decoded];
-}
-
 function _stattic_v4_functions_static_bypass_capable(string $versionRoot, string $requestPath, string $requestMethod): bool
 {
     if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
         return false;
     }
-    $configRead = _stattic_v4_functions_config_read(dirname($versionRoot) . '/functions/config.json');
+    $configRead = _stattic_functions_config_read($versionRoot);
     if ($configRead['kind'] === 'absent') {
         // Verified absence is the only state that proves this version has no
         // Functions cookie-bypass policy.
         return false;
     }
-    if ($configRead['kind'] === 'unavailable') {
-        return true;
-    }
-    $config = $configRead['value'];
-    $host = is_array($config) && is_array($config['host'] ?? null) ? $config['host'] : [];
-    $artifact = is_array($config) && is_array($config['artifact'] ?? null) ? $config['artifact'] : [];
-    if (
-        !is_array($config)
-        || ($config['runtimeKind'] ?? null) !== 'functions'
-        || !is_string($host['hostname'] ?? null) || $host['hostname'] === ''
-        || !is_string($host['bundleUrl'] ?? null) || $host['bundleUrl'] === ''
-        || !is_string($artifact['mainModule'] ?? null) || $artifact['mainModule'] === ''
-        || !is_string($artifact['compatibilityDate'] ?? null) || $artifact['compatibilityDate'] === ''
-        || !array_key_exists('bypassCookies', $artifact)
-        || !is_array($artifact['bypassCookies'])
-    ) {
+    if ($configRead['kind'] !== 'present') {
         // Unavailable/malformed configuration is NOT proof of no bypass.
         // Conservatively keep the ordinary response out of shared cache; a
         // later healthy request can recover the exact route/cookie answer
         // without a stale edge HIT hiding it.
         return true;
     }
-    $bypassCookies = $artifact['bypassCookies'];
-    if ($bypassCookies === []) {
+    // `present` already proved `artifact` is an array with its required fields.
+    $artifact = $configRead['value']['artifact'];
+    if (!array_key_exists('bypassCookies', $artifact) || !is_array($artifact['bypassCookies'])) {
+        // Stricter than the dispatch lane on purpose: a config that does not
+        // state its bypass policy cannot prove the response is invariant.
+        return true;
+    }
+    if ($artifact['bypassCookies'] === []) {
         return false;
     }
     require_once __DIR__ . '/functions-dispatch.php';
@@ -886,10 +856,10 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     } elseif ($privateProviderAsset) {
         $lane = STATTIC_RUNTIME_RESPONSE_LANE_PHP;
     }
-    $blobRelativePath = $blobSha === null ? null : _stattic_v4_blob_path((string) $context['space_id'], $blobSha);
+    $blobRelativePath = $blobSha === null ? null : _stattic_blob_relative_key((string) $context['space_id'], $blobSha);
 
     if ($blobRelativePath === null) {
-        _sf_send_headers($headers);
+        _stattic_send_response_headers($headers);
         http_response_code($status);
         exit;
     }
@@ -909,7 +879,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
             ? STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE
             : STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
         $headers['content-length'] = (string) strlen($body);
-        _sf_send_headers($headers);
+        _stattic_send_response_headers($headers);
         http_response_code(200);
         if ($method === 'GET') {
             echo $body;
@@ -923,14 +893,13 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
             $absolutePath,
             (string) $context['private_root'],
             $headers,
-            $status,
-            '_sf_send_headers'
+            $status
         );
     }
 
     if ($method === 'HEAD') {
         $headers['content-length'] = (string) $length;
-        _sf_send_headers($headers);
+        _stattic_send_response_headers($headers);
         http_response_code($status);
         exit;
     }
@@ -938,7 +907,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     _stattic_acquire_static_stream_admission($context, $length);
     $stream = _stattic_v4_open_blob($context, $absolutePath, $blobRelativePath);
     $headers['content-length'] = (string) $length;
-    _sf_send_headers($headers);
+    _stattic_send_response_headers($headers);
     http_response_code($status);
     _stattic_stream_file($stream, $length);
     fclose($stream);
@@ -1048,7 +1017,7 @@ function _stattic_v4_dispatch_action(array $context, array $action, array $entry
         _stattic_admission_acquire_once((string) $context['private_root'], $serving, 'zero');
         require_once __DIR__ . '/zero.php';
         _stattic_invoke_zero(
-            _stattic_v4_zero_action($action),
+            $action,
             (string) $context['version_root'],
             $serving,
             (string) $context['host'],
@@ -1124,7 +1093,7 @@ function _stattic_v4_serve_listing(array $context, array $action, array $entry, 
     $headers['content-type'] = 'text/html; charset=utf-8';
     $body = str_replace(STATTIC_RUNTIME_LISTING_ROWS_MARKER, $rows, $shell);
     $headers['content-length'] = (string) strlen($body);
-    _sf_send_headers($headers);
+    _stattic_send_response_headers($headers);
     http_response_code(200);
     if ((string) $context['method'] !== 'HEAD') {
         echo $body;
@@ -1146,14 +1115,12 @@ function _stattic_v4_listing_row_visible(array $context, string $path): bool
     return $admitted !== null;
 }
 
-function _stattic_v4_blob_path(string $spaceId, string $sha): string
-{
-    return 'spaces/' . $spaceId . '/blobs/' . substr($sha, 0, 2) . '/' . $sha;
-}
-
 function _stattic_v4_blob_contents(array $context, string $sha): ?string
 {
-    $relative = _stattic_v4_blob_path((string) $context['space_id'], $sha);
+    $relative = _stattic_blob_relative_key((string) $context['space_id'], $sha);
+    if ($relative === null) {
+        return null;
+    }
     $absolute = (string) $context['private_root'] . '/' . $relative;
     $body = file_get_contents($absolute);
     if (is_string($body)) {
@@ -1167,25 +1134,17 @@ function _stattic_v4_blob_contents(array $context, string $sha): ?string
 // The "\0rules" entry carries both sections under the entry's ACTION key, the
 // same slot every other non-file entry uses. A flat ordered-rule shape is still
 // read as the redirect list.
+// The residue always rides the entry's action object with `redirects`/`headers`
+// sections — the only shape the compiler emits.
 function _stattic_v4_rule_section(?array $rulesEntry, string $section): ?array
 {
-    if ($rulesEntry === null) {
-        return null;
-    }
-    $residue = is_array($rulesEntry[STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION] ?? null)
-        ? $rulesEntry[STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION]
-        : $rulesEntry;
-    $rules = is_array($residue[$section] ?? null)
-        ? $residue[$section]
-        : ($section === 'redirects' && !isset($residue['redirects']) ? $residue : null);
+    $rules = $rulesEntry[STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION][$section] ?? null;
     if (!is_array($rules) || (empty($rules['exact']) && empty($rules['pattern']))) {
         return null;
     }
     return [
         'exact' => $rules['exact'] ?? [],
         'pattern' => $rules['pattern'] ?? [],
-        // Missing means "compiled before the flag existed": walk, don't assume.
-        'has_conditions' => $rules['has_conditions'] ?? true,
     ];
 }
 
@@ -1251,28 +1210,6 @@ function _stattic_v4_rule_headers(array $context): array
         }
     }
     return $memo = [$lowered, $removed];
-}
-
-// `a` carries the Zero fields under their compiled names; zero.php reads its own
-// spellings, so this adapter is the one place the two are reconciled.
-function _stattic_v4_zero_action(array $action): array
-{
-    $mapped = ['action' => 'invoke_zero'];
-    foreach (['operation', 'endpoint_id', 'zero_artifact', 'methods', 'params', 'schema_hash', 'zero_indexed'] as $key) {
-        if (array_key_exists($key, $action)) {
-            $mapped[$key] = $action[$key];
-        }
-    }
-    // The compiler spells the two exact-route fields `endpoint` and `artifact`
-    // (site_finalize.rs zero_actions); zero.php reads `endpoint_id` and
-    // `zero_artifact`.
-    if (isset($action['endpoint']) && !isset($mapped['endpoint_id'])) {
-        $mapped['endpoint_id'] = $action['endpoint'];
-    }
-    if (isset($action['artifact']) && !isset($mapped['zero_artifact'])) {
-        $mapped['zero_artifact'] = $action['artifact'];
-    }
-    return $mapped;
 }
 
 // Pattern routes (`/api/:id`) cannot be table keys, so their artifacts are
@@ -1709,14 +1646,6 @@ function _stattic_spacefast_sdk_access_path(array $serving, string $requestHost,
     return $refererPath;
 }
 
-// One admission slot per request: the access lane reserves through this, before
-// any matching rule (bcrypt included) can render a decision.
-function _stattic_acquire_access_admission(string $privateRoot, array $serving): void
-{
-    require_once __DIR__ . '/../shared/admission.php';
-    _stattic_admission_acquire_access_lane($privateRoot, $serving);
-}
-
 // Space-scoped and unversioned: every app tier reaches this same handler, and a
 // publish or rollback only changes the code calling it, never its records.
 function _stattic_dispatch_storage(
@@ -1724,8 +1653,7 @@ function _stattic_dispatch_storage(
     array $serving,
     string $requestHost,
     string $requestPath,
-    string $requestMethod,
-    string $originalRequestPath
+    string $requestMethod
 ): void {
     require_once __DIR__ . '/../shared/admission.php';
     _stattic_admission_acquire_once($privateRoot, $serving, 'storage');
@@ -1735,8 +1663,7 @@ function _stattic_dispatch_storage(
         $serving,
         $requestHost,
         $requestPath,
-        $requestMethod,
-        $originalRequestPath
+        $requestMethod
     );
 }
 
@@ -1765,35 +1692,28 @@ function _stattic_serving_content_type_policy(array $serving): ?array
 function _stattic_content_type_allowlist_permits(array $policy, string $contentType): bool
 {
     $normalized = strtolower(trim(explode(';', $contentType, 2)[0]));
-    foreach ($policy['allowed'] as $pattern) {
+    return array_any($policy['allowed'], static function (mixed $pattern) use ($normalized): bool {
         if (!is_string($pattern) || $pattern === '') {
-            continue;
+            return false;
         }
         $pattern = strtolower($pattern);
-        if (str_ends_with($pattern, '/*')) {
-            if (str_starts_with($normalized, substr($pattern, 0, -1))) {
-                return true;
-            }
-        } elseif ($normalized === $pattern) {
-            return true;
-        }
-    }
-    return false;
+        return str_ends_with($pattern, '/*')
+            ? str_starts_with($normalized, substr($pattern, 0, -1))
+            : $normalized === $pattern;
+    });
 }
 
 function _stattic_render_content_type_blocked(array $policy): never
 {
-    // no-store: the policy clears on the next overlay swap, so it must never
-    // outlive it in a shared cache.
-    http_response_code(403);
-    header('Content-Type: text/plain; charset=utf-8');
-    header('Cache-Control: no-store');
-    header('X-Robots-Tag: noindex, nofollow');
     $message = is_string($policy['blocked_message'] ?? null) && $policy['blocked_message'] !== ''
         ? $policy['blocked_message']
         : 'This file type is not served on this space.';
-    echo $message . "\n";
-    exit;
+    // no-store: the policy clears on the next overlay swap, so it must never
+    // outlive it in a shared cache.
+    _stattic_response_send(403, $message . "\n", 'text/plain; charset=utf-8', [
+        'Cache-Control' => 'no-store',
+        'X-Robots-Tag' => 'noindex, nofollow',
+    ]);
 }
 
 function _stattic_spacefast_tag_preview_token(string $requestMethod): ?string

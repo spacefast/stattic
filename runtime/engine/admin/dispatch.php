@@ -39,8 +39,8 @@ if (!is_string($raw) || strlen($raw) > STATTIC_RUNTIME_DISPATCH_MAX_ENVELOPE_BYT
 $request = json_decode($raw, true);
 $method = is_array($request) && is_string($request['method'] ?? null) ? strtoupper(trim($request['method'])) : '';
 $path = is_array($request) && is_string($request['path'] ?? null) ? trim($request['path']) : '';
-$requestPath = parse_url($path, PHP_URL_PATH) ?: $path;
-$requestQuery = parse_url($path, PHP_URL_QUERY);
+$requestPath = _stattic_request_uri_path($path);
+$requestQuery = _stattic_request_uri_query($path);
 $queryParams = [];
 if (is_string($requestQuery) && $requestQuery !== '') {
     parse_str($requestQuery, $queryParams);

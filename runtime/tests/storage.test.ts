@@ -13,7 +13,7 @@ import {
   errorCode,
   get,
   publicAccessConfig,
-  purgeQueueRecords,
+  edgePurgeCalls,
   startRuntime,
   storagePath,
   type Runtime,
@@ -30,7 +30,7 @@ let rt: Runtime;
 let strict: Runtime;
 
 beforeAll(async () => {
-  rt = await startRuntime();
+  rt = await startRuntime({ captureEdgePurges: true });
   strict = await startRuntime({ env: { SPACEFAST_INSECURE_COOKIES: "" } });
   for (const runtime of [rt, strict]) {
     // oxlint-disable-next-line no-await-in-loop -- two fixtures, sequential setup
@@ -120,11 +120,11 @@ test("/storage/<id> is the authenticated lane: read without a key, uploader-only
   const url = new URL(object.url);
   expect((await get(rt, HOST, `${url.pathname}${url.search}`)).status).toBe(404);
   // The keyed URL opts into the edge, so the deletion must also revoke the
-  // edge copy: exactly one purge journaled (the repeat delete found no record
-  // and spent none), addressed at the space's hostnames.
-  const purges = purgeQueueRecords(rt).filter((r) => r.reason === "storage_object_deleted");
+  // edge copy: exactly one purge POST (the repeat delete found no record and
+  // spent none), addressed at the space's serving hostname.
+  const purges = edgePurgeCalls(rt).filter((r) => r.reason === "storage_object_deleted");
   expect(purges.length).toBe(1);
-  expect(purges[0]?.hostnames).toContain(HOST);
+  expect(purges[0]?.hostname).toBe(HOST);
 });
 
 test("without a session, a surface without Comments refuses uploads", async () => {

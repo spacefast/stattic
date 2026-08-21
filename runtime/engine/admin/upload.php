@@ -52,7 +52,7 @@ function _stattic_runtime_publish_session_shas(array $session): array
             $sha = is_array($entry) && is_string($entry['sha256'] ?? null)
                 ? strtolower(trim($entry['sha256']))
                 : '';
-            if (preg_match('/^[a-f0-9]{64}$/', $sha) === 1) {
+            if (_stattic_is_sha256_hex($sha)) {
                 $shas[$sha] = true;
             }
         }
@@ -478,7 +478,7 @@ function _stattic_runtime_manifest_files(mixed $files): array
         $seenPaths[$entry['path']] = true;
         if (is_string($file['sha256'] ?? null)) {
             $sha = strtolower(trim($file['sha256']));
-            if (preg_match('/^[a-f0-9]{64}$/', $sha) !== 1) {
+            if (!_stattic_is_sha256_hex($sha)) {
                 _stattic_problem_response(422, 'invalid_blob_sha', 'File sha256 is invalid.', ['details' => ['path' => $entry['path']]]);
             }
             if (isset($sizesBySha[$sha]) && $sizesBySha[$sha] !== $entry['size']) {
@@ -507,12 +507,10 @@ function _stattic_runtime_upload_admit(string $privateRoot, string $spaceId): vo
 
 function _stattic_runtime_declared_upload_file(array $session, string $filePath): ?array
 {
-    foreach ((is_array($session['manifest'] ?? null) ? $session['manifest'] : []) as $entry) {
-        if (is_array($entry) && ($entry['path'] ?? null) === $filePath) {
-            return $entry;
-        }
-    }
-    return null;
+    return array_find(
+        is_array($session['manifest'] ?? null) ? $session['manifest'] : [],
+        static fn (mixed $entry): bool => is_array($entry) && ($entry['path'] ?? null) === $filePath
+    );
 }
 
 function _stattic_runtime_canonical_upload_path(string $encodedPath): string
@@ -540,10 +538,10 @@ function _stattic_runtime_upload_blobs_have(string $privateRoot, string $spaceId
     $declaredSizes = _stattic_runtime_publish_session_declared_sizes($session);
     $accepted = [];
     foreach ($shas as $sha) {
-        if (!is_string($sha) || preg_match('/^[a-fA-F0-9]{64}$/', $sha) !== 1) {
+        $sha = is_string($sha) ? strtolower($sha) : '';
+        if (!_stattic_is_sha256_hex($sha)) {
             _stattic_problem_response(422, 'invalid_blob_sha', 'Blob sha256 is invalid.');
         }
-        $sha = strtolower($sha);
         $residentSize = _stattic_runtime_blob_size($privateRoot, (string) $session['space_id'], $sha);
         $declaredSize = array_key_exists($sha, $declaredSizes) ? $declaredSizes[$sha] : null;
         // Negotiation answers "must you send this?", and a resident object
@@ -564,44 +562,45 @@ function _stattic_runtime_upload_blobs_have(string $privateRoot, string $spaceId
     _stattic_json_response(200, ['missing' => $missing]);
 }
 
-function _stattic_runtime_upload_blob(string $privateRoot, string $spaceId, string $sha, array $claims): void
+// The one upload receipt: verified bytes committed to the CAS, the session
+// credited, the ETag echoing the digest.
+function _stattic_runtime_upload_accepted(string $privateRoot, string $spaceId, string $uploadId, string $tmpPath, string $sha, int $size): never
 {
-    $spaceId = _stattic_runtime_id($spaceId, 'space_id');
-    $sha = strtolower(trim($sha));
-    if (preg_match('/^[a-f0-9]{64}$/', $sha) !== 1) {
-        _stattic_problem_response(422, 'invalid_blob_sha', 'Blob sha256 is invalid.');
-    }
-    [$uploadId, $session] = _stattic_runtime_upload_session_for_space($privateRoot, $spaceId, $claims);
-    $declaredSize = _stattic_runtime_publish_session_declared_sizes($session)[$sha] ?? null;
-    if ($declaredSize === null || $declaredSize < 0) {
-        _stattic_problem_response(422, 'upload_sha_not_declared', 'Blob sha256 was not declared in this publish session.', ['details' => ['sha256' => $sha]]);
-    }
-    _stattic_runtime_upload_admit($privateRoot, $spaceId);
+    _stattic_runtime_blob_commit_verified($privateRoot, $spaceId, $tmpPath, $sha);
+    _stattic_runtime_publish_session_accept($privateRoot, $spaceId, $uploadId, $sha, $size);
+    header('ETag: "' . $sha . '"', false);
+    _stattic_json_response(200, ['ok' => true, 'sha256' => $sha, 'size' => $size]);
+}
+
+// The one stage-and-verify ladder both body lanes walk: bytes staged under the
+// declared size, then the staged length reconciled with it. $subject is the
+// identifying detail pair (path or sha256) the problem documents lead with.
+//
+// @return array{0:string,1:int,2:string} tmp path, received size, sha256
+function _stattic_runtime_upload_staged(string $privateRoot, string $noun, array $subject, int $declaredSize): array
+{
     $streamed = _stattic_runtime_blob_stage_stream($privateRoot, _stattic_request_body_stream(), $declaredSize);
     if (($streamed['ok'] ?? false) !== true) {
         if (($streamed['reason'] ?? null) === 'too_large') {
-            _stattic_problem_response(422, 'upload_size_mismatch', 'Blob exceeds its declared size.', ['details' => ['sha256' => $sha, 'declared_size' => $declaredSize, 'received_size' => (int) ($streamed['size'] ?? 0)]]);
+            _stattic_problem_response(422, 'upload_size_mismatch', $noun . ' exceeds its declared size.', ['details' => $subject + ['declared_size' => $declaredSize, 'received_size' => (int) ($streamed['size'] ?? 0)]]);
         }
-        _stattic_problem_response(500, 'upload_write_failed', 'Blob bytes could not be staged.');
+        _stattic_problem_response(500, 'upload_write_failed', $noun . ' bytes could not be staged.');
     }
     $tmpPath = (string) $streamed['tmp_path'];
     $receivedSize = (int) $streamed['size'];
-    $actualSha = strtolower((string) $streamed['sha256']);
     if ($receivedSize !== $declaredSize) {
         unlink($tmpPath);
-        _stattic_problem_response(422, 'upload_size_mismatch', 'Blob size does not match the publish manifest.', ['details' => ['sha256' => $sha, 'declared_size' => $declaredSize, 'received_size' => $receivedSize]]);
+        _stattic_problem_response(422, 'upload_size_mismatch', $noun . ' size does not match the publish manifest.', ['details' => $subject + ['declared_size' => $declaredSize, 'received_size' => $receivedSize]]);
     }
-    if (!hash_equals($sha, $actualSha)) {
-        unlink($tmpPath);
-        _stattic_problem_response(422, 'upload_hash_mismatch', 'Blob bytes do not match the URL sha256.', ['details' => ['declared_sha256' => $sha, 'received_sha256' => $actualSha]]);
-    }
-    _stattic_runtime_blob_commit_verified($privateRoot, $spaceId, $tmpPath, $sha);
-    _stattic_runtime_publish_session_accept($privateRoot, $spaceId, $uploadId, $sha, $receivedSize);
-    header('ETag: "' . $sha . '"', false);
-    _stattic_json_response(200, ['ok' => true, 'sha256' => $sha, 'size' => $receivedSize]);
+
+    return [$tmpPath, $receivedSize, strtolower((string) $streamed['sha256'])];
 }
 
-function _stattic_runtime_upload_file(string $privateRoot, string $uploadId, string $encodedPath, array $claims): void
+// Resolves a path-addressed upload to its session, space and declared entry:
+// the shared prelude of both file lanes, admission included.
+//
+// @return array{0:string,1:string,2:string,3:array} upload id, space id, path, entry
+function _stattic_runtime_upload_file_target(string $privateRoot, string $uploadId, string $encodedPath, array $claims): array
 {
     $uploadId = _stattic_runtime_id($uploadId, 'upload_id');
     $session = _stattic_runtime_upload_session($privateRoot, $uploadId, $claims);
@@ -612,26 +611,37 @@ function _stattic_runtime_upload_file(string $privateRoot, string $uploadId, str
         _stattic_problem_response(422, 'upload_path_not_declared', 'Path ' . $filePath . ' was not declared in this version\'s manifest.', ['details' => ['path' => $filePath]]);
     }
     _stattic_runtime_upload_admit($privateRoot, $spaceId);
-    $declaredSize = (int) $entry['size'];
-    $streamed = _stattic_runtime_blob_stage_stream($privateRoot, _stattic_request_body_stream(), $declaredSize);
-    if (($streamed['ok'] ?? false) !== true) {
-        if (($streamed['reason'] ?? null) === 'too_large') {
-            _stattic_problem_response(422, 'upload_size_mismatch', 'File exceeds its declared size.', ['details' => ['path' => $filePath, 'declared_size' => $declaredSize, 'received_size' => (int) ($streamed['size'] ?? 0)]]);
-        }
-        _stattic_problem_response(500, 'upload_write_failed', 'File bytes could not be staged.');
+
+    return [$uploadId, $spaceId, $filePath, $entry];
+}
+
+function _stattic_runtime_upload_blob(string $privateRoot, string $spaceId, string $sha, array $claims): void
+{
+    $spaceId = _stattic_runtime_id($spaceId, 'space_id');
+    $sha = strtolower(trim($sha));
+    if (!_stattic_is_sha256_hex($sha)) {
+        _stattic_problem_response(422, 'invalid_blob_sha', 'Blob sha256 is invalid.');
     }
-    $tmpPath = (string) $streamed['tmp_path'];
-    $receivedSize = (int) $streamed['size'];
-    $sha = strtolower((string) $streamed['sha256']);
-    if ($receivedSize !== $declaredSize) {
+    [$uploadId, $session] = _stattic_runtime_upload_session_for_space($privateRoot, $spaceId, $claims);
+    $declaredSize = _stattic_runtime_publish_session_declared_sizes($session)[$sha] ?? null;
+    if ($declaredSize === null || $declaredSize < 0) {
+        _stattic_problem_response(422, 'upload_sha_not_declared', 'Blob sha256 was not declared in this publish session.', ['details' => ['sha256' => $sha]]);
+    }
+    _stattic_runtime_upload_admit($privateRoot, $spaceId);
+    [$tmpPath, $receivedSize, $actualSha] = _stattic_runtime_upload_staged($privateRoot, 'Blob', ['sha256' => $sha], $declaredSize);
+    if (!hash_equals($sha, $actualSha)) {
         unlink($tmpPath);
-        _stattic_problem_response(422, 'upload_size_mismatch', 'File size does not match the publish manifest.', ['details' => ['path' => $filePath, 'declared_size' => $declaredSize, 'received_size' => $receivedSize]]);
+        _stattic_problem_response(422, 'upload_hash_mismatch', 'Blob bytes do not match the URL sha256.', ['details' => ['declared_sha256' => $sha, 'received_sha256' => $actualSha]]);
     }
+    _stattic_runtime_upload_accepted($privateRoot, $spaceId, $uploadId, $tmpPath, $sha, $receivedSize);
+}
+
+function _stattic_runtime_upload_file(string $privateRoot, string $uploadId, string $encodedPath, array $claims): void
+{
+    [$uploadId, $spaceId, $filePath, $entry] = _stattic_runtime_upload_file_target($privateRoot, $uploadId, $encodedPath, $claims);
+    [$tmpPath, $receivedSize, $sha] = _stattic_runtime_upload_staged($privateRoot, 'File', ['path' => $filePath], (int) $entry['size']);
     _stattic_runtime_publish_session_bind_sha($privateRoot, $spaceId, $uploadId, $filePath, $sha, $receivedSize);
-    _stattic_runtime_blob_commit_verified($privateRoot, $spaceId, $tmpPath, $sha);
-    _stattic_runtime_publish_session_accept($privateRoot, $spaceId, $uploadId, $sha, $receivedSize);
-    header('ETag: "' . $sha . '"', false);
-    _stattic_json_response(200, ['ok' => true, 'sha256' => $sha, 'size' => $receivedSize]);
+    _stattic_runtime_upload_accepted($privateRoot, $spaceId, $uploadId, $tmpPath, $sha, $receivedSize);
 }
 
 function _stattic_runtime_fetch_url_from_body(): array
@@ -668,10 +678,6 @@ function _stattic_runtime_stream_url_to_tmp(array $source, string $tmpPath, int 
     $sink = _stattic_runtime_stream_sink_open($tmpPath, $limit, 0, 'x+b');
     if ($sink === false) {
         _stattic_problem_response(500, 'upload_write_failed', 'Could not stage fetched bytes.');
-    }
-    if (!_stattic_http_available()) {
-        _stattic_runtime_stream_sink_abort($sink, 'curl_unavailable');
-        _stattic_problem_response(500, 'upload_source_url_fetch_unavailable', 'URL uploads require curl support.');
     }
     $status = 0;
     $tooLarge = false;
@@ -718,15 +724,7 @@ function _stattic_runtime_stream_url_to_tmp(array $source, string $tmpPath, int 
 
 function _stattic_runtime_upload_file_from_url(string $privateRoot, string $uploadId, string $encodedPath, array $claims): void
 {
-    $uploadId = _stattic_runtime_id($uploadId, 'upload_id');
-    $session = _stattic_runtime_upload_session($privateRoot, $uploadId, $claims);
-    $spaceId = (string) $session['space_id'];
-    $filePath = _stattic_runtime_canonical_upload_path($encodedPath);
-    $entry = _stattic_runtime_declared_upload_file($session, $filePath);
-    if ($entry === null) {
-        _stattic_problem_response(422, 'upload_path_not_declared', 'Path ' . $filePath . ' was not declared in this version\'s manifest.', ['details' => ['path' => $filePath]]);
-    }
-    _stattic_runtime_upload_admit($privateRoot, $spaceId);
+    [$uploadId, $spaceId, $filePath, $entry] = _stattic_runtime_upload_file_target($privateRoot, $uploadId, $encodedPath, $claims);
     $source = _stattic_runtime_fetch_url_from_body();
     $stagingRoot = $privateRoot . '/runtime/blob-staging';
     _stattic_runtime_mkdir($stagingRoot);
@@ -743,9 +741,6 @@ function _stattic_runtime_upload_file_from_url(string $privateRoot, string $uplo
     $streamed = _stattic_runtime_stream_url_to_tmp($source, $tmpPath, (int) $entry['size']);
     $sha = strtolower((string) $streamed['sha256']);
     $size = (int) $streamed['size'];
-    $session = _stattic_runtime_publish_session_bind_sha($privateRoot, $spaceId, $uploadId, $filePath, $sha, $size);
-    _stattic_runtime_blob_commit_verified($privateRoot, $spaceId, (string) $streamed['tmp_path'], $sha);
-    _stattic_runtime_publish_session_accept($privateRoot, $spaceId, $uploadId, $sha, $size);
-    header('ETag: "' . $sha . '"', false);
-    _stattic_json_response(200, ['ok' => true, 'sha256' => $sha, 'size' => $size]);
+    _stattic_runtime_publish_session_bind_sha($privateRoot, $spaceId, $uploadId, $filePath, $sha, $size);
+    _stattic_runtime_upload_accepted($privateRoot, $spaceId, $uploadId, (string) $streamed['tmp_path'], $sha, $size);
 }

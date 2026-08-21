@@ -9,15 +9,21 @@ declare(strict_types=1);
 const STATTIC_HTTP_CONNECT_TIMEOUT_SECONDS = 10;
 const STATTIC_HTTP_TIMEOUT_SECONDS = 30;
 
-function _stattic_http_available(): bool
+// The persistent share belongs to this FPM worker, not one PHP request. DNS,
+// TCP and TLS state therefore survives request teardown. Cookies are
+// intentionally absent: no visitor state may cross requests through libcurl.
+function _stattic_http_share_handle(): \CurlSharePersistentHandle
 {
-    return function_exists('curl_init');
+    return curl_share_init_persistent([
+        CURL_LOCK_DATA_DNS,
+        CURL_LOCK_DATA_CONNECT,
+        CURL_LOCK_DATA_SSL_SESSION,
+    ]);
 }
 
-// One handle per process, so libcurl's handle-scoped connection cache survives
-// across calls. Sharing is safe only because a request is opened, run and
-// classified inside _stattic_http_request(): no caller can hold this handle
-// across another call's curl_exec().
+// One easy handle per process avoids allocations across sequential calls. The
+// persistent share also lets prepared curl_multi transfers reuse its DNS,
+// connection, and TLS state after every reset by _stattic_http_configure().
 function _stattic_http_handle(): \CurlHandle
 {
     static $handle = null;
@@ -89,7 +95,6 @@ function _stattic_http_configure(\CurlHandle $handle, array $request, object $st
     }
 
     $method = strtoupper((string) ($request['method'] ?? 'GET'));
-    $redirects = max(0, (int) ($request['redirects'] ?? 0));
     $options = [
         CURLOPT_URL => $url,
         CURLOPT_CUSTOMREQUEST => $method,
@@ -97,12 +102,15 @@ function _stattic_http_configure(\CurlHandle $handle, array $request, object $st
         CURLOPT_HTTPHEADER => _stattic_http_header_lines(is_array($request['headers'] ?? null) ? $request['headers'] : []),
         CURLOPT_CONNECTTIMEOUT => (int) ($request['connect_timeout'] ?? STATTIC_HTTP_CONNECT_TIMEOUT_SECONDS),
         CURLOPT_TIMEOUT => (int) ($request['timeout'] ?? STATTIC_HTTP_TIMEOUT_SECONDS),
-        CURLOPT_FOLLOWLOCATION => $redirects > 0,
-        CURLOPT_MAXREDIRS => $redirects,
+        // Redirects are never followed: every caller pins its exact upstream,
+        // and a Location hop would escape the egress-validated connect set.
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_MAXREDIRS => 0,
         CURLOPT_PROTOCOLS => $mask,
         CURLOPT_REDIR_PROTOCOLS => $mask,
         CURLOPT_RETURNTRANSFER => false,
         CURLOPT_HEADER => false,
+        CURLOPT_SHARE => _stattic_http_share_handle(),
     ];
     if (array_key_exists('connect_timeout_ms', $request)) {
         $options[CURLOPT_CONNECTTIMEOUT_MS] = max(1, (int) $request['connect_timeout_ms']);
@@ -186,11 +194,9 @@ function _stattic_http_state(): object
 // Returns ['ok', 'status', 'headers' (ordered [name, value] pairs), 'body',
 // 'error']. 'ok' means a 2xx arrived intact; a non-2xx is a successful
 // transport with error null, so callers classify status themselves.
+#[\NoDiscard('HTTP outcomes must be classified by the caller')]
 function _stattic_http_request(array $request): array
 {
-    if (!_stattic_http_available()) {
-        return _stattic_http_failure('http_transport_unavailable');
-    }
     $state = _stattic_http_state();
     $handle = _stattic_http_handle();
     $configured = _stattic_http_configure($handle, $request, $state);
@@ -221,11 +227,9 @@ function _stattic_http_request(array $request): array
 
 // A handle configured by the same policy record but not run: the S3 batch lane
 // drives many of these through one curl_multi loop.
+#[\NoDiscard('Prepared HTTP transfers must be executed or rejected by the caller')]
 function _stattic_http_prepare(array $request): array|false
 {
-    if (!_stattic_http_available()) {
-        return false;
-    }
     $handle = curl_init();
     if ($handle === false) {
         return false;

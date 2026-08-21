@@ -32,12 +32,7 @@ const STATTIC_RELAY_DENIED_REQUEST_PREFIXES = ['spacefast-access-'];
 
 function _stattic_relay_header_prefixed(string $lowerName, array $prefixes): bool
 {
-    foreach ($prefixes as $prefix) {
-        if (str_starts_with($lowerName, $prefix)) {
-            return true;
-        }
-    }
-    return false;
+    return array_any($prefixes, static fn (string $prefix): bool => str_starts_with($lowerName, $prefix));
 }
 
 // Header-injection guard for every value this runtime hands an upstream. The
@@ -60,7 +55,7 @@ function _stattic_relay_safe_header_value(string $value): string
  *
  * @return array<string,string>
  */
-function _stattic_relay_inbound_headers(): array
+function _stattic_relay_inbound_headers(bool $lowercase = false): array
 {
     $headers = [];
     foreach ($_SERVER as $key => $value) {
@@ -75,7 +70,10 @@ function _stattic_relay_inbound_headers(): array
         } else {
             continue;
         }
-        $headers[ucwords(strtolower(str_replace('_', '-', $name)), '-')] = (string) $value;
+        // One pass builds the caller's casing — Zero wants lowercase keys, the
+        // relay wants canonical Header-Case — so nobody rebuilds the map after.
+        $name = strtolower(str_replace('_', '-', $name));
+        $headers[$lowercase ? $name : ucwords($name, '-')] = (string) $value;
     }
     return $headers;
 }

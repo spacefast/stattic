@@ -4,18 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/storage.php';
 require_once __DIR__ . '/record-store.php';
 
-function _stattic_base64url_decode(string $value): string
-{
-    $padded = strtr($value, '-_', '+/');
-    $padded .= str_repeat('=', (4 - strlen($padded) % 4) % 4);
-    $decoded = base64_decode($padded, true);
-    return is_string($decoded) ? $decoded : '';
-}
-
-function _stattic_base64url_encode(string $value): string
-{
-    return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
-}
+// _stattic_base64url_encode/_decode live in shared/context.php.
 
 function _stattic_jwt_parse(string $token): ?array
 {
@@ -41,9 +30,6 @@ function _stattic_jwt_parse(string $token): ?array
 // which would crash instead of failing closed.
 function _stattic_jwt_ed25519_valid(string $signingInput, string $signatureRaw, string $publicKeyRaw): bool
 {
-    if (!function_exists('sodium_crypto_sign_verify_detached')) {
-        return false;
-    }
     if (strlen($publicKeyRaw) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES) {
         return false;
     }
@@ -163,18 +149,12 @@ function _stattic_runtime_jwks_usable(mixed $jwks): bool
     if (!is_array($jwks) || !is_array($jwks['keys'] ?? null) || $jwks['keys'] === []) {
         return false;
     }
-    foreach ($jwks['keys'] as $key) {
-        if (
-            is_array($key)
-            && ($key['kty'] ?? null) === 'OKP'
-            && ($key['crv'] ?? null) === 'Ed25519'
-            && is_string($key['x'] ?? null)
-            && trim($key['x']) !== ''
-        ) {
-            return true;
-        }
-    }
-    return false;
+    return array_any($jwks['keys'], static fn (mixed $key): bool =>
+        is_array($key)
+        && ($key['kty'] ?? null) === 'OKP'
+        && ($key['crv'] ?? null) === 'Ed25519'
+        && is_string($key['x'] ?? null)
+        && trim($key['x']) !== '');
 }
 
 /**
@@ -202,8 +182,8 @@ function _stattic_runtime_signing_jwks(string $privateRoot, string $kid, bool $a
 // vocabulary (admin/auth.php).
 //
 // `$profile` is the lane's data: `claims` (ordered claim => ['equals' => …] |
-// ['present' => true] | ['absent' => true]), `scope_valid`, `state_valid`,
-// `allow_jwks_fetch`, `instance_pinned`.
+// ['present' => true]), `scope_valid`, `state_valid`, `allow_jwks_fetch`,
+// `instance_pinned`.
 //
 // Check order is load-bearing. `scope_valid` runs before the runtime pin so an
 // invalid public request never reaches mounted storage, and `state_valid` before
@@ -292,12 +272,6 @@ function _stattic_runtime_token_claims(
     }
 
     foreach (is_array($profile['claims'] ?? null) ? $profile['claims'] : [] as $claim => $rule) {
-        if (($rule['absent'] ?? false) === true) {
-            if (array_key_exists($claim, $claims)) {
-                return $reject('claim', (string) $claim, 'absent');
-            }
-            continue;
-        }
         $value = $claims[$claim] ?? null;
         if (($rule['present'] ?? false) === true) {
             if (!is_string($value) || trim($value) === '') {
@@ -355,7 +329,7 @@ function _stattic_runtime_blob_gate_claims(string $privateRoot, string $token): 
             $versionId = $claims['version_id'] ?? null;
             $path = $claims['path'] ?? null;
             $hasSha = $nonEmpty($claims['sha256'] ?? null)
-                && preg_match('/\A[a-f0-9]{64}\z/', strtolower((string) $claims['sha256'])) === 1;
+                && _stattic_is_sha256_hex(strtolower((string) $claims['sha256']));
             // Exactly one resolver: two would let a deleted record be laundered
             // through a version, or a path claim borrow a sha claim's answer.
             $lanes = (int) $nonEmpty($record) + (int) $nonEmpty($upload) + (int) $nonEmpty($path);
@@ -394,8 +368,8 @@ function _stattic_runtime_blob_gate_claims(string $privateRoot, string $token): 
 
 // Only pure outcomes may be memoized: time-dependent and stateful checks
 // (exp/nbf, aud, jti consumption) stay outside in _stattic_visitor_verify.
-// Never APCu — a signature verdict must not outlive its request, and per-space
-// key material must not land in pool-shared storage.
+// Never cross-request — a signature verdict must not outlive its request, and
+// per-space key material must not land in pool-shared storage.
 
 const STATTIC_JWT_VERIFY_MEMO_MAX = 256;
 
@@ -570,7 +544,6 @@ function _stattic_visitor_verify(string $token, array $options): ?array
         'sub' => is_string($claims['sub'] ?? null) ? $claims['sub'] : '',
         'exp' => $claimExp,
         'claims' => $claims,
-        'issuerFingerprint' => $issuerFingerprint,
     ];
 }
 

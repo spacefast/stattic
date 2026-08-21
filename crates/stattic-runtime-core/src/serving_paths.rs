@@ -33,18 +33,21 @@ const CASE_INSENSITIVE_CONFIG_PATHS: &[&str] = &[
 ];
 
 pub(crate) fn is_private_serving_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
     if EXACT_PRIVATE_PATHS.contains(&path)
-        || CASE_INSENSITIVE_CONFIG_PATHS.contains(&lower.as_str())
+        || CASE_INSENSITIVE_CONFIG_PATHS
+            .iter()
+            .any(|config| config.eq_ignore_ascii_case(path))
         || path.starts_with("zero/")
         || path.starts_with("__spacefast/functions/bundles/")
         || path.starts_with("__spacefast/functions/seeds/")
         // Page templates and the layout cascade are compile inputs too: the
         // reserved `_pages` directory anywhere in the tree, and `_layout.html`
         // at the root or as a trailing segment.
-        || lower.split('/').any(|segment| segment == "_pages")
-        || lower == "_layout.html"
-        || lower.ends_with("/_layout.html")
+        || path
+            .split('/')
+            .any(|segment| segment.eq_ignore_ascii_case("_pages"))
+        || path.eq_ignore_ascii_case("_layout.html")
+        || ends_with_ignore_ascii_case(path, "/_layout.html")
     {
         return true;
     }
@@ -53,8 +56,8 @@ pub(crate) fn is_private_serving_path(path: &str) -> bool {
             return true;
         }
     }
-    lower.split('/').enumerate().any(|(index, segment)| {
-        !(index == 0 && segment == ".well-known") && segment.starts_with('.')
+    path.split('/').enumerate().any(|(index, segment)| {
+        !(index == 0 && segment.eq_ignore_ascii_case(".well-known")) && segment.starts_with('.')
     })
 }
 
@@ -63,8 +66,13 @@ pub(crate) fn is_public_serving_path(path: &str, source_exists: impl FnOnce(&str
 }
 
 fn precompressed_source(path: &str) -> Option<&str> {
-    let lower = path.to_ascii_lowercase();
-    (lower.ends_with(".br") || lower.ends_with(".gz")).then(|| &path[..path.len() - 3])
+    (ends_with_ignore_ascii_case(path, ".br") || ends_with_ignore_ascii_case(path, ".gz"))
+        .then(|| &path[..path.len() - 3])
+}
+
+fn ends_with_ignore_ascii_case(path: &str, suffix: &str) -> bool {
+    let (path, suffix) = (path.as_bytes(), suffix.as_bytes());
+    path.len() >= suffix.len() && path[path.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 #[cfg(test)]

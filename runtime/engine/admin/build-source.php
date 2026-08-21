@@ -84,15 +84,7 @@ function _stattic_build_source_read(
     if (!is_int($size) || $stream === false) {
         _stattic_problem_response(404, 'build_source_not_found', 'Build source was not found.');
     }
-    _stattic_runtime_version_source_reset_headers();
-    header('Content-Type: application/gzip', true);
-    header('Content-Length: ' . $size, true);
-    header('Cache-Control: private, no-store', true);
-    header('X-Content-Type-Options: nosniff', true);
-    _stattic_runtime_version_source_status(200);
-    _stattic_stream_file($stream, $size);
-    fclose($stream);
-    exit;
+    _stattic_runtime_version_source_send($stream, $size, 'application/gzip');
 }
 
 function _stattic_build_source_delete(

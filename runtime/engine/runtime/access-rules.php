@@ -100,11 +100,6 @@ function _stattic_page_serving(): array
         : [];
 }
 
-function _stattic_is_sha256_hex(mixed $value): bool
-{
-    return is_string($value) && preg_match('/\A[a-f0-9]{64}\z/', $value) === 1;
-}
-
 function _stattic_is_anonymous_id(mixed $value): bool
 {
     return is_string($value) && preg_match('/\Aanon_[a-f0-9]{32}\z/', $value) === 1;
@@ -329,11 +324,8 @@ function _stattic_access_public_profile(mixed $value): ?array
 // neither can ever verify as the other.
 function _stattic_access_session_hmac_key(array $serving, string $label): ?string
 {
-    $descriptor = _stattic_access_page_descriptor($serving);
-    $exchange = is_array($descriptor) && is_array($descriptor['exchange'] ?? null)
-        ? $descriptor['exchange']
-        : null;
-    $credential = is_array($exchange) && is_string($exchange['credential'] ?? null)
+    $exchange = _stattic_access_page_exchange($serving);
+    $credential = $exchange !== null && is_string($exchange['credential'] ?? null)
         ? $exchange['credential']
         : '';
     return strlen($credential) >= 32 ? hash_hmac('sha256', $label, $credential) : null;
@@ -571,17 +563,24 @@ function _stattic_access_session_encode_fitting(array $serving, string $host, ar
     return null;
 }
 
+// One name, one lifetime: every lane that hands a browser a visitor session
+// writes the same cookie.
+function _stattic_access_set_session_cookie(string $value): void
+{
+    _stattic_set_cookie(
+        _stattic_session_cookie_name(),
+        $value,
+        STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS
+    );
+}
+
 function _stattic_access_session_issue(array $serving, string $host, array &$claims): bool
 {
     $value = _stattic_access_session_encode_fitting($serving, $host, $claims);
     if ($value === null) {
         return false;
     }
-    _stattic_set_cookie(
-        _stattic_session_cookie_name(),
-        $value,
-        STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS
-    );
+    _stattic_access_set_session_cookie($value);
     return true;
 }
 
@@ -638,13 +637,6 @@ function _stattic_access_session_record_delete(string $privateRoot, string $sess
     }
     _stattic_record_store_delete($store, $sessionId);
     return true;
-}
-
-// Path-addressed deletion, kept for the logout lane which knows a path and not
-// a store.
-function _stattic_access_session_store_delete(string $path): void
-{
-    unlink($path);
 }
 
 // $storedRecord receives the claim set that was minted, so a caller deriving a
@@ -877,11 +869,7 @@ function _stattic_anonymous_session_set(
     if ($value === null) {
         return false;
     }
-    _stattic_set_cookie(
-        _stattic_session_cookie_name(),
-        $value,
-        STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS
-    );
+    _stattic_access_set_session_cookie($value);
     return true;
 }
 
@@ -1154,54 +1142,34 @@ function _stattic_grant_valid(mixed $grant): bool
         ) {
             return false;
         }
+        $listValid = static function (mixed $list, int $max, callable $item): bool {
+            return is_array($list) && $list !== [] && count($list) <= $max && array_all($list, $item);
+        };
         // An IP constraint is still a well-formed Grant — it just admits nobody
         // (see _stattic_grant_decision). Rejecting it here would null the whole
         // projection and close the Space, which is a far worse answer than
         // closing the one Grant that cannot be enforced.
-        if (isset($network['ipCidrs'])) {
-            if (
-                !is_array($network['ipCidrs'])
-                || $network['ipCidrs'] === []
-                || count($network['ipCidrs']) > 50
-            ) {
-                return false;
-            }
-            foreach ($network['ipCidrs'] as $cidr) {
-                if (!is_string($cidr) || $cidr === '') {
-                    return false;
-                }
-            }
+        if (
+            isset($network['ipCidrs'])
+            && !$listValid($network['ipCidrs'], 50, static fn (mixed $cidr): bool => is_string($cidr) && $cidr !== '')
+        ) {
+            return false;
         }
         foreach (['countries', 'excludedCountries'] as $countrySelector) {
-            if (!isset($network[$countrySelector])) {
-                continue;
-            }
             if (
-                !is_array($network[$countrySelector])
-                || $network[$countrySelector] === []
-                || count($network[$countrySelector]) > 250
+                isset($network[$countrySelector])
+                && !$listValid($network[$countrySelector], 250, static fn (mixed $country): bool =>
+                    is_string($country) && preg_match('/\A[A-Z]{2}\z/', $country) === 1)
             ) {
                 return false;
-            }
-            foreach ($network[$countrySelector] as $country) {
-                if (!is_string($country) || preg_match('/\A[A-Z]{2}\z/', $country) !== 1) {
-                    return false;
-                }
             }
         }
-        if (isset($network['excludedUserAgentSubstrings'])) {
-            if (
-                !is_array($network['excludedUserAgentSubstrings'])
-                || $network['excludedUserAgentSubstrings'] === []
-                || count($network['excludedUserAgentSubstrings']) > 50
-            ) {
-                return false;
-            }
-            foreach ($network['excludedUserAgentSubstrings'] as $needle) {
-                if (!is_string($needle) || trim($needle) === '' || strlen($needle) > 200) {
-                    return false;
-                }
-            }
+        if (
+            isset($network['excludedUserAgentSubstrings'])
+            && !$listValid($network['excludedUserAgentSubstrings'], 50, static fn (mixed $needle): bool =>
+                is_string($needle) && trim($needle) !== '' && strlen($needle) <= 200)
+        ) {
+            return false;
         }
     }
     $audienceKind = $grant['audience']['kind'] ?? null;
@@ -1255,7 +1223,7 @@ function _stattic_grant_pattern_compiled_segments(array $segments): array
 {
     $collapsed = [];
     foreach ($segments as $segment) {
-        if ($segment === '**' && ($collapsed[count($collapsed) - 1] ?? null) === '**') {
+        if ($segment === '**' && array_last($collapsed) === '**') {
             continue;
         }
         $collapsed[] = $segment;
@@ -1276,7 +1244,7 @@ function _stattic_grant_exclude_pattern_variants(array $segments): array
 {
     $collapsed = _stattic_grant_pattern_compiled_segments($segments);
     $variants = [$collapsed];
-    if (($collapsed[count($collapsed) - 1] ?? null) === 'index.html') {
+    if (array_last($collapsed) === 'index.html') {
         $variants[] = array_slice($collapsed, 0, -1);
     }
     return $variants;
@@ -1511,10 +1479,6 @@ function _stattic_authorization_envelope_valid(mixed $value): bool
 function _stattic_compile_authorization_projection(mixed $value): ?array
 {
     // Test-only compile counter; production leaves it unset.
-    $compileCounterPath = getenv('SPACEFAST_TEST_AUTHORIZATION_COMPILE_COUNTER');
-    if (is_string($compileCounterPath) && $compileCounterPath !== '') {
-        file_put_contents($compileCounterPath, "compile\n", FILE_APPEND | LOCK_EX);
-    }
     if (!_stattic_authorization_envelope_valid($value)) {
         return null;
     }
@@ -1555,24 +1519,6 @@ function _stattic_authorization_projection_compiled(mixed $value): bool
         && is_array($index['lanes']['identity'] ?? null)
         && is_bool($index['unconditionalTargets']['live'] ?? null)
         && is_bool($index['unconditionalTargets']['all_versions'] ?? null);
-}
-
-// Null is the canonical fail-closed marker from a failed compile, never a raw
-// projection to compile.
-function _stattic_authorization_projection_for_runtime(mixed $value): ?array
-{
-    if ($value === null) {
-        return null;
-    }
-    if (_stattic_authorization_projection_compiled($value)) {
-        return $value;
-    }
-    return _stattic_compile_authorization_projection($value);
-}
-
-function _stattic_authorization_projection_valid(mixed $value): bool
-{
-    return _stattic_authorization_projection_compiled($value);
 }
 
 function _stattic_authorization_grant_index(array $projection): ?array
@@ -1858,7 +1804,7 @@ function _stattic_scoped_admission_context(
     if (array_key_exists($memoKey, $memo)) {
         return $memo[$memoKey];
     }
-    if (!_stattic_authorization_projection_valid($projection)) {
+    if (!_stattic_authorization_projection_compiled($projection)) {
         return $memo[$memoKey] = ['error' => 'projection'];
     }
     $path = $artifactResource
@@ -2046,19 +1992,11 @@ function _stattic_enforce_scoped_admission(
 // bypass the requested URL's Grants, enforcing only the original serves bytes
 // nobody was admitted to.
 function _stattic_access_enforce_v4(
-    array $overlay,
     string $requestHost,
     string $requestPath,
-    string $requestMethod,
     string $originalRequestPath
 ): void {
     $serving = _stattic_page_serving();
-    // The fence, before any grant work: a mutation toward a stronger state holds
-    // until its purge lands, and a fenced request fails closed.
-    if (($overlay['fence'] ?? null) === 'exposure') {
-        _stattic_render_scoped_deny($serving);
-    }
-    $GLOBALS['SPACEFAST_PAGE_SERVING'] = $serving;
     $GLOBALS['SPACEFAST_ACCESS_ENFORCED'] = true;
 
     _stattic_access_apply_system_view_cookie($serving, $requestHost);
@@ -2086,27 +2024,6 @@ function _stattic_access_enforce_v4(
 
 function _stattic_scope_path(string $path, bool $canonicalizeIndexAlias = true): ?string
 {
-    return _stattic_scope_path_with_normalizer($path, '_stattic_nfc_string', $canonicalizeIndexAlias);
-}
-
-function _stattic_artifact_scope_path(string $path): ?string
-{
-    return _stattic_scope_path($path, false);
-}
-
-function _stattic_scope_contains(string $scope, string $path): bool
-{
-    return $scope === '/'
-        || $path === $scope
-        || str_starts_with($path, $scope . '/');
-}
-
-function _stattic_scope_path_with_normalizer(
-    string $path,
-    ?callable $normalizeUnicode,
-    bool $canonicalizeIndexAlias = true
-): ?string
-{
     if (
         $path === ''
         || $path[0] !== '/'
@@ -2131,10 +2048,7 @@ function _stattic_scope_path_with_normalizer(
             continue;
         }
         if (preg_match('/[^\x00-\x7F]/', $segment) === 1) {
-            if ($normalizeUnicode === null) {
-                return null;
-            }
-            $normalized = $normalizeUnicode($segment);
+            $normalized = _stattic_nfc_string($segment);
             if (!is_string($normalized)) {
                 return null;
             }
@@ -2142,10 +2056,22 @@ function _stattic_scope_path_with_normalizer(
         }
         $segments[] = $segment;
     }
-    if ($canonicalizeIndexAlias && ($segments[count($segments) - 1] ?? null) === 'index.html') {
+    if ($canonicalizeIndexAlias && array_last($segments) === 'index.html') {
         array_pop($segments);
     }
     return $segments === [] ? '/' : '/' . implode('/', $segments);
+}
+
+function _stattic_artifact_scope_path(string $path): ?string
+{
+    return _stattic_scope_path($path, false);
+}
+
+function _stattic_scope_contains(string $scope, string $path): bool
+{
+    return $scope === '/'
+        || $path === $scope
+        || str_starts_with($path, $scope . '/');
 }
 
 function _stattic_private_cross_host_subresource(string $requestHost): bool
@@ -2428,13 +2354,11 @@ function _stattic_access_session_verify(
         $authorityEntries
     ));
     $profile = _stattic_access_public_profile($claims['profile'] ?? null);
-    $sessionPath = _stattic_access_session_path(_stattic_access_private_root(), $claims['sid']);
     return [
         'authorities' => $authorities,
         'emailVerifiedAuthorities' => $emailVerifiedAuthorities,
         'authorityEntries' => $authorityEntries,
         'sessionId' => $claims['sid'],
-        'sessionPath' => $sessionPath,
         'sessionRecord' => $claims,
         'exp' => $exp,
         ...($profile !== null ? ['profile' => $profile] : []),
@@ -2548,7 +2472,9 @@ function _stattic_authority_generation_candidates(array $projection, string $aut
 
 // A digest over EVERY live candidate hash: any change to what admits this
 // authority (rotation, edit, withdrawal, an added Grant) drops it from the
-// session at the next re-mint — fails closed.
+// session at the next re-mint — fails closed. Deliberately not memoized: the
+// candidate set is expiry-dependent, and a worker-lifetime static would keep an
+// expired candidate's generation verifying.
 function _stattic_authority_generation(array $projection, string $authority): ?string
 {
     $candidates = _stattic_authority_generation_candidates($projection, $authority);
@@ -2682,6 +2608,15 @@ function _stattic_visitor_verify_options(array $serving, string $host, ?array $i
 
 // Absent or malformed means "no lanes": the page falls back to the uniform
 // deny, never open.
+// The descriptor's exchange block, or null — the one extraction every exchange
+// caller shares, so a descriptor without the key can never fatal a lane.
+function _stattic_access_page_exchange(array $serving): ?array
+{
+    $descriptor = _stattic_access_page_descriptor($serving);
+    $exchange = is_array($descriptor) ? ($descriptor['exchange'] ?? null) : null;
+    return is_array($exchange) ? $exchange : null;
+}
+
 function _stattic_access_page_descriptor(array $serving): ?array
 {
     static $memo = [];
@@ -2773,18 +2708,12 @@ function _stattic_access_lane_active(array $projection, string $kind, array $tar
     if (!is_array($entries)) {
         return false;
     }
-    foreach ($entries as $entry) {
-        if (
-            is_array($entry)
-            && (!is_int($entry['notBefore'] ?? null) || $entry['notBefore'] <= $now)
-            && (!is_int($entry['expiresAt'] ?? null) || $entry['expiresAt'] > $now)
-            && is_array($entry['target'] ?? null)
-            && _stattic_grant_target_matches($entry['target'], $target)
-        ) {
-            return true;
-        }
-    }
-    return false;
+    return array_any($entries, static fn (mixed $entry): bool =>
+        is_array($entry)
+        && (!is_int($entry['notBefore'] ?? null) || $entry['notBefore'] <= $now)
+        && (!is_int($entry['expiresAt'] ?? null) || $entry['expiresAt'] > $now)
+        && is_array($entry['target'] ?? null)
+        && _stattic_grant_target_matches($entry['target'], $target));
 }
 
 // Null means "render the uniform deny page": no descriptor, no usable lanes,
@@ -2792,7 +2721,7 @@ function _stattic_access_lane_active(array $projection, string $kind, array $tar
 function _stattic_access_page_lanes(array $serving): ?array
 {
     $projection = is_array($serving['authorization'] ?? null) ? $serving['authorization'] : null;
-    if ($projection === null || !_stattic_authorization_projection_valid($projection)) {
+    if ($projection === null || !_stattic_authorization_projection_compiled($projection)) {
         return null;
     }
     if (($projection['fence'] ?? 'none') !== 'none') {
@@ -3036,7 +2965,7 @@ function _stattic_render_unclaimed_notice(array $serving): never
     $projection = is_array($serving['authorization'] ?? null) ? $serving['authorization'] : null;
     if (
         $projection === null
-        || !_stattic_authorization_projection_valid($projection)
+        || !_stattic_authorization_projection_compiled($projection)
         || ($projection['fence'] ?? 'none') !== 'none'
         || ($projection['spaceClaimed'] ?? true) !== false
     ) {
@@ -3048,19 +2977,37 @@ function _stattic_render_unclaimed_notice(array $serving): never
         : null;
     $notice = '<p class="sf-copy">Ask your agent or check your logs for the link you need to '
         . 'unlock this Space.</p>';
+    _stattic_serve_access_denied_page(
+        $serving,
+        $displayName !== null ? $displayName . ' is private' : '',
+        '',
+        $notice,
+        _stattic_access_clean_return_path()
+    );
+}
+
+// The one 403 access page: the gate and the unclaimed notice differ only in
+// title and fragments.
+function _stattic_serve_access_denied_page(
+    array $serving,
+    string $title,
+    string $statusFragment,
+    string $lanesFragment,
+    string $returnPath
+): never {
     _stattic_serve_page('access', [
         'status' => 403,
-        'headers' => ['Cache-Control' => 'private, no-store'],
+        'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE],
         'private' => true,
         'message' => 'This space is private.',
         'code' => 'access_denied',
         'customizable' => true,
         'serving' => $serving,
-        'fragment' => $notice,
-        'status_fragment' => '',
-        'lanes_fragment' => $notice,
-        'title' => $displayName !== null ? $displayName . ' is private' : '',
-        'request_path' => parse_url(_stattic_access_clean_return_path(), PHP_URL_PATH) ?: '/',
+        'fragment' => $statusFragment . $lanesFragment,
+        'status_fragment' => $statusFragment,
+        'lanes_fragment' => $lanesFragment,
+        'title' => $title,
+        'request_path' => parse_url($returnPath, PHP_URL_PATH) ?: '/',
     ]);
     exit;
 }
@@ -3135,10 +3082,7 @@ function _stattic_render_access_gate(array $serving, string $requestHost, array 
             // stops a bounce that finds nothing from looping. That hands this
             // browser a stateless session, so the bounce cannot be cacheable.
             _stattic_access_record_identity_check($serving, $requestHost, $identity);
-            header('Cache-Control: ' . STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
-            header('Referrer-Policy: no-referrer', true);
-            header('Location: ' . $redirect, true, 302);
-            exit;
+            _stattic_access_redirect($redirect, 302, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE);
         }
     }
     if ($status === '' && $expired) {
@@ -3157,21 +3101,7 @@ function _stattic_render_access_gate(array $serving, string $requestHost, array 
     $title = is_string($descriptor['displayName'])
         ? $descriptor['displayName'] . ' is private'
         : '';
-    _stattic_serve_page('access', [
-        'status' => 403,
-        'headers' => ['Cache-Control' => 'private, no-store'],
-        'private' => true,
-        'message' => 'This space is private.',
-        'code' => 'access_denied',
-        'customizable' => true,
-        'serving' => $serving,
-        'fragment' => $statusFragment . $lanesFragment,
-        'status_fragment' => $statusFragment,
-        'lanes_fragment' => $lanesFragment,
-        'title' => $title,
-        'request_path' => parse_url($returnPath, PHP_URL_PATH) ?: '/',
-    ]);
-    exit;
+    _stattic_serve_access_denied_page($serving, $title, $statusFragment, $lanesFragment, $returnPath);
 }
 
 function _stattic_access_test_connect_origin(): string
@@ -3188,7 +3118,7 @@ function _stattic_access_exchange_post(string $url, array $fields, array $header
     // decision is answered from the projection on disk.
     require_once __DIR__ . '/../shared/http.php';
 
-    if (!_stattic_http_available() || !_stattic_platform_destination_allowed($url)) {
+    if (!_stattic_platform_destination_allowed($url)) {
         return null;
     }
     $requestUrl = $url;
@@ -3420,40 +3350,71 @@ function _stattic_access_handle_password(array $serving, string $requestHost, st
     if ($result['status'] === 200 && $token !== '') {
         $sessionToken = _stattic_access_consume_handoff_token($serving, $host, $token);
         if ($sessionToken !== null) {
-            _stattic_set_cookie(
-                _stattic_session_cookie_name(),
-                $sessionToken,
-                STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS
-            );
-            header('Cache-Control: no-store', true);
-            header('Referrer-Policy: no-referrer', true);
-            header('Location: ' . $returnPath, true, 303);
-            exit;
+            _stattic_access_set_session_cookie($sessionToken);
+            _stattic_access_redirect($returnPath, 303);
         }
         _stattic_access_gate_after_post($serving, $requestHost, $returnPath, 'exchange-unavailable');
     }
+    _stattic_access_gate_email_verification(
+        $serving,
+        $requestHost,
+        $body,
+        $lanes['exchange']['emailUrl'] ?? null,
+        $returnPath
+    );
     $errorCode = is_array($body) && is_string($body['code'] ?? null) ? $body['code'] : '';
-    if ($errorCode === 'email_verification_required') {
-        $details = is_array($body['details'] ?? null) ? $body['details'] : [];
-        $continuation = is_string($details['continuation'] ?? null)
-            ? $details['continuation']
-            : null;
-        if ($continuation !== null && is_string($lanes['exchange']['emailUrl'])) {
-            // The continuation is too large for a redirect param — render inline.
-            _stattic_render_access_gate($serving, $requestHost, [
-                'status' => '',
-                'return' => $returnPath,
-                'emailContinuation' => $continuation,
-                'allowRedirect' => false,
-            ]);
-        }
-    }
     $status = match (true) {
         $errorCode === 'rate_limited', $result['status'] === 429 => 'rate-limited',
         $errorCode === 'invalid_password' => 'invalid-password',
         default => $result['status'] >= 500 || $body === null ? 'exchange-unavailable' : 'invalid-password',
     };
     _stattic_access_gate_after_post($serving, $requestHost, $returnPath, $status);
+}
+
+// Every access bounce leaves the same way: uncacheable, and carrying no Referer
+// into whatever it points at.
+function _stattic_access_redirect(
+    string $location,
+    int $status,
+    string $cacheControl = STATTIC_CACHE_CONTROL_NO_STORE,
+    bool $noindex = false
+): never {
+    header('Cache-Control: ' . $cacheControl, true);
+    header('Referrer-Policy: no-referrer', true);
+    if ($noindex) {
+        header('X-Robots-Tag: noindex, nofollow', true);
+    }
+    header('Location: ' . $location, true, $status);
+    exit;
+}
+
+// A lane that admits only verified addresses cannot open anything until the
+// visitor proves one. The continuation is too large for a redirect param, so
+// the email gate renders inline on this response; anything else returns and
+// leaves the caller's own answer standing.
+function _stattic_access_gate_email_verification(
+    array $serving,
+    string $requestHost,
+    mixed $body,
+    mixed $emailUrl,
+    string $returnPath
+): void {
+    if (!is_string($emailUrl)) {
+        return;
+    }
+    if (!is_array($body) || ($body['code'] ?? null) !== 'email_verification_required') {
+        return;
+    }
+    $details = is_array($body['details'] ?? null) ? $body['details'] : [];
+    if (!is_string($details['continuation'] ?? null)) {
+        return;
+    }
+    _stattic_render_access_gate($serving, $requestHost, [
+        'status' => '',
+        'return' => $returnPath,
+        'emailContinuation' => $details['continuation'],
+        'allowRedirect' => false,
+    ]);
 }
 
 // Post/redirect/get with an allowlisted state code — never a secret — so a
@@ -3464,11 +3425,10 @@ function _stattic_access_gate_after_post(
     string $returnPath,
     string $status
 ): never {
-    $location = _stattic_access_url_with_params($returnPath, ['sf_access' => $status]);
-    header('Cache-Control: no-store', true);
-    header('Referrer-Policy: no-referrer', true);
-    header('Location: ' . $location, true, 303);
-    exit;
+    _stattic_access_redirect(
+        _stattic_access_url_with_params($returnPath, ['sf_access' => $status]),
+        303
+    );
 }
 
 function _stattic_access_handle_email_verification(
@@ -3668,8 +3628,8 @@ function _stattic_access_consume_handoff_token(
         return null;
     }
     $current = _stattic_current_session_identity($serving, $host);
-    $currentPath = is_array($current) && is_string($current['sessionPath'] ?? null)
-        ? $current['sessionPath']
+    $currentSid = is_array($current) && is_string($current['sessionId'] ?? null)
+        ? $current['sessionId']
         : null;
     $currentAuthorities = is_array($current) && is_array($current['authorityEntries'] ?? null)
         ? $current['authorityEntries']
@@ -3705,12 +3665,8 @@ function _stattic_access_consume_handoff_token(
     // The session id rotates to the token's; the session being left carried its
     // identity forward and must not outlive the attach, so its revocation
     // record goes with it.
-    $rotatedPath = _stattic_access_session_path(
-        _stattic_access_private_root(),
-        (string) ($storedRecord['sid'] ?? '')
-    );
-    if ($currentPath !== null && $currentPath !== $rotatedPath) {
-        _stattic_access_session_store_delete($currentPath);
+    if ($currentSid !== null && $currentSid !== (string) ($storedRecord['sid'] ?? '')) {
+        _stattic_access_session_record_delete(_stattic_access_private_root(), $currentSid);
     }
     return $credential;
 }
@@ -3834,6 +3790,56 @@ function _stattic_access_link_entry_identity_bounce(
     ]);
 }
 
+function _stattic_render_access_route_not_found(): never
+{
+    _stattic_render_platform_page_lazy(
+        'access-route-not-found',
+        404,
+        [
+            'Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE,
+            'Referrer-Policy' => 'no-referrer',
+        ],
+        "Not found.\n",
+        true
+    );
+    exit;
+}
+
+/**
+ * Redeem a link token (or space key) against the exchange's linkUrl. Null when
+ * the Space has no link exchange; otherwise the exchange verdict with the
+ * handoff extracted. Every refusal disposition stays with the caller.
+ *
+ * @return array{status:int,body:?array,fields:?array,handoff:string,exchange:array,host:string}|null
+ */
+function _stattic_access_exchange_link_token(array $serving, string $requestHost, string $token): ?array
+{
+    $exchange = _stattic_access_page_exchange($serving);
+    if ($exchange === null || !is_string($exchange['linkUrl'] ?? null)) {
+        return null;
+    }
+    $host = _stattic_canonicalize_host($requestHost);
+    $result = _stattic_access_exchange_post(
+        $exchange['linkUrl'],
+        ['host' => $host, 'token' => $token],
+        _stattic_access_exchange_headers(
+            $exchange,
+            _stattic_access_context($serving, $requestHost, '/'),
+            'application/vnd.spacefast.access-handoff+json'
+        )
+    );
+    $body = is_array($result) && is_array($result['body'] ?? null) ? $result['body'] : null;
+    $fields = is_array($body) && is_array($body['fields'] ?? null) ? $body['fields'] : null;
+    return [
+        'status' => (int) ($result['status'] ?? 0),
+        'body' => $body,
+        'fields' => $fields,
+        'handoff' => is_array($fields) && is_string($fields['token'] ?? null) ? $fields['token'] : '',
+        'exchange' => $exchange,
+        'host' => $host,
+    ];
+}
+
 // The credential lives in one reserved path for one request only: exchange it,
 // set the host-only session cookie, then move to the clean landing URL. Customer
 // bytes are never served from a credential path.
@@ -3849,42 +3855,23 @@ function _stattic_access_handle_link_entry(
     if (!in_array(_stattic_runtime_request_method(), ['GET', 'HEAD'], true)) {
         _stattic_render_method_not_allowed_lazy();
     }
-    $descriptor = _stattic_access_page_descriptor($serving);
-    $exchange = is_array($descriptor) ? $descriptor['exchange'] : null;
-    $host = _stattic_canonicalize_host($requestHost);
-    if (!is_array($exchange) || !is_string($exchange['linkUrl'] ?? null)) {
-        _stattic_render_platform_page_lazy(
-            'access-route-not-found',
-            404,
-            [
-                'Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE,
-                'Referrer-Policy' => 'no-referrer',
-            ],
-            "Not found.\n",
-            true
-        );
+    $redeemed = _stattic_access_exchange_link_token($serving, $requestHost, $token);
+    if ($redeemed === null) {
+        _stattic_render_access_route_not_found();
     }
-    $result = _stattic_access_exchange_post(
-        $exchange['linkUrl'],
-        ['host' => $host, 'token' => $token],
-        _stattic_access_exchange_headers(
-            $exchange,
-            _stattic_access_context($serving, $requestHost, '/'),
-            'application/vnd.spacefast.access-handoff+json'
-        )
-    );
-    $body = is_array($result) ? $result['body'] : null;
-    $fields = is_array($body) && is_array($body['fields'] ?? null) ? $body['fields'] : null;
-    $handoff = is_array($fields) && is_string($fields['token'] ?? null) ? $fields['token'] : '';
+    $host = $redeemed['host'];
+    $body = $redeemed['body'];
+    $fields = $redeemed['fields'];
+    $exchange = $redeemed['exchange'];
     $returnPath = is_array($fields) && is_string($fields['return'] ?? null)
         ? _stattic_safe_return_path($fields['return'])
         : null;
-    if (($result['status'] ?? 0) === 200 && $handoff !== '' && $returnPath !== null) {
+    if ($redeemed['status'] === 200 && $redeemed['handoff'] !== '' && $returnPath !== null) {
         $storedRecord = null;
         $credential = _stattic_access_consume_handoff_token(
             $serving,
             $host,
-            $handoff,
+            $redeemed['handoff'],
             $storedRecord
         );
         if ($credential !== null) {
@@ -3897,42 +3884,24 @@ function _stattic_access_handle_link_entry(
                 $returnPath
             );
             if ($bounce === null) {
-                _stattic_set_cookie(
-                    _stattic_session_cookie_name(),
-                    $credential,
-                    STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS
-                );
+                _stattic_access_set_session_cookie($credential);
             }
-            header('Cache-Control: ' . STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
-            header('Referrer-Policy: no-referrer', true);
-            header('X-Robots-Tag: noindex, nofollow', true);
-            header('Location: ' . ($bounce ?? $returnPath), true, 303);
-            exit;
+            _stattic_access_redirect(
+                $bounce ?? $returnPath,
+                303,
+                STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
+                true
+            );
         }
     }
-    $errorCode = is_array($body) && is_string($body['code'] ?? null) ? $body['code'] : '';
-    if ($errorCode === 'email_verification_required' && is_string($exchange['emailUrl'] ?? null)) {
-        $details = is_array($body['details'] ?? null) ? $body['details'] : [];
-        $continuation = is_string($details['continuation'] ?? null) ? $details['continuation'] : null;
-        if ($continuation !== null) {
-            _stattic_render_access_gate($serving, $requestHost, [
-                'status' => '',
-                'return' => '/',
-                'emailContinuation' => $continuation,
-                'allowRedirect' => false,
-            ]);
-        }
-    }
-    _stattic_render_platform_page_lazy(
-        'access-route-not-found',
-        404,
-        [
-            'Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE,
-            'Referrer-Policy' => 'no-referrer',
-        ],
-        "Not found.\n",
-        true
+    _stattic_access_gate_email_verification(
+        $serving,
+        $requestHost,
+        $body,
+        $exchange['emailUrl'] ?? null,
+        '/'
     );
+    _stattic_render_access_route_not_found();
 }
 
 // The raw access/API token never becomes a cookie and never reaches tenant code.
@@ -3962,9 +3931,8 @@ function _stattic_platform_identity_token(
     if (array_key_exists($memoKey, $memo)) {
         return $memo[$memoKey];
     }
-    $descriptor = _stattic_access_page_descriptor($serving);
-    $exchange = is_array($descriptor) ? $descriptor['exchange'] : null;
-    if (!is_array($exchange) || !is_string($exchange['tokenUrl'] ?? null)) {
+    $exchange = _stattic_access_page_exchange($serving);
+    if ($exchange === null || !is_string($exchange['tokenUrl'] ?? null)) {
         return $memo[$memoKey] = '';
     }
     $result = _stattic_access_exchange_post(
@@ -4020,7 +3988,7 @@ function _stattic_access_apply_query_token(
     // Contract A1, charged once a lane has claimed the token and real work is
     // about to happen. A refusal above costs no slot, so appending nonsense to a
     // public URL cannot spend the Space's access lane.
-    _stattic_acquire_access_admission(_stattic_access_private_root(), $serving);
+    _stattic_admission_acquire_access_lane(_stattic_access_private_root(), $serving);
     $token = (string) _stattic_access_query_token();
     if ($kind === 'link') {
         _stattic_access_redeem_query_link_token($serving, $requestHost, $token);
@@ -4076,57 +4044,33 @@ function _stattic_access_redeem_query_link_token(
     string $requestHost,
     string $token
 ): void {
-    $descriptor = _stattic_access_page_descriptor($serving);
-    $exchange = is_array($descriptor) ? $descriptor['exchange'] : null;
-    if (!is_array($exchange) || !is_string($exchange['linkUrl'] ?? null)) {
+    $redeemed = _stattic_access_exchange_link_token($serving, $requestHost, $token);
+    if ($redeemed === null) {
         return;
     }
-    $host = _stattic_canonicalize_host($requestHost);
-    $result = _stattic_access_exchange_post(
-        $exchange['linkUrl'],
-        ['host' => $host, 'token' => $token],
-        _stattic_access_exchange_headers(
-            $exchange,
-            _stattic_access_context($serving, $requestHost, '/'),
-            'application/vnd.spacefast.access-handoff+json'
-        )
-    );
-    $body = is_array($result) ? $result['body'] : null;
-    $fields = is_array($body) && is_array($body['fields'] ?? null) ? $body['fields'] : null;
-    $handoff = is_array($fields) && is_string($fields['token'] ?? null) ? $fields['token'] : '';
-    if (($result['status'] ?? 0) === 200 && $handoff !== '') {
+    $body = $redeemed['body'];
+    $exchange = $redeemed['exchange'];
+    if ($redeemed['status'] === 200 && $redeemed['handoff'] !== '') {
         $storedRecord = null;
-        $credential = _stattic_access_consume_handoff_token($serving, $host, $handoff, $storedRecord);
+        $credential = _stattic_access_consume_handoff_token($serving, $redeemed['host'], $redeemed['handoff'], $storedRecord);
         if ($credential !== null) {
             // The cookie is the whole point: the token drops out of every URL
             // the visitor navigates to next, and the page's own subresources
             // present the session instead of the secret. `_stattic_set_cookie`
             // updates $_COOKIE too, so the enforcement below this call resolves
             // the identity this response just handed out.
-            _stattic_set_cookie(
-                _stattic_session_cookie_name(),
-                $credential,
-                STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS
-            );
+            _stattic_access_set_session_cookie($credential);
         }
         return;
     }
-    // One lane still has to be answered rather than served: a Link that admits
-    // only verified addresses cannot open anything until the visitor proves one.
-    $errorCode = is_array($body) && is_string($body['code'] ?? null) ? $body['code'] : '';
-    $details = is_array($body) && is_array($body['details'] ?? null) ? $body['details'] : [];
-    if (
-        $errorCode === 'email_verification_required'
-        && is_string($exchange['emailUrl'] ?? null)
-        && is_string($details['continuation'] ?? null)
-    ) {
-        _stattic_render_access_gate($serving, $requestHost, [
-            'status' => '',
-            'return' => _stattic_access_clean_return_path(),
-            'emailContinuation' => $details['continuation'],
-            'allowRedirect' => false,
-        ]);
-    }
+    // One lane still has to be answered rather than served.
+    _stattic_access_gate_email_verification(
+        $serving,
+        $requestHost,
+        $body,
+        $exchange['emailUrl'] ?? null,
+        _stattic_access_clean_return_path()
+    );
 }
 
 function _stattic_access_apply_system_view_cookie(array $serving, string $requestHost): void
@@ -4177,8 +4121,7 @@ function _stattic_access_handle_callback(array $serving, string $requestHost, st
     if ($sessionToken === null) {
         _stattic_render_json_or_deny('access_handoff_invalid', 'Access token handoff is invalid.');
     }
-    $maxAge = STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS;
-    _stattic_set_cookie(_stattic_session_cookie_name(), $sessionToken, $maxAge);
+    _stattic_access_set_session_cookie($sessionToken);
     header('Cache-Control: no-store', true);
     header('Referrer-Policy: no-referrer', true);
     if (($fields['display'] ?? '') === 'popup') {
@@ -4230,12 +4173,12 @@ function _stattic_access_revoke_presented_session(?string $sessionId = null): bo
     if ($privateRoot === '') {
         return false;
     }
-    $path = _stattic_access_session_path($privateRoot, $sessionId);
-    clearstatcache(true, $path);
-    if (!file_exists($path)) {
+    if (!_stattic_is_sha256_hex($sessionId)) {
+        // Not a session id the store could hold: nothing to revoke.
         return true;
     }
     _stattic_access_session_record_delete($privateRoot, $sessionId);
+    $path = _stattic_access_session_path($privateRoot, $sessionId);
     clearstatcache(true, $path);
     return !file_exists($path);
 }
@@ -4255,12 +4198,9 @@ function _stattic_access_revoke_collaboration_session(
     string $sessionId,
     string $returnTo
 ): ?array {
-    $descriptor = _stattic_access_page_descriptor($serving);
-    $exchange = is_array($descriptor) && is_array($descriptor['exchange'] ?? null)
-        ? $descriptor['exchange']
-        : null;
+    $exchange = _stattic_access_page_exchange($serving);
     $spaceId = _stattic_serving_space_id($serving);
-    $logoutUrl = is_array($exchange) && is_string($exchange['logoutUrl'] ?? null)
+    $logoutUrl = $exchange !== null && is_string($exchange['logoutUrl'] ?? null)
         ? $exchange['logoutUrl']
         : null;
     // No endpoint: the local session must still be removable.
@@ -4334,12 +4274,12 @@ function _stattic_access_logout_request_allowed(string $method, string $requestH
 
 function _stattic_access_logout_unavailable(): never
 {
-    http_response_code(503);
-    header('Cache-Control: no-store', true);
-    header('Retry-After: 1', true);
-    header('Content-Type: text/plain; charset=utf-8', true);
-    echo "Could not log out safely. Try again.\n";
-    exit;
+    _stattic_response_send(
+        503,
+        "Could not log out safely. Try again.\n",
+        'text/plain; charset=utf-8',
+        ['Cache-Control' => 'no-store', 'Retry-After' => '1']
+    );
 }
 
 function _stattic_access_handle_logout(string $requestHost): void
@@ -4384,9 +4324,9 @@ function _stattic_access_handle_logout(string $requestHost): void
         _stattic_access_logout_unavailable();
     }
     _stattic_clear_cookie(_stattic_session_cookie_name());
-    header('Cache-Control: no-store', true);
-    header('Location: ' . ($clearUrl ?? $returnTo), true, 303);
-    exit;
+    // The clearUrl is cross-origin: the return= param in this URL must not
+    // leak as a Referer.
+    _stattic_access_redirect($clearUrl ?? $returnTo, 303);
 }
 
 // Comments has no session of its own: the visitor session's id names the Cast

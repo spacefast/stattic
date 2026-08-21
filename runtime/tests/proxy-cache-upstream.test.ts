@@ -422,7 +422,7 @@ beforeAll(async () => {
       "_sf_json_write($routesRoot . '/previous.json', $pointer);",
       "$pointer['shards'][$shard] = 'shards/' . $written;",
       "$pointer['gen'] = ((int) $pointer['gen']) + 1;",
-      "_sf_pointer_swap($routesRoot . '/current.json', $pointer);",
+      "_sf_json_write($routesRoot . '/current.json', $pointer);",
     ].join("\n"),
     `${rt.engineRoot}/shared/pointers.php`,
     rt.storageRoot,
@@ -433,9 +433,7 @@ beforeAll(async () => {
     throw new Error(`failed to install proxy route fixture: ${inject.stderr.toString()}`);
   }
   // Install the content-addressed route fixture before the visitor path first
-  // reads the pointer. The PHP server owns a separate APCu cache from the CLI
-  // process that swapped the pointer, so priming it earlier would retain the
-  // old generation until its TTL expires.
+  // reads the pointer.
   const callback = await postAccessCallback(
     rt,
     ACCESS_HOST,

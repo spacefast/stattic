@@ -199,12 +199,20 @@ pub fn materialize_html_pipeline(
             }
         }
 
+        let mut layout_sources = BTreeMap::new();
         for page in &mut pages {
             if files.contains_key(&page.output_path) && page.output_path != page.source_path {
                 diagnostics.push(json!({"code":"page_output_conflict","severity":"warning","message":"A generated page would overwrite an uploaded file and was skipped.","path":page.output_path}));
                 continue;
             }
-            let document = apply_layouts(page, files_root, files, site_title, diagnostics)?;
+            let document = apply_layouts(
+                page,
+                files_root,
+                files,
+                site_title,
+                &mut layout_sources,
+                diagnostics,
+            )?;
             page.layout_rendered = true;
             write_generated(
                 files_root,
@@ -321,6 +329,7 @@ fn apply_layouts(
     files_root: &Path,
     files: &BTreeMap<String, FileMeta>,
     site_title: &str,
+    layout_sources: &mut BTreeMap<String, String>,
     diagnostics: &mut Vec<Value>,
 ) -> Result<String> {
     let mut layouts = layout_cascade(path_dir(&page.source_path), files, None);
@@ -338,12 +347,33 @@ fn apply_layouts(
         return Ok(format!("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title></head><body><main>{}</main></body></html>", escape_html(&page.title), document));
     }
     for layout in layouts.into_iter().rev() {
-        let Some(template) = pipeline_text(files_root, &layout, diagnostics)? else {
+        let Some(template) = layout_source(layout_sources, files_root, &layout, diagnostics)?
+        else {
             continue;
         };
-        document = render_layout(&template, page, &document, site_title, diagnostics, &layout);
+        document = render_layout(template, page, &document, site_title, diagnostics, &layout);
     }
     Ok(document)
+}
+
+/// One layout template, read at most once per finalize. Every page walks the
+/// same cascade, and a cascade is the same handful of files.
+///
+/// A template the reader declines is not held: `pipeline_text` reports it for
+/// each page it affects, and the cache must not fold those into one.
+fn layout_source<'cache>(
+    cache: &'cache mut BTreeMap<String, String>,
+    files_root: &Path,
+    layout: &str,
+    diagnostics: &mut Vec<Value>,
+) -> Result<Option<&'cache str>> {
+    if !cache.contains_key(layout) {
+        let Some(template) = pipeline_text(files_root, layout, diagnostics)? else {
+            return Ok(None);
+        };
+        cache.insert(layout.to_string(), template);
+    }
+    Ok(cache.get(layout).map(String::as_str))
 }
 
 fn layout_cascade(
@@ -382,14 +412,14 @@ fn render_layout(
     path: &str,
 ) -> String {
     let slots = BTreeMap::from([
-        ("content", content.to_string()),
-        ("page.title", page.title.clone()),
+        ("content", content),
+        ("page.title", page.title.as_str()),
         (
             "page.description",
-            page.description.clone().unwrap_or_default(),
+            page.description.as_deref().unwrap_or_default(),
         ),
-        ("page.date", page.date.clone().unwrap_or_default()),
-        ("site.title", site_title.to_string()),
+        ("page.date", page.date.as_deref().unwrap_or_default()),
+        ("site.title", site_title),
     ]);
     let mut unresolved = BTreeSet::new();
     layout_slot_regex()
@@ -407,7 +437,7 @@ fn render_layout(
                 return captures[0].to_string();
             };
             if raw || name == "content" {
-                value.clone()
+                (*value).to_string()
             } else {
                 escape_html(value)
             }

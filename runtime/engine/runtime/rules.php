@@ -99,15 +99,12 @@ function _stattic_rule_order(array $rule): int
     return isset($rule['order']) ? (int) $rule['order'] : PHP_INT_MAX;
 }
 
+// The compiler emits only the bucketed {fallback, by_first_segment} shape.
 function _stattic_pattern_rules_for_path(mixed $pattern, string $requestPath): array
 {
     if (!is_array($pattern) || $pattern === []) {
         return [];
     }
-    if (!array_key_exists('fallback', $pattern) && !array_key_exists('by_first_segment', $pattern)) {
-        return $pattern;
-    }
-
     $fallback = is_array($pattern['fallback'] ?? null) ? $pattern['fallback'] : [];
     $byFirstSegment = is_array($pattern['by_first_segment'] ?? null) ? $pattern['by_first_segment'] : [];
     $segment = _stattic_first_path_segment($requestPath);

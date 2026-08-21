@@ -1,16 +1,16 @@
 # Source provenance
 
-This branch is an automated, allowlisted source snapshot of the Spacefast runtime.
+The `main` branch is an automated, allowlisted source history of the Spacefast runtime.
 
 - Source repository: `spacefast/monorepo`
-- Source revision: `560e8a63c3cfef69b56dc3a48247c351d7fc0c6a`
-- Runtime source hash: `3c8f68030341abc0b04bc969ba29cf1c69951bf9aab161c813920f9b68dce131`
-- Matching release tag: `runtime-560e8a63c3cfef69b56dc3a48247c351d7fc0c6a`
+- Source revision: `d0a49b4a39e49f5cf1f0fcd802980b1edf561d16`
+- Runtime source hash: `d5a50a9f1479a856db1786951dc9328bbd0e36a43e14f13410d8b2595c642ca7`
+- Matching release tag: `runtime-d0a49b4a39e49f5cf1f0fcd802980b1edf561d16`
 
-The private monorepo is the development authority. This public repository is a
-one-way source and release mirror; changes made here are replaced by the next
-sync. GitHub Actions are intentionally disabled for this repository, and the
-snapshot contains no workflow files.
+The private monorepo is the development authority. Every published source
+change appends an automated commit to this one-way public mirror. GitHub Actions
+are intentionally disabled for this repository, and the exported tree contains
+no workflow files.
 
 The snapshot includes the allowlisted Rust runtime crates, PHP engine, runtime
 tests, and selected runtime build scripts. It excludes the Spacefast control

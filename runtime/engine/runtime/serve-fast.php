@@ -18,7 +18,6 @@ function _sf_serve_fast(
     _stattic_serve_request($privateRoot, $requestMethod, $requestUri, $requestPath, $requestHost);
     exit;
 }
-
 function _sf_load_generated_config(string $privateRoot): void
 {
     static $attempted = false;
@@ -57,24 +56,4 @@ function _sf_promote_blob(string $privateRoot, string $spaceId, string $blobRela
         exit;
     }
     return $localPath;
-}
-
-// One header seam owns publisher filtering and wp.cloud edge activation for
-// both PHP bodies and server-file handoffs.
-function _sf_send_headers(array $headers): void
-{
-    header_remove('Pragma');
-    header_remove('Expires');
-    $headers = _stattic_apply_platform_header_policy($headers);
-    foreach ($headers as $name => $value) {
-        if (!is_string($name) || !is_scalar($value)) {
-            continue;
-        }
-        if (strtolower($name) === 'set-cookie') {
-            header($name . ': ' . (string) $value, false);
-            continue;
-        }
-        header_remove($name);
-        header($name . ': ' . (string) $value);
-    }
 }

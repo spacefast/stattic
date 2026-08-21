@@ -8,6 +8,14 @@ error_reporting(E_ALL);
 ini_set('log_errors', '1');
 ini_set('display_errors', '0');
 
+if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
+    error_log('Spacefast runtime requires PHP 8.5; running PHP ' . PHP_VERSION);
+    if (PHP_SAPI !== 'cli') {
+        http_response_code(500);
+    }
+    exit(1);
+}
+
 (static function (): void {
     // A CLI process with no request to serve is a tool loading WordPress — the
     // purge worker, wp-cli — not a visitor. Classifying it as a request for '/'
@@ -27,45 +35,19 @@ ini_set('display_errors', '0');
             : false;
         $target = is_string($pointer) ? trim($pointer) : '';
         if (preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) !== 1) {
-            // One release of tolerance for boxes that received the PHP pointer
-            // before the selector returned to an uncached data file.
-            $phpPointerPath = $installRoot . '/active-release.php';
-            $phpPointer = is_file($phpPointerPath)
-                ? file_get_contents($phpPointerPath, false, null, 0, 256)
-                : false;
-            $target = is_string($phpPointer)
-                && preg_match("#^<\\?php return '([^']*)';$#", trim($phpPointer), $match) === 1
-                ? $match[1]
-                : '';
+            exit(1);
         }
-        if (preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) !== 1) {
-            // The old installer lands this payload in the legacy tree before
-            // refreshing its resident copy. Keep that first pass serving; the
-            // control plane immediately runs the new installer a second time.
-            $installReal = realpath($installRoot);
-            $legacyEngine = realpath($installRoot . '/engine');
-            if (
-                !is_string($installReal)
-                || $legacyEngine !== $installReal . '/engine'
-                || !is_file($legacyEngine . '/shared/context.php')
-            ) {
-                exit(1);
-            }
-            $releaseRoot = $installReal;
-            $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseRoot;
-        } else {
-            $installReal = realpath($installRoot);
-            $releaseReal = realpath($installRoot . '/' . $target);
-            if (
-                !is_string($installReal)
-                || !is_string($releaseReal)
-                || !str_starts_with($releaseReal, $installReal . '/releases/')
-            ) {
-                exit(1);
-            }
-            $releaseRoot = $releaseReal;
-            $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseRoot;
+        $installReal = realpath($installRoot);
+        $releaseReal = realpath($installRoot . '/' . $target);
+        if (
+            !is_string($installReal)
+            || !is_string($releaseReal)
+            || !str_starts_with($releaseReal, $installReal . '/releases/')
+        ) {
+            exit(1);
         }
+        $releaseRoot = $releaseReal;
+        $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseRoot;
     }
 
     $script = basename(__FILE__);
@@ -83,7 +65,7 @@ ini_set('display_errors', '0');
             '/__spacefast/upload.php' => true,
         ];
         // END GENERATED runtime entrypoints
-        $path = parse_url((string) ($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH);
+        $path = explode('?', (string) ($_SERVER['REQUEST_URI'] ?? '/'), 2)[0];
         if (!isset($entrypointPaths[$path])) {
             require $releaseRoot . '/engine/entrypoints/prepend.php';
         }

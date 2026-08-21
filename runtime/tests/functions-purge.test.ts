@@ -11,9 +11,9 @@ import path from "node:path";
 
 import {
   deploy,
+  edgePurgeCalls,
   get,
   publicAccessConfig,
-  purgeQueueRecords,
   startRuntime,
   versionRoot,
   type Runtime,
@@ -28,7 +28,7 @@ const PURGE_TOKEN = "sfpt_functions_purge_credential_0123456789";
 let rt: Runtime;
 
 beforeAll(async () => {
-  rt = await startRuntime();
+  rt = await startRuntime({ captureEdgePurges: true });
   await deploy(rt, {
     spaceId: SPACE_ID,
     versionId: VERSION_ID,
@@ -115,13 +115,13 @@ test("the contract: POST only, bearer in sf-purge-token, 202 {accepted:true}", a
   expect(accepted.status).toBe(202);
   expect(await accepted.json()).toEqual({ accepted: true });
 
-  // The accepted request became a durable record in THE purge queue — the same
-  // store every management mutation drains through — addressed to the space's
-  // intent hostnames. (The kick may already have run and failed: there is no
-  // provider bridge here, so the record survives either way.)
-  const records = purgeQueueRecords(rt).filter((record) => record.reason === "functions_purge");
-  expect(records.length).toBeGreaterThanOrEqual(1);
-  expect(records.at(-1)?.hostnames).toEqual([HOST]);
+  // The accepted request drove a purge POST to the space's intent hostname over
+  // the same local edge-cache API every management mutation uses. `/blog/post.html`
+  // is a document path, so it is a whole-host (domain-scope) purge: no purge_uris.
+  const calls = edgePurgeCalls(rt).filter((call) => call.reason === "functions_purge");
+  expect(calls.length).toBeGreaterThanOrEqual(1);
+  expect(calls.at(-1)?.hostname).toBe(HOST);
+  expect(calls.at(-1)?.uris).toEqual([]);
 });
 
 test("a malformed or empty purge names its refusal instead of purging nothing", async () => {
@@ -141,14 +141,14 @@ test("a malformed or empty purge names its refusal instead of purging nothing", 
 
 test("identical sets coalesce; distinct sets spend the per-space quota", async () => {
   writePurgeToken(PURGE_TOKEN);
-  const before = purgeQueueRecords(rt).filter((r) => r.reason === "functions_purge").length;
+  const before = edgePurgeCalls(rt).filter((r) => r.reason === "functions_purge").length;
 
-  // The same set twice inside the coalesce window: both accepted, ONE record.
+  // The same set twice inside the coalesce window: both accepted, ONE purge.
   const first = await purge({ paths: ["/coalesce/a.css"], tags: [] });
   const repeat = await purge({ paths: ["/coalesce/a.css"], tags: [] });
   expect(first.status).toBe(202);
   expect(repeat.status).toBe(202);
-  const afterCoalesce = purgeQueueRecords(rt).filter((r) => r.reason === "functions_purge").length;
+  const afterCoalesce = edgePurgeCalls(rt).filter((r) => r.reason === "functions_purge").length;
   expect(afterCoalesce).toBe(before + 1);
 
   // Distinct sets each spend quota; past the window ceiling the refusal is a
@@ -178,10 +178,12 @@ test("tags are not part of the purge contract: a body carrying the retired field
   // by the earlier tests in this same runtime.
   const response = await purge({ paths: ["/tagged/asset.css"], tags: ["posts"] });
   if (response.status === 202) {
-    const record = purgeQueueRecords(rt)
+    // URI scope, not the domain widening tags used to force: the purge carries
+    // the concrete asset URL rather than a whole-host purge.
+    const call = edgePurgeCalls(rt)
       .filter((r) => r.reason === "functions_purge")
       .at(-1);
-    expect(record?.scope).toBe("urls");
+    expect(call?.uris).toEqual([`https://${HOST}/tagged/asset.css`]);
   } else {
     expect(response.status).toBe(429);
   }

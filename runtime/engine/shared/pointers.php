@@ -3,56 +3,41 @@ declare(strict_types=1);
 
 // The artifact rule (contracts §1), in one place.
 //
-//  - Every mutable pointer is JSON, read with one file_get_contents + APCu.
+//  - Every mutable pointer is JSON, read fresh from disk every time. Small on
+//    purpose: at pointer sizes a direct read costs single-digit microseconds,
+//    which no cache at any scope beats once its own risks are priced in.
 //  - Every PHP artifact is immutable and content-addressed: `<base>-<h16>.php`
 //    where h16 is the first 16 hex of sha256 over the FINAL bytes. Never written
 //    in place, never reused under a different content.
+//  - Every derived cache is a write-once `<?php return [...]` file served from
+//    opcache SHM (`_sf_php_cache_read`/`_sf_php_cache_write`). The fleet runs
+//    opcache.validate_timestamps=Off, so a PHP file's content may NEVER change
+//    under a path opcache has seen — immutability is what makes staleness
+//    structurally impossible, not any invalidation protocol.
+//
+// There is no APCu anywhere in the engine: the clusters run without it. Shared
+// mutable state is files (flock where it counts); shared derived state is
+// opcached PHP; cross-process rate gating is memcached (`_sf_runtime_log_once`).
 //
 // Deliberately dependency-free — runtime/serve-fast.php loads this and nothing
 // else from shared/ on the hot path, so it must not pull context.php in.
 
-const SF_POINTER_APCU_PREFIX = 'sf:p:';
-
-// DELIBERATE DEVIATION from the contracts' "TTL 0" wording. The writer's
-// apcu_delete is not sufficient on its own: a reader that has already read the
-// OLD file but not yet stored it races the swap (rename -> apcu_delete), and
-// with TTL 0 its store lands AFTER the delete and pins the superseded pointer
-// for the life of the worker. A short freshness window bounds that race
-// without a lock.
-const SF_POINTER_FRESH_SECONDS = 5;
-
-// How long a stale cached value may keep answering while re-reads of an
-// EXISTING file fail (the last-known-good bound). Past it the entry expires
-// and a still-failing pointer becomes `unavailable`, never `absent` — bounded
-// staleness is the ceiling a revocation/takedown can be behind by.
-const SF_POINTER_LKG_CAP_SECONDS = 30;
-
-function _sf_apcu_available(): bool
+/** @return list<string> */
+function _sf_memcached_server_addresses(mixed $servers): array
 {
-    static $available = null;
-    if ($available === null) {
-        $available = function_exists('apcu_fetch')
-            && function_exists('apcu_store')
-            && (!function_exists('apcu_enabled') || apcu_enabled());
+    if (!is_array($servers)) {
+        return [];
     }
-    return $available;
-}
-
-function _sf_apcu_get(string $key): mixed
-{
-    if (!_sf_apcu_available()) {
-        return null;
+    $addresses = [];
+    foreach ($servers as $serverOrBucket) {
+        $bucket = is_array($serverOrBucket) ? $serverOrBucket : [$serverOrBucket];
+        foreach ($bucket as $address) {
+            if (is_string($address) && str_contains($address, ':')) {
+                $addresses[] = $address;
+            }
+        }
     }
-    $ok = false;
-    $value = apcu_fetch($key, $ok);
-    return $ok === true ? $value : null;
-}
-
-function _sf_apcu_put(string $key, mixed $value, int $ttlSeconds = 0): void
-{
-    if (_sf_apcu_available()) {
-        apcu_store($key, $value, $ttlSeconds);
-    }
+    return $addresses;
 }
 
 // Proves absence by successfully listing the nearest readable ancestor and
@@ -70,7 +55,9 @@ function _sf_path_verifiably_absent(string $path): bool
             $cursor = $parent;
             continue;
         }
-        $entries = scandir($parent);
+        // Unsorted: the listing only ever feeds the in_array below, and this
+        // proof runs on the visitor hot path.
+        $entries = scandir($parent, SCANDIR_SORT_NONE);
         if (is_array($entries)) {
             return !in_array(basename($cursor), $entries, true);
         }
@@ -82,18 +69,69 @@ function _sf_path_verifiably_absent(string $path): bool
     return false;
 }
 
-// Failure logging for the runtime read paths: one line per second per kind
-// per pool (apcu_add is the atomic gate; without APCu, log unconditionally).
-// Plain error_log on purpose — the `sf-log/1 ` marker is the TENANT log lane
-// and these are platform-internal.
-function _sf_runtime_log_gate_key(string $kind): string
+// The site-scoped memcached key prefix. The daemon at $memcached_servers is
+// the POOL SERVER's, shared by every site on it — the platform namespaces its
+// own object cache with WP_CACHE_KEY_SALT (a per-site value from the same
+// prepend), and an unsalted key here would collide across sites: another
+// site's runtime holding `sf:log:<kind>` would silence this one's gate.
+function _sf_memcached_key_salt(): string
 {
-    return 'sf:log:' . $kind;
+    static $salt = null;
+    if ($salt === null) {
+        $salt = defined('WP_CACHE_KEY_SALT') && is_string(WP_CACHE_KEY_SALT)
+            ? WP_CACHE_KEY_SALT
+            : (string) (getenv('WP_CACHE_KEY_SALT') ?: getenv('ATOMIC_SITE_ID') ?: '');
+    }
+    return $salt;
 }
 
+// True when this call may log: at most once per kind per request, and — where
+// the box has memcached — once per second per kind across the whole site
+// (`add` is the atomic gate). The platform prepend (wp.cloud's
+// /scripts/env.php, the pool's auto_prepend_file) declares the daemon as
+// $memcached_servers, the same declaration its own object cache and sessions
+// ride on; where it or the extension is absent (php -S, CI) the gate is
+// per-request only. Fails OPEN: these fire exactly when infrastructure is
+// unhappy, and a silent gate during an incident is worse than duplicate lines.
+function _sf_runtime_log_once(string $kind): bool
+{
+    static $logged = [];
+    if (isset($logged[$kind])) {
+        return false;
+    }
+    $logged[$kind] = true;
+    $servers = _sf_memcached_server_addresses($GLOBALS['memcached_servers'] ?? null);
+    if ($servers === [] || !class_exists('Memcached')) {
+        return true;
+    }
+    try {
+        static $gate = null;
+        if ($gate === null) {
+            // Persistent id: the connection outlives the request in this worker.
+            $gate = new Memcached('sf-log-gate');
+            if ($gate->getServerList() === []) {
+                foreach ($servers as $server) {
+                    [$host, $port] = explode(':', $server, 2);
+                    $gate->addServer($host, (int) $port);
+                }
+            }
+        }
+        if ($gate->add(_sf_memcached_key_salt() . ':sf:log:' . $kind, 1, 1)) {
+            return true;
+        }
+        // NOTSTORED means another process holds this second's slot; any other
+        // result is memcached itself failing, which opens the gate.
+        return $gate->getResultCode() !== Memcached::RES_NOTSTORED;
+    } catch (Throwable) {
+        return true;
+    }
+}
+
+// Failure logging for the runtime read paths. Plain error_log on purpose — the
+// `sf-log/1 ` marker is the TENANT log lane and these are platform-internal.
 function _sf_runtime_log_read_failure(string $kind, string $path, ?string $identity = null): void
 {
-    if (_sf_apcu_available() && function_exists('apcu_add') && !apcu_add(_sf_runtime_log_gate_key($kind), 1, 1)) {
+    if (!_sf_runtime_log_once($kind)) {
         return;
     }
     $error = error_get_last();
@@ -102,30 +140,21 @@ function _sf_runtime_log_read_failure(string $kind, string $path, ?string $ident
         . ($error !== null ? ' msg=' . $error['message'] : ''));
 }
 
-// $name is the pointer identity, not the path: `routes` or `space:<spaceId>`.
-// The path hash scopes the APCu key to the site, so a shared-pool topology can
-// never cross-talk pointers between private roots.
-function _sf_pointer_apcu_key(string $name, string $path): string
-{
-    return SF_POINTER_APCU_PREFIX . $name . ':' . substr(hash('sha256', $path), 0, 8);
-}
-
 /**
- * One read attempt: read the file, decode it, cache and return the present or
+ * One read attempt: read the file, decode it, return the present or
  * verified-absent outcome. Null means this attempt failed — an unreadable file
  * whose absence could not be proven, or bytes that exist but are not a pointer
  * document (corruption, not absence — the absence probe never runs for it).
  *
  * @return array{kind: 'present'|'absent', value: ?array}|null
  */
-function _sf_pointer_attempt(string $key, string $path, int $now): ?array
+function _sf_pointer_attempt(string $path): ?array
 {
     error_clear_last();
     $raw = file_get_contents($path);
     if (is_string($raw)) {
         $decoded = json_decode($raw, true);
         if (is_array($decoded)) {
-            _sf_apcu_put($key, ['value' => $decoded, 'fresh_until' => $now + SF_POINTER_FRESH_SECONDS], SF_POINTER_LKG_CAP_SECONDS);
             return ['kind' => 'present', 'value' => $decoded];
         }
         // Bytes exist but are not a pointer document: corruption, not absence.
@@ -133,7 +162,6 @@ function _sf_pointer_attempt(string $key, string $path, int $now): ?array
     }
     clearstatcache(true, $path);
     if (_sf_path_verifiably_absent($path)) {
-        _sf_apcu_put($key, ['value' => null, 'fresh_until' => $now + SF_POINTER_FRESH_SECONDS], SF_POINTER_LKG_CAP_SECONDS);
         return ['kind' => 'absent', 'value' => null];
     }
     return null;
@@ -143,76 +171,42 @@ function _sf_pointer_attempt(string $key, string $path, int $now): ?array
  * Absence is a fact this function verifies (ENOENT-confirmed); a failed read
  * of an EXISTING pointer is never a state claim. Kinds:
  *
- *  - `present`     value is the pointer (possibly last-known-good while a
- *                  re-read fails, stale by at most SF_POINTER_LKG_CAP_SECONDS)
+ *  - `present`     value is the pointer, read fresh this request
  *  - `absent`      the file verifiably does not exist
- *  - `unavailable` the file exists but could not be read, and no usable
- *                  last-known-good survives — the caller must answer 5xx
- *                  without claiming anything about deployment or access state
+ *  - `unavailable` the file exists but could not be read — the caller must
+ *                  answer 5xx without claiming anything about deployment or
+ *                  access state
+ *
+ * Every read comes from disk — no cache at any scope. At pointer sizes a read
+ * costs single-digit microseconds, so a swap is visible on the very next read,
+ * a takedown is never masked, a swap-then-reread lane sees its own write, and
+ * a failure one read observed is inherited by nobody.
  *
  * @return array{kind: 'present'|'absent'|'unavailable', value: ?array}
  */
 function _sf_pointer_read(string $name, string $path): array
 {
-    $key = _sf_pointer_apcu_key($name, $path);
-    $now = time();
-    $entry = _sf_apcu_get($key);
-    $cached = is_array($entry) && array_key_exists('value', $entry) && is_int($entry['fresh_until'] ?? null)
-        ? $entry
-        : null;
-    if ($cached !== null && $now < $cached['fresh_until']) {
-        return $cached['value'] === null
-            ? ['kind' => 'absent', 'value' => null]
-            : ['kind' => 'present', 'value' => $cached['value']];
-    }
-
     for ($attempt = 0; $attempt < 2; $attempt += 1) {
         if ($attempt === 1) {
             _sf_runtime_log_read_failure('pointer_read_failed', $path, $name);
-            if ($cached !== null && is_array($cached['value'])) {
-                // Serve last-known-good without retrying: with the answer in
-                // hand the retry rate stays proportional to cold workers, not
-                // to traffic.
-                return ['kind' => 'present', 'value' => $cached['value']];
-            }
             // One immediate retry after clearstatcache: it covers the
             // atomic-swap visibility race (which is instantaneous), and nothing
             // a delay would cover — sustained failure lands on `unavailable`
             // and the next request.
             clearstatcache(true, $path);
         }
-        $read = _sf_pointer_attempt($key, $path, $now);
+        $read = _sf_pointer_attempt($path);
         if ($read !== null) {
             return $read;
         }
     }
     _sf_runtime_log_read_failure('pointer_unavailable', $path, $name);
-    // Never cached: the next request re-reads rather than inheriting failure.
     return ['kind' => 'unavailable', 'value' => null];
 }
 
-// Derived, not passed: a pointer's APCu identity is a property of where it
-// lives, so a writer cannot swap the file and forget the key.
-function _sf_pointer_name_for_path(string $path): ?string
-{
-    $normalized = str_replace('\\', '/', $path);
-    if (str_ends_with($normalized, '/routes/current.json')) {
-        return 'routes';
-    }
-    if (str_ends_with($normalized, '/runtime/storage-read-key.json')) {
-        return 'storage-read-key';
-    }
-    if (str_ends_with($normalized, '/runtime/cron-key.json')) {
-        return 'cron-key';
-    }
-    if (preg_match('#/spaces/([^/]+)/space\.json$#', $normalized, $matches) === 1) {
-        return 'space:' . $matches[1];
-    }
-    return null;
-}
-
-// Atomic JSON write, no APCu identity: the sidecars of a pointer go through here
-// so the whole family shares one primitive.
+// THE pointer write: tmp + rename, so a reader sees the whole old document or
+// the whole new one, never a torn one. There is no cache at any scope to
+// invalidate — the next read IS the visibility protocol.
 function _sf_json_write(string $path, array $value): void
 {
     $encoded = json_encode($value, JSON_UNESCAPED_SLASHES);
@@ -225,19 +219,6 @@ function _sf_json_write(string $path, array $value): void
     if (file_put_contents($tmp, $body) !== strlen($body) || !rename($tmp, $path)) {
         unlink($tmp);
         throw new RuntimeException('pointer write failed: ' . $path);
-    }
-}
-
-// tmp + rename + apcu_delete, in that order: a reader either sees the whole old
-// pointer or the whole new one, never a torn one. The delete is what makes the
-// new pointer visible immediately; the reader's freshness window is what bounds
-// the one case the delete cannot cover (a read already in flight over this swap).
-function _sf_pointer_swap(string $path, array $value): void
-{
-    _sf_json_write($path, $value);
-    $name = _sf_pointer_name_for_path($path);
-    if ($name !== null && _sf_apcu_available() && function_exists('apcu_delete')) {
-        apcu_delete(_sf_pointer_apcu_key($name, $path));
     }
 }
 
@@ -280,4 +261,78 @@ function _sf_artifact_mkdir(string $dir): void
     if (!mkdir($dir, 0775, true) && !is_dir($dir)) {
         throw new RuntimeException('artifact directory could not be created: ' . $dir);
     }
+}
+
+// Half the fleet's opcache.max_file_size (1 MiB): a sidecar past the ceiling
+// would be re-parsed on every request, slower than the source it derives from,
+// so it is refused instead. Same split point as the response tables.
+const SF_PHP_CACHE_MAX_BYTES = 524288;
+
+/**
+ * THE derived-cache read: a write-once `<?php return [...]` file served from
+ * opcache SHM. With validate_timestamps=Off a warm hit costs one is_file stat
+ * and zero further syscalls, and the array is shared, not copied. The is_file
+ * probe is the whole freshness protocol a write-once file needs: present means
+ * final, absent means not built yet or deleted with its owner — which is why a
+ * sidecar must live INSIDE the directory whose data it derives from.
+ *
+ * $expect is the payload's identity (e.g. spaceId/versionId): every pair must
+ * match strictly or the read is a miss — a cache is never trusted to be about
+ * what its path claims.
+ *
+ * @param array<string,string> $expect
+ */
+function _sf_php_cache_read(string $path, array $expect = []): ?array
+{
+    if (!is_file($path)) {
+        return null;
+    }
+    $loaded = include $path;
+    if (!is_array($loaded)) {
+        return null;
+    }
+    foreach ($expect as $key => $value) {
+        if (($loaded[$key] ?? null) !== $value) {
+            return null;
+        }
+    }
+    return $loaded;
+}
+
+/**
+ * THE derived-cache write: best-effort and never load-bearing — any failure
+ * means the next reader rebuilds from source, so callers ignore the result
+ * except to decide sharding. tmp + rename; a given path's content never
+ * changes (the source is immutable), so no invalidation exists anywhere. The
+ * opcache_invalidate is belt-and-braces against a half-cached tmp path, same
+ * as `_sf_php_artifact_write`.
+ */
+function _sf_php_cache_write(string $path, array $value): bool
+{
+    // Cheap refusal before serializing: var_export spells every node in at
+    // least ~16 bytes, so a value past this count can never fit the ceiling —
+    // and building a multi-MB source string just to measure it would tax every
+    // request that retries an oversized write (failed writes are never
+    // memoized, e.g. the version-catalog sidecar for very large versions).
+    if (count($value, COUNT_RECURSIVE) * 16 > SF_PHP_CACHE_MAX_BYTES) {
+        return false;
+    }
+    $code = _sf_php_artifact_source($value);
+    if (strlen($code) > SF_PHP_CACHE_MAX_BYTES) {
+        return false;
+    }
+    try {
+        _sf_artifact_mkdir(dirname($path));
+        $tmp = $path . '.tmp-' . bin2hex(random_bytes(6));
+        if (file_put_contents($tmp, $code) !== strlen($code) || !rename($tmp, $path)) {
+            unlink($tmp);
+            return false;
+        }
+    } catch (Throwable) {
+        return false;
+    }
+    if (function_exists('opcache_invalidate')) {
+        opcache_invalidate($path, true);
+    }
+    return true;
 }

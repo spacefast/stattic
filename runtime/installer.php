@@ -8,6 +8,11 @@ error_reporting(E_ALL);
 ini_set('log_errors', '1');
 ini_set('display_errors', '0');
 
+if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
+    fwrite(STDERR, 'Spacefast runtime installer requires PHP 8.5; running PHP ' . PHP_VERSION . "\n");
+    exit(1);
+}
+
 // CLI program run by the SSH bootstrap and the /engine/update management
 // route, never a web entrypoint: this guard fails closed under a provider that
 // direct-executes arbitrary PHP files. Zip source rides argv[1] (an https URL
@@ -90,7 +95,7 @@ function unsafe_relative_path(string $p): bool
 // installer scratch. A payload may not claim any of them.
 function reserved_install_root_name(string $name): bool
 {
-    return in_array($name, ['storage', 'incoming', 'installer.lock', 'active-release', 'active-release.php', 'loader-version', 'releases', '', '.', '..'], true)
+    return in_array($name, ['storage', 'incoming', 'installer.lock', 'active-release', 'loader-version', 'releases', '', '.', '..'], true)
         || str_starts_with($name, 'engine-stage-')
         || str_starts_with($name, 'engine-old-')
         || str_starts_with($name, 'release-stage-')
@@ -285,44 +290,30 @@ function validate_engine_stage(string $stageRoot, array $staged): void
         $stagedFiles[$entry['relative']] = true;
     }
 
-    $nativeProbes = [
-        'bin/stattic-runtime' => 'stattic.runtime.self-test.v1',
-    ];
-    foreach ($nativeProbes as $relative => $expectedFormat) {
-        if (!isset($stagedFiles[$relative])) {
-            fail('runtime_native_manifest_missing:' . $relative);
-        }
-        $result = run_native_self_test($stageRoot . '/' . $relative);
-        $probe = json_decode($result['stdout'], true);
-        if ($result['failed'] || $result['code'] !== 0 || !is_array($probe) || ($probe['format'] ?? null) !== $expectedFormat) {
-            fail('runtime_native_self_test_failed:' . $relative);
-        }
+    $relative = 'bin/stattic-runtime';
+    if (!isset($stagedFiles[$relative])) {
+        fail('runtime_native_manifest_missing:' . $relative);
+    }
+    $result = run_native_self_test($stageRoot . '/' . $relative);
+    $probe = json_decode($result['stdout'], true);
+    if ($result['failed'] || $result['code'] !== 0 || !is_array($probe) || ($probe['format'] ?? null) !== 'stattic.runtime.self-test.v1') {
+        fail('runtime_native_self_test_failed:' . $relative);
     }
 }
 
 function active_release_pointer_target(string $installRoot): ?string
 {
-    foreach (['/active-release' => false, '/active-release.php' => true] as $name => $php) {
-        $pointer = $installRoot . $name;
-        if (!is_file($pointer) || is_link($pointer)) {
-            continue;
-        }
-        clearstatcache(true, $pointer);
-        $raw = file_get_contents($pointer, false, null, 0, 256);
-        if (!is_string($raw)) {
-            continue;
-        }
-        $target = $php ? active_release_pointer_php_target($raw) : trim($raw);
-        if (preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) === 1) {
-            return $target;
-        }
+    $pointer = $installRoot . '/active-release';
+    if (!is_file($pointer) || is_link($pointer)) {
+        return null;
     }
-    return null;
-}
-
-function active_release_pointer_php_target(string $raw): string
-{
-    return preg_match("#^<\\?php return '([^']*)';$#", trim($raw), $match) === 1 ? $match[1] : '';
+    clearstatcache(true, $pointer);
+    $raw = file_get_contents($pointer, false, null, 0, 256);
+    if (!is_string($raw)) {
+        return null;
+    }
+    $target = trim($raw);
+    return preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) === 1 ? $target : null;
 }
 
 function active_release_root(string $installRoot): ?string
@@ -365,15 +356,12 @@ function publish_active_release(string $installRoot, string $target): bool
         return false;
     }
     clearstatcache(true, $pointer);
-    unlink_if_present($installRoot . '/active-release.php');
     return active_release_pointer_target($installRoot) === $target;
 }
 
 function remove_active_release_pointer(string $installRoot): bool
 {
-    $removed = unlink_if_present($installRoot . '/active-release');
-    $removed = unlink_if_present($installRoot . '/active-release.php') || $removed;
-    return $removed;
+    return unlink_if_present($installRoot . '/active-release');
 }
 
 /**
@@ -455,12 +443,6 @@ function installer_config_value(string $envName): string
 function read_engine_revision(string $root, bool $strict = false): ?string
 {
     $path = $root . '/engine/shared/context.php';
-    // Read a bounded head first so a converge probe does not slurp the whole
-    // module; fall back to a full read only if the regex misses.
-    $head = is_file($path) ? file_get_contents($path, false, null, 0, 8192) : false;
-    if (is_string($head) && preg_match("/const SPACEFAST_RUNTIME_ENGINE_REVISION = '([^']+)';/", $head, $match) === 1) {
-        return $match[1];
-    }
     $raw = is_file($path) ? file_get_contents($path) : false;
     if (!is_string($raw)) {
         if ($strict) {
@@ -513,24 +495,19 @@ function download_http_file(string $url, string $target, int $timeoutSeconds): b
     return false;
 }
 
+// ext-zip is part of the runtime's PHP contract — no shell fallback.
 function extract_zip_archive(string $zipPath, string $extractRoot): bool
 {
-    if (class_exists('ZipArchive')) {
-        $archive = new ZipArchive();
-        if ($archive->open($zipPath) !== true) {
-            return false;
-        }
-        $extracted = $archive->extractTo($extractRoot);
-        $archive->close();
-        return $extracted;
+    if (!class_exists('ZipArchive')) {
+        fail('runtime_zip_extension_unavailable');
     }
-
-    if (!function_exists('escapeshellarg') || !function_exists('exec')) {
+    $archive = new ZipArchive();
+    if ($archive->open($zipPath) !== true) {
         return false;
     }
-    $command = 'unzip -qq ' . escapeshellarg($zipPath) . ' -d ' . escapeshellarg($extractRoot);
-    exec($command, $output, $code);
-    return $code === 0;
+    $extracted = $archive->extractTo($extractRoot);
+    $archive->close();
+    return $extracted;
 }
 
 function installed_native_matches(string $releaseRoot, string $expectedSha256): bool
@@ -592,6 +569,25 @@ function sweep_stale_install_artifacts(string $privateRoot, string $installRoot)
 }
 
 /** @param list<string> $keep */
+// --clean scrubs stale unversioned trees (a pre-release-layout `bin/` or
+// `engine/` at the install root) that nothing serves from anymore.
+/** @param list<array{relative:string}> $staged */
+function prune_unversioned_trees(string $installRoot, array $staged): void
+{
+    $names = [];
+    foreach ($staged as $entry) {
+        $names[explode('/', $entry['relative'])[0]] = true;
+    }
+    foreach (array_keys($names) as $name) {
+        $path = $installRoot . '/' . $name;
+        if (is_dir($path) && !is_link($path)) {
+            rrmdir($path);
+        } else {
+            unlink_if_present($path);
+        }
+    }
+}
+
 function prune_old_releases(string $releasesRoot, array $keep): void
 {
     $cutoff = time() - 3600;
@@ -605,54 +601,6 @@ function prune_old_releases(string $releasesRoot, array $keep): void
             continue;
         }
         rrmdir($release);
-    }
-}
-
-function copy_tree(string $source, string $target): bool
-{
-    if (is_file($source)) {
-        return ensure_install_dir(dirname($target))
-            && copy($source, $target)
-            && chmod($target, fileperms($source) & 0777);
-    }
-    if (!is_dir($source) || !ensure_install_dir($target)) {
-        return false;
-    }
-    foreach (scandir($source) ?: [] as $name) {
-        if ($name === '.' || $name === '..') {
-            continue;
-        }
-        if (!copy_tree($source . '/' . $name, $target . '/' . $name)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-function snapshot_legacy_release(string $installRoot, string $releaseRoot): void
-{
-    if (!copy_tree($installRoot . '/engine', $releaseRoot . '/engine')) {
-        fail('runtime_engine_legacy_snapshot_failed');
-    }
-    if (is_dir($installRoot . '/bin') && !copy_tree($installRoot . '/bin', $releaseRoot . '/bin')) {
-        fail('runtime_engine_legacy_snapshot_failed');
-    }
-}
-
-/** @param list<array{relative:string}> $staged */
-function prune_unreferenced_legacy_release(string $installRoot, array $staged): void
-{
-    $names = [];
-    foreach ($staged as $entry) {
-        $names[explode('/', $entry['relative'])[0]] = true;
-    }
-    foreach (array_keys($names) as $name) {
-        $path = $installRoot . '/' . $name;
-        if (is_dir($path) && !is_link($path)) {
-            rrmdir($path);
-        } else {
-            unlink_if_present($path);
-        }
     }
 }
 
@@ -731,19 +679,6 @@ function prune_alias_dir(string $publicRoot, array $alias): void
     }
 }
 
-// opcache_invalidate() returns false both when a file could not be invalidated
-// and when the extension is simply not active in this process — and it is not
-// active in a CLI run with opcache.enable_cli=0. Separating the two is what
-// makes D56's "report failure" a real signal instead of a permanent alarm.
-function opcache_active(): bool
-{
-    if (!function_exists('opcache_invalidate') || !function_exists('opcache_get_status')) {
-        return false;
-    }
-    $status = opcache_get_status(false);
-    return is_array($status) && ($status['opcache_enabled'] ?? false) === true;
-}
-
 $args = array_slice($argv, 1);
 $cleanInstall = false;
 foreach ($args as $index => $arg) {
@@ -787,10 +722,9 @@ if ($expectedRevision === '') {
 }
 $expectedNativeSha256 = strtolower(installer_config_value('SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256'));
 
-// Converge short-circuit: only the pointer-based layout can converge without a
-// reinstall. A legacy real `.stattic/engine` must take the migration path even
-// when its bytes already match, and so must a box whose loader marker predates
-// the content identity — its loader may be older than the revision it reports.
+// Converge short-circuit: a box whose loader marker predates the content
+// identity must reinstall — its loader may be older than the revision it
+// reports.
 $installedReleaseRoot = active_release_root($installRoot);
 $installedReleaseTarget = active_release_pointer_target($installRoot);
 $installedLoaderIdentity = installed_loader_identity($installRoot);
@@ -834,7 +768,6 @@ $manifest = read_engine_manifest($extractRoot);
 // converged years ago and an unchanged loader never rewrites a live file.
 $loaderIdentity = loader_payload_identity($extractRoot, $manifest['alias']);
 $installAliases = $installedLoaderIdentity !== $loaderIdentity;
-$legacyReleasePresent = is_dir($installRoot . '/engine') && !is_link($installRoot . '/engine');
 
 // Everything up to pointer publication is disposable: the active release keeps
 // serving throughout staging and validation.
@@ -861,19 +794,6 @@ if (!rename($stageRoot, $releaseRoot)) {
 }
 register_cleanup_path($releaseRoot);
 
-// One-time migration: snapshot the still-live legacy tree, publish that
-// immutable snapshot, then replace the public aliases. Old aliases keep using
-// the untouched legacy tree; new aliases use the byte-identical snapshot.
-if (active_release_pointer_target($installRoot) === null && $legacyReleasePresent) {
-    $legacyRoot = $releasesRoot . '/legacy-' . $suffix;
-    register_cleanup_path($legacyRoot);
-    snapshot_legacy_release($installRoot, $legacyRoot);
-    $legacyTarget = 'releases/' . basename($legacyRoot);
-    if (!publish_active_release($installRoot, $legacyTarget)) {
-        fail('runtime_engine_legacy_pointer_failed');
-    }
-    unregister_cleanup_path($legacyRoot);
-}
 $previousReleaseTarget = active_release_pointer_target($installRoot);
 $previousReleaseRoot = active_release_root($installRoot);
 
@@ -896,29 +816,13 @@ if ($installAliases) {
     }
 }
 
-$installedPhp = [];
-foreach ($manifest['staged'] as $entry) {
-    if (str_ends_with($entry['relative'], '.php')) {
-        $installedPhp[] = $releaseRoot . '/' . $entry['relative'];
-    }
-}
-if ($installAliases) {
-    foreach ($manifest['alias'] as $entry) {
-        if (str_ends_with($entry['path'], '.php')) {
-            $installedPhp[] = $publicRoot . '/' . $entry['path'];
-        }
-    }
-}
-$opcacheActive = opcache_active();
-$staleOpcacheEntries = [];
-if ($opcacheActive) {
-    foreach ($installedPhp as $path) {
-        if (!opcache_invalidate($path, true)) {
-            $staleOpcacheEntries[] = $path;
-        }
-    }
-}
-
+// No opcache work here, deliberately. This installer runs as CLI, and CLI
+// opcache is a different SHM from FPM's — invalidating it converges nothing a
+// visitor sees (on wp.cloud opcache.enable_cli is off besides). FPM converges
+// structurally: each release lands under a fresh path opcache has never seen,
+// and the rewritten-in-place alias files are dropped from FPM's SHM by the
+// engine-update receipt route, which runs inside FPM
+// (_stattic_engine_update_invalidate_aliases).
 $fileCount = count($manifest['staged']) + count($manifest['alias']);
 $receipt = [
     'file_count' => $fileCount,
@@ -926,18 +830,7 @@ $receipt = [
     'engine_revision' => $actualRevision,
     'layout' => 'release',
     'loader' => $installAliases ? 'installed' : 'current',
-    'opcache' => $opcacheActive ? 'invalidated' : 'inactive',
 ];
-
-// Invalidate before publication. If it fails, the pointer still selects the
-// complete previous release.
-if ($staleOpcacheEntries !== []) {
-    $receipt['opcache'] = 'stale';
-    $receipt['opcache_stale_count'] = count($staleOpcacheEntries);
-    $receipt['rolled_back'] = $previousReleaseTarget !== null;
-    echo json_encode(['status' => 'failed', 'reason' => 'opcache_invalidation_failed'] + $receipt, JSON_PRETTY_PRINT) . "\n";
-    fail('opcache_invalidation_failed');
-}
 
 if ($installAliases) {
     $loaderMarker = $installRoot . '/loader-version';
@@ -999,8 +892,8 @@ if (is_file($stagedInstaller) && ensure_install_dir($publicRoot . '/__spacefast'
 }
 
 unregister_cleanup_path($releaseRoot);
-if ($cleanInstall && !$legacyReleasePresent) {
-    prune_unreferenced_legacy_release($installRoot, $manifest['staged']);
+if ($cleanInstall) {
+    prune_unversioned_trees($installRoot, $manifest['staged']);
 }
 prune_old_releases($releasesRoot, array_values(array_filter([
     realpath($releaseRoot) ?: null,

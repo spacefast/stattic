@@ -138,7 +138,7 @@ function _stattic_comments_handle_exchange(
     if ($pagePath === null || strlen($pagePath) > 1024) {
         _stattic_render_json_unauthenticated('comments_path_invalid');
     }
-    _stattic_acquire_access_admission($privateRoot, $serving);
+    _stattic_admission_acquire_access_lane($privateRoot, $serving);
     if (_stattic_enforce_scoped_admission($serving, $requestHost, $pagePath, true) === null) {
         _stattic_render_json_unauthenticated('comments_denied');
     }
@@ -157,10 +157,7 @@ function _stattic_comments_handle_exchange(
     $isTicket = $requestPath === STATTIC_COMMENTS_TICKET_PATH;
     $isVersionUrls = $requestPath === STATTIC_COMMENTS_VERSION_URLS_PATH;
     $isZeroRealtimeTicket = $requestPath === STATTIC_ZERO_REALTIME_TICKET_PATH;
-    $descriptor = _stattic_access_page_descriptor($serving);
-    $exchange = is_array($descriptor) && is_array($descriptor['exchange'] ?? null)
-        ? $descriptor['exchange']
-        : null;
+    $exchange = _stattic_access_page_exchange($serving);
     $exchangeKey = match (true) {
         $isZeroRealtimeTicket => 'zeroRealtimeTicketUrl',
         $isVersionUrls => 'commentsVersionUrlsUrl',
@@ -294,9 +291,7 @@ function _stattic_spacefast_sdk_bootstrap(
     $overlay = _stattic_comments_local_config($privateRoot, $serving, $requestHost);
     $collabBase = _stattic_spacefast_sdk_base_url($sdkConfig);
     $descriptor = _stattic_access_page_descriptor($serving);
-    $exchange = is_array($descriptor) && is_array($descriptor['exchange'] ?? null)
-        ? $descriptor['exchange']
-        : null;
+    $exchange = _stattic_access_page_exchange($serving);
     $pageHost = _stattic_normalize_hostname($requestHost);
     // A machine-local Cast origin under a public control plane came from a
     // deployment wired against a developer's machine: no visitor could reach
@@ -417,6 +412,10 @@ function _stattic_spacefast_sdk_placeholder_orb(array $overlay): string
         '}catch(e){}';
 }
 
+// The SDK manifest contract requires an apiBase (packages' readManifest
+// refuses a null one), so a deployment without SPACEFAST_API_BASE_URL —
+// self-host, local harness — derives it from the Cast origin rather than
+// shipping an unbootable manifest.
 function _stattic_spacefast_sdk_api_base_url(array $sdkConfig): ?string
 {
     $base = rtrim(_stattic_config_value('SPACEFAST_API_BASE_URL'), '/');
@@ -457,7 +456,9 @@ function _stattic_spacefast_sdk_base_url(array $sdkConfig): ?string
     $base = _stattic_spacefast_sdk_config_string($sdkConfig, 'cast_api_base')
         ?? _stattic_config_value('SPACEFAST_CAST_API_URL');
     $base = rtrim($base, '/');
-    return $base !== '' ? $base : null;
+    // Every consumer (the SDK loader and the Collab frame) gets the same
+    // answer: a configured value that is not a URL is absent, not a base.
+    return $base !== '' && filter_var($base, FILTER_VALIDATE_URL) !== false ? $base : null;
 }
 
 // THE SDK configuration, and the only place it comes from: the Space overlay,
@@ -480,7 +481,7 @@ function _stattic_spacefast_sdk_tag_body(string $privateRoot, array $serving): s
         return $sdk['body'];
     }
     $sha = $sdk['body_sha256'] ?? null;
-    if (!is_string($sha) || preg_match('/\A[a-f0-9]{64}\z/', $sha) !== 1) {
+    if (!is_string($sha) || !_stattic_is_sha256_hex($sha)) {
         return '';
     }
     $body = _stattic_v4_blob_contents([

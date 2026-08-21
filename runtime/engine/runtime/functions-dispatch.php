@@ -27,6 +27,10 @@ const SPACEFAST_FUNCTIONS_DISPATCH_HEADER_PREFIX = 'sf-fx-';
 const STATTIC_FUNCTIONS_DISPATCH_TIMEOUT_SECONDS = 30;
 const STATTIC_FUNCTIONS_DISPATCH_CONNECT_TIMEOUT_SECONDS = 5;
 
+// Storage, database and platform services transit the relay. The Next cache and
+// tenant fetch live with the worker, and log delivery degrades on its own.
+const STATTIC_FUNCTIONS_RELAY_FREE_CAPABILITIES = ['fetch', 'log', 'next.cache'];
+
 // Compiled beside the version's file tree, never inside it, like the config.
 // The non-terminal reader lets the static lane distinguish verified absence
 // from a transient/malformed artifact: the latter must keep the committed
@@ -90,13 +94,6 @@ function _stattic_load_functions_routes_artifact(string $versionRoot): ?array
     return $read['value'];
 }
 
-function _stattic_functions_route_method_matches(?string $routeMethod, string $requestMethod): bool
-{
-    return $routeMethod === null
-        || $routeMethod === $requestMethod
-        || ($routeMethod === 'GET' && $requestMethod === 'HEAD');
-}
-
 /**
  * Runs after every static and Zero resolution: assets win, and a request
  * matching no compiled route never wakes the worker. The worker owns status
@@ -149,36 +146,12 @@ function _stattic_resolve_functions_route_action(string $versionRoot, string $lo
     return null;
 }
 
-// Stored beside the version's file tree, never inside it: a publish reaches
-// `files/` and nothing else, so no upload can create or amend this document.
+// The valid config or null; artifacts.php's `_stattic_functions_config_read`
+// owns the read and its memo.
 function _stattic_functions_config(string $versionRoot): ?array
 {
-    // Request-scoped: the static-bypass check and the dispatch lane both read
-    // this document. Present and verified-absent outcomes are memoized; the
-    // transient read failure (`false`) never is, so a later call retries.
-    static $cache = [];
-    $path = dirname($versionRoot) . '/functions/config.json';
-    if (array_key_exists($path, $cache)) {
-        return $cache[$path];
-    }
-    $config = _stattic_runtime_read_json($path);
-    if ($config === false) {
-        return null;
-    }
-    if (!is_array($config) || ($config['runtimeKind'] ?? null) !== 'functions') {
-        return $cache[$path] = null;
-    }
-    $host = is_array($config['host'] ?? null) ? $config['host'] : [];
-    $artifact = is_array($config['artifact'] ?? null) ? $config['artifact'] : [];
-    if (
-        !is_string($host['hostname'] ?? null) || $host['hostname'] === ''
-        || !is_string($host['bundleUrl'] ?? null) || $host['bundleUrl'] === ''
-        || !is_string($artifact['mainModule'] ?? null) || $artifact['mainModule'] === ''
-        || !is_string($artifact['compatibilityDate'] ?? null) || $artifact['compatibilityDate'] === ''
-    ) {
-        return $cache[$path] = null;
-    }
-    return $cache[$path] = $config;
+    $read = _stattic_functions_config_read($versionRoot);
+    return $read['kind'] === 'present' ? $read['value'] : null;
 }
 
 /**
@@ -256,12 +229,9 @@ function _stattic_functions_dispatch_headers(
         && is_string($relay['url'] ?? null) && $relay['url'] !== ''
         && is_string($relay['token'] ?? null) && $relay['token'] !== '';
     if (!$relayUsable) {
-        // Storage, database and platform services transit the relay. The Next
-        // cache and tenant fetch live with the worker, and log delivery
-        // degrades on its own below.
         $capabilities = array_values(array_filter(
             $capabilities,
-            static fn($c) => in_array($c, ['fetch', 'log', 'next.cache'], true)
+            static fn($c) => in_array($c, STATTIC_FUNCTIONS_RELAY_FREE_CAPABILITIES, true)
         ));
     }
 
@@ -296,11 +266,13 @@ function _stattic_functions_dispatch_headers(
     if (is_string($host['seedUrl'] ?? null) && $host['seedUrl'] !== '') {
         $headers['sf-fx-seed'] = (string) $host['seedUrl'];
     }
+    // A needed relay is a usable one: when it is not, the filter above leaves
+    // only relay-free capabilities behind.
     $relayNeeded = array_filter(
         $capabilities,
-        static fn($c) => !in_array($c, ['fetch', 'log', 'next.cache'], true)
+        static fn($c) => !in_array($c, STATTIC_FUNCTIONS_RELAY_FREE_CAPABILITIES, true)
     ) !== [];
-    if ($relayUsable && $relayNeeded) {
+    if ($relayNeeded) {
         $headers['sf-fx-relay'] = (string) $relay['url'];
         $headers['sf-fx-relay-token'] = (string) $relay['token'];
     }
@@ -420,7 +392,6 @@ function _stattic_functions_dispatch(
     if (
         $config === null
         || $dispatchToken === ''
-        || !_stattic_http_available()
         || !_stattic_platform_destination_allowed('https://' . $config['host']['hostname'])
     ) {
         _stattic_functions_edge_unconfigured();

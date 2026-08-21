@@ -77,9 +77,10 @@ declare(strict_types=1);
  *      removal is a pool `php_admin_value[disable_functions]` — a provider
  *      capability.
  *   B. UID / PROCESS SEPARATION. All spaces on one box share the engine pool's
- *      uid and its APCu/opcache SHM; a same-box space cannot be denied at the
- *      kernel level, only at the PHP-API level above. Per-space uid + a
- *      disjoint master are provider capabilities.
+ *      uid and its opcache SHM (which also carries every space's derived-cache
+ *      sidecars); a same-box space cannot be denied at the kernel level, only
+ *      at the PHP-API level above. Per-space uid + a disjoint master are
+ *      provider capabilities.
  *   C. PER-REQUEST INI RESET is load-bearing. Because `open_basedir` cannot be
  *      widened once tightened, re-pinning per space on a shared box only works
  *      because php-fpm restores ini to the pool baseline at the end of every

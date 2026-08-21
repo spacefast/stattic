@@ -197,20 +197,6 @@ pub fn target_allowed(
     })
 }
 
-/// One hop of a caller-driven redirect chain: the hop budget, then the same
-/// policy [`target_allowed`] applies to the original target.
-pub fn redirect_target_allowed(
-    profile: EgressProfile,
-    url: &str,
-    hop: u32,
-    internal: &InternalHosts,
-) -> Result<EgressTarget, EgressDenial> {
-    if hop >= EGRESS_MAX_REDIRECT_HOPS {
-        return Err(EgressDenial::RedirectLimit);
-    }
-    target_allowed(profile, url, internal)
-}
-
 fn normalize_host(host: &str) -> String {
     host.trim_matches(|character| {
         matches!(
@@ -462,28 +448,6 @@ mod tests {
             );
         }
         assert_eq!(
-            redirect_target_allowed(
-                EgressProfile::TenantFetch,
-                "https://example.com",
-                3,
-                &internal
-            ),
-            Err(EgressDenial::RedirectLimit)
-        );
-        assert_eq!(
-            target_allowed(
-                EgressProfile::TenantFetch,
-                "https://example.com:8443",
-                &internal
-            ),
-            redirect_target_allowed(
-                EgressProfile::TenantFetch,
-                "https://example.com:8443",
-                2,
-                &internal
-            )
-        );
-        assert_eq!(
             target_allowed(EgressProfile::TenantFetch, "https://example.com", &internal)
                 .unwrap()
                 .port,
@@ -494,6 +458,16 @@ mod tests {
                 .unwrap()
                 .port,
             80
+        );
+        assert_eq!(
+            target_allowed(
+                EgressProfile::TenantFetch,
+                "https://example.com:8443",
+                &internal
+            )
+            .unwrap()
+            .port,
+            8443
         );
     }
 }

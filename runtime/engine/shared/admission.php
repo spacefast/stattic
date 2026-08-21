@@ -7,13 +7,13 @@ require_once __DIR__ . '/storage.php';
 
 const STATTIC_ADMISSION_DEFAULT_LIMIT = 6;
 const STATTIC_ADMISSION_RETRY_AFTER_SECONDS = 2;
-// Crash-recovery self-heal window, NOT the accounting lifetime: apcu sets the
-// TTL once at creation and never refreshes it, so a holder outliving this window
-// has its key purged mid-request and the per-space cap is bypassed. Must stay at
-// request-timeout scale. Residual (apcu): the window is anchored at generation
-// creation and shared by every holder, so one admitted near rollover is
-// forgotten — up to `limit` extra admissions once per window. Generation scoping
-// still guarantees a forgotten holder's release cannot decrement its successor.
+// Crash-recovery self-heal window and maximum generation lifetime. A generation
+// rotates after this bound even while surviving traffic mutates its count, so
+// crashed workers cannot leak capacity forever. Must stay at request-timeout
+// scale: a holder that legitimately outlives the generation releases only into
+// its retired generation and cannot decrement the successor.
+// Generation scoping guarantees a rotated-away holder's release cannot
+// decrement its successor.
 const STATTIC_ADMISSION_STALE_SECONDS_DEFAULT = 120;
 
 function _stattic_admission_stale_seconds(): int
@@ -32,119 +32,25 @@ function _stattic_admission_configured_limit(array $serving): int
     return max(1, $limit);
 }
 
-// Picked once per process so a request never mixes an apcu acquire with a file
-// release. Feature-detect via apcu_enabled(), not the apc.enabled ini flag:
-// under CLI / `php -S` the functions exist and the flag reads on while the
-// cache is dead without apc.enable_cli.
-function _stattic_admission_backend(): string
-{
-    static $backend = null;
-    if ($backend !== null) {
-        return $backend;
-    }
-
-    $forced = strtolower(_stattic_config_value('SPACEFAST_ADMISSION_COUNTER_BACKEND'));
-    if ($forced === 'file') {
-        $backend = 'file';
-        return $backend;
-    }
-    if ($forced === 'apcu') {
-        $backend = 'apcu';
-        return $backend;
-    }
-    $backend = function_exists('apcu_inc') && function_exists('apcu_dec') && function_exists('apcu_enabled') && apcu_enabled()
-        ? 'apcu'
-        : 'file';
-    return $backend;
-}
-
 // Counter keys carry caller-controlled input (space id, bucket id): this
-// allowlist makes them safe as both an apcu key and a filesystem path segment.
+// allowlist makes them safe as a filesystem path segment.
 function _stattic_admission_sanitize_key(string $value): string
 {
     return preg_replace('/[^A-Za-z0-9._-]/', '_', $value);
 }
 
-function _stattic_admission_key(string $spaceId): string
-{
-    return 'spacefast:adm:' . _stattic_admission_sanitize_key($spaceId);
-}
-
-function _stattic_admission_fallback_path(string $privateRoot, string $spaceId): string
+function _stattic_admission_counter_path(string $privateRoot, string $spaceId): string
 {
     return $privateRoot . '/runtime/admission/' . _stattic_admission_sanitize_key($spaceId) . '.json';
 }
 
-function _stattic_admission_journal_fallback_once(string $privateRoot): void
-{
-    // Throttle stat first so the steady-state cost is one filemtime.
-    $marker = $privateRoot . '/runtime/admission/file-fallback-journaled';
-    if (!_stattic_marker_throttle($marker, PHP_INT_MAX)) {
-        return;
-    }
-    _stattic_runtime_mkdir(dirname($marker));
-    if (!touch($marker)) {
-        return;
-    }
-    _stattic_runtime_append_journal($privateRoot, [
-        'event' => 'admission_counter_fallback',
-        'backend' => 'file',
-    ]);
-}
-
-// A TTL'd generation selects its own count key, so a killed worker's slot
-// self-heals without letting an old release touch a replacement generation.
-function _stattic_admission_apcu_generation(string $key, int $windowSeconds): ?string
-{
-    $generationKey = $key . ':generation';
-    apcu_add($generationKey, bin2hex(random_bytes(16)), $windowSeconds);
-    $generation = apcu_fetch($generationKey, $found);
-    return $found && is_string($generation) ? $generation : null;
-}
-
-// Null (not a count) means apcu itself failed: callers must fall back rather
-// than treat it as a real reading.
-function _stattic_admission_apcu_counter_increment(string $key, int $windowSeconds): ?array
-{
-    $generation = _stattic_admission_apcu_generation($key, $windowSeconds);
-    if ($generation === null) {
-        return null;
-    }
-    $countKey = $key . ':' . $generation;
-    apcu_add($countKey, 0, $windowSeconds);
-    $count = apcu_inc($countKey, 1, $ok, $windowSeconds);
-    return $ok && is_int($count) ? ['count' => $count, 'count_key' => $countKey] : null;
-}
-
-function _stattic_admission_apcu_counter_acquire(string $key, int $limit, int $windowSeconds): callable|false|null
-{
-    $incremented = _stattic_admission_apcu_counter_increment($key, $windowSeconds);
-    if ($incremented === null) {
-        return null;
-    }
-    $countKey = $incremented['count_key'];
-    if ($incremented['count'] > $limit) {
-        apcu_dec($countKey, 1);
-        return false;
-    }
-    return static function () use ($countKey): void {
-        // A late release may only touch the generation that admitted it.
-        if (!apcu_exists($countKey)) {
-            return;
-        }
-        $value = apcu_dec($countKey, 1, $ok);
-        if ($ok && is_int($value) && $value < 0) {
-            apcu_cas($countKey, $value, 0);
-        }
-    };
-}
-
-// THE file-backed windowed counter. Every mutation serializes on the generation
+// THE windowed counter — flock-serialized files, shared by every worker that
+// serves the site regardless of pool. Every mutation serializes on the generation
 // pointer's lock, so concurrent increments cannot lose each other. $decide gets
 // the in-window count and returns the delta to persist. $requireGeneration
 // binds a caller to the window it joined — a rotated-away generation makes the
 // update a no-op instead of landing on its successor.
-function _stattic_admission_file_counter_update(
+function _stattic_admission_counter_update(
     string $path,
     int $staleSeconds,
     callable $decide,
@@ -160,13 +66,14 @@ function _stattic_admission_file_counter_update(
 
     rewind($pointerHandle);
     $pointerRaw = stream_get_contents($pointerHandle);
-    $generation = _stattic_admission_file_counter_generation($pointerRaw);
+    $generation = _stattic_admission_counter_generation($pointerRaw);
     if ($requireGeneration !== null && ($generation === null || !hash_equals($requireGeneration, $generation))) {
         _stattic_lock_release($pointerHandle);
         return null;
     }
 
     $updatedAt = 0;
+    $startedAt = 0;
     $count = 0;
     if ($generation !== null) {
         $countPath = $path . '.' . $generation;
@@ -174,13 +81,20 @@ function _stattic_admission_file_counter_update(
         $raw = is_file($countPath) ? file_get_contents($countPath) : false;
         $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
         $updatedAt = is_array($decoded) && is_int($decoded['updated_at'] ?? null) ? $decoded['updated_at'] : 0;
+        // Generation files created before `started_at` use their last update as
+        // the migration baseline, then gain an explicit lifetime on next write.
+        $startedAt = is_array($decoded) && is_int($decoded['started_at'] ?? null)
+            ? $decoded['started_at']
+            : $updatedAt;
         $count = is_array($decoded) && is_int($decoded['count'] ?? null) ? max(0, $decoded['count']) : 0;
     }
 
-    $rotating = $requireGeneration === null && ($generation === null || $updatedAt < time() - $staleSeconds);
+    $now = time();
+    $rotating = $requireGeneration === null && ($generation === null || $startedAt < $now - $staleSeconds);
     if ($rotating) {
         $count = 0;
         $generation = bin2hex(random_bytes(16));
+        $startedAt = $now;
     }
 
     $delta = (int) $decide($count);
@@ -195,7 +109,8 @@ function _stattic_admission_file_counter_update(
         rewind($countHandle);
         fwrite($countHandle, json_encode([
             'count' => $next,
-            'updated_at' => $delta === 0 ? $updatedAt : time(),
+            'started_at' => $startedAt,
+            'updated_at' => $delta === 0 ? $updatedAt : $now,
         ], JSON_UNESCAPED_SLASHES) . "\n");
         fflush($countHandle);
         _stattic_lock_release($countHandle);
@@ -222,7 +137,7 @@ function _stattic_admission_file_counter_update(
     return ['count' => $next, 'generation' => (string) $generation];
 }
 
-function _stattic_admission_file_counter_generation(mixed $pointerRaw): ?string
+function _stattic_admission_counter_generation(mixed $pointerRaw): ?string
 {
     $pointer = is_string($pointerRaw) && $pointerRaw !== '' ? json_decode($pointerRaw, true) : null;
     return is_array($pointer)
@@ -232,10 +147,10 @@ function _stattic_admission_file_counter_generation(mixed $pointerRaw): ?string
             : null;
 }
 
-function _stattic_admission_file_counter_acquire(string $path, int $limit, int $staleSeconds): callable|false
+function _stattic_admission_counter_acquire(string $path, int $limit, int $staleSeconds): callable|false
 {
     $admitted = false;
-    $result = _stattic_admission_file_counter_update(
+    $result = _stattic_admission_counter_update(
         $path,
         $staleSeconds,
         static function (int $count) use ($limit, &$admitted): int {
@@ -248,30 +163,13 @@ function _stattic_admission_file_counter_acquire(string $path, int $limit, int $
     }
     $generation = $result['generation'];
     return static function () use ($path, $staleSeconds, $generation): void {
-        _stattic_admission_file_counter_update(
+        _stattic_admission_counter_update(
             $path,
             $staleSeconds,
             static fn (int $count): int => -1,
             $generation,
         );
     };
-}
-
-function _stattic_admission_counter_acquire(
-    string $privateRoot,
-    string $key,
-    string $path,
-    int $limit,
-    int $staleSeconds
-): callable|false {
-    if (_stattic_admission_backend() === 'apcu') {
-        $release = _stattic_admission_apcu_counter_acquire($key, $limit, $staleSeconds);
-        if ($release !== null) {
-            return $release;
-        }
-    }
-    _stattic_admission_journal_fallback_once($privateRoot);
-    return _stattic_admission_file_counter_acquire($path, $limit, $staleSeconds);
 }
 
 function _stattic_admission_record_shed(string $privateRoot, string $spaceId, int $limit, string $reason): void
@@ -295,9 +193,7 @@ function _stattic_admission_acquire_or_shed(string $privateRoot, array $serving,
     }
     $limit = _stattic_admission_configured_limit($serving);
     $release = _stattic_admission_counter_acquire(
-        $privateRoot,
-        _stattic_admission_key($spaceId),
-        _stattic_admission_fallback_path($privateRoot, $spaceId),
+        _stattic_admission_counter_path($privateRoot, $spaceId),
         $limit,
         _stattic_admission_stale_seconds(),
     );

@@ -799,17 +799,18 @@ test("exact Zero requests dispatch from the compiled response table with their d
   expect(response.status).toBe(201);
   expect(await response.json()).toEqual({
     ok: true,
+    artifactPath: "zero/endpoints/post_api_manifest_600f83287452.json",
     endpointId: "POST /api/manifest",
     method: "POST",
     path: "/api/manifest",
     params: [],
   });
 
-  // The endpoint id and artifact agree with zero/endpoints-index.json, so the
-  // runner is invoked by endpoint id and the envelope carries no artifact path.
+  // The envelope always names the artifact explicitly; the runner binds
+  // identity by asserting the artifact's own endpoint id against it.
   const envelope = JSON.parse(readFileSync(capturePath, "utf8"));
   expect(envelope.endpointId).toBe("POST /api/manifest");
-  expect(envelope.artifactPath).toBeUndefined();
+  expect(envelope.artifactPath).toBe("zero/endpoints/post_api_manifest_600f83287452.json");
   expect(envelope.context.schemaHash).toBe("sha256:manifest");
 });
 

@@ -30,9 +30,10 @@ use crate::config::jsonc::parse as parse_jsonc;
 use crate::content::{materialize_html_pipeline, IMPLICIT_FAVICON_PATH, PIPELINE_SOURCE_MAX_BYTES};
 use crate::csp::PlatformCspSources;
 use crate::finalize::{
-    artifact_metadata, create_dir_all, file_meta, invalid, invalid_with_details, mime_for_path,
-    read_bounded, remove_any, sha256, validate_id, validate_relative_path, write_bytes,
-    write_generated, write_json, write_php, AdoptablePath, FileMeta, FinalizeError, Result,
+    artifact_metadata, create_dir_all, file_meta, invalid, invalid_error, invalid_with_details,
+    mime_for_path, read_bounded, remove_any, sha256, validate_id, validate_relative_path,
+    write_bytes, write_generated, write_json, write_php, AdoptablePath, FileMeta, FinalizeError,
+    Result,
 };
 use crate::hash::stable_json_sha256;
 use crate::model::{
@@ -1412,13 +1413,8 @@ fn optional_field<T: serde::de::DeserializeOwned + Default>(
 ) -> Result<T> {
     match field {
         None | Some(Value::Null) => Ok(T::default()),
-        Some(value) => {
-            serde_json::from_value(value.clone()).map_err(|error| FinalizeError::Invalid {
-                code,
-                message: format!("{key} is not {expected}: {error}"),
-                details: None,
-            })
-        }
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| invalid_error(code, format!("{key} is not {expected}: {error}"))),
     }
 }
 
@@ -1782,15 +1778,17 @@ fn existing_finalize_output(
     input_hash: &str,
 ) -> Result<SiteFinalizeOutput> {
     let metadata_path = version_root.join("metadata.json");
-    let bytes = fs::read(&metadata_path).map_err(|_| FinalizeError::Invalid {
-        code: "version_existing_invalid",
-        message: "The existing immutable version metadata is unavailable.".into(),
-        details: None,
+    let bytes = fs::read(&metadata_path).map_err(|_| {
+        invalid_error(
+            "version_existing_invalid",
+            "The existing immutable version metadata is unavailable.",
+        )
     })?;
-    let metadata: Value = serde_json::from_slice(&bytes).map_err(|_| FinalizeError::Invalid {
-        code: "version_existing_invalid",
-        message: "The existing immutable version metadata is invalid.".into(),
-        details: None,
+    let metadata: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        invalid_error(
+            "version_existing_invalid",
+            "The existing immutable version metadata is invalid.",
+        )
     })?;
     let Some(metadata) = metadata.as_object() else {
         return invalid(
@@ -1826,21 +1824,18 @@ fn existing_finalize_output(
     let root: Value = fs::read(&pointer)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .ok_or_else(|| FinalizeError::Invalid {
-            code: "version_existing_invalid",
-            message: format!(
-                "The existing immutable version is missing {VERSION_ROOT_POINTER_FILE}."
-            ),
-            details: None,
+        .ok_or_else(|| {
+            invalid_error(
+                "version_existing_invalid",
+                format!("The existing immutable version is missing {VERSION_ROOT_POINTER_FILE}."),
+            )
         })?;
-    let root_file =
-        root.get("root")
-            .and_then(Value::as_str)
-            .ok_or_else(|| FinalizeError::Invalid {
-                code: "version_existing_invalid",
-                message: "The existing immutable version root pointer is invalid.".into(),
-                details: None,
-            })?;
+    let root_file = root.get("root").and_then(Value::as_str).ok_or_else(|| {
+        invalid_error(
+            "version_existing_invalid",
+            "The existing immutable version root pointer is invalid.",
+        )
+    })?;
     if !version_root.join(root_file).is_file() {
         return invalid(
             "version_existing_invalid",
@@ -1851,10 +1846,11 @@ fn existing_finalize_output(
         .get("tables")
         .and_then(Value::as_object)
         .filter(|tables| !tables.is_empty())
-        .ok_or_else(|| FinalizeError::Invalid {
-            code: "version_existing_invalid",
-            message: "The existing immutable version records no response table.".into(),
-            details: None,
+        .ok_or_else(|| {
+            invalid_error(
+                "version_existing_invalid",
+                "The existing immutable version records no response table.",
+            )
         })?;
     for table in tables.values() {
         let Some(table) = table.as_str() else {
@@ -1885,10 +1881,11 @@ fn existing_finalize_output(
         .get("diagnostics")
         .cloned()
         .and_then(|value| serde_json::from_value::<Vec<RuntimeDiagnostic>>(value).ok())
-        .ok_or_else(|| FinalizeError::Invalid {
-            code: "version_existing_invalid",
-            message: "The existing immutable version diagnostics are invalid.".into(),
-            details: None,
+        .ok_or_else(|| {
+            invalid_error(
+                "version_existing_invalid",
+                "The existing immutable version diagnostics are invalid.",
+            )
         })?;
     // A replay answers with the delta the first finalize published, rather than
     // recomputing one against a live version that has since moved.
@@ -1897,10 +1894,11 @@ fn existing_finalize_output(
         .filter(|delta| !delta.is_null())
         .map(|delta| serde_json::from_value::<CatalogDelta>(delta.clone()))
         .transpose()
-        .map_err(|_| FinalizeError::Invalid {
-            code: "version_existing_invalid",
-            message: "The existing immutable version records an invalid catalog delta.".into(),
-            details: None,
+        .map_err(|_| {
+            invalid_error(
+                "version_existing_invalid",
+                "The existing immutable version records an invalid catalog delta.",
+            )
         })?;
     Ok(SiteFinalizeOutput {
         format: SITE_FINALIZE_OUTPUT_FORMAT.to_string(),
@@ -1972,10 +1970,11 @@ fn validate_zero_routes(version_root: &Path, expected_count: usize) -> Result<()
     let endpoints = endpoint_index
         .get("endpoints")
         .and_then(Value::as_object)
-        .ok_or_else(|| FinalizeError::Invalid {
-            code: "runtime_artifact_validation_failed",
-            message: "Zero endpoint index entries are invalid.".into(),
-            details: None,
+        .ok_or_else(|| {
+            invalid_error(
+                "runtime_artifact_validation_failed",
+                "Zero endpoint index entries are invalid.",
+            )
         })?;
     let mut entries = Vec::new();
     entries.extend(
@@ -2070,10 +2069,11 @@ fn validate_zero_index(
     let entries = index
         .get(entries_key)
         .and_then(Value::as_object)
-        .ok_or_else(|| FinalizeError::Invalid {
-            code: "runtime_artifact_validation_failed",
-            message: format!("{relative_path} has invalid entries."),
-            details: None,
+        .ok_or_else(|| {
+            invalid_error(
+                "runtime_artifact_validation_failed",
+                format!("{relative_path} has invalid entries."),
+            )
         })?;
     if entries.len() != expected_count {
         return invalid(
@@ -2082,13 +2082,12 @@ fn validate_zero_index(
         );
     }
     for (identity, artifact_path) in entries {
-        let artifact_path = artifact_path
-            .as_str()
-            .ok_or_else(|| FinalizeError::Invalid {
-                code: "runtime_artifact_validation_failed",
-                message: format!("{relative_path} contains an invalid artifact path."),
-                details: None,
-            })?;
+        let artifact_path = artifact_path.as_str().ok_or_else(|| {
+            invalid_error(
+                "runtime_artifact_validation_failed",
+                format!("{relative_path} contains an invalid artifact path."),
+            )
+        })?;
         validate_relative_path(artifact_path)?;
         let artifact: Value = read_json_artifact(&version_root.join(artifact_path))?;
         if artifact.get(identity_key).and_then(Value::as_str) != Some(identity) {
@@ -2105,10 +2104,11 @@ fn validate_zero_index(
                 artifact
                     .get(path_key)
                     .and_then(Value::as_str)
-                    .ok_or_else(|| FinalizeError::Invalid {
-                        code: "runtime_artifact_validation_failed",
-                        message: format!("{artifact_path} is missing {path_key}."),
-                        details: None,
+                    .ok_or_else(|| {
+                        invalid_error(
+                            "runtime_artifact_validation_failed",
+                            format!("{artifact_path} is missing {path_key}."),
+                        )
                     })?;
             validate_relative_path(generated_path)?;
             let generated = fs::read(version_root.join(generated_path)).map_err(|source| {
@@ -2121,10 +2121,11 @@ fn validate_zero_index(
                 .get(hash_key)
                 .and_then(Value::as_str)
                 .and_then(|value| value.strip_prefix("sha256:"))
-                .ok_or_else(|| FinalizeError::Invalid {
-                    code: "runtime_artifact_validation_failed",
-                    message: format!("{artifact_path} is missing {hash_key}."),
-                    details: None,
+                .ok_or_else(|| {
+                    invalid_error(
+                        "runtime_artifact_validation_failed",
+                        format!("{artifact_path} is missing {hash_key}."),
+                    )
                 })?;
             if sha256(&generated) != expected {
                 return invalid(

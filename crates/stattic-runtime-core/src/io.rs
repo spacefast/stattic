@@ -1,4 +1,4 @@
-use crate::finalize::FinalizeError;
+use crate::finalize::{invalid_error, FinalizeError};
 use crate::{SiteFinalizeInput, SiteFinalizeOutput, SITE_FINALIZE_INPUT_FORMAT};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,11 +17,10 @@ pub fn read_site_finalize_input(
             source,
         })?;
     if input.format != SITE_FINALIZE_INPUT_FORMAT {
-        return Err(FinalizeError::Invalid {
-            code: "finalizer_input_format_invalid",
-            message: "Unsupported finalizer input format.".into(),
-            details: None,
-        });
+        return Err(invalid_error(
+            "finalizer_input_format_invalid",
+            "Unsupported finalizer input format.",
+        ));
     }
     crate::finalize::validate_id(&input.space_id, "space_id")?;
     crate::finalize::validate_id(&input.version_id, "version_id")?;

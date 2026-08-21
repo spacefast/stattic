@@ -34,6 +34,31 @@ function check(bool $condition, string $label): void
     }
 }
 
+// --- PHP 8.5 platform contract ------------------------------------------------------
+
+check(_stattic_runtime_php_version_supported(80500), 'PHP 8.5.0 is supported');
+check(_stattic_runtime_php_version_supported(80599), 'PHP 8.5 patch releases are supported');
+check(!_stattic_runtime_php_version_supported(80499), 'PHP 8.4 is rejected');
+check(!_stattic_runtime_php_version_supported(80600), 'PHP 8.6 is rejected until adopted explicitly');
+
+$httpShare = _stattic_http_share_handle();
+check($httpShare instanceof CurlSharePersistentHandle, 'HTTP uses a persistent cURL share');
+$httpShareOptions = $httpShare->options;
+sort($httpShareOptions);
+$expectedHttpShareOptions = [CURL_LOCK_DATA_DNS, CURL_LOCK_DATA_CONNECT, CURL_LOCK_DATA_SSL_SESSION];
+sort($expectedHttpShareOptions);
+check(
+    $httpShareOptions === $expectedHttpShareOptions,
+    'persistent HTTP state is limited to DNS, connections and TLS sessions',
+);
+
+check(_stattic_request_uri_path('/docs/page?draft=1') === '/docs/page', 'URI parser splits the request query');
+check(_stattic_request_uri_path('/a/../private') === '/a/../private', 'URI parser preserves dot segments for rejection');
+check(_stattic_request_uri_path('/caf%C3%A9') === '/caf%C3%A9', 'URI parser preserves encoded Unicode');
+check(_stattic_request_uri_path('/café') === '/caf%C3%A9', 'URI parser encodes authored Unicode before validation');
+check(_stattic_request_uri_path(':malformed') === '', 'URI parser fails malformed targets closed');
+check(_stattic_request_uri_query('/docs?draft=1%202') === 'draft=1%202', 'URI parser preserves the raw query');
+
 // --- Request path joining ------------------------------------------------------------
 
 check(_stattic_join_request_path('/', '/') === '/', 'path join keeps the root');
@@ -74,8 +99,20 @@ check(
     'verified absence: an existing non-file path is unavailable, not absent'
 );
 check(
-    _sf_runtime_log_gate_key('pointer_read_failed') === 'sf:log:pointer_read_failed',
-    'runtime read-failure throttling is scoped to a fixed failure kind'
+    _sf_runtime_log_once('sf_test_log_kind') && !_sf_runtime_log_once('sf_test_log_kind')
+        && _sf_runtime_log_once('sf_test_other_kind'),
+    'read-failure logging opens once per kind per request and is scoped by kind'
+);
+check(
+    _sf_memcached_server_addresses(['cache-a:11211', 'cache-b:11211']) === ['cache-a:11211', 'cache-b:11211'],
+    'read-failure logging accepts flat provider memcached servers'
+);
+check(
+    _sf_memcached_server_addresses([
+        'default' => ['cache-a:11211'],
+        'sessions' => ['cache-b:11211'],
+    ]) === ['cache-a:11211', 'cache-b:11211'],
+    'read-failure logging flattens provider memcached server buckets'
 );
 unlink($absenceRoot . '/present.json');
 rmdir($absenceRoot . '/wrong-type.json');
@@ -379,12 +416,6 @@ check(
     'network Grant fixture compiles into a runtime projection'
 );
 $networkProjection = is_array($networkProjection) ? $networkProjection : [];
-$upgradedNetworkProjection = _stattic_authorization_projection_for_runtime($rawNetworkProjection);
-check(
-    is_array($upgradedNetworkProjection)
-        && _stattic_authorization_projection_compiled($upgradedNetworkProjection),
-    'raw stored authorization is upgraded at the runtime boundary'
-);
 $unclaimedPasswordGrant = [
     ...$networkGrant,
     'id' => 'grt_unclaimed_config_password',
@@ -531,7 +562,7 @@ $publicProjection = _stattic_compile_authorization_projection($projectionEnvelop
 ]));
 check(
     is_array($publicProjection)
-        && _stattic_authorization_projection_valid($publicProjection)
+        && _stattic_authorization_projection_compiled($publicProjection)
         && count(_stattic_grant_candidates($publicProjection, [])) === 1,
     'compiled Public admission selects one candidate regardless of 499 unrelated Grants'
 );
@@ -1006,23 +1037,23 @@ check(
 
 // Request-side eligibility (the boolean the serving path hands the classifier).
 check(
-    _stattic_proxy_cache_request_eligible('shared', [], [], 'GET', 'GET', false),
+    _stattic_proxy_cache_request_eligible('shared', [], [], 'GET', false),
     'proxy cache: an opted anonymous safe GET is shared-cache eligible'
 );
 check(
-    !_stattic_proxy_cache_request_eligible(null, [], [], 'GET', 'GET', false),
+    !_stattic_proxy_cache_request_eligible(null, [], [], 'GET', false),
     'proxy cache: an unopted route stays no-store'
 );
 check(
-    !_stattic_proxy_cache_request_eligible('shared', [], [], 'POST', 'POST', false),
+    !_stattic_proxy_cache_request_eligible('shared', [], [], 'POST', false),
     'proxy cache: unsafe request methods stay no-store'
 );
 check(
-    !_stattic_proxy_cache_request_eligible('shared', ['Authorization' => 'Bearer configured'], [], 'GET', 'GET', false),
+    !_stattic_proxy_cache_request_eligible('shared', ['Authorization' => 'Bearer configured'], [], 'GET', false),
     'proxy cache: a static Authorization route header revokes shared caching'
 );
 check(
-    !_stattic_proxy_cache_request_eligible('shared', ['Cookie' => 'session=configured'], [], 'GET', 'GET', false),
+    !_stattic_proxy_cache_request_eligible('shared', ['Cookie' => 'session=configured'], [], 'GET', false),
     'proxy cache: a static Cookie route header revokes shared caching'
 );
 
@@ -2092,7 +2123,7 @@ $runtimeLogRecords = static function () use ($runtimeLogPath): array {
 };
 $runtimeLogLast = static function () use ($runtimeLogRecords): array {
     $records = $runtimeLogRecords();
-    return $records === [] ? [] : $records[count($records) - 1];
+    return array_last($records) ?? [];
 };
 // `metadata` is the one field whose JSON *shape* matters — a caller reads it
 // without a shape check — and assoc decoding erases the object/array
@@ -2102,7 +2133,7 @@ $runtimeLogLastLine = static function () use ($runtimeLogPath): string {
         explode("\n", (string) @file_get_contents($runtimeLogPath)),
         static fn (string $line): bool => str_contains($line, SPACEFAST_RUNTIME_LOG_MARKER)
     ));
-    return $lines === [] ? '' : $lines[count($lines) - 1];
+    return array_last($lines) ?? '';
 };
 
 _stattic_runtime_log_write(['level' => 'warn', 'message' => 'hello'], 'ver_writer');
@@ -2520,6 +2551,29 @@ check(
     'db broker bit: BIT(64) delivered as digits'
 );
 
+// Authorization follows the SQL, never the caller's result-shape hint. The
+// rows mirror db.rs `statement_authorization_tests` exactly: the classifier is
+// ported logic, and a row diverging between the engines is a grant that means
+// something different depending on which broker answered.
+foreach ([
+    'SELECT 1',
+    "/* ordinary comment */ -- another comment\n SHOW TABLES",
+    'DESCRIBE notes',
+    'EXPLAIN SELECT * FROM notes',
+] as $sql) {
+    check(!_stattic_db_broker_statement_is_mutation($sql), "db broker grant: read: {$sql}");
+}
+foreach ([
+    "INSERT INTO notes (body) VALUES ('write')",
+    'WITH note AS (SELECT 1) SELECT * FROM note',
+    '/*!50000 DELETE FROM notes */',
+    'EXPLAIN ANALYZE SELECT * FROM notes',
+    "SELECT 1 INTO OUTFILE '/tmp/notes'",
+    "--not-a-comment\nSELECT 1",
+] as $sql) {
+    check(_stattic_db_broker_statement_is_mutation($sql), "db broker grant: mutation: {$sql}");
+}
+
 // mysqli reports "no rows" as -1 where the wire carried u64::MAX.
 check(_stattic_db_broker_unsigned_literal(-1) === '18446744073709551615', 'db broker u64: -1 is u64::MAX');
 check(_stattic_db_broker_unsigned_literal(0) === '0', 'db broker u64: zero');
@@ -2585,12 +2639,6 @@ check(
 check(
     _stattic_runtime_purge_scope([]) === 'domain',
     'purge planner fails closed when no addressable URL exists'
-);
-check(
-    _stattic_runtime_purge_provider_accepted(true)
-        && !_stattic_runtime_purge_provider_accepted(false)
-        && !_stattic_runtime_purge_provider_accepted(null),
-    'purge provider receipt accepts only an explicit true result'
 );
 
 // --- Purge scope derivation ----------------------------------------------------------
@@ -2686,48 +2734,17 @@ check(
 );
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($scopeRoot)));
 
-// --- Version cache retirement -------------------------------------------------------
+// --- Version catalog + gate sidecars ------------------------------------------------
 //
-// A version id is written exactly once, so the catalog and the blob gate's sha
-// map are cached pool-wide for their full TTL. Deleting a version is the one
-// event that breaks that promise: without an explicit retirement, a blob-gate
-// link minted a moment earlier keeps serving the deleted version's bytes (which
-// outlive the directory in the space's shared CAS) on every worker that cached
-// it. This section proves the pool-visible state, which is the state that
-// outlives the deleting request — the per-process memos are per request.
-//
-// APCu is a pool cache, not something a CLI process has: this stands in an
-// in-memory triple with the same semantics when the extension is absent, and
-// uses the real one when it is there. Declared LAST in this file on purpose, so
-// nothing above it changes behavior.
-if (!function_exists('apcu_fetch')) {
-    $GLOBALS['sf_test_apcu'] = [];
-    function apcu_fetch(string $key, &$success = null): mixed
-    {
-        $success = array_key_exists($key, $GLOBALS['sf_test_apcu']);
-        return $success ? $GLOBALS['sf_test_apcu'][$key] : false;
-    }
-    function apcu_store(string $key, mixed $value, int $ttl = 0): bool
-    {
-        $GLOBALS['sf_test_apcu'][$key] = $value;
-        return true;
-    }
-    function apcu_delete(string $key): bool
-    {
-        unset($GLOBALS['sf_test_apcu'][$key]);
-        return true;
-    }
-    function sf_test_apcu_has(string $key): bool
-    {
-        return array_key_exists($key, $GLOBALS['sf_test_apcu']);
-    }
-} else {
-    function sf_test_apcu_has(string $key): bool
-    {
-        apcu_fetch($key, $hit);
-        return $hit === true;
-    }
-}
+// A version id is written exactly once, so the catalog and the blob gate's
+// lane map are derived ONCE into write-once PHP sidecars inside the version
+// directory and served from opcache SHM from then on. Everything a resolver
+// may answer from lives inside that directory — metadata.json or the sidecars
+// — so deleting the directory IS the retirement: the next request's is_file
+// probe finds nothing, a minted blob link stops resolving, and there is no
+// pool cache anywhere to forget. This section proves both halves: the sidecar
+// alone answers (warm reads never re-decode the catalog), and nothing outside
+// the directory does.
 
 $catalogRoot = realpath(sys_get_temp_dir()) . '/sf-version-cache-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
 $catalogSpaceId = 'spc_cache_' . bin2hex(random_bytes(4));
@@ -2759,273 +2776,176 @@ file_put_contents($catalogVersionRoot . '/metadata.json', json_encode([
     ],
 ]));
 
-$catalogKey = _stattic_runtime_version_catalog_cache_key($catalogSpaceId, $catalogVersionId);
-$blobShasKey = _stattic_runtime_version_blob_shas_cache_key($catalogSpaceId, $catalogVersionId);
-$lanes = _stattic_runtime_version_blob_shas($catalogRoot, $catalogSpaceId, $catalogVersionId);
+$catalog = _stattic_runtime_version_catalog($catalogRoot, $catalogSpaceId, $catalogVersionId);
+$lanes = _stattic_runtime_catalog_lanes($catalog);
 check(
     $lanes[STATTIC_RUNTIME_VERSION_BLOB_BASE_LANE] === [$sourceSha => 'text/html', $servedSha => 'text/html'],
-    'gate sha map: the base lane holds both identities of every catalogued path'
+    'gate lanes: the base lane holds both identities of every catalogued path'
 );
 check(
     $lanes['preview'] === [$variantSha => 'text/html'],
-    'gate sha map: a channel lane holds that channel\'s variant objects'
+    'gate lanes: a channel lane holds that channel\'s variant objects'
 );
 check(
-    _stattic_runtime_version_blob_shas($catalogRoot, $catalogSpaceId, 'ver_absent') === null,
-    'gate sha map: a version with no readable catalog resolves nothing'
+    _stattic_runtime_version_blob_mime($catalogRoot, $catalogSpaceId, $catalogVersionId, $sourceSha) === 'text/html'
+        && _stattic_runtime_version_blob_mime($catalogRoot, $catalogSpaceId, $catalogVersionId, $servedSha) === 'text/html',
+    'blob mime: either identity of a catalogued path resolves in the base lane'
 );
-// APCu loaded but disabled for CLI (the CI runner image) makes the real
-// apcu_store a silent no-op the polyfill cannot shadow — extension functions
-// are not redeclarable. Probe whether stores actually land; the positive
-// cache assertions are only provable when they do. FPM (where the engine
-// serves) always has APCu enabled; this gate is about the test environment.
-apcu_store('sf_test_store_probe', 1);
-$apcuStores = sf_test_apcu_has('sf_test_store_probe');
-apcu_delete('sf_test_store_probe');
-check(!$apcuStores || sf_test_apcu_has($catalogKey), 'reading a catalog caches it pool-wide');
 check(
-    !$apcuStores || sf_test_apcu_has($blobShasKey),
-    'every gate lane rides in ONE pool entry per version, so no channel-keyed entry can outlive it'
+    _stattic_runtime_version_blob_mime($catalogRoot, $catalogSpaceId, $catalogVersionId, $variantSha, 'preview') === 'text/html'
+        && _stattic_runtime_version_blob_mime($catalogRoot, $catalogSpaceId, $catalogVersionId, $variantSha) === null,
+    'blob mime: a variant sha resolves only in its channel lane'
+);
+check(
+    _stattic_runtime_version_blob_mime($catalogRoot, $catalogSpaceId, $catalogVersionId, $sourceSha, 'other') === null,
+    'blob mime: a channel this version overrides nothing for resolves nothing'
+);
+check(
+    _stattic_runtime_version_blob_mime($catalogRoot, $catalogSpaceId, 'ver_absent', $sourceSha) === null,
+    'blob mime: a version with no readable catalog resolves nothing'
+);
+check(
+    is_file($catalogVersionRoot . '/' . STATTIC_RUNTIME_VERSION_CATALOG_SIDECAR)
+        && is_file($catalogVersionRoot . '/' . STATTIC_RUNTIME_VERSION_GATE_SIDECAR),
+    'the first read derives both write-once sidecars beside the catalog'
 );
 
-_stattic_runtime_forget_version_caches($catalogSpaceId, $catalogVersionId);
+// The sidecar alone answers: a version directory carrying ONLY a gate sidecar
+// (what a warm worker consults) resolves without metadata.json ever existing —
+// warm reads never re-decode the catalog.
+$sidecarOnlyVersion = 'ver_cache_warm_' . bin2hex(random_bytes(4));
+$sidecarOnlyRoot = _stattic_version_root($catalogRoot, $catalogSpaceId, $sidecarOnlyVersion);
+mkdir($sidecarOnlyRoot, 0o777, true);
 check(
-    !sf_test_apcu_has($catalogKey) && !sf_test_apcu_has($blobShasKey),
-    'deleting a version retires both of its pool entries, so a minted link stops resolving'
+    _sf_php_cache_write($sidecarOnlyRoot . '/' . STATTIC_RUNTIME_VERSION_GATE_SIDECAR, [
+        'spaceId' => $catalogSpaceId,
+        'versionId' => $sidecarOnlyVersion,
+        'lanes' => [STATTIC_RUNTIME_VERSION_BLOB_BASE_LANE => [$sourceSha => 'text/plain']],
+    ]) && _stattic_runtime_version_blob_mime($catalogRoot, $catalogSpaceId, $sidecarOnlyVersion, $sourceSha) === 'text/plain',
+    'a warm read answers from the gate sidecar alone'
+);
+
+// A sidecar bound to a different version is ignored, never trusted: identity
+// is validated from the payload, not assumed from the path.
+$mismatchVersion = 'ver_cache_mismatch_' . bin2hex(random_bytes(4));
+$mismatchRoot = _stattic_version_root($catalogRoot, $catalogSpaceId, $mismatchVersion);
+mkdir($mismatchRoot, 0o777, true);
+_sf_php_cache_write($mismatchRoot . '/' . STATTIC_RUNTIME_VERSION_GATE_SIDECAR, [
+    'spaceId' => $catalogSpaceId,
+    'versionId' => 'ver_somebody_else',
+    'lanes' => [STATTIC_RUNTIME_VERSION_BLOB_BASE_LANE => [$sourceSha => 'text/plain']],
+]);
+check(
+    _stattic_runtime_version_blob_mime($catalogRoot, $catalogSpaceId, $mismatchVersion, $sourceSha) === null,
+    'a sidecar bound to a different version is ignored, not trusted'
+);
+
+// Past the derived-cache ceiling the lane map shards by sha prefix: one small
+// include per lookup whatever the version size, so a scan stays linear.
+$bigVersion = 'ver_cache_big_' . bin2hex(random_bytes(4));
+$bigRoot = _stattic_version_root($catalogRoot, $catalogSpaceId, $bigVersion);
+mkdir($bigRoot, 0o777, true);
+$bigPaths = [];
+for ($i = 0; $i < 8000; $i += 1) {
+    $sha = hash('sha256', 'big-' . $i);
+    $bigPaths['file-' . $i . '.bin'] = [
+        'source' => ['sha256' => $sha, 'size' => 1, 'contentType' => 'application/octet-stream'],
+        'served' => ['sha256' => $sha, 'size' => 1, 'contentType' => 'application/octet-stream'],
+        'public' => true,
+    ];
+}
+file_put_contents($bigRoot . '/metadata.json', json_encode([
+    STATTIC_RUNTIME_VERSION_CATALOG_KEY => [
+        'format' => STATTIC_RUNTIME_VERSION_CATALOG_FORMAT,
+        'spaceId' => $catalogSpaceId,
+        'versionId' => $bigVersion,
+        'paths' => $bigPaths,
+        'variants' => [],
+    ],
+]));
+$bigProbeSha = hash('sha256', 'big-1234');
+check(
+    _stattic_runtime_version_blob_mime($catalogRoot, $catalogSpaceId, $bigVersion, $bigProbeSha) === 'application/octet-stream',
+    'an oversized lane map still resolves'
+);
+check(
+    !is_file($bigRoot . '/' . STATTIC_RUNTIME_VERSION_GATE_SIDECAR)
+        && is_file($bigRoot . '/' . STATTIC_RUNTIME_VERSION_GATE_SHARD_DIR . '/' . substr($bigProbeSha, 0, 2) . '.php'),
+    'past the derived-cache ceiling the gate shards by sha prefix'
 );
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($catalogRoot)));
 
-// --- Host-level purge dispatch (_stattic_runtime_purge_hosts_now) ----------------------
-// Order matters: the fallback paths are proven BEFORE the Edge_Cache stub class
-// exists, because class_exists() cannot be undone within one process.
-
-$purgeStubEdge = new class {
-    public array $uris = [];
-    public function purge_uris_now(array $urls, string $reason): bool
-    {
-        $this->uris[] = $urls;
-        return true;
-    }
-};
-check(
-    _stattic_runtime_purge_hosts_now($purgeStubEdge, [], 'route_updated') === true
-        && $purgeStubEdge->uris === [],
-    'host purge: an empty hostname set is accepted without any provider call'
-);
-check(
-    _stattic_runtime_purge_hosts_now($purgeStubEdge, ['a.example', 'b.example'], 'route_updated') === true
-        && $purgeStubEdge->uris === [['https://a.example/', 'https://b.example/']],
-    'host purge: without the provider library, hostnames fall back to root-URI purges'
-);
-$bareEdge = new class {};
-check(
-    _stattic_runtime_purge_hosts_now($bareEdge, ['a.example'], 'route_updated') === false,
-    'host purge: a plugin variant with no usable method reports non-acceptance, never silent success'
-);
-
-// Conditional declaration: an unconditional top-level class binds at compile
-// time and would make class_exists() true during the fallback checks above.
-if (!class_exists('Edge_Cache')) {
-    class Edge_Cache
-    {
-        const HOST_CACHE = 'edge_cache_host';
-        public static array $batches = [];
-        public static bool $accept = true;
-        public static function edge_cache_purge(array $pathsPerBuckets, array $logTags = []): bool
-        {
-            self::$batches[] = $pathsPerBuckets;
-            return self::$accept;
-        }
-    }
-}
-$manyHosts = array_map(static fn(int $i): string => "v{$i}--space.example", range(1, 120));
-check(
-    _stattic_runtime_purge_hosts_now($purgeStubEdge, $manyHosts, 'access_transition') === true
-        && count(Edge_Cache::$batches) === 3
-        && array_keys(Edge_Cache::$batches[0]) === ['edge_cache_host']
-        && count(Edge_Cache::$batches[0]['edge_cache_host']) === STATTIC_RUNTIME_PURGE_HOST_BATCH_SIZE
-        && Edge_Cache::$batches[2]['edge_cache_host'] === array_slice($manyHosts, 100),
-    'host purge: the provider library takes host-bucket batches, chunked, preserving caller order'
-);
-Edge_Cache::$accept = false;
-Edge_Cache::$batches = [];
-check(
-    _stattic_runtime_purge_hosts_now($purgeStubEdge, ['a.example'], 'route_updated') === false,
-    'host purge: a rejected batch reports non-acceptance so the durable record retries'
-);
-
-// --- Queue drain coalescing (_stattic_runtime_purge_process_queue) ---------------------
+// --- Edge purge dispatch (direct local site API) ---------------------------------------
 //
-// A backlog is dominated by repeats of the same effect; the drain plans first
-// and pays one provider call per distinct (scope, hostname/URL set), with every
-// coalesced record sharing that call's outcome. Acceptance is still the only
-// thing that deletes a record.
+// A mutation purges the provider edge by POSTing to the site's local edge-cache
+// API over loopback. The wire round-trip is exercised end to end by the
+// credential-gated wp.cloud suite (e2e-tests/direct); here the runtime's own
+// decisions get proven without a box: whether there is an edge to call, and
+// which hostname gets which URLs.
 
-$drainRoot = realpath(sys_get_temp_dir()) . '/sf-purge-drain-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
-mkdir($drainRoot, 0o777, true);
-
-// N identical-effect domain records (hostname ORDER differs; the set does not)
-// are one provider call, and acceptance consumes every one of them.
-foreach ([
-    ['a.example', 'b.example'],
-    ['b.example', 'a.example'],
-    ['a.example', 'b.example'],
-    ['B.EXAMPLE', 'a.example'],
-] as $hosts) {
-    _stattic_runtime_purge_enqueue($drainRoot, ['hostnames' => $hosts, 'paths' => ['/page']]);
-}
-$drainCalls = [];
-$drainSummary = _stattic_runtime_purge_process_queue($drainRoot, static function (array $record) use (&$drainCalls): bool {
-    $drainCalls[] = $record;
-    return true;
-});
+// Off wp.cloud the platform env is absent, so there is no endpoint and a purge
+// is a successful no-op rather than a failure. (Guarded: ATOMIC_* are not
+// defined in the test process.)
 check(
-    count($drainCalls) === 1
-        && $drainSummary['processed'] === 4
-        && $drainSummary['ok'] === 4
-        && count($drainSummary['results']) === 4
-        && _stattic_record_store_records(_stattic_runtime_purge_store($drainRoot)) === [],
-    'drain coalescing: identical domain records pay one provider call and are all consumed'
+    !defined('ATOMIC_SITE_ID')
+        && _stattic_runtime_edge_purge_endpoint() === null,
+    'edge purge: no endpoint without the platform site env'
 );
 
-// Distinct effects stay distinct calls: two hostname sets and one URL set are
-// three provider calls, never one blanket purge.
-foreach ([
-    ['hostnames' => ['a.example'], 'paths' => ['/doc']],
-    ['hostnames' => ['a.example'], 'paths' => ['/other']],
-    ['hostnames' => ['c.example'], 'paths' => ['/doc']],
-    ['hostnames' => ['x.example'], 'paths' => ['/app.css']],
-    ['hostnames' => ['x.example'], 'paths' => ['/app.css']],
-] as $input) {
-    _stattic_runtime_purge_enqueue($drainRoot, $input);
-}
-$drainCalls = [];
-$drainSummary = _stattic_runtime_purge_process_queue($drainRoot, static function (array $record) use (&$drainCalls): bool {
-    $drainCalls[] = $record;
-    return true;
-});
-$drainCallKeys = array_map(
-    static fn (array $record): string => ($record['scope'] === 'urls' ? 'urls:' : 'domain:')
-        . implode(',', $record['scope'] === 'urls' ? $record['urls'] : $record['hostnames']),
-    $drainCalls
-);
-sort($drainCallKeys, SORT_STRING);
+$offBoxRoot = realpath(sys_get_temp_dir()) . '/sf-purge-offbox-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
+mkdir($offBoxRoot, 0o777, true);
 check(
-    $drainCallKeys === ['domain:a.example', 'domain:c.example', 'urls:https://x.example/app.css']
-        && $drainSummary['ok'] === 5
-        && _stattic_record_store_records(_stattic_runtime_purge_store($drainRoot)) === [],
-    'drain coalescing: mixed hostname and URL sets stay distinct provider calls'
+    _stattic_runtime_purge_dispatch($offBoxRoot, ['a.example'], [], 'domain', 'route_updated') === true
+        && !is_file($offBoxRoot . '/runtime/journal.jsonl'),
+    'edge purge: off-box dispatch is a no-op success and journals nothing'
 );
-
-// A domain purge covers every URL on its hostnames, so a urls record whose
-// hosts sit inside a domain record's set rides the domain call.
-_stattic_runtime_purge_enqueue($drainRoot, ['hostnames' => ['a.example', 'b.example'], 'paths' => ['/doc']]);
-_stattic_runtime_purge_enqueue($drainRoot, ['hostnames' => ['a.example'], 'paths' => ['/app.js']]);
-$drainCalls = [];
-$drainSummary = _stattic_runtime_purge_process_queue($drainRoot, static function (array $record) use (&$drainCalls): bool {
-    $drainCalls[] = $record;
-    return true;
-});
-check(
-    count($drainCalls) === 1
-        && ($drainCalls[0]['scope'] ?? null) === 'domain'
-        && $drainSummary['ok'] === 2
-        && _stattic_record_store_records(_stattic_runtime_purge_store($drainRoot)) === [],
-    'drain coalescing: a domain purge subsumes a urls record on the same hosts'
-);
-
-// Refusal retains every coalesced member — each with its own attempt bump — so
-// no record's retry is lost to sharing a call.
-foreach ([1, 2, 3] as $_) {
-    _stattic_runtime_purge_enqueue($drainRoot, ['hostnames' => ['a.example'], 'paths' => ['/doc']]);
-}
-$drainCalls = [];
-$drainSummary = _stattic_runtime_purge_process_queue($drainRoot, static function (array $record) use (&$drainCalls): bool {
-    $drainCalls[] = $record;
-    return false;
-});
-$drainRetained = _stattic_record_store_records(_stattic_runtime_purge_store($drainRoot));
-check(
-    count($drainCalls) === 1
-        && $drainSummary['failed'] === 3
-        && $drainSummary['ok'] === 0
-        && count($drainRetained) === 3
-        && array_unique(array_column($drainRetained, 'attempts')) === [1]
-        && array_unique(array_column($drainRetained, 'status')) === ['queued'],
-    'drain coalescing: a refused call retains every coalesced record with its own attempt bump'
-);
-_stattic_job_runner_unit_rm_recursive(dirname(dirname($drainRoot)));
-
-// --- In-process drain (_stattic_runtime_purge_drain) -----------------------------------
-// The deferred FPM pass and the operator CLI worker run this same function: it
-// feature-detects the provider bridge in THIS process (never a subprocess — the
-// FPM mount namespace has no php CLI) and drains the durable queue through it.
-
-$fpmRoot = realpath(sys_get_temp_dir()) . '/sf-purge-fpm-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
-mkdir($fpmRoot, 0o777, true);
-$fpmRecord = _stattic_runtime_purge_enqueue($fpmRoot, [
-    'hostnames' => ['fpm.example'],
-    'paths' => ['/doc'],
+$offBoxReceipt = _stattic_runtime_purge_now($offBoxRoot, [
+    'hostnames' => ['a.example', 'b.example'],
+    'paths' => ['/page'],
     'reason' => 'route_updated',
 ]);
-$fpmJournal = static function () use ($fpmRoot): string {
-    $path = $fpmRoot . '/runtime/journal.jsonl';
-    return is_file($path) ? (string) file_get_contents($path) : '';
-};
-
-// No bridge and no wp-load anywhere near the temp site root: the pass journals
-// the unavailable provider and RETAINS the record for the next pass.
-$drainSummary = _stattic_runtime_purge_drain($fpmRoot);
-$fpmRetained = _stattic_record_store_records(_stattic_runtime_purge_store($fpmRoot));
 check(
-    ($drainSummary['results'][$fpmRecord['id']] ?? null) === 'failed'
-        && count($fpmRetained) === 1
-        && ($fpmRetained[$fpmRecord['id']]['attempts'] ?? null) === 1
-        && str_contains($fpmJournal(), '"purge_provider_unavailable"')
-        && str_contains($fpmJournal(), '"edge_cache_plugin_absent"'),
-    'in-process drain: an absent bridge is journaled and the record stays queued'
+    $offBoxReceipt === ['status' => 'ok', 'mode' => 'domain'],
+    'edge purge: a document mutation off-box reports an ok domain purge'
+);
+$offBoxAsset = _stattic_runtime_purge_now($offBoxRoot, [
+    'hostnames' => ['a.example'],
+    'paths' => ['/assets/app.css'],
+    'reason' => 'route_updated',
+]);
+check(
+    $offBoxAsset === ['status' => 'ok', 'mode' => 'urls', 'urls' => 1],
+    'edge purge: a pure-asset mutation off-box reports an ok url purge with its count'
+);
+check(
+    _stattic_runtime_purge_now($offBoxRoot, ['hostnames' => [], 'paths' => ['/x']])
+        === ['status' => 'ok', 'mode' => 'none'],
+    'edge purge: an unaddressable purge (no hostname) is ok/none'
+);
+_stattic_job_runner_unit_rm_recursive(dirname(dirname($offBoxRoot)));
+
+// The per-host purge plan. A domain-scope purge maps every hostname to a
+// whole-host purge (empty URL list); the {domain} path segment is what the
+// gateway keys on.
+check(
+    _stattic_runtime_purge_host_targets(['a.example', 'b.example'], [], 'domain')
+        === ['a.example' => [], 'b.example' => []],
+    'purge plan: a domain scope purges every named host in full'
+);
+// A urls-scope purge routes each URL to ITS OWN host, and a host that owns no
+// URL in the set is not called at all — each host is a distinct edge key.
+check(
+    _stattic_runtime_purge_host_targets(
+        ['a.example', 'b.example', 'c.example'],
+        ['https://a.example/app.css', 'https://a.example/app.js', 'https://b.example/x.css'],
+        'urls'
+    ) === [
+        'a.example' => ['https://a.example/app.css', 'https://a.example/app.js'],
+        'b.example' => ['https://b.example/x.css'],
+    ],
+    'purge plan: a urls scope gives each host only its own URLs and skips hosts with none'
 );
 
-// The stubbed bridge (how a live box looks after wp-load): the SAME deferred
-// pass now drains the queued record — provider domain call, host-bucket purge,
-// record consumed.
-// Conditional declaration, like the Edge_Cache stub above: an unconditional
-// top-level class binds at compile time and would make class_exists() true
-// during the absent-bridge pass.
-if (!class_exists('Edge_Cache_Plugin')) {
-    class Edge_Cache_Plugin
-    {
-        public static object $instance;
-
-        public static function get_instance(): object
-        {
-            return self::$instance;
-        }
-    }
-}
-Edge_Cache_Plugin::$instance = new class {
-    public array $domainReasons = [];
-
-    public function purge_domain_now(string $reason): bool
-    {
-        $this->domainReasons[] = $reason;
-        return true;
-    }
-};
-Edge_Cache::$accept = true;
-Edge_Cache::$batches = [];
-$drainSummary = _stattic_runtime_purge_drain($fpmRoot);
-check(
-    ($drainSummary['results'][$fpmRecord['id']] ?? null) === 'ok'
-        && _stattic_record_store_records(_stattic_runtime_purge_store($fpmRoot)) === []
-        && Edge_Cache_Plugin::$instance->domainReasons === ['spacefast:route_updated']
-        && (Edge_Cache::$batches[0]['edge_cache_host'] ?? null) === ['fpm.example']
-        && str_contains($fpmJournal(), '"edge_purge"'),
-    'in-process drain: the deferred pass drains a queued record through the stubbed bridge'
-);
-_stattic_job_runner_unit_rm_recursive(dirname(dirname($fpmRoot)));
-
-// ---------------------------------------------------------------------------------------
 
 // The subprocess env scope (engine-update's installer spawn): extra values are
 // exported for the child, unset names removed, host-supplied values inherited,

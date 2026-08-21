@@ -108,9 +108,7 @@ beforeAll(async () => {
       // it opts out explicitly.
       SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS: "0",
       // The shed test seeds the promote admission counter directly, so pin the
-      // file backend: on a host whose php ships apcu with apc.enabled=1 the
-      // acquire would read apcu and ignore the seeded file.
-      SPACEFAST_ADMISSION_COUNTER_BACKEND: "file",
+      // per-space promote concurrency to the one slot it occupies.
       SPACEFAST_TIER_PROMOTE_CONC_PER_SPACE: "1",
     },
   });

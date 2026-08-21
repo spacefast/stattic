@@ -23,8 +23,8 @@ declare(strict_types=1);
  *           provider's `site-cron-results` webhook keys on. 2 is a usage error
  *           and 3 an unprovisioned box; neither ran a request.
  *
- * Like entrypoints/purge.php, this is never mounted as a public alias: it is in
- * the manifest's `files` and in none of its `aliases`.
+ * This is never mounted as a public alias: it is in the manifest's `files` and
+ * in none of its `aliases`.
  */
 
 if (PHP_SAPI !== 'cli') {

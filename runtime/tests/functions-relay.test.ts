@@ -2,14 +2,14 @@
 //
 // This is the one path nothing else covers. `unit.php` proves the token
 // verifier refuses what it should. Neither proves that a dispatched worker's
-// HTTPS callback actually reaches the native db-broker executor, executes SQL,
-// and comes back — or that the grant inside the credential is what decides
-// whether it may.
+// HTTPS callback actually reaches the in-process database broker, executes
+// SQL, and comes back — or that the grant inside the credential is what
+// decides whether it may.
 //
 // So this drives the real engine over HTTP: a real Ed25519 relay token minted
-// by the harness key, posted to the real route in serve.php, executed by the
-// real `stattic-runtime db-broker` subprocess, against a real MySQL 8.4
-// container.
+// by the harness key, posted to the real route in serve.php, answered by the
+// engine's in-process MySQL broker (db-broker.php; service frames still run
+// the real `service-broker` subprocess), against a real MySQL 8.4 container.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import net from "node:net";
@@ -302,6 +302,26 @@ test("a read-only grant cannot write, and the write does not land", async () => 
   expect(body.code).toBe("zero_db_capability_denied");
   expect(mysql.exec("SELECT COUNT(*) FROM notes;")).toBe(before);
   expect(mysql.exec("SELECT body FROM notes;")).not.toContain("should-not-land");
+});
+
+test("a burst of relay operations does not open a connection per operation", async () => {
+  // The relay is the one lane where a handler's Kth query used to cost a whole
+  // process and a fresh handshake, so what a burst costs the database is a
+  // property worth pinning rather than inferring. The broker's persistent link
+  // outlives the request in PHP's own pool; one warm-up first, so the burst is
+  // measured against a link that already exists. `mysql.exec` opens one
+  // connection of its own per probe — the threshold accounts for it.
+  const warmup = await relay({ mode: "query", sql: "SELECT 1" }, relayToken());
+  expect(warmup.status).toBe(200);
+  const accepted = () =>
+    Number(mysql.exec("SHOW GLOBAL STATUS LIKE 'Connections';").split("\t")[1]);
+  const before = accepted();
+  for (let index = 0; index < 8; index++) {
+    const response = await relay({ mode: "query", sql: "SELECT 1 AS budget" }, relayToken());
+    expect(response.status).toBe(200);
+    expect((await response.json()) as { ok?: boolean }).toMatchObject({ ok: true });
+  }
+  expect(accepted() - before).toBeLessThanOrEqual(4);
 });
 
 test("the named broker decides which executor runs, and the grant is narrowed to it", async () => {

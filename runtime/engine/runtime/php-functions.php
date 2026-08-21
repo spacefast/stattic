@@ -136,7 +136,7 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     $spaceId = (string) $context['space_id'];
     $serving = is_array($context['serving']) ? $context['serving'] : [];
     $sha = is_string($action['sha'] ?? null) ? $action['sha'] : '';
-    if ($spaceId === '' || preg_match('/^[a-f0-9]{64}$/', $sha) !== 1) {
+    if ($spaceId === '' || !_stattic_is_sha256_hex($sha)) {
         _stattic_render_runtime_invariant_error_lazy('route-action-metadata-missing', 'Runtime PHP function action metadata is malformed.');
     }
 
@@ -197,11 +197,12 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     $state['database'] = _stattic_php_functions_bind_database($runnerEnv);
     $state['services'] = _stattic_php_functions_bind_services($context, $runnerEnv);
 
-    $bodyCap = STATTIC_RUNTIME_EXECUTION_BODY_BYTES_DEFAULT;
     $raw = in_array($method, ['GET', 'HEAD'], true)
         ? ''
-        : (string) _stattic_request_body_contents($bodyCap + 1);
-    if (strlen($raw) > $bodyCap) {
+        : _stattic_bounded_request_body(STATTIC_RUNTIME_EXECUTION_BODY_BYTES_DEFAULT);
+    if ($raw === null) {
+        // Over-declared, over-read, or unreadable: refuse rather than hand the
+        // handler an empty body a failed read would have produced.
         _stattic_php_functions_problem(413, 'payload_too_large', 'Request body exceeds the PHP function body limit.');
     }
     $state['raw_body'] = $raw;

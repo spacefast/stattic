@@ -3,11 +3,16 @@
 /**
  * The callback surface a dispatched worker uses for brokered database access.
  * Authority travels inside the presented token; this endpoint never looks a
- * grant up. PHP owns authentication and nothing else: the operation body is
- * handed as-is to the native `db-broker` executor, which owns the protocol,
- * the credential, and every limit. Every call re-enters this space's PHP-FPM
- * pool while the proxied request still occupies a worker in it — the deadlock
- * hazard the executor's one-operation lifetime bounds.
+ * grant up. Database frames are answered in-process by the engine's own MySQL
+ * broker (shared/db-broker.php) — the native executor's byte-for-byte twin,
+ * pinned by the db-broker.test.ts corpus — so an operation costs neither a
+ * process spawn nor a fresh MySQL handshake: the `p:` link outlives the
+ * request in PHP's own persistent pool, the only lifetime this host allows.
+ * Service frames still run the one-shot `service-broker` executor, whose cost
+ * is its outbound HTTPS call and whose identity is per invocation. Every call
+ * re-enters this space's PHP-FPM pool while the proxied request still occupies
+ * a worker in it — the deadlock hazard the broker's one-operation lifetime
+ * bounds.
  */
 
 require_once __DIR__ . '/../shared/context.php';
@@ -18,6 +23,7 @@ require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/jwt.php';
 require_once __DIR__ . '/../shared/runtime-log.php';
 require_once __DIR__ . '/../shared/artifacts.php';
+require_once __DIR__ . '/../shared/db-broker.php';
 require_once __DIR__ . '/../shared/native-process.php';
 
 const STATTIC_FUNCTIONS_RELAY_AUD = 'spacefast-functions-relay';
@@ -74,11 +80,10 @@ function _stattic_functions_relay_claims(
         // still belongs to the version that started it. Revocation rides the
         // isolate identity, not this check.
         'state_valid' => static fn (array $claims): bool => is_dir(
-            $privateRoot . '/spaces/' . $spaceId . '/versions/' . (string) $claims['version_id']
+            _stattic_version_root($privateRoot, $spaceId, (string) $claims['version_id'])
         ),
     ]);
 }
-
 // Fail closed: an absent or malformed claim yields an empty grant.
 function _stattic_functions_relay_grant(array $claims, array $allowed): array
 {
@@ -98,19 +103,6 @@ function _stattic_functions_relay_bearer(): string
         return '';
     }
     return trim(substr($header, 7));
-}
-
-function _stattic_functions_relay_body(int $limit): ?string
-{
-    $declared = isset($_SERVER['CONTENT_LENGTH']) ? (int) $_SERVER['CONTENT_LENGTH'] : 0;
-    if ($declared > $limit) {
-        return null;
-    }
-    $body = _stattic_request_body_contents($limit + 1);
-    if ($body === false || strlen($body) > $limit) {
-        return null;
-    }
-    return $body;
 }
 
 /**
@@ -177,11 +169,11 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     }
     $claims = _stattic_functions_relay_claims($privateRoot, $spaceId, _stattic_functions_relay_bearer());
     if ($claims === null) {
-        _stattic_functions_relay_refused(401, 'relay_unauthorized', 'Relay credential is not valid.');
+        _stattic_problem_refused(401, 'relay_unauthorized', 'Relay credential is not valid.');
     }
     $broker = _stattic_functions_relay_broker();
     if ($broker === null) {
-        _stattic_functions_relay_refused(403, 'relay_forbidden', 'Relay broker is not recognised.');
+        _stattic_problem_refused(403, 'relay_forbidden', 'Relay broker is not recognised.');
     }
     ['executor' => $executor, 'capabilities' => $brokerCapabilities] = SPACEFAST_FUNCTIONS_RELAY_BROKERS[$broker];
     // Narrowed to the selected broker before the grant is checked for
@@ -189,11 +181,34 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     // reach the service executor by naming it, and vice versa.
     $grant = _stattic_functions_relay_grant($claims, $brokerCapabilities);
     if ($grant === []) {
-        _stattic_functions_relay_refused(403, 'relay_forbidden', 'Relay credential grants no brokered capability.');
+        _stattic_problem_refused(403, 'relay_forbidden', 'Relay credential grants no brokered capability.');
     }
-    $body = _stattic_functions_relay_body(STATTIC_FUNCTIONS_RELAY_MAX_BODY_BYTES);
+    $body = _stattic_bounded_request_body(STATTIC_FUNCTIONS_RELAY_MAX_BODY_BYTES);
     if ($body === null) {
-        _stattic_functions_relay_refused(413, 'relay_payload_too_large', 'Relay frame exceeds the size limit.');
+        _stattic_problem_refused(413, 'relay_payload_too_large', 'Relay frame exceeds the size limit.');
+    }
+
+    if ($broker === 'database') {
+        // The broker is bound to exactly the URL and grant the one-shot
+        // executor's environment would have carried; the limits it enforces
+        // read the same configuration names the relay used to copy into that
+        // environment. A worker cannot tell the lanes apart — the corpus pins
+        // the answer bytes — but the database can: the persistent link makes a
+        // handler's Kth query cost a round trip, not a spawn and a handshake.
+        $env = _stattic_functions_relay_executor_env($claims, $broker, $grant);
+        _stattic_db_broker_bind(
+            is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : '',
+            is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
+        );
+        _stattic_db_broker_grant($grant);
+        $answer = _stattic_db_broker_execute($body);
+        // Same ordering as the native executor's stdio loop: a frame must
+        // never leave a transaction — and its row locks — behind, so the
+        // rollback lands before the answer does.
+        _stattic_db_broker_rollback_open_transaction();
+        _stattic_response_send(200, $answer, 'application/json; charset=utf-8', [
+            'Cache-Control' => 'no-store',
+        ]);
     }
 
     $result = _stattic_runtime_run_subprocess(
@@ -207,7 +222,7 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     );
     $stdout = trim($result['stdout']);
     if (!$result['spawned'] || $result['timedOut'] || $result['exitCode'] !== 0 || $stdout === '') {
-        _stattic_functions_relay_refused(503, 'relay_unavailable', 'Relay executor is unavailable.');
+        _stattic_problem_refused(503, 'relay_unavailable', 'Relay executor is unavailable.');
     }
 
     _stattic_response_send(200, $stdout, 'application/json; charset=utf-8', [
@@ -224,11 +239,11 @@ function _stattic_functions_logs_serve(string $privateRoot, string $spaceId, str
     }
     $claims = _stattic_functions_relay_claims($privateRoot, $spaceId, _stattic_functions_relay_bearer());
     if ($claims === null) {
-        _stattic_functions_relay_refused(401, 'relay_unauthorized', 'Relay credential is not valid.');
+        _stattic_problem_refused(401, 'relay_unauthorized', 'Relay credential is not valid.');
     }
-    $body = _stattic_functions_relay_body(STATTIC_FUNCTIONS_LOG_MAX_BODY_BYTES);
+    $body = _stattic_bounded_request_body(STATTIC_FUNCTIONS_LOG_MAX_BODY_BYTES);
     if ($body === null) {
-        _stattic_functions_relay_refused(413, 'relay_payload_too_large', 'Log delivery exceeds the size limit.');
+        _stattic_problem_refused(413, 'relay_payload_too_large', 'Log delivery exceeds the size limit.');
     }
 
     _stattic_functions_log_append((string) $claims['version_id'], $body);
@@ -256,9 +271,4 @@ function _stattic_functions_log_append(string $versionId, string $body): void
             _stattic_runtime_log_write($record, $versionId);
         }
     }
-}
-
-function _stattic_functions_relay_refused(int $status, string $code, string $message): never
-{
-    _stattic_problem_response($status, $code, $message, [], ['Cache-Control' => 'no-store']);
 }

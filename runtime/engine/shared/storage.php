@@ -22,6 +22,44 @@ function _stattic_json_body(): array
     return $decoded;
 }
 
+// ?limit= for a paged management read: the default when absent, 422 outside
+// [1, $max].
+function _stattic_query_limit(int $default, int $max, string $message): int
+{
+    $raw = $_GET['limit'] ?? null;
+    if ($raw === null || $raw === '') {
+        return $default;
+    }
+    if (!is_string($raw) || !ctype_digit($raw) || (int) $raw < 1 || (int) $raw > $max) {
+        _stattic_problem_response(422, 'validation_error', $message);
+    }
+    return (int) $raw;
+}
+
+// ?cursor= as base64url JSON: null when absent, $reject() when malformed. The
+// caller owns its payload schema and its rejection message.
+function _stattic_query_cursor_payload(int $maxLength, callable $reject): ?array
+{
+    $raw = $_GET['cursor'] ?? null;
+    if ($raw === null || $raw === '') {
+        return null;
+    }
+    if (!is_string($raw) || strlen($raw) > $maxLength || preg_match('/^[A-Za-z0-9_-]+$/', $raw) !== 1) {
+        $reject();
+    }
+    $payload = json_decode(_stattic_base64url_decode($raw), true);
+    if (!is_array($payload)) {
+        $reject();
+    }
+    return $payload;
+}
+
+function _stattic_query_cursor_encode(array $payload): string
+{
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+    return _stattic_base64url_encode(is_string($json) ? $json : '{}');
+}
+
 function _stattic_runtime_route_not_found(): never
 {
     _stattic_problem_response(404, 'runtime_route_not_found', 'Runtime API route not found.');
@@ -112,6 +150,100 @@ function _stattic_runtime_mkdir_soft(string $path): bool
     }
     chmod($path, 0775);
     return true;
+}
+
+/**
+ * A box secret minted lazily under the site write lock, so provisioning never
+ * has to learn about it and two concurrent first callers agree (the loser of
+ * the mint race reads the winner's key). Minting is key ROTATION for anyone
+ * already holding the secret, so it may only follow a VERIFIED absence: a
+ * failed read of an existing record, or one with a malformed key, returns null
+ * and the caller decides its unavailable disposition.
+ *
+ * The record is `{key, minted_at}` at `runtime/<name>.json`; the key is $bytes
+ * of entropy spelled as lowercase hex. Rotation lanes may re-stamp the record
+ * with their own provenance — only `key` is ever read back.
+ */
+function _stattic_lazy_minted_secret(string $privateRoot, string $name, int $bytes): ?string
+{
+    $path = $privateRoot . '/runtime/' . $name . '.json';
+    $pattern = '/^[a-f0-9]{' . ($bytes * 2) . '}$/';
+    // string = the key; null = verified absent; false = unavailable.
+    $read = static function () use ($name, $path, $pattern): string|null|false {
+        $record = _sf_pointer_read($name, $path);
+        if ($record['kind'] === 'absent') {
+            return null;
+        }
+        $key = is_array($record['value']) ? ($record['value']['key'] ?? null) : null;
+        return is_string($key) && preg_match($pattern, $key) === 1 ? $key : false;
+    };
+    $state = $read();
+    if (is_string($state)) {
+        return $state;
+    }
+    if ($state === false || !_stattic_runtime_mkdir_soft($privateRoot . '/runtime')) {
+        return null;
+    }
+    $minted = _stattic_lock_with(
+        $privateRoot . '/runtime/write.lock',
+        STATTIC_LOCK_WAIT,
+        null,
+        static function () use ($read, $path, $bytes): ?string {
+            $existing = $read();
+            if (is_string($existing)) {
+                return $existing;
+            }
+            if ($existing === false) {
+                return null;
+            }
+            $key = bin2hex(random_bytes($bytes));
+            _sf_json_write($path, ['key' => $key, 'minted_at' => gmdate('c')]);
+            return $key;
+        },
+    );
+    return is_string($minted) ? $minted : null;
+}
+
+// Every space root on this box, or null when the space tree could not be
+// enumerated this instant. Sweeps MUST abort on null rather than treating an
+// unreadable tree as "no spaces" — a rotation or retention pass that silently
+// sees zero spaces completes without doing its job.
+function _stattic_runtime_space_roots(string $privateRoot): ?array
+{
+    $entries = _stattic_runtime_directory_entries($privateRoot . '/spaces');
+    return $entries === null ? null : array_values(array_filter($entries, 'is_dir'));
+}
+
+// The admin-lane strict spelling: rebuilds and state scans must abort loudly
+// on an unenumerable space tree, never proceed over zero spaces.
+function _stattic_runtime_space_roots_strict(string $privateRoot): array
+{
+    $roots = _stattic_runtime_space_roots($privateRoot);
+    if ($roots === null) {
+        throw new RuntimeException('runtime document enumeration failed: ' . $privateRoot . '/spaces');
+    }
+    return $roots;
+}
+
+// Full child paths of a directory: [] when the directory verifiably does not
+// exist, null when it could not be enumerated this instant.
+function _stattic_runtime_directory_entries(string $root): ?array
+{
+    clearstatcache(true, $root);
+    if (!is_dir($root)) {
+        return _sf_path_verifiably_absent($root) ? [] : null;
+    }
+    $entries = scandir($root);
+    if (!is_array($entries)) {
+        return null;
+    }
+    $paths = [];
+    foreach ($entries as $entry) {
+        if ($entry !== '.' && $entry !== '..') {
+            $paths[] = $root . '/' . $entry;
+        }
+    }
+    return $paths;
 }
 
 // null = the file verifiably does not exist (ENOENT); false = the file exists
@@ -248,53 +380,16 @@ function _stattic_runtime_json_object(array $value): object|array
     return $value === [] ? (object) [] : $value;
 }
 
+// Fixed-name but write-once: the only callers write version-directory
+// artifacts at finalize, before any reader has included the path, so opcache
+// has never compiled it and no invalidation protocol exists. The invalidate is
+// belt-and-braces parity with `_sf_php_artifact_write`, result ignored.
 function _stattic_runtime_write_php_atomic(string $path, array $value): void
 {
-    _stattic_runtime_write_private_string($path, "<?php\nreturn " . var_export($value, true) . ";\n");
-    _stattic_runtime_invalidate_php_artifact($path);
-}
-
-function _stattic_runtime_invalidate_php_artifact(string $path): void
-{
-    if (!function_exists('opcache_invalidate')) {
-        return;
+    _stattic_runtime_write_private_string($path, _sf_php_artifact_source($value));
+    if (function_exists('opcache_invalidate')) {
+        opcache_invalidate($path, true);
     }
-
-    if (opcache_invalidate($path, true)) {
-        return;
-    }
-
-    $privateRoot = _stattic_runtime_real_private_root($path);
-    _stattic_runtime_record_repair_state($privateRoot, 'opcache_invalidation_failed', [
-        'path' => _stattic_runtime_relative_private_path($privateRoot, $path),
-    ]);
-}
-
-function _stattic_runtime_record_repair_state(string $privateRoot, string $code, array $details): void
-{
-    $record = [
-        'code' => $code,
-        'details' => $details,
-        'created_at' => gmdate('c'),
-    ];
-    _stattic_runtime_write_json_atomic($privateRoot . '/runtime/repair-state.json', $record);
-    // Non-blocking: this runs on serve-path reads too and must never wait on
-    // journal-lock contention. repair-state.json above is the durable signal.
-    _stattic_runtime_append_journal($privateRoot, [
-        'event' => 'runtime_repair_required',
-        'code' => $code,
-        'details' => $details,
-    ], false);
-}
-
-function _stattic_runtime_relative_private_path(string $privateRoot, string $path): string
-{
-    $realRoot = realpath($privateRoot);
-    $realPath = realpath($path);
-    if (!is_string($realRoot) || !is_string($realPath) || !_stattic_runtime_path_is_inside($realPath, $realRoot)) {
-        return basename($path);
-    }
-    return ltrim(substr($realPath, strlen($realRoot)), '/');
 }
 
 const STATTIC_RUNTIME_JOURNAL_MAX_BYTES = 8388608; // 8 MiB per generation
@@ -532,19 +627,13 @@ function _stattic_runtime_copy_private_file(string $source, string $target): voi
     }
 }
 
-function _stattic_runtime_blob_key(string $sha): string
-{
-    $sha = strtolower(trim($sha));
-    if (preg_match('/^[a-f0-9]{64}$/', $sha) !== 1) {
-        _stattic_problem_response(422, 'invalid_blob_sha', 'Blob sha256 is invalid.');
-    }
-    return substr($sha, 0, 2) . '/' . $sha;
-}
-
 function _stattic_runtime_blob_path(string $privateRoot, string $spaceId, string $sha): string
 {
-    $spaceId = _stattic_runtime_id($spaceId, 'space_id');
-    return _stattic_space_root($privateRoot, $spaceId) . '/blobs/' . _stattic_runtime_blob_key($sha);
+    $relative = _stattic_blob_relative_key(_stattic_runtime_id($spaceId, 'space_id'), $sha);
+    if ($relative === null) {
+        _stattic_problem_response(422, 'invalid_blob_sha', 'Blob sha256 is invalid.');
+    }
+    return $privateRoot . '/' . $relative;
 }
 
 // Must agree exactly with `content_mtime` in
@@ -649,13 +738,25 @@ const STATTIC_RUNTIME_VERSION_CATALOG_FORMAT = 'spacefast.runtime.file-catalog.v
 // bound, not a contract bound: the pathological extreme above cannot be decoded
 // by any worker, so it is refused here instead of OOMing one.
 const STATTIC_RUNTIME_VERSION_CATALOG_MAX_BYTES = 67108864;
-// Read once per (space, version) per process AND per pool: a scan pulls one blob
-// per request, so re-decoding the catalog every time would make it quadratic.
-// Safe to cache because a version id is written exactly once — a republish is a
-// NEW version id, and create_version 409s on a committed one. A MISS is memoized
-// only for the request, never in APCu: a version finalized a moment later must
-// not stay invisible to the pool for the rest of the TTL.
-const STATTIC_RUNTIME_VERSION_CATALOG_TTL_SECONDS = 300;
+// Read once per (space, version) per request, and across requests from opcache
+// SHM via a write-once sidecar: a scan pulls one blob per request, so
+// re-decoding the catalog every time would make it quadratic. Safe to cache
+// with no TTL at all because a version id is written exactly once — a republish
+// is a NEW version id, and create_version 409s on a committed one — and the
+// sidecars live INSIDE the version directory, so deleting the version deletes
+// its caches with it and no invalidation protocol exists. A MISS is memoized
+// only for the request, never durably: a version finalized a moment later must
+// not stay invisible.
+const STATTIC_RUNTIME_VERSION_CATALOG_SIDECAR = 'catalog-cache.php';
+// The blob gate's derived lane map: one sidecar when it fits the derived-cache
+// ceiling, else sha-prefix shards so the gate includes exactly one small shard
+// per request instead of decoding the whole catalog.
+const STATTIC_RUNTIME_VERSION_GATE_SIDECAR = 'gate-cache.php';
+const STATTIC_RUNTIME_VERSION_GATE_SHARD_DIR = 'gate-cache';
+// The path lane's counterpart for versions whose catalog exceeds the whole-
+// sidecar ceiling: sha(path)-prefix shards so the file resolver includes one
+// small shard per request instead of re-decoding a multi-MB metadata.json.
+const STATTIC_RUNTIME_VERSION_PATH_SHARD_DIR = 'path-cache';
 
 const STATTIC_RUNTIME_VERSION_FILE_VIEWS = ['source', 'served'];
 
@@ -706,7 +807,7 @@ function _stattic_runtime_publish_session_blob(
     string $uploadId,
     string $sha256
 ): ?array {
-    if (!_stattic_id_valid($uploadId) || preg_match('/\A[a-f0-9]{64}\z/', $sha256) !== 1) {
+    if (!_stattic_id_valid($uploadId) || !_stattic_is_sha256_hex($sha256)) {
         return null;
     }
     $session = _stattic_record_store_get(
@@ -747,45 +848,11 @@ function _stattic_runtime_publish_session_blob(
 const STATTIC_RUNTIME_VERSION_BLOB_BASE_LANE = "\0base";
 
 /**
- * The two APCu entries one version's identity occupies. Both are keyed on
- * (space, version) ALONE — the channel dimension lives INSIDE the cached value,
- * never in the key — so retiring a version is two exact deletes. APCu has no
- * prefix delete, and a route-keyed variant entry would have outlived the version
- * it describes.
- */
-function _stattic_runtime_version_catalog_cache_key(string $spaceId, string $versionId): string
-{
-    return 'sf:vc|' . $spaceId . "\0" . $versionId;
-}
-
-function _stattic_runtime_version_blob_shas_cache_key(string $spaceId, string $versionId): string
-{
-    return 'sf:bg|' . $spaceId . "\0" . $versionId;
-}
-
-/**
- * Retire a deleted version from the pool caches.
- *
- * Both caches are safe to hold for their full TTL on the promise that a version
- * id is written exactly once. Deletion is the ONE event that breaks that
- * promise: without this, a blob-gate link minted before the delete keeps serving
- * the deleted version's bytes for the rest of the TTL, on every worker that
- * cached it. The per-process static memos need no clearing — they are per
- * request, and the request that deletes a version answers no reads after it.
- */
-function _stattic_runtime_forget_version_caches(string $spaceId, string $versionId): void
-{
-    if (!function_exists('apcu_delete')) {
-        return;
-    }
-    apcu_delete(_stattic_runtime_version_catalog_cache_key($spaceId, $versionId));
-    apcu_delete(_stattic_runtime_version_blob_shas_cache_key($spaceId, $versionId));
-}
-
-/**
  * The decoded catalog for one version, or null when it is absent, oversized,
- * malformed, or bound to a different space/version. Memoized per process and in
- * APCu when the pool has it.
+ * malformed, or bound to a different space/version. Memoized per request; warm
+ * reads come out of the opcached sidecar written by the first reader. The
+ * sidecar embeds the (space, version) identity and is validated against the
+ * caller's — a cache is never trusted to be about what its path claims.
  *
  * @return array{paths: array<string,mixed>, variants: array<string,mixed>}|null
  */
@@ -796,12 +863,13 @@ function _stattic_runtime_version_catalog(string $privateRoot, string $spaceId, 
     if (array_key_exists($memoKey, $memo)) {
         return $memo[$memoKey];
     }
-    $apcuKey = _stattic_runtime_version_catalog_cache_key($spaceId, $versionId);
-    $cached = _sf_apcu_get($apcuKey);
-    if (is_array($cached)) {
-        return $memo[$memoKey] = $cached;
+    $root = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    $identity = ['spaceId' => $spaceId, 'versionId' => $versionId];
+    $cached = _sf_php_cache_read($root . '/' . STATTIC_RUNTIME_VERSION_CATALOG_SIDECAR, $identity);
+    if (is_array($cached) && is_array($cached['paths'] ?? null) && is_array($cached['variants'] ?? null)) {
+        return $memo[$memoKey] = ['paths' => $cached['paths'], 'variants' => $cached['variants']];
     }
-    $path = _stattic_version_root($privateRoot, $spaceId, $versionId) . '/metadata.json';
+    $path = $root . '/metadata.json';
     if (!is_file($path)) {
         return $memo[$memoKey] = null;
     }
@@ -824,7 +892,12 @@ function _stattic_runtime_version_catalog(string $privateRoot, string $spaceId, 
         'paths' => $decoded['paths'],
         'variants' => is_array($decoded['variants'] ?? null) ? $decoded['variants'] : [],
     ];
-    _sf_apcu_put($apcuKey, $catalog, STATTIC_RUNTIME_VERSION_CATALOG_TTL_SECONDS);
+    // A catalog too large for the whole sidecar falls to path shards, so the
+    // per-path lane never re-decodes metadata.json once any reader has built
+    // them (the sha lane has its own gate shards).
+    if (!_sf_php_cache_write($root . '/' . STATTIC_RUNTIME_VERSION_CATALOG_SIDECAR, $catalog + $identity)) {
+        _stattic_runtime_write_path_sidecars($root, $spaceId, $versionId, $catalog['paths']);
+    }
     return $memo[$memoKey] = $catalog;
 }
 
@@ -840,7 +913,7 @@ function _stattic_runtime_catalog_object(mixed $object): ?array
         return null;
     }
     $sha = is_string($object['sha256'] ?? null) ? strtolower($object['sha256']) : '';
-    if (preg_match('/\A[a-f0-9]{64}\z/', $sha) !== 1) {
+    if (!_stattic_is_sha256_hex($sha)) {
         return null;
     }
     $mime = is_string($object['contentType'] ?? null) && $object['contentType'] !== ''
@@ -870,37 +943,19 @@ function _stattic_runtime_catalog_lane_shas(array $objects): array
 }
 
 /**
- * Every sha the blob gate may serve for one version, as lane => (sha => type).
- * The base lane holds the version's own objects — BOTH identities, because a sha
- * claim may name the uploaded object or the served one, and either is a byte
- * this version legitimately holds. Each further lane is one channel's variant
- * overrides, which is what a variant-scoped token resolves against; a channel
- * this version overrides nothing for has no lane and resolves nothing.
+ * Every sha the blob gate may serve for one version, as lane => (sha => type),
+ * built from the catalog. The base lane holds the version's own objects — BOTH
+ * identities, because a sha claim may name the uploaded object or the served
+ * one, and either is a byte this version legitimately holds. Each further lane
+ * is one channel's variant overrides, which is what a variant-scoped token
+ * resolves against; a channel this version overrides nothing for has no lane
+ * and resolves nothing.
  *
- * Every lane is built and cached in ONE entry rather than one per channel: a
- * version's channels are sparse and small, and a per-channel key could not be
- * invalidated when the version is deleted (see
- * `_stattic_runtime_forget_version_caches`).
- *
- * @return array<string,array<string,string>>|null null when the version has no
- *         readable catalog, which is a 404 like any other unresolvable token.
+ * @param array{paths: array<string,mixed>, variants: array<string,mixed>} $catalog
+ * @return array<string,array<string,string>>
  */
-function _stattic_runtime_version_blob_shas(string $privateRoot, string $spaceId, string $versionId): ?array
+function _stattic_runtime_catalog_lanes(array $catalog): array
 {
-    static $memo = [];
-    $memoKey = $spaceId . "\0" . $versionId;
-    if (array_key_exists($memoKey, $memo)) {
-        return $memo[$memoKey];
-    }
-    $apcuKey = _stattic_runtime_version_blob_shas_cache_key($spaceId, $versionId);
-    $cached = _sf_apcu_get($apcuKey);
-    if (is_array($cached)) {
-        return $memo[$memoKey] = $cached;
-    }
-    $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
-    if ($catalog === null) {
-        return $memo[$memoKey] = null;
-    }
     $base = [];
     foreach ($catalog['paths'] as $entry) {
         if (!is_array($entry)) {
@@ -915,8 +970,111 @@ function _stattic_runtime_version_blob_shas(string $privateRoot, string $spaceId
             $lanes[$routeName] = _stattic_runtime_catalog_lane_shas(array_values($variant));
         }
     }
-    _sf_apcu_put($apcuKey, $lanes, STATTIC_RUNTIME_VERSION_CATALOG_TTL_SECONDS);
-    return $memo[$memoKey] = $lanes;
+    return $lanes;
+}
+
+/**
+ * The content type one sha claim resolves to in one lane of one version, or
+ * null when the version has no readable catalog, the channel overrides nothing,
+ * or the sha is not a byte this version holds — the gate's uniform 404 either
+ * way.
+ *
+ * Warm reads never touch the catalog: the whole lane map rides in one opcached
+ * gate sidecar when it fits the derived-cache ceiling, else in sha-prefix
+ * shards so a request includes exactly one small shard. Both are built from
+ * ONE catalog decode the first time any sha is asked — a scan pulls one blob
+ * per request, and this is what keeps it linear instead of quadratic.
+ */
+function _stattic_runtime_version_blob_mime(
+    string $privateRoot,
+    string $spaceId,
+    string $versionId,
+    string $sha256,
+    ?string $routeName = null
+): ?string {
+    if (!_stattic_is_sha256_hex($sha256)) {
+        return null;
+    }
+    $lane = $routeName ?? STATTIC_RUNTIME_VERSION_BLOB_BASE_LANE;
+    $root = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    $identity = ['spaceId' => $spaceId, 'versionId' => $versionId];
+    foreach (
+        [
+            $root . '/' . STATTIC_RUNTIME_VERSION_GATE_SIDECAR,
+            $root . '/' . STATTIC_RUNTIME_VERSION_GATE_SHARD_DIR . '/' . substr($sha256, 0, 2) . '.php',
+        ] as $sidecar
+    ) {
+        $cached = _sf_php_cache_read($sidecar, $identity);
+        if (is_array($cached) && is_array($cached['lanes'] ?? null)) {
+            $mime = $cached['lanes'][$lane][$sha256] ?? null;
+            return is_string($mime) ? $mime : null;
+        }
+    }
+    $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
+    if ($catalog === null) {
+        return null;
+    }
+    $lanes = _stattic_runtime_catalog_lanes($catalog);
+    _stattic_runtime_write_gate_sidecars($root, $spaceId, $versionId, $lanes);
+    $mime = $lanes[$lane][$sha256] ?? null;
+    return is_string($mime) ? $mime : null;
+}
+
+/**
+ * Best-effort, once per version: one gate sidecar when the lane map fits the
+ * derived-cache ceiling, else all 256 sha-prefix shards — every prefix gets a
+ * file, because an absent shard means "not built" and would send the next
+ * lookup back to a full catalog decode. Failures leave the next reader to
+ * rebuild; nothing is load-bearing.
+ *
+ * @param array<string,array<string,string>> $lanes
+ */
+function _stattic_runtime_write_gate_sidecars(string $root, string $spaceId, string $versionId, array $lanes): void
+{
+    $identity = ['spaceId' => $spaceId, 'versionId' => $versionId];
+    if (_sf_php_cache_write($root . '/' . STATTIC_RUNTIME_VERSION_GATE_SIDECAR, $identity + ['lanes' => $lanes])) {
+        return;
+    }
+    $shards = [];
+    foreach ($lanes as $lane => $shas) {
+        foreach ($shas as $sha => $mime) {
+            $shards[substr((string) $sha, 0, 2)][$lane][$sha] = $mime;
+        }
+    }
+    $dir = $root . '/' . STATTIC_RUNTIME_VERSION_GATE_SHARD_DIR;
+    for ($i = 0; $i < 256; $i += 1) {
+        $prefix = str_pad(dechex($i), 2, '0', STR_PAD_LEFT);
+        if (!_sf_php_cache_write($dir . '/' . $prefix . '.php', $identity + ['lanes' => $shards[$prefix] ?? []])) {
+            return;
+        }
+    }
+}
+
+/**
+ * Best-effort, once per version whose catalog exceeds the whole-sidecar
+ * ceiling: 256 sha(path)-prefix shards mirroring the gate shards, so the file
+ * resolver answers a path from one small opcached shard. Every prefix gets a
+ * file — a written shard that lacks the path is an authoritative miss, while
+ * an absent shard means "not built" and falls back to the catalog.
+ *
+ * @param array<string,mixed> $paths
+ */
+function _stattic_runtime_write_path_sidecars(string $root, string $spaceId, string $versionId, array $paths): void
+{
+    $identity = ['spaceId' => $spaceId, 'versionId' => $versionId];
+    $shards = [];
+    foreach ($paths as $path => $entry) {
+        if (is_string($path) && $path !== '' && is_array($entry)) {
+            $shards[substr(hash('sha256', $path), 0, 2)][$path] = $entry;
+        }
+    }
+    $dir = $root . '/' . STATTIC_RUNTIME_VERSION_PATH_SHARD_DIR;
+    for ($i = 0; $i < 256; $i += 1) {
+        $prefix = str_pad(dechex($i), 2, '0', STR_PAD_LEFT);
+        if (!_sf_php_cache_write($dir . '/' . $prefix . '.php', $identity + ['paths' => $shards[$prefix] ?? []])) {
+            return;
+        }
+    }
 }
 
 /**
@@ -945,11 +1103,23 @@ function _stattic_runtime_resolve_version_file(
     if ($path === null) {
         return null;
     }
-    $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
-    if ($catalog === null) {
-        return null;
+    // Warm path for catalogs past the whole-sidecar ceiling: one opcached
+    // shard holds this path's entry (or its authoritative absence) without
+    // touching metadata.json.
+    $root = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    $shard = _sf_php_cache_read(
+        $root . '/' . STATTIC_RUNTIME_VERSION_PATH_SHARD_DIR . '/' . substr(hash('sha256', $path), 0, 2) . '.php',
+        ['spaceId' => $spaceId, 'versionId' => $versionId]
+    );
+    if (is_array($shard) && is_array($shard['paths'] ?? null)) {
+        $entry = $shard['paths'][$path] ?? null;
+    } else {
+        $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
+        if ($catalog === null) {
+            return null;
+        }
+        $entry = $catalog['paths'][$path] ?? null;
     }
-    $entry = $catalog['paths'][$path] ?? null;
     if (!is_array($entry)) {
         return null;
     }
@@ -1209,11 +1379,17 @@ function _stattic_runtime_real_private_root(string $path): string
         _stattic_problem_response(500, 'runtime_path_unconfined', 'Runtime path is outside private storage.');
     }
     $root = substr($path, 0, $index + strlen($marker));
+    // The resolved root cannot change within a worker, and this runs several
+    // times per request through the path asserts — memoize the success.
+    static $resolved = [];
+    if (isset($resolved[$root])) {
+        return $resolved[$root];
+    }
     $realRoot = realpath($root);
     if (!is_string($realRoot)) {
         _stattic_problem_response(500, 'runtime_private_root_missing', 'Runtime private storage is missing.');
     }
-    return rtrim(str_replace('\\', '/', $realRoot), '/');
+    return $resolved[$root] = rtrim(str_replace('\\', '/', $realRoot), '/');
 }
 
 function _stattic_runtime_normalize_absolute_path(string $path): ?string

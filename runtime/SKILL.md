@@ -10,7 +10,7 @@ You are operating Spacefast Engine, the open-source PHP runtime (this directory)
 
 ## Quick Start (local serving)
 
-1. Verify PHP: `php -v` (8.2+), extensions `sodium`, `curl`, `zip`.
+1. Verify PHP: `php -v` (8.5.x only), extensions `sodium`, `curl`, `zip`.
 2. Lay out a web root:
    - build or obtain the engine ZIP
    - run `runtime/installer.php <zip>` with the expected revision and digests

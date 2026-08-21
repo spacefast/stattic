@@ -3,11 +3,11 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/shared/context.php';
 
-// The runtime and the provider edge own their own explicit cache contracts.
-// Batcache ignores those contracts and can replay private or pre-publish bytes.
-if (function_exists('batcache_cancel')) {
-    batcache_cancel();
-}
+// No batcache handling here: this lane serves and exits before WordPress core
+// (and therefore advanced-cache.php) ever loads, so batcache can never observe
+// a runtime response to cache. The one lane that did load WordPress — the old
+// WP-bootstrap purge bridge — is gone; edge purges now call the platform site
+// API directly (shared/purge.php).
 
 // Must run before anything can exit: every early return below is a response that
 // has to be attributable to this runtime, including access denials that would

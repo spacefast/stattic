@@ -7,9 +7,8 @@ declare(strict_types=1);
  * The provider's crontab runs a shell command on the site's box, and that
  * command has to reach the SAME routing a visitor reaches: static entries,
  * PHP Functions, Zero, the Functions relay. A loopback HTTP kick would answer
- * that by racing the visitor pool for a worker (entrypoints/purge.php states
- * the same deadlock from the other side), and a second router would answer it
- * by drifting. So neither: this file STAGES a request into the superglobals the
+ * that by racing the visitor pool for a worker, and a second router would answer
+ * it by drifting. So neither: this file STAGES a request into the superglobals the
  * front door already reads and then calls `_sf_serve_fast()` — the exact call
  * engine/init.php makes. Everything downstream is unaware it is on the CLI.
  *

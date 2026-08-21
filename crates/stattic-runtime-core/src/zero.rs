@@ -543,34 +543,18 @@ fn zero_route_match_shape(pattern: &str) -> (Vec<Option<&str>>, bool, usize) {
 }
 
 fn zero_endpoint_slug(method: &str, path: &str, index: usize) -> String {
-    let mut base = format!("{}_{}", method, path.trim_matches('/')).to_ascii_lowercase();
-    let mut collapsed = String::with_capacity(base.len());
-    let mut last_was_separator = false;
-    for character in base.chars() {
-        if character.is_ascii_alphanumeric() {
-            collapsed.push(character);
-            last_was_separator = false;
-        } else if !last_was_separator {
-            collapsed.push('_');
-            last_was_separator = true;
-        }
-    }
-    base = collapsed.trim_matches('_').to_string();
-    if base.is_empty() {
-        base = "endpoint".to_string();
-    }
-    let prefix = if base.len() > 64 { &base[..64] } else { &base };
+    let base = sanitize_slug(&format!("{method}_{path}"), "endpoint");
     let digest = sha256(format!("{method}\n{path}\n{index}").as_bytes());
-    format!("{prefix}_{}", &digest[..12])
+    format!("{base}_{}", &digest[..12])
 }
 
 fn zero_run_slug(run_id: &str, index: usize) -> String {
-    let base = sanitize_slug(run_id);
+    let base = sanitize_slug(run_id, "run");
     let digest = sha256(format!("{run_id}\n{index}").as_bytes());
     format!("{base}_{}", &digest[..12])
 }
 
-fn sanitize_slug(input: &str) -> String {
+fn sanitize_slug(input: &str, fallback: &str) -> String {
     let mut collapsed = String::with_capacity(input.len());
     let mut last_was_separator = false;
     for character in input.to_ascii_lowercase().chars() {
@@ -583,7 +567,7 @@ fn sanitize_slug(input: &str) -> String {
         }
     }
     let base = collapsed.trim_matches('_');
-    let base = if base.is_empty() { "run" } else { base };
+    let base = if base.is_empty() { fallback } else { base };
     if base.len() > 64 {
         base[..64].to_string()
     } else {
@@ -708,17 +692,8 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
         let Some(physical_name) = table.get("physicalName").and_then(Value::as_str) else {
             continue;
         };
-        let primary_key = table
-            .get("primaryKey")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("id");
         let columns = table.get("columns").and_then(Value::as_object);
-        let primary_physical = columns
-            .and_then(|columns| columns.get(primary_key))
-            .and_then(|column| column.get("physicalName"))
-            .and_then(Value::as_str)
-            .unwrap_or(primary_key);
+        let (primary_key, primary_physical) = table_primary_physical(table, columns);
         let mut column_definitions = Vec::new();
         if let Some(columns) = columns {
             for (name, column) in columns {
@@ -776,17 +751,8 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
                 // `CREATE TABLE IF NOT EXISTS` is a no-op once the table exists, so a
                 // schema that gains a field only ever reaches the database through this
                 // ALTER. The primary key is part of the CREATE and is never added here.
-                let primary_key = table
-                    .get("primaryKey")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("id");
                 let columns = table.get("columns").and_then(Value::as_object);
-                let primary_physical = columns
-                    .and_then(|columns| columns.get(primary_key))
-                    .and_then(|column| column.get("physicalName"))
-                    .and_then(Value::as_str)
-                    .unwrap_or(primary_key);
+                let (primary_key, primary_physical) = table_primary_physical(table, columns);
                 let Some(column_name) = operation
                     .get("column")
                     .and_then(|column| column.get("name"))
@@ -882,24 +848,40 @@ fn zero_migration_statement_sort_key(statement: &str) -> String {
     format!("{priority}:{statement}")
 }
 
+fn table_primary_physical<'a>(
+    table: &'a serde_json::Map<String, Value>,
+    columns: Option<&'a serde_json::Map<String, Value>>,
+) -> (&'a str, &'a str) {
+    let primary_key = table
+        .get("primaryKey")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("id");
+    let primary_physical = columns
+        .and_then(|columns| columns.get(primary_key))
+        .and_then(|column| column.get("physicalName"))
+        .and_then(Value::as_str)
+        .unwrap_or(primary_key);
+    (primary_key, primary_physical)
+}
+
 fn quote_mysql_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
 }
 
-pub(crate) fn zero_endpoint_artifact_path(artifact: &ZeroEndpointArtifact) -> String {
-    artifact
-        .source_path
+fn artifact_json_path(source_path: &str) -> String {
+    source_path
         .strip_suffix(".source.js")
         .map(|base| format!("{base}.json"))
-        .unwrap_or_else(|| format!("{}.json", artifact.source_path))
+        .unwrap_or_else(|| format!("{source_path}.json"))
+}
+
+pub(crate) fn zero_endpoint_artifact_path(artifact: &ZeroEndpointArtifact) -> String {
+    artifact_json_path(&artifact.source_path)
 }
 
 pub(crate) fn zero_run_artifact_path(artifact: &ZeroRunArtifact) -> String {
-    artifact
-        .source_path
-        .strip_suffix(".source.js")
-        .map(|base| format!("{base}.json"))
-        .unwrap_or_else(|| format!("{}.json", artifact.source_path))
+    artifact_json_path(&artifact.source_path)
 }
 
 #[cfg(test)]

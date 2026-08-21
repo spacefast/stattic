@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -710,23 +709,22 @@ fn database_opts() -> Result<Opts, BrokerRefusal> {
         .into())
 }
 
-fn configured_limit(name: &str) -> Option<usize> {
+/// The env may lower a cap, never raise it: an unset, unparsable, zero or
+/// larger-than-the-ceiling value is the ceiling.
+fn configured_limit(name: &str, ceiling: usize) -> usize {
     env::var(name)
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
+        .map_or(ceiling, |value| value.min(ceiling))
 }
 
 fn db_rows_max() -> usize {
-    // The env may lower a cap, never raise it — same as the byte ceiling below.
-    configured_limit("SPACEFAST_ZERO_DB_ROWS_MAX")
-        .map_or(DB_RESULT_ROWS_MAX, |value| value.min(DB_RESULT_ROWS_MAX))
+    configured_limit("SPACEFAST_ZERO_DB_ROWS_MAX", DB_RESULT_ROWS_MAX)
 }
 
 fn db_result_bytes_max() -> usize {
-    configured_limit("SPACEFAST_ZERO_DB_RESULT_BYTES_MAX")
-        .map(|value| value.min(DB_RESULT_BYTES_MAX))
-        .unwrap_or(DB_RESULT_BYTES_MAX)
+    configured_limit("SPACEFAST_ZERO_DB_RESULT_BYTES_MAX", DB_RESULT_BYTES_MAX)
 }
 
 fn database_opts_from_url(url: &str, source: DatabaseUrlSource) -> Result<Opts, BrokerRefusal> {
@@ -820,7 +818,7 @@ fn json_to_mysql_value(value: &Value) -> Result<MysqlValue, BrokerRefusal> {
 }
 
 fn row_to_json(row: &Row) -> Result<Value, BrokerRefusal> {
-    let mut object = BTreeMap::new();
+    let mut object = serde_json::Map::new();
     for (index, column) in row.columns_ref().iter().enumerate() {
         let name = column.name_str().into_owned();
         let value = row.as_ref(index).ok_or_else(|| {
@@ -831,7 +829,7 @@ fn row_to_json(row: &Row) -> Result<Value, BrokerRefusal> {
         })?;
         object.insert(name, mysql_value_to_json(value)?);
     }
-    Ok(json!(object))
+    Ok(Value::Object(object))
 }
 
 fn mysql_value_to_json(value: &MysqlValue) -> Result<Value, BrokerRefusal> {

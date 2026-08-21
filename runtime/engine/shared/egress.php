@@ -64,12 +64,8 @@ function _stattic_platform_destination_allowed(string $url): bool
     if ($allowed === []) {
         return true;
     }
-    foreach ($allowed as $allowedHost) {
-        if ($host === $allowedHost || str_ends_with($host, '.' . $allowedHost)) {
-            return true;
-        }
-    }
-    return false;
+    return array_any($allowed, static fn (string $allowedHost): bool =>
+        $host === $allowedHost || str_ends_with($host, '.' . $allowedHost));
 }
 
 function _stattic_egress_host_is_stattic_internal(string $host): bool
@@ -111,13 +107,10 @@ function _stattic_egress_ip_public(string $ip): bool
 
 function _stattic_egress_ip_outside_denylist(string $packed, array $deniedCidrs): bool
 {
-    foreach ($deniedCidrs as $cidr) {
+    return !array_any($deniedCidrs, static function (string $cidr) use ($packed): bool {
         [$network, $bits] = explode('/', $cidr, 2);
-        if (_stattic_egress_ip_in_cidr($packed, (string) inet_pton($network), (int) $bits)) {
-            return false;
-        }
-    }
-    return true;
+        return _stattic_egress_ip_in_cidr($packed, (string) inet_pton($network), (int) $bits);
+    });
 }
 
 function _stattic_egress_ip_in_cidr(string $packedIp, string $packedNetwork, int $bits): bool
@@ -145,9 +138,6 @@ function _stattic_egress_proxy_policy_shape_valid(array $route): bool
         return false;
     }
     if (!is_string($route['target_prefix'] ?? null) || $route['target_prefix'] === '' || $route['target_prefix'][0] !== '/') {
-        return false;
-    }
-    if (array_key_exists('method', $route) && $route['method'] !== null && !_stattic_egress_proxy_method_valid($route['method'])) {
         return false;
     }
     if (!is_array($route['methods'] ?? null) || $route['methods'] === []) {
@@ -207,11 +197,11 @@ const STATTIC_EGRESS_RESOLVE_TTL_SECONDS = 5;
 // defeats DNS rebinding between validation and connect. Null when resolution
 // fails or ANY resolved address is non-public.
 //
-// Memoized per (host,port): a process-local TTL cache plus a best-effort APCu
-// entry, so repeated resolves in one request (and briefly across requests) skip
-// DNS. The whole verdict — including the "any non-public => null" decision — is
-// what gets cached, so a denied host is never re-derived from raw IPs, and the
-// TTL bounds the rebinding window the cache opens.
+// Memoized per (host,port) within the request only — the whole verdict,
+// including the "any non-public => null" decision, so a denied host is never
+// re-derived from raw IPs. Deliberately no cross-process cache: the proxy lane
+// resolves once per request anyway, and a shared entry would let one worker's
+// transient resolver failure deny every request on the box for the TTL.
 function _stattic_egress_resolve_public_ips(string $host, ?int $port = null): ?array
 {
     static $memo = [];
@@ -220,23 +210,8 @@ function _stattic_egress_resolve_public_ips(string $host, ?int $port = null): ?a
     if (isset($memo[$key]) && $memo[$key]['exp'] > $now) {
         return $memo[$key]['ips'];
     }
-
-    $apcuKey = 'stattic_egress_resolve|' . $key;
-    $apcuOn = function_exists('apcu_fetch') && function_exists('apcu_enabled') && apcu_enabled();
-    if ($apcuOn) {
-        $cached = apcu_fetch($apcuKey, $found);
-        if ($found === true && is_array($cached) && array_key_exists('ips', $cached)) {
-            $memo[$key] = ['exp' => $now + STATTIC_EGRESS_RESOLVE_TTL_SECONDS, 'ips' => $cached['ips']];
-            return $cached['ips'];
-        }
-    }
-
     $ips = _stattic_egress_resolve_public_ips_compute($host, $port);
     $memo[$key] = ['exp' => $now + STATTIC_EGRESS_RESOLVE_TTL_SECONDS, 'ips' => $ips];
-    if ($apcuOn) {
-        // ['ips' => null] is a real cached verdict (denied), distinct from a miss.
-        apcu_store($apcuKey, ['ips' => $ips], STATTIC_EGRESS_RESOLVE_TTL_SECONDS);
-    }
     return $ips;
 }
 
@@ -284,12 +259,8 @@ function _stattic_egress_test_target_allowlisted(string $host, ?int $port): bool
         return false;
     }
     $target = strtolower(trim($host, '[]')) . ':' . $port;
-    foreach (explode(',', $raw) as $entry) {
-        if (strtolower(trim($entry)) === $target) {
-            return true;
-        }
-    }
-    return false;
+    return array_any(explode(',', $raw), static fn (string $entry): bool =>
+        strtolower(trim($entry)) === $target);
 }
 
 function _stattic_egress_curl_resolve_entries(string $host, int $port, array $ips): array

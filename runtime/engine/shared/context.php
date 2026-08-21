@@ -8,6 +8,19 @@ error_reporting(E_ALL);
 ini_set('log_errors', '1');
 ini_set('display_errors', '0');
 
+function _stattic_runtime_php_version_supported(int $versionId): bool
+{
+    return $versionId >= 80500 && $versionId < 80600;
+}
+
+if (!_stattic_runtime_php_version_supported(PHP_VERSION_ID)) {
+    error_log('Spacefast runtime requires PHP 8.5; running PHP ' . PHP_VERSION);
+    if (PHP_SAPI !== 'cli') {
+        http_response_code(500);
+    }
+    exit(1);
+}
+
 require_once __DIR__ . '/response.php';
 require_once __DIR__ . '/finalizer-protocol.generated.php';
 
@@ -195,10 +208,13 @@ function _stattic_control_path_is_zero_route(string $path): bool
 
 function _stattic_control_path_row(string $path): ?array
 {
-    if (!str_starts_with($path, '/__')) {
+    // Fold before the fast-exit (a raw '/__' prefix survives folding, so the
+    // folded check covers both): '//__' spellings must reach the fold-enabled
+    // rows exactly like their canonical spelling.
+    $folded = '/' . trim(strtolower($path), '/');
+    if (!str_starts_with($folded, '/__')) {
         return null;
     }
-    $folded = '/' . trim(strtolower($path), '/');
     foreach (SPACEFAST_CONTROL_PATHS as $row) {
         $subject = empty($row['fold']) ? $path : $folded;
         $target = $row['path'];
@@ -231,17 +247,19 @@ function _stattic_control_path_admits_visitor(string $path): bool
 
 function _stattic_control_path_namespace_is_private(string $path): bool
 {
+    // Fold BEFORE the fast-exit: '//__spacefast' spellings must answer exactly
+    // like '/__spacefast', or the early return becomes a probe oracle for
+    // which encoded spellings the runtime recognizes as private.
     $folded = '/' . trim(strtolower($path), '/');
-    foreach (SPACEFAST_CONTROL_PATHS as $row) {
-        if (
-            $row['match'] === 'namespace'
-            && $row['visitor'] === false
-            && ($folded === $row['path'] || str_starts_with($folded, $row['path'] . '/'))
-        ) {
-            return true;
-        }
+    // Every private-namespace row is '/__'-prefixed; the ordinary visitor path
+    // exits on one comparison instead of walking the table.
+    if (!str_starts_with($folded, '/__')) {
+        return false;
     }
-    return false;
+    return array_any(SPACEFAST_CONTROL_PATHS, static fn (array $row): bool =>
+        $row['match'] === 'namespace'
+        && $row['visitor'] === false
+        && ($folded === $row['path'] || str_starts_with($folded, $row['path'] . '/')));
 }
 
 function _stattic_path_is_reserved(string $path): bool
@@ -507,6 +525,21 @@ function _stattic_request_body_contents(?int $limit = null): string|false
     return $limit === null
         ? file_get_contents('php://input')
         : file_get_contents('php://input', false, null, 0, $limit);
+}
+
+// Declared-then-read bound: an over-declared body is refused before the read,
+// an under-declared one after it.
+function _stattic_bounded_request_body(int $limit): ?string
+{
+    $declared = isset($_SERVER['CONTENT_LENGTH']) ? (int) $_SERVER['CONTENT_LENGTH'] : 0;
+    if ($declared > $limit) {
+        return null;
+    }
+    $body = _stattic_request_body_contents($limit + 1);
+    if ($body === false || strlen($body) > $limit) {
+        return null;
+    }
+    return $body;
 }
 
 /** @return resource|false */
@@ -804,23 +837,12 @@ const SPACEFAST_EDGE_CACHE_OPT_OUT = 'no-cache';
 function _stattic_platform_owns_header(string $name): bool
 {
     $lower = strtolower(trim($name));
-    if (
-        in_array($lower, STATTIC_RUNTIME_PLATFORM_OWNED_HEADERS, true)
+    return in_array($lower, STATTIC_RUNTIME_PLATFORM_OWNED_HEADERS, true)
         || in_array($lower, STATTIC_PLATFORM_OWNED_HEADERS_EXTRA, true)
-    ) {
-        return true;
-    }
-    foreach (STATTIC_RUNTIME_PLATFORM_OWNED_HEADER_PREFIXES as $prefix) {
-        if (str_starts_with($lower, $prefix)) {
-            return true;
-        }
-    }
-    foreach (STATTIC_PLATFORM_OWNED_HEADER_PREFIXES_EXTRA as $prefix) {
-        if (str_starts_with($lower, $prefix)) {
-            return true;
-        }
-    }
-    return false;
+        || array_any(
+            [...STATTIC_RUNTIME_PLATFORM_OWNED_HEADER_PREFIXES, ...STATTIC_PLATFORM_OWNED_HEADER_PREFIXES_EXTRA],
+            static fn (string $prefix): bool => str_starts_with($lower, $prefix)
+        );
 }
 
 /**
@@ -881,6 +903,28 @@ function _stattic_clear_platform_owned_response_headers(): void
         if ($name !== '' && _stattic_platform_owns_header($name)) {
             header_remove($name);
         }
+    }
+}
+
+// THE response-header emitter for file bodies and server-file handoffs, on
+// every lane: publisher filtering and wp.cloud edge activation happen here, so
+// no caller can emit a header map that skipped the platform policy. Set-Cookie
+// appends; everything else replaces.
+function _stattic_send_response_headers(array $headers): void
+{
+    header_remove('Pragma');
+    header_remove('Expires');
+    $headers = _stattic_apply_platform_header_policy($headers);
+    foreach ($headers as $name => $value) {
+        if (!is_string($name) || !is_scalar($value)) {
+            continue;
+        }
+        if (strtolower($name) === 'set-cookie') {
+            header($name . ': ' . (string) $value, false);
+            continue;
+        }
+        header_remove($name);
+        header($name . ': ' . (string) $value);
     }
 }
 
@@ -991,7 +1035,7 @@ function _stattic_space_root(string $privateRoot, string $spaceId): string
 
 function _stattic_version_root(string $privateRoot, string $spaceId, string $versionId): string
 {
-    return $privateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId;
+    return _stattic_space_root($privateRoot, $spaceId) . '/versions/' . $versionId;
 }
 
 function _stattic_space_routes_root(string $privateRoot, string $spaceId): string
@@ -1021,6 +1065,37 @@ function _stattic_id_valid(string $value): bool
     return preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/', $value) === 1;
 }
 
+function _stattic_base64url_decode(string $value): string
+{
+    $padded = strtr($value, '-_', '+/');
+    $padded .= str_repeat('=', (4 - strlen($padded) % 4) % 4);
+    $decoded = base64_decode($padded, true);
+    return is_string($decoded) ? $decoded : '';
+}
+
+function _stattic_base64url_encode(string $value): string
+{
+    return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
+}
+
+// The one spelling of "a lowercase sha-256 digest" — every CAS key, blob path
+// and content digest check shares it.
+function _stattic_is_sha256_hex(mixed $value): bool
+{
+    return is_string($value) && preg_match('/\A[a-f0-9]{64}\z/', $value) === 1;
+}
+
+// The one spelling of a CAS blob's relative key — the local blob tree and the
+// S3 object namespace derive from this and can never disagree on layout.
+function _stattic_blob_relative_key(string $spaceId, string $sha256): ?string
+{
+    $sha256 = strtolower(trim($sha256));
+    if (!_stattic_id_valid($spaceId) || !_stattic_is_sha256_hex($sha256)) {
+        return null;
+    }
+    return 'spaces/' . $spaceId . '/blobs/' . substr($sha256, 0, 2) . '/' . $sha256;
+}
+
 // Spec "Space Configuration Files": private after compile, never served. Shared
 // by the compile-side exclusion (admin/generate.php) and the serve-side
 // terminal-404 gate (runtime/serve.php); keys are canonical lowercase paths.
@@ -1046,15 +1121,11 @@ const STATTIC_PRIVATE_COMPILE_FILES = [
 // not. Callers pass the path pre-lowercased and slash-trimmed.
 function _stattic_path_has_hidden_segment(string $lowerPath): bool
 {
-    foreach (explode('/', $lowerPath) as $index => $segment) {
-        if ($index === 0 && $segment === '.well-known') {
-            continue;
-        }
-        if (str_starts_with($segment, '.')) {
-            return true;
-        }
-    }
-    return false;
+    return array_any(
+        explode('/', $lowerPath),
+        static fn (string $segment, int $index): bool =>
+            !($index === 0 && $segment === '.well-known') && str_starts_with($segment, '.')
+    );
 }
 
 function _stattic_config_value(string $envName): string
@@ -1130,24 +1201,50 @@ function _stattic_nfc_no_intl_journal_once(): void
     ], false);
 }
 
-// PHP 8.5's uri extension parses per RFC 3986 without parse_url's lossy
-// heuristics; parse_url stays the fallback.
+// RFC 3986 accepts ASCII URI bytes. HTTP request targets may carry authored
+// UTF-8 directly, so encode only those bytes before parsing; the canonical path
+// gate below performs the one validated percent-decode and NFC normalization.
+function _stattic_uri_ascii(string $uri): ?string
+{
+    if (preg_match('//u', $uri) !== 1) {
+        return null;
+    }
+    return preg_replace_callback(
+        '/[^\x00-\x7f]+/u',
+        static fn (array $match): string => rawurlencode($match[0]),
+        $uri,
+    );
+}
+
+// Preserve getRawPath(): getPath() removes dot segments before our security
+// gate can reject them. There is deliberately no parse_url fallback.
 function _stattic_request_uri_path(string $requestUri): string
 {
-    if (class_exists('\Uri\Rfc3986\Uri')) {
-        try {
-            $path = (new \Uri\Rfc3986\Uri($requestUri, 'http://spacefast.invalid'))->getPath();
-            if (is_string($path) && $path !== '') {
-                return $path;
-            }
-        } catch (Throwable $error) {
-            // The URI can contain credentials, so log the parser failure class
-            // without copying its raw input or exception message.
-            error_log('spacefast URI parser failed type=' . get_debug_type($error));
-            // The canonical-path gate rejects whatever survives parse_url.
-        }
+    $ascii = _stattic_uri_ascii($requestUri);
+    if ($ascii === null) {
+        return '';
     }
-    return parse_url($requestUri, PHP_URL_PATH) ?: '/';
+    try {
+        $path = (new \Uri\Rfc3986\Uri($ascii))->getRawPath();
+        return $path === '' ? '/' : $path;
+    } catch (Throwable $error) {
+        // The URI can contain credentials, so log only the parser failure class.
+        error_log('spacefast URI parser failed type=' . get_debug_type($error));
+        return '';
+    }
+}
+
+function _stattic_request_uri_query(string $requestUri): ?string
+{
+    $ascii = _stattic_uri_ascii($requestUri);
+    if ($ascii === null) {
+        return null;
+    }
+    try {
+        return (new \Uri\Rfc3986\Uri($ascii))->getRawQuery();
+    } catch (Throwable) {
+        return null;
+    }
 }
 
 // The URI stays raw for return URLs and redirect query handling; matchers get
@@ -1247,24 +1344,7 @@ function _stattic_is_management_host(string $host): bool
     }
 
     $allowed = _stattic_management_hostname();
-    if ($allowed !== '' && hash_equals($allowed, $host)) {
-        return true;
-    }
-
-    // Test/multi-host harness only — production leaves this unset. A single
-    // leading-`*.` wildcard accepting exactly one extra label.
-    $pattern = _stattic_normalize_hostname(
-        _stattic_config_value('SPACEFAST_MANAGEMENT_HOST_PATTERN')
-    );
-    if ($pattern !== '' && str_starts_with($pattern, '*.')) {
-        $suffix = substr($pattern, 1);
-        if (str_ends_with($host, $suffix)) {
-            $label = substr($host, 0, -strlen($suffix));
-            return $label !== '' && !str_contains($label, '.');
-        }
-    }
-
-    return false;
+    return $allowed !== '' && hash_equals($allowed, $host);
 }
 
 // A non-digit config value falls back to $default; the result is floored at $min.

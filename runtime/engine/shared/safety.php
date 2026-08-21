@@ -77,15 +77,11 @@ const SPACEFAST_INTERNAL_REDIRECT_HEADERS = [
 function _stattic_platform_managed_header(string $name): bool
 {
     $lower = strtolower(trim($name));
-    if (isset(SPACEFAST_PLATFORM_MANAGED_HEADERS[$lower])) {
-        return true;
-    }
-    foreach (SPACEFAST_PLATFORM_MANAGED_HEADER_PREFIXES as $prefix) {
-        if (str_starts_with($lower, $prefix)) {
-            return true;
-        }
-    }
-    return false;
+    return isset(SPACEFAST_PLATFORM_MANAGED_HEADERS[$lower])
+        || array_any(
+            SPACEFAST_PLATFORM_MANAGED_HEADER_PREFIXES,
+            static fn (string $prefix): bool => str_starts_with($lower, $prefix)
+        );
 }
 
 function _stattic_policy_extension(string $path): string

@@ -84,7 +84,7 @@ function _stattic_static_upload_path_violation(string $path): ?array
     }
 
     $reserved = static fn (string $p): array => _stattic_static_path_violation('static_runtime_control_path_not_supported', 'Static deploys cannot upload runtime control paths.', $p);
-    $lowerName = $lowerSegments[count($lowerSegments) - 1];
+    $lowerName = array_last($lowerSegments);
     if (in_array($lowerName, SPACEFAST_UPLOAD_EXECUTION_CONTROL_FILES, true)) {
         return _stattic_static_path_violation('static_control_file_not_supported', 'Static deploys cannot upload execution-control files.', $path);
     }

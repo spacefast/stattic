@@ -4,10 +4,20 @@
 // converged fast-path, the exec contract (argv URL + env checksums), and how
 // installer verdicts map onto HTTP.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
-import { api, errorCode, RUNTIME_HTTP_API_BASE, startRuntime, type Runtime } from "./harness";
+import {
+  api,
+  dispatchCli,
+  errorCode,
+  managementToken,
+  RUNTIME_HTTP_API_BASE,
+  runtimeHttpPath,
+  startRuntime,
+  type Runtime,
+} from "./harness";
 
 let rt: Runtime;
 
@@ -59,32 +69,39 @@ test("answers converged for the running revision without spawning anything", asy
   });
 });
 
-test("runs the resident installer for the same revision when the request came through the legacy layout", async () => {
-  const legacy = await startRuntime();
+test("runs the resident installer for the same revision when the lane did not pin a release", async () => {
+  // The SSH dispatch lane loads the engine directly, so no active-release root
+  // is pinned for the process. A revision match alone must not answer
+  // "converged" there — only a pinned release layout proves the running bytes
+  // are the published ones.
+  const lane = await startRuntime();
   try {
-    cpSync(
-      path.join(legacy.root, ".stattic/releases/test/engine"),
-      path.join(legacy.root, ".stattic/engine"),
-      {
-        recursive: true,
-      },
-    );
-    rmSync(path.join(legacy.root, ".stattic/active-release"));
     plantResidentInstaller(
       "<?php echo json_encode(['status' => 'installed', 'engine_revision' => getenv('SPACEFAST_RUNTIME_ENGINE_REVISION'), 'layout' => 'release']);",
-      legacy,
+      lane,
     );
 
-    const response = await update({ ...UPDATE_BODY, revision: "source-tree" }, legacy);
+    const result = await dispatchCli(
+      lane,
+      JSON.stringify({
+        method: "POST",
+        path: runtimeHttpPath(`${RUNTIME_HTTP_API_BASE}/engine/update`),
+        authorization: `Bearer ${managementToken("update_engine")}`,
+        body: JSON.stringify({ ...UPDATE_BODY, revision: "source-tree" }),
+      }),
+      { env: { PATH: process.env.PATH, HOME: process.env.HOME } },
+    );
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
+    expect(result.exitCode, result.stderr).toBe(0);
+    const envelope: { status?: unknown; body?: unknown } = JSON.parse(result.stdout);
+    expect(envelope.status).toBe(200);
+    expect(envelope.body).toEqual({
       status: "installed",
       engine_revision: "source-tree",
       layout: "release",
     });
   } finally {
-    legacy.stop();
+    lane.stop();
   }
 });
 
@@ -138,4 +155,44 @@ test("surfaces the installer's stderr code on a failed converge", async () => {
   };
   expect(body.code).toBe("runtime_engine_update_failed");
   expect(body.details).toMatchObject({ error: "runtime_engine_md5_mismatch", exit_code: 1 });
+});
+
+test("invalidates exactly the rewritten-in-place aliases: the loader copies and the resident installer", async () => {
+  // These aliases are the ONLY engine files a converge reinstalls under an
+  // unchanged path; the fleet runs opcache.validate_timestamps=Off, so an alias
+  // FPM does not invalidate keeps executing its old compiled module forever.
+  // The invalidate loop itself is a PHP guarantee; what the runtime owns — and
+  // what breaks if the entrypoint set drifts — is the exact absolute path set,
+  // derived here from the same constant serve.php dispatches on. (PHP 8.5's
+  // CLI/cli-server SAPIs retain no SHM opcache entries across a run, so the SHM
+  // eviction has no honest local observable; it is exercised end to end by the
+  // credential-gated wp.cloud converge suite.)
+  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-alias-opcache-"));
+  try {
+    const script = [
+      "<?php",
+      `require ${JSON.stringify(path.resolve(import.meta.dirname, "../engine/admin/engine-update.php"))};`,
+      `echo json_encode(_stattic_engine_update_alias_paths(${JSON.stringify(`${root}/.stattic/storage`)}));`,
+    ].join("\n");
+    const scriptPath = path.join(root, "probe-script.php");
+    writeFileSync(scriptPath, script);
+    const result = Bun.spawnSync({
+      cmd: ["php", "-d", "auto_prepend_file=", scriptPath],
+      env: process.env,
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    const paths = JSON.parse(result.stdout.toString()) as string[];
+    expect(new Set(paths)).toEqual(
+      new Set([
+        `${root}/custom-redirects.php`,
+        `${root}/index.php`,
+        `${root}/__spacefast/engine-update.php`,
+        `${root}/__spacefast/api.php`,
+        `${root}/__spacefast/health.php`,
+        `${root}/__spacefast/upload.php`,
+      ]),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

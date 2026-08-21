@@ -66,21 +66,9 @@ function _stattic_s3_default_bucket_id(): ?string
 // stored — not in a shard, not in a metadata record, not in a job payload. That
 // is what makes a space move a pure prefix operation and a stale stored key
 // impossible.
-function _stattic_s3_blob_key(string $spaceId, string $sha256): ?string
-{
-    $sha256 = strtolower(trim($sha256));
-    if (
-        preg_match('/^[A-Za-z0-9._-]{1,128}$/', $spaceId) !== 1
-        || preg_match('/^[a-f0-9]{64}$/', $sha256) !== 1
-    ) {
-        return null;
-    }
-    return 'spaces/' . $spaceId . '/blobs/' . substr($sha256, 0, 2) . '/' . $sha256;
-}
-
 function _stattic_s3_blob_locator(string $bucketId, string $spaceId, string $sha256): ?array
 {
-    $key = _stattic_s3_blob_key($spaceId, $sha256);
+    $key = _stattic_blob_relative_key($spaceId, $sha256);
     return $key === null ? null : ['bucket' => $bucketId, 'key' => $key];
 }
 
@@ -90,7 +78,7 @@ function _stattic_s3_blob_locator(string $bucketId, string $spaceId, string $sha
 function _stattic_s3_blob_head(string $spaceId, string $sha256, ?string $bucketId = null): ?int
 {
     $bucketId ??= _stattic_s3_default_bucket_id();
-    $key = $bucketId === null ? null : _stattic_s3_blob_key($spaceId, $sha256);
+    $key = $bucketId === null ? null : _stattic_blob_relative_key($spaceId, $sha256);
     if ($key === null) {
         return null;
     }

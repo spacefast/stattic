@@ -381,12 +381,9 @@ function _stattic_db_broker_transaction(stdClass $operation): array
         $shapes[] = $shape;
     }
 
-    $connection = _stattic_db_broker_connection();
+    $connection = _stattic_db_broker_open_transaction();
     if (is_array($connection)) {
         return $connection;
-    }
-    if ($connection->query('START TRANSACTION') === false) {
-        return _stattic_db_broker_driver_error('zero_db_transaction_start_failed', $connection);
     }
 
     $results = [];
@@ -407,9 +404,12 @@ function _stattic_db_broker_transaction(stdClass $operation): array
 }
 
 /**
- * @return array{ok:true,json:string}|array{ok:false,code:string,message:string}
+ * The one way a transaction starts, batched or held: nothing else may be open,
+ * the connection has to be live, and the server has to accept the START.
+ *
+ * @return mysqli|array{ok:false,code:string,message:string}
  */
-function _stattic_db_broker_begin_transaction(): array
+function _stattic_db_broker_open_transaction(): mysqli|array
 {
     $state = &_stattic_db_broker_state();
     if ($state['txn']) {
@@ -422,6 +422,20 @@ function _stattic_db_broker_begin_transaction(): array
     if ($connection->query('START TRANSACTION') === false) {
         return _stattic_db_broker_driver_error('zero_db_transaction_start_failed', $connection);
     }
+
+    return $connection;
+}
+
+/**
+ * @return array{ok:true,json:string}|array{ok:false,code:string,message:string}
+ */
+function _stattic_db_broker_begin_transaction(): array
+{
+    $connection = _stattic_db_broker_open_transaction();
+    if (is_array($connection)) {
+        return $connection;
+    }
+    $state = &_stattic_db_broker_state();
     $state['txn'] = true;
 
     return ['ok' => true, 'json' => '{"ok":true}'];
@@ -453,6 +467,104 @@ function _stattic_db_broker_finish_transaction(string $command): array
  * @param array{sql:string,params:list<mixed>,mode:string|null} $statement
  * @return array{ok:true,json:string}|array{ok:false,code:string,message:string}
  */
+/**
+ * Authorization follows the SQL, never the caller-supplied result-shape hint —
+ * db.rs `statement_is_mutation`, ported clause for clause. Anything not
+ * positively recognized as a read fails closed as a mutation. The local tier
+ * never notices (its grant is all-or-nothing); the relay's narrowed read-only
+ * credential is what this classifier exists for.
+ */
+function _stattic_db_broker_statement_is_mutation(string $sql): bool
+{
+    $keyword = _stattic_db_broker_leading_sql_keyword($sql);
+    if ($keyword === null) {
+        return true;
+    }
+    [$word, $rest] = $keyword;
+
+    if (strcasecmp($word, 'SELECT') === 0 || strcasecmp($word, 'SHOW') === 0) {
+        return _stattic_db_broker_contains_sql_keyword($sql, 'OUTFILE')
+            || _stattic_db_broker_contains_sql_keyword($sql, 'DUMPFILE');
+    }
+
+    if (strcasecmp($word, 'EXPLAIN') === 0 || strcasecmp($word, 'DESCRIBE') === 0 || strcasecmp($word, 'DESC') === 0) {
+        $next = _stattic_db_broker_leading_sql_keyword($rest);
+        return $next !== null && strcasecmp($next[0], 'ANALYZE') === 0;
+    }
+
+    return true;
+}
+
+/**
+ * Finds the first SQL keyword after syntax MySQL skips before the statement.
+ * Executable version comments (the "slash star bang" form) remain unrecognized
+ * and therefore classify as writes.
+ *
+ * @return array{0:string,1:string}|null keyword and the text after it
+ */
+function _stattic_db_broker_leading_sql_keyword(string $sql): ?array
+{
+    while (true) {
+        // \f is in the trim set because the Rust side trims it too.
+        $sql = ltrim($sql, " \t\n\r\0\x0B\f");
+        if (str_starts_with($sql, '(')) {
+            $sql = substr($sql, 1);
+            continue;
+        }
+        if (str_starts_with($sql, '#')) {
+            $sql = _stattic_db_broker_skip_sql_line(substr($sql, 1));
+            continue;
+        }
+        if (str_starts_with($sql, '--')) {
+            $rest = substr($sql, 2);
+            // MySQL only treats `--` as a comment when whitespace follows it.
+            if ($rest === '' || strspn($rest, " \t\n\r\x0B\f") === 0) {
+                return null;
+            }
+            $sql = _stattic_db_broker_skip_sql_line($rest);
+            continue;
+        }
+        if (str_starts_with($sql, '/*')) {
+            $rest = substr($sql, 2);
+            if (str_starts_with($rest, '!')) {
+                return null;
+            }
+            $end = strpos($rest, '*/');
+            if ($end === false) {
+                return null;
+            }
+            $sql = substr($rest, $end + 2);
+            continue;
+        }
+        break;
+    }
+
+    if ($sql === '' || (!ctype_alpha($sql[0]) && $sql[0] !== '_')) {
+        return null;
+    }
+    $length = strspn($sql, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$');
+
+    return [substr($sql, 0, $length), substr($sql, $length)];
+}
+
+function _stattic_db_broker_skip_sql_line(string $sql): string
+{
+    $end = strcspn($sql, "\n\r");
+
+    return $end >= strlen($sql) ? '' : substr($sql, $end);
+}
+
+function _stattic_db_broker_contains_sql_keyword(string $sql, string $expected): bool
+{
+    foreach (preg_split('/[^A-Za-z0-9_$]+/', $sql) ?: [] as $token) {
+        if (strcasecmp($token, $expected) === 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function _stattic_db_broker_run_statement(array $statement): array
 {
     $sql = _stattic_db_broker_trim($statement['sql']);
@@ -479,7 +591,10 @@ function _stattic_db_broker_run_statement(array $statement): array
     $state['operations'] += 1;
 
     $mutation = $statement['mode'] === 'execute' || $statement['mode'] === 'exec' || $statement['mode'] === 'mutation';
-    if (!_stattic_db_broker_capability_granted($mutation ? 'db.write' : 'db.read')) {
+    // $mutation keeps steering the result shape, error codes and metrics (the
+    // caller's declared intent, db.rs `execute_shape`); the grant check follows
+    // the SQL itself, so a write disguised as a query needs db.write.
+    if (!_stattic_db_broker_capability_granted(_stattic_db_broker_statement_is_mutation($sql) ? 'db.write' : 'db.read')) {
         return _stattic_db_broker_error('zero_db_capability_denied', 'Zero DB capability is not granted.');
     }
 

@@ -15,7 +15,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 
-import { ACTIVE_RELEASE_POINTER, readActiveReleaseTarget } from "./active-release.ts";
+import { readActiveReleaseTarget } from "./active-release.ts";
 
 // The installer has one mode: argv[1] carries the zip source (an https URL or
 // a local path), SPACEFAST_RUNTIME_ENGINE_MD5/_REVISION/_NATIVE_SHA256 carry
@@ -44,15 +44,6 @@ async function startUpdateFixture(options?: {
   revision?: string;
   /** Ship the installer itself in the payload (the self-refresh path). */
   shipInstaller?: boolean;
-  /**
-   * Have the staged native self-test delete one staged PHP module before the
-   * swap. The module then goes live as a missing path, and the post-swap
-   * opcache_invalidate() of it fails — the only deterministic way to reach
-   * D56's failure verdict, since opcache_invalidate() returns true for every
-   * resolvable path and an absent/denied OPcache is reported as "inactive" on
-   * purpose (a CLI without opcache must not be a permanent alarm).
-   */
-  vanishingModule?: boolean;
   publicRoot?: string;
   visitorEngine?: boolean;
   /** Change the loader payload's bytes, and with them its installed identity. */
@@ -81,12 +72,6 @@ async function startUpdateFixture(options?: {
       path.resolve(import.meta.dirname, "../installer.php"),
       path.join(payload, "installer.php"),
     );
-  }
-  if (options?.vanishingModule) {
-    payloadFiles.push("engine/shared/vanishing.php");
-    writeFileSync(path.join(payload, "engine/shared/vanishing.php"), "<?php\n// staged module\n");
-    // The self-test runs against the staged tree, before the swap.
-    selfTest.push('rm -f "$(dirname "$0")/../engine/shared/vanishing.php"');
   }
   const aliases: Array<{ source: string; path: string }> = [];
   if (options?.visitorEngine) {
@@ -211,17 +196,7 @@ async function runInstaller(
   },
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const child = Bun.spawn({
-    // OPcache on: the installer's D56 verdict is only a real signal when the
-    // extension is actually active in the run, and php-fpm always has it.
-    cmd: [
-      "php",
-      "-d",
-      "auto_prepend_file=",
-      "-d",
-      "opcache.enable_cli=1",
-      fixture.installerPath,
-      options?.zipUrl ?? fixture.zipUrl,
-    ],
+    cmd: ["php", "-d", "auto_prepend_file=", fixture.installerPath, options?.zipUrl ?? fixture.zipUrl],
     stdout: "pipe",
     stderr: "pipe",
     env: {
@@ -251,8 +226,6 @@ test("installs the engine tree and prints the receipt", async () => {
     engine_revision: fixture.revision,
     layout: "release",
     file_count: 3,
-    // D56: every installed module was invalidated, and the receipt says so.
-    opcache: "invalidated",
   });
   const releaseRoot = activeReleaseRoot(fixture.publicRoot);
   expect(existsSync(path.join(releaseRoot, "engine/shared/context.php"))).toBe(true);
@@ -327,60 +300,6 @@ test("reinstalls the loader only when the payload's loader bytes differ from the
   expect(readVisitor(fixture.publicRoot)).toEqual({
     context: next.revision,
     module: next.revision,
-  });
-});
-
-test("serves through the transitional PHP pointer and republishes it as plain text", async () => {
-  const fixture = await startUpdateFixture({ visitorEngine: true });
-  expect((await runInstaller(fixture)).exitCode).toBe(0);
-  const installRoot = installRootOf(fixture.publicRoot);
-  const installed = readActiveReleaseTarget(installRoot);
-
-  // One release of compatibility for boxes that briefly received an opcached
-  // PHP selector before the selector returned to an immediate data-file read.
-  rmSync(path.join(installRoot, ACTIVE_RELEASE_POINTER));
-  writeFileSync(path.join(installRoot, "active-release.php"), `<?php return '${installed}';\n`);
-  expect(readVisitor(fixture.publicRoot)).toEqual({
-    context: fixture.revision,
-    module: fixture.revision,
-  });
-
-  const upgraded = await runInstaller(fixture);
-
-  expect(upgraded.exitCode, upgraded.stderr).toBe(0);
-  expect(readActiveReleaseTarget(installRoot)).not.toBe(installed);
-  expect(existsSync(path.join(installRoot, "active-release.php"))).toBe(false);
-  expect(readVisitor(fixture.publicRoot)).toEqual({
-    context: fixture.revision,
-    module: fixture.revision,
-  });
-});
-
-test("serves the first legacy-installer pass and migrates it on the next converge", async () => {
-  const fixture = await startUpdateFixture({ visitorEngine: true });
-  installLegacyVisitor(fixture.publicRoot, fixture.revision);
-  copyFileSync(
-    path.resolve(import.meta.dirname, "../custom-redirects.php"),
-    path.join(fixture.publicRoot, "index.php"),
-  );
-
-  expect(readVisitor(fixture.publicRoot)).toEqual({
-    context: fixture.revision,
-    module: fixture.revision,
-  });
-
-  const migrated = await runInstaller(fixture, { nativeSha256: fixture.nativeSha256 });
-
-  expect(migrated.exitCode, migrated.stderr).toBe(0);
-  expect(JSON.parse(migrated.stdout)).toMatchObject({
-    status: "installed",
-    engine_revision: fixture.revision,
-    layout: "release",
-  });
-  expect(readActiveReleaseTarget(installRootOf(fixture.publicRoot))).toMatch(/^releases\//);
-  expect(readVisitor(fixture.publicRoot)).toEqual({
-    context: fixture.revision,
-    module: fixture.revision,
   });
 });
 
@@ -604,49 +523,3 @@ test("serves only complete old or new revisions while the real installer flips t
   }
 }, 20_000);
 
-test("rolls back to the usable old release when opcache invalidation fails", async () => {
-  // D56: the swapped bytes are live and correct either way, but an
-  // invalidation php-fpm did not honour means it may keep executing the
-  // previous revision's compiled modules — a failed converge, not a success.
-  const opcacheProbe = Bun.spawnSync({
-    cmd: [
-      "php",
-      "-d",
-      "opcache.enable_cli=1",
-      "-r",
-      "$s = @opcache_get_status(false); echo is_array($s) && ($s['opcache_enabled'] ?? false) === true ? 'active' : 'inactive';",
-    ],
-    env: process.env,
-  });
-  expect(
-    opcacheProbe.stdout.toString(),
-    "PHP must load Zend OPcache for the installer to reach D56's invalidation verdict",
-  ).toBe("active");
-
-  const old = await startUpdateFixture({ revision: "old-opcache-release" });
-  expect((await runInstaller(old)).exitCode).toBe(0);
-  const fixture = await startUpdateFixture({
-    revision: "new-opcache-release",
-    vanishingModule: true,
-    publicRoot: old.publicRoot,
-  });
-
-  const result = await runInstaller(fixture);
-
-  expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain("opcache_invalidation_failed");
-  expect(JSON.parse(result.stdout)).toMatchObject({
-    status: "failed",
-    reason: "opcache_invalidation_failed",
-    opcache: "stale",
-    opcache_stale_count: 1,
-    engine_revision: fixture.revision,
-  });
-  expect(JSON.parse(result.stdout)).toMatchObject({ rolled_back: true });
-  expect(
-    readFileSync(
-      path.join(activeReleaseRoot(fixture.publicRoot), "engine/shared/context.php"),
-      "utf8",
-    ),
-  ).toContain(old.revision);
-});

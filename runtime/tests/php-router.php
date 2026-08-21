@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-// PHP 8.3's built-in server does not execute auto_prepend_file before its
+// PHP's built-in server does not execute auto_prepend_file before its
 // router script. Load the CI bootstrap explicitly so each request starts and
 // flushes PCOV; require_once keeps PHP versions that do prepend it from
 // registering the collector twice.

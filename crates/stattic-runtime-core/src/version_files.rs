@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::catalog::read_version_catalog;
-use crate::finalize::{invalid, remove_any, write_bytes, FinalizeError, Result};
+use crate::finalize::{invalid, invalid_error, remove_any, write_bytes, FinalizeError, Result};
 use crate::protocol::{PAGE_MAX_BYTES, VERSION_ROOT_POINTER_FILE};
 use crate::transforms::html::{
     validate_installed_page, AccessSlot, InstalledPageError, InstalledPageKind,
@@ -16,13 +16,12 @@ use crate::transforms::html::{
 
 pub fn validate_embedded_page_inputs(body: &Value) -> Result<()> {
     if let Some(raw_artifacts) = body.get("page_artifacts") {
-        let artifacts = raw_artifacts
-            .as_object()
-            .ok_or_else(|| FinalizeError::Invalid {
-                code: "invalid_page_artifacts",
-                message: "page_artifacts must be a bounded document map.".into(),
-                details: None,
-            })?;
+        let artifacts = raw_artifacts.as_object().ok_or_else(|| {
+            invalid_error(
+                "invalid_page_artifacts",
+                "page_artifacts must be a bounded document map.",
+            )
+        })?;
         if artifacts.len() > 100_000 {
             return invalid(
                 "invalid_page_artifacts",
@@ -45,13 +44,9 @@ pub fn validate_embedded_page_inputs(body: &Value) -> Result<()> {
         }
     }
     if let Some(raw_pages) = body.get("access_pages") {
-        let pages = raw_pages
-            .as_object()
-            .ok_or_else(|| FinalizeError::Invalid {
-                code: "invalid_access_pages",
-                message: "access_pages must be an object.".into(),
-                details: None,
-            })?;
+        let pages = raw_pages.as_object().ok_or_else(|| {
+            invalid_error("invalid_access_pages", "access_pages must be an object.")
+        })?;
         if pages
             .keys()
             .any(|key| !matches!(key.as_str(), "challenge" | "deny"))
@@ -71,10 +66,11 @@ pub fn validate_embedded_page_inputs(body: &Value) -> Result<()> {
             let Some(value) = pages.get(slot) else {
                 continue;
             };
-            let content = value.as_str().ok_or_else(|| FinalizeError::Invalid {
-                code: "invalid_access_pages",
-                message: format!("access_pages.{slot} must be a string."),
-                details: None,
+            let content = value.as_str().ok_or_else(|| {
+                invalid_error(
+                    "invalid_access_pages",
+                    format!("access_pages.{slot} must be a string."),
+                )
             })?;
             if let Err(error) = validate_installed_page(content, kind) {
                 return match error {
@@ -91,10 +87,11 @@ pub fn validate_embedded_page_inputs(body: &Value) -> Result<()> {
         }
     }
     if let Some(value) = body.get("layout_template") {
-        let content = value.as_str().ok_or_else(|| FinalizeError::Invalid {
-            code: "invalid_layout_template",
-            message: "layout_template must be a string.".into(),
-            details: None,
+        let content = value.as_str().ok_or_else(|| {
+            invalid_error(
+                "invalid_layout_template",
+                "layout_template must be a string.",
+            )
         })?;
         if let Err(error) = validate_installed_page(content, InstalledPageKind::Layout) {
             return match error {

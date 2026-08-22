@@ -15,30 +15,12 @@ declare(strict_types=1);
 //    under a path opcache has seen — immutability is what makes staleness
 //    structurally impossible, not any invalidation protocol.
 //
-// There is no APCu anywhere in the engine: the clusters run without it. Shared
-// mutable state is files (flock where it counts); shared derived state is
-// opcached PHP; cross-process rate gating is memcached (`_sf_runtime_log_once`).
+// There is no APCu or Memcached anywhere in the engine: the clusters run
+// without either. Shared mutable state is files (flock where it counts); shared
+// derived state is opcached PHP. Runtime read failures always log immediately.
 //
 // Deliberately dependency-free — runtime/serve-fast.php loads this and nothing
 // else from shared/ on the hot path, so it must not pull context.php in.
-
-/** @return list<string> */
-function _sf_memcached_server_addresses(mixed $servers): array
-{
-    if (!is_array($servers)) {
-        return [];
-    }
-    $addresses = [];
-    foreach ($servers as $serverOrBucket) {
-        $bucket = is_array($serverOrBucket) ? $serverOrBucket : [$serverOrBucket];
-        foreach ($bucket as $address) {
-            if (is_string($address) && str_contains($address, ':')) {
-                $addresses[] = $address;
-            }
-        }
-    }
-    return $addresses;
-}
 
 // Proves absence by successfully listing the nearest readable ancestor and
 // observing the first missing path component. `is_file()` cannot do this: false
@@ -69,71 +51,10 @@ function _sf_path_verifiably_absent(string $path): bool
     return false;
 }
 
-// The site-scoped memcached key prefix. The daemon at $memcached_servers is
-// the POOL SERVER's, shared by every site on it — the platform namespaces its
-// own object cache with WP_CACHE_KEY_SALT (a per-site value from the same
-// prepend), and an unsalted key here would collide across sites: another
-// site's runtime holding `sf:log:<kind>` would silence this one's gate.
-function _sf_memcached_key_salt(): string
-{
-    static $salt = null;
-    if ($salt === null) {
-        $salt = defined('WP_CACHE_KEY_SALT') && is_string(WP_CACHE_KEY_SALT)
-            ? WP_CACHE_KEY_SALT
-            : (string) (getenv('WP_CACHE_KEY_SALT') ?: getenv('ATOMIC_SITE_ID') ?: '');
-    }
-    return $salt;
-}
-
-// True when this call may log: at most once per kind per request, and — where
-// the box has memcached — once per second per kind across the whole site
-// (`add` is the atomic gate). The platform prepend (wp.cloud's
-// /scripts/env.php, the pool's auto_prepend_file) declares the daemon as
-// $memcached_servers, the same declaration its own object cache and sessions
-// ride on; where it or the extension is absent (php -S, CI) the gate is
-// per-request only. Fails OPEN: these fire exactly when infrastructure is
-// unhappy, and a silent gate during an incident is worse than duplicate lines.
-function _sf_runtime_log_once(string $kind): bool
-{
-    static $logged = [];
-    if (isset($logged[$kind])) {
-        return false;
-    }
-    $logged[$kind] = true;
-    $servers = _sf_memcached_server_addresses($GLOBALS['memcached_servers'] ?? null);
-    if ($servers === [] || !class_exists('Memcached')) {
-        return true;
-    }
-    try {
-        static $gate = null;
-        if ($gate === null) {
-            // Persistent id: the connection outlives the request in this worker.
-            $gate = new Memcached('sf-log-gate');
-            if ($gate->getServerList() === []) {
-                foreach ($servers as $server) {
-                    [$host, $port] = explode(':', $server, 2);
-                    $gate->addServer($host, (int) $port);
-                }
-            }
-        }
-        if ($gate->add(_sf_memcached_key_salt() . ':sf:log:' . $kind, 1, 1)) {
-            return true;
-        }
-        // NOTSTORED means another process holds this second's slot; any other
-        // result is memcached itself failing, which opens the gate.
-        return $gate->getResultCode() !== Memcached::RES_NOTSTORED;
-    } catch (Throwable) {
-        return true;
-    }
-}
-
 // Failure logging for the runtime read paths. Plain error_log on purpose — the
 // `sf-log/1 ` marker is the TENANT log lane and these are platform-internal.
 function _sf_runtime_log_read_failure(string $kind, string $path, ?string $identity = null): void
 {
-    if (!_sf_runtime_log_once($kind)) {
-        return;
-    }
     $error = error_get_last();
     error_log('spacefast runtime ' . $kind . ' path=' . $path
         . ($identity !== null ? ' pointer=' . $identity : '')

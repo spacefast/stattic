@@ -98,22 +98,23 @@ check(
     !_sf_path_verifiably_absent($absenceRoot . '/wrong-type.json'),
     'verified absence: an existing non-file path is unavailable, not absent'
 );
+$runtimeErrorLog = $absenceRoot . '/runtime-errors.log';
+$previousErrorLog = ini_set('error_log', $runtimeErrorLog);
+error_clear_last();
+_sf_runtime_log_read_failure('sf_test_read_failure', '/tmp/sf-test-unreadable');
+_sf_runtime_log_read_failure('sf_test_read_failure', '/tmp/sf-test-unreadable');
+$runtimeErrorLogContents = file_get_contents($runtimeErrorLog);
 check(
-    _sf_runtime_log_once('sf_test_log_kind') && !_sf_runtime_log_once('sf_test_log_kind')
-        && _sf_runtime_log_once('sf_test_other_kind'),
-    'read-failure logging opens once per kind per request and is scoped by kind'
+    is_string($runtimeErrorLogContents)
+        && substr_count($runtimeErrorLogContents, 'spacefast runtime sf_test_read_failure') === 2,
+    'every runtime read failure is logged without suppression'
 );
-check(
-    _sf_memcached_server_addresses(['cache-a:11211', 'cache-b:11211']) === ['cache-a:11211', 'cache-b:11211'],
-    'read-failure logging accepts flat provider memcached servers'
-);
-check(
-    _sf_memcached_server_addresses([
-        'default' => ['cache-a:11211'],
-        'sessions' => ['cache-b:11211'],
-    ]) === ['cache-a:11211', 'cache-b:11211'],
-    'read-failure logging flattens provider memcached server buckets'
-);
+if (is_string($previousErrorLog)) {
+    ini_set('error_log', $previousErrorLog);
+} else {
+    ini_restore('error_log');
+}
+unlink($runtimeErrorLog);
 unlink($absenceRoot . '/present.json');
 rmdir($absenceRoot . '/wrong-type.json');
 rmdir($absenceRoot);

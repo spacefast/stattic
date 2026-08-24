@@ -48,9 +48,9 @@ function _stattic_version_files_root(string $privateRoot, string $spaceId, strin
 }
 
 // The config lives beside the version's files (`../functions/`), not inside
-// them, so a publish can never write it. Verified absence is the only state
-// that proves "no worker" — an unreadable or malformed config keeps the
-// Functions lanes engaged so a transient failure never collapses into 404.
+// them, so a publish can never write it. Only verified absence proves "no
+// worker"; an unreadable or malformed config keeps the Functions lanes engaged
+// so a transient failure never collapses into 404.
 function _stattic_version_has_functions(string $versionRoot): bool
 {
     return _stattic_functions_config_read($versionRoot)['kind'] !== 'absent';
@@ -58,11 +58,9 @@ function _stattic_version_has_functions(string $versionRoot): bool
 
 // The ONE reader of the version-adjacent functions/config.json: the static
 // bypass probe (serve.php), the dispatch lane (functions-dispatch.php) and the
-// purge credential (functions-purge.php) all answer from this memo. Stored
-// beside the version's file tree, never inside it: a publish reaches `files/`
-// and nothing else, so no upload can create or amend this document. Settled
-// outcomes — present, verified absent, malformed — are memoized; `unavailable`
-// is transient and every caller gets its own retry.
+// purge credential (functions-purge.php) all answer from this memo. Settled
+// outcomes (present, verified absent, malformed) are memoized; `unavailable` is
+// transient and every caller gets its own retry.
 /** @return array{kind: 'present', value: array}|array{kind: 'absent'|'unavailable'|'malformed'} */
 function _stattic_functions_config_read(string $versionRoot): array
 {
@@ -99,8 +97,8 @@ function _stattic_functions_config_read(string $versionRoot): array
 }
 
 // Tombstone page variants (C10). The CSAM variant must stay byte-identical to a
-// never-deployed host — same 503 body, no page identity, and 'robots' => false
-// suppressing the noindex marker every other variant advertises.
+// never-deployed host: same 503 body, no page identity, and 'robots' => false
+// to suppress the noindex marker other variants advertise.
 const STATTIC_TOMBSTONE_VARIANTS = [
     'tombstone-csam' => ['template_id' => 'undeployed', 'status' => 503, 'body' => "This space hasn't been published yet.\n", 'robots' => false, 'cache_control' => STATTIC_CACHE_CONTROL_NO_STORE],
     'tombstone-dmca' => ['template_id' => 'tombstone-dmca', 'status' => 451, 'body' => "This content is unavailable for legal reasons.\n", 'robots' => true, 'cache_control' => STATTIC_DEFAULT_EDGE_CACHE_CONTROL],
@@ -151,14 +149,14 @@ function _stattic_service_invocation_id(mixed $raw): string
  * The environment the platform-service broker runs with.
  *
  * Every value here is the runtime's, never the caller's. The Akismet key and
- * the Gravatar token are credentials that must not exist inside tenant code in
- * any form, and the blog URL is the space's own canonical origin — Akismet
- * partitions reputation by it, so a caller that could name it could spend
- * another space's standing. Each space is its own site with its own generated
- * config, which is what makes a site-level constant a per-space value.
+ * the Gravatar token must never exist inside tenant code. The blog URL is the
+ * space's own canonical origin: Akismet partitions reputation by it, so a
+ * caller that could name it could spend another space's standing. Each space is
+ * its own site with its own generated config, which makes a site-level constant
+ * a per-space value.
  *
  * The identity triple is the outbox's idempotency key. A replayed invocation
- * has to arrive at the same key, or it sends the mail twice.
+ * must arrive at the same key, or it sends the mail twice.
  */
 function _stattic_service_broker_env(array $identity): array
 {
@@ -189,13 +187,10 @@ function _stattic_service_broker_env(array $identity): array
 
 function _stattic_zero_runner_base_env(array $config = []): array
 {
-    $env = _stattic_zero_internal_hosts_env(
-        _stattic_config_value('SPACEFAST_MANAGEMENT_HOSTNAME'),
-        _stattic_config_value('SPACEFAST_API_BASE_URL')
-    );
-    // DATABASE_URL travels under a reserved name with explicit provenance so the
-    // runner can tell an application URL from the provider database and reject
-    // ambient configuration.
+    $env = _stattic_zero_internal_hosts_env(_stattic_config_value('SPACEFAST_API_BASE_URL'));
+    // DATABASE_URL travels under a reserved name with explicit provenance so
+    // the runner can tell an application URL from the provider database and
+    // reject ambient configuration.
     $variables = is_array($config['variableValues'] ?? null) ? $config['variableValues'] : [];
     $selectedDatabaseUrl = is_string($variables['DATABASE_URL'] ?? null)
         ? trim($variables['DATABASE_URL'])
@@ -234,13 +229,9 @@ function _stattic_zero_runner_base_env(array $config = []): array
  * The native runner owns DNS resolution and address pinning. PHP only supplies
  * the environment-specific hostnames that cannot live in its compiled policy.
  */
-function _stattic_zero_internal_hosts_env(string $managementHostname, string $apiBaseUrl): array
+function _stattic_zero_internal_hosts_env(string $apiBaseUrl): array
 {
     $hosts = [];
-    $managementHostname = strtolower(trim($managementHostname, "[] \t\n\r\0\x0B."));
-    if ($managementHostname !== '') {
-        $hosts[] = $managementHostname;
-    }
     $apiHostname = strtolower((string) parse_url($apiBaseUrl, PHP_URL_HOST));
     if ($apiHostname !== '') {
         $hosts[] = $apiHostname;
@@ -440,8 +431,8 @@ function _stattic_v4_assert_schema(mixed $schema, string $what): void
 }
 
 /**
- * false = a shard this host may live in exists but could not be read — the
- * host's existence is UNKNOWN, which must never collapse into "undeployed".
+ * false = a shard this host may live in exists but could not be read. The
+ * host's existence is UNKNOWN and must never collapse into "undeployed".
  *
  * @return array{entry: array, routes: array}|false|null
  */
@@ -494,9 +485,9 @@ function _stattic_v4_host_lookup(string $privateRoot, array $routes, string $req
     return ['entry' => $entry, 'routes' => $hostRoutes];
 }
 
-// D49: `*` matches exactly one label, and the most specific pattern wins —
-// specificity being the number of literal labels. `*.a.example` and
-// `*.*.example` both match `x.a.example`; the first one takes it.
+// D49: `*` matches exactly one label, and the pattern with the most literal
+// labels wins. `*.a.example` and `*.*.example` both match `x.a.example`; the
+// first one takes it.
 function _stattic_v4_wildcard_match(array $entries, string $requestHost): ?array
 {
     $hostLabels = explode('.', $requestHost);
@@ -531,8 +522,8 @@ function _stattic_v4_wildcard_match(array $entries, string $requestHost): ?array
     return $best;
 }
 
-// false = the overlay artifact exists but could not be read; the caller must
-// answer unavailable, not denied — a failure is not an access decision either.
+// false = the overlay artifact exists but could not be read. The caller must
+// answer unavailable, not denied: a failure is not an access decision.
 function _stattic_v4_overlay(string $privateRoot, string $spaceId, mixed $space): array|false|null
 {
     if ($spaceId === '' || !is_array($space) || !is_string($space['overlay'] ?? null)) {
@@ -567,8 +558,8 @@ function _stattic_v4_version_for_host(array $hostEntry, array $overlay): ?string
 }
 
 // null = the artifact verifiably does not exist; false = it exists but this
-// include failed (I/O). Failures are never memoized — the next call re-reads —
-// and callers must route false to the unavailable 503, never fold it into the
+// include failed (I/O). Failures are never memoized, so the next call re-reads.
+// Callers must route false to the unavailable 503, never fold it into the
 // absent answer (undeployed / version-pending / 404 / denied).
 function _stattic_v4_include_artifact(string $path): array|false|null
 {
@@ -622,12 +613,12 @@ function _stattic_v4_authorization_projection(array $overlay): ?array
         'sessionVersion' => is_int($overlay['session_ver'] ?? null) ? $overlay['session_ver'] : 0,
         'fence' => is_string($overlay['fence'] ?? null) ? $overlay['fence'] : 'none',
         'acquireUrl' => $exchange['acquire_url'],
-        // Without this the sfv2_/sfa1_ HMAC key cannot be derived at all
+        // Without this the sfv2_/sfa1_ HMAC key cannot be derived
         // (access-rules.php `_stattic_access_session_hmac_key` reads
         // `accessPage.exchange.credential`), so a protected Space could neither
         // mint nor verify a session: permanently deny-only. The overlay carries
         // the descriptor verbatim under `access_page`; access-rules.php
-        // re-validates every field of it before use.
+        // re-validates every field before use.
         'accessPage' => is_array($overlay['access_page'] ?? null)
             ? $overlay['access_page']
             : null,
@@ -667,7 +658,7 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
         'pages' => is_array($overlay['pages'] ?? null) ? $overlay['pages'] : [],
         // ONE SDK section (§4): {revision, config, body|body_sha256}. The
         // loader, its Comments configuration and the production tag bytes all
-        // come from here — there is no second SDK artifact and no serve-time
+        // come from here. There is no second SDK artifact and no serve-time
         // configuration call back to the control plane.
         'sdk' => is_array($overlay['sdk'] ?? null) && is_array($overlay['sdk']['config'] ?? null)
             ? $overlay['sdk']

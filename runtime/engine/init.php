@@ -5,9 +5,8 @@ require_once __DIR__ . '/shared/context.php';
 
 // No batcache handling here: this lane serves and exits before WordPress core
 // (and therefore advanced-cache.php) ever loads, so batcache can never observe
-// a runtime response to cache. The one lane that did load WordPress — the old
-// WP-bootstrap purge bridge — is gone; edge purges now call the platform site
-// API directly (shared/purge.php).
+// a runtime response to cache. Edge purges call the platform site API directly
+// (shared/purge.php).
 
 // Must run before anything can exit: every early return below is a response that
 // has to be attributable to this runtime, including access denials that would
@@ -53,10 +52,9 @@ if (_stattic_is_runtime_private_http_path($requestPath) && !_stattic_control_pat
     _stattic_deny_private_path();
 }
 
-// The visitor lane: generated config, then straight into runtime/serve.php's
-// pointer -> shard -> overlay -> root -> table walk. There is no memo in front
-// of it (D98 withdrawn) — the opcached artifact includes ARE the fast path.
-require_once __DIR__ . '/runtime/serve-fast.php';
+// No memo in front of serve.php's pointer -> shard -> overlay -> root -> table
+// walk (D98 withdrawn): the opcached artifact includes ARE the fast path.
+require_once __DIR__ . '/runtime/serve.php';
 _sf_serve_fast($storageRoot, $requestMethod, $requestUri, $requestPath, $requestHost);
 
 function _stattic_dispatch_public_alias_entrypoint(string $engineRoot, string $requestPath, string $requestUri): void

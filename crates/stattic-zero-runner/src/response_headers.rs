@@ -11,70 +11,19 @@ pub struct ResponseHeaderPolicyError {
     pub message: &'static str,
 }
 
-/// The Rust authority for response headers a Zero endpoint may set.
+/// The policy for response headers a Zero endpoint may set.
 ///
-/// The runner applies this policy to every endpoint response before the
-/// response crosses the process boundary; the PHP request adapter keeps only a
+/// The runner applies this to every endpoint response before the response
+/// crosses the process boundary; the PHP request adapter keeps only a
 /// fail-closed boundary filter in case an invalid or compromised runner tries
 /// to bypass this native policy.
 ///
-/// The platform-managed list below intentionally duplicates
-/// `stattic-runtime-core/src/policy.rs::platform_managed_response_header` (the
-/// `_headers` compile/apply authority): runtime-core depends on this crate, so
-/// the runner cannot import it without inverting the dependency. Both are ports
-/// of one TypeScript definition
-/// (`packages/common/src/utils/static-runtime-policy.ts`);
-/// `apps/control-plane/src/runtime/php-policy-parity.test.ts` fails if any of
-/// them drift apart.
-#[must_use]
-pub fn platform_managed_response_header(name: &str) -> bool {
-    let name = name.trim().to_ascii_lowercase();
-    name.starts_with("x-spacefast-")
-        || name.starts_with("x-stattic-")
-        || matches!(
-            name.as_str(),
-            "accept-ranges"
-                | "age"
-                | "allow"
-                | "alt-svc"
-                | "cdn-cache-control"
-                | "cloudflare-cdn-cache-control"
-                | "connection"
-                | "content-encoding"
-                | "content-length"
-                | "content-range"
-                | "cookie"
-                | "date"
-                | "host"
-                | "keep-alive"
-                | "location"
-                | "netlify-cdn-cache-control"
-                | "proxy-authenticate"
-                | "proxy-authorization"
-                | "server"
-                | "set-cookie"
-                | "strict-transport-security"
-                | "surrogate-control"
-                | "te"
-                | "trailer"
-                | "transfer-encoding"
-                | "upgrade"
-                | "vary"
-                // The internal-redirect/sendfile family, every vendor spelling: these
-                // instruct the web server to serve a different file instead of
-                // describing this response.
-                | "x-accel-buffering"
-                | "x-accel-charset"
-                | "x-accel-expires"
-                | "x-accel-limit-rate"
-                | "x-accel-redirect"
-                | "x-lighttpd-send-file"
-                | "x-lighttpd-sendfile"
-                | "x-lighttpd-sendfile2"
-                | "x-reproxy-url"
-                | "x-sendfile"
-        )
-}
+/// The list itself lives in `stattic-runtime-policy`, the leaf crate the
+/// `_headers` compile/apply authority (`stattic-runtime-core/src/policy.rs`)
+/// reads too. It has to be a leaf: runtime-core depends on this crate, so the
+/// runner cannot import from it, and runtime-core also builds for wasm where
+/// this crate is not a dependency at all.
+pub use stattic_runtime_policy::platform_managed_response_header;
 
 pub fn validate_response_headers(
     headers: BTreeMap<String, String>,

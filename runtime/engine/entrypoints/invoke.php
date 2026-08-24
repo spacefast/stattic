@@ -8,7 +8,7 @@ declare(strict_types=1);
  *       --host=example.spacefast.io --path=/api/report [--method=POST] \
  *       [--header='content-type: application/json'] [--private-root=…]
  *
- * WP.Cloud prepends a runtime bootstrap to every PHP process — disable it:
+ * WP.Cloud prepends a runtime bootstrap to every PHP process. Disable it:
  *   php -d auto_prepend_file= …/engine/entrypoints/invoke.php …
  *
  * Contract:
@@ -19,9 +19,9 @@ declare(strict_types=1);
  *           plus whatever the dispatched route logged. Response HEADERS are not
  *           in it: the CLI SAPI discards `header()` outright, so reporting them
  *           would mean inventing them.
- *   exit    0 when the final status is < 400, 1 when it is not — the signal the
- *           provider's `site-cron-results` webhook keys on. 2 is a usage error
- *           and 3 an unprovisioned box; neither ran a request.
+ *   exit    0 when the final status is < 400, 1 when it is not. That is the
+ *           signal the provider's `site-cron-results` webhook keys on. 2 is a
+ *           usage error and 3 an unprovisioned box; neither ran a request.
  *
  * This is never mounted as a public alias: it is in the manifest's `files` and
  * in none of its `aliases`.

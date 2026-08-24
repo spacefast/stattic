@@ -27,12 +27,11 @@ const ACCESS_HOST = "proxy-access-cache.test";
 const ACCESS_HOST_ROUTE = "proxy-route-private.test";
 const ETAG = '"proxy-upstream-v1"';
 
-// A proxy upstream is a user-supplied URL. Under nginx these headers do not describe
-// the response, they make the server produce a different one: an internal read of the
-// runtime's private storage root — here a blob belonging to the OTHER space, which on a
-// shared wp.cloud site is the only place its bytes exist (contracts §2/§8: the v4
-// compiler writes no per-version file tree) — or, for X-Accel-Limit-Rate, a pinned
-// worker for the length of the transfer.
+// A proxy upstream is a user-supplied URL. Under nginx these headers do not
+// describe the response, they make the server produce a different one: an
+// internal read of the runtime's private storage root, here a blob belonging to
+// the other space. X-Accel-Limit-Rate instead pins a worker for the length of
+// the transfer.
 const CROSS_SPACE_PRIVATE_BODY = "proxy access fixture\n";
 const CROSS_SPACE_PRIVATE_SHA = sha256(CROSS_SPACE_PRIVATE_BODY);
 const CROSS_SPACE_PRIVATE_PATH = `/.stattic/storage/spaces/spc_proxy_access_cache/blobs/${CROSS_SPACE_PRIVATE_SHA.slice(0, 2)}/${CROSS_SPACE_PRIVATE_SHA}`;
@@ -83,9 +82,9 @@ function visitorToken(host: string): string {
 
 function accessProjection() {
   return {
-    // Every compiled proxy rule is plan-gated on `external_proxy`; this file is
-    // about what a proxy DOES once the gate is open, so the route carries the
-    // entitlement. The gate itself is proven in routing.test.ts.
+    // Every compiled proxy rule is plan-gated on `external_proxy`. This file
+    // covers what a proxy does once the gate is open, so the route carries the
+    // entitlement; routing.test.ts proves the gate.
     entitlements: { externalProxy: true },
     visitor_issuer: "spacefast-api",
     visitor_jwks: {
@@ -107,9 +106,8 @@ function accessProjection() {
       fence: "none",
       acquireUrl: "https://access.spacefast.test/acquire/proxy-cache",
       spaceClaimed: true,
-      // Every sfv2_/sfa1_ session key is derived from this credential
-      // (contracts §4: `exchange.credential`, per space) — without the
-      // descriptor a protected Space can neither mint nor verify a session,
+      // Every sfv2_/sfa1_ session key is derived from this credential. Without
+      // the descriptor a protected Space can neither mint nor verify a session,
       // so the link handoff below would have nothing to trade the token for.
       accessPage: {
         displayName: "Proxy cache",
@@ -219,8 +217,7 @@ beforeAll(async () => {
 
     if (requestPath === "/relay/content-encoding") {
       // curl is never given CURLOPT_ENCODING, so these bytes reach the visitor
-      // still compressed — Content-Encoding is the only thing that makes them
-      // readable.
+      // still compressed. Content-Encoding is what makes them readable.
       response.setHeader("Content-Encoding", "gzip");
       response.end(gzipSync(Buffer.from(GZIP_RELAY_BODY)));
       return;

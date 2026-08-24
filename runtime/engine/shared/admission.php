@@ -12,8 +12,6 @@ const STATTIC_ADMISSION_RETRY_AFTER_SECONDS = 2;
 // crashed workers cannot leak capacity forever. Must stay at request-timeout
 // scale: a holder that legitimately outlives the generation releases only into
 // its retired generation and cannot decrement the successor.
-// Generation scoping guarantees a rotated-away holder's release cannot
-// decrement its successor.
 const STATTIC_ADMISSION_STALE_SECONDS_DEFAULT = 120;
 
 function _stattic_admission_stale_seconds(): int
@@ -44,12 +42,12 @@ function _stattic_admission_counter_path(string $privateRoot, string $spaceId): 
     return $privateRoot . '/runtime/admission/' . _stattic_admission_sanitize_key($spaceId) . '.json';
 }
 
-// THE windowed counter — flock-serialized files, shared by every worker that
-// serves the site regardless of pool. Every mutation serializes on the generation
-// pointer's lock, so concurrent increments cannot lose each other. $decide gets
-// the in-window count and returns the delta to persist. $requireGeneration
-// binds a caller to the window it joined — a rotated-away generation makes the
-// update a no-op instead of landing on its successor.
+// THE windowed counter: flock-serialized files, shared by every worker that
+// serves the site regardless of pool. Every mutation serializes on the
+// generation pointer's lock, so concurrent increments cannot lose each other.
+// $decide gets the in-window count and returns the delta to persist.
+// $requireGeneration binds a caller to the window it joined, so a rotated-away
+// generation makes the update a no-op instead of landing on its successor.
 function _stattic_admission_counter_update(
     string $path,
     int $staleSeconds,
@@ -212,9 +210,8 @@ function _stattic_admission_acquire_or_shed(string $privateRoot, array $serving,
     }
 }
 
-// One slot per request, whichever lane charges it first. Callers reach this
-// from wherever the "this request needs a slot" verdict is known, so the
-// once-guard lives here instead of at each of them.
+// One slot per request, whichever lane charges it first: the once-guard lives
+// here instead of at each caller.
 function _stattic_admission_acquire_once(string $privateRoot, array $serving, string $lane): void
 {
     if (!empty($GLOBALS['SPACEFAST_ADMISSION_ACQUIRED'])) {

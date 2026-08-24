@@ -17,6 +17,7 @@ unicode-normalization.workspace = true
 url.workspace = true
 walkdir.workspace = true
 stattic-runtime-egress = { path = "../stattic-runtime-egress" }
+stattic-runtime-policy = { path = "../stattic-runtime-policy" }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 stattic-zero-runner = { path = "../stattic-zero-runner" }

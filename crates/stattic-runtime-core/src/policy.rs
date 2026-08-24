@@ -207,66 +207,15 @@ pub fn validate_finalize_policy(context: FinalizePolicyContext<'_>) -> Result<()
     Ok(())
 }
 
-/// The single Rust authority for response headers controlled by the platform.
+/// The policy for response headers controlled by the platform.
 ///
-/// The finalizer uses this policy when compiling and validating `_headers`;
-/// the Zero runner applies the same list to endpoint responses. Ported from
-/// the donor Zero compiler so this stage stays self-contained.
-///
-/// The policy is defined once in TypeScript
-/// (`packages/common/src/utils/static-runtime-policy.ts`), which the `_headers`
-/// compiler imports and the PHP runtime is generated from. This list is a port,
-/// not a variant: `apps/control-plane/src/runtime/php-policy-parity.test.ts`
-/// fails if the prefixes or the literal set drift apart.
-#[must_use]
-pub fn platform_managed_response_header(name: &str) -> bool {
-    let name = name.trim().to_ascii_lowercase();
-    name.starts_with("x-spacefast-")
-        || name.starts_with("x-stattic-")
-        || matches!(
-            name.as_str(),
-            "accept-ranges"
-                | "age"
-                | "allow"
-                | "alt-svc"
-                | "cdn-cache-control"
-                | "cloudflare-cdn-cache-control"
-                | "connection"
-                | "content-encoding"
-                | "content-length"
-                | "content-range"
-                | "cookie"
-                | "date"
-                | "host"
-                | "keep-alive"
-                | "location"
-                | "netlify-cdn-cache-control"
-                | "proxy-authenticate"
-                | "proxy-authorization"
-                | "server"
-                | "set-cookie"
-                | "strict-transport-security"
-                | "surrogate-control"
-                | "te"
-                | "trailer"
-                | "transfer-encoding"
-                | "upgrade"
-                | "vary"
-                // The internal-redirect/sendfile family, every vendor spelling: these
-                // instruct the web server to serve a different file instead of
-                // describing this response.
-                | "x-accel-buffering"
-                | "x-accel-charset"
-                | "x-accel-expires"
-                | "x-accel-limit-rate"
-                | "x-accel-redirect"
-                | "x-lighttpd-send-file"
-                | "x-lighttpd-sendfile"
-                | "x-lighttpd-sendfile2"
-                | "x-reproxy-url"
-                | "x-sendfile"
-        )
-}
+/// The finalizer asks this when compiling and validating `_headers`; the Zero
+/// runner applies the same answer to endpoint responses, and the PHP engine
+/// re-asks it at send time. All three read one list, in
+/// `stattic-runtime-policy` — a leaf crate because this module also compiles
+/// for `wasm32-wasip1`, where `stattic-zero-runner` is not a dependency.
+/// TypeScript and PHP are generated from that crate, never transcribed.
+pub use stattic_runtime_policy::platform_managed_response_header;
 
 /// Response headers a publisher may SET but never REMOVE.
 ///

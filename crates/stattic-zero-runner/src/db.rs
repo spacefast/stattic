@@ -1,7 +1,5 @@
 use std::cell::RefCell;
 use std::env;
-use std::fs;
-use std::path::Path;
 use std::time::Instant;
 
 use base64::Engine;
@@ -10,38 +8,29 @@ use mysql::{Opts, Params, Pool, PoolConstraints, PoolOpts, PooledConn, Row, Valu
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::constants::MIGRATIONS_FORMAT;
-
-pub(crate) const DB_OPERATION_MAX_BYTES: usize = 64 * 1024;
-const DB_PARAM_MAX_COUNT: usize = 256;
-const DB_TRANSACTION_MAX_STATEMENTS: usize = 64;
+// The tenant-facing operation shape. `shared/db-broker.php` enforces the same
+// numbers under the same names; it consumes them from the generated protocol
+// file rather than restating them, so this declaration is the only authority.
+pub const DB_OPERATION_MAX_BYTES: usize = 64 * 1024;
+pub const DB_PARAM_MAX_COUNT: usize = 256;
+pub const DB_TRANSACTION_MAX_STATEMENTS: usize = 64;
 
 // Without a cap an unbounded SELECT OOMs the process instead of returning a
 // named error the tenant can handle. The byte ceiling mirrors
 // EXECUTION_OUTPUT_BYTES_MAX in `stattic-runtime-core/src/protocol.rs`.
-const DB_RESULT_ROWS_MAX: usize = 50000;
+pub const DB_RESULT_ROWS_MAX: usize = 50000;
 const DB_RESULT_BYTES_MAX: usize = 10_485_760;
 
 // sql_mode is written out rather than inherited: a laxer server global must not
 // silently change what counts as a valid write. Applied per fresh connection.
-const DB_SESSION_PIN: &str = "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_0900_as_cs'\
+pub const DB_SESSION_PIN: &str = "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_0900_as_cs'\
     , SESSION sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'\
     , SESSION transaction_isolation = 'REPEATABLE-READ'\
     , SESSION time_zone = '+00:00'";
 
-/// The capability set a broker invocation runs under. `None` grant state means
-/// the in-process Zero path, which is all-or-nothing by capability mask before
-/// the host function is even installed.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct DbGrant {
-    pub read: bool,
-    pub write: bool,
-}
-
 thread_local! {
     static DB_METRICS: RefCell<DbMetrics> = RefCell::new(DbMetrics::default());
     static DB_TRANSACTION: RefCell<Option<PooledConn>> = const { RefCell::new(None) };
-    static DB_GRANT: RefCell<Option<DbGrant>> = const { RefCell::new(None) };
     // One pool per process: statements in one invocation share a connection
     // instead of paying a handshake each.
     static DB_POOL: RefCell<Option<Pool>> = const { RefCell::new(None) };
@@ -83,34 +72,6 @@ struct DbStatement {
     mode: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MigrationArtifact {
-    format: String,
-    #[serde(rename = "artifact_kind")]
-    artifact_kind: String,
-    statements: Vec<String>,
-}
-
-pub(crate) fn set_grant(grant: Option<DbGrant>) {
-    DB_GRANT.with(|state| {
-        *state.borrow_mut() = grant;
-    });
-}
-
-fn capability_granted(mutation: bool) -> bool {
-    DB_GRANT.with(|state| match *state.borrow() {
-        None => true,
-        Some(grant) => {
-            if mutation {
-                grant.write
-            } else {
-                grant.read
-            }
-        }
-    })
-}
-
 pub(crate) fn reset_metrics() {
     DB_METRICS.with(|metrics| {
         *metrics.borrow_mut() = DbMetrics::default();
@@ -140,42 +101,6 @@ pub(crate) fn handle_db_operation(raw: &str) -> String {
         Ok(value) => value.to_string(),
         Err(error) => error.refusal_json(),
     }
-}
-
-pub(crate) fn apply_migrations_file(path: &Path) -> Result<(), String> {
-    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let artifact: MigrationArtifact =
-        serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-    if artifact.format != MIGRATIONS_FORMAT || artifact.artifact_kind != "zero_migrations" {
-        return Err("Zero migration artifact format is unsupported.".to_string());
-    }
-    if artifact.statements.len() > 256 {
-        return Err("Zero migration artifact has too many statements.".to_string());
-    }
-
-    let mut conn = connect_db().map_err(|error| error.message)?;
-    for statement in artifact.statements {
-        let sql = statement.trim();
-        if sql.is_empty() || sql.contains('\0') {
-            return Err("Zero migration statement is invalid.".to_string());
-        }
-        if let Err(error) = conn.query_drop(sql) {
-            // MySQL has no `ADD COLUMN IF NOT EXISTS`, so replaying a migration that
-            // already landed is reported as duplicate-column (1060) the same way a
-            // replayed index is duplicate-key (1061) or missing-key (1091).
-            let ignorable_schema_state = matches!(
-                &error,
-                mysql::Error::MySqlError(database_error)
-                    if (sql.starts_with("CREATE INDEX ") && database_error.code == 1061)
-                        || (sql.starts_with("DROP INDEX ") && database_error.code == 1091)
-                        || (sql.starts_with("ALTER TABLE ") && database_error.code == 1060)
-            );
-            if !ignorable_schema_state {
-                return Err(error.to_string());
-            }
-        }
-    }
-    Ok(())
 }
 
 fn execute_db_operation(raw: &str) -> Result<Value, BrokerRefusal> {
@@ -457,8 +382,13 @@ struct ReadyStatement<'a> {
     execute_shape: bool,
 }
 
-/// Everything that can be decided without a connection: SQL shape, parameter
-/// marshalling, and whether the grant covers the statement itself.
+/// Everything that can be decided without a connection: SQL shape and
+/// parameter marshalling. There is no capability mask here — the QuickJS host
+/// function this engine serves is installed or withheld whole, by the
+/// endpoint's compiled `db` capability, before an operation can be issued at
+/// all. The read/write split lives in `shared/db-broker.php`, whose callers
+/// (the Functions relay, PHP Functions, the management dump) each hold a
+/// narrower grant than the credential they run under.
 fn ready_statement(statement: &DbStatement) -> Result<ReadyStatement<'_>, BrokerRefusal> {
     let sql = statement.sql.trim();
     if sql.is_empty() || sql.contains('\0') {
@@ -484,97 +414,11 @@ fn ready_statement(statement: &DbStatement) -> Result<ReadyStatement<'_>, Broker
         statement.mode.as_deref(),
         Some("execute") | Some("exec") | Some("mutation")
     );
-    if !capability_granted(statement_is_mutation(sql)) {
-        return Err(BrokerRefusal::new(
-            "zero_db_capability_denied",
-            "Zero DB capability is not granted.",
-        ));
-    }
     Ok(ReadyStatement {
         sql,
         params,
         execute_shape,
     })
-}
-
-/// Authorization follows the SQL, never the caller-supplied result-shape hint.
-/// Anything not positively recognized as a read fails closed as a mutation.
-fn statement_is_mutation(sql: &str) -> bool {
-    let Some((keyword, rest)) = leading_sql_keyword(sql) else {
-        return true;
-    };
-
-    if keyword.eq_ignore_ascii_case("SELECT") || keyword.eq_ignore_ascii_case("SHOW") {
-        return contains_sql_keyword(sql, "OUTFILE") || contains_sql_keyword(sql, "DUMPFILE");
-    }
-
-    if keyword.eq_ignore_ascii_case("EXPLAIN")
-        || keyword.eq_ignore_ascii_case("DESCRIBE")
-        || keyword.eq_ignore_ascii_case("DESC")
-    {
-        return leading_sql_keyword(rest)
-            .is_some_and(|(next, _)| next.eq_ignore_ascii_case("ANALYZE"));
-    }
-
-    true
-}
-
-/// Finds the first SQL keyword after syntax MySQL skips before the statement.
-/// Executable version comments (`/*! ... */`) remain unrecognized and therefore
-/// classify as writes.
-fn leading_sql_keyword(mut sql: &str) -> Option<(&str, &str)> {
-    loop {
-        sql = sql.trim_start();
-        if let Some(rest) = sql.strip_prefix('(') {
-            sql = rest;
-            continue;
-        }
-        if let Some(rest) = sql.strip_prefix('#') {
-            sql = skip_sql_line(rest);
-            continue;
-        }
-        if let Some(rest) = sql.strip_prefix("--") {
-            if !rest.chars().next().is_some_and(char::is_whitespace) {
-                return None;
-            }
-            sql = skip_sql_line(rest);
-            continue;
-        }
-        if let Some(rest) = sql.strip_prefix("/*") {
-            if rest.starts_with('!') {
-                return None;
-            }
-            let end = rest.find("*/")?;
-            sql = &rest[end + 2..];
-            continue;
-        }
-        break;
-    }
-
-    let mut bytes = sql.bytes();
-    let first = bytes.next()?;
-    if !first.is_ascii_alphabetic() && first != b'_' {
-        return None;
-    }
-    let end = 1 + bytes
-        .position(|byte| !sql_keyword_byte(byte))
-        .unwrap_or(sql.len() - 1);
-    Some((&sql[..end], &sql[end..]))
-}
-
-fn skip_sql_line(sql: &str) -> &str {
-    sql.find(['\n', '\r']).map_or("", |end| &sql[end..])
-}
-
-fn contains_sql_keyword(sql: &str, expected: &str) -> bool {
-    sql.split(|character: char| {
-        !character.is_ascii_alphanumeric() && character != '_' && character != '$'
-    })
-    .any(|token| token.eq_ignore_ascii_case(expected))
-}
-
-fn sql_keyword_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
 }
 
 fn run_ready_statement(
@@ -882,62 +726,6 @@ impl BrokerRefusal {
             "message": self.message,
         })
         .to_string()
-    }
-}
-
-#[cfg(test)]
-mod statement_authorization_tests {
-    use super::{ready_statement, set_grant, statement_is_mutation, DbGrant, DbStatement};
-
-    #[test]
-    fn classifies_only_known_non_executing_sql_as_read() {
-        for sql in [
-            "SELECT 1",
-            "/* ordinary comment */ -- another comment\n SHOW TABLES",
-            "DESCRIBE notes",
-            "EXPLAIN SELECT * FROM notes",
-        ] {
-            assert!(!statement_is_mutation(sql), "expected read: {sql}");
-        }
-
-        for sql in [
-            "INSERT INTO notes (body) VALUES ('write')",
-            "WITH note AS (SELECT 1) SELECT * FROM note",
-            "/*!50000 DELETE FROM notes */",
-            "EXPLAIN ANALYZE SELECT * FROM notes",
-            "SELECT 1 INTO OUTFILE '/tmp/notes'",
-            "--not-a-comment\nSELECT 1",
-        ] {
-            assert!(statement_is_mutation(sql), "expected mutation: {sql}");
-        }
-    }
-
-    #[test]
-    fn authorizes_the_sql_statement_instead_of_the_callers_result_shape() {
-        set_grant(Some(DbGrant {
-            read: true,
-            write: false,
-        }));
-
-        let read_statement = DbStatement {
-            sql: "SELECT 1".into(),
-            params: vec![],
-            mode: Some("query".into()),
-        };
-        let disguised_write_statement = DbStatement {
-            sql: "INSERT INTO notes (body) VALUES ('should-not-land')".into(),
-            params: vec![],
-            mode: Some("query".into()),
-        };
-        let read = ready_statement(&read_statement);
-        let disguised_write = ready_statement(&disguised_write_statement);
-
-        set_grant(None);
-        assert!(read.is_ok());
-        assert_eq!(
-            disguised_write.err().map(|error| error.code),
-            Some("zero_db_capability_denied")
-        );
     }
 }
 

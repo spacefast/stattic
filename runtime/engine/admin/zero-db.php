@@ -7,13 +7,17 @@ declare(strict_types=1);
  * every physical name is recomputed from this space's scoping rule (co-tenant
  * and WordPress core tables fail that equality), and the broker grant is
  * db.read only.
+ *
+ * The read runs on the engine's own MySQL broker (shared/db-broker.php) in this
+ * worker. A dump touches one table per operation and an export pages through
+ * one, so a link outliving the operation saves a handshake per table.
  */
 
 require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/../shared/artifacts.php';
 require_once __DIR__ . '/../shared/jwt.php';
-require_once __DIR__ . '/../shared/native-process.php';
+require_once __DIR__ . '/../shared/db-broker.php';
 
 const STATTIC_ZERO_DB_DUMP_ROWS_DEFAULT = 25;
 const STATTIC_ZERO_DB_DUMP_ROWS_MAX = 100;
@@ -24,6 +28,7 @@ const STATTIC_ZERO_DB_DUMP_ARTIFACT_SCAN_MAX = 256;
 const STATTIC_ZERO_DB_EXPORT_ROWS_DEFAULT = 500;
 const STATTIC_ZERO_DB_EXPORT_ROWS_MAX = 1000;
 const STATTIC_ZERO_DB_EXPORT_PAGE_MAX_BYTES = 16777216; // 16 MiB
+const STATTIC_ZERO_DB_READ_DEADLINE_MS = 30000;
 
 function _stattic_zero_db_dump(string $privateRoot, string $spaceId, string $versionId): void
 {
@@ -227,26 +232,40 @@ function _stattic_zero_db_resolve_scoped(string $versionRoot, string $spaceId): 
     return ['config' => $config, 'artifacts' => $artifacts, 'scoped' => $scoped];
 }
 
-// Withholding db.write is what structurally prevents these routes from changing
-// tenant data, however their SQL is later edited. A failed executor returns an
-// empty string, which every caller treats as a failed read.
+// Withholding db.write is what stops these routes changing tenant data, however
+// their SQL is later edited: the broker classifies the SQL itself, so a mutation
+// is refused even when spelled as a read. A refusal comes back as an `ok:false`
+// document, which every caller treats as a failed read.
 function _stattic_zero_db_read_operation(array $config, string $operation): string
 {
     $env = _stattic_zero_runner_base_env($config);
-    $env['SPACEFAST_DB_BROKER_GRANT'] = 'db.read';
-    $result = _stattic_runtime_run_subprocess(
-        [_stattic_runtime_native_binary(), 'db-broker'],
-        $env,
-        $operation,
-        null,
-        30000,
-        STATTIC_ZERO_DB_EXPORT_PAGE_MAX_BYTES * 2,
-        65536
+    _stattic_db_broker_set_read_deadline_ms(_stattic_zero_db_read_deadline_ms());
+    _stattic_db_broker_bind(
+        is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : null,
+        is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
     );
-    if (!$result['spawned'] || $result['timedOut'] || $result['exitCode'] !== 0) {
-        return '';
+    _stattic_db_broker_grant(['db.read']);
+    $answer = _stattic_db_broker_execute($operation);
+    // A dump reads many tables on one link, so the rollback lands per operation,
+    // not per route: no read here opens a transaction, and one that did must not
+    // hold row locks across the next table's query.
+    _stattic_db_broker_rollback_open_transaction();
+
+    return $answer;
+}
+
+function _stattic_zero_db_read_deadline_ms(): int
+{
+    // Production is fixed. The real-MySQL behavior suite shortens the deadline
+    // to prove a blocked query is interrupted without adding thirty seconds to
+    // every acceptance run.
+    if (getenv('SPACEFAST_RUNTIME_TEST_MODE') === '1') {
+        $override = getenv('SPACEFAST_ZERO_DB_READ_DEADLINE_MS');
+        if (is_string($override) && preg_match('/^[1-9][0-9]{0,4}$/', $override) === 1) {
+            return min(STATTIC_ZERO_DB_READ_DEADLINE_MS, (int) $override);
+        }
     }
-    return trim($result['stdout']);
+    return STATTIC_ZERO_DB_READ_DEADLINE_MS;
 }
 
 /** @param array<string,mixed> $row */
@@ -566,8 +585,8 @@ function _stattic_zero_db_logical_name_valid(string $value): bool
     return strlen($value) <= 128 && preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $value) === 1;
 }
 
-// Deliberately narrower than MySQL's own rules: the generator only emits
-// `[a-z0-9_]`, and anything wider is a reason to refuse rather than escape.
+// Narrower than MySQL's own rules: the generator only emits `[a-z0-9_]`, and
+// anything wider is a reason to refuse rather than escape.
 function _stattic_zero_db_identifier_valid(string $value): bool
 {
     return preg_match('/^[A-Za-z0-9_$]{1,64}$/', $value) === 1;

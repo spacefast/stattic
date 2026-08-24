@@ -10,7 +10,6 @@ require_once __DIR__ . '/storage.php';
 // assertion are the same for all of them.
 const STATTIC_LOCK_WAIT = 'wait';
 const STATTIC_LOCK_TRY = 'try';
-const STATTIC_LOCK_SHARED = 'shared';
 
 const STATTIC_LOCK_DEADLINE_MS = 10000;
 const STATTIC_LOCK_RETRY_MIN_US = 1000;
@@ -19,9 +18,8 @@ const STATTIC_LOCK_RETRY_MAX_US = 100000;
 // flock() is per open file description, so a second handle on a lock this
 // process already holds conflicts with itself: a nested acquire would block
 // until its own deadline. Every acquire is registered here so a nested one
-// reuses the open handle, and a nested exclusive request converts the held
-// shared lock rather than queueing behind it. Statics reset per request under
-// FPM and the CLI server.
+// reuses the open handle and only the outermost release unlocks it. Statics
+// reset per request under FPM and the CLI server.
 function &_stattic_lock_registry(): array
 {
     static $held = [];
@@ -55,24 +53,16 @@ function _stattic_lock_flock($handle, int $operation, bool $wait): bool
 }
 
 /**
- * @param  string $mode STATTIC_LOCK_WAIT | STATTIC_LOCK_TRY | STATTIC_LOCK_SHARED
+ * @param  string $mode STATTIC_LOCK_WAIT | STATTIC_LOCK_TRY
  * @return resource|false
  */
 function _stattic_lock_acquire(string $path, string $mode = STATTIC_LOCK_WAIT)
 {
     _stattic_runtime_assert_private_path($path);
-    $exclusive = $mode !== STATTIC_LOCK_SHARED;
     $wait = $mode !== STATTIC_LOCK_TRY;
     $held = &_stattic_lock_registry();
     if (isset($held[$path])) {
-        $upgrade = $exclusive && !$held[$path]['exclusive'];
-        if ($upgrade) {
-            if (!_stattic_lock_flock($held[$path]['handle'], LOCK_EX, $wait)) {
-                return false;
-            }
-            $held[$path]['exclusive'] = true;
-        }
-        $held[$path]['upgrades'][] = $upgrade;
+        $held[$path]['depth']++;
         return $held[$path]['handle'];
     }
 
@@ -80,11 +70,11 @@ function _stattic_lock_acquire(string $path, string $mode = STATTIC_LOCK_WAIT)
     if (!is_resource($handle)) {
         return false;
     }
-    if (!_stattic_lock_flock($handle, $exclusive ? LOCK_EX : LOCK_SH, $wait)) {
+    if (!_stattic_lock_flock($handle, LOCK_EX, $wait)) {
         fclose($handle);
         return false;
     }
-    $held[$path] = ['handle' => $handle, 'exclusive' => $exclusive, 'upgrades' => [false]];
+    $held[$path] = ['handle' => $handle, 'depth' => 1];
     $paths = &_stattic_lock_registry_paths();
     $paths[get_resource_id($handle)] = $path;
     return $handle;
@@ -105,12 +95,7 @@ function _stattic_lock_release($handle): void
         fclose($handle);
         return;
     }
-    $upgraded = array_pop($held[$path]['upgrades']);
-    if ($held[$path]['upgrades'] !== []) {
-        if ($upgraded === true) {
-            flock($handle, LOCK_SH);
-            $held[$path]['exclusive'] = false;
-        }
+    if (--$held[$path]['depth'] > 0) {
         return;
     }
     unset($paths[$id], $held[$path]);

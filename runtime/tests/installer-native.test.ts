@@ -1,16 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -24,7 +15,7 @@ afterEach(() => {
   }
 });
 
-test("clean installer replaces stale native tools and preserves executable manifest entries", async () => {
+test("installer stages the native tool executable and leaves engine files read-only", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-native-installer-"));
   roots.push(root);
   const publicRoot = path.join(root, "public");
@@ -56,10 +47,6 @@ test("clean installer replaces stale native tools and preserves executable manif
     })}\n`,
   );
 
-  const staleBin = path.join(publicRoot, ".stattic/bin");
-  mkdirSync(staleBin, { recursive: true });
-  writeFileSync(path.join(staleBin, "obsolete"), "stale");
-
   const zipPath = path.join(root, "runtime-engine.zip");
   execFileSync(
     "zip",
@@ -71,7 +58,7 @@ test("clean installer replaces stale native tools and preserves executable manif
     .digest("hex");
   const output = execFileSync(
     "php",
-    ["-d", "auto_prepend_file=", path.join(installerRoot, "installer.php"), "--clean", zipPath],
+    ["-d", "auto_prepend_file=", path.join(installerRoot, "installer.php"), zipPath],
     {
       encoding: "utf8",
       env: {
@@ -84,10 +71,8 @@ test("clean installer replaces stale native tools and preserves executable manif
 
   expect(JSON.parse(output)).toMatchObject({
     status: "installed",
-    clean: true,
     engine_revision: revision,
   });
-  expect(existsSync(path.join(staleBin, "obsolete"))).toBe(false);
   const installRoot = path.join(publicRoot, ".stattic");
   const activeRelease = path.join(installRoot, readActiveReleaseTarget(installRoot));
   expect(statSync(path.join(activeRelease, "bin/stattic-runtime")).mode & 0o777).toBe(0o755);
@@ -137,7 +122,7 @@ test("installer rejects a hung native self-test within its deadline", async () =
   try {
     execFileSync(
       "php",
-      ["-d", "auto_prepend_file=", path.join(installerRoot, "installer.php"), "--clean", zipPath],
+      ["-d", "auto_prepend_file=", path.join(installerRoot, "installer.php"), zipPath],
       {
         timeout: 10_000,
         env: {

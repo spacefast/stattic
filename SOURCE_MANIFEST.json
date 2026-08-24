@@ -1,7 +1,7 @@
 {
-  "revision": "42140d9b8d6cd2d43f433f26a1c052b52f02919b",
-  "sourceHash": "ba436db23f7e5d873830b2051786d277367d1de32a4a84d45e053dbb4471ea1a",
-  "manifestSha256": "a5bf1ea43874faf680874efa919fda5e0a9f11ac7a71cceb9116d02b89823890",
+  "revision": "81477995aebb91f24e4002bd92c061175009b3ab",
+  "sourceHash": "89b2529b9aa07c1ccc9cc758f107b227e48bd3e2911f0b3a7ed03df579bd4379",
+  "manifestSha256": "ccce7d35599526e37753c08f26eacf2c13c411e7acd1402820fe8df66e9832af",
   "files": [
     {
       "path": ".gitignore",
@@ -9,35 +9,35 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "eabc2cc3692807ef143627c69d0b8ec5cda4c4473281296a749923c682070c42"
+      "sha256": "1a5030b513f79bdf41c330bd78b5211f22d0326b7237a91d0aebd9b52ad62d9a"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "ba44c75417cac3cde37347e5fac2805cee09c17b519ef4bd747f1dc43b8797b6"
+      "sha256": "09dc14875f66601bc72a3560e6249c084cb4123076c03ec3c22399ca70d6acd6"
     },
     {
       "path": "README.md",
-      "sha256": "ed803fe94b48991c8f36bbaeb442e6f2913ac55b1b359b02e5530c6bf3583918"
+      "sha256": "c2cf1fb954a0db56542da27020fa8c42be875894583bf69202c38fd43109def6"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "e02f9f0701ed428ffafbb12488347441eb413f8ccefa1b09f261ddf534961b29"
+      "sha256": "171ba8d0684e7ed9f08a8a92026c0134380924e1d1c2e0b9ad90ca7a094e5d75"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
-      "sha256": "b5b7a126aca3e19a3b55fe8381d35e0d2b9a928c405e2f034532db6b95cf27cc"
+      "sha256": "c6323f594f6431db60278c575f05b2eddd75ee9166b8e6fbb910479c1ad4991b"
     },
     {
       "path": "crates/stattic-runtime-compiler/src/bin/protocol-codegen.rs",
-      "sha256": "259023a3e1e73c5d19382a0b37cc8697db318bee29727c4bbe8da849697d0a1b"
+      "sha256": "f310c51dd9bbe73389db6395f52ec8f35c24001be3e0673ed96139ba6b727cb4"
     },
     {
       "path": "crates/stattic-runtime-compiler/src/main.rs",
-      "sha256": "b7cb3f094e07d3dc0b8165e4371087c3e9795ecac952613b576b01ca7e9ef1a6"
+      "sha256": "c1cced0f9fde0fe17aceec74efa824cdd3a97a6a7a591dceec596555f1f4332a"
     },
     {
       "path": "crates/stattic-runtime-core/Cargo.toml",
-      "sha256": "6ebde7ff204b8dd515be62da707b009f904f603380080a5f6e709a34f6f0b16b"
+      "sha256": "238d25dcc6050f54d980ebeeef30290cbd0a23b52101b497a29f6458a9a09baa"
     },
     {
       "path": "crates/stattic-runtime-core/src/access.rs",
@@ -49,7 +49,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/catalog.rs",
-      "sha256": "4ca1e6a07e8aad1f354d32f394f1ff0ac773d90af49e2bf0914e9bd52747d703"
+      "sha256": "638e6c5a3dd60ded61914595afa6188999b40bbf5528de978250cfd00a7a3f43"
     },
     {
       "path": "crates/stattic-runtime-core/src/config/access.rs",
@@ -125,7 +125,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/lib.rs",
-      "sha256": "d9ee70eee0c23e3ba7f6c551cf789801967d3b3034f2bb7c9f1b123c01e7248c"
+      "sha256": "5fcb37f9df673de286ceeb9b4ca710420a6bc26b542daa5b6e43d953c1130308"
     },
     {
       "path": "crates/stattic-runtime-core/src/metadata.rs",
@@ -137,7 +137,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/policy.rs",
-      "sha256": "99b30c253fbb41f9d51cb267b1b1d3a67484a456cfbba046f06b9c743a95b264"
+      "sha256": "af1d903b23a5d349ecda18c1a69c0008971c9658b02550c07a2aa401b3b00cba"
     },
     {
       "path": "crates/stattic-runtime-core/src/prepare.rs",
@@ -149,11 +149,11 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/protocol.rs",
-      "sha256": "38753d1fb7b48f2ce21d4b903c0ecf74a7d7ce651a5245f52872c74a0f5d5ca1"
+      "sha256": "2a1b6ffff45627be1d09d723e2aa1311d149af79be6db646ed11ed86193d2b0e"
     },
     {
       "path": "crates/stattic-runtime-core/src/responses.rs",
-      "sha256": "b299b9f4c437dc5e3cadc2d900c9452670421f02b5afc6c05d21dceba097ee46"
+      "sha256": "f3288e27df81d9b90d5e53b6b57ce9b7332302fe8a44737de74928f2654e391e"
     },
     {
       "path": "crates/stattic-runtime-core/src/routing/headers.rs",
@@ -217,7 +217,15 @@
     },
     {
       "path": "crates/stattic-runtime-egress/src/lib.rs",
-      "sha256": "94eab31ee247dd08107fe503f77f444b41a789af510dc54f8083de076d213591"
+      "sha256": "267b1c7150ce4d7265af160b8fe01776d23b2354603cbc618743269190ffcd79"
+    },
+    {
+      "path": "crates/stattic-runtime-policy/Cargo.toml",
+      "sha256": "500e14c12db7939784e4b3dc025990fedf6284583275574a5f692853419c100d"
+    },
+    {
+      "path": "crates/stattic-runtime-policy/src/lib.rs",
+      "sha256": "c39f5fd52b33651fd278009be2213afc5500c0c2c2dba52cbf7141c689e63e6e"
     },
     {
       "path": "crates/stattic-runtime-wasi/Cargo.toml",
@@ -229,7 +237,7 @@
     },
     {
       "path": "crates/stattic-zero-runner/Cargo.toml",
-      "sha256": "4da190fba496bb907d73758ad023698bf7103e0d1788a6592d24dad67ec84d95"
+      "sha256": "372deb2172b8b2a55c337b41db5b5660342eb3675fccfe24da7067f7af593d83"
     },
     {
       "path": "crates/stattic-zero-runner/assets/fonts/LICENSE-Haskoy.txt",
@@ -257,7 +265,7 @@
     },
     {
       "path": "crates/stattic-zero-runner/src/db.rs",
-      "sha256": "432bff8585cd60f87490b9e269ab17eaad7f4ccf656a78275098c9980389eab3"
+      "sha256": "9467aee089723349fcd26b15f8623cbddb8b7dd98c8d0403f967fc74f3a8f50b"
     },
     {
       "path": "crates/stattic-zero-runner/src/fetch.rs",
@@ -273,7 +281,7 @@
     },
     {
       "path": "crates/stattic-zero-runner/src/lib.rs",
-      "sha256": "196608f02a62b106889101e0bc484a0ad13eed607bdaf7f8123b4373c0d11efe"
+      "sha256": "59699942b25ebe0beee3a1a23177c0a1f0b60e4b6a7c0a7846de994e341d7f54"
     },
     {
       "path": "crates/stattic-zero-runner/src/protocol.rs",
@@ -285,7 +293,7 @@
     },
     {
       "path": "crates/stattic-zero-runner/src/response_headers.rs",
-      "sha256": "f9a805214cdb1b77642db2ac187f4377b2c07f84fe06729dd1d17615bf47dc52"
+      "sha256": "8133b90a3a694ff5b7cbeb95bd07503f643fbdbe1fa262dd60da959914415bdd"
     },
     {
       "path": "crates/stattic-zero-runner/src/services.rs",
@@ -305,35 +313,35 @@
     },
     {
       "path": "runtime/README.md",
-      "sha256": "a323b9aa23dbea6e31dbfdd1f7fa92c9fa936ea74b5ff16066f08a8ec26b695c"
+      "sha256": "d182fa5ffc074c3783a826b1073c666f1143e8f7d8f5978f692c72259dbcf06d"
     },
     {
       "path": "runtime/SKILL.md",
-      "sha256": "e935a961d85feeb1c6a513df4593af116b73e3fd70160f28fb2dcd5439769290"
+      "sha256": "35656fa9fdda92c258a6ebdcd86e795e3cb9761917451de0de6457f720a09563"
     },
     {
       "path": "runtime/browser-specs/control-plane-access-fixture.ts",
-      "sha256": "f1ac40c806c21bd117d5d3c822c6dcd7073f99d997a5f670b2159ef3a66343f8"
+      "sha256": "e40c57b26da3d0cd450862826e5b001cd9d064113f46ba8e781f62e0d6a7117f"
     },
     {
       "path": "runtime/browser-specs/origin-null-access.test.ts",
-      "sha256": "ed1384d747aadb01e00467a9682b2562a5f761a1c9f8a5f3563ed4a247651caa"
+      "sha256": "5e5ab043056224eac12fbd56508ccf775d250eb29c6e8207008ef78a419393b9"
     },
     {
       "path": "runtime/browser-specs/run.ts",
-      "sha256": "ee992d14b4c0399977083ba218621893b08d84db0eadfc9c37a6724a2a9f1ce3"
+      "sha256": "34f078844a2fda367a42bb8b8fabe240215e8ee70f095af428c0d9cea133cf3f"
     },
     {
       "path": "runtime/custom-redirects.php",
-      "sha256": "178da708c7f27d21e0b3091eb2637cbaadab7fc22689a79a31756284c1713ae5"
+      "sha256": "2114f2528c61e05a71220823393bd16df5879f701b6ee6129100c6abcf736ee9"
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "1a41ed8944d007e84a8615f8c9d590b8285a4d508d7a4cb8268bfe51133a3dbc"
+      "sha256": "e9780ddf9eb4238e1ac53732cbd8cf2ffd1a191c0b9ba783e227eb3d3a257078"
     },
     {
       "path": "runtime/engine/admin/api.php",
-      "sha256": "4b1084c60b829b2981501d277a5b460364aa789809a0924ed0f774475b76b430"
+      "sha256": "276ba50c756871440d4679552eaa381baa9199709618d683b4f5aecd40363aac"
     },
     {
       "path": "runtime/engine/admin/auth.php",
@@ -345,39 +353,39 @@
     },
     {
       "path": "runtime/engine/admin/dispatch.php",
-      "sha256": "b722f42ccc030a82f95aab251a511f4558931421270e4da8c25f31a2dc54940f"
+      "sha256": "b686a0d29eda0e9aaa7d512c37bf38f08510b1be554bfff954d09f08119c984d"
     },
     {
       "path": "runtime/engine/admin/engine-update.php",
-      "sha256": "308382e0ff8a226e1cad832411133ca64155a6d66653d1adac4fa7cf25920aa1"
+      "sha256": "4622c191da3caf1418497756708a97f1b2a19945b25bfc0f40de34850247ca4d"
     },
     {
       "path": "runtime/engine/admin/finalize-rust.php",
-      "sha256": "9055544f1263a0569ccb8f9e4e96aecafc9f6d1ba01fb340173bc8247f32cade"
+      "sha256": "4a635e26070a2f4e9322accd179538da16daa43177905147b5ad2f537f978bf2"
     },
     {
       "path": "runtime/engine/admin/generate.php",
-      "sha256": "6f359a67e79bd7dfc228561ce71742938d462f5b15c68189ea4f48d92e4ce994"
+      "sha256": "30639c49250fe496148089d5df0a2c8d5193ecbb87fe967e20b615da8a8defdc"
     },
     {
       "path": "runtime/engine/admin/jobs.php",
-      "sha256": "621c5830f5d49dc87e940a2e7f99af1348b0f5b1451128bf30da6d7ce5e854bd"
+      "sha256": "22ee65231701dd3d648fb4793640234c32d49e8baf7a999723f5f38937eb8afa"
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "8e159101ab25cad92f2c5ab2678542739a689159bfc24a71a771ab79a0e8726f"
+      "sha256": "943cc5a44bc6312d1776b2bcb19d10cbad8341c8989e5b193e50e121fe235565"
     },
     {
       "path": "runtime/engine/admin/retention.php",
-      "sha256": "f6c6a20b4361b0ec3b6a0d94114a4165be97bc7a8fe7f1f40d58a1ad18a96ca0"
+      "sha256": "6c0302d0c7707c3f72182b9a535db01ef3bc09911940e5c7fd3da8219271ee90"
     },
     {
       "path": "runtime/engine/admin/storage.php",
-      "sha256": "7345d1a890afd8a72924e3fc2fdd993a1cc44a2b882cf2f03d4f6c2a0e31b1d1"
+      "sha256": "48f9e5415bdcc3c70d9fda877b587c1bfb3f77342013a0e09d20b7983b2e6f5d"
     },
     {
       "path": "runtime/engine/admin/tier.php",
-      "sha256": "f5cb24e75f87db1d138c8b80f567f13898f69c49a4a5147aa70d7928c4dd8fe1"
+      "sha256": "d9db5f3bb74711eb5b6afa98a8110636bc4df0e4bfc6e0531e3b63af7420f2bd"
     },
     {
       "path": "runtime/engine/admin/upload-policy.php",
@@ -385,19 +393,19 @@
     },
     {
       "path": "runtime/engine/admin/upload.php",
-      "sha256": "73f2407d3b7ec9b0fc2a42b5d00006ca62d4d8b9f007662a018c9cbcd7bd01f7"
+      "sha256": "cacb5cae369c33974656f24055af90bc786c372bff297da3870676581b1b9c30"
     },
     {
       "path": "runtime/engine/admin/zero-db.php",
-      "sha256": "be440715817f1971c60876a571a9b8bd9f0dcaf55ab4a4edda97d8fd05c30393"
+      "sha256": "8cb81c71112b6a8d77f40d872c8d54ed30c6f0433900bb8c2b057be591abbacb"
     },
     {
       "path": "runtime/engine/entrypoints/blob.php",
-      "sha256": "e6c69b4855d74333c68d6ad245c73aa83cf3a2a2cb7283cd62530f01c8839f41"
+      "sha256": "8814e59981c8a6a67f2a35e94872aaa4453ef72e96fd517c330863b7ec5b1e13"
     },
     {
       "path": "runtime/engine/entrypoints/cron.php",
-      "sha256": "36c08a961a697ab6ff8bf6ced8275cc0b5c70fe39ea84b4bba30119f09466a65"
+      "sha256": "7da1b3ee00433f31edf6e910b62543e9f0a8ea4ff57ff97f111814c2c45117c0"
     },
     {
       "path": "runtime/engine/entrypoints/health.php",
@@ -405,15 +413,11 @@
     },
     {
       "path": "runtime/engine/entrypoints/invoke.php",
-      "sha256": "4d908810df63ea5a5e44b6649e559f92617861cdcfcd02c07df9d947afd61241"
+      "sha256": "a45e8ba549bee135df9aa560340115a88eb60209612a308808ef12f47cf61b16"
     },
     {
       "path": "runtime/engine/entrypoints/management.php",
       "sha256": "5440549e3177df90168ff1f7711fbf1a2cec6b1cb44b9705db9baa7d2f2bd0f3"
-    },
-    {
-      "path": "runtime/engine/entrypoints/prepend.php",
-      "sha256": "c270b56c52327b3662ba8bc6339987bfe29f1c95b36402d6e3342976021d1f53"
     },
     {
       "path": "runtime/engine/entrypoints/upload.php",
@@ -421,23 +425,23 @@
     },
     {
       "path": "runtime/engine/init.php",
-      "sha256": "38fbafa8b165067599c5201a92a1a1e1f24744caf9b80fbf3e1944536e0d8c16"
+      "sha256": "ac684890f5d8d249e2626585c534951f4ab70da41d0697c8cacfb1a7f98469d0"
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "ee5f84ed200b29e3fe9e12e84383b539b342273dc5c6057bcf9a613ef39f21ed"
+      "sha256": "45eb367c976851c4ca93b3ed5ff495af9f843f1da62c6a627e1a93e55f07331d"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
-      "sha256": "b239e2499df4e03c8133b5a09b51f186a1aa2376038a951b81d9413333a552e7"
+      "sha256": "426b13cab22320ecd3b25c840a1a8ed4d7c19f449e370c05eada0545e89d4c34"
     },
     {
       "path": "runtime/engine/runtime/collab-frame.php",
-      "sha256": "f2b313391d487fe7b962aa880552cf866532fc2451cf36929587b65d35d76e98"
+      "sha256": "63935c4ded75e810c07cdc5903314b610a29189f19632b9a81e6b53307ad20ed"
     },
     {
       "path": "runtime/engine/runtime/crons.php",
-      "sha256": "7aee39eefa7488cbd636d1eeadedb992acf20fdf7730129eaf4bb087292501e8"
+      "sha256": "3e7a747c11550c73ec0c0cb635b98990cf05f9f741a325a1ec297a9de22acca4"
     },
     {
       "path": "runtime/engine/runtime/functions-artifacts.php",
@@ -445,59 +449,55 @@
     },
     {
       "path": "runtime/engine/runtime/functions-dispatch.php",
-      "sha256": "2207c998355869ead6509518ac11ce0be135a1893b6310da97cba4ea558ccd6f"
+      "sha256": "0bfbab39f90119514585507a033d8c4e363557433338046693185887e468b021"
     },
     {
       "path": "runtime/engine/runtime/functions-purge.php",
-      "sha256": "54f5b514c65fff3950aaacb259f4bce97304ccb98b51ef150b118ec0104227a4"
+      "sha256": "1382680bddf93eb94cd6d2b4e3feb13c07c42acfec473d050a36a9443924b8dc"
     },
     {
       "path": "runtime/engine/runtime/functions-relay.php",
-      "sha256": "9a7e77710cf680b2a73596775bc9efcc3bb575cbd4089cf44202047a5da50029"
+      "sha256": "29d2a64b0f19b126fa6c9ad6551642a62b81f0bb4be8cc005f3abe7fbd7da969"
     },
     {
       "path": "runtime/engine/runtime/headers.php",
-      "sha256": "1527c705988926f371e12a47a788c195adb149b0fc83d3d40a036a51b9beb421"
+      "sha256": "7539a82de839f7960041283806100a041e629c99479bad3181623e44581cde2e"
     },
     {
       "path": "runtime/engine/runtime/php-functions.php",
-      "sha256": "609f2a62837ef968152ae611e50e3b47bea6d4865effff13613fe38c868a1796"
+      "sha256": "09f9b45adfcb3499f232b6c511b8565df5b17225a92a06b27909d01866f8c158"
     },
     {
       "path": "runtime/engine/runtime/proxy.php",
-      "sha256": "f96dd472dc8c19fef1d900a73a7e3278613a2550921487cef87cddfa4c1c659f"
+      "sha256": "c1ac0a687981bb08078b4c88b03b2407a69b10b144085d846166259e8e1e0ee4"
     },
     {
       "path": "runtime/engine/runtime/redirects.php",
-      "sha256": "a4fc56c9e3b21e2b2ccaf7b9f5979cd67e4a64b39773f27c78cef66e7bb2f747"
+      "sha256": "f3f454dc22b9eecdb789b6ab59f885f38c9ee6e121b4544f019323f71db15d34"
     },
     {
       "path": "runtime/engine/runtime/rules.php",
-      "sha256": "1ea0325501216609a9e130f92bbd34e3d2242192f526c9fa161b2bddeb33e6c2"
-    },
-    {
-      "path": "runtime/engine/runtime/serve-fast.php",
-      "sha256": "45c37f5fee57958ccada35e97d8f18d61906f91acec09cd15d42da8f4e0628a1"
+      "sha256": "e26b3a43e19d268a5d8af0ba3c80130138416acffe3a7ac0ebb33a69260a175a"
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "e91a8db2090bc8cfff727034ccf5c6ef36754fb78f46d4af33365d5521b5964b"
+      "sha256": "e040bd44a39b0b365a62905846043b6162b807a412b7137c7cf50239e5187dc7"
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
-      "sha256": "7d0a70808a9eb8a3ed6b11e30c3e12b0c61a0d31b5d78b1d8960ead6d11d1d31"
+      "sha256": "1e99e1fd8e51e55e1ac5949db6c69b63a93572afec233e20f111d1730b0ba26c"
     },
     {
       "path": "runtime/engine/runtime/storage.php",
-      "sha256": "886fcfcc44d1c5ae67d973f597125866208d9d009a428280570e7fffb2ceff0b"
+      "sha256": "71aebb8dfc23baebb34d9a09401beae6bac3ac21dba90a474d5684f084912458"
     },
     {
       "path": "runtime/engine/runtime/tenant-prelude.php",
-      "sha256": "ab3df14604858317df007a2b24f4e3baa6816679d6cb11f003bc00849d07ecb6"
+      "sha256": "f9ebd0e9d56bc9b83fd63a34d7dbef1d0cae0c9e6a9b349e3252d9fb9d945d4d"
     },
     {
       "path": "runtime/engine/runtime/tier.php",
-      "sha256": "95d24566c385ccd84e3e2c35db15207b4e4effd3658c41f3de79f36f20893fc5"
+      "sha256": "c243a847de5f4f5205760c71021438a186a5ab179baf282407af32586cff4ab9"
     },
     {
       "path": "runtime/engine/runtime/zero-routes.php",
@@ -505,15 +505,15 @@
     },
     {
       "path": "runtime/engine/runtime/zero.php",
-      "sha256": "8c5929da8d0898091200f0ed99cd56b5727768b451b4f1fb2a74cb975d08df8f"
+      "sha256": "962f0cde00123cafbae89fef316e6f5859c06c1545b36790fe81b9bd5e761961"
     },
     {
       "path": "runtime/engine/shared/admission.php",
-      "sha256": "d555866143ec2c1c30594f0592354495752e98d642ce76e6696cbf8f468c9d60"
+      "sha256": "7e2125a032831e730f1e53e14043e665d661ca3b0ecaf829a0bbc060859a9a99"
     },
     {
       "path": "runtime/engine/shared/artifacts.php",
-      "sha256": "2d129dda6f2ac3c50433f2b2faf5c65eaf4544bcbb3082b5dca8941b6b41446b"
+      "sha256": "fd5ec27c0197e1caf9ee9963caa928c22bbf3c45458b77ede2a0e9cb0d1fcf0a"
     },
     {
       "path": "runtime/engine/shared/bootstrap-config.php",
@@ -521,31 +521,31 @@
     },
     {
       "path": "runtime/engine/shared/cache-policy.php",
-      "sha256": "973944742c28f1dc060b0751d1b7f66b92a32fe44940a8f6d6978b726a346b50"
+      "sha256": "b6c7351ac6541e9f360b973aa70fead60c9f126525436c0507adce2d196cf8bb"
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "c2622c2111fe8a61efe437d12f0d593c8f36baad0d45925b3dbd243582948f73"
+      "sha256": "3a9e0f1cd29b7384ea4942a6edeb982fb37541be92a2c2b5426457de34f77ae6"
     },
     {
       "path": "runtime/engine/shared/db-broker.php",
-      "sha256": "f452d3c02476df72c8e39c683679d156d261857c6db02f2d23922ad2dd0149d1"
+      "sha256": "81998b48da4402e281af10e1c2151c81cca0dfff982227b793af4fd52cdee7fd"
     },
     {
       "path": "runtime/engine/shared/egress.php",
-      "sha256": "250fcc21ce7c20f476a622675af207103373c79493576ddeb5a306abe54575e7"
+      "sha256": "a6b31f446f8152f80e19a3b474006fff0aafd08eca94bb4fbd0141ec971d7ae7"
     },
     {
       "path": "runtime/engine/shared/errors.php",
-      "sha256": "ad7446123be29af065e1446463f8c7e9968961060678b9af8440fa9ab3a930c0"
+      "sha256": "cbc00c1ee4867db8bb61567ea5435e9f6e3cae405ce7f4d4f302cf97a70a002f"
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
-      "sha256": "e8c8f1f8e7161ef4de56b5f4c39ec999f68c1b0c6d61a24c6b2bff7964c1930f"
+      "sha256": "fe49514ae0e618a008fd2198c580a8c6b3501b0ddc694a4b7c840d9e09f9a621"
     },
     {
       "path": "runtime/engine/shared/html-insert.php",
-      "sha256": "d9c54ea5f9bd542cd9423c299107f18e6ed145fdbe89525a7830975c963b2cad"
+      "sha256": "d7514ea52e6200ea3e322fd9cd943911c4c466b67aac0bbdaf9036ec13de5af4"
     },
     {
       "path": "runtime/engine/shared/http.php",
@@ -553,51 +553,47 @@
     },
     {
       "path": "runtime/engine/shared/jwt.php",
-      "sha256": "f420e8726923b13f9b79c4763e315483a9827c5dd0372ccb09ae856ce67526b8"
+      "sha256": "acfbd5ac8e9f1b29e0bdda741c665d05ce52494d006d558b27986ec15365f6fa"
     },
     {
       "path": "runtime/engine/shared/lock.php",
-      "sha256": "2586d70abf6bd544f5d929218fcb955af8ec23521ca2796832d95c67e09c7ba3"
+      "sha256": "c6b99cfdaefa576b26b22c00a890b5f6a7d338fc88bf68de19204b156605fd95"
     },
     {
       "path": "runtime/engine/shared/native-process.php",
-      "sha256": "b0be25c1dccf98df59b0da17865aa3f70c0af84419ec272c62ad7f95b2b010d0"
-    },
-    {
-      "path": "runtime/engine/shared/ndjson-log.php",
-      "sha256": "8fb57bb4ff89b39d0d5c25f651daf516250d2b316f87a5caa63a76eca529b144"
+      "sha256": "76648becb8cde2ab6474070ea3f77ea32b3b917f3bdb53c59f3e6f8c4a82dde6"
     },
     {
       "path": "runtime/engine/shared/pointers.php",
-      "sha256": "89dc7f9c31144aa83528dface3983904176600735abcd3e0dc6293dbf08c5155"
+      "sha256": "e0247a260b61eb1c52b7b197bce9fa33b32fbcc0d69d7ebb0125edfc9f3cdd87"
     },
     {
       "path": "runtime/engine/shared/problem.php",
-      "sha256": "1551f6ccd2217a9e3c8e1bf6f1caa8c1932a1bf6b57d97daeacd8a7b5a525809"
+      "sha256": "627cae58c5babf9f565d051d8103e1fd99bbbfad36f1b06620ade85700043264"
     },
     {
       "path": "runtime/engine/shared/purge.php",
-      "sha256": "e40f1a64148aa13258983f0e86336999277d0a0d63280e24c7546e4831682ba5"
+      "sha256": "f58cc9203ad54c60b558cbf4675ea768ab0e91a3df27828823328a9825d5982c"
     },
     {
       "path": "runtime/engine/shared/record-store.php",
-      "sha256": "428b4e14fc9b2f3234ce21b0548c7c1f7864be4f96707e7a2fff346c28e907a1"
+      "sha256": "0758c09a2070a67eac9fdd65cf4c597152d4420d06f4f6d04ee7520b53bbe411"
     },
     {
       "path": "runtime/engine/shared/response.php",
-      "sha256": "a30f114d8979724b83729f6c7eb6ac72c7a529cb7044b4f7209b76ee1edefdab"
+      "sha256": "6a35b460e6c336dafa5417457865bb017124e6066ad12e97a3d28014ae52110a"
     },
     {
       "path": "runtime/engine/shared/runtime-log.php",
-      "sha256": "ea0098a47bfd10f58d33a4d3eb2b67500df6f9feb88039a77cb68d09d91ed7ea"
+      "sha256": "c96bea9cbe1e01fb4427ecd058cd71f4defb9e8c083dde8895b7d16d373120c5"
     },
     {
       "path": "runtime/engine/shared/s3.php",
-      "sha256": "740bdb514e079f87efc5837cc401ec631b3dde78c21298f298217a15fa1a36a8"
+      "sha256": "a04ff61356364adc2866c2c41e07e8c68434196e9ab1369841851eed2156d736"
     },
     {
       "path": "runtime/engine/shared/safety.php",
-      "sha256": "6ee886133b722dc7cc579ceffcc0ff07d5600717cff78f6a0a06924581c43ba4"
+      "sha256": "86d9f35f7da8e1c1ffb0634a7f3ddfb00521b0c305980c9b8dfc943528e06118"
     },
     {
       "path": "runtime/engine/shared/server-file.php",
@@ -609,7 +605,7 @@
     },
     {
       "path": "runtime/engine/shared/storage.php",
-      "sha256": "03878ac18119c574a5b9a35e5cde395dd5024e45660b231114aa45bceae4eead"
+      "sha256": "7c36849be5850e592fdb523366c6dc9230db3fb96edaa5cc27d841b69d20ee67"
     },
     {
       "path": "runtime/engine/shared/streaming.php",
@@ -617,23 +613,27 @@
     },
     {
       "path": "runtime/engine/shared/upstream-relay.php",
-      "sha256": "ff6af5e9ffd3cbcd8510848a2bb354f34b852c1a67db2a8b19af3afc545dfa5c"
+      "sha256": "227bd17e83913edadb5adb454edfe12227935976bb61282a9281657be90cb283"
     },
     {
       "path": "runtime/installer.php",
-      "sha256": "f06b7e175228fb96321174278cc10c18a72d9bf95a39f282eedca63b6b9852c6"
+      "sha256": "2bba2e272fa4ca0a33c0a670e3132c0ec381ac9ec990bc03dfdb2948fd11a3dd"
+    },
+    {
+      "path": "runtime/php-fpm-readiness.php",
+      "sha256": "81d7f51116c9b8a3a362b9de4916e58fc935c7bcdea29c9e5694c9ac2b2e7b3a"
     },
     {
       "path": "runtime/tests/access-chain.test.ts",
-      "sha256": "b165127cb8626fec3e6c056ad39025c42da73e68d18bedf0584ed09072a37be2"
+      "sha256": "1f176434390bc77911f77d798428f6e27274cd9eacc8ea8f75cc42600c108583"
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "a97f92f8f6f48af8cd1c1f5dc7df3f3713ad01b95448f7ab329b1e15c0fd787c"
+      "sha256": "a8f1caf376ca9888af2d70e72d9a8f7ea6a0191844dc94f2ea7ad82675c97787"
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "a69278867fd065f4ed96c681bca857701ed5e5a6cdbece9a8a0cbc33a1a4926a"
+      "sha256": "5da04d7292a90ce6d41f1d39d17248d4a506c45235923c03e88a4828835b2f76"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",
@@ -641,15 +641,15 @@
     },
     {
       "path": "runtime/tests/active-release.ts",
-      "sha256": "c37dd4fc25ba263bc6af492dec0dbb91e1a5819e3bfc2507aeb65c293b46434c"
+      "sha256": "a43b1a1b28337698ab65c43ccccf10416e656f9998c9100f42e554df85d5925c"
     },
     {
       "path": "runtime/tests/admission.test.ts",
-      "sha256": "9947048b1852d2aaae9cf8294c9442e7300b6d7b498193de01e10b5caac4629b"
+      "sha256": "0b4593c376ff49bcced39dcf7a93799d2b564ddbdaa51e140ff24e4c062557d7"
     },
     {
       "path": "runtime/tests/agent-detection.test.ts",
-      "sha256": "9568d5f1a648971e61dd751cea83264d6af4e56582bb2b2e74574f7cdaeb15cc"
+      "sha256": "0779c209d19f4f414b534dd748e757908b6d09684d243bc19fe5991423e08336"
     },
     {
       "path": "runtime/tests/atomic-prepend.php",
@@ -661,7 +661,7 @@
     },
     {
       "path": "runtime/tests/callback-drain.test.ts",
-      "sha256": "37d70816687cf67f1678cf854fa7e37c7d66c077cc0d495151cd1325b92bd544"
+      "sha256": "5a2363fd40336355908a4293a61cdf8e8bc5605c34942aef0984dbcfee0561e1"
     },
     {
       "path": "runtime/tests/collab-frame.test.ts",
@@ -669,55 +669,55 @@
     },
     {
       "path": "runtime/tests/content-type-policy.test.ts",
-      "sha256": "a91166d1e4408c2c4a59b4e429bc8b699815e24ed788a2e92e6e9bb69e18ed72"
+      "sha256": "648e167a4b1c6b4a9537007545868ac76e3aaa8c5a381ae1eb25a465d7d5bed6"
     },
     {
       "path": "runtime/tests/cron-cli.test.ts",
-      "sha256": "f14fd6eb099aebe0230071fcf6c9814e82a4cbaaa7711f58262212ef58fe5705"
+      "sha256": "9e9b6764c580198b1b3e2359db6bb479925fb1112d6ca4e38a0bc2a644e348d5"
     },
     {
       "path": "runtime/tests/db-broker-bench.php",
-      "sha256": "454505c20e0596d7ca1fa0255cb260d6db510abe9f01c027c3554d103daee9ea"
+      "sha256": "c8d3a9900945eaad0ed4ff8fe79f1f59af8adf5736e7b58f9490edbcacb88a23"
     },
     {
       "path": "runtime/tests/db-broker-cli.php",
-      "sha256": "01fafa31d97656b9c5d8c2d00ebb278ddf7039eac06fb31c1f5013ad5e8643db"
+      "sha256": "36c672256f7363bb57d0d590aa8a049ca0e2ddb13f059c76fbe882b456ad074e"
     },
     {
       "path": "runtime/tests/db-broker-corpus.ts",
-      "sha256": "11a8f39838047152d58a1b577b57be9e8dd6307a5fea42752860bb68d58ecd52"
+      "sha256": "f879f9a0d97af7d6bb7bce85105202f5febdbdcd57bee866f02ed50cd7582634"
     },
     {
       "path": "runtime/tests/db-broker.test.ts",
-      "sha256": "3e34639a17cea0fa9ebb2a106692bad31b1d39048859cf1a187aa418b5a3fbb4"
+      "sha256": "9a26a8e9d0e131dbd9ebd1f7455b714ce9a1685b8ac8faff70fb55425bdf1752"
     },
     {
       "path": "runtime/tests/dispatch.test.ts",
-      "sha256": "8a5e1d9f38d84ea9e35bbc872a189c138d640087e683b6de5ebeff350b959ba9"
+      "sha256": "4764d81602dfc54214d8a9d557eb639bf06c46c19ac20125096f800bdfbbc299"
     },
     {
       "path": "runtime/tests/engine-manifest-drift.test.ts",
-      "sha256": "dad140d4ea0c81573a49d130c0becaad76db4cbfea305452bd7d3801fccacf44"
+      "sha256": "53b193f91aaa63a81012dce162d0c381a2a4490e3d66f73054e0ea5bbb3ec491"
     },
     {
       "path": "runtime/tests/engine-update-route.test.ts",
-      "sha256": "fc259ad2aa69fbddd648186fcf417d01fd2b68d46137094fa3b09f2f0478a8a4"
+      "sha256": "3ee51ae7381c86f1e360f2b55a1b255802f6dc5db6bbf4d2f66d01e8f6c32247"
     },
     {
       "path": "runtime/tests/entrypoint-probes.ts",
-      "sha256": "9ac2e0e4101f119e5d0d014c0848a5a6435f99a08a1e7bd033580ef568d780f4"
+      "sha256": "1c6c34affd84c0b0bcf96cb1818a574755853a8fa6e18c233259be277855580a"
     },
     {
       "path": "runtime/tests/entrypoints.test.ts",
-      "sha256": "b9799d28da49bad7ef37e8c794eaa194d9174cc3e8cd160e55d775d3ea0682fa"
+      "sha256": "267f28282862ad6bdede33eb0d5e93e54d47e536f54c7a4454414a0577cc6b21"
     },
     {
       "path": "runtime/tests/finalize-rust.test.ts",
-      "sha256": "ea88d0fd2628806fe6a2c474b0eb355f7ad150791d095d491f65f19dfe1822f7"
+      "sha256": "8faa9f91db1a36fe2c8e6b8047a9e7652083b035f24147fcf2360bc89ff12ef2"
     },
     {
       "path": "runtime/tests/fixtures/admission-counter-generation.php",
-      "sha256": "fa3b27fe89403b6a7527483de362c8ea445fef4aa968b3549e24310720b46c3d"
+      "sha256": "caf907191d70eb7d28645195604fc1ee03df65cab87384fd6450203a4878d60c"
     },
     {
       "path": "runtime/tests/fixtures/database-egress-addresses.json",
@@ -725,19 +725,19 @@
     },
     {
       "path": "runtime/tests/fixtures/tenant-prelude-probe.php",
-      "sha256": "71e8f5b5fc2f42182af932199311be77178484ea5a2eb8de0d81496d000d97d6"
+      "sha256": "2ac837649204c3e37145e9eaaf16ef4671a3e102ba8963c1c619725fa30069ca"
     },
     {
       "path": "runtime/tests/functions-artifacts.test.ts",
-      "sha256": "b27c175770e733dfc5cc3e69993e4d330821a12a3c1aae71c250f5b7febd26c3"
+      "sha256": "b7534b2f790b8aed83f17346236d34420d5e7269ed217982b5ba755d981aae19"
     },
     {
       "path": "runtime/tests/functions-purge.test.ts",
-      "sha256": "c8f6d8c1f48a5e263d06f21645b0400a75e5092a2216612889174464448221c4"
+      "sha256": "20de9862f2e71c3b6cc093d5804074a2bc0e86e5842680344c0709689fe1097c"
     },
     {
       "path": "runtime/tests/functions-relay.test.ts",
-      "sha256": "b1b466e30a0fcd028d076d2b00de951dec9e3b494ca4aa5c9fa4f1a49b3c65fa"
+      "sha256": "b21a5946fef4a40c0eaf21a233936f87f325763f58e425c548fa0b2131f88c09"
     },
     {
       "path": "runtime/tests/grant-conformance.php",
@@ -745,35 +745,35 @@
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "a6d86c28cbd3ca914480a4ee34e51411a7aa2b1c936a64ef8e7f654c2ce8a89e"
+      "sha256": "9517077bce72acd276e13f30a11f88db90384b8c7aa7d1b2c56700017eddda3b"
     },
     {
       "path": "runtime/tests/headers.test.ts",
-      "sha256": "4444bf83bf86d9a84d4575437124f9d10d427ac0c022611587750335a5faf30f"
+      "sha256": "c1f320761da33a3a4df366b1286d8ca29cda81759055df02edfbe0f3303b14ff"
     },
     {
       "path": "runtime/tests/html-inject.test.ts",
-      "sha256": "840d6f83b8bf8c58b397da1db1902d7505986752d7613b4dd42c308f1709d6cf"
+      "sha256": "dd536b55f363842a175720a94e9d6a882a9451ded1fd6062622d9a1a8d072ae1"
     },
     {
       "path": "runtime/tests/installer-native.test.ts",
-      "sha256": "7a7b058e42bbc68fc552b1615f3dac62744de574a36acc3f8c4fea604ed0de04"
+      "sha256": "fb4b5c2cc75a2d2942daed043acfb3389b51eafe8fca4defc4b2b6a03b7ed802"
     },
     {
       "path": "runtime/tests/installer-real-manifest.test.ts",
-      "sha256": "3337f9a510630e866e972becd9cd68dc2816b407d07c4bd6cebbe95d4ed9f662"
+      "sha256": "52e4dd6c7b503a05307bc724410f982475ff962f00a8953caf724320773918c2"
     },
     {
       "path": "runtime/tests/installer-update.test.ts",
-      "sha256": "1e5e4c66e499856d788f69f1ae860ce30c4b18fd4bedca702bd1b9579979d342"
+      "sha256": "b7a37dd68605010517a5177d17870921963f6ca4b58dad16a98c939cd160ddd1"
     },
     {
       "path": "runtime/tests/job-runner.test.ts",
-      "sha256": "60bb8e58309baa04518a550c748e451d05f036a3b42916e30fef1e3e72b7b6dc"
+      "sha256": "0a037e7869f25bda0fdfea01302a5578a0c6c5fd4a4c188891deee74b5fb596f"
     },
     {
       "path": "runtime/tests/mysql-container.ts",
-      "sha256": "cca3249aeb947922c645bf0748748c4f992da4854ad5ad791e29625f5ad2e076"
+      "sha256": "00227f65f42376c1d5445a89e8ea0de7ed8af5cc39408d82a2818b68c0fdbe63"
     },
     {
       "path": "runtime/tests/pages-system.test.ts",
@@ -781,7 +781,7 @@
     },
     {
       "path": "runtime/tests/php-functions.test.ts",
-      "sha256": "1e8910482f4993baa0ff58659c32445876cf8be7ad5380f04ef85236ed01f0b3"
+      "sha256": "cc78a7a144c9a767a047c0233212f93562c7ae78e0d2c0f4b9d5db2025f30a5c"
     },
     {
       "path": "runtime/tests/php-router.php",
@@ -793,39 +793,39 @@
     },
     {
       "path": "runtime/tests/proxy-cache-upstream.test.ts",
-      "sha256": "ef9469037f13cad7d70d7ea0f7b10df418dd3c5a4f9ef51bf2b4d80e73b0d1af"
+      "sha256": "7a0f77fedb6643e2f811a6dd842177280fa020778606c7795bc7408abda4e01e"
     },
     {
       "path": "runtime/tests/route-index.test.ts",
-      "sha256": "50edb26d5f8b3ddf59ba5b5284837c4dbc10ac26635f594a48fcbc42fded3d36"
+      "sha256": "f1525b14aa48c29f5c7ebf76ec1e9342b079e551bd49a4fd65428c8e7781e3a4"
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "57b318245c65576b1359e0634ccffd7b898173d7931a59f60a15b7fef95694a4"
+      "sha256": "6fd99b03526c318c35e96d54b1e02cd86abcc7985f7986d772b0cd4e62938d4a"
     },
     {
       "path": "runtime/tests/run.sh",
-      "sha256": "a895e434a2708ea8848f6d0a547ade285f6f04f923d8e1e14b53a94997cf3399"
+      "sha256": "0529bb13573c9845bfc4d303aafd7aacd8f6cf196ee9775e8949ea314f09fe9d"
     },
     {
       "path": "runtime/tests/s3-cli.php",
-      "sha256": "96d6344c8404ef5f0b616979cfe80f96311bd2b6ae771770480939822524c395"
+      "sha256": "c44f11b35de09a6e4ca99d1d1469dc72b3f98dea0ab3bdaafa676093954a60e4"
     },
     {
       "path": "runtime/tests/s3-fake.ts",
-      "sha256": "23bf918922861081ee1a635d71b47a519a4476144b49f43246f79df27f9d19c4"
+      "sha256": "7e639373a9c4c1eec4527c52fd1ce9c7809b13cd2bd8b2a2b386baade914d1f4"
     },
     {
       "path": "runtime/tests/s3.test.ts",
-      "sha256": "c3a5445a883b551e3eecade1f5dfa985bc4afa18bae34d010c12e79d03e6592d"
+      "sha256": "2745f20aa54066ae9210c50c52d0981a3fe4593c0dc75abd9be6d7713ba0cea0"
     },
     {
       "path": "runtime/tests/spacefast-sdk.test.ts",
-      "sha256": "40945e4583c5a71ed456cba625e3787651c20f83683528ef706005c3de871e9b"
+      "sha256": "0a7023607be0448d5f13398ec9fd85bdbb9d05347c8271913f4baff42a20f2a1"
     },
     {
       "path": "runtime/tests/storage.test.ts",
-      "sha256": "0d9c5e961aad839e7b703754f1511a498a5c6fa8c4c3f670bb87ff2dae2dd43f"
+      "sha256": "90cb3fea0b1be58396f7dff2860a82575be13168c8d6363d03002d8b30e6fcf5"
     },
     {
       "path": "runtime/tests/subprocess-cli.php",
@@ -837,43 +837,43 @@
     },
     {
       "path": "runtime/tests/tenant-prelude.test.ts",
-      "sha256": "9bb91be919a0ca2829d415d4e88a27d79ac7f5911faeb71ac5eaebef29c8bcd7"
+      "sha256": "06b558b385975870cac5fb644715368cdaf30a23b85c39819b4bef0e4007ae54"
     },
     {
       "path": "runtime/tests/tiering.test.ts",
-      "sha256": "12adae224c25ec46f52e93c1145681ca3c01484034a9b9fce4530cdd3c5bfffb"
+      "sha256": "d56c6f3f5253e156480cf4464b0090b0aa53e108730d94ee3c300d979ef66522"
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "a7976e6a067fccb3f8cf79f0da70433100b200e3e719f7f4d0cfc6c03ce769b1"
+      "sha256": "68f32d2cee8b0a58685663a72ad2a012e9195664aaf0c16cd033788ef70f816b"
     },
     {
       "path": "runtime/tests/uploads.test.ts",
-      "sha256": "b02358d3d809e58a0cd5588b82236b07f48760d6a1784d7b7514cd713d30402f"
+      "sha256": "6836e7518916c0dcc611edf8f0b4a536bb351577aa6f3d3da768b4c7bfaf60fa"
     },
     {
       "path": "runtime/tests/version-files.test.ts",
-      "sha256": "2d726e595e7b32d07d8dfbe4ef069d0e5af5a46a211901726be3bb5f951f3858"
+      "sha256": "e056cc4f6a27d387bd40b00c98c3c82b885da14d9bccc3e3b74774f188fb5889"
     },
     {
       "path": "runtime/tests/write-lock.test.ts",
-      "sha256": "42688d1383b4fef0ba1f0c56d322362fdb4f3e7f03442ce6e3816eea13902df1"
+      "sha256": "33d39f7452413e193e5e3c8e4f4f4dc0ea5c3460d62525b62e1327c322107e41"
     },
     {
       "path": "runtime/tests/zero-config-safety.test.ts",
-      "sha256": "6fd7af1166f4e00211b4493dbeac444217180ddcd4e49761f2480eb05d818191"
+      "sha256": "8ed81804c1237c8a66e15381495db42c51d79ea47f6c6dd16dc4c949f9728aac"
     },
     {
       "path": "runtime/tests/zero-db-dump.test.ts",
-      "sha256": "4cc47ad0e6465fdfbb2c2714332dfbfb3621da83c36a935f2e6bc33822235a83"
+      "sha256": "f77da62911ccd2fb734d6cb96b409c8bc71d2e3368869b98097289cf86cdbaed"
     },
     {
       "path": "runtime/tests/zero-runtime.test.ts",
-      "sha256": "3c6c4aea8e2355bf3b3225572e7210338f9970ff06771c951d7c1d5216495d45"
+      "sha256": "417ef67569442bb7f1d0e55ecaa04036962430d1d3008f6294c4f2cc155dc82a"
     },
     {
       "path": "runtime/tests/zero-rust-runner.test.ts",
-      "sha256": "4ec9def521c618b2a0f5371273101b2b25c054db185d9192d36ea1732c5ad2b2"
+      "sha256": "50b3041ca892c7a3cbf4b62d47c7770ac11197acb79128dfea125b2d24333b46"
     },
     {
       "path": "rust-toolchain.toml",
@@ -889,7 +889,7 @@
     },
     {
       "path": "scripts/check-finalizer-protocol.mjs",
-      "sha256": "4af6f7510a0640b60a75a7422b44464fd187b3ecef41cfbd99f12c47deea060c"
+      "sha256": "1e518c0ed09337357d7afa75901475e6e98214f136b70c848ca258c2275ee436"
     }
   ]
 }

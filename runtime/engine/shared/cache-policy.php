@@ -2,6 +2,23 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/context.php';
+require_once __DIR__ . '/finalizer-protocol.generated.php';
+
+function _sf_cache_control(string $cacheClass, bool $open): string
+{
+    if (!$open) {
+        return STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+    }
+    return match ($cacheClass) {
+        STATTIC_RUNTIME_CACHE_CLASS_IMMUTABLE => 'public, max-age=31536000, immutable',
+        // Everything else a version serves is version-pinned until activation.
+        // A whole-host purge accelerates sync, but it is a deferred
+        // best-effort side effect: correctness cannot depend on every purge
+        // succeeding. Keep a bounded shared lifetime while browsers revalidate
+        // every load (max-age=0 + ETag).
+        default => 'public, s-maxage=600, max-age=0, must-revalidate',
+    };
+}
 
 // One answer to "may anything store this response, and where". Every lane asks
 // here with its own inputs; none of them re-reads the request-scoped flags
@@ -89,9 +106,9 @@ function _stattic_cache_policy(array $lane = []): array
         // The provider edge is method-blind (_stattic_edge_cache_directive): it
         // keys a stored response on host+path+query alone, so a stored answer
         // to a POST/PUT/DELETE would be replayed to later GETs of the URL.
-        // Whatever policy the lane, a worker or its upstream composed — a null
-        // hand-back to the lane's own headers included — a response to a
-        // non-GET/HEAD request leaves as private no-store. Deliberately WITHOUT
+        // A response to a non-GET/HEAD request leaves as private no-store
+        // whatever the lane, a worker or its upstream composed, including a
+        // null hand-back to the lane's own headers. Deliberately WITHOUT
         // flipping `private`, which selects the private-CONTENT boundary; that
         // boundary governs protected bytes, not method safety.
         $cacheControl = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
@@ -154,8 +171,8 @@ function _stattic_cache_policy_send(array $policy): void
         }
         header($name . ': ' . $value, true);
     }
-    // §16: the edge opt-in travels with the policy that justifies it, and this is
-    // its only writer — a tenant can never steer the edge.
+    // §16: the edge opt-in travels with the policy that justifies it, and this
+    // is its only writer, so a tenant can never steer the edge.
     _stattic_clear_platform_owned_response_headers();
     header(
         STATTIC_EDGE_CACHE_HEADER . ': ' . _stattic_edge_cache_directive($policy['cache_control']),

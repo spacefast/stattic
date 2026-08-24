@@ -1,20 +1,14 @@
-// Minimal in-process fake S3-compatible bucket for exercising shared/s3.php's
-// SigV4 signer + client (plan §26/§28, DECISIONS I-12/I-13/I-14). Path-style
-// addressing (`/{bucket}/{key...}`); a vhost-style request against this
-// fixture works too as long as the caller pins the vhost host to this
-// server's loopback address (CURLOPT_RESOLVE — see s3.test.ts) since there is
-// no real DNS for `{bucket}.127.0.0.1` in a test environment.
+// In-process fake S3 bucket for exercising shared/s3.php's SigV4 signer and
+// client (plan §26/§28, DECISIONS I-12/I-13/I-14). Path-style addressing
+// (`/{bucket}/{key...}`); a vhost-style request works too if the caller pins the
+// vhost host to this server's loopback address (CURLOPT_RESOLVE, see
+// s3.test.ts), since there is no DNS for `{bucket}.127.0.0.1`.
 //
-// Verifies (loosely, per the house rule "run the code, not source text" —
-// this loose check is about the WIRE PROTOCOL our client emits, not
-// implementation source): the Authorization header has the AWS4-HMAC-SHA256
-// shape with Credential=/SignedHeaders=/Signature= present, and that a PUT's
-// x-amz-content-sha256 header matches the actual received body (mirrors the
-// real probe finding in plan §18: wrong hash -> 400, UNSIGNED-PAYLOAD -> 200).
-// This is intentionally not a full reimplementation of AWS's signature
-// verification (recomputing the HMAC chain) — that would just be testing the
-// fixture against itself. It is enough to catch "sent unsigned/malformed
-// requests" while independently confirming payload integrity end to end.
+// It checks the wire protocol the client emits: the Authorization header has the
+// AWS4-HMAC-SHA256 shape with Credential=/SignedHeaders=/Signature=, and a PUT's
+// x-amz-content-sha256 matches the received body (plan §18: wrong hash -> 400,
+// UNSIGNED-PAYLOAD -> 200). It does not recompute the HMAC chain, which would
+// only test the fixture against itself.
 import { randomUUID } from "node:crypto";
 
 import type { Server } from "bun";
@@ -116,6 +110,26 @@ export async function startFakeS3(bucket = "test-bucket"): Promise<FakeS3> {
             status: 403,
           },
         );
+      }
+
+      // ListObjectsV2: the bucket root with `list-type=2`. Lexicographic
+      // ordering like the real thing, so a paged caller that deletes what it
+      // lists makes progress instead of re-reading the same window.
+      if (req.method === "GET" && key === "" && url.searchParams.get("list-type") === "2") {
+        const prefix = url.searchParams.get("prefix") ?? "";
+        const maxKeys = Number(url.searchParams.get("max-keys") ?? "1000");
+        const matched = [...objects.keys()].filter((name) => name.startsWith(prefix)).toSorted();
+        const page = matched.slice(0, maxKeys);
+        return new Response(listXml(bucket, prefix, page, matched.length > page.length), {
+          status: 200,
+          headers: { "content-type": "application/xml" },
+        });
+      }
+
+      if (req.method === "DELETE") {
+        // S3 DELETE is idempotent: a key that is not there answers 204 too.
+        objects.delete(key);
+        return new Response(null, { status: 204 });
       }
 
       if (req.method === "PUT") {
@@ -220,6 +234,21 @@ export async function startFakeS3(bucket = "test-bucket"): Promise<FakeS3> {
     },
     stop: () => server.stop(true),
   };
+}
+
+function listXml(bucket: string, prefix: string, keys: string[], truncated: boolean): string {
+  const contents = keys
+    .map((key) => `<Contents><Key>${escapeXml(key)}</Key><Size>0</Size></Contents>`)
+    .join("");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<ListBucketResult><Name>${escapeXml(bucket)}</Name><Prefix>${escapeXml(prefix)}</Prefix><KeyCount>${keys.length}</KeyCount><IsTruncated>${truncated}</IsTruncated>${contents}${truncated ? `<NextContinuationToken>${escapeXml(keys.at(-1) ?? "")}</NextContinuationToken>` : ""}</ListBucketResult>\n`;
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function errorXml(code: string, message: string): string {

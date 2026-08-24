@@ -42,10 +42,6 @@ test("wp.cloud config is decryptable before a clean route enters the runtime", (
       path.join(engineRoot, "init.php"),
       '<?php echo json_encode(["dbPassword" => defined("DB_PASSWORD") ? DB_PASSWORD : null]);',
     );
-    copyFileSync(
-      path.resolve(import.meta.dir, "../engine/entrypoints/prepend.php"),
-      path.join(engineRoot, "entrypoints/prepend.php"),
-    );
     mkdirSync(path.join(root, ".stattic"), { recursive: true });
     writeActiveReleasePointer(path.join(root, ".stattic"), "releases/test");
     copyFileSync(
@@ -94,10 +90,6 @@ test("a CLI process with no request passes through custom-redirects unserved", (
       `<?php require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/context.php"))};`,
     );
     writeFileSync(path.join(engineRoot, "init.php"), '<?php echo "SERVED"; exit(0);');
-    copyFileSync(
-      path.resolve(import.meta.dir, "../engine/entrypoints/prepend.php"),
-      path.join(engineRoot, "entrypoints/prepend.php"),
-    );
     mkdirSync(path.join(root, ".stattic"), { recursive: true });
     writeActiveReleasePointer(path.join(root, ".stattic"), "releases/test");
     copyFileSync(
@@ -124,6 +116,25 @@ test("a CLI process with no request passes through custom-redirects unserved", (
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("custom-redirects passes a nonce-bound FPM readiness probe through the private namespace", async () => {
+  const nonce = "a".repeat(32);
+  const publicPath = `/__spacefast/php-fpm-readiness-${nonce}.php`;
+  const probePath = path.join(rt.root, publicPath);
+  mkdirSync(path.dirname(probePath), { recursive: true });
+  copyFileSync(path.resolve(import.meta.dir, "../php-fpm-readiness.php"), probePath);
+
+  const response = await fetch(`${rt.baseUrl}${publicPath}?nonce=${nonce}`);
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("application/json");
+  expect(await response.json()).toEqual({
+    nonce,
+    php_version: expect.any(String),
+    php_version_id: expect.any(Number),
+    php_sapi: expect.any(String),
+  });
 });
 
 test("the loader restores full PHP error logging without leaking diagnostics to stdout", () => {

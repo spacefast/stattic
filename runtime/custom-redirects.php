@@ -1,9 +1,9 @@
 <?php
 declare(strict_types=1);
 
-// The provider owns the error-log destination. The runtime owns whether PHP
-// reports to it. Keep diagnostics out of visitor responses, but never reduce
-// the reported severity set or disable the provider's log pipeline.
+// The provider owns the error-log destination; the runtime owns whether PHP
+// reports to it. Keep diagnostics out of visitor responses without reducing
+// severity or disabling the provider's log pipeline.
 error_reporting(E_ALL);
 ini_set('log_errors', '1');
 ini_set('display_errors', '0');
@@ -17,10 +17,10 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
 }
 
 (static function (): void {
-    // A CLI process with no request to serve is a tool loading WordPress — the
-    // purge worker, wp-cli — not a visitor. Classifying it as a request for '/'
-    // would serve the space and exit() the tool mid-run (which is how engine
-    // purge kicks sat queued forever). Simulated-request drivers (FPM always,
+    // A CLI process with no request to serve is a tool loading WordPress, the
+    // purge worker or wp-cli, not a visitor. Classifying it as a request for
+    // '/' would serve the space and exit() the tool mid-run; that is how engine
+    // purge kicks sat queued forever. Simulated-request drivers (FPM always,
     // the test harness by contract) carry REQUEST_METHOD and still classify.
     if (PHP_SAPI === 'cli' && !isset($_SERVER['REQUEST_METHOD'])) {
         return;
@@ -53,9 +53,9 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
     $script = basename(__FILE__);
     if ($script === 'custom-redirects.php') {
         // This copy is the provider's auto_prepend for every request, and each
-        // entrypoint below runs its own script right after — so the visitor
-        // engine must not be loaded in front of them. This is the request's one
-        // classification: prepend.php trusts the decision made here.
+        // entrypoint below runs its own script right after, so the visitor
+        // engine must not load in front of them. This is the request's one
+        // classification; prepend.php trusts it.
         // BEGIN GENERATED runtime entrypoints — DO NOT EDIT
         // Source: runtime/engine-manifest.json (aliases under __spacefast/).
         // Regenerate: bun run check:runtime-entrypoints -- --write
@@ -66,8 +66,30 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
         ];
         // END GENERATED runtime entrypoints
         $path = explode('?', (string) ($_SERVER['REQUEST_URI'] ?? '/'), 2)[0];
-        if (!isset($entrypointPaths[$path])) {
-            require $releaseRoot . '/engine/entrypoints/prepend.php';
+        $isFpmReadinessProbe = preg_match(
+            '#^/__spacefast/php-fpm-readiness-[a-f0-9]{32}\.php$#',
+            $path
+        ) === 1;
+        if (
+            !isset($entrypointPaths[$path])
+            && !$isFpmReadinessProbe
+            && is_file($releaseRoot . '/engine/shared/context.php')
+        ) {
+            // The visitor lane. DB_PASSWORD moves from the process environment
+            // into a constant before any engine code runs, so tenant-adjacent
+            // code paths never see it in $_SERVER/$_ENV/getenv.
+            if (!defined('DB_PASSWORD')) {
+                $spacefastDbPassword = getenv('DB_PASSWORD');
+                if (is_string($spacefastDbPassword)) {
+                    define('DB_PASSWORD', $spacefastDbPassword);
+                    if (PHP_SAPI !== 'cli') {
+                        unset($_SERVER['DB_PASSWORD'], $_ENV['DB_PASSWORD']);
+                        putenv('DB_PASSWORD');
+                    }
+                }
+                unset($spacefastDbPassword);
+            }
+            require $releaseRoot . '/engine/init.php';
         }
         return;
     }

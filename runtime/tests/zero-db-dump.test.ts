@@ -1,13 +1,11 @@
 // The management dump of a version's Zero database (admin/zero-db.php), against
 // the real PHP engine.
 //
-// Two lanes on purpose. Everything about routing, the management JWT, the
-// contract shape and — most importantly — WHICH tables a caller may address is
-// decided from the version's own compiled artifacts, before a database
-// connection exists; those tests need no MySQL and run everywhere. Only the row
-// dump itself needs a live server, and it needs PHP's mysqli extension with it
-// (a dependency shared with functions-relay.test.ts), so it
-// stands alone at the bottom of this file and brings up its own container.
+// Two lanes. Routing, the management JWT, the contract shape and which tables a
+// caller may address are all decided from the version's compiled artifacts
+// before a database connection exists, so those tests need no MySQL. Only the
+// row dump needs a live server plus PHP's mysqli extension, so it stands alone
+// at the bottom of this file and brings up its own container.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 
 import {
@@ -28,8 +26,8 @@ import {
 import { startMysqlContainer, stopMysqlContainers } from "./mysql-container.ts";
 
 const SPACE_ID = "spc_zero_dump";
-// A capsule with no tables: enough to prove the route, the scope refusal and
-// the contract shape without a database anywhere in the picture.
+// A capsule with no tables: enough for the route, the scope refusal and the
+// contract shape without a database.
 const ZERO_VERSION_ID = "ver_zero_dump_1";
 const STATIC_VERSION_ID = "ver_zero_dump_static";
 const FUNCTIONS_VERSION_ID = "ver_zero_dump_functions";
@@ -197,8 +195,8 @@ test("a version whose capsule declares no tables dumps an empty database", async
   const dumped = await dumpOk(rt, ZERO_VERSION_ID);
   expect(dumped).toEqual({
     versionId: ZERO_VERSION_ID,
-    // Capsule identity is the control plane's name for the build; the engine
-    // reports the version it was asked about and leaves that field to it.
+    // artifactId is the control plane's name for the build; the engine reports
+    // only the version it was asked about.
     artifactId: null,
     schemaHash: SCHEMA_HASH,
     tables: [],
@@ -227,10 +225,9 @@ async function refusals(names: readonly string[]): Promise<Record<string, string
 }
 
 test("only tables this version's capsule declares can be addressed", async () => {
-  // WordPress core, another space's scoped tables, and the db-broker fixture
-  // all live in the same MySQL as a hosted capsule's own. None of them is part
-  // of this capsule, so all three are refused identically — and refused before
-  // a connection exists, which is why this holds with no database anywhere.
+  // WordPress core, another space's scoped tables and the db-broker fixture all
+  // live in the same MySQL as a capsule's own. None belongs to this capsule, so
+  // all three are refused before a connection exists.
   expect(await refusals(["wp_users", "sf_spc_other_todos_0123456789", "dt"])).toEqual({
     wp_users: "404 zero_db_table_not_found",
     sf_spc_other_todos_0123456789: "404 zero_db_table_not_found",
@@ -247,9 +244,9 @@ test("a table name that is not an identifier is refused before anything reads it
 });
 
 test("a Functions version is refused rather than answered as an empty database", async () => {
-  // A worker's tables are created over the relay under names nothing declares,
-  // in a MySQL it shares with co-tenants. `tables: []` would read as "your
-  // worker stored nothing", which is the one answer this route must never give.
+  // A worker's tables are created over the relay under names nothing declares.
+  // `tables: []` would read as "your worker stored nothing", the one answer this
+  // route must never give.
   const response = await dump(rt, FUNCTIONS_VERSION_ID);
   expect(response.status).toBe(409);
   expect(await errorCode(response)).toBe("zero_db_kind_unsupported");
@@ -322,10 +319,8 @@ test("the dump runs the same handler over the SSH dispatch transport", async () 
 
 // --- live database --------------------------------------------------------------------
 //
-// REQUIRES: docker (for the MySQL server) AND a PHP built with mysqli, which is
-// what the broker connects through. Without the extension this test fails the
-// way functions-relay.test.ts does on the same machine; nothing above it depends on
-// either.
+// REQUIRES: docker for the MySQL server, and a PHP built with mysqli, which the
+// broker connects through. Nothing above this line depends on either.
 test("rows come back for the capsule's scoped tables, ordered and bounded by the limit", async () => {
   const mysql = await startMysqlContainer({
     namePrefix: "stattic-zero-dump",
@@ -334,11 +329,16 @@ test("rows come back for the capsule's scoped tables, ordered and bounded by the
   });
   const spaceId = "spc_zero_dump_live";
   const versionId = "ver_zero_dump_live_1";
-  const runtime = await startRuntime({ env: { SPACEFAST_ZERO_DATABASE_URL: mysql.url } });
+  const runtime = await startRuntime({
+    env: {
+      SPACEFAST_ZERO_DATABASE_URL: mysql.url,
+      SPACEFAST_ZERO_DB_READ_DEADLINE_MS: "100",
+    },
+  });
   mysqlRuntime = runtime;
 
-  // Finalize compiles the capsule and applies its migrations, so the physical
-  // tables below are created by the engine itself rather than by the fixture.
+  // Finalize compiles the capsule and applies its migrations, so the engine
+  // creates the physical tables below, not the fixture.
   await deploy(runtime, {
     spaceId,
     versionId,
@@ -390,8 +390,26 @@ test("rows come back for the capsule's scoped tables, ordered and bounded by the
     { note_id: 3, note_created_at: "2026-01-02T00:00:00.000Z", note_title: "third" },
   ]);
 
-  // Naming the table answers with that table alone, and the limit bounds the
-  // rows rather than the tables.
+  // Re-apply runs the statements the deploy already ran, against a schema that
+  // now holds rows. Replaying a stored plan has to be a no-op: repairing a
+  // half-created schema must not empty the table.
+  const reapplied = await api(
+    runtime,
+    "POST",
+    `/__spacefast/api.php/spaces/${spaceId}/versions/${versionId}/zero/migrate`,
+    "apply_zero_migrations",
+    { space_id: spaceId, version_id: versionId },
+  );
+  expect(reapplied.status).toBe(200);
+  expect(await reapplied.json()).toEqual({
+    space_id: spaceId,
+    version_id: versionId,
+    applied: true,
+  });
+  expect(mysql.exec("SELECT COUNT(*) FROM sf_spc_zero_dump_live_notes_1f76cb914b")).toBe("3");
+
+  // Naming the table answers with that table alone; the limit bounds rows, not
+  // tables.
   const named = await dumpOk(runtime, versionId, { table: "notes", limit: "2" }, spaceId);
   expect(named.tables.map((table) => table.name)).toEqual(["notes"]);
   expect(named.tables[0]?.rows).toEqual([
@@ -399,8 +417,8 @@ test("rows come back for the capsule's scoped tables, ordered and bounded by the
     { note_id: 2, note_created_at: "2026-01-01T00:00:00.000Z", note_title: "second" },
   ]);
 
-  // The scope refusal is the same one the no-database lane proves, here against
-  // a table that genuinely exists in this very database.
+  // The same scope refusal the no-database lane proves, here against a table
+  // that really exists in this database.
   const foreign = await dump(
     runtime,
     versionId,
@@ -455,10 +473,10 @@ test("rows come back for the capsule's scoped tables, ordered and bounded by the
   expect(staleExport.status).toBe(409);
   expect(await errorCode(staleExport)).toBe("zero_db_export_schema_changed");
 
-  // A second version of the same space whose compiled artifacts point at a
-  // co-tenant space's scoped table. The table is real — this deploy creates it
-  // in the shared MySQL — and the dump still refuses, because the physical name
-  // is not the one this space's scoping rule produces for `notes`.
+  // A second version whose compiled artifacts point at a co-tenant space's
+  // scoped table. This deploy really creates that table, and the dump still
+  // refuses: the physical name is not the one this space's scoping rule
+  // produces for `notes`.
   await deploy(runtime, {
     spaceId,
     versionId: UNSCOPED_VERSION_ID,
@@ -489,9 +507,57 @@ test("rows come back for the capsule's scoped tables, ordered and bounded by the
   expect(unscoped.status).toBe(409);
   expect(await errorCode(unscoped)).toBe("zero_db_table_unscoped");
 
-  // Naming the table cannot get past it either: the scope check runs before the
-  // requested-table lookup, so no name reaches the database.
+  // The scope check runs before the requested-table lookup, so no name reaches
+  // the database.
   const unscopedNamed = await dump(runtime, UNSCOPED_VERSION_ID, { table: "notes" }, spaceId);
   expect(unscopedNamed.status).toBe(409);
   expect(await errorCode(unscopedNamed)).toBe("zero_db_table_unscoped");
+
+  // Hold a real MySQL table lock from another connection. The marker row is the
+  // signal: the export starts only after the server granted the lock, with no
+  // timing guess.
+  const lockClient = Bun.spawn(
+    [
+      "docker",
+      "exec",
+      "-i",
+      mysql.name,
+      "mysql",
+      "-uroot",
+      `-p${MYSQL_ROOT_PASSWORD}`,
+      "--default-character-set=utf8mb4",
+      "--unbuffered",
+      "-N",
+      "-B",
+      MYSQL_DATABASE,
+    ],
+    { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+  );
+  lockClient.stdin.write(
+    "LOCK TABLES sf_spc_zero_dump_live_notes_1f76cb914b WRITE; SELECT 'locked';\n",
+  );
+  await lockClient.stdin.flush();
+  const lockReader = lockClient.stdout.getReader();
+  const lockSignal = await lockReader.read();
+  lockReader.releaseLock();
+  expect(new TextDecoder().decode(lockSignal.value)).toContain("locked");
+  try {
+    // Neither a server-side lock nor a dead socket may hold a PHP-FPM worker
+    // past the read deadline.
+    const deadlineStarted = performance.now();
+    const blockedExport = await exportDatabase(
+      runtime,
+      versionId,
+      { table: "notes", schemaHash: SCHEMA_HASH, limit: "1" },
+      spaceId,
+    );
+    const deadlineElapsedMs = performance.now() - deadlineStarted;
+    expect(blockedExport.status).toBe(500);
+    expect(await errorCode(blockedExport)).toBe("zero_db_export_failed");
+    expect(deadlineElapsedMs).toBeLessThan(5_000);
+  } finally {
+    lockClient.stdin.write("UNLOCK TABLES; quit\n");
+    lockClient.stdin.end();
+    await lockClient.exited;
+  }
 }, 600_000);

@@ -76,9 +76,9 @@ beforeAll(async () => {
   runtimeRoot = mkdtempSync(path.join(os.tmpdir(), "spacefast-runtime-atomic-config-"));
   const runtimePath = path.join(runtimeRoot, "fake-runtime.php");
   const phpPath = Bun.which("php") ?? "/usr/bin/php";
-  // One binary serves the finalize and Zero lanes. Only `invoke` is faked here
-  // (so the runner's env and its emitted events are observable); every other
-  // subcommand — `finalize` above all — delegates to the real binary.
+  // One binary serves the finalize and Zero lanes. Only `invoke` is faked, so
+  // the runner's env and emitted events are observable; every other subcommand,
+  // `finalize` above all, delegates to the real binary.
   writeFileSync(
     runtimePath,
     `#!${phpPath}
@@ -128,8 +128,8 @@ echo json_encode([
       SPACEFAST_ZERO_CALLBACK_ALLOWED_HOSTS: "127.0.0.1",
     },
     // Provider-owned DB_* values are ordinary process configuration, not
-    // duplicated Spacefast persistent data. An omitted DB_HOST exercises the
-    // standard local-MySQL default observed on the public runtime lane.
+    // duplicated Spacefast persistent data. Omitting DB_HOST exercises the
+    // local-MySQL default of the public runtime lane.
     env: {
       DB_NAME: "zero database",
       DB_USER: "zero:user",
@@ -179,10 +179,10 @@ afterAll(() => {
   }
 });
 
-// Zero realtime is the one live push lane the runtime keeps (contracts §10 —
-// everything else drains from the journal). This pins where its credentials and
-// destinations come from: the per-version `zero.realtime` config, never a
-// global, and never at all when the version declares none.
+// Zero realtime is the one live push lane the runtime keeps (contracts §10;
+// everything else drains from the journal). Its credentials and destinations
+// come from the per-version `zero.realtime` config, never a global, and not at
+// all when the version declares none.
 test("Zero realtime uses per-version config and stays silent without it", async () => {
   const endpoint = await get(rt, HOST, "/api/atomic-config");
   expect(endpoint.status).toBe(201);
@@ -217,7 +217,7 @@ test("Zero realtime uses per-version config and stays silent without it", async 
   expect(replay.status).toBe(200);
   expect(await replay.json()).toEqual({ events: [{ id: "evt_atomic_config" }] });
   // The version's own callback token authenticates the replay; the fleet secret
-  // is not also leaked upstream.
+  // is not leaked upstream.
   expect(replays).toEqual([{ authorization: `Bearer ${CALLBACK_TOKEN}`, realtimeToken: "" }]);
 
   await deploy(rt, {
@@ -259,11 +259,11 @@ test("Zero realtime uses per-version config and stays silent without it", async 
     databaseUrl: DATABASE_URL,
   });
   // The runner emitted an event again, but this version declares no callback
-  // destination: nothing is delivered anywhere.
+  // destination, so nothing is delivered.
   expect(callbacks).toHaveLength(1);
 
-  // Replay still works without a per-version token — it falls back to the fleet
-  // secret from process config, presented under its own header.
+  // Without a per-version token, replay falls back to the fleet secret from
+  // process config, presented under its own header.
   const fallbackReplay = await get(rt, HOST, "/__spacefast/zero/realtime/events");
   expect(fallbackReplay.status).toBe(200);
   expect(replays[1]).toEqual({ authorization: "", realtimeToken: REALTIME_TOKEN });

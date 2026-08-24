@@ -9,13 +9,13 @@ declare(strict_types=1);
  * PHP Functions, Zero, the Functions relay. A loopback HTTP kick would answer
  * that by racing the visitor pool for a worker, and a second router would answer
  * it by drifting. So neither: this file STAGES a request into the superglobals the
- * front door already reads and then calls `_sf_serve_fast()` — the exact call
+ * front door already reads and then calls `_sf_serve_fast()`, the exact call
  * engine/init.php makes. Everything downstream is unaware it is on the CLI.
  *
  * What the CLI SAPI changes, and what it does not:
  *   * `header()` is a silent no-op and `headers_list()` is empty, so response
  *     HEADERS are not observable. The receipt therefore carries the status, not
- *     the header map — and the status IS observable: `http_response_code()`
+ *     the header map. The status IS observable: `http_response_code()`
  *     works under CLI. Exit code follows from it, which is the whole contract
  *     the provider's `site-cron-results` webhook keys on.
  *   * `_stattic_send_server_file()` already declines on any non-FPM SAPI, so
@@ -27,12 +27,12 @@ declare(strict_types=1);
  * Hardening is NOT relaxed anywhere. tenant-prelude.php CANNOT.C requires that
  * one request execute at most one space's tenant file, because `open_basedir`
  * cannot be widened once tightened and only php-fpm's per-request ini reset
- * un-pins it. A CLI process has no such reset — which is why this file runs
- * exactly ONE request and exits. Never loop it.
+ * un-pins it. A CLI process has no such reset, so this file runs exactly ONE
+ * request and exits. Never loop it.
  */
 
 require_once __DIR__ . '/../shared/context.php';
-require_once __DIR__ . '/serve-fast.php';
+require_once __DIR__ . '/serve.php';
 
 // Same shape as purge.php's result line, and for the same reason: a dispatched
 // route prints whatever tenant code feels like printing, so the receipt is a
@@ -41,7 +41,7 @@ require_once __DIR__ . '/serve-fast.php';
 const STATTIC_RUNTIME_INVOKE_RESULT_SENTINEL = 'spacefast-invoke-result: ';
 
 // Usage/config errors the caller can fix. Distinct from exit 1, which means the
-// request ran and answered >= 400 — the signal the provider webhook keys on.
+// request ran and answered >= 400, the signal the provider webhook keys on.
 const STATTIC_RUNTIME_INVOKE_EXIT_USAGE = 2;
 const STATTIC_RUNTIME_INVOKE_EXIT_UNRESOLVED = 3;
 const STATTIC_RUNTIME_INVOKE_EXIT_FAILED = 1;
@@ -85,7 +85,7 @@ function _stattic_cli_flags(array $argv): array
 
 /**
  * `name: value` pairs into the FastCGI request-parameter spelling the engine
- * reads everywhere ($_SERVER, never the process environment — the tenant scrub
+ * reads everywhere ($_SERVER, never the process environment: the tenant scrub
  * walks the environment, so a request header staged here is not something it
  * can or should remove).
  *
@@ -116,7 +116,7 @@ function _stattic_cli_request_params(array $raw): array
 }
 
 // content-type and content-length are request params without the HTTP_ prefix
-// (CGI/1.1 §4.1) — the same spelling php-fpm hands the engine, and the one
+// (CGI/1.1 §4.1), the same spelling php-fpm hands the engine and the one
 // functions-dispatch.php and the body readers look for.
 function _stattic_cli_request_param_name(string $name): string
 {
@@ -128,7 +128,7 @@ function _stattic_cli_request_param_name(string $name): string
  * Stage the request and hand it to the visitor lane. Never returns: every
  * terminal below exits, and the receipt rides the shutdown sequence.
  *
- * $platformParams are the request params only the ENGINE may assert — they are
+ * $platformParams are the request params only the ENGINE may assert. They are
  * re-applied after _stattic_strip_untrusted_edge_headers() has removed whatever
  * a client sent under the same names, so their presence downstream is proof the
  * engine synthesized the request.
@@ -191,19 +191,58 @@ function _stattic_cli_invoke(
  * Arm the receipt, before the dispatch that will exit.
  *
  * Two hops on purpose. Registering here puts this FIRST in the shutdown
- * sequence — ahead of the cleanup the serve lanes register DURING the request
- * (php-functions.php's scratch tmp, context.php's deferred-work queue) — and
- * the receipt has to exit(), which would skip all of it. So the first hop only
- * re-queues: a shutdown function registered from inside the shutdown sequence
- * is appended, so the second hop runs after everything the request registered.
+ * sequence, ahead of the cleanup the serve lanes register DURING the request
+ * (php-functions.php's scratch tmp, context.php's deferred-work queue), and
+ * the receipt has to exit(), which would skip all of it. So the first hop
+ * captures the terminal status before cleanup can replace error_get_last(),
+ * then re-queues: a shutdown function registered from inside the shutdown
+ * sequence is appended, so the second hop runs after everything the request
+ * registered.
  *
  * @param array{method: string, path: string} $request
  */
 function _stattic_cli_arm_receipt(array $request): void
 {
+    _stattic_cli_capture_fatal_errors();
     register_shutdown_function(static function () use ($request): void {
-        register_shutdown_function('_stattic_cli_receipt', $request);
+        // A cleanup warning must not hide the fatal that ended the handler.
+        $error = error_get_last();
+        $fatal = _stattic_cli_observed_fatal()
+            || (is_array($error)
+                && in_array($error['type'] ?? 0, [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true));
+        $code = http_response_code();
+        $status = $fatal ? 500 : (is_int($code) && $code > 0 ? $code : 200);
+
+        register_shutdown_function('_stattic_cli_receipt', $request, $status);
     });
+}
+
+// Catchable fatal errors have to be observed when PHP raises them. A prepend
+// file can register shutdown work before this entrypoint loads, and a warning
+// from that earlier callback replaces error_get_last() before our own shutdown
+// callback runs. Uncatchable engine fatals still use the shutdown fallback.
+function _stattic_cli_capture_fatal_errors(): void
+{
+    $previous = null;
+    $previous = set_error_handler(
+        static function (int $severity, string $message, string $file, int $line) use (&$previous): bool {
+            $handled = $previous !== null && $previous($severity, $message, $file, $line) === true;
+            if (!$handled) {
+                _stattic_cli_observed_fatal(true);
+            }
+            return $handled;
+        },
+        E_USER_ERROR | E_RECOVERABLE_ERROR
+    );
+}
+
+function _stattic_cli_observed_fatal(?bool $observed = null): bool
+{
+    static $fatal = false;
+    if ($observed !== null) {
+        $fatal = $observed;
+    }
+    return $fatal;
 }
 
 /**
@@ -211,16 +250,8 @@ function _stattic_cli_arm_receipt(array $request): void
  *
  * @param array{method: string, path: string} $request
  */
-function _stattic_cli_receipt(array $request): never
+function _stattic_cli_receipt(array $request, int $status): never
 {
-    // A fatal answers no request at all, so it must not be reported as the 200
-    // an unset response code would read as.
-    $error = error_get_last();
-    $fatal = is_array($error)
-        && in_array($error['type'] ?? 0, [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true);
-    $code = http_response_code();
-    $status = $fatal ? 500 : (is_int($code) && $code > 0 ? $code : 200);
-
     $receipt = json_encode([
         'method' => $request['method'],
         'path' => $request['path'],
@@ -235,7 +266,7 @@ function _stattic_cli_receipt(array $request): never
 /**
  * The private root for the release this file belongs to, or a caller's override.
  * The deployed layout is <siteRoot>/.stattic/storage, and the release lives at
- * <siteRoot>/.stattic/releases/<release>/engine — so the engine's own location
+ * <siteRoot>/.stattic/releases/<release>/engine, so the engine's own location
  * already names it and the crontab entry does not have to.
  */
 function _stattic_cli_private_root(string $engineRoot, string $override): string

@@ -26,9 +26,8 @@ const STATTIC_ZERO_REPLAY_QUERY_MAX_BYTES = 512;
 const STATTIC_ZERO_REPLAY_EVENT_ID_MAX_BYTES = 160;
 const STATTIC_ZERO_REALTIME_TOKEN_MAX_BYTES = 2048;
 const STATTIC_ZERO_CONFIG_PATH = 'zero/config.json';
-// Per-request tenant-code budget for the native runner subprocess (mirrors the
-// functions relay's executor bounds): without these the runner ran unbounded on
-// the visitor hot path.
+// Per-request tenant-code budget for the native runner subprocess, mirroring
+// the functions relay's executor bounds.
 const STATTIC_ZERO_RUNNER_TIMEOUT_MS = 30000;
 const STATTIC_ZERO_RUNNER_STDOUT_MAX_BYTES = 16777216;
 const STATTIC_ZERO_RUNNER_STDERR_MAX_BYTES = 65536;
@@ -70,8 +69,7 @@ function _stattic_invoke_zero(
     }
 
     // Always explicit: the runner validates the artifact's own endpoint_id
-    // against the envelope after reading it, which is the check that matters —
-    // consulting zero/endpoints-index.json here only re-derived the same path.
+    // against the envelope after reading it, which is the check that matters.
     $artifactPath = (string) $action['artifact'];
     $envelope = _stattic_zero_envelope(
         $parentRoot,
@@ -215,8 +213,8 @@ function _stattic_zero_send_runner_response(
         exit;
     }
 
-    // D44. Every header the response will carry is set above, so the filter can
-    // read the content type it must match on, and only the endpoint's own body
+    // D44. Every header the response carries is set above, so the filter can
+    // read the content type it matches on, and only the endpoint's own body
     // passes through it.
     _stattic_html_insert_stream_begin($insertSnippets);
     echo $body;
@@ -235,9 +233,9 @@ function _stattic_zero_send_headers(array $headers, array $suppressLowerNames = 
             $lower === 'content-length'
             || in_array($lower, $suppressLowerNames, true)
             || _stattic_platform_managed_header($lower)
-            // The send-time boundary, not just the publisher-input one: a
+            // The send-time boundary as well as the publisher-input one: a
             // runner must not emit platform-owned headers (a8c-*, x-ac, …)
-            // regardless of what the cache-policy sender clears afterwards.
+            // whatever the cache-policy sender clears afterwards.
             || _stattic_platform_owns_header($lower)
         ) {
             continue;
@@ -834,11 +832,9 @@ function _stattic_zero_send_callback_events(
     }
     $versionId = (string) ($envelope['context']['versionId'] ?? '');
     // A capsule's own output never travels to the control plane. It is a
-    // runtime log like a PHP function's or a worker's, so it goes to the one
-    // place runtime logs live — PHP's error log on this box, which the provider
-    // ships and serves back. Writing it is a local append with nothing waiting
-    // on it; posting it was a per-line HTTP round trip holding a worker in this
-    // space's pool.
+    // runtime log like a PHP function's or a worker's, so it goes where runtime
+    // logs live: PHP's error log on this box, which the provider ships and
+    // serves back. Writing it is a local append with nothing waiting on it.
     $callbackEvents = [];
     $logged = 0;
     foreach ($runnerResponse['events'] as $event) {
@@ -914,11 +910,9 @@ function _stattic_zero_send_callback_events(
 // Zero realtime keeps its own LIVE lane (contracts §10): the journal is the only
 // sink for management events, but a realtime event that arrives after the room
 // has moved on is worthless, so it goes straight to the Cast callback instead of
-// through a pull cursor. This is that transport, and it is local on purpose —
-// the generic push transport in storage.php is deleted, and nothing else in the
-// runtime may grow a second one. Delivery is best effort: the caller already
-// runs it after the response flush, inside a total time budget, and a failure
-// has no retry lane by design.
+// through a pull cursor. This transport is local on purpose, and nothing else
+// in the runtime may grow a second one. Delivery is best effort: the caller
+// runs it after the response flush, inside a time budget, with no retry lane.
 function _stattic_zero_post_callback_event(string $url, string $token, array $event, int $timeoutMs): void
 {
     require_once __DIR__ . '/../shared/http.php';

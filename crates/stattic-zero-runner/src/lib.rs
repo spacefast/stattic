@@ -44,6 +44,15 @@ pub use services::SERVICE_UPSTREAM_HOSTS;
 /// generated PHP constants stay sourced from this crate.
 pub use constants::{QUICKJS_ABI, RUNNER_ABI};
 
+/// The MySQL broker's operation shape and session pin. `shared/db-broker.php`
+/// is specified against this engine down to the bytes, so protocol codegen
+/// emits these into the generated PHP constants instead of leaving the PHP
+/// side to restate them and drift.
+pub use db::{
+    DB_OPERATION_MAX_BYTES, DB_PARAM_MAX_COUNT, DB_RESULT_ROWS_MAX, DB_SESSION_PIN,
+    DB_TRANSACTION_MAX_STATEMENTS,
+};
+
 /// The on-disk artifact identifiers this runner refuses a request over,
 /// re-exported so the compiler that writes them spells them once — here, where
 /// they are read.
@@ -69,67 +78,35 @@ pub fn self_test() -> Result<(), String> {
     }
 }
 
-/// The Functions relay's per-request DB executor: one operation JSON document
-/// on stdin, one result JSON line on stdout. The grant arrives in
-/// `SPACEFAST_DB_BROKER_GRANT` (comma-separated capability names) and fails
-/// closed — an absent or empty grant denies every statement. The database URL
-/// arrives via the same labeled env contract the Zero path uses. Errors are
-/// in-band (`{"ok":false,"code":…,"message":…}`); the exit code stays 0 so the
-/// transport treats protocol refusals and driver failures identically.
-pub fn run_db_broker_stdio() {
-    db::set_grant(Some(env_db_broker_grant()));
-    run_broker_stdio(
-        db::DB_OPERATION_MAX_BYTES,
-        "{\"ok\":false,\"code\":\"zero_db_operation_invalid\",\"message\":\"Zero DB operation could not be read.\"}",
-        db::handle_db_operation,
-    );
-}
-
 /// The Functions relay's per-request platform-service executor: one frame JSON
-/// document on stdin, one result JSON line on stdout — the same shape and the
-/// same lifetime as the DB broker above, and the same reason for both. Which
-/// services the frame may name is decided by the relay from the version's
+/// document on stdin, one result JSON line on stdout, exit 0 either way — so
+/// the transport treats protocol refusals and driver failures identically.
+/// Which services the frame may name is decided by the relay from the version's
 /// grant before this process is ever spawned; by the time a frame arrives the
 /// authority question is already answered.
+///
+/// Reading one byte past the limit is enough — the handler turns the overrun
+/// into its own typed refusal without buffering the rest. The rollback happens
+/// before the answer is printed: an email effect writes the outbox row on this
+/// process's own connection, and a client that vanishes mid-frame must not
+/// leave row locks behind for the lifetime of the connection pool.
 pub fn run_service_broker_stdio() {
     services::set_grant(services::ServiceGrant::from_wire(
         &std::env::var("SPACEFAST_SERVICE_BROKER_GRANT").unwrap_or_default(),
     ));
-    run_broker_stdio(
-        services::SERVICE_FRAME_MAX_BYTES,
-        "{\"ok\":false,\"code\":\"service_payload_invalid\",\"message\":\"The service frame could not be read.\"}",
-        services::handle_service_frame,
-    );
-}
-
-/// The stdio shape both brokers run under: one JSON document in, one JSON line
-/// out, exit 0 either way.
-///
-/// Reading one byte past the limit is enough — the handler turns the overrun
-/// into its own typed refusal without buffering the rest. The rollback happens
-/// before the answer is printed: a client that vanishes mid-transaction, or an
-/// email effect on the DB broker's own connection, must not leave row locks
-/// behind for the lifetime of the connection pool.
-fn run_broker_stdio(limit: usize, read_refusal: &'static str, handle: impl FnOnce(&str) -> String) {
     let mut input = String::new();
     let outcome = io::stdin()
-        .take(limit as u64 + 1)
+        .take(services::SERVICE_FRAME_MAX_BYTES as u64 + 1)
         .read_to_string(&mut input);
     let response = match outcome {
-        Ok(_) => handle(&input),
-        Err(_) => read_refusal.to_string(),
+        Ok(_) => services::handle_service_frame(&input),
+        Err(_) => {
+            "{\"ok\":false,\"code\":\"service_payload_invalid\",\"message\":\"The service frame could not be read.\"}"
+                .to_string()
+        }
     };
     db::rollback_open_transaction();
     println!("{response}");
-}
-
-fn env_db_broker_grant() -> db::DbGrant {
-    let raw = std::env::var("SPACEFAST_DB_BROKER_GRANT").unwrap_or_default();
-    let granted = |name: &str| raw.split(',').any(|token| token.trim() == name);
-    db::DbGrant {
-        read: granted("db.read"),
-        write: granted("db.write"),
-    }
 }
 
 pub fn run_stdio() {
@@ -230,23 +207,6 @@ pub fn prepare(
         Ok(()) => 0,
         Err(error) => {
             eprintln!("zero bytecode compile failed: {error}");
-            1
-        }
-    }
-}
-
-pub fn migrate(version_root: &str) -> i32 {
-    let migrations_path = match resolve_version_path(version_root, "zero/migrations.json") {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("zero migration path invalid: {error}");
-            return 2;
-        }
-    };
-    match db::apply_migrations_file(&migrations_path) {
-        Ok(()) => 0,
-        Err(error) => {
-            eprintln!("zero migration failed: {error}");
             1
         }
     }

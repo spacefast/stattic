@@ -2,16 +2,15 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 // The v4 header contract (contracts §5, §15, §16):
 //
-//  * every request-independent `_headers` rule is BAKED into the response entry
-//    at finalize, so what a visitor gets is the compiled header set plus the two
-//    things the engine composes at send time — `cache-control` (from the entry's
-//    cache class and whether this response is private) and `A8C-Edge-Cache`;
-//  * the cache class is compiled from content: html, an already-hashed asset
-//    name (`imm`), or revalidate. A publisher `Cache-Control` rule replaces the
-//    class outright and is served verbatim;
+//  * every request-independent `_headers` rule is baked into the response entry
+//    at finalize. A visitor gets the compiled header set plus the two headers
+//    the engine composes at send time: `cache-control` and `A8C-Edge-Cache`;
+//  * the cache class is compiled from content (html, an already-hashed asset
+//    name, or revalidate). A publisher `Cache-Control` rule replaces it and is
+//    served verbatim;
 //  * a private response is never immutable and never edge-stored;
-//  * the provider owns `A8C-*`, `x-ac`/`x-sc`/`x-nc` and HSTS. A publisher can
-//    name them; the engine strips them and states its own edge intent.
+//  * the provider owns `A8C-*`, `x-ac`/`x-sc`/`x-nc` and HSTS. The engine strips
+//    a publisher's attempt at them and states its own edge intent.
 //
 // Nginx/FastCGI handoff behavior is proven only on real wp.cloud.
 
@@ -35,17 +34,15 @@ const CONTRACT_404_HOST = "headers-404-contract.test";
 const REJECTED_NAMES_HOST = "headers-rejected-names.test";
 
 // The composed policies, one name each (contracts §15/§16).
-const HTML_OPEN = "public, max-age=0, must-revalidate";
+const HTML_OPEN = "public, s-maxage=600, max-age=0, must-revalidate";
 const IMMUTABLE = "public, max-age=31536000, immutable";
-const REVALIDATE = "public, max-age=0, must-revalidate";
+const REVALIDATE = "public, s-maxage=600, max-age=0, must-revalidate";
 // Synthetic/unpurgeable URLs (404s, pattern-rule redirects) keep the bounded
 // shared window instead of a cache class.
 const EDGE_DEFAULT = "public, max-age=0, s-maxage=600, stale-while-revalidate=60";
 // A tokened URL is the secret itself, so cache-policy.php's sticky no-store
-// flag replaces whatever class or publisher policy the entry carried — the same
-// answer the deny, 404, proxy and Zero lanes give for that request.
+// flag replaces whatever class or publisher policy the entry carried.
 const TOKENED = "private, no-store";
-// A share-link token makes the URL itself the secret.
 // Every token that may ride `?__=` names its lane with a prefix; `sfl_` is a
 // customer share link (context.php: STATTIC_ACCESS_QUERY_TOKEN_LINK_PREFIX).
 const SHARE_TOKEN = "?__=sfl_aBcD-shareLink_0123456789";
@@ -230,7 +227,6 @@ afterAll(() => {
 test("exact header rules apply only to their path, in declaration order", async () => {
   const about = await get(rt, HOST, "/about.html");
   expect(about.status).toBe(200);
-  // Set by the first block, removed by the second: the later rule wins.
   expect(about.headers.get("x-about")).toBeNull();
   // The wp.cloud edge ignores CDN-Cache-Control / Surrogate-Control, so the
   // runtime states its policy once, in Cache-Control.
@@ -259,10 +255,9 @@ test("browser paths keep one identity across compiled rules, access, and lookup"
 });
 
 // The cache class is a property of the content, decided once at finalize. Each
-// row here fails for its own reason: an HTML page is always revalidated because
-// its live URL can move; a name that already carries a content hash is frozen;
-// a date, a version number and an ordinary asset name are not hashes and must
-// revalidate.
+// row fails for its own reason: an HTML page revalidates because its live URL
+// can move, a name carrying a content hash is frozen, and a date, a version
+// number or an ordinary asset name is not a hash.
 test("cache classes are compiled from content, never guessed at request time", async () => {
   const cases = [
     ["/", HTML_OPEN],
@@ -279,9 +274,9 @@ test("cache classes are compiled from content, never guessed at request time", a
   }
 });
 
-// A publisher Cache-Control replaces the class outright and is served exactly as
-// written — no s-maxage grafted on, no bounded window added underneath it. The
-// edge opt-in still follows the policy, so a restrictive one bypasses the edge.
+// A publisher Cache-Control replaces the class outright and is served verbatim:
+// no s-maxage grafted on, no bounded window underneath. The edge opt-in follows
+// the policy, so a restrictive one bypasses the edge.
 test("a publisher Cache-Control rule is served verbatim and steers the edge opt-in", async () => {
   const cases = [
     ["/cache.txt", "no-store", "no-cache"],
@@ -297,14 +292,11 @@ test("a publisher Cache-Control rule is served verbatim and steers the edge opt-
   }
 });
 
-// A share-link token turns any URL into a secret URL: the edge keys on
-// host+path+query and ignores Vary, so nothing — not a publisher's immutable
-// policy, not the compiled `imm` class — may leave a tokened response storable.
-// `private, no-store` is the only private response policy;
-// the token is an orthogonal sticky reason nothing may keep the bytes at all,
-// which is why a revocation binds on the very next request. The two rows below
-// fail for their own reasons — one replaces a compiled class, the other a
-// publisher `Cache-Control` rule.
+// A share-link token turns any URL into a secret URL. The edge keys on
+// host+path+query and ignores Vary, so neither a publisher's immutable policy
+// nor the compiled `imm` class may leave a tokened response storable. The token
+// is a sticky reason to keep no bytes at all, which is why a revocation binds on
+// the very next request.
 test("a tokened URL is private: never immutable, never edge-stored", async () => {
   const asset = await get(rt, HOST, `/${HASHED_JS}${SHARE_TOKEN}`);
   expect(asset.status).toBe(200);
@@ -318,10 +310,10 @@ test("a tokened URL is private: never immutable, never edge-stored", async () =>
   expect(cachePolicy(pinned)).toEqual([TOKENED, "no-cache"]);
 });
 
-// §16: the edge stores a public PHP-lane response only when it sees BOTH a
+// §16: the edge stores a public PHP-lane response only when it sees both a
 // public Cache-Control and `A8C-Edge-Cache: cache`. That channel is the
-// platform's — a tenant that names it (or the provider's x-ac/x-sc/x-nc
-// diagnostics, or HSTS, which the provider rewrites) never reaches the wire.
+// platform's: a tenant naming it, the provider's x-ac/x-sc/x-nc diagnostics, and
+// HSTS never reach the wire.
 test("the engine owns the edge-cache channel and the provider headers next to it", async () => {
   const response = await get(rt, HOST, "/owned.html");
   expect(response.status).toBe(200);
@@ -330,9 +322,9 @@ test("the engine owns the edge-cache channel and the provider headers next to it
   expect(response.headers.get("strict-transport-security")).toBeNull();
 });
 
-// A compiled artifact is replayed into every response, so a name the platform
-// owns — or a string that is not a header name at all — has to die at compile
-// time. The version still publishes; the rule simply never becomes an entry.
+// A compiled artifact is replayed into every response, so a platform-owned name
+// or a string that is not a header name at all dies at compile time. The version
+// still publishes; the rule never becomes an entry.
 test("header names the platform owns never compile into an artifact", async () => {
   const names = ["Set-Cookie", "Strict-Transport-Security", "CDN-Cache-Control", "x-bad header"];
   const spaceId = "spc_headers_rejected_names";
@@ -362,8 +354,8 @@ test("header names the platform owns never compile into an artifact", async () =
     ).not.toContain(name.toLowerCase());
   }
 
-  // And nothing reaches the visitor either. (`x-bad header` is skipped: it is
-  // not a legal header name, so it cannot even be looked up.)
+  // Nothing reaches the visitor either. `x-bad header` is skipped: not a legal
+  // header name, so it cannot be looked up.
   const served = await get(rt, REJECTED_NAMES_HOST, "/index.html");
   expect(served.status).toBe(200);
   for (const name of ["Set-Cookie", "Strict-Transport-Security", "CDN-Cache-Control"]) {
@@ -371,9 +363,9 @@ test("header names the platform owns never compile into an artifact", async () =
   }
 });
 
-// Removals are the publisher's to make over their own metadata, but they stop at
-// the platform boundary: nosniff is re-asserted after every rule, and the ETag
-// is the platform's validator (D121) rather than publisher metadata.
+// Removals cover the publisher's own metadata but stop at the platform boundary:
+// nosniff is re-asserted after every rule, and the ETag is the platform's
+// validator (D121).
 test("_headers removals cannot strip platform metadata", async () => {
   const response = await get(rt, HOST, "/remove.txt");
   expect(response.status).toBe(200);
@@ -401,9 +393,8 @@ test("_headers match the original URL of an internal rewrite", async () => {
 
 // Unconditional redirects are a pure function of the cache key (host+path+query)
 // and are storable; a condition-matched one is per-visitor and must never enter
-// a shared cache. The two arrive by different routes — an exact unconditional
-// rule is a compiled table entry, a pattern is answered by the ordered rules —
-// and both have to state a policy.
+// a shared cache. The two lanes differ: an exact unconditional rule is a
+// compiled table entry, a pattern is answered by the ordered rules.
 test("redirects carry an explicit edge cache policy on both lanes", async () => {
   const compiled = await get(rt, HOST, "/old");
   expect(compiled.status).toBe(301);
@@ -425,10 +416,9 @@ test("redirects carry an explicit edge cache policy on both lanes", async () => 
 });
 
 // A URL under a conditional rule is request-varying whether or not this visitor
-// matched: the matched branch serves per-visitor bytes, and caching the
-// unmatched branch would stop later matching visitors reaching the origin at
-// all. Publisher policy on those URLs — set, removed or absent — cannot make
-// them storable, because none of those request inputs is part of the cache key.
+// matched: caching the unmatched branch would stop later matching visitors
+// reaching the origin at all. Publisher policy cannot make those URLs storable,
+// because none of the request inputs is part of the cache key.
 test("condition-matched responses never enter a shared cache", async () => {
   const matched = await get(rt, HOST, "/doc-rewrite", { headers: { cookie: "beta=1" } });
   expect(matched.status).toBe(200);
@@ -450,8 +440,8 @@ test("condition-matched responses never enter a shared cache", async () => {
 });
 
 // Synthetic URLs no purge can enumerate: the SPA shell keeps the HTML policy
-// (its bytes are a published page), while a 404 falls back to the bounded shared
-// window rather than a year at the edge.
+// (its bytes are a published page), a 404 falls back to the bounded shared
+// window.
 test("fallback and not-found responses state a bounded policy", async () => {
   const fallback = await get(rt, CONTRACT_HOST, "/spa/route");
   expect(fallback.status).toBe(200);
@@ -464,11 +454,11 @@ test("fallback and not-found responses state a bounded policy", async () => {
   expect(cachePolicy(custom404)).toEqual([EDGE_DEFAULT, "cache"]);
 });
 
-// D138 corrected: robots.txt stops a crawler READING a page, never indexing its
-// URL, so the noindex that binds is X-Robots-Tag on the HTML — which reaches the
-// crawler because HTML never leaves the PHP lane. robots.txt is demoted to crawl
-// control, compiled under the reserved key, and only a noindex host serves the
-// platform's deny-all instead of the publisher's own file.
+// D138 corrected: robots.txt stops a crawler reading a page, never indexing its
+// URL, so the noindex that binds is X-Robots-Tag on the HTML, which reaches the
+// crawler because HTML never leaves the PHP lane. robots.txt is crawl control
+// only, and only a noindex host serves the platform's deny-all instead of the
+// publisher's file.
 test("noindex hosts own X-Robots-Tag, and robots.txt is only crawl control", async () => {
   const indexable = await get(rt, "indexable.test", "/index.html");
   expect(indexable.headers.get("x-robots-tag")).toBe("all");

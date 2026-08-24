@@ -1801,6 +1801,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "stattic-runtime-core",
+ "stattic-runtime-policy",
  "stattic-zero-runner",
 ]
 
@@ -1818,6 +1819,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "stattic-runtime-egress",
+ "stattic-runtime-policy",
  "stattic-zero-runner",
  "tempfile",
  "unicode-normalization",
@@ -1831,6 +1833,10 @@ version = "0.1.0"
 dependencies = [
  "url",
 ]
+
+[[package]]
+name = "stattic-runtime-policy"
+version = "0.1.0"
 
 [[package]]
 name = "stattic-runtime-wasi"
@@ -1852,6 +1858,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "stattic-runtime-egress",
+ "stattic-runtime-policy",
  "takumi",
  "tempfile",
  "ureq",

@@ -13,7 +13,7 @@ const STATTIC_RUNTIME_JOB_BACKOFF_MIN_SECONDS = 10;
 const STATTIC_RUNTIME_JOB_BACKOFF_MULTIPLIER = 1.5;
 const STATTIC_RUNTIME_JOB_BACKOFF_MAX_SECONDS = 15 * 60;
 const STATTIC_RUNTIME_JOB_DEAD_LETTER_RETENTION_SECONDS = 14 * 86400;
-// A finished job stays readable — and holds its idempotency key — for this long.
+// How long a finished job stays readable and holds its idempotency key.
 const STATTIC_RUNTIME_JOB_COMPLETE_RETENTION_SECONDS = 86400;
 const STATTIC_RUNTIME_JOB_DEFAULT_BUDGET_MS = 50000;
 const STATTIC_RUNTIME_JOB_MAX_BUDGET_MS = 600000;
@@ -127,7 +127,7 @@ function _stattic_runtime_job_load_any(string $privateRoot, string $jobId): ?arr
         ?? _stattic_record_store_get(_stattic_runtime_jobs_dead_store($privateRoot), $jobId);
 }
 
-// Never expose payload secrets — today that is the claims job_create captured.
+// Never expose payload secrets; today that is the claims job_create captured.
 function _stattic_runtime_job_public_response(array $record): array
 {
     if (is_array($record['payload'] ?? null)) {
@@ -136,9 +136,9 @@ function _stattic_runtime_job_public_response(array $record): array
     return $record;
 }
 
-// space_id/operation_id come from the VERIFIED management JWT claims, never from
-// the request body; $claims is stashed under payload._claims so lifecycle events
-// can record management events.
+// space_id/operation_id come from the VERIFIED management JWT claims, never the
+// request body. $claims is stashed under payload._claims so lifecycle events can
+// record management events.
 function _stattic_runtime_job_create(
     string $privateRoot,
     string $type,
@@ -146,9 +146,6 @@ function _stattic_runtime_job_create(
     array $payload,
     array $claims
 ): array {
-    if ($type === 'tier_demote' && !_stattic_tiering_enabled()) {
-        throw new StatticJobFatal('tiering_disabled');
-    }
     $lane = _stattic_runtime_job_lane_for_type($type);
     $idempotencyKey = trim($idempotencyKey);
     if ($idempotencyKey === '') {
@@ -496,18 +493,15 @@ function _stattic_runtime_job_run_claimed(string $privateRoot, array $job, float
 }
 
 /**
- * THE maintenance tick. The ORDER is load-bearing: retention shrinks the set the
- * later steps walk, version pruning is what makes blobs collectable, the blob GC
- * then sees the reduced live set, trash cleanup releases what pruning parked, and
- * the disk report is last so it measures what the pass left behind.
+ * THE maintenance tick. The ORDER is load-bearing: retention shrinks the set
+ * later steps walk, blob GC collects bytes no remaining declaration names, and
+ * the disk report runs last so it measures what the pass left.
  */
 function _stattic_runtime_job_maintenance_steps(): array
 {
     return [
         'retention' => '_stattic_runtime_job_housekeeping_retention',
-        'prune_versions' => '_stattic_runtime_job_housekeeping_prune_versions',
         'blob_gc' => '_stattic_runtime_job_housekeeping_local_blob_gc',
-        'trash_cleanup' => '_stattic_runtime_job_housekeeping_trash_cleanup',
         'route_shard_gc' => '_stattic_runtime_job_housekeeping_route_shard_gc',
         'disk_report' => '_stattic_runtime_job_housekeeping_disk_report',
     ];
@@ -515,9 +509,8 @@ function _stattic_runtime_job_maintenance_steps(): array
 
 function _stattic_runtime_job_maintenance_tick(string $privateRoot, array $claims = []): array
 {
-    // Loaded here, not at the top: retention.php requires this file back, and the
-    // cron/CLI entry into the tick does not go through management.php. These
-    // requires are what make the steps below callable at all.
+    // Loaded here, not at the top: retention.php requires this file back, and
+    // the cron/CLI entry into the tick does not go through management.php.
     require_once __DIR__ . '/retention.php';
     require_once __DIR__ . '/tier.php';
     require_once __DIR__ . '/generate.php';
@@ -560,7 +553,7 @@ function _stattic_runtime_job_tick(string $privateRoot, string $lane, int $budge
     _stattic_runtime_mkdir(_stattic_runtime_jobs_queue_dir($privateRoot));
     _stattic_runtime_mkdir(_stattic_runtime_jobs_dead_dir($privateRoot));
 
-    // Try-once: a lane already ticking makes this a no-op, never a queued wait —
+    // Try-once: a lane already ticking makes this a no-op, never a queued wait,
     // unlike _stattic_runtime_with_write_lock's blocking+503 semantics.
     $handle = _stattic_lock_acquire(_stattic_runtime_job_lane_lock_path($privateRoot, $lane), STATTIC_LOCK_TRY);
     if ($handle === false) {
@@ -569,8 +562,9 @@ function _stattic_runtime_job_tick(string $privateRoot, string $lane, int $budge
 
     try {
         $budgetMs = max(0, min($budgetMs, STATTIC_RUNTIME_JOB_MAX_BUDGET_MS));
-        // The lane lock is an OS flock, so a wedged worker would pin the lane forever: bound the tick
-        // past its cooperative budget so PHP tears the worker down and the heartbeat reaper recovers.
+        // The lane lock is an OS flock, so a wedged worker would pin the lane
+        // forever. Bound the tick past its cooperative budget so PHP tears the
+        // worker down and the heartbeat reaper recovers.
         $executionTimeoutSeconds = max(
             1,
             (int) ceil($budgetMs / 1000) + STATTIC_RUNTIME_JOB_EXECUTION_TIMEOUT_MARGIN_SECONDS
@@ -591,8 +585,8 @@ function _stattic_runtime_job_tick(string $privateRoot, string $lane, int $budge
         }
 
         // The cron watchdog's trigger for the same pass a maintenance_tick job
-        // runs — skipped when the tick just ran one, so the most expensive
-        // periodic work does not happen twice in a single request.
+        // runs. Skipped when the tick just ran one, so the most expensive
+        // periodic work does not repeat within one request.
         if ($lane === 'bulk' && ($job['type'] ?? null) !== 'maintenance_tick') {
             _stattic_runtime_job_maintenance_tick($privateRoot, $claims);
         }
@@ -677,8 +671,8 @@ function _stattic_runtime_jobs_tick_route(string $privateRoot, array $claims = [
     _stattic_json_response(200, [
         'lane' => $result['lane'],
         'job' => $job !== null ? _stattic_runtime_job_public_response($job) : null,
-        // Reports that a bulk pass ran, not that anything was delivered —
-        // delivery is the pull lane's (/events/drain).
+        // Reports that a bulk pass ran, not that anything was delivered.
+        // Delivery belongs to the pull lane (/events/drain).
         'drained' => $lane === 'bulk',
         'execution_timeout_seconds' => $result['executionTimeoutSeconds'] ?? null,
         'tick_status' => $result['status'],

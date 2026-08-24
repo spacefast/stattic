@@ -12,15 +12,14 @@ declare(strict_types=1);
 //  - Every derived cache is a write-once `<?php return [...]` file served from
 //    opcache SHM (`_sf_php_cache_read`/`_sf_php_cache_write`). The fleet runs
 //    opcache.validate_timestamps=Off, so a PHP file's content may NEVER change
-//    under a path opcache has seen — immutability is what makes staleness
+//    under a path opcache has seen. Immutability is what makes staleness
 //    structurally impossible, not any invalidation protocol.
 //
-// There is no APCu or Memcached anywhere in the engine: the clusters run
-// without either. Shared mutable state is files (flock where it counts); shared
-// derived state is opcached PHP. Runtime read failures always log immediately.
+// Shared mutable state is files (flock where it counts); shared derived state
+// is opcached PHP. Runtime read failures always log immediately.
 //
-// Deliberately dependency-free — runtime/serve-fast.php loads this and nothing
-// else from shared/ on the hot path, so it must not pull context.php in.
+// Deliberately dependency-free: the serve lane loads this and nothing else from
+// shared/ on the hot path, so it must not pull context.php in.
 
 // Proves absence by successfully listing the nearest readable ancestor and
 // observing the first missing path component. `is_file()` cannot do this: false
@@ -51,7 +50,7 @@ function _sf_path_verifiably_absent(string $path): bool
     return false;
 }
 
-// Failure logging for the runtime read paths. Plain error_log on purpose — the
+// Failure logging for the runtime read paths. Plain error_log on purpose: the
 // `sf-log/1 ` marker is the TENANT log lane and these are platform-internal.
 function _sf_runtime_log_read_failure(string $kind, string $path, ?string $identity = null): void
 {
@@ -62,10 +61,10 @@ function _sf_runtime_log_read_failure(string $kind, string $path, ?string $ident
 }
 
 /**
- * One read attempt: read the file, decode it, return the present or
- * verified-absent outcome. Null means this attempt failed — an unreadable file
- * whose absence could not be proven, or bytes that exist but are not a pointer
- * document (corruption, not absence — the absence probe never runs for it).
+ * One read attempt. Null means it failed: an unreadable file whose absence
+ * could not be proven, or bytes that exist but are not a pointer document.
+ * That second case is corruption, not absence, so the absence probe never runs
+ * for it.
  *
  * @return array{kind: 'present'|'absent', value: ?array}|null
  */
@@ -78,7 +77,6 @@ function _sf_pointer_attempt(string $path): ?array
         if (is_array($decoded)) {
             return ['kind' => 'present', 'value' => $decoded];
         }
-        // Bytes exist but are not a pointer document: corruption, not absence.
         return null;
     }
     clearstatcache(true, $path);
@@ -94,14 +92,13 @@ function _sf_pointer_attempt(string $path): ?array
  *
  *  - `present`     value is the pointer, read fresh this request
  *  - `absent`      the file verifiably does not exist
- *  - `unavailable` the file exists but could not be read — the caller must
- *                  answer 5xx without claiming anything about deployment or
- *                  access state
+ *  - `unavailable` the file exists but could not be read. The caller answers
+ *                  5xx without claiming anything about deployment or access
+ *                  state
  *
- * Every read comes from disk — no cache at any scope. At pointer sizes a read
- * costs single-digit microseconds, so a swap is visible on the very next read,
- * a takedown is never masked, a swap-then-reread lane sees its own write, and
- * a failure one read observed is inherited by nobody.
+ * Every read comes from disk, no cache at any scope. A swap is visible on the
+ * very next read, a takedown is never masked, a swap-then-reread lane sees its
+ * own write, and a failure one read observed is inherited by nobody.
  *
  * @return array{kind: 'present'|'absent'|'unavailable', value: ?array}
  */
@@ -110,10 +107,9 @@ function _sf_pointer_read(string $name, string $path): array
     for ($attempt = 0; $attempt < 2; $attempt += 1) {
         if ($attempt === 1) {
             _sf_runtime_log_read_failure('pointer_read_failed', $path, $name);
-            // One immediate retry after clearstatcache: it covers the
-            // atomic-swap visibility race (which is instantaneous), and nothing
-            // a delay would cover — sustained failure lands on `unavailable`
-            // and the next request.
+            // One immediate retry after clearstatcache covers the atomic-swap
+            // visibility race and nothing else. Sustained failure lands on
+            // `unavailable` and the next request.
             clearstatcache(true, $path);
         }
         $read = _sf_pointer_attempt($path);
@@ -126,8 +122,8 @@ function _sf_pointer_read(string $name, string $path): array
 }
 
 // THE pointer write: tmp + rename, so a reader sees the whole old document or
-// the whole new one, never a torn one. There is no cache at any scope to
-// invalidate — the next read IS the visibility protocol.
+// the whole new one, never a torn one. Nothing to invalidate: the next read IS
+// the visibility protocol.
 function _sf_json_write(string $path, array $value): void
 {
     $encoded = json_encode($value, JSON_UNESCAPED_SLASHES);
@@ -194,11 +190,11 @@ const SF_PHP_CACHE_MAX_BYTES = 524288;
  * opcache SHM. With validate_timestamps=Off a warm hit costs one is_file stat
  * and zero further syscalls, and the array is shared, not copied. The is_file
  * probe is the whole freshness protocol a write-once file needs: present means
- * final, absent means not built yet or deleted with its owner — which is why a
+ * final, absent means not built yet or deleted with its owner. That is why a
  * sidecar must live INSIDE the directory whose data it derives from.
  *
  * $expect is the payload's identity (e.g. spaceId/versionId): every pair must
- * match strictly or the read is a miss — a cache is never trusted to be about
+ * match strictly or the read is a miss. A cache is never trusted to be about
  * what its path claims.
  *
  * @param array<string,string> $expect
@@ -221,20 +217,20 @@ function _sf_php_cache_read(string $path, array $expect = []): ?array
 }
 
 /**
- * THE derived-cache write: best-effort and never load-bearing — any failure
+ * THE derived-cache write: best-effort and never load-bearing. Any failure
  * means the next reader rebuilds from source, so callers ignore the result
  * except to decide sharding. tmp + rename; a given path's content never
  * changes (the source is immutable), so no invalidation exists anywhere. The
- * opcache_invalidate is belt-and-braces against a half-cached tmp path, same
- * as `_sf_php_artifact_write`.
+ * opcache_invalidate guards against a half-cached tmp path, same as
+ * `_sf_php_artifact_write`.
  */
 function _sf_php_cache_write(string $path, array $value): bool
 {
     // Cheap refusal before serializing: var_export spells every node in at
-    // least ~16 bytes, so a value past this count can never fit the ceiling —
-    // and building a multi-MB source string just to measure it would tax every
-    // request that retries an oversized write (failed writes are never
-    // memoized, e.g. the version-catalog sidecar for very large versions).
+    // least ~16 bytes, so a value past this count can never fit the ceiling.
+    // Building a multi-MB source string just to measure it would tax every
+    // request that retries an oversized write, and failed writes are never
+    // memoized.
     if (count($value, COUNT_RECURSIVE) * 16 > SF_PHP_CACHE_MAX_BYTES) {
         return false;
     }

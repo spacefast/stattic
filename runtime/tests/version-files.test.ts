@@ -1,17 +1,14 @@
 // The version file authority: one catalog, one resolver, two readers.
 //
-// The runtime owns what a version contains. `GET .../versions/{v}/files` is the
-// only file list — the dashboard browser reads `view=source`, the abuse scanner
-// reads `view=served&public_only=1` — and the blob gate's path lane is the
-// only way bytes leave, resolved through the SAME resolver so a list row and a
-// download can never disagree.
+// `GET .../versions/{v}/files` is the only file list: the dashboard browser
+// reads `view=source`, the abuse scanner reads `view=served&public_only=1`.
+// The blob gate's path lane is the only way bytes leave, and it resolves
+// through the same resolver, so a list row and a download cannot disagree.
 //
-// Deliberately NOT here, and not provable here: Range/206, 416, conditional
-// 304, and the dashboard CORS header surviving real provider delivery. This
-// fixture runs `php -S`, where every request uses the PHP body fallback. The
-// credential-gated wp.cloud suite owns both provider facts: ordinary downloads
-// retain the Nginx X-Accel lane, while an exact dashboard-origin fetch stays on
-// the PHP body lane so wp.cloud cannot strip its CORS header.
+// Not provable here: Range/206, 416, conditional 304, and the dashboard CORS
+// header surviving real provider delivery. This fixture runs `php -S`, where
+// every request takes the PHP body fallback. The credential-gated wp.cloud
+// suite owns those provider facts.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
 
@@ -24,6 +21,7 @@ import {
   deploy,
   errorCode,
   getBlob,
+  manifestFor,
   RUNTIME_HTTP_API_BASE,
   type Runtime,
   sha256,
@@ -52,6 +50,7 @@ const INDEX = "<h1>files</h1>\n";
 const NOTE = "private note\n";
 const STYLE = "body{color:red}\n";
 const SCRIPT = "console.log('app');\n";
+const INTERNAL_ARTIFACT = "__spacefast/zero/deploy.json";
 
 beforeAll(async () => {
   rt = await startRuntime();
@@ -63,13 +62,13 @@ beforeAll(async () => {
       "config.js": UPLOADED_CONFIG,
       "assets/app.js": SCRIPT,
       "assets/style.css": STYLE,
+      [INTERNAL_ARTIFACT]: '{"digest":"sha256:private"}\n',
       ".hidden/note.txt": NOTE,
       "sf.jsonc": CONFIG_FILE,
     },
-    // Substitution is what makes source and served two different answers for one
-    // path: the uploaded byte lands in the catalog's `source`, the compiled byte
-    // in its `served`. The version declares its own template; only the values
-    // come from outside.
+    // Substitution makes source and served two answers for one path: the
+    // uploaded byte lands in the catalog's `source`, the compiled byte in its
+    // `served`.
     finalize: { variable_scopes: VARIABLE_SCOPES },
     activate: { route_name: "production", production_hostnames: [HOST] },
   });
@@ -106,6 +105,7 @@ function pathToken(filePath: string, view: VersionFileView, ttlSeconds = 600): s
 test("the catalog is the version's file identity: source is what was uploaded, served is what ships", async () => {
   const catalog = versionCatalog(rt, SPACE, VERSION);
   expect(catalog?.format).toBe("spacefast.runtime.file-catalog.v1");
+  expect(catalog?.paths[INTERNAL_ARTIFACT]).toBeDefined();
 
   const source = await listFiles("?view=source");
   expect(source.view).toBe("source");
@@ -119,9 +119,13 @@ test("the catalog is the version's file identity: source is what was uploaded, s
     "sf.jsonc",
   ]);
   expect(source.next_cursor).toBeNull();
+  expect(sourcePaths).not.toContain(INTERNAL_ARTIFACT);
 
-  // The uploaded object, not the compiled one — and the size and type travel
-  // with it, so a browser row needs no second lookup.
+  const runtimePlanning = await listFiles("?view=source&include_internal=1");
+  expect(runtimePlanning.files.map((file) => file.path)).toContain(INTERNAL_ARTIFACT);
+
+  // The uploaded object, not the compiled one. Size and type travel with the
+  // row, so a browser needs no second lookup.
   const sourceConfig = source.files.find((file) => file.path === "config.js");
   expect(sourceConfig).toEqual({
     path: "config.js",
@@ -131,7 +135,7 @@ test("the catalog is the version's file identity: source is what was uploaded, s
     public: true,
   });
 
-  // Visibility is recorded once, by the finalizer, and read here — never
+  // Visibility is recorded once by the finalizer and read here, never
   // recomputed from the path.
   expect(source.files.find((file) => file.path === ".hidden/note.txt")?.public).toBe(false);
 
@@ -139,13 +143,13 @@ test("the catalog is the version's file identity: source is what was uploaded, s
   expect(served.files.find((file) => file.path === "config.js")?.sha256).toBe(
     sha256(SERVED_CONFIG),
   );
-  // A private input exists in source and is absent from served: it has no byte a
-  // visitor can ever receive.
+  // A private input exists in source and not in served: no byte a visitor can
+  // receive.
   expect(served.files.map((file) => file.path)).not.toContain(".hidden/note.txt");
 });
 
 test("path, public_only, prefix, q and cursor bound what a reader has to hold", async () => {
-  // The scanner's enumeration: served bytes a visitor could actually fetch.
+  // The scanner's enumeration: served bytes a visitor could fetch.
   const scannable = await listFiles("?view=served&public_only=1");
   expect(scannable.files.every((file) => file.public)).toBe(true);
   expect(scannable.files.map((file) => file.path)).not.toContain(".hidden/note.txt");
@@ -158,15 +162,15 @@ test("path, public_only, prefix, q and cursor bound what a reader has to hold", 
     "assets/style.css",
   ]);
 
-  // A per-file lookup is one bounded page, and a path the view does not hold is
-  // an empty one — absence is the answer, not an error.
+  // A per-file lookup is one bounded page. A path the view does not hold comes
+  // back as an empty page, not an error.
   expect((await listFiles("?path=config.js")).files.map((file) => file.sha256)).toEqual([
     sha256(UPLOADED_CONFIG),
   ]);
   expect((await listFiles("?view=served&path=.hidden/note.txt")).files).toEqual([]);
 
-  // Paging walks the same total order the rows are sorted in, so no row is
-  // delivered twice and none is skipped across a boundary.
+  // Paging walks the row sort order, so no row repeats or is skipped across a
+  // page boundary.
   const walked: string[] = [];
   let cursor: string | null = null;
   for (let page = 0; page < 10; page += 1) {
@@ -187,9 +191,8 @@ test("path, public_only, prefix, q and cursor bound what a reader has to hold", 
     "sf.jsonc",
   ]);
 
-  // A channel selects template-variant bytes, which only exist in the served
-  // view; asking for them alongside the uploaded objects is a contradiction, not
-  // a silently ignored parameter.
+  // A channel selects template-variant bytes, which exist only in the served
+  // view. Asking for them with `view=source` is refused, not ignored.
   const contradiction = await api(
     rt,
     "GET",
@@ -209,16 +212,16 @@ test("a path claim serves the view it names, as an attachment the dashboard may 
   expect(served.status).toBe(200);
   expect(await served.text()).toBe(SERVED_CONFIG);
 
-  // The same path, the other view, different bytes — this is the whole reason
-  // `view` is a claim and not a convenience.
+  // The same path in the other view returns different bytes, which is why
+  // `view` is part of the claim.
   const source = await getBlob(rt, HOST, pathToken("config.js", "source"));
   expect(source.status).toBe(200);
   expect(await source.text()).toBe(UPLOADED_CONFIG);
 
-  // Unconditional attachment: the gate answers on the public site hostname
-  // before any host or access check, so nothing it hands back may run as a page
-  // on the Space's own origin. And the pinned dashboard origin rides beside it,
-  // because a `fetch()` that cannot read the response cannot render a preview.
+  // The gate answers on the public site hostname before any host or access
+  // check, so everything it hands back is an attachment and can never run as a
+  // page on the Space's own origin. The pinned dashboard origin rides beside
+  // it, because a `fetch()` that cannot read the response cannot preview it.
   expect(source.headers.get("content-disposition")).toBe("attachment");
   expect(source.headers.get("cache-control")).toBe("private, no-store");
   expect(source.headers.get("access-control-allow-origin")).toBe(DASHBOARD_ORIGIN);
@@ -230,17 +233,21 @@ test("a path claim serves the view it names, as an attachment the dashboard may 
   expect(head.headers.get("content-disposition")).toBe("attachment");
   expect(await head.text()).toBe("");
 
-  // A private input has a source byte and no served byte, and the gate says so
+  // A private input has a source byte and no served byte, and the gate answers
   // per view rather than per file.
   expect((await getBlob(rt, HOST, pathToken(".hidden/note.txt", "source"))).status).toBe(200);
   const noServed = await getBlob(rt, HOST, pathToken(".hidden/note.txt", "served"));
   expect(noServed.status).toBe(404);
   expect(await errorCode(noServed)).toBe("version_file_not_found");
+
+  const internal = await getBlob(rt, HOST, pathToken(INTERNAL_ARTIFACT, "source"));
+  expect(internal.status).toBe(404);
+  expect(await errorCode(internal)).toBe("version_file_not_found");
 });
 
 test("a path claim buys exactly one path in one version, and nothing outside it", async () => {
-  // Everything that fails BEFORE the capability is verified answers the same
-  // bare 404 — never a code, never a hint at which check failed.
+  // Everything that fails before the capability is verified answers the same
+  // bare 404, with no code and no hint at which check failed.
   const bare = async (token: string) => {
     const response = await getBlob(rt, HOST, token);
     expect(response.status).toBe(404);
@@ -251,9 +258,7 @@ test("a path claim buys exactly one path in one version, and nothing outside it"
   await bare(blobGatePathToken(SPACE, VERSION, "index.html", "source", { rogueKey: true }));
   await bare(blobGatePathToken(SPACE, VERSION, "index.html", "sideways" as VersionFileView));
   // A sha claim and a path claim in one token would let a caller borrow the
-  // other lane's resolution — a deleted record laundered through a version, or
-  // a path answered by a sha the version merely happens to hold. Scope
-  // validation refuses the mixture outright.
+  // other lane's resolution, so scope validation refuses the mixture.
   await bare(
     signToken({
       aud: "spacefast-blob-gate",
@@ -265,14 +270,14 @@ test("a path claim buys exactly one path in one version, and nothing outside it"
     }),
   );
 
-  // Past the capability check the answer is named, because the control plane
-  // mints these blind and the holder was already told this triple exists.
+  // Past the capability check the answer is named: the control plane mints
+  // tokens blind, and the holder was already told this triple exists.
   const wrongPath = await getBlob(rt, HOST, pathToken("nope.html", "source"));
   expect(wrongPath.status).toBe(404);
   expect(await errorCode(wrongPath)).toBe("version_file_not_found");
 
-  // A traversal never becomes a filesystem path: it fails normalization, and
-  // that is the same stable refusal as an unknown path.
+  // A traversal fails normalization and gets the same refusal as an unknown
+  // path.
   const traversal = await getBlob(rt, HOST, pathToken("../ver_other/index.html", "source"));
   expect(await errorCode(traversal)).toBe("version_file_not_found");
 
@@ -288,9 +293,8 @@ test("a path claim buys exactly one path in one version, and nothing outside it"
 
 test("a reusable version with no list republishes everything the runtime already holds", async () => {
   const reusedVersion = "ver_files_retained";
-  // No `files` and no `retained_files`, with `retention: "all"`: the caller
-  // names the version to carry forward and the runtime materializes the path
-  // list from its own catalog.
+  // With `retention: "all"` and neither `files` nor `retained_files`, the
+  // runtime materializes the path list from its own catalog.
   await deploy(rt, {
     spaceId: SPACE,
     versionId: reusedVersion,
@@ -308,20 +312,16 @@ test("a reusable version with no list republishes everything the runtime already
     "index.html",
     "sf.jsonc",
   ]);
-  // Retention carries the UPLOADED object forward, not the previous publish's
-  // substituted byte — otherwise the last publish's variable values would be
-  // baked in permanently.
+  // Retention carries the uploaded object forward, not the previous publish's
+  // substituted byte, which would bake those variable values in permanently.
   expect(retained.files.find((file) => file.path === "config.js")?.sha256).toBe(
     sha256(UPLOADED_CONFIG),
   );
 });
 
-// Last on purpose: it unlinks a live CAS object, and every test above needs the
-// version's bytes intact.
-// The delete case: the runtime has no delete list, so a dropped path is a path
-// missing from the retained set. When the publisher declares the only surviving
-// file, that set is EMPTY — and an empty set used to be read as "retain
-// everything", which republished the very file the publish deleted.
+// The runtime has no delete list: a dropped path is a path missing from the
+// retained set. When the publisher declares the only surviving file that set is
+// empty, which must not be read as "retain everything".
 test("a pruning publish with an empty retained set drops the base's other paths", async () => {
   const baseVersion = "ver_files_prune_base";
   const prunedVersion = "ver_files_pruned";
@@ -342,13 +342,51 @@ test("a pruning publish with an empty retained set drops the base's other paths"
   expect(pruned.files.map((file) => file.path)).toEqual(["a.html"]);
 });
 
+test("a pruning publish can retain runtime-owned artifacts without exposing them to file browsing", async () => {
+  const prunedVersion = "ver_files_internal_retained";
+  await deploy(rt, {
+    spaceId: SPACE,
+    versionId: prunedVersion,
+    files: { "index.html": "<h1>pruned</h1>\n" },
+    session: {
+      reusableVersionId: VERSION,
+      retention: "list",
+      retainedFiles: manifestFor({ [INTERNAL_ARTIFACT]: '{"digest":"sha256:private"}\n' }),
+    },
+  });
+
+  expect(versionCatalog(rt, SPACE, prunedVersion)?.paths[INTERNAL_ARTIFACT]).toBeDefined();
+  expect(
+    (await listFiles("?view=source", SPACE, prunedVersion)).files.map((file) => file.path),
+  ).toEqual(["index.html"]);
+  expect(
+    (await listFiles("?view=source&include_internal=1", SPACE, prunedVersion)).files.map(
+      (file) => file.path,
+    ),
+  ).toEqual([INTERNAL_ARTIFACT, "index.html"]);
+});
+
+test("case-distinct tenant paths are not mistaken for runtime artifacts", async () => {
+  const versionId = "ver_files_uppercase_zero";
+  await deploy(rt, {
+    spaceId: SPACE,
+    versionId,
+    files: { "Zero/index.html": "<h1>tenant Zero</h1>\n" },
+  });
+
+  expect(
+    (await listFiles("?view=source", SPACE, versionId)).files.map((file) => file.path),
+  ).toEqual(["Zero/index.html"]);
+});
+
+// Last on purpose: it unlinks a live CAS object every test above needs intact.
 test("bytes momentarily unreachable are a 503, never a 404 that reads as deletion", async () => {
   const blob = blobPath(rt, SPACE, sha256(STYLE));
   expect(existsSync(blob)).toBe(true);
   rmSync(blob);
 
-  // Authorization succeeded and the catalog still names the object; a scanner
-  // that read this as "file gone" would report a live version's files deleted.
+  // Authorization succeeded and the catalog still names the object. A scanner
+  // reading a 404 here would report a live version's files as deleted.
   const unavailable = await getBlob(rt, HOST, pathToken("assets/style.css", "served"));
   expect(unavailable.status).toBe(503);
   expect(unavailable.headers.get("retry-after")).toBe("5");

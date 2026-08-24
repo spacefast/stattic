@@ -113,9 +113,8 @@ pub struct EgressTarget {
 }
 
 /// Spacefast-internal hosts, supplied by the caller rather than baked in: the
-/// serving provider suffixes are fixed, but the management hostname and the API
-/// host are resolved from configuration at runtime. An entry covers its own
-/// subdomains.
+/// serving provider suffixes are fixed, but the API host is resolved from
+/// configuration at runtime. An entry covers its own subdomains.
 #[derive(Debug, Default, Clone)]
 pub struct InternalHosts {
     hosts: BTreeSet<String>,

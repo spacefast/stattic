@@ -5,15 +5,17 @@
  *
  * A deployed Functions worker (or the control plane acting for it) asks the
  * origin to drop its hosts' edge entries after a mutation the static publish
- * pipeline never saw — an ISR revalidate, a webhook-driven content change. The
+ * pipeline never saw: an ISR revalidate, a webhook-driven content change. The
  * caller authenticates with the bearer purge credential in `sf-purge-token`,
  * carries `{paths: string[]}`, and gets a 202: accepted into the durable purge
- * queue, not confirmed by the edge — the same queue and provider bridge every
- * management mutation already drains through (shared/purge.php).
+ * queue, not confirmed by the edge. It is the same queue and provider bridge
+ * every management mutation already drains through (shared/purge.php).
  *
  * Paths only, no tags: a tag names a group only the worker's own cache object
  * understands, and OpenNext resolves tags to concrete routes BEFORE minting
- * the purge frame — so a tag could never reach this route with meaning.
+ * the purge frame, so a tag could never reach this route with meaning. The
+ * paths validate and coalesce the request; the eviction itself is whole-host
+ * (shared/purge.php header explains why no narrower scope exists).
  *
  * Like the relay and log intake beside it, this route holds no per-tenant
  * state and resolves no content: authority travels in the presented token.
@@ -35,7 +37,7 @@ const STATTIC_FUNCTIONS_PURGE_MAX_BODY_BYTES = 65536;
 
 // Per-space admission: at most this many ACCEPTED purges per rolling window.
 // The ceiling exists because every accepted request becomes provider API calls
-// against a shared edge — a runaway revalidate loop must exhaust its own quota,
+// against a shared edge: a runaway revalidate loop must exhaust its own quota,
 // not the provider's.
 const STATTIC_FUNCTIONS_PURGE_QUOTA_PER_WINDOW = 10;
 const STATTIC_FUNCTIONS_PURGE_QUOTA_WINDOW_SECONDS = 60;
@@ -62,9 +64,9 @@ function _stattic_functions_purge_expected_token(string $versionRoot): ?string
     return is_string($token) && $token !== '' ? $token : null;
 }
 
-// Deliberately the same 404 for every refusal — no purge block, a non-Functions
-// version, a wrong token — exactly as the functions host treats its signed
-// bundle route: distinguishing them would confirm which spaces carry a purge
+// Deliberately the same 404 for every refusal: no purge block, a non-Functions
+// version, a wrong token. Same as the functions host treats its signed bundle
+// route, because distinguishing them would confirm which spaces carry a purge
 // credential.
 function _stattic_functions_purge_refused(): never
 {
@@ -186,13 +188,12 @@ function _stattic_functions_purge_serve(string $privateRoot, string $spaceId, st
 
     // A space whose intent names no hostname is unaddressable at the provider
     // (shared/purge.php requires hostnames); accepting and doing nothing is the
-    // honest answer — there is no edge entry to drop. 202 is the contract:
+    // honest answer: there is no edge entry to drop. 202 is the contract:
     // accepted, never edge-confirmed. purge_now defers the loopback provider
     // call past fastcgi_finish_request, so the caller gets its 202 immediately.
     if (($decision['verdict'] ?? null) === 'accepted' && $hostnames !== []) {
         _stattic_runtime_purge_now($privateRoot, [
             'hostnames' => $hostnames,
-            'paths' => $paths,
             'reason' => 'functions_purge',
         ]);
         _stattic_defer(static function () use ($store): void {

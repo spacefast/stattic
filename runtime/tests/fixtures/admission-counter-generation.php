@@ -32,113 +32,6 @@ function admission_fixture_generation_file_count(string $path): int
     ));
 }
 
-function admission_fixture_legacy_file_acquire(string $path, int $limit): callable|false
-{
-    $handle = fopen($path, 'c+');
-    if (!is_resource($handle)) {
-        return false;
-    }
-    if (!flock($handle, LOCK_EX)) {
-        fclose($handle);
-        return false;
-    }
-    $raw = stream_get_contents($handle);
-    $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
-    $count = is_array($decoded) && is_int($decoded['count'] ?? null) ? max(0, $decoded['count']) : 0;
-    if ($count >= $limit) {
-        flock($handle, LOCK_UN);
-        fclose($handle);
-        return false;
-    }
-    ftruncate($handle, 0);
-    rewind($handle);
-    fwrite($handle, json_encode(['count' => $count + 1, 'updated_at' => time()], JSON_THROW_ON_ERROR) . "\n");
-    fflush($handle);
-    flock($handle, LOCK_UN);
-    fclose($handle);
-
-    return static function () use ($path): void {
-        $handle = fopen($path, 'c+');
-        if (!is_resource($handle)) {
-            return;
-        }
-        if (!flock($handle, LOCK_EX)) {
-            fclose($handle);
-            return;
-        }
-        $raw = stream_get_contents($handle);
-        $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
-        $count = is_array($decoded) && is_int($decoded['count'] ?? null) ? max(0, $decoded['count'] - 1) : 0;
-        ftruncate($handle, 0);
-        rewind($handle);
-        fwrite($handle, json_encode(['count' => $count, 'updated_at' => time()], JSON_THROW_ON_ERROR) . "\n");
-        fflush($handle);
-        flock($handle, LOCK_UN);
-        fclose($handle);
-    };
-}
-
-function admission_fixture_mixed_file_cutover(string $privateRoot, int $limit): array
-{
-    $path = $privateRoot . '/runtime/admission/legacy-counter.json';
-
-    // Old-code requests fill the legacy counter to the limit and are still in
-    // flight (non-stale) when the first new-code request cuts over during a
-    // deploy — the worst case for the cutover policy.
-    $legacyReleases = [];
-    for ($holder = 0; $holder < $limit; $holder++) {
-        $release = admission_fixture_legacy_file_acquire($path, $limit);
-        if (!is_callable($release)) {
-            throw new RuntimeException('legacy holder was not admitted');
-        }
-        $legacyReleases[] = $release;
-    }
-
-    // The cutover abandons the live legacy count rather than carrying it:
-    // those holders release into the legacy path, never the generation file,
-    // so a carried count would shed valid requests as phantom slots until the
-    // stale window. The first new-code request must therefore be admitted.
-    $releaseB = _stattic_admission_counter_acquire($path, $limit, 60);
-    if (!is_callable($releaseB)) {
-        throw new RuntimeException('current request B was shed by abandoned legacy slots at cutover');
-    }
-    $legacyPathExistsAfterCutover = is_file($path);
-    $countAfterCutover = admission_fixture_counter_value($path);
-
-    // Old-code holders finish: their releases recreate/decrement only the
-    // legacy path and must not touch the new generation's count.
-    foreach ($legacyReleases as $release) {
-        $release();
-    }
-    $countAfterLegacyRelease = admission_fixture_counter_value($path);
-
-    $freshResults = [];
-    $freshReleases = [];
-    for ($attempt = 0; $attempt < $limit; $attempt++) {
-        $release = _stattic_admission_counter_acquire($path, $limit, 60);
-        $freshResults[] = is_callable($release);
-        if (is_callable($release)) {
-            $freshReleases[] = $release;
-        }
-    }
-    $persistedCountAtLimit = admission_fixture_counter_value($path);
-
-    foreach ($freshReleases as $release) {
-        $release();
-    }
-    $releaseB();
-
-    return [
-        'request_b_admitted' => is_callable($releaseB),
-        'legacy_path_exists_after_cutover' => $legacyPathExistsAfterCutover,
-        'count_after_cutover' => $countAfterCutover,
-        'count_after_legacy_release' => $countAfterLegacyRelease,
-        'fresh_results' => $freshResults,
-        'persisted_count_at_limit' => $persistedCountAtLimit,
-        'final_persisted_count' => admission_fixture_counter_value($path),
-    ];
-}
-
 $limit = 2;
 $fixtureRoot = sys_get_temp_dir() . '/spacefast-admission-generation-' . bin2hex(random_bytes(8));
 $privateRoot = $fixtureRoot . '/.stattic/storage';
@@ -224,7 +117,6 @@ try {
         $generationFileCountsAfterRotations[] = admission_fixture_generation_file_count($path);
         $release();
     }
-    $mixedFileCutover = admission_fixture_mixed_file_cutover($privateRoot, $limit);
 
     echo json_encode([
         'request_b_admitted' => is_callable($releaseB),
@@ -236,7 +128,6 @@ try {
         'admitted_after_slots_freed' => $admittedAfterSlotsFreed,
         'final_persisted_count' => $finalPersistedCount,
         'generation_file_counts_after_rotations' => $generationFileCountsAfterRotations,
-        'mixed_file_cutover' => $mixedFileCutover,
     ], JSON_THROW_ON_ERROR) . "\n";
 } finally {
     exec('rm -rf ' . escapeshellarg($fixtureRoot));

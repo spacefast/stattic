@@ -1,13 +1,13 @@
 // The machine purge intake: POST /__spacefast/functions/purge
-// (engine/runtime/functions-purge.php), authorized by the purge credential the
-// control plane mints into the version-adjacent functions/config.json under
-// `purge.token`. The mint is control-plane-side, so this suite plays the
-// control plane: it writes the token into the finalized config document on
-// disk — the exact artifact serve time reads — and then drives the route over
-// HTTP like a worker would.
+// (engine/runtime/functions-purge.php), authorized by the token the control
+// plane mints into functions/config.json under `purge.token`. This suite plays
+// the control plane: it writes the token into the finalized config on disk,
+// then drives the route over HTTP like a worker would.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+
+import { z } from "zod";
 
 import {
   deploy,
@@ -22,8 +22,14 @@ import {
 const HOST = "functions-purge.test";
 const SPACE_ID = "spc_fx_purge";
 const VERSION_ID = "ver_fx_purge_1";
+const RETIRED_TAG_HOST = "functions-purge-retired-tag.test";
+const RETIRED_TAG_SPACE_ID = "spc_fx_purge_retired_tag";
+const RETIRED_TAG_VERSION_ID = "ver_fx_purge_retired_tag_1";
 const PURGE_PATH = "/__spacefast/functions/purge";
 const PURGE_TOKEN = "sfpt_functions_purge_credential_0123456789";
+const functionsConfigSchema = z
+  .object({ purge: z.object({ token: z.string() }).nullable().optional() })
+  .passthrough();
 
 let rt: Runtime;
 
@@ -53,33 +59,59 @@ beforeAll(async () => {
       version_hostnames: [],
     },
   });
+  await deploy(rt, {
+    spaceId: RETIRED_TAG_SPACE_ID,
+    versionId: RETIRED_TAG_VERSION_ID,
+    metadata: { mode: "website", title: "Functions purge retired tag" },
+    files: { "index.html": "<h1>retired tag purge</h1>" },
+    functions: {
+      artifact: {
+        appName: "functions-purge-retired-tag",
+        entry: "worker.js",
+        mainModule: "index.js",
+        compatibilityDate: "2026-07-01",
+        compatibilityFlags: [],
+        routes: [{ method: null, path: "/api", subtree: true }],
+      },
+      host: { hostname: "functions.invalid", bundleUrl: "https://example.test/bundle.json" },
+      grantedCapabilities: [],
+    },
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig({ mode: "website", site_title: "Functions purge retired tag" }),
+      production_hostnames: [RETIRED_TAG_HOST],
+      version_hostnames: [],
+    },
+  });
 }, 30000);
 
 afterAll(() => {
   rt?.stop();
 });
 
-function configPath(): string {
-  return path.join(versionRoot(rt, SPACE_ID, VERSION_ID), "functions", "config.json");
+function configPath(spaceId = SPACE_ID, versionId = VERSION_ID): string {
+  return path.join(versionRoot(rt, spaceId, versionId), "functions", "config.json");
 }
 
 /** The control plane's mint, replayed onto the finalized artifact. */
-function writePurgeToken(token: string | null): void {
-  const config = JSON.parse(readFileSync(configPath(), "utf8")) as Record<string, unknown>;
+function writePurgeToken(token: string | null, spaceId = SPACE_ID, versionId = VERSION_ID): void {
+  const target = configPath(spaceId, versionId);
+  const config = functionsConfigSchema.parse(JSON.parse(readFileSync(target, "utf8")));
   if (token === null) {
     delete config.purge;
   } else {
     config.purge = { token };
   }
-  writeFileSync(configPath(), `${JSON.stringify(config)}\n`);
+  writeFileSync(target, `${JSON.stringify(config)}\n`);
 }
 
 function purge(
   body: unknown,
   token: string | null = PURGE_TOKEN,
   method = "POST",
+  host = HOST,
 ): Promise<Response> {
-  return get(rt, HOST, PURGE_PATH, {
+  return get(rt, host, PURGE_PATH, {
     method,
     headers: {
       "content-type": "application/json",
@@ -90,9 +122,8 @@ function purge(
 }
 
 test("without a minted credential the route is indistinguishable from a 404", async () => {
-  // The deploy wrote a functions config with no `purge` block: refusal, and the
-  // same refusal a wrong token gets once the block exists — probing confirms
-  // nothing about a space's configuration.
+  // The deploy wrote no `purge` block. A wrong token gets the same refusal, so
+  // probing confirms nothing about a space's configuration.
   const unminted = await purge({ paths: ["/x"], tags: [] });
   expect(unminted.status).toBe(404);
 
@@ -116,8 +147,7 @@ test("the contract: POST only, bearer in sf-purge-token, 202 {accepted:true}", a
   expect(await accepted.json()).toEqual({ accepted: true });
 
   // The accepted request drove a purge POST to the space's intent hostname over
-  // the same local edge-cache API every management mutation uses. `/blog/post.html`
-  // is a document path, so it is a whole-host (domain-scope) purge: no purge_uris.
+  // the local edge-cache API. Every purge is whole-host: no purge_uris.
   const calls = edgePurgeCalls(rt).filter((call) => call.reason === "functions_purge");
   expect(calls.length).toBeGreaterThanOrEqual(1);
   expect(calls.at(-1)?.hostname).toBe(HOST);
@@ -151,8 +181,8 @@ test("identical sets coalesce; distinct sets spend the per-space quota", async (
   const afterCoalesce = edgePurgeCalls(rt).filter((r) => r.reason === "functions_purge").length;
   expect(afterCoalesce).toBe(before + 1);
 
-  // Distinct sets each spend quota; past the window ceiling the refusal is a
-  // 429 that names when to come back — never a silent drop.
+  // Distinct sets each spend quota. Past the window ceiling the refusal is a
+  // 429 that names when to come back, never a silent drop.
   let limited: Response | null = null;
   for (let i = 0; i < 12; i += 1) {
     const response = await purge({ paths: [`/quota/${i}.css`], tags: [] });
@@ -167,24 +197,22 @@ test("identical sets coalesce; distinct sets spend the per-space quota", async (
   expect(((await limited?.json()) as { code?: string }).code).toBe("purge_rate_limited");
 });
 
-test("tags are not part of the purge contract: a body carrying the retired field purges its paths", async () => {
-  writePurgeToken(PURGE_TOKEN);
+test("tags are not part of the purge contract: a body carrying the retired field still purges", async () => {
+  writePurgeToken(PURGE_TOKEN, RETIRED_TAG_SPACE_ID, RETIRED_TAG_VERSION_ID);
   // Tag invalidation lives in the worker's cache object, and OpenNext resolves
-  // tags to concrete routes before minting the frame — so tags never reach the
-  // CDN, and a body still carrying the retired field purges as if it were
-  // absent (URI scope, not the domain widening tags used to force).
-  // Fresh quota window is not guaranteed here; tolerate a 429 by only
-  // asserting when accepted. The window record is space-scoped state written
-  // by the earlier tests in this same runtime.
-  const response = await purge({ paths: ["/tagged/asset.css"], tags: ["posts"] });
-  if (response.status === 202) {
-    // URI scope, not the domain widening tags used to force: the purge carries
-    // the concrete asset URL rather than a whole-host purge.
-    const call = edgePurgeCalls(rt)
-      .filter((r) => r.reason === "functions_purge")
-      .at(-1);
-    expect(call?.uris).toEqual([`https://${HOST}/tagged/asset.css`]);
-  } else {
-    expect(response.status).toBe(429);
-  }
+  // tags to concrete routes before minting the frame, so tags never reach the
+  // CDN. A body still carrying the retired field purges as if it were absent.
+  // Separate Space, so the quota test above cannot turn a missing purge into an
+  // accepted 429 branch.
+  const before = edgePurgeCalls(rt).length;
+  const response = await purge(
+    { paths: ["/tagged/asset.css"], tags: ["posts"] },
+    PURGE_TOKEN,
+    "POST",
+    RETIRED_TAG_HOST,
+  );
+  expect(response.status).toBe(202);
+  expect(edgePurgeCalls(rt).slice(before)).toEqual([
+    { hostname: RETIRED_TAG_HOST, reason: "functions_purge", uris: [] },
+  ]);
 });

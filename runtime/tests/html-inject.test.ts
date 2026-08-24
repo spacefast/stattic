@@ -110,8 +110,8 @@ test("platform_meta renders the space's meta into <head> and cache-busts local a
   expect(html).toContain('<meta property="og:title" content="Platform title">');
   expect(html).toContain('<meta property="og:description" content="Platform description">');
   expect(html).toContain('<meta name="twitter:card" content="summary_large_image">');
-  // Scraper caches key on the URL, so the emitted og:image has to carry the
-  // image's own content hash -- otherwise unfurls pin to the first upload.
+  // Scraper caches key on the URL, so og:image must carry the image's content
+  // hash or unfurls pin to the first upload.
   expect(html).toContain(
     `<meta property="og:image" content="/og.png?v=${sha256(ogImage).slice(0, 12)}">`,
   );

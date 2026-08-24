@@ -52,10 +52,9 @@ function _stattic_runtime_api_base_url(): string
 
 // Local JWKS first so verification needs no call back to the API: self-hosted
 // sets SPACEFAST_RUNTIME_JWKS_PATH; WP.Cloud pushes SPACEFAST_RUNTIME_JWKS_B64
-// through Atomic persistent data. `$allowFetch` is the management lane's own
-// flag — the public serving lane must never make a visitor request wait on an
-// outbound HTTPS round trip to resolve a key, so it reads local/cached only and
-// denies when neither answers.
+// through Atomic persistent data. `$allowFetch` is the management lane's flag.
+// The public serving lane never makes a visitor wait on an outbound HTTPS round
+// trip for a key: it reads local/cached only and denies when neither answers.
 function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$reason = null): ?array
 {
     $cachePath = $privateRoot . '/runtime/jwks.json';
@@ -73,9 +72,8 @@ function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$
         if (_stattic_runtime_jwks_usable($decoded)) {
             // Provider persistent data is available on management/bootstrap
             // requests, not on the no-WordPress public serving lane. Persist
-            // that trusted configured source so the extensionless blob gate
-            // can verify later scan requests without decrypting provider data
-            // or fetching a key over the network.
+            // the configured source so the extensionless blob gate can verify
+            // later scan requests without provider data or a network fetch.
             $cached = _stattic_runtime_read_json($cachePath);
             $persistentRuntimeRoot = str_ends_with(
                 rtrim(str_replace('\\', '/', $privateRoot), '/'),
@@ -120,8 +118,8 @@ function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$
         $reason = 'api_base_url_missing';
         return null;
     }
-    // https only: the JWKS is the runtime's trust anchor, so a cleartext fetch it
-    // could be tampered in flight is never accepted, even if the API base is http.
+    // https only: the JWKS is the runtime's trust anchor, so a cleartext fetch,
+    // tamperable in flight, is refused even when the API base is http.
     $result = _stattic_http_request([
         'url' => $apiBaseUrl . '/.well-known/spacefast-runtime-jwks.json',
         'schemes' => ['https'],
@@ -129,8 +127,8 @@ function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$
     ]);
     $jwks = $result['ok'] ? json_decode($result['body'], true) : null;
     // A malformed or empty response is a retryable fetch failure (500), never a
-    // doc worth persisting: caching garbage here 401s every privileged request
-    // for the next 300s. Only a well-formed Ed25519 OKP key set is cached.
+    // doc worth persisting: caching garbage 401s every privileged request for
+    // 300s. Only a well-formed Ed25519 OKP key set is cached.
     if (!_stattic_runtime_jwks_usable($jwks)) {
         $reason = 'jwks_fetch_failed';
         return null;
@@ -159,7 +157,7 @@ function _stattic_runtime_jwks_usable(mixed $jwks): bool
 
 /**
  * @return list<array> every Ed25519 key for this kid; a kid-less token matches
- *         them all — the caller tries each and stops at the first that verifies.
+ *         them all, and the caller stops at the first that verifies.
  */
 function _stattic_runtime_signing_jwks(string $privateRoot, string $kid, bool $allowFetch, ?string &$reason = null): array
 {
@@ -176,21 +174,21 @@ function _stattic_runtime_signing_jwks(string $privateRoot, string $kid, bool $a
     return $candidates;
 }
 
-// The ONE control-plane-token verifier, for every aud. It returns claims or null
-// and never writes a response, so the serving lane cannot leak which spaces,
-// versions and digests exist; the admin lane maps `$rejection` through its own
-// vocabulary (admin/auth.php).
+// The ONE control-plane-token verifier, for every aud. It returns claims or
+// null and never writes a response, so the serving lane leaks nothing about
+// which spaces, versions and digests exist. The admin lane maps `$rejection`
+// through its own vocabulary (admin/auth.php).
 //
 // `$profile` is the lane's data: `claims` (ordered claim => ['equals' => …] |
 // ['present' => true]), `scope_valid`, `state_valid`, `allow_jwks_fetch`,
 // `instance_pinned`.
 //
 // Check order is load-bearing. `scope_valid` runs before the runtime pin so an
-// invalid public request never reaches mounted storage, and `state_valid` before
-// the key lookup so a bad token costs zero lookups; both compare only
+// invalid public request never reaches mounted storage, and `state_valid`
+// before the key lookup so a bad token costs zero lookups. Both compare only
 // caller-supplied values against the token's own, so neither is an oracle. The
-// `claims` profile runs LAST, after the signature: pinning a claim is only
-// meaningful once the token is proven authentic.
+// `claims` profile runs LAST, after the signature: pinning a claim means
+// nothing until the token is proven authentic.
 function _stattic_runtime_token_claims(
     string $privateRoot,
     string $token,
@@ -221,8 +219,8 @@ function _stattic_runtime_token_claims(
     // Pinned to this runtime so a token lifted from one origin cannot be replayed
     // against another; a space move re-runs finalize and re-mints. Opting out is
     // for a lane whose token names its own Space and resolves nothing outside it
-    // (the blob gate): such a token is already only usable on the host holding
-    // that Space, and the minter has no placement to pin at mint time.
+    // (the blob gate): it is already usable only on the host holding that Space,
+    // and the minter has no placement to pin at mint time.
     $runtimeInstanceId = _stattic_runtime_instance_id();
     if (
         ($profile['instance_pinned'] ?? true) === true
@@ -305,12 +303,11 @@ function _stattic_runtime_token_claims(
 //
 //   exp        control-plane TTLs: download 10 min, scan 60 min
 //
-// The path lane deliberately carries no `route_name`: per-channel bytes are a
-// content-addressed concern (the scanner enumerates a channel and fetches by
-// sha), and no customer-facing read names a channel.
+// The path lane carries no `route_name`: per-channel bytes are
+// content-addressed, the scanner enumerates a channel and fetches by sha, and
+// no customer-facing read names a channel.
 //
-// Returns the claims or null; never writes a response — every rejection is the
-// caller's uniform 404.
+// Returns the claims or null; every rejection is the caller's uniform 404.
 function _stattic_runtime_blob_gate_claims(string $privateRoot, string $token): ?array
 {
     $claims = _stattic_runtime_token_claims($privateRoot, $token, 'spacefast-blob-gate', [
@@ -368,7 +365,7 @@ function _stattic_runtime_blob_gate_claims(string $privateRoot, string $token): 
 
 // Only pure outcomes may be memoized: time-dependent and stateful checks
 // (exp/nbf, aud, jti consumption) stay outside in _stattic_visitor_verify.
-// Never cross-request — a signature verdict must not outlive its request, and
+// Never cross-request: a signature verdict must not outlive its request, and
 // per-space key material must not land in pool-shared storage.
 
 const STATTIC_JWT_VERIFY_MEMO_MAX = 256;
@@ -456,10 +453,9 @@ function _stattic_visitor_verify(string $token, array $options): ?array
         return null;
     }
     // The audience names the Space, so a handoff keeps its identity across
-    // claim, rename and custom domains. Host binding did not go away with it:
-    // the mint records the serving host in its own claim and it must equal the
-    // host this request arrived on, so a token lifted from one origin is still
-    // refused on every other.
+    // claim, rename and custom domains. The mint also records the serving host
+    // in its own claim, which must equal the host this request arrived on, so a
+    // token lifted from one origin is refused on every other.
     $host = strtolower((string) ($options['host'] ?? ''));
     $expectedSpaceId = is_string($options['spaceId'] ?? null) ? $options['spaceId'] : '';
     $audience = is_string($claims['aud'] ?? null) ? $claims['aud'] : '';
@@ -533,7 +529,7 @@ function _stattic_visitor_verify(string $token, array $options): ?array
         if ($privateRoot === '') {
             return null;
         }
-        // Fail closed: a replayed OR unstorable jti both reject — no access is
+        // Fail closed: a replayed OR unstorable jti both reject. No access is
         // handed out when the replay guard cannot record the id.
         if (_stattic_jwt_consume_jti($privateRoot, 'visitor', $jti, $claimExp, $now) !== 'ok') {
             return null;
@@ -547,11 +543,10 @@ function _stattic_visitor_verify(string $token, array $options): ?array
     ];
 }
 
-// Replay markers expire at the token's own exp, which the claim stamps as the
-// marker's mtime; the sweep is throttled because unthrottled it would run
-// inside every token consume — quadratic across a deploy burst. Markers also
-// reclaim lazily on collision, so the cadence bounds disk usage only, never
-// correctness.
+// Replay markers expire at the token's own exp, stamped as the marker's mtime.
+// The sweep is throttled: unthrottled it runs inside every token consume, which
+// is quadratic across a deploy burst. Markers also reclaim lazily on collision,
+// so the cadence bounds disk usage only, never correctness.
 function _stattic_jwt_replay_store(string $privateRoot): array
 {
     $root = $privateRoot . '/runtime/jti';
@@ -567,8 +562,8 @@ function _stattic_jwt_replay_store(string $privateRoot): array
 
 // Returns 'ok' (first to claim), 'replayed' (live marker exists), or
 // 'unavailable' (the write failed with no marker on disk). A replay verdict
-// requires evidence — reporting a storage outage as a replay turns a full disk
-// into a permanent-looking auth failure; callers answer retryable instead.
+// requires evidence: reporting a storage outage as a replay would turn a full
+// disk into a permanent-looking auth failure, so callers answer retryable.
 // `$namespace` keeps the visitor and management id spaces from colliding.
 function _stattic_jwt_consume_jti(string $privateRoot, string $namespace, string $jti, int $exp, int $now): string
 {

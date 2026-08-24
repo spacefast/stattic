@@ -1,8 +1,8 @@
 <?php
 declare(strict_types=1);
 
-// Pure-function unit tests for runtime policy modules, run directly with
-// `php runtime/tests/unit.php` (no server, no network — literal IPs only).
+// Pure-function unit tests for runtime policy modules. Run with
+// `php runtime/tests/unit.php` (no server, no network, literal IPs only).
 
 require_once __DIR__ . '/../engine/shared/context.php'; // engine identity + config_value helpers
 require_once __DIR__ . '/../engine/shared/egress.php';
@@ -16,7 +16,7 @@ require_once __DIR__ . '/../engine/shared/artifacts.php'; // route pattern + art
 require_once __DIR__ . '/../engine/shared/storage.php';
 require_once __DIR__ . '/../engine/shared/purge.php';
 require_once __DIR__ . '/../engine/admin/generate.php'; // hostname-intent scope derivation (pure with an injected intent)
-require_once __DIR__ . '/../engine/admin/jobs.php'; // job runner policy (§22) — pure functions only here
+require_once __DIR__ . '/../engine/admin/jobs.php'; // job runner policy (§22), pure functions only here
 require_once __DIR__ . '/../engine/runtime/functions-artifacts.php'; // signed build-artifact reads
 require_once __DIR__ . '/../engine/runtime/functions-dispatch.php'; // origin -> host dispatch contract
 require_once __DIR__ . '/../engine/shared/runtime-log.php'; // the one runtime log writer
@@ -126,7 +126,7 @@ foreach ([
     'sub.localhost',
     'view.fast',
     'site.view.fast',
-    'wpc-manage-site.view.fast',
+    'site.view.fast',
     'atomicsites.net',
     'client-ssh.atomicsites.net',
     '',
@@ -245,16 +245,14 @@ foreach ($deniedNames as $denied) {
     check($applied === [], "denylist blocks header: {$denied}");
 }
 
-// A benign custom header that merely mentions the product name is NOT reserved.
 $applied = [];
 _stattic_apply_header_operations($applied, [['kind' => 'set', 'name' => 'X-Spacefastish', 'value' => 'ok']], []);
 check(count($applied) === 1, 'denylist prefix does not over-match X-Spacefastish');
 
-// _headers leads across grammars: a sf.jsonc rule that sets a header name a file
-// rule already set is skipped, not appended. `X-Frame-Options: DENY,SAMEORIGIN`
-// is a header browsers discard, so appending would hand an additive config rule
-// the power to remove the file's clickjacking protection. Repeats within one
-// grammar still accumulate.
+// _headers leads across grammars: a sf.jsonc rule setting a header a file rule
+// already set is skipped, not appended. Browsers discard
+// `X-Frame-Options: DENY,SAMEORIGIN`, so appending would let a config rule
+// delete the file's clickjacking protection. Repeats within one grammar accumulate.
 $applied = [];
 _stattic_apply_header_operations($applied, [['kind' => 'set', 'name' => 'X-Frame-Options', 'value' => 'DENY']], [], 'file');
 _stattic_apply_header_operations($applied, [
@@ -275,11 +273,10 @@ check(_stattic_expand_template('/to/:splat?q=:value', ['splat' => 'a/b', 'value'
 
 // --- Ordered-rule matching: the compiled regex carries the PCRE delimiter -----------
 
-// `#` is a legal path character — `_redirects` only treats it as a comment when
-// it is the first character of a line — so `/a#b/:id` is an accepted source and
-// the compilers emit it unescaped into `regex`. Interpolated raw into a `#...#`
-// pattern it ended the delimiter early: PCRE warned "Unknown modifier", the rule
-// silently never matched, and every request logged into the tenant-visible lane.
+// `#` is a legal path character (`_redirects` treats it as a comment only at the
+// start of a line), so `/a#b/:id` compiles unescaped into `regex`. Interpolated
+// into a `#...#` pattern it ended the delimiter early: PCRE warned "Unknown
+// modifier", the rule never matched, and every request logged to the tenant lane.
 $hashRule = ['regex' => '^/a#b/(?P<id>[^/]+)/?$'];
 $pathMatches = [];
 $hostMatches = [];
@@ -292,7 +289,7 @@ check(
     !_stattic_ordered_rule_request_matches($hashRule, false, '/ab/42', 'example.com'),
     'rule regex containing the PCRE delimiter still refuses a non-matching path'
 );
-// The host matcher is the same seam with the `i` modifier, which has to survive
+// The host matcher is the same seam plus the `i` modifier, which has to survive
 // the delimiter escaping.
 check(
     _stattic_ordered_rule_request_matches(
@@ -306,10 +303,9 @@ check(
 
 // --- Upload path policy --------------------------------------------------------------
 
-// Deliberately no cases here. This file's copy of the expected verdicts was one of the
-// two hand-maintained lists that let the policy drift; upload-policy.php is now generated
-// from packages/common/src/utils/publish-policy.ts, and publish-policy.fixtures.json is
-// asserted against this file AND against the TypeScript policy by
+// No cases here on purpose. upload-policy.php is generated from
+// packages/common/src/utils/publish-policy.ts, and publish-policy.fixtures.json is
+// asserted against both the PHP and the TypeScript policy by
 // apps/control-plane/src/runtime/php-policy-parity.test.ts. New cases go in the fixture.
 
 // --- PHP-like safety policy ----------------------------------------------------------
@@ -384,11 +380,10 @@ check(
 
 // --- Canonical Grant network constraints ---------------------------------------------
 
-// Contracts §16: IP/CIDR grants are gone. The only client-IP-ish headers that
-// reach PHP here (X-Real-IP, CF-Connecting-IP, X-Forwarded-Host) are
-// attacker-controlled, so there is no address to match against and no CIDR
-// helper left to test. What survives is country (server-set fastcgi_param) and
-// user-agent selectors, plus the fail-closed rule for a stored ipCidrs grant.
+// Contracts §16: IP/CIDR grants are gone. The client-IP headers reaching PHP
+// (X-Real-IP, CF-Connecting-IP, X-Forwarded-Host) are attacker-controlled, so
+// there is no address to match. What survives: country (a server-set
+// fastcgi_param), user-agent selectors, and fail-closed for a stored ipCidrs grant.
 $networkGrant = [
     'id' => 'grt_network',
     'generation' => 1,
@@ -477,8 +472,7 @@ check(
     )['capabilities'], true),
     'Grant network excludes a configured country locally'
 );
-// No provider geo header means no country: a country selector must fail closed
-// rather than admitting the unknown.
+// No provider geo header means no country: the selector fails closed.
 check(
     !in_array('page.view', _stattic_grant_decision(
         $networkProjection,
@@ -504,9 +498,9 @@ check(
     'Grant network excludes configured user-agent substrings case-insensitively'
 );
 
-// §16: an overlay that still carries an IP grant compiles (the control plane may
-// hold one), but the grant authorizes nobody — the runtime cannot name the
-// visitor, so "inside the CIDR" would degrade to "sent the right header".
+// §16: an overlay carrying an IP grant still compiles, but authorizes nobody.
+// The runtime cannot name the visitor, so "inside the CIDR" would degrade to
+// "sent the right header".
 $ipCidrProjection = _stattic_compile_authorization_projection([
     ...$rawNetworkProjection,
     'grants' => [[
@@ -592,13 +586,12 @@ check(
 
 // --- Grant-decision conformance: the shared corpus ------------------------------------
 //
-// This engine re-implements the Grant vocabulary that
-// packages/common/src/utils/grants.ts defines, because a request has to be
-// admitted here without calling home. The corpus below is generated by that
-// reference evaluator (packages/common/scripts/generate-grant-decision-fixtures.ts)
-// and answered again here: same inputs, same capabilities, same Grants firing.
-// Asserting WHICH Grant matched is the point — a verdict alone passes when the
-// right answer comes out of the wrong rule.
+// This engine re-implements the Grant vocabulary of
+// packages/common/src/utils/grants.ts, because a request is admitted here
+// without calling home. The corpus is generated by that reference evaluator
+// (packages/common/scripts/generate-grant-decision-fixtures.ts) and answered
+// again here. Asserting WHICH Grant matched is the point: a verdict alone
+// passes when the right answer comes out of the wrong rule.
 require_once __DIR__ . '/grant-conformance.php';
 $conformance = _stattic_test_grant_conformance_fixture(
     __DIR__ . '/../../packages/common/src/utils/grant-decision.fixtures.json'
@@ -620,8 +613,6 @@ foreach ($conformance['cases'] as $conformanceCase) {
     );
 }
 
-// Issuer candidates by kid: an exact kid narrows to that issuer, a miss yields
-// no candidates, and a kid-less token keeps every key so verification can retry.
 check(
     _stattic_jwt_issuers_for_kid([['kid' => 'k1', 'publicKey' => 'p1'], ['kid' => 'k2', 'publicKey' => 'p2']], 'k2')
         === [['kid' => 'k2', 'publicKey' => 'p2']],
@@ -639,8 +630,6 @@ check(
 
 // --- Visitor verify: per-request signature memo (shared/jwt.php) ---------------------
 
-// The memo primitive itself: identical (key material, token) skips the
-// verifier; different key material re-verifies; negative verdicts memoize too.
 $memoCalls = 0;
 $memoVerify = function () use (&$memoCalls): bool {
     $memoCalls++;
@@ -658,8 +647,8 @@ $memoDeny = function () use (&$memoDenies): bool {
 check(_stattic_jwt_signature_valid_memo('fp-c', 'tok-1', $memoDeny) === false, 'sig memo: negative verdict is returned');
 check(_stattic_jwt_signature_valid_memo('fp-c', 'tok-1', $memoDeny) === false && $memoDenies === 1, 'sig memo: negative verdict is memoized without re-running');
 
-// End-to-end through _stattic_visitor_verify: the memo must never change a
-// verdict, and everything time/state-dependent must keep running per call.
+// End-to-end through _stattic_visitor_verify: the memo never changes a verdict,
+// and time/state checks still run per call.
 $jwtSignKeypair = sodium_crypto_sign_keypair();
 $jwtIssuerA = [
     'alg' => 'EdDSA',
@@ -688,9 +677,8 @@ $jwtOptionsB = ['issuers' => [$jwtIssuerB], 'issuer' => 'spacefast-api', 'host' 
 $jwtFirst = _stattic_visitor_verify($jwtToken, $jwtOptionsA);
 check(is_array($jwtFirst) && $jwtFirst['sub'] === 'user:carol', 'visitor verify accepts a valid EdDSA token');
 
-// The audience names the Space, so host binding rides in its own claim — and it
-// still binds: the same token is refused on a host its `host` claim does not
-// name, and a Space-audienced token carrying no host claim is refused outright.
+// The audience names the Space, so host binding rides in its own claim, and it
+// still binds.
 check(
     _stattic_visitor_verify($jwtToken, [...$jwtOptionsA, 'host' => 'other.test']) === null,
     'space-audienced token is rejected on a host its host claim does not name'
@@ -724,8 +712,7 @@ $jwtExpired = $mintEdDSA(
 );
 check(_stattic_visitor_verify($jwtExpired, $jwtOptionsA) === null, 'expired token is rejected (exp check runs outside the memo)');
 
-// Rotation: a kid-less token signed by one live key must still verify when the
-// verifier tries a different (also-live) key first, rather than signing out.
+// Rotation: trying another live key first must not sign the visitor out.
 $mintKidless = static function (array $claims, string $secretKey): string {
     $header = _stattic_base64url_encode(json_encode(['alg' => 'EdDSA', 'typ' => 'JWT'], JSON_UNESCAPED_SLASHES));
     $body = _stattic_base64url_encode(json_encode($claims, JSON_UNESCAPED_SLASHES));
@@ -748,8 +735,8 @@ check(
     'kid-less token verifies against a later key when the first candidate fails'
 );
 
-// The request boundary decodes and NFC-normalizes once. Access scoping then
-// canonicalizes only the already-decoded identity it receives.
+// The request boundary decodes and NFC-normalizes once. Access scoping only
+// canonicalizes the already-decoded identity it receives.
 check(_stattic_scope_path('/docs//intro/') === '/docs/intro', 'access path collapses duplicate and trailing separators');
 check(_stattic_scope_path('/docs/./guide/../intro/index.html') === '/docs/intro', 'access path resolves dots and index alias');
 check(_stattic_artifact_scope_path('/docs/./guide/../intro/index.html') === '/docs/intro/index.html', 'artifact access path retains the resolved index file');
@@ -765,8 +752,8 @@ foreach ([' relative', '//host/path', '/%2fsecret', '/%5csecret', '/%3fsecret', 
     check(_stattic_canonical_request_path($invalidAccessPath) === null, 'request boundary rejects ambiguous input: ' . $invalidAccessPath);
 }
 
-// Clean-URL knob resolution moved into the finalize compiler (v4): the runtime
-// no longer computes it, so the resolver tests live in crates/stattic-runtime-core.
+// Clean-URL knob resolution lives in the finalize compiler, so the resolver
+// tests live in crates/stattic-runtime-core.
 
 // --- Job runner: backoff policy, time-stop, lane derivation (§22) ----------------------
 
@@ -798,9 +785,8 @@ check(
     'job time-stop: past 8h since first failure is stopped'
 );
 
-// D54: the registry collapsed to one maintenance tick and one demote. Space
-// moves are a control-plane workflow over the ordinary read/write surfaces
-// (D21/D72/D96), so there is no transfer lane to derive.
+// D54: only a maintenance tick and a demote remain. Space moves are a
+// control-plane workflow (D21/D72/D96), so there is no transfer lane to derive.
 foreach ([
     'maintenance_tick' => 'bulk',
     'tier_demote' => 'bulk',
@@ -819,17 +805,14 @@ try {
 }
 check($unknownLaneThrew, 'job lane: unknown type throws StatticJobFatal(unknown_job_type)');
 
-// job_create is real filesystem I/O (upsert-by-idempotency-key, journaling) rather than
-// pure logic, but it has no HTTP surface of its own in this wave (only /jobs/tick and
-// GET /jobs/{jobId} are routes — job_create is called in-process by future producers), so
-// it is exercised here directly against a throwaway private root instead of invented as a
-// test-only HTTP route.
+// job_create is filesystem I/O, not pure logic, but it has no HTTP surface of its
+// own (only /jobs/tick and GET /jobs/{jobId} are routes), so it is exercised here
+// against a throwaway private root rather than through an invented test-only route.
 function _stattic_job_runner_unit_temp_private_root(): string
 {
-    // realpath() the base first: the path-safety spine (storage.php) re-resolves
-    // ancestors with realpath() on every write, so a literal /tmp on platforms
-    // where it symlinks elsewhere (macOS: /tmp -> /private/tmp) would mismatch
-    // against the un-resolved path we handed to the job functions.
+    // realpath() the base first: storage.php re-resolves ancestors on every write,
+    // so a literal /tmp where it is a symlink (macOS: /tmp -> /private/tmp) would
+    // mismatch the path handed to the job functions.
     $base = realpath(sys_get_temp_dir());
     if (!is_string($base)) {
         $base = sys_get_temp_dir();
@@ -859,9 +842,6 @@ function _stattic_job_runner_unit_rm_recursive(string $path): void
 
 $jobsPrivateRoot = _stattic_job_runner_unit_temp_private_root();
 $claims = ['operation_id' => 'op_test', 'space_id' => 'spc_unit', 'action' => 'create_engine_job'];
-check(!_stattic_tiering_enabled(), 'tiering switch: disabled when no explicit opt-in is configured');
-putenv('SPACEFAST_TIERING_ENABLED=1');
-check(_stattic_tiering_enabled(), 'tiering switch: exact opt-in enables the retained implementation');
 $created = _stattic_runtime_job_create($jobsPrivateRoot, 'tier_demote', 'idem-1', ['target' => 3], $claims);
 check($created['type'] === 'tier_demote', 'job_create: stamps the requested type');
 check($created['lane'] === 'bulk', 'job_create: lane derived from type');
@@ -889,14 +869,12 @@ check(count($queueFiles) === 1, 'job_create: idempotency key collision creates n
 $publicResponse = _stattic_runtime_job_public_response($created);
 check(!array_key_exists('_claims', $publicResponse['payload']), 'job public response: strips payload._claims');
 check($publicResponse['payload']['target'] === 3, 'job public response: keeps non-secret payload fields');
-putenv('SPACEFAST_TIERING_ENABLED');
 
 // --- CAS install (§8) ----------------------------------------------------------------
 
-// D14/D15 deleted the per-version file tree, so there is no hardlink destination
-// left and `_stattic_runtime_blob_link` has no caller — its tests went with the
-// tree. What remains is the one write path every ingest lane shares: install
-// verified bytes at the derived CAS key `spaces/<s>/blobs/<aa>/<sha>` (D16).
+// D14/D15 deleted the per-version file tree, so `_stattic_runtime_blob_link` has
+// no caller and its tests went with it. What remains is the write path every
+// ingest lane shares: verified bytes at the CAS key `spaces/<s>/blobs/<aa>/<sha>` (D16).
 $blobSource = $jobsPrivateRoot . '/runtime/blob-source.txt';
 _stattic_runtime_mkdir(dirname($blobSource));
 file_put_contents($blobSource, 'blob bytes');
@@ -914,20 +892,17 @@ check(
     'blob store: the CAS is per-space, so the same sha is not addressable elsewhere'
 );
 
-// GC grace (§15/§17): blob mtime is a validator and is never written, so the
-// grace window cannot be read off the file. It is a configured span applied to
-// the publish timestamps carried in pin/publish-session records, and its default
-// must be non-zero or a mark-then-delete pass could collect within its own tick.
+// GC grace (§15/§17): blob mtime is never written, so the window comes from the
+// publish timestamps in pin/publish-session records, not the file. A zero default
+// would let a mark-then-delete pass collect within its own tick.
 require_once __DIR__ . '/../engine/admin/tier.php';
 check(getenv('SPACEFAST_LOCAL_BLOB_GC_GRACE_SECONDS') === false, 'gc grace: unit env leaves the knob unset');
 check(_stattic_tier_gc_grace_seconds() >= 1, 'gc grace: default grace window is non-zero seconds');
 
-// GC at CAS scale (the 2026-08-15 website-box OOM, tier.php OOM'd the 512MB
-// request limit scanning a 431k-blob space): the blob scan streams one 2-hex
-// prefix directory at a time and never materializes a per-blob map of the whole
-// space. Per-blob stat arrays for this fixture would cost tens of MB; the
-// streamed pass has to collect every garbage blob while its peak allocation
-// stays an order of magnitude under that.
+// GC at CAS scale (2026-08-15: tier.php OOM'd the 512MB request limit scanning a
+// 431k-blob space): the scan streams one 2-hex prefix directory at a time and
+// never materializes a per-blob map. Per-blob stat arrays for this fixture would
+// cost tens of MB; the streamed pass stays an order of magnitude under that.
 $gcPrivateRoot = _stattic_job_runner_unit_temp_private_root();
 $gcBlobsRoot = $gcPrivateRoot . '/spaces/spc_gc_scale/blobs';
 $gcBlobCount = 0;
@@ -939,8 +914,8 @@ for ($p = 0; $p < 64; $p++) {
         $gcBlobCount += 1;
     }
 }
-// Same-tick collection: no version declares these blobs, and both grace floors
-// are pinned to zero (the ops/test pin the implementation documents).
+// Same-tick collection: no version declares these blobs and both grace floors
+// are pinned to zero.
 putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS=0');
 $gcMemBefore = memory_get_usage(false);
 memory_reset_peak_usage();
@@ -1058,15 +1033,13 @@ check(
     'proxy cache: a static Cookie route header revokes shared caching'
 );
 
-// Conditional-request relay: the client's validators are forwarded upstream for
-// safe methods (via the real header-collection function), and never duplicated
-// when a route's forwardHeaders already lists them.
+// Conditional-request relay: client validators forward upstream for safe methods
+// and are never duplicated when forwardHeaders already lists them.
 /**
  * Stage inbound request headers where php-fpm stages them, because $_SERVER is
- * what _stattic_relay_inbound_headers() reads. Every existing request param is
- * cleared first, so a stage is TOTAL and an exact-set assertion below means
- * exactly the set named here rather than "these plus whatever an earlier check
- * left behind".
+ * what _stattic_relay_inbound_headers() reads. Existing request params are
+ * cleared first, so a stage is TOTAL: an exact-set assertion sees only the
+ * headers named here.
  *
  * @param array<string,string> $headers
  */
@@ -1097,9 +1070,8 @@ $conditionalAllowlisted = _stattic_collect_proxy_request_headers([], ['If-None-M
 check(count(array_keys($conditionalAllowlisted, 'If-None-Match: "abc123"', true)) === 1, 'proxy conditionals: a forwardHeaders-listed validator forwards exactly once');
 stage_inbound_headers([]);
 
-// A shared-cache candidate must be anonymous at the origin. Two distinct
-// visitor addresses therefore produce the same request headers, while the
-// ordinary unshared proxy path retains its X-Forwarded-For contract.
+// A shared-cache candidate must be anonymous at the origin, so two visitor
+// addresses produce the same headers. The unshared path keeps X-Forwarded-For.
 $originalRemoteAddress = $_SERVER['REMOTE_ADDR'] ?? null;
 $_SERVER['REMOTE_ADDR'] = '203.0.113.10';
 $anonymousFirst = _stattic_collect_proxy_request_headers([], [], true);
@@ -1122,10 +1094,9 @@ if ($originalRemoteAddress === null) {
 
 // --- Proxy body streaming: response-size limit state machine (runtime/proxy.php) ---
 // The curl leg cannot be driven in-process (egress policy denies loopback
-// upstreams, so the streaming decisions
-// live in pure helpers asserted here: headers are emitted at the first body
-// byte, an honestly-declared oversize Content-Length is rejected BEFORE headers
-// (clean 502), and only a lying/chunking origin hits the mid-stream abort.
+// upstreams), so the streaming decisions live in pure helpers asserted here: a
+// declared oversize Content-Length is rejected before headers (clean 502), and
+// only a lying or chunking origin hits the mid-stream abort.
 
 check(_stattic_proxy_origin_content_length([['Content-Type', 'text/html'], ['Content-Length', '1024']]) === 1024, 'proxy stream: origin Content-Length parses from raw header pairs');
 check(_stattic_proxy_origin_content_length([['content-length', ' 2048 ']]) === 2048, 'proxy stream: Content-Length parsing is case- and whitespace-tolerant');
@@ -1145,9 +1116,8 @@ check(_stattic_proxy_stream_limit_decision(null, true, 0, 0, 0) === 'relay', 'pr
 
 // --- Response cache policy (shared/cache-policy.php) --------------------------------
 //
-// One decision for every lane. The dynamic lanes (Zero, Functions) carry no
-// declared policy of their own, so what a runner, an upstream or a `_headers`
-// rule declared is suppressed rather than relayed.
+// One decision for every lane. The dynamic lanes (Zero, Functions) declare no
+// policy, so whatever a runner, upstream or `_headers` rule declared is suppressed.
 
 require_once __DIR__ . '/../engine/shared/cache-policy.php';
 require_once __DIR__ . '/../engine/runtime/zero.php';
@@ -1175,10 +1145,10 @@ check(
     ],
     'cache policy: access-protected responses pin private revalidation and the canonical private boundary'
 );
-// The framing allowlist is assembled from origins, so this parser IS the
-// boundary. Every rejected value below looks like an origin and is not one, and
-// each fails for its own reason; the last two show why directive injection is
-// structurally impossible rather than filtered — nothing past the origin is read.
+// The framing allowlist is assembled from origins, so this parser is the
+// boundary. Every rejected value below looks like an origin and is not one; the
+// last two show directive injection is impossible because nothing past the
+// origin is read.
 check(
     array_map(_stattic_absolute_url_origin(...), [
         'https://live.example/',
@@ -1237,9 +1207,9 @@ check(
 
 // --- Zero realtime replay credential (runtime/zero.php) -----------------------------
 //
-// The fleet secret presented upstream on `x-spacefast-runtime-realtime-token`
-// comes only from process config. A visitor request header is untrusted (not in
-// the edge strip list) and is never a fallback source for that credential.
+// The fleet secret on `x-spacefast-runtime-realtime-token` comes only from
+// process config. A visitor request header is untrusted (not in the edge strip
+// list) and never a fallback.
 
 $replayServer = $_SERVER;
 check(
@@ -1330,9 +1300,8 @@ check($signedHeaders === 'host;x-amz-content-sha256;x-amz-date', 's3 canonical h
 check(_stattic_s3_credentials(['getKeyId' => 'G', 'getKeySecret' => 'g', 'putKeyId' => 'P', 'putKeySecret' => 'p'], 'get') === ['key' => 'G', 'secret' => 'g'], 's3 credentials: get mode selects the GET-only key');
 check(_stattic_s3_credentials(['getKeyId' => 'G', 'getKeySecret' => 'g', 'putKeyId' => 'P', 'putKeySecret' => 'p'], 'put') === ['key' => 'P', 'secret' => 'p'], 's3 credentials: put mode selects the PUT-capable key');
 
-// Signing determinism + payload-hash sensitivity (the actual HMAC-chain
-// derivation is exercised end-to-end by the fixture round-trips in
-// s3.test.ts; this checks the pure function's contract in isolation).
+// Signing determinism and payload-hash sensitivity. The HMAC chain itself is
+// exercised end to end by the fixture round-trips in s3.test.ts.
 $signBucket = ['region' => 'us-east-1'];
 $signCreds = ['key' => 'AKIDEXAMPLE', 'secret' => 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'];
 $signedA = _stattic_s3_sign($signBucket, $signCreds, 'GET', 'example.com', '/key', [], STATTIC_S3_EMPTY_PAYLOAD_SHA256);
@@ -1342,9 +1311,8 @@ check(
 );
 $signedSamePayload = _stattic_s3_sign($signBucket, $signCreds, 'GET', 'example.com', '/key', [], STATTIC_S3_EMPTY_PAYLOAD_SHA256);
 check(
-    // The escape hatch must compare the full x-amz-date, not just YYYYMMDD:
-    // the signature covers the whole timestamp, so two calls that straddle a
-    // second boundary on the same day legitimately differ.
+    // Compare the full x-amz-date, not just YYYYMMDD: the signature covers the
+    // whole timestamp, so calls straddling a second boundary legitimately differ.
     $signedA['authorization'] === $signedSamePayload['authorization'] || $signedA['x-amz-date'] !== $signedSamePayload['x-amz-date'],
     's3 sign: identical inputs within the same second produce an identical signature'
 );
@@ -1373,9 +1341,8 @@ check(_stattic_s3_bucket_row('primary', true) === null, 's3 bucket manifest: for
 
 $digest = str_repeat('a', 64);
 
-// A real Ed25519 keypair, a real JWKS, a real signature. The bundle token is
-// the platform's existing runtime JWT rather than a second signing scheme, so
-// this exercises the same parse/verify path every other runtime token uses.
+// A real Ed25519 keypair, JWKS and signature. The bundle token is the platform's
+// runtime JWT, so this exercises the same parse/verify path as every other token.
 $keypair = sodium_crypto_sign_keypair();
 $artifactSecretKey = sodium_crypto_sign_secretkey($keypair);
 $artifactPublicKey = sodium_crypto_sign_publickey($keypair);
@@ -1448,17 +1415,16 @@ check(
     'bundle token: a correctly scoped, correctly signed token verifies'
 );
 
-// Every scope claim must be load-bearing. A token that survived a change of
-// space, version, or digest would let one tenant replay a URL against another's
-// compiled source.
+// Every scope claim is load-bearing: a token surviving a change of space,
+// version or digest would let one tenant replay a URL against another's source.
 foreach ([
     'space' => ['space_id' => 'spc_other'],
     'version' => ['version_id' => 'ver_other'],
     'digest' => ['sha256' => 'sha256:' . str_repeat('b', 64)],
     'runtime' => ['runtime_instance_id' => 'rti_other'],
     'audience' => ['aud' => 'stattic-runtime-file-fetch'],
-    // The sibling artifact kind is a foreign audience like any other: the seed
-    // token must not open the bundle it was minted beside.
+    // The sibling artifact kind is a foreign audience: a seed token must not
+    // open the bundle it was minted beside.
     'artifact kind' => ['aud' => STATTIC_FUNCTIONS_SEED_AUD],
 ] as $label => $override) {
     check(
@@ -1478,8 +1444,8 @@ check(
     'bundle token: refuses a token with no expiry, so one cannot be unbounded by omission'
 );
 
-// A forged signature over correct claims must fail. This is the check that
-// makes every claim above meaningful rather than advisory.
+// A forged signature over correct claims must fail; without it every check
+// above is advisory.
 $forgedKeypair = sodium_crypto_sign_keypair();
 $forgedHeader = _stattic_base64url_encode(json_encode(['alg' => 'EdDSA', 'typ' => 'JWT', 'kid' => 'runtime'], JSON_UNESCAPED_SLASHES));
 $forgedBody = _stattic_base64url_encode(json_encode($validClaims, JSON_UNESCAPED_SLASHES));
@@ -1496,8 +1462,8 @@ check(
 
 require_once __DIR__ . '/../engine/runtime/functions-relay.php';
 
-// The relay verifies against a real version directory, because a token naming a
-// version this origin never had is a replay from somewhere else.
+// The relay verifies against a real version directory: a token naming a version
+// this origin never had is a replay.
 $relayRoot = realpath(sys_get_temp_dir()) . '/sf-fx-relay-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
 mkdir($relayRoot . '/spaces/spc_1/versions/ver_1', 0o777, true);
 
@@ -1515,8 +1481,8 @@ $verified = _stattic_functions_relay_claims($relayRoot, 'spc_1', $mintBundleToke
 check($verified !== null, 'relay token: a correctly scoped, correctly signed token verifies');
 check(_stattic_functions_relay_grant($verified ?? [], SPACEFAST_FUNCTIONS_RELAY_BROKERS['database']['capabilities']) === ['db.read', 'db.write'], 'relay token: the grant comes from the credential, not from a lookup');
 
-// Each scope claim is load-bearing. A credential that survived any of these
-// changes would be ambient authority rather than a scoped grant.
+// Each scope claim is load-bearing: a credential surviving these changes would
+// be ambient authority, not a scoped grant.
 foreach ([
     ['aud' => 'spacefast-functions-bundle'],
     ['space_id' => 'spc_other'],
@@ -1530,15 +1496,13 @@ foreach ([
     );
 }
 
-// A token minted without an expiry is unbounded; requiring `exp` is what makes
-// minting one by omission impossible.
+// Requiring `exp` is what stops an unbounded token being minted by omission.
 $relayNoExp = $relayClaims;
 unset($relayNoExp['exp']);
 check(_stattic_functions_relay_claims($relayRoot, 'spc_1', $mintBundleToken($relayNoExp)) === null, 'relay token: refuses a token with no expiry');
 
-// A forged or expired public request must be rejected before version
-// storage is touched. The custom stream wrapper makes that filesystem effect
-// observable without coupling the test to the verifier's implementation.
+// A forged or expired request must be rejected before version storage is
+// touched. The stream wrapper makes that filesystem effect observable.
 final class SpacefastRelayStatProbe
 {
     public static int $calls = 0;
@@ -1559,20 +1523,18 @@ check(
 check(SpacefastRelayStatProbe::$calls === 0, 'relay token: refuses an expired token before probing version storage');
 stream_wrapper_unregister('sfrelaystat');
 
-// Signed by a key that is not the runtime's. Without this check every other
-// assertion here is advisory.
+// Signed by a key that is not the runtime's; without this every other assertion
+// here is advisory.
 $relayForged = _stattic_base64url_encode(json_encode(['alg' => 'EdDSA', 'typ' => 'JWT', 'kid' => 'runtime'], JSON_UNESCAPED_SLASHES))
     . '.' . _stattic_base64url_encode(json_encode($relayClaims, JSON_UNESCAPED_SLASHES));
 $relayForged .= '.' . _stattic_base64url_encode(sodium_crypto_sign_detached($relayForged, sodium_crypto_sign_secretkey($forgedKeypair)));
 check(_stattic_functions_relay_claims($relayRoot, 'spc_1', $relayForged) === null, 'relay token: refuses a token signed by a foreign key');
 
-// A grant is only what the credential says. Anything else it might claim to
-// authorize is not the relay's to serve.
+// A grant is only what the credential says.
 foreach ([
     [null, []],
     ['db.read', []],
-    // `next.cache` lives with the worker now: a credential claiming it gets no
-    // relay authority from it.
+    // `next.cache` lives with the worker: claiming it grants no relay authority.
     [['db.read', 'next.cache', 'fetch', 'log', ''], ['db.read']],
     [['db.write'], ['db.write']],
 ] as [$claimed, $expected]) {
@@ -1599,10 +1561,9 @@ check(
     'bundle path: a well-formed signed URL parses into digest, token and the bundle audience'
 );
 
-// One signed route serves both artifact kinds. The terminal filename is what
-// selects the token audience, so the parse has to report it: without a distinct
-// audience per kind, the bundle URL — which ships in a dispatch header — would
-// also read the version's cache seed.
+// One signed route serves both artifact kinds, and the terminal filename selects
+// the token audience. Without a distinct audience per kind, the bundle URL (which
+// ships in a dispatch header) would also read the version's cache seed.
 $parsedSeed = _stattic_artifact_parse_bundle_path('/__spacefast/functions/b/' . $digest . '/' . $signed . '/seed.json');
 check(
     is_array($parsedSeed) && $parsedSeed['digest'] === $digest && $parsedSeed['token'] === $signed
@@ -1614,8 +1575,8 @@ check(
     'bundle path: the two artifact kinds never share an audience'
 );
 
-// The digest is concatenated into a filesystem path, so anything that is not
-// exactly lowercase hex of the right length is refused before it gets there.
+// The digest is concatenated into a filesystem path, so anything but lowercase
+// hex of the right length is refused first.
 foreach ([
     '/__spacefast/functions/b/../../etc/passwd/a.b.c/bundle.json',
     '/__spacefast/functions/b/' . $digest . '/../bundle.json',
@@ -1624,8 +1585,8 @@ foreach ([
     '/__spacefast/functions/b/' . $digest . '/bundle.json',
     '/__spacefast/functions/b/' . $digest . '/a.b.c/extra/bundle.json',
     '/__spacefast/functions/b/' . $digest . '/a.b.c/other.json',
-    // The kind map is the whole audience selection, so it is matched exactly:
-    // a filename that only differs in case names no kind and no audience.
+    // The kind map is matched exactly: a filename differing only in case names
+    // no kind and no audience.
     '/__spacefast/functions/b/' . $digest . '/a.b.c/Seed.json',
     '/__spacefast/functions/b/' . $digest . '/a.b.c/seed.json/extra',
     // Not a compact JWS: refused lexically before any crypto runs.
@@ -1645,10 +1606,9 @@ foreach ([
 
 require_once __DIR__ . '/../engine/admin/management.php';
 
-// The writer confines every path to private storage, so the fixture lives
-// under a real `.stattic/storage` root rather than a bare temp directory.
-// realpath'd: on macOS the temp dir is a symlink, and the confinement check
-// compares a resolved ancestor against a lexically-derived root.
+// The writer confines every path to private storage, so the fixture lives under
+// a real `.stattic/storage` root. realpath'd because macOS's temp dir is a
+// symlink and the confinement check resolves ancestors.
 $configBase = realpath(sys_get_temp_dir()) . '/sf-fx-config-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
 $configRoot = $configBase . '/spaces/spc_fx/versions/ver_fx';
 mkdir($configRoot . '/files', 0o777, true);
@@ -1665,7 +1625,7 @@ _stattic_runtime_write_functions_config_artifact($configRoot, [
     'variableValues' => ['API_KEY' => 'k'],
     'inspect' => ['policy' => 'private'],
     // A key this engine does not know. It must not survive into the file the
-    // origin reads to decide what a worker may do.
+    // origin reads.
     'somethingNewer' => ['grant' => 'everything'],
 ]);
 
@@ -1682,14 +1642,14 @@ check(($written['runtimeKind'] ?? null) === 'functions', 'functions config: reco
 check(($written['host']['hostname'] ?? null) === 'fx.example', 'functions config: keeps the dispatch host');
 check(($written['grantedCapabilities'] ?? null) === ['db.read', 'db.write'], 'functions config: keeps the grant verbatim');
 check(($written['relay']['token'] ?? null) === 'tok', 'functions config: keeps the relay credential');
-// The unknown-key drop below is exactly why this needs holding: a passthrough
-// this writer does not name is a credential the origin never receives.
+// The unknown-key drop below is why this needs holding: a passthrough this
+// writer does not name never reaches the origin.
 check(($written['usage']['token'] ?? null) === 'usage-tok', 'functions config: keeps the usage credential');
 check(($written['purge']['token'] ?? null) === 'purge-tok', 'functions config: keeps the purge credential');
 check(($written['variableValues']['API_KEY'] ?? null) === 'k', 'functions config: keeps resolved variable values');
 check(!array_key_exists('somethingNewer', $written), 'functions config: drops keys this engine does not know');
 
-// Fail closed on a malformed or truncated grant rather than anything.
+// A malformed or truncated grant fails closed.
 foreach ([null, 'db.write', ['db.read', 5, ''], []] as $index => $badGrant) {
     $artifact = _stattic_runtime_functions_config_artifact(['grantedCapabilities' => $badGrant]);
     $expected = $index === 2 ? ['db.read'] : [];
@@ -1699,8 +1659,7 @@ foreach ([null, 'db.write', ['db.read', 5, ''], []] as $index => $badGrant) {
 
 // --- Functions routes: the compiled table is the only thing that dispatches ----------
 
-// Subtree expands to the path plus its :splat descendant, invalid patterns and
-// duplicates drop, and buckets mirror the Zero route shape.
+// The buckets mirror the Zero route shape.
 $compiledRoutes = _stattic_runtime_functions_routes_artifact([
     ['method' => null, 'path' => '/api', 'subtree' => true],
     ['method' => 'post', 'path' => '/submit'],
@@ -1745,8 +1704,6 @@ check(
     _stattic_resolve_functions_route_action($fxRoutesVersionRoot, 'submit', 'POST') === ['action' => 'dispatch_functions'],
     'functions routes: a method-scoped route matches its method'
 );
-// A path the table owns at other methods is a router-built 405 whose Allow set
-// is exactly the methods those entries declared — not a fall-through miss.
 check(
     _stattic_resolve_functions_route_action($fxRoutesVersionRoot, 'submit', 'GET')
         === ['method_not_allowed' => true, 'allow' => ['POST']],
@@ -1787,28 +1744,30 @@ $fxConfig = [
     'variableValues' => ['API_KEY' => 'k'],
 ];
 
-$fxHeaders = _stattic_functions_dispatch_headers($fxConfig, 'spc_1', 'ver_1', 'fxr_abc', 'dispatch-secret', 'https://shop.example');
+// The dispatch credential is opaque here: a per-box JWT the control plane
+// minted. Serving forwards it verbatim, so the fixture is a shape, not a secret.
+$fxDispatchToken = 'eyJhbGciOiJFZERTQSJ9.eyJhdWQiOiJzcGFjZWZhc3QtZnVuY3Rpb25zLWRpc3BhdGNoIn0.c2ln';
+$fxHeaders = _stattic_functions_dispatch_headers($fxConfig, 'spc_1', 'ver_1', 'fxr_abc', $fxDispatchToken, 'https://shop.example');
 check($fxHeaders['sf-fx-bundle'] === 'https://shop.example/b/x/t/bundle.json', 'dispatch: carries the signed bundle URL');
 check($fxHeaders['sf-fx-main'] === 'index.js', 'dispatch: carries the entry module');
 check($fxHeaders['sf-fx-caps'] === 'db.read,db.write', 'dispatch: carries the grant the control plane decided');
 check($fxHeaders['sf-fx-relay-token'] === 'relay-tok', 'dispatch: carries the relay credential');
-check($fxHeaders['sf-fx-dispatch-token'] === 'dispatch-secret', 'dispatch: proves the dispatch came from a Spacefast origin');
-// Empty flags are dropped rather than sent as a blank entry the runtime would reject.
+check($fxHeaders['sf-fx-dispatch-token'] === $fxDispatchToken, 'dispatch: forwards this box\'s own dispatch credential unaltered');
+// A blank flag entry would be rejected by the runtime.
 check($fxHeaders['sf-fx-compat-flags'] === 'nodejs_compat', 'dispatch: drops empty compatibility flags');
 check(base64_decode($fxHeaders['sf-fx-env']) === '{"API_KEY":"k"}', 'dispatch: carries resolved variables as base64 JSON');
 check($fxHeaders['sf-fx-log'] === 'https://shop.example/__spacefast/functions/logs', 'dispatch: log intake is on the space origin');
 // The second destination: counts go to the control plane, logs stay here.
 check($fxHeaders['sf-fx-usage'] === 'https://api.spacefast.app/v1/runtime/functions/usage', 'dispatch: usage intake is on the control plane');
 check($fxHeaders['sf-fx-usage-token'] === 'usage-tok', 'dispatch: usage carries its own credential, not the relay one');
-// The purge lane is addressed like log intake — on whichever hostname the
-// visitor hit — while its credential is its own, minted beside the relay's.
+// The purge lane is addressed like log intake, on whichever hostname the visitor
+// hit. Its credential is its own, minted beside the relay's.
 check($fxHeaders['sf-fx-purge'] === 'https://shop.example/__spacefast/functions/purge', 'dispatch: purge intake is on the request host origin');
 check($fxHeaders['sf-fx-purge-token'] === 'purge-tok', 'dispatch: purge carries its own credential, not the relay one');
 
-// The cache seed is optional: finalize mints its signed URL beside the bundle's
-// only when the version has one, and a version without it starts cold rather
-// than failing to dispatch. Absent means the header is not sent at all — an
-// empty `sf-fx-seed` would be a URL the host tries to fetch.
+// The cache seed is optional: a version without one starts cold rather than
+// failing to dispatch. Absent means no header at all, since an empty
+// `sf-fx-seed` would be a URL the host tries to fetch.
 check(!isset($fxHeaders['sf-fx-seed']), 'dispatch: no seed URL when finalize minted none');
 $fxSeed = $fxConfig;
 $fxSeed['host']['seedUrl'] = 'https://shop.example/__spacefast/functions/b/y/t/seed.json';
@@ -1827,8 +1786,8 @@ $fxEmptyEnv['variableValues'] = [];
 $fxEmptyEnvHeaders = _stattic_functions_dispatch_headers($fxEmptyEnv, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example');
 check(base64_decode($fxEmptyEnvHeaders['sf-fx-env']) === '{}', 'dispatch: an empty environment remains a JSON object');
 
-// A grant without a relay to serve it is dropped here, not sent and discovered
-// as a mystery inside tenant code.
+// A grant without a relay to serve it is dropped here, not discovered inside
+// tenant code.
 $fxNoRelay = $fxConfig;
 $fxNoRelay['relay'] = null;
 $fxHeadersNoRelay = _stattic_functions_dispatch_headers($fxNoRelay, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example');
@@ -1865,13 +1824,11 @@ foreach (['/', '/api/orders', '/posts/1', '/__spacefastish/ok'] as $ordinary) {
 }
 check(!_stattic_functions_dispatchable('/', 'TRACE'), 'dispatch: refuses TRACE');
 
-// A tenant's worker is as untrusted as a proxy origin, so it crosses the same
-// shared relay: response headers that describe the hop we are terminating, that
-// would let the worker reach outside its own response (x-accel-redirect serving
-// an arbitrary internal path), or that would plant state on the space apex
-// (Set-Cookie) do not survive. A public space's worker still owns its own
-// caching while its response carries nothing that revokes the grant, so the
-// lane decides no policy of its own and Cache-Control relays.
+// A tenant's worker is as untrusted as a proxy origin and crosses the same
+// relay: headers describing the hop we terminate, reaching outside the response
+// (x-accel-redirect), or planting state on the apex (Set-Cookie) do not survive.
+// A public space's worker keeps its own caching while nothing in its response
+// revokes the grant, so the lane decides no policy and Cache-Control relays.
 $fxPublicPolicy = _stattic_functions_response_cache_policy(false, [
     ['content-type', 'text/html'],
     ['vary', 'Accept-Encoding'],
@@ -1930,12 +1887,11 @@ $fxTenantReporting = _stattic_relay_response_header_lines([
 ], $fxPublicPolicy, _stattic_functions_relay_response_lane());
 check(count($fxTenantReporting) === 3, 'dispatch: a worker keeps its own Server and reporting endpoints');
 
-// The wp.cloud edge keys a stored response on host+path+query and ignores
-// Vary, so worker-declared caching survives only while the worker declares
-// nothing a URL-keyed store cannot honor. `Vary: RSC` is the live case — a
-// Next worker splitting flight and HTML payloads across one URL — and beside a
-// public s-maxage it would be stored once and replayed to every variant, so
-// every personalization or restriction signal revokes the grant to the proxy
+// The wp.cloud edge keys a stored response on host+path+query and ignores Vary,
+// so worker-declared caching survives only while a URL-keyed store can honor it.
+// `Vary: RSC` is the live case (a Next worker splitting flight and HTML across
+// one URL): beside a public s-maxage it would be replayed to every variant, so
+// any personalization or restriction signal revokes the grant to the proxy
 // lane's exact no-store.
 foreach ([
     [['vary', 'RSC']],
@@ -1952,10 +1908,8 @@ foreach ([
     );
 }
 
-// The full pipeline for the poisoned shape: the worker's public s-maxage never
-// reaches the wire, the decided no-store replaces it exactly once, and Vary
-// itself still relays — the visitor's own browser cache honors it even though
-// the edge cannot.
+// The full pipeline for the poisoned shape. Vary itself still relays: the
+// visitor's browser cache honors it even though the edge cannot.
 $fxPoisonedHeaders = [
     ['content-type', 'text/x-component'],
     ['vary', 'RSC'],
@@ -1971,9 +1925,8 @@ check(in_array(['Cache-Control', STATTIC_CACHE_CONTROL_NO_STORE], $fxRevokedLine
 check(count(array_filter($fxRevokedLines, static fn (array $line): bool => strtolower($line[0]) === 'cache-control')) === 1, 'dispatch cache: exactly one Cache-Control on a revoked relay');
 check(in_array(['vary', 'RSC'], $fxRevokedLines, true), 'dispatch cache: Vary itself still relays for the visitor browser cache');
 
-// Private spaces: the platform decides the policy, so the worker's cache
-// metadata is replaced rather than relayed — a clean worker response included,
-// because here the space's privacy is the revocation, not the worker's headers.
+// Private spaces: the platform decides the policy, so worker cache metadata is
+// replaced even for a clean response. The space's privacy is the revocation.
 $fxPrivatePolicy = _stattic_functions_response_cache_policy(true, [['cache-control', 'public, s-maxage=30']]);
 check($fxPrivatePolicy['cache_control'] === STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, 'dispatch cache: a private space replaces worker cache policy outright');
 $fxPrivateNames = array_map(
@@ -2014,9 +1967,8 @@ check($fxGuarded === [['X-Injected', 'valueX-Smuggled: yes']], 'relay: one guard
 stage_inbound_headers([]);
 
 // A config that cannot produce a whole dispatch produces none: a half dispatch
-// is a 502 where a 404 is the truth. Each scenario stages its own version root:
-// the config reader memoizes settled outcomes per path for the process's life,
-// exactly as a serving request would, so one path never changes documents.
+// is a 502 where a 404 is the truth. Each scenario stages its own version root
+// because the config reader memoizes per path for the process's life.
 $fxCfgRoots = [];
 $fxCfgStage = static function (?array $document) use (&$fxCfgRoots): string {
     $root = realpath(sys_get_temp_dir()) . '/sf-fx-cfg-' . bin2hex(random_bytes(6));
@@ -2050,9 +2002,8 @@ foreach ($fxCfgRoots as $fxCfgRoot) {
     @rmdir($fxCfgRoot);
 }
 
-// The `__spacefast` namespace is private by default at the front door, so every
-// visitor-facing Functions surface has to be named public or it silently 403s
-// before reaching its handler.
+// The `__spacefast` namespace is private by default, so every visitor-facing
+// Functions surface must be named public or it 403s before its handler.
 check(_stattic_control_path_admits_visitor('/__spacefast/functions/relay'), 'front door: the relay is reachable');
 check(_stattic_control_path_admits_visitor('/__spacefast/functions/logs'), 'front door: log intake is reachable');
 check(_stattic_control_path_admits_visitor('/__spacefast/functions/b/' . str_repeat('a', 64) . '/t.o.k/bundle.json'), 'front door: signed bundle reads are reachable');
@@ -2062,47 +2013,42 @@ check(_stattic_path_is_reserved('/__spacefast/functions/relay'), 'front door: co
 check(_stattic_path_is_reserved('/__SF/redeem'), 'front door: a case-folded control namespace is still reserved');
 check(!_stattic_path_is_reserved('/__spanish/page'), 'front door: reservation is whole-segment, not a string prefix');
 
-// --- Append-only NDJSON log: the cap bounds a file, on_full decides what then --------
+// --- Operator journal: the 8 MiB cap bounds one file, the roll-aside keeps history ---
 
 $logRoot = _stattic_job_runner_unit_temp_private_root();
-$rotatingLog = _stattic_ndjson_log($logRoot . '/runtime/rotate.jsonl', [
-    'max_bytes' => 64,
-    'on_full' => STATTIC_NDJSON_LOG_ROTATE,
-    'rotated' => $logRoot . '/runtime/rotate-%s.jsonl',
+$journalPath = $logRoot . '/runtime/journal.jsonl';
+_stattic_runtime_append_journal($logRoot, ['event' => 'first']);
+_stattic_runtime_append_journal($logRoot, ['event' => 'second'], false);
+$liveJournal = (string) file_get_contents($journalPath);
+check(
+    substr_count($liveJournal, "\n") === 2
+        && str_contains($liveJournal, '"first"') && str_contains($liveJournal, '"second"'),
+    'journal: each append lands as one NDJSON line'
+);
+
+_stattic_runtime_append_journal($logRoot, [
+    'event' => 'fat',
+    'pad' => str_repeat('p', STATTIC_RUNTIME_JOURNAL_MAX_BYTES),
 ]);
-_stattic_ndjson_log_append($rotatingLog, [['event' => 'first', 'pad' => str_repeat('p', 64)]]);
-_stattic_ndjson_log_append($rotatingLog, [['event' => 'second']]);
-$liveJournal = (string) file_get_contents($rotatingLog['path']);
+_stattic_runtime_append_journal($logRoot, ['event' => 'after_roll']);
+$liveJournal = (string) file_get_contents($journalPath);
 check(
-    str_contains($liveJournal, '"second"') && !str_contains($liveJournal, '"first"'),
-    'ndjson log: a full file rolls aside and the append lands in a fresh one at the same path'
+    str_contains($liveJournal, '"after_roll"') && !str_contains($liveJournal, '"first"'),
+    'journal: a full file rolls aside and the append lands in a fresh one at the same path'
 );
-$rotatedGenerations = glob($logRoot . '/runtime/rotate-*.jsonl') ?: [];
+$rolledGenerations = glob($logRoot . '/runtime/journal-*.jsonl') ?: [];
 check(
-    count($rotatedGenerations) === 1
-        && str_contains((string) file_get_contents($rotatedGenerations[0]), '"first"'),
-    'ndjson log: the rolled-aside generation keeps every record it held'
+    count($rolledGenerations) === 1
+        && str_contains((string) file_get_contents($rolledGenerations[0]), '"first"'),
+    'journal: the rolled-aside generation keeps every record it held'
 );
-
-// The tenant-facing setting: a worker in a log loop loses its newest lines
-// instead of filling the space's disk.
-$cappedLog = _stattic_ndjson_log($logRoot . '/runtime/capped.jsonl', ['max_bytes' => 64]);
-_stattic_ndjson_log_append($cappedLog, [['event' => 'first', 'pad' => str_repeat('p', 64)]]);
-_stattic_ndjson_log_append($cappedLog, [['event' => 'second']]);
-check(
-    !str_contains((string) file_get_contents($cappedLog['path']), '"second"'),
-    'ndjson log: a full file with no rotation target refuses the append'
-);
-
-_stattic_ndjson_log_append(_stattic_ndjson_log($logRoot . '/runtime/empty.jsonl'), ['not a record', 42]);
-check(!is_file($logRoot . '/runtime/empty.jsonl'), 'ndjson log: a batch carrying no record writes no file');
 
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($logRoot)));
 
 // --- Runtime log writer: one line, into the stream the provider actually ships -------
 
-// error_log() is the whole point of this writer, so the test redirects it and
-// reads back what really landed rather than inspecting an intermediate.
+// error_log() is the point of this writer, so the test redirects it and reads
+// back what landed.
 $runtimeLogPath = sys_get_temp_dir() . '/sf-runtime-log-' . bin2hex(random_bytes(6)) . '.log';
 $previousErrorLog = (string) ini_get('error_log');
 ini_set('error_log', $runtimeLogPath);
@@ -2126,9 +2072,8 @@ $runtimeLogLast = static function () use ($runtimeLogRecords): array {
     $records = $runtimeLogRecords();
     return array_last($records) ?? [];
 };
-// `metadata` is the one field whose JSON *shape* matters — a caller reads it
-// without a shape check — and assoc decoding erases the object/array
-// distinction, so that one is asserted against the bytes on the line.
+// `metadata` is the one field whose JSON shape matters, and assoc decoding
+// erases the object/array distinction, so it is asserted against the raw line.
 $runtimeLogLastLine = static function () use ($runtimeLogPath): string {
     $lines = array_values(array_filter(
         explode("\n", (string) @file_get_contents($runtimeLogPath)),
@@ -2171,22 +2116,21 @@ foreach ([
 _stattic_runtime_log_write(['message' => ['order' => 7]], 'ver_writer');
 check(($runtimeLogLast()['message'] ?? null) === '{"order":7}', 'runtime log: a logged object renders rather than vanishing');
 
-// Untrusted fields are dropped, never coerced, and metadata always answers as
-// an object so a caller can read it without a shape check.
+// Untrusted fields are dropped, never coerced; metadata always answers as an
+// object so a caller can read it without a shape check.
 _stattic_runtime_log_write(['message' => 'x', 'metadata' => [1, 2], 'requestId' => 12, 'handlerName' => []], 'ver_writer');
 $coercedRecord = $runtimeLogLast();
 check(str_contains($runtimeLogLastLine(), '"metadata":{}'), 'runtime log: list metadata cannot answer as a JSON array');
 check($coercedRecord['requestId'] === null && $coercedRecord['handlerName'] === null, 'runtime log: non-string ids are null, never coerced');
 
-// Oversized metadata loses the decoration, never the message the author wrote.
 _stattic_runtime_log_write(['message' => 'kept', 'metadata' => ['pad' => str_repeat('p', SPACEFAST_RUNTIME_LOG_METADATA_MAX_BYTES)]], 'ver_writer');
 check(
     ($runtimeLogLast()['message'] ?? null) === 'kept' && str_contains($runtimeLogLastLine(), '"metadata":{}'),
     'runtime log: oversized metadata is dropped and the message survives'
 );
 
-// A message the shipper would truncate mid-JSON is one the reader can never
-// parse, so the writer bounds it instead.
+// A message the shipper truncates mid-JSON is unparseable, so the writer
+// bounds it first.
 _stattic_runtime_log_write(['message' => str_repeat('m', SPACEFAST_RUNTIME_LOG_MESSAGE_MAX_BYTES * 2)], 'ver_writer');
 check(strlen((string) ($runtimeLogLast()['message'] ?? '')) === SPACEFAST_RUNTIME_LOG_MESSAGE_MAX_BYTES, 'runtime log: an unbounded message is cut to the limit');
 
@@ -2215,9 +2159,9 @@ $trustedProviderEnv = _stattic_zero_runner_base_env([
     'databaseUrlSource' => 'provider',
 ]);
 check(
-    _stattic_zero_internal_hosts_env('Management.Example.', 'https://API.Example/v1')
-        === ['SPACEFAST_ZERO_INTERNAL_HOSTS' => 'management.example,api.example'],
-    'tenant fetch: environment-specific Spacefast hosts reach the native egress guard'
+    _stattic_zero_internal_hosts_env('https://API.Example/v1')
+        === ['SPACEFAST_ZERO_INTERNAL_HOSTS' => 'api.example'],
+    'tenant fetch: the environment-specific Spacefast API host reaches the native egress guard'
 );
 check(
     ($trustedProviderEnv['SPACEFAST_ZERO_DATABASE_URL'] ?? null) === 'mysql://provider.internal/app'
@@ -2262,10 +2206,9 @@ if (is_object($overflowSink)) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Zero database dump: which tables a management dump may address, and the exact
-// SQL it issues for one. The rows themselves need a live MySQL (runtime/tests/
-// zero-db-dump.test.ts covers that end); everything that decides what is
-// reachable is decided from the version's own compiled artifacts, right here.
+// Zero database dump: which tables it may address and the SQL it issues. Rows
+// need a live MySQL (runtime/tests/zero-db-dump.test.ts); what is reachable is
+// decided from the version's own compiled artifacts, right here.
 
 $dumpRoot = realpath(sys_get_temp_dir()) . '/sf-zero-dump-' . bin2hex(random_bytes(6));
 mkdir($dumpRoot . '/zero/runs', 0o777, true);
@@ -2284,8 +2227,8 @@ file_put_contents($dumpRoot . '/zero/runs-index.json', json_encode([
     'artifact_kind' => 'zero_runs_index',
     'runs' => [
         'query_notes' => 'zero/runs/query_notes.json',
-        // Index entries that do not resolve to a compiled run artifact inside
-        // the version contribute nothing: a dump never follows a path out.
+        // Entries not resolving to a compiled run artifact inside the version
+        // contribute nothing: a dump never follows a path out.
         'query_escape' => '../../../../etc/passwd',
         'query_absent' => 'zero/runs/gone.json',
     ],
@@ -2301,8 +2244,8 @@ file_put_contents($dumpRoot . '/zero/runs/query_notes.json', json_encode($dumpRu
             'title' => ['physicalName' => 'note_title'],
         ],
     ],
-    // A logical name outside the contract's identifier shape: not a name a
-    // caller could ask for, so it is dropped rather than reported.
+    // A logical name outside the contract's identifier shape: no caller could
+    // ask for it, so it is dropped rather than reported.
     'not a name' => ['physicalName' => 'sf_spc_zero_dump_other_9ffe45e7b3'],
 ]), JSON_UNESCAPED_SLASHES));
 file_put_contents($dumpRoot . '/zero/endpoints-index.json', json_encode([
@@ -2363,9 +2306,8 @@ check(
 
 // --- The scoping rule itself: what a physical name has to be to be addressed.
 //
-// The expected names below are the output of the canonical implementation,
-// apps/control-plane/src/zero/db-scope.ts, for the same inputs — so these
-// assertions are a parity pin between the two, not a restatement of the PHP.
+// The expected names come from apps/control-plane/src/zero/db-scope.ts for the
+// same inputs, so these assertions are a parity pin, not a restatement of the PHP.
 check(
     _stattic_zero_db_expected_physical_name('spc_zero_dump', 'notes') === 'sf_spc_zero_dump_notes_a7a32efcd0',
     'zero dump: derives the control plane\'s scoped physical name'
@@ -2384,10 +2326,10 @@ check(
     'zero dump: another space derives a different name for the same table'
 );
 
-// A site's MySQL is shared. Every name a caller could hope to reach across the
-// space boundary — a WordPress core table, a co-tenant's scoped table, a
-// crafted fragment, a digest that does not belong to this table — is reported
-// as out of scope rather than dumped, before any connection exists.
+// A site's MySQL is shared. Every name reaching across the space boundary (a
+// WordPress core table, a co-tenant's scoped table, a crafted fragment, a
+// digest that does not belong to this table) is reported out of scope rather
+// than dumped, before any connection exists.
 $dumpForeign = [[
     'format' => 'stattic.zero.run.v1',
     'db' => ['tables' => [
@@ -2411,7 +2353,7 @@ foreach ([['', 25], ['0', 25], ['abc', 25], ['-5', 25], ['7', 7], ['100', 100], 
 $_GET = [];
 
 // The digest travels in a typed contract field, so a placeholder that is not a
-// sha256 is reported as absent rather than passed on to fail the caller's parse.
+// sha256 is reported absent rather than passed on to fail the caller's parse.
 check(
     _stattic_zero_db_dump_schema_hash(['migrations' => ['schemaHash' => 'sha256:' . str_repeat('a', 64)]], $dumpArtifacts)
         === 'sha256:' . str_repeat('a', 64),
@@ -2475,8 +2417,7 @@ check(
 // These are the exact strings serde_json 1.0.151 prints for the same doubles,
 // captured from the encoder db.rs feeds. PHP agrees on the shortest
 // round-tripping digits but not the layout (it prints 1.0 as `1`, -0.0 as `-0`
-// and 1e25 as `1.0e+25`), so the reformatter is pinned here rather than only
-// through the MySQL differential.
+// and 1e25 as `1.0e+25`), so the reformatter is pinned here.
 foreach ([
     ['0.0', 0.0],
     ['-0.0', -0.0],
@@ -2533,8 +2474,8 @@ foreach ([
     check(_stattic_db_broker_time($input) === $expected, "db broker time: {$input}");
 }
 
-// Bytes become a string when they are valid UTF-8 and standard base64 when they
-// are not, which is the fallback db.rs takes when String::from_utf8 fails.
+// Bytes become a string when valid UTF-8 and standard base64 when not, matching
+// db.rs's String::from_utf8 fallback.
 check(_stattic_db_broker_bytes_json('abc') === '"abc"', 'db broker bytes: ascii stays a string');
 check(_stattic_db_broker_bytes_json('') === '""', 'db broker bytes: empty stays a string');
 check(_stattic_db_broker_bytes_json("\0") === '"\u0000"', 'db broker bytes: NUL is a valid UTF-8 string');
@@ -2552,10 +2493,9 @@ check(
     'db broker bit: BIT(64) delivered as digits'
 );
 
-// Authorization follows the SQL, never the caller's result-shape hint. The
-// rows mirror db.rs `statement_authorization_tests` exactly: the classifier is
-// ported logic, and a row diverging between the engines is a grant that means
-// something different depending on which broker answered.
+// Authorization follows the SQL, never the caller's result-shape hint. The rows
+// mirror db.rs `statement_authorization_tests`: a row diverging between the
+// engines is a grant that means something different per broker.
 foreach ([
     'SELECT 1',
     "/* ordinary comment */ -- another comment\n SHOW TABLES",
@@ -2593,8 +2533,8 @@ check(
     'db broker trim: Unicode whitespace'
 );
 
-// The response envelopes are assembled as text, so their key order is fixed at
-// the sorted order serde_json's BTreeMap-backed maps produce.
+// The envelopes are assembled as text, so key order is pinned to the sort
+// serde_json's BTreeMap-backed maps produce.
 check(
     _stattic_db_broker_execute('not json')
         === '{"code":"zero_db_operation_invalid","message":"Zero DB operation could not be parsed.","ok":false}',
@@ -2606,9 +2546,8 @@ check(
     'db broker envelope: the size limit is checked before parsing'
 );
 
-// Query variants normalize to one path, but only pure assets use URI purge.
-// Mutable document keys widen to domain purge because one POP accepting a URI
-// invalidation does not prove every visitor-facing key converged.
+// The functions purge intake normalizes paths for its request contract and
+// coalescing signature; the eviction itself is always whole-host.
 check(
     _stattic_runtime_purge_path_list([
         '/page?utm=a',
@@ -2617,38 +2556,15 @@ check(
         'not-a-path',
         "/bad\npath",
     ]) === ['/page', '/assets/app.css'],
-    'purge planner strips query and fragment before deduplication'
-);
-check(
-    _stattic_runtime_purge_scope(['https://one.test/page']) === 'domain'
-        && _stattic_runtime_purge_scope(['https://one.test/index.html']) === 'domain'
-        && _stattic_runtime_purge_scope(['https://one.test/data.json']) === 'domain',
-    'purge planner widens mutable document paths to the domain lane'
-);
-check(
-    _stattic_runtime_purge_scope(['https://one.test/assets/app.css']) === 'urls',
-    'purge planner keeps pure assets in the URI lane'
-);
-check(
-    _stattic_runtime_purge_scope(array_fill(0, STATTIC_RUNTIME_PURGE_URL_MAX, 'https://one.test/app.js')) === 'urls',
-    'purge planner accepts the provider 300 URL boundary'
-);
-check(
-    _stattic_runtime_purge_scope(array_fill(0, STATTIC_RUNTIME_PURGE_URL_MAX + 1, 'https://one.test/app.js')) === 'domain',
-    'purge planner escalates above the provider 300 URL boundary'
-);
-check(
-    _stattic_runtime_purge_scope([]) === 'domain',
-    'purge planner fails closed when no addressable URL exists'
+    'purge intake strips query and fragment before deduplication'
 );
 
 // --- Purge scope derivation ----------------------------------------------------------
 //
-// A content activation purges ONLY the live route's serving hostnames. The
-// version-pinned hosts serve immutable bytes that an activation cannot change,
-// so purging them would only evict warm copies; the full-alias sweep is owed
-// exactly once, on the public→private access edge, where every alias may hold
-// formerly-public responses, including year-TTL immutable assets.
+// A content activation purges ONLY the live route's serving hostnames.
+// Version-pinned hosts serve immutable bytes, so purging them would only evict
+// warm copies. The full-alias sweep is owed once, on the public→private edge,
+// where every alias may hold formerly-public responses.
 $scopeIntent = [
     'space_id' => 'spc_scope',
     'routes' => [
@@ -2713,10 +2629,9 @@ check(
     _stattic_runtime_access_sweep_hostnames($scopeIntent, [
         'hostnames' => ['retired.example', 'custom.example'],
     ]) === [
-        // Live serving hosts lead, version hosts follow newest→oldest, the
-        // underivable legacy shape and redirect/proxy hosts after, tombstoned
-        // hostnames last — a tombstone duplicating a served host keeps its
-        // serving-order slot.
+        // Live hosts lead, version hosts newest→oldest, then the legacy shape
+        // and redirect/proxy hosts, tombstones last. A tombstone duplicating a
+        // served host keeps its serving-order slot.
         'site.view.fast',
         'custom.example',
         'v12--site.view.fast',
@@ -2737,15 +2652,12 @@ _stattic_job_runner_unit_rm_recursive(dirname(dirname($scopeRoot)));
 
 // --- Version catalog + gate sidecars ------------------------------------------------
 //
-// A version id is written exactly once, so the catalog and the blob gate's
-// lane map are derived ONCE into write-once PHP sidecars inside the version
-// directory and served from opcache SHM from then on. Everything a resolver
-// may answer from lives inside that directory — metadata.json or the sidecars
-// — so deleting the directory IS the retirement: the next request's is_file
-// probe finds nothing, a minted blob link stops resolving, and there is no
-// pool cache anywhere to forget. This section proves both halves: the sidecar
-// alone answers (warm reads never re-decode the catalog), and nothing outside
-// the directory does.
+// A version id is written exactly once, so the catalog and the blob gate's lane
+// map are derived ONCE into write-once PHP sidecars inside the version directory
+// and served from opcache SHM after that. Everything a resolver may answer from
+// lives in that directory (metadata.json or the sidecars), so deleting it IS the
+// retirement: the next is_file probe finds nothing, a minted blob link stops
+// resolving, and there is no pool cache anywhere to forget.
 
 $catalogRoot = realpath(sys_get_temp_dir()) . '/sf-version-cache-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
 $catalogSpaceId = 'spc_cache_' . bin2hex(random_bytes(4));
@@ -2811,9 +2723,9 @@ check(
     'the first read derives both write-once sidecars beside the catalog'
 );
 
-// The sidecar alone answers: a version directory carrying ONLY a gate sidecar
-// (what a warm worker consults) resolves without metadata.json ever existing —
-// warm reads never re-decode the catalog.
+// A version directory carrying only a gate sidecar (what a warm worker consults)
+// resolves without metadata.json ever existing: warm reads never re-decode the
+// catalog.
 $sidecarOnlyVersion = 'ver_cache_warm_' . bin2hex(random_bytes(4));
 $sidecarOnlyRoot = _stattic_version_root($catalogRoot, $catalogSpaceId, $sidecarOnlyVersion);
 mkdir($sidecarOnlyRoot, 0o777, true);
@@ -2826,8 +2738,7 @@ check(
     'a warm read answers from the gate sidecar alone'
 );
 
-// A sidecar bound to a different version is ignored, never trusted: identity
-// is validated from the payload, not assumed from the path.
+// Identity is validated from the payload, never assumed from the path.
 $mismatchVersion = 'ver_cache_mismatch_' . bin2hex(random_bytes(4));
 $mismatchRoot = _stattic_version_root($catalogRoot, $catalogSpaceId, $mismatchVersion);
 mkdir($mismatchRoot, 0o777, true);
@@ -2879,14 +2790,12 @@ _stattic_job_runner_unit_rm_recursive(dirname(dirname($catalogRoot)));
 // --- Edge purge dispatch (direct local site API) ---------------------------------------
 //
 // A mutation purges the provider edge by POSTing to the site's local edge-cache
-// API over loopback. The wire round-trip is exercised end to end by the
-// credential-gated wp.cloud suite (e2e-tests/direct); here the runtime's own
-// decisions get proven without a box: whether there is an edge to call, and
-// which hostname gets which URLs.
+// API over loopback. The wire round-trip belongs to the credential-gated
+// wp.cloud suite (e2e-tests/direct); here the runtime's own decisions are proven
+// without a box: whether there is an edge to call, and which hostnames it covers.
 
 // Off wp.cloud the platform env is absent, so there is no endpoint and a purge
-// is a successful no-op rather than a failure. (Guarded: ATOMIC_* are not
-// defined in the test process.)
+// is a successful no-op. (ATOMIC_* are not defined in the test process.)
 check(
     !defined('ATOMIC_SITE_ID')
         && _stattic_runtime_edge_purge_endpoint() === null,
@@ -2896,61 +2805,27 @@ check(
 $offBoxRoot = realpath(sys_get_temp_dir()) . '/sf-purge-offbox-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
 mkdir($offBoxRoot, 0o777, true);
 check(
-    _stattic_runtime_purge_dispatch($offBoxRoot, ['a.example'], [], 'domain', 'route_updated') === true
+    _stattic_runtime_purge_dispatch($offBoxRoot, ['a.example'], 'route_updated') === true
         && !is_file($offBoxRoot . '/runtime/journal.jsonl'),
     'edge purge: off-box dispatch is a no-op success and journals nothing'
 );
 $offBoxReceipt = _stattic_runtime_purge_now($offBoxRoot, [
     'hostnames' => ['a.example', 'b.example'],
-    'paths' => ['/page'],
     'reason' => 'route_updated',
 ]);
 check(
     $offBoxReceipt === ['status' => 'ok', 'mode' => 'domain'],
-    'edge purge: a document mutation off-box reports an ok domain purge'
-);
-$offBoxAsset = _stattic_runtime_purge_now($offBoxRoot, [
-    'hostnames' => ['a.example'],
-    'paths' => ['/assets/app.css'],
-    'reason' => 'route_updated',
-]);
-check(
-    $offBoxAsset === ['status' => 'ok', 'mode' => 'urls', 'urls' => 1],
-    'edge purge: a pure-asset mutation off-box reports an ok url purge with its count'
+    'edge purge: a mutation off-box reports an ok whole-host purge'
 );
 check(
-    _stattic_runtime_purge_now($offBoxRoot, ['hostnames' => [], 'paths' => ['/x']])
+    _stattic_runtime_purge_now($offBoxRoot, ['hostnames' => []])
         === ['status' => 'ok', 'mode' => 'none'],
     'edge purge: an unaddressable purge (no hostname) is ok/none'
 );
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($offBoxRoot)));
 
-// The per-host purge plan. A domain-scope purge maps every hostname to a
-// whole-host purge (empty URL list); the {domain} path segment is what the
-// gateway keys on.
-check(
-    _stattic_runtime_purge_host_targets(['a.example', 'b.example'], [], 'domain')
-        === ['a.example' => [], 'b.example' => []],
-    'purge plan: a domain scope purges every named host in full'
-);
-// A urls-scope purge routes each URL to ITS OWN host, and a host that owns no
-// URL in the set is not called at all — each host is a distinct edge key.
-check(
-    _stattic_runtime_purge_host_targets(
-        ['a.example', 'b.example', 'c.example'],
-        ['https://a.example/app.css', 'https://a.example/app.js', 'https://b.example/x.css'],
-        'urls'
-    ) === [
-        'a.example' => ['https://a.example/app.css', 'https://a.example/app.js'],
-        'b.example' => ['https://b.example/x.css'],
-    ],
-    'purge plan: a urls scope gives each host only its own URLs and skips hosts with none'
-);
 
-
-// The subprocess env scope (engine-update's installer spawn): extra values are
-// exported for the child, unset names removed, host-supplied values inherited,
-// and every touched variable restored afterwards.
+// The subprocess env scope (engine-update's installer spawn).
 putenv('SPACEFAST_TEST_UNSET_ME=present');
 putenv('SPACEEFAST_UNRELATED=untouched');
 $insideSeen = _stattic_runtime_with_subprocess_env(

@@ -1,20 +1,21 @@
 // Differential and behavioural coverage for the MySQL capability broker in
 // engine/shared/db-broker.php.
 //
-// The broker's contract is that it is indistinguishable from
+// The broker must be indistinguishable from
 // crates/stattic-zero-runner/src/db.rs. Two engines that disagree about how a
 // DECIMAL, an unsigned BIGINT, a BIT column or a DATETIME becomes JSON diverge
-// silently in production, so the corpus below drives the *same* operation text
-// through the real Rust runner and through the PHP library against the *same*
-// MySQL instance and compares the response bytes.
+// silently in production, so the corpus below drives the same operation text
+// through the real Rust runner and through the PHP library against the same
+// MySQL instance, then compares the response bytes.
 //
-// The Rust side is driven end to end: a Zero endpoint hands its request body
-// straight to the `__statticDbHost` host function and returns the answer
-// verbatim, so the comparison covers the real binary, not a reimplementation of
-// it. The PHP side goes through db-broker-cli.php the same way s3.test.ts drives
-// s3-cli.php — the broker has no HTTP surface of its own because the transports
-// that will wrap it are separate lanes.
+// The Rust side runs end to end: a Zero endpoint hands its request body to the
+// `__statticDbHost` host function and returns the answer verbatim, so the
+// comparison covers the real binary. The PHP side goes through db-broker-cli.php
+// the way s3.test.ts drives s3-cli.php; the broker has no HTTP surface of its
+// own.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { CORPUS, ECHO_ENDPOINT, FIXTURE_DDL, op } from "./db-broker-corpus.ts";
@@ -33,6 +34,7 @@ const MYSQL_DATABASE = "broker_test";
 
 let rt: Runtime;
 let mysql: MysqlContainer;
+const artifactRoot = mkdtempSync(path.join(os.tmpdir(), "stattic-db-broker-migrations-"));
 
 beforeAll(async () => {
   const build = Bun.spawnSync({
@@ -101,6 +103,7 @@ beforeAll(async () => {
 afterAll(() => {
   rt?.stop();
   stopMysqlContainers();
+  rmSync(artifactRoot, { recursive: true, force: true });
 });
 
 // --- drivers --------------------------------------------------------------------------
@@ -111,18 +114,13 @@ type CliRequest = {
   source?: string | null;
   capabilities?: string[];
   operations?: string[];
-  frames?: unknown[];
+  path?: string;
   hard?: boolean;
 };
 
 type CliResponse = {
   responses?: string[];
-  frames?: Array<{
-    protocol: string;
-    id: number;
-    result?: unknown;
-    error?: { code: string; message: string };
-  }>;
+  migrate?: { ok: true } | { ok: false; code: string; message: string };
   metrics?: {
     operations: number;
     connectMs: number;
@@ -293,8 +291,8 @@ test("a transaction abandoned by a dying request leaves no rows and no locks", a
   expect(killed.stdout).toContain('"abandoned":"hard"');
   expect(killed.exitCode).not.toBe(0);
 
-  // A later request must both see no row and be able to take the same key
-  // without blocking on a lock the dead request left behind.
+  // A later request must see no row and take the same key without blocking on a
+  // lock the dead request left behind.
   const { responses } = await php({
     operations: [
       op({ sql: "SELECT COUNT(*) AS n FROM lifecycle WHERE id = 6" }),
@@ -334,8 +332,7 @@ test("repeated SQL reuses one prepared statement", async () => {
 });
 
 test("the statement cache is bounded and evicts", async () => {
-  // 40 distinct statements against a cache of 32: every one is a miss, and the
-  // 40th eviction has closed the earliest entries rather than leaking them.
+  // 40 distinct statements against a cache of 32: every one is a miss.
   const operations = Array.from({ length: 40 }, (_, index) =>
     op({ sql: `SELECT ${index} AS v, id FROM dt WHERE id = ?`, params: [1] }),
   );
@@ -343,8 +340,8 @@ test("the statement cache is bounded and evicts", async () => {
   expect(metrics?.stmtCacheMisses).toBe(40);
   expect(metrics?.stmtCacheHits).toBe(0);
 
-  // Prepared statements are a server resource: eviction must actually close
-  // them, so the server never holds more than the cache bound for this link.
+  // Prepared statements are a server resource: eviction must close them, so the
+  // server never holds more than the cache bound for this link.
   const { responses } = await php({
     operations: [...operations, op({ sql: "SHOW SESSION STATUS LIKE 'Prepared_stmt_count'" })],
   });
@@ -364,18 +361,16 @@ test("a 20-statement batch is one brokered call", async () => {
   const batch = JSON.parse(responses?.[0] as string) as { ok: boolean; results: unknown[] };
   expect(batch.ok).toBe(true);
   expect(batch.results.length).toBe(20);
-  // One connection acquisition for the whole batch, and one prepare shared by
-  // all 20 executions.
+  // One prepare shared by all 20 executions.
   expect(metrics?.stmtCacheMisses).toBe(1);
   expect(metrics?.stmtCacheHits).toBe(19);
 });
 
 test("an unsigned BIGINT parameter past PHP's integer range round trips exactly", async () => {
-  // PHP has no unsigned 64-bit integer and mysqli cannot bind one, so an
-  // integer literal past the signed range is carried as its exact digits and
-  // bound as a string. That keeps writes exact — which is what a capsule store
-  // needs — at the cost of `SELECT ?` echoing it back as a string where Rust
-  // echoes a number. The write path is the one that must not lose data.
+  // PHP has no unsigned 64-bit integer and mysqli cannot bind one, so a literal
+  // past the signed range is carried as its exact digits and bound as a string.
+  // Writes stay exact, at the cost of `SELECT ?` echoing back a string where
+  // Rust echoes a number.
   const { responses } = await php({
     operations: [
       op({ mode: "execute", sql: "DELETE FROM lifecycle" }),
@@ -439,37 +434,7 @@ test("the row cap and the byte cap each refuse with their own code", async () =>
   expect(JSON.parse(bytesRefused.responses?.[0] as string).code).toBe("zero_db_result_too_large");
 });
 
-// --- capability gating and frames ----------------------------------------------------------
-
-test("broker frames carry results and errors under the protocol envelope", async () => {
-  const { frames } = await php({
-    action: "frames",
-    frames: [
-      {
-        protocol: "spacefast.broker.v1",
-        id: 1,
-        capability: "db.read",
-        payload: { sql: "SELECT 1 AS a" },
-      },
-      {
-        protocol: "spacefast.broker.v1",
-        id: 2,
-        capability: "db.read",
-        payload: { sql: "SELECT * FROM nope" },
-      },
-      { protocol: "spacefast.broker.v1", id: 3, capability: "fetch", payload: {} },
-      { protocol: "wrong.protocol", id: 4, capability: "db.read", payload: {} },
-    ],
-  });
-  expect(frames?.[0]).toEqual({
-    protocol: "spacefast.broker.v1",
-    id: 1,
-    result: { ok: true, rows: [{ a: 1 }] },
-  });
-  expect(frames?.[1]?.error?.code).toBe("zero_db_query_failed");
-  expect(frames?.[2]?.error?.code).toBe("zero_db_frame_invalid");
-  expect(frames?.[3]?.error?.code).toBe("zero_db_frame_invalid");
-});
+// --- capability gating ---------------------------------------------------------------------
 
 test("a read-only grant refuses a mutation", async () => {
   const { responses } = await php({
@@ -503,7 +468,7 @@ test("no failure path leaks the database URL", async () => {
     { url: "not a url at all", operations: [op({ sql: "SELECT 1" })] },
     { url: mysql.url, source: "bogus-label", operations: [op({ sql: "SELECT 1" })] },
     // A live connection whose statements fail: driver text reaches the tenant,
-    // so it must not carry connection details with it.
+    // so it must not carry connection details.
     { operations: [op({ sql: "SELECT * FROM does_not_exist" }), op({ sql: "SELEKT 1" })] },
   ];
 
@@ -538,4 +503,94 @@ test("the PHP broker and Rust runner pin the same database session", async () =>
     string
   >;
   expect(fromRust).toEqual(pinned);
+});
+
+// --- migrations ----------------------------------------------------------------------------------
+//
+// PHP applies a version's compiled schema (generate.php calls
+// _stattic_db_broker_apply_migrations at publish). zero-db-dump.test.ts covers
+// the publish-to-serve path; this proves the applier's contract: the statements
+// land, a replay is a no-op, and anything else stops the publish.
+
+/** Writes one `stattic.zero.migrations.v1` artifact and returns its path. */
+function migrationsArtifact(name: string, statements: string[]): string {
+  const file = path.join(artifactRoot, `${name}.json`);
+  writeFileSync(
+    file,
+    JSON.stringify({
+      format: "stattic.zero.migrations.v1",
+      artifact_kind: "zero_migrations",
+      statements,
+    }),
+  );
+  return file;
+}
+
+test("compiled migrations apply, and applying the same artifact again is a no-op", async () => {
+  // The four statement shapes the compiler emits, in order. `DROP INDEX` names
+  // an index that never existed, the ordinary case: the artifact cannot know
+  // whether the last publish created the index it drops.
+  const artifact = migrationsArtifact("apply", [
+    "CREATE TABLE IF NOT EXISTS mig_notes (id INT NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+    "ALTER TABLE mig_notes ADD COLUMN title TEXT NULL",
+    "DROP INDEX mig_notes_retired ON mig_notes",
+    "CREATE INDEX mig_notes_title ON mig_notes (title(32))",
+  ]);
+
+  expect((await php({ action: "migrate", path: artifact })).migrate).toEqual({ ok: true });
+  expect(mysql.exec("SELECT COUNT(*) FROM mig_notes")).toBe("0");
+  expect(mysql.exec("SHOW INDEX FROM mig_notes WHERE Key_name = 'mig_notes_title'")).not.toBe("");
+
+  // Duplicate column (1060) and duplicate key (1061) mean "already applied", so
+  // a second publish of an unchanged schema succeeds instead of failing the
+  // version.
+  expect((await php({ action: "migrate", path: artifact })).migrate).toEqual({ ok: true });
+  expect(
+    mysql.exec(
+      "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE()" +
+        " AND table_name = 'mig_notes' AND column_name = 'title'",
+    ),
+  ).toBe("1");
+});
+
+test("a statement the server rejects fails the publish instead of half-migrating", async () => {
+  const artifact = migrationsArtifact("reject", [
+    "CREATE TABLE IF NOT EXISTS mig_partial (id INT NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB",
+    "ALTER TABLE mig_partial ADD COLUMN broken NOT_A_COLUMN_TYPE",
+    "ALTER TABLE mig_partial ADD COLUMN never_reached TEXT NULL",
+  ]);
+
+  const { migrate } = await php({ action: "migrate", path: artifact });
+  expect(migrate?.ok).toBe(false);
+  expect(migrate).toMatchObject({ code: "zero_migration_failed" });
+  // Statements before the failure stand, since DDL cannot be rolled back, but
+  // the run stops there rather than skipping a statement the schema needs.
+  expect(
+    mysql.exec(
+      "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE()" +
+        " AND table_name = 'mig_partial' AND column_name = 'never_reached'",
+    ),
+  ).toBe("0");
+});
+
+test("an artifact this engine did not compile is refused before it connects", async () => {
+  const foreign = path.join(artifactRoot, "foreign.json");
+  writeFileSync(
+    foreign,
+    JSON.stringify({
+      format: "stattic.zero.migrations.v0",
+      artifact_kind: "zero_migrations",
+      statements: ["DROP TABLE mig_notes"],
+    }),
+  );
+
+  // The unusable URL is the assertion: reaching the connection would answer
+  // zero_db_url_invalid, so the artifact code proves the format check ran first
+  // and no foreign statement was issued.
+  const { migrate } = await php({ action: "migrate", path: foreign, url: "not a url at all" });
+  expect(migrate).toEqual({
+    ok: false,
+    code: "zero_migration_artifact_invalid",
+    message: "Zero migration artifact format is unsupported.",
+  });
 });

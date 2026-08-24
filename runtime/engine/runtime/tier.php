@@ -4,10 +4,10 @@ declare(strict_types=1);
 // Promote-on-read (contracts §8): a stat miss on a CAS blob resolves here, and
 // either the bytes are local when this returns or the caller renders 503.
 //
-// Loaded LAZILY from serve-fast.php — nothing here may be reachable from the
-// local hot path. That laziness is what makes bootstrap-config safe to require:
-// bucket credentials live in Atomic_Persistent_Data, so the miss branch pays a
-// decrypt the hot path must never pay (§6, §11).
+// Loaded LAZILY from serve.php's promote seam: nothing here may be reachable
+// from the local hot path. That laziness is what makes bootstrap-config safe to
+// require: bucket credentials live in Atomic_Persistent_Data, so the miss branch
+// pays a decrypt the hot path must never pay (§6, §11).
 require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/storage.php';
@@ -42,23 +42,40 @@ function _stattic_tier_journal(string $privateRoot, array $entry): void
 }
 
 /**
- * The pinned seam serve-fast.php calls. Returns the local CAS path once the
- * bytes are on disk, or null when the caller must render 503 — shed, bucket
- * failure, or a digest that did not match: an object that fails verification is
- * dropped, never installed and never served.
+ * A promote that could not produce the bytes. This is the ONE record on this
+ * lane the control plane has to hear about: its bucket canary counts these per
+ * bucket and alerts. So it carries an event_id and the drain delivers it.
+ *
+ * No management claims exist on a visitor request, and none are invented: the
+ * id is derived from the entry alone. `occurrence` is what makes each failure
+ * its own row on the control plane (a single blob failing a thousand times IS
+ * a bucket problem) while a redelivery of the same journal LINE still dedupes
+ * on its stored id.
+ */
+function _stattic_tier_fetch_failed(string $privateRoot, array $entry): void
+{
+    $entry = ['event' => 'tier_fetch_failed', ...$entry, 'occurrence' => bin2hex(random_bytes(8))];
+    $entry['event_id'] = _stattic_runtime_management_event_id([], $entry);
+    _stattic_tier_journal($privateRoot, $entry);
+}
+
+/**
+ * The pinned seam serve.php's `_sf_promote_blob` calls. Returns the local CAS
+ * path once the bytes are on disk, or null when the caller must render 503:
+ * shed, bucket failure, or a digest that did not match. An object that fails
+ * verification is dropped, never installed and never served.
  *
  * No lock: the CAS is content-addressed and the install is a rename, so two
  * workers promoting the same sha race to the same bytes and both win.
  */
 function _stattic_tier_promote_blob(string $privateRoot, string $spaceId, string $sha256): ?string
 {
-    if (!_stattic_tiering_enabled()) {
-        return null;
-    }
     $sha256 = strtolower(trim($sha256));
     // Checked before _stattic_runtime_blob_path(), which renders a 422 problem
-    // document — the wrong emitter entirely for a visitor request.
+    // document, the wrong emitter entirely for a visitor request.
     if (!_stattic_is_sha256_hex($sha256) || !_stattic_runtime_id_valid($spaceId)) {
+        // A local diagnostic, never the bucket canary: a reference that is not a
+        // sha never named bucket bytes, so no bucket can be at fault for it.
         _stattic_tier_journal($privateRoot, [
             'event' => 'tier_promote_failed',
             'space_id' => $spaceId,
@@ -76,8 +93,7 @@ function _stattic_tier_promote_blob(string $privateRoot, string $spaceId, string
     $bucketId = _stattic_s3_default_bucket_id();
     $locator = $bucketId === null ? null : _stattic_s3_blob_locator($bucketId, $spaceId, $sha256);
     if ($locator === null) {
-        _stattic_tier_journal($privateRoot, [
-            'event' => 'tier_promote_failed',
+        _stattic_tier_fetch_failed($privateRoot, [
             'space_id' => $spaceId,
             'sha256' => $sha256,
             'reason' => 'storage_bucket_unavailable',
@@ -104,10 +120,10 @@ function _stattic_tier_promote_blob(string $privateRoot, string $spaceId, string
     }
 
     if (!is_string($fetched['tmp_path'] ?? null)) {
-        _stattic_tier_journal($privateRoot, [
-            'event' => 'tier_promote_failed',
+        _stattic_tier_fetch_failed($privateRoot, [
             'space_id' => $spaceId,
             'sha256' => $sha256,
+            'bucket' => $bucketId,
             'status' => (int) ($fetched['status'] ?? 0),
             'reason' => (string) ($fetched['reason'] ?? 's3_get_failed'),
         ]);
@@ -118,10 +134,10 @@ function _stattic_tier_promote_blob(string $privateRoot, string $spaceId, string
     // and never a second pass over the bytes.
     if (!hash_equals($sha256, (string) ($fetched['sha256'] ?? ''))) {
         unlink($fetched['tmp_path']);
-        _stattic_tier_journal($privateRoot, [
-            'event' => 'tier_promote_failed',
+        _stattic_tier_fetch_failed($privateRoot, [
             'space_id' => $spaceId,
             'sha256' => $sha256,
+            'bucket' => $bucketId,
             'actual_sha256' => (string) ($fetched['sha256'] ?? ''),
             'reason' => 'blob_sha_mismatch',
         ]);
@@ -132,10 +148,10 @@ function _stattic_tier_promote_blob(string $privateRoot, string $spaceId, string
     // promoted inode answers with exactly the ETag the compiler recorded.
     _stattic_runtime_blob_commit_verified($privateRoot, $spaceId, $fetched['tmp_path'], $sha256);
     if (!is_file($localPath)) {
-        _stattic_tier_journal($privateRoot, [
-            'event' => 'tier_promote_failed',
+        _stattic_tier_fetch_failed($privateRoot, [
             'space_id' => $spaceId,
             'sha256' => $sha256,
+            'bucket' => $bucketId,
             'reason' => 'blob_install_failed',
         ]);
         return null;

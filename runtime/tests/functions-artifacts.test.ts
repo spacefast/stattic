@@ -1,8 +1,7 @@
-// Signed Functions bundle delivery, end to end through the real PHP origin.
-//
-// The bundle is a published file, but it is never public static content. The
-// only successful read is the signed control route, which resolves the digest
-// into the version's private `files/` tree.
+// Signed Functions bundle delivery through the real PHP origin. The bundle is
+// published but never public static content: the only read that works is the
+// signed control route, resolving the digest into the version's private
+// `files/` tree.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 
 import {
@@ -26,8 +25,7 @@ const BUNDLE = JSON.stringify({
 });
 const DIGEST = sha256(BUNDLE);
 const STORAGE_PATH = `__spacefast/functions/bundles/${DIGEST}/bundle.json`;
-// The worker's warm cache seed: published the same way, read through the same
-// signed route, but under its own token audience.
+// The worker's warm cache seed: same publish, same signed route, own audience.
 const SEED = JSON.stringify({
   format: "spacefast.functions.seed.v1",
   entries: [{ key: "/", status: 200, body: "seeded" }],
@@ -74,9 +72,8 @@ test("a signed bundle route reads the private published bundle", async () => {
   const signed = await get(rt, HOST, `/__spacefast/functions/b/${DIGEST}/${token}/bundle.json`);
   expect(signed.status).toBe(200);
   expect(signed.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
-  // The execution edge re-fetches bundles on cold starts and verifies the
-  // digest itself; the CDN holding the content-addressed, tokened URL is the
-  // point of the public policy (functions-host loadBundle).
+  // Cold starts re-fetch the bundle and verify the digest, so the CDN may hold
+  // the content-addressed tokened URL (functions-host loadBundle).
   expect(signed.headers.get("a8c-edge-cache")).toBe("cache");
   expect(await signed.text()).toBe(BUNDLE);
 });
@@ -99,9 +96,8 @@ test("the cache seed rides the same signed route under its own audience", async 
   expect(await seed.text()).toBe(SEED);
 
   // The terminal filename picks the audience, so neither token reads the other
-  // kind — even bound to the right Space, version and digest. The bundle URL
-  // ships to the execution edge in a dispatch header; if it also opened
-  // seed.json, handing out a bundle would hand out the cache seed with it.
+  // kind. The bundle URL ships to the execution edge in a dispatch header; if
+  // it also opened seed.json, handing out a bundle would leak the cache seed.
   const bundleTokenAtSeed = signToken({
     aud: "spacefast-functions-bundle",
     runtime_instance_id: RUNTIME_INSTANCE_ID,

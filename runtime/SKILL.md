@@ -19,7 +19,6 @@ You are operating Spacefast Engine, the open-source PHP runtime (this directory)
 3. Configure via environment variables:
 
 ```bash
-export SPACEFAST_MANAGEMENT_HOSTNAME=manage.localhost
 export SPACEFAST_RUNTIME_INSTANCE_ID=local-dev
 export SPACEFAST_RUNTIME_JWKS_PATH=/absolute/path/to/jwks.json
 ```
@@ -35,9 +34,9 @@ JWKS (self-hosted local file via `SPACEFAST_RUNTIME_JWKS_PATH`, WP.Cloud inline 
 
 ## Management Calls
 
-All management/upload requests must use the management hostname
-(`Host: $SPACEFAST_MANAGEMENT_HOSTNAME`) and a Bearer JWT signed with an Ed25519 key from
-the JWKS. Management claims: `aud=stattic-runtime-management`, `runtime_instance_id`,
+All management/upload requests use the site's primary hostname and a Bearer JWT
+signed with an Ed25519 key from the JWKS. Management claims:
+`aud=stattic-runtime-management`, `runtime_instance_id`,
 `operation_id`, `action`, `exp`, `nbf`, `jti`, plus scope (`space_id`, `version_id`,
 `route_name`). One token per action; `jti` is replay-protected.
 
@@ -62,8 +61,7 @@ Deploy flow:
 
 ## Troubleshooting
 
-- `runtime_api_not_found` on management calls → wrong `Host` header; management routes
-  exist only on the management hostname (the response body is deliberately generic).
+- `runtime_api_not_found` on management calls → unsupported route or action.
 - `runtime_instance_mismatch` → token `runtime_instance_id` does not match config.
 - `runtime_jwks_key_missing` / `runtime_jwks_fetch_failed` → provision
   `SPACEFAST_RUNTIME_JWKS_PATH` for self-hosted, `SPACEFAST_RUNTIME_JWKS_B64`

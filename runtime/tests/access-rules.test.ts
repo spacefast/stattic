@@ -3,15 +3,14 @@
 // The v4 session is the cookie: `sfv2_<base64url(claims)>.<hmac>`, signed with a
 // key derived from the Space's runtime exchange credential. Authorities, their
 // generations, the [access_gen, session_ver] tuple and the expiry all ride in
-// the value; the hot path verifies one HMAC and reads NO file (D120). The only
-// server-side artifact is a small revocation record at
-// `spaces/<s>/sessions/<sid>.json`, consulted exclusively on the cold lane —
-// which is what makes exact revocation possible without a global logout (D85).
+// the value; the hot path verifies one HMAC and reads no file (D120). The only
+// server-side artifact is a revocation record at
+// `spaces/<s>/sessions/<sid>.json`, read only on the cold lane, which is what
+// makes exact revocation possible without a global logout (D85).
 //
-// Because the signing key IS the exchange credential, this file mints and edits
-// cookies the way the runtime does (see `encodeSession`) instead of poking at a
-// session store that no longer exists. Every fixture therefore has to publish an
-// access-page exchange, or no session can be minted for it at all.
+// Because the signing key is the exchange credential, this file mints and edits
+// cookies the way the runtime does (see `encodeSession`). Every fixture must
+// publish an access-page exchange, or no session can be minted for it.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac, generateKeyPairSync, randomUUID } from "node:crypto";
@@ -111,11 +110,11 @@ const SESSION_TOUCH_INTERVAL_SECONDS = 21_600;
 const SESSION_CLAIM_TTL_SECONDS = 900;
 const SESSION_AUTHORITY_LIMIT = 16;
 const SESSION_CLOCK_HEADER = "x-spacefast-test-access-session-now";
-// The runtime never reads a request's scheme — X-Forwarded-Proto is
-// attacker-controlled (contracts §16) — so it builds its own origin from the
-// SPACEFAST_INSECURE_COOKIES config the harness sets, which is http here. That
-// origin is what the logout CSRF check compares against and what the
-// collaboration revoke's returnUrl carries.
+// The runtime never reads a request's scheme, because X-Forwarded-Proto is
+// attacker-controlled (contracts §16). It builds its own origin from the
+// SPACEFAST_INSECURE_COOKIES config the harness sets, http here. The logout
+// CSRF check compares against that origin, and the collaboration revoke's
+// returnUrl carries it.
 const RUNTIME_SCHEME = "http";
 // The private Space's own live origin, as its Collab overlay carries it.
 const SPACE_LIVE_ORIGIN = `${RUNTIME_SCHEME}://${PRIVATE_HOST}`;
@@ -155,12 +154,11 @@ type ProjectionInput = {
   sessionVersion?: number;
   memberRefs?: string[];
   /**
-   * The access-page exchange. Present by default: its `credential` is the
-   * material every `sfv2_`/`sfa1_` cookie is signed with (access-rules.php
+   * The access-page exchange, present by default. Its `credential` signs every
+   * `sfv2_`/`sfa1_` cookie (access-rules.php
    * `_stattic_access_session_hmac_key`), so a Space without it can hold no
-   * session at all. `"stale"` is a bundle written before collaboration logout
-   * existed; `false` is the lane-less Space that only ever shows the uniform
-   * deny.
+   * session. `"stale"` is a bundle written before collaboration logout existed;
+   * `false` is the lane-less Space that only shows the uniform deny.
    */
   exchange?: boolean | "stale";
   publicConstraints?: Record<string, unknown>;
@@ -319,10 +317,9 @@ function projection(input: ProjectionInput = {}) {
 
 /**
  * The Public fixture's resting state. The member Grant is what lets this Space
- * mint a session at all — an unconstrained Public Grant admits everyone and
- * therefore proves nothing about identity — and it never makes the anonymous
- * response private, because a Public Grant with no constraints stays
- * shared-cacheable.
+ * mint a session: an unconstrained Public Grant admits everyone and proves
+ * nothing about identity. It never makes the anonymous response private,
+ * because an unconstrained Public Grant stays shared-cacheable.
  */
 function publicBaseConfig() {
   return projection({ mode: "public", memberRefs: ["member:mem_public_owner"] });
@@ -402,7 +399,7 @@ function sessionClockHeaders(now: number): Record<string, string> {
 }
 
 // ---------------------------------------------------------------------------
-// The cookie IS the session: mint, read and edit it the way the runtime does
+// The cookie is the session: mint, read and edit it the way the runtime does
 // (access-rules.php `_stattic_access_session_encode` / `_decode`).
 // ---------------------------------------------------------------------------
 
@@ -510,12 +507,12 @@ function authorityReferences(cookie: string): string[] {
     .toSorted();
 }
 
-// The authority-less form of the same cookie: a visitor who proved nothing.
-// Built here the way a browser presents it so the runtime's reader is exercised
-// end to end rather than trusted. `sv` is the session-version half of the gen
-// tuple (D30, never summed with access_gen): the stateless session is re-keyed
-// on it so the "sign everyone out" lever reaches a visitor who holds no
-// authority, and a payload that omits it verifies against nothing.
+// The authority-less form of the same cookie: a visitor who proved nothing,
+// built the way a browser presents it so the runtime's reader runs end to end.
+// `sv` is the session-version half of the gen tuple (D30, never summed with
+// access_gen): the stateless session is re-keyed on it so the sign-everyone-out
+// lever reaches a visitor holding no authority, and a payload that omits it
+// verifies against nothing.
 function anonymousSessionCookie(
   host: string,
   payload: Record<string, unknown>,
@@ -588,10 +585,9 @@ const PERMISSIVE_HEADERS = [
 ].join("\n");
 
 /**
- * The Collab overlay a Space with Comments carries. `live_url` is the only part
- * of it the framing boundary reads — the Space's own live origin, which is the
- * one origin besides the responding host that the runtime can prove belongs to
- * this Space.
+ * The Collab overlay a Space with Comments carries. The framing boundary reads
+ * only `live_url`, the Space's own live origin, which is the one origin besides
+ * the responding host that the runtime can prove belongs to this Space.
  */
 function collabOverlay(liveUrl: string): Record<string, unknown> {
   return {
@@ -671,8 +667,8 @@ beforeAll(async () => {
       spaceId: LANELESS_SPACE,
       versionId: LANELESS_VERSION,
       hosts: [LANELESS_HOST],
-      // A scheme-relative `live_url`: origin-shaped, but not an origin. It is
-      // the laundering vector the framing boundary must refuse outright.
+      // A scheme-relative `live_url`: origin-shaped but not an origin. The
+      // framing boundary must refuse it.
       config: { ...projection({ exchange: false }), sdk: collabOverlay("//evil.test/") },
     },
     {
@@ -819,9 +815,8 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   expect(admitted.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   expect(admitted.headers.get("cross-origin-resource-policy")).toBe("same-origin");
 
-  // An all-Versions Link covers immutable Version hosts ONLY — never the live
-  // host, never a branch (#1983 aligned the grant contract across the engine
-  // and packages/common; a live URL needs a live-target Link). The same
+  // An all-Versions Link covers immutable Version hosts only, never the live
+  // host and never a branch; a live URL needs a live-target Link. The same
   // authority is refused on live and admitted on the Version host.
   const liveLinkCookie = await openAuthorities(PRIVATE_HOST, ["link:lnk_all_versions"]);
   expect(
@@ -832,12 +827,12 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
     (await get(runtime, PRIVATE_VERSION_HOST, "/", { headers: { cookie: versionLinkCookie } }))
       .status,
   ).toBe(200);
-  // Private content is framable by the Space's OWN surfaces and nothing else.
+  // Private content is framable by the Space's own surfaces and nothing else.
   // `'self'` is the Collab shell framing the page it reviews; the live origin is
   // time travel framing a version host from the live Space. The equality is the
-  // refusal: the publisher's `*` is gone, and no other origin — not even
-  // OTHER_PRIVATE_HOST, a sibling host of this same Space that the runtime
-  // cannot enumerate — is admitted.
+  // refusal: the publisher's `*` is gone, and no other origin is admitted, not
+  // even OTHER_PRIVATE_HOST, a sibling host of this Space that the runtime
+  // cannot enumerate.
   expect(admitted.headers.get("content-security-policy")).toBe(
     `frame-ancestors 'self' ${SPACE_LIVE_ORIGIN}`,
   );
@@ -864,7 +859,7 @@ test("a Space with no visitor lanes denies uniformly and discloses nothing", asy
   expect(denied.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   expect(denied.headers.get("cross-origin-resource-policy")).toBe("same-origin");
   // This Space's overlay carries a scheme-relative `live_url`. A value that is
-  // not a parseable origin contributes nothing — the boundary narrows to
+  // not a parseable origin contributes nothing, so the boundary narrows to
   // `'self'` rather than degrading to something an attacker chose.
   expect(denied.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
   expect(denied.headers.get("access-control-allow-origin")).toBeNull();
@@ -913,7 +908,7 @@ test("access callback handoffs require both the Space audience and request host"
 
   // The browser handoff reads `sf_token` from a GET and `token` from a POST
   // body. A scanner replaying the POST field name in a query admits nothing and
-  // echoes nothing back; a HEAD probe is not a lane at all.
+  // echoes nothing back; a HEAD probe is not a lane.
   const token = callbackToken(PRIVATE_HOST, authorities);
   for (const [method, status] of [
     ["GET", 403],
@@ -960,7 +955,7 @@ test("the cookie decides the request and the record only revokes it", async () =
 
   const recordPath = sessionRecordPath(SESSION_SPACE, cookie);
   expect(existsSync(recordPath)).toBe(true);
-  // The record holds no authority: losing it can only ever deny.
+  // The record holds no authority: losing it can only deny.
   const record = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>;
   expect(record.sid).toBe(claims.sid);
   expect(record.spaceId).toBe(SESSION_SPACE);
@@ -974,7 +969,7 @@ test("the cookie decides the request and the record only revokes it", async () =
   expect(hot.headers.get("set-cookie")).toBeNull();
 
   // Cold lane: aged-out claims consult the record exactly once. It is gone, so
-  // THIS session ends and the browser is handed the authority-less form.
+  // this session ends and the browser gets the authority-less form.
   const stale = editSession(SESSION_HOST, cookie, (value) => {
     value.exp = value.iat - 1;
   });
@@ -1031,9 +1026,9 @@ test("a durable session survives an access-generation move but not losing its Gr
   const cookie = await openAuthorities(SESSION_HOST, ["member:mem_session"]);
   try {
     // Ordinary Grant edits rotate the generation so stale handoffs cannot be
-    // redeemed. A browser session follows its exact still-live authority
-    // instead — this is what lets a scoped Link created before a Space is
-    // claimed keep working after the claim.
+    // redeemed. A browser session follows its own still-live authority instead,
+    // which is what lets a scoped Link created before a Space is claimed keep
+    // working after the claim.
     await putRoute(runtime, SESSION_SPACE, "production", {
       version_id: SESSION_VERSION,
       config: projection({ memberRefs: ["member:mem_session"], accessGeneration: 1 }),
@@ -1115,9 +1110,9 @@ test("logout revokes only the presented session and fails closed when the record
   expect(revoked.spaceId).toBe(PRIVATE_SPACE);
   expect(revoked.runtimeHost).toBe(PRIVATE_HOST);
   expect(revoked.returnUrl).toBe(`${RUNTIME_SCHEME}://${PRIVATE_HOST}/`);
-  // Ending the access session ends its Cast session: one id names both. It is
-  // the session id from the signed claims, never the cookie value, which is a
-  // bearer credential and must not reach the control plane or a Cast room.
+  // Ending the access session ends its Cast session: one id names both. That id
+  // comes from the signed claims, never the cookie value, which is a bearer
+  // credential and must not reach the control plane or a Cast room.
   expect(revoked.sessionId).toBe(decodeSession(firstCookie).sid);
   expect(loggedOut.headers.get("location")).toBe(
     `${logoutOrigin}/logout-cleared/${revoked.sessionId}`,
@@ -1225,7 +1220,7 @@ test("unconstrained Public access is anonymously cacheable and opts the edge in"
   expect(publicCacheControl).toContain("public");
   expect(publicCacheControl).not.toContain("private");
   // §16: a public PHP-lane response is only stored at the edge when it carries
-  // BOTH a public Cache-Control and the A8C opt-in.
+  // both a public Cache-Control and the A8C opt-in.
   expect(anonymous.headers.get(EDGE_CACHE_HEADER)).toBe("cache");
 
   // An identity that changes nothing about the bytes must not privatize a
@@ -1240,9 +1235,9 @@ test("unconstrained Public access is anonymously cacheable and opts the edge in"
   expect(withIdentity.headers.get("set-cookie")).toBeNull();
 
   // A cookie that verifies against nothing still gets the public bytes, but the
-  // response that retires it is state-changing and stays out of every cache. It
-  // is replaced by the authority-less form rather than deleted, so the next
-  // navigation can still say why the visitor is signed out.
+  // response that retires it is state-changing and stays out of every cache. The
+  // authority-less form replaces it rather than deleting it, so the next
+  // navigation can say why the visitor is signed out.
   const forged = `${COOKIE_NAME}=${SESSION_PREFIX}not-a-real-session.deadbeef`;
   const cleared = await get(runtime, PUBLIC_HOST, "/", { headers: { cookie: forged } });
   expect(cleared.status).toBe(200);
@@ -1298,8 +1293,8 @@ test("Grant constraints gate a Public Grant per request", async () => {
       403,
     );
 
-    // A country selector reads the server-set fastcgi_param only, which this
-    // fixture never sets — so every country rule fails closed.
+    // A country selector reads only the server-set fastcgi_param, which this
+    // fixture never sets, so every country rule fails closed.
     await putRoute(runtime, PUBLIC_SPACE, "production", {
       version_id: PUBLIC_VERSION,
       config: projection({
@@ -1324,8 +1319,8 @@ test("an IP network constraint admits nobody and is journaled once", async () =>
       version_id: PUBLIC_VERSION,
       config: projection({
         mode: "public",
-        // §16: X-Real-IP / CF-Connecting-IP reach PHP attacker-controlled, so
-        // "matches the CIDR" could only ever mean "sent the right header".
+        // §16: X-Real-IP and CF-Connecting-IP reach PHP attacker-controlled, so
+        // "matches the CIDR" would only mean "sent the right header".
         publicConstraints: { network: { ipCidrs: ["127.0.0.0/8"] } },
       }),
     });
@@ -1351,11 +1346,11 @@ test("an IP network constraint admits nobody and is journaled once", async () =>
   }
 });
 
-// The edge-cache purge POSTs the runtime made for one mutation, captured by the
-// loopback stand-in. The php -S harness has no fastcgi_finish_request, so the
-// engine's post-response purge falls back to synchronous execution: by the time
-// a mutation's response returns, its purge calls are already recorded. Each
-// call is one hostname; a multi-host sweep is several calls in serving order.
+// The edge-cache purge POSTs one mutation made, captured by the loopback
+// stand-in. The php -S harness has no fastcgi_finish_request, so the engine's
+// post-response purge runs synchronously: a mutation's purge calls are recorded
+// by the time its response returns. Each call is one hostname; a multi-host
+// sweep is several calls in serving order.
 async function edgePurgeCallsBy(
   rt: Runtime,
   mutate: () => Promise<unknown>,
@@ -1387,7 +1382,7 @@ test("a Public path becoming Private announces both exposure digests and denies 
     authorizationDigest: "b".repeat(64),
   };
   // Still public: a content-shaped route write purges only the live serving
-  // hostname — the version-pinned alias never changes bytes on activation.
+  // hostname, since the version-pinned alias never changes bytes on activation.
   const activationPurge = await edgePurgeCallsBy(runtime, () =>
     putRoute(runtime, CACHE_SPACE, "production", {
       version_id: CACHE_VERSION,
@@ -1401,9 +1396,9 @@ test("a Public path becoming Private announces both exposure digests and denies 
   );
   expect(activationPurge.map((call) => call.hostname)).toEqual([CACHE_HOST]);
   expect(activationPurge[0]?.reason).toBe("route_updated");
-  // Public→private: the one transition that owes EVERY alias a sweep — the
-  // edge holds long-TTL copies of the formerly-public HTML on all of them,
-  // live host first, version-pinned aliases behind it.
+  // Public→private is the one transition that owes every alias a sweep: the
+  // edge holds long-TTL copies of the formerly-public HTML on all of them, live
+  // host first, version-pinned aliases behind it.
   const sweepPurge = await edgePurgeCallsBy(runtime, () =>
     putRoute(runtime, CACHE_SPACE, "production", {
       version_id: CACHE_VERSION,
@@ -1416,14 +1411,14 @@ test("a Public path becoming Private announces both exposure digests and denies 
     }),
   );
   // Every named host in full (domain scope: no purge_uris), live host first,
-  // version-pinned alias behind it — one POST each.
+  // version-pinned alias behind it, one POST each.
   expect(sweepPurge.every((call) => call.reason === "space_access_privatized")).toBe(true);
   expect(sweepPurge.every((call) => call.uris.length === 0)).toBe(true);
   expect(sweepPurge.map((call) => call.hostname)).toEqual([CACHE_HOST, CACHE_VERSION_HOST]);
 
-  // Version ids cannot say whether cached anonymous bytes just became private —
-  // a config-only access change keeps the same pointer — so the before/after
-  // exposure descriptors in the journal are what answers that.
+  // Version ids cannot say whether cached anonymous bytes just became private,
+  // because a config-only access change keeps the same pointer. The journal's
+  // before/after exposure descriptors answer that.
   const routeEvent = journalRecords(runtime).findLast(
     (event) =>
       event.event === "route_updated" &&
@@ -1448,7 +1443,7 @@ test("a Public path becoming Private announces both exposure digests and denies 
 // Fences (D82)
 // ---------------------------------------------------------------------------
 
-test("an exposure fence denies an existing session before the stale projection converges", async () => {
+test("an exposure fence denies an existing session before the stale projection syncs", async () => {
   const staleLink: ProjectionInput = {
     links: [{ linkId: "lnk_deferred_revoke", scopes: ["/shared"], expiresAt: null }],
   };
@@ -1464,7 +1459,7 @@ test("an exposure fence denies an existing session before the stale projection c
 
     // The desired projection still contains the revoked Link, so the
     // transition's temporary exposure fence is the only thing that can deny an
-    // already-minted session while background convergence is parked.
+    // already-minted session while background sync is parked.
     await putRoute(runtime, PRIVATE_SPACE, "production", {
       version_id: PRIVATE_VERSION,
       config: projection({ ...staleLink, accessFence: "exposure" }),
@@ -1556,7 +1551,7 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
   expect(authorityReferences(unionCookie)).toEqual(["link:lnk_shared", "member:mem_owner"]);
   expect(existsSync(sessionRecordPath(SCOPED_SPACE, linkCookie))).toBe(false);
   const unionClaims = decodeSession(unionCookie);
-  // Attaching a credential rotates the session — the one id Cast disconnects
+  // Attaching a credential rotates the session, so the one id Cast disconnects
   // moves with it. The visitor's pseudonym does not: renaming them mid-thread
   // because they opened a share Link would be the bug.
   expect(unionClaims.sid).not.toBe(linkClaims.sid);
@@ -1565,8 +1560,7 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
   expect(unionClaims.principal).toBe("anonymous");
 
   // An account-lane handoff states who the session is. A later link redeem
-  // proves only a capability, so it must not re-anonymize them — the exact
-  // shape that used to demote a signed-in member arriving by share link.
+  // proves only a capability and must not re-anonymize them.
   const accountCookie = await openAuthorities(SCOPED_HOST, ["member:mem_owner"], {
     principal: "account:usr_scoped",
   });
@@ -1578,9 +1572,9 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
   expect(authorityReferences(accountByLink)).toEqual(["link:lnk_shared", "member:mem_owner"]);
 
   // The authority-less form: what a visitor holds before they prove anything.
-  // It admits nothing and is not a session in the store — presenting it can
-  // never make the runtime write one. Redeeming an authority over it upgrades
-  // that visitor in place, carrying the pseudonym they already had.
+  // It admits nothing and is not a session in the store, so presenting it never
+  // makes the runtime write one. Redeeming an authority over it upgrades that
+  // visitor in place, keeping the pseudonym they had.
   const carried = {
     sid: "a".repeat(64),
     anonymousId: `anon_${"b".repeat(32)}`,
@@ -1651,10 +1645,9 @@ test("ambiguous path identities fail closed instead of being sanitized", async (
   }
 });
 
-// D110: normalization is intl's Normalizer behind an ASCII fast path — the
-// hand-rolled shared/unicode.php tables are gone. One scope identity per page,
-// whichever spelling the request carried, and `index.html` is the same identity
-// as the directory it indexes.
+// D110: normalization is intl's Normalizer behind an ASCII fast path. One scope
+// identity per page, whichever spelling the request carried, and `index.html`
+// is the same identity as the directory it indexes.
 test("scope identities NFC-normalize and canonicalize their index alias", () => {
   const accessRulesPath = path.resolve(import.meta.dir, "../engine/runtime/access-rules.php");
   const probe = spawnSync(
@@ -1777,10 +1770,10 @@ test("Public admission stays live-only while branch previews require management 
     },
   });
   // A Public Grant on the live version says nothing about an immutable branch
-  // preview; only a grant that names that branch does. Access is a SPACE
-  // property in v4 — one overlay carries the whole grant set (contracts §4) —
-  // so a branch preview is admitted by a `target: branch` Grant in that set,
-  // never by a second projection hung off the branch route.
+  // preview; only a grant that names that branch does. Access is a Space
+  // property in v4: one overlay carries the whole grant set (contracts §4), so
+  // a branch preview is admitted by a `target: branch` Grant in that set, never
+  // by a second projection hung off the branch route.
   spaceConfig.authorization.grants.push(
     {
       id: "grt_branch_manager",
@@ -1859,8 +1852,8 @@ test("a maxUses credential session remains authorized after its winning redempti
     config,
   });
   try {
-    // maxUses is consumed at acquisition. The session it produced keeps working
-    // — a one-use link is not a one-page-view link.
+    // maxUses is consumed at acquisition. The session it produced keeps
+    // working: a one-use link is not a one-page-view link.
     const cookie = await openAuthorities(PRIVATE_HOST, ["link:single_use_link"]);
     for (const requestPath of ["/", "/docs/"]) {
       const admitted = await get(runtime, PRIVATE_HOST, requestPath, { headers: { cookie } });
@@ -1884,7 +1877,7 @@ test("authority entries expire independently and unrelated use does not extend t
   };
 
   // Absolute lifetime is per authority: the aged one is dropped on the next
-  // re-mint while the session — and its other authority — survives.
+  // re-mint while the session and its other authority survive.
   const absolute = editSession(AUTHORITY_LRU_HOST, await twoAuthorities(), (claims) => {
     const entry = authorityIn(claims, "person:per_lru_3");
     entry.openedAt = now - SESSION_ABSOLUTE_SECONDS - 1;
@@ -1912,8 +1905,8 @@ test("authority entries expire independently and unrelated use does not extend t
     (await get(runtime, AUTHORITY_LRU_HOST, "/p4/", { headers: { cookie: idle } })).status,
   ).toBe(200);
 
-  // Use moves ONLY the authority that admitted the request, and only once per
-  // touch interval — a read-mostly session re-mints nothing at all.
+  // Use moves only the authority that admitted the request, and only once per
+  // touch interval, so a read-mostly session re-mints nothing.
   const preserved = { openedAt: now - 1_000, lastSeenAt: now - 500 };
   const recent = { openedAt: now - 60, lastSeenAt: now - 2 };
   const untouched = editSession(AUTHORITY_LRU_HOST, await twoAuthorities(), (claims) => {
@@ -2087,13 +2080,13 @@ test("credential rotation and verified email are scoped to one Grant authority",
   }
 });
 
-// The session records ONE generation per authority, and it is a digest over
-// every Grant that admits that authority — not the one Grant it happened to
-// redeem. Committing to the whole set is what makes rotating the real admitting
-// Grant unforgeable: with a single candidate standing in for the set, whichever
-// Grant sorted first kept a revoked credential alive. The accepted cost is that
-// any other edit to that set — an added overlapping Grant here — also retires
-// the authority, which re-acquisition resolves.
+// The session records one generation per authority: a digest over every Grant
+// that admits it, not the one Grant it happened to redeem. Committing to the
+// whole set is what makes rotating the real admitting Grant unforgeable; with a
+// single candidate standing in, whichever Grant sorted first kept a revoked
+// credential alive. The cost is that any other edit to that set, such as the
+// added overlapping Grant here, also retires the authority, which
+// re-acquisition resolves.
 test("editing the Grant set behind an authority retires the session and degrades it in place", async () => {
   const links = [{ linkId: "lnk_unrelated", scopes: ["/shared"], expiresAt: null }];
   await putRoute(runtime, CREDENTIAL_SCOPE_SPACE, "production", {
@@ -2129,13 +2122,12 @@ test("editing the Grant set behind an authority retires the session and degrades
   });
   const revoked = await get(runtime, CREDENTIAL_SCOPE_HOST, "/shared/", { headers: { cookie } });
   expect(revoked.status).toBe(403);
-  // The edit took away what this visitor MAY DO, not WHO they are.
-  // The record retires and the browser is handed the authority-less form,
-  // keeping the pseudonym it was already using — losing that would rename the
-  // visitor mid-thread — and the session id it was already on, so the Cast
-  // session survives the demotion. Plus the one fact that explains the wall in
-  // front of them, so the page says their access expired rather than only that
-  // it is private.
+  // The edit took away what this visitor may do, not who they are. The record
+  // retires and the browser gets the authority-less form. It keeps the
+  // pseudonym already in use, since losing that would rename the visitor
+  // mid-thread, and the session id it was already on, so the Cast session
+  // survives the demotion. It also carries the one fact that explains the wall,
+  // so the page says their access expired rather than only that it is private.
   expect(existsSync(sessionRecordPath(CREDENTIAL_SCOPE_SPACE, cookie))).toBe(false);
   const replacement =
     revoked.headers

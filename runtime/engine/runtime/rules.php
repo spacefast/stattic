@@ -37,7 +37,7 @@ function _stattic_for_each_ordered_rule(array $rules, string $requestPath, calla
 
 // The compiled `regex`/`hostRegex` is a bare PCRE body: the routing compilers
 // escape `| \ { } ( ) [ ] ^ $ + ? .` and nothing else, so a literal `#` from a
-// source like `/a#b/:id` arrives unescaped and would close the delimiter — PCRE
+// source like `/a#b/:id` arrives unescaped and would close the delimiter. PCRE
 // then reads the rest as modifiers and the rule silently never matches. This is
 // also the only side that can fix versions already published, whose artifacts
 // are immutable. If the compilers ever start escaping `#`, this must change with
@@ -47,7 +47,7 @@ function _stattic_rule_pattern(string $regex, string $modifiers = ''): string
     return '#' . str_replace('#', '\\#', $regex) . '#' . $modifiers;
 }
 
-// Most compiled path patterns are `^<literal>$` — a route with no placeholder
+// Most compiled path patterns are `^<literal>$`, a route with no placeholder
 // and no wildcard. Recognising that spelling costs one strpbrk over the body,
 // where running it costs a pattern-string build plus a PCRE match, and every
 // rule in the walk pays that on every request.

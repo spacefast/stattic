@@ -31,8 +31,8 @@ function _stattic_runtime_with_write_lock(string $privateRoot, callable $callbac
 
 // A route earns this lock ONLY when every write it performs transitively stays
 // inside spaces/{spaceId}/ (see the route table in admin/api.php). The lock
-// file lives outside the space tree on purpose — that is what lets delete_space
-// hold it while unlinking the tree.
+// file lives outside the space tree so delete_space can hold it while
+// unlinking the tree.
 function _stattic_runtime_with_space_write_lock(string $privateRoot, string $spaceId, callable $callback): void
 {
     _stattic_space_write_lock_with(
@@ -107,7 +107,7 @@ function _stattic_runtime_create_version(string $privateRoot, string $spaceId, a
         _stattic_problem_response(409, 'version_already_committed', 'Version already exists.');
     }
     $files = _stattic_runtime_manifest_files($body['files'] ?? []);
-    $retainedFiles = _stattic_runtime_manifest_files($body['retained_files'] ?? []);
+    $retainedFiles = _stattic_runtime_manifest_files($body['retained_files'] ?? [], true);
     $reusableVersionId = isset($body['reusable_version_id']) && is_string($body['reusable_version_id'])
         ? _stattic_runtime_id($body['reusable_version_id'], 'reusable_version_id')
         : null;
@@ -274,7 +274,7 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
         $descriptor = $body['session'];
         if (($descriptor['upload_id'] ?? null) === $uploadId && ($descriptor['space_id'] ?? null) === $spaceId && ($descriptor['version_id'] ?? null) === $versionId) {
             if (array_key_exists('retained_files', $descriptor)) {
-                $session['retained_files'] = _stattic_runtime_manifest_files($descriptor['retained_files']);
+                $session['retained_files'] = _stattic_runtime_manifest_files($descriptor['retained_files'], true);
             }
             if (array_key_exists('reusable_version_id', $descriptor)) {
                 $session['reusable_version_id'] = is_string($descriptor['reusable_version_id'])
@@ -382,10 +382,9 @@ function _stattic_runtime_activation_route_name(array $activation): string
 }
 
 /**
- * The finalize receipt. `manifest` is read from the version's catalog on both
- * the first answer and every replay, so a retried finalize returns byte-identical
- * files to the one that committed them — and so the control plane holds ONE
- * file identity, the runtime's.
+ * The finalize receipt. `manifest` comes from the version's catalog on the first
+ * answer and every replay, so a retry returns byte-identical files and the
+ * control plane holds ONE file identity, the runtime's.
  */
 function _stattic_runtime_finalize_ready_response(string $privateRoot, string $spaceId, string $versionId, string $versionRoot, ?string $activationEventId = null, ?array $metadata = null, ?array $purge = null, ?array $telemetry = null): never
 {
@@ -420,11 +419,9 @@ function _stattic_runtime_finalize_ready_response(string $privateRoot, string $s
             'The finalized version wrote no readable file catalog.',
         );
     }
-    // Everything below is read from immutable metadata rather than from the
-    // finalizer's return envelope, because a replayed finalize never re-runs the
-    // finalizer: the version's compiled truth has to answer identically the
-    // second time. The control plane stores these verbatim — it no longer
-    // compiles the version a second time to guess at them.
+    // Read from immutable metadata, not the finalizer's return envelope: a
+    // replayed finalize never re-runs the finalizer and still has to answer
+    // identically. The control plane stores these verbatim.
     $digests = is_array($metadata['catalogDigests'] ?? null) ? $metadata['catalogDigests'] : null;
     $delta = is_array($metadata['catalogDelta'] ?? null) ? $metadata['catalogDelta'] : null;
     $previewImagePath = is_string($metadata['previewImagePath'] ?? null) && $metadata['previewImagePath'] !== ''
@@ -448,8 +445,7 @@ function _stattic_runtime_finalize_ready_response(string $privateRoot, string $s
         'variable_digests' => is_array($metadata['variableDigests'] ?? null) ? (object) $metadata['variableDigests'] : (object) [],
         'system_variable_dependencies' => _stattic_runtime_metadata_list($metadata, 'systemVariableDependencies'),
         'routing' => _stattic_runtime_finalize_routing($metadata),
-        // Stage timings and counts for the run that just happened. Absent on a
-        // replay, which finalizes nothing.
+        // Stage timings and counts for the run that just happened.
         ...($telemetry !== null ? ['telemetry' => $telemetry] : []),
         ...($activationEventId !== null ? ['activation_event_id' => $activationEventId] : []),
         ...($purge !== null ? ['purge' => $purge] : []),
@@ -465,8 +461,8 @@ function _stattic_runtime_metadata_list(?array $metadata, string $key): array
 /**
  * The version's compiled rule counts and its proxy rules. The counts are the
  * control plane's version-row projection; the proxy rules are what it overlays
- * the publishing team's plan onto. The artifact itself stays plan-agnostic —
- * this is a report of what compiled, never a verdict on it.
+ * the publishing team's plan onto. The artifact stays plan-agnostic: a report
+ * of what compiled, never a verdict on it.
  */
 function _stattic_runtime_finalize_routing(?array $metadata): array
 {
@@ -499,7 +495,7 @@ function _stattic_runtime_finalize_idempotent_ready_response(string $privateRoot
         return;
     }
 
-    // A retried finalize+activate must still converge the route pointer: the
+    // A retried finalize+activate must still sync the route pointer: the
     // first attempt may have died after finalizing artifacts but before the
     // pointer write. The conditional write makes a pure duplicate retry a no-op.
     if (isset($body['activate']) && is_array($body['activate'])) {
@@ -523,18 +519,17 @@ function _stattic_runtime_zero_endpoint_count(string $versionRoot): int
 // The whole-domain purge every space mutation owes the edge. `$hostnames` is
 // supplied only when the caller already narrowed the set (a tombstone push);
 // otherwise it is the space's full event hostname set.
-function _stattic_runtime_purge_space_now(string $privateRoot, string $spaceId, string $reason, array $paths = [], ?array $hostnames = null): array
+function _stattic_runtime_purge_space_now(string $privateRoot, string $spaceId, string $reason, ?array $hostnames = null): array
 {
     return _stattic_runtime_purge_now($privateRoot, [
         'hostnames' => $hostnames ?? _stattic_runtime_space_event_hostnames(_stattic_space_root($privateRoot, $spaceId)),
-        'paths' => $paths,
         'reason' => $reason,
     ]);
 }
 
-// The exact hostname set a space_deleted event carries — the control plane signs
-// this set before asking the runtime to delete the space, so the state preflight
-// and the mutation must keep deriving it here, together.
+// The hostname set a space_deleted event carries. The control plane signs it
+// before asking the runtime to delete the space, so the state preflight and the
+// mutation must both derive it here.
 function _stattic_runtime_space_event_hostnames(string $spaceRoot, ?array $intent = null, ?array $tombstones = null): array
 {
     $hostnames = array_fill_keys(_stattic_runtime_route_intent_hostnames($spaceRoot, $intent), true);
@@ -617,6 +612,54 @@ function _stattic_runtime_state_route(string $privateRoot): void
     ]);
 }
 
+// Where the site user's home directory is: the provider scanner writes its
+// artifacts under `~/logs`, outside the htdocs tree this engine owns. FPM does
+// not reliably export HOME, so fall through posix and the document root's
+// parent (htdocs sits directly under the home on wp.cloud sites).
+function _stattic_runtime_site_home_dir(): ?string
+{
+    $home = getenv('HOME');
+    if (is_string($home) && $home !== '' && is_dir($home)) {
+        return rtrim($home, '/');
+    }
+    if (function_exists('posix_getpwuid') && function_exists('posix_geteuid')) {
+        $entry = posix_getpwuid(posix_geteuid());
+        $dir = is_array($entry) && is_string($entry['dir'] ?? null) ? $entry['dir'] : '';
+        if ($dir !== '' && is_dir($dir)) {
+            return rtrim($dir, '/');
+        }
+    }
+    $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? null;
+    if (is_string($docRoot) && $docRoot !== '') {
+        $candidate = dirname($docRoot);
+        if (is_dir($candidate . '/logs')) {
+            return $candidate;
+        }
+    }
+    return null;
+}
+
+// The provider's malware scanner leaves its report artifact in the site home
+// (`~/logs/malware-scanner-results.log`; the control plane submits every scan
+// with log=true). This read-only route hands it back over the JWT-authed
+// management surface, so scan ingestion works over HTTPS when the response
+// ticket is status-only, never SSH. `log: null` = no artifact on disk.
+const STATTIC_RUNTIME_SCAN_LOG_MAX_BYTES = 1048576;
+
+function _stattic_runtime_scan_log_route(string $privateRoot): void
+{
+    $home = _stattic_runtime_site_home_dir();
+    $path = $home !== null ? $home . '/logs/malware-scanner-results.log' : null;
+    $log = null;
+    if ($path !== null && is_file($path) && is_readable($path)) {
+        $bytes = file_get_contents($path, false, null, 0, STATTIC_RUNTIME_SCAN_LOG_MAX_BYTES);
+        if (is_string($bytes)) {
+            $log = $bytes;
+        }
+    }
+    _stattic_json_response(200, ['log' => $log]);
+}
+
 // The journal IS the event sink and the cursor is the only delivery state. A
 // cursor is not deduplication: the control plane must commit it together with
 // the side effects of the page it just processed.
@@ -632,8 +675,8 @@ function _stattic_runtime_journal_cursor_normalize(mixed $cursor): array
 {
     $cursor = is_array($cursor) ? $cursor : [];
     return [
-        // basename() so a stored cursor can never point the reader outside
-        // runtime/ — the file name is data that survived a round trip.
+        // basename(): the stored name is data that survived a round trip, so it
+        // must never point the reader outside runtime/.
         'file' => is_string($cursor['file'] ?? null) ? basename($cursor['file']) : '',
         'offset' => is_int($cursor['offset'] ?? null) ? max(0, $cursor['offset']) : 0,
         // The generation's inode. Rotation renames `journal.jsonl` out from
@@ -683,7 +726,7 @@ function _stattic_runtime_journal_cursor_from_token(string $token): ?array
     return _stattic_runtime_journal_cursor_normalize($cursor);
 }
 
-// Cursors order by generation age then byte offset — the journal's own read
+// Cursors order by generation age then byte offset, the journal's own read
 // order (shared/storage.php `_stattic_runtime_journal_files`), never by file
 // name: after a rotation a stored `journal.jsonl` names the ROTATED generation,
 // and ranking it by name would put it ahead of that generation's own ack.
@@ -776,9 +819,9 @@ function _stattic_runtime_drain_callback_events(string $privateRoot, array $clai
     $events = [];
     foreach ($page['records'] as $record) {
         $entry = $record['entry'];
-        // Only management events carry an event_id. Everything else in the
-        // journal is operator diagnostics (job lifecycle, GC, purge receipts) and
-        // is skipped over — the cursor still advances past it.
+        // Only management events carry an event_id. Everything else is operator
+        // diagnostics (job lifecycle, GC, purge receipts): skipped, but the
+        // cursor still advances past it.
         if (!is_array($entry) || !is_string($entry['event_id'] ?? null) || $entry['event_id'] === '') {
             continue;
         }
@@ -899,8 +942,8 @@ function _stattic_runtime_write_zero_config_artifact(string $versionRoot, array 
 }
 
 // Security: this artifact names the execution host, granted capabilities, and
-// the worker's broker credential, so it lives BESIDE the version's file tree —
-// a publish reaches `files/` and nothing else, so no upload can forge it. Fields
+// the worker's broker credential, so it lives BESIDE the version's file tree. A
+// publish reaches `files/` and nothing else, so no upload can forge it. Fields
 // are copied one by one so an unrecognised key cannot land in it either.
 function _stattic_runtime_write_functions_config_artifact(string $versionRoot, array $functions): void
 {
@@ -1098,7 +1141,7 @@ function _stattic_runtime_route_updated_event(string $spaceId, string $routeName
 }
 
 // The one route-pointer flip, for route PUT and finalize+activate alike. An
-// unchanged conditional write must stay fully silent — no journal event means no
+// unchanged conditional write must stay fully silent. No journal event means no
 // edge purge for reconcile-sweep and plan-sync re-pushes.
 function _stattic_runtime_write_route_pointer(string $privateRoot, string $spaceId, string $routeName, string $versionId, array $body, array $claims, bool $storeIntent): array
 {
@@ -1218,7 +1261,7 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
         $body
     );
     // A config-only access change keeps the same version pointer, so version ids
-    // cannot say whether cached anonymous bytes just became private — the
+    // cannot say whether cached anonymous bytes just became private. The
     // before/after exposure digests answer that. Presence of the previous field
     // means a route existed; null means treat it conservatively.
     $previousExposure = null;
@@ -1237,7 +1280,7 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
     }
     // The index/pointer publish happens BEFORE the journal record that announces
     // it: that record is a promise the activation is already SERVING. The
-    // activation event id is the response's and the pointer's receipt — the
+    // activation event id is the response's and the pointer's receipt. The
     // journal copy is a diagnostic, never a delivery.
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
     $activationEventId = _stattic_runtime_management_event_id($claims, $routeEvent);
@@ -1273,7 +1316,6 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
             ]
             : [
                 'hostnames' => $hostnames,
-                'paths' => $changedPathsKnown ? $changedPaths : [],
                 'reason' => 'route_updated',
             ],
     );
@@ -1458,41 +1500,7 @@ function _stattic_runtime_put_tombstones(string $privateRoot, string $spaceId, a
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'tombstone_count' => $tombstoneCount,
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_tombstones_updated', [], $hostnames),
-    ]);
-}
-
-// The engine only STORES the policy — deletion happens on the housekeeping tick,
-// which re-checks every id against live route pointers before any rm. An empty
-// list clears the policy.
-function _stattic_runtime_put_retention_policy(string $privateRoot, string $spaceId, array $claims): void
-{
-    $body = _stattic_json_body();
-    $raw = $body['prunable_version_ids'] ?? null;
-    if (!is_array($raw)) {
-        _stattic_problem_response(422, 'runtime_retention_policy_invalid', 'prunable_version_ids must be an array of version ids.');
-    }
-    $versionIds = [];
-    foreach ($raw as $versionId) {
-        if (!is_string($versionId)) {
-            _stattic_problem_response(422, 'runtime_retention_policy_invalid', 'prunable_version_ids must be an array of version ids.');
-        }
-        $versionIds[_stattic_runtime_id($versionId, 'version_id')] = true;
-    }
-    _stattic_runtime_write_json_atomic(_stattic_space_root($privateRoot, $spaceId) . '/retention-policy.json', [
-        'space_id' => $spaceId,
-        'prunable_version_ids' => array_keys($versionIds),
-        'updated_at' => gmdate('c'),
-    ]);
-    _stattic_runtime_record_management_event($privateRoot, $claims, [
-        'event' => 'space_retention_policy_updated',
-        'space_id' => $spaceId,
-        'prunable_count' => count($versionIds),
-    ]);
-    _stattic_json_response(200, [
-        'space_id' => $spaceId,
-        'prunable_count' => count($versionIds),
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_retention_policy_updated'),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_tombstones_updated', $hostnames),
     ]);
 }
 
@@ -1521,6 +1529,12 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
         _stattic_runtime_write_json_atomic($spaceRoot . '/tombstones.json', $tombstones);
     }
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
+    // The space's demoted bytes are the one part of it that does not live under
+    // the tree just removed. Deferred: reclamation is the bucket's problem, and
+    // a delete that waited on S3 would fail whenever the bucket did.
+    _stattic_defer(static function () use ($privateRoot, $spaceId): void {
+        _stattic_tier_reclaim_space_bucket_objects($privateRoot, $spaceId);
+    });
     _stattic_runtime_record_management_event($privateRoot, $claims, [
         'event' => 'space_deleted',
         'space_id' => $spaceId,
@@ -1529,7 +1543,7 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'status' => 'deleted',
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_deleted', [], $hostnames),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_deleted', $hostnames),
     ]);
 }
 
@@ -1560,7 +1574,7 @@ function _stattic_runtime_delete_version(string $privateRoot, string $spaceId, s
         'space_id' => $spaceId,
         'version_id' => $versionId,
         'status' => 'deleted',
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'version_deleted', [], $hostnames),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'version_deleted', $hostnames),
     ]);
 }
 
@@ -1725,8 +1739,7 @@ function _stattic_runtime_version_source_reset_headers(): void
     }
 }
 
-// Absence answered as an empty private response — the caller's source-reader
-// contract treats a missing optional file as null.
+// The caller's source-reader contract treats a missing optional file as null.
 function _stattic_runtime_version_source_empty(): never
 {
     _stattic_runtime_version_source_reset_headers();
@@ -1855,21 +1868,20 @@ function _stattic_runtime_version_files_request_invalid(string $message): never
 }
 
 /**
- * THE version file list: one bounded catalog page, both views, for every reader
- * that used to reconstruct a file list from its own projection.
+ * THE version file list: one bounded catalog page, both views.
  *
- * `view=source` is the uploaded, pre-substitution object — what the file browser
- * shows. `view=served` is the immutable byte a visitor receives, which is what
- * the scanner enumerates; private compile inputs have no served object and drop
- * out of that view entirely. `channel` adds a template-variant route's own bytes
- * as extra rows carrying `variant_route`, so the scanner still sees the exact
- * bytes that channel can serve — it is a served-view dimension and nothing else.
+ * `view=source` is the uploaded, pre-substitution object the file browser shows.
+ * `view=served` is the immutable byte a visitor receives, which is what the
+ * scanner enumerates; private compile inputs have no served object and drop out
+ * of that view entirely. `channel` adds a template-variant route's own bytes as
+ * extra rows carrying `variant_route`, so the scanner sees the exact bytes that
+ * channel can serve. It is a served-view dimension and nothing else.
  *
  * `public` comes from the catalog, the single visibility implementation.
  *
  * `path` narrows the page to one exact entry, so a per-file lookup costs one
  * bounded round trip instead of a full drain. A path the view does not hold is
- * an EMPTY page, not a 404: absence is the answer the caller asked for.
+ * an EMPTY page, not a 404.
  */
 function _stattic_runtime_list_version_files_route(string $privateRoot, string $spaceId, string $versionId): void
 {
@@ -1892,6 +1904,10 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
         }
     }
     $publicOnly = _stattic_runtime_version_files_flag('public_only');
+    $includeInternal = _stattic_runtime_version_files_flag('include_internal');
+    if ($includeInternal && ($view !== 'source' || $publicOnly || $channel !== null)) {
+        _stattic_runtime_version_files_request_invalid('include_internal requires the unfiltered source view.');
+    }
     $prefix = _stattic_runtime_version_files_param('prefix') ?? '';
     $query = _stattic_runtime_version_files_param('q') ?? '';
     $limit = STATTIC_RUNTIME_VERSION_FILES_PAGE_DEFAULT;
@@ -1927,7 +1943,12 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
 
     $rows = [];
     foreach ($catalog['paths'] as $path => $entry) {
-        if (!is_string($path) || $path === '' || !is_array($entry)) {
+        if (
+            !is_string($path)
+            || $path === ''
+            || (!$includeInternal && _stattic_path_is_internal_artifact($path))
+            || !is_array($entry)
+        ) {
             continue;
         }
         $public = ($entry['public'] ?? false) === true;
@@ -1943,7 +1964,7 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
     if ($channel !== null) {
         $variant = is_array($catalog['variants'][$channel] ?? null) ? $catalog['variants'][$channel] : [];
         foreach ($variant as $path => $object) {
-            if (!is_string($path) || $path === '') {
+            if (!is_string($path) || $path === '' || (!$includeInternal && _stattic_path_is_internal_artifact($path))) {
                 continue;
             }
             // A variant substitutes bytes for a path the base already carries,
@@ -2004,7 +2025,7 @@ function _stattic_runtime_version_files_row(string $path, array $object, bool $p
     ];
 }
 
-// Base rows before their variant rows, then by path — the same order the cursor
+// Base rows before their variant rows, then by path, the same order the cursor
 // walks, so a page boundary never re-delivers or skips a row.
 function _stattic_runtime_version_files_sort_key(array $row): string
 {
@@ -2065,13 +2086,8 @@ function _stattic_runtime_version_files_cursor_decode(string $cursor): ?string
 
 function _stattic_runtime_purge_space_route(string $privateRoot, string $spaceId, array $claims): void
 {
-    $body = _stattic_json_body();
-    $paths = $body['urls'] ?? null;
-    if ($paths !== null && (!is_array($paths) || !array_is_list($paths))) {
-        _stattic_problem_response(422, 'runtime_purge_request_invalid', 'urls must be a list of request paths.');
-    }
     _stattic_json_response(200, [
         'space_id' => $spaceId,
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'control_plane_purge', $paths ?? []),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'control_plane_purge'),
     ]);
 }

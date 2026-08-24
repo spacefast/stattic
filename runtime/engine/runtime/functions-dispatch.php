@@ -5,7 +5,7 @@
  * in `sf-fx-*` request headers, so it holds no per-tenant state. Dispatch is
  * route-driven: finalize compiles the worker's declared routes into
  * `functions/routes.php`, and a request matching no entry never wakes the
- * worker — anything on disk is answered here first. The origin never holds a
+ * worker. Anything on disk is answered here first. The origin holds no
  * Cloudflare credential: no API token, account id, or namespace.
  */
 
@@ -32,9 +32,9 @@ const STATTIC_FUNCTIONS_DISPATCH_CONNECT_TIMEOUT_SECONDS = 5;
 const STATTIC_FUNCTIONS_RELAY_FREE_CAPABILITIES = ['fetch', 'log', 'next.cache'];
 
 // Compiled beside the version's file tree, never inside it, like the config.
-// The non-terminal reader lets the static lane distinguish verified absence
-// from a transient/malformed artifact: the latter must keep the committed
-// response out of shared cache without replacing those bytes with a 500.
+// The non-terminal reader lets the static lane tell verified absence from a
+// transient or malformed artifact: the latter must keep the committed response
+// out of shared cache without replacing those bytes with a 500.
 //
 // @return array{kind: 'present', value: array}|array{kind: 'absent'|'unavailable'}
 function _stattic_try_load_functions_routes_artifact(string $versionRoot): array
@@ -79,9 +79,8 @@ function _stattic_try_load_functions_routes_artifact(string $versionRoot): array
     return $cache[$path] = ['kind' => 'present', 'value' => $loaded];
 }
 
-// Absent means this version dispatches nothing; present-but-malformed remains
-// a terminal invariant failure once the request actually reaches the Functions
-// route lane.
+// Absent means this version dispatches nothing. Present-but-malformed is a
+// terminal invariant failure once the request reaches the Functions route lane.
 function _stattic_load_functions_routes_artifact(string $versionRoot): ?array
 {
     $read = _stattic_try_load_functions_routes_artifact($versionRoot);
@@ -97,10 +96,10 @@ function _stattic_load_functions_routes_artifact(string $versionRoot): ?array
 /**
  * Runs after every static and Zero resolution: assets win, and a request
  * matching no compiled route never wakes the worker. The worker owns status
- * semantics for matched paths, so the outputs are three: dispatch when a route
- * claims this path and method; a router-built 405 with the allowed methods when
- * a route claims the path at other methods (before the worker, since the table
- * already knows what it answers); and null when no route claims the path at all.
+ * semantics for matched paths, so there are three outcomes: dispatch when a
+ * route claims this path and method; a router-built 405 with the allowed
+ * methods when a route claims the path at other methods, since the table
+ * already knows what it answers; null when no route claims the path.
  */
 function _stattic_resolve_functions_route_action(string $versionRoot, string $lookup, string $requestMethod): ?array
 {
@@ -130,8 +129,8 @@ function _stattic_resolve_functions_route_action(string $versionRoot, string $lo
                 return ['action' => 'dispatch_functions'];
             }
             // The path is a route, but not at this method. A null method always
-            // matches, so only a concrete method reaches here — and GET carries
-            // HEAD with it, exactly as the match does.
+            // matches, so only a concrete method reaches here. GET carries HEAD
+            // with it, exactly as the match does.
             $allowed[$method] = true;
             if ($method === 'GET') {
                 $allowed['HEAD'] = true;
@@ -155,14 +154,13 @@ function _stattic_functions_config(string $versionRoot): ?array
 }
 
 /**
- * Whether this request must skip the static fast path and dispatch instead:
- * a draft/preview session — a request carrying one of the version's declared
- * bypass cookies — asking for a path the worker claims. Extraction makes
- * this rule necessary: a prerendered page serves from disk for everyone
- * else, but a draft request needs the worker to render the draft content.
- * The caller has already established the cheap facts (GET/HEAD, a non-empty
- * Cookie header, a functions version), so this only reads the config and
- * consults the cached route table.
+ * Whether this request must skip the static fast path and dispatch instead: a
+ * draft/preview session, meaning a request carrying one of the version's
+ * declared bypass cookies, asking for a path the worker claims. A prerendered
+ * page serves from disk for everyone else, but a draft request needs the worker
+ * to render draft content. The caller has already established the cheap facts
+ * (GET/HEAD, a non-empty Cookie header, a functions version), so this only
+ * reads the config and consults the cached route table.
  */
 function _stattic_functions_bypass_requested(string $versionRoot, string $requestPath, string $requestMethod): bool
 {
@@ -262,7 +260,7 @@ function _stattic_functions_dispatch_headers(
         'sf-fx-env' => base64_encode($encodedVariableValues),
     ];
     // The cache seed's signed read URL, minted at finalize beside the bundle
-    // URL. Optional: a version without one simply starts its cache cold.
+    // URL. Optional: a version without one starts its cache cold.
     if (is_string($host['seedUrl'] ?? null) && $host['seedUrl'] !== '') {
         $headers['sf-fx-seed'] = (string) $host['seedUrl'];
     }
@@ -280,21 +278,21 @@ function _stattic_functions_dispatch_headers(
         $headers['sf-fx-log'] = $originBaseUrl . '/' . STATTIC_FUNCTIONS_LOGS_PATH;
         $headers['sf-fx-log-token'] = (string) $relay['token'];
     }
-    // The purge channel is independent of the relay too: its credential is its
-    // own (minted at finalize beside the relay token, verified by this origin's
-    // purge route), and a worker granted nothing else must still be able to
-    // evict the pages it rendered. The URL is composed from the request host —
-    // like log intake — because the purge must land on the cache in front of
-    // the hostname the visitor actually hit.
+    // The purge channel is independent of the relay: its credential is its own,
+    // minted at finalize beside the relay token and verified by this origin's
+    // purge route, and a worker granted nothing else must still evict the pages
+    // it rendered. The URL is composed from the request host, like log intake,
+    // because the purge must land on the cache in front of the hostname the
+    // visitor hit.
     $purge = is_array($config['purge'] ?? null) ? $config['purge'] : null;
     if ($purge !== null && is_string($purge['token'] ?? null) && $purge['token'] !== '') {
         $headers['sf-fx-purge'] = $originBaseUrl . '/' . STATTIC_FUNCTIONS_PURGE_PATH;
         $headers['sf-fx-purge-token'] = (string) $purge['token'];
     }
-    // Usage reporting is independent of the relay: the credential is the
-    // control plane's, the destination is the control plane, and this origin
-    // only forwards them. So a version whose relay is unusable — and which
-    // therefore has no log channel — is still counted.
+    // Usage reporting is independent of the relay: the credential and the
+    // destination are both the control plane's, and this origin only forwards
+    // them. A version whose relay is unusable, and so has no log channel, is
+    // still counted.
     $usage = is_array($config['usage'] ?? null) ? $config['usage'] : null;
     if (
         $usage !== null
@@ -307,9 +305,9 @@ function _stattic_functions_dispatch_headers(
     return $headers;
 }
 
-// Inbound `sf-fx-*` is stripped: a visitor sending `sf-fx-caps: db.write` must
-// not reach the host, where it would be indistinguishable from ours.
-// `authorization` is deliberately absent — Spacefast credentials ride
+// Inbound `sf-fx-*` is stripped: a visitor's `sf-fx-caps: db.write` must not
+// reach the host, where it would be indistinguishable from ours.
+// `authorization` is absent on purpose. Spacefast credentials ride
 // `x-sf-authorization`, so Authorization belongs to the customer's application
 // and reaches the worker unchanged. Accept-Encoding goes because the response
 // relay strips Content-Encoding.
@@ -341,14 +339,14 @@ function _stattic_functions_relay_response_lane(): array
 
 // Without this the tenant worker's own Cache-Control governs the edge, so a
 // private space's Functions responses would be shared-cacheable by worker fiat.
-// A public space keeps worker-declared caching — the lane declares no policy —
-// but only while the worker's response carries nothing a shared store cannot
+// A public space keeps worker-declared caching, since the lane declares no
+// policy, but only while the response carries nothing a shared store cannot
 // honor: the wp.cloud edge keys a stored response on host+path+query alone and
 // ignores Vary, so a worker answering `Vary: RSC` beside a public s-maxage
 // would be stored once by URL and replayed to every variant. The signals that
 // revoke a proxy origin's shared-cache grant (any Vary beyond Accept-Encoding,
-// a Set-Cookie, a private/no-cache directive) therefore revoke the worker's the
-// same way, down to the same no-store.
+// a Set-Cookie, a private/no-cache directive) revoke the worker's the same way,
+// down to the same no-store.
 function _stattic_functions_response_cache_policy(bool $privateCache, array $workerHeaders): array
 {
     return _stattic_cache_policy([
@@ -379,16 +377,21 @@ function _stattic_functions_dispatch(
     $insertSnippets = _stattic_html_insert_snippets($serving);
     // serve.php reaches here only for a version the compile step wrote a functions
     // config for, so this request IS a function path. From here it either reaches
-    // the execution edge or answers 503 — it never degrades to static and never
-    // runs the worker on the origin (the origin decides; the edge executes). A
-    // version with no functions carries no config, so this code is never entered
-    // for it: the down-ramp is not-compiling-routes, not a serve-time flag check.
+    // the execution edge or answers 503. It never degrades to static and never
+    // runs the worker on the origin: the origin decides, the edge executes. A
+    // version with no functions carries no config, so the down-ramp is
+    // not-compiling-routes, not a serve-time flag check.
     $config = _stattic_functions_config($versionRoot);
+    // This box's own dispatch credential: a JWT the control plane minted for
+    // THIS SPACEFAST_RUNTIME_INSTANCE_ID and pushed through persistent data. The
+    // origin forwards it and the edge verifies it. It is not interchangeable
+    // between boxes, so stealing one buys nothing against another.
     $dispatchToken = (string) (_stattic_config_value('SPACEFAST_FUNCTIONS_DISPATCH_TOKEN') ?? '');
     // "No reachable edge host" is any of: a config finalize wrote no host into,
-    // no dispatch credential on this origin (the runtime-wide rollback), curl
-    // missing, or a host egress policy blocks. Order matters: the destination
-    // check dereferences the host, so it runs only once $config is non-null.
+    // no dispatch credential on this origin (a box that has never had a
+    // persistent-data sync), curl missing, or a host egress policy blocks.
+    // Order matters: the destination check dereferences the host, so it runs
+    // only once $config is non-null.
     if (
         $config === null
         || $dispatchToken === ''
@@ -497,8 +500,8 @@ function _stattic_functions_bad_gateway(): void
 // A function path whose execution edge is unreachable answers 503, never a
 // static file: once a version compiles a function route, that route is the
 // worker's or it is nothing. `functions_edge_unconfigured` is the single code
-// for every "no reachable edge" cause, so swapping the edge system stays a
-// config change with no new serve-time verdict.
+// for every "no reachable edge" cause, so swapping the edge system needs no new
+// serve-time verdict.
 function _stattic_functions_edge_unconfigured(): void
 {
     _stattic_serve_page('runtime-unavailable', [

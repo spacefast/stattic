@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  api,
   deploy,
   finalizeRaw,
   get,
@@ -52,7 +51,6 @@ let rt: Runtime;
 let runtimeRoot: string;
 let runtimePath: string;
 let capturePath: string;
-let migrationCapturePath: string;
 
 const HOST = "zero-runtime.test";
 const REAL_RUNTIME_PATH = path.resolve(
@@ -64,7 +62,6 @@ beforeAll(async () => {
   runtimeRoot = mkdtempSync(path.join(os.tmpdir(), "stattic-runtime-test-"));
   runtimePath = path.join(runtimeRoot, "fake-runtime.php");
   capturePath = path.join(runtimeRoot, "capture.json");
-  migrationCapturePath = path.join(runtimeRoot, "migrations.log");
   const phpPath = Bun.which("php") ?? "/usr/bin/php";
   writeFileSync(
     runtimePath,
@@ -72,11 +69,6 @@ beforeAll(async () => {
 <?php
 // One binary serves the finalize and Zero lanes, so delegate non-Zero commands.
 $real = ${JSON.stringify(REAL_RUNTIME_PATH)};
-$migrationCapture = ${JSON.stringify(migrationCapturePath)};
-if (($argv[1] ?? '') === 'migrate') {
-    file_put_contents($migrationCapture, ($argv[2] ?? '') . "\n", FILE_APPEND);
-    exit(0);
-}
 if (!in_array($argv[1] ?? '', ['prepare', 'invoke'], true)) {
     $process = proc_open(
         array_merge([$real], array_slice($argv, 1)),
@@ -287,55 +279,6 @@ test("invokes a finalized Zero lookup action through a fresh runner process", as
     authRef: "current",
     variablesRef: "finalized",
   });
-});
-
-test("reapplies a finalized version's stored Zero migration plan", async () => {
-  const spaceId = "spc_zero_migration_reapply";
-  const versionId = "ver_zero_migration_reapply_1";
-  await deploy(rt, {
-    spaceId,
-    versionId,
-    files: { "index.html": "<h1>migration reapply</h1>\n" },
-    serving: {
-      zero_endpoints: [
-        {
-          method: "GET",
-          path: "/api/items",
-          source: "globalThis.__statticZeroResult = '{}';",
-          endpoint_id: "GET /api/items",
-          capabilities: { db: true },
-          db: {
-            schemaHash: `sha256:${"a".repeat(64)}`,
-            migrationOperations: [{ op: "create_table", table: "items" }],
-            tables: {
-              items: {
-                physicalName: "zero_items",
-                primaryKey: "id",
-                columns: { id: { physicalName: "item_id" } },
-              },
-            },
-          },
-        },
-      ],
-    },
-  });
-  expect(readFileSync(migrationCapturePath, "utf8").trim().split("\n")).toHaveLength(1);
-
-  const reapplied = await api(
-    rt,
-    "POST",
-    `/__spacefast/api.php/spaces/${spaceId}/versions/${versionId}/zero/migrate`,
-    "apply_zero_migrations",
-    { space_id: spaceId, version_id: versionId },
-  );
-
-  expect(reapplied.status).toBe(200);
-  expect(await reapplied.json()).toEqual({
-    space_id: spaceId,
-    version_id: versionId,
-    applied: true,
-  });
-  expect(readFileSync(migrationCapturePath, "utf8").trim().split("\n")).toHaveLength(2);
 });
 
 test("finalizes an NFC Unicode Zero endpoint route", async () => {

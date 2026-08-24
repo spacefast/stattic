@@ -89,11 +89,11 @@ foreach (['exec', 'system', 'shell_exec', 'passthru', 'popen', 'proc_open'] as $
     $dangerousStillCallable[$fn] = function_exists($fn);
 }
 
-// Which platform-secret env survived the scrub (must be empty). The test seeds
-// these into the process env before spawning; the prelude must have removed
-// them from every surface a handler or a subprocess can read.
-$leakedEnv = [];
-foreach (['SPACEFAST_ACCESS_JWT', 'SPACEFAST_ATOMIC_PERSISTENT_DATA_JSON', 'DB_PASSWORD', 'DB_USER', 'AUTH_KEY'] as $name) {
+// Per-name env surfaces after the prelude. The test seeds each into the process
+// env before spawning; the caller decides which must survive (site-scoped, the
+// team owns the box) and which must be gone from EVERY surface a handler or
+// subprocess reads (fleet-wide credentials).
+$env_surfaces = static function (string $name): array {
     $surfaces = [];
     if (($_SERVER[$name] ?? null) !== null) {
         $surfaces[] = 'SERVER';
@@ -104,8 +104,23 @@ foreach (['SPACEFAST_ACCESS_JWT', 'SPACEFAST_ATOMIC_PERSISTENT_DATA_JSON', 'DB_P
     if (getenv($name) !== false) {
         $surfaces[] = 'getenv';
     }
+    return $surfaces;
+};
+
+// The fleet-wide credentials that MUST be scrubbed (empty surfaces) and the
+// site-scoped secrets that MUST survive (the team owns the box).
+$fleetEnv = [];
+foreach (['SPACEFAST_FUNCTIONS_DISPATCH_TOKEN', 'SPACEFAST_ATOMIC_PERSISTENT_DATA_JSON'] as $name) {
+    $surfaces = $env_surfaces($name);
     if ($surfaces !== []) {
-        $leakedEnv[$name] = $surfaces;
+        $fleetEnv[$name] = $surfaces;
+    }
+}
+$siteEnv = [];
+foreach (['DB_PASSWORD', 'DB_USER', 'AUTH_KEY', 'SPACEFAST_ACCESS_JWT'] as $name) {
+    $surfaces = $env_surfaces($name);
+    if ($surfaces !== []) {
+        $siteEnv[$name] = $surfaces;
     }
 }
 
@@ -117,6 +132,7 @@ echo json_encode([
     'read_sibling_space' => try_read($siblingSecret),
     'read_docroot_config' => try_read($docrootConfig),
     'read_stattic_secret' => try_read($statticSecret),
-    'leaked_platform_env' => (object) $leakedEnv,
+    'leaked_fleet_env' => (object) $fleetEnv,
+    'surviving_site_env' => (object) $siteEnv,
     'dangerous_functions_still_callable' => $dangerousStillCallable,
 ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);

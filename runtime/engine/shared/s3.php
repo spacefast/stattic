@@ -13,6 +13,11 @@ const STATTIC_S3_EMPTY_PAYLOAD_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e
 const STATTIC_S3_CONNECT_TIMEOUT_SECONDS = 10;
 const STATTIC_S3_TOTAL_TIMEOUT_SECONDS = 30;
 const STATTIC_S3_DEFAULT_PARALLEL_STREAMS = 4;
+const STATTIC_S3_LIST_PAGE_SIZE = 1000;
+// Reclamation is best-effort: a bucket outliving a deleted space costs storage,
+// not correctness. Bound the walk rather than hold a request open indefinitely.
+const STATTIC_S3_DELETE_PARALLEL_STREAMS = 8;
+const STATTIC_S3_DELETE_PREFIX_MAX_OBJECTS = 20000;
 
 // SPACEFAST_STORAGE_BUCKETS_JSON rows:
 // {id, endpoint, region, bucket, urlStyle, getKeyId, getKeySecret, putKeyId,
@@ -62,19 +67,18 @@ function _stattic_s3_default_bucket_id(): ?string
     return (string) array_key_first($manifest);
 }
 
-// The object key is DERIVED from (space, sha) at every call site and never
-// stored — not in a shard, not in a metadata record, not in a job payload. That
-// is what makes a space move a pure prefix operation and a stale stored key
-// impossible.
+// The object key is derived from (space, sha) at every call site and never
+// stored: not in a shard, a metadata record, or a job payload. That makes a
+// space move a pure prefix operation and a stale stored key impossible.
 function _stattic_s3_blob_locator(string $bucketId, string $spaceId, string $sha256): ?array
 {
     $key = _stattic_blob_relative_key($spaceId, $sha256);
     return $key === null ? null : ['bucket' => $bucketId, 'key' => $key];
 }
 
-// Object size when the blob is in the bucket, null when it is not (or the HEAD
-// could not be answered). The demote lane's upload verification for buckets
-// whose PUTs are not server-verified.
+// Object size when the blob is in the bucket, null when it is not or the HEAD
+// went unanswered. The demote lane's upload check for buckets whose PUTs are
+// not server-verified.
 function _stattic_s3_blob_head(string $spaceId, string $sha256, ?string $bucketId = null): ?int
 {
     $bucketId ??= _stattic_s3_default_bucket_id();
@@ -154,6 +158,21 @@ function _stattic_s3_locator(array $bucketRow, string $key): ?array
     ];
 }
 
+// SigV4 canonical query string: keys sorted bytewise, both halves RFC3986
+// encoded. Empty for every keyed object op; only the listing carries a query.
+function _stattic_s3_canonical_query(array $query): string
+{
+    if ($query === []) {
+        return '';
+    }
+    ksort($query, SORT_STRING);
+    $pairs = [];
+    foreach ($query as $name => $value) {
+        $pairs[] = _stattic_s3_uri_encode((string) $name) . '=' . _stattic_s3_uri_encode((string) $value);
+    }
+    return implode('&', $pairs);
+}
+
 function _stattic_s3_canonical_headers(array $headers): array
 {
     $normalized = [];
@@ -201,7 +220,8 @@ function _stattic_s3_sign(
     string $host,
     string $path,
     array $extraHeaders,
-    string $payloadHash
+    string $payloadHash,
+    string $canonicalQuery = ''
 ): array {
     $region = trim((string) ($bucketRow['region'] ?? '')) ?: 'us-east-1';
     $service = 's3';
@@ -218,7 +238,7 @@ function _stattic_s3_sign(
     $canonicalRequest = implode("\n", [
         strtoupper($method),
         $path,
-        '',
+        $canonicalQuery,
         $canonicalHeaders,
         $signedHeaders,
         $payloadHash,
@@ -248,8 +268,8 @@ function _stattic_s3_payload_hash(string $body): string
     return hash('sha256', $body);
 }
 
-// Fails closed before the wire: an incomplete credential pair could only
-// produce an unsignable request. Returns ['credentials', 'locator'] or
+// Fails closed before the wire: an incomplete credential pair cannot sign a
+// request. Returns ['credentials', 'locator'] or
 // ['error' => 's3_credentials_missing'|'s3_bucket_config_invalid'].
 function _stattic_s3_prepare(array $bucketRow, string $mode, string $key): array
 {
@@ -264,9 +284,8 @@ function _stattic_s3_prepare(array $bucketRow, string $mode, string $key): array
     return ['credentials' => $credentials, 'locator' => $locator];
 }
 
-// A signed request as a transport policy record. $options carries the extra
-// transport fields a caller may set: resolve (a list of "host:port:ip"
-// CURLOPT_RESOLVE pins), sink and on_headers.
+// A signed request as a transport policy record. $options adds resolve (a list
+// of "host:port:ip" CURLOPT_RESOLVE pins), sink and on_headers.
 function _stattic_s3_transport_request(
     array $bucketRow,
     array $credentials,
@@ -276,6 +295,9 @@ function _stattic_s3_transport_request(
     string $payloadHash,
     array $options = []
 ): array {
+    $canonicalQuery = _stattic_s3_canonical_query(
+        isset($options['query']) && is_array($options['query']) ? $options['query'] : []
+    );
     $signedHeaders = _stattic_s3_sign(
         $bucketRow,
         $credentials,
@@ -283,10 +305,11 @@ function _stattic_s3_transport_request(
         $locator['host'],
         $locator['path'],
         $extraHeaders,
-        $payloadHash
+        $payloadHash,
+        $canonicalQuery
     );
     $request = [
-        'url' => $locator['url'],
+        'url' => $locator['url'] . ($canonicalQuery === '' ? '' : '?' . $canonicalQuery),
         'method' => $method,
         'headers' => _stattic_s3_header_lines($signedHeaders),
         'connect_timeout' => STATTIC_S3_CONNECT_TIMEOUT_SECONDS,
@@ -335,7 +358,10 @@ function _stattic_s3_request(array $bucketRow, string $mode, string $method, str
         ? _stattic_s3_payload_hash($body)
         : STATTIC_S3_EMPTY_PAYLOAD_SHA256;
 
-    $transportOptions = ['resolve' => $options['resolve'] ?? []];
+    $transportOptions = [
+        'resolve' => $options['resolve'] ?? [],
+        'query' => $options['query'] ?? [],
+    ];
     if ($method === 'PUT') {
         $transportOptions['body'] = $body;
     }
@@ -368,6 +394,128 @@ function _stattic_s3_head(array $bucketRow, string $key, array $options = []): a
     return _stattic_s3_request($bucketRow, 'get', 'HEAD', $key, $options);
 }
 
+/**
+ * One ListObjectsV2 page under $prefix. No continuation token: the only caller
+ * deletes every key it is handed, so the next unpaged listing resumes where
+ * this one stopped.
+ *
+ * The response is read with a regex, not an XML parser: this client is
+ * dependency-free by contract and only ever lists derived
+ * `spaces/<id>/blobs/<aa>/<sha>` keys. Entities are still decoded so a bucket
+ * holding foreign objects cannot hand back a mangled key.
+ *
+ * @return list<string>|null null on any failure.
+ */
+function _stattic_s3_list_prefix(string $bucketId, string $prefix, array $options = []): ?array
+{
+    $result = _stattic_s3_request_by_bucket_id($bucketId, 'put', 'GET', '', [
+        'query' => [
+            'list-type' => '2',
+            'prefix' => $prefix,
+            'max-keys' => (string) STATTIC_S3_LIST_PAGE_SIZE,
+        ],
+    ] + $options);
+    if (!$result['ok'] || (int) $result['status'] !== 200) {
+        return null;
+    }
+    $keys = [];
+    if (preg_match_all('#<Key>(.*?)</Key>#s', $result['body'], $matches) > 0) {
+        foreach ($matches[1] as $key) {
+            $keys[] = html_entity_decode($key, ENT_QUOTES | ENT_XML1, 'UTF-8');
+        }
+    }
+    return $keys;
+}
+
+/**
+ * Best-effort removal of everything under $prefix, one listing page at a time.
+ * Deletions within a page run in parallel: a space's prefix is thousands of
+ * objects and serial round trips would never finish inside a request.
+ *
+ * `complete` false means the walk stopped early on a listing failure, a
+ * deletion failure, or the object ceiling. The caller must report the remainder
+ * as orphans it did not reclaim.
+ *
+ * @return array{deleted: int, complete: bool}
+ */
+function _stattic_s3_delete_prefix(
+    string $bucketId,
+    string $prefix,
+    int $maxObjects = STATTIC_S3_DELETE_PREFIX_MAX_OBJECTS,
+    array $options = []
+): array {
+    $deleted = 0;
+    while ($deleted < $maxObjects) {
+        $keys = _stattic_s3_list_prefix($bucketId, $prefix, $options);
+        if ($keys === null) {
+            return ['deleted' => $deleted, 'complete' => false];
+        }
+        if ($keys === []) {
+            return ['deleted' => $deleted, 'complete' => true];
+        }
+        $keys = array_slice($keys, 0, $maxObjects - $deleted);
+        $results = _stattic_s3_multi_delete($bucketId, $keys, $options);
+        foreach ($keys as $key) {
+            if (($results[$key] ?? false) !== true) {
+                return ['deleted' => $deleted, 'complete' => false];
+            }
+            $deleted += 1;
+        }
+    }
+    // The ceiling stopped the walk with the prefix unproven-empty.
+    return ['deleted' => $deleted, 'complete' => false];
+}
+
+/**
+ * Parallel signed DELETEs, mirroring _stattic_s3_multi_put's shape. Signed with
+ * the write credential; the get key is deliberately read-only. S3 DELETE is
+ * idempotent, so true means "the key is not in the bucket", never "I removed
+ * it".
+ *
+ * @param list<string> $keys
+ * @return array<string,bool> key => gone
+ */
+function _stattic_s3_multi_delete(string $bucketId, array $keys, array $options = []): array
+{
+    $bucketRow = _stattic_s3_bucket_row($bucketId);
+    if ($bucketRow === null) {
+        return [];
+    }
+    $jobs = [];
+    $results = [];
+    foreach ($keys as $key) {
+        $prepared = _stattic_s3_prepare($bucketRow, 'put', $key);
+        if (isset($prepared['error'])) {
+            $results[$key] = false;
+            continue;
+        }
+        ['credentials' => $credentials, 'locator' => $locator] = $prepared;
+        $job = _stattic_http_prepare(_stattic_s3_transport_request(
+            $bucketRow,
+            $credentials,
+            $locator,
+            'DELETE',
+            [],
+            STATTIC_S3_EMPTY_PAYLOAD_SHA256,
+            [
+                'resolve' => $options['resolve'] ?? [],
+                'sink' => static fn (string $chunk): bool => true,
+            ]
+        ));
+        if ($job === false) {
+            $results[$key] = false;
+            continue;
+        }
+        $jobs[] = ['id' => $key, 'handle' => $job['handle']];
+    }
+
+    foreach (_stattic_s3_multi_run($jobs, STATTIC_S3_DELETE_PARALLEL_STREAMS) as $key => $transfer) {
+        $results[$key] = $transfer['error'] === null
+            && in_array((int) $transfer['status'], [200, 204, 404], true);
+    }
+    return $results;
+}
+
 // Stale-key failures retry once against a freshly-read manifest.
 function _stattic_s3_request_by_bucket_id(string $bucketId, string $mode, string $method, string $key, array $options = []): array
 {
@@ -386,11 +534,10 @@ function _stattic_s3_request_by_bucket_id(string $bucketId, string $mode, string
 }
 
 // Runs a signed streamed GET. $onHeaders(int $status, array $headers) fires
-// once, after the final response's header block and before any body byte — the
-// only point where the caller can still set its own status/headers; $headers is
-// the lowercase name => value map. $onChunk(string) fires per chunk and
-// returning false aborts the transfer; with no $onChunk the body streams
-// straight to output. Returns the transport envelope without a buffered body.
+// once, after the final header block and before any body byte, the last point
+// where the caller can set its own status/headers; $headers is a lowercase
+// name => value map. $onChunk(string) fires per chunk and returning false
+// aborts; without it the body streams to output. No buffered body is returned.
 function _stattic_s3_stream_get(
     array $remoteLocator,
     ?string $rangeHeader = null,
@@ -426,10 +573,9 @@ function _stattic_s3_stream_get(
     ));
 }
 
-// $jobs: list of
-// ['id' => string, 'handle' => CurlHandle]. Returns a map keyed by job id of
-// ['status' => int, 'error' => ?string] — transport level only, callers apply
-// their own status check.
+// $jobs: list of ['id' => string, 'handle' => CurlHandle]. Returns a map keyed
+// by job id of ['status' => int, 'error' => ?string]. Transport level only;
+// callers apply their own status check.
 function _stattic_s3_multi_run(array $jobs, int $streams = STATTIC_S3_DEFAULT_PARALLEL_STREAMS): array
 {
     $streams = max(1, $streams);
@@ -468,7 +614,7 @@ function _stattic_s3_multi_run(array $jobs, int $streams = STATTIC_S3_DEFAULT_PA
                     'error' => $result === CURLE_OK ? null : curl_strerror($result),
                 ];
             }
-            // No curl_close(): deprecated in PHP 8.5, a no-op since 8.0 — GC
+            // No curl_close(): a no-op since PHP 8.0, deprecated in 8.5. GC
             // frees the handle once curl_multi_remove_handle() drops its ref.
             $fill();
         }
@@ -481,8 +627,7 @@ function _stattic_s3_multi_run(array $jobs, int $streams = STATTIC_S3_DEFAULT_PA
 // $items: list of {id?, bucket, key, source_path, sha256?, content_type?};
 // returns a map keyed by item id of {ok, status, error, sha256}. SigV4 signs
 // the payload hash in a header sent before the body, so an omitted 'sha256'
-// costs a separate hash_file() pass; the body itself is still streamed from
-// disk, never buffered.
+// costs a hash_file() pass. The body still streams from disk, never buffered.
 function _stattic_s3_multi_put(array $items, int $streams = STATTIC_S3_DEFAULT_PARALLEL_STREAMS): array
 {
     $jobs = [];

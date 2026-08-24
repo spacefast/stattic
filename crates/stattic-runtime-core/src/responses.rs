@@ -269,8 +269,10 @@ static CHUNK_ID_NAME: LazyLock<Regex> = LazyLock::new(|| {
 
 /// The compiled cache-class ladder — the ONE verdict for "how long may a
 /// cache hold this response", read by the response compiler ([`file_entry`])
-/// and by purge planning (`catalog::ImmutablePaths::contains`), so what the
-/// table pins for a year and what a purge skips can never disagree.
+/// and by the changelog delta (`catalog::ImmutablePaths::contains`), so what
+/// the table pins for a year and what the delta reports as changeable can
+/// never disagree. (Edge eviction itself is whole-host and class-blind —
+/// runtime/engine/shared/purge.php.)
 ///
 /// - The theme stylesheet URL revalidates whatever a publisher rule says: a
 ///   theme change swaps the blob behind that exact URL and purges it, so its
@@ -281,7 +283,7 @@ static CHUNK_ID_NAME: LazyLock<Regex> = LazyLock::new(|| {
 ///   content-hashed filename decides.
 ///
 /// `mime_hint` is the resolved mime when the caller has one (the compiler);
-/// purge planning has only the path, and falls back to the html extensions —
+/// the delta walk has only the path, and falls back to the html extensions —
 /// the one place the two callers can see a path differently, stated here as a
 /// parameter instead of hidden in a second copy of the ladder.
 pub(crate) fn compiled_cache_class(

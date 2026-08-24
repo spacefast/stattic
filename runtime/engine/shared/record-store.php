@@ -5,7 +5,7 @@ require_once __DIR__ . '/lock.php';
 require_once __DIR__ . '/storage.php';
 
 // THE id-keyed JSON record store: one directory of `{id}.json` records. Do not
-// open-code glob/read/write/expire loops over such a directory — open a store.
+// open-code glob/read/write/expire loops over such a directory. Open a store.
 //
 // `retention` says when sweep() may drop a record:
 //   mtime_seconds  expires this long after its mtime
@@ -77,8 +77,8 @@ function _stattic_record_store_put(array $store, string $id, array $record): voi
 // An exclusive create is the only atomic "first writer wins" the filesystem
 // offers, so a claim never goes through the tmp+rename primitive. $expiresAt is
 // stamped as the mtime, which is what a retention `mtime_seconds` of 0 reads.
-// False means unclaimed — already present, OR unwritable; callers that must
-// tell those apart check the on-disk evidence.
+// False means unclaimed: already present, OR unwritable. Callers that must tell
+// those apart check the on-disk evidence.
 function _stattic_record_store_claim(array $store, string $id, array $record, int $expiresAt): bool
 {
     $path = _stattic_record_store_path($store, $id);
@@ -90,9 +90,9 @@ function _stattic_record_store_claim(array $store, string $id, array $record, in
     $written = fwrite($handle, $payload);
     fclose($handle);
     // A short write (disk full) leaves an empty marker that reads as a valid
-    // claim while recording no exp — a jti guard would then answer "ok" and drop
-    // the id forever. Remove the stub and report the claim as failed, so the
-    // caller falls through to its "no marker on disk" retryable path.
+    // claim while recording no exp, so a jti guard would answer "ok" and drop
+    // the id forever. Removing the stub sends the caller down its "no marker on
+    // disk" retryable path.
     if ($written !== strlen($payload)) {
         unlink($path);
         return false;

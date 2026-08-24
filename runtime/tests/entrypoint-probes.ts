@@ -1,17 +1,12 @@
-// THE entrypoint set, taken from the one authority that decides it:
-// runtime/engine-manifest.json's alias table, run through the SAME derivation
-// the generator routes with (`entrypointAliases` in
-// scripts/check-runtime-entrypoints.mjs). Re-implementing the "under the
-// namespace and ending in .php" filter here would make the probe-set-equality
-// assertion compare one reading of the rule against another; importing it makes
-// the single-authority claim literal. Reading the manifest is a fixture read;
-// the probes below are what prove behavior.
+// The entrypoint set comes from engine-manifest.json's alias table, run through
+// the same `entrypointAliases` the generator routes with. Re-implementing that
+// filter here would make the probe-set-equality assertion compare one reading of
+// the rule against another.
 //
-// Each probe is a request whose response can ONLY come from the entrypoint's own
-// script. That is the whole point: when a path is missing from the routing
-// table, the gate hands it to init.php, which 403s the private namespace with a
-// plain-text platform page — so "the script's own signal" is exactly the signal
-// that distinguishes a routed entrypoint from a swallowed one.
+// Each probe's response can only come from the entrypoint's own script. A path
+// missing from the routing table falls through to init.php, which 403s the
+// private namespace with a plain-text page, so the script's own signal is what
+// distinguishes a routed entrypoint from a swallowed one.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -31,10 +26,16 @@ export type EntrypointProbe = {
   verify: (response: Response) => Promise<void>;
 };
 
+function entrypointProbeCatalog(
+  probes: Record<string, EntrypointProbe>,
+): Record<string, EntrypointProbe> {
+  return probes;
+}
+
 async function expectErrorCode(response: Response, status: number, code: string): Promise<void> {
-  // Reported from the raw body, not response.json(): a swallowed entrypoint
-  // answers with init.php's plain-text platform page, and "JSON parse error" is
-  // a useless way to learn that the routing table lost a path.
+  // Report from the raw body, not response.json(): a swallowed entrypoint
+  // answers with init.php's plain-text page, and "JSON parse error" is a useless
+  // way to learn the routing table lost a path.
   const body = await response.text();
   if (response.status !== status) {
     throw new Error(`expected ${status}, got ${response.status}: ${body}`);
@@ -48,7 +49,7 @@ async function expectErrorCode(response: Response, status: number, code: string)
   if (actual !== code) throw new Error(`expected error code ${code}, got ${String(actual)}`);
 }
 
-export const ENTRYPOINT_PROBES: Record<string, EntrypointProbe> = {
+export const ENTRYPOINT_PROBES = entrypointProbeCatalog({
   "/__spacefast/api.php": {
     request: (rt) =>
       fetch(`${rt.baseUrl}${runtimeHttpPath("/__spacefast/api.php/state")}`, {
@@ -69,9 +70,8 @@ export const ENTRYPOINT_PROBES: Record<string, EntrypointProbe> = {
       if (payload.ok !== true || payload.runtime !== "stattic-php") {
         throw new Error(`health did not answer for itself: ${body}`);
       }
-      // Health reports the site's real provisioning state, and every harness
-      // root has a storage tree — a "unconfigured" here means health ran
-      // against a root it should not have resolved.
+      // Every harness root has a storage tree, so anything but "configured"
+      // means health resolved a root it should not have.
       if (payload.site_state !== "configured") {
         throw new Error(`health reported an unexpected site_state: ${body}`);
       }
@@ -90,4 +90,4 @@ export const ENTRYPOINT_PROBES: Record<string, EntrypointProbe> = {
       ),
     verify: (response) => expectErrorCode(response, 401, "runtime_upload_bearer_required"),
   },
-};
+});

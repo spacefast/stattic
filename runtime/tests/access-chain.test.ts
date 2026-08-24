@@ -23,16 +23,14 @@ const GEN_SPACE = "spc_chain_gen";
 const GEN_VERSION = "ver_chain_gen_1";
 const MEMBER = "member:mem_chain_owner";
 // Contracts §5/§6 (D121/D123): a protected Space collapses every compiled cache
-// class onto one policy — no cache may retain private bytes.
+// class onto one policy. No cache may retain private bytes.
 const PROTECTED = "private, no-store";
-// The Space's per-Space exchange credential (contracts §4): every `sfv2_`
-// session cookie is signed with a key derived from it, so a projection without
-// one can mint no session at all.
+// Contracts §4: every `sfv2_` session cookie is signed with a key derived from
+// this, so a projection without one can mint no session.
 const EXCHANGE_CREDENTIAL = "runtime-chain-exchange-credential-0123456789";
 
-// Use the real control-plane signing material path before importing either the
-// mint or JWKS producer. The emitted JWKS and callback token therefore come
-// from the same production functions, not parallel test fixtures.
+// Set the real control-plane signing material before importing the mint or
+// JWKS producer, so both come from production functions, not test fixtures.
 const platformKey = generateKeyPairSync("ed25519");
 process.env.SPACEFAST_RUNTIME_JWT_PRIVATE_KEY = Buffer.from(
   platformKey.privateKey.export({ format: "pem", type: "pkcs8" }),
@@ -48,8 +46,8 @@ const [{ mintAuthorityToken }, { runtimeJwks }] = await Promise.all([
 
 /**
  * The raw route config management compiles into the overlay's grant index. The
- * two halves of the gen tuple are set independently on purpose: the overlay
- * stores `[access_gen, session_ver]` and must never sum them (contracts §4/D30).
+ * gen tuple's halves are set independently: the overlay stores
+ * `[access_gen, session_ver]` and must never sum them (contracts §4/D30).
  */
 function accessConfig(accessGeneration: number, sessionVersion: number): Record<string, unknown> {
   return {
@@ -158,7 +156,7 @@ test("control-plane mint and JWKS drive a real private runtime session", async (
 
   // The account lane as a browser walks it: the control plane 303s the signed
   // handoff into the runtime's redeem endpoint, which trades it for a local
-  // session and sends the visitor to the page they asked for.
+  // session and redirects to the requested page.
   const token = await mintCallbackToken();
   const callback = await get(
     runtime,
@@ -198,8 +196,8 @@ test("a handoff is gated on the overlay's access_gen alone, never on the summed 
   expect(await redeem(2)).toBe(403);
 
   // access_gen 1 + session_ver 1: a summing runtime would see "2" here and
-  // admit the generation-2 handoff. Rotating the session version is the
-  // sign-everyone-out lever and must not advance the Grant generation.
+  // admit the generation-2 handoff. Rotating the session version signs everyone
+  // out and must not advance the Grant generation.
   await putRoute(runtime, GEN_SPACE, "production", {
     version_id: GEN_VERSION,
     config: accessConfig(1, 1),
@@ -229,8 +227,8 @@ test("a handoff is gated on the overlay's access_gen alone, never on the summed 
 });
 
 test("a handoff minted outside the redeem freshness window is refused", async () => {
-  // Long-lived on purpose: `exp` is still in the future, so the only thing that
-  // can reject this token is the runtime's 60s cap on the mint's `iat`.
+  // Long-lived on purpose: `exp` is still in the future, so only the runtime's
+  // 60s cap on the mint's `iat` can reject this token.
   setSystemTime(new Date(Date.now() - 120_000));
   let stale: string;
   try {

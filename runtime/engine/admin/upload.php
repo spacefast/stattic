@@ -15,13 +15,11 @@ const STATTIC_RUNTIME_INGEST_CONCURRENCY_PER_SPACE = 4;
 const STATTIC_RUNTIME_UPLOAD_SOURCE_URL_TIMEOUT_SECONDS = 30;
 const STATTIC_RUNTIME_UPLOAD_SOURCE_URL_CONNECT_TIMEOUT_SECONDS = 5;
 
-// Manifest scale ceilings. These are the runtime's own last-resort boundary, not
-// plan policy: plan caps are LOWER and are enforced by the control plane
-// (packages/common/src/utils/publish-policy.ts, which these mirror exactly —
-// MANIFEST_MAX_FILES_CEILING, MANIFEST_MAX_PATH_BYTES,
-// MAX_VERSION_FILE_SIZE_BYTES). Keep the two in parity; the runtime must refuse
-// anything the control plane would have, because a compromised or skipped
-// control plane is precisely the case this boundary exists for.
+// Manifest scale ceilings: the runtime's last-resort boundary, not plan policy.
+// Plan caps are lower and enforced by the control plane. Keep these in parity
+// with MANIFEST_MAX_FILES_CEILING, MANIFEST_MAX_PATH_BYTES and
+// MAX_VERSION_FILE_SIZE_BYTES in packages/common/src/utils/publish-policy.ts;
+// a skipped or compromised control plane is why the boundary exists.
 const STATTIC_RUNTIME_MANIFEST_MAX_FILES = 100000;
 const STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES = 1024;
 const STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES = 67108864; // 64 MiB
@@ -29,9 +27,8 @@ const STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES = 67108864; // 64 MiB
 function _stattic_runtime_publish_pins_store(string $privateRoot, string $spaceId): array
 {
     $spaceId = _stattic_runtime_id($spaceId, 'space_id');
-    // Every pin is written with an `expires_at`, and the GC already honours an
-    // expired one as absent — so the record itself is reclaimable on the same
-    // clock rather than accumulating forever under pins/.
+    // Every pin carries an `expires_at` and the GC treats an expired one as
+    // absent, so pins/ reclaims on the same clock instead of growing forever.
     return _stattic_record_store(
         _stattic_space_root($privateRoot, $spaceId) . '/pins',
         ['retention' => ['field' => 'expires_at']],
@@ -74,10 +71,10 @@ function _stattic_runtime_publish_session_declared_sizes(array $session): array
     return $sizes;
 }
 
-// A pin is the ONE thing that can stop the GC collecting bytes, and `expires_at`
-// is when it may stop obeying one. Fail-closed in both directions: this writer
-// refuses to mint an unbounded pin, and the GC
-// (`_stattic_tier_space_pinned_shas`) treats one it cannot parse as expired.
+// A pin is the only thing that stops the GC collecting bytes; `expires_at`
+// bounds it. Fail-closed both ways: this writer refuses an unbounded pin, and
+// the GC (`_stattic_tier_space_pinned_shas`) treats an unparseable one as
+// expired.
 function _stattic_runtime_publish_session_write_pin(string $privateRoot, string $spaceId, string $uploadId, array $session): void
 {
     $expiresAt = _stattic_record_store_timestamp($session['expires_at'] ?? null);
@@ -93,8 +90,8 @@ function _stattic_runtime_publish_session_write_pin(string $privateRoot, string 
         _stattic_runtime_publish_pin_id($uploadId),
         [
             'shas' => _stattic_runtime_publish_session_shas($session),
-            // Normalized: the GC parses this, so it is stored in the one form
-            // that always parses rather than whatever the session carried.
+            // Normalized: the GC parses this, so store the form that always
+            // parses rather than whatever the session carried.
             'expires_at' => gmdate('c', $expiresAt),
         ],
     );
@@ -135,9 +132,8 @@ function _stattic_runtime_publish_session_load(string $privateRoot, string $spac
     return $session;
 }
 
-// Releasing drops the session AND its pin. An unavailable stripe lock means the
-// critical section never ran, so this retries once and then journals a durable
-// record — retention finishes the job rather than the bytes going unreclaimable.
+// Releasing drops the session and its pin. An unavailable stripe lock means the
+// critical section never ran: retry once, then journal for retention to finish.
 function _stattic_runtime_publish_session_release(string $privateRoot, string $spaceId, string $uploadId): void
 {
     $spaceId = _stattic_runtime_id($spaceId, 'space_id');
@@ -175,11 +171,9 @@ function _stattic_runtime_publish_session_replace(string $privateRoot, string $s
         if (!is_array($next)) {
             _stattic_problem_response(500, 'upload_session_update_failed', 'Publish session update returned an invalid record.');
         }
-        // json_decode(..., true) cannot distinguish an empty object from an
-        // empty list. Any read-modify-write of a session with no accepted
-        // uploads would therefore persist `accepted: []`, which the Rust
-        // finalizer correctly rejects. Preserve the wire contract on every
-        // mutation, including retained-only lazy finalize sessions.
+        // json_decode(..., true) cannot tell an empty object from an empty
+        // list, so a session with no accepted uploads would persist
+        // `accepted: []`, which the Rust finalizer rejects.
         $next['accepted'] = _stattic_runtime_json_object(
             is_array($next['accepted'] ?? null) ? $next['accepted'] : []
         );
@@ -368,7 +362,7 @@ function _stattic_runtime_materialize_lazy_upload_session(string $privateRoot, s
         _stattic_problem_response(409, 'version_already_committed', 'Version already exists.');
     }
     $manifest = _stattic_runtime_manifest_files($descriptor['files'] ?? []);
-    $retained = $includeRetained ? _stattic_runtime_manifest_files($descriptor['retained_files'] ?? []) : [];
+    $retained = $includeRetained ? _stattic_runtime_manifest_files($descriptor['retained_files'] ?? [], true) : [];
     $reusableVersionId = $includeRetained && is_string($descriptor['reusable_version_id'] ?? null)
         ? _stattic_runtime_id($descriptor['reusable_version_id'], 'reusable_version_id')
         : null;
@@ -386,8 +380,8 @@ function _stattic_runtime_materialize_lazy_upload_session(string $privateRoot, s
         'manifest_hash' => is_string($descriptor['manifest_hash'] ?? null) ? $descriptor['manifest_hash'] : null,
         'retained_files' => $retained,
         'reusable_version_id' => $reusableVersionId,
-        // The PUT lane's descriptor half carries no retention data at all; the
-        // full descriptor arrives with the finalize body and is merged there.
+        // The PUT lane's descriptor carries no retention data; the full one
+        // arrives with the finalize body.
         'retention' => $includeRetained
             ? _stattic_runtime_retention_mode($descriptor['retention'] ?? null, $reusableVersionId, $retained)
             : 'none',
@@ -414,16 +408,15 @@ function _stattic_runtime_assert_upload_scope(string $uploadId, array $session, 
 /**
  * The publish's retention intent, taken from the wire and NEVER inferred.
  *
- * 'all'  — retain every path of `reusable_version_id`; the list is materialized
- *          from that version's own catalog at finalize, under the space lock.
- * 'list' — retain exactly `retained_files`. An EMPTY list is meaningful: it is a
- *          publish that drops every path the base held.
- * 'none' — retain nothing.
+ * 'all':  retain every path of `reusable_version_id`, materialized from that
+ *         version's own catalog at finalize, under the space lock.
+ * 'list': retain exactly `retained_files`. An EMPTY list is meaningful: it
+ *         drops every path the base held.
+ * 'none': retain nothing.
  *
- * Absent is legal only when no reusable version is named, because then there is
- * nothing that could be retained. Deriving 'all' from "base named + empty list"
- * silently undid deletes: the runtime has no delete list, so a deleted path is
- * exactly a path missing from the retained set.
+ * Absent is legal only when no reusable version is named. Never derive 'all'
+ * from "base named + empty list": the runtime has no delete list, so a deleted
+ * path is exactly a path missing from the retained set.
  */
 function _stattic_runtime_retention_mode(mixed $value, ?string $reusableVersionId, array $retainedFiles): string
 {
@@ -446,14 +439,13 @@ function _stattic_runtime_retention_mode(mixed $value, ?string $reusableVersionI
     return $mode;
 }
 
-function _stattic_runtime_manifest_files(mixed $files): array
+function _stattic_runtime_manifest_files(mixed $files, bool $allowInternalArtifacts = false): array
 {
     if (!is_array($files)) {
         _stattic_problem_response(422, 'invalid_files', 'Version files must be an array.');
     }
-    // Nothing downstream re-checks the file count or the path length, so a
-    // manifest that could never be published is refused here, before a session
-    // reserves a pin.
+    // Nothing downstream re-checks file count or path length, so refuse an
+    // unpublishable manifest here, before a session reserves a pin.
     if (count($files) > STATTIC_RUNTIME_MANIFEST_MAX_FILES) {
         _stattic_problem_response(413, 'manifest_too_many_files', 'Version manifest declares more than ' . STATTIC_RUNTIME_MANIFEST_MAX_FILES . ' files.', ['details' => ['file_count' => count($files), 'limit' => STATTIC_RUNTIME_MANIFEST_MAX_FILES]]);
     }
@@ -465,7 +457,9 @@ function _stattic_runtime_manifest_files(mixed $files): array
             _stattic_problem_response(422, 'invalid_file', 'Each version file requires path and size.');
         }
         $entry = ['path' => _stattic_runtime_file_path($file['path']), 'size' => max(0, (int) $file['size'])];
-        _stattic_runtime_assert_static_upload_path($entry['path']);
+        if (!$allowInternalArtifacts || !_stattic_path_is_internal_artifact($entry['path'])) {
+            _stattic_runtime_assert_static_upload_path($entry['path']);
+        }
         if (strlen($entry['path']) > STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES) {
             _stattic_problem_response(422, 'manifest_path_too_long', 'File paths support up to ' . STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES . ' bytes in canonical form.', ['details' => ['path' => $entry['path'], 'bytes' => strlen($entry['path']), 'limit' => STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES]]);
         }
@@ -495,8 +489,8 @@ function _stattic_runtime_manifest_files(mixed $files): array
     return $normalized;
 }
 
-// Every ingest lane charges the same per-space slot; the call point differs per
-// handler, so it stays an explicit call rather than a hook in a shared prologue.
+// Every ingest lane charges the same per-space slot, but the call point differs
+// per handler, so it stays explicit rather than a shared prologue hook.
 function _stattic_runtime_upload_admit(string $privateRoot, string $spaceId): void
 {
     _stattic_admission_acquire_or_shed($privateRoot, [
@@ -544,12 +538,10 @@ function _stattic_runtime_upload_blobs_have(string $privateRoot, string $spaceId
         }
         $residentSize = _stattic_runtime_blob_size($privateRoot, (string) $session['space_id'], $sha);
         $declaredSize = array_key_exists($sha, $declaredSizes) ? $declaredSizes[$sha] : null;
-        // Negotiation answers "must you send this?", and a resident object
-        // whose length diverges from what this session declared is a blob only
-        // the publisher can restore. Answering "have" accepted it at the
-        // DECLARED size, so the client sent nothing and the finalizer then
-        // refused the version for that same path — a publish no client action
-        // could complete. Reporting it missing puts the bytes back in flight.
+        // Negotiation answers "must you send this?". A resident object whose
+        // length differs from the declared size is one only the publisher can
+        // restore: report it missing so the bytes go back in flight, or the
+        // finalizer refuses the version and no client action can fix it.
         if ($residentSize === null || ($declaredSize !== null && $residentSize !== $declaredSize)) {
             $missing[] = $sha;
         } elseif ($declaredSize !== null) {
@@ -572,9 +564,9 @@ function _stattic_runtime_upload_accepted(string $privateRoot, string $spaceId, 
     _stattic_json_response(200, ['ok' => true, 'sha256' => $sha, 'size' => $size]);
 }
 
-// The one stage-and-verify ladder both body lanes walk: bytes staged under the
-// declared size, then the staged length reconciled with it. $subject is the
-// identifying detail pair (path or sha256) the problem documents lead with.
+// Stage-and-verify for both body lanes: bytes staged under the declared size,
+// then the staged length reconciled with it. $subject is the identifying detail
+// (path or sha256) the problem documents lead with.
 //
 // @return array{0:string,1:int,2:string} tmp path, received size, sha256
 function _stattic_runtime_upload_staged(string $privateRoot, string $noun, array $subject, int $declaredSize): array
@@ -596,8 +588,8 @@ function _stattic_runtime_upload_staged(string $privateRoot, string $noun, array
     return [$tmpPath, $receivedSize, strtolower((string) $streamed['sha256'])];
 }
 
-// Resolves a path-addressed upload to its session, space and declared entry:
-// the shared prelude of both file lanes, admission included.
+// Shared prelude of both file lanes: resolves a path-addressed upload to its
+// session, space and declared entry, admission included.
 //
 // @return array{0:string,1:string,2:string,3:array} upload id, space id, path, entry
 function _stattic_runtime_upload_file_target(string $privateRoot, string $uploadId, string $encodedPath, array $claims): array
@@ -729,10 +721,9 @@ function _stattic_runtime_upload_file_from_url(string $privateRoot, string $uplo
     $stagingRoot = $privateRoot . '/runtime/blob-staging';
     _stattic_runtime_mkdir($stagingRoot);
     $tmpPath = $stagingRoot . '/url-' . bin2hex(random_bytes(12)) . '.tmp';
-    // Everything after the stream can exit the process — a problem document IS
-    // an exit — and PHP does not unwind `finally` through exit(), so a shutdown
-    // hook is the only construct that reclaims the staged bytes. Idempotent: on
-    // the success path the file has already been renamed away.
+    // Problem documents exit the process, and PHP does not unwind `finally`
+    // through exit(), so only a shutdown hook reclaims the staged bytes. On
+    // success the file has already been renamed away.
     register_shutdown_function(static function () use ($tmpPath): void {
         if (is_file($tmpPath)) {
             unlink($tmpPath);

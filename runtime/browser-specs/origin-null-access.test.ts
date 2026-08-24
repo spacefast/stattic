@@ -35,12 +35,11 @@ const EXPECTED_REACHABLE_STATES = {
   "exchange-unavailable": "Couldn't reach Spacefast to check that. Try again in a moment.",
 } as const;
 
-// These states originate on central account/link flows, which this browser
-// fixture cannot serve faithfully: those flows require a signed dashboard
-// session or single-use emailed credentials and redirect to production HTTPS.
-// Keep every state named so removing one from production still breaks this
-// contract; their central production transitions are covered by
-// access-broker-routes.test.ts.
+// These states originate on central account/link flows this fixture cannot
+// serve: they need a signed dashboard session or single-use emailed
+// credentials, and they redirect to production HTTPS. Keep every state named so
+// removing one from production breaks this contract.
+// access-broker-routes.test.ts covers their central transitions.
 const UNREACHABLE_IN_THIS_FIXTURE = {
   checked: "requires a signed-out central account probe",
   "no-grant": "requires a signed-in central account with no matching Grant",
@@ -287,9 +286,8 @@ test("the default access page keeps the invite form branded, aligned, and respon
     expect((await page.goto(fixture.defaultPageUrl))?.status()).toBe(403);
     await page.evaluate(() => document.fonts.ready);
     expect(await page.locator(".sf-page.access").count()).toBe(1);
-    // The access wall is deliberately zero-webfont: the platform body face is
-    // the SF Pro system stack, so the headline renders in it rather than the
-    // UA default, and nothing is downloaded to get there.
+    // The access wall ships no webfont: the body face is the SF Pro system
+    // stack, so the headline renders in it rather than the UA default.
     expect(
       await page.locator("h1").evaluate((element) => getComputedStyle(element).fontFamily),
     ).toContain("-apple-system");
@@ -414,9 +412,9 @@ test("a share link opens its clean page in one navigation, with no gate in betwe
     const opened = await page.goto(fixture.linkPageUrl);
     if (!opened) throw new Error("share link navigation returned no response");
     expect(opened.status()).toBe(200);
-    // The token is redeemed on the page request itself. Ordinary clean-URL
-    // canonicalization may add the directory slash, but keeps the token and
-    // never inserts an access interstitial or a second navigation.
+    // The token is redeemed on the page request itself. Clean-URL
+    // canonicalization may add the directory slash but keeps the token, with no
+    // access interstitial and no second navigation.
     const finalUrl = new URL(fixture.pageUrl);
     finalUrl.search = new URL(fixture.linkPageUrl).search;
     expect(page.url()).toBe(finalUrl.toString());
@@ -434,9 +432,9 @@ test("a share link opens its clean page in one navigation, with no gate in betwe
     expect((await opened.allHeaders())["cache-control"]).toBe("private, no-store");
 
     // The session cookie carries every later navigation, including pages the
-    // durable Link never named.
-    // (The dev/test lane serves plain HTTP, so the host-only cookie carries its
-    // non-__Host- name here; production keeps __Host-spacefast_session.)
+    // durable Link never named. The dev/test lane serves plain HTTP, so the
+    // cookie has its non-__Host- name here; production keeps
+    // __Host-spacefast_session.
     expect(
       (await context.cookies(fixture.defaultPageUrl)).some((cookie) =>
         cookie.name.startsWith("spacefast_session"),

@@ -21,7 +21,7 @@ function _stattic_runtime_native_binary(): string
 
 // The CLI php for subprocess work. Under FPM only a PATH search resolves it:
 // the pool's mount namespace does not contain the host php prefix, so every
-// absolute host path (PHP_BINDIR included) fails execve with ENOENT — measured
+// absolute host path (PHP_BINDIR included) fails execve with ENOENT. Measured
 // on live boxes, where the identical spawn works via execvp and fails via
 // execve. That constrains the whole recipe: spawn with env inheritance
 // (proc_open env=null → execvp → PATH search) and shape the child environment
@@ -36,11 +36,11 @@ function _stattic_runtime_php_cli_binary(): string
 }
 
 /**
- * Runs $fn with the process environment reshaped — $set exported, $unset
- * removed — restoring every touched variable afterwards. A child spawned
- * inside (proc_open with env=null) inherits the reshaped environ via execvp,
- * which keeps PATH search alive; passing proc_open an env array would switch
- * to execve and break binary resolution under FPM (see
+ * Runs $fn with the process environment reshaped, $set exported and $unset
+ * removed, restoring every touched variable afterwards. A child spawned inside
+ * (proc_open with env=null) inherits the reshaped environ via execvp, which
+ * keeps PATH search alive; passing proc_open an env array would switch to
+ * execve and break binary resolution under FPM (see
  * _stattic_runtime_php_cli_binary).
  *
  * @param array<string, string> $set
@@ -236,12 +236,12 @@ function _stattic_runtime_run_subprocess(
 }
 
 // A timed-out child is killed and polled: proc_close on a still-running child
-// waits unbounded. When a deadline is set, the wait for exit is bounded here
-// too — a child that closed stdout/stderr without exiting leaves the pipe loop
-// with $terminate false, and a bare proc_close on it would block forever while
-// the caller holds the space write lock. $terminate is by-reference so a bound
-// hit escalates it to a timeout for the caller's result. A null deadline is the
-// unbounded lane and keeps the original bare proc_close.
+// waits unbounded. With a deadline set, the wait for exit is bounded here too.
+// A child that closed stdout/stderr without exiting leaves the pipe loop with
+// $terminate false, and a bare proc_close on it would block forever while the
+// caller holds the space write lock. $terminate is by-reference so a bound hit
+// escalates it to a timeout for the caller's result. A null deadline keeps the
+// bare proc_close.
 function _stattic_reap_native_process($process, bool &$terminate, ?float $deadline = null): int
 {
     if (!$terminate && $deadline !== null) {

@@ -1,12 +1,11 @@
 <?php
 declare(strict_types=1);
 
-// The per-space storage system: a record store at
-// spaces/<s>/uploads/objects/<id>.json, bodies in the shared CAS. The record is
-// the authority — deleting it stops access even when an edge copy names the
-// same bytes. Every object is reachable at its unguessable public URL only
-// together with the runtime-wide read key (`?k=`), one rotatable secret whose
-// rotation invalidates every handed-out URL at once.
+// Per-space storage: a record store at spaces/<s>/uploads/objects/<id>.json,
+// bodies in the shared CAS. The record is the authority. Deleting it stops
+// access even when an edge copy names the same bytes. A public URL works only
+// with the runtime-wide read key (`?k=`), whose rotation invalidates every
+// handed-out URL at once.
 require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/../shared/pointers.php';
@@ -23,10 +22,10 @@ const STATTIC_UPLOADS_PROMOTE_RETRY_AFTER_SECONDS = 5;
 const STATTIC_UPLOADS_ID_PATTERN = '/^[a-f0-9]{32}$/';
 
 // A stored type a browser could execute as a page rides `Content-Disposition:
-// attachment`, always with the record's exact declared type, never a sniffable
-// one. SVG and XML are here even though the ingest policy admits them: they are
-// script-bearing documents in every browser, which the executable-content
-// denylist (aimed at ingest) does not claim to cover.
+// attachment` with the record's exact declared type, never a sniffable one.
+// SVG and XML are here even though ingest admits them: browsers treat them as
+// script-bearing documents, which the ingest-aimed executable-content denylist
+// does not cover.
 const STATTIC_UPLOADS_ACTIVE_CONTENT_TYPES = [
     'application/xhtml+xml',
     'application/xml',
@@ -50,8 +49,8 @@ function _stattic_uploads_id_valid(string $id): bool
     return preg_match(STATTIC_UPLOADS_ID_PATTERN, $id) === 1;
 }
 
-// Every reader goes through this: an unreadable or half-written record is
-// indistinguishable from an absent one, so it can never serve bytes.
+// Every reader goes through this: an unreadable or half-written record reads as
+// absent, so it never serves bytes.
 function _stattic_uploads_record(mixed $record): ?array
 {
     if (!is_array($record)) {
@@ -81,11 +80,10 @@ function _stattic_uploads_record(mixed $record): ?array
     ];
 }
 
-// The one revocable secret behind every public object URL, lazily minted
-// (`_stattic_lazy_minted_secret`) under the site write lock — rotate runs under
-// that same lock via the management route table, so a lazy mint can never race
-// a rotation. Rotation swaps the pointer and purges the edge; a rotated key
-// makes every previously handed-out URL answer 404.
+// The one revocable secret behind every public object URL. Lazily minted under
+// the site write lock, and rotation takes that same lock, so a mint cannot race
+// a rotation. Rotation swaps the pointer, purges the edge, and makes every
+// previously handed-out URL answer 404.
 function _stattic_storage_read_key(string $privateRoot): string
 {
     $key = _stattic_lazy_minted_secret($privateRoot, 'storage-read-key', 16);
@@ -120,15 +118,15 @@ function _stattic_uploads_active_content(string $contentType): bool
 }
 
 // The same validator nginx derives on the accel lane, so a PHP-served and an
-// nginx-served copy of the same object answer identically.
+// nginx-served copy answer identically.
 function _stattic_uploads_etag(array $record): string
 {
     return '"' . dechex(_stattic_content_mtime($record['sha256'])) . '-' . dechex($record['size']) . '"';
 }
 
-// Uploads are a PHP-lane-only response: nosniff, the CSP, ETag and Last-Modified
-// do not survive X-Accel-Redirect, and those are exactly the defences that keep a
-// stored file from being sniffed into an active document.
+// Uploads stay on the PHP lane: nosniff, the CSP, ETag and Last-Modified do not
+// survive X-Accel-Redirect, and those are what keep a stored file from being
+// sniffed into an active document.
 function _stattic_uploads_headers(array $record, bool $publicCache): array
 {
     $headers = [
@@ -137,10 +135,10 @@ function _stattic_uploads_headers(array $record, bool $publicCache): array
         'Last-Modified' => gmdate('D, d M Y H:i:s \G\M\T', _stattic_content_mtime($record['sha256'])),
         'X-Content-Type-Options' => 'nosniff',
         'Content-Security-Policy' => "sandbox; default-src 'none'",
-        // The object id is a 128-bit random name for immutable bytes, so the URL
-        // can be cached forever; a delete purges the edge rather than relying on
-        // revalidation. A protected space (or a share-token fetch whose URL is
-        // itself the secret) keeps the private cache class.
+        // The object id is a 128-bit random name for immutable bytes, so the
+        // URL caches forever; a delete purges the edge instead of relying on
+        // revalidation. A protected space, or a share-token fetch whose URL is
+        // itself the secret, keeps the private cache class.
         'Cache-Control' => $publicCache
             ? 'public, max-age=31536000, immutable'
             : 'private, max-age=31536000, immutable',
@@ -203,16 +201,16 @@ function _stattic_uploads_send(
     bool $publicCache
 ): never
 {
-    // §16: the edge stores only on the explicit opt-in, derived from the
-    // Cache-Control composed above — the keyed public URL may be held (deletes
-    // and key rotations purge it), the authenticated keyless URL never. The
-    // platform policy applies inside _stattic_send_response_headers.
+    // §16: the edge stores only on the explicit opt-in from the Cache-Control
+    // composed above. The keyed public URL may be held, since deletes and key
+    // rotations purge it; the authenticated keyless URL never is. The platform
+    // policy applies inside _stattic_send_response_headers.
     $headers = _stattic_uploads_headers($record, $publicCache);
     $size = $record['size'];
     $blobPath = _stattic_runtime_blob_path($privateRoot, $spaceId, $record['sha256']);
     if (!is_file($blobPath)) {
-        // Promote-on-read: the bytes come back into the CAS first and are then
-        // served locally. There is no S3-to-visitor stream.
+        // Promote-on-read: the bytes land in the CAS first, then serve locally.
+        // There is no S3-to-visitor stream.
         require_once __DIR__ . '/tier.php';
         $promoted = _stattic_tier_promote_blob($privateRoot, $spaceId, $record['sha256']);
         if ($promoted === null) {
@@ -268,9 +266,9 @@ function _stattic_storage_handle(
     $auth = _stattic_storage_auth_context($serving, $requestHost);
     $developmentGuest = _stattic_config_value('SPACEFAST_INSECURE_COOKIES') === '1';
     $authenticated = ($auth['isAuthenticated'] ?? false) === true;
-    // An anonymous commenter is admitted only where Comments itself is: the
-    // host session carries the server-owned pseudonym, so the session is the
-    // grant and storage needs no token machinery of its own.
+    // An anonymous commenter is admitted only where Comments is. The host
+    // session carries the server-owned pseudonym, so the session is the grant
+    // and storage needs no token machinery of its own.
     $anonymousId = is_string($auth['anonymousId'] ?? null) ? $auth['anonymousId'] : null;
     $anonymousCommenter = !$authenticated
         && $anonymousId !== null
@@ -332,8 +330,8 @@ function _stattic_storage_handle(
     );
 }
 
-// Whether Comments is switched on for THIS surface (live vs preview) — the
-// admission predicate the anonymous-commenter upload lane borrows.
+// Whether Comments is on for THIS surface (live vs preview). The
+// anonymous-commenter upload lane borrows it as its admission predicate.
 function _stattic_storage_comments_enabled(array $serving): bool
 {
     require_once __DIR__ . '/spacefast-sdk.php';
@@ -393,9 +391,9 @@ function _stattic_uploads_upload(
             $anonymousUploader,
             $auth
         ): array {
-            // Re-check under the lock: delete_space may have taken it and removed
-            // the tree after serving config was loaded, and an in-flight upload
-            // must not recreate a deleted space.
+            // Re-check under the lock: delete_space may have removed the tree
+            // after serving config loaded, and an in-flight upload must not
+            // recreate a deleted space.
             if (!is_dir(_stattic_space_root($privateRoot, $spaceId))) {
                 return ['status' => 'space_missing'];
             }
@@ -435,8 +433,8 @@ function _stattic_uploads_upload(
         'id' => $id,
         'contentType' => $contentType,
         'size' => $size,
-        // Fresh at response time: composed from the current read key, stable
-        // until the key rotates, independent of the route the upload arrived on.
+        // Composed from the current read key at response time, stable until it
+        // rotates, whatever route the upload arrived on.
         'url' => _stattic_uploads_public_url(
             $privateRoot,
             'https://' . $requestHost,
@@ -465,8 +463,8 @@ function _stattic_uploads_anon_budget_admit(string $privateRoot, string $spaceId
 
 /**
  * The one streamed intake path for visitor uploads and space transfers.
- * Surface-specific handlers translate its small reason set into their own
- * problem response, but byte limits, hashing and prefix capture live here.
+ * Byte limits, hashing and prefix capture live here; callers translate the
+ * reason set into their own problem response.
  */
 function _stattic_storage_stage_upload(string $privateRoot): array
 {
@@ -515,26 +513,20 @@ function _stattic_storage_commit_record(
 
 function _stattic_uploads_delete(string $privateRoot, string $spaceId, string $id): never
 {
-    // The keyed public URL opts into the edge, so removing the record must
-    // also revoke the shared copy — a deleted object must not keep serving to
-    // NEW viewers from the edge. (Browsers that already fetched it keep their
-    // year; that boundary predates the edge opt-in.) A repeat delete found no
-    // record and spends no purge.
+    // The keyed public URL opts into the edge, so removing the record must also
+    // revoke the shared copy: the whole-host purge stops the edge serving it to
+    // NEW viewers. Browsers that already fetched it keep their year. A repeat
+    // delete finds no record and spends no purge.
     if (_stattic_uploads_delete_record($privateRoot, $spaceId, $id, true)) {
         require_once __DIR__ . '/../shared/purge.php';
-        _stattic_runtime_purge_space_paths_now(
-            $privateRoot,
-            $spaceId,
-            [STATTIC_UPLOADS_PUBLIC_URL_PREFIX . $id],
-            'storage_object_deleted',
-        );
+        _stattic_runtime_purge_space_hosts_now($privateRoot, $spaceId, 'storage_object_deleted');
     }
     _stattic_uploads_deleted_response();
 }
 
 // Returns whether a record was there to delete. The CAS body is NOT unlinked:
-// the blob may back another record or a version, and the GC's live set (which
-// reads these records) is what releases it.
+// the blob may back another record or a version, and the GC's live set, which
+// reads these records, is what releases it.
 function _stattic_uploads_delete_record(
     string $privateRoot,
     string $spaceId,
@@ -573,8 +565,8 @@ function _stattic_storage_auth_context(array $serving, string $requestHost): arr
     $principal = _stattic_access_identity_principal($verified);
     if (!_stattic_access_principal_is_identified($principal)) {
         // Not identified, but possibly still a session: the comments pseudonym
-        // rides the same record, and the anonymous-commenter upload lane admits
-        // on it (never on anything the page claims).
+        // rides the same record, and the upload lane admits on it, never on
+        // anything the page claims.
         $comments = _stattic_access_identity_comments($verified);
         return [
             'isAuthenticated' => false,
@@ -592,9 +584,9 @@ function _stattic_storage_auth_context(array $serving, string $requestHost): arr
 }
 
 // The browser client carries the same signed session in `sf_token` that the
-// access layer normally reads from its cookie. Install it into the request's
-// cookie slot before grant evaluation so storage has no second permission
-// model: the ordinary path/target/constraint decision owns admission.
+// access layer reads from its cookie. Install it into the cookie slot before
+// grant evaluation so storage has no second permission model: the ordinary
+// path/target/constraint decision owns admission.
 function _stattic_storage_apply_access_token(): void
 {
     require_once __DIR__ . '/access-rules.php';
@@ -641,8 +633,8 @@ function _stattic_storage_function_auth(
     }
     return [
         'isAuthenticated' => true,
-        // Stable across versions: storage is deliberately not rolled back with
-        // the version that happened to create an object.
+        // Stable across versions: storage is not rolled back with the version
+        // that created an object.
         'userId' => 'function:' . $spaceId,
         'email' => null,
     ];

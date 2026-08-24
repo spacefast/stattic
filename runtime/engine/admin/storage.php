@@ -64,7 +64,7 @@ function _stattic_storage_read_key_get(string $privateRoot): void
 
 // The emergency lever: mint a new runtime-wide read key and purge every
 // hostname on the box, so no edge copy keeps serving under an old-key URL.
-// Every URL handed out before this answers 404 afterwards; clients converge by
+// Every URL handed out before this answers 404 afterwards; clients sync by
 // re-reading served config.
 function _stattic_storage_read_key_rotate(string $privateRoot): void
 {
@@ -91,12 +91,8 @@ function _stattic_storage_read_key_rotate(string $privateRoot): void
     $purge = ['status' => 'ok', 'mode' => 'none'];
     if ($hostnames !== []) {
         require_once __DIR__ . '/../shared/purge.php';
-        // Domain-scope purge (empty paths). Known residual: the provider bridge
-        // purges secondary hostnames at '/' only — pre-existing, applies to
-        // every space mutation, documented rather than engineered around.
         $purge = _stattic_runtime_purge_now($privateRoot, [
             'hostnames' => array_keys($hostnames),
-            'paths' => [],
             'reason' => 'storage_read_key_rotated',
         ]);
     }
@@ -119,12 +115,7 @@ function _stattic_storage_object_delete(string $privateRoot, string $spaceId, st
         // opts into the edge, so the record's removal must drop the shared
         // copy too. Deferred past the response on FPM (purge_now).
         require_once __DIR__ . '/../shared/purge.php';
-        _stattic_runtime_purge_space_paths_now(
-            $privateRoot,
-            $spaceId,
-            [STATTIC_UPLOADS_PUBLIC_URL_PREFIX . $objectId],
-            'storage_object_deleted',
-        );
+        _stattic_runtime_purge_space_hosts_now($privateRoot, $spaceId, 'storage_object_deleted');
     }
     _stattic_json_response(200, ['id' => $objectId, 'deleted' => $deleted]);
 }

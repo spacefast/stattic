@@ -3,40 +3,38 @@ declare(strict_types=1);
 
 // The blob token gate (contracts §7): GET /__stattic/blob/<jwt>.
 //
-// EVERY rejection — bad method, malformed or expired token, wrong audience,
-// unknown record, sha not in the manifest, blob not in the CAS — answers the
-// same bare 404, on purpose: the token is the only thing that distinguishes a
-// prober from the control plane, so a rejection must never say which check
-// failed or whether a Space, version, record or blob exists.
+// EVERY rejection answers the same bare 404: bad method, malformed or expired
+// token, wrong audience, unknown record, sha not in the manifest, blob not in
+// the CAS. The token is the only thing separating a prober from the control
+// plane, so a rejection must never say which check failed or whether a Space,
+// version, record or blob exists.
 //
 // The ONE named refusal is the path lane's `version_file_not_found`, and only
-// after a control-plane signature, audience, expiry and scope all passed: the
-// control plane mints path links blind (it no longer holds a file list to check
-// them against), so the holder of a valid capability for {space, version, path}
-// has already been told that triple exists and must be able to tell "wrong
-// path" from "runtime broken". Nothing that failed BEFORE that point is ever
-// distinguished.
+// after a control-plane signature, audience, expiry and scope all passed. The
+// control plane mints path links blind, so a holder of a valid capability for
+// {space, version, path} was already told that triple exists and must be able
+// to tell "wrong path" from "runtime broken". Anything that fails earlier stays
+// undistinguished.
 //
-// Replay: the jti is deliberately NOT consumed. A download link is handed to a
-// person and a browser retries, resumes and re-requests it; single use would
-// break the product feature. The bound is the TTL plus record resolution.
+// Replay: the jti is deliberately NOT consumed. A browser retries, resumes and
+// re-requests a download link; single use would break the feature. The bound is
+// the TTL plus record resolution.
 
 require_once __DIR__ . '/../shared/jwt.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/../shared/record-store.php';
 require_once __DIR__ . '/../shared/response.php';
-// This control path is not the public serving hot lane. Load provider-backed
-// config here so the gate can read the locally provisioned JWKS used to verify
-// its capability; ordinary page and asset requests still avoid that decrypt.
+// Not the public serving hot lane: the gate needs provider-backed config for
+// the locally provisioned JWKS. Ordinary page and asset requests avoid that
+// decrypt.
 require_once __DIR__ . '/../shared/bootstrap-config.php';
 
 const STATTIC_BLOB_GATE_PATH_PREFIX = '/__stattic/blob/';
 
 /**
- * The dashboard-origin CORS grant, on EVERY gate answer including the refusals:
- * a `fetch()` that cannot read a 404 or a 503 sees an opaque network error and
- * cannot tell the two apart. Pinned, never reflected — see
- * `_stattic_dashboard_origin()`.
+ * The dashboard-origin CORS grant, on EVERY gate answer including refusals: a
+ * `fetch()` that cannot read a 404 or a 503 sees only an opaque network error.
+ * Pinned, never reflected.
  *
  * @return array<string,string>
  */
@@ -47,12 +45,11 @@ function _stattic_blob_gate_cors_headers(): array
 }
 
 /**
- * wp.cloud's internal X-Accel location does not preserve arbitrary FastCGI
- * response headers. That is fine for a download or a media subresource, but a
- * dashboard `fetch()` must receive the pinned CORS header above or the browser
- * hides an otherwise successful response. Keep only that exact browser read on
- * the PHP streaming fallback; scanners and ordinary downloads retain Nginx's
- * Range/HEAD offload.
+ * wp.cloud's internal X-Accel location drops arbitrary FastCGI response
+ * headers. Fine for a download or a media subresource, but a dashboard
+ * `fetch()` needs the pinned CORS header or the browser hides an otherwise
+ * successful response. Only that exact browser read takes the PHP streaming
+ * fallback; scanners and ordinary downloads keep Nginx's Range/HEAD offload.
  */
 function _stattic_blob_gate_dashboard_fetch(): bool
 {
@@ -63,9 +60,8 @@ function _stattic_blob_gate_dashboard_fetch(): bool
     return $configured !== '' && is_string($requested) && hash_equals($configured, $requested);
 }
 
-// The one refusal/unavailable emitter for this gate: fixed private headers,
-// the CORS grant, a plain-text body — through the shared emitter, so even a
-// refusal never skips the platform header policy.
+// The one refusal/unavailable emitter for this gate. It goes through the shared
+// emitter so even a refusal never skips the platform header policy.
 function _stattic_blob_gate_refuse(int $status, string $message, array $extra = []): never
 {
     http_response_code($status);
@@ -96,11 +92,9 @@ function _stattic_blob_gate_token(string $requestPath): ?string
 }
 
 /**
- * The claim's resolver, answering the blob this token may read and the type it
- * carries. The record lane goes through the storage record reader, so an
- * unreadable, half-written or deleted record is indistinguishable from an absent
- * one — all three deny. The path lane goes through the shared version-file
- * resolver, the same one the management list route reads.
+ * Resolves the blob this token may read and its type. An unreadable,
+ * half-written or deleted record is indistinguishable from an absent one, and
+ * all three deny.
  *
  * @return array{sha: string, mime: string}|null
  */
@@ -142,8 +136,8 @@ function _stattic_blob_gate_resolve(string $privateRoot, array $claims): ?array
             $claims['path'],
             (string) ($claims['view'] ?? '')
         );
-        // Named, not the uniform 404: the capability was valid, the path was not
-        // in this view. See the file header.
+        // Named, not the uniform 404: the capability was valid, the path was
+        // not in this view.
         if ($resolved === null) {
             _stattic_runtime_version_file_not_found(_stattic_blob_gate_cors_headers());
         }
@@ -221,9 +215,8 @@ function _stattic_blob_gate_serve(string $privateRoot, string $requestMethod, st
         // header survives X-Accel-Redirect, which is why it carries the safety.
         'Content-Disposition' => 'attachment',
         'ETag' => '"' . $sha256 . '"',
-        // Shared by both delivery lanes below. wp.cloud drops this header at
-        // its internal X-Accel location, so an exact dashboard-origin fetch
-        // deliberately stays on the PHP body lane instead.
+        // wp.cloud drops this at its X-Accel location, so an exact
+        // dashboard-origin fetch stays on the PHP body lane.
         ..._stattic_blob_gate_cors_headers(),
     ];
 

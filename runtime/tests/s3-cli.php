@@ -1,15 +1,12 @@
 <?php
 declare(strict_types=1);
 
-// Dedicated CLI entry point for exercising shared/s3.php's real functions
-// against a live (fake) S3-compatible endpoint from the bun test runner.
-// This script requires the file directly from its real repo path so the suite
-// can drive individual signer/client operations without booting the full HTTP
-// runtime — see runtime/tests/s3.test.ts for the driver.
+// CLI entry point that drives shared/s3.php's signer/client operations against
+// a fake S3 endpoint without booting the full HTTP runtime. The driver is
+// runtime/tests/s3.test.ts.
 //
-// Protocol: argv[1] is a single JSON request object; stdout is a single
-// JSON response line. Binary bodies are base64-encoded under *_base64 keys
-// so the protocol stays plain-text-safe.
+// Protocol: argv[1] is a JSON request object, stdout is one JSON response line.
+// Binary bodies are base64-encoded under *_base64 keys.
 require_once __DIR__ . '/../engine/shared/s3.php';
 
 $request = json_decode((string) ($argv[1] ?? ''), true);
@@ -38,9 +35,8 @@ switch ($op) {
             break;
         }
         if ($op === 'put') {
-            // No production caller does a single-object PUT anymore (uploads go
-            // through _stattic_s3_multi_put), so there is no _stattic_s3_put
-            // wrapper to call — drive the real request path directly.
+            // Uploads go through _stattic_s3_multi_put, so there is no
+            // _stattic_s3_put wrapper. Drive the real request path directly.
             $decoded = base64_decode((string) ($request['body_base64'] ?? ''), true);
             $result = _stattic_s3_request($bucketRow, 'put', 'PUT', $key, ['body' => $decoded === false ? '' : $decoded] + $options);
         } elseif ($op === 'head') {
@@ -83,11 +79,10 @@ switch ($op) {
         break;
 
     case 'put_wrong_hash':
-        // Test-only: no shared/s3.php PUT call site ever does this (every one
-        // computes the real hash) — this deliberately declares a wrong
-        // x-amz-content-sha256 using the same exported signing primitives to
-        // prove a mismatched hash is rejected independent of the
-        // Authorization-shape check (plan §18 probe: wrong hash -> 400).
+        // Test-only: declares a wrong x-amz-content-sha256 with the real
+        // signing primitives, proving a mismatched hash is rejected
+        // independent of the Authorization-shape check. No production PUT
+        // call site does this; they all compute the real hash.
         $bucketRow = s3_cli_bucket_row($request);
         if ($bucketRow === null) {
             echo json_encode(['ok' => false, 'status' => 0, 'error' => 's3_bucket_unknown']) . "\n";

@@ -3,43 +3,36 @@ declare(strict_types=1);
 
 // THE runtime log writer.
 //
-// Everything a space's own code prints goes through here and lands in PHP's
-// error log — a Zero mutation's console output, a PHP function's uncaught
-// throwable, and a Cloudflare Worker's tail events, which reach the box by
-// calling back to this origin (runtime/functions-relay.php) after the worker's
-// response has already gone out. There is exactly one reason it is that file
-// and not a nicer one under the private root: the provider ships the PHP error
-// log off the box and serves it back through its log API, and it ships nothing
-// else. A record written anywhere else on this filesystem cannot be read by the
-// product, however well organised the file is.
+// Everything a space's own code prints lands in PHP's error log: a Zero
+// mutation's console output, a PHP function's uncaught throwable, and a
+// Cloudflare Worker's tail events, which reach the box by calling back to this
+// origin (runtime/functions-relay.php) after the worker's response has gone
+// out. It has to be that file: the provider ships the PHP error log off the box
+// and serves it back through its log API, and it ships nothing else.
 //
 // One line per record, always. The provider's shipper indexes by line, so a
 // record carrying a raw newline arrives as two documents and the second is
-// unreadable garbage. JSON encoding is what guarantees that, and the marker is
-// what lets the reader find our record inside a message the shipper may have
-// prefixed. The reader is `decodeRuntimeLogRecord` in
-// apps/control-plane/src/wp-cloud/observability.ts; the marker string is the
-// contract between them.
+// garbage. JSON encoding guarantees that; the marker lets the reader find our
+// record inside a message the shipper may have prefixed. The reader is
+// `decodeRuntimeLogRecord` in apps/control-plane/src/wp-cloud/observability.ts.
 //
-// Writing is a local append and nothing waits on it — no lock, no network, no
-// retry. That is the whole reason the log surface can promise it never sits in
-// a request's way while still being written the moment the line happens.
+// Writing is a local append with no lock, no network and no retry, so the log
+// never sits in a request's way.
 
 // Must match RUNTIME_LOG_MARKER in the control plane. The version digit is part
 // of the marker because these lines live 28 days in a log we do not own: a
-// changed record shape has to become a new marker, never a silent
-// reinterpretation of records an older runtime already wrote.
+// changed record shape needs a new marker, never a silent reinterpretation of
+// what an older runtime wrote.
 const SPACEFAST_RUNTIME_LOG_MARKER = 'sf-log/1 ';
 
-// The provider's index truncates long messages, and a truncated line is a line
-// the reader cannot parse at all — the JSON never closes. Bounding the two
-// tenant-controlled fields keeps a record whole.
+// The provider's index truncates long messages, and a truncated line never
+// closes its JSON. Bounding the two tenant-controlled fields keeps a record
+// whole.
 const SPACEFAST_RUNTIME_LOG_MESSAGE_MAX_BYTES = 4096;
 const SPACEFAST_RUNTIME_LOG_METADATA_MAX_BYTES = 4096;
 
 // The contract's four levels, plus the aliases real tail streams emit. An
-// unknown level must never drop the line — that would hide the output the
-// developer came for — so it resolves to `info`.
+// unknown level resolves to `info` rather than dropping the line.
 const SPACEFAST_RUNTIME_LOG_LEVELS = [
     'debug' => 'debug',
     'info' => 'info',
@@ -66,12 +59,9 @@ function _stattic_runtime_log_string(mixed $value, int $maxBytes): ?string
 }
 
 /**
- * The message, rendered the way a developer expects to read it.
- *
- * Tenant code hands over whatever it printed, which for a structured logger is
- * an object. JSON is the answer there because the alternative —
- * "[object Object]", or PHP's "Array" — is the single most common complaint
- * about hosted log pipelines.
+ * The message, rendered the way a developer expects to read it. A structured
+ * logger hands over an object; JSON is what keeps it readable instead of
+ * "[object Object]" or PHP's "Array".
  */
 function _stattic_runtime_log_message(mixed $value): string
 {
@@ -89,11 +79,8 @@ function _stattic_runtime_log_message(mixed $value): string
 }
 
 /**
- * Metadata survives only if it is a JSON object that fits.
- *
- * Dropping an oversized or wrongly-shaped bag is deliberate: the message is the
- * thing the developer wrote, and losing the whole record to a bad metadata
- * value would trade the useful half for the decorative one.
+ * Metadata survives only if it is a JSON object that fits. An oversized or
+ * wrongly-shaped bag is dropped rather than losing the whole record.
  */
 function _stattic_runtime_log_metadata(mixed $value): array
 {
@@ -108,13 +95,11 @@ function _stattic_runtime_log_metadata(mixed $value): array
 }
 
 /**
- * Normalises one tenant-supplied record into the wire shape and writes it.
- *
  * `versionId` is the caller's to supply and never the record's: a worker naming
  * someone else's version must not be able to file its output under it. Every
  * other field is untrusted.
  *
- * `id` is minted here rather than derived on read. The provider's log has no
+ * `id` is minted here rather than derived on read: the provider's log has no
  * identity of its own, and a caller paging a window needs a stable key for a
  * line it may meet again at a page boundary.
  */
@@ -138,13 +123,10 @@ function _stattic_runtime_log_write(array $record, string $versionId): void
 }
 
 /**
- * When the record was written, as the writer saw it.
- *
- * Tenant clocks are not ours, and the provider stamps its own `@timestamp` on
- * ingest anyway — but that stamp is the moment the line was *indexed*, minutes
- * after the fact. Carrying the emitter's own time is what makes ordering inside
- * a burst mean anything. An unusable value falls back to now rather than
- * dropping the line.
+ * When the record was written, as the writer saw it. The provider's own
+ * `@timestamp` marks when the line was *indexed*, minutes later, so only the
+ * emitter's time orders a burst. An unusable value falls back to now rather
+ * than dropping the line.
  */
 function _stattic_runtime_log_timestamp(mixed $value): string
 {

@@ -1,15 +1,13 @@
 <?php
 declare(strict_types=1);
 
-// Dedicated CLI entry point for driving shared/db-broker.php from the bun test
-// runner, mirroring s3-cli.php and subprocess-cli.php. The broker has no HTTP
-// surface of its own — the transports that will wrap it are separate lanes — so
-// there is nothing for the manifest-driven startRuntime() harness to hit.
+// CLI entry point for driving shared/db-broker.php from the bun test runner,
+// mirroring s3-cli.php and subprocess-cli.php. The broker has no HTTP surface of
+// its own, so the manifest-driven startRuntime() harness has nothing to hit.
 //
 // Protocol: argv[1] is a JSON request object, stdout is one JSON response line.
-// Operation responses are handed back as raw text, never re-encoded, because
-// the whole point of the differential test is a byte comparison against the
-// Rust engine's output.
+// Operation responses are raw text, never re-encoded, because the differential
+// test compares bytes against the Rust engine's output.
 require_once __DIR__ . '/../engine/shared/context.php';
 require_once __DIR__ . '/../engine/shared/db-broker.php';
 
@@ -30,7 +28,7 @@ $out = [];
 
 switch ((string) ($request['action'] ?? 'operations')) {
     case 'operations':
-        // Each entry is raw operation JSON text, executed in order against one
+        // Each entry is raw operation JSON text, executed in order in one
         // process so transaction and connection-reuse behaviour is observable.
         $responses = [];
         foreach ($request['operations'] ?? [] as $operation) {
@@ -40,19 +38,17 @@ switch ((string) ($request['action'] ?? 'operations')) {
         $out['metrics'] = _stattic_db_broker_take_metrics();
         break;
 
-    case 'frames':
-        // Handed to the library as raw frame JSON, the way a transport would.
-        $out['frames'] = json_decode(
-            _stattic_db_broker_handle_frame_json((string) json_encode($request['frames'] ?? [])),
-            true
-        );
-        $out['metrics'] = _stattic_db_broker_take_metrics();
+    case 'migrate':
+        // Applies one migrations.json the way generate.php does at publish, so
+        // artifact validation, replay tolerance and a real failure are all
+        // observable from the test.
+        $out['migrate'] = _stattic_db_broker_apply_migrations((string) ($request['path'] ?? ''));
         break;
 
     case 'abandon_transaction':
         // Opens a transaction, writes, and leaves without committing. The
-        // `hard` variant dies before PHP's shutdown functions can run, which is
-        // the case only the pooled connection's reuse reset can clean up.
+        // `hard` variant dies before PHP's shutdown functions run, which only
+        // the pooled connection's reuse reset can clean up.
         foreach ($request['operations'] ?? [] as $operation) {
             $responses[] = _stattic_db_broker_execute((string) $operation);
         }

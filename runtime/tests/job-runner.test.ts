@@ -2,22 +2,21 @@
 // dispatched over POST /jobs/tick and inspected over GET /jobs/{jobId}.
 //
 // v4 collapsed the framework to ONE registered maintenance tick and ONE demote
-// operation, both on the bulk lane, so this file tests the RUNNER — claim,
-// heartbeat/reap, dead-letter, single-flight, housekeeping — and nothing about
-// what a particular job does. `maintenance_tick` is the cheap stand-in for "a
-// job that runs"; `tier_demote`'s own multi-step/cursor behavior belongs to
+// operation, both on the bulk lane, so this file tests the RUNNER (claim,
+// heartbeat/reap, dead-letter, single-flight, housekeeping) and nothing about
+// what a particular job does. `maintenance_tick` is the cheap stand-in for a
+// job that runs; `tier_demote`'s multi-step/cursor behavior belongs to
 // tiering.test.ts, which drives it across ticks against the S3 fake.
 //
 // Delivery is pull-only (D53): the journal is the only sink, so lifecycle events
-// are asserted where they are written — runtime/journal.jsonl — not against a
-// callback origin. The drain route that hands those records back is
-// callback-drain.test.ts's.
+// are asserted in runtime/journal.jsonl, not against a callback origin. The
+// drain route that hands those records back is callback-drain.test.ts's.
 //
 // Some fixtures seed job records directly onto disk (the record-store layout
-// under runtime/jobs/{queue,dead}/). That is deliberate and minimal: claim
-// ordering needs two jobs with distinct created_at, and created_at has
-// one-second resolution, so the create route cannot produce the state; likewise
-// an orphaned `running` record and an aged dead-letter have no public producer.
+// under runtime/jobs/{queue,dead}/), because the create route cannot produce
+// the states they need: claim ordering needs two jobs with distinct created_at,
+// which has one-second resolution, and an orphaned `running` record and an aged
+// dead-letter have no public producer.
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
@@ -35,8 +34,8 @@ afterAll(() => {
   rt?.stop();
 });
 
-// Jobs are seeded onto disk, so a leftover pending job from a prior test would
-// otherwise be claimable by the next test's tick.
+// Jobs are seeded onto disk, so a leftover pending job stays claimable by the
+// next test's tick.
 beforeEach(() => {
   rmSync(storagePath(rt, "runtime", "jobs"), { recursive: true, force: true });
 });
@@ -167,13 +166,13 @@ test("a bulk tick claims the oldest pending job, runs it, and bounds its own exe
   expect(first.job?.id).toBe(older.id);
   expect(first.tick_status).toBe("complete");
   expect(first.job?.status).toBe("complete");
-  // The lane lock is an OS flock, so a wedged worker would pin the lane forever:
-  // the tick bounds itself past its cooperative budget (2.5s + 30s margin) so
+  // The lane lock is an OS flock, so a wedged worker would pin the lane forever.
+  // The tick bounds itself past its cooperative budget (2.5s + 30s margin) so
   // PHP tears the worker down and the heartbeat reaper recovers.
   expect(first.execution_timeout_seconds).toBe(33);
 
-  // The claimed job really ran its stepper: the housekeeping pass reports the
-  // steps it completed as the job result.
+  // The claimed job ran its stepper: the housekeeping pass reports the steps it
+  // completed as the job result.
   const completed = readJob(older.id);
   expect(completed.status).toBe("complete");
   expect(completed.heartbeat).toBeGreaterThan(0);
@@ -213,7 +212,7 @@ test("an unrunnable job dead-letters, leaves the queue, and is announced on the 
   expect(dead.error).toEqual({ code: "unknown_job_type", message: "unknown_job_type" });
 
   // Pull-only delivery (D53): the failure reaches the control plane as journal
-  // records, in the wire shape its drain parses — job_type/lane/nested error.
+  // records, in the wire shape its drain parses (job_type/lane/nested error).
   const entries = journalFor(job.id);
   expect(entries.map((entry) => entry.event)).toContain("job_dead_lettered");
   const failed = entries.find((entry) => entry.event === "job_failed");
@@ -240,8 +239,8 @@ test("reap requeues an orphaned running job past the heartbeat timeout, and it r
   });
 
   // The tick's own reap pass discovers the orphan. Nothing is claimable
-  // afterwards — the reaped job's backoff pushed not_before into the future —
-  // so the tick itself reports idle.
+  // afterwards, because the reaped job's backoff pushed not_before into the
+  // future, so the tick reports idle.
   const reaped = await tick(1000);
   expect(reaped.tick_status).toBe("idle");
   expect(reaped.job).toBeNull();
@@ -254,8 +253,8 @@ test("reap requeues an orphaned running job past the heartbeat timeout, and it r
   expect(record.not_before).not.toBeNull();
   expect(record.error?.code).toBe("heartbeat_timeout");
 
-  // Real backoff is ~10s; the transition and the clean resume are what is under
-  // test, not the wall clock, so make the job eligible again instead of waiting.
+  // Real backoff is ~10s. The transition and the clean resume are under test,
+  // not the wall clock, so make the job eligible again instead of waiting.
   record.not_before = null;
   writeJob(record);
 
@@ -266,10 +265,10 @@ test("reap requeues an orphaned running job past the heartbeat timeout, and it r
 });
 
 test("a held lane lock makes a tick a no-op, so a job is never claimed twice", async () => {
-  // Single flight is an OS flock taken try-once (§22 "held → exit 0"), so the
-  // honest way to prove no double-claim is to hold that exact lock from another
-  // process rather than race two ticks on wall-clock timing: the concurrent
-  // tick provably overlaps, whatever the scheduler does.
+  // Single flight is an OS flock taken try-once (§22 "held → exit 0"), so hold
+  // that exact lock from another process instead of racing two ticks on
+  // wall-clock timing. The concurrent tick then provably overlaps, whatever the
+  // scheduler does.
   const job = seedJob({ type: "maintenance_tick" });
   const lockPath = storagePath(rt, "runtime", "jobs", "lane-bulk.lock");
   const markerPath = storagePath(
@@ -420,10 +419,10 @@ test("the jobs surface rejects an unknown type and an unknown lane as 422 proble
 });
 
 test("housekeeping prunes dead-lettered and finished records past retention, never live work", async () => {
-  // Dead letters keep a two-week window; a finished queue record keeps a day —
-  // without it queue/ was append-only and every claim, and every idempotency
-  // lookup, re-read the whole history of jobs the site had ever run. Unfinished
-  // work is never aged out, however long it has been waiting for its backoff.
+  // Dead letters keep a two-week window; a finished queue record keeps a day.
+  // Without that, queue/ is append-only and every claim and idempotency lookup
+  // re-reads every job the site has ever run. Unfinished work is never aged
+  // out, however long it has waited for its backoff.
   const staleDead = seedDeadJob({ type: "maintenance_tick" });
   const freshDead = seedDeadJob({ type: "maintenance_tick" });
   const staleComplete = seedJob({ type: "maintenance_tick", status: "complete" });
@@ -451,9 +450,9 @@ test("housekeeping prunes dead-lettered and finished records past retention, nev
   expect(existsSync(jobPath(waitingPending.id))).toBe(true);
 });
 
-// The other half of the same registry (engine/admin/retention.php): staging
-// roots are trees, not records, so they carry their window in the table rather
-// than in a store descriptor.
+// The other half of the same registry (engine/admin/retention.php). Staging
+// roots are trees, not records, so their window lives in the table rather than
+// in a store descriptor.
 test("housekeeping reclaims abandoned staging roots and spares live recovery state", async () => {
   const stage = (relative: string, ageSeconds: number): string => {
     const target = storagePath(rt, relative);
@@ -465,7 +464,7 @@ test("housekeeping reclaims abandoned staging roots and spares live recovery sta
   const day = 24 * 60 * 60;
 
   // Staging debris is no recovery source, so its window is only a margin
-  // against a live worker slower than the sweep.
+  // against a worker slower than the sweep.
   const abandonedBlob = stage("runtime/blob-staging/blob-abandoned.tmp", 2 * day);
   const liveBlob = stage("runtime/blob-staging/blob-live.tmp", 60);
 
@@ -481,7 +480,7 @@ test("housekeeping reclaims abandoned staging roots and spares live recovery sta
 
   // .rust-finalizing is the mirror case: Rust deletes it on every path it
   // survives, so a surviving stage is a killed process's debris and takes the
-  // short staging window, while a stage from a finalize still in flight stays.
+  // short staging window. A stage from a finalize still in flight stays.
   const abandonedStage = storagePath(rt, "spaces/spc_stage/versions/.ver_stage.rust-finalizing");
   stage("spaces/spc_stage/versions/.ver_stage.rust-finalizing/files/index.html", 2 * day);
   backdate(abandonedStage, 2 * day);

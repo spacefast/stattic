@@ -1,10 +1,7 @@
-// Behavioral coverage for shared/s3.php (plan §26/§28, DECISIONS I-12/I-13).
-// Drives the real signer/client via a dedicated PHP CLI entry point
-// (s3-cli.php) against the in-process fake S3 fixture (s3-fake.ts) — no
-// source-text assertions, only real HTTP round trips and real PHP output.
-//
-// The suite spawns s3-cli.php directly against the engine file so it can drive
-// individual signer/client operations without booting the full HTTP runtime.
+// Behavioral coverage for shared/s3.php. Spawns s3-cli.php against the engine
+// file to drive the real signer/client operations, one at a time, without
+// booting the full HTTP runtime. The endpoint is the in-process fake S3
+// fixture (s3-fake.ts), so every case is a real HTTP round trip.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
@@ -77,12 +74,10 @@ async function runS3Cli(
   return JSON.parse(stdout.trim());
 }
 
-// Test-only: exercises _stattic_s3_sign()/_stattic_s3_locator() directly with
-// a deliberately wrong payload hash (production code paths never do this —
-// every PUT call site in shared/s3.php computes the real hash) to prove the
-// fixture (and by extension a real endpoint per the plan §18 probe) rejects
-// a mismatched x-amz-content-sha256 with 400, independent of the
-// Authorization-shape check.
+// Test-only: signs a deliberately wrong payload hash to prove the fixture
+// rejects a mismatched x-amz-content-sha256 with 400, independent of the
+// Authorization-shape check. Every production PUT call site in shared/s3.php
+// computes the real hash.
 async function runS3CliPutWrongHash(
   request: Record<string, unknown>,
   manifest: BucketRow[],
@@ -363,9 +358,9 @@ describe("shared/s3.php SigV4 signer + client", () => {
   });
 
   test("an unreachable endpoint surfaces a clean transport error code, not a hang", async () => {
-    // Port 1 is a privileged, never-bound port — connection is refused
-    // immediately, exercising the transport-failure path without waiting out
-    // the real 10s connect / 30s total timeouts.
+    // Port 1 is never bound, so the connection is refused immediately and the
+    // transport-failure path runs without waiting out the 10s connect / 30s
+    // total timeouts.
     const manifest = [
       { ...bucketRow(fake, "path", "s3.fake.test"), endpoint: "http://127.0.0.1:1" },
     ];

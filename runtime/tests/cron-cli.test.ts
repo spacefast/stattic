@@ -33,6 +33,7 @@ const EMPTY_HOST = "crons-empty.test";
 const EMPTY_SPACE = "spc_crons_empty";
 const EMPTY_VERSION = "ver_crons_empty_1";
 const CRON_SECRET = "sk_cron_fixture_secret";
+const PREPEND = "cron-cli-prepend.php";
 
 // Reports the request context a cron handler is supposed to be able to branch
 // on. Both names are request params, never process environment, so the tenant
@@ -72,7 +73,7 @@ function runCli(entrypoint: string, args: string[], stdin = ""): Promise<CliResu
       "-d",
       "opcache.enable_cli=0",
       "-d",
-      `auto_prepend_file=${RUNTIME_TEST_ATOMIC_PREPEND}`,
+      `auto_prepend_file=${path.join(rt.root, PREPEND)}`,
       path.join(rt.engineRoot, "entrypoints", entrypoint),
       `--private-root=${rt.storageRoot}`,
       ...args,
@@ -105,6 +106,18 @@ function receipt(stderr: string): Record<string, unknown> {
 
 beforeAll(async () => {
   rt = await startRuntime();
+  // Coverage and provider prepends can register shutdown work before the CLI
+  // entrypoint. Reproduce the dangerous ordering: its warning must not replace
+  // a tenant fatal before the receipt derives the exit status.
+  writeFileSync(
+    path.join(rt.root, PREPEND),
+    `<?php
+register_shutdown_function(static function (): void {
+    trigger_error("prepend cleanup warning", E_USER_WARNING);
+});
+require ${JSON.stringify(RUNTIME_TEST_ATOMIC_PREPEND)};
+`,
+  );
   await deploy(rt, {
     spaceId: EMPTY_SPACE,
     versionId: EMPTY_VERSION,

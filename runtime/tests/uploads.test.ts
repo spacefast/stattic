@@ -26,7 +26,7 @@ import {
   getBlob,
   journalRecords,
   managementToken,
-  MANAGEMENT_HOST,
+  RUNTIME_HOST,
   manifestFor,
   putBlob,
   readBlob,
@@ -425,7 +425,7 @@ test("an open session is what authorizes reads of the bytes it accepted", async 
   // and `_pages/*` out of bytes that exist ONLY in the open session, because the
   // version's catalog is written by the very finalize those reads feed.
   // There is deliberately no deployed base or route pointer: a first publish
-  // must read these bytes through the management host before it can create one.
+  // must read these bytes through the runtime host before it can create one.
 
   const config = '{ "headers": [] }\n';
   const files = { "index.html": "<h1>session gate</h1>\n", "sf.jsonc": config };
@@ -433,9 +433,8 @@ test("an open session is what authorizes reads of the bytes it accepted", async 
   const session = await createDeclaredSession(rt, SPACE, versionId, files);
   const digest = sha256(config);
   const fromSession = () =>
-    getBlob(rt, MANAGEMENT_HOST, blobGateToken(SPACE, digest, { upload: session.uploadId }));
-  const fromVersion = () =>
-    getBlob(rt, MANAGEMENT_HOST, blobGateToken(SPACE, digest, { versionId }));
+    getBlob(rt, RUNTIME_HOST, blobGateToken(SPACE, digest, { upload: session.uploadId }));
+  const fromVersion = () => getBlob(rt, RUNTIME_HOST, blobGateToken(SPACE, digest, { versionId }));
   const fromManagement = (maxBytes = 64 * 1024) =>
     fetch(
       managementUrl(

@@ -8,14 +8,12 @@ require_once __DIR__ . '/finalizer-protocol.generated.php';
 // link-local, cloud-metadata, RFC1918/ULA/private ranges, or Spacefast-internal
 // hosts. Policy tables are generated from stattic-runtime-core.
 
-// PARTIAL check — a name/literal-level screen only, NOT the SSRF verdict. It
-// rejects empty/localhost, Spacefast-internal hosts, and non-public IP literals,
-// but returns true for every resolvable hostname WITHOUT resolving it: a name
-// that resolves to a private address still passes here. The binding check is
-// _stattic_egress_resolve_public_ips (which pins the connect IPs); callers must
-// gate the actual connection on that, not on this predicate alone. (This name
-// overstates the guarantee; a rename to state the partiality needs to land
-// atomically with its out-of-lane callers — see the deferred-rename note.)
+// PARTIAL check, a name/literal-level screen only, NOT the SSRF verdict. The
+// name overstates it. It rejects empty/localhost, Spacefast-internal hosts and
+// non-public IP literals, but returns true for every resolvable hostname
+// WITHOUT resolving it. The binding check is _stattic_egress_resolve_public_ips,
+// which pins the connect IPs; callers must gate the connection on that, never
+// on this predicate alone.
 function _stattic_egress_host_allowed(string $host, ?int $port = null): bool
 {
     $normalized = strtolower(trim($host, "[] \t\n\r\0\x0B."));
@@ -74,10 +72,6 @@ function _stattic_egress_host_is_stattic_internal(string $host): bool
         if ($host === $internal || str_ends_with($host, '.' . $internal)) {
             return true;
         }
-    }
-    $management = _stattic_management_hostname();
-    if ($management !== '' && $host === $management) {
-        return true;
     }
     $apiHost = strtolower((string) parse_url(_stattic_config_value('SPACEFAST_API_BASE_URL'), PHP_URL_HOST));
     if ($apiHost !== '' && $host === $apiHost) {
@@ -197,11 +191,10 @@ const STATTIC_EGRESS_RESOLVE_TTL_SECONDS = 5;
 // defeats DNS rebinding between validation and connect. Null when resolution
 // fails or ANY resolved address is non-public.
 //
-// Memoized per (host,port) within the request only — the whole verdict,
-// including the "any non-public => null" decision, so a denied host is never
-// re-derived from raw IPs. Deliberately no cross-process cache: the proxy lane
-// resolves once per request anyway, and a shared entry would let one worker's
-// transient resolver failure deny every request on the box for the TTL.
+// Memoized per (host,port) within the request only, the whole verdict including
+// the "any non-public => null" decision. Deliberately no cross-process cache: a
+// shared entry would let one worker's transient resolver failure deny every
+// request on the box for the TTL.
 function _stattic_egress_resolve_public_ips(string $host, ?int $port = null): ?array
 {
     static $memo = [];

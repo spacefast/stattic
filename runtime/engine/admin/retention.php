@@ -13,9 +13,9 @@ require_once __DIR__ . '/upload.php';
 // (record-store.php `retention`); a staging root carries one here, because a
 // root is a tree, not a record.
 //
-// Stores swept where they are written — the jti replay markers on token
-// consume, upload sessions on version create — are deliberately absent: they
-// already have a driver, on a lane that runs when the tick may not.
+// Stores swept where they are written are deliberately absent: the jti replay
+// markers on token consume, upload sessions on version create. They already
+// have a driver, on a lane that runs when the tick may not.
 
 // An interrupted worker's staging debris. Nothing under these roots is a
 // recovery source, so the window is only a margin against a live worker slower
@@ -27,7 +27,7 @@ const STATTIC_RUNTIME_STAGING_RETENTION_SECONDS = 86400;
 // reclaims it.
 const STATTIC_RUNTIME_ABANDONED_RETENTION_SECONDS = 14 * 86400;
 
-// The journal (shared/ndjson-log.php) caps the one live file at 8 MiB and rolls
+// The journal (shared/storage.php) caps the one live file at 8 MiB and rolls
 // it aside; this bounds how long a rolled-aside generation survives before the
 // sweep reclaims it.
 const STATTIC_RUNTIME_LOG_RETENTION_SECONDS = 14 * 86400;
@@ -38,9 +38,8 @@ const STATTIC_RUNTIME_RECLAIM_INTERVAL_SECONDS = 3600;
 /** @return list<array> record stores the bulk tick sweeps. */
 function _stattic_runtime_retention_stores(string $privateRoot): array
 {
-    // The callback delivered/pending stores and the tier spool are gone with the
-    // push lane (D53): the journal is the only sink and rotates by size, and the
-    // pull cursor is a single file, so neither needs sweeping.
+    // The journal is the only sink and rotates by size, and the pull cursor is
+    // a single file (D53), so neither needs sweeping.
     $stores = [
         _stattic_runtime_jobs_queue_store($privateRoot),
         _stattic_runtime_jobs_dead_store($privateRoot),
@@ -48,7 +47,7 @@ function _stattic_runtime_retention_stores(string $privateRoot): array
     // Per-space stores: publish sessions and GC pins both carry their own
     // expires_at. A pin outlives its session whenever the release call never
     // arrived (a dead mover, or a deferred release), so it is swept here too.
-    // An unenumerable space tree aborts the sweep — silently seeing zero
+    // An unenumerable space tree aborts the sweep: silently seeing zero
     // spaces would complete retention without doing its per-space half.
     $spaceRoots = _stattic_runtime_space_roots($privateRoot);
     if ($spaceRoots === null) {
@@ -70,8 +69,8 @@ function _stattic_runtime_retention_roots(string $privateRoot): array
         [$privateRoot . '/runtime/finalizer-inputs/*', STATTIC_RUNTIME_STAGING_RETENTION_SECONDS],
         // D140 probe blobs: content-addressed, rewritten on demand, worthless once cold.
         [$privateRoot . '/runtime/probe/*', STATTIC_RUNTIME_STAGING_RETENTION_SECONDS],
-        // The live journal.jsonl is never stale — it is written continuously;
-        // only a rolled-aside generation nothing appends to ages out.
+        // The live journal.jsonl is written continuously and never stale; only
+        // a rolled-aside generation nothing appends to ages out.
         [$privateRoot . '/runtime/journal-*.jsonl', STATTIC_RUNTIME_LOG_RETENTION_SECONDS],
         // An interrupted native finalize's staging tree: Rust removes it on
         // every path it survives, so one that is still here is debris from a

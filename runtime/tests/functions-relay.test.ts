@@ -1,15 +1,12 @@
 // The Functions relay, end to end, against a real MySQL and a real PHP origin.
 //
-// This is the one path nothing else covers. `unit.php` proves the token
-// verifier refuses what it should. Neither proves that a dispatched worker's
-// HTTPS callback actually reaches the in-process database broker, executes
-// SQL, and comes back — or that the grant inside the credential is what
-// decides whether it may.
-//
-// So this drives the real engine over HTTP: a real Ed25519 relay token minted
-// by the harness key, posted to the real route in serve.php, answered by the
-// engine's in-process MySQL broker (db-broker.php; service frames still run
-// the real `service-broker` subprocess), against a real MySQL 8.4 container.
+// `unit.php` proves the token verifier refuses what it should. Nothing else
+// proves a dispatched worker's HTTPS callback reaches the in-process database
+// broker, executes SQL and comes back, or that the credential's grant decides
+// whether it may. So this drives the real engine over HTTP: an Ed25519 relay
+// token minted by the harness key, posted to the real route in serve.php,
+// answered by the in-process MySQL broker (db-broker.php; service frames still
+// run the real `service-broker` subprocess) against a real MySQL 8.4 container.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import net from "node:net";
@@ -130,10 +127,9 @@ beforeAll(async () => {
   mysql.exec("CREATE TABLE notes (id INT AUTO_INCREMENT PRIMARY KEY, body VARCHAR(255) NOT NULL);");
 
   rt = await startRuntime({
-    // The log intake's whole purpose is that a record reaches PHP's error log,
-    // because that is the only stream the provider ships off the box. Pointing
-    // it at a file is what lets the test read back what a real deployment
-    // would only see through the provider's log API.
+    // The log intake exists so a record reaches PHP's error log, the only stream
+    // the provider ships off the box. Pointing it at a file lets the test read
+    // back what a deployment sees through the provider's log API.
     phpIni: { log_errors: "1", error_log: runtimeLogPath },
     env: {
       SPACEFAST_ZERO_DATABASE_URL: mysql.url,
@@ -168,8 +164,8 @@ test("a granted credential brokers real SQL against real MySQL", async () => {
     { mode: "execute", sql: "INSERT INTO notes (body) VALUES (?)", params: ["from-the-relay"] },
     relayToken(),
   );
-  // Body in the failure message: a bare status tells you it refused, not which
-  // check refused it, and every refusal here is deliberately the same status.
+  // Body in the failure message: every refusal here shares a status, so a bare
+  // status would not say which check refused.
   const writeText = await write.text();
   expect(`${write.status} ${writeText}`).toStartWith("200");
   const writeBody = JSON.parse(writeText) as { ok: boolean; affectedRows?: number };
@@ -205,8 +201,8 @@ test("the relay refuses a caller with no credential at all", async () => {
 });
 
 test("every scope claim in the credential is enforced by the live route", async () => {
-  // unit.php proves the verifier refuses these. This proves the route actually
-  // calls the verifier — a wiring mistake would make all of that decorative.
+  // unit.php proves the verifier refuses these; this proves the route calls the
+  // verifier at all.
   const tampered: Array<[string, Record<string, unknown>]> = [
     ["another space", { space_id: "spc_other" }],
     ["another runtime", { runtime_instance_id: "rti_other" }],
@@ -285,8 +281,8 @@ test("a credential granting nothing reaches no database at all", async () => {
 });
 
 test("a read-only grant cannot write, and the write does not land", async () => {
-  // The grant travels inside the signed credential, so this is the property the
-  // whole design rests on: the broker never looks up what a caller may do.
+  // The grant travels inside the signed credential: the broker never looks up
+  // what a caller may do.
   const token = relayToken({ capabilities: ["db.read"] });
   const read = await relay({ mode: "query", sql: "SELECT 1 AS permitted" }, token);
   expect(read.status).toBe(200);
@@ -514,8 +510,10 @@ test("the relay is not reachable as static content", async () => {
 // the control plane. The compile step is the sole decider of what is a function
 // path (a version carries a functions config or it does not); serving only
 // forwards or refuses. These tests use the same runtime env knobs the platform
-// sets: SPACEFAST_FUNCTIONS_DISPATCH_TOKEN is the origin's dispatch credential,
-// and the edge host is whatever `host.hostname` the compiled config names.
+// sets: SPACEFAST_FUNCTIONS_DISPATCH_TOKEN is this box's own dispatch
+// credential — a JWT the control plane minted for this instance and pushed
+// through persistent data, opaque to the origin — and the edge host is whatever
+// `host.hostname` the compiled config names.
 
 /** A functions config exactly as the control plane finalizes one for a version. */
 function functionsFinalize(hostname: string): Record<string, unknown> {
@@ -535,7 +533,7 @@ function functionsFinalize(hostname: string): Record<string, unknown> {
 
 test("a function path with no reachable edge answers 503, and the origin never runs the worker", async () => {
   // `rt` carries no SPACEFAST_FUNCTIONS_DISPATCH_TOKEN, so there is no edge to
-  // reach — the platform-wide rollback state.
+  // reach — a box that has never had a persistent-data sync.
   const host = "fx-noedge.test";
   await deploy(rt, {
     spaceId: "spc_fx_noedge",

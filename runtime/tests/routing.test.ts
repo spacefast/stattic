@@ -485,12 +485,17 @@ test("a conditional rule picks one representation per visitor class", async () =
     const browser = await get(rt, SITE, requestPath, { headers: BROWSER_HEADERS });
     expect(browser.status, requestPath).toBe(200);
     expect(await browser.text(), requestPath).toBe(HANDOFF_HTML);
+    expect(browser.headers.get("cache-control"), requestPath).toBe("no-store");
+    expect(browser.headers.get("vary"), requestPath).toContain("Accept");
+    expect(browser.headers.get("vary"), requestPath).toContain("User-Agent");
 
     const agent = await get(rt, SITE, requestPath, { headers: AGENT_HEADERS });
     expect(agent.status, requestPath).toBe(200);
     expect(await agent.text(), requestPath).toBe(HANDOFF_MD);
     // Two bodies at one URL that the edge keys without Vary: unstorable.
     expect(agent.headers.get("cache-control"), requestPath).toBe("no-store");
+    expect(agent.headers.get("vary"), requestPath).toContain("Accept");
+    expect(agent.headers.get("vary"), requestPath).toContain("User-Agent");
   }
 
   // The catchers are segment-bounded, so a slug that merely shares the prefix
@@ -550,23 +555,18 @@ test("unknown hosts get the undeployed platform page", async () => {
   expect(response.status).toBe(503);
 });
 
-test("the management hostname never serves tenant content", async () => {
-  // No Host override: the request lands on the management hostname, which is
-  // answered before the route pointer is even read.
-  const content = await fetch(`${rt.baseUrl}/index.html`, { headers: { Connection: "close" } });
-  expect(content.status).toBe(404);
+test("the primary hostname serves content while runtime APIs remain authenticated", async () => {
+  const content = await get(rt, SITE, "/index.html");
+  expect(content.status).toBe(200);
+  expect(await content.text()).toBe(INDEX);
 
-  // And the mirror image: the management and upload APIs must not advertise
-  // themselves on a public hostname, ahead of any credential parsing.
-  const management = await get(rt, SITE, "/__spacefast/api.php/spaces/spc_site/versions", {
-    method: "POST",
-  });
-  expect(management.status).toBe(404);
-  const upload = await get(rt, SITE, "/__spacefast/upload.php/spaces/spc_site/blobs/have", {
+  const management = await get(rt, SITE, "/__spacefast/api.php?route=/state");
+  expect(management.status).toBe(401);
+  const upload = await get(rt, SITE, "/__spacefast/upload.php?route=/spaces/spc_site/blobs/have", {
     method: "POST",
     body: JSON.stringify({ shas: [] }),
   });
-  expect(upload.status).toBe(404);
+  expect(upload.status).toBe(401);
 });
 
 test("SPA mode serves the shell for app routes, never for asset-looking paths", async () => {
@@ -1250,7 +1250,7 @@ test("finalize rejects proxy rules targeting internal or non-public upstreams", 
     "https://127.0.0.1/api",
     "https://169.254.169.254/latest/meta-data",
     "https://api.spacefast.com/v1",
-    "https://wpc-manage-site.view.fast/x",
+    "https://site.view.fast/x",
     "https://localhost/api",
   ];
   for (const [index, upstream] of upstreams.entries()) {
@@ -1434,7 +1434,6 @@ test("public requests load only the modules their request class needs", async ()
     const staticModules = modulesFor("/");
     for (const required of [
       "init.php",
-      "runtime/serve-fast.php",
       "runtime/serve.php",
       "shared/artifacts.php",
       "shared/context.php",

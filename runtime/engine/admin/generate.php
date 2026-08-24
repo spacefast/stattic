@@ -8,6 +8,9 @@ require_once __DIR__ . '/../shared/safety.php';
 require_once __DIR__ . '/../shared/artifacts.php';
 require_once __DIR__ . '/../shared/pointers.php';
 require_once __DIR__ . '/../shared/native-process.php';
+// A published capsule's schema is created here, over the same MySQL broker the
+// serving lanes use, never a subprocess.
+require_once __DIR__ . '/../shared/db-broker.php';
 
 function _stattic_runtime_routes_from_hostname_intent(string $routeName, array $intent): array
 {
@@ -201,8 +204,8 @@ function _stattic_runtime_store_hostname_intent_from_snapshot(
         'routes' => $routes,
         'updated_at' => gmdate('c'),
     ]);
-    // A diagnostic in every caller shape: with claims it carries the operation
-    // that caused it, without them it is a bare record — never a delivery.
+    // A diagnostic in every caller shape: with claims it names the operation
+    // that caused it, without them a bare record. Never a delivery.
     _stattic_runtime_journal_management_diagnostic($privateRoot, $claims, [
         'event' => 'space_hostname_intent_updated',
         'space_id' => $spaceId,
@@ -290,7 +293,7 @@ function _stattic_runtime_affected_intent_hostnames_from_routes(array $routes, ?
 // apps/control-plane/src/runtime/php-policy-parity.test.ts).
 const STATTIC_RUNTIME_CHANGED_PATHS_MAX = 900;
 
-// An invalid or over-cap set degrades to [] — host-wide purge — never a
+// An invalid or over-cap set degrades to []: a host-wide purge, never a
 // rejected mutation.
 function _stattic_runtime_changed_path_list(mixed $raw, ?bool &$known = null): array
 {
@@ -633,7 +636,7 @@ function _stattic_runtime_update_route_index_unlocked(string $privateRoot, strin
 }
 
 // ENOENT is a normal "no document" answer; a read FAILURE of an existing
-// document must abort the operation that needed it — publishing a route index,
+// document must abort the operation that needed it. Publishing a route index,
 // purge set, or tombstone state derived from a failed read deletes live state
 // (the management route answers 5xx and the control plane retries; the
 // maintenance tick journals maintenance_step_failed). Falling back to a full
@@ -660,7 +663,7 @@ function _stattic_runtime_directory_entries_strict(string $root): array
 }
 
 // Read under the index lock: this is the read half of a read-modify-write.
-// false = current.json exists but could not be read — the caller must abort,
+// false = current.json exists but could not be read. The caller must abort,
 // never treat it as gen 0.
 function _stattic_runtime_read_route_pointer(string $privateRoot): array|false|null
 {
@@ -687,7 +690,7 @@ function _stattic_runtime_read_route_owners(string $privateRoot, ?array $pointer
     return is_array($loaded) && is_array($loaded['owners'] ?? null) ? $loaded['owners'] : null;
 }
 
-// Any unexpected on-disk SHAPE returns null — the caller falls back to a full
+// Any unexpected on-disk SHAPE returns null. The caller falls back to a full
 // rebuild. A failed include of an existing shard aborts instead: the shard's
 // bytes are fine, this read is not, and a rebuild would drop its hosts.
 function _stattic_runtime_read_route_shard(string $path): ?array
@@ -886,8 +889,8 @@ function _stattic_runtime_merge_host_contributions(array $contributions): array
         $hostRoutes[$hostname] = array_merge($canonicalRoutes, $hostRoutes[$hostname] ?? []);
     }
     // A host that only has sub-path routes (a pure redirect or proxy host) still
-    // needs a hostnames entry: the serve path resolves the Space — and therefore
-    // the overlay that answers access — from there, and would otherwise treat the
+    // needs a hostnames entry: the serve path resolves the Space from there, and
+    // with it the overlay that answers access. Without the entry it treats the
     // host as undeployed.
     foreach ($hostRoutes as $hostname => $routes) {
         if (isset($hostnames[$hostname])) {
@@ -1009,17 +1012,17 @@ function _stattic_runtime_compile_route(string $privateRoot, string $spaceId, ar
         'location' => $location,
     ];
     // Contracts §3: the shard maps host -> {space_id, version_id | route_action}
-    // plus the few flags that decide which version and which robots policy. Every
-    // access field the v3 entry carried (`runtime_config`, `admission`,
-    // `entitlements`) now lives in the Space overlay, so an access change swaps
-    // one overlay instead of rewriting every shard that names the Space.
+    // plus the few flags that decide which version and which robots policy.
+    // Access fields (`runtime_config`, `admission`, `entitlements`) live in the
+    // Space overlay, so an access change swaps one overlay instead of rewriting
+    // every shard that names the Space.
     return [
         'hostname' => $hostname,
         'route' => $entry,
         'host_entry' => [
             'space_id' => $spaceId,
-            // A version-pinned host names its version; a route-following host
-            // records the route and resolves it through the overlay.
+            // A route-following host records the route and resolves it through
+            // the overlay instead.
             'version_id' => ($target['type'] ?? null) === 'version' ? $versionId : null,
             'route_name' => is_string($resolved['route_name'] ?? null) ? $resolved['route_name'] : null,
             'immutable' => ($target['type'] ?? null) === 'version',
@@ -1028,7 +1031,7 @@ function _stattic_runtime_compile_route(string $privateRoot, string $spaceId, ar
     ];
 }
 
-// FAIL CLOSED: an absent or malformed doc returns every entitlement false — a
+// FAIL CLOSED: an absent or malformed doc returns every entitlement false. A
 // lagging sync may only withhold a capability, never grant an unconfirmed one.
 function _stattic_runtime_stored_entitlements(string $privateRoot, string $spaceId): array
 {
@@ -1056,9 +1059,7 @@ function _stattic_runtime_resolve_route_target(string $privateRoot, string $spac
             return $pointerCache[$cacheKey];
         }
         // The v4 version root pointer is what proves a version can serve; the
-        // v3 serving.php artifact no longer exists. Testing for it here made
-        // every rebuild after a trash/retention pass resolve NOTHING and blank
-        // every hostname in the shard (M1's migration blocker).
+        // v3 serving.php artifact no longer exists.
         $rootPointer = _stattic_version_root($privateRoot, $spaceId, $versionId)
             . '/' . STATTIC_RUNTIME_VERSION_ROOT_POINTER_FILE;
         if (!is_file($rootPointer)) {
@@ -1067,7 +1068,7 @@ function _stattic_runtime_resolve_route_target(string $privateRoot, string $spac
         }
         // Immutable hosts pin content bytes, not access: they deliberately reuse
         // the Space's current production authorization projection. Missing
-        // production state stays fail-closed — [] is not a valid projection.
+        // production state stays fail-closed. [] is not a valid projection.
         $production = _stattic_runtime_read_json_strict(_stattic_route_pointer_path($privateRoot, $spaceId, 'production'));
         $pointerCache[$cacheKey] = [
             'version_id' => $versionId,
@@ -1143,7 +1144,7 @@ function _stattic_runtime_set_tombstone_host_entry(array &$hostnames, string $ho
     $hostnames[$hostname] = [
         'space_id' => $spaceId,
         'route_action' => $action,
-        // CSAM must not advertise a noindex tag — it leaks that the host exists.
+        // CSAM must not advertise a noindex tag. It leaks that the host exists.
         'noindex' => (STATTIC_TOMBSTONE_VARIANTS[$variant['page_id']]['robots'] ?? true),
     ];
 }
@@ -1243,7 +1244,7 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
     );
 
     // Content-addressed names make this a content comparison: an identical
-    // index skips the whole write — gen stays put, previous.json keeps its
+    // index skips the whole write. Gen stays put, previous.json keeps its
     // true predecessor, and the unlink clock never starts for shards that
     // never retired. (Same rule the overlay writer already follows.)
     if (
@@ -1267,7 +1268,7 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
     ];
 
     // The pointer this write retires. Read BEFORE previous.json is overwritten,
-    // because the shards it names — and nothing else — are the ones whose grace
+    // because the shards it names, and nothing else, are the ones whose grace
     // period starts with THIS write.
     $retired = _stattic_runtime_read_json($routesRoot . '/previous.json');
 
@@ -1280,8 +1281,8 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
     _sf_json_write($routesRoot . '/current.json', $pointer);
 
     // D71/D93: the unlink-candidacy stamp. A shard that just fell out of both
-    // pointers gets its mtime set here, which is when its grace period starts —
-    // the maintenance tick only deletes, it never marks.
+    // pointers gets its mtime set here, which is when its grace period starts.
+    // The maintenance tick only deletes, it never marks.
     _stattic_runtime_mark_unreferenced_route_shards(
         $privateRoot,
         [$pointer, $previous],
@@ -1328,12 +1329,12 @@ function _stattic_runtime_referenced_route_shards(array $pointers): array
 // Marks only what THIS write retired: the shards named by the pointer that just
 // fell off the end (`$retired`) and are named by neither surviving pointer.
 //
-// Touching every unreferenced shard instead — the whole directory, on every
-// write — restarts the grace period of shards that stopped being referenced
-// long ago, so on a busy host nothing ever ages out and the GC deletes nothing.
-// A shard that is already marked keeps the mtime it was marked with; an orphan
-// no pointer ever named keeps its write mtime, which is the same clock, so it
-// ages out too.
+// The alternative, touching every unreferenced shard in the whole directory on
+// every write, restarts the grace period of shards that stopped being
+// referenced long ago, so on a busy host nothing ever ages out and the GC
+// deletes nothing. A shard that is already marked keeps the mtime it was marked
+// with; an orphan no pointer ever named keeps its write mtime, which is the
+// same clock, so it ages out too.
 function _stattic_runtime_mark_unreferenced_route_shards(string $privateRoot, array $pointers, ?array $retired = null): void
 {
     if ($retired === null) {
@@ -1360,10 +1361,10 @@ const STATTIC_RUNTIME_ROUTE_SHARD_GRACE_SECONDS = 300;
 //
 // The referenced set must be PROVEN, never inferred from a failed read: a
 // transient failure on current.json would read as "nothing is referenced" and
-// unlink every live shard — a persistent site-wide 503 until the next route
+// unlink every live shard, a persistent site-wide 503 until the next route
 // write. So: no valid current pointer (including never-provisioned), no pass;
 // previous.json may be genuinely absent, but not unreadable. The index lock
-// (try, skip on miss — the pass is idempotent and reruns every tick) closes
+// (try, skip on miss: the pass is idempotent and reruns every tick) closes
 // the stat-then-unlink race against a concurrent writer's is_file+touch reuse.
 function _stattic_runtime_route_shard_gc(string $privateRoot): int
 {
@@ -1428,29 +1429,28 @@ function _stattic_runtime_overlay_public_exposure(array $config): ?array
 }
 
 // `open` = "this Space can be served to everyone, for every host it answers on,
-// without loading access-rules.php at all". Two independent things must hold and
-// BOTH are checked, because either alone leaks:
+// without loading access-rules.php at all". Two independent things must hold,
+// because either alone leaks:
 //
 //  1. the control plane's public-exposure descriptor says `public` (the
-//     authority — never a grant count, never a guess), and no serving fence is
+//     authority, never a grant count, never a guess), and no serving fence is
 //     up; and
 //  2. the compiled projection structurally admits everything anonymously for
-//     every target this Space can present — the compiler's own
+//     every target this Space can present. That is the compiler's own
 //     `unconditionalTargets` verdict (access-rules.php
 //     _stattic_compile_authorization_grant_index), never re-derived here from
 //     grant fields. The descriptor's `public` only means "SOME anonymous
-//     response here is public" — a Space whose public Grant covers `/docs/**`
-//     sets it too, and skipping enforcement for such a Space would publish the
-//     rest of it.
+//     response here is public": a Space whose public Grant covers `/docs/**`
+//     sets it too, and skipping enforcement for it would publish the rest.
 //
 // Target algebra (access-rules.php `_stattic_grant_target`): a production/live
 // host is `live`, any other route name is `branch`, a version-pinned host is
 // `version` (matched by an `all_versions` selector). Branch targets are named
 // individually and can appear at any time, so a Space with any non-live route
-// is never provably open. Anything unproven simply takes the enforcement lane,
-// which still admits anonymously and keeps its shared-cache policy — the cost of
-// being wrong here is one `require`, the cost of being wrong the other way is
-// the whole Space.
+// is never provably open. Anything unproven takes the enforcement lane, which
+// still admits anonymously and keeps its shared-cache policy. The cost of being
+// wrong here is one `require`, the cost of being wrong the other way is the
+// whole Space.
 function _stattic_runtime_overlay_open(
     array $config,
     ?array $authorization,
@@ -1489,7 +1489,7 @@ const STATTIC_RUNTIME_SDK_INLINE_BODY_MAX = 32768;
 // ONE SDK section (contracts §4). The control plane sends `sdk` on the route
 // config; this is where its body is placed and where the section the serve
 // path reads is shaped. Absent/invalid means no SDK projection at all, which
-// the serve path renders as an inert loader — never as a failure.
+// the serve path renders as an inert loader, never as a failure.
 function _stattic_runtime_overlay_sdk_section(string $privateRoot, string $spaceId, mixed $sdk): ?array
 {
     if (!is_array($sdk) || !is_array($sdk['config'] ?? null)) {
@@ -1586,12 +1586,10 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
     // may still admit anonymously and keep its shared-cache policy.
     //
     // It is NEVER derived from how many grants the projection carries. "Zero
-    // grants" is the *most* protected projection there is — nobody is admitted —
-    // and reading it as "nothing to enforce" served every fenced-off Space
-    // fully public with no access code loaded. The authority is the control
-    // plane's own public-exposure descriptor (packages/common
-    // runtimePublicExposureDescriptorSchema, v>=1, `public`); absent or
-    // malformed means not public, which is the fail-closed answer.
+    // grants" is the *most* protected projection there is, admitting nobody.
+    // The authority is the control plane's own public-exposure descriptor
+    // (packages/common runtimePublicExposureDescriptorSchema, v>=1, `public`);
+    // absent or malformed means not public, which is the fail-closed answer.
     $open = _stattic_runtime_overlay_open($config, $authorization, $grantIndex, $fence, $versions);
 
     _stattic_runtime_write_space_overlay($privateRoot, $spaceId, [
@@ -1606,12 +1604,10 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
         // loading access-rules.php to learn the marker.
         'compiled_version' => $authorization['compiledVersion'] ?? null,
         'space_claimed' => ($authorization['spaceClaimed'] ?? null) === true,
-        // The access-page descriptor is NOT presentation trivia the enforcement
-        // lane can do without: its `exchange.credential` is the material every
-        // sfv2_/sfa1_ session key is derived from (access-rules.php
-        // _stattic_access_session_hmac_key). Dropping it here made a protected
-        // Space permanently deny-only — no session could be minted and none
-        // could be verified. Carried verbatim; access-rules.php re-validates
+        // Required, not presentation trivia: `exchange.credential` is the
+        // material every sfv2_/sfa1_ session key derives from (access-rules.php
+        // _stattic_access_session_hmac_key), so without it a protected Space is
+        // permanently deny-only. Carried verbatim; access-rules.php re-validates
         // every URL in it against the platform destination allowlist.
         'access_page' => is_array($authorization['accessPage'] ?? null)
             ? $authorization['accessPage']
@@ -1630,21 +1626,16 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
         ],
         'anonymous_expires_at' => is_string($config['anonymous_expires_at'] ?? null) ? $config['anonymous_expires_at'] : null,
         // The live version's compiled page pointers, so a publisher's own access
-        // and 404 templates resolve. errors.php used to read them off
-        // `serving['versions'][<vid>]['serving_config']['pages']`, a v3 shape the
-        // v4 bridge does not build — which meant a Space could publish `_pages`
-        // templates and never see one served. `pages.routes[<route>].pages[<id>]`
-        // names an artifact under `<version>/pages/`, and the version this map
-        // belongs to is exactly the one `production` points at — so it is read
-        // from THAT version's metadata, never from the route config, which has
-        // no such key and would leave every Space page-less.
+        // and 404 templates resolve. `pages.routes[<route>].pages[<id>]` names
+        // an artifact under `<version>/pages/`, so it is read from the metadata
+        // of the version `production` points at, never from the route config,
+        // which has no such key.
         'pages' => is_array($liveServingConfig['pages'] ?? null) ? $liveServingConfig['pages'] : null,
         'content_types' => is_array($config['content_types'] ?? null) ? $config['content_types'] : null,
         // ONE SDK section: Cast endpoints, the Comments configuration the SDK
         // lane answers out of this overlay instead of calling the control
         // plane per request, and the production tag bytes. A large body is
-        // moved into the CAS — the overlay is opcached PHP and every serve of
-        // this Space pays for whatever sits in it.
+        // moved into the CAS.
         'sdk' => _stattic_runtime_overlay_sdk_section($privateRoot, $spaceId, $config['sdk'] ?? null),
         'admission' => is_array($config['admission'] ?? null) ? $config['admission'] : [],
         // Read at serve time so a `planGated` proxy rule follows the current
@@ -1797,10 +1788,10 @@ function _stattic_runtime_proxy_upstream_public(string $upstream): bool
     // _stattic_egress_host_allowed is only a compile-time syntactic gate: it
     // rejects internal/loopback names and non-public IP literals but cannot
     // resolve a DNS name, so a hostname pointing at a private address passes
-    // here. That is intentional — the authoritative SSRF gate is the
+    // here. That is intentional. The authoritative SSRF gate is the
     // request-time resolution in runtime/proxy.php
     // (_stattic_egress_resolve_public_ips), which re-checks every resolved IP
-    // and pins curl to it. Never treat this predicate as the complete check.
+    // and pins curl to it.
     return in_array($scheme, ['http', 'https'], true)
         && $host !== ''
         && _stattic_egress_host_allowed($host, $port)
@@ -1840,32 +1831,36 @@ function _stattic_runtime_zero_compiler_entries(array $input, string $snakeIdKey
     return $entries;
 }
 
-function _stattic_runtime_subprocess_fail(array $result, string $code, string $message): void
-{
-    _stattic_problem_response(
-        500,
-        $code,
-        _stattic_zero_debug_message($message, $result['stderr']),
-        ['details' => ['exitCode' => $result['exitCode'], 'stdout' => is_string($result['stdout']) ? substr($result['stdout'], 0, 512) : '']],
-    );
-}
-
+/**
+ * Apply the version's compiled Zero migrations, in this worker. The database
+ * URL resolution is the one every brokered lane uses, so a capsule's schema is
+ * created against exactly the database its endpoints will later read.
+ */
 function _stattic_runtime_apply_zero_migrations(string $versionRoot): void
 {
-    if (!is_file($versionRoot . '/zero/migrations.json')) {
+    $path = $versionRoot . '/zero/migrations.json';
+    if (!is_file($path)) {
         return;
     }
     $zeroConfig = _stattic_runtime_read_json($versionRoot . '/zero/config.json');
-    $result = _stattic_runtime_run_subprocess(
-        [_stattic_runtime_native_binary(), 'migrate', $versionRoot],
-        _stattic_zero_runner_base_env(is_array($zeroConfig) ? $zeroConfig : [])
+    $env = _stattic_zero_runner_base_env(is_array($zeroConfig) ? $zeroConfig : []);
+    _stattic_db_broker_bind(
+        is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : null,
+        is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
     );
-    if (!$result['spawned']) {
-        _stattic_problem_response(500, 'zero_runner_unavailable', 'Zero runner migration command is unavailable.');
+    $result = _stattic_db_broker_apply_migrations($path);
+    // Publishing is the only thing this request does with a database, and the
+    // link is worth nothing to the rest of it.
+    _stattic_db_broker_close();
+    if ($result['ok']) {
+        return;
     }
-    if ($result['exitCode'] !== 0) {
-        _stattic_runtime_subprocess_fail($result, 'zero_migration_failed', 'Zero DB migrations failed.');
-    }
+    _stattic_problem_response(
+        500,
+        'zero_migration_failed',
+        _stattic_zero_debug_message('Zero DB migrations failed.', $result['message']),
+        ['details' => ['zero_db_code' => $result['code']]],
+    );
 }
 
 function _stattic_runtime_zero_endpoint_capabilities(mixed $input): array

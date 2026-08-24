@@ -3,26 +3,25 @@
 // Self-contained: it installs the engine from runtime/engine-manifest.json into
 // a temp web root, serves it with `php -S`, and signs management/upload/blob-gate
 // JWTs with a per-process Ed25519 key delivered through the same
-// Atomic_Persistent_Data surface WP.Cloud exposes before direct PHP entrypoints
-// run.
+// Atomic_Persistent_Data surface WP.Cloud exposes.
 //
-// The only imports from outside runtime/ are single-authority contracts the
-// engine mirrors rather than owns: the platform's problem-document derivation
-// (packages/common) and the generated finalizer protocol (packages/routing,
-// same codegen that writes shared/finalizer-protocol.generated.php). Re-declaring
-// either here would create a second reading of a wire contract.
+// The only imports from outside runtime/ are contracts the engine mirrors rather
+// than owns: the platform's problem-document derivation (packages/common) and
+// the generated finalizer protocol (packages/routing, same codegen that writes
+// shared/finalizer-protocol.generated.php). Re-declaring either here would
+// create a second reading of a wire contract.
 //
 // v4 shapes this file speaks (private-notes:internal-docs/runtime-rewrite-contracts-2026-08-07):
 //   * every admin route rides `?route=<path>` on /__spacefast/api.php and
-//     /__spacefast/upload.php — no path suffixes, no op=/upload_id= forms;
+//     /__spacefast/upload.php, with no path suffixes;
 //   * publish is content-addressed: POST /spaces/{s}/versions declares the
 //     manifest, POST /spaces/{s}/blobs/have negotiates, PUT /spaces/{s}/blobs/{sha}
 //     streams bytes, POST .../finalize consumes the session. There is no
-//     path-addressed file upload, no multipart/parts lane, no tar batch lane;
+//     multipart/parts lane and no tar batch lane;
 //   * artifacts are pointer + content-addressed PHP: routes/current.json ->
 //     routes/shards/hosts-<xx>-<h16>.php, spaces/<s>/space.json ->
 //     overlays/overlay-<h16>.php, versions/<v>/root.json -> root-<h16>.php ->
-//     responses-<h16>.php. The readers below are how a test inspects them;
+//     responses-<h16>.php;
 //   * bytes live only in the CAS at spaces/<s>/blobs/<aa>/<sha>.
 import { setDefaultTimeout } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
@@ -60,7 +59,7 @@ export const RUNTIME_DIR = path.resolve(import.meta.dir, "..");
 export const RUNTIME_TEST_ROUTER = path.resolve(import.meta.dir, "php-router.php");
 export const RUNTIME_TEST_ATOMIC_PREPEND = path.resolve(import.meta.dir, "atomic-prepend.php");
 export const RUNTIME_INSTANCE_ID = "rti_test";
-export const MANAGEMENT_HOST = "127.0.0.1";
+export const RUNTIME_HOST = "127.0.0.1";
 export const RUNTIME_HTTP_API_BASE = "/__spacefast/api.php";
 export const RUNTIME_UPLOAD_API_BASE = "/__spacefast/upload.php";
 /** The blob token gate (contracts §7): GET /__stattic/blob/<jwt>. */
@@ -185,7 +184,6 @@ export const RUNTIME_ATOMIC_DATA = {
   // The one origin allowed to READ a blob-gate response with fetch(). Pushed as
   // provider persistent data like every other runtime config value.
   SPACEFAST_DASHBOARD_ORIGIN: DASHBOARD_ORIGIN,
-  SPACEFAST_MANAGEMENT_HOSTNAME: MANAGEMENT_HOST,
   SPACEFAST_RUNTIME_INSTANCE_ID: RUNTIME_INSTANCE_ID,
   SPACEFAST_RUNTIME_JWKS_B64: Buffer.from(JWKS, "utf8").toString("base64"),
 };
@@ -479,23 +477,10 @@ function installEngine(root: string): void {
   mkdirSync(path.join(root, ".stattic", "storage"), { recursive: true });
 }
 
-// D7 / contracts §2: the installer writes `storage/config.generated.php` — plain
-// constants, no getenv, no decrypt — because the visitor lane must answer
-// "is this the management hostname?" (serve.php) without loading
-// shared/bootstrap-config.php, whose Atomic_Persistent_Data decrypt is exactly
-// what the D34 module pin forbids on the serve path. `.atomic-persistent-data.json`
-// above is the raw provider input; only the management/upload entrypoints read it.
-// Staging one without the other left every serve-path config lookup empty.
-const GENERATED_CONFIG_KEYS = ["SPACEFAST_MANAGEMENT_HOSTNAME"] as const;
-
-function writeGeneratedConfig(root: string, atomicData: Record<string, string>): void {
-  const lines = GENERATED_CONFIG_KEYS.filter((key) => (atomicData[key] ?? "") !== "").map((key) => {
-    const value = (atomicData[key] ?? "").replaceAll("\\", "\\\\").replaceAll("'", "\\'");
-    return `const ${key} = '${value}';`;
-  });
+function writeGeneratedConfig(root: string): void {
   writeFileSync(
     path.join(root, ".stattic/storage/config.generated.php"),
-    ["<?php", "declare(strict_types=1);", "", ...lines, ""].join("\n"),
+    ["<?php", "declare(strict_types=1);", ""].join("\n"),
   );
 }
 
@@ -510,7 +495,7 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
   installEngine(root);
   const atomicData = { ...RUNTIME_ATOMIC_DATA, ...options.atomicData };
   writeFileSync(path.join(root, ".atomic-persistent-data.json"), `${JSON.stringify(atomicData)}\n`);
-  writeGeneratedConfig(root, atomicData);
+  writeGeneratedConfig(root);
   if (options.autoPrependInit) {
     writeFileSync(
       path.join(root, ".stattic/test-prepend.php"),
@@ -676,11 +661,11 @@ function shellQuote(value: string): string {
 // windows.
 //
 // Minimal env by default (PATH + HOME only): the atomic prepend resolves
-// runtime config from getcwd(), and `sh -l` on CI runners sources profile
-// hooks that can chdir when the full CI env (GITHUB_* vars) is present —
-// passing process.env wholesale moves cwd off rt.root there, config resolves
-// empty, and every dispatch 404s (runtime_api_not_found) at the
-// management-hostname assert. Callers that need a narrower env pass their own.
+// runtime config from getcwd(). This deliberately uses a non-login shell: a
+// login shell is allowed to replace caller-controlled HOME and chdir while it
+// sources system profiles, which breaks both runtime discovery and the
+// provider scan-log contract on Linux CI. Callers that need a narrower env
+// pass their own.
 export function dispatchCli(
   rt: Runtime,
   stdin: string,
@@ -695,7 +680,7 @@ export function dispatchCli(
   const child = spawn(
     "sh",
     [
-      "-lc",
+      "-c",
       [
         shellQuote(PHP_BINARY),
         "-d display_errors=stderr",

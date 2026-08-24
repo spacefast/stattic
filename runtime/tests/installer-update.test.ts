@@ -19,7 +19,7 @@ import { readActiveReleaseTarget } from "./active-release.ts";
 
 // The installer has one mode: argv[1] carries the zip source (an https URL or
 // a local path), SPACEFAST_RUNTIME_ENGINE_MD5/_REVISION/_NATIVE_SHA256 carry
-// the expectations, and the JSON receipt on stdout is the whole report — no
+// the expectations, and the JSON receipt on stdout is the whole report. No
 // metadata endpoint, no callback.
 
 type UpdateFixture = {
@@ -146,35 +146,6 @@ function activeReleaseRoot(publicRoot: string): string {
   return path.join(installRoot, readActiveReleaseTarget(installRoot));
 }
 
-function installLegacyVisitor(publicRoot: string, revision: string): void {
-  const engineRoot = path.join(publicRoot, ".stattic/engine");
-  mkdirSync(path.join(engineRoot, "shared"), { recursive: true });
-  mkdirSync(path.join(engineRoot, "runtime"), { recursive: true });
-  mkdirSync(path.join(publicRoot, ".stattic/storage"), { recursive: true });
-  writeFileSync(
-    path.join(engineRoot, "shared/context.php"),
-    `<?php\nconst SPACEFAST_RUNTIME_ENGINE_REVISION = '${revision}';\n`,
-  );
-  writeFileSync(
-    path.join(engineRoot, "runtime/revision.php"),
-    `<?php\nconst VISITOR_MODULE_REVISION = '${revision}';\n`,
-  );
-  writeFileSync(
-    path.join(engineRoot, "init.php"),
-    [
-      "<?php",
-      "require_once __DIR__ . '/shared/context.php';",
-      "require_once __DIR__ . '/runtime/revision.php';",
-      "header('Content-Type: application/json');",
-      "echo json_encode(['context' => SPACEFAST_RUNTIME_ENGINE_REVISION, 'module' => VISITOR_MODULE_REVISION]);",
-    ].join("\n"),
-  );
-  writeFileSync(
-    path.join(publicRoot, "index.php"),
-    "<?php require_once __DIR__ . '/.stattic/engine/init.php';\n",
-  );
-}
-
 function readVisitor(publicRoot: string): { context: string; module: string } {
   return JSON.parse(
     execFileSync("php", ["-d", "auto_prepend_file=", path.join(publicRoot, "index.php")], {
@@ -253,7 +224,7 @@ test("refreshes the resident installer from a payload that ships installer.php",
   );
 });
 
-test("repairs an interrupted loader migration before converging", async () => {
+test("repairs an interrupted loader migration before syncing", async () => {
   const fixture = await startUpdateFixture({ visitorEngine: true });
   await runInstaller(fixture);
 
@@ -267,19 +238,19 @@ test("repairs an interrupted loader migration before converging", async () => {
     module: fixture.revision,
   });
 
-  const converged = await runInstaller(fixture, { nativeSha256: fixture.nativeSha256 });
+  const current = await runInstaller(fixture, { nativeSha256: fixture.nativeSha256 });
 
-  expect(converged.exitCode).toBe(0);
-  expect(JSON.parse(converged.stdout)).toMatchObject({
-    status: "converged",
+  expect(current.exitCode).toBe(0);
+  expect(JSON.parse(current.stdout)).toMatchObject({
+    status: "current",
     engine_revision: fixture.revision,
   });
 });
 
 test("reinstalls the loader only when the payload's loader bytes differ from the marker", async () => {
-  // The marker is the identity of the loader that is installed, so a loader
-  // fix reaches a box that already converged — with a frozen marker literal,
-  // the first install was the last one that could ever place these files.
+  // The marker holds the installed loader's identity, so a loader fix reaches a
+  // box that was already current. With a frozen marker literal, the first install
+  // was the last one that could ever place these files.
   const fixture = await startUpdateFixture({ visitorEngine: true });
   expect(JSON.parse((await runInstaller(fixture)).stdout)).toMatchObject({ loader: "installed" });
   const loader = path.join(fixture.publicRoot, "index.php");
@@ -340,15 +311,20 @@ test("refuses a non-loopback plain-http zip URL", async () => {
 });
 
 test("fails on an md5 mismatch and leaves no downloaded artifacts behind", async () => {
-  const fixture = await startUpdateFixture({ visitorEngine: true });
-  installLegacyVisitor(fixture.publicRoot, "old-staging-release");
+  const old = await startUpdateFixture({ revision: "old-staging-release", visitorEngine: true });
+  expect((await runInstaller(old)).exitCode).toBe(0);
+  const fixture = await startUpdateFixture({
+    revision: "new-staging-release",
+    visitorEngine: true,
+    publicRoot: old.publicRoot,
+  });
 
   const result = await runInstaller(fixture, { md5: "0".repeat(32) });
 
   expect(result.exitCode).toBe(1);
   expect(result.stderr).toContain("runtime_engine_md5_mismatch");
-  // Failure cleanup: a caller retrying a corrupt artifact must not accumulate
-  // downloads until the disk fills.
+  // A caller retrying a corrupt artifact must not accumulate downloads until
+  // the disk fills.
   const incoming = path.join(fixture.publicRoot, ".stattic/incoming");
   const leftovers = existsSync(incoming)
     ? readdirSync(incoming).filter((name) => name.endsWith(".zip"))
@@ -361,8 +337,14 @@ test("fails on an md5 mismatch and leaves no downloaded artifacts behind", async
 });
 
 test("keeps the old engine usable when staged validation fails", async () => {
-  const fixture = await startUpdateFixture({ visitorEngine: true, invalidSelfTest: true });
-  installLegacyVisitor(fixture.publicRoot, "old-validation-release");
+  const old = await startUpdateFixture({ revision: "old-validation-release", visitorEngine: true });
+  expect((await runInstaller(old)).exitCode).toBe(0);
+  const fixture = await startUpdateFixture({
+    revision: "new-validation-release",
+    visitorEngine: true,
+    invalidSelfTest: true,
+    publicRoot: old.publicRoot,
+  });
 
   const result = await runInstaller(fixture);
 

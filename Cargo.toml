@@ -3,6 +3,7 @@ members = [
   "crates/stattic-runtime-egress",
   "crates/stattic-runtime-compiler",
   "crates/stattic-runtime-core",
+  "crates/stattic-runtime-policy",
   "crates/stattic-runtime-wasi",
   "crates/stattic-zero-runner",
 ]
@@ -12,8 +13,6 @@ resolver = "2"
 edition = "2021"
 
 [workspace.dependencies]
-brotli = "8"
-flate2 = "1"
 lol_html = "3.0.0"
 mime_guess = "2"
 pulldown-cmark = "0.13.4"

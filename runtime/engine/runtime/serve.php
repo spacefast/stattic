@@ -7,13 +7,51 @@ declare(strict_types=1);
 // PHP never answers a conditional request and never serves a range: the platform
 // delivers neither If-None-Match/If-Modified-Since nor Range to the origin, and
 // the edge answers conditionals off its own HIT (§16, C19). ETag is still
-// EMITTED per entry — it is the edge's validator. This lane sends no
-// Last-Modified; on the accel lane nginx derives its own from the
-// content-derived mtime stamped on the placed file.
+// EMITTED per entry as the edge's validator. This lane sends no Last-Modified;
+// on the accel lane nginx derives its own from the content-derived mtime
+// stamped on the placed file.
 
 require_once __DIR__ . '/../shared/artifacts.php';
-require_once __DIR__ . '/serve-fast.php';
+require_once __DIR__ . '/../shared/server-file.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
+
+// The visitor lane's entry, called by init.php and cli-invoke.php.
+function _sf_serve_fast(
+    string $privateRoot,
+    string $requestMethod,
+    string $requestUri,
+    string $requestPath,
+    string $requestHost
+): never {
+    _sf_load_generated_config($privateRoot);
+    _stattic_serve_request($privateRoot, $requestMethod, $requestUri, $requestPath, $requestHost);
+    exit;
+}
+
+function _sf_load_generated_config(string $privateRoot): void
+{
+    static $attempted = false;
+    if ($attempted) {
+        return;
+    }
+    $attempted = true;
+    $path = $privateRoot . '/config.generated.php';
+    if (is_file($path)) {
+        require_once $path;
+    }
+}
+
+function _sf_promote_blob(string $privateRoot, string $spaceId, string $blobRelativePath): string
+{
+    require_once __DIR__ . '/tier.php';
+    $localPath = _stattic_tier_promote_blob($privateRoot, $spaceId, basename($blobRelativePath));
+    if (!is_string($localPath) || $localPath === '') {
+        require_once __DIR__ . '/../shared/errors.php';
+        _stattic_render_tier_fetch_unavailable(5);
+        exit;
+    }
+    return $localPath;
+}
 
 const STATTIC_STATIC_STREAM_ADMISSION_BYTES = 262144;
 const STATTIC_PRIVATE_FILE_ALIAS_SUFFIX = ';sf-private';
@@ -69,22 +107,18 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $originalRequestPath = $requestPath;
 
     // Authorized by its own control-plane-signed token and resolves no route, so
-    // it answers before management-host, route, host and overlay resolution. A
-    // first publish has no routes/current.json yet: this gate is how finalize
-    // reads the accepted source bytes that will create that pointer.
+    // it answers before route, host and overlay resolution: a first publish has
+    // no routes/current.json yet, and this gate is how finalize reads the
+    // accepted source bytes that create that pointer.
     if (str_starts_with($originalRequestPath, '/__stattic/blob/')) {
         require_once __DIR__ . '/../entrypoints/blob.php';
         _stattic_blob_gate_serve($privateRoot, $requestMethod, $originalRequestPath);
     }
 
-    if (_stattic_is_management_host($requestHost)) {
-        _stattic_render_platform_action(_stattic_runtime_api_not_found_action());
-    }
-
     // ---- route pointer + host shard -------------------------------------
-    // `unavailable` is a failed read of an EXISTING pointer — never rendered
-    // as `undeployed`: that page is a deployment claim and a transient I/O
-    // failure must not impersonate one (the "Waiting for launch" incident).
+    // `unavailable` is a failed read of an EXISTING pointer, never `undeployed`:
+    // that page is a deployment claim, and a transient I/O failure must not
+    // impersonate one (the "Waiting for launch" incident).
     $routesRead = _sf_pointer_read('routes', $privateRoot . '/routes/current.json');
     if ($routesRead['kind'] === 'unavailable') {
         _stattic_render_runtime_unavailable_lazy('route_pointer_unreadable');
@@ -138,16 +172,16 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         _stattic_render_runtime_unavailable_lazy('space_overlay_unreadable');
     }
     // Fail closed: an absent/invalid overlay, or one fenced mid-mutation toward
-    // a stronger state, is a denial and never an open space. (A failed READ of
-    // an existing overlay took the unavailable exit above — it is not a denial.)
+    // a stronger state, is a denial, never an open space. A failed READ of an
+    // existing overlay took the unavailable exit above.
     if ($overlay === null || ($overlay['fence'] ?? null) === 'exposure') {
         _stattic_v4_render_forbidden('denied', 'access_denied', 'Forbidden');
     }
     $open = ($overlay['open'] ?? null) === true;
 
     // A protected provider-extension asset changes its final client URL before
-    // X-Accel. The alias is reserved, resolves the original path, and passes
-    // through the complete access check again on every request.
+    // X-Accel. The alias is reserved, resolves the original path, and re-runs
+    // the full access check on every request.
     $privateFileAliasSource = _stattic_private_file_alias_source($requestPath);
     if ($privateFileAliasSource === false) {
         _stattic_private_file_alias_not_found();
@@ -176,8 +210,8 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
 
     // The Allow union of every lane that declined this request for its METHOD
     // alone (a static entry, a Zero pattern, a Functions route at other verbs).
-    // A non-empty union at the end of the ladder is a 405 naming it — never a
-    // fall-through to the 404 tail, because the path demonstrably exists.
+    // A non-empty union at the end of the ladder is a 405 naming it, never a
+    // fall-through to the 404 tail: the path demonstrably exists.
     $GLOBALS['SPACEFAST_METHOD_DECLINED_ALLOW'] = [];
     $functionsMachineRoute = str_starts_with($originalRequestPath, '/__spacefast/functions/');
     $storageRequest = $requestPath === '/storage' || str_starts_with($requestPath, '/storage/');
@@ -219,8 +253,8 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     }
     $versionDir = _stattic_version_root($privateRoot, $spaceId, $versionId);
     // zero.php / functions-*.php address the version through `<version>/files`
-    // and reach their sidecars with dirname(); the v4 compiler writes no file
-    // tree, so this is a naming convention those modules keep, not a directory.
+    // and reach their sidecars with dirname(). The v4 compiler writes no file
+    // tree, so this is a naming convention, not a directory.
     $versionRoot = _stattic_version_files_root($privateRoot, $spaceId, $versionId);
     // The first point at which a version is the answer, so the first at which the
     // response may name one: naming it above leaks which version a host points at.
@@ -231,8 +265,8 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         require_once __DIR__ . '/storage.php';
         _stattic_storage_apply_access_token();
         // A Functions binding carries its version-scoped machine grant rather
-        // than a visitor session. Authenticate it here, then send it through
-        // the exact same storage handler as a capsule request.
+        // than a visitor session. Authenticate it here, then use the same
+        // storage handler as a capsule request.
         if (_stattic_storage_function_request_authorized($privateRoot, $serving, $requestMethod)) {
             _stattic_dispatch_storage(
                 $privateRoot,
@@ -256,18 +290,17 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     }
     // Machine purge intake, on the purge credential the control plane minted
     // into this version's functions/config.json. Like the relay and log lanes
-    // above, it is authorized by its own token and resolves no route, so it
-    // answers here — before token redemption, access and content resolution.
+    // above, its own token authorizes it and it resolves no route, so it answers
+    // before token redemption, access and content resolution.
     if ($requestPath === '/' . STATTIC_FUNCTIONS_PURGE_PATH) {
         require_once __DIR__ . '/functions-purge.php';
         _stattic_functions_purge_serve($privateRoot, $spaceId, $versionRoot, $requestMethod);
     }
 
-    // `?__=` is redeemed HERE, before the response table is even read, and the
-    // request then continues to the page it named. Zero visible hops: the
-    // identity this installs is what the enforcement below sees, and the content
-    // is the response. Which lane the token belongs to is its own declaration —
-    // see _stattic_access_query_token_classify.
+    // `?__=` is redeemed HERE, before the response table is read, and the request
+    // continues to the page it named. Zero visible hops: the identity this
+    // installs is what the enforcement below sees. The token declares its own
+    // lane, see _stattic_access_query_token_classify.
     if (!$functionsMachineRoute && _stattic_access_query_token_present()) {
         require_once __DIR__ . '/access-rules.php';
         _stattic_access_apply_query_token(
@@ -295,22 +328,19 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $entry = _stattic_v4_entry($versionDir, $root, $requestPath);
     $conditionalRewrite = false;
     $conditionalCandidate = false;
+    $conditionalVary = [];
     $routeStatus = 200;
     $rulesFirst = $entry === null
         || !empty($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_RULES_FIRST]);
     $redirectRules = _stattic_v4_rule_section($rulesEntry, 'redirects');
-    // A rule's SOURCE is a request path, and the rules stage runs ahead of the
-    // control ladder below — a rewrite mutates the path that ladder compares,
-    // and a redirect terminates here before the ladder runs at all. So the
-    // reservation that decides which paths are the platform's has to be honoured
-    // HERE too, not only at the front door: the control table (context.php) is
-    // that one authority, and a route it reserves is never a tenant rule's to
-    // claim. Enforced at serve time rather than at publish because the table is
-    // the runtime's own — a route reserved by a later engine release must hold
-    // for versions published before it existed.
-    // BOTH paths, because the two diverge before this point (a private-file
-    // alias and a mounted route both rewrite $requestPath) and the ladder below
-    // reads one or the other depending on the handler.
+    // The rules stage runs ahead of the control ladder below: a rewrite mutates
+    // the path that ladder compares, and a redirect terminates here before the
+    // ladder runs at all. So path reservation is honoured HERE too, not only at
+    // the front door, from the one authority: the control table in context.php.
+    // At serve time rather than at publish, because a route reserved by a later
+    // engine release must hold for versions published before it existed. BOTH
+    // paths, because a private-file alias and a mounted route each rewrite
+    // $requestPath and the ladder below reads one or the other per handler.
     $reservedRoute = _stattic_path_is_reserved($requestPath)
         || _stattic_path_is_reserved($originalRequestPath);
     if ($rulesFirst && $redirectRules !== null && !$reservedRoute) {
@@ -318,8 +348,8 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         $result = _stattic_apply_redirects(
             $redirectRules,
             $serving,
-            // The request path's own entry is already resolved above — reuse it
-            // instead of re-hashing the same table key per matching rule.
+            // Already resolved above; reuse it instead of re-hashing the same
+            // table key per matching rule.
             static fn (string $candidate): bool => $candidate === $requestPath
                 ? $entry !== null
                 : _stattic_v4_entry($versionDir, $root, $candidate) !== null,
@@ -340,6 +370,9 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         $routeStatus = (int) $result['status'];
         $conditionalRewrite = !empty($result['conditional']);
         $conditionalCandidate = !empty($result['conditional_candidate']);
+        $conditionalVary = is_array($result['conditional_vary'] ?? null)
+            ? $result['conditional_vary']
+            : [];
         if (array_key_exists('query', $result)) {
             $_SERVER['QUERY_STRING'] = (string) $result['query'];
             parse_str((string) $result['query'], $_GET);
@@ -354,9 +387,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     if (!$open) {
         require_once __DIR__ . '/access-rules.php';
         // The SDK is a subresource of the page that embedded it and owns no
-        // scope of its own, so no page Grant lists it. The session supplies the
-        // authority; the Referer only selects which scoped page Grant to
-        // evaluate, and only for a same-host script fetch with a verified
+        // scope, so no page Grant lists it. The authority comes from the
         // session (_stattic_spacefast_sdk_access_path).
         $accessPath = $requestPath === STATTIC_SPACEFAST_SDK_PATH
             && $originalRequestPath === STATTIC_SPACEFAST_SDK_PATH
@@ -369,9 +400,9 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         );
     }
     // The enforcement verdict, not the overlay flag: a Space that HAS grants but
-    // admits this URL anonymously and unconditionally is still URL-stable, and
-    // must keep its shared-cache policy. Token presence, valid or not, pins the
-    // response out of every shared cache — the edge keys on host+path+query,
+    // admits this URL anonymously and unconditionally is still URL-stable and
+    // keeps its shared-cache policy. Token presence, valid or not, pins the
+    // response out of every shared cache: the edge keys on host+path+query,
     // ignores Vary, and looks up before PHP runs.
     $privateCache = _stattic_access_private_cache_flag()
         || $conditionalRewrite
@@ -414,9 +445,9 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     }
 
     // A Space that published its own review room answers it here, from the
-    // finalized document — the `_pages/collab.html` SOURCE stays private like
+    // finalized document. The `_pages/collab.html` SOURCE stays private like
     // every page template. No pointer means no room: the request falls through
-    // to the private-path 404 rather than to a platform page.
+    // to the private-path 404, not a platform page.
     if ($originalRequestPath === SPACEFAST_COLLAB_PAGE_PATH
         && in_array($requestMethod, ['GET', 'HEAD'], true)) {
         $collabPages = is_array($serving['pages'] ?? null) ? $serving['pages'] : [];
@@ -445,6 +476,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         'serving' => $serving,
         'private_cache' => $privateCache,
         'request_varying' => $conditionalRewrite || $conditionalCandidate,
+        'request_vary_headers' => $conditionalVary,
         'tag_preview' => $tagPreviewToken,
         'content_type_policy' => _stattic_serving_content_type_policy($serving),
         'open' => $open,
@@ -484,18 +516,17 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
 
     if (is_array($entry)) {
         // A draft/preview session must not be answered from an extracted file:
-        // when the request carries one of the version's declared bypass
-        // cookies AND the worker claims this path, the file yields and the
-        // pattern lane below dispatches. The normal response at the same URL
-        // must also opt OUT of wp.cloud's shared cache: that cache resolves
-        // host+path+query before PHP and ignores Cookie/Vary, so one cached
-        // published response would make this request-time bypass unreachable.
+        // when the request carries one of the version's declared bypass cookies
+        // AND the worker claims this path, the file yields to the pattern lane
+        // below. The normal response at the same URL must also opt OUT of
+        // wp.cloud's shared cache, which resolves host+path+query before PHP and
+        // ignores Cookie/Vary: one cached published response would make this
+        // request-time bypass unreachable.
         //
-        // A content-addressed entry (compiled `imm` class) is carved out of
-        // both sides: its bytes are identical in and out of a draft session,
-        // so it keeps serving from disk and keeps its immutable year — which
-        // a whole-site middleware claim would otherwise cost every hashed
-        // chunk on the version.
+        // A content-addressed entry (compiled `imm` class) is carved out of both
+        // sides: its bytes are identical in and out of a draft session, so it
+        // keeps serving from disk and keeps its immutable year, which a
+        // whole-site middleware claim would cost every hashed chunk.
         $immutableEntry = ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_CACHE_CLASS] ?? null)
             === STATTIC_RUNTIME_CACHE_CLASS_IMMUTABLE;
         $bypassCapable = !$immutableEntry && _stattic_v4_functions_static_bypass_capable(
@@ -525,15 +556,14 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // their exact forms already were, so a committed file still wins.
     _stattic_v4_dispatch_pattern_routes($sendContext, $requestPath, $requestMethod, $requestUri);
 
-    // Every lane that could claim this method has now had its chance. A request
-    // some lane skipped FOR ITS METHOD alone ends here as the union 405 —
-    // letting it continue into the SPA/404 tail would misreport an existing
-    // path as absent.
+    // Every lane that could claim this method has had its chance. A request some
+    // lane skipped FOR ITS METHOD alone ends here as the union 405: continuing
+    // into the SPA/404 tail would misreport an existing path as absent.
     _stattic_render_method_declined_405_if_any();
 
     $lookup = ltrim($requestPath, '/');
     // A 200 SPA index is an application-route fallback, not a catch-all asset
-    // server, and a reserved/terminal path never reaches it.
+    // server.
     if (!_stattic_lookup_not_found_is_terminal($lookup) && !_stattic_lookup_is_known_asset_extension($lookup)) {
         $spa = _stattic_v4_entry($versionDir, $root, STATTIC_RUNTIME_RESPONSE_KEY_SPA);
         if (is_array($spa)) {
@@ -557,7 +587,7 @@ function _stattic_v4_version_root_artifact(string $versionDir, ?string $routeNam
 {
     // A finalized version is immutable. Cache only its tiny mutable pointer;
     // the content-addressed PHP artifact remains OPcache's responsibility.
-    // The name only labels failure log lines — no reason to hash the path.
+    // The name only labels failure log lines, so it need not hash the path.
     $pointerRead = _sf_pointer_read('version-root:' . basename($versionDir), $versionDir . '/root.json');
     if ($pointerRead['kind'] === 'unavailable') {
         // Terminal here, not a null return: null means version-pending, whose
@@ -637,9 +667,9 @@ function _stattic_v4_entry(string $versionDir, array $root, string $key): ?array
     }
     $table = _stattic_v4_include_artifact($versionDir . '/' . $file);
     if ($table === false) {
-        // Terminal: a null return means "no entry", which the ladder resolves
-        // to a platform 404 with s-maxage=600 — ten edge-cached minutes of 404
-        // on a live page off one failed include.
+        // Terminal: a null return means "no entry", which the ladder resolves to
+        // a platform 404 with s-maxage=600, ten edge-cached minutes of 404 on a
+        // live page off one failed include.
         _stattic_render_runtime_unavailable_lazy('response_table_unreadable');
     }
     if (!is_array($table)) {
@@ -650,7 +680,7 @@ function _stattic_v4_entry(string $versionDir, array $root, string $key): ?array
 }
 
 // The directory in a `\0404:<dir>` key is the published path with `404.html`
-// stripped and every slash trimmed — `docs`, `docs/api` — so the probe carries
+// stripped and every slash trimmed, `docs` or `docs/api`, so the probe carries
 // NO leading slash, and the root's chain member is the bare `\0404` key.
 function _stattic_v4_nearest_not_found(string $versionDir, array $root, string $requestPath): ?array
 {
@@ -670,9 +700,8 @@ function _stattic_v4_nearest_not_found(string $versionDir, array $root, string $
 
 // A static entry at a worker-claimed path can become a draft response when one
 // of the version's declared bypass cookies is present. This answers the
-// cacheability question WITHOUT requiring a cookie on this request: the normal
-// response must never warm a shared edge cache that would hide a later cookie
-// from PHP altogether.
+// cacheability question WITHOUT a cookie on this request: the normal response
+// must never warm a shared edge cache that would hide a later cookie from PHP.
 function _stattic_v4_functions_static_bypass_capable(string $versionRoot, string $requestPath, string $requestMethod): bool
 {
     if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
@@ -685,10 +714,9 @@ function _stattic_v4_functions_static_bypass_capable(string $versionRoot, string
         return false;
     }
     if ($configRead['kind'] !== 'present') {
-        // Unavailable/malformed configuration is NOT proof of no bypass.
-        // Conservatively keep the ordinary response out of shared cache; a
-        // later healthy request can recover the exact route/cookie answer
-        // without a stale edge HIT hiding it.
+        // Unavailable/malformed configuration is NOT proof of no bypass. Keep
+        // the ordinary response out of shared cache so a later healthy request
+        // can recover the exact route/cookie answer without a stale edge HIT.
         return true;
     }
     // `present` already proved `artifact` is an array with its required fields.
@@ -704,10 +732,10 @@ function _stattic_v4_functions_static_bypass_capable(string $versionRoot, string
     require_once __DIR__ . '/functions-dispatch.php';
     $routesRead = _stattic_try_load_functions_routes_artifact($versionRoot);
     if ($routesRead['kind'] === 'unavailable') {
-        // The path table determines whether this static URL can vary. Failure
-        // is not proof of no bypass, but the committed asset still owns this
-        // lane: serve it no-store rather than replacing it with an invariant
-        // response from the later Functions route lane.
+        // The path table decides whether this static URL can vary. Failure is
+        // not proof of no bypass, but the committed asset still owns this lane:
+        // serve it no-store rather than replacing it with an invariant response
+        // from the later Functions route lane.
         return true;
     }
     if ($routesRead['kind'] === 'absent') {
@@ -745,7 +773,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     $headers = _stattic_v4_entry_headers($context, $entry);
 
     // A compiled redirect: the ordered lane never runs for it, so its two
-    // guarantees are reproduced here — every visitor method is admitted, and the
+    // guarantees are reproduced here. Every visitor method is admitted, and the
     // request's query rides across unless the destination states one.
     $isRedirect = $status >= 300 && $status < 400 && isset($headers['location']);
     if ($isRedirect) {
@@ -757,13 +785,12 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         // A static entry serves representations and owns no verbs beyond them,
         // so a non-GET/HEAD request is not its to TERMINATE: it records
         // {GET, HEAD} into the Allow union and declines back to the ladder,
-        // where a Zero pattern or a Functions route may still claim the method
-        // (both resolutions are method-aware). If nothing claims it, the ladder
-        // renders the accumulated 405 — never the 404 tail, because this path
-        // exists. OPTIONS keeps its current behavior on purpose: it is not
-        // special-cased anywhere on this ride, so unclaimed it still ends at
-        // the same 405-with-Allow it always received, with no synthesized
-        // 204/Allow probe answer.
+        // where a method-aware Zero pattern or Functions route may still claim
+        // the method. If nothing claims it, the ladder renders the accumulated
+        // 405, never the 404 tail, because this path exists. OPTIONS is not
+        // special-cased anywhere here, so unclaimed it ends at the same
+        // 405-with-Allow it always received, with no synthesized 204/Allow
+        // probe answer.
         _stattic_method_decline(['GET', 'HEAD']);
         return;
     }
@@ -785,8 +812,8 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
 
     // Only cache-control is composed here, from the entry's class and whether the
     // response ended up shared-cacheable. An entry with no cache class shipped an
-    // explicit policy — honored as-is, unless this response is private, where an
-    // explicit public policy would be a disclosure.
+    // explicit policy, honored as-is unless this response is private, where a
+    // public policy would be a disclosure.
     $cacheClass = is_string($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_CACHE_CLASS] ?? null)
         ? $entry[STATTIC_RUNTIME_RESPONSE_ENTRY_CACHE_CLASS]
         : null;
@@ -918,7 +945,13 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
 // private-content boundary, then the two headers a publisher may never decide.
 function _stattic_v4_platform_response_headers(array $context, array $headers, bool $privateCache): array
 {
+    _stattic_platform_vary_headers(
+        is_array($context['request_vary_headers'] ?? null)
+            ? $context['request_vary_headers']
+            : []
+    );
     if ($privateCache) {
+        _stattic_platform_vary_headers(['Cookie']);
         $headers = array_change_key_case(
             _stattic_private_content_response_headers($headers),
             CASE_LOWER
@@ -997,7 +1030,7 @@ function _stattic_v4_dispatch_action(array $context, array $action, array $entry
 {
     $type = is_string($action['t'] ?? null) ? $action['t'] : '';
     $serving = is_array($context['serving']) ? $context['serving'] : [];
-    // The action's methods are enforced HERE — before any dispatch — or not at
+    // The action's methods are enforced HERE, before any dispatch, or not at
     // all: every lane below hands the request to a module that has no idea which
     // methods this table key declared. A `404` action declares nothing servable,
     // so it is not method-gated.
@@ -1063,8 +1096,7 @@ function _stattic_v4_serve_listing(array $context, array $action, array $entry, 
         if (!is_array($row) || !is_string($row[0] ?? null) || !is_string($row[1] ?? null)) {
             continue;
         }
-        // Rows are keyed by their committed path precisely so this check can be
-        // made; a row the visitor may not reach is dropped, not challenged for.
+        // Rows are keyed by their committed path so this check can be made.
         if (!$open && _stattic_v4_listing_row_visible($context, $row[0]) !== true) {
             continue;
         }
@@ -1074,9 +1106,9 @@ function _stattic_v4_serve_listing(array $context, array $action, array $entry, 
         }
     }
 
-    // The entry's compiled header set — with this version's `_headers` rules
-    // applied over it, exactly as a compiled body gets them — ships with the
-    // joined body, through the same platform boundary the entry lane applies.
+    // The entry's compiled header set, with this version's `_headers` rules
+    // applied over it exactly as a compiled body gets them, ships with the
+    // joined body through the same platform boundary the entry lane applies.
     $headers = _stattic_v4_platform_response_headers(
         $context,
         _stattic_v4_entry_headers($context, $entry),
@@ -1132,10 +1164,8 @@ function _stattic_v4_blob_contents(array $context, string $sha): ?string
 }
 
 // The "\0rules" entry carries both sections under the entry's ACTION key, the
-// same slot every other non-file entry uses. A flat ordered-rule shape is still
-// read as the redirect list.
-// The residue always rides the entry's action object with `redirects`/`headers`
-// sections — the only shape the compiler emits.
+// same slot every other non-file entry uses, with `redirects`/`headers`
+// sections: the only shape the compiler emits.
 function _stattic_v4_rule_section(?array $rulesEntry, string $section): ?array
 {
     $rules = $rulesEntry[STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION][$section] ?? null;
@@ -1149,9 +1179,9 @@ function _stattic_v4_rule_section(?array $rulesEntry, string $section): ?array
 }
 
 // The complete header set for one table response: the entry's compiled `h` with
-// the version's `_headers` rules applied over it. The rules are matched here,
-// against the CLIENT path, because the table key that answers is not always the
-// URL the visitor asked for — a mount prefix or a residue rewrite moves it.
+// the version's `_headers` rules applied over it. The rules match against the
+// CLIENT path, because a mount prefix or a residue rewrite moves the table key
+// that answers away from the URL the visitor asked for.
 function _stattic_v4_entry_headers(array $context, array $entry): array
 {
     $headers = [];
@@ -1253,19 +1283,18 @@ function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath
         $functionsRoute = _stattic_resolve_functions_route_action($versionRoot, $lookup, $requestMethod);
         // A path the table claims at other methods ends at a 405, never a fall
         // through to the SPA index or a 404: the route exists, the verb does
-        // not. The router's Allow joins the union (a static entry may already
-        // have recorded {GET, HEAD} for this same path) and the caller renders
-        // the accumulated 405 once every lane has had its chance.
+        // not. The router's Allow joins the union, which the caller renders once
+        // every lane has had its chance.
         if (is_array($functionsRoute) && !empty($functionsRoute['method_not_allowed'])) {
             $allow = array_values(array_filter($functionsRoute['allow'] ?? [], 'is_string'));
             _stattic_method_decline($allow === [] ? ['GET', 'HEAD'] : $allow);
         }
         if (is_array($functionsRoute) && ($functionsRoute['action'] ?? null) === 'dispatch_functions') {
             // The same slot the exact-route Functions action takes in
-            // _stattic_v4_dispatch_action: a dispatched worker holds this
-            // PHP-FPM worker for up to 30s and its relay calls re-enter the
-            // same pool, so the pattern lane must pay the identical
-            // uncacheable-concurrency admission the Zero branch above does.
+            // _stattic_v4_dispatch_action: a dispatch holds this PHP-FPM worker
+            // for up to 30s and its relay calls re-enter the same pool, so this
+            // lane pays the same uncacheable-concurrency admission the Zero
+            // branch above does.
             _stattic_admission_acquire_once((string) $context['private_root'], $context['serving'], 'zero');
             _stattic_functions_dispatch(
                 $versionRoot,
@@ -1346,7 +1375,7 @@ function _stattic_render_platform_action(array $action, bool $privateCache = fal
         if ($variant === null) {
             _stattic_render_runtime_invariant_error_lazy('route-action-metadata-missing', 'Runtime tombstone page id is missing.');
         }
-        // The variant's policy is the floor — the CSAM variant is no-store, and
+        // The variant's policy is the floor: the CSAM variant is no-store, and
         // an unvalidated action must not talk the edge into holding it.
         $policy = _stattic_cache_policy([
             'private' => $privateCache,
@@ -1475,9 +1504,9 @@ function _stattic_send_route_redirect(array $action, string $remainder, bool $pr
 function _stattic_send_platform_404(bool $privateCache, string $requestPath, bool $requestVarying): never
 {
     // Structural backstop: the SPA fallback and publisher-404 entries above are
-    // themselves static entries that decline non-GET/HEAD into the union, so
-    // the union must win again here — a skipped-for-method path never reports
-    // 404 no matter which rung the ladder ran out on.
+    // static entries that decline non-GET/HEAD into the union, so the union must
+    // win again here. A skipped-for-method path never reports 404, whichever
+    // rung the ladder ran out on.
     _stattic_render_method_declined_405_if_any();
     require_once __DIR__ . '/../shared/errors.php';
     $serving = is_array($GLOBALS['SPACEFAST_PAGE_SERVING'] ?? null) ? $GLOBALS['SPACEFAST_PAGE_SERVING'] : [];
@@ -1515,7 +1544,7 @@ function _stattic_action_allows_method(?array $action, string $requestMethod): b
 //
 // `/` is deliberately NOT reserved: it is the first application route a shell
 // owns. This branch is only reached when nothing answered `/` already, so a
-// version with a real index is unaffected — but a version whose homepage IS the
+// version with a real index is unaffected. A version whose homepage IS the
 // configured 200 fallback (no inferable root index) would otherwise 404 at its
 // own front door.
 function _stattic_lookup_not_found_is_terminal(string $lookup): bool
@@ -1681,7 +1710,7 @@ function _stattic_enforce_access_for_proxy(array $serving, string $requestHost, 
     }
 }
 
-// Matching runs against the compiled Content-Type — metadata is the single
+// Matching runs against the compiled Content-Type. Metadata is the single
 // serve-time truth (nosniff), so bytes can never smuggle past the allowlist.
 function _stattic_serving_content_type_policy(array $serving): ?array
 {

@@ -9,9 +9,9 @@ declare(strict_types=1);
  *       --host=example.spacefast.io --key=api-cron-growth-report
  *
  * It resolves the key against the ACTIVE version's `__spacefast/crons.json` and
- * runs that path through entrypoints/invoke.php's dispatch — the same routing a
- * visitor gets, static entries through Zero through the Functions relay — with
- * two headers added:
+ * runs that path through entrypoints/invoke.php's dispatch. That is the same
+ * routing a visitor gets, static entries through Zero through the Functions
+ * relay, with two headers added:
  *
  *   x-spacefast-cron   `<key>.<minute>.<hmac>`, asserted by this process and
  *                      stripped off every inbound request, so a handler that

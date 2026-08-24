@@ -1,8 +1,7 @@
 use sha2::{Digest, Sha256};
 use stattic_runtime_core::{
-    finalize_site, read_site_finalize_input, transform_private_root, write_site_finalize_error,
-    write_site_finalize_output, FinalizeError, RuntimeDiagnosticSeverity, SiteFinalizeInput,
-    SITE_FINALIZE_INPUT_FORMAT,
+    finalize_site, read_site_finalize_input, write_site_finalize_error, write_site_finalize_output,
+    FinalizeError, RuntimeDiagnosticSeverity, SiteFinalizeInput, SITE_FINALIZE_INPUT_FORMAT,
 };
 use std::env;
 use std::fs;
@@ -17,10 +16,7 @@ enum Command {
         capabilities: Option<String>,
         generated_source: Option<String>,
     },
-    Migrate(String),
-    CatalogTransform(PathBuf),
     Invoke,
-    DbBroker,
     ServiceBroker,
     SelfTest,
 }
@@ -88,12 +84,7 @@ fn run() -> Result<(), CliError> {
             capabilities.as_deref(),
             generated_source.as_deref(),
         )),
-        Command::Migrate(version_root) => {
-            exit_with_status(stattic_zero_runner::migrate(&version_root))
-        }
-        Command::CatalogTransform(private_root) => catalog_transform_command(&private_root)?,
         Command::Invoke => stattic_zero_runner::run_stdio(),
-        Command::DbBroker => stattic_zero_runner::run_db_broker_stdio(),
         Command::ServiceBroker => stattic_zero_runner::run_service_broker_stdio(),
         Command::SelfTest => self_test()?,
     }
@@ -124,20 +115,6 @@ fn finalize_site_command(args: FinalizeArgs) -> Result<(), CliError> {
             write_site_finalize_error(&error, path)?;
         }
         return Err(error.into());
-    }
-    Ok(())
-}
-
-/// The one-time `metadata.json → catalog` migration for versions finalized
-/// before the catalog existed. Sweeps every retained version under the private
-/// storage root, prints the coverage report the release gate reads, and exits
-/// nonzero when any version could not be projected — a catalog-less version
-/// must stop the cutover, never reach a runtime that cannot answer for it.
-fn catalog_transform_command(private_root: &std::path::Path) -> Result<(), CliError> {
-    let report = transform_private_root(private_root)?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    if report.failed > 0 {
-        std::process::exit(1);
     }
     Ok(())
 }
@@ -252,22 +229,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliErro
                 _ => Err(CliError::Usage(usage())),
             }
         }
-        "migrate" => {
-            let values = args.collect::<Vec<_>>();
-            match values.as_slice() {
-                [version_root] => Ok(Command::Migrate(version_root.clone())),
-                _ => Err(CliError::Usage(usage())),
-            }
-        }
-        "catalog-transform" => {
-            let values = args.collect::<Vec<_>>();
-            match values.as_slice() {
-                [private_root] => Ok(Command::CatalogTransform(PathBuf::from(private_root))),
-                _ => Err(CliError::Usage(usage())),
-            }
-        }
         "invoke" => no_operands(args, Command::Invoke),
-        "db-broker" => no_operands(args, Command::DbBroker),
         "service-broker" => no_operands(args, Command::ServiceBroker),
         "--help" | "-h" | "help" => Err(CliError::Usage(usage())),
         _ => Err(CliError::Usage(format!(
@@ -326,10 +288,7 @@ fn usage() -> String {
     "usage:
   stattic-runtime finalize --input <input.json> [--version-root <dir>] [--output <file>] [--dry-run]
   stattic-runtime prepare <source.js> <bytecode> [capabilities-json] [generated-source.js]
-  stattic-runtime migrate <version-root>
-  stattic-runtime catalog-transform <private-root>
   stattic-runtime invoke
-  stattic-runtime db-broker
   stattic-runtime service-broker
   stattic-runtime --self-test
 

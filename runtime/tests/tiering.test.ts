@@ -38,11 +38,12 @@ import {
 import path from "node:path";
 
 import {
-  api,
+  ackEvents,
   apiJson,
   blobPath,
   createDeclaredSession,
   deploy,
+  drainEvents,
   get,
   journalRecords,
   publicAccessConfig,
@@ -54,6 +55,7 @@ import {
   startRuntime,
   storagePath,
   versionRoot,
+  type DrainedEvent,
   type Runtime,
 } from "./harness.ts";
 import { startFakeS3, type FakeS3 } from "./s3-fake.ts";
@@ -98,7 +100,6 @@ beforeAll(async () => {
   rt = await startRuntime({
     atomicData: { SPACEFAST_STORAGE_BUCKETS_JSON: bucketsJson() },
     env: {
-      SPACEFAST_TIERING_ENABLED: "1",
       // Collect on the spot: every maintenance pass in this suite is meant to
       // finish the mark-then-delete cycle rather than leave it half-done.
       SPACEFAST_LOCAL_BLOB_GC_GRACE_SECONDS: "0",
@@ -260,6 +261,37 @@ function promoteAdmissionCounterPath(runtime: Runtime, spaceId: string): string 
   return storagePath(runtime, "runtime", "admission", `tier_promote-${spaceId}.json`);
 }
 
+/** The bucket objects filed under one space's derived CAS prefix. */
+function casKeysInBucket(spaceId: string): string[] {
+  return [...fake.objects.keys()].filter((key) => key.startsWith(`spaces/${spaceId}/blobs/`));
+}
+
+/**
+ * Walks the callback drain, acking as it goes, until the named event for this
+ * space is delivered — the seam the control plane actually reads. Nothing else
+ * in this suite drains, so moving the cursor here costs no other test anything.
+ */
+async function drainSpaceEvent(
+  runtime: Runtime,
+  eventName: string,
+  spaceId: string,
+): Promise<DrainedEvent | null> {
+  for (let i = 0; i < 50; i += 1) {
+    const page = await drainEvents(runtime);
+    const found = page.events.find(
+      (entry) => entry.event.event === eventName && entry.event.space_id === spaceId,
+    );
+    if (found) {
+      return found;
+    }
+    if (page.pending_count === 0) {
+      return null;
+    }
+    await ackEvents(runtime, { cursor: page.cursor });
+  }
+  return null;
+}
+
 test("demote syncs every live blob to its derived key, unlinks it, and leaves the mark for lazy rehydration", async () => {
   const spaceId = nextId("spc_tier_demote");
   const versionId = nextId("ver_tier_demote");
@@ -291,10 +323,21 @@ test("demote syncs every live blob to its derived key, unlinks it, and leaves th
   expect(existsSync(demoteMarkPath(rt, spaceId, sha))).toBe(true);
   expect(casBlobs(rt, spaceId)).toEqual([]);
 
-  const events = journalRecords(rt);
-  expect(events.some((e) => e.event === "space.tier.demoted" && e.space_id === spaceId)).toBe(true);
+  // The terminal record is a DRAINED management event, not a diagnostic: the
+  // control plane's archivedBytes rollup runs off it, and the drain only
+  // delivers entries carrying an event_id. Without one the demote lands on the
+  // box and the control plane never learns the bytes moved.
+  const delivered = await drainSpaceEvent(rt, "space.tier.demoted", spaceId);
+  expect(delivered?.event_id).toBeString();
+  expect(delivered?.event).toMatchObject({
+    space_id: spaceId,
+    version_ids: [versionId],
+    bytesMoved: bytesBefore,
+    blobCount: before.length,
+  });
+
   expect(
-    events.some(
+    journalRecords(rt).some(
       (e) =>
         e.event === "local_blob_gc" && [...(e.evicted ?? []), ...(e.collected ?? [])].includes(sha),
     ),
@@ -403,10 +446,17 @@ test("promote refuses a bucket object whose bytes do not match its key: 503, not
   expect(retried.status).toBe(503);
   await retried.text();
 
-  const failure = journalRecords(rt).find(
-    (e) => e.event === "tier_promote_failed" && e.sha256 === sha,
+  // A promote that could not produce bytes is the control plane's bucket
+  // canary, so it is a DRAINED management event, not a local diagnostic: two
+  // failed reads are two rows there, which is what makes the per-bucket
+  // threshold able to fire at all.
+  const failures = journalRecords(rt).filter(
+    (e) => e.event === "tier_fetch_failed" && e.sha256 === sha,
   );
-  expect(failure?.reason).toBe("blob_sha_mismatch");
+  expect(failures.map((e) => e.reason)).toEqual(["blob_sha_mismatch", "blob_sha_mismatch"]);
+  expect(failures[0]?.event_id).toBeString();
+  expect(new Set(failures.map((e) => e.event_id)).size).toBe(2);
+  expect(failures[0]?.bucket).toBe("tier-bucket");
 });
 
 test("promote sheds above the per-space concurrency cap: 503 without dialing the bucket", async () => {
@@ -499,10 +549,10 @@ test("the blob GC deletes nothing when a live response table cannot be read", as
   expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(body);
 });
 
-test("the maintenance tick refuses to prune a routed version, trashes the unrouted one, collects the blobs it alone referenced, and reports disk usage", async () => {
-  const spaceId = nextId("spc_tier_prune");
-  const versionOld = nextId("ver_tier_prune_old");
-  const versionLive = nextId("ver_tier_prune_live");
+test("targeted version deletion makes its exclusive blobs collectable and leaves the live version serving", async () => {
+  const spaceId = nextId("spc_tier_delete");
+  const versionOld = nextId("ver_tier_delete_old");
+  const versionLive = nextId("ver_tier_delete_live");
   const host = hostFor(spaceId);
   const oldBody = "only-in-the-old-version\n".repeat(1500);
   // A private path: it answers no URL, so no response table names its bytes and
@@ -519,43 +569,27 @@ test("the maintenance tick refuses to prune a routed version, trashes the unrout
   const oldSha = entrySha(rt, spaceId, versionOld, "/assets/old.txt");
   const liveSha = entrySha(rt, spaceId, versionLive, "/assets/live.txt");
 
-  // Retention policy arrives through the management write surface, never a raw
-  // file drop, and an invalid body never lands.
-  const invalid = await api(
+  const deleted = await apiJson<{ space_id: string; version_id: string; status: string }>(
     rt,
-    "PUT",
-    `/__spacefast/api.php/spaces/${spaceId}/retention-policy`,
-    "update_retention_policy",
-    { space_id: spaceId },
-    { prunable_version_ids: "nope" },
+    "POST",
+    `/__spacefast/api.php/spaces/${spaceId}/versions/${versionOld}/delete`,
+    "delete_version",
+    { space_id: spaceId, version_id: versionOld },
   );
-  expect(invalid.status).toBe(422);
-  const policy = await apiJson<{ space_id: string; prunable_count: number }>(
-    rt,
-    "PUT",
-    `/__spacefast/api.php/spaces/${spaceId}/retention-policy`,
-    "update_retention_policy",
-    { space_id: spaceId },
-    { prunable_version_ids: [versionOld, versionLive] },
-  );
-  expect(policy.space_id).toBe(spaceId);
-  expect(policy.prunable_count).toBe(2);
+  expect(deleted).toMatchObject({
+    space_id: spaceId,
+    version_id: versionOld,
+    status: "deleted",
+  });
 
   await tick(rt);
 
-  // The engine re-checks the space's route pointers before it moves anything:
-  // the control plane listed the routed version, and the engine refuses it.
   expect(existsSync(versionRoot(rt, spaceId, versionOld))).toBe(false);
   expect(existsSync(versionRoot(rt, spaceId, versionLive))).toBe(true);
-  const pruned = journalRecords(rt).find(
-    (e) => e.event === "space.versions.pruned" && e.spaceId === spaceId,
-  );
-  expect(pruned?.versionIds).toEqual([versionOld]);
-  expect(pruned?.refusedVersionIds).toEqual([versionLive]);
 
-  // The pruned version was the only declaration naming those bytes, so the same
-  // pass collects them as garbage. The routed version's blob is untouched and
-  // still serves — the live set is read from what survived, not from a list.
+  // The deleted version was the only declaration naming these bytes, so the
+  // maintenance pass collects them. The routed version and its private source
+  // object remain declared and serving.
   expect(readBlob(rt, spaceId, oldSha)).toBeNull();
   const collected = journalRecords(rt).find(
     (e) => e.event === "local_blob_gc" && (e.collected ?? []).includes(oldSha),
@@ -573,82 +607,78 @@ test("the maintenance tick refuses to prune a routed version, trashes the unrout
   expect(Number(report?.inodes)).toBeGreaterThan(0);
 });
 
-test("version pruning skips a space whose live routes cannot be enumerated", async () => {
-  const spaceId = nextId("spc_tier_prune_unavailable");
-  const liveVersion = nextId("ver_tier_prune_unavailable_live");
-  const oldVersion = nextId("ver_tier_prune_unavailable_old");
-  const host = hostFor(spaceId);
-  await deployFixture(rt, spaceId, oldVersion, host, { "index.html": "old" });
-  await deployFixture(rt, spaceId, liveVersion, host, { "index.html": "live" });
-  await apiJson(
-    rt,
-    "PUT",
-    `/__spacefast/api.php/spaces/${spaceId}/retention-policy`,
-    "update_retention_policy",
-    { space_id: spaceId },
-    { prunable_version_ids: [oldVersion] },
-  );
-
-  const routesRoot = storagePath(rt, "spaces", spaceId, "routes");
-  chmodSync(routesRoot, 0o000);
+test("promote fails cleanly on a box with no bucket configured: 503, and the canary hears about it", async () => {
+  // Tiering is native, so "no bucket manifest" is the only remaining way for a
+  // promote to be impossible — and it must degrade to a 503, never to a serve
+  // of nothing. The control plane learns about it through the same drained
+  // canary event a real bucket failure raises.
+  const bucketless = await startRuntime({
+    env: { SPACEFAST_LOCAL_BLOB_GC_GRACE_SECONDS: "0" },
+  });
   try {
-    await tick(rt);
-    expect(existsSync(versionRoot(rt, spaceId, oldVersion))).toBe(true);
-    expect(existsSync(versionRoot(rt, spaceId, liveVersion))).toBe(true);
+    const spaceId = nextId("spc_tier_no_bucket");
+    const versionId = nextId("ver_tier_no_bucket");
+    const host = hostFor(spaceId);
+    const body = "no-bucket-here\n".repeat(4000);
+    await deployFixture(bucketless, spaceId, versionId, host, { "assets/local.txt": body });
+    const sha = entrySha(bucketless, spaceId, versionId, "/assets/local.txt");
+
+    // The blob is remote-only, exactly as a demote would have left it.
+    rmSync(blobPath(bucketless, spaceId, sha));
+    writeFileSync(demoteMarkPath(bucketless, spaceId, sha), "{}\n");
+
+    const served = await get(bucketless, host, "/assets/local.txt");
+    expect(served.status).toBe(503);
+    await served.text();
+    expect(readBlob(bucketless, spaceId, sha)).toBeNull();
+
+    const failure = journalRecords(bucketless).find(
+      (e) => e.event === "tier_fetch_failed" && e.sha256 === sha,
+    );
+    expect(failure?.reason).toBe("storage_bucket_unavailable");
+    expect(failure?.event_id).toBeString();
   } finally {
-    chmodSync(routesRoot, 0o775);
+    bucketless.stop();
   }
 });
 
-test("tiering is disabled by default: jobs and promote-on-read move no bytes", async () => {
-  const parked = await startRuntime({
-    atomicData: { SPACEFAST_STORAGE_BUCKETS_JSON: bucketsJson() },
-    env: {
-      SPACEFAST_LOCAL_BLOB_GC_GRACE_SECONDS: "0",
-    },
+test("deleting a space reclaims its bucket prefix and leaves other spaces' objects alone", async () => {
+  // The object key is derived from (space, sha) and stored nowhere, so once the
+  // space tree is gone there is no list left to reclaim its bucket bytes from —
+  // the delete is the only moment this can happen.
+  const spaceId = nextId("spc_tier_delete");
+  const versionId = nextId("ver_tier_delete");
+  const neighbourId = nextId("spc_tier_delete_neighbour");
+  const neighbourVersionId = nextId("ver_tier_delete_neighbour");
+  await deployFixture(rt, spaceId, versionId, hostFor(spaceId), {
+    "assets/gone.txt": "reclaim-me\n".repeat(2000),
   });
-  try {
-    const spaceId = nextId("spc_tiering_parked");
-    const versionId = nextId("ver_tiering_parked");
-    const host = hostFor(spaceId);
-    const body = "wp-cloud-local\n".repeat(4000);
-    await deployFixture(parked, spaceId, versionId, host, { "assets/local.txt": body });
-    const sha = entrySha(parked, spaceId, versionId, "/assets/local.txt");
-    const key = objectKey(spaceId, sha);
+  await deployFixture(rt, neighbourId, neighbourVersionId, hostFor(neighbourId), {
+    "assets/kept.txt": "keep-me\n".repeat(2000),
+  });
+  expect((await demote(rt, spaceId)).status).toBe("complete");
+  expect((await demote(rt, neighbourId)).status).toBe("complete");
 
-    fake.requests.splice(0);
-    const rejected = await api(
-      parked,
-      "POST",
-      "/__spacefast/api.php/jobs",
-      "create_engine_job",
-      { space_id: spaceId },
-      {
-        type: "tier_demote",
-        idempotency_key: `tier-parked:${spaceId}`,
-        payload: { space_id: spaceId },
-      },
-    );
-    expect(rejected.status).toBe(422);
-    expect(((await rejected.json()) as { code?: string }).code).toBe("tiering_disabled");
+  const deletedKeys = casKeysInBucket(spaceId);
+  const neighbourKeys = casKeysInBucket(neighbourId);
+  expect(deletedKeys.length).toBeGreaterThan(0);
+  expect(neighbourKeys.length).toBeGreaterThan(0);
 
-    await tick(parked);
-    expect(readBlob(parked, spaceId, sha)?.toString("utf8")).toBe(body);
-    expect(existsSync(demoteMarkPath(parked, spaceId, sha))).toBe(false);
-    expect(fake.getObject(key)).toBeUndefined();
-    expect(fake.requests).toHaveLength(0);
+  const deleted = await apiJson<{ status: string }>(
+    rt,
+    "POST",
+    `/__spacefast/api.php/spaces/${spaceId}/delete`,
+    "delete_space",
+    { space_id: spaceId },
+    {},
+  );
+  expect(deleted.status).toBe("deleted");
 
-    // Even a pre-existing remote-only reference cannot dial or install while
-    // the switch is off. Re-enabling later retains the original recovery path.
-    fake.putObject(key, Buffer.from(body));
-    rmSync(blobPath(parked, spaceId, sha));
-    writeFileSync(demoteMarkPath(parked, spaceId, sha), "{}\n");
-    fake.requests.splice(0);
-    const served = await get(parked, host, "/assets/local.txt");
-    expect(served.status).toBe(503);
-    expect(readBlob(parked, spaceId, sha)).toBeNull();
-    expect(fake.requests).toHaveLength(0);
-  } finally {
-    parked.stop();
-  }
+  expect(casKeysInBucket(spaceId)).toEqual([]);
+  expect(casKeysInBucket(neighbourId).toSorted()).toEqual(neighbourKeys.toSorted());
+  const reclaimed = journalRecords(rt).find(
+    (e) => e.event === "space_bucket_objects_reclaimed" && e.space_id === spaceId,
+  );
+  expect(reclaimed).toMatchObject({ complete: true, bucket: "tier-bucket" });
+  expect(Number(reclaimed?.deleted)).toBe(deletedKeys.length);
 });

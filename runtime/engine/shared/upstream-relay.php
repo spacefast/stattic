@@ -6,12 +6,12 @@ require_once __DIR__ . '/context.php';
 /**
  * One relay for every lane that puts an untrusted upstream's response on the
  * visitor's connection. A proxy route's origin and a tenant's Functions worker
- * are the same trust class — both answer on the space's own hostname — so both
- * cross here, and a lane's difference is an option, never a second filter.
+ * are the same trust class, both answering on the space's own hostname, so both
+ * cross here and a lane's difference is an option, never a second filter.
  *
- * The header state machine itself lives one layer down, in http.php: a status
- * line resets the collected block, and on_headers fires once for the first
- * non-1xx block, so a 1xx preamble's headers can never reach a visitor.
+ * The header state machine lives one layer down, in http.php: a status line
+ * resets the collected block, and on_headers fires once for the first non-1xx
+ * block, so a 1xx preamble's headers can never reach a visitor.
  */
 
 // Hop-by-hop / transport headers describe the hop we terminate (RFC 9110 §7.6.1);
@@ -46,12 +46,11 @@ function _stattic_relay_safe_header_value(string $value): string
 /**
  * The request's headers, from the request params themselves.
  *
- * Not getallheaders(): that function is a SAPI convenience php-fpm derives from
- * exactly these keys, and it does not EXIST on the plain CLI — where it would
- * silently answer "this request had no headers" and relay nothing. Reading
- * $_SERVER is the one spelling that holds on every lane, including the CLI
- * dispatch a cron enters through, and it is the same map the strip and the
- * platform assertion in shared/context.php operate on.
+ * Not getallheaders(): php-fpm derives it from exactly these keys, and it does
+ * not EXIST on the plain CLI, where a cron's dispatch would silently relay no
+ * headers at all. $_SERVER is the one spelling that holds on every lane, and
+ * the same map the strip and the platform assertion in shared/context.php
+ * operate on.
  *
  * @return array<string,string>
  */
@@ -70,8 +69,8 @@ function _stattic_relay_inbound_headers(bool $lowercase = false): array
         } else {
             continue;
         }
-        // One pass builds the caller's casing — Zero wants lowercase keys, the
-        // relay wants canonical Header-Case — so nobody rebuilds the map after.
+        // One pass builds the caller's casing, lowercase for Zero and canonical
+        // Header-Case for the relay, so nobody rebuilds the map after.
         $name = strtolower(str_replace('_', '-', $name));
         $headers[$lowercase ? $name : ucwords($name, '-')] = (string) $value;
     }

@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 // The route index and its pointer swap (contracts §3). v4 has no route
 // generations directory and no hardlink forwarding: shard files are immutable
 // and content-addressed, so an untouched shard keeps its NAME across a pointer
-// write (same content -> same sha16 -> same file) and dedupe is a property of
-// the addressing rather than a reuse pass. What is left to pin here is the swap
-// itself — gen monotonicity, which shards a mutation rewrites, previous.json as
-// the grace anchor, shard GC by (unreferenced AND aged), and the cross-space
-// correctness the incremental update's owners map exists to preserve.
+// write (same content -> same sha16 -> same file) and dedupe falls out of the
+// addressing rather than a reuse pass. What is left to pin is the swap itself:
+// gen monotonicity, which shards a mutation rewrites, previous.json as the
+// grace anchor, shard GC by (unreferenced AND aged), and the cross-space
+// correctness the incremental update's owners map preserves.
 import { chmodSync, existsSync, unlinkSync, utimesSync } from "node:fs";
 
 import {
@@ -126,9 +126,9 @@ test("activating a new version swaps the space overlay and leaves every route sh
     });
 
     // §3/§4: a production host follows its ROUTE, so the version lives in the
-    // overlay and nothing about the host->space mapping changed. The shard bytes
-    // are identical, so their content addresses are identical, and an identical
-    // index skips the pointer write entirely — gen counts real index changes.
+    // overlay and the host->space mapping is unchanged. The shard bytes are
+    // identical, so their content addresses are too, and an identical index
+    // skips the pointer write. gen counts real index changes.
     const after = readPointer(rt);
     expect(after.gen).toBe(before.gen);
     expect(after.shards).toEqual(before.shards);
@@ -299,8 +299,8 @@ test("a hostname change rewrites only the owning shard and keeps the retired poi
     expect(shardFile(after, SHARD_B)).not.toBe(shardFile(before, SHARD_B));
     expect(shardFile(after, SHARD_A)).toBe(shardFile(before, SHARD_A));
 
-    // The retired pointer — and therefore the superseded shard file — stays
-    // reachable for requests already mid-flight over the swap.
+    // The retired pointer, and so the superseded shard file, stays reachable
+    // for requests already mid-flight over the swap.
     expect(readPreviousPointer(rt)).toEqual(before);
     expect(existsSync(storagePath(rt, "routes", shardFile(before, SHARD_B)))).toBe(true);
 
@@ -392,9 +392,9 @@ test("cross-space hostname collisions stay correct through incremental pointer s
     expect(claimed.status).toBe(200);
     expect(await claimed.text()).toBe("s1");
 
-    // Space S releases the hostname: T's tombstone must resurface (the owners
+    // Space S releases the hostname: T's tombstone must resurface. The owners
     // map is what makes the incremental update recompute the host from BOTH
-    // spaces instead of only the mutating one).
+    // spaces instead of only the mutating one.
     await putRoute(rt, "spc_idx_s", "production", productionRoute([], "ver_idx_s1"));
     const resurfaced = await get(rt, sharedHost, "/");
     expect(resurfaced.status).toBe(404);
@@ -526,8 +526,8 @@ test("an invalid fresh shard leaves the active route pointer and served version 
     const before = readPointer(rt);
 
     // A shard is immutable once addressable, so a malformed one would be served
-    // until some later mutation happened to replace the pointer naming it: the
-    // writer must reject it before anything is written or swapped.
+    // until a later mutation replaced the pointer naming it. The writer must
+    // reject it before anything is written or swapped.
     const rejected = Bun.spawnSync([
       "php",
       "-r",
@@ -601,7 +601,7 @@ test("the maintenance tick reclaims only shards no pointer names and only past t
     const first = readPointer(rt);
     // Two more hostname changes: after the second, `first`'s artifacts are named
     // by neither current.json nor previous.json, which is when the writer stamps
-    // them as unlink candidates (D71/D93 — the tick deletes, it never marks).
+    // them as unlink candidates (D71/D93; the tick deletes, it never marks).
     await putRoute(
       rt,
       spaceId,
@@ -619,8 +619,8 @@ test("the maintenance tick reclaims only shards no pointer names and only past t
       ...pointerFiles(readPointer(rt)),
       ...pointerFiles(readPreviousPointer(rt)),
     ]);
-    // The retired host shard and the retired owners map: enough to hold one back
-    // inside the grace window while the other ages out.
+    // The retired host shard and owners map: enough to hold one inside the
+    // grace window while the other ages out.
     const [withinGrace, ...aged] = pointerFiles(first).filter((name) => !referenced.has(name));
     expect(withinGrace).toBeDefined();
     expect(aged.length).toBeGreaterThanOrEqual(1);
@@ -648,10 +648,10 @@ test("the maintenance tick reclaims only shards no pointer names and only past t
       expect(await served.text()).toBe("gc");
     }
 
-    // The referenced set must be PROVEN: with current.json unreadable, the GC
-    // must treat the live set as unknown and delete nothing — inferring
-    // "nothing is referenced" from the failed read would unlink every live
-    // shard and 503 the whole site until the next route write.
+    // The referenced set must be PROVEN. With current.json unreadable the GC
+    // treats the live set as unknown and deletes nothing; reading the failed
+    // read as "nothing is referenced" would unlink every live shard and 503 the
+    // site until the next route write.
     chmodSync(storagePath(rt, "routes", "current.json"), 0o000);
     try {
       utimesSync(storagePath(rt, "routes", String(withinGrace)), staleAt, staleAt);

@@ -171,20 +171,23 @@ pub const RESPONSE_LANE_PHP: u64 = 1;
 /// `cc` values. The overlay's `open` flag picks the open or protected string at
 /// send time, because open-ness is a space property and the version tables are
 /// immutable. The composing PHP is `_sf_cache_control`
-/// (runtime/engine/runtime/serve-fast.php) — these doc strings mirror it, they
+/// (runtime/engine/shared/cache-policy.php) — these doc strings mirror it, they
 /// do not define it.
 ///
 /// - `imm` — open: `public, max-age=31536000, immutable`. Protected: NEVER
 ///   immutable (a cached year outlives every revocation), so it composes
 ///   down to `private, no-store`.
-/// - `html` — open: `public, max-age=0, must-revalidate`, paired with the
-///   `A8C-Edge-Cache: cache` opt-in the engine adds at send time. Deliberately
-///   NO `s-maxage`: a document URL changes when its live route moves, and
-///   correctness must not depend on every Accept-Encoding cache variant being
-///   evicted — provider purges accelerate convergence, revalidation guarantees
-///   it. Protected: `private, no-store`.
-/// - `no` — open: `public, max-age=0, must-revalidate`. Protected:
-///   `private, no-store`.
+/// - `html` and `no` — open: `public, s-maxage=600, max-age=0,
+///   must-revalidate`, paired with the `A8C-Edge-Cache: cache` opt-in the
+///   engine adds at send time. Both classes are version-pinned content. A
+///   whole-host purge accelerates activation, while the bounded shared TTL
+///   keeps correctness independent from a deferred purge succeeding. Browsers
+///   revalidate every load (`max-age=0` + ETag). The edge stores only on a
+///   positive shared TTL beside the opt-in (measured live,
+///   e2e-tests/direct/wpcloud-behavior.test.ts). Protected:
+///   `private, no-store`. The two classes stay distinct in the compiled
+///   tables — document-ness still steers other seams, e.g. the changelog
+///   delta — not because the composed policy differs.
 pub const CACHE_CLASS_IMMUTABLE: &str = "imm";
 pub const CACHE_CLASS_HTML: &str = "html";
 pub const CACHE_CLASS_REVALIDATE: &str = "no";
@@ -749,15 +752,27 @@ pub fn php_source() -> String {
     let tenant_fetch_schemes = php_string_array(EgressProfile::TenantFetch.allowed_schemes());
     let proxy_route_schemes = php_string_array(EgressProfile::ProxyRoute.allowed_schemes());
     let provider_asset_extensions = php_string_array(PROVIDER_ASSET_EXTENSIONS);
+    // The MySQL broker's operation shape, sourced from the Rust engine
+    // `shared/db-broker.php` is specified against. Emitted under the engine's
+    // own spelling so the PHP file consumes them where it used to restate them.
+    let db_broker = format!(
+        "\nconst STATTIC_DB_OPERATION_MAX_BYTES = {};\nconst STATTIC_DB_PARAM_MAX_COUNT = {};\nconst STATTIC_DB_TRANSACTION_MAX_STATEMENTS = {};\nconst STATTIC_DB_RESULT_ROWS_MAX = {};\nconst STATTIC_DB_SESSION_PIN = {};\n",
+        stattic_zero_runner::DB_OPERATION_MAX_BYTES,
+        stattic_zero_runner::DB_PARAM_MAX_COUNT,
+        stattic_zero_runner::DB_TRANSACTION_MAX_STATEMENTS,
+        stattic_zero_runner::DB_RESULT_ROWS_MAX,
+        php_single_quoted(stattic_zero_runner::DB_SESSION_PIN),
+    );
     let platform_owned_prefixes = php_string_array(PLATFORM_OWNED_HEADER_PREFIXES);
     let platform_owned_headers = php_string_array(PLATFORM_OWNED_HEADERS);
     let responses = format!(
         "\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA = {ARTIFACT_SCHEMA_VERSION};\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA_MIN = {ARTIFACT_SCHEMA_MIN};\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA_MAX = {ARTIFACT_SCHEMA_MAX};\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA_NAME = '{ARTIFACT_SCHEMA_NAME}';\nconst STATTIC_RUNTIME_ARTIFACT_HASH_PREFIX_LEN = {ARTIFACT_HASH_PREFIX_LEN};\nconst STATTIC_RUNTIME_VERSION_ROOT_POINTER_FILE = '{VERSION_ROOT_POINTER_FILE}';\nconst STATTIC_RUNTIME_VERSION_ROOT_BASENAME = '{VERSION_ROOT_BASENAME}';\nconst STATTIC_RUNTIME_RESPONSE_TABLE_BASENAME = '{RESPONSE_TABLE_BASENAME}';\nconst STATTIC_RUNTIME_RESPONSE_TABLE_SINGLE_KEY = '{RESPONSE_TABLE_SINGLE_KEY}';\nconst STATTIC_RUNTIME_RESPONSE_TABLE_SPLIT_BYTES = {RESPONSE_TABLE_SPLIT_BYTES};\nconst STATTIC_RUNTIME_RESPONSE_TABLE_MAX_BYTES = {RESPONSE_TABLE_MAX_BYTES};\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS = '{RESPONSE_ENTRY_STATUS}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_HEADERS = '{RESPONSE_ENTRY_HEADERS}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_BLOB = '{RESPONSE_ENTRY_BLOB}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_ETAG = '{RESPONSE_ENTRY_ETAG}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_LENGTH = '{RESPONSE_ENTRY_LENGTH}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_LANE = '{RESPONSE_ENTRY_LANE}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION = '{RESPONSE_ENTRY_ACTION}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_CACHE_CLASS = '{RESPONSE_ENTRY_CACHE_CLASS}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_RULES_FIRST = '{RESPONSE_ENTRY_RULES_FIRST}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_ALLOWLISTED_EXT = '{RESPONSE_ENTRY_ALLOWLISTED_EXT}';\nconst STATTIC_RUNTIME_RESPONSE_LANE_ACCEL = {RESPONSE_LANE_ACCEL};\nconst STATTIC_RUNTIME_RESPONSE_LANE_PHP = {RESPONSE_LANE_PHP};\nconst STATTIC_RUNTIME_CACHE_CLASS_IMMUTABLE = '{CACHE_CLASS_IMMUTABLE}';\nconst STATTIC_RUNTIME_CACHE_CLASS_HTML = '{CACHE_CLASS_HTML}';\nconst STATTIC_RUNTIME_CACHE_CLASS_REVALIDATE = '{CACHE_CLASS_REVALIDATE}';\nconst STATTIC_RUNTIME_RESPONSE_KEY_SPA = \"\\0spa\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_NOT_FOUND = \"\\x00404\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_NOT_FOUND_PREFIX = \"\\x00404:\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_RULES = \"\\0rules\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_ROBOTS = \"\\0robots\";\nconst STATTIC_RUNTIME_RESPONSE_ACTION_ZERO = '{RESPONSE_ACTION_ZERO}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_FUNCTION = '{RESPONSE_ACTION_FUNCTION}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_PHP = '{RESPONSE_ACTION_PHP}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_PROXY = '{RESPONSE_ACTION_PROXY}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_LISTING = '{RESPONSE_ACTION_LISTING}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_NOT_FOUND = '{RESPONSE_ACTION_NOT_FOUND}';\nconst STATTIC_RUNTIME_PLATFORM_OWNED_HEADER_PREFIXES = {platform_owned_prefixes};\nconst STATTIC_RUNTIME_PLATFORM_OWNED_HEADERS = {platform_owned_headers};\nconst STATTIC_RUNTIME_PROVIDER_ASSET_EXTENSIONS = {provider_asset_extensions};\nconst STATTIC_RUNTIME_PHP_LANE_BODY_MAX_BYTES = {PHP_LANE_BODY_MAX_BYTES};\nconst STATTIC_RUNTIME_THEME_STYLESHEET_PATH = '{THEME_STYLESHEET_PATH}';\nconst STATTIC_RUNTIME_THEME_STYLESHEET_URL = '{THEME_STYLESHEET_URL}';\nconst STATTIC_RUNTIME_LISTING_ROWS_MARKER = '{LISTING_ROWS_MARKER}';\n"
     );
     format!(
-        "<?php\ndeclare(strict_types=1);\n\n// @generated by `cargo run -p stattic-runtime-compiler --bin protocol-codegen -- --php`.\n// Rust protocol and Zero runner constants are the only editable authorities.\n\nconst STATTIC_RUNTIME_ZERO_RUNNER_ABI = '{}';\nconst STATTIC_RUNTIME_ZERO_QUICKJS_ABI = '{}';\nconst STATTIC_RUNTIME_ZERO_BUNDLE_MAX_BYTES = {};\nconst STATTIC_RUNTIME_ZERO_BUNDLE_LIMIT = {};\nconst STATTIC_RUNTIME_EGRESS_MAX_REDIRECT_HOPS = {};\nconst STATTIC_RUNTIME_EGRESS_TENANT_FETCH_ALLOWED_SCHEMES = {};\nconst STATTIC_RUNTIME_EGRESS_PROXY_ROUTE_ALLOWED_SCHEMES = {};\nconst STATTIC_RUNTIME_EGRESS_DENIED_IPV4 = {};\nconst STATTIC_RUNTIME_EGRESS_DENIED_IPV6 = {};\nconst STATTIC_RUNTIME_EGRESS_INTERNAL_HOSTS = {};\nconst STATTIC_RUNTIME_BROKER_PROTOCOL = '{}';\nconst STATTIC_RUNTIME_EXECUTION_TIMEOUT_MS_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_TIMEOUT_MS_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_MEMORY_BYTES_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_MEMORY_BYTES_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_BODY_BYTES_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_BODY_BYTES_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_OUTPUT_BYTES_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_OUTPUT_BYTES_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_SUBREQUESTS_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_SUBREQUESTS_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_DB_OPERATIONS_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_DB_OPERATIONS_MAX = {};\n{}",
+        "<?php\ndeclare(strict_types=1);\n\n// @generated by `cargo run -p stattic-runtime-compiler --bin protocol-codegen -- --php`.\n// Rust protocol and Zero runner constants are the only editable authorities.\n\nconst STATTIC_RUNTIME_ZERO_RUNNER_ABI = '{}';\nconst STATTIC_RUNTIME_ZERO_QUICKJS_ABI = '{}';\nconst STATTIC_RUNTIME_ZERO_MIGRATIONS_FORMAT = '{}';\nconst STATTIC_RUNTIME_ZERO_BUNDLE_MAX_BYTES = {};\nconst STATTIC_RUNTIME_ZERO_BUNDLE_LIMIT = {};\nconst STATTIC_RUNTIME_EGRESS_MAX_REDIRECT_HOPS = {};\nconst STATTIC_RUNTIME_EGRESS_TENANT_FETCH_ALLOWED_SCHEMES = {};\nconst STATTIC_RUNTIME_EGRESS_PROXY_ROUTE_ALLOWED_SCHEMES = {};\nconst STATTIC_RUNTIME_EGRESS_DENIED_IPV4 = {};\nconst STATTIC_RUNTIME_EGRESS_DENIED_IPV6 = {};\nconst STATTIC_RUNTIME_EGRESS_INTERNAL_HOSTS = {};\nconst STATTIC_RUNTIME_BROKER_PROTOCOL = '{}';\nconst STATTIC_RUNTIME_EXECUTION_TIMEOUT_MS_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_TIMEOUT_MS_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_MEMORY_BYTES_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_MEMORY_BYTES_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_BODY_BYTES_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_BODY_BYTES_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_OUTPUT_BYTES_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_OUTPUT_BYTES_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_SUBREQUESTS_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_SUBREQUESTS_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_DB_OPERATIONS_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_DB_OPERATIONS_MAX = {};\nconst STATTIC_RUNTIME_CONFIG_INJECT_SNIPPET_LIMIT = {};\nconst STATTIC_RUNTIME_CONFIG_INJECT_SNIPPET_MAX_BYTES = {};\n{}{}",
         stattic_zero_runner::RUNNER_ABI,
         stattic_zero_runner::QUICKJS_ABI,
+        stattic_zero_runner::ZERO_MIGRATIONS_FORMAT,
         ZERO_BUNDLE_MAX_BYTES,
         ZERO_BUNDLE_LIMIT,
         EGRESS_MAX_REDIRECT_HOPS,
@@ -779,7 +794,10 @@ pub fn php_source() -> String {
         EXECUTION_SUBREQUESTS_MAX,
         EXECUTION_DB_OPERATIONS_DEFAULT,
         EXECUTION_DB_OPERATIONS_MAX,
+        CONFIG_INJECT_SNIPPET_LIMIT,
+        CONFIG_INJECT_SNIPPET_MAX_BYTES,
         responses,
+        db_broker,
     )
 }
 
@@ -793,6 +811,13 @@ fn php_string_array(values: &[impl AsRef<str>]) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+/// A PHP single-quoted string literal. Only the backslash and the quote itself
+/// carry meaning inside one, so escaping those two is the whole encoding.
+#[cfg(not(target_family = "wasm"))]
+fn php_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
 #[cfg(test)]

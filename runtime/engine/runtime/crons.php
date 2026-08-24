@@ -9,13 +9,13 @@ declare(strict_types=1);
  * path does that key name, and WHAT does the request have to carry so the
  * handler can tell the platform fired it.
  *
- * The manifest is the compiler's, read out of the ACTIVE version's file catalog
- * — `__spacefast/crons.json`, the same document `sf.jsonc` declared. The catalog
- * (metadata.json, written by finalize) is the version's authoritative file list,
- * so this reads what the version actually shipped rather than a second copy of
- * it. The path is a runtime control path a publish can never write
- * (admin/upload-policy.php reserves the whole `__spacefast` segment, with the
- * bundle prefix and the Zero deploy record as its only exceptions), so a
+ * The manifest is the compiler's, read out of the ACTIVE version's file
+ * catalog: `__spacefast/crons.json`, the same document `sf.jsonc` declared. The
+ * catalog (metadata.json, written by finalize) is the version's authoritative
+ * file list, so this reads what the version actually shipped rather than a
+ * second copy of it. The path is a runtime control path a publish can never
+ * write (admin/upload-policy.php reserves the whole `__spacefast` segment, with
+ * the bundle prefix and the Zero deploy record as its only exceptions), so a
  * declared cron can only have come through finalize.
  */
 
@@ -37,8 +37,8 @@ const STATTIC_CRON_SECRET_VARIABLE = 'CRON_SECRET';
 /**
  * The space and active version one hostname resolves to.
  *
- * The dispatcher needs these BEFORE a request exists — the manifest read is
- * what decides which request to make — so it walks the same pointers
+ * The dispatcher needs these BEFORE a request exists, because the manifest read
+ * is what decides which request to make, so it walks the same pointers
  * runtime/serve.php walks, through the same helpers, rather than carrying its
  * own idea of what "active" means. It stops at the version: access, tombstones
  * and rules are the SERVE path's to apply, and the invocation goes through it.
@@ -140,11 +140,11 @@ function _stattic_cron_manifest(string $privateRoot, string $spaceId, string $ve
 /**
  * The space's own `CRON_SECRET`, when it declared one.
  *
- * Runtime variable VALUES land beside the version at finalize — the same
+ * Runtime variable VALUES land beside the version at finalize, in the same
  * documents the Functions dispatch header and the Zero envelope read them from
  * (functions-dispatch.php `sf-fx-env`, zero.php `variables`). Only names the
  * build declared are present, so a space that never declared CRON_SECRET has no
- * entry here and the request simply carries no Authorization.
+ * entry here and the request carries no Authorization.
  *
  * @return array{kind: 'present', value: string}|array{kind: 'absent'|'unavailable'}
  */
@@ -185,7 +185,7 @@ function _stattic_cron_secret(string $privateRoot, string $spaceId, string $vers
 /**
  * The `x-spacefast-cron` value: `<key>.<minute>.<hmac>`.
  *
- * Two independent properties, and it is worth being exact about which does what.
+ * Two independent properties.
  *
  * The one that makes the header trustworthy at all is that a CLIENT CANNOT SEND
  * IT: `_stattic_strip_untrusted_edge_headers()` drops the name off every inbound
@@ -195,7 +195,7 @@ function _stattic_cron_secret(string $privateRoot, string $spaceId, string $vers
  * signature.
  *
  * The signature BINDS that presence to one cron and one minute, so a value that
- * escapes — a tenant log, a relayed request recorded at the execution edge —
+ * escapes into a tenant log or a relayed request recorded at the execution edge
  * cannot be replayed as a different cron or in a later minute. The key is
  * box-local and engine-only, so the ENGINE verifies it; a handler that wants a
  * secret of its own compares `authorization: Bearer <CRON_SECRET>`, which is the

@@ -1,8 +1,7 @@
-// POST /engine/update — the management route that runs the resident installer
-// and relays its receipt. The real installer's behavior is held by
-// installer-update.test.ts; this file owns the route seam: validation, the
-// converged fast-path, the exec contract (argv URL + env checksums), and how
-// installer verdicts map onto HTTP.
+// POST /engine/update runs the resident installer and relays its receipt.
+// installer-update.test.ts holds the installer's own behavior; this file owns
+// the route seam: validation, the current fast-path, the exec contract
+// (argv URL + env checksums), and how installer verdicts map onto HTTP.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -56,14 +55,14 @@ test("rejects a plain-http zip_url", async () => {
   expect(await errorCode(response)).toBe("runtime_engine_update_invalid");
 });
 
-test("answers converged for the running revision without spawning anything", async () => {
+test("answers current for the running revision without spawning anything", async () => {
   // The tree copy the harness serves carries revision 'source-tree'; no
   // resident installer exists, so reaching the exec path would 503.
   removeResidentInstaller();
   const response = await update({ ...UPDATE_BODY, revision: "source-tree" });
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({
-    status: "converged",
+    status: "current",
     engine_revision: "source-tree",
     layout: "release",
   });
@@ -72,7 +71,7 @@ test("answers converged for the running revision without spawning anything", asy
 test("runs the resident installer for the same revision when the lane did not pin a release", async () => {
   // The SSH dispatch lane loads the engine directly, so no active-release root
   // is pinned for the process. A revision match alone must not answer
-  // "converged" there — only a pinned release layout proves the running bytes
+  // "current" there. Only a pinned release layout proves the running bytes
   // are the published ones.
   const lane = await startRuntime();
   try {
@@ -145,7 +144,7 @@ test("maps a busy installer to 409", async () => {
   expect(await errorCode(response)).toBe("runtime_engine_update_busy");
 });
 
-test("surfaces the installer's stderr code on a failed converge", async () => {
+test("surfaces the installer's stderr code on a failed sync", async () => {
   plantResidentInstaller('<?php fwrite(STDERR, "runtime_engine_md5_mismatch\\n"); exit(1);');
   const response = await update(UPDATE_BODY);
   expect(response.status).toBe(424);
@@ -158,15 +157,14 @@ test("surfaces the installer's stderr code on a failed converge", async () => {
 });
 
 test("invalidates exactly the rewritten-in-place aliases: the loader copies and the resident installer", async () => {
-  // These aliases are the ONLY engine files a converge reinstalls under an
-  // unchanged path; the fleet runs opcache.validate_timestamps=Off, so an alias
-  // FPM does not invalidate keeps executing its old compiled module forever.
-  // The invalidate loop itself is a PHP guarantee; what the runtime owns — and
-  // what breaks if the entrypoint set drifts — is the exact absolute path set,
-  // derived here from the same constant serve.php dispatches on. (PHP 8.5's
-  // CLI/cli-server SAPIs retain no SHM opcache entries across a run, so the SHM
-  // eviction has no honest local observable; it is exercised end to end by the
-  // credential-gated wp.cloud converge suite.)
+  // These aliases are the ONLY engine files a sync reinstalls under an
+  // unchanged path, and the fleet runs opcache.validate_timestamps=Off, so an
+  // alias FPM does not invalidate keeps executing its old compiled module. The
+  // invalidate loop is a PHP guarantee; what the runtime owns, and what breaks
+  // if the entrypoint set drifts, is the absolute path set derived here from the
+  // same constant serve.php dispatches on. PHP 8.5's CLI SAPIs retain no SHM
+  // opcache entries across a run, so the eviction itself has no local
+  // observable; the wp.cloud sync suite covers it end to end.
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-alias-opcache-"));
   try {
     const script = [

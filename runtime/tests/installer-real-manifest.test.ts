@@ -17,9 +17,9 @@ import { residentInstallerTransfer } from "../../apps/control-plane/src/runtime/
 import { readActiveReleaseTarget } from "./active-release.ts";
 
 // The URL-mode tests build their own fixture manifest, so a regression in the
-// shipped `runtime/engine-manifest.json` (like #1208 dropping `executables`)
-// slipped through them. This one installs from the real manifest through the
-// resident installer, exactly as the /engine/update route runs it.
+// shipped `runtime/engine-manifest.json` (#1208 dropped `executables`) slipped
+// past them. This one installs from the real manifest through the resident
+// installer, as the /engine/update route runs it.
 
 const runtimeRoot = path.resolve(import.meta.dirname, "..");
 
@@ -40,9 +40,8 @@ type RealManifestInstall = {
   exitCode: number;
 };
 
-// One pull install straight out of `runtime/engine-manifest.json`: builds the
-// payload zip from the shipped file list, serves it from an in-process
-// metadata/download endpoint, and runs the resident installer against it.
+// One install straight out of `runtime/engine-manifest.json`: zips the shipped
+// file list and runs the resident installer against it.
 async function installFromShippedManifest(): Promise<RealManifestInstall> {
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-real-manifest-"));
   roots.push(root);
@@ -71,11 +70,10 @@ async function installFromShippedManifest(): Promise<RealManifestInstall> {
     copyFileSync(path.join(runtimeRoot, file), path.join(payload, file));
   }
 
-  // Read the shipped revision by evaluating the engine's own constant, not by
-  // pattern-matching context.php with the installer's regex (that duplicated the
-  // implementation blindly and broke on harmless declaration refactors). The
-  // installer independently re-reads and hard-matches this value on extract, so
-  // a successful install proves the shipped engine really carries this revision.
+  // Read the revision by evaluating the engine's own constant, not by
+  // re-implementing the installer's regex. The installer re-reads and
+  // hard-matches this value on extract, so a successful install proves the
+  // shipped engine carries it.
   const revisionProbe = execFileSync(
     "php",
     [

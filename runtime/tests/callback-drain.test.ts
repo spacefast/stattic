@@ -1,14 +1,14 @@
 // The event pull lane (contracts §10, D53): `runtime/journal.jsonl` is the ONLY
 // event sink. There is no callback record store, no push transport, no lease and
-// no callback credential — the control plane is blocked on the drain response,
-// so a page of journal records is handed back in the body and
-// `runtime/journal-cursor.json` (advanced by ACK, never backwards) is what makes
-// the next page start where this one stopped.
+// no callback credential. The control plane blocks on the drain response, so a
+// page of journal records comes back in the body and
+// `runtime/journal-cursor.json` (advanced by ACK, never backwards) makes the
+// next page start where this one stopped.
 //
-// Everything here is the drain/ack seam itself: which records reach the wire,
-// how far one page reaches, and what an acknowledgement is allowed to commit.
-// That management operations write the journal records in the first place is
-// held where those operations live (uploads.test.ts, route-index.test.ts).
+// This file owns the drain/ack seam: which records reach the wire, how far one
+// page reaches, and what an acknowledgement may commit. That management
+// operations write the records at all is held where those operations live
+// (uploads.test.ts, route-index.test.ts).
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
@@ -42,8 +42,8 @@ function journalPath(): string {
   return storagePath(rt, "runtime", "journal.jsonl");
 }
 
-// Each test owns the whole sink: the drain's contract is "read journal.jsonl
-// from the persisted cursor", so both are reset to the state of a fresh site.
+// Each test owns the whole sink. The drain reads journal.jsonl from the
+// persisted cursor, so both are reset to a fresh site's state.
 beforeEach(() => {
   const runtimeDir = storagePath(rt, "runtime");
   mkdirSync(runtimeDir, { recursive: true });
@@ -55,7 +55,7 @@ beforeEach(() => {
   }
 });
 
-/** Append raw journal lines — the sink's own NDJSON format (shared/ndjson-log.php). */
+/** Append raw journal lines in the sink's own NDJSON format (shared/storage.php). */
 function seedJournal(records: Array<Record<string, unknown>>): void {
   mkdirSync(path.dirname(journalPath()), { recursive: true });
   appendFileSync(journalPath(), records.map((record) => `${JSON.stringify(record)}\n`).join(""));
@@ -103,8 +103,8 @@ test("a publish journals only diagnostics: nothing reaches the wire, the cursor 
 
   // A publish's receipt rides its own management responses (activation event
   // id, purge status), so both halves land in the journal as operator
-  // diagnostics — attributed to their operation, but carrying no event_id and
-  // owed to no drain.
+  // diagnostics: attributed to their operation, carrying no event_id, owed to
+  // no drain.
   const written = journalRecords(rt);
   const names = written.map((record) => record.event);
   expect(names).toContain("version_finalized");
@@ -132,9 +132,9 @@ test("a publish journals only diagnostics: nothing reaches the wire, the cursor 
 
 test("one page spans the records it does not return: diagnostics and non-target events", async () => {
   // Only management records carry an event_id. Operator diagnostics (job
-  // lifecycle, GC, purge receipts) share the sink and must never reach the wire
-  // — but the page cursor still has to reach past them, or a diagnostic run
-  // would wedge the lane forever.
+  // lifecycle, GC, purge receipts) share the sink and must never reach the wire,
+  // yet the page cursor still has to reach past them, or a diagnostic run wedges
+  // the lane forever.
   seedJournal([
     { event: "job_started", job: "maintenance" },
     managementRecord("evt_first"),
@@ -149,8 +149,8 @@ test("one page spans the records it does not return: diagnostics and non-target 
   expect(page.pending_count).toBe(0);
 
   // Each event carries the position to ack THROUGH itself, so a per-event
-  // cursor stops at its own record: the page reached past the trailing
-  // diagnostic, the last event's cursor did not.
+  // cursor stops at its own record. The page reached past the trailing
+  // diagnostic; the last event's cursor did not.
   const [firstEvent, secondEvent] = page.events;
   if (!firstEvent || !secondEvent) {
     throw new Error("expected two drained events");
@@ -203,7 +203,7 @@ test("an ack commits per delivery, validates the whole batch first, and never re
   }
 
   // The page ends on an event here, so the last event's cursor IS the page
-  // cursor — the page-level field is the end of the same sequence.
+  // cursor. Both name the end of the same sequence.
   expect(third.cursor).toEqual(page.cursor);
 
   // Nothing commits until the whole batch is well-formed: a valid delivery

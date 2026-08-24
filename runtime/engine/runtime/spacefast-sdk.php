@@ -39,21 +39,21 @@ function _stattic_serve_spacefast_sdk(
     http_response_code(200);
     header('Content-Type: application/javascript; charset=utf-8', false);
     // A versioned SDK URL (?v=<engine/content token>, baked in by the control
-    // plane) is content-addressed: the token changes whenever the resolved body
-    // would, so this response may pin immutably. The unversioned URL and every
-    // preview stay short-lived and revalidated, so an engine revision is never
-    // frozen into a visitor's cache. `_stattic_send_cache_policy_headers` still
-    // downgrades private responses regardless of this value.
+    // plane) is content-addressed: the token changes whenever the body would,
+    // so this response may pin immutably. The unversioned URL and every preview
+    // stay short-lived and revalidated, so an engine revision is never frozen
+    // into a visitor's cache. `_stattic_send_cache_policy_headers` still
+    // downgrades private responses whatever this value is.
     $publicCacheControl = ($previewToken === null && _stattic_spacefast_sdk_versioned_request())
         ? 'public, max-age=31536000, immutable'
         : STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
     _stattic_send_cache_policy_headers($privateCache, $publicCacheControl);
     header('ETag: ' . $etag, false);
     header('X-Spacefast-Sdk-Revision: ' . $revision, false);
-    // No conditional branch: §15 D122 — the platform never delivers
-    // If-None-Match to the origin, and the edge answers conditionals off its own
-    // HIT. The ETag above is the validator it does that with; a 304 written here
-    // could only ever fire in a hand-rolled request that bypassed the edge.
+    // No conditional branch (§15 D122): the platform never delivers
+    // If-None-Match to the origin, and the edge answers conditionals off its
+    // own HIT with the ETag above. A 304 written here could only fire for a
+    // hand-rolled request that bypassed the edge.
     if ($requestMethod !== 'HEAD') {
         echo $body;
     }
@@ -85,7 +85,7 @@ function _stattic_comments_render_json(int $status, array $body): never
 }
 
 // There is no second cookie: the unified host session carries the Comments
-// identity, and the anonymous id stays server-owned — the page never names it.
+// identity, and the anonymous id stays server-owned. The page never names it.
 function _stattic_comments_visitor_identity(
     array $serving,
     string $requestHost,
@@ -95,7 +95,7 @@ function _stattic_comments_visitor_identity(
     if ($fromSession !== null) {
         return $fromSession;
     }
-    // No pseudonym yet. Writing one also settles the session id — a stateless
+    // No pseudonym yet. Writing one also settles the session id: a stateless
     // session mints its own on that write, a recorded one already has it.
     $remembered = _stattic_access_session_remember(
         $serving,
@@ -143,11 +143,10 @@ function _stattic_comments_handle_exchange(
         _stattic_render_json_unauthenticated('comments_denied');
     }
     // The boot copy of this configuration is embedded in the SDK bootstrap, so
-    // this lane is no longer on the boot path: it is the background revalidate
-    // that converges a toggle flipped since the page's sdk.js response was
-    // generated. Only the lanes below it — which MINT something — reach the
-    // control plane, because a ticket is auth and auth is not this host's to
-    // issue.
+    // this lane is the background revalidate that syncs a toggle flipped
+    // since the page's sdk.js response was generated. Only the lanes below it,
+    // which MINT something, reach the control plane: a ticket is auth, and auth
+    // is not this host's to issue.
     if ($requestPath === STATTIC_COMMENTS_CONFIG_PATH) {
         _stattic_comments_render_json(200, [
             'data' => _stattic_comments_local_config($privateRoot, $serving, $requestHost),
@@ -233,17 +232,17 @@ function _stattic_comments_handle_exchange(
         ) {
             _stattic_render_json_unauthenticated('comments_identity_invalid');
         }
-        // The name is the visitor's claim; the anonymous subject never is — it
-        // comes from the session record, never from the page.
+        // The name is the visitor's claim. The anonymous subject comes from the
+        // session record, never from the page.
         $payload['identity'] = [
             'anonymousId' => $visitor['anonymousId'],
             'name' => $name,
             'namedByUser' => $browserIdentity['namedByUser'],
         ];
         // Whether this Space's overlay watches the Space feed is serving
-        // configuration, written at publish time and answered here — the mint
-        // signs the second ticket from the decision it already reached, so this
-        // says which rooms the session needs, never what it may do in them.
+        // configuration, written at publish time. The mint signs the second
+        // ticket from the decision it already reached, so this says which rooms
+        // the session needs, never what it may do in them.
         $overlay = _stattic_comments_local_config($privateRoot, $serving, $requestHost);
         $payload['notices'] = ($overlay['features']['notices'] ?? null) === true;
     }
@@ -277,25 +276,24 @@ function _stattic_spacefast_sdk_bootstrap(
     string $requestHost,
     ?string $previewToken = null
 ): string {
-    // The descriptor below lives in access-rules.php, and an OPEN Space reaches
-    // this lane without the serve path having loaded any access code (D34) — so
-    // the SDK route pulls it in itself rather than fataling on a public Space.
+    // An OPEN Space reaches this lane without the serve path having loaded any
+    // access code (D34), so this route requires access-rules.php itself rather
+    // than fataling on a public Space.
     require_once __DIR__ . '/access-rules.php';
     $sdkConfig = _stattic_spacefast_sdk_config($serving);
     $preview = _stattic_spacefast_preview_surface($serving);
-    // The whole OverlayConfig, from the overlay, inline: the boot path asks this
-    // host nothing. Everything in it is space-level except the room key, and the
-    // room key is the one thing this response cannot know — a single cacheable
-    // script URL serves every page of the Space — so the SDK derives it from
-    // location.pathname instead.
+    // The whole OverlayConfig inline, so the boot path asks this host nothing.
+    // Everything in it is space-level except the room key. One cacheable script
+    // URL serves every page of the Space, so the SDK derives the room key from
+    // location.pathname.
     $overlay = _stattic_comments_local_config($privateRoot, $serving, $requestHost);
     $collabBase = _stattic_spacefast_sdk_base_url($sdkConfig);
     $descriptor = _stattic_access_page_descriptor($serving);
     $exchange = _stattic_access_page_exchange($serving);
     $pageHost = _stattic_normalize_hostname($requestHost);
     // A machine-local Cast origin under a public control plane came from a
-    // deployment wired against a developer's machine: no visitor could reach
-    // it, so refuse to inject it rather than ship a guaranteed console error.
+    // deployment wired against a developer's machine. No visitor can reach it,
+    // so refuse to inject it.
     $brokerHost = is_array($exchange) && is_string($exchange['commentsTicketUrl'] ?? null)
         ? parse_url($exchange['commentsTicketUrl'], PHP_URL_HOST)
         : null;
@@ -313,10 +311,10 @@ function _stattic_spacefast_sdk_bootstrap(
     $embeddedTagBody = $previewToken === null
         ? _stattic_spacefast_sdk_tag_body($privateRoot, $serving)
         : '';
-    // Where the orb expands (collab-public-api §1). The Space that published a
-    // review room gets its own; every other Space gets the platform frame. The
-    // pointer's absence IS the signal — resolved here so the browser never has
-    // to know a Space can have a layout at all.
+    // Where the orb expands (collab-public-api §1). A Space that published a
+    // review room gets its own; every other gets the platform frame. The
+    // pointer's absence IS the signal, resolved here so the browser never has
+    // to know a Space can have a layout.
     $collabPages = is_array($serving['pages'] ?? null) ? $serving['pages'] : [];
     $manifest = [
         'version' => 4,
@@ -337,17 +335,16 @@ function _stattic_spacefast_sdk_bootstrap(
         ...($commentsAvailable ? ['config' => $overlay] : []),
     ];
     // Comments off for this surface costs the page zero Comments bytes: no
-    // config, no placeholder orb, no module loader — not a disabled copy of any
-    // of them. The permissions toggle is a byte budget, not just a flag.
+    // config, no placeholder orb, no module loader, not even a disabled copy.
     $collab = !$commentsAvailable ? '' : (
         'if(root.collabLoader)return;' .
         _stattic_spacefast_sdk_placeholder_orb($overlay) .
         'var o=document.createElement("script");' .
         'o.async=true;o.type="module";' .
         'o.src=' . json_encode(rtrim((string) $collabBase, '/') . '/sdk/v1/collab.js', JSON_UNESCAPED_SLASHES) . ';' .
-        // The placeholder orb stands in for an overlay that is arriving. When
-        // the module never arrives it is standing in for nothing, so it goes:
-        // a disc that pulses forever is a worse lie than no orb at all.
+        // The placeholder orb stands in for an arriving overlay. When the
+        // module never arrives, remove it: a disc that pulses forever is a
+        // worse lie than no orb.
         'o.onerror=function(){var e=new Error("Spacefast Comments module failed to load");console.error(e);var b=document.getElementById("sf-collab-boot-orb");if(b)b.remove();window.dispatchEvent(new CustomEvent("spacefast:collab-error",{detail:{stage:"module",message:e.message}}));};' .
         'root.collabLoader=o;document.head.appendChild(o);'
     );
@@ -356,8 +353,6 @@ function _stattic_spacefast_sdk_bootstrap(
         'var previewToken=' . json_encode($previewToken, JSON_UNESCAPED_SLASHES) . ';' .
         'var root=window.Spacefast=window.Spacefast||{};' .
         'root.manifest=manifest;' .
-        // Preview artifacts stay capability-selected at the control plane;
-        // production tag bytes are embedded in this same-host response below.
         'if(previewToken&&manifest.apiBase&&manifest.spaceId&&!root.tagLoader){' .
         'var tagUrl=new URL(manifest.apiBase.replace(/\\/+$/,"")+"/v1/spaces/"+encodeURIComponent(manifest.spaceId)+"/tags/sdk.js");' .
         'tagUrl.searchParams.set("host",manifest.host||location.host);' .
@@ -375,16 +370,16 @@ function _stattic_spacefast_sdk_bootstrap(
  * The orb, painted before a single Cast byte is fetched.
  *
  * A static disc in the placement the visitor last dragged it to, wearing the
- * Space accent and the `connecting` pulse — the same visuals the real orb boots
- * into (theme/stylesheet.ts `.sf-orb`). It has no behaviour at all: the SDK
- * removes it the moment the real overlay mounts (shell/mount.ts). Placement
- * mirrors the store's `restoreOrbPlacement` + `orbDockStyle`; a stored value
- * this rejects simply falls back to the default bottom-right dock.
+ * Space accent and the `connecting` pulse, the same visuals the real orb boots
+ * into (theme/stylesheet.ts `.sf-orb`). It has no behaviour: the SDK removes it
+ * when the real overlay mounts (shell/mount.ts). Placement mirrors the store's
+ * `restoreOrbPlacement` + `orbDockStyle`; a rejected stored value falls back to
+ * the default bottom-right dock.
  *
- * Framed documents paint nothing: inside the Collab frame (or anyone else's
- * iframe) the orb is suppressed for the whole page life (collab-frame-plan §2),
- * so painting one here would only flash it. The SDK itself still boots — the
- * frame handshake is its job in there.
+ * Framed documents paint nothing: inside the Collab frame or anyone else's
+ * iframe the orb is suppressed for the whole page life (collab-frame-plan §2),
+ * so painting one here would only flash it. The SDK still boots there to run
+ * the frame handshake.
  */
 function _stattic_spacefast_sdk_placeholder_orb(array $overlay): string
 {
@@ -413,9 +408,8 @@ function _stattic_spacefast_sdk_placeholder_orb(array $overlay): string
 }
 
 // The SDK manifest contract requires an apiBase (packages' readManifest
-// refuses a null one), so a deployment without SPACEFAST_API_BASE_URL —
-// self-host, local harness — derives it from the Cast origin rather than
-// shipping an unbootable manifest.
+// refuses a null one), so a deployment without SPACEFAST_API_BASE_URL, a
+// self-host or local harness, derives it from the Cast origin.
 function _stattic_spacefast_sdk_api_base_url(array $sdkConfig): ?string
 {
     $base = rtrim(_stattic_config_value('SPACEFAST_API_BASE_URL'), '/');
@@ -462,9 +456,9 @@ function _stattic_spacefast_sdk_base_url(array $sdkConfig): ?string
 }
 
 // THE SDK configuration, and the only place it comes from: the Space overlay,
-// written by the control plane's own serving-state push. Nothing on this lane
-// asks the control plane for configuration at request time — a Cast endpoint
-// move, a Comments toggle or a theme change converges when the overlay swaps.
+// written by the control plane's serving-state push. Nothing here asks the
+// control plane at request time. A Cast endpoint move, a Comments toggle or a
+// theme change syncs when the overlay swaps.
 function _stattic_spacefast_sdk_config(array $serving): array
 {
     $sdk = is_array($serving['sdk'] ?? null) ? $serving['sdk'] : [];
@@ -494,12 +488,11 @@ function _stattic_spacefast_sdk_tag_body(string $privateRoot, array $serving): s
 }
 
 /**
- * Preview surface or live surface — the ONE predicate, for every lane on this
+ * Preview surface or live surface: the ONE predicate for every lane on this
  * route. An immutable version host is a preview surface; the live host is not.
- * The request reaching this Space on this host is itself the proof of which one
- * it is. A `?preview=` token names a tag release, never a Comments lane: letting
- * it pick the lane would have let anyone consult the preview toggle from the
- * live site by decorating the script URL.
+ * The host the request arrived on is the proof. A `?preview=` token names a tag
+ * release, never a Comments lane, or anyone could consult the preview toggle
+ * from the live site by decorating the script URL.
  */
 function _stattic_spacefast_preview_surface(array $serving): bool
 {
@@ -535,9 +528,9 @@ function _stattic_comments_overlay_theme(array $comments): array
  * Everything space-level (Cast endpoints, the published/preview toggles, the
  * theme, the feature set, the screenshot endpoint) rides the overlay. The
  * runtime adds only what it alone knows: which version host the visitor is on,
- * and its own same-origin ticket endpoint. Nothing here is per-page, which is
- * why it can be embedded verbatim in the cacheable SDK bootstrap — the SDK
- * derives the one per-page value, the room key, from location.pathname.
+ * and its own same-origin ticket endpoint. Nothing here is per-page, so it can
+ * be embedded verbatim in the cacheable SDK bootstrap. The SDK derives the one
+ * per-page value, the room key, from location.pathname.
  */
 function _stattic_comments_local_config(string $privateRoot, array $serving, string $requestHost): array
 {
@@ -585,9 +578,9 @@ function _stattic_comments_local_config(string $privateRoot, array $serving, str
     $liveVersionId = is_string($serving['live_version_id'] ?? null) ? $serving['live_version_id'] : null;
     $liveUrl = is_string($comments['live_url'] ?? null) ? $comments['live_url'] : null;
     $features = is_array($comments['features'] ?? null) ? $comments['features'] : [];
-    // The read key rides the served config — that is the whole "fresh URLs"
+    // The read key rides the served config. That is the whole "fresh URLs"
     // mechanism: clients compose attachment URLs from {base, key} + id, nothing
-    // per-object is ever signed, and a rotation converges on the next config
+    // per-object is signed, and a rotation syncs on the next config
     // revalidate.
     require_once __DIR__ . '/storage.php';
     return [
@@ -631,8 +624,8 @@ function _stattic_spacefast_sdk_preview_token(): ?string
 }
 
 // The `v` query component the control plane bakes into the injected SDK URL.
-// Its presence — not its value — is what admits the immutable cache policy: the
-// token is opaque here and only ever changes when the served body would.
+// Its presence, not its value, admits the immutable cache policy: the token is
+// opaque here and changes only when the served body would.
 function _stattic_spacefast_sdk_versioned_request(): bool
 {
     return isset($_GET['v']) && is_string($_GET['v']) && trim($_GET['v']) !== '';

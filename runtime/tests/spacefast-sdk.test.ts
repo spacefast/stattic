@@ -744,7 +744,7 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     // THE headline: configuration is assembled here, from the overlay. The
     // control plane is not called at all. This lane is no longer on the boot
     // path — the same bytes ride the SDK bootstrap — so all it does now is let
-    // a running overlay converge on a toggle flipped since that response was
+    // a running overlay sync on a toggle flipped since that response was
     // generated.
     expect(exchanges).toHaveLength(0);
     const payload = (await response.json()) as { data: Record<string, unknown> };

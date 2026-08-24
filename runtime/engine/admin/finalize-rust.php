@@ -3,15 +3,15 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../shared/native-process.php';
 
-// Ownership boundary: Rust owns every immutable version byte and artifact —
-// this file validates only the result envelope, never the artifacts themselves.
+// Ownership boundary: Rust owns every immutable version byte and artifact.
+// This file validates only the result envelope.
 
 function _stattic_runtime_native_session_payload(array $session): array
 {
     // A session reloaded from disk decodes `accepted: {}` to an empty PHP
-    // array, which re-encodes as `[]` — the finalizer requires an object. The
-    // lazy path normalizes on write (upload.php); this is the choke point for
-    // every path, including a zero-upload retain-all created by create_version.
+    // array, which re-encodes as `[]`. The finalizer requires an object.
+    // upload.php normalizes on write; this is the choke point for every path,
+    // including a zero-upload retain-all from create_version.
     $session['accepted'] = _stattic_runtime_json_object(
         is_array($session['accepted'] ?? null) ? $session['accepted'] : []
     );
@@ -21,10 +21,9 @@ function _stattic_runtime_native_session_payload(array $session): array
 function _stattic_runtime_native_body_payload(array $body): array
 {
     // json_decode(..., true) collapses every empty JSON object into a PHP
-    // array, which json_encode writes back as `[]`. Rust intentionally models
-    // these fields as maps, so preserve their wire identity at the one PHP ->
-    // native boundary. Values are already resolved by the control plane; this
-    // changes only container shape, never variable contents.
+    // array, which json_encode writes back as `[]`. Rust models these fields as
+    // maps, so preserve their wire identity at the PHP -> native boundary. This
+    // changes container shape only, never variable contents.
     $scopes = $body['variable_scopes'] ?? null;
     if (is_array($scopes)) {
         foreach ($scopes as $scopeIndex => $scope) {
@@ -55,32 +54,32 @@ function _stattic_runtime_native_body_payload(array $body): array
 }
 
 // Storage boundary for Rust: every retained byte must sit in the per-space CAS
-// (`spaces/<spaceId>/blobs/<aa>/<sha>`) before the finalizer starts — Rust reads
+// (`spaces/<spaceId>/blobs/<aa>/<sha>`) before the finalizer starts. Rust reads
 // retained files from the CAS only and never touches the network.
 //
-// This runs under the space lock (finalize_version's row), which is what makes
-// reading the reusable version's catalog safe against a concurrent finalize or
-// GC sweep of that space.
+// Runs under finalize_version's space lock, which makes reading the reusable
+// version's catalog safe against a concurrent finalize or GC sweep of that
+// space.
 function _stattic_runtime_prepare_retained_blobs(string $privateRoot, string $spaceId, array $session): array
 {
     $entries = is_array($session['retained_files'] ?? null) ? $session['retained_files'] : [];
     $reusableVersionId = is_string($session['reusable_version_id'] ?? null)
         ? _stattic_runtime_id($session['reusable_version_id'], 'reusable_version_id')
         : null;
-    // Re-validated here, not trusted: a session record written before this
-    // engine version carries no mode, and reading that as retain-nothing would
-    // drop files silently. It fails loudly instead.
+    // Re-validated, not trusted: an older session record carries no mode, and
+    // reading that as retain-nothing would drop files silently. This fails
+    // loudly.
     $retention = _stattic_runtime_retention_mode($session['retention'] ?? null, $reusableVersionId, $entries);
-    // "Retain everything from version X" carries no list and gets none: Rust
-    // materializes the path set from that version's catalog inside the same pass
-    // that stages it, so a version of any size costs one catalog read here
-    // instead of a per-path loop and a multi-megabyte envelope.
+    // "Retain everything from version X" carries no list: Rust materializes the
+    // path set from that version's catalog in the same pass that stages it, so
+    // any size costs one catalog read instead of a per-path loop and a
+    // multi-megabyte envelope.
     if ($retention === 'all' || $entries === []) {
         return $session;
     }
-    // A caller-supplied list still needs the reusable version to be readable:
-    // without its catalog there is no telling a path that moved from a version
-    // that is gone, and the recovery branch below reads the same document.
+    // A caller-supplied list still needs a readable reusable version: without
+    // its catalog, a moved path is indistinguishable from a gone version, and
+    // the recovery branch below reads the same document.
     if (_stattic_runtime_version_catalog($privateRoot, $spaceId, $reusableVersionId) === null) {
         _stattic_problem_response(
             409,
@@ -97,16 +96,18 @@ function _stattic_runtime_prepare_retained_blobs(string $privateRoot, string $sp
             continue;
         }
         $path = _stattic_runtime_file_path((string) ($entry['path'] ?? ''));
-        _stattic_runtime_assert_static_upload_path($path);
+        if (!_stattic_path_is_internal_artifact($path)) {
+            _stattic_runtime_assert_static_upload_path($path);
+        }
         $hasDeclaredSha = array_key_exists('sha256', $entry);
         $sha = is_string($entry['sha256'] ?? null) ? strtolower(trim($entry['sha256'])) : '';
         if ($hasDeclaredSha && !_stattic_is_sha256_hex($sha)) {
             _stattic_problem_response(422, 'invalid_blob_sha', 'Retained file sha256 is invalid.', ['details' => ['path' => $path]]);
         }
         if ($sha === '') {
-            // A ready manifest may carry no digest; the reusable version's own
-            // catalog is authoritative, so recover the source identity from
-            // there rather than blocking a settings-only re-finalize forever.
+            // A ready manifest may carry no digest. The reusable version's
+            // catalog is authoritative, so recover the source identity there
+            // rather than blocking a settings-only re-finalize.
             $source = _stattic_runtime_resolve_version_file($privateRoot, $spaceId, $reusableVersionId, $path, 'source');
             if ($source === null) {
                 $missing($path);
@@ -187,9 +188,9 @@ function _stattic_runtime_finalize_with_rust(
     $outputPath = $inputPath . '.output.json';
     _stattic_runtime_write_json_atomic($inputPath, $input);
 
-    // Move an existing immutable version aside BEFORE the binary starts, so an
-    // interruption anywhere in the native run leaves a recoverable
-    // `.rust-previous`; Rust owns the recovery semantics from there.
+    // Move an existing immutable version aside BEFORE the binary starts, so any
+    // interruption in the native run leaves a recoverable `.rust-previous`.
+    // Rust owns recovery from there.
     if (is_dir($versionRoot)) {
         $backup = dirname($versionRoot) . '/.' . $versionId . '.rust-previous';
         if (is_dir($backup)) {
@@ -244,9 +245,7 @@ function _stattic_runtime_finalize_with_rust(
             'version_upload_incomplete',
             'version_reusable_file_missing',
             'version_existing_mismatch',
-            // The state of a version this publish reuses, not of the request:
-            // same 409 the PHP-side check answered with before the retained set
-            // was materialized natively.
+            // The state of a version this publish reuses, not of the request.
             'runtime_file_catalog_invalid',
         ];
         $status = in_array($rustCode, $conflictCodes, true) ? 409 : 422;
@@ -261,7 +260,7 @@ function _stattic_runtime_finalize_with_rust(
     }
     $output = _stattic_runtime_read_finalizer_output($outputPath);
     unlink($outputPath);
-    // Envelope only — Rust self-validates every immutable artifact it wrote.
+    // Envelope only. Rust self-validates every immutable artifact it wrote.
     if (
         !is_array($output)
         || ($output['format'] ?? null) !== 'stattic.runtime.finalize.output.v2'

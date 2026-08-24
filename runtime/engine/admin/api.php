@@ -5,9 +5,9 @@ require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/auth.php';
 
-// The one bootstrap for the two direct admin entrypoints (entrypoints/
-// management.php, entrypoints/upload.php): identity on the wire, the
-// undeployed 503, then dispatch onto the surface's route table.
+// Bootstrap for both direct admin entrypoints (entrypoints/management.php,
+// entrypoints/upload.php): identity, the undeployed 503, then the surface's
+// route table.
 function _stattic_runtime_admin_entrypoint(string $engineRoot, string $surface): void
 {
     $storageRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
@@ -19,23 +19,17 @@ function _stattic_runtime_admin_entrypoint(string $engineRoot, string $surface):
     _stattic_runtime_admin_api($storageRoot, $requestMethod, $requestPath, $surface);
 }
 
-// Auth lanes are hard security boundaries: a token minted for one lane can never
-// authorize another's row, because each lane's verifier pins its own `aud` before
-// any claim is trusted.
+// Auth lanes are hard security boundaries: each lane's verifier pins its own
+// `aud` before trusting a claim, so one lane's token cannot authorize another's
+// row.
 function _stattic_runtime_admin_api(string $privateRoot, string $method, string $requestPath, string $surface): void
 {
     _stattic_runtime_admin_register_error_envelope();
-    // Host gate BEFORE route resolution: a public hostname must get the
-    // deliberately-generic runtime_api_not_found, never a route-specific 404
-    // that would confirm the management/upload API lives here.
-    _stattic_runtime_assert_api_hostname();
-    // CORS BEFORE route resolution, and the preflight answered before it too.
-    // A browser only ever sees a response it is allowed to read: a 404 emitted
-    // without these headers reaches the caller as an opaque CORS failure that
-    // names the wrong problem, and a preflight that 404s blocks the real
-    // request outright. A preflight carries no credentials and asserts nothing
-    // about the route, so answering it ahead of resolution is the contract, not
-    // a shortcut — the actual request is still resolved and authorized below.
+    // CORS headers and the preflight answer come BEFORE route resolution. A 404
+    // without these headers reaches the browser as an opaque CORS failure that
+    // names the wrong problem, and a preflight that 404s blocks the real request
+    // outright. A preflight carries no credentials; the real request is still
+    // resolved and authorized below.
     _stattic_runtime_cors_headers();
     if ($method === 'OPTIONS') {
         http_response_code(204);
@@ -76,12 +70,12 @@ function _stattic_runtime_admin_api(string $privateRoot, string $method, string 
     $routeNotFound();
 }
 
-// Error envelope for the admin API. It is armed before the host gate and JWT,
-// so an unauthenticated caller reaches these handlers: they must answer a fixed
-// generic 500 carrying only a correlation id, and send the real Throwable /
-// fatal text (paths, include chains) to error_log alone. The correlation id is
-// minted once per request and shared by both handlers so an operator can match
-// the response the caller saw to the logged cause.
+// Error envelope for the admin API. Armed before JWT verification, so an
+// unauthenticated caller reaches these handlers: they answer a fixed 500
+// carrying only a correlation id and send the real Throwable or fatal text
+// (paths, include chains) to error_log alone. The id is minted once per request
+// and shared by both handlers, so an operator can match the caller's response
+// to the logged cause.
 function _stattic_runtime_admin_register_error_envelope(): void
 {
     static $registered = false;
@@ -143,9 +137,9 @@ function _stattic_runtime_admin_run_route(string $privateRoot, array $route, arr
     if ($route['lane'] === 'management') {
         require_once __DIR__ . '/management.php';
         // A route-index rebuild on a many-space site can exceed the default PHP
-        // execution budget, and a mid-rebuild kill leaves the work half done
-        // behind a provider-edge 504. These requests are JWT-authed, low-volume
-        // and never on the public hot path.
+        // execution budget, and a mid-rebuild kill leaves work half done behind
+        // a 504. These requests are JWT-authed, low-volume, and off the public
+        // hot path.
         set_time_limit(0);
         $required = [];
         foreach ($route['scope'] as $field => $captureIndex) {
@@ -184,8 +178,8 @@ function _stattic_runtime_admin_run_route(string $privateRoot, array $route, arr
     $handler(...$args);
 }
 
-// Row fields: lane, methods, pattern, binary (streams bytes / writes a raw
-// response — never dispatchable over the SSH envelope transport),
+// Row fields: lane, methods, pattern, binary (streams bytes or writes a raw
+// response; never dispatchable over the SSH envelope transport),
 // method_mismatch (null = keep scanning, otherwise the 405 answered when the
 // pattern matches but the method does not), plus the lane-specific auth inputs.
 function _stattic_runtime_admin_routes(string $surface): array
@@ -198,18 +192,19 @@ function _stattic_runtime_admin_routes(string $surface): array
 
 // Management lane rows: [method, pattern, action, scope (claim key => capture
 // index, ascending), lock, binary, handler]. Handlers are called as
-// ($privateRoot, ...$scopeIds, $claims); ones that omit the trailing parameter
-// still receive it positionally, so never widen such a signature without
+// ($privateRoot, ...$scopeIds, $claims); one that omits the trailing parameter
+// still receives it positionally, so never widen such a signature without
 // declaring the `array $claims` it would silently pick up.
 //
-// A route earns lock='space' ONLY when every write it performs transitively is
-// confined to that one space's storage. delete_space MUST share
-// finalize_version's per-space lock: a publish writing into the space tree while
-// the delete unlinks it recreates a deleted Space.
+// A route earns lock='space' ONLY when every write it makes transitively stays
+// in that one space's storage. delete_space MUST share finalize_version's
+// per-space lock: a publish writing into the space tree while the delete
+// unlinks it recreates a deleted Space.
 function _stattic_runtime_admin_management_routes(): array
 {
     $rows = [
         ['GET', '#^/state$#', 'read_state', [], 'none', false, '_stattic_runtime_state_route'],
+        ['GET', '#^/scan-log$#', 'read_scan_log', [], 'none', false, '_stattic_runtime_scan_log_route'],
         ['POST', '#^/events/drain$#', 'drain_events', [], 'none', false, '_stattic_runtime_drain_callback_events'],
         ['POST', '#^/events/ack$#', 'ack_events', [], 'none', false, '_stattic_runtime_ack_callback_events'],
         ['POST', '#^/jobs$#', 'create_engine_job', [], 'none', false, '_stattic_runtime_jobs_create_route'],
@@ -237,7 +232,6 @@ function _stattic_runtime_admin_management_routes(): array
         ['PUT', '#^/spaces/([^/]+)/routes/([^/]+)$#', 'update_route', ['space_id' => 1, 'route_name' => 2], 'space', false, '_stattic_runtime_put_route'],
         ['PUT', '#^/spaces/([^/]+)/hostname-intent$#', 'update_hostname_intent', ['space_id' => 1], 'space', false, '_stattic_runtime_put_hostname_intent'],
         ['PUT', '#^/spaces/([^/]+)/tombstones$#', 'update_tombstones', ['space_id' => 1], 'space', false, '_stattic_runtime_put_tombstones'],
-        ['PUT', '#^/spaces/([^/]+)/retention-policy$#', 'update_retention_policy', ['space_id' => 1], 'space', false, '_stattic_runtime_put_retention_policy'],
         ['POST', '#^/spaces/([^/]+)/delete$#', 'delete_space', ['space_id' => 1], 'space', false, '_stattic_runtime_delete_space'],
         ['POST', '#^/spaces/([^/]+)/repair$#', 'repair_space', ['space_id' => 1], 'site', false, '_stattic_runtime_repair_space'],
     ];
@@ -261,12 +255,12 @@ function _stattic_runtime_admin_management_routes(): array
     return $routes;
 }
 
-// Upload lane rows: [method, pattern, binary (streams bytes / writes a raw
+// Upload lane rows: [method, pattern, binary (streams bytes or writes a raw
 // response), captures (how many pattern groups the handler takes), the 405
-// message answered when the pattern matches but the method does not — null
-// keeps scanning and falls through to the surface 404]. Handlers are called as
+// message answered when the pattern matches but the method does not; null keeps
+// scanning and falls through to the surface 404]. Handlers are called as
 // ($privateRoot, ...$captures, $claims), the same shape the management lane
-// uses; the upload JWT resolves the session from its OWN claims, so a capture
+// uses. The upload JWT resolves the session from its OWN claims, so a capture
 // is never the authorization.
 function _stattic_runtime_admin_upload_routes(): array
 {

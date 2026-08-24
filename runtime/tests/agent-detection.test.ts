@@ -1,11 +1,11 @@
-// Shared-fixture guard for the agent-detection twins, PHP side. Replays every
+// Shared-fixture replay for the agent-detection twins, PHP side. Replays every
 // case from packages/routing/fixtures/agent-detection.json against
 // _stattic_is_agent_request through the real serving path (php -S + an
 // agent-conditional forced rewrite): agents get the markdown twin, browsers
 // get the HTML twin. packages/routing/src/agent-detection.test.ts replays the
-// same table against the TS matcher and carries the source-parity checks;
-// widening detection in redirects.php without updating the shared table goes
-// red here, on the runtime lane, even when packages/routing is untouched.
+// same table against the TS matcher; the lists both twins match on are
+// generated from the fixture by scripts/check-agent-detection.mjs, so this
+// suite owns PHP's matching logic, not its constants.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -20,7 +20,6 @@ type AgentDetectionCase = {
 };
 
 type AgentDetectionTable = {
-  acceptTokens: string[];
   needles: string[];
   cases: AgentDetectionCase[];
 };

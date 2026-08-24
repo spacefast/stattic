@@ -12,7 +12,7 @@ if (runtimeBin === undefined) {
 }
 
 const [
-  { runtimeExchangeRoutes },
+  { deliveryExchangeContractRoutes: runtimeExchangeRoutes },
   { createApp },
   { createAccessShareLink, logoutAllSpaceSessions, setAccessRequestClockForTests },
   { createPasswordCredential },
@@ -29,7 +29,7 @@ const [
   { compilePages, compileVersionConfig, runtimeServingConfigPayload },
   { deploy, putRoute, startRuntime },
 ] = await Promise.all([
-  import("../../apps/control-plane/src/access/runtime-exchange-routes.ts"),
+  import("../../apps/control-plane/src/api-contracts/delivery/exchange.ts"),
   import("../../apps/control-plane/src/app.ts"),
   import("../../apps/control-plane/src/access/canonical.ts"),
   import("../../apps/control-plane/src/access/credentials.ts"),
@@ -101,15 +101,15 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 
 try {
   // The scaffold's owner membership would produce an identity-bound management
-  // Grant and correctly trigger silent account acquisition before the access
-  // page. This visitor fixture has no active member: remove that canonical
-  // principal and let the production projection omit its Team Grant itself.
+  // Grant and trigger silent account acquisition before the access page. This
+  // visitor fixture has no active member, so remove that principal and let the
+  // production projection omit its Team Grant.
   await db.delete(authMembers).where(eq(authMembers.userId, seed.userId));
 
   // The seeded default .fast hostname is HSTS-preloaded and cannot reach this
-  // intentionally plain-HTTP PHP server, so give the browser runtime a .test
-  // hostname directly. Provider lifecycle behavior is exercised only against
-  // the real wp.cloud sandbox lane.
+  // plain-HTTP PHP server, so give the browser runtime a .test hostname.
+  // Provider lifecycle behavior is covered only by the real wp.cloud sandbox
+  // lane.
   const defaultHostname = await ensureSpaceDefaultHostname(seed.spaceId);
   const hostname = `${defaultHostname.label}.access-page.test`;
   assignedDomainId = createId("dom");
@@ -126,9 +126,9 @@ try {
     dnsInstructionsJson: [],
   });
 
-  // Production credential creation owns both the password proof and its
-  // canonical Grant. No fixture code invents a credential id, authority
-  // reference, Grant projection, exchange credential, or handoff token.
+  // Production credential creation owns the password proof and its canonical
+  // Grant. No fixture code invents a credential id, authority reference, Grant
+  // projection, exchange credential, or handoff token.
   await createPasswordCredential({
     spaceId: seed.spaceId,
     credential: {
@@ -289,7 +289,7 @@ try {
   stopExchange = () => exchange.stop(true);
   // Route server calls and browser handoffs through this fixture. Production
   // keeps these origins separate, so overriding one must not leave projected
-  // exchange URLs pointed at the environment's public handoff origin.
+  // exchange URLs on the environment's public handoff origin.
   const fixtureOrigin = `http://127.0.0.1:${exchange.port}`;
   Object.assign(env, {
     SPACEFAST_API_URL: fixtureOrigin,
@@ -300,8 +300,8 @@ try {
   controlPlane = createApp();
   await controlPlane.modules;
   // Attempt budgets key on the visitor IP and inbox address, which repeat
-  // across local runs against the shared Redis. A rerun starts with empty
-  // windows instead of inheriting the previous run's deliberate grinding.
+  // across local runs against the shared Redis. Clear them so a rerun starts
+  // with empty windows.
   await clearAllFixedWindowCountersForTests();
 
   const manifestPaths = new Set(["custom/index.html", "custom/_pages/access.html"]);
@@ -324,9 +324,9 @@ try {
     throw new Error(`access page compilation failed: ${JSON.stringify(compileErrors)}`);
   }
 
-  // The share link a recipient is actually given: the destination URL with the
-  // durable token on it. The browser spec walks that exact URL shape, rehosted
-  // on this fixture's plain-HTTP origin.
+  // The share link a recipient is given: the destination URL with the durable
+  // token on it. The browser spec walks that URL shape, rehosted on this
+  // fixture's plain-HTTP origin.
   const link = await createAccessShareLink({
     spaceId: seed.spaceId,
     name: "Browser share link fixture",
@@ -347,8 +347,8 @@ try {
   });
   if (!space) throw new Error("seeded space disappeared before route projection");
 
-  // Hydrate and project the complete runtime route through production
-  // boundaries. Neither authorization nor hostname intent is fixture-shaped.
+  // Project the whole runtime route through production boundaries. Neither
+  // authorization nor hostname intent is fixture-shaped.
   const projectedRoute = await runtimeRouteConfigForSpace(space);
   const versionId = createId("ver");
   const routeIntent = await runtimeRouteIntentForSpace({
@@ -396,8 +396,8 @@ try {
       accessStateCodes,
     })}\n`,
   );
-  // Keep the owning module active as long as its PHP child and exchange server.
-  // SIGINT/SIGTERM above perform the real cleanup and terminate the process.
+  // Stay alive alongside the PHP child and exchange server. The SIGINT/SIGTERM
+  // handlers above do the cleanup and exit.
   await new Promise<void>(() => {});
 } catch (error) {
   await cleanup();

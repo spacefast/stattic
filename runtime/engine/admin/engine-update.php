@@ -6,15 +6,15 @@ require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/../shared/response.php';
 require_once __DIR__ . '/../shared/native-process.php';
 
-// POST /engine/update — the one runtime self-update path. The control plane
+// POST /engine/update: the one runtime self-update path. The control plane
 // sends the target revision plus the artifact URL and checksums over the
 // authenticated management lane; this route runs the resident installer
 // synchronously and relays its receipt. Bytes come from the URL, trust comes
 // from the JWT-carried checksums. The installer's own single-flight lock
-// serializes overlapping converges.
+// serializes overlapping updates.
 
-// The control plane's client waits 330s; finishing under that keeps a slow
-// converge distinguishable from a dead one.
+// The control plane's client waits 330s. This timeout distinguishes a slow
+// update from a dead one.
 const STATTIC_ENGINE_UPDATE_TIMEOUT_SECONDS = 300;
 
 function _stattic_engine_release_layout_active(string $privateRoot): bool
@@ -27,9 +27,9 @@ function _stattic_engine_release_layout_active(string $privateRoot): bool
         && str_starts_with($releaseReal, $installRoot . '/releases/');
 }
 
-// The alias files — the loader copies (custom-redirects.php, index.php, the
-// entrypoint aliases) plus the resident installer — are the ONLY engine bytes
-// reinstalled under an unchanged path; releases get fresh directories opcache
+// The alias files are the ONLY engine bytes reinstalled under an unchanged
+// path: the loader copies (custom-redirects.php, index.php, the entrypoint
+// aliases) plus the resident installer. Releases get fresh directories opcache
 // has never seen. Absolute box paths, derived from the private root the route
 // already holds.
 //
@@ -46,10 +46,10 @@ function _stattic_engine_update_alias_paths(string $privateRoot): array
 
 // Drop the rewritten-in-place aliases from THIS process's opcache. The fleet
 // runs opcache.validate_timestamps=Off, so FPM keeps executing an alias's OLD
-// compiled module forever unless something inside FPM invalidates it — and a
-// CLI invalidation cannot, since CLI opcache is a different SHM. This request
+// compiled module forever unless something inside FPM invalidates it. A CLI
+// invalidation cannot, since CLI opcache is a different SHM. This request
 // IS inside FPM (it is the receipt lane the control plane calls after every
-// converge), so it invalidates here. Idempotent and cheap; invalidating an
+// update), so it invalidates here. Idempotent and cheap; invalidating an
 // unchanged alias just recompiles ~one file.
 function _stattic_engine_update_invalidate_aliases(string $privateRoot): void
 {
@@ -81,7 +81,7 @@ function _stattic_engine_update_route(string $privateRoot, array $_claims): void
 
     if ($revision === SPACEFAST_RUNTIME_ENGINE_REVISION && _stattic_engine_release_layout_active($privateRoot)) {
         _stattic_json_response(200, [
-            'status' => 'converged',
+            'status' => 'current',
             'engine_revision' => SPACEFAST_RUNTIME_ENGINE_REVISION,
             'layout' => 'release',
         ]);
@@ -129,12 +129,12 @@ function _stattic_engine_update_route(string $privateRoot, array $_claims): void
         $error = $stderr !== ''
             ? strtok($stderr, "\n")
             : ($run['spawned'] ? 'runtime_engine_update_failed' : 'runtime_engine_update_spawn_failed');
-        _stattic_problem_response(424, 'runtime_engine_update_failed', 'The installer did not converge.', [
+        _stattic_problem_response(424, 'runtime_engine_update_failed', 'The installer did not finish the update.', [
             'details' => ['error' => substr($error, 0, 512), 'exit_code' => $run['exitCode']],
         ]);
     }
     if ($receipt['status'] === 'busy') {
-        _stattic_problem_response(409, 'runtime_engine_update_busy', 'Another engine converge is already running.');
+        _stattic_problem_response(409, 'runtime_engine_update_busy', 'Another engine update is already running.');
     }
     _stattic_json_response(200, $receipt);
 }

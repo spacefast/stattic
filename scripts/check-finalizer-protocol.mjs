@@ -18,6 +18,14 @@ if (process.argv.length > 3 || (process.argv.length === 3 && !write)) {
 const outputs = [
   { args: [], file: "packages/routing/src/protocol.generated.ts" },
   { args: ["--php"], file: "runtime/engine/shared/finalizer-protocol.generated.php" },
+  // The platform-managed response-header lists, authored in
+  // crates/stattic-runtime-policy and re-exported by
+  // packages/common/src/utils/static-runtime-policy.ts. PHP is NOT emitted
+  // here: runtime/engine/shared/safety.php is compiled from this generated
+  // TypeScript by apps/control-plane/src/scripts/codegen-php-policy.ts, so a
+  // second emission would be a second definition. After --write, rerun
+  // `bun --filter @spacefast/control-plane runtime:codegen-policy`.
+  { args: ["--policy-ts"], file: "packages/common/src/utils/static-runtime-policy.generated.ts" },
 ];
 
 function run(command, args, options = {}) {
@@ -158,6 +166,14 @@ try {
     {
       name: "STATTIC_RUNTIME_EXECUTION_DB_OPERATIONS_MAX",
       read: (p) => p.limits.executionDbOperationsMax,
+    },
+    {
+      name: "STATTIC_RUNTIME_CONFIG_INJECT_SNIPPET_LIMIT",
+      read: (p) => p.limits.configInjectSnippetLimit,
+    },
+    {
+      name: "STATTIC_RUNTIME_CONFIG_INJECT_SNIPPET_MAX_BYTES",
+      read: (p) => p.limits.configInjectSnippetMaxBytes,
     },
     { name: "STATTIC_RUNTIME_ZERO_BUNDLE_MAX_BYTES", read: (p) => p.limits.zeroBundleMaxBytes },
     { name: "STATTIC_RUNTIME_ZERO_BUNDLE_LIMIT", read: (p) => p.limits.zeroBundleLimit },

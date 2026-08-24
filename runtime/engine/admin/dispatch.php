@@ -12,7 +12,7 @@ ini_set('display_errors', '0');
 // envelope on stdin, one {status, body} envelope on stdout, running the same
 // routing, JWT verification and handlers as HTTP.
 //
-// WP.Cloud prepends a runtime bootstrap to every PHP process — disable it:
+// WP.Cloud prepends a runtime bootstrap to every PHP process. Disable it:
 //   php -d auto_prepend_file= htdocs/.stattic/releases/<release>/engine/admin/dispatch.php < request.json
 
 const STATTIC_RUNTIME_DISPATCH_CLI = true;
@@ -83,14 +83,6 @@ if (!is_dir($storageRoot)) {
 // Stage the request exactly where the HTTP handlers read it; the management JWT
 // is still required and verified identically.
 $_SERVER['REQUEST_METHOD'] = $method;
-// Fail loudly as a config error rather than staging a blank host, which the
-// api.php host assert would answer with the generic public 404 — masking the
-// misconfiguration as "no such route".
-$managementHostname = _stattic_management_hostname();
-if ($managementHostname === '') {
-    _stattic_problem_response(500, 'runtime_dispatch_management_hostname_unconfigured', 'SPACEFAST_MANAGEMENT_HOSTNAME is not configured; the dispatch transport cannot assert the management host.');
-}
-$_SERVER['HTTP_HOST'] = $managementHostname;
 $_SERVER['HTTP_AUTHORIZATION'] = $authorization;
 $_SERVER['REQUEST_URI'] = $path;
 $_SERVER['QUERY_STRING'] = is_string($requestQuery) ? $requestQuery : '';

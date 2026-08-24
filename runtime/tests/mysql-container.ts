@@ -1,17 +1,15 @@
-// A throwaway MySQL server for the runtime suites that need a real one: the
-// capability broker's differential corpus, the Functions relay's brokered
-// callbacks, the native Zero runner, and the management dump of a version's
-// Zero database. They all drive a real driver against a real server, so none of
-// them can stand in a fake for it — and they share this one bring-up so the
-// image digest, the readiness rule and the teardown cannot drift apart.
+// A throwaway MySQL server for the suites that drive a real driver against a
+// real server: the capability broker's differential corpus, the Functions
+// relay's brokered callbacks, the native Zero runner, and the management dump of
+// a version's Zero database. They share one bring-up so the image digest, the
+// readiness rule and the teardown cannot drift apart.
 import net from "node:net";
 
 const MYSQL_IMAGE =
   "mirror.gcr.io/library/mysql:8.4@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af";
-// First-boot datadir initialisation dominates this and scales with how loaded
-// the host is; 60s is not enough on a machine already running other stacks.
-// Exported so a suite's own beforeAll deadline can be stated as this plus what
-// the rest of its setup costs, rather than as a second guess at the same number.
+// First-boot datadir initialisation dominates this and scales with host load;
+// 60s is not enough on a machine already running other stacks. Exported so a
+// suite states its beforeAll deadline as this plus its own setup cost.
 export const MYSQL_SETUP_TIMEOUT_MS = 300_000;
 
 export type MysqlContainer = {
@@ -20,20 +18,20 @@ export type MysqlContainer = {
   /** The seeded database's connection URL, as the engines take it. */
   url: string;
   /**
-   * Run SQL in the seeded database, throwing its stderr on failure and
-   * answering with the server's own output (headerless and tab-separated, so a
-   * caller can assert on it without parsing a table).
+   * Run SQL in the seeded database. Throws its stderr on failure; returns the
+   * server's headerless, tab-separated output, so a caller can assert on it
+   * without parsing a table.
    */
   exec(sql: string): string;
 };
 
-// Every container this process started, so a suite can tear down what it began
-// even when the start itself threw partway through.
+// Every container this process started, so teardown still works when a start
+// threw partway through.
 const started: string[] = [];
 
 /**
- * Boots a MySQL container with `database` already created, waits until both the
- * server and its published host port answer, and hands back its connection URL.
+ * Boots a MySQL container with `database` already created and waits until both
+ * the server and its published host port answer.
  */
 export async function startMysqlContainer(input: {
   /** Names the container, so a leaked one says which suite left it. */

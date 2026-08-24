@@ -4,15 +4,14 @@
  * The callback surface a dispatched worker uses for brokered database access.
  * Authority travels inside the presented token; this endpoint never looks a
  * grant up. Database frames are answered in-process by the engine's own MySQL
- * broker (shared/db-broker.php) — the native executor's byte-for-byte twin,
- * pinned by the db-broker.test.ts corpus — so an operation costs neither a
- * process spawn nor a fresh MySQL handshake: the `p:` link outlives the
- * request in PHP's own persistent pool, the only lifetime this host allows.
- * Service frames still run the one-shot `service-broker` executor, whose cost
- * is its outbound HTTPS call and whose identity is per invocation. Every call
- * re-enters this space's PHP-FPM pool while the proxied request still occupies
- * a worker in it — the deadlock hazard the broker's one-operation lifetime
- * bounds.
+ * broker (shared/db-broker.php), the native executor's byte-for-byte twin,
+ * pinned by the db-broker.test.ts corpus. An operation costs neither a process
+ * spawn nor a fresh MySQL handshake: the `p:` link outlives the request in
+ * PHP's own persistent pool, the only lifetime this host allows. Service frames
+ * still run the one-shot `service-broker` executor, whose cost is its outbound
+ * HTTPS call and whose identity is per invocation. Every call re-enters this
+ * space's PHP-FPM pool while the proxied request still occupies a worker in it,
+ * the deadlock hazard the broker's one-operation lifetime bounds.
  */
 
 require_once __DIR__ . '/../shared/context.php';
@@ -28,16 +27,15 @@ require_once __DIR__ . '/../shared/native-process.php';
 
 const STATTIC_FUNCTIONS_RELAY_AUD = 'spacefast-functions-relay';
 
-// Which executor answers a frame, what it may be granted, the env var its grant
-// travels in, and whether it is handed the caller's service identity — keyed by
-// the broker the outbound gateway named. The gateway sets that header outside
-// the isolate, so tenant code cannot choose its own executor by forging one.
+// What a frame may be granted, keyed by the broker the outbound gateway named.
+// The gateway sets that header outside the isolate, so tenant code cannot
+// choose its own lane by forging one. A lane that runs a native subprocess also
+// names its `executor`, the env var its grant travels in, and whether it is
+// handed the caller's service identity; the database lane names none of the
+// three, because the engine answers its frames itself.
 const SPACEFAST_FUNCTIONS_RELAY_BROKERS = [
     'database' => [
-        'executor' => 'db-broker',
         'capabilities' => ['db.read', 'db.write'],
-        'grant_env' => 'SPACEFAST_DB_BROKER_GRANT',
-        'identity' => false,
     ],
     'services' => [
         'executor' => 'service-broker',
@@ -111,8 +109,8 @@ function _stattic_functions_relay_bearer(): string
  * things the child may see.
  *
  * The service broker gets the database URL too, because an accepted email is a
- * row in this space's outbox — but the grant it receives names services, and
- * an ungranted one is refused inside the broker as well as here.
+ * row in this space's outbox. The grant it receives names services, and an
+ * ungranted one is refused inside the broker as well as here.
  */
 function _stattic_functions_relay_executor_env(array $claims, string $broker, array $grant): array
 {
@@ -138,7 +136,7 @@ function _stattic_functions_relay_executor_env(array $claims, string $broker, ar
 /**
  * The invocation this frame belongs to, as the origin named it when it
  * dispatched. It is the outbox's idempotency key, so a worker must not be able
- * to supply its own — an absent header yields an empty identity, and the broker
+ * to supply its own. An absent header yields an empty identity, and the broker
  * refuses to enqueue without one rather than inventing a key that would let the
  * same message land twice.
  */
@@ -149,8 +147,7 @@ function _stattic_functions_relay_invocation_id(): string
 
 /**
  * The broker the gateway selected, restricted to the ones this relay runs.
- * Absent means the database broker: that was the only one before services
- * existed, and a dispatch from an older host still names nothing.
+ * Absent means the database broker: a dispatch from an older host names none.
  */
 function _stattic_functions_relay_broker(): ?string
 {
@@ -175,7 +172,7 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     if ($broker === null) {
         _stattic_problem_refused(403, 'relay_forbidden', 'Relay broker is not recognised.');
     }
-    ['executor' => $executor, 'capabilities' => $brokerCapabilities] = SPACEFAST_FUNCTIONS_RELAY_BROKERS[$broker];
+    $brokerCapabilities = SPACEFAST_FUNCTIONS_RELAY_BROKERS[$broker]['capabilities'];
     // Narrowed to the selected broker before the grant is checked for
     // emptiness: a version granted only database access must not be able to
     // reach the service executor by naming it, and vice versa.
@@ -189,22 +186,22 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     }
 
     if ($broker === 'database') {
-        // The broker is bound to exactly the URL and grant the one-shot
-        // executor's environment would have carried; the limits it enforces
-        // read the same configuration names the relay used to copy into that
-        // environment. A worker cannot tell the lanes apart — the corpus pins
-        // the answer bytes — but the database can: the persistent link makes a
-        // handler's Kth query cost a round trip, not a spawn and a handshake.
-        $env = _stattic_functions_relay_executor_env($claims, $broker, $grant);
+        // The broker is bound to the same URL resolution every other database
+        // lane uses, and to exactly the grant this credential carries; the
+        // result limits it enforces read the same configuration names directly.
+        // A worker cannot tell this lane from a spawned executor, since the
+        // corpus pins the answer bytes against the native engine. The database
+        // can: the persistent link makes a handler's Kth query cost a round
+        // trip, not a spawn and a handshake.
+        $env = _stattic_zero_runner_base_env();
         _stattic_db_broker_bind(
             is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : '',
             is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
         );
         _stattic_db_broker_grant($grant);
         $answer = _stattic_db_broker_execute($body);
-        // Same ordering as the native executor's stdio loop: a frame must
-        // never leave a transaction — and its row locks — behind, so the
-        // rollback lands before the answer does.
+        // A frame must never leave an open transaction behind, holding row
+        // locks, so the rollback lands before the answer does.
         _stattic_db_broker_rollback_open_transaction();
         _stattic_response_send(200, $answer, 'application/json; charset=utf-8', [
             'Cache-Control' => 'no-store',
@@ -212,7 +209,7 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     }
 
     $result = _stattic_runtime_run_subprocess(
-        [_stattic_runtime_native_binary(), $executor],
+        [_stattic_runtime_native_binary(), SPACEFAST_FUNCTIONS_RELAY_BROKERS[$broker]['executor']],
         _stattic_functions_relay_executor_env($claims, $broker, $grant),
         $body,
         null,
@@ -259,9 +256,7 @@ function _stattic_functions_logs_serve(string $privateRoot, string $spaceId, str
  * The worker runs on Cloudflare with no route to the control plane, so it tails
  * to the origin that dispatched it; the origin writes to PHP's error log, which
  * the provider ships and serves back. This is the hop that connects a Functions
- * handler's `console.log` to `sf logs runtime` — before it existed the records
- * landed in NDJSON files under the private root, which no provider log API can
- * see.
+ * handler's `console.log` to `sf logs runtime`.
  */
 function _stattic_functions_log_append(string $versionId, string $body): void
 {

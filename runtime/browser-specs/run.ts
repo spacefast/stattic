@@ -16,9 +16,8 @@ const FIXTURE_PROCESS = fileURLToPath(
 const TEST_FILE = fileURLToPath(new URL("./origin-null-access.test.ts", import.meta.url));
 
 // A bare local run must not share the dev database: a running `bun run dev`
-// worker is NOTIFY-woken on operation insert and claims this fixture's email
-// operations, minting their URLs with its own env instead of the fixture's.
-// Clone a run-owned database exactly like `bun run test` does; CI passes an
+// worker claims this fixture's email operations and mints their URLs with its
+// own env. Clone a run-owned database like `bun run test` does. CI passes an
 // isolated SPACEFAST_TEST_DATABASE_URL and skips this.
 let dropIsolatedDatabase: (() => Promise<void>) | undefined;
 let fixtureDatabaseUrl = process.env.SPACEFAST_TEST_DATABASE_URL;

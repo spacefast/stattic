@@ -21,16 +21,24 @@ import { PHP_BINARY, RUNTIME_DIR } from "./harness.ts";
 const PRELUDE_PATH = path.join(RUNTIME_DIR, "engine/runtime/tenant-prelude.php");
 const PROBE_PATH = path.join(RUNTIME_DIR, "tests/fixtures/tenant-prelude-probe.php");
 
-// The platform secrets a real worker carries when it reaches tenant dispatch:
-// DB credentials, the raw persistent-data blob, an access JWT, a WordPress key.
-// The prelude must remove every one from $_SERVER, $_ENV, and the C env.
-const SECRET_ENV: Record<string, string> = {
+// The env a real worker carries when it reaches tenant dispatch. Two classes:
+//   * FLEET-WIDE — the dispatch token (authenticates to the functions edge for
+//     every site) and the persistent-data blob that embeds it. A tenant reading
+//     either could impersonate another team's site, so the prelude scrubs them.
+//   * SITE-SCOPED — DB creds, an access JWT, a WordPress key. These belong to
+//     the one team that shares the box, so the prelude leaves them: the team
+//     owns its box, and reading its own secret is not an escalation.
+const FLEET_ENV = {
+  SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "fleet-dispatch-token-tenant-must-never-see",
+  SPACEFAST_ATOMIC_PERSISTENT_DATA_JSON:
+    '{"SPACEFAST_FUNCTIONS_DISPATCH_TOKEN":"fleet-dispatch-token-tenant-must-never-see"}',
+} satisfies Record<string, string>;
+const SITE_ENV = {
   DB_PASSWORD: "s3cr3t-db-pass",
   DB_USER: "wp_db_user",
-  SPACEFAST_ACCESS_JWT: "eyJhbGciOiJFZERTQSJ9.tenant-must-never-see-this",
-  SPACEFAST_ATOMIC_PERSISTENT_DATA_JSON: '{"DB_PASSWORD":"s3cr3t-db-pass"}',
+  SPACEFAST_ACCESS_JWT: "eyJhbGciOiJFZERTQSJ9.site-scoped-same-team",
   AUTH_KEY: "wordpress-auth-key",
-};
+} satisfies Record<string, string>;
 
 let box: string;
 type SpaceLayout = { id: string; phpRoot: string; tmp: string; selfSecret: string };
@@ -73,7 +81,8 @@ type ProbeResult = {
   read_sibling_space: { ok: boolean };
   read_docroot_config: { ok: boolean };
   read_stattic_secret: { ok: boolean };
-  leaked_platform_env: Record<string, string[]>;
+  leaked_fleet_env: Record<string, string[]>;
+  surviving_site_env: Record<string, string[]>;
   dangerous_functions_still_callable: Record<string, boolean>;
 };
 
@@ -83,7 +92,8 @@ function runProbe(self: SpaceLayout, sibling: SpaceLayout): ProbeResult {
     encoding: "utf8",
     env: {
       ...process.env,
-      ...SECRET_ENV,
+      ...FLEET_ENV,
+      ...SITE_ENV,
       STATTIC_PRELUDE_PATH: PRELUDE_PATH,
       STATTIC_PROBE_SPACE_ID: self.id,
       STATTIC_PROBE_PHP_ROOT: self.phpRoot,
@@ -100,7 +110,7 @@ function runProbe(self: SpaceLayout, sibling: SpaceLayout): ProbeResult {
   return JSON.parse(result.stdout) as ProbeResult;
 }
 
-test("prelude jails each space to its own php-root and scrubs platform secrets", () => {
+test("prelude jails each space to its own php-root and scrubs only fleet-wide secrets", () => {
   const a = runProbe(spaces.A, spaces.B);
   const b = runProbe(spaces.B, spaces.A);
 
@@ -123,9 +133,17 @@ test("prelude jails each space to its own php-root and scrubs platform secrets",
   expect(b.read_self.ok).toBe(true);
   expect(b.read_sibling_space.ok).toBe(false); // B cannot read A
 
-  // No platform secret survives on any surface a handler or subprocess reads.
+  // No FLEET-WIDE secret survives on any surface a handler or subprocess reads:
+  // the dispatch token and the persistent-data blob that embeds it are gone.
   // (PHP encodes an empty map as `[]`, so assert on the key set.)
-  expect(Object.keys(a.leaked_platform_env)).toHaveLength(0);
+  expect(Object.keys(a.leaked_fleet_env)).toHaveLength(0);
+
+  // SITE-SCOPED secrets are deliberately LEFT: the team owns the box, so a
+  // same-team tenant reading the DB password or a WordPress key is not an
+  // escalation. Every seeded one is still readable via getenv.
+  expect(a.surviving_site_env.DB_PASSWORD).toContain("getenv");
+  expect(a.surviving_site_env.AUTH_KEY).toContain("getenv");
+  expect(a.surviving_site_env.SPACEFAST_ACCESS_JWT).toContain("getenv");
 
   // The known, documented gap: function removal needs the provider pool, so the
   // exec family is still callable. The proof records it rather than hiding it.

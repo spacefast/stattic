@@ -1,35 +1,27 @@
-// Runtime write-lock hardening (management.php _stattic_runtime_with_write_lock /
-// _stattic_runtime_with_space_write_lock). Before this change ONE site-wide
-// flock serialized every mutating management route across every space on a
-// many-space shared site (production incident: commit a06d0571c "ride out
-// write-lock contention; serialize same-site CI deploys"). Exactly
-// Config-shaped routes (update_route, update_hostname_intent,
-// update_tombstones, update_retention_policy) take a per-space lock file so
-// unrelated spaces stop contending, and after the
-// finalize-family write-audit so did finalize_version and delete_version:
-// their writes are space-confined (version trees, per-space blob CAS, pointer
-// flip) or independently serialized (journal append, the always-innermost
-// routes/index.lock, one-shot content/randomly-addressed spool files).
-// repair_space is now the ONLY site-wide row (see admin/api.php's lock-scope
-// classification comment): it rebuilds the full cross-space route index, and
-// serializing it against every mutation is the point. delete_space moved to a
-// per-space lock file outside the tree it deletes, so it no longer contends on
-// the site-wide lock. The event drain/ack pair took the site lock back when it
-// was a push lane with leases to hand out; it is now a cursor read over
-// journal.jsonl (D53), whose two inputs — the append-only journal and the
-// cursor file — serialize themselves, so it takes no write lock at all and must
-// not queue behind a publish.
+// Runtime write-lock scoping (management.php _stattic_runtime_with_write_lock /
+// _stattic_runtime_with_space_write_lock).
 //
-// Behavioral only: every assertion races real management requests against a
-// REAL flock held externally on the exact lock file path, each request run
-// as its own OS process through the SSH management dispatcher
-// (admin/dispatch.php — the same transport runtime/tests/dispatch.test.ts
-// exercises). Two independent `php` CLI processes give genuine OS-level
-// concurrency; racing HTTP requests against a single `php -S` dev server
-// instead was tried and is flaky (its worker-pool scheduling under
+// The Config-shaped routes (update_route, update_hostname_intent,
+// update_tombstones) plus finalize_version and delete_version take a per-space
+// lock file, so unrelated spaces do not
+// contend: their writes are space-confined (version trees, per-space blob CAS,
+// pointer flip) or independently serialized (journal append, the
+// always-innermost routes/index.lock, one-shot randomly-addressed spool files).
+// repair_space is the only site-wide row (see admin/api.php's lock-scope
+// classification comment): it rebuilds the full cross-space route index, and
+// serializing it against every mutation is the point. delete_space takes a
+// per-space lock file outside the tree it deletes. The event drain/ack pair is
+// a cursor read over journal.jsonl (D53), whose two inputs serialize
+// themselves, so it takes no write lock and must not queue behind a publish.
+//
+// Every assertion races real management requests against a real flock held
+// externally on the exact lock file path, each request run as its own OS
+// process through the SSH management dispatcher (admin/dispatch.php, the same
+// transport runtime/tests/dispatch.test.ts exercises). Two independent `php`
+// CLI processes give real OS-level concurrency. Racing HTTP requests against a
+// single `php -S` dev server is flaky instead: its worker-pool scheduling under
 // PHP_CLI_SERVER_WORKERS does not reliably hand two near-simultaneous
-// connections to two different workers, which produces false "serialized"
-// timings unrelated to the runtime's own locking).
+// connections to two different workers, which fakes serialized timings.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
@@ -91,10 +83,9 @@ function routeIndexLockPath(): string {
   return storagePath(rt, "routes", "index.lock");
 }
 
-// Acquires a real, blocking, exclusive flock on `lockPath` in a detached PHP
-// child process and holds it for `holdMs` before releasing. Resolves once the
-// lock is confirmed held (the child prints "locked" right after flock()
-// returns), so the caller never races the hold's own setup.
+// Holds a real exclusive flock on `lockPath` from a PHP child process for
+// `holdMs`. Resolves once the child confirms the lock is held, so the caller
+// never races the hold's own setup.
 function holdFlockExternally(lockPath: string, holdMs: number): Promise<void> {
   mkdirSync(path.dirname(lockPath), { recursive: true });
   return new Promise((resolve, reject) => {
@@ -132,9 +123,9 @@ function holdFlockExternally(lockPath: string, holdMs: number): Promise<void> {
   });
 }
 
-// Holds a real lock until the caller explicitly releases it. This proves a
-// request does not acquire that lock without comparing unrelated process
-// startup/finalizer latency against a timing threshold.
+// Holds a real lock until the caller releases it. Proves a request does not
+// take that lock without weighing unrelated process latency against a timing
+// threshold.
 function holdFlockUntilReleased(lockPath: string): Promise<() => Promise<void>> {
   mkdirSync(path.dirname(lockPath), { recursive: true });
   return new Promise((resolve, reject) => {
@@ -186,10 +177,9 @@ function holdFlockUntilReleased(lockPath: string): Promise<() => Promise<void>> 
   });
 }
 
-// Runs one management request through the shared CLI dispatcher driver as its
-// own OS process — genuine process-level concurrency between two calls, unlike
-// racing fetch() against a shared dev-server connection pool. `elapsedMs` is
-// measured around the child, which the contention-window assertions below need.
+// Runs one management request through the shared CLI dispatcher as its own OS
+// process, giving real concurrency between two calls. `elapsedMs` is measured
+// around the child, which the contention-window assertions below need.
 async function dispatchTimed(
   request: Record<string, unknown>,
 ): Promise<{ status: number; body: Record<string, unknown>; elapsedMs: number; stderr: string }> {
@@ -209,8 +199,8 @@ async function dispatchTimed(
   };
 }
 
-// On a status mismatch surface the dispatch envelope body too — a bare status
-// diff (like this suite's CI-only 404s) is undebuggable from CI logs alone.
+// On a status mismatch, surface the dispatch envelope body: a bare status diff
+// is undebuggable from CI logs alone.
 function expectDispatchStatus(
   result: { status: number; body: Record<string, unknown>; stderr?: string },
   expected: number,
@@ -243,9 +233,9 @@ test("a per-space write lock does not serialize mutations on a different space",
   const releaseSpaceALock = await holdFlockUntilReleased(spaceLockPath(SPACE_A));
   const resultAPromise = updateTombstonesDispatch(SPACE_A);
 
-  // Space B's lock is a different file entirely: its mutation completes
-  // while A's lock is still held. Release only after that real completion
-  // signal, avoiding process-startup timing as a proxy for lock independence.
+  // Space B's lock is a different file, so its mutation completes while A's
+  // lock is still held. Releasing on that completion avoids using
+  // process-startup timing as a proxy for lock independence.
   const resultB = await updateTombstonesDispatch(SPACE_B).finally(releaseSpaceALock);
   const resultA = await resultAPromise;
 
@@ -255,10 +245,9 @@ test("a per-space write lock does not serialize mutations on a different space",
 
 test("update_tombstones takes the per-space lock: free of the site lock, serialized on its own space", async () => {
   // update_tombstones writes its own space's tombstones.json and rebuilds the
-  // shared cross-space route index — but the index has its own always-innermost
-  // lock now (routes/index.lock, covered by the index-lock tests), so the call
-  // no longer rides the site-wide lock. A held SITE lock must not delay it; a
-  // held lock on ITS OWN space still serializes it.
+  // shared cross-space route index, which has its own always-innermost lock
+  // (routes/index.lock). A held site lock must not delay it. A held lock on its
+  // own space still serializes it.
   const releaseSiteLock = await holdFlockUntilReleased(siteLockPath());
   const underSiteLock = await updateTombstonesDispatch(SPACE_A).finally(releaseSiteLock);
   expectDispatchStatus(underSiteLock, 200);
@@ -292,9 +281,6 @@ function updateRouteDispatch(
   );
 }
 
-// update_route is the Config-shaped route the incident was actually about: the
-// deploy that could not flip its pointer because an unrelated space held the
-// site-wide lock.
 test("update_route takes the per-space lock: free of the site lock, serialized on its own space", async () => {
   const releaseSiteLock = await holdFlockUntilReleased(siteLockPath());
   const underSiteLock = await updateRouteDispatch(SPACE_A, "ver_lock_a1").finally(releaseSiteLock);
@@ -314,7 +300,7 @@ test("a foreign space's lock leaves update_route alone; the shared route index s
   expectDispatchStatus(underForeignLock, 200);
 
   // `changed_paths` forces a real pointer write: an unchanged replay returns
-  // before it ever reaches the shared index, and would pass this vacuously.
+  // before reaching the shared index and would pass vacuously.
   await holdFlockExternally(routeIndexLockPath(), HOLD_MS);
   const underIndexLock = await updateRouteDispatch(
     SPACE_B,
@@ -326,10 +312,10 @@ test("a foreign space's lock leaves update_route alone; the shared route index s
   expect(underIndexLock.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
 });
 
-// Stages a finalizable version: declared session + every blob negotiated and
-// PUT by sha (the ingest half of a v4 publish, §9). Returns the upload id the
-// finalize call must present. Deliberately NOT the harness's deploy(): finalize
-// is the call under test and has to be dispatched separately, timed.
+// Stages a finalizable version: a declared session plus every blob negotiated
+// and PUT by sha. Returns the upload id finalize must present. Not the
+// harness's deploy(), because finalize is the call under test and has to be
+// dispatched separately and timed.
 async function stageFinalizableVersion(spaceId: string, versionId: string): Promise<string> {
   const files = { "index.html": `${spaceId}/${versionId}` };
   const session = await createDeclaredSession(rt, spaceId, versionId, files);
@@ -361,10 +347,9 @@ function deleteVersionDispatch(spaceId: string, versionId: string) {
 }
 
 test("finalize_version takes the per-space lock: free of the site lock, serialized on its own space", async () => {
-  // The finalize-family write-audit (management.php classification comment):
-  // every finalize write is version-tree/space-confined or independently
-  // serialized, so a long site-locked mutation elsewhere must not delay it —
-  // this was the minutes-long hold that queued every other space's config PUT.
+  // Every finalize write is version-tree/space-confined or independently
+  // serialized (management.php classification comment), so a long site-locked
+  // mutation elsewhere must not delay it.
   const spaceId = "spc_lock_fin_scope";
   const siteUpload = await stageFinalizableVersion(spaceId, "ver_lock_fin_site");
   const releaseSiteLock = await holdFlockUntilReleased(siteLockPath());
@@ -390,7 +375,7 @@ test("concurrent finalizes on different spaces do not serialize", async () => {
   const releaseBlockedLock = await holdFlockUntilReleased(spaceLockPath(blockedSpace));
   const blockedPromise = finalizeDispatch(blockedSpace, "ver_lock_fin_cross_a", blockedUpload);
 
-  // The free space completes while the other space's lock remains held. That
+  // The free space completes while the other space's lock is still held. That
   // completion is the release signal, so unrelated process latency cannot
   // masquerade as shared-lock contention.
   const free = await finalizeDispatch(freeSpace, "ver_lock_fin_cross_b", freeUpload).finally(
@@ -437,9 +422,8 @@ test("repair alone serializes on the site-wide write lock; space delete and the 
 
   await holdFlockExternally(siteLockPath(), HOLD_MS);
   const [repair, deleted, drained] = await Promise.all([
-    // repair_space is the last site-wide row: the recovery hammer rebuilds the
-    // whole cross-space route index, so serializing it against every mutation
-    // on the site is the point.
+    // repair_space rebuilds the whole cross-space route index, so serializing
+    // it against every mutation on the site is the point.
     dispatchTimed(
       dispatchEnvelope(
         "POST",
@@ -450,12 +434,9 @@ test("repair alone serializes on the site-wide write lock; space delete and the 
         },
       ),
     ),
-    // Space deletion is NOT on that list any more. Its lock file used to live
-    // inside the tree it deletes, which made a per-space lock unsafe and forced
-    // it onto the site lock; the lock now lives at
-    // runtime/locks/spaces/{spaceId}.lock, so the delete contends with its OWN
-    // space's finalize (which is the pairing that matters) and with nothing
-    // else. Held site lock, unrelated space: it must go straight through.
+    // Space deletion locks runtime/locks/spaces/{spaceId}.lock, outside the
+    // tree it deletes, so it contends only with its own space's finalize. A
+    // held site lock on an unrelated space must not delay it.
     dispatchTimed(
       dispatchEnvelope(
         "POST",
@@ -464,10 +445,9 @@ test("repair alone serializes on the site-wide write lock; space delete and the 
         { space_id: deleteSpace },
       ),
     ),
-    // Neither is the event drain, any more. It took the site lock as a push
-    // lane handing out leases; the pull lane (D53) only reads journal.jsonl
-    // from the persisted cursor, and both of those serialize themselves — so it
-    // holds no write lock and a site-locked repair must never queue it.
+    // The event drain holds no write lock: the pull lane (D53) only reads
+    // journal.jsonl from the persisted cursor, and both of those serialize
+    // themselves. A site-locked repair must never queue it.
     dispatchTimed(
       dispatchEnvelope(
         "POST",
@@ -490,7 +470,7 @@ test("repair alone serializes on the site-wide write lock; space delete and the 
   expect(drained?.elapsedMs).toBeLessThan(BLOCKED_FLOOR_MS);
   expect(repair?.body).toMatchObject({ space_id: SPACE_A, status: "repaired" });
   expect(deleted?.body).toMatchObject({ space_id: deleteSpace, status: "deleted" });
-  // The drain really ran the journal read rather than short-circuiting: it hands
+  // The drain really read the journal instead of short-circuiting: it hands
   // back a page-end cursor over runtime/journal.jsonl.
   expect(drained?.body.cursor).toMatchObject({ offset: expect.any(Number) });
 });

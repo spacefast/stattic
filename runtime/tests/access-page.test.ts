@@ -15,10 +15,10 @@ import {
   visitorIssuer,
 } from "./harness.ts";
 
-// The runtime-rendered visitor access page: lanes derived from the projected
-// grants, presentation from the accessPage descriptor, credentials verified
-// centrally through the server-to-server exchange. The central exchange here
-// is a local fake that mints real handoff tokens with the suite's visitor key.
+// The runtime-rendered visitor access page: lanes from the projected grants,
+// presentation from the accessPage descriptor, credentials verified centrally
+// through the server-to-server exchange. That exchange is a local fake here,
+// minting real handoff tokens with the suite's visitor key.
 
 let runtime: Runtime;
 let exchange: ReturnType<typeof Bun.serve>;
@@ -55,10 +55,10 @@ const FENCED_VERSION = "ver_access_page_fenced";
 
 const EXCHANGE_CREDENTIAL = "runtime-exchange-credential-0123456789abcdef";
 const PASSWORD = "correct horse battery staple";
-// A share link is the destination URL with this token on it. Durable and
-// multi-use until the Grant behind it is revoked. Every token that may ride
-// `?__=` declares its lane with a prefix (context.php:
-// STATTIC_ACCESS_QUERY_TOKEN_*_PREFIX) so nothing has to guess from its shape.
+// A share link is the destination URL with this token on it, durable and
+// multi-use until its Grant is revoked. Every token that may ride `?__=`
+// declares its lane with a prefix (context.php:
+// STATTIC_ACCESS_QUERY_TOKEN_*_PREFIX).
 const LINK_PREFIX = "sfl_";
 const SYSTEM_VIEW_PREFIX = "sfv_";
 const LINK_TOKEN = `${LINK_PREFIX}aBcD-shareLink_0123456789`;
@@ -71,8 +71,8 @@ const SSO_START_URL =
   "https://access.access-page.test/identity/acn_okta/start?spaceId=spc_access_page_lanes";
 
 // Both session forms are `<prefix><base64url payload>.<hmac>` (contracts §7):
-// the cookie IS the session. `sfv2_` carries authorities plus the
-// [access_gen, session_ver] tuple; `sfa1_` carries no authority at all.
+// the cookie is the session. `sfv2_` carries authorities plus the
+// [access_gen, session_ver] tuple; `sfa1_` carries no authority.
 const RECORDED_SESSION_PREFIX = "sfv2_";
 const STATELESS_SESSION_PREFIX = "sfa1_";
 
@@ -86,8 +86,8 @@ const exchangeRequests: Array<{
   form: URLSearchParams;
 }> = [];
 
-// The session states itself: the payload is the value the runtime handed the
-// browser, so a test reads what was minted without any server-side lookup.
+// The payload is the value the runtime handed the browser, so a test reads the
+// minted session without a server-side lookup.
 function sessionPayload(cookie: string): Record<string, unknown> {
   const value = cookie.split("=", 2)[1] ?? "";
   const prefix = [RECORDED_SESSION_PREFIX, STATELESS_SESSION_PREFIX].find((candidate) =>
@@ -100,9 +100,9 @@ function sessionPayload(cookie: string): Record<string, unknown> {
   return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>;
 }
 
-// The only server-side session state left (§7/D85): one small record per
-// recorded session, existing solely so a single session can be revoked exactly.
-// A visitor who proved nothing must never appear in here.
+// The only server-side session state left (§7/D85): one record per recorded
+// session, so a single session can be revoked exactly. A visitor who proved
+// nothing never appears here.
 function sessionRecords(spaceId: string): string[] {
   const directory = path.join(spaceRoot(runtime, spaceId), "sessions");
   return existsSync(directory)
@@ -164,9 +164,9 @@ function handoffToken(
 }
 
 // Internal surfaces (thumbnail fetchers, admin view links) present a signed
-// token on the same `?__=` param. The JWT stays the authority; runtime may echo
-// it into a brief host-only cookie so the renderer can fetch page assets, but
-// no visitor session or server-side record is created.
+// token on the same `?__=` param. The JWT stays the authority. The runtime may
+// echo it into a short host-only cookie so the renderer can fetch page assets,
+// but creates no visitor session and no server-side record.
 function systemViewToken(
   overrides: Record<string, unknown> = {},
   host = LANES_HOST,
@@ -197,10 +197,10 @@ function accessConfig(input: {
   spaceClaimed?: boolean;
   fence?: string;
   // The Space's access generation. Every Grant mutation moves it (the control
-  // plane bumps `spaces.access_generation` in the same transaction), and it is
-  // what the runtime compares a session's `[access_gen, session_ver]` tuple
-  // against — so a fixture that edits a Grant without moving it is not
-  // modelling a mutation the platform can actually produce.
+  // plane bumps `spaces.access_generation` in the same transaction), and the
+  // runtime compares a session's `[access_gen, session_ver]` tuple against it.
+  // A fixture that edits a Grant without moving it models a mutation the
+  // platform cannot produce.
   generation?: number;
 }) {
   const generation = input.generation ?? 0;
@@ -274,8 +274,8 @@ function lanesGrants(shareGeneration = 1): Array<Record<string, unknown>> {
   ];
 }
 
-// The central exchange refuses with the platform's RFC 9457 problem document,
-// same as every other control-plane API answer the runtime parses.
+// The central exchange refuses with an RFC 9457 problem document, like every
+// other control-plane answer the runtime parses.
 function problem(status: number, code: string, extra: Record<string, unknown> = {}): Response {
   return Response.json(problemDocument(status, code, undefined, extra), {
     status,
@@ -558,7 +558,7 @@ beforeAll(async () => {
     });
   }
   // A publisher-supplied access template: the compiled artifact carries the
-  // runtime slots, the runtime injects the working lane blocks at serve time.
+  // runtime slots and the runtime injects the lane blocks at serve time.
   await deploy(runtime, {
     spaceId: CUSTOM_SPACE,
     versionId: CUSTOM_VERSION,
@@ -635,11 +635,10 @@ test("the deny surface renders the access page with every configured lane", asyn
 });
 
 test("state codes render as page states and never echo unknown values", async () => {
-  // Central account/link transitions need dashboard identity or emailed,
-  // single-use credentials and cannot run inside the local browser fixture.
-  // Assert states with dedicated status copy independently here; the
-  // control-plane route suite owns the decisions and redirects that produce
-  // these codes. The checked probe's redirect suppression is covered below.
+  // Central account/link transitions need dashboard identity or single-use
+  // emailed credentials and cannot run in the local browser fixture, so assert
+  // their status copy here. The control-plane route suite owns the decisions
+  // and redirects that produce these codes.
   const centralStateCopy = {
     "no-grant": "hasn&#039;t let you in yet",
     "link-expired": "That link has expired",
@@ -684,8 +683,8 @@ test("an unclaimed space points the visitor at the link it cannot render", async
   expect(html).not.toContain('name="password"');
   expect(html).not.toContain("Continue with Spacefast");
 
-  // The hidden Link lane still opens the destination even though this Space
-  // has no password, account, request, or identity lane to render.
+  // The hidden Link lane still opens the destination though this Space renders
+  // no password, account, request, or identity lane.
   const opened = await get(runtime, UNCLAIMED_HOST, `/__/${UNCLAIMED_LINK_TOKEN}`);
   expect(opened.status).toBe(303);
   expect(opened.headers.get("location")).toBe("/docs/");
@@ -717,9 +716,9 @@ test("the password lane verifies centrally and admits with zero visible redirect
   expect(submitted.headers.get("location")).toBe("/docs/");
   const cookie = sessionCookie(submitted);
   expect(cookie).toStartWith(`spacefast_session_dev=${RECORDED_SESSION_PREFIX}`);
-  // The cookie is the session (§7/D120): it names the authority it was minted
-  // for and the [access_gen, session_ver] tuple the hot path compares against
-  // the overlay, so admitting the next request reads no file at all.
+  // The cookie is the session (§7/D120): it names its authority and the
+  // [access_gen, session_ver] tuple the hot path compares against the overlay,
+  // so the next request is admitted without reading a file.
   const claims = sessionPayload(cookie);
   expect(claims.spaceId).toBe(LANES_SPACE);
   expect(claims.host).toBe(LANES_HOST);
@@ -791,7 +790,7 @@ const originMetadataCases: Array<{
   accepted: boolean;
 }> = [
   // No Origin and no same-origin fetch metadata proves nothing about where the
-  // submission came from, so it is refused rather than trusted.
+  // submission came from, so refuse it.
   { name: "absent Origin + absent Sec-Fetch-Site", accepted: false },
   { name: "absent Origin + Sec-Fetch-Site none", secFetchSite: "none", accepted: false },
   {
@@ -876,10 +875,10 @@ test("the request-invite lane relays centrally and remembers only the requested 
   });
   expect(submitted.status).toBe(303);
   expect(submitted.headers.get("location")).toBe("/docs/?sf_access=request-pending");
-  // The requested scope is remembered on the one host session, not in a cookie
-  // of its own. Nobody proved anything here, so that session is the stateless
-  // form: asking for an invite creates no revocation record, and a flood of
-  // requests therefore cannot evict anyone who did prove something.
+  // The requested scope is remembered on the host session, not in a cookie of
+  // its own. Nobody proved anything here, so that session is the stateless
+  // form: asking for an invite writes no revocation record, and a flood of
+  // requests cannot evict anyone who did prove something.
   const requested = sessionCookie(submitted);
   expect(requested).toStartWith(`spacefast_session_dev=${STATELESS_SESSION_PREFIX}`);
   expect(sessionRecords(LANES_SPACE)).toEqual(recordsBefore);
@@ -940,8 +939,8 @@ test("identity-bound spaces probe the account session silently, once per browser
   expect(location).toContain("return=%2Fdocs%2F");
   // No probe cookie of its own: the probe is remembered on the host session,
   // which this visitor did not have until now. That session is the stateless
-  // form — an unauthenticated bounce creates no revocation record, so curling
-  // this URL in a loop cannot evict a single real session.
+  // form, so an unauthenticated bounce writes no revocation record and curling
+  // this URL in a loop evicts no real session.
   const guard = sessionCookie(probe);
   expect(guard).toStartWith(`spacefast_session_dev=${STATELESS_SESSION_PREFIX}`);
   expect(sessionRecords(SILENT_SPACE)).toEqual([]);
@@ -960,9 +959,8 @@ test("identity-bound spaces probe the account session silently, once per browser
   expect(replayed.status).toBe(302);
   expect(replayed.headers.get("location") ?? "").toContain("silent=1");
 
-  // A share-link token minted for another Space opens nothing here, so the
-  // arrival is an ordinary unadmitted visitor and gets the same probe rather
-  // than walking straight into the deny page.
+  // A share-link token minted for another Space opens nothing here, so this
+  // arrival is an ordinary unadmitted visitor and gets the same probe.
   const tokened = await get(runtime, SILENT_HOST, `/docs/?__=${LINK_TOKEN}`, {
     headers: { "sec-fetch-dest": "document" },
   });
@@ -971,9 +969,8 @@ test("identity-bound spaces probe the account session silently, once per browser
 });
 
 // The dead credential is gone by the time the page renders, so the diagnosis
-// cannot live on it. It moves onto the stateless session that replaces it,
-// which is the only reason the visitor gets told why they are signed out
-// instead of meeting a blank "this is private" wall on the way back.
+// moves onto the stateless session that replaces it. That is why the visitor is
+// told they were signed out instead of meeting a blank "this is private" wall.
 test("a session that expired still explains itself on the next navigation", async () => {
   const dead = `${RECORDED_SESSION_PREFIX}${"0".repeat(64)}.${"0".repeat(64)}`;
   const cleared = await get(runtime, LANES_HOST, "/docs/", {
@@ -991,8 +988,8 @@ test("a session that expired still explains itself on the next navigation", asyn
   expect(next.status).toBe(403);
   expect(await next.text()).toContain("Your access expired");
 
-  // It carries the diagnosis and nothing else: it opens no page the visitor
-  // was not already entitled to, and it names no authority.
+  // It carries the diagnosis and nothing else: it opens no page the visitor was
+  // not already entitled to, and names no authority.
   expect(sessionPayload(replacement).authorities).toBeUndefined();
   expect(
     (await get(runtime, LANES_HOST, "/docs/guide/", { headers: { cookie: replacement } })).status,
@@ -1017,9 +1014,9 @@ test("a sole SSO lane skips the chooser entirely", async () => {
   const location = probe.headers.get("location") ?? "";
   expect(location.startsWith(SSO_START_URL)).toBe(true);
   expect(location).toContain(`host=${SOLE_SSO_HOST}`);
-  // This projection carries no exchange credential, so there is no key to sign
-  // a stateless session with and the probe cannot be remembered. It degrades to
-  // bouncing again next time — never to writing a session nobody can verify.
+  // This projection carries no exchange credential, so no key exists to sign a
+  // stateless session and the probe cannot be remembered. It degrades to
+  // bouncing again next time, never to writing a session nobody can verify.
   expect(probe.headers.getSetCookie()).toEqual([]);
   expect(sessionRecords(SOLE_SSO_SPACE)).toEqual([]);
 
@@ -1057,7 +1054,7 @@ test("a publisher access template keeps the working lane blocks", async () => {
   const expired = await get(runtime, CUSTOM_HOST, "/?sf_access=link-expired");
   const expiredHtml = await expired.text();
   expect(expiredHtml).toContain("That link has expired");
-  // The status renders once, in its slot — never duplicated into the lanes.
+  // The status renders once, in its slot, never duplicated into the lanes.
   expect(expiredHtml.split("That link has expired").length).toBe(2);
 });
 
@@ -1132,17 +1129,17 @@ test("a public Grant retains a signed-in account identity without team membershi
   expect((await get(runtime, PUBLIC_HOST, "/", { headers: { cookie } })).status).toBe(200);
 });
 
-// THE shape of a share link: the page you want with the secret appended, and
-// that page is the response. Zero visible hops — one request, 200, content. A
-// link an agent cannot follow with one request is not a link.
+// The shape of a share link: the page you want with the secret appended,
+// returned as the response. One request, 200, content. A link an agent cannot
+// follow with one request is not a link.
 test("a share token on the URL returns that page in the same response", async () => {
   const before = exchangeRequests.length;
   const opened = await get(runtime, LANES_HOST, `/docs/guide/?__=${LINK_TOKEN}`);
   expect(opened.status).toBe(200);
   expect(await opened.text()).toContain(`guide of ${LANES_SPACE}`);
 
-  // Exactly one control-plane call, and no browser hop at all: nothing about
-  // this response asks the client to go anywhere.
+  // One control-plane call and no browser hop: nothing here asks the client to
+  // go anywhere.
   expect(
     exchangeRequests
       .slice(before)
@@ -1155,25 +1152,24 @@ test("a share token on the URL returns that page in the same response", async ()
   expect(opened.headers.get("cache-control")).toBe("private, no-store");
   expect(opened.headers.get("referrer-policy")).toBe("no-referrer");
 
-  // The cookie rides the same response, which is what lets the token drop out
-  // of every URL after this one.
+  // The cookie rides the same response, which lets the token drop out of every
+  // later URL.
   const cookie = sessionCookie(opened);
   expect(cookie).toStartWith(`spacefast_session_dev=${RECORDED_SESSION_PREFIX}`);
   const followed = await get(runtime, LANES_HOST, "/docs/", { headers: { cookie } });
   expect(followed.status).toBe(200);
 
-  // The link's stored landing path does not override the URL that was asked
-  // for; that is what makes a deep link a deep link. (The exchange fake answers
-  // this token with return: "/docs/", and the guide was still served above.)
+  // The link's stored landing path does not override the requested URL. The
+  // exchange fake answers this token with return: "/docs/", and the guide was
+  // still served above.
   const deep = await get(runtime, LANES_HOST, `/docs/?__=${LINK_TOKEN}`);
   expect(deep.status).toBe(200);
   expect(await deep.text()).toContain(`docs of ${LANES_SPACE}`);
 
-  // A compiled canonical redirect happens after successful exchange. It keeps
-  // ordinary query state AND the Link token: a cookie-less agent following the
-  // Location must still land on the page (share-links' one-request contract),
-  // so only off-origin targets shed the token. The session cookie still rides
-  // this response for clients that carry cookies.
+  // A compiled canonical redirect happens after a successful exchange. It keeps
+  // ordinary query state and the Link token, so a cookie-less agent following
+  // the Location still lands on the page; only off-origin targets shed the
+  // token. The session cookie still rides this response for cookie clients.
   const canonical = await get(runtime, LANES_HOST, `/docs?view=compact&__=${LINK_TOKEN}&page=2`);
   expect(canonical.status).toBe(308);
   expect(canonical.headers.get("location")).toBe(`/docs/?view=compact&__=${LINK_TOKEN}&page=2`);
@@ -1210,7 +1206,7 @@ test("an access URL sets a session and redirects to a clean live URL", async () 
   expect(call?.form.get("landingPath")).toBeNull();
   expect(call?.form.get("token")).toBe(LINK_TOKEN);
 
-  // The cookie carries the visitor from there — no token in later URLs.
+  // The cookie carries the visitor from there, with no token in later URLs.
   const followed = await get(runtime, LANES_HOST, "/docs/guide/", { headers: { cookie } });
   expect(followed.status).toBe(200);
 
@@ -1284,10 +1280,10 @@ test("revoking the Grant behind a link closes the sessions it opened", async () 
     version_id: LANES_VERSION,
     config: accessConfig({
       spaceId: LANES_SPACE,
-      // A revoked Link is a new Grant generation, and the Space's access
-      // generation moves with it — that tuple change is what pulls a live
-      // session off the hot lane and re-checks the generation hashes it
-      // carries. Every session that carried the old authority stops here.
+      // A revoked Link is a new Grant generation and the Space's access
+      // generation moves with it. That tuple change pulls a live session off
+      // the hot lane and re-checks the generation hashes it carries, so every
+      // session with the old authority stops here.
       grants: lanesGrants(2),
       generation: 1,
       accessPage: lanesAccessPage(),
@@ -1296,10 +1292,10 @@ test("revoking the Grant behind a link closes the sessions it opened", async () 
   try {
     const denied = await get(runtime, LANES_HOST, "/docs/", { headers: { cookie } });
     expect(denied.status).toBe(403);
-    // The Grant is gone, so the session it opened is too — its revocation
-    // record retires with it. But the visitor is not nobody: the identity the
-    // session carried moves onto the stateless session, so a comment thread
-    // does not change author because a link expired.
+    // The Grant is gone, so the session it opened is too and its revocation
+    // record retires with it. The identity the session carried moves onto the
+    // stateless session, so a comment thread does not change author because a
+    // link expired.
     expect(existsSync(recordPath)).toBe(false);
     const replacement = sessionCookie(denied);
     expect(replacement).toStartWith(`spacefast_session_dev=${STATELESS_SESSION_PREFIX}`);
@@ -1345,10 +1341,9 @@ test("an invalid access URL never serves customer content", async () => {
   expect(unknown.headers.get("cache-control")).toBe("no-store");
   expect(unknown.headers.get("referrer-policy")).toBe("no-referrer");
 
-  // A token that names no lane is refused by name. It used to be sniffed —
-  // "two dots means a platform JWT, anything else is opaque" — and an opaque
-  // customer token that matched neither reading was silently dropped, so the
-  // visitor met the access gate and the operator saw nothing at all.
+  // A token that names no lane is refused by name, with a diagnostic. Sniffing
+  // the shape instead drops opaque customer tokens silently, leaving the
+  // visitor at the gate and the operator with nothing to see.
   const before = exchangeRequests.length;
   for (const candidateToken of ["notAValidShareToken00", "sfz_someOtherThing0000", "", "a.b.c"]) {
     const refused = await get(runtime, LANES_HOST, `/docs/?__=${candidateToken}`);
@@ -1362,9 +1357,9 @@ test("an invalid access URL never serves customer content", async () => {
   expect(exchangeRequests.length).toBe(before);
 });
 
-// A well-formed token the control plane does not open behaves exactly as if the
-// parameter were absent: the Space's own gate, never a token error and never a
-// 500. A prober learns nothing about whether this token ever existed.
+// A well-formed token the control plane does not open behaves as if the
+// parameter were absent: the Space's own gate, no token error, no 500. A prober
+// learns nothing about whether the token ever existed.
 test("a share token that opens nothing serves the gate, not content", async () => {
   const refused = await get(runtime, LANES_HOST, `/docs/?__=${LINK_PREFIX}neverMintedToken0000`);
   expect(refused.status).toBe(403);
@@ -1376,7 +1371,7 @@ test("a share token that opens nothing serves the gate, not content", async () =
   expect(refused.headers.get("referrer-policy")).toBe("no-referrer");
 });
 
-// Section I: the system lane. Same param, different kind of secret.
+// The system lane: same param, different kind of secret.
 test("a system view token serves the page and its same-origin assets without a session", async () => {
   const before = exchangeRequests.length;
   const recordsBefore = sessionRecords(LANES_SPACE);
@@ -1387,8 +1382,8 @@ test("a system view token serves the page and its same-origin assets without a s
   );
   expect(opened.status).toBe(200);
   expect(await opened.text()).toContain("docs of spc_access_page_lanes");
-  // The brief cookie carries the same signed proof to subresources; it is not
-  // a visitor session and creates no revocation record.
+  // The short cookie carries the same signed proof to subresources. It is not a
+  // visitor session and creates no revocation record.
   const assetCookie = systemViewCookie(opened);
   expect(assetCookie).toStartWith("spacefast_system_view_dev=");
   expect(sessionCookie(opened)).toBe("");
@@ -1401,9 +1396,9 @@ test("a system view token serves the page and its same-origin assets without a s
   expect(asset.status).toBe(200);
   expect(await asset.text()).toContain("color: #123456");
 
-  // wp.cloud claims ordinary .js client URLs before PHP can protect their
-  // cache policy. The authenticated request therefore moves to a reserved,
-  // extension-safe URL; that URL re-verifies the same proof before serving.
+  // wp.cloud claims ordinary .js URLs before PHP can set their cache policy, so
+  // the authenticated request moves to a reserved extension-safe URL that
+  // re-verifies the same proof before serving.
   const protectedAsset = await get(runtime, LANES_HOST, "/docs/app-D2mDMWBM.js", {
     headers: { cookie: assetCookie },
   });
@@ -1416,12 +1411,12 @@ test("a system view token serves the page and its same-origin assets without a s
   expect(aliasedAsset.status).toBe(200);
   expect(await aliasedAsset.text()).toContain("spacefastProtectedAsset");
   expect(aliasedAsset.headers.get("cache-control")).toBe("private, no-store");
-  // Verified locally against the runtime's own keys — the exchange never hears
+  // Verified locally against the runtime's own keys. The exchange never hears
   // about a system token.
   expect(exchangeRequests.length).toBe(before);
 
   // An absent scope is whole-space on purpose: a thumbnail fetcher names no
-  // path. A present one is a hard boundary — including the space root.
+  // path. A present one is a hard boundary, including the space root.
   const scopedToken = systemViewToken({ scope: "/docs" });
   const scoped = await get(runtime, LANES_HOST, `/docs/?__=${SYSTEM_VIEW_PREFIX}${scopedToken}`);
   expect(scoped.status).toBe(200);

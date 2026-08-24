@@ -8,7 +8,7 @@ require_once __DIR__ . '/rules.php';
 require_once __DIR__ . '/../shared/safety.php';
 
 // Every `_headers` rule the version declares, in publisher order. $requestPath
-// is the CLIENT path — the table key that answers a request is not always the
+// is the CLIENT path: the table key that answers a request is not always the
 // URL the visitor asked for, so matching cannot happen at compile time.
 //
 // Removals survive collection so a later rule can delete a header an entry's
@@ -46,8 +46,8 @@ function _stattic_collect_response_headers(array $rules, string $requestHost, st
 
 // Repeated `set` ops for one name fold into a comma-joined value, but only
 // within a grammar: `_headers` is authoritative, so a sf.jsonc rule naming a
-// header a file rule already set is skipped — folding would produce values
-// browsers discard outright (`X-Frame-Options: DENY,SAMEORIGIN`).
+// header a file rule already set is skipped, because folding would produce
+// values browsers discard outright (`X-Frame-Options: DENY,SAMEORIGIN`).
 function _stattic_apply_header_operations(array &$applied, array $operations, array $captures, string $origin = 'file', ?array &$removed = null): void
 {
     foreach ($operations as $operation) {

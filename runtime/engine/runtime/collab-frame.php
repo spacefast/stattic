@@ -1,14 +1,13 @@
 <?php
 declare(strict_types=1);
 
-// `/__/collab` — the Collab frame shell (collab-frame-plan §4/§5).
+// `/__/collab`: the Collab frame shell (collab-frame-plan §4/§5).
 //
 // The document is chrome and nothing else: ~2 KB of HTML carrying a boot-neutral
 // manifest (space name, accent, hide_branding, the requested page) plus the
-// module tag for `frame.js` on Cast. Every live value — threads, presence,
-// version state, the adopted appearance — arrives in the browser over the
-// shell<->SDK handshake, so this response is never a second copy of the config
-// that could go stale.
+// module tag for `frame.js` on Cast. Threads, presence, version state and the
+// adopted appearance all arrive in the browser over the shell<->SDK handshake,
+// so this response is never a second copy of the config that could go stale.
 //
 // It dispatches after the access check (serve.php) because its bytes vary by
 // Space and it must ride the host session that check just minted; the
@@ -33,7 +32,7 @@ function _stattic_serve_collab_frame(
 
     // R-20: the manifest varies by viewer and settings, and a cached 200 shell
     // where a 404 belongs is the failure this forbids. Private or public, no
-    // store — the heavy asset is frame.js off Cast, not this document.
+    // store: the heavy asset is frame.js off Cast, not this document.
     $policy = _stattic_cache_policy([
         'private' => $privateCache,
         'no_store' => true,
@@ -78,9 +77,9 @@ function _stattic_serve_collab_frame(
 }
 
 /**
- * R-4: `?path=` is accepted only as a same-origin absolute page path — leading
- * `/`, never `//`, no scheme, no backslash, `..` resolved and never escaping the
- * root. Anything else yields null, the shell's quiet not-found state, and no
+ * R-4: `?path=` is accepted only as a same-origin absolute page path. That means
+ * leading `/`, never `//`, no scheme, no backslash, `..` resolved and never
+ * escaping the root. Anything else yields null, the shell's quiet state, and no
  * iframe navigation at all. `_stattic_scope_path` is that rule already; the
  * index-alias canonicalization is off so the visitor's URL is answered as asked.
  */

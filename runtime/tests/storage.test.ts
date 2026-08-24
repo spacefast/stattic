@@ -1,7 +1,7 @@
-// The object lane v2: one per-space record store behind two read lanes — the
+// The object lane v2: one per-space record store behind two read lanes, the
 // keyed public visitor URL (`/__stattic/u/<id>?k=<runtime read key>`) and the
-// authenticated `/storage/<id>` surface — with the read key as the single
-// revocable secret. Rotation invalidates every handed-out URL at once.
+// authenticated `/storage/<id>` surface. The read key is the single revocable
+// secret, so rotation invalidates every handed-out URL at once.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -79,18 +79,18 @@ test("the keyed visitor URL is the only public read, and a wrong key answers exa
   expect(url.pathname).toBe(`/__stattic/u/${object.id}`);
   const key = url.searchParams.get("k") ?? "";
   expect(key).toMatch(/^[a-f0-9]{32}$/);
-  // The composed URL is the key file's current value — one secret, one source.
+  // The composed URL carries the key file's current value.
   expect(keyOnDisk(rt)).toBe(key);
 
   const served = await get(rt, HOST, `${url.pathname}${url.search}`);
   expect(served.status).toBe(200);
   expect(served.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
   // The edge may hold the keyed URL: the key rides the cache key, and a delete
-  // or key rotation purges the copy rather than waiting out revalidation.
+  // or rotation purges the copy instead of waiting out revalidation.
   expect(served.headers.get("a8c-edge-cache")).toBe("cache");
   expect(await served.text()).toBe("keyed bytes");
 
-  // Wrong key, absent key, unknown id: three identical 404s — the lane leaks
+  // Wrong key, absent key, unknown id: three identical 404s, so the lane leaks
   // neither which ids exist nor whether a key was close.
   const wrongKey = await get(rt, HOST, `${url.pathname}?k=${"f".repeat(32)}`);
   const noKey = await get(rt, HOST, url.pathname);
@@ -107,8 +107,8 @@ test("/storage/<id> is the authenticated lane: read without a key, uploader-only
   const object = await upload("authed bytes");
   const read = await get(rt, HOST, `/storage/${object.id}`);
   expect(read.status).toBe(200);
-  // The keyless URL is authenticated per request, so no shared cache may ever
-  // answer for it — the browser may keep its own copy of the immutable bytes.
+  // The keyless URL is authenticated per request, so no shared cache may
+  // answer for it. The browser may keep its own copy of the immutable bytes.
   expect(read.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
   expect(read.headers.get("a8c-edge-cache")).toBe("no-cache");
   expect(await read.text()).toBe("authed bytes");
@@ -116,12 +116,11 @@ test("/storage/<id> is the authenticated lane: read without a key, uploader-only
   expect((await get(rt, HOST, `/storage/${object.id}`, { method: "DELETE" })).status).toBe(204);
   expect((await get(rt, HOST, `/storage/${object.id}`, { method: "DELETE" })).status).toBe(204);
   expect((await get(rt, HOST, `/storage/${object.id}`)).status).toBe(404);
-  // The record died; the keyed visitor URL dies with it.
   const url = new URL(object.url);
   expect((await get(rt, HOST, `${url.pathname}${url.search}`)).status).toBe(404);
-  // The keyed URL opts into the edge, so the deletion must also revoke the
-  // edge copy: exactly one purge POST (the repeat delete found no record and
-  // spent none), addressed at the space's serving hostname.
+  // The keyed URL opts into the edge, so a delete must revoke the edge copy:
+  // one purge POST at the space's serving hostname. The repeat delete found no
+  // record and spent none.
   const purges = edgePurgeCalls(rt).filter((r) => r.reason === "storage_object_deleted");
   expect(purges.length).toBe(1);
   expect(purges[0]?.hostname).toBe(HOST);
@@ -173,17 +172,15 @@ test("rotation mints a new key, kills every old URL, and answers with a purge re
   expect(rotated.key).toMatch(/^[a-f0-9]{32}$/);
   expect(rotated.key).not.toBe(oldKey);
   expect(Date.parse(rotated.rotatedAt)).toBeGreaterThan(0);
-  // The dev harness has no provider edge; what matters is that a purge was
-  // attempted and receipted, not that the fake edge accepted it.
+  // The dev harness has no provider edge, so only the purge receipt is checked.
   expect(typeof rotated.purge.status).toBe("string");
   expect(keyOnDisk(rt)).toBe(rotated.key);
 
-  // Every URL handed out under the old key answers 404 now…
   expect((await get(rt, HOST, `${oldUrl.pathname}${oldUrl.search}`)).status).toBe(404);
-  // …and the same id serves under the new key: bytes were never the casualty.
+  // The same id still serves under the new key: only the key was revoked.
   expect((await get(rt, HOST, `${oldUrl.pathname}?k=${rotated.key}`)).status).toBe(200);
 
-  // Fresh-URLs-everywhere: the next upload composes against the new key.
+  // The next upload composes against the new key.
   const next = await upload("post-rotation bytes");
   expect(new URL(next.url).searchParams.get("k")).toBe(rotated.key);
 });
@@ -194,8 +191,8 @@ const ANON_DAILY_BYTES = 200 * 1024 * 1024;
 
 /** A public space whose access page carries a comments exchange descriptor.
  *  The exchange URLs are deliberately unreachable: the ticket lane mints the
- *  anonymous session BEFORE it calls the control plane, and the session — not
- *  the ticket — is the storage lane's grant. */
+ *  anonymous session before it calls the control plane, and that session, not
+ *  the ticket, is the storage lane's grant. */
 function anonCommentsConfig(commentsEnabled: boolean): Record<string, unknown> {
   const config = publicAccessConfig({ mode: "website", site_title: "Anon storage" });
   const authorization = config.authorization;
@@ -243,7 +240,7 @@ test("an anonymous commenter session is the upload grant — budgeted, and only 
     },
   });
 
-  // The ticket exchange is unreachable (502) — but the runtime already minted
+  // The ticket exchange is unreachable (502), but the runtime already minted
   // the anonymous session with its comments pseudonym and set the cookie.
   const ticket = await get(strict, ANON_HOST, "/__spacefast/comments/ticket", {
     method: "POST",
@@ -287,7 +284,7 @@ test("an anonymous commenter session is the upload grant — budgeted, and only 
     ).status,
   ).toBe(204);
 
-  // The shared daily budget: near the cap, the next anonymous upload refuses.
+  // Near the shared daily cap, the next anonymous upload refuses.
   writeFileSync(
     storagePath(strict, "spaces", ANON_SPACE, "uploads", "anon-usage.json"),
     `${JSON.stringify({ day: new Date().toISOString().slice(0, 10), bytes: ANON_DAILY_BYTES - 2 })}\n`,
@@ -300,8 +297,8 @@ test("an anonymous commenter session is the upload grant — budgeted, and only 
   expect(refused.status).toBe(429);
   expect(await errorCode(refused)).toBe("storage_quota_exceeded");
 
-  // Comments off (same space, same credential, same session): the grant dies
-  // with the surface — the session alone is not an upload authorization.
+  // Comments off, same space and session: the grant dies with the surface. The
+  // session alone is not an upload authorization.
   await deploy(strict, {
     spaceId: ANON_SPACE,
     versionId: "ver_storage_anon_2",

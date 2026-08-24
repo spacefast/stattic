@@ -4,9 +4,8 @@ declare(strict_types=1);
 // RFC 9457 problem documents. The `type` and `title` derivations below duplicate
 // errorDocsUrl() / errorTitle() in packages/common/src/contracts/error-codes.ts,
 // which PHP cannot import: change one, change the other.
-// `requestId` is deliberately absent — the runtime mints no request ids, and
-// reflecting a caller-supplied header would invent one that correlates with
-// nothing.
+// `requestId` is deliberately absent: the runtime mints no request ids, and a
+// reflected caller-supplied header would correlate with nothing.
 
 const STATTIC_PROBLEM_MEDIA_TYPE = 'application/problem+json';
 const STATTIC_ERROR_DOCS_BASE_URL = 'https://spacefast.com/docs/errors';

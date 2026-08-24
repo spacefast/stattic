@@ -1,18 +1,17 @@
 // Shared fixture for the MySQL capability broker's differential test: the
 // schema, the passthrough Zero endpoint that exposes the Rust engine, and the
-// corpus itself. It lives beside the test rather than inside it so the same
-// corpus can be driven from a scratch harness without booting the test runner.
+// corpus. It sits beside the test so the same corpus can be driven from a
+// scratch harness without the test runner.
 
-// The endpoint is a raw passthrough to the DB host function. The runner hands
-// the request body to JavaScript already base64-encoded, and decoding it there
-// rather than reading a decoded string keeps the operation text exact without a
-// UTF-8 decoder inside QuickJS — operations are held to ASCII for that reason.
+// A raw passthrough to the DB host function. The runner hands the request body
+// to JavaScript base64-encoded; decoding it here keeps the operation text exact
+// without a UTF-8 decoder inside QuickJS, which is why operations stay ASCII.
 export const ECHO_ENDPOINT = `
 const request = globalThis.__statticZeroRequest;
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 // Charcode-indexed lookup and block-wise fromCharCode, not indexOf and string
-// append: the oversized-operation case decodes ~90KB and the endpoint's whole
-// CPU budget is 500ms, which the naive form does not fit inside.
+// append: the oversized case decodes ~90KB inside a 500ms CPU budget, which the
+// naive form does not fit.
 const INDEX = [];
 for (let i = 0; i < 128; i++) { INDEX[i] = -1; }
 for (let i = 0; i < ALPHABET.length; i++) { INDEX[ALPHABET.charCodeAt(i)] = i; }
@@ -37,10 +36,9 @@ function decodeBase64(input) {
   return out;
 }
 let operation = decodeBase64(request.bodyBase64 || "");
-// Fixture shorthand for the over-the-limit case. The engine still receives a
-// genuine >64KB operation; only the trip into this endpoint is compressed,
-// because base64-decoding ~90KB of request body does not fit the 500ms CPU
-// budget reliably on a loaded machine.
+// Shorthand for the over-the-limit case: the engine still receives a genuine
+// >64KB operation, but base64-decoding ~90KB of request body here does not
+// reliably fit the 500ms CPU budget on a loaded machine.
 if (operation.indexOf("__repeat__:") === 0) {
   operation = '{"sql":"' + "x".repeat(parseInt(operation.slice(11), 10)) + '"}';
 }
@@ -94,9 +92,8 @@ export const FIXTURE_DDL = `
 `;
 
 /**
- * Operation text is kept pure ASCII so the base64 hop into QuickJS is exact
- * without a UTF-8 decoder there; JSON's \uXXXX escapes mean no information is
- * lost.
+ * Operation text stays pure ASCII so the base64 hop into QuickJS is exact
+ * without a UTF-8 decoder there. JSON's \uXXXX escapes lose nothing.
  */
 export function op(value: unknown): string {
   return JSON.stringify(value).replace(
@@ -107,11 +104,10 @@ export function op(value: unknown): string {
 
 /**
  * `bytes` compares the two engines' responses byte for byte. `code` compares
- * only the error code, and is reserved for the inputs whose message text is a
- * JSON-parser diagnostic: Rust reports serde's own wording and byte offset
- * ("invalid type: integer `5`, expected a sequence at line 1 column 28"), which
- * no PHP parser can reproduce. Every server-side failure stays on `bytes` —
- * those messages are rendered in the Rust driver's exact format and do match.
+ * only the error code, and is reserved for inputs whose message is a JSON-parser
+ * diagnostic: Rust reports serde's own wording and byte offset, which no PHP
+ * parser reproduces. Server-side failures stay on `bytes`; PHP renders those in
+ * the Rust driver's exact format.
  */
 export type CorpusCase = [
   name: string,
@@ -156,8 +152,8 @@ export const CORPUS: CorpusCase[] = [
   ["0x00 inside a BINARY", op({ sql: "SELECT c_binary AS v FROM dt WHERE id = 1" })],
   ["non-ASCII text round trip", op({ sql: "SELECT c_varchar AS v FROM dt WHERE id = 1" })],
 
-  // Float layout: PHP and serde_json agree on the digits but not on the layout,
-  // so every branch of the reformatter is pinned against the real engine.
+  // PHP and serde_json agree on the digits but not the layout, so every branch
+  // of the reformatter is pinned against the real engine.
   ["double 1.0", op({ sql: "SELECT CAST(1 AS DOUBLE) AS v" })],
   ["double 100.0", op({ sql: "SELECT CAST(100 AS DOUBLE) AS v" })],
   [

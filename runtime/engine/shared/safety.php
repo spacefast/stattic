@@ -2,7 +2,11 @@
 declare(strict_types=1);
 
 // GENERATED FILE — DO NOT EDIT.
-// Source of truth: packages/common/src/utils/static-runtime-policy.ts
+// Source of truth: packages/common/src/utils/static-runtime-policy.ts and
+// packages/common/src/contracts/runtime-services.ts for the spam vocabulary,
+// except the platform-managed response-header lists below, which the policy
+// module re-exports from crates/stattic-runtime-policy. Change those lists in
+// Rust, run `bun scripts/check-finalizer-protocol.mjs --write`, then regenerate.
 // Regenerate: bun --filter @spacefast/control-plane runtime:codegen-policy
 // Parity is enforced by static-runtime-policy.fixtures.json.
 
@@ -74,6 +78,12 @@ const SPACEFAST_INTERNAL_REDIRECT_HEADERS = [
     'x-sendfile' => true,
 ];
 
+// Akismet's recognised content types, as sf_spam() validates a submission
+// against them. The classifier is trained on this exact vocabulary, so every
+// runtime that offers a spam verdict — the Zero/Functions service client and
+// this engine — has to accept the same words, and neither may invent synonyms.
+const SPACEFAST_SPAM_CONTENT_TYPES = ['comment', 'reply', 'forum-post', 'contact-form', 'signup', 'message'];
+
 function _stattic_platform_managed_header(string $name): bool
 {
     $lower = strtolower(trim($name));
@@ -96,4 +106,3 @@ function _stattic_path_is_php_like(string $path): bool
 {
     return in_array(_stattic_policy_extension($path), SPACEFAST_PHP_LIKE_EXTENSIONS, true);
 }
-

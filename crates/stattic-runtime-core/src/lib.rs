@@ -38,11 +38,7 @@ pub mod transforms;
 pub mod version_files;
 
 #[cfg(not(target_family = "wasm"))]
-pub use catalog::{
-    catalog_from_metadata, read_version_catalog, transform_private_root, transform_version,
-    CatalogDelta, CatalogDigests, FileCatalog, TransformOutcome, TransformReport,
-    TRANSFORM_REPORT_FORMAT,
-};
+pub use catalog::{read_version_catalog, CatalogDelta, CatalogDigests, FileCatalog};
 pub use finalize::FinalizeError;
 pub use hash::stable_json_sha256;
 #[cfg(not(target_family = "wasm"))]

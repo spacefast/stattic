@@ -3,41 +3,40 @@
 declare(strict_types=1);
 
 /**
- * PHP Functions — the `t=php` response action (slice A).
+ * PHP Functions: the `t=php` response action (slice A).
  *
  * Executes a committed `functions/<route>.php` IN THIS php-fpm worker, after
- * `_stattic_tenant_harden()` (tenant-prelude.php) has jailed the worker's
- * filesystem view to the space's own content store and scrubbed every platform
- * secret from the environment. In-process `include` — not a subprocess — is the
- * owner-ruled execution model: a wp.cloud site owns no second fpm pool, no
- * per-space uid and no `disable_functions`, so the only containment available
- * is the one the engine applies to its own worker before handing over control
- * (see tenant-prelude.php's header for the full model and its limits).
+ * `_stattic_tenant_harden()` (tenant-prelude.php) jails the worker's filesystem
+ * view to the space's own content store and scrubs every platform secret from
+ * the environment. A wp.cloud site owns no second fpm pool, no per-space uid
+ * and no `disable_functions`, so in-process `include` is the only execution
+ * model and the prelude is the only containment available (see
+ * tenant-prelude.php's header for the full model and its limits).
  *
- * Hard sequencing contract, in order, all before the prelude runs:
+ * Hard sequencing contract, all before the prelude runs:
  *   1. every engine `require` (nothing outside the jail is readable after);
  *   2. the visitor identity verify (it reads `.stattic/**` keys the jail
- *      denies) — sf_auth() serves the PRE-VERIFIED result, it never verifies;
- *   3. every brokered capability's configuration: the database credential, and
- *      the service broker's binary path plus the platform service keys. All of
- *      it is read from the process environment the scrub is about to empty, so
- *      a capability that resolved anything lazily would resolve it to nothing;
+ *      denies). sf_auth() serves that result, it never verifies;
+ *   3. every brokered capability's configuration: the database credential, the
+ *      service broker's binary path, the platform service keys. All of it comes
+ *      from the process environment the scrub is about to empty, so a lazy
+ *      resolve would resolve to nothing;
  *   4. the request body read, the scratch tmp mkdir, the admission slot flock.
  * After the prelude: the tenant include, and a response path that touches no
- * file outside the jail — platform error pages are template files, so every
- * post-harden failure answers as an inline problem+json document instead.
+ * file outside the jail. Platform error pages are template files, so every
+ * post-harden failure answers as an inline problem+json document.
  *
- * One request executes ONE space's handler, enforced by the `active` latch
- * below and load-bearing for the prelude: `open_basedir` can only tighten, so
- * a second space's pin in the same request would be trapped by the first
- * (tenant-prelude.php "PER-REQUEST INI RESET is load-bearing").
+ * One request executes ONE space's handler, latched by `active` below.
+ * `open_basedir` can only tighten, so a second space's pin in the same request
+ * would be trapped by the first (tenant-prelude.php "PER-REQUEST INI RESET is
+ * load-bearing").
  *
  * Admission is a per-space set of flock slots rather than
  * `_stattic_admission_acquire_or_shed`: that lane's release reopens counter
- * files under the private root at shutdown, which the jail (still pinned when
- * shutdown functions run) would deny — leaking the slot for the whole stale
- * window. A flock held on a pre-opened handle is released by the kernel when
- * the request's handles close, jail or no jail, crash or no crash.
+ * files under the private root at shutdown, which the still-pinned jail denies,
+ * leaking the slot for the whole stale window. A flock held on a pre-opened
+ * handle is released by the kernel when the request's handles close, jail or no
+ * jail, crash or no crash.
  */
 
 require_once __DIR__ . '/../shared/context.php';
@@ -47,6 +46,9 @@ require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/admission.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
 require_once __DIR__ . '/../shared/problem.php';
+// sf_spam()'s submission vocabulary, generated from the same TypeScript
+// contract the Zero and Functions service clients are built from.
+require_once __DIR__ . '/../shared/safety.php';
 // The database credential and the socket live here and only here: sf_db() hands
 // tenant code operation frames, never a connection.
 require_once __DIR__ . '/../shared/db-broker.php';
@@ -62,29 +64,28 @@ require_once __DIR__ . '/access-rules.php';
 require_once __DIR__ . '/zero.php';
 
 /**
- * Response header names only the platform may decide, beyond the generated
- * PLATFORM_OWNED lists: `x-accel-*` is nginx's internal control surface — a
- * handler-set `X-Accel-Redirect` would make nginx serve an arbitrary origin
- * file with platform authority.
+ * Header names only the platform may decide, beyond the generated
+ * PLATFORM_OWNED lists. `x-accel-*` is nginx's control surface: a handler-set
+ * `X-Accel-Redirect` would serve an arbitrary origin file with platform
+ * authority.
  */
 const STATTIC_PHP_FUNCTIONS_DENIED_HEADER_PREFIXES = ['x-accel-'];
 
 /**
  * What this lane grants the platform-service broker, in the broker's own wire
- * vocabulary (`ServiceGrant::from_wire` in
- * crates/stattic-zero-runner/src/services.rs is what enforces it). It is the
- * sf_* surface written out, so an executor that somehow received a frame for an
- * ungranted service is refused inside the child as well as here. The broker's
- * granularity is the SERVICE, not the operation: `spam.check` admits the whole
- * spam service, which is what the correction verbs (sf_report_spam /
- * sf_report_ham) spend. `gravatar.profile` is deliberately absent — there is no
- * sf_gravatar(), and a grant nothing can spend is only reach.
+ * vocabulary (enforced by `ServiceGrant::from_wire` in
+ * crates/stattic-zero-runner/src/services.rs). It is the sf_* surface written
+ * out, so a frame for an ungranted service is refused inside the child too.
+ * Granularity is the SERVICE, not the operation: `spam.check` admits the whole
+ * spam service, which is what sf_report_spam / sf_report_ham spend.
+ * `gravatar.profile` is absent because there is no sf_gravatar(), and a grant
+ * nothing can spend is only reach.
  */
 const STATTIC_PHP_FUNCTIONS_SERVICE_GRANT = ['spam.check', 'email.send'];
 const STATTIC_PHP_FUNCTIONS_SERVICE_GRANT_ENV = 'SPACEFAST_SERVICE_BROKER_GRANT';
 
-// A visitor is holding an admission slot on this space's fpm pool for the whole
-// call, and the broker's own upstream timeout is 5s — this bounds a child that
+// A visitor holds an admission slot on this space's fpm pool for the whole
+// call, and the broker's own upstream timeout is 5s. This bounds a child that
 // hangs before or after that, not the upstream itself.
 const STATTIC_PHP_FUNCTIONS_SERVICE_TIMEOUT_MS = 15000;
 // One JSON line: a verdict, a message id, or a refusal. Anything approaching
@@ -116,9 +117,9 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
 {
     $state = &_stattic_php_functions_state();
     if ($state['active']) {
-        // One request, one space, one handler — the prelude's jail cannot be
-        // re-pinned, so a second dispatch in this worker request is a platform
-        // invariant failure, never a second include.
+        // The prelude's jail cannot be re-pinned, so a second dispatch in this
+        // worker request is a platform invariant failure, never a second
+        // include.
         _stattic_php_functions_problem(500, 'runtime_invariant_violation', 'A PHP function already executed on this request.');
     }
 
@@ -126,8 +127,8 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     if ($method === 'TRACE' || $method === 'CONNECT') {
         _stattic_render_method_not_allowed_lazy();
     }
-    // Control paths stay terminal exactly as on the JS Functions lane: a tenant
-    // handler must never answer `/__spacefast/...` or `/_headers` for the platform.
+    // Control paths stay terminal as on the JS Functions lane: a tenant handler
+    // must never answer `/__spacefast/...` or `/_headers` for the platform.
     if (_stattic_path_is_reserved($requestPath)) {
         _stattic_php_functions_problem(404, 'not_found', 'Not found.');
     }
@@ -140,9 +141,9 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
         _stattic_render_runtime_invariant_error_lazy('route-action-metadata-missing', 'Runtime PHP function action metadata is malformed.');
     }
 
-    // The handler bytes live in the space's own content store — which is also
-    // the prelude jail, so the include target stays readable after hardening
-    // and a handler can never be resolved outside its own space.
+    // The handler bytes live in the space's own content store, which is also
+    // the prelude jail: the include target stays readable after hardening, and
+    // a handler can never resolve outside its own space.
     $phpRoot = _stattic_space_root($privateRoot, $spaceId) . '/blobs';
     $handler = $phpRoot . '/' . substr($sha, 0, 2) . '/' . $sha;
     if (!is_file($handler)) {
@@ -175,21 +176,16 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     $state['method'] = $method;
     $state['private'] = (bool) $context['private_cache'];
     $state['noindex'] = !empty(is_array($context['host_entry'] ?? null) ? $context['host_entry']['noindex'] ?? null : null);
-    // The engine's already-verified visitor identity: same verify, same shape
-    // as a Zero endpoint's auth context. Runs now because verification reads
-    // the `.stattic/**` key material the jail denies.
+    // Same verify, same shape as a Zero endpoint's auth context. Runs now
+    // because verification reads `.stattic/**` key material the jail denies.
     $state['auth'] = _stattic_zero_auth_context($serving, (string) $context['host']);
 
-    // Same reason, same moment: the database credential is resolved from
-    // platform configuration the jail is about to deny, and bound into the
-    // broker's process memory. The handler is handed frames, never a DSN or a
-    // connection — but note what that is and is not worth. In-process binding
-    // is not a credential boundary against the tenant: this is the same
-    // process, and tenant-prelude.php's own header says a handler can still
-    // `exec` its way to any on-disk secret, which is precisely why cross-team
-    // PHP never co-locates. What binding here DOES buy is that the credential
-    // never reaches the handler by accident, and that a subprocess the handler
-    // spawns still inherits a scrubbed environment.
+    // Same reason, same moment: the database credential comes from platform
+    // configuration the jail is about to deny, and is bound into the broker's
+    // process memory. The handler gets frames, never a DSN or a connection.
+    // That is not a credential boundary against the tenant (same process; see
+    // _stattic_php_functions_service_call for what it does and does not buy),
+    // it only keeps the credential from reaching the handler by accident.
     //
     // One resolution feeds both bindings: the service broker writes an accepted
     // email into this space's own outbox, so it needs the same database URL.
@@ -207,9 +203,9 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     }
     $state['raw_body'] = $raw;
 
-    // Per-request scratch tmp inside the space's own private area: part of the
-    // jail, so uploads/sessions/sys-temp land here and the cleanup below still
-    // works after hardening.
+    // Per-request scratch tmp inside the space's own private area, so it is
+    // part of the jail: uploads/sessions/sys-temp land here and the cleanup
+    // below still works after hardening.
     $scratchTmp = _stattic_space_root($privateRoot, $spaceId) . '/tmp/php-fx-' . bin2hex(random_bytes(8));
     _stattic_runtime_mkdir($scratchTmp);
     register_shutdown_function(static function () use ($scratchTmp): void {
@@ -219,8 +215,8 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
         rmdir($scratchTmp);
     });
 
-    // From the first output byte — however it is produced, including a tenant
-    // flush() — the platform re-takes the headers it owns.
+    // At the first output byte, however produced, including a tenant flush(),
+    // the platform re-takes the headers it owns.
     header_register_callback('_stattic_php_functions_enforce_platform_headers');
     ob_start();
     $state['active'] = true;
@@ -234,8 +230,8 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
             get_debug_type($error),
             $error->getMessage(),
         ));
-        // Fail closed: never run tenant code unhardened. File-free response —
-        // the platform error pages are templates the jail may already deny.
+        // Fail closed: never run tenant code unhardened. File-free response,
+        // because platform error pages are templates the jail may already deny.
         _stattic_php_functions_problem(500, 'runtime_invariant_violation', 'PHP function containment failed.');
     }
 
@@ -248,8 +244,7 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     } catch (Throwable $error) {
         // Through the runtime log writer, not a bare error_log: an untagged
         // line lands in the same file but the space's own log surface cannot
-        // tell it from one of the engine's, so the author never sees the throw
-        // that took their handler down.
+        // tell it from the engine's, so the author never sees the throw.
         _stattic_runtime_log_write([
             'level' => 'error',
             'message' => $error->getMessage(),
@@ -259,16 +254,15 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
         _stattic_php_functions_problem(500, 'php_function_error', 'The PHP function failed.');
     }
 
-    // The handler produced its response with echo/header() and returned.
     $body = (string) ob_get_clean();
     $status = http_response_code();
     _stattic_php_functions_send(is_int($status) && $status > 0 ? $status : 200, [], $body);
 }
 
 /**
- * Platform header ownership at send time. Runs as the header callback, so it
- * fires however the response starts — the bridge's own send, a tenant echo
- * that fills the buffer, or an explicit tenant flush().
+ * Platform header ownership at send time. As the header callback it fires
+ * however the response starts: the bridge's own send, a tenant echo that fills
+ * the buffer, or a tenant flush().
  */
 function _stattic_php_functions_enforce_platform_headers(): void
 {
@@ -297,8 +291,8 @@ function _stattic_php_functions_enforce_platform_headers(): void
         }
     }
     // A protected space's dynamic response is never shared-cacheable, whatever
-    // the handler declared; an open space keeps a handler-declared policy and
-    // otherwise defaults to no-store — a function's URL is un-purgeable.
+    // the handler declared. An open space keeps a declared policy and otherwise
+    // gets no-store, because a function's URL is un-purgeable.
     if ($state['private']) {
         header('cache-control: ' . STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
     } elseif (!$hasCacheControl) {
@@ -343,14 +337,14 @@ function _stattic_php_functions_problem(int $status, string $code, string $detai
 }
 
 // ---------------------------------------------------------------------------
-// The sf_* helper prelude — the API a functions/<route>.php handler writes to.
+// The sf_* helpers: the API a functions/<route>.php handler writes to.
 // ---------------------------------------------------------------------------
 
 /**
- * The parsed request body. JSON bodies decode to arrays, form bodies (urlencoded
- * and multipart) answer as the parsed fields; any other body answers as its raw
- * string, and no body answers null. A malformed JSON body is the caller's
- * error and fails loudly as 400 — never a silent null.
+ * The parsed request body. JSON decodes to an array, form bodies (urlencoded
+ * and multipart) answer as the parsed fields, any other body answers as its raw
+ * string, and no body answers null. Malformed JSON fails as 400, never a silent
+ * null.
  */
 function sf_body(): array|string|null
 {
@@ -389,11 +383,11 @@ function sf_json(mixed $data, int $status = 200): never
 }
 
 /**
- * The labeled database environment for this version, resolved exactly as the
- * capsule runner resolves it: a space that declares `DATABASE_URL` reaches the
- * same database from PHP and from a capsule, and a space that declares none
- * reaches the provider database the site already owns. Read once — it costs a
- * version-config read, and both brokered capabilities need the answer.
+ * The labeled database environment for this version, resolved as the capsule
+ * runner resolves it: a space that declares `DATABASE_URL` reaches the same
+ * database from PHP and from a capsule, one that declares none reaches the
+ * provider database the site already owns. Read once, because it costs a
+ * version-config read and both brokered capabilities need the answer.
  *
  * @return array<string,string>
  */
@@ -421,8 +415,7 @@ function _stattic_php_functions_bind_database(array $env): bool
         : null;
     if ($url === '') {
         // An empty grant, not an absent one: `null` means every capability, so
-        // an unattached space must be told what it may do rather than left to
-        // the default.
+        // an unattached space must be told what it may do.
         _stattic_db_broker_bind(null, null);
         _stattic_db_broker_grant([]);
 
@@ -439,25 +432,23 @@ function _stattic_php_functions_bind_database(array $env): bool
  * Resolve everything the platform-service broker needs, before the jail: the
  * platform's service credentials and the native binary's path both come from
  * configuration the scrub is about to empty. The credentials have nowhere else
- * to come from at all — bind after hardening and the broker is handed nothing,
- * which the suite pins by asserting a refusal that only a configured sender
- * list can produce. The binary's path degrades more quietly: it falls back to
- * the engine's sibling `bin/`, so a post-jail resolve keeps working on a
- * manifest install and silently misses on a release-root one
- * (`SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT`, scrubbed by then). Resolved here so
- * neither case depends on which install layout is underneath.
+ * to come from, so binding after hardening hands the broker nothing. The
+ * binary's path degrades more quietly: it falls back to the engine's sibling
+ * `bin/`, so a post-jail resolve keeps working on a manifest install and
+ * silently misses on a release-root one
+ * (`SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT`, scrubbed by then). Resolving here
+ * makes neither case depend on the install layout.
  *
  * The invocation identity is minted HERE and never read from a request header.
  * It is half of the outbox's primary key, so a visitor who could name it could
- * collide with another visitor's queued message and have it silently deduped
- * away. Each call spends its own ordinal of it (see the call below).
+ * collide with another visitor's queued message and have it deduped away. Each
+ * call spends its own ordinal of it.
  *
  * The trusted visitor IP is captured at the same moment, for the same reason:
  * it is the identity the ingress proved (`_stattic_zero_trusted_visitor_ip`,
  * the value a Zero capsule's invocation envelope carries), and where it arrives
- * as platform configuration rather than a FastCGI request param, the scrub is
- * about to empty it. sf_spam()'s userIp default reads this capture, never a
- * post-jail surface.
+ * as platform configuration rather than a FastCGI request param the scrub is
+ * about to empty it. sf_spam()'s userIp default reads this capture.
  *
  * @param array<string,string> $runnerEnv
  * @return array{binary:string,env:array<string,string>,invocation:string,calls:int,visitorIp:?string}
@@ -469,12 +460,11 @@ function _stattic_php_functions_bind_services(array $context, array $runnerEnv):
         'visitorIp' => _stattic_zero_trusted_visitor_ip(),
         // Identical construction to the relay's executor env
         // (functions-relay.php `_stattic_functions_relay_executor_env`), so a
-        // brokered call behaves the same whether it came from a dispatched
-        // worker or from a handler in this process.
+        // brokered call behaves the same from a dispatched worker or from here.
         'env' => $runnerEnv + _stattic_service_broker_env([
             'spaceId' => (string) $context['space_id'],
             'versionId' => (string) $context['version_id'],
-            // Per call, not per request — set at the call site.
+            // Set per call, not per request, at the call site.
             'invocationId' => '',
         ]) + [
             STATTIC_PHP_FUNCTIONS_SERVICE_GRANT_ENV => implode(',', STATTIC_PHP_FUNCTIONS_SERVICE_GRANT),
@@ -485,10 +475,9 @@ function _stattic_php_functions_bind_services(array $context, array $runnerEnv):
 }
 
 /**
- * The verified visitor identity — the engine's own verification, performed
- * before the handler ran, in the exact shape a Zero endpoint's `auth` context
- * has: `user`, `userId`, `provider`, `isGuest`, `isAuthenticated`, and the
- * profile fields when identified.
+ * The visitor identity the engine verified before the handler ran, in the shape
+ * a Zero endpoint's `auth` context has: `user`, `userId`, `provider`,
+ * `isGuest`, `isAuthenticated`, and the profile fields when identified.
  */
 function sf_auth(): array
 {
@@ -500,11 +489,11 @@ function sf_auth(): array
 // ---- brokered capabilities -------------------------------------------------
 
 /**
- * A database operation the broker refused or the driver failed. `$errorCode` is the
- * platform's own error vocabulary (`zero_db_query_failed`,
- * `zero_db_capability_denied`, …) — the same code the capsule lane surfaces for
- * the same failure, so one contract explains both. Uncaught, it becomes a 500
- * the way any other handler exception does; the message is logged, never sent.
+ * A database operation the broker refused or the driver failed. `$errorCode` is
+ * the platform's own error vocabulary (`zero_db_query_failed`,
+ * `zero_db_capability_denied`, …), the same code the capsule lane surfaces for
+ * the same failure. Uncaught, it becomes a 500 like any other handler
+ * exception; the message is logged, never sent.
  */
 final class SpacefastDbError extends RuntimeException
 {
@@ -520,8 +509,8 @@ final class SpacefastDbError extends RuntimeException
 /**
  * The tenant's view of the database: three verbs over the broker, and nothing
  * that could carry a credential. Every call is a frame in and rows out, so the
- * handler holds no connection, no DSN and no statement handle — the same
- * arrangement the capsule lane has, expressed for a classic PHP file.
+ * handler holds no connection, no DSN and no statement handle, the same
+ * arrangement the capsule lane has.
  *
  * Parameters are always bound, never interpolated: `?` placeholders are the
  * only supported shape, matching the capsule SDK's tagged template.
@@ -593,9 +582,8 @@ final class SpacefastDb
         if (!is_string($encoded)) {
             throw new SpacefastDbError('zero_db_operation_invalid', 'Zero DB operation could not be encoded.');
         }
-        // BIGINT_AS_STRING both ways: the broker prints unsigned 64-bit values
-        // PHP's int cannot hold, and rounding them through a float here would
-        // undo the exactness the encoder went to trouble for.
+        // BIGINT_AS_STRING: the broker prints unsigned 64-bit values PHP's int
+        // cannot hold, and a float round-trip would lose them.
         $decoded = json_decode(_stattic_db_broker_execute($encoded), true, 512, JSON_BIGINT_AS_STRING);
         if (!is_array($decoded)) {
             throw new SpacefastDbError('zero_db_operation_invalid', 'Zero DB response could not be parsed.');
@@ -612,9 +600,9 @@ final class SpacefastDb
 }
 
 /**
- * The space's database. Answers a named problem — not a driver error — when the
- * space has no database attached, because that is a publish-time fact about the
- * space rather than something the handler did wrong.
+ * The space's database. With no database attached it answers a named problem,
+ * not a driver error: that is a publish-time fact about the space, not
+ * something the handler did wrong.
  */
 function sf_db(): SpacefastDb
 {
@@ -636,14 +624,13 @@ function sf_db(): SpacefastDb
  * A platform service refused the call, or could not be reached. `$errorCode` is
  * the broker's own vocabulary (`service_not_configured`,
  * `service_capability_denied`, `service_upstream_unavailable`,
- * `email_sender_unverified`, …) — the same codes the capsule tier surfaces for
- * the same failures, so one contract explains both. The one code with no
- * capsule twin is `service_broker_unavailable`: over there the broker is
- * in-process and cannot fail to start.
+ * `email_sender_unverified`, …), the same codes the capsule tier surfaces. The
+ * one code with no capsule twin is `service_broker_unavailable`: there the
+ * broker is in-process and cannot fail to start.
  *
- * Uncaught, it becomes a 500 the way any other handler exception does. A
- * handler that wants to branch — hold a comment when spam checking is down
- * rather than lose it — catches it and reads `errorCode`.
+ * Uncaught, it becomes a 500 like any other handler exception. A handler that
+ * wants to branch, say to hold a comment while spam checking is down, catches
+ * it and reads `errorCode`.
  */
 final class SpacefastServiceError extends RuntimeException
 {
@@ -657,45 +644,32 @@ final class SpacefastServiceError extends RuntimeException
 }
 
 /**
- * Akismet's recognised content types, mirroring `SPAM_CONTENT_TYPES` in
- * packages/common/src/contracts/runtime-services.ts. The vendor is not in the
- * name of anything an author touches, but the vocabulary is Akismet's because
- * the classifier is trained on it.
- */
-const STATTIC_PHP_FUNCTIONS_SPAM_TYPES = ['comment', 'reply', 'forum-post', 'contact-form', 'signup', 'message'];
-
-/**
- * One frame to the native `service-broker` executor, one answer back — the same
- * child, the same protocol and the same grant the Functions relay hands a
- * dispatched worker (functions-relay.php `SPACEFAST_FUNCTIONS_RELAY_BROKERS`).
- * Reusing it is what keeps a spam verdict identical whether it was asked for
- * from a capsule, a Functions worker, or this file.
+ * One frame to the native `service-broker` executor, one answer back. Same
+ * child, protocol and grant the Functions relay hands a dispatched worker
+ * (functions-relay.php `SPACEFAST_FUNCTIONS_RELAY_BROKERS`), which keeps a spam
+ * verdict identical from a capsule, a Functions worker, or this file.
  *
  * ---------------------------------------------------------------------------
  * Spawning a subprocess AFTER the jail: what actually happens
  * ---------------------------------------------------------------------------
- * It works, and the suite proves it rather than arguing it: `open_basedir` is a
- * check inside PHP's own file APIs, so it never reaches `proc_open` — which is
- * the same fact tenant-prelude.php states from the other direction (CANNOT.A:
- * the prelude does not and cannot remove `exec`/`proc_open`, and a child's
- * filesystem view is not bounded by the jail). The binary sits outside the
- * jail; nothing here stats it first, because that stat WOULD be denied — a
- * failed spawn is already the answer.
+ * It works. `open_basedir` is a check inside PHP's own file APIs, so it never
+ * reaches `proc_open` (tenant-prelude.php CANNOT.A: the prelude cannot remove
+ * `exec`/`proc_open`, and a child's filesystem view is not bounded by the
+ * jail). The binary sits outside the jail; nothing stats it first, because that
+ * stat WOULD be denied and a failed spawn is already the answer.
  *
- * So this call is not contained from the handler in any OS sense. What it buys
- * is narrower and worth stating plainly:
- *   * the Akismet key and the database URL are handed to THIS child as an
- *     explicit environment, built here — the scrub emptied the worker's own
- *     environment before the handler ran, so a subprocess the HANDLER spawns
- *     inherits neither, and `proc_open` gets no inherited environment either;
+ * So this call is not contained from the handler in any OS sense. What it buys:
+ *   * the Akismet key and the database URL reach THIS child as an explicit
+ *     environment built here. The scrub emptied the worker's own environment
+ *     before the handler ran, so a HANDLER-spawned subprocess inherits neither;
  *   * the credential is never a value tenant code was given, so it cannot leak
- *     by accident — through a var_dump, a stack trace, or an echoed config;
- *   * the grant is enforced inside the child as well as here, so a frame naming
- *     an ungranted service is refused even if this file were wrong.
- * What it does NOT buy: this is one process with tenant code, and a handler can
- * call the engine's own functions or `exec` its way to anything on disk that
- * the fpm uid can read. That residual is why cross-team PHP never co-locates
- * (tenant-prelude.php, trust model) — not something this file fixes.
+ *     through a var_dump, a stack trace, or an echoed config;
+ *   * the grant is enforced inside the child too, so a frame naming an
+ *     ungranted service is refused even if this file were wrong.
+ * What it does NOT buy: one process holds both, so a handler can call the
+ * engine's own functions or `exec` its way to anything on disk the fpm uid can
+ * read. That residual is why cross-team PHP never co-locates
+ * (tenant-prelude.php, trust model).
  *
  * @param array<string,mixed> $payload
  */
@@ -717,10 +691,9 @@ function _stattic_php_functions_service_call(string $service, string $operation,
     }
 
     // The executor's lifetime is one frame, so its email effect counter always
-    // starts at zero — which makes the invocation id, not the counter, what
-    // separates two sends. Each call spends its own ordinal of this request's
-    // minted identity; two sf_email() calls in one request are therefore two
-    // outbox rows rather than one row written twice under the same key.
+    // starts at zero. The invocation id, not the counter, separates two sends:
+    // each call spends its own ordinal of this request's minted identity, so
+    // two sf_email() calls write two outbox rows rather than one row twice.
     $env = $bundle['env'];
     $env['SPACEFAST_SERVICE_INVOCATION_ID'] = $bundle['invocation'] . '_' . (string) $bundle['calls'];
     $state['services']['calls'] = (int) $bundle['calls'] + 1;
@@ -757,8 +730,8 @@ function _stattic_php_functions_service_call(string $service, string $operation,
 /**
  * Check a submission for spam and get a verdict back:
  * `['spam' => bool, 'discard' => bool]`. `discard` is Akismet's "blatant,
- * pervasive" flag — its own guidance is that such a submission may be dropped
- * outright rather than held for review, so it is surfaced instead of folded in.
+ * pervasive" flag: Akismet's guidance is that such a submission may be dropped
+ * outright rather than held for review, so it is surfaced separately.
  *
  *   $verdict = sf_spam([
  *       'content' => $body['message'],
@@ -775,16 +748,13 @@ function _stattic_php_functions_service_call(string $service, string $operation,
  * `authorEmail`, `authorUrl`, `authorRole`, `createdAt` and `languages` are
  * optional.
  *
- * `userIp` defaults ONLY to the visitor identity the ingress proved — the
- * server-owned SPACEFAST_VISITOR_IP the trusted invocation envelope carries to
- * a Zero capsule, captured for this lane at dispatch (see
- * `_stattic_php_functions_bind_services`) — and never to what PHP can see for
- * itself: `REMOTE_ADDR` here is the provider's proxy rather than the visitor,
- * and every edge header that claims otherwise reaches PHP client-settable
- * (access-rules.php, live probe). Defaulting to the proxy would hand Akismet
- * one address for every visitor of every site on the box — a worse verdict
- * than none, and shared reputation nobody chose. An explicit `userIp` still
- * wins — a handler proxying a submission knows better — and with neither, the
+ * `userIp` defaults ONLY to the visitor identity the ingress proved: the
+ * server-owned SPACEFAST_VISITOR_IP, captured at dispatch (see
+ * `_stattic_php_functions_bind_services`). Never to what PHP sees for itself.
+ * `REMOTE_ADDR` here is the provider's proxy, and every edge header claiming
+ * otherwise reaches PHP client-settable (access-rules.php, live probe).
+ * Defaulting to the proxy would hand Akismet one address for every visitor of
+ * every site on the box. An explicit `userIp` wins; with neither, the
  * submission is refused rather than guessed at.
  *
  * @param array<string,mixed> $submission
@@ -810,11 +780,11 @@ function sf_spam(array $submission): array
  *   sf_report_spam(['content' => $row['message'], 'userIp' => $row['user_ip']]);
  *
  * Corrections belong to a moderation flow, not to the request that took the
- * submission — the visitor on THIS request is the moderator, not the spammer
+ * submission: the visitor on THIS request is the moderator, not the spammer
  * whose evidence is being filed. So unlike sf_spam(), nothing here defaults
- * from this request: the submission carries its own complete evidence,
- * `userIp` included, exactly as the capsule surface's `reportSpam` does. Store
- * what sf_spam() was shown; a correction replays it.
+ * from this request. The submission carries its own complete evidence, `userIp`
+ * included, as the capsule surface's `reportSpam` does. Store what sf_spam()
+ * was shown; a correction replays it.
  *
  * @param array<string,mixed> $submission
  */
@@ -825,8 +795,8 @@ function sf_report_spam(array $submission): void
 
 /**
  * The opposite correction: a submission the verdict flagged was legitimate.
- * Same moderation-flow contract as sf_report_spam() — complete evidence,
- * nothing defaulted from this request.
+ * Same contract as sf_report_spam(): complete evidence, nothing defaulted from
+ * this request.
  *
  * @param array<string,mixed> $submission
  */
@@ -847,21 +817,21 @@ function sf_report_ham(array $submission): void
  * Fields are `EmailMessage` from the shared contract: `to` (an address, an
  * `['email' => ..., 'name' => ...]` pair, or a list of either), `subject`, and
  * at least one of `text` / `html`; `cc`, `bcc`, `replyTo` and `headers` are
- * optional. `from` is optional here — it defaults to the space's first verified
- * sender, which this request already resolved — and an explicit one must still
- * be a verified sender or the broker refuses with `email_sender_unverified`.
- * Who a space may send as is management state, not version content: rolling a
- * version back does not roll back which addresses it has proven it owns.
+ * optional. `from` defaults to the space's first verified sender, which this
+ * request already resolved; an explicit one must still be a verified sender or
+ * the broker refuses with `email_sender_unverified`. Who a space may send as is
+ * management state, not version content: rolling a version back does not roll
+ * back which addresses it has proven it owns.
  *
  * The id names the message; it is not a claim that anything was delivered.
  * Accepting it writes a row in this space's own outbox, which a later delivery
  * pass drains.
  *
- * That outbox row lands on the BROKER's connection, not on this request's — so
- * unlike a capsule's send, it does not join an sf_db() transaction. A handler
+ * That outbox row lands on the BROKER's connection, not this request's, so
+ * unlike a capsule's send it does not join an sf_db() transaction. A handler
  * that rolls its transaction back has still queued the mail. Send after the
- * write it is announcing, not inside it. A Space with no database at all has
- * nowhere to queue, and the broker says so: `email_outbox_unavailable`.
+ * write it announces, not inside it. A Space with no database has nowhere to
+ * queue, and the broker says so: `email_outbox_unavailable`.
  *
  * @param array<string,mixed> $message
  */
@@ -878,14 +848,14 @@ function sf_email(array $message): string
 
 /**
  * This request's own spam evidence, filled into a check's submission where the
- * author named nothing — the PHP mirror of `requestSpamPayload` in the shared
- * client source, with the lane's one deliberate inversion: there the host
- * overwrites what the author wrote; here an explicit value wins, because a
- * detached helper may be proxying a submission it knows better than this
- * request does. Applied by sf_spam() only — a correction (sf_report_spam /
- * sf_report_ham) files evidence about some OTHER request and defaults nothing.
+ * author named nothing. The PHP mirror of `requestSpamPayload` in the shared
+ * client source, with one deliberate inversion: there the host overwrites what
+ * the author wrote, here an explicit value wins, because a detached helper may
+ * be proxying a submission it knows better than this request does. Applied by
+ * sf_spam() only. A correction (sf_report_spam / sf_report_ham) files evidence
+ * about some OTHER request and defaults nothing.
  *
- * `userIp` comes from the dispatch-time capture and only from it; `userAgent`
+ * `userIp` comes from the dispatch-time capture and only from it. `userAgent`
  * and `referrer` are this request's own headers, the same values a capsule
  * handler reads off its Request.
  *
@@ -913,10 +883,9 @@ function _stattic_php_functions_spam_request_defaults(array $submission): array
 
 /**
  * The `SpamSubmission` normalization, mirroring `spamPayload` in the shared
- * client source. It runs here rather than in the broker for the same reason it
- * runs in that client: an author gets the field name they wrote back, before a
- * process is spawned. The broker validates again — this is convenience, not the
- * boundary.
+ * client source. It runs here so an author gets the field name they wrote back
+ * before a process is spawned. The broker validates again; this is convenience,
+ * not the boundary.
  *
  * @param array<string,mixed> $submission
  * @return array<string,mixed>
@@ -935,10 +904,10 @@ function _stattic_php_functions_spam_payload(array $submission): array
         );
     }
     $type = is_string($submission['type'] ?? null) && $submission['type'] !== '' ? $submission['type'] : 'comment';
-    if (!in_array($type, STATTIC_PHP_FUNCTIONS_SPAM_TYPES, true)) {
+    if (!in_array($type, SPACEFAST_SPAM_CONTENT_TYPES, true)) {
         throw new SpacefastServiceError(
             'service_payload_invalid',
-            'Submission type must be one of: ' . implode(', ', STATTIC_PHP_FUNCTIONS_SPAM_TYPES) . '.'
+            'Submission type must be one of: ' . implode(', ', SPACEFAST_SPAM_CONTENT_TYPES) . '.'
         );
     }
     if (($submission['authorRole'] ?? null) !== null && $submission['authorRole'] !== 'administrator') {
@@ -968,8 +937,8 @@ function _stattic_php_functions_spam_payload(array $submission): array
 
 /**
  * The `EmailMessage` normalization, mirroring `emailPayload` in the shared
- * client source — same required fields, same address coercion, same header
- * rules, so a message that sends from a capsule sends from here.
+ * client source: same required fields, address coercion and header rules, so a
+ * message that sends from a capsule sends from here.
  *
  * @param array<string,mixed> $message
  * @return array<string,mixed>
@@ -1037,8 +1006,8 @@ function _stattic_php_functions_email_payload(array $message): array
 /**
  * The space's first verified sender, so the common call is
  * `sf_email(['to' => …, 'subject' => …, 'text' => …])`. The list was resolved
- * before the jail with everything else; an empty one leaves `from` empty and
- * the broker refuses, which is the same answer it gives a capsule.
+ * before the jail; an empty one leaves `from` empty and the broker refuses, the
+ * same answer a capsule gets.
  */
 function _stattic_php_functions_default_sender(): string
 {

@@ -8,9 +8,9 @@ require_once __DIR__ . '/../shared/cache-policy.php';
 require_once __DIR__ . '/../shared/upstream-relay.php';
 require_once __DIR__ . '/../shared/html-insert.php';
 
-// Proxy caching is an explicit route capability, never inferred from an
-// upstream response: `cache=shared` grants only the short revalidatable edge
-// policy, and any personalization signal revokes it back to no-store.
+// Proxy caching is an explicit route grant, never inferred from the upstream
+// response. `cache=shared` gives only the short revalidatable edge policy, and
+// any personalization signal revokes it to no-store.
 const STATTIC_PROXY_EDGE_CACHE_POLICY = 'no-store';
 const STATTIC_PROXY_SHARED_CACHE_POLICY = STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
 const STATTIC_PROXY_SHARED_CACHE_STATUSES = [200, 203, 300, 301, 304, 404, 410];
@@ -35,7 +35,7 @@ function _stattic_proxy_cache_request_eligible(
 }
 
 // The route's shared-cache grant is a request-side opt-in; the upstream's own
-// headers are the lane input that can revoke it.
+// headers can revoke it.
 function _stattic_proxy_response_cache_policy(
     bool $sharedCacheRequest,
     int $responseStatus,
@@ -69,8 +69,8 @@ function _stattic_proxy_response_header_lines(array $originHeaders, array $platf
     return _stattic_cache_policy_apply_lines($cachePolicy, $lines);
 }
 
-// $serving carries the version's resolved runtime config; the only thing this
-// lane reads from it is the head-insert snippets.
+// $serving is the version's resolved runtime config; this lane reads only the
+// head-insert snippets from it.
 function _stattic_proxy_request(array $route, string $remainder, array $serving = []): void
 {
     $insertSnippets = _stattic_html_insert_snippets($serving);
@@ -96,8 +96,8 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
         $remainder
     );
 
-    // The share-link token opens THIS space and nothing else: a publisher's
-    // origin (and its logs) must never see it, however it arrived.
+    // The share-link token opens THIS space only: a publisher's origin and its
+    // logs must never see it, however it arrived.
     $query = _stattic_strip_access_query_token((string) ($_SERVER['QUERY_STRING'] ?? ''));
     if ($query !== '') {
         $target .= (str_contains($target, '?') ? '&' : '?') . $query;
@@ -112,8 +112,8 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
     if (!in_array($requestMethod, $allowedMethods, true)) {
         _stattic_render_platform_page('method-not-allowed', 405, ['Allow' => implode(', ', $allowedMethods)], "Proxy route does not allow this method.\n");
     }
-    // The upstream request rides the visitor's own method: no producer of a
-    // proxy action writes a per-route method override.
+    // The upstream request rides the visitor's method: no producer of a proxy
+    // action writes a per-route override.
     $method = $requestMethod;
     // A condition-matched rule is per-visitor, so never shared-cacheable.
     $privateResponse = _stattic_access_private_cache_flag() || !empty($route['conditional_match']);
@@ -173,9 +173,9 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
         );
     };
 
-    // A shared-cacheable response is buffered and emitted only after curl
-    // reports a complete transfer, so a truncated upstream can never leave
-    // public cache headers attached to partial bytes.
+    // A shared-cacheable response is buffered until curl reports a complete
+    // transfer, so a truncated upstream cannot leave public cache headers on
+    // partial bytes.
     $relayedBodyBytes = 0;
     $bufferedBody = '';
     $bufferSharedResponse = null;
@@ -212,8 +212,8 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
         if (!$headersSent) {
             $sendProxyResponseHeaders();
             $headersSent = true;
-            // Installed here and nowhere earlier: past this point every byte is
-            // upstream body, so a platform error page can never be filtered.
+            // Installed here and no earlier: past this point every byte is
+            // upstream body, so a platform error page is never filtered.
             _stattic_html_insert_stream_begin($insertSnippets);
         }
 
@@ -258,7 +258,7 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
     exit;
 }
 
-// Null when absent, malformed, or self-contradictory — the streaming counter is
+// Null when absent, malformed, or self-contradictory. The streaming counter is
 // then the only enforcement.
 function _stattic_proxy_origin_content_length(array $originHeaders): ?int
 {
@@ -280,7 +280,7 @@ function _stattic_proxy_origin_content_length(array $originHeaders): ?int
     return $declared;
 }
 
-// 'reject': provably oversize with nothing emitted yet — clean 502.
+// 'reject': provably oversize, nothing emitted yet. Clean 502.
 // 'abort': headers already out, so the transfer ends truncated.
 // 'relay': within the limit.
 function _stattic_proxy_stream_limit_decision(?int $declaredLength, bool $headersSent, int $relayedBytes, int $chunkBytes, int $limit): string
@@ -329,7 +329,7 @@ function _stattic_assert_proxy_target_allowed(string $target): array
 }
 
 // Pins the transport to the validated addresses so the connection cannot be
-// rebound to a different IP after validation.
+// rebound to another IP.
 function _stattic_proxy_upstream_pins(array $parts): array
 {
     $scheme = (string) ($parts['scheme'] ?? '');
@@ -356,10 +356,9 @@ function _stattic_collect_proxy_request_headers(
         }
     }
 
-    // An anonymous shared-cache request inherits no visitor-controlled header
-    // beyond the validators an origin needs to answer 304 end to end, and its
-    // REMOTE_ADDR is withheld so it cannot become an origin-side variant the
-    // origin forgets to declare with Vary.
+    // An anonymous shared-cache request forwards no visitor-controlled header
+    // beyond the 304 validators, and withholds REMOTE_ADDR so it cannot become
+    // a variant the origin forgets to declare with Vary.
     $inbound = _stattic_relay_request_headers([
         'allow' => $sharedCacheRequest
             ? array_values(array_diff(['if-none-match', 'if-modified-since'], $allowed))
@@ -367,8 +366,8 @@ function _stattic_collect_proxy_request_headers(
         'deny' => STATTIC_PROXY_DENIED_REQUEST_HEADERS,
     ]);
     if ($sharedCacheRequest) {
-        // Re-spelled canonically: a shared-cache candidate must not vary by how
-        // the client capitalized the name.
+        // A shared-cache candidate must not vary by the client's
+        // capitalization.
         foreach (['if-none-match' => 'If-None-Match', 'if-modified-since' => 'If-Modified-Since'] as $lowerName => $canonical) {
             foreach ($inbound as [$name, $value]) {
                 if (strtolower($name) === $lowerName && $value !== '') {

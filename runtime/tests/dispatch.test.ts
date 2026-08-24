@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 // SSH management dispatcher (engine/admin/dispatch.php): one JSON request
 // envelope on stdin, one {status, body} envelope on stdout, the SAME handlers
 // and JWT verification as the HTTP management surface. This is the WP.Cloud
@@ -122,6 +122,49 @@ test("state reports unavailable instead of erasing state after a failed read", a
   expect(recovered.body.spaces).toEqual(
     expect.arrayContaining([expect.objectContaining({ space_id: "spc_dsp" })]),
   );
+});
+
+test("scan-log serves the provider's malware-scanner artifact from the site home", async () => {
+  // The provider scanner writes `~/logs/malware-scanner-results.log`; the
+  // management surface reads it back so scan ingestion works over HTTPS when
+  // the response ticket is status-only. HOME is the handler's first resolution
+  // step, so the dispatch transport (caller-controlled env) exercises the real
+  // read against an isolated fake home.
+  const fakeHome = path.join(rt.root, "fake-home");
+  mkdirSync(path.join(fakeHome, "logs"), { recursive: true });
+  const report = "Virus scanning starting up\nVirus scan completed\n";
+  writeFileSync(path.join(fakeHome, "logs", "malware-scanner-results.log"), report);
+
+  const request = {
+    method: "GET",
+    path: runtimeHttpPath("/__spacefast/api.php/scan-log"),
+    authorization: `Bearer ${managementToken("read_scan_log")}`,
+  };
+  const withArtifact = await dispatchRaw(JSON.stringify(request), {
+    PATH: process.env.PATH,
+    HOME: fakeHome,
+  });
+  expect(withArtifact.exitCode).toBe(0);
+  // SAFETY: the dispatcher's stdout contract is exactly one {status, body} envelope.
+  const envelope = JSON.parse(withArtifact.stdout) as DispatchEnvelope;
+  expect(envelope.status).toBe(200);
+  expect(envelope.body.log).toBe(report);
+
+  // No artifact on disk is a normal answer, not an error.
+  const emptyHome = path.join(rt.root, "fake-home-empty");
+  mkdirSync(path.join(emptyHome, "logs"), { recursive: true });
+  const withoutArtifact = await dispatchRaw(
+    JSON.stringify({
+      ...request,
+      authorization: `Bearer ${managementToken("read_scan_log")}`,
+    }),
+    { PATH: process.env.PATH, HOME: emptyHome },
+  );
+  expect(withoutArtifact.exitCode).toBe(0);
+  // SAFETY: the dispatcher's stdout contract is exactly one {status, body} envelope.
+  const emptyEnvelope = JSON.parse(withoutArtifact.stdout) as DispatchEnvelope;
+  expect(emptyEnvelope.status).toBe(200);
+  expect(emptyEnvelope.body.log).toBeNull();
 });
 
 test("dispatch runs through the fake Atomic top-level without runtime config env", async () => {

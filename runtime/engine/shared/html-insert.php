@@ -3,21 +3,20 @@ declare(strict_types=1);
 
 // THE streaming HTML insert filter (D44–D46, D77, D94, D95).
 //
-// Static HTML gets its snippets at compile time. Everything dynamic — the
-// function proxy, route proxies, Zero — gets them here, at the one point where
-// a response body leaves the runtime, so there is exactly one applier and none
-// at the edge (D47).
+// Static HTML gets its snippets at compile time. Everything dynamic gets them
+// here, at the one point where a response body leaves the runtime: the function
+// proxy, route proxies, Zero. Exactly one applier, none at the edge (D47).
 //
 // The rules that make it safe to run on a stream:
 //   * Bytes are held only until the anchor is found, or until 16 KiB, and never
 //     after (D94). The anchor is the first `<head` START tag: a start tag
 //     cannot appear inside a script, because no script can precede it. We do
-//     not look for `</head>` — that text CAN appear inside a script. With no
-//     `<head` in the window, the `<html` start tag is the anchor. With neither,
-//     the response passes through untouched and the miss is journaled once.
+//     not look for `</head>`, which CAN appear inside a script. With no `<head`
+//     in the window, the `<html` start tag is the anchor. With neither, the
+//     response passes through untouched and the miss is journaled once.
 //   * text/html only, never an event stream (D46/D77).
 //   * The upstream Content-Length is removed and the body goes out chunked
-//     (D95) — the insert changes the length, and with an output handler
+//     (D95): the insert changes the length, and with an output handler
 //     installed PHP owns the framing.
 require_once __DIR__ . '/context.php';
 
@@ -25,10 +24,10 @@ const STATTIC_HTML_INSERT_SCAN_LIMIT_BYTES = 16384;
 // Slack past the scan window so an anchor that STARTS inside the window but
 // carries a long attribute list still completes. Bounds what we ever hold.
 const STATTIC_HTML_INSERT_TAG_SLACK_BYTES = 4096;
-// Mirrors the compiler's config limits (CONFIG_INJECT_SNIPPET_LIMIT /
-// CONFIG_INJECT_SNIPPET_MAX_BYTES in crates/stattic-runtime-core/src/protocol.rs).
-const STATTIC_HTML_INSERT_SNIPPET_LIMIT = 16;
-const STATTIC_HTML_INSERT_SNIPPET_MAX_BYTES = 8192;
+// The compiler's config limits arrive generated
+// (STATTIC_RUNTIME_CONFIG_INJECT_SNIPPET_LIMIT / _MAX_BYTES in
+// finalizer-protocol.generated.php, via context.php): a stream-time snippet is
+// the same snippet the compiler admitted, so both sides read one authority.
 
 // The dynamic lanes mirror the compile-time head placement only: bodyStart /
 // bodyEnd / noscript anchors are not byte-findable on a stream without a real
@@ -41,11 +40,11 @@ function _stattic_html_insert_snippets(array $servingOrConfig): array
     }
     $snippets = [];
     foreach ($inject['head'] as $snippet) {
-        if (!is_string($snippet) || $snippet === '' || strlen($snippet) > STATTIC_HTML_INSERT_SNIPPET_MAX_BYTES) {
+        if (!is_string($snippet) || $snippet === '' || strlen($snippet) > STATTIC_RUNTIME_CONFIG_INJECT_SNIPPET_MAX_BYTES) {
             continue;
         }
         $snippets[] = $snippet;
-        if (count($snippets) >= STATTIC_HTML_INSERT_SNIPPET_LIMIT) {
+        if (count($snippets) >= STATTIC_RUNTIME_CONFIG_INJECT_SNIPPET_LIMIT) {
             break;
         }
     }
@@ -53,8 +52,8 @@ function _stattic_html_insert_snippets(array $servingOrConfig): array
 }
 
 // Installs the filter for the response about to be written. Call it as late as
-// possible — after the response headers are registered and immediately before
-// the first body byte — so no platform error page can ever be filtered.
+// possible, after the response headers are registered and immediately before
+// the first body byte, so no platform error page can ever be filtered.
 function _stattic_html_insert_stream_begin(array $snippets): void
 {
     if (!empty($GLOBALS['SPACEFAST_HTML_INSERT_ACTIVE'])) {
@@ -160,7 +159,7 @@ function _stattic_html_insert_anchor(string $subject, string $tag, int $maxStart
         }
         $next = $subject[$after];
         if ($next !== '>' && $next !== '/' && trim($next) !== '') {
-            $offset = $after; // `<header`, `<htmlish` — keep looking.
+            $offset = $after; // `<header`, `<htmlish`: keep looking.
             continue;
         }
         $end = strpos($subject, '>', $after);
@@ -187,7 +186,7 @@ function _stattic_html_insert_eligible(): bool
         $name = strtolower(trim(substr($line, 0, $separator)));
         $value = strtolower(trim(substr($line, $separator + 1)));
         if ($name === 'x-accel-buffering' && $value === 'no') {
-            return false; // A real stream (D77) — never hold its bytes.
+            return false; // A real stream (D77): never hold its bytes.
         }
         if ($name === 'content-type') {
             $contentType = $value;

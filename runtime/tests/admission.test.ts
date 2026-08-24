@@ -750,14 +750,5 @@ test("admission releases stay within their acquire generation", () => {
     admitted_after_slots_freed: true,
     final_persisted_count: 0,
     generation_file_counts_after_rotations: [1, 1, 1, 1, 1],
-    mixed_file_cutover: {
-      request_b_admitted: true,
-      legacy_path_exists_after_cutover: false,
-      count_after_cutover: 1,
-      count_after_legacy_release: 1,
-      fresh_results: [true, false],
-      persisted_count_at_limit: 2,
-      final_persisted_count: 0,
-    },
   });
 });

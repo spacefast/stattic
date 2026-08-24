@@ -1,9 +1,7 @@
-// Generic serve-time content-type allowlist (route-config `content_types`):
-// the engine refuses files whose stored Content-Type matches no pattern —
-// exact types or `prefix/*` wildcards — with the pushed blocked_message. The
-// control plane uses it for unclaimed anonymous spaces (no opaque binaries
-// pre-claim); the engine itself is policy-blind, and a null push clears the
-// restriction (what a claim's route sync does).
+// Serve-time content-type allowlist (route-config `content_types`). The engine
+// is policy-blind: it refuses files whose stored Content-Type matches no
+// pattern (exact type or `prefix/*`) with the pushed blocked_message, and a
+// null push clears the restriction.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 
 import {

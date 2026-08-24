@@ -32,10 +32,8 @@ learns about users, teams, plans, billing, or domain ownership.
 
 Runtime archives are published as GitHub release assets; the control plane never serves
 their bytes. Provisioning resolves the latest promoted release, lands the CLI-only resident
-`installer.php` over SSH, and installs it immediately. Existing post-migration boxes update
-through their authenticated `/engine/update` management route. Calls from the removed
-pre-migration pull updater receive inert `200` responses while
-`SPACEFAST_LEGACY_RUNTIME_UPDATES_FROZEN=true`; those responses contain no release metadata.
+`installer.php` over SSH, and installs it immediately. Existing boxes update through their
+authenticated `/engine/update` management route.
 The installer is not an HTTP entrypoint. Bundle contents are defined by
 `engine-manifest.json`, never by scanning directories. Engine install never touches committed
 space storage or route indexes.
@@ -53,7 +51,7 @@ Requirements: PHP 8.5 with `sodium`, `curl`, and `zip` extensions, plus the bund
    release. WP.Cloud's `custom-redirects.php` loader returns for the canonical direct
    `/__spacefast/*.php` entrypoints after its environment bootstrap finishes. The loader is
    reinstalled whenever the payload's loader bytes differ from the installed ones
-   (`.stattic/loader-version` holds their sha256), so a loader fix reaches a converged box.
+   (`.stattic/loader-version` holds their sha256), so a loader fix reaches a synced box.
 3. Deny direct web access to `.stattic/**` at the webserver level. The engine also
    denies it itself, defense in depth is still good practice.
 4. Provide configuration (see below).
@@ -70,14 +68,13 @@ runtime entrypoints execute as direct PHP files, after WP.Cloud has finished
 defining the DB constants needed to decrypt that data. Local tests and e2e shims
 inject the same Atomic shape before runtime PHP is loaded.
 
-| Key                             | Purpose                                                                                                                                                                                                                      |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SPACEFAST_API_BASE_URL`        | Private control-plane transport. Used for JWKS refresh and callbacks only; never emitted to public pages.                                                                                                                    |
-| `SPACEFAST_BROWSER_API_URL`     | Browser-safe public API origin for the same-host SDK. HTTPS in production; loopback HTTP is accepted for local development.                                                                                                  |
-| `SPACEFAST_MANAGEMENT_HOSTNAME` | The only hostname that accepts `/__spacefast/api.php?route=...` and `/__spacefast/upload.php?op=...`. Public hosts reject management paths before JWT parsing; ordinary public paths on the management hostname fail closed. |
-| `SPACEFAST_RUNTIME_INSTANCE_ID` | This runtime's identity. Every management/upload JWT must be scoped to it.                                                                                                                                                   |
-| `SPACEFAST_RUNTIME_JWKS_PATH`   | Optional. Path to a local JWKS file for self-hosted runtimes that should never call the API.                                                                                                                                 |
-| `SPACEFAST_RUNTIME_JWKS_B64`    | Optional. Base64-encoded inline JWKS JSON. WP.Cloud receives this through persistent data.                                                                                                                                   |
+| Key                             | Purpose                                                                                                                     |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `SPACEFAST_API_BASE_URL`        | Private control-plane transport. Used for JWKS refresh and callbacks only; never emitted to public pages.                   |
+| `SPACEFAST_BROWSER_API_URL`     | Browser-safe public API origin for the same-host SDK. HTTPS in production; loopback HTTP is accepted for local development. |
+| `SPACEFAST_RUNTIME_INSTANCE_ID` | This runtime's identity. Every management/upload JWT must be scoped to it.                                                  |
+| `SPACEFAST_RUNTIME_JWKS_PATH`   | Optional. Path to a local JWKS file for self-hosted runtimes that should never call the API.                                |
+| `SPACEFAST_RUNTIME_JWKS_B64`    | Optional. Base64-encoded inline JWKS JSON. WP.Cloud receives this through persistent data.                                  |
 
 When no local JWKS is provisioned, the runtime fetches and caches
 `<SPACEFAST_API_BASE_URL>/.well-known/spacefast-runtime-jwks.json`.
@@ -94,7 +91,9 @@ always available in the configured error log.
 
 ## Management API
 
-All management routes live on the management hostname only.
+Management routes use the site's primary hostname. Their JWT audience, action,
+runtime-instance, operation, and replay checks are the authorization boundary;
+the hostname is not a credential.
 
 ```text
 GET  /__spacefast/health.php                              public-safe, no auth
@@ -189,8 +188,8 @@ beyond localhost. Safe for CI.
 
 - User uploads are never executed. PHP-like files are inert bytes served as text/download.
 - `.htaccess`, `.user.ini`, `__spacefast`, `.spacefast/storage`, `.spacefast/engine`
-  (plus the legacy `.stattic/...` spellings), and engine filenames are rejected at
-  upload and blocked at serve time.
+  (plus the `.stattic/...` spellings of the engine's own install root), and engine
+  filenames are rejected at upload and blocked at serve time.
 - Proxy egress validates resolved upstream IPs and pins connections to the validated
   addresses: loopback, link-local, cloud-metadata, RFC1918/ULA, and Spacefast-internal
   hosts are denied at request time (anti-DNS-rebinding).

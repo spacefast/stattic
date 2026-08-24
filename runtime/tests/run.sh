@@ -35,10 +35,10 @@ fi
 export SPACEFAST_RUNTIME_BIN="$runtime_target_dir/debug/stattic-runtime"
 
 echo "==> runtime integration tests"
-# Scoped to the runtime dir on purpose: from the repo root, `bun test
-# runtime/tests` also glob-matches the handbook's vendored source mirrors
-# under apps/handbook-web/public/generated/src/runtime/tests/, which cannot
-# resolve their imports and fail as phantom tests once the handbook is built.
+# Scoped to the runtime dir: from the repo root, `bun test runtime/tests` also
+# matches the handbook's vendored source mirrors under
+# apps/handbook-web/public/generated/src/runtime/tests/, which cannot resolve
+# their imports and fail as phantom tests once the handbook is built.
 cd "$RUNTIME_DIR"
 test_args=(test)
 if [[ -n "${SPACEFAST_BUN_COVERAGE_DIR:-}" ]]; then

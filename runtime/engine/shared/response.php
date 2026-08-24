@@ -30,16 +30,15 @@ function _stattic_response_send(int $status, string $body, string $mediaType = '
 function _stattic_json_response(int $status, array $body, string $mediaType = 'application/json', array $headers = []): never
 {
     // SSH dispatch: the response rides stdout as one {status, body} envelope.
-    // Always exit 0 — transport failures are the non-zero/garbage cases.
+    // Always exit 0: transport failures are the non-zero/garbage cases.
     if (defined('STATTIC_RUNTIME_DISPATCH_CLI')) {
         echo json_encode(['status' => $status, 'body' => $body], JSON_UNESCAPED_SLASHES) . "\n";
         exit(0);
     }
     // wp.cloud's Nginx layer may otherwise buffer the complete upstream
-    // request, which defeats fastcgi_finish_request(): the PHP worker starts
-    // its deferred purge while the control plane is still waiting for bytes.
-    // Only lanes that explicitly opted into pre-deferred flushing get this
-    // provider instruction; ordinary JSON responses keep their normal path.
+    // request, defeating fastcgi_finish_request(): the PHP worker starts its
+    // deferred purge while the control plane is still waiting for bytes. Only
+    // lanes that opted into pre-deferred flushing get this instruction.
     if (
         function_exists('_stattic_flush_response_before_deferred')
         && _stattic_flush_response_before_deferred()
@@ -78,7 +77,7 @@ function _stattic_problem_refused(int $status, string $code, string $message): n
 }
 
 /**
- * The one 405. Allow is not optional — a refusal that does not name the methods
+ * The one 405. Allow is not optional: a refusal that does not name the methods
  * it would accept is unusable to every client, human or agent.
  *
  * `$options`: `code`/`message` answer a problem document, `body`/`media_type`

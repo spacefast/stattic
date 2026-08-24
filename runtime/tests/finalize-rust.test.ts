@@ -44,10 +44,10 @@ let failMarkerPath: string;
 let probePath: string;
 
 /**
- * What a published version actually answers with at `key`, read through the v4
- * artifact chain: root.json -> root-<h16>.php -> responses-<h16>.php -> the CAS
- * blob the entry names (contracts §2/§5). Version trees hold no bytes any more,
- * so this — not a `files/` read — is how a test proves which bytes a version owns.
+ * What a published version answers with at `key`, read through the v4 artifact
+ * chain: root.json -> root-<h16>.php -> responses-<h16>.php -> the CAS blob the
+ * entry names (contracts §2/§5). Version trees hold no bytes, so this is how a
+ * test proves which bytes a version owns.
  */
 function publishedBody(spaceId: string, versionId: string, key: string): string | null {
   const sha = responseEntry(rt, spaceId, versionId, key)?.b;
@@ -75,10 +75,10 @@ beforeAll(async () => {
   }
   runtimePath = path.join(REPO_ROOT, "target/debug/stattic-runtime");
 
-  // Wrapper binary: passes through to the real compiler unless the fail
-  // marker exists. On a forced failure it records whether the version dir
-  // named inside the marker existed at invocation time — the observable proof
-  // that PHP moved the previous version aside before starting the binary.
+  // Wrapper binary: passes through to the real compiler unless the fail marker
+  // exists. On a forced failure it records whether the version dir named in the
+  // marker existed at invocation time, which is the observable proof that PHP
+  // moved the previous version aside before starting the binary.
   const bunPath = Bun.which("bun") ?? "/usr/bin/env bun";
   wrapperRoot = path.join(
     "/tmp",
@@ -166,8 +166,7 @@ test("native finalize publishes and serves a site end to end", async () => {
   expect(guide.status).toBe(200);
   expect(await guide.text()).toBe("<h1>guide</h1>\n");
 
-  // The committed `_redirects` convention compiled inside the Rust finalizer
-  // and is enforced by the serving path.
+  // `_redirects` is compiled by the Rust finalizer and enforced when serving.
   const redirect = await get(rt, HOST, "/old");
   expect(redirect.status).toBe(301);
   expect(redirect.headers.get("location")).toBe("/docs/guide.html");
@@ -183,11 +182,40 @@ test("native finalize publishes and serves a site end to end", async () => {
     version_id: "ver_native_1",
     route_name: "production",
   });
+
+  const nextFiles = {
+    "index.html": "<h1>native home v2</h1>\n",
+    "docs/guide.html": "<h1>guide</h1>\n",
+    _redirects: "/old /docs/guide.html 301\n",
+  };
+  const next = await createDeclaredSession(rt, "spc_native", "ver_native_2", nextFiles);
+  await uploadSessionBlobs(rt, next, nextFiles);
+  const nextResponse = await finalize(rt, "spc_native", "ver_native_2", {
+    upload_id: next.uploadId,
+    // The finalizer needs this independently of activation: it reads the two
+    // immutable catalogs and returns the changelog counts to the control plane.
+    previous_version_id: "ver_native_1",
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig({ mode: "website", site_title: "Native Finalize" }),
+      previous_version_id: "ver_native_1",
+      production_hostnames: [HOST],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+  expect(nextResponse.status).toBe(200);
+  const nextReceipt = runtimeVersionFinalizeResponseSchema.parse(await nextResponse.json());
+  expect(nextReceipt.delta).toEqual({ added: 0, changed: 1, removed: 0 });
+
+  const updatedHome = await get(rt, HOST, "/");
+  expect(updatedHome.status).toBe(200);
+  expect(await updatedHome.text()).toBe("<h1>native home v2</h1>\n");
 });
 
-// The space card addresses this path on the version's own public URL, so the
-// choice has to be a path the version SERVES publicly. It is made once, in the
-// finalizer, from the catalog — the control plane stores what it is told.
+// The space card addresses this path on the version's own public URL, so it
+// must be a path the version SERVES publicly. The finalizer picks it once from
+// the catalog; the control plane stores what it is told.
 test("finalize names the version's first public served image for the space card", async () => {
   const files = {
     ".hidden/cover.png": "private cover bytes\n",
@@ -201,16 +229,14 @@ test("finalize names the version's first public served image for the space card"
     upload_id: session.uploadId,
   });
   expect(response.status).toBe(200);
-  // Parsed through the control plane's own contract, so this receipt is
-  // checked against the shape that consumer requires rather than a restatement
-  // of it here.
+  // Parsed through the control plane's own contract, so the receipt is checked
+  // against the shape its consumer requires.
   const body = runtimeVersionFinalizeResponseSchema.parse(await response.json());
   // Not `.hidden/cover.png`, which sorts first but is never served, and not
   // `assets/zzz.png`, which is an image but not the first one.
   expect(body.preview_image_path).toBe("assets/logo.png");
-  // Stage telemetry describes the RUN, so unlike everything else in this
-  // receipt it cannot be read back from immutable metadata: it rides the
-  // native finalizer's envelope through PHP untouched.
+  // Stage telemetry describes the RUN, so it cannot be read back from immutable
+  // metadata. It rides the native finalizer's envelope through PHP untouched.
   expect(body.telemetry?.stagedFiles).toBe(Object.keys(files).length);
   expect(body.telemetry?.skippedFiles).toBe(0);
 
@@ -266,8 +292,8 @@ test("timed-out native child is killed and reaped within the deadline", () => {
   const [exitCode, timedOut] = JSON.parse(probe.stdout.toString()) as [number, boolean];
   expect(timedOut).toBe(true);
   expect(exitCode).not.toBe(0);
-  // The 60s sleeper was killed and reaped at the 1s deadline — the call
-  // returned as soon as the child was gone, not when the sleep finished.
+  // The 60s sleeper was killed and reaped at the 1s deadline: the call returned
+  // as soon as the child was gone, not when the sleep finished.
   expect(elapsedMs).toBeLessThan(10_000);
 });
 
@@ -301,9 +327,8 @@ test("a finalize failure moves an existing version aside and restores it", async
   // PHP moved the previous immutable version aside before invoking the binary.
   const probe = JSON.parse(readFileSync(probePath, "utf8")) as { versionDirExists: boolean };
   expect(probe.versionDirExists).toBe(false);
-  // The failure restored the existing directory, and no backup or quarantine
-  // debris is left behind. The upload session remains available to the caller;
-  // this test owns only the move-aside and restoration seam.
+  // The failure restored the directory and left no backup or quarantine debris.
+  // This test owns only the move-aside and restore seam.
   expect(readFileSync(partialMarker, "utf8")).toBe("prior partial finalize\n");
   const siblings = readdirSync(path.dirname(root));
   expect(siblings.some((name) => name.includes(".rust-previous"))).toBe(false);

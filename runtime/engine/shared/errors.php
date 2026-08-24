@@ -113,7 +113,7 @@ function _stattic_page_font_faces(): string
 }
 
 // Fonts are a cross-origin fetch; preloading ahead of the inline stylesheet
-// starts it with the parse. `crossorigin` is required — font requests are CORS
+// starts it with the parse. `crossorigin` is required: font requests are CORS
 // mode, and a mismatched preload is discarded.
 function _stattic_page_font_preloads(): string
 {
@@ -247,9 +247,9 @@ function _stattic_serve_page(string $pageId, array $context = []): void
     $representation = $negotiable ? _stattic_page_representation($ambiguousDefault) : 'html';
     $requestMethod = _stattic_runtime_request_method();
     http_response_code($status);
-    // §16: every fault page carries no-store or private, so this resolves to the
-    // bypass directive — a denial or an error must never be the copy the edge
-    // holds for the next visitor.
+    // §16: every fault page carries no-store or private, so this resolves to
+    // the bypass directive. A denial or an error must never be the copy the
+    // edge holds for the next visitor.
     foreach (_stattic_apply_platform_header_policy($headers) as $name => $value) {
         if (is_string($name) && is_scalar($value)) header($name . ': ' . (string) $value, true);
     }

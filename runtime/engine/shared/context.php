@@ -37,8 +37,8 @@ function _stattic_runtime_install_root(string $engineRoot): string
 const STATTIC_RUNTIME_NAMESPACE_PATH = '/__spacefast';
 const STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH = '/__sf';
 // Security boundary: only these files may be direct-executed. The drift guard
-// only proves this region matches the manifest — it cannot see a second table
-// added outside the markers, so widen the manifest, never the region.
+// proves this region matches the manifest; it cannot see a second table added
+// outside the markers, so widen the manifest, never the region.
 // BEGIN GENERATED runtime entrypoints — DO NOT EDIT
 // Source: runtime/engine-manifest.json (aliases under __spacefast/).
 // Regenerate: bun run check:runtime-entrypoints -- --write
@@ -57,13 +57,12 @@ const STATTIC_ZERO_REALTIME_TICKET_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zer
 const STATTIC_COMMENTS_VERSION_URLS_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/version-urls';
 // Mirrors COLLAB_VERSION_URLS_MAX_IDS in packages/common.
 const STATTIC_COMMENTS_VERSION_URLS_MAX_IDS = 50;
-// Recoleta is the only downloaded platform page face — body and mono are
-// system stacks. It is commercial (never shipped in the engine) and loads from
+// Recoleta is the only downloaded platform page face; body and mono are system
+// stacks. It is commercial, never shipped in the engine, and loads from
 // wordpress.com's font CDN, so every space hostname reuses one warm
-// browser-cache entry instead of a cold per-space fetch. Mirrors
-// packages/common/src/utils/page-fonts.ts.
+// browser-cache entry. Mirrors packages/common/src/utils/page-fonts.ts.
 // url => [family, weight, preload]; emission order is CSS order, and preload
-// marks the face the pages actually render (Recoleta 400 headings).
+// marks the face the pages render (Recoleta 400 headings).
 const STATTIC_PLATFORM_PAGE_FONTS = [
     'https://wordpress.com/i/fonts/recoleta/300.woff2' => ['Recoleta', '300', false],
     'https://wordpress.com/i/fonts/recoleta/400.woff2' => ['Recoleta', '400', true],
@@ -76,12 +75,12 @@ const STATTIC_TAG_PREVIEW_QUERY_NAME = 'spacefast_tag_preview';
 const STATTIC_PAGE_PREVIEW_QUERY_NAME = 'spacefast_view';
 
 // Wire contract: the compiler bakes this set into artifacts, the validators
-// compare with `===`, the serving lane answers 405 with it — widening it on one
-// side only breaks the others.
+// compare with `===`, and the serving lane answers 405 with it. Widening one
+// side alone breaks the others.
 const STATTIC_VISITOR_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 
 // `X-Spacefast-Runtime: 1` is emitted from init.php before ANY gate can exit, so
-// it rides every response shape including denials — on a denial it is the only
+// it rides every response shape including denials. On a denial it is the only
 // thing separating our access wall from an upstream proxy/CDN 401.
 function _stattic_emit_runtime_identity(?string $versionId = null): void
 {
@@ -103,11 +102,10 @@ const STATTIC_SYSTEM_VIEW_COOKIE = '__Host-spacefast_system_view';
 const STATTIC_SYSTEM_VIEW_DEV_COOKIE = 'spacefast_system_view_dev';
 const STATTIC_SYSTEM_VIEW_COOKIE_SECONDS = 5 * 60;
 // `?__=` is THE access lane: present a token on the page you want and that page
-// is the response. Every kind of token that may ride it names itself with a
-// prefix, so dispatch is a table lookup and a token nobody claims is refused by
-// name instead of falling through to the gate. /__/<token> is the older
-// reserved-path form, kept for links minted before the prefixes existed and for
-// the space-key door.
+// is the response. Every token that may ride it names itself with a prefix, so
+// dispatch is a table lookup and an unclaimed token is refused by name instead
+// of falling through to the gate. /__/<token> is the older reserved-path form,
+// kept for links minted before the prefixes existed and for the space-key door.
 const STATTIC_ACCESS_QUERY_TOKEN_PARAM = '__';
 const STATTIC_ACCESS_ENTRY_PREFIX = '/__/';
 // A customer share link: an opaque durable secret, redeemed with the control
@@ -156,10 +154,22 @@ const STATTIC_FUNCTIONS_PURGE_PATH = '__spacefast/functions/purge';
 // The ONE stable visitor URL of a public uploads-store object.
 const STATTIC_UPLOADS_PUBLIC_URL_PREFIX = '/__stattic/u/';
 
+// Runtime-owned files keep their existing physical layout inside a version.
+// They are implementation state, regardless of any catalog visibility bit.
+function _stattic_path_is_internal_artifact(string $path): bool
+{
+    $normalized = trim($path, '/');
+    $foldedPlatformPath = strtolower($normalized);
+    return $normalized === 'zero'
+        || str_starts_with($normalized, 'zero/')
+        || $foldedPlatformPath === '__spacefast'
+        || str_starts_with($foldedPlatformPath, '__spacefast/');
+}
+
 // Every platform control path, once: which exist, whether the visitor lane
 // admits them at the front door (init.php), whether a tenant may publish under
 // them (admin/generate.php, Functions dispatch), and which handler answers.
-// Ordered — the walk takes the first matching row whose `admit` passes, so
+// Ordered: the walk takes the first matching row whose `admit` passes, so
 // specific rows precede the namespace they sit in, and `entry`-stage order IS
 // serve.php's dispatch ladder order.
 // `match`: exact | prefix | namespace (whole-segment, so `/__spanish/page` is a
@@ -178,7 +188,7 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_COMMENTS_VERSION_URLS_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_ZERO_REALTIME_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     // Reserved (tenant false) so no publisher can shadow the review link, and
-    // ahead of the token-entry prefix it sits inside — first match wins.
+    // ahead of the token-entry prefix it sits inside, because first match wins.
     // serve.php dispatches it AFTER the access check: the shell's bytes vary by
     // Space and must ride the host session that check just minted.
     ['path' => SPACEFAST_COLLAB_FRAME_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'frame', 'handler' => 'collab_frame'],
@@ -238,7 +248,7 @@ function _stattic_control_path_row(string $path): ?array
     return null;
 }
 
-// "Reaches the handler" only — each surface refuses without a valid signature.
+// "Reaches the handler" only. Each surface refuses without a valid signature.
 function _stattic_control_path_admits_visitor(string $path): bool
 {
     $row = _stattic_control_path_row($path);
@@ -354,8 +364,8 @@ function _stattic_access_query_token_state(): array
 
 // The dispatch table. A prefix names the lane and the rest is that lane's token,
 // already length- and alphabet-bounded so no lane parses an unbounded string.
-// Null means no lane claims it — the refusal, never a fall-through: the sniffing
-// this replaced is what silently sent customer share links to the access gate.
+// Null means no lane claims it, a refusal and never a fall-through: the sniffing
+// this replaced silently sent customer share links to the access gate.
 function _stattic_access_query_token_classify(string $value): ?array
 {
     // `keep` says whether the lane's token still carries its prefix: the two
@@ -420,11 +430,11 @@ function _stattic_strip_access_query_token(string $query): string
 }
 
 // THE scrubber for anything that records a URL: journals, telemetry, error
-// bodies, a relayed request line. A share token is a durable secret and a log
-// is durable storage, so a record that keeps one has published it. Both spellings
-// go: the `?__=` value and the `/__/<token>` path segment carry the same secret.
-// Returns the URL with the secrets replaced, never shortened away, so a record
-// still shows that a token was presented.
+// bodies, a relayed request line. A share token is a durable secret and a log is
+// durable storage, so a record that keeps one has published it. Both spellings
+// carry the same secret: the `?__=` value and the `/__/<token>` path segment.
+// Secrets are replaced, never shortened away, so a record still shows that a
+// token was presented.
 function _stattic_redact_access_secrets(string $uri): string
 {
     $redacted = preg_replace(
@@ -469,7 +479,7 @@ function _stattic_strip_untrusted_edge_headers(): void
         'HTTP_X_FORWARDED_PROTO',
         'HTTP_X_FORWARDED_HOST',
         // Asserted by the cron dispatcher and by nothing else. An inbound copy
-        // is forged by definition — same rule the relay applies to
+        // is forged by definition, the same rule the relay applies to
         // Spacefast-Access-* identity forwarding.
         'HTTP_X_SPACEFAST_CRON',
     ] as $key) {
@@ -559,7 +569,7 @@ function _stattic_request_body_stream()
 }
 
 // Hand-mirrored by the control-plane generator (admin/generate.php) onto baked
-// artifacts — keep the two byte-identical when tuning it.
+// artifacts. Keep the two byte-identical when tuning it.
 const STATTIC_DEFAULT_EDGE_CACHE_CONTROL = 'public, max-age=0, s-maxage=600, stale-while-revalidate=60';
 const STATTIC_CACHE_CONTROL_NO_STORE = 'no-store';
 // Protected and request-bound bytes are never retained by the browser, edge or
@@ -590,19 +600,39 @@ function _stattic_private_content_vary(string $existing = ''): string
 }
 
 /**
+ * Platform-owned request headers that selected this response representation.
+ * The provider cache still cannot key on Vary, so conditional routes remain
+ * no-store; this declaration is for downstream HTTP caches and clients.
+ *
+ * @param list<string>|null $add
+ * @return list<string>
+ */
+function _stattic_platform_vary_headers(?array $add = null): array
+{
+    static $headers = [];
+    foreach ($add ?? [] as $name) {
+        $trimmed = trim((string) $name);
+        if ($trimmed !== '' && !isset($headers[strtolower($trimmed)])) {
+            $headers[strtolower($trimmed)] = $trimmed;
+        }
+    }
+    return array_values($headers);
+}
+
+/**
  * The ONE decision about which origins may frame a Space's private content.
  *
  * `'self'` is the main path: the Collab shell at `/__/collab` and the page it
  * frames are the same origin, so a Space behind an access gate can review its
  * own work. The Space's live origin is the one OTHER origin the runtime can
- * PROVE belongs to this same Space — an immutable version host is framed from
- * the live Space for time travel, and both hosts serve this Space under one
+ * PROVE belongs to this same Space. An immutable version host is framed from the
+ * live Space for time travel, and both hosts serve this Space under one
  * authorization projection, so the live origin is already trusted with these
  * bytes and its publisher already controls them.
  *
  * The set only ever narrows. A Space with no live origin, or one the overlay
  * states in a form that is not an origin, contributes nothing and lands on
- * `'self'` — never on a value someone else chose.
+ * `'self'`, never on a value someone else chose.
  */
 function _stattic_space_frame_ancestors(): string
 {
@@ -619,10 +649,10 @@ function _stattic_space_frame_ancestors(): string
 /**
  * `scheme://host[:port]` for an absolute http(s) URL, or null.
  *
- * Null is a refusal, never a fallback: a value that is not an origin — a
- * scheme-relative `//host/`, a `javascript:` URL, anything carrying userinfo or
- * a character that could close a CSP directive — must not reach a security
- * header at all.
+ * Null is a refusal, never a fallback. A value that is not an origin must not
+ * reach a security header at all: a scheme-relative `//host/`, a `javascript:`
+ * URL, anything carrying userinfo or a character that could close a CSP
+ * directive.
  */
 function _stattic_absolute_url_origin(mixed $url): ?string
 {
@@ -773,7 +803,7 @@ function _stattic_invalid_access_cookie_cleared(?bool $set = null): bool
     return $cleared;
 }
 // Lives here, not with its readers: shared/errors.php needs it and cannot
-// require runtime/access-rules.php — that dependency runs the other way.
+// require runtime/access-rules.php, since that dependency runs the other way.
 function _stattic_access_private_root(?string $set = null): string
 {
     if ($set !== null) {
@@ -787,8 +817,8 @@ function _stattic_access_private_root(?string $set = null): string
 // Every visitor-facing lane opens the same way, and must: edge headers stripped
 // before any read of geo/proto/IP/Spacefast-Access-*, the private root bound,
 // the flush intent declared, and the runtime identity on the wire before any
-// gate can exit. Management/upload lanes pass false — their fatal-envelope
-// shutdown handlers still need to write a response.
+// gate can exit. Management/upload lanes pass false, because their
+// fatal-envelope shutdown handlers still need to write a response.
 function _stattic_visitor_lane_begin(string $privateRoot, bool $flushResponseBeforeDeferred = true): void
 {
     _stattic_strip_untrusted_edge_headers();
@@ -822,7 +852,7 @@ function _stattic_cache_control_allows_shared_store(string $cacheControl): bool
 // A8C-* is the platform's edge-cache control channel; x-ac/x-sc/x-nc and their
 // diagnostic spellings are the provider's own; HSTS the provider rewrites. A
 // publisher header map naming any of them is stripped at send time, on every
-// lane — a tenant must never steer the edge that fronts every Space.
+// lane: a tenant must never steer the edge that fronts every Space.
 //
 // The generated protocol owns the list the compiler also enforces; these two are
 // the spellings it does not carry yet, kept separate so a regeneration cannot
@@ -862,10 +892,10 @@ function _stattic_strip_platform_owned_headers(array $headers): array
 // The provider edge is METHOD-BLIND: it keys a stored response on
 // host+path+query alone, so a stored answer to a POST/PUT/DELETE would be
 // replayed to every later GET of the same URL. No response to a non-GET/HEAD
-// request may therefore ever be storable — not by the edge and not by any
-// other cache, because the URL alone does not say what the method did. The
-// verdict lives here, beside the seams that compose platform response headers,
-// so every lane inherits it structurally instead of re-deciding it.
+// request may therefore be storable by any cache, edge included: the URL alone
+// does not say what the method did. The verdict lives here, beside the seams
+// that compose platform response headers, so every lane inherits it
+// structurally instead of re-deciding it.
 function _stattic_request_method_forbids_shared_store(): bool
 {
     return !in_array(_stattic_runtime_request_method(), ['GET', 'HEAD'], true);
@@ -930,7 +960,7 @@ function _stattic_send_response_headers(array $headers): void
 
 /**
  * The one send-time transform every lane's header map passes through: strip what
- * the provider owns — from the map AND from anything already staged — then state
+ * the provider owns, from the map AND from anything already staged, then state
  * this response's edge intent.
  *
  * @param array<string, mixed> $headers
@@ -959,6 +989,10 @@ function _stattic_apply_platform_header_policy(array $headers, string $cacheCont
     }
     $headers = _stattic_strip_platform_owned_headers($headers);
     _stattic_clear_platform_owned_response_headers();
+    $vary = _stattic_platform_vary_headers();
+    if ($vary !== []) {
+        $headers['Vary'] = implode(', ', $vary);
+    }
     // A token in the URL makes the URL the secret, and Referer would hand it to
     // every third-party asset the page loads. Platform-owned for this request
     // only: the publisher's own policy applies on every untokened response.
@@ -1050,8 +1084,8 @@ function _stattic_route_pointer_path(string $privateRoot, string $spaceId, strin
 
 // The write lock lives OUTSIDE the space tree deliberately: inside it,
 // delete_space unlinks the lock file while a holder still has it open, the next
-// request locks a FRESH inode, and two writers believe they hold the same lock —
-// an in-flight publish then recreates a just-deleted Space. Never move it back
+// request locks a FRESH inode, and two writers believe they hold the same lock.
+// An in-flight publish then recreates a just-deleted Space. Never move it back
 // under spaces/{spaceId}/.
 function _stattic_space_write_lock_path(string $privateRoot, string $spaceId): string
 {
@@ -1078,15 +1112,15 @@ function _stattic_base64url_encode(string $value): string
     return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
 }
 
-// The one spelling of "a lowercase sha-256 digest" — every CAS key, blob path
+// The one spelling of "a lowercase sha-256 digest": every CAS key, blob path
 // and content digest check shares it.
 function _stattic_is_sha256_hex(mixed $value): bool
 {
     return is_string($value) && preg_match('/\A[a-f0-9]{64}\z/', $value) === 1;
 }
 
-// The one spelling of a CAS blob's relative key — the local blob tree and the
-// S3 object namespace derive from this and can never disagree on layout.
+// The one spelling of a CAS blob's relative key: the local blob tree and the
+// S3 object namespace both derive from it and can never disagree on layout.
 function _stattic_blob_relative_key(string $spaceId, string $sha256): ?string
 {
     $sha256 = strtolower(trim($sha256));
@@ -1117,7 +1151,7 @@ const STATTIC_PRIVATE_COMPILE_FILES = [
 ];
 
 // Spec "Hidden Files": a dot-prefixed segment is private, except a root-level
-// `.well-known` — files inside it are public, dot-prefixed entries deeper are
+// `.well-known`. Files inside it are public; dot-prefixed entries deeper are
 // not. Callers pass the path pre-lowercased and slash-trimmed.
 function _stattic_path_has_hidden_segment(string $lowerPath): bool
 {
@@ -1158,16 +1192,16 @@ function _stattic_config_value(string $envName): string
 }
 
 // Spec "Upload Contract": every object path is UTF-8, NFC, percent-decoded
-// exactly once — applied at upload intake, manifest intake and the serve-time
-// route-map lookup so NFC and NFD forms resolve identically.
+// exactly once. Applied at upload intake, manifest intake and the serve-time
+// route-map lookup, so NFC and NFD forms resolve identically.
 function _stattic_nfc_path(string $path): string
 {
     $normalized = _stattic_nfc_string($path);
     return is_string($normalized) ? $normalized : $path;
 }
 
-// ASCII is already NFC, so the fast path never touches intl. Without intl at all,
-// NFD and NFC spellings of one path stop resolving to each other — that degrades
+// ASCII is already NFC, so the fast path never touches intl. Without intl, NFD
+// and NFC spellings of one path stop resolving to each other. That degrades
 // matching without corrupting anything, so the request proceeds unnormalized and
 // the operator gets one journal record per process instead of a hard failure.
 function _stattic_nfc_string(string $value): string|false
@@ -1308,21 +1342,14 @@ function _stattic_normalize_hostname(string $hostname): string
     return preg_replace('/:\d+$/', '', strtolower($hostname)) ?: '';
 }
 
-function _stattic_management_hostname(): string
-{
-    return _stattic_normalize_hostname(
-        _stattic_config_value('SPACEFAST_MANAGEMENT_HOSTNAME')
-    );
-}
-
 /**
  * The one browser origin allowed to READ a blob-gate response cross-origin.
  *
  * Pinned from configuration, never reflected from `Origin` (the
- * `Access-Control-Allow-Origin` entry in the header-conformance probe is the
- * same posture): the token is the authorization, and CORS only decides whether
- * the dashboard's `fetch()` may see bytes the browser already fetched. Unset
- * configuration means NO header — a gate link then still downloads, it just
+ * header-conformance probe's `Access-Control-Allow-Origin` entry has the same
+ * posture): the token is the authorization, and CORS only decides whether the
+ * dashboard's `fetch()` may see bytes the browser already fetched. Unset
+ * configuration means NO header. A gate link then still downloads, it just
  * cannot be read by script.
  *
  * Returns a bare origin (scheme://host[:port]) or '' when unusable.
@@ -1336,17 +1363,6 @@ function _stattic_dashboard_origin(): string
     return $origin = _stattic_absolute_url_origin(_stattic_config_value('SPACEFAST_DASHBOARD_ORIGIN')) ?? '';
 }
 
-function _stattic_is_management_host(string $host): bool
-{
-    $host = _stattic_normalize_hostname($host);
-    if ($host === '') {
-        return false;
-    }
-
-    $allowed = _stattic_management_hostname();
-    return $allowed !== '' && hash_equals($allowed, $host);
-}
-
 // A non-digit config value falls back to $default; the result is floored at $min.
 function _stattic_config_int(string $envName, int $default, int $min = 1): int
 {
@@ -1355,14 +1371,6 @@ function _stattic_config_int(string $envName, int $default, int $min = 1): int
         return max($min, (int) $raw);
     }
     return max($min, $default);
-}
-
-// Tiering is parked for the WP.Cloud-local cutover. Keep the complete S3
-// implementation available, but require an explicit opt-in before any blob is
-// promoted, demoted, or evicted between storage tiers.
-function _stattic_tiering_enabled(): bool
-{
-    return _stattic_config_value('SPACEFAST_TIERING_ENABLED') === '1';
 }
 
 // Attribute-safe: ENT_QUOTES covers both quote styles.
@@ -1574,9 +1582,8 @@ function _stattic_append_query_before_fragment(string $target, string $query): s
 // A same-origin destination is a path: exactly one leading slash and no
 // authority. Browsers treat `//host`, `/\host`, and a leading `\` as
 // protocol-relative and a `scheme:` prefix as absolute, so none of those are
-// same-origin. Used to classify a redirect template, to re-check its
-// expansion, and to decide whether a redirect may keep the visitor's link
-// token.
+// same-origin. Used to classify a redirect template, re-check its expansion,
+// and decide whether a redirect may keep the visitor's link token.
 function _stattic_redirect_is_same_origin_path(string $value): bool
 {
     if (($value[0] ?? '') !== '/') {
@@ -1589,13 +1596,13 @@ function _stattic_redirect_is_same_origin_path(string $value): bool
 function _stattic_append_current_query_to_url(string $target): string
 {
     $requestQuery = (string) ($_SERVER['QUERY_STRING'] ?? '');
-    // A successful query-Link exchange has already installed the session on
-    // this response, but the token still rides a same-origin canonical
-    // redirect: the visitor already presented it to this host, and a share
-    // link an agent cannot follow without a cookie jar is not a link. A
-    // target that leaves this origin must never receive the durable Link
-    // secret. Before exchange (for example a host redirect) the cookie marker
-    // is false, so the token still reaches the host that must redeem it.
+    // A successful query-Link exchange has already installed the session, but
+    // the token still rides a same-origin canonical redirect: the visitor
+    // already presented it to this host, and a share link an agent cannot follow
+    // without a cookie jar is not a link. A target that leaves this origin must
+    // never receive the durable Link secret. Before exchange (a host redirect,
+    // say) the cookie marker is false, so the token still reaches the host that
+    // must redeem it.
     if (
         _stattic_access_query_token_present()
         && _stattic_identity_cookie_mutated()
@@ -1624,15 +1631,4 @@ function _stattic_runtime_cors_headers(): void
     header('Access-Control-Expose-Headers: ETag', false);
     header('Access-Control-Max-Age: 600', false);
     header('Vary: Origin', false);
-}
-
-function _stattic_runtime_assert_api_hostname(): void
-{
-    $host = strtolower((string) ($_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? ''));
-    if (_stattic_is_management_host($host)) {
-        return;
-    }
-    // Deliberately generic: public hostnames must not advertise that the
-    // management/upload API exists.
-    _stattic_problem_response(404, 'runtime_api_not_found', 'Not found.');
 }

@@ -1,9 +1,8 @@
 <?php
 declare(strict_types=1);
 
-// The installer is a standalone CLI entrypoint and does not load engine
-// context.php. Report every PHP severity to stderr without corrupting the JSON
-// receipt written to stdout.
+// Standalone CLI entrypoint: engine context.php is not loaded. Errors go to
+// stderr so they cannot corrupt the JSON receipt on stdout.
 error_reporting(E_ALL);
 ini_set('log_errors', '1');
 ini_set('display_errors', '0');
@@ -13,12 +12,11 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
     exit(1);
 }
 
-// CLI program run by the SSH bootstrap and the /engine/update management
-// route, never a web entrypoint: this guard fails closed under a provider that
-// direct-executes arbitrary PHP files. Zip source rides argv[1] (an https URL
-// or a local path); SPACEFAST_RUNTIME_ENGINE_MD5 / _REVISION /
-// _NATIVE_SHA256 (optional) ride the environment. The JSON receipt on stdout
-// is the whole report — there is no callback.
+// CLI only, run by the SSH bootstrap and the /engine/update route. This guard
+// fails closed under a provider that direct-executes arbitrary PHP files. The
+// zip source rides argv[1] (https URL or local path); SPACEFAST_RUNTIME_ENGINE_MD5,
+// _REVISION and optional _NATIVE_SHA256 ride the environment. The JSON receipt
+// on stdout is the whole report. There is no callback.
 if (PHP_SAPI !== 'cli') {
     exit(1);
 }
@@ -34,8 +32,8 @@ function fail(string $message): never
     exit(1);
 }
 
-// Cleanup paths are intentionally idempotent. Absence is a successful no-op;
-// an existing path that cannot be removed still reaches PHP's error log.
+// Idempotent. Absence is a no-op; a path that exists but cannot be removed
+// still reaches PHP's error log.
 function unlink_if_present(string $path): bool
 {
     if (!file_exists($path) && !is_link($path)) {
@@ -75,8 +73,8 @@ function ensure_runtime_storage_dir(string $path): void
     chmod($path, 0775);
 }
 
-// Directory modes are asserted, not inherited: a provider umask of 077 would
-// otherwise leave the engine tree unreadable to php-fpm.
+// Modes are asserted, not inherited: a provider umask of 077 would leave the
+// engine tree unreadable to php-fpm.
 function ensure_install_dir(string $path): bool
 {
     if (!is_dir($path) && !mkdir($path, 0755, true) && !is_dir($path)) {
@@ -91,13 +89,11 @@ function unsafe_relative_path(string $p): bool
     return $p === '' || str_starts_with($p, '/') || str_contains($p, '..') || str_contains($p, '\\');
 }
 
-// Names reserved for site state, the active pointer, immutable releases, and
-// installer scratch. A payload may not claim any of them.
+// Reserved for site state, the active pointer, releases, and installer
+// scratch. A payload may not claim any of them.
 function reserved_install_root_name(string $name): bool
 {
     return in_array($name, ['storage', 'incoming', 'installer.lock', 'active-release', 'loader-version', 'releases', '', '.', '..'], true)
-        || str_starts_with($name, 'engine-stage-')
-        || str_starts_with($name, 'engine-old-')
         || str_starts_with($name, 'release-stage-')
         || str_starts_with($name, 'runtime-install-');
 }
@@ -270,7 +266,7 @@ function build_engine_stage(string $extractRoot, string $stageRoot, array $stage
             fail('runtime_engine_stage_copy_failed:' . $entry['relative']);
         }
         // Fatal on purpose: the live tree is untouched here, and a
-        // non-executable binary would otherwise surface as a serving failure.
+        // non-executable binary would surface later as a serving failure.
         if (!chmod($target, $entry['executable'] ? 0755 : 0644)) {
             fail('runtime_engine_stage_chmod_failed:' . $entry['relative']);
         }
@@ -278,8 +274,8 @@ function build_engine_stage(string $extractRoot, string $stageRoot, array $stage
 }
 
 /**
- * The self-test runs the STAGED binary, not the extracted one: the staged tree is
- * what goes live, modes and all.
+ * The self-test runs the STAGED binary, not the extracted one: the staged tree
+ * is what goes live, modes and all.
  *
  * @param list<array{relative:string}> $staged
  */
@@ -365,12 +361,12 @@ function remove_active_release_pointer(string $installRoot): bool
 }
 
 /**
- * The identity of the public loader this payload would install: sha256 over
- * every alias, ordered by served path (read_engine_manifest sorts them), as
+ * Identity of the public loader this payload would install: sha256 over every
+ * alias, ordered by served path (read_engine_manifest sorts them), as
  * `<served path>\0<byte length>\0<bytes>`. Deriving it from the payload rather
- * than from a version number or a timestamp is what makes it hermetic — the
- * same zip always answers the same identity, and any change to what the loader
- * *is* (its bytes, its served path, the set of aliases) changes it.
+ * than a version number keeps it hermetic. The same zip always answers the same
+ * identity, and any change to the loader's bytes, served path, or alias set
+ * changes it.
  *
  * @param list<array{source:string,path:string}> $alias
  */
@@ -387,10 +383,9 @@ function loader_payload_identity(string $extractRoot, array $alias): string
     return hash_final($digest);
 }
 
-// The marker holds the identity of the loader that is actually installed. A
-// box that installed before this marker became content-derived carries the
-// frozen literal it used to be written with; that reads as "no identity", so
-// its loader is reinstalled once and the marker converges.
+// The marker holds the identity of the installed loader. A box that installed
+// before the marker became content-derived carries a literal that fails this
+// regex, so it reads as no identity and its loader is reinstalled once.
 function installed_loader_identity(string $installRoot): ?string
 {
     $marker = $installRoot . '/loader-version';
@@ -435,11 +430,10 @@ function installer_config_value(string $envName): string
     return '';
 }
 
-// This regex is the drift guard against build-runtime-engine-zip's emitted
-// line. Revisions are deterministic (git commit hash, or dev-<sourcehash>), so
-// identity is plain string equality. Strict is for a freshly staged payload,
-// where a missing constant is fatal; lenient answers "what is installed right
-// now", where absent means "not converged yet".
+// The regex is the drift guard against build-runtime-engine-zip's emitted line.
+// Revisions are deterministic (git commit hash, or dev-<sourcehash>), so
+// comparison is string equality. Strict is for a freshly staged payload, where
+// a missing constant is fatal; lenient answers what is installed right now.
 function read_engine_revision(string $root, bool $strict = false): ?string
 {
     $path = $root . '/engine/shared/context.php';
@@ -495,7 +489,7 @@ function download_http_file(string $url, string $target, int $timeoutSeconds): b
     return false;
 }
 
-// ext-zip is part of the runtime's PHP contract — no shell fallback.
+// ext-zip is part of the runtime's PHP contract. No shell fallback.
 function extract_zip_archive(string $zipPath, string $extractRoot): bool
 {
     if (!class_exists('ZipArchive')) {
@@ -544,15 +538,13 @@ function cleanup_registered_paths(): void
     $GLOBALS['spacefast_cleanup_paths'] = [];
 }
 
-// Backstop for artifacts a hard-killed process could not clean: only a hard kill
+// Backstop for artifacts a hard-killed process left behind; only a hard kill
 // skips fail()'s cleanup.
 function sweep_stale_install_artifacts(string $privateRoot, string $installRoot): void
 {
     $cutoff = time() - 3600;
     $staleDirs = array_merge(
         glob($privateRoot . '/runtime-install-*') ?: [],
-        glob($installRoot . '/engine-stage-*') ?: [],
-        glob($installRoot . '/engine-old-*') ?: [],
         glob($installRoot . '/release-stage-*') ?: [],
     );
     foreach ($staleDirs as $dir) {
@@ -569,25 +561,6 @@ function sweep_stale_install_artifacts(string $privateRoot, string $installRoot)
 }
 
 /** @param list<string> $keep */
-// --clean scrubs stale unversioned trees (a pre-release-layout `bin/` or
-// `engine/` at the install root) that nothing serves from anymore.
-/** @param list<array{relative:string}> $staged */
-function prune_unversioned_trees(string $installRoot, array $staged): void
-{
-    $names = [];
-    foreach ($staged as $entry) {
-        $names[explode('/', $entry['relative'])[0]] = true;
-    }
-    foreach (array_keys($names) as $name) {
-        $path = $installRoot . '/' . $name;
-        if (is_dir($path) && !is_link($path)) {
-            rrmdir($path);
-        } else {
-            unlink_if_present($path);
-        }
-    }
-}
-
 function prune_old_releases(string $releasesRoot, array $keep): void
 {
     $cutoff = time() - 3600;
@@ -605,7 +578,7 @@ function prune_old_releases(string $releasesRoot, array $keep): void
 }
 
 /**
- * One converge at a time per site; overlapping runs exit quietly.
+ * One update at a time per site; overlapping runs exit quietly.
  *
  * @return resource
  */
@@ -646,48 +619,6 @@ function validate_expected_md5(string $zipPath, string $expectedMd5): void
     }
 }
 
-/**
- * `--clean` prunes what the current manifest no longer declares from the alias
- * directory. The resident copy of this program is never pruned even though
- * no manifest alias declares it: deleting engine-update.php severs the box's
- * only self-update path.
- *
- * @param list<array{path:string}> $alias
- */
-function prune_alias_dir(string $publicRoot, array $alias): void
-{
-    $keep = ['engine-update.php' => true];
-    foreach ($alias as $entry) {
-        if (str_starts_with($entry['path'], '__spacefast/')) {
-            $keep[substr($entry['path'], strlen('__spacefast/'))] = true;
-        }
-    }
-    $aliasDir = $publicRoot . '/__spacefast';
-    if (!is_dir($aliasDir)) {
-        return;
-    }
-    foreach (scandir($aliasDir) ?: [] as $name) {
-        if ($name === '.' || $name === '..' || isset($keep[$name])) {
-            continue;
-        }
-        $path = $aliasDir . '/' . $name;
-        if (is_dir($path) && !is_link($path)) {
-            rrmdir($path);
-        } else {
-            unlink_if_present($path);
-        }
-    }
-}
-
-$args = array_slice($argv, 1);
-$cleanInstall = false;
-foreach ($args as $index => $arg) {
-    if ($arg === '--clean') {
-        $cleanInstall = true;
-        unset($args[$index]);
-    }
-}
-$args = array_values($args);
 [$privateRoot, $publicRoot] = installer_roots();
 $installRoot = $publicRoot . '/.stattic';
 $installerLock = acquire_installer_lock($privateRoot);
@@ -697,15 +628,15 @@ if (!is_dir($incomingRoot)) {
     mkdir($incomingRoot, 0700, true);
 }
 
-$zipSource = is_string($args[0] ?? null) && $args[0] !== ''
-    ? $args[0]
+$zipSource = is_string($argv[1] ?? null) && $argv[1] !== ''
+    ? $argv[1]
     : installer_config_value('SPACEFAST_RUNTIME_ENGINE_ZIP_URL');
 if ($zipSource === '') {
     fail('runtime_engine_zip_source_missing');
 }
-// Remote bytes travel over TLS only (loopback excepted, for dev and tests);
-// the checksums arrive out of band through the caller (management JWT or the
-// SSH session), so https plus md5 is the integrity story.
+// Remote bytes travel over TLS only, loopback excepted for dev and tests. The
+// checksums arrive out of band from the caller (management JWT or SSH session),
+// so https plus md5 is the integrity story.
 if (is_remote_zip_source($zipSource) && !str_starts_with($zipSource, 'https://')) {
     $zipHost = parse_url($zipSource, PHP_URL_HOST);
     if (!in_array($zipHost, ['127.0.0.1', 'localhost', '::1'], true)) {
@@ -722,8 +653,8 @@ if ($expectedRevision === '') {
 }
 $expectedNativeSha256 = strtolower(installer_config_value('SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256'));
 
-// Converge short-circuit: a box whose loader marker predates the content
-// identity must reinstall — its loader may be older than the revision it
+// Sync short-circuit. A box whose loader marker predates the content
+// identity must reinstall: its loader may be older than the revision it
 // reports.
 $installedReleaseRoot = active_release_root($installRoot);
 $installedReleaseTarget = active_release_pointer_target($installRoot);
@@ -736,7 +667,7 @@ if (
     && read_engine_revision($installedReleaseRoot) === $expectedRevision
     && installed_native_matches($installedReleaseRoot, $expectedNativeSha256)
 ) {
-    echo json_encode(['status' => 'converged', 'engine_revision' => $expectedRevision, 'layout' => 'release'], JSON_PRETTY_PRINT) . "\n";
+    echo json_encode(['status' => 'current', 'engine_revision' => $expectedRevision, 'layout' => 'release'], JSON_PRETTY_PRINT) . "\n";
     exit(0);
 }
 $suffix = getmypid() . '-' . bin2hex(random_bytes(4));
@@ -763,9 +694,9 @@ if (!extract_zip_archive($zipPath, $extractRoot)) {
 }
 
 $manifest = read_engine_manifest($extractRoot);
-// The loader is reinstalled exactly when the bytes it would be installed from
-// differ from the bytes installed last time, so a loader fix reaches a box that
-// converged years ago and an unchanged loader never rewrites a live file.
+// Reinstall the loader exactly when its bytes differ from the ones installed
+// last time: a loader fix reaches a box that was already current, and an unchanged loader
+// never rewrites a live file.
 $loaderIdentity = loader_payload_identity($extractRoot, $manifest['alias']);
 $installAliases = $installedLoaderIdentity !== $loaderIdentity;
 
@@ -816,17 +747,15 @@ if ($installAliases) {
     }
 }
 
-// No opcache work here, deliberately. This installer runs as CLI, and CLI
-// opcache is a different SHM from FPM's — invalidating it converges nothing a
-// visitor sees (on wp.cloud opcache.enable_cli is off besides). FPM converges
-// structurally: each release lands under a fresh path opcache has never seen,
-// and the rewritten-in-place alias files are dropped from FPM's SHM by the
-// engine-update receipt route, which runs inside FPM
-// (_stattic_engine_update_invalidate_aliases).
+// No opcache work here, deliberately. CLI opcache is a different SHM from
+// FPM's, so invalidating it changes nothing a visitor sees (and wp.cloud has
+// opcache.enable_cli off). FPM loads each release from
+// a fresh path opcache has never seen, and the rewritten-in-place alias files
+// are dropped from FPM's SHM by _stattic_engine_update_invalidate_aliases in
+// the engine-update receipt route.
 $fileCount = count($manifest['staged']) + count($manifest['alias']);
 $receipt = [
     'file_count' => $fileCount,
-    'clean' => $cleanInstall,
     'engine_revision' => $actualRevision,
     'layout' => 'release',
     'loader' => $installAliases ? 'installed' : 'current',
@@ -843,10 +772,6 @@ if ($installAliases) {
         unlink_if_present($temporaryMarker);
         fail('runtime_engine_loader_marker_failed');
     }
-}
-
-if ($cleanInstall) {
-    prune_alias_dir($publicRoot, $manifest['alias']);
 }
 
 $newReleaseTarget = 'releases/' . basename($releaseRoot);
@@ -892,9 +817,6 @@ if (is_file($stagedInstaller) && ensure_install_dir($publicRoot . '/__spacefast'
 }
 
 unregister_cleanup_path($releaseRoot);
-if ($cleanInstall) {
-    prune_unversioned_trees($installRoot, $manifest['staged']);
-}
 prune_old_releases($releasesRoot, array_values(array_filter([
     realpath($releaseRoot) ?: null,
     $previousReleaseRoot,

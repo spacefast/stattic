@@ -5,52 +5,46 @@ require_once __DIR__ . '/context.php';
 require_once __DIR__ . '/finalizer-protocol.generated.php';
 
 // The MySQL capability broker. PHP owns the database credential and the socket;
-// tenant code owns neither and only ever sees request/response frames. Two
-// transports sit on top of this file and share every line of it:
+// tenant code owns neither and only ever sees operation frames. Every caller is
+// in this process. There is no stdio lane and no broker subprocess:
 //
-//   local tier  — the native Zero runner is a child process of a PHP request and
-//                 exchanges frames over its stdio pipes, so brokering costs no
-//                 additional PHP-FPM worker.
-//   remote tier — a Cloudflare isolate calls back into the space origin over
-//                 HTTPS, so every brokered call burns a worker and round-trip
-//                 count is the cost that matters. `mode: transaction` batching
-//                 is what makes that tier affordable.
+//   php-functions.php:   sf_db() inside the tenant's own request, after the
+//                        jail; the credential was read before the scrub.
+//   functions-relay.php: a dispatched Cloudflare worker calls back into the
+//                        space origin over HTTPS, so every brokered call burns
+//                        a PHP-FPM worker and round-trip count is the cost that
+//                        matters. `mode: transaction` batching is what makes
+//                        that lane affordable.
+//   admin/zero-db.php:   the management dump/export, on a db.read-only grant.
 //
-// The observable contract is `crates/stattic-zero-runner/src/db.rs`, down to the
-// bytes: same operation shape, same JSON encoding of every MySQL type, same
-// error codes, same limits, same transaction semantics. Two engines that
-// disagree about how a DECIMAL or an unsigned BIGINT becomes JSON diverge
-// silently in production, so the encoder here is written against the Rust
-// driver's wire behaviour rather than against PHP's conveniences.
-
-// Mirrors of the db.rs constants of the same name. These are the tenant-facing
-// operation shape, not protocol-wide limits, so they live with the engine that
-// enforces them rather than in the generated protocol file.
-const STATTIC_DB_OPERATION_MAX_BYTES = 64 * 1024;
-const STATTIC_DB_PARAM_MAX_COUNT = 256;
-const STATTIC_DB_TRANSACTION_MAX_STATEMENTS = 64;
+// The `p:` link outlives the request in PHP's own persistent pool, the only
+// lifetime this host allows, so a handler's Kth operation costs a round trip
+// rather than a connect.
+//
+// The observable contract is `crates/stattic-zero-runner/src/db.rs`, the
+// in-process executor behind the Zero runner's QuickJS host function, down to
+// the bytes: same operation shape, same JSON encoding of every MySQL type, same
+// error codes, same limits, same transaction semantics, pinned by the
+// db-broker.test.ts corpus. Two engines that disagree about how a DECIMAL or an
+// unsigned BIGINT becomes JSON diverge silently in production, so the encoder
+// here follows the Rust driver's wire behaviour rather than PHP's conveniences.
+//
+// STATTIC_DB_OPERATION_MAX_BYTES, _PARAM_MAX_COUNT, _TRANSACTION_MAX_STATEMENTS,
+// _RESULT_ROWS_MAX and _SESSION_PIN are the shared half of that contract and
+// arrive generated from db.rs (finalizer-protocol.generated.php). The rest of
+// the tuning below is this engine's alone.
 
 // Server-side prepared statements are a finite server resource
-// (`max_prepared_stmt_count` is global, not per-connection), so the per-
-// connection cache is bounded and evicts least-recently-used entries by
-// actually closing them. A capsule store issues a small, highly repetitive
-// statement set, so a modest cache runs at a high hit rate.
+// (`max_prepared_stmt_count` is global, not per-connection), so the
+// per-connection cache is bounded and evicts least-recently-used entries by
+// closing them. A capsule store issues a small, repetitive statement set, so a
+// modest cache runs at a high hit rate.
 const STATTIC_DB_STMT_CACHE_MAX = 32;
 
-// Result sets are capped on both axes. Without this a single unbounded SELECT
-// exhausts the worker's memory limit and takes the whole request down with an
-// OOM instead of a named error the tenant can handle.
-const STATTIC_DB_RESULT_ROWS_MAX = 50000;
-
-// Every session knob that decides whether two engines agree on comparisons,
-// sort order and rounding, pinned in one statement so re-pinning costs one
-// round trip rather than four. sql_mode is written out rather than inherited:
-// a server whose global sql_mode is laxer must not silently change what a
-// capsule store considers a valid write.
-const STATTIC_DB_SESSION_PIN = "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_0900_as_cs'"
-    . ", SESSION sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'"
-    . ", SESSION transaction_isolation = 'REPEATABLE-READ'"
-    . ", SESSION time_zone = '+00:00'";
+// A capsule's whole schema in one artifact. Well past what the compiler emits
+// for any real store, and low enough that a malformed artifact stops here
+// rather than after a few thousand DDL round trips.
+const STATTIC_DB_MIGRATION_STATEMENTS_MAX = 256;
 
 /**
  * Process-wide broker state, returned by reference so callers mutate the one
@@ -78,17 +72,18 @@ function &_stattic_db_broker_state(): array
         'url' => null,
         'source' => null,
         'capabilities' => null,
+        'readDeadlineMs' => null,
     ];
 
     return $state;
 }
 
 /**
- * Bind the database URL for this process. The local tier passes the
- * application-declared `DATABASE_URL` it already resolves in
- * `_stattic_zero_runner_base_env()`; leaving it unbound falls back to the same
- * reserved configuration names db.rs reads, with the same fail-closed rule —
- * ambient configuration never steers a broker connection.
+ * Bind the database URL for this process. Callers pass the application-declared
+ * `DATABASE_URL` they already resolve through `_stattic_zero_runner_base_env()`;
+ * leaving it unbound falls back to the same reserved configuration names db.rs
+ * reads, under the same fail-closed rule: ambient configuration never steers a
+ * broker connection.
  */
 function _stattic_db_broker_bind(?string $url, ?string $source = null): void
 {
@@ -116,10 +111,26 @@ function _stattic_db_broker_grant(?array $capabilities): void
 }
 
 /**
- * Execute one operation and return the response JSON. This is the exact
- * analogue of db.rs `handle_db_operation`: raw JSON text in, one JSON object
- * out, never a thrown exception, and byte-identical output for every input the
- * two engines share.
+ * Bound both server statement execution and the client socket read. This is a
+ * trusted caller policy, not part of the tenant operation frame: allowing SQL
+ * to choose its own timeout would make the resource bound optional.
+ */
+function _stattic_db_broker_set_read_deadline_ms(?int $deadlineMs): void
+{
+    $state = &_stattic_db_broker_state();
+    $normalized = $deadlineMs === null ? null : max(1, $deadlineMs);
+    if ($normalized !== $state['readDeadlineMs'] && $state['link'] instanceof mysqli) {
+        // mysqli socket options are fixed before real_connect(). Reacquire the
+        // persistent handle rather than pretending an existing socket changed.
+        _stattic_db_broker_close();
+    }
+    $state['readDeadlineMs'] = $normalized;
+}
+
+/**
+ * Execute one operation and return the response JSON. The analogue of db.rs
+ * `handle_db_operation`: raw JSON text in, one JSON object out, never a thrown
+ * exception, byte-identical output for every input the two engines share.
  */
 function _stattic_db_broker_execute(string $raw): string
 {
@@ -134,72 +145,77 @@ function _stattic_db_broker_execute(string $raw): string
 }
 
 /**
- * The transport seam: raw `spacefast.broker.v1` frame JSON in, raw response
- * frame JSON out. Both transports have exactly this in hand — the stdio relay
- * in the local tier reads a line from the runner's pipe, the HTTPS relay in the
- * remote tier reads a request body — and neither has to decode anything, which
- * is what keeps values PHP cannot hold (unsigned BIGINT above 2^63) exact all
- * the way to the caller.
+ * Apply a version's compiled Zero migrations, in order, on one connection.
  *
- * Accepts a single frame object or an array of them, and answers in kind.
+ * PHP owns this outright, so the artifact is validated here before a single
+ * statement runs: the format and artifact kind the compiler stamps, a bounded
+ * statement count, and no empty or NUL-bearing SQL. The statements are DDL, so
+ * they run as plain queries rather than through the prepared-statement path:
+ * MySQL cannot prepare most DDL, and there are no parameters to bind.
+ *
+ * Replay is expected. `generate.php` applies a version's migrations on every
+ * publish, and MySQL has no `ADD COLUMN IF NOT EXISTS`. A statement that only
+ * restates schema the last publish created reports duplicate column (1060),
+ * duplicate key (1061) or missing key (1091), and each is tolerated only for
+ * the statement shape that can legitimately produce it. Every other driver
+ * error stops the run: a half-migrated schema must fail the publish rather
+ * than serve.
+ *
+ * @return array{ok:true}|array{ok:false,code:string,message:string}
  */
-function _stattic_db_broker_handle_frame_json(string $json): string
+function _stattic_db_broker_apply_migrations(string $path): array
 {
-    $decoded = json_decode($json, false, 512, JSON_BIGINT_AS_STRING);
-    if (is_array($decoded)) {
-        $responses = [];
-        foreach ($decoded as $frame) {
-            $responses[] = _stattic_db_broker_frame_response_json($frame);
-        }
-        return '[' . implode(',', $responses) . ']';
+    $raw = @file_get_contents($path);
+    if (!is_string($raw)) {
+        return _stattic_db_broker_error('zero_migration_artifact_unreadable', 'Zero migration artifact could not be read.');
+    }
+    $artifact = json_decode($raw, true);
+    if (
+        !is_array($artifact)
+        || ($artifact['format'] ?? null) !== STATTIC_RUNTIME_ZERO_MIGRATIONS_FORMAT
+        || ($artifact['artifact_kind'] ?? null) !== 'zero_migrations'
+        || !is_array($artifact['statements'] ?? null)
+    ) {
+        return _stattic_db_broker_error('zero_migration_artifact_invalid', 'Zero migration artifact format is unsupported.');
+    }
+    $statements = $artifact['statements'];
+    if (count($statements) > STATTIC_DB_MIGRATION_STATEMENTS_MAX) {
+        return _stattic_db_broker_error('zero_migration_artifact_invalid', 'Zero migration artifact has too many statements.');
     }
 
-    return _stattic_db_broker_frame_response_json($decoded);
+    $link = _stattic_db_broker_connection();
+    if (!$link instanceof mysqli) {
+        return $link;
+    }
+    foreach ($statements as $statement) {
+        if (!is_string($statement)) {
+            return _stattic_db_broker_error('zero_migration_statement_invalid', 'Zero migration statement is invalid.');
+        }
+        $sql = _stattic_db_broker_trim($statement);
+        if ($sql === '' || str_contains($sql, "\0")) {
+            return _stattic_db_broker_error('zero_migration_statement_invalid', 'Zero migration statement is invalid.');
+        }
+        if ($link->query($sql) !== false) {
+            continue;
+        }
+        if (!_stattic_db_broker_migration_replay($sql, $link->errno)) {
+            return _stattic_db_broker_driver_error('zero_migration_failed', $link);
+        }
+    }
+
+    return ['ok' => true];
 }
 
-/** Renders one response frame as JSON, whatever the request frame turned out to be. */
-function _stattic_db_broker_frame_response_json(mixed $frame): string
+/** Whether this driver error is this statement shape's own "already applied". */
+function _stattic_db_broker_migration_replay(string $sql, int $errno): bool
 {
-    $id = $frame instanceof stdClass && is_int($frame->id ?? null) ? $frame->id : 0;
-    $head = '{"protocol":' . _stattic_db_broker_json_string(STATTIC_RUNTIME_BROKER_PROTOCOL) . ',"id":' . $id;
-
-    $error = static fn(string $code, string $message): string => $head
-        . ',"error":{"code":' . _stattic_db_broker_json_string($code)
-        . ',"message":' . _stattic_db_broker_json_string($message) . '}}';
-
-    if (!$frame instanceof stdClass || ($frame->protocol ?? null) !== STATTIC_RUNTIME_BROKER_PROTOCOL) {
-        return $error('zero_db_frame_invalid', 'Broker frame protocol is unsupported.');
-    }
-
-    $capability = $frame->capability ?? null;
-    if ($capability !== 'db.read' && $capability !== 'db.write') {
-        return $error('zero_db_frame_invalid', 'Broker frame capability is not a database capability.');
-    }
-    if (!_stattic_db_broker_capability_granted($capability)) {
-        return $error('zero_db_capability_denied', 'Zero DB capability is not granted.');
-    }
-
-    // The engine is specified against raw JSON text — its size limit is a byte
-    // limit on the operation as sent — so the payload is re-encoded rather than
-    // handed over as a decoded value.
-    $encoded = json_encode(
-        $frame->payload ?? null,
-        JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_LINE_TERMINATORS
-    );
-    if (!is_string($encoded)) {
-        return $error('zero_db_operation_invalid', 'Zero DB operation payload could not be encoded.');
-    }
-
-    $outcome = _stattic_db_broker_operation($encoded);
-    if ($outcome['ok']) {
-        return $head . ',"result":' . $outcome['json'] . '}';
-    }
-
-    return $error($outcome['code'], $outcome['message']);
+    return (str_starts_with($sql, 'CREATE INDEX ') && $errno === 1061)
+        || (str_starts_with($sql, 'DROP INDEX ') && $errno === 1091)
+        || (str_starts_with($sql, 'ALTER TABLE ') && $errno === 1060);
 }
 
 /**
- * Take and clear the accumulated metrics, or null when nothing ran — the same
+ * Take and clear the accumulated metrics, or null when nothing ran. The same
  * "absent unless used" shape db.rs attaches to a runner response.
  *
  * @return array<string,float|int>|null
@@ -279,10 +295,10 @@ function _stattic_db_broker_operation(string $raw): array
     }
 
     // Decoded to objects rather than associative arrays: PHP renders both `{}`
-    // and `[]` as an empty array, and the two are not interchangeable here —
-    // `{}` is a valid operation with no SQL, `[]` is a parse failure.
-    // JSON_BIGINT_AS_STRING keeps integer parameters past PHP's signed range
-    // exact instead of rounding them through a float.
+    // and `[]` as an empty array, and the two differ here. `{}` is a valid
+    // operation with no SQL, `[]` is a parse failure. JSON_BIGINT_AS_STRING
+    // keeps integer parameters past PHP's signed range exact instead of
+    // rounding them through a float.
     $operation = json_decode($raw, false, 512, JSON_BIGINT_AS_STRING);
     if (!$operation instanceof stdClass) {
         return _stattic_db_broker_error('zero_db_operation_invalid', 'Zero DB operation could not be parsed.');
@@ -464,15 +480,11 @@ function _stattic_db_broker_finish_transaction(string $command): array
 }
 
 /**
- * @param array{sql:string,params:list<mixed>,mode:string|null} $statement
- * @return array{ok:true,json:string}|array{ok:false,code:string,message:string}
- */
-/**
- * Authorization follows the SQL, never the caller-supplied result-shape hint —
- * db.rs `statement_is_mutation`, ported clause for clause. Anything not
+ * Authorization follows the SQL, never the caller-supplied result-shape hint.
+ * Ported clause for clause from db.rs `statement_is_mutation`. Anything not
  * positively recognized as a read fails closed as a mutation. The local tier
- * never notices (its grant is all-or-nothing); the relay's narrowed read-only
- * credential is what this classifier exists for.
+ * never notices (its grant is all-or-nothing); this classifier exists for the
+ * relay's narrowed read-only credential.
  */
 function _stattic_db_broker_statement_is_mutation(string $sql): bool
 {
@@ -565,6 +577,10 @@ function _stattic_db_broker_contains_sql_keyword(string $sql, string $expected):
     return false;
 }
 
+/**
+ * @param array{sql:string,params:list<mixed>,mode:string|null} $statement
+ * @return array{ok:true,json:string}|array{ok:false,code:string,message:string}
+ */
 function _stattic_db_broker_run_statement(array $statement): array
 {
     $sql = _stattic_db_broker_trim($statement['sql']);
@@ -591,9 +607,9 @@ function _stattic_db_broker_run_statement(array $statement): array
     $state['operations'] += 1;
 
     $mutation = $statement['mode'] === 'execute' || $statement['mode'] === 'exec' || $statement['mode'] === 'mutation';
-    // $mutation keeps steering the result shape, error codes and metrics (the
-    // caller's declared intent, db.rs `execute_shape`); the grant check follows
-    // the SQL itself, so a write disguised as a query needs db.write.
+    // $mutation steers the result shape, error codes and metrics (the caller's
+    // declared intent, db.rs `execute_shape`); the grant check follows the SQL
+    // itself, so a write disguised as a query needs db.write.
     if (!_stattic_db_broker_capability_granted(_stattic_db_broker_statement_is_mutation($sql) ? 'db.write' : 'db.read')) {
         return _stattic_db_broker_error('zero_db_capability_denied', 'Zero DB capability is not granted.');
     }
@@ -718,8 +734,8 @@ function _stattic_db_broker_rows(mysqli_stmt $prepared, string $cacheKey): array
 
 /**
  * Trim exactly what Rust's `str::trim` trims: Unicode White_Space. PHP's own
- * trim() would also eat NUL, which is the one byte the SQL guard exists to
- * catch — a trailing NUL has to survive the trim to be rejected.
+ * trim() would also eat NUL, the one byte the SQL guard exists to catch. A
+ * trailing NUL has to survive the trim to be rejected.
  */
 function _stattic_db_broker_trim(string $value): string
 {
@@ -732,11 +748,10 @@ function _stattic_db_broker_trim(string $value): string
 // --- value encoding ------------------------------------------------------------------
 
 /**
- * One column value as a JSON fragment. The mapping is the composition of two
- * things that must not drift: how the MySQL binary protocol types a column, and
- * how db.rs `mysql_value_to_json` turns that type into JSON. mysqlnd helpfully
- * pre-converts some of those (BIT to an integer, YEAR to a string), so the
- * helpful conversions are undone here before encoding.
+ * One column value as a JSON fragment. The mapping composes two things that
+ * must not drift: how the MySQL binary protocol types a column, and how db.rs
+ * `mysql_value_to_json` turns that type into JSON. mysqlnd pre-converts some of
+ * those (BIT to an integer, YEAR to a string), undone here before encoding.
  */
 function _stattic_db_broker_column_json(mixed $value, object $field): string
 {
@@ -794,8 +809,8 @@ function _stattic_db_broker_column_json(mixed $value, object $field): string
 }
 
 /**
- * Bytes become a JSON string when they are valid UTF-8 and standard base64
- * otherwise — the exact fallback db.rs takes when `String::from_utf8` fails.
+ * Bytes become a JSON string when they are valid UTF-8, standard base64
+ * otherwise. The same fallback db.rs takes when `String::from_utf8` fails.
  */
 function _stattic_db_broker_bytes_json(string $bytes): string
 {
@@ -1040,8 +1055,8 @@ function _stattic_db_broker_json_string(string $value): string
 
 /**
  * Turn decoded JSON parameters into a mysqli bind spec. The parameter's MySQL
- * wire type is observable — `SELECT ?` echoes it back as the column type — so
- * integers, floats and strings are bound as themselves rather than all as
+ * wire type is observable, since `SELECT ?` echoes it back as the column type,
+ * so integers, floats and strings are bound as themselves rather than all as
  * strings the way `mysqli_stmt::execute($params)` would.
  *
  * @param list<mixed> $params
@@ -1123,11 +1138,11 @@ function _stattic_db_broker_connection(): mysqli|array
         return $state['link'];
     }
 
-    // PHP 8.1 made mysqli throw by default. Every failure here has to become an
-    // error value instead: an escaping mysqli_sql_exception would carry driver
-    // text into a stack trace, and a stack trace is one of the places the DSN
-    // must never appear. This is the only mysqli entry point in the engine, so
-    // owning the process-global reporting mode is safe.
+    // mysqli throws by default since PHP 8.1. Every failure here has to become
+    // an error value instead: an escaping mysqli_sql_exception carries driver
+    // text into a stack trace, where the DSN must never appear. This is the
+    // only mysqli entry point in the engine, so owning the process-global
+    // reporting mode is safe.
     mysqli_report(MYSQLI_REPORT_OFF);
 
     $dsn = _stattic_db_broker_dsn();
@@ -1137,13 +1152,28 @@ function _stattic_db_broker_connection(): mysqli|array
 
     $started = hrtime(true);
     try {
-        // The `p:` prefix is the whole efficiency story. PHP keeps the socket
-        // open across requests in this worker and performs an implicit session
-        // reset when it hands it back out, which is also what makes an
-        // abandoned transaction safe: measured on MySQL 8.4, reuse rolls back
-        // open transactions, drops temp tables, releases named locks and clears
-        // user variables, prepared statements and every session variable.
-        $link = new mysqli(
+        // The `p:` prefix keeps the socket open across requests in this worker.
+        // PHP does an implicit session reset when it hands the link back out,
+        // which is what makes an abandoned transaction safe: measured on MySQL
+        // 8.4, reuse rolls back open transactions, drops temp tables, releases
+        // named locks and clears user variables, prepared statements and every
+        // session variable.
+        $link = mysqli_init();
+        if (!$link instanceof mysqli) {
+            return _stattic_db_broker_error('zero_db_connect_failed', 'Zero DB connection could not be established.');
+        }
+        $readDeadlineMs = is_int($state['readDeadlineMs']) ? $state['readDeadlineMs'] : null;
+        if ($readDeadlineMs !== null) {
+            $socketSeconds = max(1, (int) ceil($readDeadlineMs / 1000));
+            if (
+                !$link->options(MYSQLI_OPT_CONNECT_TIMEOUT, $socketSeconds)
+                || !$link->options(MYSQLI_OPT_READ_TIMEOUT, $socketSeconds)
+            ) {
+                $link->close();
+                return _stattic_db_broker_error('zero_db_connect_failed', 'Zero DB connection deadline could not be configured.');
+            }
+        }
+        $link->real_connect(
             'p:' . $dsn['host'],
             $dsn['user'],
             $dsn['pass'],
@@ -1165,7 +1195,14 @@ function _stattic_db_broker_connection(): mysqli|array
 
     // Because reuse discards session state, the pin is re-applied on every
     // acquisition. One combined SET keeps that at a single round trip.
-    if ($link->query(STATTIC_DB_SESSION_PIN) === false) {
+    $sessionPin = STATTIC_DB_SESSION_PIN;
+    if (is_int($state['readDeadlineMs'])) {
+        // MySQL's MAX_EXECUTION_TIME is milliseconds and applies to SELECTs.
+        // The socket deadline above remains the outer bound for a stalled
+        // server or connection that cannot return the timeout response.
+        $sessionPin .= ', SESSION max_execution_time = ' . $state['readDeadlineMs'];
+    }
+    if ($link->query($sessionPin) === false) {
         $link->close();
         return _stattic_db_broker_error('zero_db_connect_failed', 'Zero DB session could not be initialised.');
     }
@@ -1194,8 +1231,7 @@ function _stattic_db_broker_connection(): mysqli|array
 }
 
 /**
- * A prepared statement for this SQL, from the per-connection LRU cache. The
- * statement set a capsule store issues is small and repetitive, so the cache
+ * A prepared statement for this SQL, from the per-connection LRU cache. A hit
  * turns two round trips per operation into one.
  *
  * @return mysqli_stmt|array{ok:false,code:string,message:string}
@@ -1233,12 +1269,11 @@ function _stattic_db_broker_statement(mysqli $link, string $sql, string $key, bo
 }
 
 /**
- * Statement cache key. The parameter types are part of it, not just the SQL:
- * MySQL fixes a statement's result metadata to the types of its first
- * execution, so re-binding `SELECT ?` from a double to a string on a reused
- * statement silently decodes the answer as a double. The Rust engine never
- * meets this because it reconnects per operation and its own statement cache is
- * therefore always cold.
+ * Statement cache key: the SQL plus the parameter types. MySQL fixes a
+ * statement's result metadata to the types of its first execution, so
+ * re-binding `SELECT ?` from a double to a string on a reused statement
+ * silently decodes the answer as a double. The Rust engine never meets this
+ * because it reconnects per operation, so its statement cache is always cold.
  */
 function _stattic_db_broker_cache_key(string $sql, string $types): string
 {

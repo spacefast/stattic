@@ -5,11 +5,10 @@ declare(strict_types=1);
 //
 //   php runtime/tests/db-broker-bench.php mysql://user:pass@host:port/db [iterations]
 //
-// It measures the three things the broker's design rests on, against a real
-// MySQL: what connection reuse is worth, what the statement cache is worth on
-// top of that, and what batching is worth to a transport that pays per call.
-// The first two baselines are deliberately *not* the library — they are the
-// alternatives, so the numbers say what the design bought.
+// Against a real MySQL, it measures what connection reuse is worth, what the
+// statement cache adds on top, and what batching is worth to a transport that
+// pays per call. The first two baselines are the alternatives to the library,
+// not the library, so the numbers say what the design bought.
 require_once __DIR__ . '/../engine/shared/context.php';
 require_once __DIR__ . '/../engine/shared/db-broker.php';
 
@@ -51,9 +50,9 @@ $setup->close();
 function measure(int $iterations, callable $body): array
 {
     // Each iteration stands for one invocation, so the per-invocation operation
-    // budget is reset the way a new request would reset it. Without this the
-    // benchmark silently starts measuring the cost of returning
-    // zero_db_operation_budget_exhausted, which is very fast and very useless.
+    // budget is reset the way a new request would. Without this the benchmark
+    // ends up measuring the cost of returning
+    // zero_db_operation_budget_exhausted, which is fast and useless.
     _stattic_db_broker_reset_metrics();
     $body();
     $started = hrtime(true);
@@ -87,8 +86,8 @@ echo "MySQL {$serverVersion}, PHP " . PHP_VERSION . ", {$iterations} iterations\
 
 echo "One query per operation\n";
 
-// What the native runner does today: Opts::from_url + Pool::new + get_conn for
-// every single operation, then a prepare, then the execute.
+// What the native runner does: Opts::from_url + Pool::new + get_conn per
+// operation, then a prepare, then the execute.
 report('connect per operation (today)', measure($iterations, function () use ($host, $user, $pass, $name, $port, $SELECT) {
     $link = new mysqli($host, $user, $pass, $name, $port);
     $link->query(STATTIC_DB_SESSION_PIN);
@@ -104,8 +103,8 @@ report('connect per operation (today)', measure($iterations, function () use ($h
 }));
 
 // The remote tier's per-call shape: the pooled link comes back from PHP's
-// persistent pool (paying the implicit session reset), gets re-pinned, and
-// prepares fresh because no PHP statement handle survives a request.
+// persistent pool, paying the implicit session reset, gets re-pinned, and
+// prepares fresh because no statement handle survives a request.
 report('pooled + reset + pin, prepare each call', measure($iterations, function () use ($host, $user, $pass, $name, $port, $SELECT) {
     $link = new mysqli('p:' . $host, $user, $pass, $name, $port);
     $link->query(STATTIC_DB_SESSION_PIN);
@@ -120,8 +119,8 @@ report('pooled + reset + pin, prepare each call', measure($iterations, function 
     $link->close();
 }));
 
-// The local tier: one connection held across the whole request, statements
-// served from the cache. This is the library itself.
+// The local tier, the library itself: one connection held across the request,
+// statements served from the cache.
 $operation = (string) json_encode(['sql' => $SELECT, 'params' => [7]]);
 report('broker, pooled + statement cache', measure($iterations, function () use ($operation) {
     must_succeed(_stattic_db_broker_execute($operation));
@@ -202,8 +201,8 @@ $serial = measure($batchIterations, function () use ($singles) {
 });
 printf("  %-52s %9.3f ms/batch\n", '20 separate operations, same connection', $serial['ms']);
 
-// What the remote tier actually pays: every operation is its own brokered call,
-// so every operation pays the pool reset and the pin as well.
+// What the remote tier pays: every operation is its own brokered call, so each
+// also pays the pool reset and the pin.
 $relay = measure($batchIterations, function () use ($singles) {
     foreach ($singles as $single) {
         _stattic_db_broker_close();

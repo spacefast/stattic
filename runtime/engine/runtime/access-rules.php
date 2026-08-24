@@ -10,12 +10,11 @@ require_once __DIR__ . '/../shared/record-store.php';
 require_once __DIR__ . '/../shared/admission.php';
 
 // Country and IP come ONLY from values a client cannot set (contracts §16, live
-// probe 2026-08-07): every request header the edge was assumed to own —
-// CF-Connecting-IP, X-Real-IP, CF-IPCountry, X-Forwarded-Host — reaches PHP
-// attacker-controlled on this platform, so none of them is read here any more.
-// `GEOIP_COUNTRY_CODE` is a server-set fastcgi_param (no HTTP_ prefix), and
-// REMOTE_ADDR is the connecting peer.
-// Neither is an authorization input on its own: see _stattic_grant_decision.
+// probe 2026-08-07). Every header the edge was assumed to own reaches PHP
+// attacker-controlled here: CF-Connecting-IP, X-Real-IP, CF-IPCountry,
+// X-Forwarded-Host. None is read. `GEOIP_COUNTRY_CODE` is a server-set
+// fastcgi_param (no HTTP_ prefix); REMOTE_ADDR is the connecting peer. Neither
+// is an authorization input on its own: see _stattic_grant_decision.
 function _stattic_access_context(
     array $serving,
     string $requestHost,
@@ -84,8 +83,8 @@ const STATTIC_ACCESS_SESSION_RECORD_MAX_BYTES = 8192;
 const STATTIC_ACCESS_SESSION_IDLE_SECONDS = 604800;
 const STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS = 2592000;
 // The claim set's own life. Past it a request pays ONE record read and leaves
-// with a fresh cookie — which is also the window a revoked (or stolen) cookie
-// keeps working, so it is deliberately short.
+// with a fresh cookie. That is also how long a revoked (or stolen) cookie keeps
+// working, so it is deliberately short.
 const STATTIC_ACCESS_SESSION_CLAIM_TTL_SECONDS = 900;
 // How often that revalidation writes `lastSeenAt` back to the server record.
 const STATTIC_ACCESS_SESSION_TOUCH_INTERVAL_SECONDS = 21600;
@@ -320,8 +319,8 @@ function _stattic_access_public_profile(mixed $value): ?array
 }
 
 // One key per space and per purpose, derived from the space's runtime exchange
-// credential — the same material both cookies use, under a different label so
-// neither can ever verify as the other.
+// credential: both cookies share that material, so the label is what stops
+// either verifying as the other.
 function _stattic_access_session_hmac_key(array $serving, string $label): ?string
 {
     $exchange = _stattic_access_page_exchange($serving);
@@ -585,7 +584,7 @@ function _stattic_access_session_issue(array $serving, string $host, array &$cla
 }
 
 // The revocation record. Absent means revoked (or never created), which is a
-// denial — it never means "admit anyway".
+// denial. It never means "admit anyway".
 function _stattic_access_session_record_read(string $privateRoot, string $sessionId): ?array
 {
     $store = _stattic_access_session_store($privateRoot);
@@ -715,7 +714,7 @@ function _stattic_access_session_create(
         ..._stattic_access_session_carried_identity($inherit),
     ];
     // The record before the cookie: a cookie whose record never landed would be
-    // denied on its first revalidation anyway, and this way that is impossible.
+    // denied at its first revalidation anyway.
     if (!_stattic_access_session_record_write($privateRoot, $sessionId, [
         'sid' => $sessionId,
         'spaceId' => $spaceId,
@@ -767,11 +766,10 @@ function _stattic_access_session_inheritable(?array $identity): array
 }
 
 // The anonymous session carries no authority, so it needs no record and no
-// revocation lane. It is re-keyed on the session-version half of the gen tuple
-// — the two are never summed: rotating the session version is the "sign
-// everyone out" lever and must reach the stateless session too, while
-// access_gen moves on every Grant edit and must NOT reset a visitor's Comments
-// identity.
+// revocation lane. It is re-keyed on the session-version half of the gen tuple,
+// never the sum: rotating the session version is the "sign everyone out" lever
+// and must reach the stateless session too, while access_gen moves on every
+// Grant edit and must NOT reset a visitor's Comments identity.
 //
 // Nothing here grants anything, so a malformed field degrades to
 // "not remembered" instead of rejecting the session.
@@ -1145,10 +1143,9 @@ function _stattic_grant_valid(mixed $grant): bool
         $listValid = static function (mixed $list, int $max, callable $item): bool {
             return is_array($list) && $list !== [] && count($list) <= $max && array_all($list, $item);
         };
-        // An IP constraint is still a well-formed Grant — it just admits nobody
-        // (see _stattic_grant_decision). Rejecting it here would null the whole
-        // projection and close the Space, which is a far worse answer than
-        // closing the one Grant that cannot be enforced.
+        // An IP constraint is still a well-formed Grant. It just admits nobody
+        // (see _stattic_grant_decision); rejecting it here would null the whole
+        // projection and close the Space.
         if (
             isset($network['ipCidrs'])
             && !$listValid($network['ipCidrs'], 50, static fn (mixed $cidr): bool => is_string($cidr) && $cidr !== '')
@@ -1231,15 +1228,14 @@ function _stattic_grant_pattern_compiled_segments(array $segments): array
     return $collapsed;
 }
 
-// Exclude patterns get one extra compiled variant: a pattern ending in
-// 'index.html' ALSO emits the stripped form, because the URL lane collapses a
-// trailing index.html while the artifact lane keeps it — an exclude naming an
-// index artifact must close the route that artifact serves too.
+// An exclude pattern ending in 'index.html' ALSO compiles to the stripped form:
+// the URL lane collapses a trailing index.html while the artifact lane keeps
+// it, and an exclude naming an index artifact must close the route it serves.
 //
-// Include patterns deliberately do NOT get that variant: granting the stripped
-// route would hand out access nobody wrote down. The asymmetry IS the rule —
-// the widest reading of exclude, the narrowest of include — and
-// packages/common/src/utils/grants.ts reads it the same way.
+// Includes deliberately do NOT get that variant: granting the stripped route
+// would hand out access nobody wrote down. The asymmetry IS the rule, and
+// packages/common/src/utils/grants.ts reads exclude as widely and include as
+// narrowly.
 function _stattic_grant_exclude_pattern_variants(array $segments): array
 {
     $collapsed = _stattic_grant_pattern_compiled_segments($segments);
@@ -1253,9 +1249,9 @@ function _stattic_grant_exclude_pattern_variants(array $segments): array
 // Fail-closed bucket key for a grant's compiled include list: the single literal
 // first segment shared by EVERY include, or null (fallback) when any include is
 // root, wildcard/param-leading, or the includes disagree. A grant bucketed to X
-// can only ever match requests whose first path segment is X, so scanning only
-// bucket X + fallback for such a request loses no grant. Exclude patterns never
-// enter this decision — a missed exclude is a silent over-grant.
+// can only match requests whose first path segment is X, so scanning bucket X
+// plus fallback loses no grant. Excludes never enter this decision: a missed
+// exclude is a silent over-grant.
 function _stattic_grant_bucket_key(array $includeVariants): ?string
 {
     $key = null;
@@ -1285,7 +1281,6 @@ function _stattic_grant_index_place(array &$store, array $compiled): void
     $store['by_first_segment'][$key][] = $compiled;
 }
 
-// The always-checked fallback plus the request's own first-segment bucket.
 function _stattic_grant_index_bucket_candidates(mixed $store, string $firstSegment): array
 {
     if (!is_array($store)) {
@@ -1319,11 +1314,10 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
     $generationSources = [];
     $lanes = ['password' => [], 'identity' => []];
     // Per target kind: does a public grant admit ANY path, anonymously, with no
-    // constraint at all — the only shape that makes "skip the access code"
-    // equivalent to "run the access code"? Computed here, and only here, so the
-    // overlay's `open` decision (admin/generate.php) can read a flag instead of
-    // re-deriving grant semantics field by field; a grant field this compiler
-    // learns tomorrow flows into the decision automatically.
+    // constraint at all? That is the only shape where skipping the access code
+    // matches running it. Computed here alone, so the overlay's `open` decision
+    // (admin/generate.php) reads a flag instead of re-deriving grant semantics,
+    // and a grant field this compiler learns tomorrow reaches it automatically.
     $unconditionalTargets = ['live' => false, 'all_versions' => false];
     $spaceClaimed = ($projection['spaceClaimed'] ?? false) === true;
     foreach ($grants as $grant) {
@@ -1379,9 +1373,9 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
         }
         $compiled = [
             // Carried so a decision can name WHICH Grant admitted a request:
-            // references collapse (one authority, many Grants) and the shared
-            // conformance corpus asserts the rule that fired, not just the
-            // verdict. Never an authorization input.
+            // references collapse (one authority, many Grants), and the shared
+            // conformance corpus asserts the rule that fired. Never an
+            // authorization input.
             'id' => (string) $grant['id'],
             'reference' => $reference,
             'include' => $include,
@@ -1413,8 +1407,8 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
                 'source' => (string) $grant['id'] . ':' . (string) $grant['generation'],
                 'expiresAt' => $expiresAt,
             ];
-            // `$constraints === []` rather than a field list: any constraint —
-            // including one that doesn't exist yet — defeats unconditionality.
+            // `$constraints === []` rather than a field list: any constraint,
+            // including one that doesn't exist yet, defeats unconditionality.
             // `['**']` as an include variant also forces the fallback bucket
             // (_stattic_grant_bucket_key), so the flag never claims more than a
             // full bucket scan would find.
@@ -1478,7 +1472,6 @@ function _stattic_authorization_envelope_valid(mixed $value): bool
 
 function _stattic_compile_authorization_projection(mixed $value): ?array
 {
-    // Test-only compile counter; production leaves it unset.
     if (!_stattic_authorization_envelope_valid($value)) {
         return null;
     }
@@ -1576,19 +1569,19 @@ function _stattic_grant_target_matches(array $selector, array $target): bool
             && ($target['versionId'] ?? null) === ($selector['versionId'] ?? null),
         'branch' => ($target['kind'] ?? null) === 'branch'
             && ($target['branch'] ?? null) === ($selector['branch'] ?? null),
-        // Immutable Version hosts only — never the live host, never a branch.
+        // Immutable Version hosts only: never the live host, never a branch.
         'all_versions' => ($target['kind'] ?? null) === 'version',
         default => false,
     };
 }
 
-// An external audience is (issuer, subject) — BOTH, always. `spacefast-membership`
+// An external audience is (issuer, subject): BOTH, always. `spacefast-membership`
 // and `claim-preview` name their issuer in the prefix; every other issuer is a
-// Team-configured identity connection, and those are hashed together with the
-// subject so one provider's `alice` can never satisfy another provider's Grant.
-// Hashing (rather than joining) keeps the reference inside the authority
-// alphabet (_stattic_authority_reference_valid) even though an issuer is an
-// arbitrary URL, and keeps it short enough for the session cookie budget.
+// Team-configured identity connection, hashed together with the subject so one
+// provider's `alice` can never satisfy another provider's Grant. Hashing rather
+// than joining keeps the reference inside the authority alphabet
+// (_stattic_authority_reference_valid) even though an issuer is an arbitrary
+// URL, and keeps it short enough for the session cookie budget.
 // Mirrors externalAuthorityReference in
 // apps/control-plane/src/access/authority-generation.ts byte for byte.
 function _stattic_grant_audience_reference(array $audience): string|false|null
@@ -1613,8 +1606,8 @@ function _stattic_grant_audience_reference(array $audience): string|false|null
 }
 
 // Once per request, after the response: a Space whose Grants still carry an IP
-// constraint is serving with that Grant closed, and the operator has to be able
-// to see that from the journal rather than from a support ticket.
+// constraint is serving with that Grant closed, and the operator has to see
+// that in the journal.
 function _stattic_grant_network_ip_unsupported(array $grant): void
 {
     static $journaled = false;
@@ -1638,10 +1631,10 @@ function _stattic_grant_network_ip_unsupported(array $grant): void
 }
 
 // There is no `$ipAddress`: IP constraints are unenforceable on this platform
-// (contracts §16 — the forwarding headers are attacker-controlled), so a Grant
-// carrying one admits nobody rather than admitting everybody who can set a
-// header. `$country` comes from the server-set fastcgi_param only, and is empty
-// when the provider sets none — which fails every country selector closed.
+// (contracts §16, the forwarding headers are attacker-controlled), so a Grant
+// carrying one admits nobody rather than everybody who can set a header.
+// `$country` comes from the server-set fastcgi_param only, and is empty when the
+// provider sets none, which fails every country selector closed.
 function _stattic_grant_decision(
     array $projection,
     string $path,
@@ -1652,10 +1645,9 @@ function _stattic_grant_decision(
     string $userAgent = '',
     bool $artifactResource = false,
     bool $pathCanonical = false,
-    // Test seams, both inert on the serve path: $nowOverride pins the clock so
-    // the shared conformance corpus can assert an expiry boundary to the second,
-    // and $matchedGrantIds collects the Grants that fired. The returned decision
-    // shape is the same either way.
+    // Test seams, both inert on the serve path: $nowOverride pins the clock for
+    // expiry-boundary assertions, $matchedGrantIds collects the Grants that
+    // fired. The returned decision shape is the same either way.
     ?int $nowOverride = null,
     ?array &$matchedGrantIds = null
 ): array {
@@ -1882,7 +1874,7 @@ function _stattic_enforce_scoped_admission(
         && _stattic_system_view_admits($admission['path'])
     ) {
         // Stateless proof admits this request and nothing else: nothing minted
-        // here can be replayed. A fenced Space stays closed to it — internal
+        // here can be replayed. A fenced Space stays closed to it. Internal
         // viewing is not an exception to a platform hold.
         _stattic_access_private_cache_flag(true);
         return true;
@@ -2267,7 +2259,7 @@ function _stattic_access_session_degrade(
 
 // Hot lane: verify the cookie's signature, compare its [access_gen,
 // session_ver] tuple with the overlay's, hand the grant evaluator the
-// authorities it names — no file is read. Cold lane (claims aged out, a gen
+// authorities it names. No file is read. Cold lane (claims aged out, a gen
 // moved, an authority aged out) is the ONLY place the server record is
 // consulted: present means re-mint against the current gens, absent means this
 // exact session was revoked and no other session is touched.
@@ -2308,7 +2300,7 @@ function _stattic_access_session_verify(
             return _stattic_access_session_degrade($serving, $host, $claims, $credential);
         }
         // A gen moved, so the generation hashes the cookie carries are re-checked
-        // against the compiled index — an authority whose Grant was edited or
+        // against the compiled index. An authority whose Grant was edited or
         // withdrawn does not survive the re-mint.
         $matching = _stattic_access_session_matching_retained_authorities(
             $claims,
@@ -2472,7 +2464,7 @@ function _stattic_authority_generation_candidates(array $projection, string $aut
 
 // A digest over EVERY live candidate hash: any change to what admits this
 // authority (rotation, edit, withdrawal, an added Grant) drops it from the
-// session at the next re-mint — fails closed. Deliberately not memoized: the
+// session at the next re-mint. Fails closed. Deliberately not memoized: the
 // candidate set is expiry-dependent, and a worker-lifetime static would keep an
 // expired candidate's generation verifying.
 function _stattic_authority_generation(array $projection, string $authority): ?string
@@ -2502,7 +2494,7 @@ function _stattic_visitor_cookie_from_request(): string
 
 // The lane-less pre-auth boundary stays identical across claim state, route
 // existence, Grant reasons and available authorities: none of that private
-// metadata may reach crawlers. $serving is unused — the deny is uniform.
+// metadata may reach crawlers. $serving is unused: the deny is uniform.
 function _stattic_render_scoped_deny(array $serving): never
 {
     $message = 'This page is private.';
@@ -2606,9 +2598,7 @@ function _stattic_visitor_verify_options(array $serving, string $host, ?array $i
     ], $extra);
 }
 
-// Absent or malformed means "no lanes": the page falls back to the uniform
-// deny, never open.
-// The descriptor's exchange block, or null — the one extraction every exchange
+// The descriptor's exchange block, or null. The one extraction every exchange
 // caller shares, so a descriptor without the key can never fatal a lane.
 function _stattic_access_page_exchange(array $serving): ?array
 {
@@ -3229,8 +3219,8 @@ function _stattic_access_exchange_headers(array $exchange, array $context, strin
 }
 
 // Every browser that can reach these forms sends Origin on a form POST, so a
-// submission proving nothing — no Origin, no same-origin fetch metadata — is
-// refused rather than trusted.
+// submission proving nothing is refused rather than trusted: no Origin, no
+// same-origin fetch metadata.
 function _stattic_access_same_origin_post(string $requestHost): bool
 {
     $origin = trim((string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
@@ -3417,7 +3407,7 @@ function _stattic_access_gate_email_verification(
     ]);
 }
 
-// Post/redirect/get with an allowlisted state code — never a secret — so a
+// Post/redirect/get with an allowlisted state code, never a secret, so a
 // refresh re-renders cleanly.
 function _stattic_access_gate_after_post(
     array $serving,
@@ -3621,7 +3611,7 @@ function _stattic_access_consume_handoff_token(
     }
     // Positively require the handoff purpose: only a token minted for
     // redemption may consume the jti and become a durable session. Rejecting
-    // known-bad purposes (system-view) is not enough — any other purpose the
+    // known-bad purposes (system-view) is not enough. Any other purpose the
     // platform key signs, present or future, must fail here by default.
     $claims = is_array($verified['claims'] ?? null) ? $verified['claims'] : [];
     if (($claims['purpose'] ?? null) !== STATTIC_HANDOFF_PURPOSE) {
@@ -3959,13 +3949,12 @@ function _stattic_platform_identity_token(
 
 // THE `?__=` lane, and the shape of the whole thing: whatever the token proves,
 // it proves it for the URL it is sitting on, and that URL answers with its own
-// content in this response. Nothing here redirects — a link an agent cannot
+// content in this response. Nothing here redirects: a link an agent cannot
 // follow with one request is not a link.
 //
 // Which lane runs is the token's own declaration (its prefix), never a guess at
-// its shape. A token naming no lane is refused here by name rather than dropped
-// on the floor for the gate to answer, because "the gate" is exactly what a
-// silently-unhandled customer share link used to get.
+// its shape. A token naming no lane is refused by name rather than dropped on
+// the floor for the gate to answer.
 function _stattic_access_apply_query_token(
     array $serving,
     string $requestHost,
@@ -3979,9 +3968,8 @@ function _stattic_access_apply_query_token(
         _stattic_render_access_query_token_unrecognized();
     }
     // Redemption is a GET/HEAD act. Any other method keeps whatever the request
-    // already presented — a form posting back to the URL it was opened from
-    // still carries the token, and the cookie that first request set is what
-    // admits it.
+    // already presented: a form posting back to the URL it was opened from still
+    // carries the token, and the cookie that first request set is what admits it.
     if (!in_array(_stattic_runtime_request_method(), ['GET', 'HEAD'], true)) {
         return;
     }
@@ -4033,7 +4021,7 @@ function _stattic_render_access_query_token_unrecognized(): never
 // A customer share link (or a space key) on the URL it is meant to open: redeem
 // it server-to-server, set the session cookie on THIS response, and return so
 // the enforcement below serves the page the visitor actually asked for. The
-// link's own stored landing path is not consulted — the request path is the
+// link's own stored landing path is not consulted: the request path is the
 // landing path, which is what makes a deep link a deep link.
 //
 // A token that does not open anything returns silently: enforcement then answers
@@ -4126,7 +4114,7 @@ function _stattic_access_handle_callback(array $serving, string $requestHost, st
     header('Referrer-Policy: no-referrer', true);
     if (($fields['display'] ?? '') === 'popup') {
         // The session cookie is already set browser-wide: tell the opener
-        // (same-origin only) and close — no token ever crosses postMessage.
+        // (same-origin only) and close. No token ever crosses postMessage.
         $nonce = bin2hex(random_bytes(16));
         header("Content-Security-Policy: default-src 'none'; script-src 'nonce-" . $nonce . "'; base-uri 'none'; frame-ancestors 'none'", true);
         header('Content-Type: text/html; charset=utf-8', true);
@@ -4185,7 +4173,7 @@ function _stattic_access_revoke_presented_session(?string $sessionId = null): bo
 
 // https ALWAYS, exactly like _stattic_cookies_secure: X-Forwarded-Proto reaches
 // PHP attacker-controlled (contracts §16), and this scheme builds the Origin the
-// logout CSRF check compares against — a caller who could set it would be
+// logout CSRF check compares against. A caller who could set it would be
 // choosing its own expected origin. The dev/test flag is the only escape.
 function _stattic_request_scheme(): string
 {
@@ -4301,8 +4289,8 @@ function _stattic_access_handle_logout(string $requestHost): void
     $serving = _stattic_page_serving();
     // Ending the session ends its Cast session: one id names both. The stateless
     // lane keeps its id in the cookie payload rather than a record, so read it
-    // from the resolved identity — never from the cookie value itself, which
-    // must never travel to the control plane or into a Cast room.
+    // from the resolved identity, never from the cookie value itself, which must
+    // never travel to the control plane or into a Cast room.
     $comments = _stattic_access_identity_comments(
         _stattic_current_session_identity($serving, $requestHost)
     );

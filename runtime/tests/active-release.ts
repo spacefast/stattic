@@ -1,5 +1,3 @@
-// One form, written and read here, so a suite never restates it.
-
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 

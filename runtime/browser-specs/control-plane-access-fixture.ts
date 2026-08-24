@@ -12,7 +12,7 @@ if (runtimeBin === undefined) {
 }
 
 const [
-  { deliveryExchangeContractRoutes: runtimeExchangeRoutes },
+  { deliveryExchangeContractRoutes },
   { createApp },
   { createAccessShareLink, logoutAllSpaceSessions, setAccessRequestClockForTests },
   { createPasswordCredential },
@@ -281,7 +281,9 @@ try {
       if (request.method === "POST" && pathname.endsWith("/request")) {
         exchangeEffects.request += 1;
       }
-      if (pathname.startsWith("/acquire/")) return runtimeExchangeRoutes.fetch(request);
+      if (pathname.startsWith("/acquire/")) {
+        return deliveryExchangeContractRoutes.fetch(request);
+      }
       if (!controlPlane) return new Response("fixture starting", { status: 503 });
       return controlPlane.handle(request);
     },

@@ -823,10 +823,10 @@ function _stattic_zero_replay_query_string(string $requestMethod): string
 function _stattic_zero_send_callback_events(
     array $runnerResponse,
     array $envelope,
-    array $config
+    array $config,
+    float $callbackBudgetSeconds = STATTIC_ZERO_CALLBACK_TOTAL_BUDGET_SECONDS
 ): void
 {
-    $callbackBudgetSeconds = STATTIC_ZERO_CALLBACK_TOTAL_BUDGET_SECONDS;
     if (!is_array($runnerResponse['events'] ?? null) || $runnerResponse['events'] === []) {
         return;
     }

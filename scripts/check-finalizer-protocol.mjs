@@ -85,7 +85,7 @@ try {
       if (format.status !== 0) {
         process.stderr.write(format.stderr ?? "");
         throw new Error(
-          "finalizer_protocol_format_failed: oxfmt is unavailable; run bun install and retry",
+          "finalizer_protocol_format_failed: oxfmt is unavailable; run pnpm install and retry",
         );
       }
     }

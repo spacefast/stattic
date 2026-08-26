@@ -1,7 +1,7 @@
 {
-  "revision": "ed6f95d4f13dfa14bab9df4da46aeb7b190da03e",
-  "sourceHash": "07744ca4c29e15c23b1606d20c0bb7fb3c67f11fe8660570b766ae18214ad73b",
-  "manifestSha256": "140c4b772baa59719332b767cb4ea71fbf0debabefbd7eec10b091ac66822486",
+  "revision": "732c3c6f7ce19663c3135189d6667f6587f7b410",
+  "sourceHash": "8ce6fa36ecc3139467eba057213ecc4aa97f59c7eb19e3197f83cd799c1cec1d",
+  "manifestSha256": "d9e7d2d8b6792dfe06e241b19370cc2dacfde40f08323f1ad07e9e31398f0c20",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "a299055a445f05f9cb503f4213e6771009508bc2c084b4fed4a53a45552697ec"
+      "sha256": "f24a652df22557149c1ff73ae75765a4e209d3ec0775b89d643903bdf3ae21db"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "8625237e6ed01f8fa4311e5ae04b226776de5d65c1f6f4f506e7ed8b1f8b1a13"
+      "sha256": "c5e0b7f8afe30bfea667ce701bd63ccb4ec46675b0390ae51524bf8dacb466f3"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -61,7 +61,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/config/current.rs",
-      "sha256": "4749d4f7686740fdc3b4f3ab8bfdc063bac47c799049715a556c98d9bb4be749"
+      "sha256": "cadea1ca91f84a3dbdc6a8891f2e498ae79a2477a53053a7801381baa320d36a"
     },
     {
       "path": "crates/stattic-runtime-core/src/config/diagnostics.rs",
@@ -73,11 +73,15 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/config/mod.rs",
-      "sha256": "27941d04fbf2223bc0196b29ff6b70452a87de45c7632eaedd34c8a7e24f70a7"
+      "sha256": "e1de921c388829bd9577d4f04fa57ff78bf028e52fcec9bb2135eefea10cf81f"
     },
     {
       "path": "crates/stattic-runtime-core/src/config/strict.rs",
-      "sha256": "2bf788e2c3da617f940674b8f3482d288ab3f049b6fc7a3a7b1575c4710d7b2b"
+      "sha256": "c86ed93d0c715288ae199bcc3b4be778f30f49e2235e36b914a5316c50edcc88"
+    },
+    {
+      "path": "crates/stattic-runtime-core/src/config/system.rs",
+      "sha256": "44ba9f57f891ad4fb05ade05bba6878488f3654ae2014545d2a6cc625da75dc7"
     },
     {
       "path": "crates/stattic-runtime-core/src/content/frontmatter.rs",
@@ -365,7 +369,7 @@
     },
     {
       "path": "runtime/engine/admin/generate.php",
-      "sha256": "30639c49250fe496148089d5df0a2c8d5193ecbb87fe967e20b615da8a8defdc"
+      "sha256": "ec5868a09650adccd82c23d99a745ae9de86b42e603c81db8adbcaf2be018efc"
     },
     {
       "path": "runtime/engine/admin/jobs.php",
@@ -441,7 +445,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "45eb367c976851c4ca93b3ed5ff495af9f843f1da62c6a627e1a93e55f07331d"
+      "sha256": "680864ae7201e3ddd5bbbda5742f4f4709be1022ac2a0e44672e9471a10de774"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -825,7 +829,7 @@
     },
     {
       "path": "runtime/tests/pages-system.test.ts",
-      "sha256": "0ca28bd234a219a2b5d0bd0d105cf362c26346e366427a847cebb4555be6aa8a"
+      "sha256": "f1d6c7e7b25a2cea38f7aeee9f3ca70e459f7ce93a8bd7e294900abfae782f84"
     },
     {
       "path": "runtime/tests/php-functions.test.ts",

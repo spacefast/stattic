@@ -43,6 +43,11 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "runtime",
     "space",
     "superpowers",
+    // Control-plane-only system-space manifest. Recognized here so it is not
+    // stripped as an unknown key, then passed through verbatim: the control
+    // plane parses and validates it in TypeScript (it never rides the Rust
+    // effective-config lane the serving engine reads).
+    "system",
     "templates",
     "theme",
 ];
@@ -1253,6 +1258,7 @@ pub fn public_json_schema() -> Value {
                 "items": { "type": "string", "minLength": 1 }
             },
             "crons": crons,
+            "system": super::system::json_schema(),
             "superpowers": superpowers,
             "theme": theme,
             "build": build,
@@ -1542,6 +1548,44 @@ mod tests {
                 .map(|item| (item.code.as_str(), item.path.as_deref()))
                 .collect::<Vec<_>>(),
             [("config_cron_invalid_schedule", Some("crons.0.schedule"))]
+        );
+    }
+
+    /// The `system` manifest is control-plane-only: the crate recognizes the
+    /// key so it is not stripped as unknown, then passes it through verbatim for
+    /// the control plane to parse and validate. This lane must not strip it, not
+    /// warn `config_invalid`, and not mutate its contents.
+    #[test]
+    fn system_manifest_survives_the_current_lane_verbatim() {
+        let mut diagnostics = Vec::new();
+        let system = json!({
+            "presentation": {
+                "name": "Acme",
+                "supportUrl": "https://acme.example/support",
+                "contacts": { "security": "https://acme.example/security" }
+            },
+            "hostnames": { "apex": "acme.example" },
+            "api": {
+                "origin": "https://api.acme.example",
+                "allowedOrigins": ["https://app.acme.example"]
+            },
+            "tokenIssuers": [
+                { "issuer": "https://acme.example", "keys": [{ "kid": "k1", "publicKey": "PUB" }] }
+            ],
+            "subscriptions": [
+                { "url": "https://acme.example/hooks", "events": ["version.published"] }
+            ]
+        });
+        let config = parse_config(
+            &format!(r#"{{ "name": "acme", "system": {system} }}"#),
+            "sf.jsonc",
+            &mut diagnostics,
+        );
+
+        assert_eq!(diagnostics, Vec::new());
+        assert_eq!(
+            config.and_then(|value| value.pointer("/system").cloned()),
+            Some(system)
         );
     }
 

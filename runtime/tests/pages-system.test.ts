@@ -103,6 +103,17 @@ test("a tombstoned space answers with the engine's page, never its own documents
   expect(html).not.toContain("__spacefast/pages/fonts");
   expect(html).not.toContain("Best way to share what your agent made");
   expect(html).not.toContain("Acme");
+
+  // A per-principal suspension (`site_suspended`) serves the SAME 402 suspended
+  // page as a tenant suspension: both differentiate to the suspended variant.
+  const siteSuspended = await tombstone("spc_pages_fault", {
+    hostnames: [host],
+    reason: "site_suspended",
+  });
+  expect(siteSuspended.status).toBe(200);
+  const perPrincipal = await get(rt, host, "/", { headers: { Accept: "text/html" } });
+  expect(perPrincipal.status).toBe(402);
+  expect(await perPrincipal.text()).toContain("This space is paused");
 });
 
 test("the retired per-space font path takes the uniform private-namespace denial", async () => {

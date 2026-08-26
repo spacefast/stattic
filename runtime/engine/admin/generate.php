@@ -1157,7 +1157,7 @@ function _stattic_runtime_tombstone_variant(?string $reason, ?string $category):
     $pageId = match ($key) {
         'csam' => 'tombstone-csam',
         'copyright', 'dmca' => 'tombstone-dmca',
-        'tenant_suspended', 'account_suspended' => 'tombstone-suspended',
+        'tenant_suspended', 'account_suspended', 'site_suspended' => 'tombstone-suspended',
         default => 'tombstone-generic',
     };
     return [

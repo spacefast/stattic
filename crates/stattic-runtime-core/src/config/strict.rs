@@ -4,6 +4,7 @@
 use super::access::{normalized_public_patterns, CONFIG_ACCESS_PUBLIC_SOURCE_REFERENCE};
 use super::crons;
 use super::jsonc::parse_document;
+use super::system;
 use crate::protocol::{
     CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT, CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS,
     CONFIG_BUILD_TIMEOUT_MAX_SECONDS, CONFIG_BUILD_TIMEOUT_MIN_SECONDS, CONFIG_FILE_MAX_BYTES,
@@ -197,6 +198,7 @@ pub fn public_json_schema() -> Value {
                 "additionalProperties": false
             },
             "crons": crons::json_schema(),
+            "system": system::json_schema(),
             "access": {
                 "anyOf": [
                     {
@@ -411,6 +413,7 @@ fn validate_keys(
         "substitute",
         "access",
         "crons",
+        "system",
     ];
     let renamed = [
         ("index", "serve.index"),
@@ -1493,6 +1496,12 @@ fn project(root: &Map<String, Value>) -> Value {
         if let Ok(patterns) = normalized_public_patterns(access) {
             out.insert("access".into(), json!({ "public": patterns }));
         }
+    }
+    // Control-plane-only manifest: carried through verbatim for the control
+    // plane to parse and validate. The strict compiler neither shapes nor
+    // enforces it.
+    if let Some(system) = root.get("system") {
+        out.insert("system".into(), system.clone());
     }
     Value::Object(out)
 }

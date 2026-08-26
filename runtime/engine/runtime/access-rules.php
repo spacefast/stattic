@@ -1907,7 +1907,7 @@ function _stattic_enforce_scoped_admission(
         ($projection['fence'] ?? 'none') === 'none'
         && _stattic_system_view_admits($path)
     ) {
-        // A platform API token is exchanged on first use, so its scoped
+        // A Spacefast API token is exchanged on first use, so its scoped
         // system-view proof only exists after resolving the request identity.
         _stattic_access_private_cache_flag(true);
         return true;

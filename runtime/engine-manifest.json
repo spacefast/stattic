@@ -19,6 +19,9 @@
     "engine/admin/storage.php",
     "engine/entrypoints/blob.php",
     "engine/entrypoints/cron.php",
+    "engine/entrypoints/content.php",
+    "engine/entrypoints/content-admin.php",
+    "engine/entrypoints/content-media.php",
     "engine/entrypoints/health.php",
     "engine/entrypoints/invoke.php",
     "engine/entrypoints/management.php",
@@ -48,6 +51,9 @@
     "engine/shared/artifacts.php",
     "engine/shared/bootstrap-config.php",
     "engine/shared/cache-policy.php",
+    "engine/shared/content-access.php",
+    "engine/shared/content-admin.php",
+    "engine/shared/content-request.php",
     "engine/shared/context.php",
     "engine/shared/db-broker.php",
     "engine/shared/egress.php",
@@ -71,11 +77,23 @@
     "engine/shared/storage.php",
     "engine/shared/streaming.php",
     "engine/shared/upstream-relay.php",
+    "engine/wordpress/content-kernel.php",
+    "wordpress-content-loader.php",
     "installer.php",
     "custom-redirects.php"
   ],
   "executables": ["bin/stattic-runtime"],
   "aliases": [
+    {
+      "source": "custom-redirects.php",
+      "path": "__spacefast/content-admin.php",
+      "const": "STATTIC_RUNTIME_CONTENT_ADMIN_PATH"
+    },
+    {
+      "source": "custom-redirects.php",
+      "path": "__spacefast/content.php",
+      "const": "STATTIC_RUNTIME_CONTENT_API_PATH"
+    },
     {
       "source": "custom-redirects.php",
       "path": "__spacefast/health.php"
@@ -97,6 +115,10 @@
     {
       "source": "custom-redirects.php",
       "path": "index.php"
+    },
+    {
+      "source": "wordpress-content-loader.php",
+      "path": "wp-content/mu-plugins/spacefast-content.php"
     }
   ]
 }

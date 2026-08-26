@@ -74,7 +74,7 @@ const PAGE_SOURCE =
   "<sf-access-status></sf-access-status><sf-access-lanes></sf-access-lanes>" +
   "</body></html>";
 
-const seed = await seedSpaceWithKey("origin-null-browser");
+const seed = await seedSpaceWithKey("origin-null-browser", { providerPlacement: "unplaced" });
 let stopExchange: (() => void) | undefined;
 let runtime: Awaited<ReturnType<typeof startRuntime>> | undefined;
 let assignedDomainId: string | undefined;

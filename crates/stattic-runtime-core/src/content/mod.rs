@@ -24,6 +24,7 @@ use crate::finalize::{
 };
 use crate::protocol::{THEME_STYLESHEET_PATH, THEME_STYLESHEET_URL};
 use gutenberg::{block_page, gutenberg_document_shell, render_files_mode_gutenberg};
+pub use markdown::markdown_fragment;
 use markdown::markdown_page;
 use support::{
     first_heading, inject_snippets, marked_block, path_dir, resolve_layout_override, string_in,

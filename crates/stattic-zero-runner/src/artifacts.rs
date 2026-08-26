@@ -66,6 +66,10 @@ pub struct EndpointCapabilities {
     pub spam: bool,
     #[serde(default = "default_true")]
     pub email: bool,
+    // New authority defaults closed. Historical fields predate explicit
+    // capability manifests and retain their compatibility defaults above.
+    #[serde(default)]
+    pub content: bool,
 }
 
 impl Default for EndpointCapabilities {
@@ -86,13 +90,14 @@ impl EndpointCapabilities {
             gravatar: true,
             spam: true,
             email: true,
+            content: false,
         }
     }
 
     /// Whether this handler reaches any brokered platform service. The prelude
     /// installs one bridge for all three, so this is what gates it.
     pub(crate) fn any_service(&self) -> bool {
-        self.gravatar || self.spam || self.email
+        self.gravatar || self.spam || self.email || self.content
     }
 }
 

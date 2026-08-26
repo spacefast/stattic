@@ -37,7 +37,12 @@ function _stattic_engine_release_layout_active(string $privateRoot): bool
 function _stattic_engine_update_alias_paths(string $privateRoot): array
 {
     $publicRoot = dirname($privateRoot, 2);
-    $aliases = ['/custom-redirects.php', '/index.php', '/__spacefast/engine-update.php'];
+    $aliases = [
+        '/custom-redirects.php',
+        '/index.php',
+        '/__spacefast/engine-update.php',
+        '/wp-content/mu-plugins/spacefast-content.php',
+    ];
     foreach (array_keys(SPACEFAST_RUNTIME_ENTRYPOINT_PATHS) as $entrypoint) {
         $aliases[] = $entrypoint;
     }

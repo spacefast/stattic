@@ -11,7 +11,7 @@ declare(strict_types=1);
 const SPACEFAST_UPLOAD_MAX_PATH_BYTES = 1024;
 const SPACEFAST_UPLOAD_EXECUTION_CONTROL_FILES = ['.htaccess', '.user.ini'];
 // Root-level docroot files this engine installs (from its own engine-manifest.json).
-const SPACEFAST_UPLOAD_RESERVED_ROOT_CONTROL_FILES = ['custom-redirects.php', 'engine-manifest.json', 'installer.php'];
+const SPACEFAST_UPLOAD_RESERVED_ROOT_CONTROL_FILES = ['custom-redirects.php', 'engine-manifest.json', 'installer.php', 'wordpress-content-loader.php'];
 // Whole root segments, exactly the namespaces the front door's control table
 // claims at request time (see SPACEFAST_CONTROL_PATHS in shared/context.php):
 // '__sfx' and '__spanish' are tenant paths, '__sf/x' and '__span/x' are ours.

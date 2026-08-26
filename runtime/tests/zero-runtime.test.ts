@@ -673,6 +673,7 @@ test("native compiler defaults omitted Zero capabilities conservatively", () => 
     gravatar: true,
     spam: true,
     email: true,
+    content: false,
   });
 
   const omitted = JSON.parse(
@@ -688,6 +689,7 @@ test("native compiler defaults omitted Zero capabilities conservatively", () => 
     gravatar: true,
     spam: true,
     email: true,
+    content: false,
   });
 });
 

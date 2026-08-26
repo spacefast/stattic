@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/../shared/response.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
+require_once __DIR__ . '/../shared/content-access.php';
 require_once __DIR__ . '/../shared/artifacts.php';
 require_once __DIR__ . '/../shared/native-process.php';
 require_once __DIR__ . '/../shared/safety.php';
@@ -124,13 +125,27 @@ function _stattic_zero_execute_envelope(array $envelope, array $config, string $
 function _stattic_zero_service_identity(array $envelope): array
 {
     $context = is_array($envelope['context'] ?? null) ? $envelope['context'] : [];
+    $request = is_array($envelope['request'] ?? null) ? $envelope['request'] : [];
     $headers = is_array($envelope['request']['headers'] ?? null) ? $envelope['request']['headers'] : [];
     $requestId = is_string($headers['x-request-id'] ?? null) ? $headers['x-request-id'] : '';
+    $origin = is_string($request['origin'] ?? null) ? rtrim($request['origin'], '/') : '';
+    $contentUrl = preg_match('#^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?$#', $origin) === 1
+        ? $origin . STATTIC_RUNTIME_CONTENT_API_PATH
+        : '';
     return [
         'spaceId' => is_string($context['spaceId'] ?? null) ? $context['spaceId'] : '',
         'versionId' => is_string($context['versionId'] ?? null) ? $context['versionId'] : '',
         // Constrained rather than trusted: it becomes half of a primary key.
         'invocationId' => _stattic_service_invocation_id($requestId),
+        'contentUrl' => $contentUrl,
+        // These remain runtime-owned broker environment. They are deliberately
+        // absent from the tenant-visible request envelope.
+        'contentCookie' => _stattic_content_access_cookie_header(
+            is_string($_SERVER['HTTP_COOKIE'] ?? null) ? $_SERVER['HTTP_COOKIE'] : ''
+        ),
+        'contentAuthorization' => _stattic_content_access_authorization_header(
+            _stattic_platform_bearer_token_from_request()
+        ),
     ];
 }
 

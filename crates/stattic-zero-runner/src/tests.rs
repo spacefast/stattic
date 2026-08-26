@@ -75,6 +75,7 @@ fn no_capabilities() -> EndpointCapabilities {
         gravatar: false,
         spam: false,
         email: false,
+        content: false,
     }
 }
 
@@ -140,7 +141,8 @@ impl Fixture {
                     "logging": capabilities.logging,
                     "gravatar": capabilities.gravatar,
                     "spam": capabilities.spam,
-                    "email": capabilities.email
+                    "email": capabilities.email,
+                    "content": capabilities.content
                 },
                 "db": {
                     "schemaHash": null,
@@ -277,6 +279,7 @@ fn renders_capability_templates_only_when_declared() {
         gravatar: true,
         spam: true,
         email: true,
+        content: true,
     });
 
     let response = handle_invoke(&fixture.envelope()).expect("response");
@@ -413,6 +416,7 @@ fn endpoint_capabilities_default_conservatively_when_metadata_is_absent_or_parti
     assert!(missing.env);
     assert!(missing.realtime);
     assert!(missing.logging);
+    assert!(!missing.content);
 
     let partial: EndpointCapabilities =
         serde_json::from_value(json!({ "db": false })).expect("capabilities");
@@ -422,6 +426,11 @@ fn endpoint_capabilities_default_conservatively_when_metadata_is_absent_or_parti
     assert!(partial.env);
     assert!(partial.realtime);
     assert!(partial.logging);
+    assert!(!partial.content);
+
+    let explicit: EndpointCapabilities =
+        serde_json::from_value(json!({ "content": true })).expect("capabilities");
+    assert!(explicit.content);
 }
 
 #[test]

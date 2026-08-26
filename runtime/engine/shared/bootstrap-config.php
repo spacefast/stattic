@@ -21,11 +21,11 @@ function _stattic_runtime_bootstrap_config(): void
     if ($bootstrapped) {
         return;
     }
-    $bootstrapped = true;
 
     if (!class_exists('Atomic_Persistent_Data')) {
         return;
     }
+    $bootstrapped = true;
 
     try {
         $persistent = new Atomic_Persistent_Data();

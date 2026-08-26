@@ -1,0 +1,86 @@
+<?php
+declare(strict_types=1);
+
+$engineRoot = dirname(__DIR__);
+require_once $engineRoot . '/shared/bootstrap-config.php';
+require_once $engineRoot . '/shared/context.php';
+require_once $engineRoot . '/shared/content-admin.php';
+require_once $engineRoot . '/shared/storage.php';
+
+_stattic_emit_runtime_identity();
+header('Cache-Control: private, no-store', true);
+header('Referrer-Policy: no-referrer', true);
+
+$privateRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
+$host = _stattic_normalize_hostname((string) ($_SERVER['HTTP_HOST'] ?? ''));
+$ticket = is_string($_GET['ticket'] ?? null) ? $_GET['ticket'] : '';
+$launch = _stattic_content_admin_consume_ticket($privateRoot, $ticket, $host);
+if (
+    $launch === null
+    || !_stattic_content_admin_authorization_matches($privateRoot, $launch['authorization'])
+) {
+    _stattic_problem_response(401, 'content_admin_ticket_invalid', 'This content editor link is invalid or expired.');
+}
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] = $launch['frame_origin'];
+header("Content-Security-Policy: frame-ancestors 'self' " . $launch['frame_origin'], true);
+
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_IDENTITY'] = $launch['identity'];
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $launch['authorization']['space_id'];
+$publicRoot = dirname(_stattic_runtime_install_root($engineRoot));
+$wpLoad = $publicRoot . '/wp-load.php';
+if (!is_file($wpLoad)) {
+    _stattic_problem_response(503, 'content_wordpress_unavailable', 'The Space content service is not ready.');
+}
+if (!defined('DISALLOW_FILE_EDIT')) {
+    define('DISALLOW_FILE_EDIT', true);
+}
+if (!defined('DISALLOW_FILE_MODS')) {
+    define('DISALLOW_FILE_MODS', true);
+}
+if (!defined('AUTOMATIC_UPDATER_DISABLED')) {
+    define('AUTOMATIC_UPDATER_DISABLED', true);
+}
+if (!defined('WP_AUTO_UPDATE_CORE')) {
+    define('WP_AUTO_UPDATE_CORE', false);
+}
+require $wpLoad;
+
+$userId = function_exists('spacefast_content_admin_establish_user')
+    ? spacefast_content_admin_establish_user()
+    : 0;
+$session = _stattic_content_admin_mint_session(
+    $privateRoot,
+    $host,
+    $userId,
+    $launch['authorization'],
+    $launch['frame_origin']
+);
+if ($session === null) {
+    _stattic_problem_response(503, 'content_admin_session_unavailable', 'The content editor session could not be started.');
+}
+$wpAuthCookie = function_exists('spacefast_content_admin_auth_cookie')
+    ? spacefast_content_admin_auth_cookie($userId, SPACEFAST_CONTENT_ADMIN_SESSION_TTL)
+    : null;
+if ($wpAuthCookie === null) {
+    _stattic_problem_response(503, 'content_admin_session_unavailable', 'The content editor session could not be started.');
+}
+_stattic_set_cookie(
+    _stattic_content_admin_cookie_name(),
+    $session['token'],
+    SPACEFAST_CONTENT_ADMIN_SESSION_TTL,
+    true
+);
+_stattic_set_cookie(
+    $wpAuthCookie['name'],
+    $wpAuthCookie['value'],
+    SPACEFAST_CONTENT_ADMIN_SESSION_TTL,
+    true
+);
+$postsType = function_exists('spacefast_content_builtin_post_type')
+    ? spacefast_content_builtin_post_type('posts')
+    : '';
+if ($postsType === '') {
+    _stattic_problem_response(503, 'content_kernel_unavailable', 'The Space content kernel is not ready.');
+}
+header('Location: /wp-admin/edit.php?post_type=' . rawurlencode($postsType), true, 303);
+exit;

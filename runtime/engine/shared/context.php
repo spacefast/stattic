@@ -43,9 +43,13 @@ const STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH = '/__sf';
 // Source: runtime/engine-manifest.json (aliases under __spacefast/).
 // Regenerate: bun run check:runtime-entrypoints -- --write
 const STATTIC_RUNTIME_MANAGEMENT_API_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/api.php';
+const STATTIC_RUNTIME_CONTENT_ADMIN_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/content-admin.php';
+const STATTIC_RUNTIME_CONTENT_API_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/content.php';
 const STATTIC_RUNTIME_UPLOAD_API_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/upload.php';
 const SPACEFAST_RUNTIME_ENTRYPOINT_PATHS = [
     STATTIC_RUNTIME_NAMESPACE_PATH . '/api.php' => true,
+    STATTIC_RUNTIME_NAMESPACE_PATH . '/content-admin.php' => true,
+    STATTIC_RUNTIME_NAMESPACE_PATH . '/content.php' => true,
     STATTIC_RUNTIME_NAMESPACE_PATH . '/health.php' => true,
     STATTIC_RUNTIME_NAMESPACE_PATH . '/upload.php' => true,
 ];
@@ -1357,10 +1361,15 @@ function _stattic_normalize_hostname(string $hostname): string
 function _stattic_dashboard_origin(): string
 {
     static $origin = null;
-    if ($origin !== null) {
+    if (is_string($origin) && $origin !== '') {
         return $origin;
     }
-    return $origin = _stattic_absolute_url_origin(_stattic_config_value('SPACEFAST_DASHBOARD_ORIGIN')) ?? '';
+    $resolved = _stattic_absolute_url_origin(_stattic_config_value('SPACEFAST_DASHBOARD_ORIGIN'));
+    if (is_string($resolved) && $resolved !== '') {
+        $origin = $resolved;
+        return $origin;
+    }
+    return '';
 }
 
 // A non-digit config value falls back to $default; the result is floored at $min.

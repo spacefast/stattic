@@ -188,6 +188,8 @@ pub struct ZeroCapabilities {
     pub spam: bool,
     #[serde(default = "default_true")]
     pub email: bool,
+    #[serde(default)]
+    pub content: bool,
 }
 
 impl Default for ZeroCapabilities {
@@ -202,6 +204,7 @@ impl Default for ZeroCapabilities {
             gravatar: true,
             spam: true,
             email: true,
+            content: false,
         }
     }
 }

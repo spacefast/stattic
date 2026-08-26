@@ -176,6 +176,9 @@ function _stattic_service_broker_env(array $identity): array
         'SPACEFAST_SERVICE_SPACE_ID' => 'spaceId',
         'SPACEFAST_SERVICE_VERSION_ID' => 'versionId',
         'SPACEFAST_SERVICE_INVOCATION_ID' => 'invocationId',
+        'SPACEFAST_SERVICE_CONTENT_URL' => 'contentUrl',
+        'SPACEFAST_SERVICE_CONTENT_COOKIE' => 'contentCookie',
+        'SPACEFAST_SERVICE_CONTENT_AUTHORIZATION' => 'contentAuthorization',
     ] as $name => $key) {
         $value = is_string($identity[$key] ?? null) ? trim($identity[$key]) : '';
         if ($value !== '') {

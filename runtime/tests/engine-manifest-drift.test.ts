@@ -49,6 +49,9 @@ function runtimeFilesOnDisk(directory = runtimeRoot, prefix = ""): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (relative === "bin" || relative.startsWith("bin/")) return [];
+    // Coverage-instrumented native children receive the runtime's production
+    // env allowlist, so LLVM falls back to this cwd-relative profile name.
+    if (/^default_[0-9]+_[0-9]+_[0-9]+\.profraw$/.test(relative)) return [];
     return entry.isDirectory()
       ? runtimeFilesOnDisk(path.join(directory, entry.name), relative)
       : [relative];

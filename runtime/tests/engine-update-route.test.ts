@@ -180,15 +180,18 @@ test("invalidates exactly the rewritten-in-place aliases: the loader copies and 
     });
     expect(result.exitCode, result.stderr.toString()).toBe(0);
     const paths: unknown = JSON.parse(result.stdout.toString());
-    expect(paths).toHaveLength(6);
+    expect(paths).toHaveLength(9);
     expect(paths).toEqual(
       expect.arrayContaining([
         `${root}/custom-redirects.php`,
         `${root}/index.php`,
         `${root}/__spacefast/engine-update.php`,
         `${root}/__spacefast/api.php`,
+        `${root}/__spacefast/content-admin.php`,
+        `${root}/__spacefast/content.php`,
         `${root}/__spacefast/health.php`,
         `${root}/__spacefast/upload.php`,
+        `${root}/wp-content/mu-plugins/spacefast-content.php`,
       ]),
     );
   } finally {

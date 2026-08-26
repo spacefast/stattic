@@ -204,6 +204,7 @@ fn install_globals(
         gravatar: artifact.capabilities.gravatar,
         spam: artifact.capabilities.spam,
         email: artifact.capabilities.email,
+        content: artifact.capabilities.content,
     });
     if artifact.capabilities.any_service() {
         let globals = ctx.globals();

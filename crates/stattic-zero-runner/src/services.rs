@@ -45,6 +45,7 @@ const SERVICE_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Upstream bodies are small — a profile document or the literal `true`. A
 /// larger response means something other than the service we asked for.
 const SERVICE_RESPONSE_MAX_BYTES: u64 = 256 * 1024;
+const CONTENT_RESPONSE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 /// The frame limit. Generous enough for a long comment plus its metadata, and
 /// far under what MySQL or the relay would accept.
@@ -65,6 +66,7 @@ pub(crate) struct ServiceGrant {
     pub gravatar: bool,
     pub spam: bool,
     pub email: bool,
+    pub content: bool,
 }
 
 impl ServiceGrant {
@@ -72,6 +74,7 @@ impl ServiceGrant {
         gravatar: false,
         spam: false,
         email: false,
+        content: false,
     };
 
     /// Parses the comma-separated wire grant the relay passes to the executor.
@@ -82,6 +85,7 @@ impl ServiceGrant {
             gravatar: granted("gravatar.profile"),
             spam: granted("spam.check"),
             email: granted("email.send"),
+            content: granted("content.query"),
         }
     }
 
@@ -90,6 +94,7 @@ impl ServiceGrant {
             "gravatar" => self.gravatar,
             "spam" => self.spam,
             "email" => self.email,
+            "content" => self.content,
             _ => false,
         }
     }
@@ -127,6 +132,9 @@ struct ServiceConfig {
     space_id: String,
     version_id: String,
     invocation_id: String,
+    content_url: Option<String>,
+    content_cookie: Option<String>,
+    content_authorization: Option<String>,
 }
 
 impl ServiceConfig {
@@ -152,6 +160,9 @@ impl ServiceConfig {
             space_id: value("SPACEFAST_SERVICE_SPACE_ID").unwrap_or_default(),
             version_id: value("SPACEFAST_SERVICE_VERSION_ID").unwrap_or_default(),
             invocation_id: value("SPACEFAST_SERVICE_INVOCATION_ID").unwrap_or_default(),
+            content_url: value("SPACEFAST_SERVICE_CONTENT_URL"),
+            content_cookie: value("SPACEFAST_SERVICE_CONTENT_COOKIE"),
+            content_authorization: value("SPACEFAST_SERVICE_CONTENT_AUTHORIZATION"),
         }
     }
 }
@@ -192,6 +203,7 @@ fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
         ("spam", "report_spam") => spam_report(&config, &frame.payload, "submit-spam"),
         ("spam", "report_ham") => spam_report(&config, &frame.payload, "submit-ham"),
         ("email", "send") => email_send(&config, &frame.payload),
+        ("content", "query") => content_query(&config, &frame.payload),
         _ => Err(BrokerRefusal::new(
             "service_operation_unknown",
             format!(
@@ -200,6 +212,106 @@ fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
             ),
         )),
     }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Space content                                                               */
+/* -------------------------------------------------------------------------- */
+
+fn content_query(
+    config: &ServiceConfig,
+    payload: &Map<String, Value>,
+) -> Result<Value, BrokerRefusal> {
+    let Some(url) = config.content_url.as_deref() else {
+        return Err(BrokerRefusal::new(
+            "service_not_configured",
+            "This runtime has no Space content endpoint.",
+        ));
+    };
+    if !content_url_valid(url) {
+        return Err(BrokerRefusal::new(
+            "service_not_configured",
+            "The Space content endpoint is invalid.",
+        ));
+    }
+    let Some(queries) = payload.get("queries").and_then(Value::as_object) else {
+        return Err(BrokerRefusal::new(
+            "service_payload_invalid",
+            "Content queries must be an object.",
+        ));
+    };
+    if queries.is_empty() || queries.len() > 25 {
+        return Err(BrokerRefusal::new(
+            "service_payload_invalid",
+            "A content batch must contain between 1 and 25 queries.",
+        ));
+    }
+    let body = json!({
+        "format": "spacefast.content.query",
+        "version": 1,
+        "queries": queries,
+    })
+    .to_string();
+    let response =
+        content_request(config, url)
+            .send(body.as_bytes())
+            .map_err(|error| match error {
+                ureq::Error::StatusCode(status) => BrokerRefusal::new(
+                    "content_upstream_refused",
+                    format!("The Space content service answered {status}."),
+                ),
+                _ => BrokerRefusal::new(
+                    "content_upstream_unavailable",
+                    "The Space content service could not be reached.",
+                ),
+            })?;
+    let document: Value = serde_json::from_str(&read_content_body(response)?).map_err(|_| {
+        BrokerRefusal::new(
+            "content_response_invalid",
+            "The Space content service returned an unreadable response.",
+        )
+    })?;
+    if document.get("format").and_then(Value::as_str) != Some("spacefast.content.query")
+        || document.get("version").and_then(Value::as_u64) != Some(1)
+    {
+        return Err(BrokerRefusal::new(
+            "content_response_invalid",
+            "The Space content service returned an unsupported response.",
+        ));
+    }
+    document.get("results").cloned().ok_or_else(|| {
+        BrokerRefusal::new(
+            "content_response_invalid",
+            "The Space content service omitted its results.",
+        )
+    })
+}
+
+fn content_request(
+    config: &ServiceConfig,
+    url: &str,
+) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
+    let mut request = agent()
+        .post(url)
+        .header("accept", "application/json")
+        .header("content-type", "application/json");
+    if let Some(cookie) = config.content_cookie.as_deref() {
+        request = request.header("cookie", cookie);
+    }
+    if let Some(authorization) = config.content_authorization.as_deref() {
+        request = request.header("x-sf-authorization", authorization);
+    }
+    request
+}
+
+fn content_url_valid(url: &str) -> bool {
+    let Some(authority_and_path) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let Some((authority, path)) = authority_and_path.split_once('/') else {
+        return false;
+    };
+    !authority.is_empty() && !authority.contains(['@', '\\']) && path == "__spacefast/content.php"
 }
 
 /* -------------------------------------------------------------------------- */
@@ -532,19 +644,48 @@ fn required_str<'a>(
 }
 
 fn read_body(response: ureq::http::Response<ureq::Body>) -> Result<String, BrokerRefusal> {
-    let mut body = String::new();
-    response
-        .into_body()
-        .into_reader()
-        .take(SERVICE_RESPONSE_MAX_BYTES)
-        .read_to_string(&mut body)
+    read_body_bounded(
+        response.into_body().into_reader(),
+        SERVICE_RESPONSE_MAX_BYTES,
+        "service_response_too_large",
+        "The service response exceeded its size limit.",
+    )
+}
+
+fn read_content_body(response: ureq::http::Response<ureq::Body>) -> Result<String, BrokerRefusal> {
+    read_body_bounded(
+        response.into_body().into_reader(),
+        CONTENT_RESPONSE_MAX_BYTES,
+        "content_response_too_large",
+        "The Space content response exceeded the Zero service limit.",
+    )
+}
+
+fn read_body_bounded(
+    reader: impl Read,
+    max_bytes: u64,
+    too_large_code: &'static str,
+    too_large_message: &'static str,
+) -> Result<String, BrokerRefusal> {
+    let mut body = Vec::new();
+    reader
+        .take(max_bytes + 1)
+        .read_to_end(&mut body)
         .map_err(|_| {
             BrokerRefusal::new(
                 "service_upstream_unavailable",
                 "The service response could not be read.",
             )
         })?;
-    Ok(body)
+    if body.len() as u64 > max_bytes {
+        return Err(BrokerRefusal::new(too_large_code, too_large_message));
+    }
+    String::from_utf8(body).map_err(|_| {
+        BrokerRefusal::new(
+            "service_upstream_unavailable",
+            "The service response could not be read.",
+        )
+    })
 }
 
 #[cfg(test)]
@@ -556,6 +697,7 @@ mod tests {
             gravatar: true,
             spam: true,
             email: true,
+            content: true,
         });
         handle_service_frame(
             &json!({ "service": service, "operation": operation, "payload": payload }).to_string(),
@@ -589,6 +731,20 @@ mod tests {
         let oversized = "x".repeat(SERVICE_FRAME_MAX_BYTES + 1);
         let (code, _) = refusal(&handle_service_frame(&oversized));
         assert_eq!(code, "service_payload_invalid");
+    }
+
+    #[test]
+    fn oversized_content_responses_are_refused_without_parsing_truncated_json() {
+        let error = read_body_bounded(
+            std::io::Cursor::new(vec![b'x'; 5]),
+            4,
+            "content_response_too_large",
+            "too large",
+        )
+        .expect_err("the fifth byte must cross the limit");
+        let (code, message) = refusal(&error.refusal_json());
+        assert_eq!(code, "content_response_too_large");
+        assert_eq!(message, "too large");
     }
 
     #[test]
@@ -640,6 +796,7 @@ mod tests {
             gravatar: true,
             spam: false,
             email: false,
+            content: false,
         });
         let (code, message) = refusal(&handle_service_frame(
             &json!({ "service": "spam", "operation": "check", "payload": {} }).to_string(),
@@ -663,8 +820,46 @@ mod tests {
                 gravatar: false,
                 spam: true,
                 email: true,
+                content: false,
             }
         );
+    }
+
+    #[test]
+    fn content_urls_are_runtime_owned_https_entrypoints() {
+        assert!(content_url_valid(
+            "https://space.example/__spacefast/content.php"
+        ));
+        for url in [
+            "http://space.example/__spacefast/content.php",
+            "https://space.example/__spacefast/content.php?target=other",
+            "https://user@space.example/__spacefast/content.php",
+            "https://space.example/wp-json/wp/v2/posts",
+        ] {
+            assert!(!content_url_valid(url), "accepted {url}");
+        }
+    }
+
+    #[test]
+    fn content_requests_forward_runtime_owned_access_evidence() {
+        let config = ServiceConfig {
+            akismet_key: None,
+            gravatar_key: None,
+            blog_url: None,
+            email_senders: Vec::new(),
+            space_id: String::new(),
+            version_id: String::new(),
+            invocation_id: String::new(),
+            content_url: None,
+            content_cookie: Some("__Host-spacefast_session=session".to_string()),
+            content_authorization: Some("Bearer sfa_access_token".to_string()),
+        };
+        let request = content_request(&config, "https://space.example/__spacefast/content.php");
+        let headers = request
+            .headers_ref()
+            .expect("valid content request headers");
+        assert_eq!(headers["cookie"], "__Host-spacefast_session=session");
+        assert_eq!(headers["x-sf-authorization"], "Bearer sfa_access_token");
     }
 
     #[test]

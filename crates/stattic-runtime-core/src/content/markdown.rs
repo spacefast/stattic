@@ -18,9 +18,7 @@ pub(super) fn markdown_page(
     diagnostics: &mut Vec<Value>,
 ) -> std::result::Result<Page, String> {
     let (frontmatter, body) = split_frontmatter(source, path, diagnostics);
-    let mut rendered = String::new();
-    let parser = Parser::new_ext(body, Options::all());
-    html::push_html(&mut rendered, decorate_markdown_events(parser).into_iter());
+    let rendered = markdown_fragment(body);
     let title = string_in(&frontmatter, "title")
         .or_else(|| first_heading(&rendered))
         .unwrap_or_else(|| title_from_path(path));
@@ -47,6 +45,13 @@ pub(super) fn markdown_page(
         draft,
         layout_rendered: false,
     })
+}
+
+pub fn markdown_fragment(source: &str) -> String {
+    let mut rendered = String::new();
+    let parser = Parser::new_ext(source, Options::all());
+    html::push_html(&mut rendered, decorate_markdown_events(parser).into_iter());
+    rendered
 }
 
 pub(super) fn markdown_output_path(path: &str) -> String {

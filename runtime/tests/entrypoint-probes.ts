@@ -42,6 +42,7 @@ async function expectErrorCode(response: Response, status: number, code: string)
   }
   let actual: unknown;
   try {
+    // SAFETY: The optional field is used only for an exact runtime error-code comparison.
     actual = (JSON.parse(body) as { code?: unknown }).code;
   } catch {
     throw new Error(`expected the ${code} problem document, got a non-JSON body: ${body}`);
@@ -57,11 +58,29 @@ export const ENTRYPOINT_PROBES = entrypointProbeCatalog({
       }),
     verify: (response) => expectErrorCode(response, 401, "runtime_unauthorized"),
   },
+  "/__spacefast/content-admin.php": {
+    request: (rt) =>
+      fetch(`${rt.baseUrl}${runtimeHttpPath("/__spacefast/content-admin.php")}`, {
+        redirect: "manual",
+      }),
+    verify: (response) => expectErrorCode(response, 401, "content_admin_ticket_invalid"),
+  },
+  "/__spacefast/content.php": {
+    request: (rt) =>
+      fetch(`${rt.baseUrl}${runtimeHttpPath("/__spacefast/content.php")}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operation: "schema.apply", manifest: {} }),
+        redirect: "manual",
+      }),
+    verify: (response) => expectErrorCode(response, 401, "runtime_unauthorized"),
+  },
   "/__spacefast/health.php": {
     request: (rt) => fetch(`${rt.baseUrl}/__spacefast/health.php`, { redirect: "manual" }),
     verify: async (response) => {
       const body = await response.text();
       if (response.status !== 200) throw new Error(`expected 200, got ${response.status}: ${body}`);
+      // SAFETY: The probe checks every field it consumes before accepting the response.
       const payload = JSON.parse(body) as {
         ok?: boolean;
         runtime?: string;

@@ -598,6 +598,7 @@ fn runner_capabilities(capabilities: &ZeroCapabilities) -> ZeroEndpointCapabilit
         gravatar: capabilities.gravatar,
         spam: capabilities.spam,
         email: capabilities.email,
+        content: capabilities.content,
     }
 }
 

@@ -31,7 +31,7 @@ const STATTIC_RUNTIME_PURGE_ATTEMPTS = 2;
 // wp.cloud (dev, CI, the php -S harness) there is no edge to purge, and a purge
 // there is a successful no-op, never a failure.
 //
-// @return array{base: string, key: string}|null
+// @return array{base: string, key: string, scheme: string}|null
 function _stattic_runtime_edge_purge_endpoint(): ?array
 {
     $siteId = _stattic_config_value('ATOMIC_SITE_ID');

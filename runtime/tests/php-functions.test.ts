@@ -34,6 +34,7 @@ sf_json([
     'dispatch_token' => getenv('SPACEFAST_FUNCTIONS_DISPATCH_TOKEN'),
     'dispatch_token_server' => $_SERVER['SPACEFAST_FUNCTIONS_DISPATCH_TOKEN'] ?? null,
     'site_env_runtime_bin' => getenv('SPACEFAST_RUNTIME_BIN'),
+    'api_url' => sf_api_url('/health'),
     'auth' => sf_auth(),
 ]);
 `;
@@ -41,6 +42,15 @@ sf_json([
 // sf_db() is wired to the broker, so "unavailable" means the Space has no
 // database attached, answered as its own problem.
 const DB_PHP = "<?php sf_db()->query('SELECT 1');\n";
+
+const CACHE_PHP = `<?php
+header('Cache-Control: public, max-age=3600');
+if (isset($_GET['cookie'])) {
+    header('Set-Cookie: preview=one; Path=/; HttpOnly; SameSite=Lax');
+}
+header('Content-Type: text/plain; charset=utf-8');
+echo 'cached';
+`;
 
 // The one verified sender this runtime is configured with. It reaches the
 // broker because the bridge resolved it into process memory before the jail.
@@ -130,6 +140,7 @@ beforeAll(async () => {
       "functions/spam-evidence.php": SPAM_EVIDENCE_PHP,
       "functions/email.php": EMAIL_PHP,
       "functions/db.php": DB_PHP,
+      "functions/cache.php": CACHE_PHP,
       // A pattern-named module is not an expressible table key in this slice:
       // it stays an inert attachment, neither executed nor dropped.
       "functions/[id].php": "<?php echo 'never executed';\n",
@@ -155,7 +166,7 @@ test("a functions route executes: parsed body in, JSON out, platform cache polic
   expect(post.status).toBe(200);
   expect(post.headers.get("content-type")).toBe("application/json; charset=utf-8");
   // The platform owns caching for a dynamic URL the purger cannot enumerate.
-  expect(post.headers.get("cache-control")).toBe("no-store");
+  expect(post.headers.get("cache-control")).toBe("private, no-store");
   expect(await post.json()).toEqual({ hello: "batuhan" });
 
   // Form bodies parse through the same sf_body() seam.
@@ -188,6 +199,7 @@ test("the handler runs inside the prelude's jail, with platform secrets scrubbed
     dispatch_token: string | false;
     dispatch_token_server: string | null;
     site_env_runtime_bin: string | false;
+    api_url: string;
     auth: Record<string, unknown>;
   };
 
@@ -203,12 +215,36 @@ test("the handler runs inside the prelude's jail, with platform secrets scrubbed
   expect(report.dispatch_token).toBe(false);
   expect(report.dispatch_token_server).toBeNull();
   expect(report.site_env_runtime_bin).not.toBe(false);
+  expect(report.api_url).toBe("https://api.spacefast.com/health");
 
   // sf_auth() consumed the engine's verified visitor context: no cookie means
   // the guest identity.
   expect(report.auth["isGuest"]).toBe(true);
   expect(report.auth["isAuthenticated"]).toBe(false);
   expect(report.auth["provider"]).toBe("guest");
+});
+
+test("a safe public PHP function response opts into the edge cache", async () => {
+  const cached = await get(rt, HOST, "/cache");
+  expect(cached.status).toBe(200);
+  expect(cached.headers.get("cache-control")).toBe("public, max-age=3600");
+  expect(cached.headers.get("a8c-edge-cache")).toBe("cache");
+  expect(await cached.text()).toBe("cached");
+
+  // The provider cache is method-blind. A POST must not populate the URL that
+  // a later GET reads, even when the handler declares a public policy.
+  const post = await get(rt, HOST, "/cache", { method: "POST" });
+  expect(post.status).toBe(200);
+  expect(post.headers.get("cache-control")).toBe("private, no-store");
+  expect(post.headers.get("a8c-edge-cache")).toBe("no-cache");
+
+  // A stateful response revokes the shared grant before the platform writes
+  // the edge opt-in. The Set-Cookie still reaches the visitor.
+  const stateful = await get(rt, HOST, "/cache?cookie=1");
+  expect(stateful.status).toBe(200);
+  expect(stateful.headers.get("cache-control")).toBe("no-store");
+  expect(stateful.headers.get("a8c-edge-cache")).toBe("no-cache");
+  expect(stateful.headers.get("set-cookie")).toContain("preview=one");
 });
 
 test("brokered capabilities reach the native broker from inside the jail", async () => {

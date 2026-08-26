@@ -103,11 +103,33 @@ function &_stattic_php_functions_state(): array
         'raw_body' => null,
         'private' => false,
         'noindex' => false,
+        'api_base_url' => null,
         'database' => false,
         'services' => null,
     ];
 
     return $state;
+}
+
+// Resolve only this non-secret value before the jail. Do not load the complete
+// Atomic payload into constants: it also contains platform credentials.
+function _stattic_php_functions_api_base_url(): string
+{
+    $apiBaseUrl = _stattic_runtime_api_base_url();
+    if ($apiBaseUrl === '' && class_exists('Atomic_Persistent_Data')) {
+        try {
+            $persistent = new Atomic_Persistent_Data();
+            $configured = $persistent->SPACEFAST_API_BASE_URL ?? null;
+            $apiBaseUrl = is_string($configured) ? rtrim($configured, '/') : '';
+        } catch (Throwable $error) {
+            error_log('spacefast php function api config failed type=' . get_debug_type($error));
+            $apiBaseUrl = '';
+        }
+    }
+    if (filter_var($apiBaseUrl, FILTER_VALIDATE_URL) === false) {
+        return '';
+    }
+    return $apiBaseUrl;
 }
 
 /**
@@ -176,6 +198,7 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     $state['method'] = $method;
     $state['private'] = (bool) $context['private_cache'];
     $state['noindex'] = !empty(is_array($context['host_entry'] ?? null) ? $context['host_entry']['noindex'] ?? null : null);
+    $state['api_base_url'] = _stattic_php_functions_api_base_url();
     // Same verify, same shape as a Zero endpoint's auth context. Runs now
     // because verification reads `.stattic/**` key material the jail denies.
     $state['auth'] = _stattic_zero_auth_context($serving, (string) $context['host']);
@@ -270,9 +293,11 @@ function _stattic_php_functions_enforce_platform_headers(): void
     if (!$state['active']) {
         return;
     }
-    $hasCacheControl = false;
+    $headerLines = [];
+    $cacheControl = null;
     foreach (headers_list() as $line) {
-        $name = strtolower(trim((string) strstr($line, ':', true)));
+        $separator = strpos($line, ':');
+        $name = $separator === false ? '' : strtolower(trim(substr($line, 0, $separator)));
         if ($name === '') {
             continue;
         }
@@ -286,18 +311,24 @@ function _stattic_php_functions_enforce_platform_headers(): void
             header_remove($name);
             continue;
         }
+        $value = trim(substr($line, $separator + 1));
+        $headerLines[] = [$name, $value];
         if ($name === 'cache-control') {
-            $hasCacheControl = true;
+            $cacheControl = $value;
         }
     }
-    // A protected space's dynamic response is never shared-cacheable, whatever
-    // the handler declared. An open space keeps a declared policy and otherwise
-    // gets no-store, because a function's URL is un-purgeable.
-    if ($state['private']) {
-        header('cache-control: ' . STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
-    } elseif (!$hasCacheControl) {
-        header('cache-control: ' . STATTIC_CACHE_CONTROL_NO_STORE, true);
-    }
+
+    // A handler can request shared caching, but it cannot write the provider
+    // opt-in. The platform derives that header from the final policy after the
+    // same cookie/Vary/cache checks used for a remote Functions response.
+    $safePublicCacheControl = is_string($cacheControl)
+        && !_stattic_cache_policy_upstream_revokes_shared_store($headerLines)
+            ? $cacheControl
+            : STATTIC_CACHE_CONTROL_NO_STORE;
+    _stattic_cache_policy_send(_stattic_cache_policy([
+        'private' => $state['private'],
+        'public' => $safePublicCacheControl,
+    ]));
     if ($state['noindex']) {
         header('x-robots-tag: noindex, nofollow', true);
     }
@@ -484,6 +515,27 @@ function sf_auth(): array
     $state = &_stattic_php_functions_state();
 
     return is_array($state['auth']) ? $state['auth'] : _stattic_zero_guest_auth_context();
+}
+
+/** The configured Spacefast API URL, resolved before the filesystem jail. */
+function sf_api_url(string $path = ''): string
+{
+    if (
+        $path !== ''
+        && (
+            !str_starts_with($path, '/')
+            || str_starts_with($path, '//')
+            || preg_match('/[\x00-\x20\x7f#]/', $path) === 1
+        )
+    ) {
+        _stattic_php_functions_problem(400, 'php_function_api_path_invalid', 'The API path must start with one slash.');
+    }
+    $state = &_stattic_php_functions_state();
+    $apiBaseUrl = is_string($state['api_base_url'] ?? null) ? $state['api_base_url'] : '';
+    if ($apiBaseUrl === '') {
+        _stattic_php_functions_problem(503, 'php_function_api_unavailable', 'The Spacefast API URL is not available.');
+    }
+    return $apiBaseUrl . $path;
 }
 
 // ---- brokered capabilities -------------------------------------------------

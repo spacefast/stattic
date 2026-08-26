@@ -624,6 +624,7 @@ function startEdgePurgeCapture(sink: EdgePurgeCall[]): EdgePurgeCapture {
       if (request.method !== "POST" || match === null) {
         return new Response('{"message":"Invalid action","data":[]}', { status: 400 });
       }
+      const hostname = decodeURIComponent(match[1] ?? "");
       const form = new URLSearchParams(await request.text());
       const uris: string[] = [];
       for (const [key, value] of form) {
@@ -633,7 +634,7 @@ function startEdgePurgeCapture(sink: EdgePurgeCall[]): EdgePurgeCapture {
       }
       const action = form.get("wp_action") ?? "";
       sink.push({
-        hostname: decodeURIComponent(match[1] ?? ""),
+        hostname,
         reason: action.startsWith("spacefast:") ? action.slice("spacefast:".length) : action,
         uris,
       });

@@ -29,7 +29,6 @@ import {
   signEd25519Jwt,
   spaceRoot,
   startRuntime,
-  storagePath,
   type Runtime,
   visitorIssuer,
 } from "./harness.ts";

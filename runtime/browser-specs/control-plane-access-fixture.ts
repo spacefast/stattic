@@ -252,7 +252,7 @@ try {
         if (action === "deny") {
           const denied = await controlPlane.handle(
             new Request(
-              `http://control-plane.test/v1/spaces/${seed.spaceId}/requests/${current.id}/deny`,
+              `http://control-plane.test/v1/spaces/${seed.spaceId}/access-requests/${current.id}/deny`,
               { method: "POST", headers: seed.authHeaders },
             ),
           );
@@ -263,7 +263,7 @@ try {
           setAccessRequestClockForTests(() => Date.now() + 15 * 24 * 60 * 60 * 1000);
           try {
             const expired = await controlPlane.handle(
-              new Request(`http://control-plane.test/v1/spaces/${seed.spaceId}/requests`, {
+              new Request(`http://control-plane.test/v1/spaces/${seed.spaceId}/access-requests`, {
                 headers: seed.authHeaders,
               }),
             );

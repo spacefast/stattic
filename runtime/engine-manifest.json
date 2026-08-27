@@ -65,6 +65,7 @@
     "engine/shared/lock.php",
     "engine/shared/native-process.php",
     "engine/shared/pointers.php",
+    "engine/shared/private-tree.php",
     "engine/shared/problem.php",
     "engine/shared/purge.php",
     "engine/shared/record-store.php",

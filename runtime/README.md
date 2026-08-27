@@ -145,7 +145,11 @@ htdocs/.stattic/storage
   spaces/<spaceId>/versions/<versionId>/    committed files + compiled serving artifacts
   spaces/<spaceId>/routes/<routeName>.json  mutable route pointers
   spaces/<spaceId>/policy.json              deny-only Firewall policy
-  routes/current.php, routes/generations/   active route generations
+  spaces/<spaceId>/content/releases/<rev>/  compiled Payload content releases, with
+                                            content/active-release naming the live one
+  spaces/<spaceId>/content-media/           Space media the content API serves
+  routes/current.json, routes/previous.json active + superseded route pointers
+  routes/shards/<name>.php                  host lookup shards the pointers name
 ```
 
 ## Native finalization

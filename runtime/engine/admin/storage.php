@@ -82,15 +82,15 @@ function _stattic_storage_read_key_rotate(string $privateRoot): void
     if ($spaceRoots === null) {
         _stattic_problem_response(503, 'storage_rotation_purge_unavailable', 'Space enumeration failed; the rotation purge could not be planned.');
     }
+    require_once __DIR__ . '/../shared/purge.php';
     $hostnames = [];
     foreach ($spaceRoots as $spaceRoot) {
-        foreach (_stattic_runtime_space_event_hostnames($spaceRoot) as $hostname) {
+        foreach (_stattic_runtime_space_sweep_hostnames($spaceRoot) as $hostname) {
             $hostnames[$hostname] = true;
         }
     }
     $purge = ['status' => 'ok', 'mode' => 'none'];
     if ($hostnames !== []) {
-        require_once __DIR__ . '/../shared/purge.php';
         $purge = _stattic_runtime_purge_now($privateRoot, [
             'hostnames' => array_keys($hostnames),
             'reason' => 'storage_read_key_rotated',

@@ -82,9 +82,18 @@ echo json_encode([
   'expired_session' => _stattic_content_admin_verify_session('/private', $session['token'], 'space.example', 5001),
   'expiry_boundary' => _stattic_content_admin_verify_session('/private', $session['token'], 'space.example', 4600),
   'tampered_session' => _stattic_content_admin_verify_session('/private', $tampered, 'space.example', 1001),
+  // The editor lane is /wp-admin, /wp-json AND /?rest_route=: the admin
+  // screens save through the REST API, which answers on the query form when
+  // pretty permalinks are off. A gate that answers one and not the others has
+  // a hole.
   'paths' => [
+    _stattic_content_admin_request_path('/wp-admin'),
     _stattic_content_admin_request_path('/wp-admin/edit.php'),
+    _stattic_content_admin_request_path('/wp-json'),
     _stattic_content_admin_request_path('/wp-json/wp/v2/posts'),
+    _stattic_content_admin_request_path('/', ['rest_route' => '/wp/v2/types']),
+    _stattic_content_admin_request_path('/'),
+    _stattic_content_admin_request_path('/wp-adminx'),
     _stattic_content_admin_request_path('/wp-login.php'),
     _stattic_content_admin_request_path('/index.html'),
   ],
@@ -123,6 +132,6 @@ echo json_encode([
     expired_session: null,
     expiry_boundary: null,
     tampered_session: null,
-    paths: [true, true, false, false],
+    paths: [true, true, true, true, true, false, false, false, false],
   });
 });

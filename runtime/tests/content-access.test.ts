@@ -3,6 +3,7 @@ import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dir, "../..");
 const accessModule = path.join(repoRoot, "runtime/engine/shared/content-access.php");
+const adminModule = path.join(repoRoot, "runtime/engine/shared/content-admin.php");
 
 test("content access resolves the host exposure and forwards only access credentials", async () => {
   const script = String.raw`
@@ -29,6 +30,7 @@ function _stattic_v4_host_lookup(string $root, array $routes, string $host): arr
   $entry = ['space_id' => 'spc_1', 'route_name' => 'live'];
   if ($scenario === 'host-serve') $entry['route_action'] = ['action' => 'serve'];
   if ($scenario === 'host-tombstone') $entry['route_action'] = ['action' => 'tombstone'];
+  if ($scenario === 'host-platform-error') $entry['route_action'] = ['action' => 'platform_error'];
   return ['entry' => $entry, 'routes' => []];
 }
 function _stattic_v4_overlay(string $root, string $spaceId, array $space): array|false|null {
@@ -46,12 +48,20 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
 }
 
 require $argv[1];
+require $argv[2];
+$scenarios = ['open', 'protected', 'host-serve', 'host-tombstone', 'host-platform-error', 'host-absent', 'routes-unavailable', 'overlay-unavailable', 'fenced', 'version-absent'];
 $results = [];
-foreach (['open', 'protected', 'host-serve', 'host-tombstone', 'host-absent', 'routes-unavailable', 'overlay-unavailable', 'fenced', 'version-absent'] as $scenario) {
+$holds = [];
+foreach ($scenarios as $scenario) {
   $results[$scenario] = _stattic_content_access_target('/private', 'SPACE.EXAMPLE');
+  // The editor gate reads the same target and refuses on the platform's own
+  // hold only: an unpublished Space is what the editor exists to fill, and the
+  // exposure fence is covered by the session's accessGeneration.
+  $holds[$scenario] = _stattic_content_admin_platform_hold('/private', 'SPACE.EXAMPLE');
 }
 echo json_encode([
   'targets' => $results,
+  'editorHolds' => $holds,
   'cookies' => _stattic_content_access_cookie_header(
     'analytics=drop; __Host-spacefast_session=session_ok; bad=drop; spacefast_system_view_dev=view_ok'
   ),
@@ -60,7 +70,7 @@ echo json_encode([
   'badAuthorization' => _stattic_content_access_authorization_header("bad\r\ntoken"),
 ]);
 `;
-  const process = Bun.spawn(["php", "-r", script, accessModule], {
+  const process = Bun.spawn(["php", "-r", script, accessModule, adminModule], {
     cwd: repoRoot,
     stderr: "pipe",
     stdout: "pipe",
@@ -107,12 +117,25 @@ echo json_encode([
           authorization: { open: false },
         },
       },
-      "host-tombstone": { kind: "absent" },
-      "host-absent": { kind: "absent" },
+      "host-tombstone": { kind: "absent", hold: "tombstone" },
+      "host-platform-error": { kind: "absent", hold: "platform_error" },
+      "host-absent": { kind: "absent", hold: null },
       "routes-unavailable": { kind: "unavailable" },
       "overlay-unavailable": { kind: "unavailable" },
       fenced: { kind: "unavailable" },
-      "version-absent": { kind: "absent" },
+      "version-absent": { kind: "absent", hold: null },
+    },
+    editorHolds: {
+      open: null,
+      protected: null,
+      "host-serve": null,
+      "host-tombstone": "tombstone",
+      "host-platform-error": "platform_error",
+      "host-absent": null,
+      "routes-unavailable": null,
+      "overlay-unavailable": null,
+      fenced: null,
+      "version-absent": null,
     },
     cookies: "__Host-spacefast_session=session_ok; spacefast_system_view_dev=view_ok",
     badCookie: "",

@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 $engineRoot = dirname(__DIR__);
 require_once $engineRoot . '/shared/bootstrap-config.php';
+require_once $engineRoot . '/shared/cache-policy.php';
 require_once $engineRoot . '/shared/context.php';
 require_once $engineRoot . '/shared/content-access.php';
 require_once $engineRoot . '/shared/content-admin.php';
@@ -14,6 +15,36 @@ require_once $engineRoot . '/admin/auth.php';
 _stattic_emit_runtime_identity();
 
 const SPACEFAST_CONTENT_REQUEST_MAX_BYTES = 4194304;
+
+// The read policy this lane WOULD offer a shared cache. It is deliberately
+// stated rather than sent: shared/cache-policy.php decides what actually goes
+// out, and while this endpoint stays POST-only its method-blind edge rule pins
+// every answer to private no-store.
+const SPACEFAST_CONTENT_READ_CACHE_CONTROL = 'public, max-age=0, s-maxage=60, stale-while-revalidate=300';
+
+/**
+ * THE Cache-Control author for this endpoint.
+ *
+ * The lane states one input — is this answer private — and shared/cache-policy.php
+ * decides. That seam is what carries the method-blind edge rule here: the
+ * provider edge keys a stored response on host+path+query alone, so a
+ * publicly-storable answer to a POST would be replayed to every later GET of
+ * the same URL. This endpoint accepts nothing but POST, so today the verdict is
+ * always private no-store; hand-rolling that literal is how the lane drifted
+ * out of the rule in the first place.
+ *
+ * The verdict is all this lane takes. It deliberately does NOT go through
+ * _stattic_cache_policy_send()'s private-CONTENT boundary, whose same-origin
+ * CORP and Access-Control-Allow-Origin strip protect page bytes: the content
+ * API is an intentional `Access-Control-Allow-Origin: *` JSON surface.
+ */
+function _stattic_content_cache_control(bool $private): string
+{
+    return (string) _stattic_cache_policy([
+        'private' => $private,
+        'public' => SPACEFAST_CONTENT_READ_CACHE_CONTROL,
+    ])['cache_control'];
+}
 
 $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 header('Access-Control-Allow-Origin: *', true);
@@ -115,7 +146,7 @@ if (is_string($operation)) {
         _stattic_json_response(200, [
             'path' => '/__spacefast/content-admin.php?ticket=' . rawurlencode($ticket['token']),
             'expiresAt' => gmdate('Y-m-d\\TH:i:s\\Z', $ticket['expires_at']),
-        ], 'application/json', ['Cache-Control' => 'private, no-store']);
+        ], 'application/json', ['Cache-Control' => _stattic_content_cache_control(true)]);
     }
 } else {
     $privateRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
@@ -183,15 +214,16 @@ try {
 
 $privateRead = !$managed
     && (_stattic_access_private_cache_flag() || is_string($_SERVER['HTTP_COOKIE'] ?? null));
-$headers = $managed || $privateRead
-    ? ['Cache-Control' => 'private, no-store']
-    : ['Cache-Control' => 'public, max-age=0, s-maxage=60, stale-while-revalidate=300'];
+$headers = ['Cache-Control' => _stattic_content_cache_control($managed || $privateRead)];
 $encoded = json_encode($result, JSON_UNESCAPED_SLASHES);
 if (!is_string($encoded)) {
     _stattic_problem_response(500, 'content_response_invalid', 'The content response could not be encoded.');
 }
 $etag = '"' . hash('sha256', $encoded) . '"';
 $headers['ETag'] = $etag;
+// Revalidation is not storability: a client that kept the previous answer on
+// purpose still gets to skip the bytes, whatever any cache was allowed to do
+// with it. The gate stays on the lane's own read verdict.
 if (!$managed && !$privateRead && trim((string) ($_SERVER['HTTP_IF_NONE_MATCH'] ?? '')) === $etag) {
     _stattic_response_send(304, '', '', $headers);
 }

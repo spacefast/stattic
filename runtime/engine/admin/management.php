@@ -522,26 +522,10 @@ function _stattic_runtime_zero_endpoint_count(string $versionRoot): int
 function _stattic_runtime_purge_space_now(string $privateRoot, string $spaceId, string $reason, ?array $hostnames = null): array
 {
     return _stattic_runtime_purge_now($privateRoot, [
-        'hostnames' => $hostnames ?? _stattic_runtime_space_event_hostnames(_stattic_space_root($privateRoot, $spaceId)),
+        'hostnames' => $hostnames
+            ?? _stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId)),
         'reason' => $reason,
     ]);
-}
-
-// The hostname set a space_deleted event carries. The control plane signs it
-// before asking the runtime to delete the space, so the state preflight and the
-// mutation must both derive it here.
-function _stattic_runtime_space_event_hostnames(string $spaceRoot, ?array $intent = null, ?array $tombstones = null): array
-{
-    $hostnames = array_fill_keys(_stattic_runtime_route_intent_hostnames($spaceRoot, $intent), true);
-    $tombstones ??= _stattic_runtime_read_json($spaceRoot . '/tombstones.json');
-    if (is_array($tombstones) && is_array($tombstones['hostnames'] ?? null)) {
-        foreach ($tombstones['hostnames'] as $hostname) {
-            if (is_string($hostname)) {
-                $hostnames[$hostname] = true;
-            }
-        }
-    }
-    return array_keys($hostnames);
 }
 
 function _stattic_runtime_state_summary(string $privateRoot): array
@@ -589,7 +573,7 @@ function _stattic_runtime_state_summary(string $privateRoot): array
                 ? count($tombstones['hostnames'])
                 : 0,
             'intent_hostnames' => _stattic_runtime_route_intent_hostnames($spaceRoot, $intent),
-            'hostnames' => _stattic_runtime_space_event_hostnames($spaceRoot, $intent, $tombstones),
+            'hostnames' => _stattic_runtime_access_sweep_hostnames($intent, $tombstones),
         ];
     }
     return ['routes_generation' => $generation, 'spaces' => $spaces];
@@ -1520,7 +1504,7 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
         throw new RuntimeException('runtime tombstones are invalid: ' . $spaceRoot);
     }
     $tombstones = is_array($tombstonesDoc) ? $tombstonesDoc : [];
-    $hostnames = _stattic_runtime_space_event_hostnames($spaceRoot, $intent, $tombstones);
+    $hostnames = _stattic_runtime_access_sweep_hostnames($intent, $tombstones);
     _stattic_runtime_rm_recursive($spaceRoot);
     // Tombstones must survive the rm: retired hostnames keep serving the
     // tombstone page rather than degrading to the generic undeployed 503.

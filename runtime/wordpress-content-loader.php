@@ -39,7 +39,21 @@ declare(strict_types=1);
     if (!defined('PAYLOADWP_RUNNER') && is_file($runner) && is_executable($runner)) {
         define('PAYLOADWP_RUNNER', $runner);
     }
-    $contentRoot = $installRoot . '/storage/content';
+    // Compiled content releases are per Space (content-kernel.php
+    // spacefast_content_release_root). One wp.cloud site hosts many Spaces, so
+    // resolving this box-wide would hand every Space whichever one compiled
+    // last. Every entrypoint that boots WordPress sets the Space before
+    // requiring wp-load, so it is already here; a request that has none (wp-cron
+    // and friends) loads no compiled release at all, which is the safe answer.
+    $spaceId = $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? null;
+    if (
+        !is_string($spaceId)
+        || strlen($spaceId) > 128
+        || preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*$/', $spaceId) !== 1
+    ) {
+        return;
+    }
+    $contentRoot = $installRoot . '/storage/spaces/' . $spaceId . '/content';
     $contentPointer = @file_get_contents($contentRoot . '/active-release', false, null, 0, 128);
     $contentRevision = is_string($contentPointer) ? trim($contentPointer) : '';
     if (preg_match('/^[a-f0-9]{64}$/', $contentRevision) === 1) {

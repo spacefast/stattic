@@ -91,11 +91,6 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             $path
         ) === 1;
         $isContentAdminRequest = false;
-        $isContentAdminPath = $path === '/wp-admin'
-            || str_starts_with($path, '/wp-admin/')
-            || $path === '/wp-json'
-            || str_starts_with($path, '/wp-json/')
-            || ($path === '/' && isset($_GET['rest_route']));
         $isWordPressCorePhp = preg_match(
             '#^/(?:wp-[^/]+\.php|wp-(?:includes|content)/.+\.php)(?:/|$)#',
             $path
@@ -118,34 +113,63 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             require $releaseRoot . '/engine/entrypoints/content-media.php';
             exit;
         }
+        // Which requests ARE the editor lane is decided by
+        // _stattic_content_admin_request_path and asked, never restated here:
+        // this file carried its own copy, and a gate whose request set
+        // disagrees with the shared one is a gate with a hole on whichever
+        // side is narrower. shared/content-admin.php is dependency-free
+        // function declarations that read no environment, so requiring it to
+        // ask still leaves $bindDatabasePassword() the first thing any engine
+        // code that could observe DB_PASSWORD sees.
+        $isContentAdminPath = false;
         if (
             !isset($entrypointPaths[$path])
             && !$isFpmReadinessProbe
-            && $isContentAdminPath
             && is_file($releaseRoot . '/engine/shared/content-admin.php')
         ) {
+            require_once $releaseRoot . '/engine/shared/content-admin.php';
+            $isContentAdminPath = _stattic_content_admin_request_path(
+                $path,
+                is_array($_GET) ? $_GET : []
+            );
+        }
+        if ($isContentAdminPath) {
             require_once $releaseRoot . '/engine/shared/bootstrap-config.php';
+            require_once $releaseRoot . '/engine/shared/cache-policy.php';
             require_once $releaseRoot . '/engine/shared/context.php';
             require_once $releaseRoot . '/engine/shared/storage.php';
-            require_once $releaseRoot . '/engine/shared/content-admin.php';
+            // The route pointer + host entry the visitor lane reads. The hold
+            // verdict is decided from those alone, before any space overlay,
+            // so this lane needs no generated config to reach it.
+            require_once $releaseRoot . '/engine/shared/artifacts.php';
+            require_once $releaseRoot . '/engine/shared/content-access.php';
             $isContentAdminRequest = true;
-            $dashboardOrigin = _stattic_dashboard_origin();
-            header(
-                "Content-Security-Policy: frame-ancestors 'self'"
-                    . ($dashboardOrigin === '' ? '' : ' ' . $dashboardOrigin),
-                true
-            );
-            header('Cache-Control: private, no-store', true);
+            $privateRoot = $installRoot . '/storage';
             $host = _stattic_normalize_hostname((string) ($_SERVER['HTTP_HOST'] ?? ''));
+            // The platform's answer outranks the session. A tombstoned or
+            // held host gets the platform's page from every visitor; leaving
+            // it editable for the rest of a session TTL would let an editor
+            // keep writing into a Space the platform has taken over.
+            $hold = _stattic_content_admin_platform_hold($privateRoot, $host);
+            if ($hold === 'tombstone') {
+                _stattic_problem_response(
+                    404,
+                    'content_admin_space_not_found',
+                    'No editable Space is active for this host.'
+                );
+            }
+            if ($hold !== null) {
+                _stattic_problem_response(
+                    503,
+                    'content_admin_space_unavailable',
+                    'This Space is not editable right now.'
+                );
+            }
             $cookieName = _stattic_content_admin_cookie_name();
             $token = is_string($_COOKIE[$cookieName] ?? null)
                 ? $_COOKIE[$cookieName]
                 : '';
-            $session = _stattic_content_admin_verify_session(
-                $installRoot . '/storage',
-                $token,
-                $host
-            );
+            $session = _stattic_content_admin_verify_session($privateRoot, $token, $host);
             if ($session === null) {
                 _stattic_problem_response(
                     401,
@@ -154,21 +178,11 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 );
             }
             $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = $session['user_id'];
-            $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $session['space_id'];
-            $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $installRoot . '/storage';
-            $GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] = $session['frame_origin'];
-            if (!defined('DISALLOW_FILE_EDIT')) {
-                define('DISALLOW_FILE_EDIT', true);
-            }
-            if (!defined('DISALLOW_FILE_MODS')) {
-                define('DISALLOW_FILE_MODS', true);
-            }
-            if (!defined('AUTOMATIC_UPDATER_DISABLED')) {
-                define('AUTOMATIC_UPDATER_DISABLED', true);
-            }
-            if (!defined('WP_AUTO_UPDATE_CORE')) {
-                define('WP_AUTO_UPDATE_CORE', false);
-            }
+            _stattic_content_admin_enter_wordpress(
+                $privateRoot,
+                $session['space_id'],
+                $session['frame_origin']
+            );
             $bindDatabasePassword();
         }
         if (

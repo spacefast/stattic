@@ -163,6 +163,11 @@ function _stattic_runtime_route_intent_hostnames(string $spaceRoot, ?array $inte
  * redirect/proxy hosts and tombstoned hostnames. Order decides who gets fresh
  * bytes first; the host purge preserves it.
  *
+ * THE collector for "every hostname this space answers on". It is also the set
+ * a space_deleted event carries, which the control plane signs before asking
+ * the runtime to delete the space — so the state preflight and the mutation
+ * must both derive it here, and nothing may derive it a second way.
+ *
  * @return list<string>
  */
 function _stattic_runtime_access_sweep_hostnames(?array $intent, ?array $tombstones): array
@@ -172,7 +177,7 @@ function _stattic_runtime_access_sweep_hostnames(?array $intent, ?array $tombsto
     $unnumbered = [];
     $rest = [];
     foreach (is_array($intent['routes'] ?? null) ? $intent['routes'] : [] as $route) {
-        if (!is_array($route) || !is_string($route['hostname'] ?? null)) {
+        if (!is_array($route) || !is_string($route['hostname'] ?? null) || $route['hostname'] === '') {
             continue;
         }
         $type = is_array($route['target'] ?? null) ? ($route['target']['type'] ?? null) : null;
@@ -202,6 +207,21 @@ function _stattic_runtime_access_sweep_hostnames(?array $intent, ?array $tombsto
     // First occurrence wins, so a tombstoned hostname the intent still serves
     // keeps its serving-order slot.
     return array_values(array_unique($hostnames));
+}
+
+/**
+ * The same set for a caller that does not already hold the two documents.
+ * Reading them here is what keeps the collector single: a caller that has the
+ * documents passes them straight to _stattic_runtime_access_sweep_hostnames.
+ *
+ * @return list<string>
+ */
+function _stattic_runtime_space_sweep_hostnames(string $spaceRoot): array
+{
+    return _stattic_runtime_access_sweep_hostnames(
+        _stattic_runtime_read_json($spaceRoot . '/hostname-intent.json'),
+        _stattic_runtime_read_json($spaceRoot . '/tombstones.json'),
+    );
 }
 
 /**
@@ -298,11 +318,7 @@ function _stattic_runtime_purge_space_hosts_now(
     string $spaceId,
     string $reason
 ): array {
-    $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
-    $hostnames = _stattic_runtime_access_sweep_hostnames(
-        _stattic_runtime_read_json($spaceRoot . '/hostname-intent.json'),
-        _stattic_runtime_read_json($spaceRoot . '/tombstones.json'),
-    );
+    $hostnames = _stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId));
     if ($hostnames === []) {
         return ['status' => 'ok', 'mode' => 'none'];
     }

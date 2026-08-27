@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/private-tree.php';
 require_once __DIR__ . '/streaming.php';
 require_once __DIR__ . '/problem.php';
 require_once __DIR__ . '/response.php';
@@ -1317,23 +1318,20 @@ function _stattic_runtime_blob_put(string $privateRoot, string $spaceId, string 
     _stattic_runtime_blob_commit_verified($privateRoot, $spaceId, $tmpPath, $expected);
 }
 
+// The engine-lane spelling of the guarded delete: assert loudly first (the
+// engine answers a containment failure with a problem document), then hand the
+// walk to the one implementation in shared/private-tree.php, which the content
+// kernel inside WordPress requires too.
 function _stattic_runtime_rm_recursive(string $path): void
 {
-    if (!file_exists($path)) {
+    if (!file_exists($path) && !is_link($path)) {
         return;
     }
     _stattic_runtime_assert_private_path($path);
-    if (is_file($path) || is_link($path)) {
-        unlink($path);
-        return;
-    }
-    foreach (scandir($path) ?: [] as $entry) {
-        if ($entry === '.' || $entry === '..') {
-            continue;
-        }
-        _stattic_runtime_rm_recursive($path . '/' . $entry);
-    }
-    rmdir($path);
+    // Best-effort past the assert, as it has always been: an entry the walk
+    // could not unlink leaves debris for the retention sweep, it does not fail
+    // the mutation that asked for the delete.
+    _stattic_private_tree_remove($path);
 }
 
 function _stattic_runtime_assert_private_path(string $path): void

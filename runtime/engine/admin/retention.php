@@ -11,7 +11,9 @@ require_once __DIR__ . '/upload.php';
 // THE retention registry: everything the bulk tick reclaims is listed here, and
 // listing it is all it takes. A store carries its own window in its descriptor
 // (record-store.php `retention`); a staging root carries one here, because a
-// root is a tree, not a record.
+// root is a tree, not a record. A tree whose survivors are chosen by something
+// other than age gets its own sweeper here, called from the same tick — not its
+// own driver somewhere else.
 //
 // Stores swept where they are written are deliberately absent: the jti replay
 // markers on token consume, upload sessions on version create. They already
@@ -31,6 +33,16 @@ const STATTIC_RUNTIME_ABANDONED_RETENTION_SECONDS = 14 * 86400;
 // it aside; this bounds how long a rolled-aside generation survives before the
 // sweep reclaims it.
 const STATTIC_RUNTIME_LOG_RETENTION_SECONDS = 14 * 86400;
+
+// A killed content compile's stage root. Nothing reads it; the only reason to
+// wait at all is a live compile slower than the sweep, and the compiler's own
+// subprocess deadline is 60s.
+const STATTIC_RUNTIME_CONTENT_STAGE_RETENTION_SECONDS = 3600;
+
+// How many compiled content releases a Space keeps behind its active one, and
+// how long an unreachable one may sit before the sweep takes it.
+const STATTIC_RUNTIME_CONTENT_RELEASES_KEPT = 3;
+const STATTIC_RUNTIME_CONTENT_RELEASE_RETENTION_SECONDS = 7 * 86400;
 
 // Every registered root is globbed on this cadence, not on every bulk tick.
 const STATTIC_RUNTIME_RECLAIM_INTERVAL_SECONDS = 3600;
@@ -83,7 +95,61 @@ function _stattic_runtime_retention_roots(string $privateRoot): array
         // Quarantined by _stattic_runtime_restore_interrupted_version. The
         // sibling `.rust-previous` is live recovery state and is NOT listed.
         [$privateRoot . '/spaces/*/versions/.*.rust-failed-*', STATTIC_RUNTIME_ABANDONED_RETENTION_SECONDS],
+        // A content compile's stage root (content-kernel.php
+        // spacefast_content_compile_schema). The compile removes it on every
+        // path it survives, including its own failures, so one still here is
+        // debris from a killed worker. Nothing reads it and nothing recovers
+        // from it, so the window is only a margin over the compiler's own 60s
+        // subprocess deadline.
+        [$privateRoot . '/spaces/*/content/compile-*', STATTIC_RUNTIME_CONTENT_STAGE_RETENTION_SECONDS],
     ];
+}
+
+/**
+ * Compiled content releases, which age out by COUNT before they age out by
+ * clock: every schema.compile writes a new revision tree and repoints
+ * active-release at it, so a Space that compiles often would otherwise keep one
+ * tree per compile forever.
+ *
+ * Two things must survive: the release the pointer names, whatever its age —
+ * deleting it is a site outage for that Space's compiled schema — and the
+ * newest few behind it, so a worker that resolved the pointer just before a
+ * compile keeps serving, and so a bad compile can be pointed back at its
+ * predecessor. Everything past that is unreachable, and reclaimed once it is
+ * also cold.
+ *
+ * @return int releases reclaimed
+ */
+function _stattic_runtime_reclaim_content_releases(string $privateRoot, ?int $now = null): int
+{
+    $now ??= time();
+    $deadline = $now - STATTIC_RUNTIME_CONTENT_RELEASE_RETENTION_SECONDS;
+    $reclaimed = 0;
+    foreach (glob($privateRoot . '/spaces/*/content') ?: [] as $contentRoot) {
+        $active = _stattic_private_tree_read_pointer($contentRoot . '/active-release', 128);
+        $releases = [];
+        foreach (glob($contentRoot . '/releases/*') ?: [] as $release) {
+            if (!is_dir($release)) {
+                continue;
+            }
+            $mtime = filemtime($release);
+            $releases[$release] = $mtime === false ? $now : $mtime;
+        }
+        arsort($releases);
+        $kept = 0;
+        foreach ($releases as $release => $mtime) {
+            if (basename($release) === $active || $kept < STATTIC_RUNTIME_CONTENT_RELEASES_KEPT) {
+                $kept += 1;
+                continue;
+            }
+            if ($mtime > $deadline) {
+                continue;
+            }
+            _stattic_runtime_rm_recursive($release);
+            $reclaimed += 1;
+        }
+    }
+    return $reclaimed;
 }
 
 function _stattic_runtime_job_housekeeping_retention(string $privateRoot, array $claims = []): void
@@ -102,6 +168,10 @@ function _stattic_runtime_job_housekeeping_retention(string $privateRoot, array 
                 if ($count > 0) {
                     $reclaimed[_stattic_runtime_relative_to($privateRoot, $pattern)] = $count;
                 }
+            }
+            $releases = _stattic_runtime_reclaim_content_releases($privateRoot);
+            if ($releases > 0) {
+                $reclaimed['spaces/*/content/releases'] = $releases;
             }
             if ($reclaimed !== []) {
                 _stattic_runtime_append_journal($privateRoot, [

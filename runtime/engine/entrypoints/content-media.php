@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 $engineRoot = dirname(__DIR__);
 require_once $engineRoot . '/shared/bootstrap-config.php';
+require_once $engineRoot . '/shared/cache-policy.php';
 require_once $engineRoot . '/shared/context.php';
 require_once $engineRoot . '/shared/content-access.php';
 require_once $engineRoot . '/shared/content-admin.php';
@@ -12,10 +13,21 @@ require_once $engineRoot . '/shared/storage.php';
 
 const SPACEFAST_CONTENT_MEDIA_PATH_PREFIX = '/__spacefast/content-media/';
 
+/**
+ * Every response this lane sends is private: media bytes belong to one Space
+ * and are reachable only through a scope segment derived from its id. The lane
+ * states that one input and shared/cache-policy.php decides, so this endpoint
+ * is not a second author of a caching rule.
+ */
+function _stattic_content_media_cache_control(): string
+{
+    return (string) _stattic_cache_policy(['private' => true])['cache_control'];
+}
+
 function _stattic_content_media_refuse(int $status): never
 {
     _stattic_response_send($status, $status === 503 ? 'Unavailable' : 'Not Found', 'text/plain; charset=UTF-8', [
-        'Cache-Control' => 'private, no-store',
+        'Cache-Control' => _stattic_content_media_cache_control(),
         'Referrer-Policy' => 'no-referrer',
         'X-Content-Type-Options' => 'nosniff',
     ]);
@@ -138,7 +150,11 @@ if (
 
 $size = filesize($fileReal);
 $headers = [
-    'Cache-Control' => 'private, no-store',
+    // Space media is never shareable: shared/cache-policy.php is the one author
+    // of that verdict, and asking it (rather than restating the literal) is what
+    // keeps this lane inside the sticky no-store flags — a share-link token in
+    // the URL, an identity cookie mutation, a cleared invalid access cookie.
+    'Cache-Control' => _stattic_content_media_cache_control(),
     'Content-Security-Policy' => 'sandbox',
     'Content-Type' => _stattic_content_media_type($fileReal),
     'Referrer-Policy' => 'no-referrer',

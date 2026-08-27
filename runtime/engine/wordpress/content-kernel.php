@@ -6,6 +6,14 @@
  */
 declare(strict_types=1);
 
+// The kernel's one dependency on the engine tree. shared/private-tree.php has
+// no requires of its own and decides nothing on the kernel's behalf: it holds
+// the containment-guarded delete and the verified pointer publish that the
+// kernel would otherwise open-code (and once did, unguarded and @-suppressed).
+// Relative to this file, so it resolves inside whichever immutable release
+// loaded the kernel.
+require_once __DIR__ . '/../shared/private-tree.php';
+
 const SPACEFAST_CONTENT_SCHEMA_FORMAT = 'spacefast.content.schema';
 const SPACEFAST_CONTENT_QUERY_FORMAT = 'spacefast.content.query';
 const SPACEFAST_CONTENT_API_VERSION = 1;
@@ -101,6 +109,25 @@ function spacefast_content_require_space_id(): string
         throw new Spacefast_Content_Error(403, 'content_space_scope_invalid', 'Content requires a valid Space scope.');
     }
     return $spaceId;
+}
+
+/**
+ * Where one Space's compiled content releases live, beside every other
+ * per-Space tree (versions/, routes/, content-media/).
+ *
+ * A wp.cloud site hosts many Spaces. This tree used to hang off the box-wide
+ * private root, which made the compiled release and its active-release pointer
+ * box state: one Space's schema.compile replaced the schema every Space on the
+ * box read. The path is the fix — it is also the only reason a compiled release
+ * needs no tenant check at read time.
+ *
+ * `wordpress-content-loader.php` derives the same path independently, from the
+ * install root and the request's Space, because it runs before the kernel is
+ * loaded. Keep the two spellings in step.
+ */
+function spacefast_content_release_root(string $privateRoot, string $spaceId): string
+{
+    return rtrim($privateRoot, '/') . '/spaces/' . $spaceId . '/content';
 }
 
 function spacefast_content_option_name(string $base): string
@@ -1504,7 +1531,7 @@ function spacefast_content_compile_schema(mixed $bundle, bool $managed): array
         throw new Spacefast_Content_Error(503, 'content_compiler_unavailable', 'The content compiler is not ready.');
     }
 
-    $contentRoot = rtrim($privateRoot, '/') . '/content';
+    $contentRoot = spacefast_content_release_root($privateRoot, spacefast_content_require_space_id());
     $releasesRoot = $contentRoot . '/releases';
     if ((!is_dir($releasesRoot) && !mkdir($releasesRoot, 0750, true)) || !is_dir($releasesRoot)) {
         throw new Spacefast_Content_Error(503, 'content_compiler_storage_unavailable', 'Content compiler storage is unavailable.');
@@ -1552,6 +1579,7 @@ function spacefast_content_compile_schema(mixed $bundle, bool $managed): array
             throw new Spacefast_Content_Error(422, 'content_compile_failed', 'The Payload content config could not be compiled.');
         }
         $artifact = spacefast_content_validate_compiler_artifact($outputRoot);
+        spacefast_content_require_no_compiled_collision($artifact);
         $revisionHash = hash_init('sha256');
         foreach (['schema.json', 'hooks.json', 'payloadwp.php', 'payloadwp-admin.js', 'payloadwp-admin.css'] as $file) {
             hash_update($revisionHash, $file . "\0" . (string) file_get_contents($outputRoot . '/' . $file) . "\0");
@@ -1561,14 +1589,7 @@ function spacefast_content_compile_schema(mixed $bundle, bool $managed): array
         if (!is_dir($release) && !rename($outputRoot, $release)) {
             throw new Spacefast_Content_Error(500, 'content_compile_publish_failed', 'The compiled content revision could not be published.');
         }
-        $pointer = $contentRoot . '/active-release';
-        $temporaryPointer = $pointer . '.tmp.' . bin2hex(random_bytes(8));
-        if (
-            file_put_contents($temporaryPointer, $revision . "\n", LOCK_EX) === false
-            || !chmod($temporaryPointer, 0640)
-            || !rename($temporaryPointer, $pointer)
-        ) {
-            @unlink($temporaryPointer);
+        if (!_stattic_private_tree_write_pointer($contentRoot . '/active-release', $revision)) {
             throw new Spacefast_Content_Error(500, 'content_compile_pointer_failed', 'The compiled content revision could not be activated.');
         }
         return [
@@ -1583,7 +1604,7 @@ function spacefast_content_compile_schema(mixed $bundle, bool $managed): array
             )),
         ];
     } finally {
-        spacefast_content_remove_tree($stageRoot);
+        _stattic_private_tree_remove($stageRoot);
         flock($lock, LOCK_UN);
         fclose($lock);
     }
@@ -1661,6 +1682,45 @@ function spacefast_content_validate_compiler_artifact(string $root): array
     return $schema;
 }
 
+/**
+ * Refuse a compiled artifact whose collection slug is already an applied
+ * manifest collection.
+ *
+ * Both schema lanes exist on purpose, and spacefast_content_resolve_collection()
+ * tries the compiled one first. So a compile naming a slug the manifest already
+ * owns did not merge with it — it replaced it, wholesale and silently, for
+ * every reader: different post type, different fields, and `public => false`,
+ * which turns a published collection authenticated-only. Nothing in the
+ * response said so.
+ *
+ * Coexistence is fine; collision is not. Loud at compile time is the only place
+ * the author can still fix it, and the applied manifest is what a live Space is
+ * already serving, so the compile is what yields.
+ *
+ * (The builtin `media`/`posts`/`pages` slugs are shadowable the same way. That
+ * is deliberately still allowed: a Payload config naming `posts` is a normal
+ * thing to write, and the two lanes' relationship is a pending product
+ * decision. Only the applied-manifest collision is an error.)
+ */
+function spacefast_content_require_no_compiled_collision(array $artifact): void
+{
+    $applied = spacefast_content_manifest()['collections'] ?? null;
+    if (!is_array($applied) || $applied === []) {
+        return;
+    }
+    foreach ($artifact['collections'] as $collection) {
+        $slug = is_array($collection) ? ($collection['slug'] ?? null) : null;
+        if (is_string($slug) && isset($applied[$slug])) {
+            throw new Spacefast_Content_Error(
+                409,
+                'content_collection_slug_conflict',
+                'The compiled collection "' . $slug . '" is already an applied collection. '
+                    . 'Rename the Payload collection, or remove the applied one first.'
+            );
+        }
+    }
+}
+
 function spacefast_content_ir_field_count(array $schema): int
 {
     $countFields = static function (array $fields) use (&$countFields): int {
@@ -1687,28 +1747,32 @@ function spacefast_content_ir_field_count(array $schema): int
     return $count;
 }
 
-function spacefast_content_remove_tree(string $path): void
-{
-    if (!is_dir($path)) {
-        @unlink($path);
-        return;
-    }
-    foreach (new FilesystemIterator($path, FilesystemIterator::SKIP_DOTS) as $entry) {
-        if ($entry->isDir() && !$entry->isLink()) {
-            spacefast_content_remove_tree($entry->getPathname());
-        } else {
-            @unlink($entry->getPathname());
-        }
-    }
-    @rmdir($path);
-}
-
 function spacefast_content_apply_schema(mixed $manifest, bool $managed): array
 {
     if (!$managed) {
         throw new Spacefast_Content_Error(401, 'content_auth_required', 'Schema changes require Spacefast authorization.');
     }
     $validated = spacefast_content_validate_manifest($manifest);
+    // The same collision, approached from the other lane. An applied collection
+    // whose name a compiled release already owns would be stored and then never
+    // resolved, because the compiled lane is tried first — an apply that
+    // reports a revision and changes nothing a reader sees.
+    $compiled = [];
+    foreach (spacefast_content_compiled_schema()['collections'] as $collection) {
+        if (is_array($collection) && is_string($collection['slug'] ?? null)) {
+            $compiled[$collection['slug']] = true;
+        }
+    }
+    foreach (array_keys($validated['collections']) as $name) {
+        if (isset($compiled[$name])) {
+            throw new Spacefast_Content_Error(
+                409,
+                'content_collection_slug_conflict',
+                'The collection "' . $name . '" is already a compiled Payload collection. '
+                    . 'Rename it, or recompile without that collection first.'
+            );
+        }
+    }
     $current = spacefast_content_manifest();
     $nextResourceIds = [];
     foreach ($validated['collections'] as $collection) {

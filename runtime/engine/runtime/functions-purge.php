@@ -7,9 +7,11 @@
  * origin to drop its hosts' edge entries after a mutation the static publish
  * pipeline never saw: an ISR revalidate, a webhook-driven content change. The
  * caller authenticates with the bearer purge credential in `sf-purge-token`,
- * carries `{paths: string[]}`, and gets a 202: accepted into the durable purge
- * queue, not confirmed by the edge. It is the same queue and provider bridge
- * every management mutation already drains through (shared/purge.php).
+ * carries `{paths: string[]}`, and gets a 202: accepted, never edge-confirmed.
+ * It goes through the same provider bridge every management mutation uses
+ * (shared/purge.php), which defers the loopback call past
+ * fastcgi_finish_request. There is no queue behind that 202 — shared/purge.php
+ * says why a same-box loopback POST does not need one.
  *
  * Paths only, no tags: a tag names a group only the worker's own cache object
  * understands, and OpenNext resolves tags to concrete routes BEFORE minting

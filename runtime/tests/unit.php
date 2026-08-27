@@ -15,6 +15,7 @@ require_once __DIR__ . '/../engine/runtime/access-rules.php'; // unified Rule ma
 require_once __DIR__ . '/../engine/shared/artifacts.php'; // route pattern + artifact path guards
 require_once __DIR__ . '/../engine/shared/storage.php';
 require_once __DIR__ . '/../engine/shared/purge.php';
+require_once __DIR__ . '/../engine/admin/retention.php'; // THE retention registry + the sweepers it drives
 require_once __DIR__ . '/../engine/admin/generate.php'; // hostname-intent scope derivation (pure with an injected intent)
 require_once __DIR__ . '/../engine/admin/jobs.php'; // job runner policy (§22), pure functions only here
 require_once __DIR__ . '/../engine/runtime/functions-artifacts.php'; // signed build-artifact reads
@@ -2648,6 +2649,17 @@ check(
         && _stattic_runtime_access_sweep_hostnames(null, ['hostnames' => ['t.example']]) === ['t.example'],
     'access sweep tolerates a space with no stored intent'
 );
+// The disk-reading spelling. The space purge and the storage key rotation hold
+// neither document, and derive the set only through this one collector.
+file_put_contents(
+    _stattic_space_root($scopeRoot, 'spc_scope') . '/tombstones.json',
+    json_encode(['hostnames' => ['retired.example', 'site.view.fast']])
+);
+check(
+    _stattic_runtime_space_sweep_hostnames(_stattic_space_root($scopeRoot, 'spc_scope'))
+        === ['site.view.fast', 'retired.example'],
+    'the disk-reading sweep spelling reads the current intent and tombstones in sweep order'
+);
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($scopeRoot)));
 
 // --- Version catalog + gate sidecars ------------------------------------------------
@@ -2846,6 +2858,68 @@ check(getenv('SPACEFAST_TEST_UNSET_ME') === 'present', 'subprocess env scope: un
 check(getenv('SPACEFAST_TEST_EXPORTED') === false, 'subprocess env scope: extras removed after');
 putenv('SPACEFAST_TEST_UNSET_ME');
 putenv('SPACEEFAST_UNRELATED');
+
+// --- Compiled content release retention (admin/retention.php) -----------------------
+//
+// Every schema.compile writes a new revision tree and repoints active-release.
+// Nothing else reclaims them, so the registry has to: the pointer's target and
+// the newest few behind it survive whatever their age, everything past that
+// goes once it is cold.
+$contentRetentionRoot = realpath(sys_get_temp_dir()) . '/sf-content-retention-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
+$contentSpaceRoot = $contentRetentionRoot . '/spaces/spc_retain/content';
+mkdir($contentSpaceRoot . '/releases', 0o777, true);
+$contentRevisions = [];
+foreach (range(0, 5) as $index) {
+    $revision = str_repeat(dechex($index), 64);
+    $contentRevisions[] = $revision;
+    mkdir($contentSpaceRoot . '/releases/' . $revision, 0o777, true);
+    // Oldest first, all well past the retention window.
+    touch($contentSpaceRoot . '/releases/' . $revision, time() - (30 * 86400) + $index);
+}
+// A crashed compile's stage root is registered too, and is not a release.
+mkdir($contentSpaceRoot . '/compile-' . str_repeat('c', 24), 0o777, true);
+check(
+    _stattic_private_tree_write_pointer($contentSpaceRoot . '/active-release', $contentRevisions[0]),
+    'the compiled release pointer publishes through the shared verified write'
+);
+check(
+    _stattic_private_tree_read_pointer($contentSpaceRoot . '/active-release', 128) === $contentRevisions[0],
+    'the published pointer reads back as the revision that was written'
+);
+check(
+    _stattic_runtime_reclaim_content_releases($contentRetentionRoot) === 2,
+    'content retention reclaims only the releases past the kept window'
+);
+$survivors = array_map('basename', glob($contentSpaceRoot . '/releases/*') ?: []);
+sort($survivors);
+$expectedSurvivors = [$contentRevisions[0], $contentRevisions[3], $contentRevisions[4], $contentRevisions[5]];
+sort($expectedSurvivors);
+check(
+    $survivors === $expectedSurvivors,
+    'content retention keeps the active release whatever its age, plus the newest three'
+);
+check(
+    in_array(
+        [$contentRetentionRoot . '/spaces/*/content/compile-*', STATTIC_RUNTIME_CONTENT_STAGE_RETENTION_SECONDS],
+        _stattic_runtime_retention_roots($contentRetentionRoot),
+        true
+    ),
+    'a crashed compile stage root is a registered retention root'
+);
+// The guard the kernel gained: nothing outside private storage is removable,
+// and the private root itself is not inside itself.
+check(
+    !_stattic_private_tree_remove(realpath(sys_get_temp_dir()) . '/sf-not-private')
+        && !_stattic_private_tree_remove($contentRetentionRoot)
+        && !_stattic_private_tree_write_pointer(realpath(sys_get_temp_dir()) . '/sf-not-private', 'x'),
+    'the shared private-tree guard refuses anything outside a .stattic/storage tree'
+);
+_stattic_runtime_rm_recursive($contentSpaceRoot);
+check(
+    !is_dir($contentSpaceRoot),
+    'the engine-lane delete removes a whole tree through the shared walk'
+);
+_stattic_job_runner_unit_rm_recursive(dirname(dirname($contentRetentionRoot)));
 
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");

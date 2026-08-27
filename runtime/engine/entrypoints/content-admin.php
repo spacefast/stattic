@@ -3,12 +3,13 @@ declare(strict_types=1);
 
 $engineRoot = dirname(__DIR__);
 require_once $engineRoot . '/shared/bootstrap-config.php';
+require_once $engineRoot . '/shared/cache-policy.php';
 require_once $engineRoot . '/shared/context.php';
 require_once $engineRoot . '/shared/content-admin.php';
 require_once $engineRoot . '/shared/storage.php';
 
 _stattic_emit_runtime_identity();
-header('Cache-Control: private, no-store', true);
+header('Cache-Control: ' . (string) _stattic_cache_policy(['private' => true])['cache_control'], true);
 header('Referrer-Policy: no-referrer', true);
 
 $privateRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
@@ -21,28 +22,17 @@ if (
 ) {
     _stattic_problem_response(401, 'content_admin_ticket_invalid', 'This content editor link is invalid or expired.');
 }
-$GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] = $launch['frame_origin'];
-header("Content-Security-Policy: frame-ancestors 'self' " . $launch['frame_origin'], true);
-
 $GLOBALS['SPACEFAST_CONTENT_ADMIN_IDENTITY'] = $launch['identity'];
-$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $launch['authorization']['space_id'];
 $publicRoot = dirname(_stattic_runtime_install_root($engineRoot));
 $wpLoad = $publicRoot . '/wp-load.php';
 if (!is_file($wpLoad)) {
     _stattic_problem_response(503, 'content_wordpress_unavailable', 'The Space content service is not ready.');
 }
-if (!defined('DISALLOW_FILE_EDIT')) {
-    define('DISALLOW_FILE_EDIT', true);
-}
-if (!defined('DISALLOW_FILE_MODS')) {
-    define('DISALLOW_FILE_MODS', true);
-}
-if (!defined('AUTOMATIC_UPDATER_DISABLED')) {
-    define('AUTOMATIC_UPDATER_DISABLED', true);
-}
-if (!defined('WP_AUTO_UPDATE_CORE')) {
-    define('WP_AUTO_UPDATE_CORE', false);
-}
+_stattic_content_admin_enter_wordpress(
+    $privateRoot,
+    $launch['authorization']['space_id'],
+    $launch['frame_origin']
+);
 require $wpLoad;
 
 $userId = function_exists('spacefast_content_admin_establish_user')

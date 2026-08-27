@@ -308,10 +308,95 @@ function _stattic_content_admin_verify_session(
     ];
 }
 
-function _stattic_content_admin_request_path(string $path): bool
+/**
+ * THE editor-lane request predicate. `/wp-json` is in it because WordPress's
+ * own admin screens call the REST API for everything they save, and
+ * `/?rest_route=` because that is where the REST API answers when pretty
+ * permalinks are off — the three are one lane, and whatever gate answers one
+ * has to answer all of them. A second, narrower spelling elsewhere is how one
+ * of them ends up ungated.
+ *
+ * `$query` is the request's query parameters ($_GET at the gate). It stays a
+ * parameter rather than a global read so the predicate is still a pure
+ * function of the request.
+ */
+function _stattic_content_admin_request_path(string $path, array $query = []): bool
 {
     return $path === '/wp-admin'
         || str_starts_with($path, '/wp-admin/')
         || $path === '/wp-json'
-        || str_starts_with($path, '/wp-json/');
+        || str_starts_with($path, '/wp-json/')
+        || ($path === '/' && isset($query['rest_route']));
+}
+
+/**
+ * Establish the WordPress context the content editor runs inside: the frame
+ * policy, the request's Space, and the constants that keep a WordPress install
+ * from editing or updating itself. Both editor entries — the ticket redemption
+ * at /__spacefast/content-admin.php and the session-bound /wp-admin lane in
+ * custom-redirects.php — call this and nothing else, so the two can never
+ * establish subtly different contexts.
+ *
+ * ONE frame-origin source, in priority order: the per-request origin the
+ * launch carried (ticket, then the session minted from it), because that is
+ * the dashboard that actually opened this editor and it is signed. The box
+ * env (_stattic_dashboard_origin) is the fallback for a request whose launch
+ * origin did not survive — it is box-wide configuration, not a fact about
+ * this request, so it never overrides one.
+ */
+function _stattic_content_admin_enter_wordpress(
+    string $privateRoot,
+    string $spaceId,
+    ?string $frameOrigin
+): void {
+    $origin = is_string($frameOrigin) && $frameOrigin !== ''
+        ? $frameOrigin
+        : (function_exists('_stattic_dashboard_origin') ? _stattic_dashboard_origin() : '');
+    header(
+        "Content-Security-Policy: frame-ancestors 'self'" . ($origin === '' ? '' : ' ' . $origin),
+        true
+    );
+    // shared/cache-policy.php is the one Cache-Control author; the editor is
+    // per-session by construction.
+    header('Cache-Control: ' . (string) _stattic_cache_policy(['private' => true])['cache_control'], true);
+    header('Referrer-Policy: no-referrer', true);
+    $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
+    $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
+    $GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] = $origin;
+    foreach ([
+        'DISALLOW_FILE_EDIT' => true,
+        'DISALLOW_FILE_MODS' => true,
+        'AUTOMATIC_UPDATER_DISABLED' => true,
+        'WP_AUTO_UPDATE_CORE' => false,
+    ] as $name => $value) {
+        if (!defined($name)) {
+            define($name, $value);
+        }
+    }
+}
+
+/**
+ * The platform's own answer for this host, when it has one.
+ *
+ * The editor lane consults the SAME facts the visitor lane does
+ * (_stattic_content_access_target), because a Space the platform has taken over
+ * — tombstoned, or held behind the platform error page — must not stay editable
+ * for the remainder of a session TTL while every visitor gets the platform's
+ * answer. Only the platform hold refuses: an `absent` target with no hold is the
+ * normal unpublished Space the editor exists to fill.
+ *
+ * The exposure fence is deliberately NOT consulted. The visitor lane fails
+ * closed on it because it is about to serve bytes under a policy that is
+ * mid-commit. An editor session is bound to an accessGeneration
+ * (_stattic_content_admin_verify_session), and the same runtime sync that
+ * commits the new exposure projection pushes the new generation
+ * (control-plane runtime-sync `contentAuthorization`), so the session the fence
+ * would have blocked is revoked by the commit the fence was announcing. Fencing
+ * here would only close the editor during every routine access change.
+ */
+function _stattic_content_admin_platform_hold(string $privateRoot, string $requestHost): ?string
+{
+    $target = _stattic_content_access_target($privateRoot, $requestHost);
+    $hold = $target['kind'] === 'absent' ? ($target['hold'] ?? null) : null;
+    return is_string($hold) ? $hold : null;
 }

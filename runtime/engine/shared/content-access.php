@@ -8,13 +8,22 @@ declare(strict_types=1);
  * Space named by the runtime route pointers. Reusing the serving projection is
  * what makes the existing visitor access engine authoritative here too.
  *
- * @return array{kind: 'present', open: bool, space_id: string, version_id: string, serving: array}|array{kind: 'absent'|'unavailable'}
+ * `absent` carries `hold`: the platform's own route_action for the host when
+ * the platform has taken the host over ('tombstone' / 'platform_error'), null
+ * when the host simply names no Space or no version. The two are the same
+ * answer to a visitor and very different answers to the editor lane, which
+ * serves an unpublished Space on purpose but must never stay editable behind a
+ * platform hold.
+ *
+ * @return array{kind: 'present', open: bool, space_id: string, version_id: string, serving: array}|array{kind: 'absent', hold: ?string}|array{kind: 'unavailable'}
  */
 function _stattic_content_access_target(string $privateRoot, string $requestHost): array
 {
     $routesRead = _sf_pointer_read('routes', $privateRoot . '/routes/current.json');
     if ($routesRead['kind'] !== 'present' || !is_array($routesRead['value'])) {
-        return ['kind' => $routesRead['kind']];
+        return $routesRead['kind'] === 'absent'
+            ? ['kind' => 'absent', 'hold' => null]
+            : ['kind' => 'unavailable'];
     }
     $host = _stattic_v4_host_lookup(
         $privateRoot,
@@ -27,14 +36,12 @@ function _stattic_content_access_target(string $privateRoot, string $requestHost
     $hostEntry = is_array($host['entry'] ?? null) ? $host['entry'] : null;
     $spaceId = is_string($hostEntry['space_id'] ?? null) ? $hostEntry['space_id'] : '';
     if ($hostEntry === null || $spaceId === '') {
-        return ['kind' => 'absent'];
+        return ['kind' => 'absent', 'hold' => null];
     }
     $hostAction = is_array($hostEntry['route_action'] ?? null) ? $hostEntry['route_action'] : null;
-    if (
-        is_array($hostAction)
-        && in_array(($hostAction['action'] ?? null), ['tombstone', 'platform_error'], true)
-    ) {
-        return ['kind' => 'absent'];
+    $holdAction = is_array($hostAction) ? ($hostAction['action'] ?? null) : null;
+    if (in_array($holdAction, ['tombstone', 'platform_error'], true)) {
+        return ['kind' => 'absent', 'hold' => (string) $holdAction];
     }
 
     $spaceRead = _sf_pointer_read(
@@ -42,7 +49,9 @@ function _stattic_content_access_target(string $privateRoot, string $requestHost
         $privateRoot . '/spaces/' . $spaceId . '/space.json'
     );
     if ($spaceRead['kind'] !== 'present' || !is_array($spaceRead['value'])) {
-        return ['kind' => $spaceRead['kind'] === 'present' ? 'unavailable' : $spaceRead['kind']];
+        return $spaceRead['kind'] === 'absent'
+            ? ['kind' => 'absent', 'hold' => null]
+            : ['kind' => 'unavailable'];
     }
     $overlay = _stattic_v4_overlay($privateRoot, $spaceId, $spaceRead['value']);
     if ($overlay === false || $overlay === null || ($overlay['fence'] ?? null) === 'exposure') {
@@ -50,7 +59,7 @@ function _stattic_content_access_target(string $privateRoot, string $requestHost
     }
     $versionId = _stattic_v4_version_for_host($hostEntry, $overlay);
     if ($versionId === null) {
-        return ['kind' => 'absent'];
+        return ['kind' => 'absent', 'hold' => null];
     }
     return [
         'kind' => 'present',

@@ -7,7 +7,11 @@ const repoRoot = path.resolve(import.meta.dir, "../..");
 const kernel = path.join(repoRoot, "runtime/engine/wordpress/content-kernel.php");
 const contentLoader = path.join(repoRoot, "runtime/wordpress-content-loader.php");
 
-test("the MU loader follows immutable engine and compiled content pointers", () => {
+// The engine release pointer is box state: one immutable engine serves the whole
+// site. The compiled content release is NOT — a wp.cloud site hosts many Spaces,
+// and each compiles its own Payload schema — so it hangs off the request's
+// Space, and a request with no Space loads none.
+test("the MU loader follows the box engine pointer and the request Space's content pointer", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-content-loader-"));
   const publicRoot = path.join(root, "public");
   const muPlugin = path.join(publicRoot, "wp-content/mu-plugins/spacefast-content.php");
@@ -22,30 +26,32 @@ test("the MU loader follows immutable engine and compiled content pointers", () 
       `<?php $GLOBALS['loaded_kernel'] = ${JSON.stringify(release)};`,
     );
   }
-  const revisions = ["a".repeat(64), "b".repeat(64)];
-  for (const revision of revisions) {
-    const compiledRoot = path.join(publicRoot, ".stattic/storage/content/releases", revision);
+  // Two Spaces on one box, each with its own compiled revision and pointer.
+  const spaces = { spc_alpha: "a".repeat(64), spc_beta: "b".repeat(64) };
+  for (const [spaceId, revision] of Object.entries(spaces)) {
+    const contentRoot = path.join(publicRoot, ".stattic/storage/spaces", spaceId, "content");
+    const compiledRoot = path.join(contentRoot, "releases", revision);
     mkdirSync(compiledRoot, { recursive: true });
     writeFileSync(
       path.join(compiledRoot, "payloadwp.php"),
-      `<?php $GLOBALS['loaded_content'] = ${JSON.stringify(revision)};`,
+      `<?php $GLOBALS['loaded_content'] = ${JSON.stringify(`${spaceId}:${revision}`)};`,
     );
+    writeFileSync(path.join(contentRoot, "active-release"), `${revision}\n`);
   }
-  mkdirSync(path.join(publicRoot, ".stattic/storage/content"), { recursive: true });
 
-  const load = (release: string, revision: string) => {
+  const load = (release: string, spaceId: string | null) => {
     writeFileSync(path.join(publicRoot, ".stattic/active-release"), `releases/${release}\n`);
-    writeFileSync(
-      path.join(publicRoot, ".stattic/storage/content/active-release"),
-      `${revision}\n`,
-    );
+    const scope =
+      spaceId === null
+        ? ""
+        : `$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = ${JSON.stringify(spaceId)};`;
     const result = Bun.spawnSync({
       cmd: [
         "php",
         "-d",
         "auto_prepend_file=",
         "-r",
-        `require $argv[1]; echo json_encode([$GLOBALS['loaded_kernel'] ?? null, $GLOBALS['loaded_content'] ?? null]);`,
+        `${scope} require $argv[1]; echo json_encode([$GLOBALS['loaded_kernel'] ?? null, $GLOBALS['loaded_content'] ?? null]);`,
         muPlugin,
       ],
     });
@@ -54,8 +60,15 @@ test("the MU loader follows immutable engine and compiled content pointers", () 
   };
 
   try {
-    expect(load("release-a", revisions[0])).toEqual(["release-a", revisions[0]]);
-    expect(load("release-b", revisions[1])).toEqual(["release-b", revisions[1]]);
+    expect(load("release-a", "spc_alpha")).toEqual(["release-a", `spc_alpha:${spaces.spc_alpha}`]);
+    // Same box, same engine release, different Space: the compile spc_alpha
+    // just published must not follow the request over.
+    expect(load("release-b", "spc_beta")).toEqual(["release-b", `spc_beta:${spaces.spc_beta}`]);
+    // A Space with nothing compiled, and a request carrying no Space at all
+    // (wp-cron): the engine still loads, no compiled release does.
+    expect(load("release-b", "spc_gamma")).toEqual(["release-b", null]);
+    expect(load("release-b", null)).toEqual(["release-b", null]);
+    expect(load("release-b", "../spc_alpha")).toEqual(["release-b", null]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1045,4 +1058,88 @@ echo json_encode(['codes' => $codes, 'valid' => $valid]);
       images: [7, 9],
     },
   });
+});
+
+// Both schema lanes stay, and spacefast_content_resolve_collection() tries the
+// compiled one first. That makes a shared slug a silent replacement — different
+// post type, different fields, and `public => false`, which turns a published
+// collection authenticated-only — so a collision has to fail where the author
+// can still fix it, from whichever lane arrives second.
+test("a compiled collection slug never silently shadows an applied one", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-content-collision-"));
+  writeFileSync(
+    path.join(root, "schema.json"),
+    JSON.stringify({
+      schema_version: 3,
+      collections: [{ slug: "articles", wordpress_storage: "post", fields: [] }],
+      globals: [],
+      hooks: [],
+    }),
+  );
+  const applied = {
+    format: "spacefast.content.schema",
+    version: 1,
+    collections: {
+      articles: {
+        name: "articles",
+        resourceId: "res_articles_1",
+        label: "Articles",
+        singularLabel: "Article",
+        fields: {},
+      },
+    },
+  };
+  const script = String.raw`
+function get_option(string $name, mixed $default = false): mixed {
+  return $GLOBALS['applied_manifest'] ?? $default;
+}
+function update_option(string $name, mixed $value, bool $autoload = true): bool { return true; }
+require $argv[1];
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+$GLOBALS['applied_manifest'] = json_decode($argv[3], true);
+$attempt = static function (callable $run): mixed {
+  try {
+    $run();
+    return null;
+  } catch (Spacefast_Content_Error $error) {
+    return [$error->status, $error->codeName];
+  }
+};
+$compiledArtifact = json_decode((string) file_get_contents($argv[2] . '/schema.json'), true);
+$collides = $attempt(static fn () => spacefast_content_require_no_compiled_collision($compiledArtifact));
+$coexists = $attempt(static fn () => spacefast_content_require_no_compiled_collision(
+  ['collections' => [['slug' => 'notes']]]
+));
+// The other lane: apply a manifest naming a slug the compiled release owns.
+$GLOBALS['applied_manifest'] = null;
+$GLOBALS['SPACEFAST_CONTENT_COMPILED_RELEASE_ROOT'] = $argv[2];
+$manifest = json_decode($argv[3], true);
+$applyCollides = $attempt(static fn () => spacefast_content_apply_schema($manifest, true));
+$manifest['collections']['notes'] = $manifest['collections']['articles'] + ['name' => 'notes'];
+$manifest['collections']['notes']['name'] = 'notes';
+unset($manifest['collections']['articles']);
+$applyCoexists = $attempt(static fn () => spacefast_content_apply_schema($manifest, true));
+echo json_encode([
+  'compile_collides' => $collides,
+  'compile_coexists' => $coexists,
+  'apply_collides' => $applyCollides,
+  'apply_coexists' => $applyCoexists,
+]);
+`;
+  try {
+    const process = Bun.spawnSync(["php", "-r", script, kernel, root, JSON.stringify(applied)], {
+      cwd: repoRoot,
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    expect(process.exitCode, process.stderr.toString()).toBe(0);
+    expect(JSON.parse(process.stdout.toString())).toEqual({
+      compile_collides: [409, "content_collection_slug_conflict"],
+      compile_coexists: null,
+      apply_collides: [409, "content_collection_slug_conflict"],
+      apply_coexists: null,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

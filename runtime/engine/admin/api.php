@@ -218,6 +218,7 @@ function _stattic_runtime_admin_management_routes(): array
         ['GET', '#^/storage/read-key$#', 'storage_read_key', [], 'none', false, '_stattic_storage_read_key_get'],
         ['POST', '#^/storage/read-key/rotate$#', 'rotate_storage_read_key', [], 'site', false, '_stattic_storage_read_key_rotate'],
         ['PUT', '#^/spaces/([^/]+)/build-sources/([^/]+)$#', 'build_source_put', ['space_id' => 1, 'build_id' => 2], 'space', true, '_stattic_build_source_put'],
+        ['POST', '#^/spaces/([^/]+)/static-zip$#', 'ingest_static_zip', ['space_id' => 1], 'space', true, '_stattic_runtime_static_zip_ingest'],
         ['GET', '#^/spaces/([^/]+)/build-sources/([^/]+)$#', 'build_source_get', ['space_id' => 1, 'build_id' => 2], 'none', false, '_stattic_build_source_get'],
         ['GET', '#^/spaces/([^/]+)/build-sources/([^/]+)/body$#', 'build_source_read', ['space_id' => 1, 'build_id' => 2], 'none', true, '_stattic_build_source_read'],
         ['DELETE', '#^/spaces/([^/]+)/build-sources/([^/]+)$#', 'build_source_delete', ['space_id' => 1, 'build_id' => 2], 'space', false, '_stattic_build_source_delete'],

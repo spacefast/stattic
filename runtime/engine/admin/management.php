@@ -20,6 +20,7 @@ require_once __DIR__ . '/retention.php';
 require_once __DIR__ . '/zero-db.php';
 require_once __DIR__ . '/storage.php';
 require_once __DIR__ . '/build-source.php';
+require_once __DIR__ . '/static-zip.php';
 require_once __DIR__ . '/engine-update.php';
 
 function _stattic_runtime_with_write_lock(string $privateRoot, callable $callback): void

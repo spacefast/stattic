@@ -1,7 +1,7 @@
 {
-  "revision": "a29a9852b1d2456fb2fcfc5cd21588e203d233d0",
-  "sourceHash": "e5b6f812baffe2e56284ba28bde421d7d42e2fabf9af0d7cddf1a396a6e31170",
-  "manifestSha256": "49b693f0f253c068b375f4ede4e77ef805bd1a2a68825c292f7b79afe2b62b52",
+  "revision": "7dd512f84cf2504721318bb73c902c55f0976b2c",
+  "sourceHash": "cdcf8c02ed42fd9a3da6124346aff969f0d61fbc1e0efb45c8542b9bce6e52cd",
+  "manifestSha256": "684acd529b739cda49b39844a2a9c9048196452c046c990663a36c6ea4c04d01",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "07412e54a6391d4971fafc2aec8bcb9e889605850e8815000a6a0d7c78de8ba6"
+      "sha256": "0a5c1b5e4ab621bc11d5ae16ae4a4d3f3387430a1c7933b40f42e70214b6afd2"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "1e2ced74a819fc965f5f64a552c9e55c62dac00b9908e0e133ba826f7a82a056"
+      "sha256": "5cd9d7ea8a0248ebb583c114145052d2d89bb4814d3fb3759c08a71a51b77225"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -341,11 +341,11 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "f489953c71e74760255e15a728bc3f1251f1e8a0786d4c0f2595e2dba58eebcf"
+      "sha256": "da9805eb35bb2ecd518c588db4383cdd83e9b8638ecf0cb65d71d2a44e7e80df"
     },
     {
       "path": "runtime/engine/admin/api.php",
-      "sha256": "276ba50c756871440d4679552eaa381baa9199709618d683b4f5aecd40363aac"
+      "sha256": "f24025c2697c440af379fe7fbcfbcfc0e711c1b1bf557f1dd97c36fb5c0ff759"
     },
     {
       "path": "runtime/engine/admin/auth.php",
@@ -377,11 +377,15 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "e71fa413eb1595c54eb15128b4a9ef38b671a74bf22f427c4f7029cd145bcc48"
+      "sha256": "37c7fbb67d7a490de0f88971ac49aedc4b054cf507bac458969873ecf76bc557"
     },
     {
       "path": "runtime/engine/admin/retention.php",
       "sha256": "8e7e0db48aefb907b5641d30ac78c0daf04451c6c3fc31df4f9d971838984191"
+    },
+    {
+      "path": "runtime/engine/admin/static-zip.php",
+      "sha256": "d5ec48337276251257887fd11bd82b063ff8b3308fcc62d493e95bc0d9086d68"
     },
     {
       "path": "runtime/engine/admin/storage.php",
@@ -882,6 +886,10 @@
     {
       "path": "runtime/tests/spacefast-sdk.test.ts",
       "sha256": "0a7023607be0448d5f13398ec9fd85bdbb9d05347c8271913f4baff42a20f2a1"
+    },
+    {
+      "path": "runtime/tests/static-zip.test.ts",
+      "sha256": "044bce1e55ac5ea3265808b26810962d8220c43ca2bcaf491b1abc24e663df97"
     },
     {
       "path": "runtime/tests/storage.test.ts",

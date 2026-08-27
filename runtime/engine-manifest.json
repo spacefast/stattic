@@ -12,6 +12,7 @@
     "engine/admin/jobs.php",
     "engine/admin/management.php",
     "engine/admin/retention.php",
+    "engine/admin/static-zip.php",
     "engine/admin/tier.php",
     "engine/admin/upload-policy.php",
     "engine/admin/upload.php",

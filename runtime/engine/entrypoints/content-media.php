@@ -142,7 +142,7 @@ $fileReal = realpath($mediaRoot . '/' . $request['relative']);
 if (
     !is_string($rootReal)
     || !is_string($fileReal)
-    || !str_starts_with($fileReal, rtrim($rootReal, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR)
+    || !_stattic_runtime_path_is_inside($fileReal, $rootReal)
     || !is_file($fileReal)
 ) {
     _stattic_content_media_refuse(404);

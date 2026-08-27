@@ -76,22 +76,17 @@ if ($operation === false) {
     _stattic_problem_response(400, 'content_operation_invalid', 'The content operation is not supported.');
 }
 
+$privateRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
+if (!is_dir($privateRoot)) {
+    _stattic_problem_response(503, 'runtime_undeployed', 'Runtime storage is not provisioned on this site.');
+}
+
 if (is_string($operation)) {
-    $privateRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
-    if (!is_dir($privateRoot)) {
-        _stattic_problem_response(503, 'runtime_undeployed', 'Runtime storage is not provisioned on this site.');
-    }
-    $requestedAuthorization = in_array(
-        $operation,
-        ['content.authorization.apply', 'content.admin.launch'],
-        true
-    )
+    $needsAuthorization = in_array($operation, ['content.authorization.apply', 'content.admin.launch'], true);
+    $requestedAuthorization = $needsAuthorization
         ? _stattic_content_admin_authorization($request['authorization'] ?? null)
         : null;
-    if (
-        in_array($operation, ['content.authorization.apply', 'content.admin.launch'], true)
-        && $requestedAuthorization === null
-    ) {
+    if ($needsAuthorization && $requestedAuthorization === null) {
         _stattic_problem_response(422, 'content_authorization_invalid', 'The content authorization is invalid.');
     }
     $claims = _stattic_runtime_require_management_jwt(
@@ -149,10 +144,6 @@ if (is_string($operation)) {
         ], 'application/json', ['Cache-Control' => _stattic_content_cache_control(true)]);
     }
 } else {
-    $privateRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
-    if (!is_dir($privateRoot)) {
-        _stattic_problem_response(503, 'runtime_undeployed', 'Runtime storage is not provisioned on this site.');
-    }
     _stattic_visitor_lane_begin($privateRoot);
     require_once $engineRoot . '/runtime/serve.php';
     _sf_load_generated_config($privateRoot);

@@ -2494,7 +2494,8 @@ function _stattic_visitor_cookie_from_request(): string
 
 // The lane-less pre-auth boundary stays identical across claim state, route
 // existence, Grant reasons and available authorities: none of that private
-// metadata may reach crawlers. $serving is unused: the deny is uniform.
+// metadata may reach crawlers. The compiled frame may carry partner branding;
+// the runtime-owned denial fragment and status stay uniform.
 function _stattic_render_scoped_deny(array $serving): never
 {
     $message = 'This page is private.';
@@ -2504,6 +2505,8 @@ function _stattic_render_scoped_deny(array $serving): never
         'private' => true,
         'message' => $message,
         'code' => 'access_denied',
+        'customizable' => true,
+        'serving' => $serving,
         'fragment' => '<p class="sf-copy">' . _stattic_html_escape($message) . '</p>',
     ]);
 }

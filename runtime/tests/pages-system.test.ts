@@ -40,6 +40,10 @@ const PAGE_ARTIFACTS = {
     "<!doctype html><html><body><h1>Acme says no</h1><!--sf-runtime:denial:start--><p>Fallback denial</p><!--sf-runtime:denial:end--></body></html>",
   "page-404":
     "<!doctype html><html><body><h1>Acme lost it</h1><p><!--sf-runtime:request-path:start-->fallback<!--sf-runtime:request-path:end--></p></body></html>",
+  "platform-partner-suspended":
+    '<!doctype html><html><body><header>Partner Cloud</header><h1>This space is paused</h1><a href="https://partner.example/help">Need help?</a></body></html>',
+  "platform-partner-undeployed":
+    "<!doctype html><html><body><header>Partner Cloud</header><h1>Waiting for launch</h1></body></html>",
 };
 
 const SITE_FILES = {
@@ -52,6 +56,33 @@ async function deploySite(spaceId: string, versionId: string, host: string): Pro
     versionId,
     files: SITE_FILES,
     pageArtifacts: PAGE_ARTIFACTS,
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig(),
+      production_hostnames: [host],
+      version_hostnames: [],
+    },
+  });
+}
+
+async function deployPartnerSite(spaceId: string, versionId: string, host: string): Promise<void> {
+  await deploy(rt, {
+    spaceId,
+    versionId,
+    files: SITE_FILES,
+    pageArtifacts: PAGE_ARTIFACTS,
+    serving: {
+      config: {
+        pages: {
+          routes: {},
+          previews: {},
+          platform: {
+            suspended: "platform-partner-suspended",
+            undeployed: "platform-partner-undeployed",
+          },
+        },
+      },
+    },
     activate: {
       route_name: "production",
       config: publicAccessConfig(),
@@ -116,6 +147,26 @@ test("a tombstoned space answers with the engine's page, never its own documents
   expect(await perPrincipal.text()).toContain("This space is paused");
 });
 
+test("a partner tombstone uses its compiled de-branded platform page", async () => {
+  const host = "pages-partner-fault.test";
+  await deployPartnerSite("spc_pages_partner_fault", "ver_pages_partner_fault_1", host);
+  const suspended = await tombstone("spc_pages_partner_fault", {
+    hostnames: [host],
+    reason: "tenant_suspended",
+  });
+  expect(suspended.status).toBe(200);
+
+  const response = await get(rt, host, "/", { headers: { Accept: "text/html" } });
+  expect(response.status).toBe(402);
+  const html = await response.text();
+  expect(html).toContain("Partner Cloud");
+  expect(html).toContain("https://partner.example/help");
+  expect(html).not.toContain("Spacefast");
+  expect(html).not.toContain("spacefast.com");
+  expect(html).not.toContain("Recoleta");
+  expect(html).not.toContain("wordpress.com");
+});
+
 test("the retired per-space font path takes the uniform private-namespace denial", async () => {
   const host = "pages-fonts.test";
   await deploySite("spc_pages_fonts", "ver_pages_fonts_1", host);
@@ -149,7 +200,9 @@ test("reserved access-path variants deny uniformly instead of falling through to
 
 test("CSAM stays byte-identical to undeployed for every negotiated representation", async () => {
   const host = "pages-csam.test";
-  await deploySite("spc_pages_csam", "ver_pages_csam_1", host);
+  // Even a partner version carrying an undeployed artifact takes the neutral
+  // built-in path for CSAM, so the response cannot reveal that the host existed.
+  await deployPartnerSite("spc_pages_csam", "ver_pages_csam_1", host);
   const takedown = await tombstone("spc_pages_csam", { hostnames: [host], category: "csam" });
   expect(takedown.status).toBe(200);
 

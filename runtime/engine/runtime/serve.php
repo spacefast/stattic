@@ -99,6 +99,39 @@ function _stattic_private_file_alias_redirect(string $sourcePath): never
     exit;
 }
 
+// A terminal host action normally needs no Space bytes. Partner presentation is
+// the narrow exception: when the retained Space pointer and overlay are still
+// readable, expose only the already-compiled serving projection to the page
+// renderer. Failure stays on the platform fallback and never weakens the action.
+function _stattic_prime_platform_page_serving(string $privateRoot, array $hostEntry, array $action): void
+{
+    if (($action['page_id'] ?? null) === 'tombstone-csam') {
+        return;
+    }
+    $spaceId = is_string($action['space_id'] ?? null) ? $action['space_id'] : '';
+    if ($spaceId === '') {
+        return;
+    }
+    $spaceRead = _sf_pointer_read('platform-page-space:' . $spaceId, $privateRoot . '/spaces/' . $spaceId . '/space.json');
+    if (!is_array($spaceRead['value'] ?? null)) {
+        return;
+    }
+    $overlay = _stattic_v4_overlay($privateRoot, $spaceId, $spaceRead['value']);
+    if (!is_array($overlay)) {
+        return;
+    }
+    $versionId = _stattic_v4_version_for_host($hostEntry, $overlay);
+    if (!is_string($versionId) || $versionId === '') {
+        return;
+    }
+    $GLOBALS['SPACEFAST_PAGE_SERVING'] = _stattic_v4_legacy_serving(
+        $spaceId,
+        $versionId,
+        $hostEntry,
+        $overlay
+    );
+}
+
 function _stattic_serve_request(string $privateRoot, string $requestMethod, string $requestUri, string $requestPath, string $requestHost): void
 {
     _stattic_visitor_lane_begin($privateRoot);
@@ -155,6 +188,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         if (!_stattic_action_allows_method($hostAction, $requestMethod)) {
             _stattic_render_method_not_allowed_lazy();
         }
+        _stattic_prime_platform_page_serving($privateRoot, $hostEntry, $hostAction);
         _stattic_render_platform_action($hostAction);
     }
 

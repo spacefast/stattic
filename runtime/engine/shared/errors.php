@@ -54,6 +54,9 @@ function _stattic_page_route_candidates(string $requestPath): array
 function _stattic_page_artifact(array $context, string $pageId): ?string
 {
     $serving = is_array($context['serving'] ?? null) ? $context['serving'] : [];
+    if ($serving === [] && is_array($GLOBALS['SPACEFAST_PAGE_SERVING'] ?? null)) {
+        $serving = $GLOBALS['SPACEFAST_PAGE_SERVING'];
+    }
     $versionId = is_string($serving['version_id'] ?? null) ? $serving['version_id'] : '';
     $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : '';
     // The Space overlay carries the live version's page pointers.
@@ -61,6 +64,10 @@ function _stattic_page_artifact(array $context, string $pageId): ?string
     $routes = is_array($pages['routes'] ?? null) ? $pages['routes'] : [];
     $requestPath = is_string($context['request_path'] ?? null) ? $context['request_path'] : _stattic_runtime_request_path();
     $artifact = is_string($context['artifact'] ?? null) ? $context['artifact'] : null;
+    if ($artifact === null) {
+        $platform = is_array($pages['platform'] ?? null) ? $pages['platform'] : [];
+        $artifact = is_string($platform[$pageId] ?? null) ? $platform[$pageId] : null;
+    }
     if ($artifact === null) {
         foreach (_stattic_page_route_candidates($requestPath) as $routePath) {
             $route = is_array($routes[$routePath] ?? null) ? $routes[$routePath] : [];
@@ -302,7 +309,19 @@ function _stattic_render_platform_page(string $pageId, int $status, array $heade
         'tombstone-dmca' => 'legal', 'tombstone-suspended' => 'suspended',
         'tombstone-generic' => 'gone',
     ];
-    _stattic_serve_page($map[$pageId] ?? $pageId, ['status' => $status, 'headers' => $headers, 'message' => $fallback, 'code' => str_replace('-', '_', $pageId), 'private' => $private]);
+    $resolvedPageId = $map[$pageId] ?? $pageId;
+    // CSAM must remain indistinguishable from an unknown host. It deliberately
+    // takes the same built-in undeployed fallback even when a stale Space
+    // pointer still exists. Other platform pages may use a compiled partner
+    // artifact when the request resolved a serving overlay.
+    _stattic_serve_page($resolvedPageId, [
+        'status' => $status,
+        'headers' => $headers,
+        'message' => $fallback,
+        'code' => str_replace('-', '_', $pageId),
+        'private' => $private,
+        'customizable' => $pageId !== 'tombstone-csam' && $resolvedPageId !== 'undeployed',
+    ]);
 }
 
 function _stattic_render_not_found(): void
@@ -312,17 +331,17 @@ function _stattic_render_not_found(): void
 
 function _stattic_render_runtime_invariant_error(string $code, string $message): void
 {
-    _stattic_serve_page('runtime-error', ['status' => 500, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'X-Spacefast-Runtime-Error' => $code], 'message' => $message, 'code' => $code]);
+    _stattic_serve_page('runtime-error', ['status' => 500, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'X-Spacefast-Runtime-Error' => $code], 'message' => $message, 'code' => $code, 'customizable' => true]);
 }
 
 function _stattic_render_admission_shed(int $retryAfterSeconds, string $code = 'rate_limited'): void
 {
-    _stattic_serve_page('rate-limited', ['status' => 429, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'Retry-After' => (string) $retryAfterSeconds], 'message' => 'Too Many Requests', 'code' => $code]);
+    _stattic_serve_page('rate-limited', ['status' => 429, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'Retry-After' => (string) $retryAfterSeconds], 'message' => 'Too Many Requests', 'code' => $code, 'customizable' => true]);
 }
 
 function _stattic_render_tier_fetch_unavailable(int $retryAfterSeconds): void
 {
-    _stattic_serve_page('tier-unavailable', ['status' => 503, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'Retry-After' => (string) $retryAfterSeconds], 'message' => 'Service Unavailable', 'code' => 'tier_unavailable']);
+    _stattic_serve_page('tier-unavailable', ['status' => 503, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'Retry-After' => (string) $retryAfterSeconds], 'message' => 'Service Unavailable', 'code' => 'tier_unavailable', 'customizable' => true]);
 }
 
 // A pointer/artifact that EXISTS could not be read this instant. Deliberately
@@ -331,6 +350,6 @@ function _stattic_render_tier_fetch_unavailable(int $retryAfterSeconds): void
 // path exists to prevent. no-store keeps the edge from holding the failure.
 function _stattic_render_runtime_unavailable(string $code, int $retryAfterSeconds = 5): never
 {
-    _stattic_serve_page('tier-unavailable', ['status' => 503, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'Retry-After' => (string) $retryAfterSeconds, 'X-Spacefast-Unavailable' => $code], 'message' => 'Service Unavailable', 'code' => $code]);
+    _stattic_serve_page('tier-unavailable', ['status' => 503, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'Retry-After' => (string) $retryAfterSeconds, 'X-Spacefast-Unavailable' => $code], 'message' => 'Service Unavailable', 'code' => $code, 'customizable' => true]);
     exit;
 }

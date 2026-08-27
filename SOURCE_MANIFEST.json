@@ -1,7 +1,7 @@
 {
-  "revision": "c1d769e547f9e47c6cfc881c095320e4248d2db2",
-  "sourceHash": "d8ed001af5bb84167cc166aefc743a6ea417d2300e854493263230bfe0300916",
-  "manifestSha256": "9991e595bb859c8211ccfb91de5c88d8800dc1d1bd8fca94afe5782162a68682",
+  "revision": "15f8e05b2641fe46f4003e4894229990e0b0d2da",
+  "sourceHash": "a679ce0fbabca28ed18a4a56dd8f47ad59e3e56e6f5c34b26b6ed1210fb161c0",
+  "manifestSha256": "94f8ec0f3a717f8fffaeb20c88dd08c80bc5f24082da36af2a632ff3c5da941a",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "489aba9272a2d50812fcee3171628bead78a6eb66416e341b388487af9838634"
+      "sha256": "a85c8e19366da341c9c381ebb1341c74111d20f4c13d2724af32fc7c3cb3df9a"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "5f03c01f883e464db26df0b70532905363013c62d07903e6f818c084b84abec0"
+      "sha256": "ef076c198c3acb1540839a01b9e6d3f166bc0dfbaa0af23b05412f19862234fb"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -445,7 +445,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "680864ae7201e3ddd5bbbda5742f4f4709be1022ac2a0e44672e9471a10de774"
+      "sha256": "5ff5647ed0d189ee886fa246c65c29c50560fb11785d2643523411fe6d68ba75"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -497,7 +497,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "e040bd44a39b0b365a62905846043b6162b807a412b7137c7cf50239e5187dc7"
+      "sha256": "6f8cdbe5111c96a26291a803ee4b6573541080d107c9d054b387f8a7a4731bb6"
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
@@ -565,7 +565,7 @@
     },
     {
       "path": "runtime/engine/shared/errors.php",
-      "sha256": "cbc00c1ee4867db8bb61567ea5435e9f6e3cae405ce7f4d4f302cf97a70a002f"
+      "sha256": "77cab6ad41a17fba84aaccfbfe6cfc904231cb5b85e6c299783acf05f42940eb"
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
@@ -833,7 +833,7 @@
     },
     {
       "path": "runtime/tests/pages-system.test.ts",
-      "sha256": "f1d6c7e7b25a2cea38f7aeee9f3ca70e459f7ce93a8bd7e294900abfae782f84"
+      "sha256": "838dd65e1dcd9e8b2d86e097323422e6399fbddba4c66e5e5c30d73787bc6bc5"
     },
     {
       "path": "runtime/tests/php-functions.test.ts",

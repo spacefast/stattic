@@ -776,6 +776,7 @@ test("content admin users persist only a pseudonymous editor identity", async ()
 $inserted = null;
 $created = null;
 $current = null;
+$options = ['blogname' => 'My WordPress Site'];
 function get_user_by(string $field, mixed $value): object|false {
   global $created;
   if ($field === 'login' && $created === null) return false;
@@ -803,7 +804,11 @@ $GLOBALS['SPACEFAST_CONTENT_ADMIN_IDENTITY'] = [
   'subject' => 'content_' . str_repeat('b', 64),
 ];
 $userId = spacefast_content_admin_establish_user();
-echo json_encode(['user_id' => $userId, 'current' => $current, 'inserted' => $inserted]);
+echo json_encode([
+  'user_id' => $userId,
+  'current' => $current,
+  'inserted' => $inserted,
+]);
 `;
   const process = Bun.spawn(["php", "-r", script, kernel], {
     cwd: repoRoot,
@@ -836,24 +841,61 @@ echo json_encode(['user_id' => $userId, 'current' => $current, 'inserted' => $in
   });
 });
 
-test("content admin authentication mints a short-lived WordPress secure cookie", async () => {
+test("the managed Space title shadows WordPress blogname", async () => {
+  const script = String.raw`
+$options = [
+  'blogname' => 'Changed in WordPress',
+  'spacefast_space_title' => 'The docs Space',
+];
+function get_option(string $name, mixed $default = false): mixed {
+  return $GLOBALS['options'][$name] ?? $default;
+}
+require $argv[1];
+echo json_encode([
+  'stored_blogname' => get_option('blogname'),
+  'effective_blogname' => spacefast_content_managed_site_title(false),
+]);
+`;
+  const process = Bun.spawnSync(["php", "-r", script, kernel], {
+    cwd: repoRoot,
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+
+  expect(process.exitCode, process.stderr.toString()).toBe(0);
+  expect(JSON.parse(process.stdout.toString())).toEqual({
+    stored_blogname: "Changed in WordPress",
+    effective_blogname: "The docs Space",
+  });
+});
+
+test("content admin authentication mints matching WordPress admin and REST cookies", async () => {
   const script = String.raw`
 define('SECURE_AUTH_COOKIE', 'wordpress_sec_test');
-$generated = null;
-function wp_generate_auth_cookie(int $userId, int $expiration, string $scheme): string {
+define('LOGGED_IN_COOKIE', 'wordpress_logged_in_test');
+$generated = [];
+class WP_Session_Tokens {
+  public static function get_instance(int $userId): object {
+    return new class($userId) {
+      public function __construct(private int $userId) {}
+      public function create(int $expiration): string { return 'session-token-' . $this->userId; }
+    };
+  }
+}
+function wp_generate_auth_cookie(int $userId, int $expiration, string $scheme, string $token): string {
   global $generated;
-  $generated = compact('userId', 'expiration', 'scheme');
-  return 'signed-wordpress-cookie';
+  $generated[] = compact('userId', 'expiration', 'scheme', 'token');
+  return 'signed-' . $scheme . '-cookie';
 }
 require $argv[1];
 $before = time();
-$cookie = spacefast_content_admin_auth_cookie(57, 3600);
+$cookies = spacefast_content_admin_auth_cookies(57, 3600);
 $after = time();
 echo json_encode([
-  'cookie' => $cookie,
+  'cookies' => $cookies,
   'generated' => $generated,
-  'expiration_in_range' => $generated['expiration'] >= $before + 3600
-    && $generated['expiration'] <= $after + 3600,
+  'expiration_in_range' => $generated[0]['expiration'] >= $before + 3600
+    && $generated[0]['expiration'] <= $after + 3600,
 ]);
 `;
   const process = Bun.spawn(["php", "-r", script, kernel], {
@@ -869,16 +911,65 @@ echo json_encode([
 
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
   expect(JSON.parse(stdout)).toEqual({
-    cookie: {
-      name: "wordpress_sec_test",
-      value: "signed-wordpress-cookie",
-    },
-    generated: {
-      userId: 57,
-      expiration: expect.any(Number),
-      scheme: "secure_auth",
-    },
+    cookies: [
+      { name: "wordpress_sec_test", value: "signed-secure_auth-cookie" },
+      { name: "wordpress_logged_in_test", value: "signed-logged_in-cookie" },
+    ],
+    generated: [
+      {
+        userId: 57,
+        expiration: expect.any(Number),
+        scheme: "secure_auth",
+        token: "session-token-57",
+      },
+      {
+        userId: 57,
+        expiration: expect.any(Number),
+        scheme: "logged_in",
+        token: "session-token-57",
+      },
+    ],
     expiration_in_range: true,
+  });
+});
+
+test("a verified content session enables Gutenberg REST without exposing other WordPress users", async () => {
+  const script = String.raw`
+class WP_Error {
+  public function __construct(
+    public string $code,
+    public string $message,
+    public array $data,
+  ) {}
+}
+require $argv[1];
+$closed = spacefast_content_disable_rest_api(null);
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = 57;
+echo json_encode([
+  'closed' => [$closed->code, $closed->data['status']],
+  'rest' => spacefast_content_disable_rest_api(null),
+  'show_in_rest' => spacefast_content_post_type_args('Posts', 'Post', ['editor'])['show_in_rest'],
+  'user_query' => spacefast_content_scope_rest_user_query(['orderby' => 'name'], null),
+]);
+`;
+  const process = Bun.spawn(["php", "-r", script, kernel], {
+    cwd: repoRoot,
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+  ]);
+
+  expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+  expect(JSON.parse(stdout)).toEqual({
+    closed: ["spacefast_rest_disabled", 404],
+    rest: null,
+    show_in_rest: true,
+    user_query: { include: [57], orderby: "name" },
   });
 });
 

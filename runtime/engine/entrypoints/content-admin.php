@@ -58,10 +58,10 @@ $session = _stattic_content_admin_mint_session(
 if ($session === null) {
     _stattic_problem_response(503, 'content_admin_session_unavailable', 'The content editor session could not be started.');
 }
-$wpAuthCookie = function_exists('spacefast_content_admin_auth_cookie')
-    ? spacefast_content_admin_auth_cookie($userId, SPACEFAST_CONTENT_ADMIN_SESSION_TTL)
+$wpAuthCookies = function_exists('spacefast_content_admin_auth_cookies')
+    ? spacefast_content_admin_auth_cookies($userId, SPACEFAST_CONTENT_ADMIN_SESSION_TTL)
     : null;
-if ($wpAuthCookie === null) {
+if ($wpAuthCookies === null) {
     _stattic_problem_response(503, 'content_admin_session_unavailable', 'The content editor session could not be started.');
 }
 _stattic_set_cookie(
@@ -70,12 +70,14 @@ _stattic_set_cookie(
     SPACEFAST_CONTENT_ADMIN_SESSION_TTL,
     true
 );
-_stattic_set_cookie(
-    $wpAuthCookie['name'],
-    $wpAuthCookie['value'],
-    SPACEFAST_CONTENT_ADMIN_SESSION_TTL,
-    true
-);
+foreach ($wpAuthCookies as $wpAuthCookie) {
+    _stattic_set_cookie(
+        $wpAuthCookie['name'],
+        $wpAuthCookie['value'],
+        SPACEFAST_CONTENT_ADMIN_SESSION_TTL,
+        true
+    );
+}
 $postsType = function_exists('spacefast_content_builtin_post_type')
     ? spacefast_content_builtin_post_type('posts')
     : '';

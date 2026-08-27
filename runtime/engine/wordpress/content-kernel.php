@@ -11,6 +11,7 @@ const SPACEFAST_CONTENT_QUERY_FORMAT = 'spacefast.content.query';
 const SPACEFAST_CONTENT_API_VERSION = 1;
 const SPACEFAST_CONTENT_MANIFEST_OPTION = 'spacefast_content_manifest_v1';
 const SPACEFAST_CONTENT_REVISION_OPTION = 'spacefast_content_revision_v1';
+const SPACEFAST_CONTENT_SITE_TITLE_OPTION = 'spacefast_space_title';
 const SPACEFAST_CONTENT_EXTERNAL_ID_META = '_spacefast_external_id';
 const SPACEFAST_CONTENT_MARKDOWN_META = '_spacefast_markdown_original';
 const SPACEFAST_CONTENT_SPACE_META = '_spacefast_space_id';
@@ -56,6 +57,8 @@ if (function_exists('add_action')) {
     add_filter('xmlrpc_enabled', '__return_false');
     add_filter('wp_is_application_passwords_available', '__return_false');
     add_filter('rest_authentication_errors', 'spacefast_content_disable_rest_api', 1);
+    add_filter('pre_option_blogname', 'spacefast_content_managed_site_title');
+    add_filter('rest_user_query', 'spacefast_content_scope_rest_user_query', 10, 2);
     add_filter('site_url', 'spacefast_content_request_url', 1, 4);
     add_filter('home_url', 'spacefast_content_request_url', 1, 4);
     add_filter('upload_dir', 'spacefast_content_scope_upload_dir');
@@ -221,6 +224,17 @@ function spacefast_content_admin_current_user(mixed $currentUser): mixed
     return (int) $user->ID;
 }
 
+function spacefast_content_managed_site_title(mixed $pre): mixed
+{
+    if (!function_exists('get_option')) {
+        return $pre;
+    }
+    $siteTitle = get_option(SPACEFAST_CONTENT_SITE_TITLE_OPTION, null);
+    return is_string($siteTitle) && trim($siteTitle) !== '' && strlen($siteTitle) <= 1020
+        ? $siteTitle
+        : $pre;
+}
+
 function spacefast_content_admin_establish_user(): int
 {
     $userId = spacefast_content_admin_current_user(0);
@@ -231,23 +245,34 @@ function spacefast_content_admin_establish_user(): int
     return is_object($user) && (int) ($user->ID ?? 0) === $userId ? $userId : 0;
 }
 
-function spacefast_content_admin_auth_cookie(int $userId, int $ttlSeconds): ?array
+function spacefast_content_admin_auth_cookies(int $userId, int $ttlSeconds): ?array
 {
     if (
         $userId < 1
         || $ttlSeconds < 1
         || !defined('SECURE_AUTH_COOKIE')
+        || !defined('LOGGED_IN_COOKIE')
+        || !class_exists('WP_Session_Tokens')
         || !function_exists('wp_generate_auth_cookie')
     ) {
         return null;
     }
-    $value = wp_generate_auth_cookie($userId, time() + $ttlSeconds, 'secure_auth');
-    if (!is_string($value) || $value === '') {
+    $expiration = time() + $ttlSeconds;
+    $manager = WP_Session_Tokens::get_instance($userId);
+    $token = is_object($manager) && method_exists($manager, 'create')
+        ? $manager->create($expiration)
+        : '';
+    if (!is_string($token) || $token === '') {
+        return null;
+    }
+    $secure = wp_generate_auth_cookie($userId, $expiration, 'secure_auth', $token);
+    $loggedIn = wp_generate_auth_cookie($userId, $expiration, 'logged_in', $token);
+    if (!is_string($secure) || $secure === '' || !is_string($loggedIn) || $loggedIn === '') {
         return null;
     }
     return [
-        'name' => SECURE_AUTH_COOKIE,
-        'value' => $value,
+        ['name' => SECURE_AUTH_COOKIE, 'value' => $secure],
+        ['name' => LOGGED_IN_COOKIE, 'value' => $loggedIn],
     ];
 }
 
@@ -265,7 +290,10 @@ function spacefast_content_disable_rest_api(mixed $result): mixed
     if (
         $result !== null
         || !class_exists('WP_Error')
-        || (int) ($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? 0) > 0
+        || (
+            spacefast_content_space_id() !== ''
+            && (int) ($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? 0) > 0
+        )
     ) {
         return $result;
     }
@@ -274,6 +302,15 @@ function spacefast_content_disable_rest_api(mixed $result): mixed
         'WordPress REST access is managed by Spacefast.',
         ['status' => 404]
     );
+}
+
+function spacefast_content_scope_rest_user_query(array $args, mixed $request): array
+{
+    $userId = $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? null;
+    if (spacefast_content_space_id() !== '' && is_int($userId) && $userId > 0) {
+        $args['include'] = [$userId];
+    }
+    return $args;
 }
 
 function spacefast_content_lock_admin(): void
@@ -713,7 +750,7 @@ function spacefast_content_register_collections(): void
             'labels' => ['name' => 'Categories', 'singular_name' => 'Category'],
             'public' => false,
             'show_ui' => true,
-            'show_in_rest' => false,
+            'show_in_rest' => true,
             'hierarchical' => true,
             'rewrite' => false,
         ]);
@@ -721,7 +758,7 @@ function spacefast_content_register_collections(): void
             'labels' => ['name' => 'Tags', 'singular_name' => 'Tag'],
             'public' => false,
             'show_ui' => true,
-            'show_in_rest' => false,
+            'show_in_rest' => true,
             'hierarchical' => false,
             'rewrite' => false,
         ]);
@@ -753,7 +790,7 @@ function spacefast_content_post_type_args(
         'publicly_queryable' => false,
         'show_ui' => true,
         'show_in_menu' => true,
-        'show_in_rest' => false,
+        'show_in_rest' => true,
         'hierarchical' => $hierarchical,
         'rewrite' => false,
         'supports' => $supports,

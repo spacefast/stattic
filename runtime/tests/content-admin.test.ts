@@ -123,6 +123,6 @@ echo json_encode([
     expired_session: null,
     expiry_boundary: null,
     tampered_session: null,
-    paths: [true, false, false, false],
+    paths: [true, true, false, false],
   });
 });

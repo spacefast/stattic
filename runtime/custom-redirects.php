@@ -94,7 +94,8 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
         $isContentAdminPath = $path === '/wp-admin'
             || str_starts_with($path, '/wp-admin/')
             || $path === '/wp-json'
-            || str_starts_with($path, '/wp-json/');
+            || str_starts_with($path, '/wp-json/')
+            || ($path === '/' && isset($_GET['rest_route']));
         $isWordPressCorePhp = preg_match(
             '#^/(?:wp-[^/]+\.php|wp-(?:includes|content)/.+\.php)(?:/|$)#',
             $path

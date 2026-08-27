@@ -311,5 +311,7 @@ function _stattic_content_admin_verify_session(
 function _stattic_content_admin_request_path(string $path): bool
 {
     return $path === '/wp-admin'
-        || str_starts_with($path, '/wp-admin/');
+        || str_starts_with($path, '/wp-admin/')
+        || $path === '/wp-json'
+        || str_starts_with($path, '/wp-json/');
 }

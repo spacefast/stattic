@@ -115,39 +115,48 @@ function _stattic_content_admin_verify_session(string $root, string $token, stri
       path.resolve(import.meta.dir, "../custom-redirects.php"),
       path.join(root, "custom-redirects.php"),
     );
-    const driver = path.join(root, "driver.php");
-    writeFileSync(
-      driver,
-      [
-        "<?php",
-        `$_SERVER['DOCUMENT_ROOT'] = ${JSON.stringify(root)};`,
-        `$_SERVER['SCRIPT_FILENAME'] = ${JSON.stringify(path.join(root, "wp-admin/edit.php"))};`,
-        "$_SERVER['REQUEST_METHOD'] = 'GET';",
-        "$_SERVER['REQUEST_URI'] = '/wp-admin/edit.php';",
-        "$_SERVER['HTTP_HOST'] = 'space.example';",
-        "$_COOKIE['spacefast_content_admin'] = 'valid-session';",
-        `require ${JSON.stringify(path.join(root, "custom-redirects.php"))};`,
-        "echo json_encode([",
-        "  'dashboard_config_loaded' => $GLOBALS['dashboard_config_loaded'] ?? false,",
-        "  'user_id' => $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? null,",
-        "  'space_id' => $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? null,",
-        "  'frame_origin' => $GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] ?? null,",
-        "]);",
-      ].join("\n"),
-    );
+    for (const [index, request] of [
+      { uri: "/wp-admin/edit.php", script: "wp-admin/edit.php" },
+      { uri: "/wp-json/wp/v2/types", script: "index.php" },
+      { uri: "/?rest_route=/wp/v2/types", script: "index.php", restRoute: "/wp/v2/types" },
+    ].entries()) {
+      const driver = path.join(root, `driver-${index}.php`);
+      writeFileSync(
+        driver,
+        [
+          "<?php",
+          `$_SERVER['DOCUMENT_ROOT'] = ${JSON.stringify(root)};`,
+          `$_SERVER['SCRIPT_FILENAME'] = ${JSON.stringify(path.join(root, request.script))};`,
+          "$_SERVER['REQUEST_METHOD'] = 'GET';",
+          `$_SERVER['REQUEST_URI'] = ${JSON.stringify(request.uri)};`,
+          "$_SERVER['HTTP_HOST'] = 'space.example';",
+          ...(request.restRoute
+            ? [`$_GET['rest_route'] = ${JSON.stringify(request.restRoute)};`]
+            : []),
+          "$_COOKIE['spacefast_content_admin'] = 'valid-session';",
+          `require ${JSON.stringify(path.join(root, "custom-redirects.php"))};`,
+          "echo json_encode([",
+          "  'dashboard_config_loaded' => $GLOBALS['dashboard_config_loaded'] ?? false,",
+          "  'user_id' => $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? null,",
+          "  'space_id' => $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? null,",
+          "  'frame_origin' => $GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] ?? null,",
+          "]);",
+        ].join("\n"),
+      );
 
-    const result = Bun.spawnSync({
-      cmd: ["php", "-d", "auto_prepend_file=", driver],
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
-    expect(JSON.parse(result.stdout.toString())).toEqual({
-      dashboard_config_loaded: true,
-      user_id: 57,
-      space_id: "spc_test",
-      frame_origin: "https://my.sf.localhost",
-    });
+      const result = Bun.spawnSync({
+        cmd: ["php", "-d", "auto_prepend_file=", driver],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode, result.stderr.toString()).toBe(0);
+      expect(JSON.parse(result.stdout.toString())).toEqual({
+        dashboard_config_loaded: true,
+        user_id: 57,
+        space_id: "spc_test",
+        frame_origin: "https://my.sf.localhost",
+      });
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

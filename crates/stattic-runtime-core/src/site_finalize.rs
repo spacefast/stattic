@@ -3087,7 +3087,7 @@ mod tests {
                 ("index.html", b"home"),
                 ("agents-doc/index.html", b"human"),
                 ("agents-doc.md", b"agent"),
-                ("agent-handoff.html", b"handoff"),
+                ("forced.html", b"forced"),
                 ("blog/404.html", b"gone"),
                 (
                     "_redirects",
@@ -3095,7 +3095,7 @@ mod tests {
 /found /about.html 302\n\
 /agents-doc /agents-doc.md 200! Agent=true\n\
 /app/* /index.html 200\n\
-/agent/* /agent-handoff.html 200!\n\
+/forced/* /forced.html 200!\n\
 /gone/* /blog/404.html 404",
                 ),
             ],
@@ -3124,7 +3124,7 @@ mod tests {
             rule["source"] == "/app/*" && rule["action"] == "rewrite" && rule["force"] == false
         }));
         assert!(redirects.iter().any(|rule| {
-            rule["source"] == "/agent/*" && rule["action"] == "rewrite" && rule["force"] == true
+            rule["source"] == "/forced/*" && rule["action"] == "rewrite" && rule["force"] == true
         }));
         assert!(redirects.iter().any(|rule| {
             rule["source"] == "/gone/*" && rule["action"] == "notFound" && rule["status"] == 404

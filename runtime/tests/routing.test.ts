@@ -77,8 +77,8 @@ const BLOG_404 = "<h1>blog 404</h1>\n";
 const POST = "<h1>post</h1>\n";
 const APP_JS = "console.log('app');\n";
 const APP_JS_GZIP = gzipSync(Buffer.from(APP_JS));
-const HANDOFF_HTML = "<h1>agent handoff html</h1>\n";
-const HANDOFF_MD = "# agent handoff markdown\n";
+const GUIDE_HTML = "<h1>browser guide</h1>\n";
+const GUIDE_MD = "# agent guide\n";
 // A gzip member under an extension nothing has a MIME for: finalize sniffs the
 // magic bytes so the response describes the bytes, and no lane invents a
 // Content-Encoding for them.
@@ -153,8 +153,8 @@ beforeAll(async () => {
       "assets/app.js.gz": APP_JS_GZIP,
       "pagefind/index.pf_index": GZIP_PAYLOAD,
       "yield/keep.txt": "kept\n",
-      "agent-handoff.html": HANDOFF_HTML,
-      "agent-handoff.md": HANDOFF_MD,
+      "guide.html": GUIDE_HTML,
+      "guide.md": GUIDE_MD,
       "inert.php": "<?php echo 'never executed';\n",
       _headers: [
         "/inert.php",
@@ -179,9 +179,9 @@ beforeAll(async () => {
         // Non-forced: yields wherever bytes exist, applies where they do not.
         "/yield/* /index.html 200",
         "/gone/* /blog/404.html 404",
-        // One document for every id, two representations, chosen per visitor.
-        "/agent/* /agent-handoff.md 200! Agent=true",
-        "/agent/* /agent-handoff.html 200!",
+        // One path family with two representations, chosen per visitor.
+        "/guide/* /guide.md 200! Agent=true",
+        "/guide/* /guide.html 200!",
         `/preserve/* ${redirectReceiverUrl("/receiver")} 307`,
       ].join("\n"),
     },
@@ -477,21 +477,20 @@ test("forced rewrites override committed bytes; non-forced ones yield to them", 
 });
 
 test("a conditional rule picks one representation per visitor class", async () => {
-  // One static document for every id: a real and a made-up id are
-  // indistinguishable, markdown for agents, HTML for browsers, no client JS.
+  // Markdown goes to agents and HTML goes to browsers.
   // (Which requests count as agents is agent-detection.test.ts's table.)
-  const documentIds = ["/agent/aghf_1a2b3c4d5e6f7a8b9c0d", "/agent/aghf_00000000000000000000"];
-  for (const requestPath of documentIds) {
+  const guidePaths = ["/guide/install", "/guide/publish"];
+  for (const requestPath of guidePaths) {
     const browser = await get(rt, SITE, requestPath, { headers: BROWSER_HEADERS });
     expect(browser.status, requestPath).toBe(200);
-    expect(await browser.text(), requestPath).toBe(HANDOFF_HTML);
+    expect(await browser.text(), requestPath).toBe(GUIDE_HTML);
     expect(browser.headers.get("cache-control"), requestPath).toBe("no-store");
     expect(browser.headers.get("vary"), requestPath).toContain("Accept");
     expect(browser.headers.get("vary"), requestPath).toContain("User-Agent");
 
     const agent = await get(rt, SITE, requestPath, { headers: AGENT_HEADERS });
     expect(agent.status, requestPath).toBe(200);
-    expect(await agent.text(), requestPath).toBe(HANDOFF_MD);
+    expect(await agent.text(), requestPath).toBe(GUIDE_MD);
     // Two bodies at one URL that the edge keys without Vary: unstorable.
     expect(agent.headers.get("cache-control"), requestPath).toBe("no-store");
     expect(agent.headers.get("vary"), requestPath).toContain("Accept");
@@ -500,17 +499,17 @@ test("a conditional rule picks one representation per visitor class", async () =
 
   // The catchers are segment-bounded, so a slug that merely shares the prefix
   // falls through to ordinary routing — here, the root 404.
-  for (const slug of ["/agent-team", "/agents", "/agent-team/~/settings"]) {
+  for (const slug of ["/guide-team", "/guides", "/guide-team/~/settings"]) {
     const response = await get(rt, SITE, slug, { headers: BROWSER_HEADERS });
     expect(response.status, slug).toBe(404);
     expect(await response.text(), slug).toBe(ROOT_404);
   }
 
-  // The catchers claim `/agent/…` and nothing else, so the generated documents
-  // keep serving their own bytes at their own URLs, to every audience.
-  const direct = await get(rt, SITE, "/agent-handoff.md", { headers: BROWSER_HEADERS });
+  // The catchers claim `/guide/…` and nothing else, so the source document
+  // keeps serving its own bytes at its own URL, to every audience.
+  const direct = await get(rt, SITE, "/guide.md", { headers: BROWSER_HEADERS });
   expect(direct.status).toBe(200);
-  expect(await direct.text()).toBe(HANDOFF_MD);
+  expect(await direct.text()).toBe(GUIDE_MD);
 });
 
 test("static entries answer GET and HEAD only", async () => {
@@ -627,7 +626,7 @@ test("a configured SPA fallback owns `/` when no root index can be inferred", as
   await deploy(rt, {
     spaceId: "spc_spa_root",
     versionId: "ver_spa_root_1",
-    files: { "_shell.html": shell, "agent-handoff.html": "<h1>handoff</h1>\n" },
+    files: { "_shell.html": shell, "secondary.html": "<h1>secondary</h1>\n" },
     serving: { config: { fallback: { path: "_shell.html", status: 200 } } },
     activate: {
       route_name: "production",
@@ -644,8 +643,8 @@ test("a configured SPA fallback owns `/` when no root index can be inferred", as
   // The deep routes that already worked keep working, and the second root
   // document is still reachable at its own path.
   expect(await (await get(rt, "spa-root.test", "/client/route/42")).text()).toBe(shell);
-  expect(await (await get(rt, "spa-root.test", "/agent-handoff.html")).text()).toBe(
-    "<h1>handoff</h1>\n",
+  expect(await (await get(rt, "spa-root.test", "/secondary.html")).text()).toBe(
+    "<h1>secondary</h1>\n",
   );
 });
 

@@ -2179,6 +2179,17 @@ check(
     'db egress: an unrecognized source cannot select provider authority'
 );
 
+$mysqlDeadlinePin = _stattic_db_broker_session_pin(30_000, '8.4.6');
+check(
+    str_ends_with($mysqlDeadlinePin, ', SESSION max_execution_time = 30000'),
+    'db deadline: MySQL receives its millisecond session timeout'
+);
+$mariaDbDeadlinePin = _stattic_db_broker_session_pin(1_250, '11.8.9-MariaDB-ubu2404');
+check(
+    str_ends_with($mariaDbDeadlinePin, ', SESSION max_statement_time = 1.250'),
+    'db deadline: MariaDB receives its second-based session timeout'
+);
+
 // --- Canonical storage byte sink ----------------------------------------------------
 
 $sinkPath = sys_get_temp_dir() . '/spacefast-stream-sink-' . bin2hex(random_bytes(8));

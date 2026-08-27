@@ -669,7 +669,7 @@ function _stattic_db_broker_run_statement(array $statement): array
         return ['ok' => true, 'json' => '{"affectedRows":' . $affected . ',"lastInsertId":' . $insertId . ',"ok":true}'];
     }
 
-    return _stattic_db_broker_rows($prepared, $cacheKey);
+    return _stattic_db_broker_rows($connection, $prepared, $cacheKey);
 }
 
 /**
@@ -679,10 +679,15 @@ function _stattic_db_broker_run_statement(array $statement): array
  *
  * @return array{ok:true,json:string}|array{ok:false,code:string,message:string}
  */
-function _stattic_db_broker_rows(mysqli_stmt $prepared, string $cacheKey): array
+function _stattic_db_broker_rows(mysqli $connection, mysqli_stmt $prepared, string $cacheKey): array
 {
     $result = $prepared->get_result();
     if (!$result instanceof mysqli_result) {
+        if ($prepared->field_count > 0) {
+            $failure = _stattic_db_broker_driver_error('zero_db_query_failed', $connection, $prepared);
+            _stattic_db_broker_evict($cacheKey);
+            return $failure;
+        }
         // No result set at all (a DDL or DML statement run in query mode):
         // db.rs reports the same empty row list.
         return ['ok' => true, 'json' => '{"ok":true,"rows":[]}'];
@@ -1124,6 +1129,20 @@ function _stattic_db_broker_bind_params(mysqli_stmt $stmt, string $types, array 
 
 // --- connection ----------------------------------------------------------------------
 
+function _stattic_db_broker_session_pin(?int $readDeadlineMs, string $serverInfo): string
+{
+    if ($readDeadlineMs === null) {
+        return STATTIC_DB_SESSION_PIN;
+    }
+    if (stripos($serverInfo, 'mariadb') !== false) {
+        $milliseconds = str_pad((string) ($readDeadlineMs % 1000), 3, '0', STR_PAD_LEFT);
+        $seconds = intdiv($readDeadlineMs, 1000) . '.' . $milliseconds;
+        return STATTIC_DB_SESSION_PIN . ', SESSION max_statement_time = ' . $seconds;
+    }
+
+    return STATTIC_DB_SESSION_PIN . ', SESSION max_execution_time = ' . $readDeadlineMs;
+}
+
 /**
  * The pooled link for this process, pinned and ready. Returns an error array
  * rather than throwing, so a connection failure becomes an ordinary operation
@@ -1195,13 +1214,10 @@ function _stattic_db_broker_connection(): mysqli|array
 
     // Because reuse discards session state, the pin is re-applied on every
     // acquisition. One combined SET keeps that at a single round trip.
-    $sessionPin = STATTIC_DB_SESSION_PIN;
-    if (is_int($state['readDeadlineMs'])) {
-        // MySQL's MAX_EXECUTION_TIME is milliseconds and applies to SELECTs.
-        // The socket deadline above remains the outer bound for a stalled
-        // server or connection that cannot return the timeout response.
-        $sessionPin .= ', SESSION max_execution_time = ' . $state['readDeadlineMs'];
-    }
+    $sessionPin = _stattic_db_broker_session_pin(
+        is_int($state['readDeadlineMs']) ? $state['readDeadlineMs'] : null,
+        $link->server_info
+    );
     if ($link->query($sessionPin) === false) {
         $link->close();
         return _stattic_db_broker_error('zero_db_connect_failed', 'Zero DB session could not be initialised.');

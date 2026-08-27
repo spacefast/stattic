@@ -20,6 +20,9 @@ if (!is_array($request)) {
 if (is_string($request['url'] ?? null)) {
     _stattic_db_broker_bind($request['url'], $request['source'] ?? null);
 }
+if (is_int($request['readDeadlineMs'] ?? null)) {
+    _stattic_db_broker_set_read_deadline_ms($request['readDeadlineMs']);
+}
 if (is_array($request['capabilities'] ?? null)) {
     _stattic_db_broker_grant($request['capabilities']);
 }

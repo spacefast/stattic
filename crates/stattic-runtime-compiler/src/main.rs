@@ -166,11 +166,14 @@ fn content_compile(
         println!("{}", report.ir_json);
     } else {
         println!(
-            "{{\"format\":\"spacefast.content.compile.v1\",\"collections\":{},\"fields\":{},\"hooks\":{},\"output\":{}}}",
-            report.collections,
-            report.fields,
-            report.hooks,
-            serde_json::to_string(&report.output.to_string_lossy().as_ref())?
+            "{}",
+            serde_json::json!({
+                "format": "spacefast.content.compile.v1",
+                "collections": report.collections,
+                "fields": report.fields,
+                "hooks": report.hooks,
+                "output": report.output.to_string_lossy(),
+            })
         );
     }
     Ok(())

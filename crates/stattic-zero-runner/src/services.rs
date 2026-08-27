@@ -279,7 +279,11 @@ fn content_query(
             "The Space content service returned an unsupported response.",
         ));
     }
-    document.get("results").cloned().ok_or_else(|| {
+    match document {
+        Value::Object(mut document) => document.remove("results"),
+        _ => None,
+    }
+    .ok_or_else(|| {
         BrokerRefusal::new(
             "content_response_invalid",
             "The Space content service omitted its results.",

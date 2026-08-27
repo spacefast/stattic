@@ -1,7 +1,7 @@
 {
-  "revision": "1c521ac51b111b150338342b7e890e8691fc5770",
-  "sourceHash": "b3a83e8d40226e0e34a7d69a68dd4f0fa6125021989932bf8a8a2f93a3328f11",
-  "manifestSha256": "ccaf35f231425a7a9d3ae37d282f2cc7855f7e04d8f6a9e13ac3b71142c42c28",
+  "revision": "ade9ea5650b582652a10ba30be5418330ec2794d",
+  "sourceHash": "e5b6f812baffe2e56284ba28bde421d7d42e2fabf9af0d7cddf1a396a6e31170",
+  "manifestSha256": "dd6a5813f82ec5ce34b0a1725eec0f546d2096b1e71abeb4bddcb62bd15d5dcd",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "579d30e4fde43aeee5760737b488cb9aab198d79468c38f0f301cce39a1ae6fb"
+      "sha256": "f52d81e4a1c28ff3689850557ef92b17fd2c554ccaadfe42543ffba3cc0f1021"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "7a9d2a0aa855a72c5c63c5b28c83468d3627426b3b24ae6e1fc3c77e06b837d3"
+      "sha256": "3594b9d7d594ee33760de19ac62fa41233ab603b4871fbcffd628b8876345bce"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -649,7 +649,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-kernel.php",
-      "sha256": "76c622e2d602c04bdda680949b2b620929e006f3eed081a4fb40c77b850d3020"
+      "sha256": "b944cd62e6811d7dce511c08c621178bd9c1a27a697fd2f4111c472f6b0b8059"
     },
     {
       "path": "runtime/installer.php",

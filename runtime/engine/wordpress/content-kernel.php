@@ -144,6 +144,13 @@ function spacefast_content_taxonomy(string $name): string
 
 function spacefast_content_request_origin(): string
 {
+    // Recomputed on every site_url/home_url/upload_dir filter, of which one
+    // request fires many; the request host and cookie-secure verdict are both
+    // request-invariant, so the first non-empty answer stands for the rest.
+    static $origin = null;
+    if (is_string($origin)) {
+        return $origin;
+    }
     if (spacefast_content_space_id() === '') {
         return '';
     }
@@ -152,7 +159,7 @@ function spacefast_content_request_origin(): string
         return '';
     }
     $secure = !function_exists('_stattic_cookies_secure') || _stattic_cookies_secure();
-    return ($secure ? 'https://' : 'http://') . $host;
+    return $origin = ($secure ? 'https://' : 'http://') . $host;
 }
 
 function spacefast_content_request_url(mixed $url): mixed
@@ -570,10 +577,18 @@ function spacefast_content_run_payload_hook(mixed $result, mixed $id, mixed $arg
     ) {
         return null;
     }
-    $manifest = json_decode((string) @file_get_contents($root . '/hooks.json'), true);
-    $hooks = is_array($manifest) && is_array($manifest['hooks'] ?? null)
-        ? $manifest['hooks']
-        : [];
+    // The compiled release is immutable for the request, so a request that runs
+    // several hooks reads and decodes hooks.json once, not once per hook.
+    static $cachedRoot = null;
+    static $cachedHooks = [];
+    if ($cachedRoot !== $root) {
+        $cachedRoot = $root;
+        $manifest = json_decode((string) @file_get_contents($root . '/hooks.json'), true);
+        $cachedHooks = is_array($manifest) && is_array($manifest['hooks'] ?? null)
+            ? $manifest['hooks']
+            : [];
+    }
+    $hooks = $cachedHooks;
     $hook = null;
     foreach ($hooks as $candidate) {
         if (is_array($candidate) && ($candidate['id'] ?? null) === $id) {
@@ -609,19 +624,33 @@ function spacefast_content_run_payload_hook(mixed $result, mixed $id, mixed $arg
 
 function spacefast_content_compiled_collection(string $name): ?array
 {
+    // A deterministic projection of the immutable compiled release, resolved on
+    // hot admin hooks (map_meta_cap runs it per capability check). Cache per
+    // release root so the field normalization runs once per collection.
+    static $cachedRoot = null;
+    static $cache = [];
+    $root = $GLOBALS['SPACEFAST_CONTENT_COMPILED_RELEASE_ROOT'] ?? null;
+    $cacheRoot = is_string($root) ? $root : '';
+    if ($cachedRoot !== $cacheRoot) {
+        $cachedRoot = $cacheRoot;
+        $cache = [];
+    }
+    if (array_key_exists($name, $cache)) {
+        return $cache[$name];
+    }
     foreach (spacefast_content_compiled_schema()['collections'] as $collection) {
         if (!is_array($collection) || ($collection['slug'] ?? null) !== $name) {
             continue;
         }
         $storage = (string) ($collection['wordpress_storage'] ?? 'post');
         if (!in_array($storage, ['post', 'attachment'], true)) {
-            return null;
+            return $cache[$name] = null;
         }
         $fields = [];
         foreach (spacefast_content_normalize_compiled_fields($collection['fields'] ?? []) as $normalized) {
             $fields[$normalized['name']] = $normalized['definition'];
         }
-        return [
+        return $cache[$name] = [
             'name' => $name,
             'post_type' => (string) ($collection['wordpress_post_type'] ?? ''),
             // Payload's empty read policy means authenticated-only, while an
@@ -636,7 +665,7 @@ function spacefast_content_compiled_collection(string $name): ?array
             'payload' => $collection,
         ];
     }
-    return null;
+    return $cache[$name] = null;
 }
 
 /** @return list<array{name:string,definition:array<string,mixed>}> */
@@ -735,8 +764,10 @@ function spacefast_content_register_collections(): void
     }
     $posts = spacefast_content_compiled_collection('posts');
     $pages = spacefast_content_compiled_collection('pages');
-    $postsType = $posts['post_type'] ?? spacefast_content_builtin_post_type('posts');
-    $pagesType = $pages['post_type'] ?? spacefast_content_builtin_post_type('pages');
+    // Only read inside the `=== null` branches below, where the compiled
+    // lookup returned nothing — so the post type is always the builtin one.
+    $postsType = spacefast_content_builtin_post_type('posts');
+    $pagesType = spacefast_content_builtin_post_type('pages');
     if ($posts === null) {
         register_post_type($postsType, spacefast_content_post_type_args('Posts', 'Post', [
             'title', 'editor', 'excerpt', 'thumbnail', 'revisions',
@@ -1233,21 +1264,35 @@ function spacefast_content_scope_meta_cap(array $caps, string $cap, int $userId,
 
 function spacefast_content_collection_for_post_type(string $postType): ?array
 {
+    // Resolved per capability check on map_meta_cap; without a memo this scans
+    // every compiled collection twice (once here by post type, again inside
+    // spacefast_content_compiled_collection by slug) on each hook call.
+    static $cachedRoot = null;
+    static $cache = [];
+    $root = $GLOBALS['SPACEFAST_CONTENT_COMPILED_RELEASE_ROOT'] ?? null;
+    $cacheRoot = is_string($root) ? $root : '';
+    if ($cachedRoot !== $cacheRoot) {
+        $cachedRoot = $cacheRoot;
+        $cache = [];
+    }
+    if (array_key_exists($postType, $cache)) {
+        return $cache[$postType];
+    }
     foreach (spacefast_content_compiled_schema()['collections'] as $compiled) {
         if (
             is_array($compiled)
             && ($compiled['wordpress_post_type'] ?? null) === $postType
             && is_string($compiled['slug'] ?? null)
         ) {
-            return spacefast_content_compiled_collection($compiled['slug']);
+            return $cache[$postType] = spacefast_content_compiled_collection($compiled['slug']);
         }
     }
     foreach (['posts', 'pages'] as $name) {
         if (spacefast_content_builtin_post_type($name) === $postType) {
-            return spacefast_content_resolve_collection($name);
+            return $cache[$postType] = spacefast_content_resolve_collection($name);
         }
     }
-    return null;
+    return $cache[$postType] = null;
 }
 
 function spacefast_content_handle_request(array $request, bool $managed): array
@@ -1277,10 +1322,7 @@ function spacefast_content_render_document(array $request, bool $managed): array
     ) {
         throw new Spacefast_Content_Error(400, 'content_render_invalid', 'The content render request is invalid.');
     }
-    $collection = spacefast_content_resolve_collection($request['collection']);
-    if (!$managed && !$collection['public']) {
-        throw new Spacefast_Content_Error(404, 'content_collection_not_found', 'The content collection was not found.');
-    }
+    $collection = spacefast_content_resolve_collection($request['collection'], $managed);
     $where = isset($request['id'])
         ? [['field' => 'id', 'operator' => 'eq', 'value' => $request['id']]]
         : [['field' => 'slug', 'operator' => 'eq', 'value' => $request['slug']]];
@@ -1634,10 +1676,7 @@ function spacefast_content_execute_query(mixed $query, bool $managed): array
     if (!$managed && $status !== 'publish') {
         throw new Spacefast_Content_Error(403, 'content_status_forbidden', 'Public content queries can only read published content.');
     }
-    $collection = spacefast_content_resolve_collection($query['collection']);
-    if (!$managed && !$collection['public']) {
-        throw new Spacefast_Content_Error(404, 'content_collection_not_found', 'The content collection was not found.');
-    }
+    $collection = spacefast_content_resolve_collection($query['collection'], $managed);
     $args = spacefast_content_compile_query_args($query, $collection, $managed);
     $wpQuery = new WP_Query($args);
     $items = [];
@@ -1652,36 +1691,44 @@ function spacefast_content_execute_query(mixed $query, bool $managed): array
     ];
 }
 
-function spacefast_content_resolve_collection(string $name): array
+function spacefast_content_resolve_collection(string $name, bool $managed = true): array
 {
-    $compiled = spacefast_content_compiled_collection($name);
-    if ($compiled !== null) {
-        return $compiled;
+    $collection = spacefast_content_compiled_collection($name);
+    if ($collection === null) {
+        if ($name === 'media') {
+            $collection = [
+                'name' => 'media',
+                'post_type' => 'attachment',
+                'public' => true,
+                'fields' => [],
+                'builtin' => true,
+                'media' => true,
+                'scoped' => true,
+            ];
+        } elseif ($name === 'posts' || $name === 'pages') {
+            $collection = [
+                'name' => $name,
+                'post_type' => spacefast_content_builtin_post_type($name),
+                'public' => true,
+                'fields' => [],
+                'builtin' => true,
+                'scoped' => true,
+            ];
+        } else {
+            // The compiled release is the only source of custom collections. A
+            // name the live version's content config did not declare does not
+            // exist.
+            throw new Spacefast_Content_Error(404, 'content_collection_not_found', 'The content collection was not found.');
+        }
     }
-    if ($name === 'media') {
-        return [
-            'name' => 'media',
-            'post_type' => 'attachment',
-            'public' => true,
-            'fields' => [],
-            'builtin' => true,
-            'media' => true,
-            'scoped' => true,
-        ];
+    // Resolution owns the public-read gate: an unmanaged caller may not reach a
+    // non-public collection, and an absent one is indistinguishable from one it
+    // may not see. Every read funnels through here, so the check lives here once
+    // rather than being re-derived at each read leaf.
+    if (!$managed && !$collection['public']) {
+        throw new Spacefast_Content_Error(404, 'content_collection_not_found', 'The content collection was not found.');
     }
-    if ($name === 'posts' || $name === 'pages') {
-        return [
-            'name' => $name,
-            'post_type' => spacefast_content_builtin_post_type($name),
-            'public' => true,
-            'fields' => [],
-            'builtin' => true,
-            'scoped' => true,
-        ];
-    }
-    // The compiled release is the only source of custom collections. A name the
-    // live version's content config did not declare does not exist.
-    throw new Spacefast_Content_Error(404, 'content_collection_not_found', 'The content collection was not found.');
+    return $collection;
 }
 
 function spacefast_content_compile_query_args(array $query, array $collection, bool $managed): array
@@ -1707,7 +1754,7 @@ function spacefast_content_compile_query_args(array $query, array $collection, b
         throw new Spacefast_Content_Error(400, 'content_query_invalid', 'The content filters are invalid.');
     }
     $metaQuery = ['relation' => 'AND'];
-    if (($collection['scoped'] ?? true) === true) {
+    if ($collection['scoped'] === true) {
         $metaQuery[] = spacefast_content_space_meta_clause();
     }
     foreach ($where as $filter) {

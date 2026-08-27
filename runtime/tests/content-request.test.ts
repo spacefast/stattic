@@ -18,7 +18,8 @@ echo json_encode([
     'format' => 'spacefast.content.query',
     'queries' => ['preview' => ['collection' => 'posts', 'status' => 'draft']],
   ]),
-  'schema' => _stattic_content_management_action(['operation' => 'schema.apply']),
+  'compile' => _stattic_content_management_action(['operation' => 'schema.compile']),
+  'activate' => _stattic_content_management_action(['operation' => 'schema.activate']),
   'admin' => _stattic_content_management_action(['operation' => 'admin.launch']),
   'authorization' => _stattic_content_management_action(['operation' => 'authorization.apply']),
   'document' => _stattic_content_management_action(['operation' => 'document.upsert']),
@@ -47,7 +48,8 @@ echo json_encode([
     managed: "content.query",
     markdown: "content.markdown.sync",
     public: null,
-    schema: "content.schema.apply",
+    compile: "content.schema.compile",
+    activate: "content.schema.activate",
   });
 });
 

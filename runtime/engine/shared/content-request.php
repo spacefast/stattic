@@ -24,8 +24,8 @@ function _stattic_content_management_action(array $request): string|false|null
     return match ((string) ($request['operation'] ?? '')) {
         'admin.launch' => 'content.admin.launch',
         'authorization.apply' => 'content.authorization.apply',
-        'schema.apply' => 'content.schema.apply',
         'schema.compile' => 'content.schema.compile',
+        'schema.activate' => 'content.schema.activate',
         'document.upsert' => 'content.document.upsert',
         'markdown.sync' => 'content.markdown.sync',
         default => false,

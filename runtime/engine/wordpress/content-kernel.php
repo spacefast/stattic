@@ -14,11 +14,8 @@ declare(strict_types=1);
 // loaded the kernel.
 require_once __DIR__ . '/../shared/private-tree.php';
 
-const SPACEFAST_CONTENT_SCHEMA_FORMAT = 'spacefast.content.schema';
 const SPACEFAST_CONTENT_QUERY_FORMAT = 'spacefast.content.query';
 const SPACEFAST_CONTENT_API_VERSION = 1;
-const SPACEFAST_CONTENT_MANIFEST_OPTION = 'spacefast_content_manifest_v1';
-const SPACEFAST_CONTENT_REVISION_OPTION = 'spacefast_content_revision_v1';
 const SPACEFAST_CONTENT_SITE_TITLE_OPTION = 'spacefast_space_title';
 const SPACEFAST_CONTENT_EXTERNAL_ID_META = '_spacefast_external_id';
 const SPACEFAST_CONTENT_MARKDOWN_META = '_spacefast_markdown_original';
@@ -50,7 +47,6 @@ if (function_exists('add_action')) {
     add_action('plugins_loaded', 'spacefast_content_admin_establish_user', 1);
     add_action('init', 'spacefast_content_register_collections', 5);
     add_action('acf/init', 'spacefast_content_register_scf_field_groups', 5);
-    add_action('add_meta_boxes', 'spacefast_content_add_meta_boxes');
     add_action('add_attachment', 'spacefast_content_scope_attachment');
     add_action('save_post', 'spacefast_content_scope_post', 1, 2);
     add_action('save_post', 'spacefast_content_save_fields', 10, 2);
@@ -534,18 +530,6 @@ JS);
     }
 }
 
-function spacefast_content_manifest(): array
-{
-    if (!function_exists('get_option') || spacefast_content_space_id() === '') {
-        return spacefast_content_empty_manifest();
-    }
-    $manifest = get_option(
-        spacefast_content_option_name(SPACEFAST_CONTENT_MANIFEST_OPTION),
-        spacefast_content_empty_manifest()
-    );
-    return is_array($manifest) ? $manifest : spacefast_content_empty_manifest();
-}
-
 function spacefast_content_compiled_schema(): array
 {
     static $cachedRoot = null;
@@ -744,15 +728,6 @@ function spacefast_content_payload_field_identifier(mixed $value): bool
         && preg_match('/^[A-Za-z][A-Za-z0-9_-]*$/', $value) === 1;
 }
 
-function spacefast_content_empty_manifest(): array
-{
-    return [
-        'format' => SPACEFAST_CONTENT_SCHEMA_FORMAT,
-        'version' => SPACEFAST_CONTENT_API_VERSION,
-        'collections' => [],
-    ];
-}
-
 function spacefast_content_register_collections(): void
 {
     if (!function_exists('register_post_type') || spacefast_content_space_id() === '') {
@@ -790,19 +765,8 @@ function spacefast_content_register_collections(): void
             'rewrite' => false,
         ]);
     }
-    foreach (spacefast_content_manifest()['collections'] as $name => $collection) {
-        if (!is_string($name) || !is_array($collection)) {
-            continue;
-        }
-        register_post_type(
-            spacefast_content_post_type((string) ($collection['resourceId'] ?? $name)),
-            spacefast_content_post_type_args(
-                (string) ($collection['label'] ?? $name),
-                (string) ($collection['singularLabel'] ?? $name),
-                ['title', 'revisions']
-            )
-        );
-    }
+    // Compiled collections register their own post types from the release's
+    // payloadwp.php, which the loader requires before this runs.
 }
 
 function spacefast_content_post_type_args(
@@ -830,26 +794,6 @@ function spacefast_content_post_type(string $resourceId): string
     return 'sf_' . substr(hash('sha256', spacefast_content_require_space_id() . '|' . $resourceId), 0, 16);
 }
 
-function spacefast_content_add_meta_boxes(): void
-{
-    if (spacefast_content_scf_available() || !function_exists('add_meta_box')) {
-        return;
-    }
-    foreach (spacefast_content_manifest()['collections'] as $name => $collection) {
-        if (!is_string($name) || !is_array($collection)) {
-            continue;
-        }
-        add_meta_box(
-            'spacefast-content-fields',
-            (string) ($collection['singularLabel'] ?? 'Content') . ' fields',
-            static fn (object $post) => spacefast_content_render_fields($post, $collection),
-            spacefast_content_post_type((string) ($collection['resourceId'] ?? $name)),
-            'normal',
-            'high'
-        );
-    }
-}
-
 function spacefast_content_scf_available(): bool
 {
     return function_exists('acf_add_local_field_group');
@@ -867,38 +811,6 @@ function spacefast_content_register_scf_field_groups(): void
 {
     if (!spacefast_content_scf_available() || spacefast_content_space_id() === '') {
         return;
-    }
-    foreach (spacefast_content_manifest()['collections'] as $name => $collection) {
-        if (!is_string($name) || !is_array($collection)) {
-            continue;
-        }
-        $resourceId = (string) ($collection['resourceId'] ?? $name);
-        $fields = [];
-        foreach (is_array($collection['fields'] ?? null) ? $collection['fields'] : [] as $fieldName => $field) {
-            if (is_string($fieldName) && is_array($field)) {
-                $fields[] = spacefast_content_scf_field($resourceId, $fieldName, $field);
-            }
-        }
-        if ($fields === []) {
-            continue;
-        }
-        acf_add_local_field_group([
-            'key' => spacefast_content_scf_key('group', $resourceId),
-            'title' => (string) ($collection['singularLabel'] ?? $name) . ' fields',
-            'fields' => $fields,
-            'location' => [[[
-                'param' => 'post_type',
-                'operator' => '==',
-                'value' => spacefast_content_post_type($resourceId),
-            ]]],
-            'position' => 'normal',
-            'style' => 'default',
-            'label_placement' => 'top',
-            'instruction_placement' => 'label',
-            'show_in_rest' => 0,
-            'allow_ai_access' => 0,
-            'active' => true,
-        ]);
     }
     foreach (spacefast_content_compiled_schema()['collections'] as $collection) {
         if (!is_array($collection) || ($collection['wordpress_storage'] ?? 'post') !== 'post') {
@@ -1159,83 +1071,6 @@ function spacefast_content_load_scf_value(mixed $value, mixed $postId, mixed $fi
         : $value;
 }
 
-function spacefast_content_render_fields(object $post, array $collection): void
-{
-    if (function_exists('wp_nonce_field')) {
-        wp_nonce_field('spacefast_content_fields', 'spacefast_content_nonce');
-    }
-    foreach (is_array($collection['fields'] ?? null) ? $collection['fields'] : [] as $name => $field) {
-        if (!is_string($name) || !is_array($field)) {
-            continue;
-        }
-        $value = function_exists('get_post_meta') ? get_post_meta((int) $post->ID, $name, true) : '';
-        $label = function_exists('esc_html') ? esc_html((string) ($field['label'] ?? $name)) : $name;
-        $escapedName = function_exists('esc_attr') ? esc_attr($name) : $name;
-        $isMultiple = !empty($field['multiple']);
-        $values = is_array($value) ? array_map('strval', $value) : [(string) $value];
-        $valueText = is_array($value) ? implode(',', $values) : (string) $value;
-        $escapedValue = function_exists('esc_textarea') ? esc_textarea($valueText) : $valueText;
-        $required = !empty($field['required']) ? ' required' : '';
-        echo '<p><label for="sf-field-' . $escapedName . '"><strong>' . $label . '</strong></label><br>';
-        if (($field['type'] ?? '') === 'boolean') {
-            $checked = !empty($value) ? ' checked' : '';
-            echo '<input type="checkbox" value="1" name="spacefast_fields[' . $escapedName . ']" id="sf-field-' . $escapedName . '"' . $checked . '>';
-        } elseif (($field['type'] ?? '') === 'select' && is_array($field['options'] ?? null)) {
-            $multiple = $isMultiple ? ' multiple size="6"' : '';
-            $nameSuffix = $isMultiple ? '[]' : '';
-            echo '<select class="widefat" name="spacefast_fields[' . $escapedName . ']' . $nameSuffix . '" id="sf-field-' . $escapedName . '"' . $multiple . $required . '>';
-            foreach ($field['options'] as $option) {
-                $escapedOption = function_exists('esc_attr') ? esc_attr((string) $option) : (string) $option;
-                $selected = in_array((string) $option, $values, true) ? ' selected' : '';
-                echo '<option value="' . $escapedOption . '"' . $selected . '>' . $escapedOption . '</option>';
-            }
-            echo '</select>';
-        } elseif (($field['type'] ?? '') === 'relation') {
-            $related = spacefast_content_resolve_collection((string) ($field['collection'] ?? ''));
-            $options = function_exists('get_posts') ? get_posts([
-                'post_type' => $related['post_type'],
-                'post_status' => 'any',
-                'posts_per_page' => 100,
-                'orderby' => 'title',
-                'order' => 'ASC',
-                'meta_query' => [spacefast_content_space_meta_clause()],
-            ]) : [];
-            $multiple = $isMultiple ? ' multiple size="8"' : '';
-            $nameSuffix = $isMultiple ? '[]' : '';
-            echo '<select class="widefat" name="spacefast_fields[' . $escapedName . ']' . $nameSuffix . '" id="sf-field-' . $escapedName . '"' . $multiple . $required . '>';
-            if (!$isMultiple) {
-                echo '<option value="">None</option>';
-            }
-            foreach ($options as $option) {
-                $id = (string) ($option->ID ?? '');
-                $title = function_exists('esc_html') ? esc_html((string) ($option->post_title ?? $id)) : $id;
-                $selected = in_array($id, $values, true) ? ' selected' : '';
-                echo '<option value="' . $id . '"' . $selected . '>' . $title . '</option>';
-            }
-            echo '</select>';
-        } elseif (($field['type'] ?? '') === 'media') {
-            echo '<input class="widefat" type="text" readonly value="' . $escapedValue . '" name="spacefast_fields[' . $escapedName . ']" id="sf-field-' . $escapedName . '"' . $required . '>';
-            echo '<button type="button" class="button" data-spacefast-media="sf-field-' . $escapedName . '" data-multiple="' . ($isMultiple ? 'true' : 'false') . '">Choose media</button>';
-        } elseif (($field['type'] ?? '') === 'richText' && function_exists('wp_editor')) {
-            wp_editor((string) $value, 'sf-field-' . $escapedName, [
-                'textarea_name' => 'spacefast_fields[' . $escapedName . ']',
-                'textarea_rows' => 10,
-                'media_buttons' => true,
-            ]);
-        } elseif (($field['type'] ?? '') === 'markdown' || !empty($field['multiline'])) {
-            echo '<textarea class="widefat" rows="8" name="spacefast_fields[' . $escapedName . ']" id="sf-field-' . $escapedName . '"' . $required . '>' . $escapedValue . '</textarea>';
-        } else {
-            $inputType = in_array(($field['type'] ?? ''), ['number', 'date'], true) ? $field['type'] : 'text';
-            echo '<input class="widefat" type="' . $inputType . '" value="' . $escapedValue . '" name="spacefast_fields[' . $escapedName . ']" id="sf-field-' . $escapedName . '"' . $required . '>';
-        }
-        if (is_string($field['description'] ?? null) && $field['description'] !== '') {
-            $description = function_exists('esc_html') ? esc_html($field['description']) : $field['description'];
-            echo '<span class="description">' . $description . '</span>';
-        }
-        echo '</p>';
-    }
-}
-
 function spacefast_content_save_fields(int $postId, object $post): void
 {
     if (spacefast_content_scf_available()) {
@@ -1412,15 +1247,6 @@ function spacefast_content_collection_for_post_type(string $postType): ?array
             return spacefast_content_resolve_collection($name);
         }
     }
-    foreach (spacefast_content_manifest()['collections'] as $name => $collection) {
-        if (
-            is_string($name)
-            && is_array($collection)
-            && spacefast_content_post_type((string) ($collection['resourceId'] ?? $name)) === $postType
-        ) {
-            return $collection;
-        }
-    }
     return null;
 }
 
@@ -1430,8 +1256,8 @@ function spacefast_content_handle_request(array $request, bool $managed): array
         return spacefast_content_execute_batch($request, $managed);
     }
     return match ((string) ($request['operation'] ?? '')) {
-        'schema.apply' => spacefast_content_apply_schema($request['manifest'] ?? null, $managed),
         'schema.compile' => spacefast_content_compile_schema($request['bundle'] ?? null, $managed),
+        'schema.activate' => spacefast_content_activate_release($request['revision'] ?? null, $managed),
         'document.render' => spacefast_content_render_document($request, $managed),
         'document.upsert' => spacefast_content_upsert_document($request['document'] ?? null, $managed),
         'markdown.sync' => spacefast_content_sync_markdown($request, $managed),
@@ -1579,7 +1405,6 @@ function spacefast_content_compile_schema(mixed $bundle, bool $managed): array
             throw new Spacefast_Content_Error(422, 'content_compile_failed', 'The Payload content config could not be compiled.');
         }
         $artifact = spacefast_content_validate_compiler_artifact($outputRoot);
-        spacefast_content_require_no_compiled_collision($artifact);
         $revisionHash = hash_init('sha256');
         foreach (['schema.json', 'hooks.json', 'payloadwp.php', 'payloadwp-admin.js', 'payloadwp-admin.css'] as $file) {
             hash_update($revisionHash, $file . "\0" . (string) file_get_contents($outputRoot . '/' . $file) . "\0");
@@ -1589,9 +1414,10 @@ function spacefast_content_compile_schema(mixed $bundle, bool $managed): array
         if (!is_dir($release) && !rename($outputRoot, $release)) {
             throw new Spacefast_Content_Error(500, 'content_compile_publish_failed', 'The compiled content revision could not be published.');
         }
-        if (!_stattic_private_tree_write_pointer($contentRoot . '/active-release', $revision)) {
-            throw new Spacefast_Content_Error(500, 'content_compile_pointer_failed', 'The compiled content revision could not be activated.');
-        }
+        // Compiling never changes what the Space serves. The control plane binds
+        // this revision to the version being published and activates it only when
+        // that version goes live, so a publish that never activates — and a
+        // rollback to an older version — cannot move the live content model.
         return [
             'revision' => $revision,
             'schemaVersion' => $artifact['schema_version'],
@@ -1608,6 +1434,46 @@ function spacefast_content_compile_schema(mixed $bundle, bool $managed): array
         flock($lock, LOCK_UN);
         fclose($lock);
     }
+}
+
+/**
+ * Point the Space at an already-compiled content release, or at none.
+ *
+ * Activation is deliberately separate from compilation: the live content model
+ * is whatever the live version bound, so promoting or rolling back a version
+ * replays this call with that version's revision and never recompiles.
+ */
+function spacefast_content_activate_release(mixed $revision, bool $managed): array
+{
+    if (!$managed) {
+        throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content activation requires Spacefast authorization.');
+    }
+    if ($revision !== null && (!is_string($revision) || preg_match('/^[a-f0-9]{64}$/', $revision) !== 1)) {
+        throw new Spacefast_Content_Error(400, 'content_release_invalid', 'The content release revision is invalid.');
+    }
+    $privateRoot = $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? null;
+    if (!is_string($privateRoot) || $privateRoot === '') {
+        throw new Spacefast_Content_Error(503, 'content_compiler_storage_unavailable', 'Content compiler storage is unavailable.');
+    }
+    $contentRoot = spacefast_content_release_root($privateRoot, spacefast_content_require_space_id());
+    $pointer = $contentRoot . '/active-release';
+    // A version that shipped no content config declares "no managed content".
+    // Clearing the pointer is what makes a rollback to such a version faithful.
+    if ($revision === null) {
+        if (is_file($pointer) && !_stattic_private_tree_remove($pointer)) {
+            throw new Spacefast_Content_Error(500, 'content_release_pointer_failed', 'The content release pointer could not be cleared.');
+        }
+        return ['revision' => null];
+    }
+    // Refuse to point at a release this Space has not compiled. Serving would
+    // otherwise degrade silently to an empty schema in the loader.
+    if (!is_file($contentRoot . '/releases/' . $revision . '/schema.json')) {
+        throw new Spacefast_Content_Error(409, 'content_release_not_found', 'The content release is not present on this Space.');
+    }
+    if (!_stattic_private_tree_write_pointer($pointer, $revision)) {
+        throw new Spacefast_Content_Error(500, 'content_release_pointer_failed', 'The content release could not be activated.');
+    }
+    return ['revision' => $revision];
 }
 
 function spacefast_content_validate_source_bundle(mixed $bundle): array
@@ -1682,45 +1548,6 @@ function spacefast_content_validate_compiler_artifact(string $root): array
     return $schema;
 }
 
-/**
- * Refuse a compiled artifact whose collection slug is already an applied
- * manifest collection.
- *
- * Both schema lanes exist on purpose, and spacefast_content_resolve_collection()
- * tries the compiled one first. So a compile naming a slug the manifest already
- * owns did not merge with it — it replaced it, wholesale and silently, for
- * every reader: different post type, different fields, and `public => false`,
- * which turns a published collection authenticated-only. Nothing in the
- * response said so.
- *
- * Coexistence is fine; collision is not. Loud at compile time is the only place
- * the author can still fix it, and the applied manifest is what a live Space is
- * already serving, so the compile is what yields.
- *
- * (The builtin `media`/`posts`/`pages` slugs are shadowable the same way. That
- * is deliberately still allowed: a Payload config naming `posts` is a normal
- * thing to write, and the two lanes' relationship is a pending product
- * decision. Only the applied-manifest collision is an error.)
- */
-function spacefast_content_require_no_compiled_collision(array $artifact): void
-{
-    $applied = spacefast_content_manifest()['collections'] ?? null;
-    if (!is_array($applied) || $applied === []) {
-        return;
-    }
-    foreach ($artifact['collections'] as $collection) {
-        $slug = is_array($collection) ? ($collection['slug'] ?? null) : null;
-        if (is_string($slug) && isset($applied[$slug])) {
-            throw new Spacefast_Content_Error(
-                409,
-                'content_collection_slug_conflict',
-                'The compiled collection "' . $slug . '" is already an applied collection. '
-                    . 'Rename the Payload collection, or remove the applied one first.'
-            );
-        }
-    }
-}
-
 function spacefast_content_ir_field_count(array $schema): int
 {
     $countFields = static function (array $fields) use (&$countFields): int {
@@ -1747,154 +1574,6 @@ function spacefast_content_ir_field_count(array $schema): int
     return $count;
 }
 
-function spacefast_content_apply_schema(mixed $manifest, bool $managed): array
-{
-    if (!$managed) {
-        throw new Spacefast_Content_Error(401, 'content_auth_required', 'Schema changes require Spacefast authorization.');
-    }
-    $validated = spacefast_content_validate_manifest($manifest);
-    // The same collision, approached from the other lane. An applied collection
-    // whose name a compiled release already owns would be stored and then never
-    // resolved, because the compiled lane is tried first — an apply that
-    // reports a revision and changes nothing a reader sees.
-    $compiled = [];
-    foreach (spacefast_content_compiled_schema()['collections'] as $collection) {
-        if (is_array($collection) && is_string($collection['slug'] ?? null)) {
-            $compiled[$collection['slug']] = true;
-        }
-    }
-    foreach (array_keys($validated['collections']) as $name) {
-        if (isset($compiled[$name])) {
-            throw new Spacefast_Content_Error(
-                409,
-                'content_collection_slug_conflict',
-                'The collection "' . $name . '" is already a compiled Payload collection. '
-                    . 'Rename it, or recompile without that collection first.'
-            );
-        }
-    }
-    $current = spacefast_content_manifest();
-    $nextResourceIds = [];
-    foreach ($validated['collections'] as $collection) {
-        if (is_array($collection) && is_string($collection['resourceId'] ?? null)) {
-            $nextResourceIds[$collection['resourceId']] = true;
-        }
-    }
-    foreach (is_array($current['collections'] ?? null) ? $current['collections'] : [] as $name => $collection) {
-        $currentResourceId = is_array($collection) && is_string($collection['resourceId'] ?? null)
-            ? $collection['resourceId']
-            : null;
-        if ($currentResourceId !== null && !isset($nextResourceIds[$currentResourceId])) {
-            throw new Spacefast_Content_Error(
-                409,
-                'content_collection_identity_immutable',
-                'Keep every applied collection resourceId. To rename a collection, move its resourceId to the new name.'
-            );
-        }
-        $replacement = $validated['collections'][$name] ?? null;
-        if (
-            $currentResourceId !== null
-            && is_array($replacement)
-            && !hash_equals($currentResourceId, (string) ($replacement['resourceId'] ?? ''))
-        ) {
-            throw new Spacefast_Content_Error(
-                409,
-                'content_collection_identity_immutable',
-                'Keep the collection resourceId unchanged. To rename a collection, move that resourceId to the new name.'
-            );
-        }
-    }
-    $revision = hash('sha256', json_encode($validated, JSON_UNESCAPED_SLASHES));
-    update_option(spacefast_content_option_name(SPACEFAST_CONTENT_MANIFEST_OPTION), $validated, false);
-    update_option(spacefast_content_option_name(SPACEFAST_CONTENT_REVISION_OPTION), $revision, false);
-    spacefast_content_register_collections();
-    return ['revision' => $revision];
-}
-
-function spacefast_content_validate_manifest(mixed $manifest): array
-{
-    if (
-        !is_array($manifest)
-        || ($manifest['format'] ?? null) !== SPACEFAST_CONTENT_SCHEMA_FORMAT
-        || ($manifest['version'] ?? null) !== SPACEFAST_CONTENT_API_VERSION
-        || !is_array($manifest['collections'] ?? null)
-        || count($manifest['collections']) > SPACEFAST_CONTENT_CAPS['collections']
-    ) {
-        throw new Spacefast_Content_Error(400, 'content_schema_invalid', 'The content schema is invalid.');
-    }
-    $resourceIds = [];
-    foreach ($manifest['collections'] as $name => &$collection) {
-        if (
-            !spacefast_content_identifier($name)
-            || in_array($name, ['posts', 'pages', 'media'], true)
-            || !is_array($collection)
-            || ($collection['name'] ?? null) !== $name
-            || !is_string($collection['resourceId'] ?? null)
-            || strlen($collection['resourceId']) < 8
-            || strlen($collection['resourceId']) > 96
-            || !is_string($collection['label'] ?? null)
-            || trim($collection['label']) === ''
-            || !is_string($collection['singularLabel'] ?? null)
-            || trim($collection['singularLabel']) === ''
-            || !is_array($collection['fields'] ?? null)
-            || count($collection['fields']) > SPACEFAST_CONTENT_CAPS['fields']
-        ) {
-            throw new Spacefast_Content_Error(400, 'content_schema_invalid', 'A content collection is invalid.');
-        }
-        if (isset($resourceIds[$collection['resourceId']])) {
-            throw new Spacefast_Content_Error(400, 'content_schema_invalid', 'Content collection resource ids must be unique.');
-        }
-        $resourceIds[$collection['resourceId']] = true;
-        foreach ($collection['fields'] as $fieldName => $field) {
-            if (!spacefast_content_payload_field_identifier($fieldName) || !spacefast_content_field_valid($field)) {
-                throw new Spacefast_Content_Error(400, 'content_schema_invalid', 'A content field is invalid.');
-            }
-        }
-        $collection['public'] = ($collection['public'] ?? true) === true;
-    }
-    unset($collection);
-    foreach ($manifest['collections'] as $collection) {
-        foreach ($collection['fields'] as $field) {
-            if (
-                ($field['type'] ?? null) === 'relation'
-                && !in_array($field['collection'], ['posts', 'pages', 'media'], true)
-                && !isset($manifest['collections'][$field['collection']])
-            ) {
-                throw new Spacefast_Content_Error(400, 'content_schema_invalid', 'A relation references an unknown collection.');
-            }
-        }
-    }
-    return $manifest;
-}
-
-function spacefast_content_field_valid(mixed $field): bool
-{
-    $types = ['text', 'markdown', 'richText', 'number', 'boolean', 'date', 'media', 'relation', 'select'];
-    if (
-        !is_array($field)
-        || !in_array(($field['type'] ?? null), $types, true)
-        || !is_string($field['label'] ?? null)
-        || trim($field['label']) === ''
-    ) {
-        return false;
-    }
-    if (($field['type'] ?? null) === 'relation' && !spacefast_content_identifier($field['collection'] ?? null)) {
-        return false;
-    }
-    if (($field['type'] ?? null) === 'select') {
-        $options = $field['options'] ?? null;
-        if (!is_array($options) || count($options) < 1 || count($options) > 100) {
-            return false;
-        }
-        foreach ($options as $option) {
-            if (!is_string($option) || trim($option) === '') {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
 function spacefast_content_identifier(mixed $value): bool
 {
     return is_string($value)
@@ -1914,10 +1593,10 @@ function spacefast_content_execute_batch(array $request, bool $managed): array
     }
     $cacheKey = '';
     if (!$managed && function_exists('wp_cache_get')) {
-        $revision = (string) get_option(
-            spacefast_content_option_name(SPACEFAST_CONTENT_REVISION_OPTION),
-            'empty'
-        );
+        // Key on the active compiled release, so activating a different release
+        // — including a rollback to an older one — cannot serve a stale batch.
+        $releaseRoot = $GLOBALS['SPACEFAST_CONTENT_COMPILED_RELEASE_ROOT'] ?? null;
+        $revision = is_string($releaseRoot) && $releaseRoot !== '' ? basename($releaseRoot) : 'empty';
         $changed = function_exists('wp_cache_get_last_changed') ? wp_cache_get_last_changed('posts') : '';
         $cacheKey = hash(
             'sha256',
@@ -2000,18 +1679,9 @@ function spacefast_content_resolve_collection(string $name): array
             'scoped' => true,
         ];
     }
-    $collection = spacefast_content_manifest()['collections'][$name] ?? null;
-    if (!is_array($collection)) {
-        throw new Spacefast_Content_Error(404, 'content_collection_not_found', 'The content collection was not found.');
-    }
-    return $collection + [
-        'name' => $name,
-        'post_type' => spacefast_content_post_type((string) ($collection['resourceId'] ?? $name)),
-        'public' => true,
-        'fields' => [],
-        'builtin' => false,
-        'scoped' => true,
-    ];
+    // The compiled release is the only source of custom collections. A name the
+    // live version's content config did not declare does not exist.
+    throw new Spacefast_Content_Error(404, 'content_collection_not_found', 'The content collection was not found.');
 }
 
 function spacefast_content_compile_query_args(array $query, array $collection, bool $managed): array

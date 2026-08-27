@@ -1,7 +1,7 @@
 {
-  "revision": "1c1cbb13afd201d4feb3000813c0ac19b85cd749",
-  "sourceHash": "b81ce37e622d20170a484ea70b0e36fbe2c8a73196e2a8680f7d2214e9f148ee",
-  "manifestSha256": "bf41ad2a18fea3a14dd0e150037a497742b4e9569fb3a8f7975191623d1bd125",
+  "revision": "c1d769e547f9e47c6cfc881c095320e4248d2db2",
+  "sourceHash": "d8ed001af5bb84167cc166aefc743a6ea417d2300e854493263230bfe0300916",
+  "manifestSha256": "9991e595bb859c8211ccfb91de5c88d8800dc1d1bd8fca94afe5782162a68682",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "9c63448bd25bda01435e130e400164a2620a91c22e11fc394e25707778414b97"
+      "sha256": "489aba9272a2d50812fcee3171628bead78a6eb66416e341b388487af9838634"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "ad7215fd4f5daa7a69997703c38f492356a31b5bf7ec82b18c905126cc359e21"
+      "sha256": "5f03c01f883e464db26df0b70532905363013c62d07903e6f818c084b84abec0"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -549,7 +549,7 @@
     },
     {
       "path": "runtime/engine/shared/content-request.php",
-      "sha256": "86437a57e783f8b6d7c8b369b9cb79a8351b00b34d40c0b805c23599cad96e86"
+      "sha256": "6a5d187b6ad527ca0721348c5f4e88384284d5f5403a0ce6d525f5621cb4cf9d"
     },
     {
       "path": "runtime/engine/shared/context.php",
@@ -649,7 +649,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-kernel.php",
-      "sha256": "2484e0958dc696d9f9cdf55f9767de2b606cb259c2f9531cd9c33908857d1203"
+      "sha256": "76c622e2d602c04bdda680949b2b620929e006f3eed081a4fb40c77b850d3020"
     },
     {
       "path": "runtime/installer.php",
@@ -713,7 +713,7 @@
     },
     {
       "path": "runtime/tests/content-kernel.test.ts",
-      "sha256": "e015fa0733eac1ab6bbb741c3ddd9b0dedae5a78269456825bbd8a7d7a2ce9eb"
+      "sha256": "78829b75a7a09780f59933f25fb368160a5b739177b97f41bf0d1c13017f47e4"
     },
     {
       "path": "runtime/tests/content-media.test.ts",
@@ -721,7 +721,7 @@
     },
     {
       "path": "runtime/tests/content-request.test.ts",
-      "sha256": "3e24df6cfeaa48d61d2e747ee33c6916c6b519c126ea3a2e13cc0aad1f0b7a74"
+      "sha256": "5782683e2a8ac6f91b3cd9650f4e608b62c3555722254e1322f9578f2d4022eb"
     },
     {
       "path": "runtime/tests/content-type-policy.test.ts",
@@ -761,7 +761,7 @@
     },
     {
       "path": "runtime/tests/entrypoint-probes.ts",
-      "sha256": "c905519912429f6dedf08cd6f04e0c1e723e3661baf8fd23c211ae8084f46481"
+      "sha256": "a431f771596b8655203597b0f173ef7fc26c2e184005c7770bf8356bbbd32658"
     },
     {
       "path": "runtime/tests/entrypoints.test.ts",

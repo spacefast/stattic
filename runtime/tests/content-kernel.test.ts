@@ -80,7 +80,6 @@ $savedPost = null;
 $savedMeta = [];
 $savedThumbnail = 0;
 $insertCount = 0;
-$contentManifest = null;
 define('ABSPATH', '/srv/wordpress/');
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
 $_SERVER['HTTP_HOST'] = 'alpha.spacefast.test';
@@ -94,12 +93,7 @@ class ContentTestWpdb {
 }
 $wpdb = new ContentTestWpdb();
 function get_posts(array $args): array { return []; }
-function get_option(string $name, mixed $default): mixed {
-  global $contentManifest;
-  return $name === spacefast_content_option_name(SPACEFAST_CONTENT_MANIFEST_OPTION) && is_array($contentManifest)
-    ? $contentManifest
-    : $default;
-}
+function get_option(string $name, mixed $default): mixed { return $default; }
 function get_post(int $id): ?object {
   global $savedPost;
   if ($id === 7) return (object) ['ID' => 7, 'post_type' => 'page'];
@@ -141,26 +135,15 @@ function get_post_thumbnail_id(object $post): int {
   return $savedThumbnail;
 }
 require $argv[1];
-$manifest = spacefast_content_validate_manifest([
-  'format' => SPACEFAST_CONTENT_SCHEMA_FORMAT,
-  'version' => SPACEFAST_CONTENT_API_VERSION,
-  'collections' => [
-    'events' => [
-      'resourceId' => 'events_01k4t7x8',
-      'name' => 'events',
-      'label' => 'Events',
-      'singularLabel' => 'Event',
-      'fields' => [
-        'starts_at' => ['type' => 'date', 'label' => 'Starts at', 'required' => true],
-        'capacity' => ['type' => 'number', 'label' => 'Capacity'],
-      ],
-    ],
+$collection = [
+  'name' => 'events',
+  'post_type' => spacefast_content_post_type('events_01k4t7x8'),
+  'fields' => [
+    'starts_at' => ['type' => 'date', 'label' => 'Starts at', 'required' => true],
+    'capacity' => ['type' => 'number', 'label' => 'Capacity'],
   ],
-]);
-$contentManifest = $manifest;
-$collection = $manifest['collections']['events'] + [
-  'post_type' => spacefast_content_post_type($manifest['collections']['events']['resourceId']),
   'builtin' => false,
+  'scoped' => true,
 ];
 $args = spacefast_content_compile_query_args([
   'where' => [['field' => 'capacity', 'operator' => 'gte', 'value' => 50]],
@@ -187,18 +170,6 @@ try {
 } catch (Spacefast_Content_Error $error) {
   $wrongTypeCode = $error->codeName;
 }
-$fieldCode = '';
-try {
-  spacefast_content_upsert_document([
-    'externalId' => 'event:missing-date',
-    'collection' => 'events',
-    'slug' => 'missing-date',
-    'title' => 'Missing date',
-    'fields' => ['capacity' => 12],
-  ], true);
-} catch (Spacefast_Content_Error $error) {
-  $fieldCode = $error->codeName;
-}
 $bothIdentityCode = '';
 try {
   spacefast_content_upsert_document([
@@ -213,11 +184,11 @@ try {
   $bothIdentityCode = $error->codeName;
 }
 $alphaPostType = spacefast_content_post_type('events_01k4t7x8');
-$alphaOption = spacefast_content_option_name(SPACEFAST_CONTENT_MANIFEST_OPTION);
+$alphaOption = spacefast_content_option_name('spacefast_content_probe');
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_beta';
 $isolation = [
   $alphaPostType !== spacefast_content_post_type('events_01k4t7x8'),
-  $alphaOption !== spacefast_content_option_name(SPACEFAST_CONTENT_MANIFEST_OPTION),
+  $alphaOption !== spacefast_content_option_name('spacefast_content_probe'),
   !spacefast_content_post_belongs_to_space(9),
   spacefast_content_scope_meta_cap(['edit_posts'], 'edit_post', 1, [9]) === ['do_not_allow'],
 ];
@@ -240,7 +211,6 @@ $capabilities = [
   spacefast_content_scope_meta_cap(['edit_posts'], 'edit_post', 1, [7]),
 ];
 echo json_encode([
-  'public' => $manifest['collections']['events']['public'],
   'post_type' => $args['post_type'],
   'space_filter' => $args['meta_query'][0],
   'limit' => $args['posts_per_page'],
@@ -251,7 +221,6 @@ echo json_encode([
   'external_id' => $savedMeta[SPACEFAST_CONTENT_EXTERNAL_ID_META] ?? null,
   'locks' => array_map(static fn (string $query): string => str_contains($query, 'RELEASE') ? 'release' : 'acquire', $wpdb->queries),
   'wrong_type_code' => $wrongTypeCode,
-  'field_code' => $fieldCode,
   'both_identity_code' => $bothIdentityCode,
   'insert_count' => $insertCount,
   'isolation' => $isolation,
@@ -284,7 +253,6 @@ echo json_encode([
       key: "_spacefast_space_id",
       value: "spc_alpha",
     },
-    public: true,
     sort: ["starts_at", "meta_value", "ASC"],
     post: {
       createdAt: "",
@@ -300,9 +268,8 @@ echo json_encode([
       updatedAt: "",
     },
     external_id: "source:home",
-    locks: ["acquire", "release", "acquire", "release", "acquire", "release"],
+    locks: ["acquire", "release", "acquire", "release"],
     wrong_type_code: "content_document_not_found",
-    field_code: "content_field_required",
     both_identity_code: "content_document_identity_invalid",
     insert_count: 1,
     isolation: [true, true, true, true],
@@ -331,84 +298,84 @@ echo json_encode([
   });
 });
 
-test("collection resource identity survives renames and cannot change in place", async () => {
-  const script = String.raw`
-$contentManifest = [
-  'format' => 'spacefast.content.schema',
-  'version' => 1,
-  'collections' => [
-    'events' => [
-      'resourceId' => 'events_01k4t7x8',
-      'name' => 'events',
-      'label' => 'Events',
-      'singularLabel' => 'Event',
-      'fields' => [],
-    ],
-  ],
-];
-$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-function get_option(string $name, mixed $default): mixed {
-  global $contentManifest;
-  return $name === spacefast_content_option_name(SPACEFAST_CONTENT_MANIFEST_OPTION)
-    ? $contentManifest
-    : $default;
-}
-function update_option(string $name, mixed $value, bool $autoload): void {
-  global $contentManifest;
-  if ($name === spacefast_content_option_name(SPACEFAST_CONTENT_MANIFEST_OPTION)) {
-    $contentManifest = $value;
+// Compilation and activation are separate so the live content model can follow
+// the live version. This pins the half that rollback depends on: pointing at an
+// already-compiled release, and clearing the pointer for a version that shipped
+// no content config.
+test("content release activation follows the live version and refuses unknown releases", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-content-activate-"));
+  // The private tree the pointer helpers refuse to write outside of, and the
+  // per-space release root the compiler publishes into.
+  const storage = path.join(root, ".stattic/storage");
+  const contentRoot = path.join(storage, "spaces/spc_alpha/content");
+  const older = "a".repeat(64);
+  const newer = "b".repeat(64);
+  for (const revision of [older, newer]) {
+    mkdirSync(path.join(contentRoot, "releases", revision), { recursive: true });
+    writeFileSync(
+      path.join(contentRoot, "releases", revision, "schema.json"),
+      JSON.stringify({ schema_version: 3, collections: [], globals: [], hooks: [] }),
+    );
   }
-}
+  const script = String.raw`
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+$GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $argv[2];
 require $argv[1];
-$replacement = $contentManifest;
-$replacement['collections']['events']['resourceId'] = 'events_01newidentity';
-$immutableCode = '';
-try {
-  spacefast_content_apply_schema($replacement, true);
-} catch (Spacefast_Content_Error $error) {
-  $immutableCode = $error->codeName;
-}
-$forked = $contentManifest;
-$forked['collections']['calendar'] = $forked['collections']['events'];
-$forked['collections']['calendar']['name'] = 'calendar';
-$forked['collections']['calendar']['resourceId'] = 'calendar_01newid';
-unset($forked['collections']['events']);
-$forkCode = '';
-try {
-  spacefast_content_apply_schema($forked, true);
-} catch (Spacefast_Content_Error $error) {
-  $forkCode = $error->codeName;
-}
-$renamed = $contentManifest;
-$renamed['collections']['calendar'] = $renamed['collections']['events'];
-$renamed['collections']['calendar']['name'] = 'calendar';
-unset($renamed['collections']['events']);
-$result = spacefast_content_apply_schema($renamed, true);
+$pointer = $argv[2] . '/spaces/spc_alpha/content/active-release';
+$read = static fn (): ?string => is_file($pointer) ? trim((string) file_get_contents($pointer)) : null;
+$catch = static function (callable $run): string {
+  try {
+    $run();
+    return 'no_error';
+  } catch (Spacefast_Content_Error $error) {
+    return $error->codeName;
+  }
+};
+$activated = spacefast_content_activate_release($argv[3], true);
+$afterActivate = $read();
+spacefast_content_activate_release($argv[4], true);
+$afterRollback = $read();
+$cleared = spacefast_content_activate_release(null, true);
+$afterClear = $read();
 echo json_encode([
-  'immutable_code' => $immutableCode,
-  'fork_code' => $forkCode,
-  'renamed_resource_id' => $contentManifest['collections']['calendar']['resourceId'] ?? null,
-  'revision' => $result['revision'],
+  'activated' => $activated,
+  'after_activate' => $afterActivate,
+  'after_rollback' => $afterRollback,
+  'cleared' => $cleared,
+  'after_clear' => $afterClear,
+  'unknown_release' => $catch(static fn () => spacefast_content_activate_release(str_repeat('c', 64), true)),
+  'malformed_revision' => $catch(static fn () => spacefast_content_activate_release('not-a-revision', true)),
+  'unmanaged' => $catch(static fn () => spacefast_content_activate_release($argv[3], false)),
 ]);
 `;
-  const process = Bun.spawn(["php", "-r", script, kernel], {
-    cwd: repoRoot,
-    stderr: "pipe",
-    stdout: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    process.exited,
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
-  ]);
+  try {
+    const process = Bun.spawn(["php", "-r", script, kernel, storage, newer, older], {
+      cwd: repoRoot,
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
 
-  expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-  expect(JSON.parse(stdout)).toEqual({
-    immutable_code: "content_collection_identity_immutable",
-    fork_code: "content_collection_identity_immutable",
-    renamed_resource_id: "events_01k4t7x8",
-    revision: expect.stringMatching(/^[a-f0-9]{64}$/),
-  });
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+    expect(JSON.parse(stdout)).toEqual({
+      activated: { revision: newer },
+      after_activate: newer,
+      // Rolling back to the release an older version bound restores that model.
+      after_rollback: older,
+      cleared: { revision: null },
+      // A version that shipped no content config leaves the Space with none.
+      after_clear: null,
+      unknown_release: "content_release_not_found",
+      malformed_revision: "content_release_invalid",
+      unmanaged: "content_auth_required",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the managed WordPress surface admits content work and rejects Spacefast-owned screens", async () => {
@@ -1058,88 +1025,4 @@ echo json_encode(['codes' => $codes, 'valid' => $valid]);
       images: [7, 9],
     },
   });
-});
-
-// Both schema lanes stay, and spacefast_content_resolve_collection() tries the
-// compiled one first. That makes a shared slug a silent replacement — different
-// post type, different fields, and `public => false`, which turns a published
-// collection authenticated-only — so a collision has to fail where the author
-// can still fix it, from whichever lane arrives second.
-test("a compiled collection slug never silently shadows an applied one", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-content-collision-"));
-  writeFileSync(
-    path.join(root, "schema.json"),
-    JSON.stringify({
-      schema_version: 3,
-      collections: [{ slug: "articles", wordpress_storage: "post", fields: [] }],
-      globals: [],
-      hooks: [],
-    }),
-  );
-  const applied = {
-    format: "spacefast.content.schema",
-    version: 1,
-    collections: {
-      articles: {
-        name: "articles",
-        resourceId: "res_articles_1",
-        label: "Articles",
-        singularLabel: "Article",
-        fields: {},
-      },
-    },
-  };
-  const script = String.raw`
-function get_option(string $name, mixed $default = false): mixed {
-  return $GLOBALS['applied_manifest'] ?? $default;
-}
-function update_option(string $name, mixed $value, bool $autoload = true): bool { return true; }
-require $argv[1];
-$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-$GLOBALS['applied_manifest'] = json_decode($argv[3], true);
-$attempt = static function (callable $run): mixed {
-  try {
-    $run();
-    return null;
-  } catch (Spacefast_Content_Error $error) {
-    return [$error->status, $error->codeName];
-  }
-};
-$compiledArtifact = json_decode((string) file_get_contents($argv[2] . '/schema.json'), true);
-$collides = $attempt(static fn () => spacefast_content_require_no_compiled_collision($compiledArtifact));
-$coexists = $attempt(static fn () => spacefast_content_require_no_compiled_collision(
-  ['collections' => [['slug' => 'notes']]]
-));
-// The other lane: apply a manifest naming a slug the compiled release owns.
-$GLOBALS['applied_manifest'] = null;
-$GLOBALS['SPACEFAST_CONTENT_COMPILED_RELEASE_ROOT'] = $argv[2];
-$manifest = json_decode($argv[3], true);
-$applyCollides = $attempt(static fn () => spacefast_content_apply_schema($manifest, true));
-$manifest['collections']['notes'] = $manifest['collections']['articles'] + ['name' => 'notes'];
-$manifest['collections']['notes']['name'] = 'notes';
-unset($manifest['collections']['articles']);
-$applyCoexists = $attempt(static fn () => spacefast_content_apply_schema($manifest, true));
-echo json_encode([
-  'compile_collides' => $collides,
-  'compile_coexists' => $coexists,
-  'apply_collides' => $applyCollides,
-  'apply_coexists' => $applyCoexists,
-]);
-`;
-  try {
-    const process = Bun.spawnSync(["php", "-r", script, kernel, root, JSON.stringify(applied)], {
-      cwd: repoRoot,
-      stderr: "pipe",
-      stdout: "pipe",
-    });
-    expect(process.exitCode, process.stderr.toString()).toBe(0);
-    expect(JSON.parse(process.stdout.toString())).toEqual({
-      compile_collides: [409, "content_collection_slug_conflict"],
-      compile_coexists: null,
-      apply_collides: [409, "content_collection_slug_conflict"],
-      apply_coexists: null,
-    });
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
 });

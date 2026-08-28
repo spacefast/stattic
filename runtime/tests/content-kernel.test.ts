@@ -913,6 +913,34 @@ echo json_encode([
   });
 });
 
+test("content admin handshake reports the applied session expiry to its exact dashboard origin", async () => {
+  const script = String.raw`
+require $argv[1];
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] = 'https://my.spacefast.test';
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_SESSION_EXPIRES_AT'] = 1787950800;
+$ready = spacefast_content_admin_handshake_payload(1787947200);
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_SESSION_EXPIRES_AT'] = 1787947199;
+$expired = spacefast_content_admin_handshake_payload(1787947200);
+echo json_encode(['ready' => $ready, 'expired' => $expired]);
+`;
+  const process = Bun.spawnSync(["php", "-r", script, kernel], {
+    cwd: repoRoot,
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+
+  expect(process.exitCode, process.stderr.toString()).toBe(0);
+  expect(JSON.parse(process.stdout.toString())).toEqual({
+    ready: {
+      type: "spacefast.content.admin.ready",
+      version: 1,
+      expiresAt: "2026-08-28T21:00:00Z",
+      origin: "https://my.spacefast.test",
+    },
+    expired: null,
+  });
+});
+
 test("a verified content session enables Gutenberg REST without exposing other WordPress users", async () => {
   const script = String.raw`
 class WP_Error {

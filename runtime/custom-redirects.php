@@ -178,6 +178,7 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 );
             }
             $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = $session['user_id'];
+            $GLOBALS['SPACEFAST_CONTENT_ADMIN_SESSION_EXPIRES_AT'] = $session['expires_at'];
             _stattic_content_admin_enter_wordpress(
                 $privateRoot,
                 $session['space_id'],

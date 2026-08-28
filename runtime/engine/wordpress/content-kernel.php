@@ -54,6 +54,7 @@ if (function_exists('add_action')) {
     add_action('admin_init', 'spacefast_content_lock_admin', 1);
     add_action('admin_menu', 'spacefast_content_admin_menu', 999);
     add_action('admin_enqueue_scripts', 'spacefast_content_admin_assets', 1000);
+    add_action('admin_footer', 'spacefast_content_admin_handshake', 1000);
     add_action('login_init', 'spacefast_content_block_wordpress_login', 1);
     add_action('send_headers', 'spacefast_content_admin_frame_headers', 1);
     add_action('admin_head', 'spacefast_content_admin_frame_headers', 1);
@@ -467,6 +468,43 @@ function spacefast_content_admin_frame_headers(): void
 function spacefast_content_admin_footer(): string
 {
     return 'Content is managed by Spacefast.';
+}
+
+function spacefast_content_admin_handshake_payload(?int $now = null): ?array
+{
+    $origin = $GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] ?? null;
+    $expiresAt = $GLOBALS['SPACEFAST_CONTENT_ADMIN_SESSION_EXPIRES_AT'] ?? null;
+    $now ??= time();
+    if (
+        !is_string($origin)
+        || filter_var($origin, FILTER_VALIDATE_URL) === false
+        || !is_int($expiresAt)
+        || $expiresAt <= $now
+    ) {
+        return null;
+    }
+    return [
+        'type' => 'spacefast.content.admin.ready',
+        'version' => 1,
+        'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $expiresAt),
+        'origin' => $origin,
+    ];
+}
+
+function spacefast_content_admin_handshake(): void
+{
+    $payload = spacefast_content_admin_handshake_payload();
+    if ($payload === null) {
+        return;
+    }
+    $origin = $payload['origin'];
+    unset($payload['origin']);
+    $encodedPayload = json_encode($payload, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    $encodedOrigin = json_encode($origin, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    if (!is_string($encodedPayload) || !is_string($encodedOrigin)) {
+        return;
+    }
+    echo '<script>window.parent.postMessage(' . $encodedPayload . ',' . $encodedOrigin . ');</script>';
 }
 
 function spacefast_content_admin_menu(): void

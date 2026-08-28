@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 use crate::csp::{merge_platform_csp_value, PlatformCspSources};
 use crate::finalize::Result;
 use crate::protocol::{PLATFORM_OWNED_HEADERS, PLATFORM_OWNED_HEADER_PREFIXES};
-use crate::routing::{compile_routing_files, HeaderRule, RoutingInput};
+use crate::routing::{compile_routing_files, HeaderRule, RedirectRule, RoutingInput};
 use crate::transforms::{lower_runtime_conventions, RuntimeConventionsInput};
 
 const CSP_HEADER_NAME: &str = "content-security-policy";
@@ -21,6 +21,9 @@ pub struct CompiledConventions {
     pub headers_pattern: Option<Vec<Value>>,
     pub metadata_convention_files: Option<Value>,
     pub routing: ConventionRoutingSummary,
+    /// Typed rules retained for finalizer-owned route inventory and graph
+    /// validation. Serving still reads only the lowered buckets above.
+    pub(crate) route_redirects: Vec<RedirectRule>,
 }
 
 /// What the version's routing compiled TO, counted before the rules are lowered
@@ -124,6 +127,7 @@ pub fn compile_conventions(
         headers_exact: serves_headers.then_some(lowered.headers_exact),
         headers_pattern: serves_headers.then_some(lowered.headers_pattern),
         metadata_convention_files: Some(Value::Object(metadata_convention_files)),
+        route_redirects: compilation.redirects.clone(),
         routing: ConventionRoutingSummary {
             redirect_rule_count: compilation.stats.redirect_rule_count,
             header_rule_count: compilation.stats.header_rule_count,

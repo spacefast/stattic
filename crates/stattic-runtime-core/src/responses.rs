@@ -576,7 +576,7 @@ fn request_key(path: &str) -> String {
 /// segment (`[id]`, `[...rest]`) cannot be a table key and is NOT routed in
 /// this slice, so such a file keeps the inert-attachment entry like any other
 /// stray `.php`.
-fn php_function_route(path: &str) -> Option<String> {
+pub(crate) fn php_function_route(path: &str) -> Option<String> {
     let stem = path.strip_prefix("functions/")?.strip_suffix(".php")?;
     let mut segments: Vec<&str> = stem.split('/').collect();
     if segments.last() == Some(&"index") {

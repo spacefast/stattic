@@ -212,6 +212,11 @@ pub struct RedirectRule {
     /// republish; the compiled artifact never bakes a plan verdict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_gated: Option<&'static str>,
+    /// Which authoring lane declared this rule. This is finalizer provenance,
+    /// not part of the serving artifact: both lanes compile to the same
+    /// canonical redirect shape and the runtime must not branch on authorship.
+    #[serde(skip)]
+    pub(crate) origin: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -448,6 +453,7 @@ fn compile_config_rule(
             Ok(rule) => rule,
             Err(issue) => return ConfigRuleCompilation::rejected(issue),
         };
+    rule.origin = "config";
     // The query grammar is checked by re-spelling each pair as the token a
     // `_redirects` line would carry — one regex, one answer. Neither half can
     // contain `=` or `:`, so the re-spelling cannot be gamed into matching.

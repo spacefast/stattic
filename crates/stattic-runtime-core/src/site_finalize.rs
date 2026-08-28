@@ -54,6 +54,7 @@ use crate::protocol::{
 use crate::responses::{
     compile_response_table, publish_response_tables, ResponseCompileInput, DENY_ALL_ROBOTS,
 };
+use crate::route_inventory::{compile_route_inventory, RouteInventoryInput, ZERO_CONTROL_ROUTES};
 use crate::storage::{
     apply_templates, blob_path, blob_root, commit_session_files, install_blob_from, put_blob,
 };
@@ -722,6 +723,18 @@ fn run_finalize_pipeline(
         }
     }
     let convention_files = Value::Object(convention_map);
+    let assigned_hostnames: Vec<String> = input
+        .body
+        .get("routing_assigned_hostnames")
+        .and_then(Value::as_array)
+        .map(|hostnames| {
+            hostnames
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     let conventions_started = Instant::now();
     let compiled_conventions = compile_conventions(
         &convention_files,
@@ -734,18 +747,7 @@ fn run_finalize_pipeline(
             .as_ref()
             .map(|(path, _)| path.clone()),
         &ConventionCompileInput {
-            assigned_hostnames: input
-                .body
-                .get("routing_assigned_hostnames")
-                .and_then(Value::as_array)
-                .map(|hostnames| {
-                    hostnames
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            assigned_hostnames: assigned_hostnames.clone(),
             platform_csp_sources: platform_csp_sources(&serving)?,
         },
         &mut diagnostics,
@@ -754,6 +756,7 @@ fn run_finalize_pipeline(
         .metadata_convention_files
         .clone()
         .unwrap_or_else(|| convention_files.clone());
+    let route_redirects = compiled_conventions.route_redirects;
     let routing_summary = compiled_conventions.routing;
     let redirects_exact = compiled_conventions.redirects_exact.unwrap_or_default();
     let redirects_pattern = compiled_conventions.redirects_pattern.unwrap_or_default();
@@ -884,12 +887,38 @@ fn run_finalize_pipeline(
             noindex_host,
         })
     };
-    let published = timed(&mut telemetry.response_tables_ms, || {
+    let (table, route_tables) = timed(&mut telemetry.response_tables_ms, || {
         let table = compile_for(files);
         let route_tables: BTreeMap<_, _> = variant_files
             .iter()
             .map(|(route_name, variant_files)| (route_name.clone(), compile_for(variant_files)))
             .collect();
+        (table, route_tables)
+    });
+    // This is the exact predicate serving passes to an unforced rewrite: the
+    // finished response table, including generated aliases, listings, PHP
+    // functions, and Zero actions. Readiness lookup is intentionally narrower
+    // and cannot stand in for serving ownership here.
+    let exact_response_paths: BTreeSet<String> = table
+        .keys()
+        .filter(|path| path.starts_with('/'))
+        .cloned()
+        .collect();
+    let route_inventory = compile_route_inventory(RouteInventoryInput {
+        files,
+        private: &private,
+        redirects: &route_redirects,
+        config_path: substitution
+            .routing_config
+            .as_ref()
+            .map(|(path, _)| path.as_str()),
+        functions: input.body.get("functions"),
+        zero_routes: &compiled_zero.php_routes,
+        has_zero: input.body.get("zero").is_some_and(Value::is_object),
+        assigned_hostnames: &assigned_hostnames,
+        exact_response_paths: &exact_response_paths,
+    })?;
+    let published = timed(&mut telemetry.response_tables_ms, || {
         publish_response_tables(stage_root, &table, &route_tables, env!("CARGO_PKG_VERSION"))
     })?;
 
@@ -976,6 +1005,7 @@ fn run_finalize_pipeline(
             "variableDigests": substitution.variable_digests,
             "systemVariableDependencies": substitution.system_variable_dependencies,
             "routing": routing_summary,
+            "routeInventory": route_inventory,
             // The served public image a space card shows for this version.
             // Chosen once, here, from the catalog — so a replay answers with
             // the same path the first finalize picked.
@@ -1512,21 +1542,6 @@ fn original_objects(
     }
     Ok(originals)
 }
-
-/// The Zero control routes a version with a Zero runtime always answers, as
-/// `(request path, method, operation)`. Both projections below iterate this one
-/// list so a route cannot exist in the response table and not in the lookup map.
-const ZERO_CONTROL_ROUTES: &[(&str, &str, &str)] = &[
-    ("/__spacefast/zero/config", "GET", "config"),
-    ("/__spacefast/zero/run", "POST", "run"),
-    ("/__spacefast/zero/auth/gravatar/start", "GET", "auth_start"),
-    ("/__spacefast/zero/auth/sign-out", "GET", "auth_sign_out"),
-    (
-        "/__spacefast/zero/realtime/events",
-        "GET",
-        "realtime_events",
-    ),
-];
 
 /// The Zero control and exact-endpoint routes, as response-table actions.
 /// A pattern route stays in `zero/routes.php`, which the miss lane consults.
@@ -3280,6 +3295,27 @@ mod tests {
         assert!(version.join("zero/routes.php").is_file());
         assert!(version.join("zero/runs-index.json").is_file());
 
+        let metadata = finalized_metadata(&private);
+        let inventory = metadata["routeInventory"]["routes"]
+            .as_array()
+            .expect("Zero routes enter the finalizer inventory");
+        let endpoint = inventory
+            .iter()
+            .find(|route| route["kind"] == "zero-endpoint")
+            .expect("Zero endpoint route");
+        assert_eq!(endpoint["source"], json!("GET /api/items/:id"));
+        assert_eq!(endpoint["runtime"], json!("quick-js"));
+        assert_eq!(endpoint["path"], json!("/api/items/:id"));
+        assert_eq!(endpoint["methods"], json!(["GET", "HEAD"]));
+        let control = inventory
+            .iter()
+            .find(|route| route["source"] == "runtime:run")
+            .expect("generated Zero control route");
+        assert_eq!(control["kind"], json!("zero-control"));
+        assert_eq!(control["runtime"], json!("php"));
+        assert_eq!(control["path"], json!("/__spacefast/zero/run"));
+        assert_eq!(control["methods"], json!(["POST"]));
+
         // Zero control routes are exact, so they compile into the response
         // table; the dynamic endpoint is resolved from zero/routes.php above.
         let table = finalized_table(&private);
@@ -3834,9 +3870,10 @@ mod tests {
         let (_temp, _private, output) = finalize_fixture(
             &[
                 ("index.html", b"home"),
+                ("functions/ping.php", b"<?php echo 'pong';"),
                 (
                     "_redirects",
-                    b"/api/* https://api.example.com/:splat 200\n/old /new 301",
+                    b"/api/* https://api.example.com/:splat 200 Cache=shared\n/old /new 301",
                 ),
                 ("_headers", b"/*\n  x-region: {{ vars.REGION }}"),
             ],
@@ -3868,6 +3905,199 @@ mod tests {
             metadata[CATALOG_DIGESTS_METADATA_KEY],
             serde_json::to_value(output.catalog_digests.unwrap()).unwrap(),
         );
+        assert_eq!(
+            metadata["routeInventory"]["format"],
+            json!(crate::route_inventory::ROUTE_INVENTORY_FORMAT),
+        );
+        let routes = metadata["routeInventory"]["routes"]
+            .as_array()
+            .expect("normalized route inventory");
+        let proxy = routes
+            .iter()
+            .find(|route| route["kind"] == "proxy")
+            .expect("compiled proxy route");
+        assert_eq!(proxy["source"], json!("_redirects"));
+        assert_eq!(proxy["runtime"], json!("routing"));
+        assert_eq!(proxy["host"], json!("*"));
+        assert_eq!(proxy["path"], json!("/api/*"));
+        assert_eq!(proxy["methods"], json!(["*"]));
+        assert_eq!(proxy["auth"], json!("inherit"));
+        assert_eq!(proxy["cache"], json!("shared"));
+        assert_eq!(
+            proxy["destination"],
+            json!("https://api.example.com/:splat")
+        );
+        assert!(proxy["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("sha256:") && id.len() == 71));
+        let function = routes
+            .iter()
+            .find(|route| route["kind"] == "php-function")
+            .expect("PHP function route");
+        assert_eq!(function["source"], json!("functions/ping.php"));
+        assert_eq!(function["runtime"], json!("php"));
+        assert_eq!(function["path"], json!("/ping"));
+    }
+
+    #[test]
+    fn finalize_rejects_cross_source_exact_route_ownership() {
+        let (_temp, _private, output) = finalize_fixture(
+            &[
+                ("index.html", b"home"),
+                ("functions/__spacefast/zero/config.php", b"<?php echo '{}';"),
+            ],
+            json!({"mode":"website"}),
+            json!({"zero":{"runtimeKind":"zero"},"serving":{"config":{}}}),
+        );
+        match output {
+            Err(FinalizeError::Invalid {
+                code: "route_ownership_conflict",
+                details: Some(details),
+                ..
+            }) => {
+                let collision = &details["collisions"][0];
+                assert_eq!(collision["host"], json!("*"));
+                assert_eq!(collision["path"], json!("/__spacefast/zero/config"));
+                assert_eq!(collision["left"]["kind"], json!("php-function"));
+                assert_eq!(collision["right"]["kind"], json!("zero-control"));
+            }
+            other => panic!("expected a route ownership conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_rejects_multi_hop_unconditional_redirect_cycles() {
+        let (_temp, _private, output) = finalize_fixture(
+            &[
+                ("index.html", b"home"),
+                ("_redirects", b"/first /second 301\n/second /first 302"),
+            ],
+            json!({"mode":"website"}),
+            json!({"serving":{"config":{}}}),
+        );
+        match output {
+            Err(FinalizeError::Invalid {
+                code: "redirect_cycle_invalid",
+                details: Some(details),
+                ..
+            }) => {
+                let cycle = &details["cycles"][0];
+                assert_eq!(cycle["host"], json!("*"));
+                assert_eq!(cycle["paths"], json!(["/first", "/second"]));
+                assert_eq!(cycle["routeIds"].as_array().map(Vec::len), Some(2),);
+            }
+            other => panic!("expected a multi-hop redirect cycle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_uses_effective_first_match_winners_for_redirect_cycles() {
+        let (_temp, _private, output) = finalize_fixture(
+            &[
+                ("index.html", b"home"),
+                (
+                    "_redirects",
+                    b"/pattern/* /outside 301\n\
+/pattern/first /pattern/second 301\n\
+/pattern/second /pattern/first 302\n\
+/rewrite/* /outside 200\n\
+/rewrite/first /rewrite/second 301\n\
+/rewrite/second /rewrite/first 302\n\
+/proxy/* https://origin.example.test/:splat 200\n\
+/proxy/first /proxy/second 301\n\
+/proxy/second /proxy/first 302",
+                ),
+            ],
+            json!({"mode":"website"}),
+            json!({"serving":{"config":{}}}),
+        );
+        output.expect(
+            "earlier pattern redirects, rewrites, and proxies own the exact paths, so the shadowed cycles are inert",
+        );
+    }
+
+    #[test]
+    fn finalize_uses_served_php_function_entries_for_unforced_rewrites() {
+        let (_temp, _private, output) = finalize_fixture(
+            &[
+                ("index.html", b"home"),
+                ("functions/a.php", b"<?php echo 'function';"),
+                ("_redirects", b"/a /outside 200\n/a /b 301\n/b /a 302"),
+            ],
+            json!({"mode":"website"}),
+            json!({"serving":{"config":{}}}),
+        );
+        match output {
+            Err(FinalizeError::Invalid {
+                code: "redirect_cycle_invalid",
+                details: Some(details),
+                ..
+            }) => {
+                assert_eq!(details["cycles"][0]["paths"], json!(["/a", "/b"]));
+            }
+            other => {
+                panic!("expected the PHP function to expose the redirect cycle, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn finalize_expands_unmatched_redirect_placeholders_like_serving() {
+        let (_temp, _private, output) = finalize_fixture(
+            &[
+                ("index.html", b"home"),
+                (
+                    "_redirects",
+                    b"/a/:id /b/:missing 301\n/a/x /outside 302\n/b /a/x 303",
+                ),
+            ],
+            json!({"mode":"website"}),
+            json!({"serving":{"config":{}}}),
+        );
+        match output {
+            Err(FinalizeError::Invalid {
+                code: "redirect_cycle_invalid",
+                details: Some(details),
+                ..
+            }) => {
+                assert_eq!(details["cycles"][0]["paths"], json!(["/a/x", "/b"]));
+            }
+            other => panic!("expected the expanded destination cycle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_rejects_cross_host_absolute_redirect_cycles() {
+        let (_temp, _private, output) = finalize_fixture(
+            &[
+                ("index.html", b"home"),
+                (
+                    "_redirects",
+                    b"/first https://b.example.test/second 301\nhttps://b.example.test/second https://a.example.test/first 302",
+                ),
+            ],
+            json!({"mode":"website"}),
+            json!({
+                "routing_assigned_hostnames":["a.example.test","b.example.test"],
+                "serving":{"config":{}}
+            }),
+        );
+        match output {
+            Err(FinalizeError::Invalid {
+                code: "redirect_cycle_invalid",
+                details: Some(details),
+                ..
+            }) => {
+                assert_eq!(
+                    details["cycles"][0]["nodes"],
+                    json!([
+                        {"host":"a.example.test","path":"/first"},
+                        {"host":"b.example.test","path":"/second"}
+                    ]),
+                );
+            }
+            other => panic!("expected a cross-host redirect cycle, got {other:?}"),
+        }
     }
 
     /// The three integers the changelog renders and the request paths the edge

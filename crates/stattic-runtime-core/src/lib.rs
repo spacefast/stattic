@@ -8,6 +8,8 @@ mod io;
 mod metadata;
 mod model;
 #[cfg(not(target_family = "wasm"))]
+mod route_inventory;
+#[cfg(not(target_family = "wasm"))]
 mod site_finalize;
 #[cfg(not(target_family = "wasm"))]
 mod zero;

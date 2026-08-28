@@ -236,6 +236,7 @@ pub(super) fn compile_redirect_rule(
         conditions: Vec::new(),
         cache: None,
         plan_gated: None,
+        origin: "file",
     })
 }
 

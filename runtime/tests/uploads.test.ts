@@ -669,6 +669,10 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
       proxy_rule_count: number;
       proxy_rules: Array<{ source: string; destination: string }>;
     };
+    route_inventory: {
+      format: "stattic.route-inventory.v1";
+      routes: Array<{ id: string; kind: string; source: string; path: string }>;
+    };
   };
   const finalized = await apiJson<FinalizeResult>(
     rt,
@@ -698,6 +702,15 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
     proxy_rule_count: 1,
     proxy_rules: [{ source: "/api/*", destination: "https://api.example.com/:splat" }],
   });
+  expect(finalized.route_inventory.format).toBe("stattic.route-inventory.v1");
+  expect(finalized.route_inventory.routes).toContainEqual(
+    expect.objectContaining({
+      kind: "proxy",
+      source: "_redirects",
+      path: "/api/*",
+    }),
+  );
+  expect(finalized.route_inventory.routes[0]?.id).toMatch(/^sha256:[a-f0-9]{64}$/);
 
   // Idempotency for control-plane retries after a successful runtime commit:
   // finalize removes the publish session, so a duplicate finalize must observe
@@ -717,6 +730,7 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
   expect(replayed.catalog_digests).toEqual(finalized.catalog_digests);
   expect(replayed.variable_digests).toEqual(finalized.variable_digests);
   expect(replayed.routing).toEqual(finalized.routing);
+  expect(replayed.route_inventory).toEqual(finalized.route_inventory);
 
   // The journal is the only sink (D53): one record for the commit, none for the
   // replay that committed nothing.

@@ -428,6 +428,7 @@ function _stattic_runtime_finalize_ready_response(string $privateRoot, string $s
     $previewImagePath = is_string($metadata['previewImagePath'] ?? null) && $metadata['previewImagePath'] !== ''
         ? $metadata['previewImagePath']
         : null;
+    $routeInventory = _stattic_runtime_finalize_route_inventory($metadata);
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'version_id' => $versionId,
@@ -446,11 +447,26 @@ function _stattic_runtime_finalize_ready_response(string $privateRoot, string $s
         'variable_digests' => is_array($metadata['variableDigests'] ?? null) ? (object) $metadata['variableDigests'] : (object) [],
         'system_variable_dependencies' => _stattic_runtime_metadata_list($metadata, 'systemVariableDependencies'),
         'routing' => _stattic_runtime_finalize_routing($metadata),
+        ...($routeInventory !== null ? ['route_inventory' => $routeInventory] : []),
         // Stage timings and counts for the run that just happened.
         ...($telemetry !== null ? ['telemetry' => $telemetry] : []),
         ...($activationEventId !== null ? ['activation_event_id' => $activationEventId] : []),
         ...($purge !== null ? ['purge' => $purge] : []),
     ]);
+}
+
+function _stattic_runtime_finalize_route_inventory(?array $metadata): ?array
+{
+    $inventory = $metadata['routeInventory'] ?? null;
+    if (
+        !is_array($inventory)
+        || ($inventory['format'] ?? null) !== 'stattic.route-inventory.v1'
+        || !is_array($inventory['routes'] ?? null)
+        || !array_is_list($inventory['routes'])
+    ) {
+        return null;
+    }
+    return $inventory;
 }
 
 function _stattic_runtime_metadata_list(?array $metadata, string $key): array

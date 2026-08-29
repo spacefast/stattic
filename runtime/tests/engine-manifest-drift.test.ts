@@ -26,6 +26,8 @@ const manifest = JSON.parse(
 // this guard, and it leaves a visible diff a reviewer reads.
 const NOT_SHIPPED = {
   "browser-specs/": "real-browser runtime tests, never installed on a site",
+  "node_modules/": "workspace dependency links, never installed on a site",
+  "package.json": "the Turbo workspace boundary and test dependency graph, never installed",
   "tests/":
     "the test suite itself — bun/php test files, fixtures and the runner, never installed on a site",
   "README.md": "repo documentation: how the engine works, for us",

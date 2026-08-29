@@ -1,0 +1,16 @@
+{
+  "name": "@spacefast/runtime",
+  "private": true,
+  "devDependencies": {
+    "@spacefast/common": "workspace:*",
+    "@spacefast/domain-services": "workspace:*",
+    "@spacefast/image": "workspace:*",
+    "@spacefast/mcp": "workspace:*",
+    "@spacefast/routing": "workspace:*",
+    "@spacefast/runtime-native": "workspace:*",
+    "@spacefast/sdk": "workspace:*",
+    "@spacefast/wpcloud-sdk": "workspace:*",
+    "@spacefast/zero": "workspace:*",
+    "@spacefast/zero-compile": "workspace:*"
+  }
+}

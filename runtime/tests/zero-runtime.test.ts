@@ -410,18 +410,21 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       },
     });
 
-    const signIn = await get(
-      idRuntime,
-      host,
+    // The canonical spelling and the frozen-client alias reach the same
+    // auth_start operation with byte-identical results.
+    for (const startPath of [
+      "/__zero/auth/start?returnTo=%2Faccount%3Ftab%3Dprofile",
       "/__spacefast/zero/auth/gravatar/start?returnTo=%2Faccount%3Ftab%3Dprofile",
-    );
-    expect({ status: signIn.status, body: await signIn.clone().text() }).toEqual({
-      status: 302,
-      body: "Redirecting.\n",
-    });
-    expect(signIn.headers.get("location")).toBe(
-      "https://api.spacefast.test/v1/access/acquire/opaque-zero?host=zero-identity.test&return=%2Faccount%3Ftab%3Dprofile",
-    );
+    ]) {
+      const signIn = await get(idRuntime, host, startPath);
+      expect({ status: signIn.status, body: await signIn.clone().text() }).toEqual({
+        status: 302,
+        body: "Redirecting.\n",
+      });
+      expect(signIn.headers.get("location")).toBe(
+        "https://api.spacefast.test/v1/access/acquire/opaque-zero?host=zero-identity.test&return=%2Faccount%3Ftab%3Dprofile",
+      );
+    }
 
     rmSync(capturePath, { force: true });
     const guest = await get(idRuntime, host, "/api/whoami");

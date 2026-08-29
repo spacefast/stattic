@@ -3307,14 +3307,21 @@ mod tests {
         assert_eq!(endpoint["runtime"], json!("quick-js"));
         assert_eq!(endpoint["path"], json!("/api/items/:id"));
         assert_eq!(endpoint["methods"], json!(["GET", "HEAD"]));
-        let control = inventory
+        let control_runs: Vec<&Value> = inventory
             .iter()
-            .find(|route| route["source"] == "runtime:run")
-            .expect("generated Zero control route");
-        assert_eq!(control["kind"], json!("zero-control"));
-        assert_eq!(control["runtime"], json!("php"));
-        assert_eq!(control["path"], json!("/__spacefast/zero/run"));
-        assert_eq!(control["methods"], json!(["POST"]));
+            .filter(|route| route["source"] == "runtime:run")
+            .collect();
+        // Canonical route plus the permanent legacy alias frozen clients baked.
+        let control_paths: Vec<&Value> = control_runs.iter().map(|route| &route["path"]).collect();
+        assert_eq!(
+            control_paths,
+            vec![&json!("/__zero/run"), &json!("/__spacefast/zero/run")]
+        );
+        for control in control_runs {
+            assert_eq!(control["kind"], json!("zero-control"));
+            assert_eq!(control["runtime"], json!("php"));
+            assert_eq!(control["methods"], json!(["POST"]));
+        }
 
         // Zero control routes are exact, so they compile into the response
         // table; the dynamic endpoint is resolved from zero/routes.php above.

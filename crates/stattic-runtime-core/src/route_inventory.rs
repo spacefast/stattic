@@ -22,7 +22,16 @@ const ALL_METHODS: &[&str] = &["*"];
 /// The Zero control routes a version with a Zero runtime always answers, as
 /// `(request path, method, operation)`. Inventory and response-table actions
 /// iterate this one list so neither projection can invent a route alone.
+///
+/// `/__zero/*` is canonical. The `/__spacefast/zero/*` spellings are permanent
+/// aliases: frozen capsule clients baked them at build time and a republish
+/// cannot be assumed, so both prefixes answer with the same operations.
 pub(crate) const ZERO_CONTROL_ROUTES: &[(&str, &str, &str)] = &[
+    ("/__zero/config", "GET", "config"),
+    ("/__zero/run", "POST", "run"),
+    ("/__zero/auth/start", "GET", "auth_start"),
+    ("/__zero/auth/sign-out", "GET", "auth_sign_out"),
+    ("/__zero/realtime/events", "GET", "realtime_events"),
     ("/__spacefast/zero/config", "GET", "config"),
     ("/__spacefast/zero/run", "POST", "run"),
     ("/__spacefast/zero/auth/gravatar/start", "GET", "auth_start"),

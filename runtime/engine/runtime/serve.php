@@ -360,6 +360,14 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // and a miss runs the rules because a rewrite may still find bytes.
     $rulesEntry = _stattic_v4_entry($versionDir, $root, STATTIC_RUNTIME_RESPONSE_KEY_RULES);
     $entry = _stattic_v4_entry($versionDir, $root, $requestPath);
+    if ($entry === null) {
+        // Tables frozen before the /__zero cutover only know the legacy
+        // spellings; a canonical control request folds onto them.
+        $zeroLegacyPath = _stattic_zero_legacy_control_path($requestPath);
+        if ($zeroLegacyPath !== null) {
+            $entry = _stattic_v4_entry($versionDir, $root, $zeroLegacyPath);
+        }
+    }
     $conditionalRewrite = false;
     $conditionalCandidate = false;
     $conditionalVary = [];

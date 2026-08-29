@@ -431,6 +431,11 @@ fn zero_method_valid(method: &str) -> bool {
 }
 
 const ZERO_CONTROL_PATHS: &[&str] = &[
+    "/__zero/config",
+    "/__zero/run",
+    "/__zero/auth/start",
+    "/__zero/auth/sign-out",
+    "/__zero/realtime/events",
     "/__spacefast/zero/config",
     "/__spacefast/zero/run",
     "/__spacefast/zero/auth/gravatar/start",
@@ -464,10 +469,16 @@ fn zero_route_path_valid(path: &str) -> bool {
 
     !matches!(
         path,
-        "/" | "/index.html" | "/client.js" | "/auth/callback" | "/__spacefast" | "/__span"
+        "/" | "/index.html"
+            | "/client.js"
+            | "/auth/callback"
+            | "/__spacefast"
+            | "/__span"
+            | "/__zero"
     ) && !path.starts_with("/auth/")
         && !path.starts_with("/__spacefast/")
         && !path.starts_with("/__span/")
+        && !path.starts_with("/__zero/")
         && path != "/__stattic"
         && !path.starts_with("/__stattic/")
 }

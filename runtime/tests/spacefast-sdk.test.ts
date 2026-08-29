@@ -847,11 +847,12 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     expect(tamperedIdentity.anonymousId).toMatch(/^anon_[a-f0-9]{32}$/);
     expect(tamperedIdentity.anonymousId).not.toBe(firstIdentity.anonymousId);
 
-    const zeroTicket = await get(
-      runtime,
-      "comments-exchange.site.test",
-      "/__spacefast/zero/realtime-ticket",
-      {
+    // The Zero mint answers on the canonical path the config response now
+    // advertises AND on the legacy one frozen capsule clients baked. Either
+    // spelling must reach zeroRealtimeTicketUrl, never the Comments ticket
+    // lane, whose token Cast rejects.
+    for (const zeroTicketPath of ["/__zero/realtime-ticket", "/__spacefast/zero/realtime-ticket"]) {
+      const zeroTicket = await get(runtime, "comments-exchange.site.test", zeroTicketPath, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -859,21 +860,24 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
           "sec-fetch-site": "same-origin",
         },
         body: JSON.stringify({ pagePath: "/docs" }),
-      },
-    );
-    expect(zeroTicket.status).toBe(200);
-    expect(await zeroTicket.json()).toEqual({
-      data: { token: "zero-cast-ticket-token", expiresAt: "2099-01-01T00:00:00.000Z" },
-    });
-    expect(zeroTicket.headers.getSetCookie()).toHaveLength(0);
-    expect(exchanges.at(-1)).toEqual({
-      credential: "runtime-comments-credential-0000000000000000000000000000",
-      payload: {
-        origin: "http://comments-exchange.site.test",
-        pagePath: "/docs",
-        versionId: "ver_sdk_exchange_1",
-      },
-    });
+      });
+      expect({ path: zeroTicketPath, status: zeroTicket.status }).toEqual({
+        path: zeroTicketPath,
+        status: 200,
+      });
+      expect(await zeroTicket.json()).toEqual({
+        data: { token: "zero-cast-ticket-token", expiresAt: "2099-01-01T00:00:00.000Z" },
+      });
+      expect(zeroTicket.headers.getSetCookie()).toHaveLength(0);
+      expect(exchanges.at(-1)).toEqual({
+        credential: "runtime-comments-credential-0000000000000000000000000000",
+        payload: {
+          origin: "http://comments-exchange.site.test",
+          pagePath: "/docs",
+          versionId: "ver_sdk_exchange_1",
+        },
+      });
+    }
 
     // Cross-version thread links ride the same relay: a published page can
     // only reach the control plane through its own host, and the page states

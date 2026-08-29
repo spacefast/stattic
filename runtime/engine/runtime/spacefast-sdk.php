@@ -155,7 +155,12 @@ function _stattic_comments_handle_exchange(
 
     $isTicket = $requestPath === STATTIC_COMMENTS_TICKET_PATH;
     $isVersionUrls = $requestPath === STATTIC_COMMENTS_VERSION_URLS_PATH;
-    $isZeroRealtimeTicket = $requestPath === STATTIC_ZERO_REALTIME_TICKET_PATH;
+    // Both spellings identify the same mint: the config response advertises the
+    // canonical `/__zero` path, while frozen capsule clients baked the legacy
+    // one. Missing either sends the request down the Comments ticket lane and
+    // mints a ticket Cast will not accept.
+    $isZeroRealtimeTicket = $requestPath === STATTIC_ZERO_REALTIME_TICKET_PATH
+        || $requestPath === STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH;
     $exchange = _stattic_access_page_exchange($serving);
     $exchangeKey = match (true) {
         $isZeroRealtimeTicket => 'zeroRealtimeTicketUrl',

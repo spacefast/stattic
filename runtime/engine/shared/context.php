@@ -58,6 +58,12 @@ const STATTIC_SPACEFAST_SDK_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sdk.js';
 const STATTIC_COMMENTS_CONFIG_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/config';
 const STATTIC_COMMENTS_TICKET_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/ticket';
 const STATTIC_ZERO_REALTIME_TICKET_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/realtime-ticket';
+// The canonical Zero control namespace. `/__spacefast/zero/*` is served forever
+// as an alias: frozen capsule clients baked those paths at build time and a
+// republish cannot be assumed. Registration covers both prefixes; every
+// emission (config JSON, invocation descriptors) uses the canonical one.
+const STATTIC_ZERO_CANONICAL_NAMESPACE_PATH = '/__zero';
+const STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH = STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/realtime-ticket';
 const STATTIC_COMMENTS_VERSION_URLS_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/version-urls';
 // Mirrors COLLAB_VERSION_URLS_MAX_IDS in packages/common.
 const STATTIC_COMMENTS_VERSION_URLS_MAX_IDS = 50;
@@ -141,6 +147,11 @@ const STATTIC_ACCESS_CLIENT_SCRIPT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/acc
 // The namespace is private-by-default: a Zero control route missing from this
 // table silently 403s at the front door (init.php).
 const STATTIC_ZERO_CONTROL_ROUTES = [
+    '__zero/config' => ['operation' => 'config', 'methods' => ['GET', 'HEAD']],
+    '__zero/run' => ['operation' => 'run', 'methods' => ['POST']],
+    '__zero/auth/start' => ['operation' => 'auth_start', 'methods' => ['GET', 'HEAD']],
+    '__zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD']],
+    '__zero/realtime/events' => ['operation' => 'realtime_events', 'methods' => ['GET', 'HEAD']],
     '__spacefast/zero/config' => ['operation' => 'config', 'methods' => ['GET', 'HEAD']],
     '__spacefast/zero/run' => ['operation' => 'run', 'methods' => ['POST']],
     '__spacefast/zero/auth/gravatar/start' => ['operation' => 'auth_start', 'methods' => ['GET', 'HEAD']],
@@ -191,6 +202,7 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_COMMENTS_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_COMMENTS_VERSION_URLS_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_ZERO_REALTIME_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
+    ['path' => STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     // Reserved (tenant false) so no publisher can shadow the review link, and
     // ahead of the token-entry prefix it sits inside, because first match wins.
     // serve.php dispatches it AFTER the access check: the shell's bytes vary by
@@ -203,7 +215,11 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => '/' . STATTIC_FUNCTIONS_RELAY_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_relay'],
     ['path' => '/' . STATTIC_FUNCTIONS_LOGS_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_logs'],
     ['path' => '/' . STATTIC_FUNCTIONS_PURGE_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_purge'],
+    ['path' => STATTIC_ZERO_CANONICAL_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'admit' => '_stattic_control_path_is_zero_route', 'visitor' => true, 'tenant' => false, 'stage' => 'route-index', 'handler' => 'invoke_zero'],
     ['path' => STATTIC_RUNTIME_NAMESPACE_PATH . '/zero', 'match' => 'namespace', 'fold' => true, 'admit' => '_stattic_control_path_is_zero_route', 'visitor' => true, 'tenant' => false, 'stage' => 'route-index', 'handler' => 'invoke_zero'],
+    // Unknown `/__zero/*` paths refuse exactly like unknown `/__spacefast/*`:
+    // the namespace is private-by-default on both spellings.
+    ['path' => STATTIC_ZERO_CANONICAL_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => STATTIC_RUNTIME_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
     // An entry-stage row so the front door admits it and no tenant can publish
@@ -218,6 +234,22 @@ const SPACEFAST_CONTROL_PATHS = [
 function _stattic_control_path_is_zero_route(string $path): bool
 {
     return isset(STATTIC_ZERO_CONTROL_ROUTES[trim(strtolower($path), '/')]);
+}
+
+// Response tables compiled before the /__zero cutover carry only the legacy
+// spellings, and a version is immutable: the serve ladder folds a canonical
+// control path to its legacy twin when the table has no canonical row.
+function _stattic_zero_legacy_control_path(string $path): ?string
+{
+    $normalized = '/' . trim(strtolower($path), '/');
+    if ($normalized === STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/auth/start') {
+        return STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/auth/gravatar/start';
+    }
+    if (str_starts_with($normalized, STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/')) {
+        return STATTIC_RUNTIME_NAMESPACE_PATH . '/zero'
+            . substr($normalized, strlen(STATTIC_ZERO_CANONICAL_NAMESPACE_PATH));
+    }
+    return null;
 }
 
 function _stattic_control_path_row(string $path): ?array

@@ -15,7 +15,7 @@ const SPACEFAST_UPLOAD_RESERVED_ROOT_CONTROL_FILES = ['custom-redirects.php', 'e
 // Whole root segments, exactly the namespaces the front door's control table
 // claims at request time (see SPACEFAST_CONTROL_PATHS in shared/context.php):
 // '__sfx' and '__spanish' are tenant paths, '__sf/x' and '__span/x' are ours.
-const SPACEFAST_UPLOAD_RESERVED_ROOT_SEGMENTS = ['__sf', '__span'];
+const SPACEFAST_UPLOAD_RESERVED_ROOT_SEGMENTS = ['__sf', '__span', '__zero'];
 // Matched as a segment PREFIX at any depth, which is broader than the front
 // door: it also holds '__spacefast_generated/' and the planned '__stattic/*'.
 const SPACEFAST_UPLOAD_RESERVED_SEGMENT_PREFIXES = ['__spacefast', '__stattic'];

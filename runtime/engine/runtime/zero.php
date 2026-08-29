@@ -300,12 +300,12 @@ function _stattic_zero_send_config_response(array $config, array $serving = []):
         'realtime' => [
             'mode' => $realtimeMode,
             'centralUrl' => is_string($realtime['centralUrl'] ?? null) && $realtime['centralUrl'] !== '' ? $realtime['centralUrl'] : null,
-            'path' => '/__spacefast/zero/realtime',
-            'replayPath' => is_string($realtime['replayUrl'] ?? null) && $realtime['replayUrl'] !== '' ? '/__spacefast/zero/realtime/events' : null,
-            'runPath' => '/__spacefast/zero/run',
+            'path' => STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/realtime',
+            'replayPath' => is_string($realtime['replayUrl'] ?? null) && $realtime['replayUrl'] !== '' ? STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/realtime/events' : null,
+            'runPath' => STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/run',
             'resourceKey' => $castResourceKey !== '' ? $castResourceKey : null,
             'ticketPath' => $realtimeMode === 'cast' && $castResourceKey !== ''
-                ? STATTIC_ZERO_REALTIME_TICKET_PATH
+                ? STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH
                 : null,
             'socketPath' => '/api/socket/:name',
             'spaceId' => is_string($serving['space_id'] ?? null) && $serving['space_id'] !== '' ? $serving['space_id'] : null,
@@ -367,6 +367,9 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
         $schemaHash,
         [
             'method' => 'POST',
+            // Frozen server bundles bake a host adapter that compares this
+            // string exactly (isInternalRun); it stays the legacy spelling
+            // forever regardless of which alias the request arrived on.
             'path' => '/__spacefast/zero/run',
             'uri' => '/__spacefast/zero/run',
             'host' => $requestHost,

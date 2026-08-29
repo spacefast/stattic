@@ -1817,7 +1817,7 @@ check(!isset($fxHeadersNoUsage['sf-fx-usage']), 'dispatch: no usage intake witho
 check($fxHeadersNoUsage['sf-fx-bundle'] === 'https://shop.example/b/x/t/bundle.json', 'dispatch: a config without usage still dispatches');
 
 // The platform's own surfaces are never the worker's to answer.
-foreach (['/__spacefast/functions/relay', '/__spacefast/zero/run', '/__stattic/x', '/__span/y', '/__spacefast'] as $reserved) {
+foreach (['/__spacefast/functions/relay', '/__spacefast/zero/run', '/__zero/run', '/__zero', '/__stattic/x', '/__span/y', '/__spacefast'] as $reserved) {
     check(!_stattic_functions_dispatchable($reserved, 'GET'), 'dispatch: refuses reserved path ' . $reserved);
 }
 foreach (['/', '/api/orders', '/posts/1', '/__spacefastish/ok'] as $ordinary) {
@@ -2013,6 +2013,17 @@ check(!_stattic_control_path_admits_visitor('/__spacefast/functions'), 'front do
 check(_stattic_path_is_reserved('/__spacefast/functions/relay'), 'front door: control paths stay reserved from tenant code');
 check(_stattic_path_is_reserved('/__SF/redeem'), 'front door: a case-folded control namespace is still reserved');
 check(!_stattic_path_is_reserved('/__spanish/page'), 'front door: reservation is whole-segment, not a string prefix');
+
+// The canonical Zero namespace admits exactly the control routes, on both
+// spellings, and unknown paths under it stay refused and reserved.
+check(_stattic_control_path_admits_visitor('/__zero/run'), 'front door: canonical zero run is reachable');
+check(_stattic_control_path_admits_visitor('/__zero/auth/start'), 'front door: canonical zero auth start is reachable');
+check(_stattic_control_path_admits_visitor('/__spacefast/zero/auth/gravatar/start'), 'front door: frozen-client zero auth alias stays reachable');
+check(!_stattic_control_path_admits_visitor('/__zero/unknown'), 'front door: unknown canonical zero paths refuse');
+check(_stattic_path_is_reserved('/__zero/anything'), 'front door: the canonical zero namespace is reserved from tenant code');
+check(_stattic_zero_legacy_control_path('/__zero/run') === '/__spacefast/zero/run', 'fold: canonical run folds to the legacy table key');
+check(_stattic_zero_legacy_control_path('/__zero/auth/start') === '/__spacefast/zero/auth/gravatar/start', 'fold: auth start folds to the gravatar spelling');
+check(_stattic_zero_legacy_control_path('/api/run') === null, 'fold: ordinary paths never fold');
 
 // --- Operator journal: the 8 MiB cap bounds one file, the roll-aside keeps history ---
 

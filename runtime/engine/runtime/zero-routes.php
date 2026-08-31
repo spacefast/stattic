@@ -50,6 +50,9 @@ function _stattic_resolve_zero_route_action(string $versionRoot, string $lookup,
         'action' => 'invoke_zero',
         'endpoint' => $entry['endpoint_id'],
         'artifact' => $entry['artifact'],
+        'execution_mode' => is_string($entry['execution_mode'] ?? null)
+            ? $entry['execution_mode']
+            : _stattic_zero_derived_execution_mode('endpoint', $entry['method']),
         'methods' => $methods,
         'params' => $params,
     ];

@@ -7,8 +7,10 @@ import { expect, test } from "bun:test";
 // gen monotonicity, which shards a mutation rewrites, previous.json as the
 // grace anchor, shard GC by (unreferenced AND aged), and the cross-space
 // correctness the incremental update's owners map preserves.
-import { chmodSync, existsSync, unlinkSync, utimesSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, unlinkSync, utimesSync } from "node:fs";
+import path from "node:path";
 
+import { publicRuntimeRouteConfig } from "../../apps/control-plane/src/runtime/runtime-route-config.fixture";
 import {
   api,
   apiJson,
@@ -110,6 +112,50 @@ async function seedTwoSpaces(rt: Runtime): Promise<void> {
     activate: productionActivation(HOST_B),
   });
 }
+
+test("an exact host stays ahead of an older wildcard route", async () => {
+  const rt = await startRuntime();
+  const config = publicRuntimeRouteConfig();
+  try {
+    await deploy(rt, {
+      spaceId: "spc_wildcard_boundary",
+      versionId: "ver_wildcard_boundary",
+      files: { "index.html": "wildcard site" },
+      activate: {
+        route_name: "production",
+        config,
+        production_hostnames: ["*.boundary.test"],
+        version_hostnames: [],
+      },
+    });
+    await deploy(rt, {
+      spaceId: "spc_exact_boundary",
+      versionId: "ver_exact_boundary",
+      files: { "index.html": "exact site", "requested/path": "compiled file" },
+      activate: {
+        route_name: "production",
+        config,
+        production_hostnames: ["site.boundary.test"],
+        version_hostnames: [],
+      },
+    });
+    rmSync(path.join(rt.root, ".stattic", "engine", "admin"), {
+      recursive: true,
+      force: true,
+    });
+
+    const home = await get(rt, "site.boundary.test", "/");
+    expect(home.status).toBe(200);
+    expect(await home.text()).toBe("exact site");
+
+    const compiledFile = await get(rt, "site.boundary.test", "/requested/path");
+    expect(compiledFile.status).toBe(200);
+    expect(await compiledFile.text()).toBe("compiled file");
+    expect((await get(rt, "site.boundary.test", "/requested/path/")).status).toBe(404);
+  } finally {
+    rt.stop();
+  }
+});
 
 test("activating a new version swaps the space overlay and leaves every route shard addressed the same", async () => {
   const rt = await startRuntime();

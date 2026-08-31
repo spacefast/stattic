@@ -111,6 +111,10 @@ const STATTIC_SESSION_DEV_COOKIE = 'spacefast_session_dev';
 const STATTIC_SYSTEM_VIEW_COOKIE = '__Host-spacefast_system_view';
 const STATTIC_SYSTEM_VIEW_DEV_COOKIE = 'spacefast_system_view_dev';
 const STATTIC_SYSTEM_VIEW_COOKIE_SECONDS = 5 * 60;
+// An origin-bound Frame proof is a CHIPS cookie. It never enters the ordinary
+// first-party visitor or system-view cookie namespaces.
+const STATTIC_FRAME_SESSION_COOKIE = '__Host-spacefast_frame';
+const STATTIC_FRAME_SESSION_DEV_COOKIE = 'spacefast_frame_dev';
 // `?__=` is THE access lane: present a token on the page you want and that page
 // is the response. Every token that may ride it names itself with a prefix, so
 // dispatch is a table lookup and an unclaimed token is refused by name instead
@@ -129,6 +133,10 @@ const STATTIC_ACCESS_QUERY_TOKEN_SPACE_KEY_PREFIX = 'sfc_';
 // Space's own keys, never exchanged. Mirrors SYSTEM_VIEW_TOKEN_PREFIX in
 // apps/control-plane/src/access/system-view-token.ts.
 const STATTIC_ACCESS_QUERY_TOKEN_SYSTEM_VIEW_PREFIX = 'sfv_';
+// One short-lived origin-bound Frame session, signed by the platform and
+// verified locally against the Space's own keys. Mirrors
+// FRAME_SESSION_TOKEN_PREFIX in apps/control-plane/src/access/frame-session-token.ts.
+const STATTIC_ACCESS_QUERY_TOKEN_FRAME_SESSION_PREFIX = 'sff_';
 // The Collab frame shell. Short and shareable because this URL IS the review
 // link people paste; it sits inside the token-entry prefix and therefore ahead
 // of it in the table below. The TS mirror is RUNTIME_COLLAB_FRAME_PATH in
@@ -417,6 +425,11 @@ function _stattic_access_query_token_classify(string $value): ?array
             '/\A[A-Za-z0-9_-]{4,1024}\.[A-Za-z0-9_-]{4,4096}\.[A-Za-z0-9_-]{4,1024}\z/',
             false,
         ],
+        STATTIC_ACCESS_QUERY_TOKEN_FRAME_SESSION_PREFIX => [
+            'frame-session',
+            '/\A[A-Za-z0-9_-]{4,1024}\.[A-Za-z0-9_-]{4,4096}\.[A-Za-z0-9_-]{4,1024}\z/',
+            false,
+        ],
     ];
     foreach ($lanes as $prefix => [$kind, $pattern, $keep]) {
         if (!str_starts_with($value, $prefix)) {
@@ -656,6 +669,26 @@ function _stattic_platform_vary_headers(?array $add = null): array
 }
 
 /**
+ * The origin a verified system-view `embed` proof nominated as its framer, or
+ * null.
+ *
+ * Set only from a signed claim (access-rules.php verifies it), never from a
+ * request header: the whole point is that a private Space cannot be framed by
+ * whoever asks. It lives here rather than beside the rest of the system-view
+ * lane because both readers are here — the private-content CSP below and the
+ * partitioned echo cookie `_stattic_set_cookie` writes — and context.php is
+ * loaded on every request while access-rules.php is not.
+ */
+function _stattic_system_view_embed(?string $origin = null): ?string
+{
+    static $admitted = null;
+    if ($origin !== null) {
+        $admitted = $origin;
+    }
+    return $admitted;
+}
+
+/**
  * The ONE decision about which origins may frame a Space's private content.
  *
  * `'self'` is the main path: the Collab shell at `/__/collab` and the page it
@@ -666,9 +699,16 @@ function _stattic_platform_vary_headers(?array $add = null): array
  * authorization projection, so the live origin is already trusted with these
  * bytes and its publisher already controls them.
  *
- * The set only ever narrows. A Space with no live origin, or one the overlay
- * states in a form that is not an origin, contributes nothing and lands on
- * `'self'`, never on a value someone else chose.
+ * The remaining entries only ever arrive proven, per request: the parents the
+ * Space's own Link projection admitted for this response (the Frame verifier
+ * and the public Link projection are the only writers), and a system-view
+ * proof minted with an `embed` origin (a dashboard preview session) naming the
+ * one framer the platform vouched for, for that request alone.
+ *
+ * Nothing here is caller-stated. A Space with no live origin, an overlay that
+ * states one in a form that is not an origin, or a request carrying no framing
+ * proof each contribute nothing and land on `'self'`, never on a value someone
+ * else chose.
  */
 function _stattic_space_frame_ancestors(): string
 {
@@ -678,8 +718,22 @@ function _stattic_space_frame_ancestors(): string
     $sdk = is_array($serving['sdk'] ?? null) ? $serving['sdk'] : [];
     $config = is_array($sdk['config'] ?? null) ? $sdk['config'] : [];
     $comments = is_array($config['comments'] ?? null) ? $config['comments'] : [];
-    $live = _stattic_absolute_url_origin($comments['live_url'] ?? null);
-    return $live === null ? "'self'" : "'self' " . $live;
+    $origins = ["'self'"];
+    // The embed claim is already an origin by the time it lands here (a claim
+    // that is not one fails the whole token), so nothing unvalidated can reach
+    // the header.
+    foreach ([
+        _stattic_absolute_url_origin($comments['live_url'] ?? null),
+        ...(function_exists('_stattic_frame_ancestor_origins')
+            ? _stattic_frame_ancestor_origins()
+            : []),
+        _stattic_system_view_embed(),
+    ] as $origin) {
+        if (is_string($origin) && $origin !== '' && !in_array($origin, $origins, true)) {
+            $origins[] = $origin;
+        }
+    }
+    return implode(' ', $origins);
 }
 
 /**
@@ -701,7 +755,13 @@ function _stattic_absolute_url_origin(mixed $url): ?string
     }
     $scheme = strtolower((string) ($parts['scheme'] ?? ''));
     $host = strtolower((string) ($parts['host'] ?? ''));
-    if (($scheme !== 'https' && $scheme !== 'http') || preg_match('/\A[a-z0-9.-]+\z/', $host) !== 1) {
+    $ipv6 = str_starts_with($host, '[')
+        && str_ends_with($host, ']')
+        && filter_var(substr($host, 1, -1), FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+    if (
+        ($scheme !== 'https' && $scheme !== 'http')
+        || (preg_match('/\A[a-z0-9.-]+\z/', $host) !== 1 && !$ipv6)
+    ) {
         return null;
     }
     $port = $parts['port'] ?? null;

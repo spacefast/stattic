@@ -144,6 +144,7 @@ echo json_encode([
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "write",
           method: "GET",
           path: "/api/atomic-config",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -228,6 +229,7 @@ test("Zero realtime uses per-version config and stays silent without it", async 
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "write",
           method: "GET",
           path: "/api/atomic-config",
           source: "globalThis.__statticZeroResult = '{}';",

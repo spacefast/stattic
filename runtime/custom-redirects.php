@@ -122,6 +122,7 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
         // ask still leaves $bindDatabasePassword() the first thing any engine
         // code that could observe DB_PASSWORD sees.
         $isContentAdminPath = false;
+        $restFrontController = null;
         if (
             !isset($entrypointPaths[$path])
             && !$isFpmReadinessProbe
@@ -132,6 +133,24 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 $path,
                 is_array($_GET) ? $_GET : []
             );
+            // WordPress routes /wp-json through the document root's index.php,
+            // and this engine installs its own copy of THIS file over that
+            // (engine-manifest.json aliases index.php), so the REST lane cannot
+            // reach WordPress by returning — it has to name WordPress's front
+            // controller. Resolved once, here, because its absence is also the
+            // answer to whether this Space has a REST API at all: a Space with
+            // no WordPress does not, so /wp-json is an ordinary URL it does not
+            // publish and the visitor lane answers it with the Space's own 404.
+            // Claiming it would make every static Space pretend to have an
+            // editor behind it.
+            if (
+                $isContentAdminPath
+                && _stattic_content_rest_request_path($path, is_array($_GET) ? $_GET : [])
+            ) {
+                $frontController = dirname($installRoot) . '/wp-blog-header.php';
+                $restFrontController = is_file($frontController) ? $frontController : null;
+                $isContentAdminPath = $restFrontController !== null;
+            }
         }
         if ($isContentAdminPath) {
             require_once $releaseRoot . '/engine/shared/bootstrap-config.php';
@@ -170,21 +189,132 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 ? $_COOKIE[$cookieName]
                 : '';
             $session = _stattic_content_admin_verify_session($privateRoot, $token, $host);
-            if ($session === null) {
+            if ($session !== null) {
+                $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = $session['user_id'];
+                $GLOBALS['SPACEFAST_CONTENT_ADMIN_SESSION_EXPIRES_AT'] = $session['expires_at'];
+                $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $session['principal'];
+                $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = $session['wordpress_role'];
+                _stattic_content_admin_enter_wordpress(
+                    $privateRoot,
+                    $session['space_id'],
+                    $session['frame_origin']
+                );
+            } elseif ($restFrontController === null) {
+                // Not the REST lane, so /wp-admin: the editor's own HTML surface,
+                // with exactly one door — the session its launch minted.
                 _stattic_problem_response(
                     401,
                     'content_admin_session_invalid',
                     'The content editor session is invalid or expired.'
                 );
+            } else {
+                // THE WP API door. WordPress's REST API is reached as the
+                // principal a Space credential resolves to, and the decision to
+                // let this request through is made by the SAME access engine
+                // that serves the Space's pages — asked here, never restated.
+                // A protected Space refuses a credential-less REST call exactly
+                // as it refuses a page, and no lane here can be wider than the
+                // page-serving policy because there is no second policy.
+                _stattic_visitor_lane_begin($privateRoot);
+                require_once $releaseRoot . '/engine/runtime/serve.php';
+                require_once $releaseRoot . '/engine/runtime/access-rules.php';
+                _sf_load_generated_config($privateRoot);
+                // The path the access engine sees. The query spelling
+                // (`/?rest_route=`) addresses the same resource as
+                // `/wp-json/...` and must be enforced against the same path, or
+                // a Grant that scopes `/wp-json` binds only the pretty spelling.
+                $accessPath = _stattic_content_rest_access_path(
+                    $path,
+                    is_array($_GET) ? $_GET : []
+                );
+                $target = _stattic_content_access_target($privateRoot, $host);
+                if ($target['kind'] === 'unavailable') {
+                    _stattic_problem_response(
+                        503,
+                        'content_admin_space_unavailable',
+                        'This Space is not editable right now.'
+                    );
+                }
+                if ($target['kind'] !== 'present') {
+                    _stattic_problem_response(
+                        404,
+                        'content_admin_space_not_found',
+                        'No editable Space is active for this host.'
+                    );
+                }
+                $GLOBALS['SPACEFAST_PAGE_SERVING'] = $target['serving'];
+                // An open Space skips enforcement for the anonymous answer, but a
+                // presented credential is still a credential: an unusable one
+                // must deny here rather than fall through to WordPress's public
+                // answer, so a machine caller never has its failure hidden.
+                if (
+                    !$target['open']
+                    || _stattic_platform_bearer_token_from_request() !== null
+                ) {
+                    // Denials terminate inside, with the same answer this path
+                    // would give a browser asking for the page.
+                    _stattic_access_enforce_v4($host, $accessPath, $accessPath);
+                }
+                // Admitted. Who WordPress runs as is a separate question from
+                // whether the request may proceed, and null is a normal answer:
+                // WordPress then serves REST unauthenticated, which on a public
+                // Space is exactly what it would do on its own.
+                $principal = _stattic_access_wordpress_principal(
+                    $target['serving'],
+                    $host,
+                    $accessPath
+                );
+                if ($principal !== null) {
+                    $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $principal;
+                    $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = $principal['wordpress_role'];
+                }
+                _stattic_content_admin_enter_wordpress($privateRoot, $target['space_id'], null);
             }
-            $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = $session['user_id'];
-            $GLOBALS['SPACEFAST_CONTENT_ADMIN_SESSION_EXPIRES_AT'] = $session['expires_at'];
-            _stattic_content_admin_enter_wordpress(
-                $privateRoot,
-                $session['space_id'],
-                $session['frame_origin']
-            );
             $bindDatabasePassword();
+            // Both REST doors end here. /wp-admin needs none of it: those are
+            // real WordPress scripts, and returning is exactly how they run.
+            if ($restFrontController !== null) {
+                // "Does THIS Space have a WordPress" is a per-Space question,
+                // and the front controller is site-wide — one wp.cloud site
+                // hosts many Spaces (content-storage.php) — so its existence
+                // cannot answer it. The Space's own content-model/active-release
+                // pointer does: absent, this is a static Space that does not
+                // publish /wp-json, and booting the shared kernel for it would
+                // make it pretend to have an editor behind it. Both doors set
+                // SPACEFAST_CONTENT_SPACE_ID before here, so the same check
+                // guards the editor session and the WP API door alike.
+                $restSpaceId = (string) ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? '');
+                $contentModelRevision = $restSpaceId === ''
+                    ? null
+                    : _stattic_private_tree_read_pointer(
+                        $privateRoot . '/spaces/' . $restSpaceId . '/content-model/active-release',
+                        128
+                    );
+                if (
+                    !is_string($contentModelRevision)
+                    || preg_match('/\Asha256:[a-f0-9]{64}\z/D', $contentModelRevision) !== 1
+                ) {
+                    _stattic_problem_response(
+                        404,
+                        'content_admin_space_not_found',
+                        'No editable Space is active for this host.'
+                    );
+                }
+                // The gate admitted this request; whether WordPress answers REST
+                // at all is the gate's decision, not the resolved role's. The
+                // kernel's rest_authentication_errors filter reads this marker so
+                // an anonymous request the gate already admitted (a public Space)
+                // gets WordPress's own unauthenticated answer instead of a 404
+                // the gate never intended. The role still projects capabilities.
+                $GLOBALS['SPACEFAST_CONTENT_REST_ADMITTED'] = true;
+                // REST renders no theme, and WordPress answers on parse_request
+                // long before one would load.
+                if (!defined('WP_USE_THEMES')) {
+                    define('WP_USE_THEMES', false);
+                }
+                require $restFrontController;
+                exit;
+            }
         }
         if (
             !isset($entrypointPaths[$path])

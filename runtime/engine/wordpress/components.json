@@ -1,0 +1,144 @@
+{
+  "format": "spacefast.wordpress-components",
+  "version": 1,
+  "platformRelease": "source-tree",
+  "digest": "sha256:2eaaefdfd65ecc97e72f3c292fc99fa59f0095c6133f0167ed95b44a080100c6",
+  "components": [
+    {
+      "id": "wordpress-core",
+      "kind": "wordpress-core",
+      "version": "7.0.4",
+      "sha256": "sha256:f0885ad10c35ac87e70517bc5789275cd54ccac052222a58acfb7b9f870082b0",
+      "source": {
+        "kind": "archive",
+        "url": "https://wordpress.org/wordpress-7.0.4.zip",
+        "bytes": 31438468
+      },
+      "provides": ["wordpress.core", "wordpress.blocks", "wordpress.media"],
+      "activation": "always"
+    },
+    {
+      "id": "runtime-engine",
+      "kind": "runtime-engine",
+      "version": "source-tree",
+      "sha256": "sha256:f8f7cedeaf3e59806073ee15983bbabc7d4df34593dc1c9894a2ac3a7f4e8e55",
+      "source": {
+        "kind": "embedded",
+        "path": "bin/stattic-runtime"
+      },
+      "provides": ["runtime.serving", "runtime.routing", "runtime.zero"],
+      "activation": "always"
+    },
+    {
+      "id": "immutable-loader",
+      "kind": "mu-plugin",
+      "version": "source-tree",
+      "sha256": "sha256:2d9849b3a2b60f20bfac3080fecf1537c82ee83666e4f9c20f845f98ca890a01",
+      "source": {
+        "kind": "embedded",
+        "path": "wordpress-content-loader.php"
+      },
+      "provides": ["wordpress.immutable-loader"],
+      "activation": "always"
+    },
+    {
+      "id": "content-kernel",
+      "kind": "mu-plugin",
+      "version": "source-tree",
+      "sha256": "sha256:3b1ac178d388d077b072e0c981a796479c3cc08905bd1a4d7a99fd14dae6ec48",
+      "source": {
+        "kind": "embedded",
+        "path": "engine/wordpress/content-kernel.php"
+      },
+      "provides": ["wordpress.content-kernel", "wordpress.tables", "wordpress.sync"],
+      "activation": "always"
+    },
+    {
+      "id": "zero-admin",
+      "kind": "mu-plugin",
+      "version": "source-tree",
+      "sha256": "sha256:f8f7cedeaf3e59806073ee15983bbabc7d4df34593dc1c9894a2ac3a7f4e8e55",
+      "source": {
+        "kind": "embedded",
+        "path": "wordpress/zero-admin"
+      },
+      "provides": ["wordpress.zero-admin"],
+      "activation": "always"
+    },
+    {
+      "id": "managed-theme",
+      "kind": "theme",
+      "version": "source-tree",
+      "sha256": "sha256:5eb0dc0397a523d149a667b4fade45c30d11c19daeb2c1237c52313976cad6d0",
+      "source": {
+        "kind": "embedded",
+        "path": "wordpress/managed-theme"
+      },
+      "provides": ["wordpress.managed-theme"],
+      "activation": "always"
+    },
+    {
+      "id": "secure-custom-fields",
+      "kind": "plugin",
+      "version": "6.9.5",
+      "sha256": "sha256:2f3c6be871e23192bbcaf0f0870a8103678b078d168983cb39d95e0b0d25dbf3",
+      "source": {
+        "kind": "archive",
+        "url": "https://downloads.wordpress.org/plugin/secure-custom-fields.6.9.5.zip",
+        "bytes": 5532990
+      },
+      "provides": ["wordpress.scf"],
+      "activation": "always"
+    },
+    {
+      "id": "redirection",
+      "kind": "plugin",
+      "version": "5.9.0",
+      "sha256": "sha256:b6dd341a6b383440cbb1d5647fa59a82fc5e48afe2165539284c56edaf066842",
+      "source": {
+        "kind": "archive",
+        "url": "https://downloads.wordpress.org/plugin/redirection.5.9.0.zip",
+        "bytes": 382251
+      },
+      "provides": ["wordpress.redirection"],
+      "activation": "always"
+    },
+    {
+      "id": "block-transformer",
+      "kind": "block-transformer",
+      "version": "0.6.2",
+      "sha256": "sha256:16492638259e8f0c1676332e52df27dd005552cca4a3f50055274363030a5a49",
+      "source": {
+        "kind": "archive",
+        "url": "https://codeload.github.com/Automattic/blocks-engine-php-transformer/zip/refs/tags/v0.6.2",
+        "bytes": 786827
+      },
+      "provides": ["wordpress.block-transform"],
+      "activation": "always"
+    },
+    {
+      "id": "jetpack",
+      "kind": "plugin",
+      "version": "latest",
+      "sha256": "sha256:55ee45c302c9090e2be6fe18ce2f604d236355bec5d139548d9d32ede035953c",
+      "source": {
+        "kind": "provider-managed",
+        "software": "plugins/jetpack/latest"
+      },
+      "provides": ["wordpress.jetpack"],
+      "activation": "on-demand"
+    },
+    {
+      "id": "quickjs-abi",
+      "kind": "quickjs-abi",
+      "version": "rquickjs-0.12",
+      "sha256": "sha256:382fc8d76a7b69d408dcc287636f893e5af5bea77c3d40f950284374471c473d",
+      "source": {
+        "kind": "embedded",
+        "path": "engine/shared/finalizer-protocol.generated.php"
+      },
+      "provides": ["runtime.quickjs"],
+      "activation": "always"
+    }
+  ]
+}

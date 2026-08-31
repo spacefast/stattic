@@ -52,6 +52,12 @@ const UNCLAIMED_VERSION = "ver_access_page_unclaimed";
 const FENCED_HOST = "fenced.access-page.test";
 const FENCED_SPACE = "spc_access_page_fenced";
 const FENCED_VERSION = "ver_access_page_fenced";
+// The dashboard framing a private version: an `embed` claim names the one
+// origin the platform vouched for as this request's framer.
+const EMBED_ORIGIN = "https://dashboard.access-page.test";
+// Mirrors STATTIC_SYSTEM_VIEW_COOKIE_SECONDS in runtime/engine/shared/context.php:
+// the window a top-level system reader's echo cookie gets.
+const SYSTEM_VIEW_ECHO_SECONDS = 5 * 60;
 
 const EXCHANGE_CREDENTIAL = "runtime-exchange-credential-0123456789abcdef";
 const PASSWORD = "correct horse battery staple";
@@ -61,6 +67,10 @@ const PASSWORD = "correct horse battery staple";
 // STATTIC_ACCESS_QUERY_TOKEN_*_PREFIX).
 const LINK_PREFIX = "sfl_";
 const SYSTEM_VIEW_PREFIX = "sfv_";
+const FRAME_SESSION_PREFIX = "sff_";
+const FRAME_ORIGIN = "https://wordpress.example";
+const FRAME_LINK_ID = "lnk_page_frame";
+const FRAME_LINK_REVISION = 2;
 const LINK_TOKEN = `${LINK_PREFIX}aBcD-shareLink_0123456789`;
 const API_TOKEN = "sfa_ownerIntegrationToken123";
 const UNCLAIMED_LINK_TOKEN = `${LINK_PREFIX}unclaimed-shareLink_0123456789`;
@@ -122,7 +132,7 @@ function sessionCookie(response: Response): string {
   return (
     response.headers
       .getSetCookie()
-      .find((cookie) => cookie.startsWith("spacefast_session_dev="))
+      .find((cookie) => cookie.startsWith("__Host-spacefast_session="))
       ?.split(";")[0] ?? ""
   );
 }
@@ -131,8 +141,25 @@ function systemViewCookie(response: Response): string {
   return (
     response.headers
       .getSetCookie()
-      .find((cookie) => cookie.startsWith("spacefast_system_view_dev="))
+      .find((cookie) => cookie.startsWith("__Host-spacefast_system_view="))
       ?.split(";")[0] ?? ""
+  );
+}
+
+function frameSessionCookie(response: Response): string {
+  return (
+    response.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith("__Host-spacefast_frame="))
+      ?.split(";")[0] ?? ""
+  );
+}
+
+function frameSessionSetCookie(response: Response): string {
+  return (
+    response.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith("__Host-spacefast_frame=")) ?? ""
   );
 }
 
@@ -187,6 +214,89 @@ function systemViewToken(
     nbf: now,
     exp: now + 3600,
     ...overrides,
+  });
+}
+
+// What the platform binds a Frame proof to. The live shape names the Version
+// the channel currently serves, so a republish invalidates the proof; a branch
+// or Version target names its own host.
+type FrameTarget =
+  | { kind: "live"; versionId: string; routeRevision: string }
+  | { kind: "branch"; branch: string }
+  | { kind: "version"; versionId: string };
+
+// A Frame proof: one signed Grant decision (`frame`, the contract object in
+// packages/common frameSessionClaimsV1Schema) beside the flat host/space/epoch
+// claims every visitor token carries. The platform mints this in
+// apps/control-plane/src/access/frame-session-token.ts.
+function frameSessionToken(
+  overrides: {
+    origin?: string;
+    linkRevision?: number;
+    target?: FrameTarget;
+    exp?: number;
+    sessionVersion?: number;
+    capabilities?: string[];
+  } = {},
+  host = LANES_HOST,
+  spaceId = LANES_SPACE,
+): string {
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = overrides.exp ?? now + 300;
+  const origin = overrides.origin ?? FRAME_ORIGIN;
+  const sessionVersion = overrides.sessionVersion ?? 0;
+  const nonce = randomUUID();
+  const principalAssertion = {
+    format: "spacefast.principal",
+    version: 1,
+    audience: { spaceId, runtimeInstanceId: spaceId, host: `https://${host}` },
+    actor: { kind: "user", id: "usr_frame_viewer" },
+    subject: { issuer: "https://api.example/v1/auth", subject: "usr_frame_viewer" },
+    wordpressRole: "subscriber",
+    sessionVersion,
+    accessGeneration: 0,
+    nonce,
+    issuedAt: now,
+    expiresAt,
+  };
+  return signEd25519Jwt(keyPair.privateKey, issuer.kid, {
+    purpose: "frame-session",
+    iss: "spacefast-api",
+    aud: spaceId,
+    host,
+    spaceId,
+    runtime_instance_id: spaceId,
+    path: "/docs",
+    generation: 0,
+    sessionVersion,
+    principalAssertion,
+    frame: {
+      format: "spacefast.frame-session",
+      version: 1,
+      launchTicketId: randomUUID(),
+      audience: { spaceId, runtimeInstanceId: spaceId, host: `https://${host}` },
+      link: { id: FRAME_LINK_ID, revision: overrides.linkRevision ?? FRAME_LINK_REVISION },
+      principal: { kind: "user", id: "usr_frame_viewer", assertionNonce: nonce },
+      // The live channel resolves to the immutable Version it is serving, so a
+      // republish changes the proof's target and closes it.
+      target: overrides.target ?? {
+        kind: "live",
+        versionId: LANES_VERSION,
+        routeRevision: createHash("sha256").update(`${spaceId}:live`).digest("hex"),
+      },
+      surface: "wordpress.preview",
+      parentOrigin: origin,
+      capabilities: overrides.capabilities ?? ["page.view"],
+      grantDecisionDigest: createHash("sha256").update(`${spaceId}:${origin}`).digest("hex"),
+      accessGeneration: 0,
+      sessionVersion,
+      nonce: randomUUID(),
+      issuedAt: now,
+      expiresAt,
+    },
+    iat: now,
+    nbf: now,
+    exp: expiresAt,
   });
 }
 
@@ -271,6 +381,16 @@ function lanesGrants(shareGeneration = 1): Array<Record<string, unknown>> {
   return [
     grant("grt_page_password", { kind: "password", credentialId: "pwd_page_test" }),
     grant("grt_page_share", { kind: "link", linkId: "lnk_page_share" }, {}, shareGeneration),
+    {
+      ...grant(
+        "grt_page_frame",
+        { kind: "link", linkId: FRAME_LINK_ID },
+        { frameOrigin: FRAME_ORIGIN },
+        FRAME_LINK_REVISION,
+      ),
+      resources: { include: ["/docs/**"], exclude: [] },
+      capabilities: ["page.view"],
+    },
   ];
 }
 
@@ -412,7 +532,7 @@ beforeAll(async () => {
     },
   });
   exchangeOrigin = `http://127.0.0.1:${exchange.port}`;
-  runtime = await startRuntime();
+  runtime = await startRuntime({ env: { SPACEFAST_INSECURE_COOKIES: "" } });
   const fixtures = [
     {
       spaceId: LANES_SPACE,
@@ -448,7 +568,18 @@ beforeAll(async () => {
       spaceId: PUBLIC_SPACE,
       versionId: PUBLIC_VERSION,
       host: PUBLIC_HOST,
-      grants: [grant(PUBLIC_GRANT, { kind: "public" })],
+      grants: [
+        grant(PUBLIC_GRANT, { kind: "public" }),
+        {
+          ...grant(
+            "grt_public_frame",
+            { kind: "link", linkId: "lnk_public_frame" },
+            { frameOrigin: FRAME_ORIGIN },
+          ),
+          resources: { include: ["/docs/**"], exclude: [] },
+          capabilities: ["page.view"],
+        },
+      ],
       accessPage: lanesAccessPage(),
     },
     {
@@ -715,7 +846,7 @@ test("the password lane verifies centrally and admits with zero visible redirect
   expect(submitted.status).toBe(303);
   expect(submitted.headers.get("location")).toBe("/docs/");
   const cookie = sessionCookie(submitted);
-  expect(cookie).toStartWith(`spacefast_session_dev=${RECORDED_SESSION_PREFIX}`);
+  expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
   // The cookie is the session (§7/D120): it names its authority and the
   // [access_gen, session_ver] tuple the hot path compares against the overlay,
   // so the next request is admitted without reading a file.
@@ -880,7 +1011,7 @@ test("the request-invite lane relays centrally and remembers only the requested 
   // form: asking for an invite writes no revocation record, and a flood of
   // requests cannot evict anyone who did prove something.
   const requested = sessionCookie(submitted);
-  expect(requested).toStartWith(`spacefast_session_dev=${STATELESS_SESSION_PREFIX}`);
+  expect(requested).toStartWith(`__Host-spacefast_session=${STATELESS_SESSION_PREFIX}`);
   expect(sessionRecords(LANES_SPACE)).toEqual(recordsBefore);
 
   const pending = await get(runtime, LANES_HOST, "/docs/?sf_access=request-pending", {
@@ -942,7 +1073,7 @@ test("identity-bound spaces probe the account session silently, once per browser
   // form, so an unauthenticated bounce writes no revocation record and curling
   // this URL in a loop evicts no real session.
   const guard = sessionCookie(probe);
-  expect(guard).toStartWith(`spacefast_session_dev=${STATELESS_SESSION_PREFIX}`);
+  expect(guard).toStartWith(`__Host-spacefast_session=${STATELESS_SESSION_PREFIX}`);
   expect(sessionRecords(SILENT_SPACE)).toEqual([]);
 
   const rendered = await get(runtime, SILENT_HOST, "/docs/", {
@@ -974,12 +1105,12 @@ test("identity-bound spaces probe the account session silently, once per browser
 test("a session that expired still explains itself on the next navigation", async () => {
   const dead = `${RECORDED_SESSION_PREFIX}${"0".repeat(64)}.${"0".repeat(64)}`;
   const cleared = await get(runtime, LANES_HOST, "/docs/", {
-    headers: { cookie: `spacefast_session_dev=${dead}` },
+    headers: { cookie: `__Host-spacefast_session=${dead}` },
   });
   expect(cleared.status).toBe(403);
   expect(await cleared.text()).toContain("Your access expired");
   const replacement = sessionCookie(cleared);
-  expect(replacement).toStartWith(`spacefast_session_dev=${STATELESS_SESSION_PREFIX}`);
+  expect(replacement).toStartWith(`__Host-spacefast_session=${STATELESS_SESSION_PREFIX}`);
   expect(replacement).not.toContain(dead);
 
   const next = await get(runtime, LANES_HOST, "/docs/", {
@@ -1072,7 +1203,7 @@ test("the account lane redeems by GET, in the page or in a popup", async () => {
   expect(redeem.headers.get("cache-control")).toBe("no-store");
   expect(redeem.headers.get("referrer-policy")).toBe("no-referrer");
   const cookie = sessionCookie(redeem);
-  expect(cookie).toStartWith(`spacefast_session_dev=${RECORDED_SESSION_PREFIX}`);
+  expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
   const admitted = await get(runtime, LANES_HOST, "/docs/", { headers: { cookie } });
   expect(admitted.status).toBe(200);
 
@@ -1116,7 +1247,7 @@ test("a public Grant retains a signed-in account identity without team membershi
   expect(redeem.headers.get("location")).toBe("/");
 
   const cookie = sessionCookie(redeem);
-  expect(cookie).toStartWith(`spacefast_session_dev=${RECORDED_SESSION_PREFIX}`);
+  expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
   expect(sessionPayload(cookie)).toMatchObject({
     principal: "account:usr_public_voter",
     profile: {
@@ -1155,7 +1286,7 @@ test("a share token on the URL returns that page in the same response", async ()
   // The cookie rides the same response, which lets the token drop out of every
   // later URL.
   const cookie = sessionCookie(opened);
-  expect(cookie).toStartWith(`spacefast_session_dev=${RECORDED_SESSION_PREFIX}`);
+  expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
   const followed = await get(runtime, LANES_HOST, "/docs/", { headers: { cookie } });
   expect(followed.status).toBe(200);
 
@@ -1174,7 +1305,7 @@ test("a share token on the URL returns that page in the same response", async ()
   expect(canonical.status).toBe(308);
   expect(canonical.headers.get("location")).toBe(`/docs/?view=compact&__=${LINK_TOKEN}&page=2`);
   const canonicalCookie = sessionCookie(canonical);
-  expect(canonicalCookie).toStartWith(`spacefast_session_dev=${RECORDED_SESSION_PREFIX}`);
+  expect(canonicalCookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
   const canonicalFollow = await get(runtime, LANES_HOST, "/docs/?view=compact&page=2", {
     headers: { cookie: canonicalCookie },
   });
@@ -1195,7 +1326,7 @@ test("an access URL sets a session and redirects to a clean live URL", async () 
   expect(opened.headers.get("referrer-policy")).toBe("no-referrer");
   expect(await opened.text()).toBe("");
   const cookie = sessionCookie(opened);
-  expect(cookie).toStartWith(`spacefast_session_dev=${RECORDED_SESSION_PREFIX}`);
+  expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
 
   const call = exchangeRequests
     .slice(before)
@@ -1227,7 +1358,7 @@ test("a link arrival chains one silent account probe before the clean URL", asyn
   expect(location).toContain(`host=${CHAIN_HOST}`);
   expect(location).toContain("return=%2Fdocs%2F");
   const cookie = sessionCookie(opened);
-  expect(cookie).toStartWith(`spacefast_session_dev=${RECORDED_SESSION_PREFIX}`);
+  expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
 
   // The link already admitted: the detour is about identity, not access.
   const admitted = await get(runtime, CHAIN_HOST, "/docs/", { headers: { cookie } });
@@ -1298,7 +1429,7 @@ test("revoking the Grant behind a link closes the sessions it opened", async () 
     // link expired.
     expect(existsSync(recordPath)).toBe(false);
     const replacement = sessionCookie(denied);
-    expect(replacement).toStartWith(`spacefast_session_dev=${STATELESS_SESSION_PREFIX}`);
+    expect(replacement).toStartWith(`__Host-spacefast_session=${STATELESS_SESSION_PREFIX}`);
     expect(sessionPayload(replacement).sid).toBe(opened.sid);
     // And it is only an identity: it opens nothing the revocation closed.
     expect(
@@ -1385,7 +1516,7 @@ test("a system view token serves the page and its same-origin assets without a s
   // The short cookie carries the same signed proof to subresources. It is not a
   // visitor session and creates no revocation record.
   const assetCookie = systemViewCookie(opened);
-  expect(assetCookie).toStartWith("spacefast_system_view_dev=");
+  expect(assetCookie).toStartWith("__Host-spacefast_system_view=");
   expect(sessionCookie(opened)).toBe("");
   expect(sessionRecords(LANES_SPACE)).toEqual(recordsBefore);
   expect(opened.headers.get("cache-control")).toBe("private, no-store");
@@ -1441,6 +1572,180 @@ test("a system view token serves the page and its same-origin assets without a s
   }
 });
 
+// The dashboard's version preview: the same stateless proof, minted with the
+// one origin allowed to frame it. Without both halves — the widened
+// frame-ancestors and a cookie a cross-site iframe may store and send — the
+// framed page renders as a bare document with none of its assets.
+test("an embed proof spends its token on one hop, then names its framer", async () => {
+  const expiresAt = Math.floor(Date.now() / 1000) + 900;
+  const opened = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken({ embed: EMBED_ORIGIN, exp: expiresAt })}`,
+  );
+  // The exchange completes in one hop. The framed document is the CUSTOMER'S
+  // page, and a token left on `location.search` is a working credential for the
+  // whole private version that every script on that page can read.
+  expect(opened.status).toBe(302);
+  expect(opened.headers.get("location")).toBe("/docs/");
+  expect(opened.headers.get("cache-control")).toBe("private, no-store");
+  expect(opened.headers.get("referrer-policy")).toBe("no-referrer");
+  // The echo cookie IS the token, so it dies with it instead of on the short
+  // top-level window a thumbnail fetcher gets.
+  const framed =
+    opened.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith("__Host-spacefast_system_view=")) ?? "";
+  expect(Number(/Max-Age=(\d+)/.exec(framed)?.[1])).toBeGreaterThan(SYSTEM_VIEW_ECHO_SECONDS);
+
+  // What the browser actually frames is the redirected request, carrying the
+  // cookie and no secret. It is that response whose CSP has to admit the framer.
+  const document = await get(runtime, LANES_HOST, "/docs/", {
+    headers: { cookie: framed.split(";")[0] ?? "" },
+  });
+  expect(document.status).toBe(200);
+  expect(await document.text()).toContain("docs of spc_access_page_lanes");
+  // The embed origin joins the parents the Link projection already admitted —
+  // the proof widens the set, it does not replace it — and nothing else gets in.
+  expect(document.headers.get("content-security-policy")).toBe(
+    `frame-ancestors 'self' ${FRAME_ORIGIN} ${EMBED_ORIGIN}`,
+  );
+
+  // Permission is per-request and per-proof: the same page opened by a system
+  // reader that named no framer answers in place, stays unframeable, and keeps
+  // the default echo window.
+  const topLevel = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken()}`,
+  );
+  expect(topLevel.status).toBe(200);
+  expect(topLevel.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+  expect(topLevel.headers.get("content-security-policy")).not.toContain(EMBED_ORIGIN);
+  const echo = topLevel.headers
+    .getSetCookie()
+    .find((cookie) => cookie.startsWith("__Host-spacefast_system_view="));
+  expect(Number(/Max-Age=(\d+)/.exec(echo ?? "")?.[1])).toBe(SYSTEM_VIEW_ECHO_SECONDS);
+});
+
+test("a framed preview cookie carries what a cross-site iframe requires", async () => {
+  const opened = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken({ embed: EMBED_ORIGIN })}`,
+  );
+  // The token is spent on the redirect; the cookie is what the frame carries.
+  expect(opened.status).toBe(302);
+  const framed =
+    opened.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith("__Host-spacefast_system_view=")) ?? "";
+  // A Lax cookie is neither stored nor sent in a third-party frame, and
+  // Partitioned is what keeps this one out of the visitor's top-level jar.
+  expect(framed).toContain("HttpOnly");
+  expect(framed).toContain("Secure");
+  expect(framed).toContain("SameSite=None");
+  expect(framed).toContain("Partitioned");
+
+  // The whole point: the page's own assets present the cookie, not the URL.
+  const asset = await get(runtime, LANES_HOST, "/docs/site.css", {
+    headers: { cookie: framed.split(";")[0] ?? "" },
+  });
+  expect(asset.status).toBe(200);
+  expect(await asset.text()).toContain("color: #123456");
+
+  // A top-level reader keeps the same-site echo it has always had.
+  const topLevel = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken()}`,
+  );
+  const echo =
+    topLevel.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith("__Host-spacefast_system_view=")) ?? "";
+  expect(echo).toContain("SameSite=Lax");
+  expect(echo).not.toContain("Partitioned");
+});
+
+test("a private Frame proof is origin, target, revision, and Link-resource bound", async () => {
+  const recordsBefore = sessionRecords(LANES_SPACE);
+  const opened = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/?__=${FRAME_SESSION_PREFIX}${frameSessionToken()}`,
+  );
+  expect(opened.status).toBe(200);
+  expect(opened.headers.get("cache-control")).toBe("private, no-store");
+  expect(opened.headers.get("content-security-policy")).toBe(
+    `frame-ancestors 'self' ${FRAME_ORIGIN}`,
+  );
+  const cookie = frameSessionCookie(opened);
+  expect(cookie).toStartWith("__Host-spacefast_frame=");
+  expect(frameSessionSetCookie(opened)).toContain("; Secure; Partitioned");
+  expect(frameSessionSetCookie(opened)).toContain("; SameSite=None;");
+  expect(sessionCookie(opened)).toBe("");
+  expect(sessionRecords(LANES_SPACE)).toEqual(recordsBefore);
+
+  const scopedAsset = await get(runtime, LANES_HOST, "/docs/site.css", {
+    headers: { cookie },
+  });
+  expect(scopedAsset.status).toBe(200);
+  expect(scopedAsset.headers.get("cache-control")).toBe("private, no-store");
+
+  // This is the short-lived session proof, not the one-use Link acquisition.
+  // It must replay for document reloads and assets until its exact expiry.
+  const replayed = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/?__=${FRAME_SESSION_PREFIX}${frameSessionToken()}`,
+  );
+  expect(replayed.status).toBe(200);
+  expect(replayed.headers.get("cache-control")).toBe("private, no-store");
+
+  // Fetch metadata is not authority. A same-origin request outside the Link's
+  // resources stays closed even when it looks like a stylesheet subrequest.
+  const arbitrarySubresource = await get(runtime, LANES_HOST, "/admin/", {
+    headers: { cookie, "sec-fetch-dest": "style", "sec-fetch-mode": "no-cors" },
+  });
+  expect(arbitrarySubresource.status).toBe(403);
+
+  // Each row is a separate binding, and each fails alone for its own reason.
+  const refusals: Array<[string, string]> = [
+    [
+      "a parent origin the Link never named",
+      frameSessionToken({ origin: "https://other.example" }),
+    ],
+    ["a superseded Link revision", frameSessionToken({ linkRevision: FRAME_LINK_REVISION - 1 })],
+    [
+      "a target this host does not serve",
+      frameSessionToken({ target: { kind: "branch", branch: "preview" } }),
+    ],
+    ["a rotated session version", frameSessionToken({ sessionVersion: 1 })],
+    ["an expired proof", frameSessionToken({ exp: Math.floor(Date.now() / 1000) - 1 })],
+  ];
+  for (const [reason, token] of refusals) {
+    const refused = await get(runtime, LANES_HOST, `/docs/?__=${FRAME_SESSION_PREFIX}${token}`);
+    expect(`${reason}: ${String(refused.status)}`).toBe(`${reason}: 403`);
+    expect(frameSessionCookie(refused)).toBe("");
+  }
+});
+
+test("a public Frame path keeps its clean shared-cache response and projects only CSP", async () => {
+  const response = await get(runtime, PUBLIC_HOST, "/docs/");
+  expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).not.toContain("no-store");
+  expect(response.headers.get("vary")).toBeNull();
+  expect(response.headers.get("set-cookie")).toBeNull();
+  expect(response.headers.get("content-security-policy")).toBe(
+    `frame-ancestors 'self' ${FRAME_ORIGIN}`,
+  );
+
+  const outside = await get(runtime, PUBLIC_HOST, "/admin/");
+  expect(outside.status).toBe(200);
+  expect(outside.headers.get("content-security-policy")).toBeNull();
+});
+
 const systemViewRefusals: Array<{ name: string; token: () => string }> = [
   {
     name: "expired",
@@ -1460,6 +1765,12 @@ const systemViewRefusals: Array<{ name: string; token: () => string }> = [
   // An explicit-but-unusable scope fails closed: it must never widen to the
   // whole Space the way an absent scope does.
   { name: "carrying an unreadable scope", token: () => systemViewToken({ scope: "docs/../.." }) },
+  // Same shape as an unreadable scope, one directive over: a signed claim this
+  // engine cannot honour must fail the token, never degrade to "no framer".
+  {
+    name: "carrying an embed claim that is not an origin",
+    token: () => systemViewToken({ embed: "javascript:alert(1)" }),
+  },
   { name: "carrying a non-string scope", token: () => systemViewToken({ scope: 7 }) },
   {
     name: "a redeem handoff presented as a view token",

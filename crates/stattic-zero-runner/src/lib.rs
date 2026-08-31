@@ -249,7 +249,7 @@ fn handle_invoke_inner(input: &str) -> Result<RunnerResponse, RunnerResponse> {
         record_endpoint_index(index_started);
     }
     let artifact_started = Instant::now();
-    let artifact = read_endpoint_artifact(&artifact_path)?;
+    let artifact = read_endpoint_artifact(&artifact_path, &envelope)?;
     record_artifact_read(artifact_started);
     artifact.validate_for(&envelope)?;
 

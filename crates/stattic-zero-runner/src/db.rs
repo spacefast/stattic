@@ -8,6 +8,8 @@ use mysql::{Opts, Params, Pool, PoolConstraints, PoolOpts, PooledConn, Row, Valu
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::artifacts::ExecutionMode;
+
 // The tenant-facing operation shape. `shared/db-broker.php` enforces the same
 // numbers under the same names; it consumes them from the generated protocol
 // file rather than restating them, so this declaration is the only authority.
@@ -30,7 +32,9 @@ pub const DB_SESSION_PIN: &str = "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_0900_as_c
 
 thread_local! {
     static DB_METRICS: RefCell<DbMetrics> = RefCell::new(DbMetrics::default());
-    static DB_TRANSACTION: RefCell<Option<PooledConn>> = const { RefCell::new(None) };
+    static DB_TRANSACTION: RefCell<Option<InvocationTransaction>> = const { RefCell::new(None) };
+    // What this handler's own `transaction_begin` opened, if it called one.
+    static HANDLER_TRANSACTION: RefCell<Option<HandlerTransaction>> = const { RefCell::new(None) };
     // One pool per process: statements in one invocation share a connection
     // instead of paying a handshake each.
     static DB_POOL: RefCell<Option<Pool>> = const { RefCell::new(None) };
@@ -38,6 +42,30 @@ thread_local! {
     // second half of the outbox's idempotency key, so it must count per
     // invocation and not per process.
     static EMAIL_EFFECT_INDEX: RefCell<u32> = const { RefCell::new(0) };
+}
+
+struct InvocationTransaction {
+    conn: PooledConn,
+    mode: ExecutionMode,
+}
+
+/// The savepoint a handler's own transaction control runs against.
+const HANDLER_SAVEPOINT: &str = "zero_handler_transaction";
+
+/// What a bundle's `transaction_begin` actually opened.
+///
+/// Bundles compiled before the invocation owned a transaction bracket their own
+/// work with `transaction_begin`/`transaction_commit`, and their bytecode is
+/// frozen. Those calls still mean what they meant — all of it lands or none of
+/// it does — but where they now sit inside the invocation's transaction they
+/// have to be a savepoint in it rather than a second transaction beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandlerTransaction {
+    /// A savepoint inside a transaction the invocation already owns.
+    Savepoint,
+    /// The transaction itself, opened because none was running — the Functions
+    /// relay tier, where this is exactly what the call always did.
+    Whole,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -79,11 +107,65 @@ pub(crate) fn reset_metrics() {
 }
 
 pub(crate) fn rollback_open_transaction() {
+    set_handler_transaction(None);
     DB_TRANSACTION.with(|transaction| {
-        if let Some(mut conn) = transaction.borrow_mut().take() {
-            let _ = conn.query_drop("ROLLBACK");
+        if let Some(mut transaction) = transaction.borrow_mut().take() {
+            let _ = transaction.conn.query_drop("ROLLBACK");
         }
     });
+}
+
+fn handler_transaction() -> Option<HandlerTransaction> {
+    HANDLER_TRANSACTION.with(|state| *state.borrow())
+}
+
+fn set_handler_transaction(scope: Option<HandlerTransaction>) {
+    HANDLER_TRANSACTION.with(|state| *state.borrow_mut() = scope);
+}
+
+pub(crate) fn begin_invocation(mode: ExecutionMode) -> Result<(), BrokerRefusal> {
+    if transaction_active() {
+        return Err(BrokerRefusal::new(
+            "zero_db_transaction_active",
+            "A Zero invocation transaction is already active.",
+        ));
+    }
+    let mut conn = connect_db()?;
+    if mode == ExecutionMode::Read {
+        conn.query_drop("SET TRANSACTION READ ONLY")
+            .map_err(|error| {
+                BrokerRefusal::new("zero_db_transaction_start_failed", error.to_string())
+            })?;
+        conn.query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+            .map_err(|error| {
+                BrokerRefusal::new("zero_db_transaction_start_failed", error.to_string())
+            })?;
+    } else {
+        conn.query_drop("START TRANSACTION").map_err(|error| {
+            BrokerRefusal::new("zero_db_transaction_start_failed", error.to_string())
+        })?;
+    }
+    set_handler_transaction(None);
+    DB_TRANSACTION.with(|transaction| {
+        *transaction.borrow_mut() = Some(InvocationTransaction { conn, mode });
+    });
+    Ok(())
+}
+
+pub(crate) fn commit_invocation() -> Result<(), BrokerRefusal> {
+    set_handler_transaction(None);
+    let mut transaction = DB_TRANSACTION
+        .with(|state| state.borrow_mut().take())
+        .ok_or_else(|| {
+            BrokerRefusal::new(
+                "zero_db_transaction_missing",
+                "No Zero invocation transaction is active.",
+            )
+        })?;
+    transaction
+        .conn
+        .query_drop("COMMIT")
+        .map_err(|error| BrokerRefusal::new("zero_db_transaction_commit_failed", error.to_string()))
 }
 
 pub(crate) fn take_metrics() -> Option<DbMetrics> {
@@ -113,57 +195,24 @@ fn execute_db_operation(raw: &str) -> Result<Value, BrokerRefusal> {
     let operation: DbOperation = serde_json::from_str(raw)
         .map_err(|error| BrokerRefusal::new("zero_db_operation_invalid", error.to_string()))?;
 
+    // Handler-controlled transaction ops, as bundles compiled before the
+    // invocation owned a transaction still emit them. Their bytecode is frozen,
+    // so the ops keep working; `begin_handler_transaction` explains how.
     match operation.mode.as_deref() {
-        Some("transaction_begin") => return begin_transaction(),
-        Some("transaction_commit") => return finish_transaction("COMMIT"),
-        Some("transaction_rollback") => return finish_transaction("ROLLBACK"),
+        Some("transaction_begin") => {
+            return begin_handler_transaction().map(|()| json!({"ok": true}))
+        }
+        Some("transaction_commit") => {
+            return commit_handler_transaction().map(|()| json!({"ok": true}))
+        }
+        Some("transaction_rollback") => {
+            return rollback_handler_transaction().map(|()| json!({"ok": true}))
+        }
+        Some("transaction") => return run_statement_batch(&operation.statements),
         _ => {}
     }
-
-    if matches!(operation.mode.as_deref(), Some("transaction")) {
-        if transaction_active() {
-            return Err(BrokerRefusal::new(
-                "zero_db_transaction_active",
-                "A Zero DB transaction is already active.",
-            ));
-        }
-        if operation.statements.is_empty()
-            || operation.statements.len() > DB_TRANSACTION_MAX_STATEMENTS
-        {
-            return Err(BrokerRefusal::new(
-                "zero_db_transaction_invalid",
-                "Zero DB transaction statements are invalid.",
-            ));
-        }
-        // Validation and the capability check run before any connection exists:
-        // an ungranted or malformed statement must be refused without touching
-        // the database at all.
-        let ready = operation
-            .statements
-            .iter()
-            .map(ready_statement)
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut conn = connect_db()?;
-        conn.query_drop("START TRANSACTION").map_err(|error| {
-            BrokerRefusal::new("zero_db_transaction_start_failed", error.to_string())
-        })?;
-        let mut results = Vec::with_capacity(ready.len());
-        for statement in ready {
-            match run_ready_statement(&mut conn, statement) {
-                Ok(value) => results.push(value),
-                Err(error) => {
-                    let _ = conn.query_drop("ROLLBACK");
-                    return Err(error);
-                }
-            }
-        }
-        conn.query_drop("COMMIT").map_err(|error| {
-            BrokerRefusal::new("zero_db_transaction_commit_failed", error.to_string())
-        })?;
-        return Ok(json!({
-            "ok": true,
-            "results": results,
-        }));
+    if !operation.statements.is_empty() {
+        return run_statement_batch(&operation.statements);
     }
 
     let statement = DbStatement {
@@ -178,19 +227,130 @@ fn execute_db_operation(raw: &str) -> Result<Value, BrokerRefusal> {
     with_invocation_conn(|conn| run_ready_statement(conn, ready))
 }
 
+/// Open the handler's own transaction.
+///
+/// Inside an invocation transaction this is a savepoint, which is the only
+/// sound reading: the handler asked for all-or-nothing over the statements it
+/// brackets, and that is exactly what a savepoint gives it without a second
+/// transaction on a second connection that could not see the invocation's own
+/// uncommitted writes. Its commit no longer decides whether the work survives —
+/// the invocation's does — but a handler that runs to completion commits either
+/// way, so the outcome it can observe is unchanged.
+///
+/// With no invocation transaction running, this opens the real thing, which is
+/// what the call always did.
+fn begin_handler_transaction() -> Result<(), BrokerRefusal> {
+    if handler_transaction().is_some() {
+        return Err(BrokerRefusal::new(
+            "zero_db_transaction_active",
+            "A Zero DB transaction is already active.",
+        ));
+    }
+    if !transaction_active() {
+        begin_invocation(ExecutionMode::Write)?;
+        set_handler_transaction(Some(HandlerTransaction::Whole));
+        return Ok(());
+    }
+    with_invocation_conn(|conn| {
+        conn.query_drop(format!("SAVEPOINT {HANDLER_SAVEPOINT}"))
+            .map_err(|error| {
+                BrokerRefusal::new("zero_db_transaction_start_failed", error.to_string())
+            })
+    })?;
+    set_handler_transaction(Some(HandlerTransaction::Savepoint));
+    Ok(())
+}
+
+fn commit_handler_transaction() -> Result<(), BrokerRefusal> {
+    match handler_transaction() {
+        Some(HandlerTransaction::Savepoint) => {
+            with_invocation_conn(|conn| {
+                conn.query_drop(format!("RELEASE SAVEPOINT {HANDLER_SAVEPOINT}"))
+                    .map_err(|error| {
+                        BrokerRefusal::new("zero_db_transaction_commit_failed", error.to_string())
+                    })
+            })?;
+            set_handler_transaction(None);
+            Ok(())
+        }
+        Some(HandlerTransaction::Whole) => commit_invocation(),
+        None => Err(BrokerRefusal::new(
+            "zero_db_transaction_missing",
+            "No Zero DB transaction is active.",
+        )),
+    }
+}
+
+fn rollback_handler_transaction() -> Result<(), BrokerRefusal> {
+    match handler_transaction() {
+        Some(HandlerTransaction::Savepoint) => {
+            with_invocation_conn(|conn| {
+                conn.query_drop(format!("ROLLBACK TO SAVEPOINT {HANDLER_SAVEPOINT}"))
+                    .and_then(|()| {
+                        conn.query_drop(format!("RELEASE SAVEPOINT {HANDLER_SAVEPOINT}"))
+                    })
+                    .map_err(|error| {
+                        BrokerRefusal::new("zero_db_transaction_rollback_failed", error.to_string())
+                    })
+            })?;
+            set_handler_transaction(None);
+            Ok(())
+        }
+        Some(HandlerTransaction::Whole) => {
+            rollback_open_transaction();
+            Ok(())
+        }
+        None => Err(BrokerRefusal::new(
+            "zero_db_transaction_missing",
+            "No Zero DB transaction is active.",
+        )),
+    }
+}
+
+/// The batched form of the same thing: one bracket around every statement,
+/// where a failure anywhere discards all of them.
+fn run_statement_batch(statements: &[DbStatement]) -> Result<Value, BrokerRefusal> {
+    if statements.is_empty() || statements.len() > DB_TRANSACTION_MAX_STATEMENTS {
+        return Err(BrokerRefusal::new(
+            "zero_db_transaction_invalid",
+            "Zero DB transaction statements are invalid.",
+        ));
+    }
+    // Validation and the capability check run before any connection exists: an
+    // ungranted or malformed statement must be refused without touching the
+    // database at all.
+    let ready = statements
+        .iter()
+        .map(ready_statement)
+        .collect::<Result<Vec<_>, _>>()?;
+    begin_handler_transaction()?;
+    let mut results = Vec::with_capacity(ready.len());
+    for statement in ready {
+        match with_invocation_conn(|conn| run_ready_statement(conn, statement)) {
+            Ok(value) => results.push(value),
+            Err(error) => {
+                let _ = rollback_handler_transaction();
+                return Err(error);
+            }
+        }
+    }
+    commit_handler_transaction()?;
+    Ok(json!({ "ok": true, "results": results }))
+}
+
 /// Runs on the connection an open transaction holds, or on a pooled one when
 /// there is none. Anything that must land with the handler's own writes goes
 /// through here rather than reaching for a connection of its own.
-fn with_invocation_conn<T>(
+pub(crate) fn with_invocation_conn<T>(
     run: impl FnOnce(&mut PooledConn) -> Result<T, BrokerRefusal>,
 ) -> Result<T, BrokerRefusal> {
     if transaction_active() {
         return DB_TRANSACTION.with(|transaction| {
             let mut transaction = transaction.borrow_mut();
-            let conn = transaction
+            let transaction = transaction
                 .as_mut()
                 .expect("transaction presence checked on this thread");
-            run(conn)
+            run(&mut transaction.conn)
         });
     }
     let mut conn = connect_db()?;
@@ -339,43 +499,6 @@ fn transaction_active() -> bool {
     DB_TRANSACTION.with(|transaction| transaction.borrow().is_some())
 }
 
-fn begin_transaction() -> Result<Value, BrokerRefusal> {
-    if transaction_active() {
-        return Err(BrokerRefusal::new(
-            "zero_db_transaction_active",
-            "A Zero DB transaction is already active.",
-        ));
-    }
-    let mut conn = connect_db()?;
-    conn.query_drop("START TRANSACTION").map_err(|error| {
-        BrokerRefusal::new("zero_db_transaction_start_failed", error.to_string())
-    })?;
-    DB_TRANSACTION.with(|transaction| {
-        *transaction.borrow_mut() = Some(conn);
-    });
-    Ok(json!({ "ok": true }))
-}
-
-fn finish_transaction(command: &'static str) -> Result<Value, BrokerRefusal> {
-    let mut conn = DB_TRANSACTION
-        .with(|transaction| transaction.borrow_mut().take())
-        .ok_or_else(|| {
-            BrokerRefusal::new(
-                "zero_db_transaction_missing",
-                "No Zero DB transaction is active.",
-            )
-        })?;
-    conn.query_drop(command).map_err(|error| {
-        let code = if command == "COMMIT" {
-            "zero_db_transaction_commit_failed"
-        } else {
-            "zero_db_transaction_rollback_failed"
-        };
-        BrokerRefusal::new(code, error.to_string())
-    })?;
-    Ok(json!({ "ok": true }))
-}
-
 struct ReadyStatement<'a> {
     sql: &'a str,
     params: Params,
@@ -414,11 +537,116 @@ fn ready_statement(statement: &DbStatement) -> Result<ReadyStatement<'_>, Broker
         statement.mode.as_deref(),
         Some("execute") | Some("exec") | Some("mutation")
     );
+    let read_only = DB_TRANSACTION.with(|transaction| {
+        transaction
+            .borrow()
+            .as_ref()
+            .is_some_and(|transaction| transaction.mode == ExecutionMode::Read)
+    });
+    if read_only && statement_shape(sql) == StatementShape::Mutation {
+        return Err(BrokerRefusal::new(
+            "zero_db_read_only",
+            "A Zero read handler cannot execute a database write.",
+        ));
+    }
     Ok(ReadyStatement {
         sql,
         params,
         execute_shape,
     })
+}
+
+/// How a statement reads to the broker, before the server ever sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatementShape {
+    /// Provably a read.
+    Read,
+    /// Provably a write, or a read that writes a file.
+    Mutation,
+    /// Neither, to this classifier. A read invocation runs inside a READ ONLY
+    /// transaction, so the server refuses anything here that turns out to
+    /// write — and refusing it locally instead would only ever refuse
+    /// statements the server would have run.
+    Ambiguous,
+}
+
+/// The statement with its leading comments removed, so the first keyword is
+/// the statement's own.
+///
+/// `-- …`, `# …` and `/* … */` all lead real SQL, and a generated query with a
+/// header comment is the ordinary case. Reading the comment's first word as the
+/// statement's keyword classified every one of them as a write.
+fn statement_body(sql: &str) -> &str {
+    let mut rest = sql.trim_start();
+    loop {
+        let after_line_comment = rest
+            .strip_prefix("--")
+            .or_else(|| rest.strip_prefix('#'))
+            .map(|tail| tail.split_once('\n').map_or("", |(_, tail)| tail));
+        let after_block_comment = rest
+            .strip_prefix("/*")
+            .map(|tail| tail.split_once("*/").map_or("", |(_, tail)| tail));
+        match after_line_comment.or(after_block_comment) {
+            Some(tail) => rest = tail.trim_start(),
+            None => return rest,
+        }
+    }
+}
+
+fn statement_shape(sql: &str) -> StatementShape {
+    let body = statement_body(sql).to_ascii_uppercase();
+    let mut words =
+        body.split(|character: char| !character.is_ascii_alphanumeric() && character != '_');
+    let keyword = words.by_ref().find(|token| !token.is_empty()).unwrap_or("");
+    // `SELECT … INTO OUTFILE` reads the database and writes the filesystem, so
+    // a READ ONLY transaction does not stop it. This is the one write the
+    // server cannot refuse for us.
+    let writes_a_file = || {
+        body.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .any(|token| token == "OUTFILE" || token == "DUMPFILE")
+    };
+    match keyword {
+        "SELECT" | "SHOW" | "TABLE" | "VALUES" => {
+            if writes_a_file() {
+                StatementShape::Mutation
+            } else {
+                StatementShape::Read
+            }
+        }
+        "EXPLAIN" | "DESCRIBE" | "DESC" => {
+            if body.contains("ANALYZE") {
+                StatementShape::Mutation
+            } else {
+                StatementShape::Read
+            }
+        }
+        // A CTE's leading keyword says nothing about what follows it: `WITH …
+        // SELECT` and `WITH … DELETE` are both real SQL. Frozen bundles emit
+        // the read form and were refused for it, so the transaction decides.
+        "WITH" => {
+            if writes_a_file() {
+                StatementShape::Mutation
+            } else {
+                StatementShape::Ambiguous
+            }
+        }
+        // These utility statements cause an implicit commit: run inside the
+        // read invocation's transaction they commit it first and then execute in
+        // autocommit, where READ ONLY no longer applies, so the server does not
+        // refuse the table rewrite (`OPTIMIZE`/`REPAIR`) or statistics write
+        // (`ANALYZE`). They must be refused here, as the pre-classifier did.
+        // Leading `ANALYZE` is distinct from `EXPLAIN ANALYZE`, which the
+        // EXPLAIN/DESCRIBE/DESC arm above handles.
+        "OPTIMIZE" | "ANALYZE" | "REPAIR" | "CHECK" | "CHECKSUM" | "CACHE" => {
+            StatementShape::Mutation
+        }
+        "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "CREATE" | "DROP" | "ALTER" | "TRUNCATE"
+        | "RENAME" | "GRANT" | "REVOKE" | "LOAD" | "CALL" | "DO" | "SET" | "LOCK" | "UNLOCK"
+        | "START" | "BEGIN" | "COMMIT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE" | "HANDLER"
+        | "IMPORT" | "INSTALL" | "UNINSTALL" | "RESET" | "FLUSH" | "KILL" | "SHUTDOWN"
+        | "PREPARE" | "EXECUTE" | "DEALLOCATE" | "USE" => StatementShape::Mutation,
+        _ => StatementShape::Ambiguous,
+    }
 }
 
 fn run_ready_statement(
@@ -727,6 +955,10 @@ impl BrokerRefusal {
         })
         .to_string()
     }
+
+    pub(crate) fn runner_response(self) -> crate::response::RunnerResponse {
+        crate::response::error_response(503, self.code, &self.message)
+    }
 }
 
 #[cfg(test)]
@@ -813,5 +1045,124 @@ mod database_url_tests {
         )
         .unwrap();
         assert_eq!(provider.get_socket(), Some("/var/run/mysql.sock"));
+    }
+}
+
+#[cfg(test)]
+mod transaction_control_tests {
+    use serde_json::{json, Value};
+
+    use super::handle_db_operation;
+
+    fn refusal(frame: Value) -> Value {
+        serde_json::from_str(&handle_db_operation(&frame.to_string())).expect("broker response")
+    }
+
+    /// Bundles compiled before the invocation owned a transaction bracket their
+    /// own work, and their bytecode is frozen. The ops answer on their own
+    /// terms again — the codes here are the ones that broker produced — rather
+    /// than one blanket denial. Everything asserted here is decided before a
+    /// connection exists, which is why it needs no database.
+    #[test]
+    fn handler_transaction_control_answers_on_its_own_terms() {
+        for mode in ["transaction_commit", "transaction_rollback"] {
+            assert_eq!(
+                refusal(json!({ "mode": mode }))["code"],
+                json!("zero_db_transaction_missing"),
+                "{mode}"
+            );
+        }
+
+        // A batch is the other way to ask for an atomic unit, and its own
+        // bounds are checked before anything is dialled.
+        assert_eq!(
+            refusal(json!({ "mode": "transaction", "statements": [] }))["code"],
+            json!("zero_db_transaction_invalid")
+        );
+        let oversized: Vec<Value> = (0..=super::DB_TRANSACTION_MAX_STATEMENTS)
+            .map(|_| json!({ "sql": "SELECT 1" }))
+            .collect();
+        assert_eq!(
+            refusal(json!({ "mode": "transaction", "statements": oversized }))["code"],
+            json!("zero_db_transaction_invalid")
+        );
+        // Statement validation still runs across the whole batch first, so a
+        // malformed one is refused without a connection either.
+        assert_eq!(
+            refusal(json!({ "statements": [{ "sql": "SELECT 1" }, { "sql": "  " }] }))["code"],
+            json!("zero_db_sql_invalid")
+        );
+    }
+}
+
+#[cfg(test)]
+mod statement_shape_tests {
+    use super::{statement_shape, StatementShape};
+
+    /// Read mode refuses what this classifier calls a write, so what it cannot
+    /// classify has to fall through to the READ ONLY transaction rather than be
+    /// refused. Frozen bundles emit both shapes it used to get wrong: a CTE,
+    /// and a generated query carrying a header comment.
+    #[test]
+    fn classifies_reads_it_cannot_parse_as_the_transaction_s_problem() {
+        assert_eq!(statement_shape("SELECT 1"), StatementShape::Read);
+        assert_eq!(
+            statement_shape("/* generated by zero */ SELECT id FROM todos"),
+            StatementShape::Read
+        );
+        assert_eq!(
+            statement_shape("-- cached lookup\nSELECT id FROM todos"),
+            StatementShape::Read
+        );
+        assert_eq!(
+            statement_shape("WITH recent AS (SELECT id FROM todos) SELECT * FROM recent"),
+            StatementShape::Ambiguous
+        );
+        assert_eq!(
+            statement_shape("INSERT INTO todos VALUES (1)"),
+            StatementShape::Mutation
+        );
+        assert_eq!(
+            statement_shape("/* sneaky */ DELETE FROM todos"),
+            StatementShape::Mutation
+        );
+        // The one write a READ ONLY transaction does not stop, so it is refused
+        // here whichever keyword leads it.
+        assert_eq!(
+            statement_shape("SELECT * FROM todos INTO OUTFILE '/tmp/x'"),
+            StatementShape::Mutation
+        );
+        assert_eq!(
+            statement_shape("WITH t AS (SELECT 1) SELECT * FROM t INTO DUMPFILE '/tmp/x'"),
+            StatementShape::Mutation
+        );
+    }
+
+    /// Utility statements that cause an implicit commit escape the READ ONLY
+    /// transaction — it is committed before they run — so the server does not
+    /// refuse them and they must be classified as writes here. `EXPLAIN ANALYZE`
+    /// is a read and leads with `EXPLAIN`, so it is unaffected.
+    #[test]
+    fn refuses_implicit_commit_utility_statements_the_read_only_txn_cannot_stop() {
+        assert_eq!(
+            statement_shape("OPTIMIZE TABLE t"),
+            StatementShape::Mutation
+        );
+        assert_eq!(statement_shape("ANALYZE TABLE t"), StatementShape::Mutation);
+        assert_eq!(statement_shape("REPAIR TABLE t"), StatementShape::Mutation);
+        assert_eq!(statement_shape("CHECK TABLE t"), StatementShape::Mutation);
+        assert_eq!(
+            statement_shape("CHECKSUM TABLE t"),
+            StatementShape::Mutation
+        );
+        assert_eq!(
+            statement_shape("CACHE INDEX t IN c"),
+            StatementShape::Mutation
+        );
+        // Still a read: the `ANALYZE` keyword only writes stats when it leads.
+        assert_eq!(
+            statement_shape("EXPLAIN SELECT * FROM todos"),
+            StatementShape::Read
+        );
     }
 }

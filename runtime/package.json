@@ -1,8 +1,13 @@
 {
   "name": "@spacefast/runtime",
   "private": true,
+  "scripts": {
+    "ci:runtime": "bash tests/run-ci.sh",
+    "ci:runtime-browser": "bun run --cwd .. test:runtime:browser"
+  },
   "devDependencies": {
     "@spacefast/common": "workspace:*",
+    "@spacefast/control-plane": "workspace:*",
     "@spacefast/domain-services": "workspace:*",
     "@spacefast/image": "workspace:*",
     "@spacefast/mcp": "workspace:*",

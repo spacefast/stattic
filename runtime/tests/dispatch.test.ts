@@ -127,11 +127,13 @@ test("state reports unavailable instead of erasing state after a failed read", a
 test("scan-log serves the provider's malware-scanner artifact from the site home", async () => {
   // The provider scanner writes `~/logs/malware-scanner-results.log`; the
   // management surface reads it back so scan ingestion works over HTTPS when
-  // the response ticket is status-only. HOME is the handler's first resolution
-  // step, so the dispatch transport (caller-controlled env) exercises the real
-  // read against an isolated fake home.
+  // the response ticket is status-only. FPM can export an existing but unrelated
+  // HOME, so the handler must keep looking until a trusted candidate contains
+  // the artifact.
   const fakeHome = path.join(rt.root, "fake-home");
   mkdirSync(path.join(fakeHome, "logs"), { recursive: true });
+  const unrelatedHome = path.join(rt.root, "unrelated-home");
+  mkdirSync(unrelatedHome, { recursive: true });
   const report = "Virus scanning starting up\nVirus scan completed\n";
   writeFileSync(path.join(fakeHome, "logs", "malware-scanner-results.log"), report);
 
@@ -142,7 +144,8 @@ test("scan-log serves the provider's malware-scanner artifact from the site home
   };
   const withArtifact = await dispatchRaw(JSON.stringify(request), {
     PATH: process.env.PATH,
-    HOME: fakeHome,
+    HOME: unrelatedHome,
+    DOCUMENT_ROOT: path.join(fakeHome, "htdocs"),
   });
   expect(withArtifact.exitCode).toBe(0);
   // SAFETY: the dispatcher's stdout contract is exactly one {status, body} envelope.

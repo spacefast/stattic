@@ -42,7 +42,9 @@ type RealManifestInstall = {
 
 // One install straight out of `runtime/engine-manifest.json`: zips the shipped
 // file list and runs the resident installer against it.
-async function installFromShippedManifest(): Promise<RealManifestInstall> {
+async function installFromShippedManifest(
+  prepare?: (publicRoot: string) => void,
+): Promise<RealManifestInstall> {
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-real-manifest-"));
   roots.push(root);
   const publicRoot = path.join(root, "public");
@@ -93,6 +95,8 @@ async function installFromShippedManifest(): Promise<RealManifestInstall> {
   const nativeSha256 = createHash("sha256")
     .update(readFileSync(path.join(payload, "bin/stattic-runtime")))
     .digest("hex");
+
+  prepare?.(publicRoot);
 
   const child = Bun.spawn({
     cmd: ["php", "-d", "auto_prepend_file=", residentInstaller, zipPath],
@@ -155,4 +159,52 @@ test("the shipped manifest installs executable engine bytes without owning the r
   // The shipped manifest carries installer.php, so the install refreshed the
   // resident copy in place.
   expect(statSync(install.residentInstaller).isFile()).toBe(true);
+});
+
+/**
+ * Aliases land one at a time, so a request can arrive with only a prefix of
+ * them installed — and stay that way forever if the install aborts in between.
+ * `wp-content/mu-plugins/zero-admin.php` is what WordPress auto-loads and it
+ * reaches into the sibling `zero-admin/` directory, which is a separate set of
+ * aliases. Both halves of that hazard are closed here: the directory is
+ * deposited first, and the entry file is inert on its own regardless.
+ */
+test("a half-installed zero-admin mu-plugin cannot fatal a WordPress request", async () => {
+  // A directory sitting where the entry file must land makes its rename fail,
+  // which stops the install exactly there and leaves on disk precisely the
+  // aliases ordered before it.
+  const install = await installFromShippedManifest((publicRoot) => {
+    const blocked = path.join(publicRoot, "wp-content/mu-plugins/zero-admin.php");
+    mkdirSync(blocked, { recursive: true });
+    writeFileSync(path.join(blocked, "occupied"), "");
+  });
+
+  expect(install.exitCode).toBe(1);
+  expect(install.stderr).toContain(
+    "runtime_engine_alias_install_failed:wp-content/mu-plugins/zero-admin.php",
+  );
+  const muPlugins = path.join(install.publicRoot, "wp-content/mu-plugins");
+  expect(statSync(path.join(muPlugins, "zero-admin/routes.php")).isFile()).toBe(true);
+  expect(statSync(path.join(muPlugins, "zero-admin/bootstrap.php")).isFile()).toBe(true);
+
+  // And with the directory gone the entry file still loads to a no-op, so a
+  // window opened by anything else — a partial rollback, a manual copy — costs
+  // WordPress nothing.
+  rmSync(path.join(muPlugins, "zero-admin"), { recursive: true, force: true });
+  copyFileSync(
+    path.join(runtimeRoot, "wordpress/zero-admin/zero-admin.php"),
+    path.join(muPlugins, "zero-admin-entry.php"),
+  );
+  const probe = Bun.spawnSync({
+    cmd: [
+      "php",
+      "-d",
+      "auto_prepend_file=",
+      "-r",
+      "require $argv[1]; echo 'inert';",
+      path.join(muPlugins, "zero-admin-entry.php"),
+    ],
+  });
+  expect(probe.stderr.toString()).toBe("");
+  expect(probe.stdout.toString()).toBe("inert");
 });

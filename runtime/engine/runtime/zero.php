@@ -76,6 +76,9 @@ function _stattic_invoke_zero(
         $parentRoot,
         $serving,
         (string) $action['endpoint'],
+        is_string($action['execution_mode'] ?? null) && $action['execution_mode'] !== ''
+            ? $action['execution_mode']
+            : _stattic_zero_derived_execution_mode('endpoint', $requestMethod),
         is_string($action['schema_hash'] ?? null) ? $action['schema_hash'] : null,
         [
             'method' => $requestMethod,
@@ -364,6 +367,9 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
         $versionRoot,
         $serving,
         $runId,
+        // Only a query run is a read. An action predates the split entirely and
+        // was never confined to one, so it keeps the write lane it always had.
+        $op === 'query.subscribe' || $op === 'query.run' ? 'read' : 'write',
         $schemaHash,
         [
             'method' => 'POST',
@@ -395,6 +401,11 @@ function _stattic_zero_run_id(string $op, string $name): ?string
     if ($op === 'mutation.run') {
         return 'mutation_' . $name;
     }
+    // The vocabulary this engine compiles no longer emits actions, but the
+    // clients baked into already-published capsules still send `action.run`
+    // and still expect an `action.result` frame back. Those bundles cannot be
+    // rebuilt, so the operation stays a permanent alias — the same reason the
+    // route inventory keeps serving `/__spacefast/zero/*` beside `/__zero/*`.
     if ($op === 'action.run') {
         return 'action_' . $name;
     }
@@ -455,6 +466,7 @@ function _stattic_zero_envelope(
     string $versionRoot,
     array $serving,
     string $endpointId,
+    string $executionMode,
     ?string $schemaHash,
     array $request,
     string $body,
@@ -465,6 +477,7 @@ function _stattic_zero_envelope(
         'protocol' => 'stattic.zero.invoke.v1',
         'versionRoot' => $versionRoot,
         'endpointId' => $endpointId,
+        'executionMode' => $executionMode,
         'request' => [
             'method' => (string) ($request['method'] ?? ''),
             'path' => (string) ($request['path'] ?? ''),
@@ -521,6 +534,8 @@ function _stattic_zero_send_run_frame(string $op, string $name, array $request, 
         ], static fn($entry) => $entry !== null));
     }
     if ($op === 'action.run') {
+        // An old client reads `result` and nothing else off this frame; it has
+        // no changed-table bookkeeping to feed.
         _stattic_zero_json_response(200, array_filter([
             'id' => is_scalar($id) ? $id : null,
             'op' => 'action.result',
@@ -528,7 +543,6 @@ function _stattic_zero_send_run_frame(string $op, string $name, array $request, 
             'result' => $value,
         ], static fn($entry) => $entry !== null));
     }
-
     $changes = _stattic_zero_run_changed_values($runnerResponse);
     _stattic_zero_json_response(200, array_filter([
         'id' => is_scalar($id) ? $id : null,
@@ -625,17 +639,30 @@ function _stattic_zero_send_auth_redirect(
 // Identity is the principal alone; what the session may do never decides who it is.
 function _stattic_zero_auth_context(array $serving, string $requestHost): array
 {
-    return _stattic_zero_identity_from_principal(
-        _stattic_verify_cookie_identity($serving, $requestHost)
-    );
+    $verified = _stattic_verify_cookie_identity($serving, $requestHost);
+    $principal = _stattic_access_identity_principal($verified);
+    if (_stattic_access_principal_is_identified($principal)) {
+        return _stattic_zero_identity_from_principal($verified);
+    }
+
+    // The document response already minted this for a Zero page's first render
+    // (_stattic_zero_prime_anonymous_document_session), so the ordinary path here
+    // just reads the cookie back. Minting stays as the fallback for a request
+    // that reached an endpoint without one — an edge-cached document, a direct
+    // API call, a client that never loaded a page.
+    $record = _stattic_access_identity_record($verified) ?? [];
+    $anonymousId = _stattic_collab_anonymous_id($record)
+        ?? _stattic_anonymous_session_ensure_anonymous_id($serving, $requestHost);
+    return _stattic_zero_guest_auth_context($anonymousId);
 }
 
-function _stattic_zero_guest_auth_context(): array
+function _stattic_zero_guest_auth_context(?string $anonymousId = null): array
 {
+    $guestName = $anonymousId ?? 'local';
     return [
         'user' => null,
-        'userId' => 'guest:local',
-        'displayName' => 'Local',
+        'userId' => 'guest:' . $guestName,
+        'displayName' => 'Guest',
         'provider' => 'guest',
         'isGuest' => true,
         'isAuthenticated' => false,

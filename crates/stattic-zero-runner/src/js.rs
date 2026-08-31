@@ -44,6 +44,11 @@ pub(crate) fn execute_endpoint_module(
     bytecode: &[u8],
 ) -> Result<RunnerResponse, RunnerResponse> {
     crate::db::rollback_open_transaction();
+    let _execution_mode = ExecutionModeGuard::enter(artifact.execution_mode);
+    let owns_transaction = artifact.capabilities.db
+        || artifact.execution_mode == crate::artifacts::ExecutionMode::Write;
+    let mut transaction =
+        InvocationTransactionGuard::begin(owns_transaction, artifact.execution_mode)?;
     let runtime_started = Instant::now();
     let runtime = Runtime::new()
         .map_err(|error| error_response(500, "zero_js_runtime_init_failed", &error.to_string()))?;
@@ -88,7 +93,8 @@ pub(crate) fn execute_endpoint_module(
         let events_json: String = ctx
             .eval("JSON.stringify(globalThis.__statticZeroEvents || [])")
             .map_err(js_error)?;
-        let events: Vec<Value> = serde_json::from_str(&events_json).unwrap_or_default();
+        let events: Vec<Value> = serde_json::from_str(&events_json)
+            .map_err(|error| error_response(502, "zero_js_events_malformed", &error.to_string()))?;
         record_js_execution(execution_started);
         let mut headers = validate_response_headers(result.headers.unwrap_or_default())
             .map_err(|error| error_response(502, error.code, error.message))?;
@@ -113,8 +119,58 @@ pub(crate) fn execute_endpoint_module(
             metrics: None,
         })
     });
-    crate::db::rollback_open_transaction();
-    result
+    match result {
+        Ok(response) => {
+            transaction.commit()?;
+            Ok(response)
+        }
+        Err(response) => Err(response),
+    }
+}
+
+struct ExecutionModeGuard;
+
+impl ExecutionModeGuard {
+    fn enter(mode: crate::artifacts::ExecutionMode) -> Self {
+        crate::services::set_zero_execution_mode(Some(mode));
+        Self
+    }
+}
+
+impl Drop for ExecutionModeGuard {
+    fn drop(&mut self) {
+        crate::services::set_zero_execution_mode(None);
+    }
+}
+
+struct InvocationTransactionGuard {
+    active: bool,
+}
+
+impl InvocationTransactionGuard {
+    fn begin(active: bool, mode: crate::artifacts::ExecutionMode) -> Result<Self, RunnerResponse> {
+        if active {
+            crate::db::begin_invocation(mode).map_err(crate::db::BrokerRefusal::runner_response)?;
+        }
+        Ok(Self { active })
+    }
+
+    fn commit(&mut self) -> Result<(), RunnerResponse> {
+        if !self.active {
+            return Ok(());
+        }
+        crate::db::commit_invocation().map_err(crate::db::BrokerRefusal::runner_response)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for InvocationTransactionGuard {
+    fn drop(&mut self) {
+        if self.active {
+            crate::db::rollback_open_transaction();
+        }
+    }
 }
 
 /// Renders an endpoint's `image` result to a base64 PNG and stamps the response
@@ -205,6 +261,7 @@ fn install_globals(
         spam: artifact.capabilities.spam,
         email: artifact.capabilities.email,
         content: artifact.capabilities.content,
+        storage: artifact.capabilities.storage,
     });
     if artifact.capabilities.any_service() {
         let globals = ctx.globals();

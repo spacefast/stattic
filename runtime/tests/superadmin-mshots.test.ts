@@ -15,10 +15,11 @@ import { deploy, get, publicAccessConfig, type Runtime, startRuntime } from "./h
 
 const HOST = "superadmin-mshots.test";
 const SPACE = "spc_superadmin_mshots";
+const MSHOTS_API_URL = "https://127.0.0.1:9";
 const MSHOTS_PHP = readFileSync(
   path.join(import.meta.dir, "../../apps/superadmin/public/functions/mshots.php"),
   "utf8",
-);
+).replace("__SPACEFAST_API_URL_BASE64__", Buffer.from(MSHOTS_API_URL).toString("base64"));
 
 let rt: Runtime;
 

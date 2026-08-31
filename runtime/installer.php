@@ -173,8 +173,30 @@ function read_engine_manifest(string $root): array
         fail('runtime_engine_manifest_invalid');
     }
     usort($staged, fn (array $left, array $right): int => strcmp($left['path'], $right['path']));
-    usort($alias, fn (array $left, array $right): int => strcmp($left['path'], $right['path']));
+    usort($alias, fn (array $left, array $right): int => strcmp(install_order_key($left['path']), install_order_key($right['path'])));
     return ['staged' => $staged, 'alias' => $alias];
+}
+
+/**
+ * The order aliases are deposited in, as a sortable string.
+ *
+ * Aliases land one at a time, so a request can arrive with only a prefix of
+ * them installed. A directory must therefore be complete before the file that
+ * loads it appears: `wp-content/mu-plugins/zero-admin.php` is what WordPress
+ * auto-loads, and it reaches into `wp-content/mu-plugins/zero-admin/`. Plain
+ * strcmp puts it first — '.' sorts below '/' — which opens a window where every
+ * WordPress request on the box fatals, and leaves it open forever if the
+ * install aborts inside it.
+ *
+ * Ranking the separator below every printable character puts a directory's
+ * contents ahead of any sibling whose name extends it, which is that dependency
+ * for the only shape the engine ships. It stays a total order over distinct
+ * paths, so the install order and the loader identity derived from it are
+ * still deterministic.
+ */
+function install_order_key(string $path): string
+{
+    return str_replace('/', "\1", $path);
 }
 
 /** @return array{code:int,stdout:string,stderr:string,failed:bool} */

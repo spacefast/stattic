@@ -132,6 +132,11 @@ function _stattic_lazy_minted_secret(string $root, string $name, int $bytes): ?s
 function _sf_pointer_read(string $key, string $path): array {
   return ['kind' => 'present', 'value' => ['space_id' => 'spc_test', 'access_generation' => 7]];
 }
+// spc_test is a managed-WordPress Space: it carries a content-model release, so
+// the REST door hands off to WordPress rather than 404-ing a static Space.
+function _stattic_private_tree_read_pointer(string $path, int $maxBytes = 256): ?string {
+  return 'sha256:' . str_repeat('a', 64);
+}
 `,
     );
     writeFileSync(path.join(sharedRoot, "artifacts.php"), "<?php");
@@ -157,6 +162,24 @@ function _stattic_content_access_target(string $root, string $host): array {
       path.resolve(import.meta.dir, "../custom-redirects.php"),
       path.join(root, "custom-redirects.php"),
     );
+    // WordPress's front controller, reporting the context the gate handed it.
+    // Same keys as the driver's own echo below, so a REST row and an admin row
+    // are compared on the same terms and only `served_by` tells them apart.
+    writeFileSync(
+      path.join(root, "wp-blog-header.php"),
+      [
+        "<?php",
+        "echo json_encode([",
+        "  'user_id' => $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? null,",
+        "  'space_id' => $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? null,",
+        "  'private_root' => $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? null,",
+        "  'frame_origin' => $GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] ?? null,",
+        "  'file_edit_locked' => defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT,",
+        "  'served_by' => 'wordpress',",
+        "]);",
+        "",
+      ].join("\n"),
+    );
     const driver = path.join(root, "driver.php");
     writeFileSync(
       driver,
@@ -167,7 +190,7 @@ function _stattic_content_access_target(string $root, string $host): array {
         `require ${JSON.stringify(path.join(sharedRoot, "context.php"))};`,
         `require ${JSON.stringify(path.join(sharedRoot, "storage.php"))};`,
         `require ${JSON.stringify(path.join(sharedRoot, "content-admin.php"))};`,
-        `$session = _stattic_content_admin_mint_session(${JSON.stringify(path.join(root, ".stattic/storage"))}, 'space.example', 57, ['space_id' => 'spc_test', 'access_generation' => 7], 'https://launch.sf.localhost');`,
+        `$session = _stattic_content_admin_mint_session(${JSON.stringify(path.join(root, ".stattic/storage"))}, 'space.example', 57, ['kind' => 'user', 'issuer' => 'spacefast', 'subject' => 'sub_entrypoints_test'], ['space_id' => 'spc_test', 'access_generation' => 7], 'editor', 'https://launch.sf.localhost');`,
         `$_SERVER['DOCUMENT_ROOT'] = ${JSON.stringify(root)};`,
         `$_SERVER['SCRIPT_FILENAME'] = ${JSON.stringify(root)} . '/' . (getenv('SPACEFAST_TEST_SCRIPT') ?: 'wp-admin/edit.php');`,
         "$_SERVER['REQUEST_METHOD'] = 'GET';",
@@ -207,20 +230,25 @@ function _stattic_content_access_target(string $root, string $host): array {
       frame_origin: "https://launch.sf.localhost",
       file_edit_locked: true,
     };
-    // Every shape the editor lane arrives in: the admin screens, the REST API
-    // they save through, and the REST API's query form when the site has no
-    // pretty permalinks.
+    // The admin screens are real WordPress scripts: the gate establishes the
+    // context and returns, and PHP runs them next.
     expect(run({})).toEqual(admitted);
+    // The REST API the admin screens save through — in both spellings — cannot
+    // be reached by returning: this engine installs its own index.php over the
+    // one WordPress routes /wp-json through, so the gate has to name WordPress's
+    // front controller itself. Reaching it, carrying the same context, is the
+    // assertion.
+    const handedOff = { ...admitted, served_by: "wordpress" };
     expect(
       run({ SPACEFAST_TEST_URI: "/wp-json/wp/v2/types", SPACEFAST_TEST_SCRIPT: "index.php" }),
-    ).toEqual(admitted);
+    ).toEqual(handedOff);
     expect(
       run({
         SPACEFAST_TEST_URI: "/?rest_route=/wp/v2/types",
         SPACEFAST_TEST_SCRIPT: "index.php",
         SPACEFAST_TEST_REST_ROUTE: "/wp/v2/types",
       }),
-    ).toEqual(admitted);
+    ).toEqual(handedOff);
     // A platform hold outranks a live session: the host answers the platform's
     // page to every visitor, so it must not stay editable for a session TTL.
     expect(run({ SPACEFAST_TEST_HOLD: "tombstone" })).toEqual({

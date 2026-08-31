@@ -893,6 +893,37 @@ function _stattic_anonymous_session_write(
     return _stattic_anonymous_session_set($serving, $requestHost, $payload) ? $payload : null;
 }
 
+// The one mint for a visitor's stable guest pseudonym, and the reason it has to
+// be callable from the DOCUMENT response: a Zero page's client opens auth.get,
+// query.subscribe and mutation.run in parallel on first render. Each of those
+// requests arrives without a cookie, each mints its own session, and the browser
+// keeps whichever Set-Cookie landed last — so the identity the page displays and
+// the identity a mutation ran under disagree. Nothing in a request can correlate
+// two parallel cookie-less XHRs, so the session must already exist before any of
+// them leaves. Capsules bake their client at build time and may never be rebuilt,
+// so client-side serialization can only be an optimization on top of this.
+//
+// Idempotent: a visitor who already carries an anonymous pseudonym keeps it, and
+// a presented recorded credential is never written over.
+function _stattic_anonymous_session_ensure_anonymous_id(
+    array $serving,
+    string $requestHost
+): ?string {
+    $presented = _stattic_anonymous_session_decode(
+        $serving,
+        $requestHost,
+        _stattic_visitor_cookie_from_request()
+    );
+    $existing = $presented === null ? null : _stattic_collab_anonymous_id($presented);
+    if ($existing !== null) {
+        return $existing;
+    }
+    $payload = _stattic_anonymous_session_write($serving, $requestHost, [
+        'anonymousId' => _stattic_collab_mint_anonymous_id(),
+    ]);
+    return is_array($payload) ? _stattic_collab_anonymous_id($payload) : null;
+}
+
 // Null means nothing could be remembered; callers must accept that rather than
 // mint a second session over the first.
 function _stattic_access_session_remember(
@@ -1108,9 +1139,23 @@ function _stattic_grant_valid(mixed $grant): bool
     }
     $constraints = $grant['constraints'];
     if (array_diff(array_keys($constraints), [
-        'notBefore', 'expiresAt', 'maxUses', 'requireVerifiedEmail', 'network',
+        'notBefore', 'expiresAt', 'maxUses', 'requireVerifiedEmail', 'network', 'frameOrigin',
     ]) !== []) {
         return false;
+    }
+    if (isset($constraints['frameOrigin'])) {
+        $origin = _stattic_absolute_url_origin($constraints['frameOrigin']);
+        $parts = $origin === null ? false : parse_url($origin);
+        $scheme = is_array($parts) ? strtolower((string) ($parts['scheme'] ?? '')) : '';
+        $host = is_array($parts) ? strtolower((string) ($parts['host'] ?? '')) : '';
+        $loopback = in_array($host, ['localhost', '127.0.0.1', '[::1]'], true);
+        if (
+            $origin === null
+            || $origin !== $constraints['frameOrigin']
+            || ($scheme !== 'https' && !($scheme === 'http' && $loopback))
+        ) {
+            return false;
+        }
     }
     if (
         isset($constraints['maxUses'])
@@ -1171,6 +1216,16 @@ function _stattic_grant_valid(mixed $grant): bool
     }
     $audienceKind = $grant['audience']['kind'] ?? null;
     if (
+        isset($constraints['frameOrigin'])
+        && (
+            $audienceKind !== 'link'
+            || !empty($constraints['requireVerifiedEmail'])
+            || isset($constraints['network'])
+        )
+    ) {
+        return false;
+    }
+    if (
         isset($constraints['maxUses'])
         && !in_array($audienceKind, ['link', 'password', 'machine', 'external'], true)
     ) {
@@ -1212,7 +1267,7 @@ function _stattic_grant_valid(mixed $grant): bool
 
 // Must match packages/common's runtime contract.
 const STATTIC_AUTHORIZATION_GRANT_LIMIT = 1024;
-const STATTIC_AUTHORIZATION_COMPILED_VERSION = 3;
+const STATTIC_AUTHORIZATION_COMPILED_VERSION = 4;
 
 // The segment list the matcher runs against: runs of '**' collapse ('**/**' ==
 // '**') so the recursion meets at most one.
@@ -1313,6 +1368,7 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
     $authorities = [];
     $generationSources = [];
     $lanes = ['password' => [], 'identity' => []];
+    $hasFrameLinks = false;
     // Per target kind: does a public grant admit ANY path, anonymously, with no
     // constraint at all? That is the only shape where skipping the access code
     // matches running it. Computed here alone, so the overlay's `open` decision
@@ -1377,6 +1433,7 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
             // conformance corpus asserts the rule that fired. Never an
             // authorization input.
             'id' => (string) $grant['id'],
+            'generation' => (int) $grant['generation'],
             'reference' => $reference,
             'include' => $include,
             'exclude' => $exclude,
@@ -1389,10 +1446,16 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
             'network' => is_array($constraints['network'] ?? null)
                 ? $constraints['network']
                 : null,
+            'frameOrigin' => is_string($constraints['frameOrigin'] ?? null)
+                ? $constraints['frameOrigin']
+                : null,
             'sharedCacheable' => $reference === null
                 && in_array('page.view', $grant['capabilities'], true)
                 && $constraints === [],
         ];
+        if ($compiled['frameOrigin'] !== null) {
+            $hasFrameLinks = true;
+        }
         if ($reference === null) {
             _stattic_grant_index_place($public, $compiled);
             // A Public Grant authorizes anonymous requests without a carried
@@ -1452,6 +1515,7 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
         'authorities' => $authorities,
         'generations' => $generations,
         'lanes' => $lanes,
+        'hasFrameLinks' => $hasFrameLinks,
         'unconditionalTargets' => $unconditionalTargets,
     ];
 }
@@ -1510,15 +1574,50 @@ function _stattic_authorization_projection_compiled(mixed $value): bool
         && is_array($index['lanes'] ?? null)
         && is_array($index['lanes']['password'] ?? null)
         && is_array($index['lanes']['identity'] ?? null)
+        && is_bool($index['hasFrameLinks'] ?? null)
         && is_bool($index['unconditionalTargets']['live'] ?? null)
         && is_bool($index['unconditionalTargets']['all_versions'] ?? null);
 }
 
+/**
+ * The projection this engine can decide with, upgraded on read.
+ *
+ * A Space that never republishes keeps the overlay its last publish wrote, so
+ * the serve path meets projections compiled by older engines indefinitely.
+ * Refusing them is a uniform deny of a Space that was serving fine yesterday,
+ * which is why the version bump alone must not be an access decision.
+ *
+ * A recompile is not available here: the overlay stores the compiled grant
+ * index, never the raw Grants it came from, and only the management lane ever
+ * sees those. Version 4 does not need them. It added `hasFrameLinks` to the
+ * index and `frameOrigin`/`generation` to each compiled Grant — and a version-3
+ * index predates the `frameOrigin` constraint entirely, so no Grant in it can
+ * carry one and the flag is false by construction. Every version-4 reader of
+ * the two per-Grant fields already treats an absent one as null. Deriving the
+ * flag here therefore yields exactly what recompiling the same Grants would.
+ *
+ * Anything older stays refused, as it already was before version 4: those
+ * shapes are not reconstructible from what the overlay keeps.
+ */
+function _stattic_authorization_projection_current(mixed $value): ?array
+{
+    if (!is_array($value)) {
+        return null;
+    }
+    if (_stattic_authorization_projection_compiled($value)) {
+        return $value;
+    }
+    if (($value['compiledVersion'] ?? null) === 3 && is_array($value['grantIndex'] ?? null)) {
+        $value['compiledVersion'] = STATTIC_AUTHORIZATION_COMPILED_VERSION;
+        $value['grantIndex']['hasFrameLinks'] = false;
+    }
+    return _stattic_authorization_projection_compiled($value) ? $value : null;
+}
+
 function _stattic_authorization_grant_index(array $projection): ?array
 {
-    return _stattic_authorization_projection_compiled($projection)
-        ? $projection['grantIndex']
-        : null;
+    $current = _stattic_authorization_projection_current($projection);
+    return $current === null ? null : $current['grantIndex'];
 }
 
 // $firstSegment is the request path's first segment (''=root); it selects each
@@ -1796,7 +1895,8 @@ function _stattic_scoped_admission_context(
     if (array_key_exists($memoKey, $memo)) {
         return $memo[$memoKey];
     }
-    if (!_stattic_authorization_projection_compiled($projection)) {
+    $projection = _stattic_authorization_projection_current($projection);
+    if ($projection === null) {
         return $memo[$memoKey] = ['error' => 'projection'];
     }
     $path = $artifactResource
@@ -1871,7 +1971,10 @@ function _stattic_enforce_scoped_admission(
     $projection = $admission['projection'];
     if (
         ($projection['fence'] ?? 'none') === 'none'
-        && _stattic_system_view_admits($admission['path'])
+        && (
+            _stattic_system_view_admits($admission['path'])
+            || _stattic_frame_session_admits($admission['path'])
+        )
     ) {
         // Stateless proof admits this request and nothing else: nothing minted
         // here can be replayed. A fenced Space stays closed to it. Internal
@@ -1905,7 +2008,10 @@ function _stattic_enforce_scoped_admission(
     $identity = _stattic_current_session_identity($serving, $requestHost);
     if (
         ($projection['fence'] ?? 'none') === 'none'
-        && _stattic_system_view_admits($path)
+        && (
+            _stattic_system_view_admits($path)
+            || _stattic_frame_session_admits($path)
+        )
     ) {
         // A Spacefast API token is exchanged on first use, so its scoped
         // system-view proof only exists after resolving the request identity.
@@ -1992,6 +2098,7 @@ function _stattic_access_enforce_v4(
     $GLOBALS['SPACEFAST_ACCESS_ENFORCED'] = true;
 
     _stattic_access_apply_system_view_cookie($serving, $requestHost);
+    _stattic_access_apply_frame_session_cookie($serving, $requestHost);
 
     $protected = _stattic_enforce_scoped_admission($serving, $requestHost, $requestPath, false, false);
     if ($originalRequestPath !== $requestPath) {
@@ -2012,6 +2119,91 @@ function _stattic_access_enforce_v4(
     if ($protected) {
         _stattic_access_private_cache_flag(true);
     }
+}
+
+/**
+ * THE WP API door's identity step, and the fourth way a WordPress principal
+ * comes into existence (after the content API's assertion, the editor session,
+ * and the Frame session).
+ *
+ * Called only AFTER _stattic_access_enforce_v4 has admitted the request, so it
+ * decides nothing about access: enforcement already said the caller may reach
+ * this path, and this only names who WordPress attributes the work to and how
+ * much of WordPress the request may touch while it runs. Returning null is the
+ * normal answer, not a failure — WordPress then answers as nobody, which is
+ * exactly its own unauthenticated REST behavior.
+ *
+ * The capabilities are re-derived here rather than read out of enforcement
+ * because enforcement deliberately returns early on a Space whose Public Grant
+ * already admits the path, without ever evaluating the caller's own Grants. A
+ * public Space must still be able to hand an agent an editor's role.
+ */
+function _stattic_access_wordpress_principal(
+    array $serving,
+    string $requestHost,
+    string $requestPath
+): ?array {
+    $identity = _stattic_current_session_identity($serving, $requestHost);
+    if (!is_array($identity)) {
+        return null;
+    }
+    $admission = _stattic_scoped_admission_context($serving, $requestHost, $requestPath);
+    if (($admission['error'] ?? null) !== null) {
+        return null;
+    }
+    $decision = _stattic_grant_decision(
+        $admission['projection'],
+        $admission['path'],
+        $admission['target'],
+        is_array($identity['authorities'] ?? null) ? $identity['authorities'] : [],
+        is_array($identity['emailVerifiedAuthorities'] ?? null)
+            ? $identity['emailVerifiedAuthorities']
+            : [],
+        (string) $admission['country'],
+        (string) $admission['userAgent'],
+        false,
+        true
+    );
+    $role = _stattic_wordpress_role_for_capabilities($decision['capabilities']);
+    if ($role === null) {
+        return null;
+    }
+    $actorId = _stattic_access_machine_actor_id($identity);
+    if ($actorId === null) {
+        // A person reaching this door has no (issuer, subject) pair here: the
+        // session names them by authority reference, and `external:<sha256>` is
+        // not invertible into the pair content-principals.php keys WordPress
+        // users by. Minting a user from anything else would open a SECOND
+        // account for somebody who already has one through the editor. Until
+        // the handoff carries the pair, a person gets WordPress's
+        // unauthenticated REST answer.
+        return null;
+    }
+    return [
+        // An API key is not a person: shared/content-principal.php gives every
+        // service actor the issuer `spacefast-service` and the actor id as its
+        // subject, so this door converges on the same WordPress user the
+        // control plane's own service actor would.
+        'kind' => 'service',
+        'actor_id' => $actorId,
+        'session_version' => _stattic_session_version($serving),
+        'access_generation' => _stattic_projection_generation($serving),
+        'expires_at' => is_int($identity['exp'] ?? null) ? $identity['exp'] : 0,
+        'wordpress_role' => $role,
+        'profile' => [],
+    ];
+}
+
+/** The machine credential behind a session, when one authenticated it. */
+function _stattic_access_machine_actor_id(array $identity): ?string
+{
+    foreach (is_array($identity['authorities'] ?? null) ? $identity['authorities'] : [] as $authority) {
+        if (is_string($authority) && str_starts_with($authority, 'machine:')) {
+            $id = substr($authority, strlen('machine:'));
+            return preg_match('/\A[A-Za-z0-9_.-]{1,128}\z/D', $id) === 1 ? $id : null;
+        }
+    }
+    return null;
 }
 
 function _stattic_scope_path(string $path, bool $canonicalizeIndexAlias = true): ?string
@@ -2713,8 +2905,8 @@ function _stattic_access_lane_active(array $projection, string $kind, array $tar
 // or a serving fence in force.
 function _stattic_access_page_lanes(array $serving): ?array
 {
-    $projection = is_array($serving['authorization'] ?? null) ? $serving['authorization'] : null;
-    if ($projection === null || !_stattic_authorization_projection_compiled($projection)) {
+    $projection = _stattic_authorization_projection_current($serving['authorization'] ?? null);
+    if ($projection === null) {
         return null;
     }
     if (($projection['fence'] ?? 'none') !== 'none') {
@@ -2955,10 +3147,9 @@ function _stattic_access_lanes_fragment(
 // uniform deny, which stays for fence and unusable-projection cases.
 function _stattic_render_unclaimed_notice(array $serving): never
 {
-    $projection = is_array($serving['authorization'] ?? null) ? $serving['authorization'] : null;
+    $projection = _stattic_authorization_projection_current($serving['authorization'] ?? null);
     if (
         $projection === null
-        || !_stattic_authorization_projection_compiled($projection)
         || ($projection['fence'] ?? 'none') !== 'none'
         || ($projection['spaceClaimed'] ?? true) !== false
     ) {
@@ -3668,6 +3859,244 @@ function _stattic_access_consume_handoff_token(
 // other's checks, and a system view token never mints a visitor session. Each
 // purpose is REQUIRED positively by its own consumer.
 const STATTIC_SYSTEM_VIEW_PURPOSE = 'system-view';
+const STATTIC_FRAME_SESSION_PURPOSE = 'frame-session';
+
+function _stattic_frame_session_cookie_name(): string
+{
+    return _stattic_config_value('SPACEFAST_INSECURE_COOKIES') === '1'
+        ? STATTIC_FRAME_SESSION_DEV_COOKIE
+        : STATTIC_FRAME_SESSION_COOKIE;
+}
+
+function _stattic_frame_session_cookie_from_request(): string
+{
+    $cookie = $_COOKIE[_stattic_frame_session_cookie_name()] ?? '';
+    return is_string($cookie) ? $cookie : '';
+}
+
+/**
+ * The exact normalized parents admitted for this response. The verifier and
+ * the public Link projection are the only writers.
+ *
+ * @param list<string>|null $set
+ * @return list<string>
+ */
+function _stattic_frame_ancestor_origins(?array $set = null): array
+{
+    static $origins = [];
+    if ($set !== null) {
+        $origins = array_values(array_unique(array_filter(
+            $set,
+            static fn (mixed $origin): bool => is_string($origin) && $origin !== ''
+        )));
+    }
+    return $origins;
+}
+
+function _stattic_frame_grant_matches_path(array $grant, string $path): bool
+{
+    $segments = $path === '/' ? [] : explode('/', substr($path, 1));
+    $included = false;
+    foreach (is_array($grant['include'] ?? null) ? $grant['include'] : [] as $pattern) {
+        if (is_array($pattern) && _stattic_grant_segments_match($pattern, $segments)) {
+            $included = true;
+            break;
+        }
+    }
+    if (!$included) {
+        return false;
+    }
+    foreach (is_array($grant['exclude'] ?? null) ? $grant['exclude'] : [] as $pattern) {
+        if (is_array($pattern) && _stattic_grant_segments_match($pattern, $segments)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function _stattic_frame_grant_active(array $grant, array $target, string $path): bool
+{
+    $now = _stattic_access_session_now();
+    return is_string($grant['frameOrigin'] ?? null)
+        && is_array($grant['target'] ?? null)
+        && _stattic_grant_target_matches($grant['target'], $target)
+        && (!is_int($grant['notBefore'] ?? null) || $grant['notBefore'] <= $now)
+        && (!is_int($grant['expiresAt'] ?? null) || $grant['expiresAt'] > $now)
+        && in_array('page.view', is_array($grant['capabilities'] ?? null) ? $grant['capabilities'] : [], true)
+        && _stattic_frame_grant_matches_path($grant, $path);
+}
+
+/** @return list<array> */
+function _stattic_frame_link_grants(array $projection, string $linkId, string $path): array
+{
+    $index = _stattic_authorization_grant_index($projection);
+    if ($index === null) {
+        return [];
+    }
+    $authority = 'link:' . $linkId;
+    $first = $path === '/' ? '' : (explode('/', substr($path, 1))[0] ?? '');
+    return _stattic_grant_index_bucket_candidates(
+        $index['authorities'][$authority] ?? null,
+        $first
+    );
+}
+
+function _stattic_frame_session_admits(
+    string $path,
+    ?array $setGrant = null,
+    ?array $setTarget = null
+): bool
+{
+    static $grant = null;
+    static $target = null;
+    if ($setGrant !== null && $setTarget !== null) {
+        $grant = $setGrant;
+        $target = $setTarget;
+    }
+    $canonical = _stattic_scope_path($path);
+    return $canonical !== null
+        && is_array($grant)
+        && is_array($target)
+        && _stattic_frame_grant_active($grant, $target, $canonical);
+}
+
+function _stattic_access_verify_frame_session_token(
+    array $serving,
+    string $host,
+    string $token,
+    ?string $entryPath = null
+): bool {
+    $verified = _stattic_visitor_verify(
+        $token,
+        _stattic_visitor_verify_options($serving, $host, null, ['requireJti' => false])
+    );
+    if ($verified === null) {
+        return false;
+    }
+    $claims = is_array($verified['claims'] ?? null) ? $verified['claims'] : [];
+    // The Grant decision the platform signed. `frame` is the contract object
+    // (packages/common frameSessionClaimsV1Schema); the flat siblings beside it
+    // are the bindings _stattic_visitor_verify already checked.
+    $frame = is_array($claims['frame'] ?? null) ? $claims['frame'] : [];
+    $link = is_array($frame['link'] ?? null) ? $frame['link'] : [];
+    $capabilities = is_array($frame['capabilities'] ?? null) ? $frame['capabilities'] : [];
+    $origin = _stattic_absolute_url_origin($frame['parentOrigin'] ?? null);
+    $path = is_string($claims['path'] ?? null) ? _stattic_scope_path($claims['path']) : null;
+    $target = is_array($frame['target'] ?? null) ? $frame['target'] : null;
+    $currentTarget = _stattic_grant_target($serving);
+    if (
+        ($claims['purpose'] ?? null) !== STATTIC_FRAME_SESSION_PURPOSE
+        || ($frame['format'] ?? null) !== 'spacefast.frame-session'
+        || ($frame['version'] ?? null) !== 1
+        // Reading a page is the only thing this proof admits. A writing surface
+        // carries content.publish too, but that is projected by the content
+        // kernel from the principal assertion, never by this admission check.
+        || !in_array('page.view', $capabilities, true)
+        || !is_string($link['id'] ?? null)
+        || !is_int($link['revision'] ?? null)
+        || $link['revision'] < 1
+        || $origin === null
+        || $origin !== ($frame['parentOrigin'] ?? null)
+        || $path === null
+        || $target === null
+        || !_stattic_grant_target_matches($target, $currentTarget)
+        // Rotating either epoch closes every proof minted before it, with no
+        // lookup. Both copies must agree: the flat claim the shared verifier
+        // reads and the one inside the signed Grant decision.
+        || !is_int($claims['sessionVersion'] ?? null)
+        || $claims['sessionVersion'] !== _stattic_session_version($serving)
+        || ($frame['sessionVersion'] ?? null) !== $claims['sessionVersion']
+        || ($frame['accessGeneration'] ?? null) !== ($claims['generation'] ?? null)
+    ) {
+        return false;
+    }
+    if ($entryPath !== null && _stattic_scope_path($entryPath) !== $path) {
+        return false;
+    }
+    $matched = null;
+    foreach (_stattic_frame_link_grants($serving['authorization'] ?? [], $link['id'], $path) as $grant) {
+        if (
+            is_array($grant)
+            && ($grant['generation'] ?? null) === $link['revision']
+            && ($grant['frameOrigin'] ?? null) === $origin
+            && _stattic_frame_grant_active($grant, $currentTarget, $path)
+        ) {
+            $matched = $grant;
+            break;
+        }
+    }
+    if ($matched === null) {
+        return false;
+    }
+    // Expiry is decided BEFORE anything is installed. _stattic_frame_session_admits
+    // and _stattic_frame_ancestor_origins are side effects the enforcement path
+    // reads back on its own; priming them and then returning false would admit
+    // the request anyway. The shared visitor verifier deliberately tolerates a
+    // 300s clock skew on `exp`, so this is the only gate that closes a stale
+    // proof, and both copies of the lifetime have to agree.
+    $expiry = $claims['exp'] ?? null;
+    if (
+        !is_int($expiry)
+        || ($frame['expiresAt'] ?? null) !== $expiry
+        || $expiry <= _stattic_access_session_now()
+    ) {
+        return false;
+    }
+    _stattic_frame_session_admits($path, $matched, $currentTarget);
+    _stattic_frame_ancestor_origins([$origin]);
+    $GLOBALS['SPACEFAST_FRAME_SESSION_EXPIRY'] = $expiry;
+    return true;
+}
+
+/** @return list<string> */
+function _stattic_public_frame_origins(array $serving, string $requestPath): array
+{
+    $path = _stattic_scope_path($requestPath);
+    $projection = is_array($serving['authorization'] ?? null) ? $serving['authorization'] : [];
+    $index = _stattic_authorization_grant_index($projection);
+    if ($path === null || $index === null || ($index['hasFrameLinks'] ?? false) !== true) {
+        return [];
+    }
+    $target = _stattic_grant_target($serving);
+    $first = $path === '/' ? '' : (explode('/', substr($path, 1))[0] ?? '');
+    $origins = [];
+    foreach ($index['authorities'] as $reference => $store) {
+        if (!is_string($reference) || !str_starts_with($reference, 'link:')) {
+            continue;
+        }
+        foreach (_stattic_grant_index_bucket_candidates($store, $first) as $grant) {
+            if (is_array($grant) && _stattic_frame_grant_active($grant, $target, $path)) {
+                $origins[] = $grant['frameOrigin'];
+            }
+        }
+    }
+    return array_values(array_unique($origins));
+}
+
+/**
+ * Adds only the deterministic CSP policy for public Frame paths. It leaves the
+ * body cache key, cache policy, cookies, and Vary untouched.
+ */
+function _stattic_frame_response_headers(array $serving, string $requestPath, array $headers): array
+{
+    $origins = _stattic_frame_ancestor_origins();
+    if ($origins === []) {
+        $origins = _stattic_public_frame_origins($serving, $requestPath);
+        _stattic_frame_ancestor_origins($origins);
+    }
+    if ($origins === []) {
+        return $headers;
+    }
+    $existing = [];
+    foreach ($headers as $name => $value) {
+        if (strtolower((string) $name) === 'content-security-policy') {
+            $existing[] = is_scalar($value) ? (string) $value : '';
+            unset($headers[$name]);
+        }
+    }
+    $headers['content-security-policy'] = _stattic_private_content_csp_values($existing);
+    return $headers;
+}
 const STATTIC_HANDOFF_PURPOSE = 'handoff';
 
 function _stattic_system_view_cookie_name(): string
@@ -3696,6 +4125,22 @@ function _stattic_system_view_admits(string $scopePath): bool
 {
     $scope = _stattic_system_view_scope();
     return $scope !== null && _stattic_scope_contains($scope, $scopePath);
+}
+
+/**
+ * When the current request's proof expires, as a unix timestamp, or null.
+ *
+ * The echo cookie is the token, so it must not outlive it: a cookie that
+ * survives its own payload is a browser that keeps presenting a dead credential
+ * and gets a gate page for every asset.
+ */
+function _stattic_system_view_expiry(?int $expiresAt = null): ?int
+{
+    static $admitted = null;
+    if ($expiresAt !== null) {
+        $admitted = $expiresAt;
+    }
+    return $admitted;
 }
 
 function _stattic_access_verify_system_view_token(
@@ -3738,7 +4183,23 @@ function _stattic_access_verify_system_view_token(
         }
         $scope = $candidate;
     }
+    // The framer, when the mint declared one. Present-but-unreadable fails the
+    // whole token exactly like an unreadable scope: a claim the platform signed
+    // and this engine cannot honour must never degrade into the default.
+    $embed = null;
+    if (array_key_exists('embed', $claims)) {
+        $embed = _stattic_absolute_url_origin($claims['embed']);
+        if ($embed === null) {
+            return false;
+        }
+    }
     _stattic_system_view_scope($scope);
+    if ($embed !== null) {
+        _stattic_system_view_embed($embed);
+    }
+    if (isset($claims['exp'])) {
+        _stattic_system_view_expiry((int) $claims['exp']);
+    }
     return true;
 }
 
@@ -3985,6 +4446,27 @@ function _stattic_access_apply_query_token(
         _stattic_access_redeem_query_link_token($serving, $requestHost, $token);
         return;
     }
+    if ($kind === 'frame-session') {
+        $verified = _stattic_access_verify_frame_session_token(
+            $serving,
+            _stattic_canonicalize_host($requestHost),
+            $token,
+            $requestPath
+        );
+        if ($verified) {
+            $expiry = $GLOBALS['SPACEFAST_FRAME_SESSION_EXPIRY'] ?? null;
+            $seconds = is_int($expiry)
+                ? max(1, $expiry - _stattic_access_session_now())
+                : 1;
+            _stattic_set_cookie(
+                _stattic_frame_session_cookie_name(),
+                $token,
+                $seconds,
+                true
+            );
+        }
+        return;
+    }
     // The JWT remains the authority. Echo it briefly into a separate host-only
     // cookie so the renderer's CSS, images, fonts and scripts can present the
     // same proof without rewriting customer bytes. There is no session record,
@@ -3995,12 +4477,52 @@ function _stattic_access_apply_query_token(
         $token
     );
     if ($verified && _stattic_system_view_admits($requestPath)) {
+        // An embed proof is framed cross-site, where a Lax cookie is neither
+        // stored nor sent, so its echo is partitioned by the top-level site and
+        // lives exactly as long as the token it carries. A top-level reader
+        // (thumbnail fetcher, operator link) keeps the short same-site echo it
+        // has always had.
+        $embed = _stattic_system_view_embed();
+        $expiresAt = _stattic_system_view_expiry();
         _stattic_set_cookie(
             _stattic_system_view_cookie_name(),
             $token,
-            STATTIC_SYSTEM_VIEW_COOKIE_SECONDS
+            $embed === null || $expiresAt === null
+                ? STATTIC_SYSTEM_VIEW_COOKIE_SECONDS
+                : max(0, $expiresAt - time()),
+            $embed !== null
         );
+        if ($embed !== null) {
+            _stattic_access_redirect_framed_preview();
+        }
     }
+}
+
+/**
+ * The one hop this lane takes, and only for a framed preview.
+ *
+ * Everywhere else `?__=` deliberately does not redirect (see the contract above
+ * this function): a link an agent cannot follow with one request is not a link,
+ * and a thumbnail fetcher or an operator opening an ops URL is exactly that
+ * caller. A framed preview is not. Its token is a working credential for the
+ * whole private version, and the document it opens is the CUSTOMER'S page —
+ * every script on it, including a third-party dependency the publisher pulled
+ * in, can read `location.search`. Leaving the token there for its full life
+ * would publish it to that page.
+ *
+ * So the exchange completes here: the cookie set on this response carries the
+ * session from now on, and the browser is sent to the same URL without the
+ * secret. The redirected request presents the cookie and nothing else.
+ */
+function _stattic_access_redirect_framed_preview(): never
+{
+    _stattic_access_private_cache_flag(true);
+    _stattic_access_redirect(
+        _stattic_access_clean_return_path(),
+        302,
+        STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
+        true
+    );
 }
 
 // Named, uniform, and content-free: the operator can tell a mis-shaped token
@@ -4082,7 +4604,32 @@ function _stattic_access_apply_system_view_cookie(array $serving, string $reques
             $token
         )
     ) {
+        // Both namespaces: a dead cookie says nothing about whether it was
+        // written for a framed preview, and a partitioned cookie survives an
+        // unpartitioned deletion.
         _stattic_clear_cookie(_stattic_system_view_cookie_name());
+        _stattic_clear_cookie(_stattic_system_view_cookie_name(), true);
+        _stattic_identity_cookie_mutated(true);
+    }
+}
+
+function _stattic_access_apply_frame_session_cookie(array $serving, string $requestHost): void
+{
+    if (_stattic_access_query_token_present()) {
+        return;
+    }
+    $token = _stattic_frame_session_cookie_from_request();
+    if ($token === '') {
+        return;
+    }
+    if (
+        !_stattic_access_verify_frame_session_token(
+            $serving,
+            _stattic_canonicalize_host($requestHost),
+            $token
+        )
+    ) {
+        _stattic_clear_cookie(_stattic_frame_session_cookie_name(), true);
         _stattic_identity_cookie_mutated(true);
     }
 }

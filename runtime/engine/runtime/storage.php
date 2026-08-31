@@ -49,6 +49,32 @@ function _stattic_uploads_id_valid(string $id): bool
     return preg_match(STATTIC_UPLOADS_ID_PATTERN, $id) === 1;
 }
 
+/**
+ * The uploader's own name for an object, or null.
+ *
+ * Presentation only: the id is the identity, the name is what a person reads in
+ * a list. It is never a path — only the last segment survives — because a
+ * record field that could carry `../` would eventually be joined to something.
+ * Absent, unreadable, or hostile all answer null, which is why every legacy
+ * record written before this field existed still validates.
+ */
+function _stattic_uploads_filename(mixed $filename): ?string
+{
+    if (!is_string($filename)) {
+        return null;
+    }
+    $lastSeparator = max(strrpos($filename, '/'), strrpos($filename, '\\'));
+    $basename = trim($lastSeparator === false ? $filename : substr($filename, $lastSeparator + 1));
+    if (
+        $basename === '' || $basename === '.' || $basename === '..'
+        || strlen($basename) > 255
+        || preg_match('/[\x00-\x1f\x7f]/', $basename) === 1
+    ) {
+        return null;
+    }
+    return $basename;
+}
+
 // Every reader goes through this: an unreadable or half-written record reads as
 // absent, so it never serves bytes.
 function _stattic_uploads_record(mixed $record): ?array
@@ -74,10 +100,41 @@ function _stattic_uploads_record(mixed $record): ?array
         'contentType' => $contentType,
         'createdAt' => $createdAt,
         'email' => is_string($record['email'] ?? null) ? $record['email'] : null,
+        // Optional, and null on every record written before the field existed.
+        'filename' => _stattic_uploads_filename($record['filename'] ?? null),
         'sha256' => strtolower($sha256),
         'size' => $size,
         'uploaderId' => $uploaderId,
     ];
+}
+
+/**
+ * The filename this request declared, from `Content-Disposition`.
+ *
+ * The upload lanes take raw bytes, not multipart, so the header is the only
+ * place a name can ride. `filename*` (RFC 5987) wins when present because that
+ * is the form a browser uses for anything non-ASCII; a percent sequence that
+ * does not decode is discarded rather than guessed at.
+ */
+function _stattic_uploads_request_filename(): ?string
+{
+    $header = $_SERVER['HTTP_CONTENT_DISPOSITION'] ?? null;
+    if (!is_string($header) || $header === '' || strlen($header) > 1024) {
+        return null;
+    }
+    if (preg_match("/filename\*\s*=\s*UTF-8''([^;]+)/i", $header, $extended) === 1) {
+        $decoded = rawurldecode(trim($extended[1]));
+        if (mb_check_encoding($decoded, 'UTF-8')) {
+            return _stattic_uploads_filename($decoded);
+        }
+    }
+    if (preg_match('/filename\s*=\s*"((?:[^"\\\\]|\\\\.)*)"/i', $header, $quoted) === 1) {
+        return _stattic_uploads_filename(stripslashes($quoted[1]));
+    }
+    if (preg_match('/filename\s*=\s*([^;\s]+)/i', $header, $token) === 1) {
+        return _stattic_uploads_filename($token[1]);
+    }
+    return null;
 }
 
 // The one revocable secret behind every public object URL. Lazily minted under
@@ -371,6 +428,7 @@ function _stattic_uploads_upload(
         unlink($tmpPath);
         _stattic_problem_refused(415, 'storage_content_blocked', 'Executable and active web content cannot be uploaded.');
     }
+    $filename = _stattic_uploads_request_filename();
 
     $committed = _stattic_space_write_lock_with(
         $privateRoot,
@@ -387,6 +445,7 @@ function _stattic_uploads_upload(
             $tmpPath,
             $sha256,
             $contentType,
+            $filename,
             $uploaderId,
             $anonymousUploader,
             $auth
@@ -405,6 +464,7 @@ function _stattic_uploads_upload(
                 'contentType' => $contentType,
                 'createdAt' => gmdate('c'),
                 'email' => is_string($auth['email'] ?? null) ? $auth['email'] : null,
+                'filename' => $filename,
                 'sha256' => $sha256,
                 'size' => $size,
                 'uploaderId' => $uploaderId,
@@ -432,6 +492,9 @@ function _stattic_uploads_upload(
     _stattic_json_response(201, [
         'id' => $id,
         'contentType' => $contentType,
+        // Omitted, never null: the field is absent on an object that was
+        // uploaded without a name.
+        ...($filename === null ? [] : ['filename' => $filename]),
         'size' => $size,
         // Composed from the current read key at response time, stable until it
         // rotates, whatever route the upload arrived on.

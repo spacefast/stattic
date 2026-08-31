@@ -299,8 +299,12 @@ fn runtime_engine_root_names() -> &'static BTreeSet<String> {
                     .filter_map(Value::as_str),
             )
         {
-            if let Some(name) = path.rsplit('/').next() {
-                let name = name.to_ascii_lowercase();
+            // Only entries that live at the install ROOT can shadow a served
+            // root path. Taking the last segment of nested entries turned a
+            // theme template like `templates/index.html` into a forbidden
+            // root name, refusing every customer rewrite to `/index.html`.
+            if !path.contains('/') {
+                let name = path.to_ascii_lowercase();
                 if name != "index.php" {
                     names.insert(name);
                 }

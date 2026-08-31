@@ -49,11 +49,14 @@
     "engine/runtime/storage.php",
     "engine/runtime/zero.php",
     "engine/shared/admission.php",
+    "engine/shared/application-journal.php",
+    "engine/shared/content-source-journal.php",
     "engine/shared/artifacts.php",
     "engine/shared/bootstrap-config.php",
     "engine/shared/cache-policy.php",
     "engine/shared/content-access.php",
     "engine/shared/content-admin.php",
+    "engine/shared/content-principal.php",
     "engine/shared/content-request.php",
     "engine/shared/context.php",
     "engine/shared/db-broker.php",
@@ -79,10 +82,31 @@
     "engine/shared/storage.php",
     "engine/shared/streaming.php",
     "engine/shared/upstream-relay.php",
+    "engine/wordpress/content-html.php",
+    "engine/wordpress/content-markdown.php",
+    "engine/wordpress/content-source-sync.php",
+    "engine/wordpress/content-model-kernel.php",
+    "engine/wordpress/content-source-journal.php",
     "engine/wordpress/content-kernel.php",
+    "engine/admin/components.php",
+    "engine/wordpress/components.json",
+    "engine/wordpress/content-principals.php",
+    "engine/wordpress/content-users.php",
+    "engine/wordpress/content-storage.php",
     "wordpress-content-loader.php",
+    "wordpress/managed-theme/style.css",
+    "wordpress/managed-theme/theme.json",
+    "wordpress/managed-theme/templates/index.html",
     "installer.php",
-    "custom-redirects.php"
+    "custom-redirects.php",
+    "wordpress/zero-admin/admin-page.php",
+    "wordpress/zero-admin/assets.php",
+    "wordpress/zero-admin/bootstrap.php",
+    "wordpress/zero-admin/routes.php",
+    "wordpress/zero-admin/zero-admin.php",
+    "wordpress/zero-admin/build/admin.js",
+    "wordpress/zero-admin/build/admin.css",
+    "wordpress/zero-admin/build/admin.asset.php"
   ],
   "executables": ["bin/stattic-runtime"],
   "aliases": [
@@ -121,6 +145,50 @@
     {
       "source": "wordpress-content-loader.php",
       "path": "wp-content/mu-plugins/spacefast-content.php"
+    },
+    {
+      "source": "wordpress/managed-theme/style.css",
+      "path": "wp-content/themes/spacefast-managed/style.css"
+    },
+    {
+      "source": "wordpress/managed-theme/theme.json",
+      "path": "wp-content/themes/spacefast-managed/theme.json"
+    },
+    {
+      "source": "wordpress/managed-theme/templates/index.html",
+      "path": "wp-content/themes/spacefast-managed/templates/index.html"
+    },
+    {
+      "source": "wordpress/zero-admin/admin-page.php",
+      "path": "wp-content/mu-plugins/zero-admin/admin-page.php"
+    },
+    {
+      "source": "wordpress/zero-admin/assets.php",
+      "path": "wp-content/mu-plugins/zero-admin/assets.php"
+    },
+    {
+      "source": "wordpress/zero-admin/bootstrap.php",
+      "path": "wp-content/mu-plugins/zero-admin/bootstrap.php"
+    },
+    {
+      "source": "wordpress/zero-admin/routes.php",
+      "path": "wp-content/mu-plugins/zero-admin/routes.php"
+    },
+    {
+      "source": "wordpress/zero-admin/zero-admin.php",
+      "path": "wp-content/mu-plugins/zero-admin.php"
+    },
+    {
+      "source": "wordpress/zero-admin/build/admin.js",
+      "path": "wp-content/mu-plugins/zero-admin/build/admin.js"
+    },
+    {
+      "source": "wordpress/zero-admin/build/admin.css",
+      "path": "wp-content/mu-plugins/zero-admin/build/admin.css"
+    },
+    {
+      "source": "wordpress/zero-admin/build/admin.asset.php",
+      "path": "wp-content/mu-plugins/zero-admin/build/admin.asset.php"
     }
   ]
 }

@@ -22,7 +22,8 @@ if (
 ) {
     _stattic_problem_response(401, 'content_admin_ticket_invalid', 'This content editor link is invalid or expired.');
 }
-$GLOBALS['SPACEFAST_CONTENT_ADMIN_IDENTITY'] = $launch['identity'];
+$GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $launch['principal'];
+$GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = $launch['wordpress_role'];
 $publicRoot = dirname(_stattic_runtime_install_root($engineRoot));
 $wpLoad = $publicRoot . '/wp-load.php';
 if (!is_file($wpLoad)) {
@@ -35,14 +36,16 @@ _stattic_content_admin_enter_wordpress(
 );
 require $wpLoad;
 
-$userId = function_exists('spacefast_content_admin_establish_user')
-    ? spacefast_content_admin_establish_user()
+$userId = function_exists('spacefast_content_principal_establish_user')
+    ? spacefast_content_principal_establish_user()
     : 0;
 $session = _stattic_content_admin_mint_session(
     $privateRoot,
     $host,
     $userId,
+    $launch['principal'],
     $launch['authorization'],
+    $launch['wordpress_role'],
     $launch['frame_origin']
 );
 if ($session === null) {
@@ -68,11 +71,26 @@ foreach ($wpAuthCookies as $wpAuthCookie) {
         true
     );
 }
-$postsType = function_exists('spacefast_content_builtin_post_type')
-    ? spacefast_content_builtin_post_type('posts')
-    : '';
-if ($postsType === '') {
-    _stattic_problem_response(503, 'content_kernel_unavailable', 'The Space content kernel is not ready.');
-}
-header('Location: /wp-admin/edit.php?post_type=' . rawurlencode($postsType), true, 303);
+// Where the launch lands.
+//
+// `post` is the type both landings open. A ContentModel projects its
+// collections as a taxonomy over WordPress's own posts — see
+// register_taxonomy(SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY, ['post'])
+// in wordpress/content-model-kernel.php — so there is no per-collection post
+// type to resolve, and asking for one is what the removed
+// spacefast_content_builtin_post_type() call was doing. That function has not
+// existed since the ContentModel rename, so every redemption was answering
+// 503 content_kernel_unavailable; kernel readiness is already proven above by
+// the principal and auth-cookie calls, which fail closed on their own.
+//
+// The Content screens live in the zero-admin plugin, and its own route builder
+// composes their URL: the page slug and the `p` parameter are that plugin's
+// vocabulary, and spelling them here would be a second copy to keep in step.
+// A launch that named no screen — the dashboard's "Open WordPress admin"
+// escape hatch — lands on WordPress's own list instead.
+$screen = $launch['screen'] ?? null;
+$landing = $screen !== null && function_exists('zero_admin_route_url')
+    ? zero_admin_route_url($screen === 'users' ? '/users' : '/types/post')
+    : '/wp-admin/edit.php';
+header('Location: ' . $landing, true, 303);
 exit;

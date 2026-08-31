@@ -41,14 +41,10 @@ fn capability_source() -> &'static str {
 const auth = globalThis.__statticAuth.current();
 const env = globalThis.__statticEnv;
 globalThis.__statticLog("info", "mutation committed", { table: "todos" });
-const published = globalThis.__statticRealtime.publish({
-  changedTables: ["todos"],
-  invalidate: ["todos.active"]
-});
 globalThis.__statticZeroResult = JSON.stringify({
   status: 200,
   headers: { "content-type": "application/json; charset=utf-8" },
-  body: JSON.stringify({ auth, env, published })
+  body: JSON.stringify({ auth, env })
 });
 "#
 }
@@ -76,6 +72,7 @@ fn no_capabilities() -> EndpointCapabilities {
         spam: false,
         email: false,
         content: false,
+        storage: false,
     }
 }
 
@@ -124,6 +121,7 @@ impl Fixture {
                 "format": ENDPOINT_FORMAT,
                 "endpointId": "GET /api/status",
                 "kind": "endpoint",
+                "executionMode": "read",
                 "method": "GET",
                 "path": "/api/status",
                 "sourcePath": "zero/endpoints/test.source.js",
@@ -167,6 +165,30 @@ impl Fixture {
         Self { site, root }
     }
 
+    fn artifact_path(&self) -> PathBuf {
+        self.root.join("zero/endpoints/test.json")
+    }
+
+    /// Rewrites the artifact on disk with `edit` applied, so a test can serve
+    /// the exact JSON a capsule finalized before a given law left behind.
+    fn edit_artifact(&self, edit: impl FnOnce(&mut serde_json::Map<String, Value>)) {
+        let raw = fs::read_to_string(self.artifact_path()).expect("artifact bytes");
+        let mut artifact: Value = serde_json::from_str(&raw).expect("artifact json");
+        edit(artifact.as_object_mut().expect("artifact object"));
+        fs::write(self.artifact_path(), artifact.to_string()).expect("artifact");
+    }
+
+    /// The envelope an engine from before the execution law sent: no mode at
+    /// all, because the field did not exist when that engine was built.
+    fn envelope_without_execution_mode(&self) -> String {
+        let mut envelope: Value = serde_json::from_str(&self.envelope()).expect("envelope json");
+        envelope
+            .as_object_mut()
+            .expect("envelope object")
+            .remove("executionMode");
+        envelope.to_string()
+    }
+
     /// The image render cache, a sibling of the version root.
     fn render_cache(&self) -> PathBuf {
         self.site.path().join("zero-render-cache")
@@ -191,6 +213,7 @@ impl Fixture {
             "protocol": "stattic.zero.invoke.v1",
             "versionRoot": self.root.to_string_lossy(),
             "endpointId": "GET /api/status",
+            "executionMode": "read",
             "request": {
                 "method": "GET",
                 "path": "/api/status",
@@ -256,106 +279,59 @@ fn invokes_bytecode_endpoint_artifact() {
     );
 }
 
+/// A capsule finalized before the execution law declares no `executionMode`,
+/// and its version is immutable. The runner derives the mode the publish path
+/// would have stamped and serves it, whether the engine on the box declares a
+/// mode for the request or predates the law as well.
 #[test]
-fn installs_db_host_only_when_capability_declares_db() {
-    let fixture = Fixture::new(true);
+fn serves_a_frozen_artifact_that_declares_no_execution_mode() {
+    let fixture = Fixture::new(false);
+    fixture.edit_artifact(|artifact| {
+        artifact.remove("executionMode");
+    });
 
-    let response = handle_invoke(&fixture.envelope()).expect("response");
+    let from_new_engine = handle_invoke(&fixture.envelope()).expect("response");
+    let from_old_engine =
+        handle_invoke(&fixture.envelope_without_execution_mode()).expect("response");
 
-    assert_eq!(response_body(&response)["dbInstalled"], true);
-    assert_eq!(response_body(&response)["dbCapability"], true);
-    assert_eq!(response_body(&response)["fetchInstalled"], false);
+    assert_eq!(from_new_engine.status, 202);
+    assert_eq!(
+        response_body(&from_new_engine)["endpointId"],
+        "GET /api/status"
+    );
+    assert_eq!(from_old_engine.status, 202);
+    assert_eq!(
+        response_body(&from_old_engine)["endpointId"],
+        "GET /api/status"
+    );
 }
 
 #[test]
 fn renders_capability_templates_only_when_declared() {
     let fixture = Fixture::with_capabilities(EndpointCapabilities {
-        db: true,
-        fetch: true,
+        db: false,
+        fetch: false,
         auth: true,
         env: true,
-        realtime: true,
+        realtime: false,
         logging: true,
         gravatar: true,
         spam: true,
-        email: true,
+        email: false,
         content: true,
+        storage: true,
     });
 
     let response = handle_invoke(&fixture.envelope()).expect("response");
     let body = response_body(&response);
 
-    assert_eq!(body["dbInstalled"], true);
-    assert_eq!(body["fetchInstalled"], true);
+    assert_eq!(body["dbInstalled"], false);
+    assert_eq!(body["fetchInstalled"], false);
     assert_eq!(body["authInstalled"], true);
     assert_eq!(body["envInstalled"], true);
-    assert_eq!(body["realtimeInstalled"], true);
+    assert_eq!(body["realtimeInstalled"], false);
     assert_eq!(body["loggingInstalled"], true);
     assert_eq!(body["serviceInstalled"], true);
-}
-
-#[test]
-fn declared_fetch_exposes_the_author_api_and_projects_the_broker_response() {
-    let fixture = Fixture::with_source_and_capabilities(
-        r#"
-function endpointResponseBodyBytes(value) { return [...String(value || "")].map((character) => character.charCodeAt(0)); }
-function endpointEncodeBase64(bytes) {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let output = "";
-  for (let index = 0; index < bytes.length; index += 3) {
-    const first = bytes[index], second = bytes[index + 1], third = bytes[index + 2];
-    output += alphabet[first >> 2];
-    output += alphabet[((first & 3) << 4) | ((second || 0) >> 4)];
-    output += second === undefined ? "=" : alphabet[((second & 15) << 2) | ((third || 0) >> 6)];
-    output += third === undefined ? "=" : alphabet[third & 63];
-  }
-  return output;
-}
-function decodeBase64Bytes(value) {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let bits = 0, length = 0; const bytes = [];
-  for (const character of value) {
-    if (character === "=") break;
-    bits = (bits << 6) | alphabet.indexOf(character); length += 6;
-    if (length >= 8) { length -= 8; bytes.push((bits >> length) & 255); }
-  }
-  return bytes;
-}
-globalThis.Headers = class Headers {
-  constructor(values = {}) { this.values = values; }
-  entries() { return Object.entries(this.values)[Symbol.iterator](); }
-};
-globalThis.Response = class Response {
-  constructor(body, init) { this.body = body; this.status = init.status; this.headers = init.headers; }
-  async text() { return String.fromCharCode(...this.body); }
-};
-globalThis.__statticFetchHost = (frame) => {
-  const request = JSON.parse(frame);
-  return JSON.stringify({
-    ok: true,
-    result: {
-      status: request.method === "POST" ? 201 : 400,
-      headers: { "content-type": "text/plain" },
-      bodyBase64: "aG9zdGVkLWZldGNo",
-    },
-  });
-};
-const response = await fetch("https://example.com/probe", { method: "POST", body: "hello" });
-globalThis.__statticZeroResult = JSON.stringify({
-  status: 200,
-  body: JSON.stringify({ status: response.status, body: await response.text() }),
-});
-"#,
-        EndpointCapabilities {
-            fetch: true,
-            ..no_capabilities()
-        },
-    );
-
-    let response = handle_invoke(&fixture.envelope()).expect("response");
-
-    assert_eq!(response_body(&response)["status"], 201);
-    assert_eq!(response_body(&response)["body"], "hosted-fetch");
 }
 
 /// One service is enough to install the bridge, because the bridge is shared
@@ -379,7 +355,6 @@ fn capability_shims_read_bootstrap_and_emit_events() {
         EndpointCapabilities {
             auth: true,
             env: true,
-            realtime: true,
             logging: true,
             ..no_capabilities()
         },
@@ -390,47 +365,87 @@ fn capability_shims_read_bootstrap_and_emit_events() {
 
     assert_eq!(body["auth"]["userId"], "usr_test");
     assert_eq!(body["env"]["FEATURE_FLAG"], "enabled");
-    assert_eq!(body["published"]["ok"], true);
-    assert_eq!(response.events.len(), 2);
+    assert_eq!(response.events.len(), 1);
     assert_eq!(response.events[0]["event"], "zero.log");
     assert_eq!(response.events[0]["level"], "info");
-    assert_eq!(response.events[1]["event"], "zero.realtime");
-    assert_eq!(response.events[1]["payload"]["spaceId"], "spc_test");
-    assert_eq!(response.events[1]["payload"]["versionId"], "ver_test");
-    assert_eq!(
-        response.events[1]["payload"]["changedTables"],
-        json!(["todos"])
-    );
-    assert_eq!(
-        response.events[1]["payload"]["changedQueries"],
-        json!(["todos.active"])
-    );
 }
 
 #[test]
 fn endpoint_capabilities_default_conservatively_when_metadata_is_absent_or_partial() {
+    // The write-side authorities default closed: an artifact that never named
+    // one cannot inherit a grant a `read` execution mode forbids.
     let missing: EndpointCapabilities = serde_json::from_value(json!({})).expect("capabilities");
     assert!(missing.db);
-    assert!(missing.fetch);
+    assert!(!missing.fetch);
     assert!(missing.auth);
     assert!(missing.env);
-    assert!(missing.realtime);
+    assert!(!missing.realtime);
     assert!(missing.logging);
+    assert!(!missing.email);
     assert!(!missing.content);
 
     let partial: EndpointCapabilities =
         serde_json::from_value(json!({ "db": false })).expect("capabilities");
     assert!(!partial.db);
-    assert!(partial.fetch);
+    assert!(!partial.fetch);
     assert!(partial.auth);
     assert!(partial.env);
-    assert!(partial.realtime);
+    assert!(!partial.realtime);
     assert!(partial.logging);
+    assert!(!partial.email);
     assert!(!partial.content);
 
     let explicit: EndpointCapabilities =
-        serde_json::from_value(json!({ "content": true })).expect("capabilities");
+        serde_json::from_value(json!({ "content": true, "realtime": true })).expect("capabilities");
     assert!(explicit.content);
+    assert!(explicit.realtime);
+
+    // Reading a frozen artifact needs this same set as a value, so the two must
+    // not drift apart.
+    assert_eq!(missing, EndpointCapabilities::declared_defaults());
+}
+
+/// A capsule finalized before the execution law was compiled against a prelude
+/// that installed fetch, realtime and email unless told otherwise. Reading its
+/// omissions as the modern "closed" would take capabilities away from a version
+/// nobody can rebuild, and the mode check would then refuse it outright for
+/// carrying the only shape it could have been published in.
+#[test]
+fn a_frozen_artifact_keeps_the_open_capabilities_it_was_published_with() {
+    let fixture = Fixture::with_source_and_capabilities(
+        // The grant the handler is actually run under, read back off the
+        // bootstrap rather than off the compiled template — the template is
+        // baked at publish and cannot tell one reading of the artifact from
+        // another.
+        r#"
+globalThis.__statticZeroResult = JSON.stringify({
+  status: 200,
+  headers: { "content-type": "application/json; charset=utf-8" },
+  body: JSON.stringify(globalThis.__statticZeroCapabilities)
+});
+"#,
+        EndpointCapabilities {
+            fetch: true,
+            realtime: true,
+            email: true,
+            ..no_capabilities()
+        },
+    );
+    fixture.edit_artifact(|artifact| {
+        artifact.remove("executionMode");
+        // The pre-law capability block: the write-side keys simply are not in it.
+        artifact.insert("capabilities".to_string(), json!({ "db": false }));
+    });
+
+    let response = handle_invoke(&fixture.envelope()).expect("response");
+    let body = response_body(&response);
+
+    assert_eq!(response.status, 200);
+    assert_eq!(body["fetch"], true);
+    assert_eq!(body["realtime"], true);
+    assert_eq!(body["email"], true);
+    // A key it did state is still its own.
+    assert_eq!(body["db"], false);
 }
 
 #[test]
@@ -492,6 +507,21 @@ fn rejects_wrong_endpoint_id() {
 
     assert_eq!(response.status, 422);
     assert_eq!(response_body(&response)["code"], "zero_endpoint_mismatch");
+}
+
+#[test]
+fn rejects_artifact_mode_that_does_not_match_the_invocation() {
+    let fixture = Fixture::new(false);
+    let mut envelope: Value = serde_json::from_str(&fixture.envelope()).expect("envelope");
+    envelope["executionMode"] = json!("write");
+
+    let response = handle_invoke(&envelope.to_string()).unwrap_err();
+
+    assert_eq!(response.status, 422);
+    assert_eq!(
+        response_body(&response)["code"],
+        "zero_artifact_mode_invalid"
+    );
 }
 
 #[test]

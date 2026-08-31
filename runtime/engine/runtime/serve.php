@@ -791,6 +791,55 @@ function _stattic_v4_functions_static_bypass_capable(string $versionRoot, string
     return is_array($route) && ($route['action'] ?? null) === 'dispatch_functions';
 }
 
+// One stat, cached per version: a Zero page's document response settles the
+// visitor's guest identity, and every purely static version has to answer that
+// question without paying for a read. `zero/config.json` is the artifact the
+// Zero lane itself reads, so its presence is the same "this version HAS Zero"
+// the runtime already trusts.
+function _stattic_v4_version_has_zero_runtime(string $versionRoot): bool
+{
+    static $cache = [];
+    $path = dirname($versionRoot) . '/zero/config.json';
+    return $cache[$path] ??= is_file($path);
+}
+
+/**
+ * Settle a Zero visitor's anonymous session on the DOCUMENT, before the page can
+ * open a single XHR.
+ *
+ * A Zero client's first render fires auth.get, query.subscribe and mutation.run
+ * together. Each of those requests arrives cookie-less, each mints its own
+ * anonymous session, and the browser keeps whichever Set-Cookie landed last: the
+ * identity the page renders and the identity a mutation ran under disagree.
+ * Serializing that in the client cannot fix it for capsules, which bake their
+ * client at build time and may never be rebuilt — so the server establishes the
+ * session on the one response that provably precedes every XHR.
+ *
+ * Writing the cookie also marks the response no-store
+ * (_stattic_identity_cookie_mutated), so this document never warms a shared
+ * cache with one visitor's Set-Cookie.
+ */
+function _stattic_zero_prime_anonymous_document_session(
+    array $context,
+    array $headers,
+    int $status,
+    string $method
+): void {
+    if (
+        $status !== 200
+        || !in_array($method, ['GET', 'HEAD'], true)
+        || !str_starts_with(strtolower((string) ($headers['content-type'] ?? '')), 'text/html')
+        || !_stattic_v4_version_has_zero_runtime((string) $context['version_root'])
+    ) {
+        return;
+    }
+    require_once __DIR__ . '/access-rules.php';
+    _stattic_anonymous_session_ensure_anonymous_id(
+        is_array($context['serving'] ?? null) ? $context['serving'] : [],
+        (string) $context['host']
+    );
+}
+
 // Exits on every path that produces a response. It RETURNS only when the entry
 // was an action that declined to handle the request, so the caller's ladder
 // continues to the 404 tail.
@@ -836,6 +885,8 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         _stattic_method_decline(['GET', 'HEAD']);
         return;
     }
+
+    _stattic_zero_prime_anonymous_document_session($context, $headers, $status, $method);
 
     $noStore = _stattic_cache_policy_no_store_flags();
     $privateCache = (bool) $context['private_cache'] || $noStore;
@@ -999,6 +1050,13 @@ function _stattic_v4_platform_response_headers(array $context, array $headers, b
             CASE_LOWER
         );
         _stattic_clear_private_content_response_headers();
+    }
+    if (function_exists('_stattic_frame_response_headers')) {
+        $headers = _stattic_frame_response_headers(
+            is_array($context['serving'] ?? null) ? $context['serving'] : [],
+            (string) ($context['client_path'] ?? '/'),
+            $headers
+        );
     }
     $headers['x-content-type-options'] = 'nosniff';
     if (!empty($context['host_entry']['noindex'])) {

@@ -41,16 +41,35 @@ const BUILD_ARTIFACTS = new Set([
   // Built by scripts/build-runtime-native.mjs into gitignored runtime/bin/;
   // installer-real-manifest.test.ts stubs it for the same reason.
   "bin/stattic-runtime",
+  // The zero-admin plugin, built by packages/zero-admin/scripts/build.ts into
+  // gitignored runtime/wordpress/zero-admin/. Its source lives in that package
+  // (PHP included), and packages/zero-admin/test/engine-manifest.test.ts holds
+  // these entries against it — this guard only needs to know they are built.
+  "wordpress/zero-admin/admin-page.php",
+  "wordpress/zero-admin/assets.php",
+  "wordpress/zero-admin/bootstrap.php",
+  "wordpress/zero-admin/routes.php",
+  "wordpress/zero-admin/zero-admin.php",
+  "wordpress/zero-admin/build/admin.js",
+  "wordpress/zero-admin/build/admin.css",
+  "wordpress/zero-admin/build/admin.asset.php",
 ]);
+
+// Generated roots: present after a build, absent in a fresh checkout, so the
+// walk has to skip them either way and BUILD_ARTIFACTS reconciles their
+// manifest entries instead. Turbo task metadata is build output the same way.
+const GENERATED_ROOTS = [".turbo", "bin", "wordpress/zero-admin"];
 
 // Walk the working tree, not Git's index, because the dev engine builder
 // packages the working tree too. An untracked PHP module must be covered before
 // its first commit, or a caller requires it locally while the built artifact
-// omits it. `bin/` is generated and reconciled through BUILD_ARTIFACTS instead.
+// omits it.
 function runtimeFilesOnDisk(directory = runtimeRoot, prefix = ""): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (relative === "bin" || relative.startsWith("bin/")) return [];
+    if (GENERATED_ROOTS.some((root) => relative === root || relative.startsWith(`${root}/`))) {
+      return [];
+    }
     // Coverage-instrumented native children receive the runtime's production
     // env allowlist, so LLVM falls back to this cwd-relative profile name.
     if (/^default_[0-9]+_[0-9]+_[0-9]+\.profraw$/.test(relative)) return [];

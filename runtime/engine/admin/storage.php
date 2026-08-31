@@ -57,6 +57,81 @@ function _stattic_storage_list(string $privateRoot, string $spaceId): void
     ]);
 }
 
+/**
+ * The owner's own upload lane: raw bytes in, one storage object out.
+ *
+ * The visitor lane (runtime/storage.php) admits a browser session and charges an
+ * anonymous budget. Neither applies here — the control plane has already
+ * authorized the space, and it names the person on whose behalf it is acting in
+ * the signed `storage_uploader_id` claim, so a caller cannot invent an uploader.
+ * The content policy IS shared: whatever a visitor may not store, an owner may
+ * not store either.
+ *
+ * The route table gives this row the per-space write lock, so the commit below
+ * must not take it again.
+ */
+function _stattic_storage_object_create(string $privateRoot, string $spaceId, array $claims): void
+{
+    if (!is_dir(_stattic_space_root($privateRoot, $spaceId))) {
+        _stattic_problem_response(404, 'storage_unavailable', 'Storage is unavailable for this space.');
+    }
+    $staged = _stattic_storage_stage_upload($privateRoot);
+    if (($staged['ok'] ?? false) !== true) {
+        if (($staged['reason'] ?? null) === 'too_large') {
+            _stattic_problem_response(413, 'storage_file_too_large', 'Storage uploads are limited to 5 MiB.');
+        }
+        if (($staged['reason'] ?? null) === 'empty') {
+            _stattic_problem_response(400, 'storage_empty_file', 'Storage uploads cannot be empty.');
+        }
+        _stattic_problem_response(503, 'storage_unavailable', 'Storage could not persist this object.');
+    }
+    $tmpPath = is_string($staged['tmp_path'] ?? null) ? $staged['tmp_path'] : '';
+    $contentType = is_string($_SERVER['CONTENT_TYPE'] ?? null)
+        ? trim(substr($_SERVER['CONTENT_TYPE'], 0, 255))
+        : '';
+    if ($contentType === '') {
+        $contentType = 'application/octet-stream';
+    }
+    if (_stattic_storage_content_blocked($contentType, is_string($staged['prefix'] ?? null) ? $staged['prefix'] : '')) {
+        unlink($tmpPath);
+        _stattic_problem_response(415, 'storage_content_blocked', 'Executable and active web content cannot be uploaded.');
+    }
+
+    $uploaderId = is_string($claims['storage_uploader_id'] ?? null)
+        ? trim($claims['storage_uploader_id'])
+        : '';
+    if ($uploaderId === '' || strlen($uploaderId) > 255) {
+        // The claim is the control plane's to set; a request without a usable
+        // one still records who it was on behalf of at the coarsest true level.
+        $uploaderId = 'owner:' . $spaceId;
+    }
+    $id = bin2hex(random_bytes(16));
+    $record = [
+        'contentType' => $contentType,
+        'createdAt' => gmdate('c'),
+        'filename' => _stattic_uploads_request_filename(),
+        'sha256' => is_string($staged['sha256'] ?? null) ? $staged['sha256'] : '',
+        'size' => is_int($staged['size'] ?? null) ? $staged['size'] : 0,
+        'uploaderId' => $uploaderId,
+    ];
+    // Normalized BEFORE the commit: a record this reader would refuse must never
+    // reach the store, where it would read as an absent object over live bytes.
+    $normalized = _stattic_uploads_record($record);
+    if ($normalized === null) {
+        unlink($tmpPath);
+        _stattic_problem_response(503, 'storage_unavailable', 'Storage could not persist this object.');
+    }
+    // The read key composes the URL in the response, and minting it can fail.
+    // Resolve it BEFORE the commit so that failure refuses the upload instead
+    // of storing an object the caller was told did not happen.
+    $readKey = _stattic_storage_read_key($privateRoot);
+    _stattic_storage_commit_record($privateRoot, $spaceId, $id, $tmpPath, $record);
+
+    // The same projection the list answers with, so one object shape crosses
+    // this boundary whether it was just created or read back later.
+    _stattic_json_response(201, _stattic_uploads_owner_object($id, $normalized, $readKey));
+}
+
 function _stattic_storage_read_key_get(string $privateRoot): void
 {
     _stattic_json_response(200, ['key' => _stattic_storage_read_key($privateRoot)]);
@@ -157,6 +232,9 @@ function _stattic_uploads_owner_object(string $id, array $record, string $readKe
         'id' => $id,
         'contentType' => $record['contentType'],
         'createdAt' => gmdate('Y-m-d\TH:i:s\Z', (int) strtotime($record['createdAt'])),
+        // Omitted, never null: an object stored before names existed, or
+        // uploaded without one, simply has no filename.
+        ...($record['filename'] === null ? [] : ['filename' => $record['filename']]),
         'size' => $record['size'],
         'uploaderId' => $record['uploaderId'],
         'sha256' => $record['sha256'],

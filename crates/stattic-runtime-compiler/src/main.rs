@@ -1,4 +1,3 @@
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use stattic_runtime_core::{
     finalize_site, read_site_finalize_input, write_site_finalize_error, write_site_finalize_output,
@@ -21,16 +20,6 @@ enum Command {
     Invoke,
     ServiceBroker,
     MarkdownToHtml,
-    ContentCompile {
-        config: PathBuf,
-        output: PathBuf,
-        php_only: bool,
-        inspect: bool,
-    },
-    RunHook {
-        manifest: PathBuf,
-        id: String,
-    },
     SelfTest,
 }
 
@@ -48,7 +37,6 @@ enum CliError {
     Finalize(FinalizeError),
     Json(serde_json::Error),
     Io(io::Error),
-    ContentCompile(String),
     SelfTest(String),
 }
 
@@ -59,7 +47,6 @@ impl std::fmt::Display for CliError {
             Self::Finalize(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
             Self::Io(error) => write!(f, "{error}"),
-            Self::ContentCompile(error) => f.write_str(error),
             Self::SelfTest(message) => f.write_str(message),
         }
     }
@@ -110,71 +97,7 @@ fn run() -> Result<(), CliError> {
         Command::Invoke => stattic_zero_runner::run_stdio(),
         Command::ServiceBroker => stattic_zero_runner::run_service_broker_stdio(),
         Command::MarkdownToHtml => markdown_to_html()?,
-        Command::ContentCompile {
-            config,
-            output,
-            php_only,
-            inspect,
-        } => content_compile(config, output, php_only, inspect)?,
-        Command::RunHook { manifest, id } => run_content_hook(manifest, id)?,
         Command::SelfTest => self_test()?,
-    }
-    Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-struct HookManifest {
-    hooks: Vec<payloadwp::ir::Hook>,
-}
-
-fn run_content_hook(manifest: PathBuf, id: String) -> Result<(), CliError> {
-    let manifest: HookManifest = serde_json::from_slice(&fs::read(&manifest)?)?;
-    let hook = manifest
-        .hooks
-        .iter()
-        .find(|hook| hook.id == id)
-        .ok_or_else(|| CliError::ContentCompile(format!("hook {id} is not present")))?;
-    if !hook.capabilities.is_empty() {
-        return Err(CliError::ContentCompile(format!(
-            "hook {id} requires unsupported capabilities: {}",
-            hook.capabilities.join(", ")
-        )));
-    }
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-    let arguments = serde_json::from_str(&input)?;
-    let result = payloadwp::javascript::run_executable(&hook.source, &arguments, &hook.event)
-        .map_err(|error| CliError::ContentCompile(error.to_string()))?;
-    println!("{}", serde_json::to_string(&result)?);
-    Ok(())
-}
-
-fn content_compile(
-    config: PathBuf,
-    output: PathBuf,
-    php_only: bool,
-    inspect: bool,
-) -> Result<(), CliError> {
-    let report = payloadwp::compile(payloadwp::CompileOptions {
-        config,
-        output,
-        php_only,
-        inspect_only: inspect,
-    })
-    .map_err(|error| CliError::ContentCompile(error.to_string()))?;
-    if inspect {
-        println!("{}", report.ir_json);
-    } else {
-        println!(
-            "{}",
-            serde_json::json!({
-                "format": "spacefast.content.compile.v1",
-                "collections": report.collections,
-                "fields": report.fields,
-                "hooks": report.hooks,
-                "output": report.output.to_string_lossy(),
-            })
-        );
     }
     Ok(())
 }
@@ -336,69 +259,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliErro
         "invoke" => no_operands(args, Command::Invoke),
         "service-broker" => no_operands(args, Command::ServiceBroker),
         "markdown-to-html" => no_operands(args, Command::MarkdownToHtml),
-        "content-compile" => parse_content_compile_args(args),
-        "run-hook" => parse_run_hook_args(args),
         "--help" | "-h" | "help" => Err(CliError::Usage(usage())),
         _ => Err(CliError::Usage(format!(
             "unknown command {command:?}\n\n{}",
             usage()
         ))),
     }
-}
-
-fn parse_run_hook_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliError> {
-    let mut manifest = None;
-    let mut id = None;
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--manifest" => manifest = Some(next_path(&mut args, "--manifest")?),
-            "--id" => id = Some(next_value(&mut args, "--id")?),
-            "--help" | "-h" => return Err(CliError::Usage(usage())),
-            _ => {
-                return Err(CliError::Usage(format!(
-                    "unknown argument {arg:?} for run-hook\n\n{}",
-                    usage()
-                )))
-            }
-        }
-    }
-    Ok(Command::RunHook {
-        manifest: manifest.ok_or_else(|| CliError::Usage("run-hook requires --manifest".into()))?,
-        id: id.ok_or_else(|| CliError::Usage("run-hook requires --id".into()))?,
-    })
-}
-
-fn parse_content_compile_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliError> {
-    let mut config = None;
-    let mut output = None;
-    let mut php_only = false;
-    let mut inspect = false;
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--config" => config = Some(next_path(&mut args, "--config")?),
-            "--output" => output = Some(next_path(&mut args, "--output")?),
-            "--php-only" => php_only = true,
-            "--inspect" => inspect = true,
-            "--help" | "-h" => return Err(CliError::Usage(usage())),
-            _ => {
-                return Err(CliError::Usage(format!(
-                    "unknown argument {arg:?} for content-compile\n\n{}",
-                    usage()
-                )))
-            }
-        }
-    }
-    let config =
-        config.ok_or_else(|| CliError::Usage("content-compile requires --config".into()))?;
-    let output = output.unwrap_or_else(|| PathBuf::from("dist/spacefast-content"));
-    Ok(Command::ContentCompile {
-        config,
-        output,
-        php_only,
-        inspect,
-    })
 }
 
 fn no_operands(
@@ -453,8 +319,6 @@ fn usage() -> String {
   stattic-runtime invoke
   stattic-runtime service-broker
   stattic-runtime markdown-to-html
-  stattic-runtime content-compile --config <payload.config.ts> [--output <dir>] [--php-only] [--inspect]
-  stattic-runtime run-hook --manifest <hooks.json> --id <hook-id>
   stattic-runtime --self-test
 
 finalize takes a `stattic.runtime.finalize.input.v2` payload, runs the
@@ -483,72 +347,5 @@ mod tests {
         assert!(!env::temp_dir()
             .join(format!("stattic-runtime-self-test-{}", std::process::id()))
             .exists());
-    }
-
-    #[test]
-    fn content_compile_evaluates_typescript_and_keeps_quickjs_fallbacks() {
-        let root = env::temp_dir().join(format!(
-            "spacefast-content-compile-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("create compiler fixture root");
-        let config = root.join("payload.config.ts");
-        let collections = root.join("collections");
-        let output = root.join("compiled");
-        fs::create_dir_all(&collections).expect("create collection fixture directory");
-        fs::write(
-            collections.join("articles.ts"),
-            r#"
-const collectionSlug: string = "articles";
-export const Articles = {
-  slug: collectionSlug,
-  fields: [
-    { name: "title", type: "text", required: true },
-    { name: "priority", type: "number", validate: value => value <= 5 || "Too high" },
-  ],
-  hooks: { beforeChange: [async ({ data }) => data] },
-};
-"#,
-        )
-        .expect("write imported TypeScript fixture");
-        fs::write(
-            &config,
-            r#"
-import { Articles } from "./collections/articles.ts";
-export default {
-  collections: [Articles],
-  globals: [],
-};
-"#,
-        )
-        .expect("write TypeScript fixture");
-
-        content_compile(config, output.clone(), false, false).expect("compile Payload config");
-        let schema: serde_json::Value = serde_json::from_slice(
-            &fs::read(output.join("schema.json")).expect("read compiled schema"),
-        )
-        .expect("parse compiled schema");
-        let hooks: serde_json::Value = serde_json::from_slice(
-            &fs::read(output.join("hooks.json")).expect("read compiled hooks"),
-        )
-        .expect("parse compiled hooks");
-        assert_eq!(schema["schema_version"], 3);
-        assert_eq!(schema["collections"][0]["slug"], "articles");
-        let hook_list = hooks["hooks"].as_array().expect("hook list");
-        assert!(hook_list.iter().any(|hook| hook["target"] == "php"));
-        let hook = hook_list
-            .iter()
-            .find(|hook| hook["target"] == "quick_js")
-            .expect("QuickJS fallback hook");
-        let executed = payloadwp::javascript::run_executable(
-            hook["source"].as_str().expect("hook source"),
-            &serde_json::json!({ "data": { "title": "Hello" } }),
-            hook["event"].as_str().expect("hook event"),
-        )
-        .expect("execute QuickJS fallback");
-        assert_eq!(executed["title"], "Hello");
-        assert!(output.join("payloadwp.php").is_file());
-        let _ = fs::remove_dir_all(root);
     }
 }

@@ -2,32 +2,22 @@
 declare(strict_types=1);
 
 /**
- * Return the management JWT action, null for a public query, or false when the
- * request does not name a supported content operation.
+ * Return the management JWT action, or false when the request does not name a
+ * supported control-plane operation. Content model data reads and writes execute as
+ * Abilities through Zero; this endpoint has no public data lane.
  */
-function _stattic_content_management_action(array $request): string|false|null
+function _stattic_content_management_action(array $request): string|false
 {
-    if (($request['format'] ?? null) === 'spacefast.content.query') {
-        if (($request['managed'] ?? false) === true) {
-            return 'content.query';
-        }
-        foreach (is_array($request['queries'] ?? null) ? $request['queries'] : [] as $query) {
-            if (is_array($query) && ($query['status'] ?? 'publish') !== 'publish') {
-                return 'content.query';
-            }
-        }
-        return null;
-    }
-    if (($request['operation'] ?? null) === 'document.render') {
-        return ($request['managed'] ?? false) === true ? 'content.render' : null;
-    }
     return match ((string) ($request['operation'] ?? '')) {
         'admin.launch' => 'content.admin.launch',
         'authorization.apply' => 'content.authorization.apply',
-        'schema.compile' => 'content.schema.compile',
-        'schema.activate' => 'content.schema.activate',
-        'document.upsert' => 'content.document.upsert',
-        'markdown.sync' => 'content.markdown.sync',
+        'model.stage' => 'content.model.stage',
+        'model.activate' => 'content.model.activate',
+        'source.reconcile' => 'content.source.reconcile',
+        'source.acknowledge' => 'content.source.acknowledge',
+        'storage.list' => 'content.storage.list',
+        'storage.get' => 'content.storage.get',
+        'storage.delete' => 'content.storage.delete',
         default => false,
     };
 }

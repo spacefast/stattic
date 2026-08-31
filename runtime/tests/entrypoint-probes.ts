@@ -70,7 +70,7 @@ export const ENTRYPOINT_PROBES = entrypointProbeCatalog({
       fetch(`${rt.baseUrl}${runtimeHttpPath("/__spacefast/content.php")}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ operation: "schema.activate", revision: null }),
+        body: JSON.stringify({ operation: "model.activate", revision: null }),
         redirect: "manual",
       }),
     verify: (response) => expectErrorCode(response, 401, "runtime_unauthorized"),

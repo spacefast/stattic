@@ -1402,7 +1402,27 @@ function _stattic_runtime_route_shard_gc(string $privateRoot): int
     return is_int($deleted) ? $deleted : 0;
 }
 
-const STATTIC_RUNTIME_ZERO_CAPABILITIES = ['db', 'fetch', 'auth', 'env', 'realtime', 'logging'];
+// Every capability the publish path recognizes, with the grant applied when the
+// descriptor omits it. The write-side authorities default closed: a `read`
+// handler may not carry one, so an open default would compile an artifact the
+// runner refuses on every request.
+// Mirrors ZeroCapabilities in stattic-runtime-core's model.rs, key for key
+// and default for default. A capability missing here cannot be declared
+// through this intake at all — the normalizer emits exactly these keys — so
+// drift between the two lists silently strips grants from every artifact.
+const STATTIC_RUNTIME_ZERO_CAPABILITIES = [
+    'db' => true,
+    'fetch' => false,
+    'auth' => true,
+    'env' => true,
+    'realtime' => false,
+    'logging' => true,
+    'gravatar' => true,
+    'spam' => true,
+    'email' => false,
+    'content' => false,
+    'storage' => false,
+];
 
 // ---------------------------------------------------------------------------
 // Space overlay (contracts §4)
@@ -1476,6 +1496,12 @@ function _stattic_runtime_overlay_open(
     $unconditional = is_array($grantIndex['unconditionalTargets'] ?? null)
         ? $grantIndex['unconditionalTargets']
         : [];
+    // Frame paths need access-rules.php even when their page bytes are public:
+    // it projects the exact Link-owned parent origins into CSP without adding a
+    // token, cookie, Vary value, or private cache policy.
+    if (($grantIndex['hasFrameLinks'] ?? false) === true) {
+        return false;
+    }
     return ($unconditional['live'] ?? null) === true
         && ($unconditional['all_versions'] ?? null) === true;
 }
@@ -1823,8 +1849,24 @@ function _stattic_runtime_zero_compiler_entries(array $input, string $snakeIdKey
         if (is_string($entry['schema_hash'] ?? null) && !array_key_exists('schemaHash', $entry)) {
             $entry['schemaHash'] = $entry['schema_hash'];
         }
+        if (is_string($entry['execution_mode'] ?? null) && !array_key_exists('executionMode', $entry)) {
+            $entry['executionMode'] = $entry['execution_mode'];
+        }
+        if (!array_key_exists('executionMode', $entry)) {
+            // Capsules built before the execution law declare no mode. Derive
+            // it, sharing the one rule the serve path applies to the same
+            // capsule: a legacy run keeps write, what every run could do before
+            // the split. The runner still cross-checks the declared mode
+            // against the invoked operation at serve time and refuses on
+            // disagreement, so this default can never widen what a request may
+            // actually do.
+            $entry['executionMode'] = _stattic_zero_derived_execution_mode(
+                $camelIdKey === 'endpointId' ? 'endpoint' : 'run',
+                (string) ($entry['method'] ?? '')
+            );
+        }
         $entry['capabilities'] = _stattic_runtime_zero_endpoint_capabilities($entry['capabilities'] ?? []);
-        unset($entry[$snakeIdKey], $entry['schema_hash']);
+        unset($entry[$snakeIdKey], $entry['schema_hash'], $entry['execution_mode']);
         $entries[] = $entry;
     }
 
@@ -1867,10 +1909,10 @@ function _stattic_runtime_zero_endpoint_capabilities(mixed $input): array
 {
     $raw = is_array($input) ? $input : [];
     $out = [];
-    foreach (STATTIC_RUNTIME_ZERO_CAPABILITIES as $capability) {
+    foreach (STATTIC_RUNTIME_ZERO_CAPABILITIES as $capability => $granted) {
         $out[$capability] = array_key_exists($capability, $raw)
             ? (bool) $raw[$capability]
-            : true;
+            : $granted;
     }
 
     return $out;

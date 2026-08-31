@@ -2,7 +2,7 @@
 // runs their QuickJS bytecode, and finalize turns everything a version answers
 // into schema-v4 response-table entries (contracts §5). Serving of redirects and
 // `_headers` belongs to routing.test.ts and headers.test.ts. This file owns only
-// that the compiler writes those answers, the Zero actions and the Zero pack
+// that the compiler writes those answers, the Zero endpoints and the Zero pack
 // into the artifacts the serve path reads.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -63,6 +63,7 @@ const MYSQL_TODOS_DB = {
 } as const;
 const SHARED_ZERO_RUNS = [
   {
+    execution_mode: "read",
     run_id: "query_todos",
     source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });",
     schema_hash: "sha256:mysql",
@@ -70,6 +71,7 @@ const SHARED_ZERO_RUNS = [
     db: MYSQL_TODOS_DB,
   },
   {
+    execution_mode: "write",
     run_id: "mutation_addTodo",
     source:
       'globalThis.__statticZeroResult = JSON.stringify({ status: 200, body: JSON.stringify(globalThis.__statticRealtime.publish("todos", {})) });',
@@ -165,6 +167,7 @@ globalThis.__statticZeroResult = JSON.stringify({
       SPACEFAST_ZERO_RUNNER_CAPTURE: runtimeCapturePath,
       SPACEFAST_ZERO_RUNNER_DEBUG: "1",
       SPACEFAST_ZERO_DATABASE_URL: mysql.url,
+      SPACEFAST_SERVICE_EMAIL_SENDERS: "hello@example.com",
     },
   });
   await deploy(rt, {
@@ -177,6 +180,7 @@ globalThis.__statticZeroResult = JSON.stringify({
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "write",
           method: "POST",
           path: "/api/status",
           source: endpointSource,
@@ -205,12 +209,14 @@ globalThis.__statticZeroResult = JSON.stringify({
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "write",
           method: "POST",
           path: "/api/generated",
           source: endpointSource,
           capabilities: { db: false },
         },
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/generated/:id",
           source: endpointSource,
@@ -249,6 +255,7 @@ globalThis.__statticZeroResult = JSON.stringify({
           },
         },
         {
+          execution_mode: "write",
           method: "POST",
           path: "/api/generated/db",
           source: `
@@ -272,44 +279,39 @@ globalThis.__statticZeroResult = JSON.stringify({
           db: MYSQL_TODOS_DB,
         },
         {
-          method: "POST",
-          path: "/api/generated/db-rollback",
+          execution_mode: "read",
+          method: "GET",
+          path: "/api/generated/read-law",
           source: `
-const endpoint = globalThis.__statticZeroEndpoint;
-const table = endpoint.db.tables.todos.quotedName;
-const rollback = JSON.parse(globalThis.__statticDb(JSON.stringify({
-  mode: "transaction",
-  statements: [
-    {
-      mode: "execute",
-      sql: "INSERT INTO " + table + " (todo_title) VALUES (?)",
-      params: ["rolled-back"]
-    },
-    {
-      mode: "execute",
-      sql: "INSERT INTO " + table + " (missing_column) VALUES (?)",
-      params: ["boom"]
-    }
-  ]
-})));
-const rows = JSON.parse(globalThis.__statticDb(JSON.stringify({
-  sql: "SELECT todo_id, todo_title FROM " + table + " WHERE todo_title = ?",
-  params: ["rolled-back"]
+const table = globalThis.__statticZeroEndpoint.db.tables.todos.quotedName;
+const count = () => JSON.parse(globalThis.__statticDb(JSON.stringify({
+  sql: "SELECT COUNT(*) AS total FROM " + table + " WHERE todo_title = ?",
+  params: ["repeatable-read-probe"]
+}))).rows[0].total;
+const before = count();
+globalThis.__statticDb(JSON.stringify({ sql: "SELECT SLEEP(1)" }));
+const after = count();
+const write = JSON.parse(globalThis.__statticDb(JSON.stringify({
+  mode: "execute",
+  sql: "INSERT INTO " + table + " (todo_title) VALUES (?)",
+  params: ["read-mode-write"]
 })));
 globalThis.__statticZeroResult = JSON.stringify({
   status: 200,
   headers: { "content-type": "application/json; charset=utf-8" },
-  body: JSON.stringify({ rollback, rows: rows.rows })
+  body: JSON.stringify({ before, after, write })
 });
 `,
           capabilities: { db: true },
           db: MYSQL_TODOS_DB,
         },
         {
+          execution_mode: "write",
           method: "POST",
           path: "/api/generated/atomic-rollback",
           source: `${ZERO_RUNTIME_HOST_SOURCE}
 const route = {
+  mode: "write",
   method: "POST",
   path: "/api/generated/atomic-rollback",
 };
@@ -317,22 +319,44 @@ const capsule = {
   endpoints: {
     atomicRollback: {
       ...route,
-      // Every db call is awaited: the host adapter's table API is async, so an
-      // unawaited insert reports its duplicate as an unhandled rejection and the
-      // transaction commits the first write regardless.
       async handler(ctx) {
-        let failure = "";
-        try {
-          await ctx.transaction(async () => {
-            await ctx.db.todos.insert({ id: "99001", title: "must-roll-back" });
-            await ctx.db.todos.insert({ id: "99001", title: "duplicate" });
-          });
-        } catch (error) {
-          failure = String(error && error.message ? error.message : error);
-        }
+        await ctx.db.todos.insert({ title: "must-roll-back-invalid-output" });
+        return { ok: true };
+      },
+    },
+  },
+};
+await globalThis.__statticRunZeroEndpoint(capsule, route);
+globalThis.__statticZeroResult = "{";`,
+          schema_hash: "sha256:mysql",
+          capabilities: { db: true, realtime: true },
+          db: MYSQL_TODOS_DB,
+        },
+        {
+          execution_mode: "write",
+          method: "POST",
+          path: "/api/generated/atomic-mail",
+          source: `${ZERO_RUNTIME_HOST_SOURCE}
+const route = {
+  mode: "write",
+  method: "POST",
+  path: "/api/generated/atomic-mail",
+};
+const capsule = {
+  endpoints: {
+    atomicMail: {
+      ...route,
+      async handler(ctx) {
+        await ctx.db.todos.insert({ id: "99003", title: "committed-mail" });
+        const committed = await ctx.email.send({
+          from: "hello@example.com",
+          to: "reader@example.com",
+          subject: "committed",
+          text: "commits with the row",
+        });
         return {
-          duplicateRejected: failure.length > 0,
-          row: await ctx.db.todos.get("99001"),
+          committedRow: await ctx.db.todos.get("99003"),
+          committed,
         };
       },
     },
@@ -340,7 +364,39 @@ const capsule = {
 };
 await globalThis.__statticRunZeroEndpoint(capsule, route);`,
           schema_hash: "sha256:mysql",
-          capabilities: { db: true, realtime: true },
+          capabilities: { db: true, email: true },
+          db: MYSQL_TODOS_DB,
+        },
+        {
+          execution_mode: "write",
+          method: "POST",
+          path: "/api/generated/atomic-mail-rollback",
+          source: `${ZERO_RUNTIME_HOST_SOURCE}
+const route = {
+  mode: "write",
+  method: "POST",
+  path: "/api/generated/atomic-mail-rollback",
+};
+const capsule = {
+  endpoints: {
+    atomicMailRollback: {
+      ...route,
+      async handler(ctx) {
+        await ctx.db.todos.insert({ id: "99002", title: "rolled-back-mail" });
+        await ctx.email.send({
+          from: "hello@example.com",
+          to: "reader@example.com",
+          subject: "rolled back",
+          text: "must not leave the transaction",
+        });
+        throw new Error("rollback mail");
+      },
+    },
+  },
+};
+await globalThis.__statticRunZeroEndpoint(capsule, route);`,
+          schema_hash: "sha256:mysql",
+          capabilities: { db: true, email: true },
           db: MYSQL_TODOS_DB,
         },
         {
@@ -348,6 +404,7 @@ await globalThis.__statticRunZeroEndpoint(capsule, route);`,
           path: "/api/generated/lakebed-db",
           source: `${ZERO_RUNTIME_HOST_SOURCE}
 const route = {
+  mode: "write",
   method: "POST",
   path: "/api/generated/lakebed-db",
 };
@@ -467,6 +524,7 @@ await globalThis.__statticRunZeroEndpoint(capsule, route);`,
           },
         },
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/generated/response-headers",
           source: `
@@ -563,6 +621,7 @@ test("surfaces Rust runtime compiler diagnostics during finalize", async () => {
       serving: {
         zero_endpoints: [
           {
+            execution_mode: "read",
             method: "GET",
             path: "/api/broken",
             source: "export {",
@@ -580,6 +639,7 @@ test("surfaces Rust runtime compiler diagnostics during finalize", async () => {
 test("Rust compiler rejects equal-score overlapping Zero patterns in either order", async () => {
   const endpoints = [
     {
+      execution_mode: "read",
       method: "GET",
       path: "/api/:left/alpha",
       source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });",
@@ -587,6 +647,7 @@ test("Rust compiler rejects equal-score overlapping Zero patterns in either orde
       capabilities: { db: false },
     },
     {
+      execution_mode: "read",
       method: "GET",
       path: "/api/beta/:right",
       source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });",
@@ -636,6 +697,7 @@ test("compiles zero_endpoints during finalize and invokes generated bytecode", a
   });
   const envelope = JSON.parse(readFileSync(runtimeCapturePath, "utf8"));
   expect(envelope.endpointId).toBe("POST /api/generated");
+  expect(envelope.executionMode).toBe("write");
   expect(envelope.artifactPath).toBe("zero/endpoints/post_api_generated_04e4ec1c0c3f.json");
 });
 
@@ -644,12 +706,12 @@ test("compiles zero_endpoints during finalize and invokes generated bytecode", a
 // a static path is an action on the entry for that path (§5). Both come out of
 // the same finalize into the same table, so a compiler that dropped one shows up
 // here.
-test("compiles Zero actions and publisher redirects into one response table", () => {
+test("compiles Zero endpoints and publisher redirects into one response table", () => {
   const entries = responseEntries(rt, GENERATED_SPACE, GENERATED_VERSION);
 
   expect(entries["/api/generated"]).toMatchObject({
     s: 200,
-    a: { t: "zero", endpoint: "POST /api/generated" },
+    a: { t: "zero", endpoint: "POST /api/generated", execution_mode: "write" },
   });
   expect(entries["/old-generated"]).toMatchObject({
     s: 308,
@@ -665,7 +727,10 @@ test("writes compiler-produced Zero routes artifact when no base routes are merg
     runtime_engine_version: string;
     format: string;
     artifact_kind: string;
-    exact: Record<string, { endpoint_id: string; method: string; pattern: string }>;
+    exact: Record<
+      string,
+      { endpoint_id: string; execution_mode: string; method: string; pattern: string }
+    >;
   }>(generatedVersionFile("zero/routes.php"));
 
   expect(routes).toMatchObject({
@@ -677,6 +742,7 @@ test("writes compiler-produced Zero routes artifact when no base routes are merg
   expect(Object.values(routes?.exact ?? {})).toContainEqual(
     expect.objectContaining({
       endpoint_id: "POST /api/generated",
+      execution_mode: "write",
       method: "POST",
       pattern: "/api/generated",
     }),
@@ -713,6 +779,7 @@ test("writes compiler-produced Zero run artifacts", () => {
     format: "stattic.zero.run.v1",
     kind: "run",
     runId: "mutation_addTodo",
+    executionMode: "write",
     capabilities: { db: true, realtime: true },
   });
   expect(existsSync(generatedVersionFile(runArtifact.sourcePath))).toBe(true);
@@ -785,6 +852,7 @@ async function publishRepublishSpace(versionId: string, withNote: boolean) {
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "write",
           method: "POST",
           path: "/api/republish/db",
           source: `
@@ -982,6 +1050,37 @@ test("executes Zero DB query and mutation through local MySQL", async () => {
   });
 });
 
+test("holds read handlers on one repeatable-read snapshot and rejects writes", async () => {
+  mysql.exec(
+    "DELETE FROM zero_items WHERE todo_title IN ('repeatable-read-probe', 'read-mode-write')",
+  );
+  const pendingResponse = get(rt, GENERATED_HOST, "/api/generated/read-law");
+  let sleeping = false;
+  for (let attempt = 0; attempt < 100 && !sleeping; attempt += 1) {
+    sleeping =
+      mysql.exec(
+        "SELECT COUNT(*) FROM information_schema.processlist WHERE INFO LIKE 'SELECT SLEEP(1)%'",
+      ) === "1";
+  }
+  expect(sleeping).toBe(true);
+  mysql.exec("INSERT INTO zero_items (todo_title) VALUES ('repeatable-read-probe')");
+
+  const response = await pendingResponse;
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    before: 0,
+    after: 0,
+    write: {
+      ok: false,
+      code: "zero_db_read_only",
+      message: "A Zero read handler cannot execute a database write.",
+    },
+  });
+  expect(mysql.exec("SELECT COUNT(*) FROM zero_items WHERE todo_title = 'read-mode-write'")).toBe(
+    "0",
+  );
+});
+
 test("executes the Lakebed database v1 API through the real Rust runner", async () => {
   const response = await get(rt, GENERATED_HOST, "/api/generated/lakebed-db", {
     method: "POST",
@@ -1132,8 +1231,9 @@ test("the runner ignores ambient DATABASE_URL and requires the labeled URL", asy
   expect(primed.status).toBe(200);
   const envelope = readFileSync(runtimeCapturePath);
 
-  // Ambient DATABASE_URL alone does not feed the DB layer: the operation fails
-  // closed before any connection.
+  // The runtime owns the transaction, so an unusable URL fails the invocation
+  // open before any handler code runs — the refusal never reaches a handler as
+  // a per-call result.
   const ambientOnly = Bun.spawnSync({
     cmd: [runtimePath, "invoke"],
     stdin: envelope,
@@ -1143,9 +1243,9 @@ test("the runner ignores ambient DATABASE_URL and requires the labeled URL", asy
   });
   expect(ambientOnly.exitCode).toBe(0);
   const ambientResponse = JSON.parse(ambientOnly.stdout.toString());
-  expect(ambientResponse.status).toBe(200);
-  const ambientBody = JSON.parse(ambientResponse.body);
-  expect(ambientBody.insert).toMatchObject({ ok: false, code: "zero_db_url_missing" });
+  expect(ambientResponse.status).toBe(503);
+  // Ambient DATABASE_URL is not an input at all, so the labeled name is absent.
+  expect(JSON.parse(ambientResponse.body).code).toBe("zero_db_url_missing");
 
   // A labeled URL with an unknown provenance label also fails closed.
   const mislabeled = Bun.spawnSync({
@@ -1159,8 +1259,9 @@ test("the runner ignores ambient DATABASE_URL and requires the labeled URL", asy
     },
   });
   expect(mislabeled.exitCode).toBe(0);
-  const mislabeledBody = JSON.parse(JSON.parse(mislabeled.stdout.toString()).body);
-  expect(mislabeledBody.insert).toMatchObject({ ok: false, code: "zero_db_url_invalid" });
+  const mislabeledResponse = JSON.parse(mislabeled.stdout.toString());
+  expect(mislabeledResponse.status).toBe(503);
+  expect(JSON.parse(mislabeledResponse.body).code).toBe("zero_db_url_invalid");
 
   // The labeled provider URL is the one accepted path.
   const labeled = Bun.spawnSync({
@@ -1178,37 +1279,64 @@ test("the runner ignores ambient DATABASE_URL and requires the labeled URL", asy
   expect(labeledBody.insert).toMatchObject({ ok: true });
 });
 
-test("rolls back failed Zero DB transactions through local MySQL", async () => {
-  const response = await get(rt, GENERATED_HOST, "/api/generated/db-rollback", { method: "POST" });
-  const text = await response.text();
-
-  if (response.status !== 200) {
-    throw new Error(`expected 200, got ${response.status}: ${text}`);
-  }
-  expect(JSON.parse(text)).toEqual({
-    rollback: {
-      ok: false,
-      code: "zero_db_execute_failed",
-      message: expect.stringContaining("missing_column"),
-    },
-    rows: [],
-  });
-});
-
-test("makes ctx.transaction writes atomic through the real Rust runner", async () => {
+test("rolls back parent-owned writes when the complete handler output is invalid", async () => {
   const response = await get(rt, GENERATED_HOST, "/api/generated/atomic-rollback", {
     method: "POST",
     headers: { "content-type": "application/json" },
   });
   const text = await response.text();
 
+  expect(response.status).toBe(502);
+  expect(JSON.parse(text)).toMatchObject({ code: "zero_js_response_malformed" });
+  expect(
+    mysql.exec(
+      "SELECT COUNT(*) FROM zero_items WHERE todo_title = 'must-roll-back-invalid-output'",
+    ),
+  ).toBe("0");
+});
+
+test("mail intent lives and dies with the invocation transaction", async () => {
+  // Under the execution law the runner owns one transaction per write-mode
+  // invocation; a handler cannot open or close its own. A throwing handler
+  // therefore takes its outbox insert down with its row write, and a
+  // succeeding one commits both — intent cannot outlive the write it
+  // announces.
+  const rolledBack = await get(rt, GENERATED_HOST, "/api/generated/atomic-mail-rollback", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-request-id": "inv_atomic_mail_rb" },
+  });
+  expect(rolledBack.status).toBe(500);
+
+  const response = await get(rt, GENERATED_HOST, "/api/generated/atomic-mail", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-request-id": "inv_atomic_mail" },
+  });
+  const text = await response.text();
   if (response.status !== 200) {
     throw new Error(`expected 200, got ${response.status}: ${text}`);
   }
-  expect(JSON.parse(text)).toEqual({
-    duplicateRejected: true,
-    row: null,
-  });
+  // SAFETY: the 200 above is this fixture endpoint's own JSON, shaped by the
+  // handler defined in this file.
+  const result = JSON.parse(text) as {
+    committedRow: { title?: string } | null;
+    committed: { messageId?: string };
+  };
+  const messageId = result.committed.messageId ?? "";
+  expect(messageId).toMatch(/^msg_[a-f0-9]{32}$/);
+  expect(result.committedRow?.title).toBe("committed-mail");
+
+  // The thrown invocation's row is gone with its intent.
+  expect(mysql.exec("SELECT todo_title FROM zero_items WHERE todo_id = '99002';")).toBe("");
+
+  // One outbox row, and it is the committed one.
+  const outbox = mysql.exec(
+    "SELECT message_id, state, CONVERT(payload_json USING utf8mb4) FROM _spacefast_email_outbox;",
+  );
+  expect(outbox.split("\n")).toHaveLength(1);
+  expect(outbox).toContain(messageId);
+  expect(outbox).toContain("queued");
+  expect(outbox).toContain("commits with the row");
+  expect(outbox).not.toContain("must not leave the transaction");
 });
 
 test("keeps finalize-generated Zero artifacts private", async () => {

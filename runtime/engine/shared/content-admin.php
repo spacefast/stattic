@@ -39,18 +39,6 @@ function _stattic_content_admin_ticket_store(string $privateRoot): array
     ]);
 }
 
-function _stattic_content_admin_identity(mixed $value): ?array
-{
-    if (!is_array($value)) {
-        return null;
-    }
-    $subject = trim((string) ($value['subject'] ?? ''));
-    if (preg_match('/^content_[a-f0-9]{64}$/', $subject) !== 1) {
-        return null;
-    }
-    return ['subject' => $subject];
-}
-
 function _stattic_content_admin_frame_origin(mixed $value): ?string
 {
     if (!is_string($value)) {
@@ -59,6 +47,21 @@ function _stattic_content_admin_frame_origin(mixed $value): ?string
     $value = trim($value);
     $origin = _stattic_absolute_url_origin($value);
     return is_string($origin) && hash_equals($origin, $value) ? $origin : null;
+}
+
+/**
+ * The screen a launch lands on, from a closed set.
+ *
+ * This is an address, not a grant. The session the launch mints admits the
+ * Space's whole /wp-admin lane (see _stattic_content_admin_request_path), and
+ * that has not changed: a screen only decides where the one-use ticket puts
+ * the browser when it is redeemed. It is a closed set rather than a free path
+ * so a ticket URL can never be talked into landing somewhere its issuer did
+ * not name. `null` is the WordPress-admin landing the editor has always used.
+ */
+function _stattic_content_admin_screen(mixed $value): ?string
+{
+    return is_string($value) && in_array($value, ['collections', 'users'], true) ? $value : null;
 }
 
 function _stattic_content_admin_authorization(mixed $value): ?array
@@ -138,19 +141,62 @@ function _stattic_content_admin_authorization_matches(
         && $current['access_generation'] === ($authorization['access_generation'] ?? null);
 }
 
+function _stattic_content_wordpress_role(mixed $value): ?string
+{
+    return is_string($value) && in_array($value, ['subscriber', 'editor', 'administrator'], true)
+        ? $value
+        : null;
+}
+
+/**
+ * The runtime half of THE grant→WordPress-role mapping. The other half is
+ * wordpressRoleForGrantCapabilities in
+ * packages/common/src/contracts/principal-assertion.ts, and the two must change
+ * together; runtime/tests/content-admin.test.ts runs them side by side.
+ *
+ * Two authors exist because the two lanes learn the capabilities at different
+ * moments. The control plane knows them when it composes a principal assertion
+ * for the content API and the editor launch. The WP API door has no control
+ * plane in the request at all: the capabilities come from the Grant decision
+ * the runtime just made for THIS path, so the runtime has to map them itself.
+ */
+function _stattic_wordpress_role_for_capabilities(array $capabilities): ?string
+{
+    if (in_array('access.manage', $capabilities, true)) {
+        return 'administrator';
+    }
+    if (in_array('content.publish', $capabilities, true)) {
+        return 'editor';
+    }
+    return in_array('page.view', $capabilities, true)
+        || in_array('comments.read', $capabilities, true)
+        ? 'subscriber'
+        : null;
+}
+
 function _stattic_content_admin_mint_ticket(
     string $privateRoot,
     string $host,
-    array $identity,
+    array $principal,
     array $authorization,
+    string $wordpressRole,
     string $frameOrigin,
+    mixed $screen = null,
     ?int $now = null
 ): ?array {
-    $identity = _stattic_content_admin_identity($identity);
+    $principal = isset($principal['kind']) ? $principal : null;
     $authorization = _stattic_content_admin_authorization($authorization);
+    $wordpressRole = _stattic_content_wordpress_role($wordpressRole) ?? '';
     $frameOrigin = _stattic_content_admin_frame_origin($frameOrigin);
+    $screen = _stattic_content_admin_screen($screen);
     $host = strtolower(trim($host));
-    if ($identity === null || $authorization === null || $frameOrigin === null || $host === '') {
+    if (
+        !is_array($principal)
+        || $authorization === null
+        || $wordpressRole === ''
+        || $frameOrigin === null
+        || $host === ''
+    ) {
         return null;
     }
     $now ??= time();
@@ -163,9 +209,11 @@ function _stattic_content_admin_mint_ticket(
         $expiresAt = $now + SPACEFAST_CONTENT_ADMIN_TICKET_TTL;
         if (_stattic_record_store_claim($store, $id, [
             'host' => $host,
-            'identity' => $identity,
+            'principal' => $principal,
             'authorization' => $authorization,
+            'wordpress_role' => $wordpressRole,
             'frame_origin' => $frameOrigin,
+            'screen' => $screen,
             'expires_at' => $expiresAt,
         ], $expiresAt)) {
             return ['token' => $token, 'expires_at' => $expiresAt];
@@ -200,15 +248,18 @@ function _stattic_content_admin_consume_ticket(
             ) {
                 return null;
             }
-            $identity = _stattic_content_admin_identity($record['identity'] ?? null);
+            $principal = is_array($record['principal'] ?? null) ? $record['principal'] : null;
             $authorization = _stattic_content_admin_authorization($record['authorization'] ?? null);
+            $wordpressRole = _stattic_content_wordpress_role($record['wordpress_role'] ?? null);
             $frameOrigin = _stattic_content_admin_frame_origin($record['frame_origin'] ?? null);
-            return $identity === null || $authorization === null || $frameOrigin === null
+            return $principal === null || $authorization === null || $wordpressRole === null || $frameOrigin === null
                 ? null
                 : [
-                    'identity' => $identity,
+                    'principal' => $principal,
                     'authorization' => $authorization,
+                    'wordpress_role' => $wordpressRole,
                     'frame_origin' => $frameOrigin,
+                    'screen' => _stattic_content_admin_screen($record['screen'] ?? null),
                 ];
         }
     );
@@ -228,13 +279,24 @@ function _stattic_content_admin_mint_session(
     string $privateRoot,
     string $host,
     int $userId,
+    array $principal,
     array $authorization,
+    string $wordpressRole,
     string $frameOrigin,
     ?int $now = null
 ): ?array {
     $authorization = _stattic_content_admin_authorization($authorization);
+    $principal = isset($principal['kind']) ? $principal : null;
+    $wordpressRole = _stattic_content_wordpress_role($wordpressRole);
     $frameOrigin = _stattic_content_admin_frame_origin($frameOrigin);
-    if ($userId < 1 || trim($host) === '' || $authorization === null || $frameOrigin === null) {
+    if (
+        $userId < 1
+        || trim($host) === ''
+        || !is_array($principal)
+        || $authorization === null
+        || $wordpressRole === null
+        || $frameOrigin === null
+    ) {
         return null;
     }
     $secret = _stattic_content_admin_session_secret($privateRoot);
@@ -246,8 +308,10 @@ function _stattic_content_admin_mint_session(
     $payload = _stattic_content_admin_base64url_encode((string) json_encode([
         'host' => strtolower(trim($host)),
         'user_id' => $userId,
+        'principal' => $principal,
         'space_id' => $authorization['space_id'],
         'access_generation' => $authorization['access_generation'],
+        'wordpress_role' => $wordpressRole,
         'frame_origin' => $frameOrigin,
         'expires_at' => $expiresAt,
     ], JSON_UNESCAPED_SLASHES));
@@ -291,9 +355,13 @@ function _stattic_content_admin_verify_session(
         return null;
     }
     $authorization = _stattic_content_admin_authorization($claims);
+    $principal = is_array($claims['principal'] ?? null) ? $claims['principal'] : null;
+    $wordpressRole = _stattic_content_wordpress_role($claims['wordpress_role'] ?? null);
     $frameOrigin = _stattic_content_admin_frame_origin($claims['frame_origin'] ?? null);
     if (
         $authorization === null
+        || $principal === null
+        || $wordpressRole === null
         || $frameOrigin === null
         || !_stattic_content_admin_authorization_matches($privateRoot, $authorization)
     ) {
@@ -301,8 +369,10 @@ function _stattic_content_admin_verify_session(
     }
     return [
         'user_id' => $claims['user_id'],
+        'principal' => $principal,
         'space_id' => $authorization['space_id'],
         'access_generation' => $authorization['access_generation'],
+        'wordpress_role' => $wordpressRole,
         'frame_origin' => $frameOrigin,
         'expires_at' => $claims['expires_at'],
     ];
@@ -324,9 +394,50 @@ function _stattic_content_admin_request_path(string $path, array $query = []): b
 {
     return $path === '/wp-admin'
         || str_starts_with($path, '/wp-admin/')
-        || $path === '/wp-json'
+        || _stattic_content_rest_request_path($path, $query);
+}
+
+/**
+ * The REST subset of the editor lane — WordPress's own API, in all three
+ * spellings. It lives here, immediately beside the lane predicate and expressed
+ * as a term of it, because the failure the lane predicate warns about is two
+ * copies drifting apart: this one can only ever be narrower by exactly
+ * `/wp-admin`, and that is visible in one screen.
+ *
+ * The distinction is real, not a convenience. `/wp-admin` is the editor's HTML
+ * surface and stays cookie-only. The REST paths are the API, and they are the
+ * ones an agent reaches with a Space credential.
+ */
+function _stattic_content_rest_request_path(string $path, array $query = []): bool
+{
+    return $path === '/wp-json'
         || str_starts_with($path, '/wp-json/')
         || ($path === '/' && isset($query['rest_route']));
+}
+
+/**
+ * The path a REST request is admitted and role-derived against. The pretty
+ * spelling already names the resource (`/wp-json/...`); the query spelling
+ * `/?rest_route=/wp/v2/posts` addresses the SAME resource but arrives at `/`,
+ * so it is canonicalized to its `/wp-json` equivalent here. Without this the two
+ * spellings would be enforced against different paths, and a Grant that scopes
+ * `/wp-json` would bind only the pretty one — letting the query form reach REST
+ * under the `/` policy the exclude never touched. Both spellings must resolve to
+ * the same path so the lane can never be wider than page serving.
+ */
+function _stattic_content_rest_access_path(string $path, array $query = []): string
+{
+    if ($path !== '/' || !isset($query['rest_route'])) {
+        return $path;
+    }
+    $restRoute = $query['rest_route'];
+    // Any REST-lane request resolves to `/wp-json` or deeper, never to `/`: an
+    // empty, array, or otherwise unusable `rest_route` still names the REST root,
+    // so the lane predicate's `isset` and this canonicalization admit the same
+    // set of requests against the same policy.
+    return is_string($restRoute) && $restRoute !== '' && $restRoute !== '/'
+        ? '/wp-json/' . ltrim($restRoute, '/')
+        : '/wp-json';
 }
 
 /**

@@ -233,6 +233,30 @@ test("a second begin while a transaction is open is refused", async () => {
   expect(JSON.parse(responses?.[1] as string).code).toBe("zero_db_transaction_active");
 });
 
+// The parent lane's own state edges. The runner never reaches these — it
+// refuses every control spelling outright (transaction_control_tests in
+// db.rs) — so their codes are the broker's alone to hold.
+test("transaction control state edges answer the broker's own codes", async () => {
+  const { responses } = await php({
+    operations: [
+      op({ mode: "transaction_commit" }),
+      op({ mode: "transaction_rollback" }),
+      op({ mode: "transaction", statements: [] }),
+      op({
+        mode: "transaction",
+        statements: Array.from({ length: 65 }, () => ({ sql: "SELECT 1" })),
+      }),
+    ],
+  });
+  const codes = (responses ?? []).map((body) => JSON.parse(String(body)).code);
+  expect(codes).toEqual([
+    "zero_db_transaction_missing",
+    "zero_db_transaction_missing",
+    "zero_db_transaction_invalid",
+    "zero_db_transaction_invalid",
+  ]);
+});
+
 test("a batch transaction rolls back entirely when one statement fails", async () => {
   const { responses } = await php({
     operations: [

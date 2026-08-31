@@ -24,6 +24,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use crate::artifacts::ExecutionMode;
 use crate::db::BrokerRefusal;
 
 /// Every host this module can reach. Exported for the runtime egress allowlist
@@ -53,6 +54,7 @@ pub(crate) const SERVICE_FRAME_MAX_BYTES: usize = 1024 * 1024;
 
 thread_local! {
     static SERVICE_GRANT: RefCell<ServiceGrant> = const { RefCell::new(ServiceGrant::NONE) };
+    static ZERO_EXECUTION_MODE: RefCell<Option<ExecutionMode>> = const { RefCell::new(None) };
 }
 
 /// Which services this invocation may reach.
@@ -67,6 +69,7 @@ pub(crate) struct ServiceGrant {
     pub spam: bool,
     pub email: bool,
     pub content: bool,
+    pub storage: bool,
 }
 
 impl ServiceGrant {
@@ -75,6 +78,7 @@ impl ServiceGrant {
         spam: false,
         email: false,
         content: false,
+        storage: false,
     };
 
     /// Parses the comma-separated wire grant the relay passes to the executor.
@@ -85,6 +89,9 @@ impl ServiceGrant {
             gravatar: granted("gravatar.profile"),
             spam: granted("spam.check"),
             email: granted("email.send"),
+            // The Functions tier already spells the storage grant this way;
+            // one vocabulary across tiers rather than a second spelling here.
+            storage: granted("storage.read"),
             content: granted("content.query"),
         }
     }
@@ -95,6 +102,7 @@ impl ServiceGrant {
             "spam" => self.spam,
             "email" => self.email,
             "content" => self.content,
+            "storage" => self.storage,
             _ => false,
         }
     }
@@ -102,6 +110,10 @@ impl ServiceGrant {
 
 pub(crate) fn set_grant(grant: ServiceGrant) {
     SERVICE_GRANT.with(|state| *state.borrow_mut() = grant);
+}
+
+pub(crate) fn set_zero_execution_mode(mode: Option<ExecutionMode>) {
+    ZERO_EXECUTION_MODE.with(|state| *state.borrow_mut() = mode);
 }
 
 fn grant() -> ServiceGrant {
@@ -196,6 +208,27 @@ fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
             ),
         ));
     }
+    let read_only = ZERO_EXECUTION_MODE.with(|state| {
+        state
+            .borrow()
+            .is_some_and(|mode| mode == ExecutionMode::Read)
+    });
+    if read_only
+        && matches!(
+            (frame.service.as_str(), frame.operation.as_str()),
+            ("spam", "report_spam" | "report_ham")
+                | ("email", "send")
+                // Storage writes leave a mark outside the database, so a read
+                // handler — replayable, and re-run for every subscription
+                // refresh — is refused one before the transport is consulted.
+                | ("storage", "put" | "delete")
+        )
+    {
+        return Err(BrokerRefusal::new(
+            "service_read_only",
+            "A Zero read handler cannot emit an external effect.",
+        ));
+    }
     let config = ServiceConfig::from_env();
     match (frame.service.as_str(), frame.operation.as_str()) {
         ("gravatar", "profile") => gravatar_profile(&config, &frame.payload),
@@ -203,7 +236,11 @@ fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
         ("spam", "report_spam") => spam_report(&config, &frame.payload, "submit-spam"),
         ("spam", "report_ham") => spam_report(&config, &frame.payload, "submit-ham"),
         ("email", "send") => email_send(&config, &frame.payload),
-        ("content", "query") => content_query(&config, &frame.payload),
+        ("content", "query") => Err(content_query_retired()),
+        ("storage", "list") => storage_call(&config, "storage.list", &frame.payload),
+        ("storage", "get") => storage_call(&config, "storage.get", &frame.payload),
+        ("storage", "delete") => storage_call(&config, "storage.delete", &frame.payload),
+        ("storage", "put") => Err(storage_put_unsupported()),
         _ => Err(BrokerRefusal::new(
             "service_operation_unknown",
             format!(
@@ -218,8 +255,59 @@ fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
 /* Space content                                                               */
 /* -------------------------------------------------------------------------- */
 
-fn content_query(
+/// The retired batch-query lane.
+///
+/// `ctx.content.query` sent `spacefast.content.query` to the Space's content
+/// endpoint, which answered it out of a compiled content schema. That schema
+/// format and the WordPress projection that executed against it were both
+/// retired: the engine now serves content models as Abilities, and a release in
+/// the old format is answered with `content_model_republish_required` rather
+/// than read. There is nothing left upstream to forward this frame to, so the
+/// runner answers it here instead of spending a round trip to collect a generic
+/// upstream refusal that names no cause.
+///
+/// The code is stable and distinct on purpose: a handler that catches it can
+/// tell "this Space cannot answer content queries any more" from "the content
+/// service is down", and the message names the remedy.
+fn content_query_retired() -> BrokerRefusal {
+    BrokerRefusal::new(
+        "content_query_retired",
+        "ctx.content.query is retired. This Space serves its content model as Abilities; call the generated content Ability instead.",
+    )
+}
+
+/* -------------------------------------------------------------------------- */
+/* Space storage                                                               */
+/* -------------------------------------------------------------------------- */
+
+/// Why a handler cannot write bytes.
+///
+/// Not a stub standing in for work that is nearly done: there is no transport
+/// for handler-initiated bytes anywhere in this runtime today, and pretending
+/// otherwise would mean a `put` that reports success over a write that never
+/// happened. The service frame is synchronous JSON capped at
+/// `SERVICE_FRAME_MAX_BYTES`, so it is the wrong shape for object bytes even
+/// once a destination exists; a streaming path is its own lane. Reads and the
+/// trash below go over the Space content endpoint, which already exists.
+///
+/// Agents are not blocked by this: `zero/storage-upload` uploads for real
+/// inside WordPress, where the media library and its capability checks live.
+fn storage_put_unsupported() -> BrokerRefusal {
+    BrokerRefusal::new(
+        "storage_put_unsupported",
+        "Zero handlers cannot upload bytes. Use the zero/storage-upload ability.",
+    )
+}
+
+/// One storage operation, answered by the Space's own content endpoint.
+///
+/// The same transport `content_query` uses, and the same authority: the runtime
+/// forwards this request's access evidence and the endpoint decides. A handler
+/// running without it is refused there rather than here — the endpoint owns
+/// that verdict, and this must not shadow it with a guess.
+fn storage_call(
     config: &ServiceConfig,
+    operation: &str,
     payload: &Map<String, Value>,
 ) -> Result<Value, BrokerRefusal> {
     let Some(url) = config.content_url.as_deref() else {
@@ -234,59 +322,39 @@ fn content_query(
             "The Space content endpoint is invalid.",
         ));
     }
-    let Some(queries) = payload.get("queries").and_then(Value::as_object) else {
+    let mut body = payload.clone();
+    // Reserved names: the endpoint reads who is asking from the evidence the
+    // runtime attached, never from a field tenant code can set.
+    for reserved in ["operation", "principal", "managed", "authorization"] {
+        body.remove(reserved);
+    }
+    body.insert(
+        "operation".to_string(),
+        Value::String(operation.to_string()),
+    );
+    let encoded = Value::Object(body).to_string();
+    if encoded.len() > SERVICE_FRAME_MAX_BYTES {
         return Err(BrokerRefusal::new(
             "service_payload_invalid",
-            "Content queries must be an object.",
-        ));
-    };
-    if queries.is_empty() || queries.len() > 25 {
-        return Err(BrokerRefusal::new(
-            "service_payload_invalid",
-            "A content batch must contain between 1 and 25 queries.",
+            "The storage request is too large.",
         ));
     }
-    let body = json!({
-        "format": "spacefast.content.query",
-        "version": 1,
-        "queries": queries,
-    })
-    .to_string();
-    let response =
-        content_request(config, url)
-            .send(body.as_bytes())
-            .map_err(|error| match error {
-                ureq::Error::StatusCode(status) => BrokerRefusal::new(
-                    "content_upstream_refused",
-                    format!("The Space content service answered {status}."),
-                ),
-                _ => BrokerRefusal::new(
-                    "content_upstream_unavailable",
-                    "The Space content service could not be reached.",
-                ),
-            })?;
-    let document: Value = serde_json::from_str(&read_content_body(response)?).map_err(|_| {
+    let response = content_request(config, url)
+        .send(encoded.as_bytes())
+        .map_err(|error| match error {
+            ureq::Error::StatusCode(status) => BrokerRefusal::new(
+                "storage_upstream_refused",
+                format!("The Space storage service answered {status}."),
+            ),
+            _ => BrokerRefusal::new(
+                "storage_upstream_unavailable",
+                "The Space storage service could not be reached.",
+            ),
+        })?;
+    serde_json::from_str(&read_content_body(response)?).map_err(|_| {
         BrokerRefusal::new(
-            "content_response_invalid",
-            "The Space content service returned an unreadable response.",
-        )
-    })?;
-    if document.get("format").and_then(Value::as_str) != Some("spacefast.content.query")
-        || document.get("version").and_then(Value::as_u64) != Some(1)
-    {
-        return Err(BrokerRefusal::new(
-            "content_response_invalid",
-            "The Space content service returned an unsupported response.",
-        ));
-    }
-    match document {
-        Value::Object(mut document) => document.remove("results"),
-        _ => None,
-    }
-    .ok_or_else(|| {
-        BrokerRefusal::new(
-            "content_response_invalid",
-            "The Space content service omitted its results.",
+            "storage_response_invalid",
+            "The Space storage service returned an unreadable response.",
         )
     })
 }
@@ -697,11 +765,13 @@ mod tests {
     use super::*;
 
     fn frame(service: &str, operation: &str, payload: Value) -> String {
+        set_zero_execution_mode(None);
         set_grant(ServiceGrant {
             gravatar: true,
             spam: true,
             email: true,
             content: true,
+            storage: true,
         });
         handle_service_frame(
             &json!({ "service": service, "operation": operation, "payload": payload }).to_string(),
@@ -726,6 +796,20 @@ mod tests {
         // is checked first — so it never reaches the operation table at all.
         let (code, _) = refusal(&frame("sms", "send", json!({})));
         assert_eq!(code, "service_capability_denied");
+    }
+
+    /// The batch-query lane is gone from the engine, and a frozen capsule still
+    /// calls it. It gets a code of its own rather than an upstream refusal that
+    /// names no cause, and it never spends a round trip to learn that.
+    #[test]
+    fn the_retired_content_query_lane_refuses_by_name() {
+        let (code, message) = refusal(&frame(
+            "content",
+            "query",
+            json!({ "queries": { "posts": { "collection": "posts" } } }),
+        ));
+        assert_eq!(code, "content_query_retired");
+        assert!(message.contains("Abilities"), "{message}");
     }
 
     #[test]
@@ -771,6 +855,57 @@ mod tests {
             json!({ "content": "hi", "userIp": "203.0.113.9" }),
         ));
         assert_eq!(code, "service_not_configured");
+
+        set_zero_execution_mode(Some(ExecutionMode::Read));
+        let (code, _) = refusal(&handle_service_frame(
+            &json!({
+                "service": "spam",
+                "operation": "report_spam",
+                "payload": { "content": "hi", "userIp": "203.0.113.9" }
+            })
+            .to_string(),
+        ));
+        assert_eq!(code, "service_read_only");
+        set_zero_execution_mode(None);
+    }
+
+    #[test]
+    fn storage_never_reports_a_write_it_cannot_perform() {
+        // `put` is refused by name in every mode, ahead of any transport
+        // question: there is no path for handler-initiated bytes, so the one
+        // thing this must never do is answer `ok`.
+        let (code, message) = refusal(&frame(
+            "storage",
+            "put",
+            json!({ "filename": "a.txt", "contentBase64": "aGk=" }),
+        ));
+        assert_eq!(code, "storage_put_unsupported");
+        // The refusal points at the surface that does upload for real.
+        assert!(message.contains("zero/storage-upload"), "{message}");
+
+        // Trashing a file is an effect outside the database, so a replayable
+        // read handler is refused it before the endpoint is consulted — while
+        // listing stays available and gets as far as the transport check.
+        // Dispatched directly rather than through `frame()`, which resets the
+        // execution mode as part of its per-call setup.
+        set_zero_execution_mode(Some(ExecutionMode::Read));
+        let (code, _) = refusal(&handle_service_frame(
+            &json!({ "service": "storage", "operation": "delete", "payload": { "id": 7 } })
+                .to_string(),
+        ));
+        assert_eq!(code, "service_read_only");
+        let (code, _) = refusal(&handle_service_frame(
+            &json!({ "service": "storage", "operation": "list", "payload": {} }).to_string(),
+        ));
+        assert_eq!(code, "service_not_configured");
+        set_zero_execution_mode(None);
+
+        // And an ungranted storage call never reaches any of that.
+        set_grant(ServiceGrant::NONE);
+        let (code, _) = refusal(&handle_service_frame(
+            &json!({ "service": "storage", "operation": "list", "payload": {} }).to_string(),
+        ));
+        assert_eq!(code, "service_capability_denied");
     }
 
     #[test]
@@ -800,6 +935,7 @@ mod tests {
             gravatar: true,
             spam: false,
             email: false,
+            storage: false,
             content: false,
         });
         let (code, message) = refusal(&handle_service_frame(
@@ -825,6 +961,7 @@ mod tests {
                 spam: true,
                 email: true,
                 content: false,
+                storage: false,
             }
         );
     }

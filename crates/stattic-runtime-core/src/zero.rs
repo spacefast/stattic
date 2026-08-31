@@ -11,6 +11,7 @@ use crate::finalize::sha256;
 use crate::hash::{sha256_prefixed, stable_json_sha256};
 use crate::metadata::artifact_metadata_fields;
 use crate::model::*;
+use crate::route_inventory::is_zero_control_path;
 
 pub(crate) struct CompiledZeroEndpoints {
     pub(crate) php_routes: Vec<PhpActionRecord>,
@@ -194,7 +195,7 @@ pub(crate) fn compile_zero_endpoints(
             .filter(|value| !value.is_empty())
             .cloned()
             .unwrap_or_else(|| zero_endpoint_id(&method, &path));
-        if ZERO_CONTROL_PATHS.contains(&path.as_str()) {
+        if is_zero_control_path(&path) {
             diagnostics.push(RuntimeDiagnostic {
                 severity: RuntimeDiagnosticSeverity::Error,
                 code: "zero_endpoint_conflict".to_string(),
@@ -266,6 +267,7 @@ pub(crate) fn compile_zero_endpoints(
             format: ZERO_ENDPOINT_FORMAT.to_string(),
             endpoint_id: endpoint_id.clone(),
             kind: "endpoint".to_string(),
+            execution_mode: endpoint.execution_mode,
             method: method.clone(),
             path: path.clone(),
             source_path: program.source_path,
@@ -289,6 +291,7 @@ pub(crate) fn compile_zero_endpoints(
         compiled.php_routes.push(PhpActionRecord::InvokeZero {
             pattern: path.clone(),
             method: method.clone(),
+            execution_mode: endpoint.execution_mode,
             endpoint_id: endpoint_id.clone(),
             zero_artifact: artifact_path.clone(),
             schema_hash: schema_hash.clone(),
@@ -296,6 +299,7 @@ pub(crate) fn compile_zero_endpoints(
         });
         let route_entry = ZeroRouteEntry {
             method,
+            execution_mode: endpoint.execution_mode,
             pattern: path.clone(),
             endpoint_id,
             artifact: artifact_path.clone(),
@@ -362,6 +366,7 @@ pub(crate) fn compile_zero_endpoints(
             format: ZERO_RUN_FORMAT.to_string(),
             run_id: run_id.to_string(),
             kind: "run".to_string(),
+            execution_mode: run.execution_mode,
             source_path: program.source_path,
             bytecode_path: program.bytecode_path,
             source_sha256: program.source_sha256,
@@ -429,19 +434,6 @@ fn zero_method_valid(method: &str) -> bool {
         "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
     )
 }
-
-const ZERO_CONTROL_PATHS: &[&str] = &[
-    "/__zero/config",
-    "/__zero/run",
-    "/__zero/auth/start",
-    "/__zero/auth/sign-out",
-    "/__zero/realtime/events",
-    "/__spacefast/zero/config",
-    "/__spacefast/zero/run",
-    "/__spacefast/zero/auth/gravatar/start",
-    "/__spacefast/zero/auth/sign-out",
-    "/__spacefast/zero/realtime/events",
-];
 
 fn zero_route_path_valid(path: &str) -> bool {
     if path.is_empty()
@@ -610,6 +602,7 @@ fn runner_capabilities(capabilities: &ZeroCapabilities) -> ZeroEndpointCapabilit
         spam: capabilities.spam,
         email: capabilities.email,
         content: capabilities.content,
+        storage: capabilities.storage,
     }
 }
 
@@ -918,6 +911,7 @@ mod tests {
             let endpoints = paths
                 .iter()
                 .map(|path| RuntimeZeroEndpoint {
+                    execution_mode: crate::model::ZeroExecutionMode::Read,
                     method: "GET".to_string(),
                     path: (*path).to_string(),
                     source: "globalThis.__statticZeroResult = '{}';".to_string(),
@@ -978,6 +972,7 @@ mod tests {
         };
         assert_eq!(
             endpoint(json!({
+                "executionMode": "read",
                 "method": "GET",
                 "path": "/api/defaults",
                 "source": "globalThis.__statticZeroResult = '{}';"
@@ -987,6 +982,7 @@ mod tests {
         );
         assert_eq!(
             endpoint(json!({
+                "executionMode": "read",
                 "method": "GET",
                 "path": "/api/partial",
                 "source": "globalThis.__statticZeroResult = '{}';",

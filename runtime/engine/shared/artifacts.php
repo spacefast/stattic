@@ -123,6 +123,20 @@ function _stattic_runtime_tombstone_route_action_valid(mixed $action): bool
         && ($action['methods'] ?? null) === STATTIC_VISITOR_METHODS;
 }
 
+/**
+ * The execution mode a route or artifact from before the execution law never
+ * declared. `admin/generate.php` stamps exactly this derivation onto an entry
+ * that arrives without one, and a run keeps `write` — everything a run could do
+ * before the split. The serve path applies the same rule, because a capsule
+ * published before the law is immutable and both paths read the same bytes.
+ */
+function _stattic_zero_derived_execution_mode(string $kind, string $method): string
+{
+    return $kind === 'endpoint' && in_array(strtoupper($method), ['GET', 'HEAD', 'OPTIONS'], true)
+        ? 'read'
+        : 'write';
+}
+
 function _stattic_zero_route_entry_shape_valid(mixed $entry): bool
 {
     return is_array($entry)
@@ -133,6 +147,12 @@ function _stattic_zero_route_entry_shape_valid(mixed $entry): bool
         && $entry['pattern'][0] === '/'
         && is_string($entry['endpoint_id'] ?? null)
         && $entry['endpoint_id'] !== ''
+        // A routes artifact compiled before the execution law carries no mode.
+        // Absent is valid and the resolver derives it; a stale entry must not
+        // fail the shape check, because that verdict condemns the whole bucket
+        // — every other route in it included.
+        && (!array_key_exists('execution_mode', $entry)
+            || in_array($entry['execution_mode'], ['read', 'write'], true))
         && is_string($entry['artifact'] ?? null)
         && _stattic_runtime_relative_artifact_path_valid($entry['artifact'])
         && (!array_key_exists('schema_hash', $entry) || is_string($entry['schema_hash']) || $entry['schema_hash'] === null);

@@ -8,6 +8,7 @@ require_once __DIR__ . '/../shared/purge.php';
 require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/safety.php';
 require_once __DIR__ . '/../shared/server-file.php';
+require_once __DIR__ . '/../shared/application-journal.php';
 require_once __DIR__ . '/upload-policy.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/generate.php';
@@ -22,12 +23,240 @@ require_once __DIR__ . '/storage.php';
 require_once __DIR__ . '/build-source.php';
 require_once __DIR__ . '/static-zip.php';
 require_once __DIR__ . '/engine-update.php';
+require_once __DIR__ . '/components.php';
 
 function _stattic_runtime_with_write_lock(string $privateRoot, callable $callback): void
 {
     $lockDir = $privateRoot . '/runtime';
     _stattic_runtime_mkdir($lockDir);
     _stattic_runtime_acquire_write_lock($lockDir . '/write.lock', $callback);
+}
+
+function _stattic_runtime_application_journal_drain(string $privateRoot, array $claims): void
+{
+    unset($privateRoot, $claims);
+    $body = _stattic_json_body();
+    $sink = is_string($body['sink'] ?? null) ? $body['sink'] : '';
+    $limit = is_int($body['limit'] ?? null) ? $body['limit'] : STATTIC_APPLICATION_JOURNAL_MAX_PAGE;
+    $leaseSeconds = is_int($body['lease_seconds'] ?? null) ? $body['lease_seconds'] : 60;
+    if (
+        preg_match('/^[A-Za-z0-9:_-]{1,160}$/', $sink) !== 1
+        || $limit < 1 || $limit > STATTIC_APPLICATION_JOURNAL_MAX_PAGE
+        || $leaseSeconds < 5 || $leaseSeconds > 900
+    ) {
+        _stattic_problem_response(422, 'application_journal_drain_invalid', 'Application journal drain request is invalid.');
+    }
+    $connection = _stattic_db_broker_connection();
+    if (!$connection instanceof mysqli) {
+        _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.');
+    }
+    try {
+        $claims = _stattic_application_journal_claim($connection, $sink, $limit, $leaseSeconds);
+    } catch (Throwable $error) {
+        error_log('spacefast application journal claim failed type=' . get_debug_type($error));
+        _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.');
+    }
+    _stattic_json_response(200, ['claims' => $claims]);
+}
+
+function _stattic_runtime_application_journal_complete(string $privateRoot, array $claims): void
+{
+    unset($privateRoot, $claims);
+    $body = _stattic_json_body();
+    $receipts = $body['receipts'] ?? null;
+    if (!is_array($receipts) || !array_is_list($receipts) || count($receipts) > STATTIC_APPLICATION_JOURNAL_MAX_PAGE) {
+        _stattic_problem_response(422, 'application_journal_receipts_invalid', 'Application journal receipts are invalid.');
+    }
+    $connection = _stattic_db_broker_connection();
+    if (!$connection instanceof mysqli) {
+        _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.');
+    }
+    $recorded = 0;
+    $stale = 0;
+    foreach ($receipts as $receipt) {
+        if (!is_array($receipt)) {
+            $stale += 1;
+            continue;
+        }
+        if (_stattic_application_journal_complete($connection, $receipt)) {
+            $recorded += 1;
+        } else {
+            $stale += 1;
+        }
+    }
+    _stattic_json_response(200, ['recorded' => $recorded, 'stale' => $stale]);
+}
+
+function _stattic_runtime_application_journal_mail_address(mixed $value): ?string
+{
+    if (!is_array($value) || !is_string($value['email'] ?? null)) {
+        return null;
+    }
+    $email = trim($value['email']);
+    if (filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
+        return null;
+    }
+    if (!array_key_exists('name', $value)) {
+        return $email;
+    }
+    if (!is_string($value['name']) || $value['name'] === '' || preg_match('/[\r\n\0]/', $value['name']) === 1) {
+        return null;
+    }
+    return $value['name'] . ' <' . $email . '>';
+}
+
+/** @return list<string>|null */
+function _stattic_runtime_application_journal_mail_addresses(mixed $value, bool $allowEmpty): ?array
+{
+    if (!is_array($value) || !array_is_list($value) || (!$allowEmpty && count($value) === 0)) {
+        return null;
+    }
+    $addresses = [];
+    foreach ($value as $address) {
+        $formatted = _stattic_runtime_application_journal_mail_address($address);
+        if ($formatted === null) {
+            return null;
+        }
+        $addresses[] = $formatted;
+    }
+    return $addresses;
+}
+
+/** @return array{to:list<string>,subject:string,message:string,headers:list<string>,multipart_text:?string}|null */
+function _stattic_runtime_application_journal_wordpress_mail(array $claim): ?array
+{
+    $entry = is_array($claim['entry'] ?? null) ? $claim['entry'] : [];
+    $payload = is_array($entry['payload'] ?? null) ? $entry['payload'] : [];
+    $messageId = is_string($payload['messageId'] ?? null) ? $payload['messageId'] : '';
+    $from = _stattic_runtime_application_journal_mail_address($payload['from'] ?? null);
+    $to = _stattic_runtime_application_journal_mail_addresses($payload['to'] ?? null, false);
+    $cc = array_key_exists('cc', $payload)
+        ? _stattic_runtime_application_journal_mail_addresses($payload['cc'], true)
+        : [];
+    $bcc = array_key_exists('bcc', $payload)
+        ? _stattic_runtime_application_journal_mail_addresses($payload['bcc'], true)
+        : [];
+    $replyTo = array_key_exists('replyTo', $payload)
+        ? _stattic_runtime_application_journal_mail_address($payload['replyTo'])
+        : $from;
+    $subject = is_string($payload['subject'] ?? null) ? $payload['subject'] : '';
+    $body = is_array($payload['body'] ?? null) ? $payload['body'] : [];
+    if (
+        preg_match('/^msg_[a-f0-9]{32}$/', $messageId) !== 1
+        || $from === null || $to === null || $cc === null || $bcc === null || $replyTo === null
+        || $subject === '' || preg_match('/[\r\n\0]/', $subject) === 1
+    ) {
+        return null;
+    }
+    $kind = is_string($body['kind'] ?? null) ? $body['kind'] : '';
+    $message = '';
+    $multipartText = null;
+    $contentType = null;
+    if ($kind === 'text' && is_string($body['text'] ?? null)) {
+        $message = $body['text'];
+    } elseif ($kind === 'html' && is_string($body['html'] ?? null)) {
+        $message = $body['html'];
+        $contentType = 'text/html; charset=UTF-8';
+    } elseif (
+        $kind === 'multipart' && is_string($body['text'] ?? null) && is_string($body['html'] ?? null)
+    ) {
+        $message = $body['html'];
+        $multipartText = $body['text'];
+        $contentType = 'text/html; charset=UTF-8';
+    } else {
+        return null;
+    }
+    $headers = [
+        'From: ' . $from,
+        'Reply-To: ' . $replyTo,
+        'Message-ID: <' . $messageId . '@mail.spacefast.com>',
+        'X-Spacefast-Journal-Id: ' . (string) ($entry['id'] ?? ''),
+    ];
+    if ($cc !== []) {
+        $headers[] = 'Cc: ' . implode(', ', $cc);
+    }
+    if ($bcc !== []) {
+        $headers[] = 'Bcc: ' . implode(', ', $bcc);
+    }
+    if ($contentType !== null) {
+        $headers[] = 'Content-Type: ' . $contentType;
+    }
+    $reserved = ['from', 'to', 'cc', 'bcc', 'reply-to', 'content-type', 'message-id'];
+    $custom = is_array($payload['headers'] ?? null) ? $payload['headers'] : [];
+    foreach ($custom as $name => $value) {
+        if (
+            !is_string($name) || preg_match('/^[!#$%&\'*+\-.^_`|~0-9A-Za-z]+$/', $name) !== 1
+            || in_array(strtolower($name), $reserved, true)
+            || !is_string($value) || preg_match('/[\r\n\0]/', $value) === 1
+        ) {
+            return null;
+        }
+        $headers[] = $name . ': ' . $value;
+    }
+    return [
+        'to' => $to,
+        'subject' => $subject,
+        'message' => $message,
+        'headers' => $headers,
+        'multipart_text' => $multipartText,
+    ];
+}
+
+function _stattic_runtime_application_journal_mail(
+    string $privateRoot,
+    string $spaceId,
+    array $claims
+): void {
+    unset($claims);
+    $body = _stattic_json_body();
+    $claim = is_array($body['claim'] ?? null) ? $body['claim'] : [];
+    $connection = _stattic_db_broker_connection();
+    if (!$connection instanceof mysqli) {
+        _stattic_problem_response(503, 'application_journal_mail_unavailable', 'The Space mail outbox is unavailable.');
+    }
+    $claimState = _stattic_application_journal_mail_claim_state($connection, $claim, $spaceId);
+    if ($claimState === null) {
+        _stattic_problem_response(409, 'application_journal_mail_claim_stale', 'This mail claim no longer owns its lease.');
+    }
+    if ($claimState['state'] === 'accepted') {
+        _stattic_json_response(200, ['message_id' => $claimState['message_id']]);
+    }
+    $mail = _stattic_runtime_application_journal_wordpress_mail($claim);
+    if ($mail === null) {
+        _stattic_problem_response(422, 'application_journal_mail_invalid', 'The journal mail payload is invalid.');
+    }
+    $publicRoot = dirname($privateRoot, 2);
+    $wpLoad = $publicRoot . '/wp-load.php';
+    if (!is_file($wpLoad)) {
+        _stattic_problem_response(503, 'application_journal_mail_unavailable', 'WordPress mail is unavailable on this site.');
+    }
+    require_once $wpLoad;
+    if (!function_exists('wp_mail')) {
+        _stattic_problem_response(503, 'application_journal_mail_unavailable', 'WordPress mail is unavailable on this site.');
+    }
+
+    $configureMailer = static function (mixed $mailer) use ($mail): void {
+        if (is_string($mail['multipart_text']) && is_object($mailer)) {
+            $mailer->AltBody = $mail['multipart_text'];
+        }
+    };
+    if (function_exists('add_action')) {
+        add_action('phpmailer_init', $configureMailer);
+    }
+    try {
+        $accepted = wp_mail($mail['to'], $mail['subject'], $mail['message'], $mail['headers']);
+    } finally {
+        if (function_exists('remove_action')) {
+            remove_action('phpmailer_init', $configureMailer);
+        }
+    }
+    if ($accepted !== true) {
+        _stattic_problem_response(503, 'application_journal_mail_rejected', 'WordPress did not accept the message.');
+    }
+    if (!_stattic_application_journal_record_mail_accepted($connection, $claimState['message_id'])) {
+        _stattic_problem_response(500, 'application_journal_mail_acceptance_unrecorded', 'WordPress accepted the message, but its receipt could not be recorded.');
+    }
+    _stattic_json_response(200, ['message_id' => $claimState['message_id']]);
 }
 
 // A route earns this lock ONLY when every write it performs transitively stays
@@ -613,31 +842,37 @@ function _stattic_runtime_state_route(string $privateRoot): void
     ]);
 }
 
-// Where the site user's home directory is: the provider scanner writes its
-// artifacts under `~/logs`, outside the htdocs tree this engine owns. FPM does
-// not reliably export HOME, so fall through posix and the document root's
-// parent (htdocs sits directly under the home on wp.cloud sites).
-function _stattic_runtime_site_home_dir(): ?string
+// The provider scanner writes artifacts under the site user's `~/logs`, outside
+// the htdocs tree this engine owns. FPM's HOME is not authoritative: it may be
+// absent or point at the process user's unrelated home. Keep the bounded set of
+// platform-derived roots and let each artifact lookup select the root that
+// actually contains its fixed, trusted path.
+/** @return list<string> */
+function _stattic_runtime_site_home_candidates(string $privateRoot): array
 {
-    $home = getenv('HOME');
-    if (is_string($home) && $home !== '' && is_dir($home)) {
-        return rtrim($home, '/');
-    }
-    if (function_exists('posix_getpwuid') && function_exists('posix_geteuid')) {
-        $entry = posix_getpwuid(posix_geteuid());
-        $dir = is_array($entry) && is_string($entry['dir'] ?? null) ? $entry['dir'] : '';
-        if ($dir !== '' && is_dir($dir)) {
-            return rtrim($dir, '/');
+    $candidates = [];
+    $append = static function (mixed $candidate) use (&$candidates): void {
+        if (!is_string($candidate) || $candidate === '' || !is_dir($candidate)) {
+            return;
         }
-    }
+        $candidate = rtrim($candidate, '/');
+        if (!in_array($candidate, $candidates, true)) {
+            $candidates[] = $candidate;
+        }
+    };
+
     $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? null;
-    if (is_string($docRoot) && $docRoot !== '') {
-        $candidate = dirname($docRoot);
-        if (is_dir($candidate . '/logs')) {
-            return $candidate;
-        }
+    if (!is_string($docRoot) || $docRoot === '') {
+        $docRoot = getenv('DOCUMENT_ROOT');
     }
-    return null;
+    if (is_string($docRoot) && $docRoot !== '') {
+        $append(dirname($docRoot));
+    }
+    // Runtime storage is always <site-home>/htdocs/.stattic/storage. Unlike
+    // process environment, this path is the installation contract and remains
+    // available to the SSH dispatcher where DOCUMENT_ROOT is not populated.
+    $append(dirname($privateRoot, 3));
+    return $candidates;
 }
 
 // The provider's malware scanner leaves its report artifact in the site home
@@ -649,14 +884,17 @@ const STATTIC_RUNTIME_SCAN_LOG_MAX_BYTES = 1048576;
 
 function _stattic_runtime_scan_log_route(string $privateRoot): void
 {
-    $home = _stattic_runtime_site_home_dir();
-    $path = $home !== null ? $home . '/logs/malware-scanner-results.log' : null;
     $log = null;
-    if ($path !== null && is_file($path) && is_readable($path)) {
+    foreach (_stattic_runtime_site_home_candidates($privateRoot) as $home) {
+        $path = $home . '/logs/malware-scanner-results.log';
+        if (!is_file($path) || !is_readable($path)) {
+            continue;
+        }
         $bytes = file_get_contents($path, false, null, 0, STATTIC_RUNTIME_SCAN_LOG_MAX_BYTES);
         if (is_string($bytes)) {
             $log = $bytes;
         }
+        break;
     }
     _stattic_json_response(200, ['log' => $log]);
 }

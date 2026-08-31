@@ -1,19 +1,21 @@
 import { expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dir, "../..");
 const kernel = path.join(repoRoot, "runtime/engine/wordpress/content-kernel.php");
 const contentLoader = path.join(repoRoot, "runtime/wordpress-content-loader.php");
+const accessRules = path.join(repoRoot, "runtime/engine/runtime/access-rules.php");
 
 // The engine release pointer is box state: one immutable engine serves the whole
-// site. The compiled content release is NOT — a wp.cloud site hosts many Spaces,
-// and each compiles its own Payload schema — so it hangs off the request's
-// Space, and a request with no Space loads none.
-test("the MU loader follows the box engine pointer and the request Space's content pointer", () => {
+// site. The ContentModelRelease is per Space, data-only, and selected only after an
+// exact request Space is known. The loader never executes generated PHP.
+test("the MU loader follows the engine pointer and selects one Space's immutable contentModel", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-content-loader-"));
-  const publicRoot = path.join(root, "public");
+  // The loader resolves the release through realpath, and the system temp dir
+  // is itself a symlink on macOS.
+  const publicRoot = path.join(realpathSync(root), "public");
   const muPlugin = path.join(publicRoot, "wp-content/mu-plugins/spacefast-content.php");
   mkdirSync(path.dirname(muPlugin), { recursive: true });
   copyFileSync(contentLoader, muPlugin);
@@ -26,17 +28,17 @@ test("the MU loader follows the box engine pointer and the request Space's conte
       `<?php $GLOBALS['loaded_kernel'] = ${JSON.stringify(release)};`,
     );
   }
-  // Two Spaces on one box, each with its own compiled revision and pointer.
+  // Two Spaces on one box, each with its own immutable ContentModelRelease pointer.
   const spaces = { spc_alpha: "a".repeat(64), spc_beta: "b".repeat(64) };
   for (const [spaceId, revision] of Object.entries(spaces)) {
-    const contentRoot = path.join(publicRoot, ".stattic/storage/spaces", spaceId, "content");
-    const compiledRoot = path.join(contentRoot, "releases", revision);
-    mkdirSync(compiledRoot, { recursive: true });
-    writeFileSync(
-      path.join(compiledRoot, "payloadwp.php"),
-      `<?php $GLOBALS['loaded_content'] = ${JSON.stringify(`${spaceId}:${revision}`)};`,
+    const contentModelRoot = path.join(
+      publicRoot,
+      ".stattic/storage/spaces",
+      spaceId,
+      "content-model",
     );
-    writeFileSync(path.join(contentRoot, "active-release"), `${revision}\n`);
+    mkdirSync(path.join(contentModelRoot, "releases", revision), { recursive: true });
+    writeFileSync(path.join(contentModelRoot, "active-release"), `sha256:${revision}\n`);
   }
 
   const load = (release: string, spaceId: string | null) => {
@@ -51,7 +53,7 @@ test("the MU loader follows the box engine pointer and the request Space's conte
         "-d",
         "auto_prepend_file=",
         "-r",
-        `${scope} require $argv[1]; echo json_encode([$GLOBALS['loaded_kernel'] ?? null, $GLOBALS['loaded_content'] ?? null]);`,
+        `${scope} require $argv[1]; echo json_encode([$GLOBALS['loaded_kernel'] ?? null, $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] ?? null, $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] ?? null]);`,
         muPlugin,
       ],
     });
@@ -60,173 +62,111 @@ test("the MU loader follows the box engine pointer and the request Space's conte
   };
 
   try {
-    expect(load("release-a", "spc_alpha")).toEqual(["release-a", `spc_alpha:${spaces.spc_alpha}`]);
+    expect(load("release-a", "spc_alpha")).toEqual([
+      "release-a",
+      `sha256:${spaces.spc_alpha}`,
+      path.join(
+        publicRoot,
+        ".stattic/storage/spaces/spc_alpha/content-model/releases",
+        spaces.spc_alpha,
+      ),
+    ]);
     // Same box, same engine release, different Space: the compile spc_alpha
     // just published must not follow the request over.
-    expect(load("release-b", "spc_beta")).toEqual(["release-b", `spc_beta:${spaces.spc_beta}`]);
+    expect(load("release-b", "spc_beta")).toEqual([
+      "release-b",
+      `sha256:${spaces.spc_beta}`,
+      path.join(
+        publicRoot,
+        ".stattic/storage/spaces/spc_beta/content-model/releases",
+        spaces.spc_beta,
+      ),
+    ]);
     // A Space with nothing compiled, and a request carrying no Space at all
     // (wp-cron): the engine still loads, no compiled release does.
-    expect(load("release-b", "spc_gamma")).toEqual(["release-b", null]);
-    expect(load("release-b", null)).toEqual(["release-b", null]);
-    expect(load("release-b", "../spc_alpha")).toEqual(["release-b", null]);
+    expect(load("release-b", "spc_gamma")).toEqual(["release-b", null, null]);
+    expect(load("release-b", null)).toEqual(["release-b", null, null]);
+    expect(load("release-b", "../spc_alpha")).toEqual(["release-b", null, null]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("the WordPress content kernel isolates Spaces while validating writes and compiling queries", async () => {
+// One wp.cloud site hosts many Spaces. Native post types and a shared media
+// library are what the WordPress content model cutover left behind, so isolation is
+// no longer a per-Space post type: it is the Space stamp on every row, the
+// clause forced into every query, and the capability that goes away without it.
+test("the WordPress content kernel keeps one Space's native content out of another's", async () => {
   const script = String.raw`
-$savedPost = null;
-$savedMeta = [];
-$savedThumbnail = 0;
-$insertCount = 0;
 define('ABSPATH', '/srv/wordpress/');
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
 $_SERVER['HTTP_HOST'] = 'alpha.spacefast.test';
-class ContentTestWpdb {
-  public array $queries = [];
-  public function prepare(string $query, string $value): string { return $query . ':' . $value; }
-  public function get_var(string $query): string {
-    $this->queries[] = $query;
-    return '1';
-  }
-}
-$wpdb = new ContentTestWpdb();
-function get_posts(array $args): array { return []; }
-function get_option(string $name, mixed $default): mixed { return $default; }
+$savedMeta = [];
+
+// 9 is spc_alpha's attachment, 7 is spc_beta's, 5 is a revision of 9, and 3 is
+// a post type no contentModel of this Space owns.
 function get_post(int $id): ?object {
-  global $savedPost;
-  if ($id === 7) return (object) ['ID' => 7, 'post_type' => 'page'];
-  if ($id === 9) return (object) ['ID' => 9, 'post_type' => 'attachment'];
-  return $savedPost;
+  return match ($id) {
+    9 => (object) ['ID' => 9, 'post_type' => 'attachment'],
+    7 => (object) ['ID' => 7, 'post_type' => 'attachment'],
+    5 => (object) ['ID' => 5, 'post_type' => 'revision', 'post_parent' => 9],
+    3 => (object) ['ID' => 3, 'post_type' => 'wpcom_menu'],
+    default => null,
+  };
 }
 function get_post_meta(int $id, string $key, bool $single): mixed {
   global $savedMeta;
-  if ($id === 9 && $key === SPACEFAST_CONTENT_SPACE_META) return 'spc_alpha';
-  return $savedMeta[$key] ?? '';
+  if (isset($savedMeta[$id][$key])) return $savedMeta[$id][$key];
+  return $key === SPACEFAST_CONTENT_SPACE_META
+    ? ([9 => 'spc_alpha', 7 => 'spc_beta', 3 => 'spc_alpha'][$id] ?? '')
+    : '';
 }
-function wp_insert_post(array $post, bool $returnError): int {
-  global $insertCount, $savedPost;
-  $insertCount += 1;
-  $savedPost = (object) array_merge([
-    'ID' => 41,
-    'post_content' => '',
-    'post_excerpt' => '',
-    'post_name' => '',
-    'post_status' => 'draft',
-    'post_title' => '',
-  ], $post, ['ID' => 41]);
-  return 41;
-}
-function is_wp_error(mixed $value): bool { return false; }
 function update_post_meta(int $id, string $key, mixed $value): void {
-  global $savedMeta;
-  $savedMeta[$key] = $value;
+  global $savedMeta; $savedMeta[$id][$key] = $value;
 }
-function sanitize_title(string $value): string { return strtolower(str_replace(' ', '-', $value)); }
-function sanitize_textarea_field(string $value): string { return 'text:' . $value; }
-function wp_kses_post(string $value): string { return 'html:' . $value; }
-function set_post_thumbnail(int $id, int $mediaId): void {
-  global $savedThumbnail;
-  $savedThumbnail = $mediaId;
-}
-function get_post_thumbnail_id(object $post): int {
-  global $savedThumbnail;
-  return $savedThumbnail;
+final class ScopeTestQuery {
+  public array $vars = [];
+  public function get(string $name): mixed { return $this->vars[$name] ?? null; }
+  public function set(string $name, mixed $value): void { $this->vars[$name] = $value; }
 }
 require $argv[1];
-$collection = [
-  'name' => 'events',
-  'post_type' => spacefast_content_post_type('events_01k4t7x8'),
-  'fields' => [
-    'starts_at' => ['type' => 'date', 'label' => 'Starts at', 'required' => true],
-    'capacity' => ['type' => 'number', 'label' => 'Capacity'],
-  ],
-  'builtin' => false,
-  'scoped' => true,
-];
-$args = spacefast_content_compile_query_args([
-  'where' => [['field' => 'capacity', 'operator' => 'gte', 'value' => 50]],
-  'orderBy' => [['field' => 'starts_at', 'direction' => 'asc']],
-  'limit' => 10,
-], $collection, false);
-$post = spacefast_content_upsert_document([
-  'externalId' => 'source:home',
-  'collection' => 'posts',
-  'slug' => 'Hello World',
-  'title' => 'Hello',
-  'status' => 'publish',
-  'fields' => ['content' => '<p>Hello</p>', 'excerpt' => 'Short', 'featured_media' => 9],
-], true);
-$wrongTypeCode = '';
-try {
-  spacefast_content_upsert_document([
-    'id' => 7,
-    'collection' => 'posts',
-    'slug' => 'wrong',
-    'title' => 'Wrong',
-    'fields' => [],
-  ], true);
-} catch (Spacefast_Content_Error $error) {
-  $wrongTypeCode = $error->codeName;
-}
-$bothIdentityCode = '';
-try {
-  spacefast_content_upsert_document([
-    'id' => 41,
-    'externalId' => 'source:home',
-    'collection' => 'posts',
-    'slug' => 'ambiguous',
-    'title' => 'Ambiguous',
-    'fields' => [],
-  ], true);
-} catch (Spacefast_Content_Error $error) {
-  $bothIdentityCode = $error->codeName;
-}
-$alphaPostType = spacefast_content_post_type('events_01k4t7x8');
-$alphaOption = spacefast_content_option_name('spacefast_content_probe');
+
+// Uploading stamps the Space onto the attachment WordPress just created.
+spacefast_content_scope_attachment(11);
+
+$postQuery = new ScopeTestQuery();
+spacefast_content_scope_post_query($postQuery);
+$capability = static fn (int $postId): array =>
+  spacefast_content_scope_meta_cap(['edit_posts'], 'edit_post', 1, [$postId]);
+$capabilities = [$capability(9), $capability(7), $capability(5), $capability(3)];
+
+$alphaOwnsNine = spacefast_content_post_belongs_to_space(9);
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_beta';
-$isolation = [
-  $alphaPostType !== spacefast_content_post_type('events_01k4t7x8'),
-  $alphaOption !== spacefast_content_option_name('spacefast_content_probe'),
-  !spacefast_content_post_belongs_to_space(9),
-  spacefast_content_scope_meta_cap(['edit_posts'], 'edit_post', 1, [9]) === ['do_not_allow'],
-];
+$betaOwnsNine = spacefast_content_post_belongs_to_space(9);
+$betaCapability = $capability(9);
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-$scopedOrQuery = spacefast_content_scope_meta_query([
-  'relation' => 'OR',
-  ['key' => 'featured', 'value' => '1'],
-  ['key' => 'promoted', 'value' => '1'],
-]);
-$mediaArgs = spacefast_content_compile_query_args([
-  'where' => [['field' => 'id', 'operator' => 'in', 'value' => [9, '12']]],
-], spacefast_content_resolve_collection('media'), false);
+
 $uploads = spacefast_content_scope_upload_dir([
   'basedir' => '/srv/uploads',
   'baseurl' => 'https://space.example/wp-content/uploads',
   'subdir' => '/2026/08',
 ]);
-$capabilities = [
-  spacefast_content_scope_meta_cap(['edit_posts'], 'edit_post', 1, [9]),
-  spacefast_content_scope_meta_cap(['edit_posts'], 'edit_post', 1, [7]),
-];
 echo json_encode([
-  'post_type' => $args['post_type'],
-  'space_filter' => $args['meta_query'][0],
-  'limit' => $args['posts_per_page'],
-  'filter' => $args['meta_query'][1],
-  'sort' => [$args['meta_key'], $args['orderby'], $args['order']],
-  'cursor' => spacefast_content_decode_cursor(spacefast_content_encode_cursor(3)),
-  'post' => $post,
-  'external_id' => $savedMeta[SPACEFAST_CONTENT_EXTERNAL_ID_META] ?? null,
-  'locks' => array_map(static fn (string $query): string => str_contains($query, 'RELEASE') ? 'release' : 'acquire', $wpdb->queries),
-  'wrong_type_code' => $wrongTypeCode,
-  'both_identity_code' => $bothIdentityCode,
-  'insert_count' => $insertCount,
-  'isolation' => $isolation,
-  'scoped_or_query' => $scopedOrQuery,
+  'attachment_stamp' => $savedMeta[11][SPACEFAST_CONTENT_SPACE_META],
+  'post_query' => $postQuery->get('meta_query'),
+  'attachment_query' => spacefast_content_scope_attachment_query(['post_status' => 'inherit']),
+  // An OR the caller wrote keeps its own shape, wrapped under a mandatory AND.
+  'nested_or' => spacefast_content_scope_meta_query([
+    'relation' => 'OR',
+    ['key' => 'featured', 'value' => '1'],
+    ['key' => 'promoted', 'value' => '1'],
+  ]),
+  // Already scoped: the clause is not stacked a second time.
+  'already_scoped' => spacefast_content_scope_meta_query([
+    ['key' => SPACEFAST_CONTENT_SPACE_META, 'value' => 'spc_alpha', 'compare' => '='],
+  ]),
   'capabilities' => $capabilities,
-  'media_query' => [$mediaArgs['post_type'], $mediaArgs['post_status'], $mediaArgs['post__in']],
+  'ownership' => [$alphaOwnsNine, $betaOwnsNine, $betaCapability],
   'upload_scope' => [$uploads['basedir'], $uploads['baseurl'], $uploads['path'], $uploads['url']],
   'request_url' => spacefast_content_request_url('https://provider.example/wp-admin/edit.php?post_type=post'),
 ]);
@@ -242,142 +182,37 @@ echo json_encode([
     new Response(process.stderr).text(),
   ]);
 
+  const spaceClause = { key: "_spacefast_space_id", value: "spc_alpha", compare: "=" };
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
   expect(JSON.parse(stdout)).toEqual({
-    cursor: 3,
-    filter: { compare: ">=", key: "capacity", type: "NUMERIC", value: 50 },
-    limit: 10,
-    post_type: `sf_${new Bun.CryptoHasher("sha256").update("spc_alpha|events_01k4t7x8").digest("hex").slice(0, 16)}`,
-    space_filter: {
-      compare: "=",
-      key: "_spacefast_space_id",
-      value: "spc_alpha",
-    },
-    sort: ["starts_at", "meta_value", "ASC"],
-    post: {
-      createdAt: "",
-      fields: {
-        content: "html:<p>Hello</p>",
-        excerpt: "text:Short",
-        featured_media: 9,
-      },
-      id: 41,
-      slug: "hello-world",
-      status: "publish",
-      title: "Hello",
-      updatedAt: "",
-    },
-    external_id: "source:home",
-    locks: ["acquire", "release", "acquire", "release"],
-    wrong_type_code: "content_document_not_found",
-    both_identity_code: "content_document_identity_invalid",
-    insert_count: 1,
-    isolation: [true, true, true, true],
-    scoped_or_query: {
-      0: {
-        compare: "=",
-        key: "_spacefast_space_id",
-        value: "spc_alpha",
-      },
+    attachment_stamp: "spc_alpha",
+    post_query: [spaceClause],
+    attachment_query: { post_status: "inherit", meta_query: [spaceClause] },
+    nested_or: {
+      relation: "AND",
+      0: spaceClause,
       1: {
+        relation: "OR",
         0: { key: "featured", value: "1" },
         1: { key: "promoted", value: "1" },
-        relation: "OR",
       },
-      relation: "AND",
     },
-    capabilities: [["edit_posts"], ["do_not_allow"]],
-    media_query: ["attachment", "inherit", [9, 12]],
+    already_scoped: [spaceClause],
+    // Own attachment: allowed. Another Space's: denied. A revision follows its
+    // parent. A post type no content model owns is denied whoever holds it.
+    capabilities: [["edit_posts"], ["do_not_allow"], ["edit_posts"], ["do_not_allow"]],
+    // The same row seen from the other Space on the same box.
+    ownership: [true, false, ["do_not_allow"]],
     upload_scope: [
       "/srv/wordpress/.stattic/storage/spaces/spc_alpha/content-media",
       `https://alpha.spacefast.test/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}`,
       "/srv/wordpress/.stattic/storage/spaces/spc_alpha/content-media/2026/08",
       `https://alpha.spacefast.test/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}/2026/08`,
     ],
+    // WordPress must never hand the provider's own hostname to the browser.
     request_url: "https://alpha.spacefast.test/wp-admin/edit.php?post_type=post",
   });
 });
-
-// Compilation and activation are separate so the live content model can follow
-// the live version. This pins the half that rollback depends on: pointing at an
-// already-compiled release, and clearing the pointer for a version that shipped
-// no content config.
-test("content release activation follows the live version and refuses unknown releases", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-content-activate-"));
-  // The private tree the pointer helpers refuse to write outside of, and the
-  // per-space release root the compiler publishes into.
-  const storage = path.join(root, ".stattic/storage");
-  const contentRoot = path.join(storage, "spaces/spc_alpha/content");
-  const older = "a".repeat(64);
-  const newer = "b".repeat(64);
-  for (const revision of [older, newer]) {
-    mkdirSync(path.join(contentRoot, "releases", revision), { recursive: true });
-    writeFileSync(
-      path.join(contentRoot, "releases", revision, "schema.json"),
-      JSON.stringify({ schema_version: 3, collections: [], globals: [], hooks: [] }),
-    );
-  }
-  const script = String.raw`
-$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-$GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $argv[2];
-require $argv[1];
-$pointer = $argv[2] . '/spaces/spc_alpha/content/active-release';
-$read = static fn (): ?string => is_file($pointer) ? trim((string) file_get_contents($pointer)) : null;
-$catch = static function (callable $run): string {
-  try {
-    $run();
-    return 'no_error';
-  } catch (Spacefast_Content_Error $error) {
-    return $error->codeName;
-  }
-};
-$activated = spacefast_content_activate_release($argv[3], true);
-$afterActivate = $read();
-spacefast_content_activate_release($argv[4], true);
-$afterRollback = $read();
-$cleared = spacefast_content_activate_release(null, true);
-$afterClear = $read();
-echo json_encode([
-  'activated' => $activated,
-  'after_activate' => $afterActivate,
-  'after_rollback' => $afterRollback,
-  'cleared' => $cleared,
-  'after_clear' => $afterClear,
-  'unknown_release' => $catch(static fn () => spacefast_content_activate_release(str_repeat('c', 64), true)),
-  'malformed_revision' => $catch(static fn () => spacefast_content_activate_release('not-a-revision', true)),
-  'unmanaged' => $catch(static fn () => spacefast_content_activate_release($argv[3], false)),
-]);
-`;
-  try {
-    const process = Bun.spawn(["php", "-r", script, kernel, storage, newer, older], {
-      cwd: repoRoot,
-      stderr: "pipe",
-      stdout: "pipe",
-    });
-    const [exitCode, stdout, stderr] = await Promise.all([
-      process.exited,
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
-    ]);
-
-    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-    expect(JSON.parse(stdout)).toEqual({
-      activated: { revision: newer },
-      after_activate: newer,
-      // Rolling back to the release an older version bound restores that model.
-      after_rollback: older,
-      cleared: { revision: null },
-      // A version that shipped no content config leaves the Space with none.
-      after_clear: null,
-      unknown_release: "content_release_not_found",
-      malformed_revision: "content_release_invalid",
-      unmanaged: "content_auth_required",
-    });
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test("the managed WordPress surface admits content work and rejects Spacefast-owned screens", async () => {
   const script = String.raw`
 $bootstrapCalls = 0;
@@ -403,9 +238,6 @@ $scfMedia = spacefast_content_scf_field('articles_01k4t7x8', 'gallery', [
   'label' => 'Gallery',
   'multiple' => true,
 ]);
-$publicRest = spacefast_content_disable_rest_api(null);
-$GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = 17;
-$adminRest = spacefast_content_disable_rest_api(null);
 echo json_encode([
   'bootstrap_calls' => $bootstrapCalls,
   'allowed' => array_map('spacefast_content_admin_page_allowed', [
@@ -417,16 +249,11 @@ echo json_encode([
     'plugins.php', 'themes.php', 'users.php', 'options-general.php',
     'tools.php', 'profile.php', 'edit-comments.php', 'site-health.php',
   ]),
-  'multiple_media' => spacefast_content_sanitize_field_value(
-    ['type' => 'media', 'multiple' => true],
-    '4,0,9'
-  ),
   'scf' => [
     [$scfText['type'], $scfText['rows'], $scfText['maxlength']],
     [$scfMedia['type'], $scfMedia['return_format']],
     str_starts_with($scfText['key'], 'field_'),
   ],
-  'rest' => [$publicRest->code, $publicRest->data['status'], $adminRest],
 ]);
 `;
   const process = Bun.spawn(["php", "-r", script, kernel], {
@@ -445,352 +272,179 @@ echo json_encode([
     bootstrap_calls: 1,
     allowed: Array(10).fill(true),
     blocked: Array(8).fill(false),
-    multiple_media: [4, 9],
     scf: [["textarea", 8, 280], ["gallery", "id"], true],
-    rest: ["spacefast_rest_disabled", 404, null],
   });
 });
 
-test("compiled Payload collections feed Spacefast queries, rendering, and SCF", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-payload-schema-"));
-  writeFileSync(
-    path.join(root, "schema.json"),
-    JSON.stringify({
-      schema_version: 3,
-      collections: [
-        {
-          slug: "articles",
-          wordpress_storage: "post",
-          wordpress_post_type: "pwp_articles",
-          label: "Articles",
-          singular_label: "Article",
-          fields: [
-            { name: "title", field_type: "text", required: true },
-            { name: "body", field_type: "richText", required: false },
-            { name: "summary", field_type: "textarea", label: "Summary", required: false },
-            { name: "rating", field_type: "number", required: false },
-            { name: "layout", field_type: "group", required: false },
-          ],
-          hooks: {},
-          access: { read: [] },
-          versions: { enabled: true, drafts: true, max_per_doc: 20 },
-          auth: { enabled: false },
-          upload: { enabled: false },
-        },
-      ],
-      globals: [
-        {
-          slug: "site-settings",
-          label: "Site settings",
-          wordpress_option_name: "payloadwp_global_site_settings",
-          fields: [{ name: "tagline", field_type: "text", required: false }],
-          hooks: {},
-          access: {},
-          versions: { enabled: true, drafts: false, max_per_doc: 10 },
-        },
-      ],
-      hooks: [],
-      localization: null,
-    }),
-  );
-  writeFileSync(
-    path.join(root, "hooks.json"),
-    JSON.stringify({
-      hooks: [{ id: "hook.quick", target: "quick_js", capabilities: [] }],
-    }),
-  );
+test("managed API and admin requests converge on durable issuer-subject WordPress principals", async () => {
   const script = String.raw`
-$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-$GLOBALS['SPACEFAST_CONTENT_COMPILED_RELEASE_ROOT'] = $argv[2];
-define('PAYLOADWP_RUNNER', '/runtime/stattic-runtime');
-$hookProcess = null;
-function _stattic_runtime_run_subprocess(
-  array $command,
-  ?array $environment,
-  ?string $stdin,
-  ?string $cwd,
-  ?int $timeout,
-  ?int $stdoutLimit,
-  ?int $stderrLimit,
-): array {
-  global $hookProcess;
-  $hookProcess = [$command, json_decode((string) $stdin, true), $cwd, $timeout, $stdoutLimit, $stderrLimit];
-  return [
-    'spawned' => true,
-    'timedOut' => false,
-    'exitCode' => 0,
-    'stdout' => '{"ran":"quickjs"}',
-    'stderr' => '',
-  ];
-}
+$inserted = [];
+$users = [];
 $options = [];
-class WP_Query {
-  public array $posts;
-  public int $found_posts = 1;
-  public int $max_num_pages = 1;
-  public function __construct(public array $args) {
-    $this->posts = [(object) [
-      'ID' => 73,
-      'post_type' => 'pwp_articles',
-      'post_name' => 'native-wordpress',
-      'post_status' => 'publish',
-      'post_title' => 'Native WordPress',
-      'post_content' => '<!-- wp:paragraph --><p>Hello</p><!-- /wp:paragraph -->',
-      'post_excerpt' => '',
-    ]];
-  }
-}
-function get_post_meta(int $id, string $key, bool $single): mixed {
-  return match ($key) {
-    'payloadwp_summary' => 'Compiled summary',
-    'payloadwp_rating' => '4.5',
-    'payloadwp_layout' => '{"theme":"news"}',
-    default => '',
-  };
-}
-function get_option(string $name, mixed $default): mixed { global $options; return $options[$name] ?? $default; }
-function update_option(string $name, mixed $value, bool $autoload): void { global $options; $options[$name] = $value; }
-function get_the_title(object $post): string { return $post->post_title; }
-function get_post_time(string $format, bool $gmt, object $post): string { return '2026-08-26T00:00:00+00:00'; }
-function get_post_modified_time(string $format, bool $gmt, object $post): string { return '2026-08-26T01:00:00+00:00'; }
-function apply_filters(string $name, string $content): string { return '<main>' . $content . '</main>'; }
-require $argv[1];
-$collection = spacefast_content_resolve_collection('articles');
-$publicQueryCode = '';
-try {
-  spacefast_content_execute_query(['collection' => 'articles'], false);
-} catch (Spacefast_Content_Error $error) {
-  $publicQueryCode = $error->codeName;
-}
-$query = spacefast_content_compile_query_args([
-  'where' => [['field' => 'rating', 'operator' => 'gte', 'value' => 4]],
-], $collection, false);
-$post = (new WP_Query([]))->posts[0];
-$item = spacefast_content_serialize_post($post, $collection, null);
-$blocks = spacefast_content_render_document([
-  'format' => 'spacefast.content.render', 'version' => 1, 'collection' => 'articles',
-  'slug' => 'native-wordpress', 'field' => 'body', 'output' => 'blocks',
-], true);
-$html = spacefast_content_render_document([
-  'format' => 'spacefast.content.render', 'version' => 1, 'collection' => 'articles',
-  'id' => 73, 'field' => 'body', 'output' => 'html',
-], true);
-$summary = spacefast_content_normalize_compiled_field(
-  spacefast_content_compiled_schema()['collections'][0]['fields'][2]
-);
-$summary['definition']['name'] = $summary['definition']['storageName'];
-$scf = spacefast_content_scf_field('payloadwp:articles', 'summary', $summary['definition']);
-$layout = spacefast_content_normalize_compiled_field(
-  spacefast_content_compiled_schema()['collections'][0]['fields'][4]
-);
-$nested = spacefast_content_normalize_compiled_fields([[
-  'name' => null,
-  'field_type' => 'tabs',
-  'children' => [[
-    'name' => 'seoTitle',
-    'field_type' => 'text',
-    'localized' => true,
-  ]],
-]]);
-$related = spacefast_content_scf_field('payloadwp:articles', 'related', [
-  'type' => 'relation',
-  'collections' => ['articles', 'media'],
-  'multiple' => true,
-]);
-$global = spacefast_content_compiled_schema()['globals'][0];
-$globalField = spacefast_content_normalize_compiled_field($global['fields'][0]);
-$globalField['definition']['globalOption'] = spacefast_content_compiled_global_option_name($global);
-$globalField['definition']['globalField'] = $globalField['name'];
-spacefast_content_prepare_scf_value('Built on WordPress', 'option', [
-  'spacefast_definition' => $globalField['definition'],
-]);
-echo json_encode([
-  'post_type' => $collection['post_type'],
-  'scoped' => $collection['scoped'],
-  'public_query_code' => $publicQueryCode,
-  'filter' => $query['meta_query'][0],
-  'item' => $item,
-  'blocks' => $blocks,
-  'html' => $html,
-  'scf' => [$scf['name'], $scf['type'], $scf['rows']],
-  'scf_json' => spacefast_content_prepare_scf_value('{"theme":"news"}', 73, [
-    'spacefast_definition' => $layout['definition'],
-  ]),
-  'nested' => [$nested[0]['name'], $nested[0]['definition']['type']],
-  'related' => [$related['type'], $related['post_type']],
-  'global' => spacefast_content_load_scf_value(null, 'option', [
-    'spacefast_definition' => $globalField['definition'],
-  ]),
-  'global_option_names' => array_keys($options),
-  'quickjs' => spacefast_content_run_payload_hook(null, 'hook.quick', ['value' => 1]),
-  'hook_process' => $hookProcess,
-]);
-`;
-  try {
-    const process = Bun.spawn(["php", "-r", script, kernel, root], {
-      cwd: repoRoot,
-      stderr: "pipe",
-      stdout: "pipe",
-    });
-    const [exitCode, stdout, stderr] = await Promise.all([
-      process.exited,
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
-    ]);
-
-    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-    expect(JSON.parse(stdout)).toEqual({
-      post_type: "pwp_articles",
-      scoped: false,
-      public_query_code: "content_collection_not_found",
-      filter: { compare: ">=", key: "payloadwp_rating", type: "NUMERIC", value: 4 },
-      item: {
-        id: 73,
-        slug: "native-wordpress",
-        status: "publish",
-        title: "Native WordPress",
-        createdAt: "2026-08-26T00:00:00+00:00",
-        updatedAt: "2026-08-26T01:00:00+00:00",
-        fields: {
-          title: "Native WordPress",
-          body: "<!-- wp:paragraph --><p>Hello</p><!-- /wp:paragraph -->",
-          summary: "Compiled summary",
-          rating: 4.5,
-          layout: { theme: "news" },
-        },
-      },
-      blocks: {
-        id: 73,
-        content: "<!-- wp:paragraph --><p>Hello</p><!-- /wp:paragraph -->",
-        output: "blocks",
-      },
-      html: {
-        id: 73,
-        content: "<main><!-- wp:paragraph --><p>Hello</p><!-- /wp:paragraph --></main>",
-        output: "html",
-      },
-      scf: ["payloadwp_summary", "textarea", 16],
-      scf_json: { theme: "news" },
-      nested: ["seoTitle", "json"],
-      related: ["relationship", ["pwp_articles", "attachment"]],
-      global: "Built on WordPress",
-      global_option_names: [
-        `payloadwp_global_site_settings_${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex")}`,
-      ],
-      quickjs: { ran: "quickjs" },
-      hook_process: [
-        [
-          "/runtime/stattic-runtime",
-          "run-hook",
-          "--manifest",
-          path.join(root, "hooks.json"),
-          "--id",
-          "hook.quick",
-        ],
-        { value: 1 },
-        root,
-        5000,
-        2097152,
-        65536,
-      ],
-    });
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("compiled Payload auth collections defer identity to Spacefast Auth", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-payload-auth-"));
-  writeFileSync(
-    path.join(root, "schema.json"),
-    JSON.stringify({
-      schema_version: 3,
-      collections: [
-        {
-          slug: "users",
-          wordpress_storage: "user",
-          fields: [],
-          auth: { enabled: true },
-        },
-      ],
-      globals: [],
-      hooks: [],
-    }),
-  );
-  for (const artifact of [
-    "hooks.json",
-    "payloadwp.php",
-    "payloadwp-admin.js",
-    "payloadwp-admin.css",
-  ]) {
-    writeFileSync(path.join(root, artifact), artifact === "hooks.json" ? '{"hooks":[]}' : "");
-  }
-  const script = String.raw`
-require $argv[1];
-try {
-  spacefast_content_validate_compiler_artifact($argv[2]);
-  echo json_encode(null);
-} catch (Spacefast_Content_Error $error) {
-  echo json_encode([$error->status, $error->codeName, $error->getMessage()]);
-}
-`;
-  try {
-    const process = Bun.spawnSync(["php", "-r", script, kernel, root], {
-      cwd: repoRoot,
-      stderr: "pipe",
-      stdout: "pipe",
-    });
-    expect(process.exitCode, process.stderr.toString()).toBe(0);
-    expect(JSON.parse(process.stdout.toString())).toEqual([
-      422,
-      "content_auth_collection_unsupported",
-      "Payload auth collections must use Spacefast Auth.",
-    ]);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("content admin users persist only a pseudonymous editor identity", async () => {
-  const script = String.raw`
-$inserted = null;
-$created = null;
+$metas = [];
 $current = null;
-$options = ['blogname' => 'My WordPress Site'];
+final class TestUser {
+  public string $role = '';
+  public function __construct(
+    public int $ID,
+    public string $user_login,
+    public string $display_name,
+    public string $user_email = '',
+  ) {}
+  public function set_role(string $role): void { $this->role = $role; }
+}
 function get_user_by(string $field, mixed $value): object|false {
-  global $created;
-  if ($field === 'login' && $created === null) return false;
-  if ($field === 'id' && $created !== null) return $created;
+  global $users;
+  foreach ($users as $user) {
+    if ($field === 'login' && $user->user_login === $value) return $user;
+    if ($field === 'id' && $user->ID === (int) $value) return $user;
+  }
   return false;
 }
 function wp_insert_user(array $user): int {
-  global $created, $inserted;
-  $inserted = $user;
-  $created = (object) [
-    'ID' => 57,
-    'display_name' => $user['display_name'],
-    'user_email' => $user['user_email'],
-  ];
-  return 57;
+  global $users, $inserted;
+  $id = 57 + count($users);
+  $inserted[] = $user;
+  $users[] = new TestUser($id, $user['user_login'], $user['display_name']);
+  return $id;
 }
 function is_wp_error(mixed $value): bool { return false; }
 function wp_set_current_user(int $userId): object {
-  global $created, $current;
+  global $current;
   $current = $userId;
-  return $created;
+  return get_user_by('id', $userId);
+}
+function get_current_user_id(): int { global $current; return (int) ($current ?? 0); }
+function get_option(string $name, mixed $default = false): mixed {
+  return $GLOBALS['options'][$name] ?? $default;
+}
+function update_option(string $name, mixed $value, bool $autoload = false): bool {
+  $GLOBALS['options'][$name] = $value;
+  return true;
+}
+function update_user_meta(int $userId, string $name, mixed $value): void {
+  $GLOBALS['metas'][$userId][$name] = $value;
+}
+function delete_user_meta(int $userId, string $name): void { unset($GLOBALS['metas'][$userId][$name]); }
+function get_role(string $name): object {
+  return (object) ['capabilities' => match ($name) {
+    'administrator' => ['edit_posts' => true, 'publish_posts' => true, 'manage_options' => true],
+    'editor' => ['edit_posts' => true, 'publish_posts' => true],
+    default => ['read' => true],
+  }];
+}
+function wp_update_user(array $update): int {
+  $user = get_user_by('id', $update['ID']);
+  if (isset($update['display_name'])) $user->display_name = $update['display_name'];
+  if (isset($update['user_email'])) $user->user_email = $update['user_email'];
+  return $user->ID;
 }
 require $argv[1];
-$GLOBALS['SPACEFAST_CONTENT_ADMIN_IDENTITY'] = [
-  'subject' => 'content_' . str_repeat('b', 64),
+// The access layer's own derivation, loaded side by side, so the WordPress
+// principal key and the Grant audience reference cannot drift apart.
+require $argv[2];
+$GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = 'editor';
+$GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = [
+  'kind' => 'user',
+  'actor_id' => 'usr_1',
+  'issuer' => 'https://issuer-a.example',
+  'subject' => 'shared-subject',
+  'profile' => ['display_name' => 'Ada'],
 ];
-$userId = spacefast_content_admin_establish_user();
+$apiUser = spacefast_content_principal_current_user(0);
+$authoredPost = ['post_author' => $apiUser];
+$adminUser = spacefast_content_principal_establish_user();
+// WordPress hands the filter the user whose caps are being tested. Project only
+// onto the request's own principal, so pass that user rather than a bare null.
+$projectedCapabilities = spacefast_content_principal_capabilities(
+  [], [], [], get_user_by('id', get_current_user_id())
+);
+$GLOBALS['SPACEFAST_CONTENT_PRINCIPAL']['profile'] = ['display_name' => 'Grace'];
+$repeatUser = spacefast_content_principal_establish_user();
+$GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = 'administrator';
+$administratorCapabilities = spacefast_content_principal_capabilities(
+  [], [], [], get_user_by('id', get_current_user_id())
+);
+// The same projection must NOT reach a different user: WordPress runs this
+// filter for whoever's caps are tested, and the Grant decision belongs to the
+// request's principal alone.
+$otherUserCapabilities = spacefast_content_principal_capabilities(
+  ['read' => true], [], [], (object) ['ID' => get_current_user_id() + 1]
+);
+$sameUserAsAdministrator = spacefast_content_principal_establish_user();
+$GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = 'editor';
+$GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = [
+  'kind' => 'user',
+  'actor_id' => 'usr_2',
+  'issuer' => 'https://issuer-b.example',
+  'subject' => 'shared-subject',
+  'profile' => ['display_name' => 'Grace'],
+];
+$otherIssuerUser = spacefast_content_principal_establish_user();
+$GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = [
+  'kind' => 'service',
+  'actor_id' => 'api-key:key_1',
+  'profile' => ['display_name' => 'Publisher'],
+];
+$serviceUser = spacefast_content_principal_establish_user();
+// A commenter earns no role, so no WordPress user is created for them at all.
+$GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = [
+  'kind' => 'user',
+  'actor_id' => 'usr_3',
+  'issuer' => 'https://issuer-c.example',
+  'subject' => 'commenter',
+  'profile' => ['display_name' => 'Commenter'],
+];
+$GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = null;
+$rolelessUser = spacefast_content_principal_establish_user();
+$rolelessCapabilities = spacefast_content_principal_capabilities(['read' => true], [], [], null);
+$GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = 'editor';
+$GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = ['kind' => 'anonymous'];
+$anonymousUser = spacefast_content_principal_establish_user();
+unset($GLOBALS['SPACEFAST_CONTENT_PRINCIPAL']);
+$afterRevocation = spacefast_content_principal_current_user(0);
 echo json_encode([
-  'user_id' => $userId,
+  'api_user' => $apiUser,
+  'admin_user' => $adminUser,
+  'repeat_user' => $repeatUser,
+  'same_user_as_administrator' => $sameUserAsAdministrator,
+  'other_issuer_user' => $otherIssuerUser,
+  'service_user' => $serviceUser,
+  'roleless_user' => $rolelessUser,
+  'anonymous_user' => $anonymousUser,
+  'after_revocation' => $afterRevocation,
+  'authored_post' => $authoredPost,
   'current' => $current,
   'inserted' => $inserted,
+  'users' => array_map(static fn (TestUser $user): array => [
+    'id' => $user->ID,
+    'login' => $user->user_login,
+    'display_name' => $user->display_name,
+    'email' => $user->user_email,
+    'role' => $user->role,
+  ], $users),
+  'metas' => $metas,
+  'projected_capabilities' => $projectedCapabilities,
+  'administrator_capabilities' => $administratorCapabilities,
+  'other_user_capabilities' => $otherUserCapabilities,
+  'roleless_capabilities' => $rolelessCapabilities,
+  'authority_agrees' => [
+    spacefast_content_principal_authority('https://issuer-a.example', 'shared-subject'),
+    _stattic_grant_audience_reference([
+      'kind' => 'external',
+      'issuer' => 'https://issuer-a.example',
+      'subject' => 'shared-subject',
+    ]),
+    spacefast_content_principal_authority('spacefast-membership', 'mbr_1'),
+    _stattic_grant_audience_reference([
+      'kind' => 'external',
+      'issuer' => 'spacefast-membership',
+      'subject' => 'mbr_1',
+    ]),
+  ],
 ]);
 `;
-  const process = Bun.spawn(["php", "-r", script, kernel], {
+  const process = Bun.spawn(["php", "-r", script, kernel, accessRules], {
     cwd: repoRoot,
     stderr: "pipe",
     stdout: "pipe",
@@ -802,23 +456,63 @@ echo json_encode([
   ]);
 
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-  expect(JSON.parse(stdout)).toEqual({
-    current: 57,
-    user_id: 57,
-    inserted: {
-      display_name: "Spacefast editor",
-      role: "editor",
-      user_email: `spacefast_${new Bun.CryptoHasher("sha256")
-        .update(`content_${"b".repeat(64)}`)
-        .digest("hex")
-        .slice(0, 24)}@spacefast.invalid`,
-      user_login: `spacefast_${new Bun.CryptoHasher("sha256")
-        .update(`content_${"b".repeat(64)}`)
-        .digest("hex")
-        .slice(0, 24)}`,
-      user_pass: expect.stringMatching(/^[a-f0-9]{64}$/),
-    },
+  // SAFETY: the shape is the echo statement at the end of the PHP script above;
+  // the expectations below fail loudly if the script ever stops emitting it.
+  const result = JSON.parse(stdout) as {
+    api_user: number;
+    admin_user: number;
+    repeat_user: number;
+    same_user_as_administrator: number;
+    other_issuer_user: number;
+    service_user: number;
+    roleless_user: number;
+    anonymous_user: number;
+    after_revocation: number;
+    authored_post: { post_author: number };
+    inserted: Array<Record<string, string>>;
+    users: Array<Record<string, string | number>>;
+    metas: Record<string, Record<string, string>>;
+    projected_capabilities: Record<string, boolean>;
+    administrator_capabilities: Record<string, boolean>;
+    other_user_capabilities: Record<string, boolean>;
+    roleless_capabilities: Record<string, boolean>;
+    authority_agrees: string[];
+  };
+  expect(result.api_user).toBe(57);
+  expect(result.admin_user).toBe(57);
+  expect(result.repeat_user).toBe(57);
+  // A stronger role for the same person is the same person: authority keys the
+  // WordPress user, the role only decides what that request may touch.
+  expect(result.same_user_as_administrator).toBe(57);
+  expect(result.other_issuer_user).toBe(58);
+  expect(result.service_user).toBe(59);
+  // No role, no user: a commenter's work is the platform's, not this site's.
+  expect(result.roleless_user).toBe(0);
+  expect(result.roleless_capabilities).toEqual({ read: true });
+  expect(result.anonymous_user).toBe(0);
+  expect(result.after_revocation).toBe(0);
+  expect(result.authored_post.post_author).toBe(57);
+  expect(result.inserted).toHaveLength(3);
+  expect(result.users.map((user) => user.display_name)).toEqual(["Grace", "Grace", "Publisher"]);
+  expect(new Set(result.users.map((user) => user.login)).size).toBe(3);
+  expect(result.users.every((user) => user.email === "")).toBe(true);
+  expect(result.users.every((user) => user.role === "")).toBe(true);
+  expect(result.projected_capabilities).toEqual({ edit_posts: true, publish_posts: true });
+  expect(result.administrator_capabilities).toEqual({
+    edit_posts: true,
+    publish_posts: true,
+    manage_options: true,
   });
+  // A second user's capability test gets nothing from this request's principal.
+  expect(result.other_user_capabilities).toEqual({ read: true });
+  expect(result.metas["57"]?._spacefast_principal_issuer).toBe("https://issuer-a.example");
+  expect(result.metas["58"]?._spacefast_principal_issuer).toBe("https://issuer-b.example");
+  expect(result.metas["59"]?._spacefast_principal_kind).toBe("service");
+  // The WordPress principal key IS the platform authority reference, hashed
+  // form and reserved-issuer prefix form alike.
+  expect(result.authority_agrees[0]).toBe(result.authority_agrees[1]);
+  expect(result.authority_agrees[2]).toBe(result.authority_agrees[3]);
+  expect(result.metas["57"]?._spacefast_principal_id).toBe(result.authority_agrees[0]);
 });
 
 test("the managed Space title shadows WordPress blogname", async () => {
@@ -941,7 +635,7 @@ echo json_encode(['ready' => $ready, 'expired' => $expired]);
   });
 });
 
-test("a verified content session enables Gutenberg REST without exposing other WordPress users", async () => {
+test("a verified content session enables Gutenberg REST and scopes users to the Space on both REST doors", async () => {
   const script = String.raw`
 class WP_Error {
   public function __construct(
@@ -953,12 +647,24 @@ class WP_Error {
 require $argv[1];
 $closed = spacefast_content_disable_rest_api(null);
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+// Door 1: the editor session, keyed by SPACEFAST_CONTENT_ADMIN_USER_ID.
 $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = 57;
+$sessionDoor = [
+  'rest' => spacefast_content_disable_rest_api(null),
+  'user_query' => spacefast_content_scope_rest_user_query(['orderby' => 'name'], null),
+];
+// Door 2: the WP API door, admitted by a principal role with no editor user
+// id. The user scope must still apply, or /wp/v2/users enumerates every Space.
+unset($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID']);
+$GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = 'administrator';
+$apiDoor = [
+  'rest' => spacefast_content_disable_rest_api(null),
+  'user_query' => spacefast_content_scope_rest_user_query(['orderby' => 'name'], null),
+];
 echo json_encode([
   'closed' => [$closed->code, $closed->data['status']],
-  'rest' => spacefast_content_disable_rest_api(null),
-  'show_in_rest' => spacefast_content_post_type_args('Posts', 'Post', ['editor'])['show_in_rest'],
-  'user_query' => spacefast_content_scope_rest_user_query(['orderby' => 'name'], null),
+  'session_door' => $sessionDoor,
+  'api_door' => $apiDoor,
 ]);
 `;
   const process = Bun.spawn(["php", "-r", script, kernel], {
@@ -972,57 +678,44 @@ echo json_encode([
     new Response(process.stderr).text(),
   ]);
 
+  const scopedQuery = {
+    orderby: "name",
+    meta_key: "_spacefast_space_id",
+    meta_value: "spc_alpha",
+  };
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
   expect(JSON.parse(stdout)).toEqual({
     closed: ["spacefast_rest_disabled", 404],
-    rest: null,
-    show_in_rest: true,
-    user_query: { include: [57], orderby: "name" },
+    session_door: { rest: null, user_query: scopedQuery },
+    api_door: { rest: null, user_query: scopedQuery },
   });
 });
 
-test("custom collection writes enforce the applied field schema before persistence", async () => {
+test("the REST gate's admission enables WordPress REST, with or without a role", async () => {
+  // spacefast_content_disable_rest_api is not a second authorization: the WP API
+  // door already ran the access engine and, on admission, set
+  // SPACEFAST_CONTENT_REST_ADMITTED. An admitted anonymous request (no editor
+  // user, no resolved role) must therefore get WordPress's own unauthenticated
+  // answer, while a request that reached WordPress without the gate still 404s.
   const script = String.raw`
-require $argv[1];
-$collection = [
-  'fields' => [
-    'starts_at' => ['type' => 'date', 'label' => 'Starts at', 'required' => true],
-    'capacity' => ['type' => 'number', 'label' => 'Capacity'],
-    'summary' => ['type' => 'text', 'label' => 'Summary', 'maxLength' => 5],
-    'tracks' => [
-      'type' => 'select',
-      'label' => 'Tracks',
-      'multiple' => true,
-      'options' => ['design', 'code'],
-    ],
-    'images' => ['type' => 'media', 'label' => 'Images', 'multiple' => true],
-  ],
-];
-$cases = [
-  ['capacity' => 12],
-  ['starts_at' => '2026-02-30'],
-  ['starts_at' => '2026-08-26', 'capacity' => 'many'],
-  ['starts_at' => '2026-08-26', 'summary' => 'too long'],
-  ['starts_at' => '2026-08-26', 'tracks' => 'design'],
-  ['starts_at' => '2026-08-26', 'images' => array_fill(0, 101, 1)],
-];
-$codes = [];
-foreach ($cases as $fields) {
-  try {
-    spacefast_content_validate_document_fields($collection, $fields);
-    $codes[] = 'accepted';
-  } catch (Spacefast_Content_Error $error) {
-    $codes[] = $error->codeName;
-  }
+class WP_Error {
+  public function __construct(
+    public string $code,
+    public string $message,
+    public array $data,
+  ) {}
 }
-$valid = spacefast_content_validate_document_fields($collection, [
-  'starts_at' => '2026-08-26',
-  'capacity' => '42.5',
-  'summary' => 'Hello',
-  'tracks' => ['design', 'code'],
-  'images' => ['7', 9, 7],
-]);
-echo json_encode(['codes' => $codes, 'valid' => $valid]);
+require $argv[1];
+function verdict(mixed $result): mixed {
+  return $result instanceof WP_Error ? [$result->code, $result->data['status']] : $result;
+}
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+// Reached WordPress with a Space scope but no gate admission: still closed.
+$noGate = verdict(spacefast_content_disable_rest_api(null));
+// The gate admitted an anonymous request: no editor user, no role, marker set.
+$GLOBALS['SPACEFAST_CONTENT_REST_ADMITTED'] = true;
+$anonymousAdmitted = verdict(spacefast_content_disable_rest_api(null));
+echo json_encode(['no_gate' => $noGate, 'anonymous_admitted' => $anonymousAdmitted]);
 `;
   const process = Bun.spawn(["php", "-r", script, kernel], {
     cwd: repoRoot,
@@ -1037,20 +730,7 @@ echo json_encode(['codes' => $codes, 'valid' => $valid]);
 
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
   expect(JSON.parse(stdout)).toEqual({
-    codes: [
-      "content_field_required",
-      "content_field_invalid",
-      "content_field_invalid",
-      "content_field_invalid",
-      "content_field_invalid",
-      "content_field_invalid",
-    ],
-    valid: {
-      starts_at: "2026-08-26",
-      capacity: 42.5,
-      summary: "Hello",
-      tracks: ["design", "code"],
-      images: [7, 9],
-    },
+    no_gate: ["spacefast_rest_disabled", 404],
+    anonymous_admitted: null,
   });
 });

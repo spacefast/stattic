@@ -585,6 +585,29 @@ check(
     'runtime projection compilation rejects Grants beyond the hard ceiling'
 );
 
+// A Space that never republishes keeps the overlay its last publish wrote, so
+// this engine meets projections an older one compiled forever. Version 3 is
+// upgraded on read rather than denied: it predates the frameOrigin constraint,
+// so no Grant in it can carry one and the flag it lacks is false by
+// construction. The upgrade must decide identically to the current shape.
+$version3Projection = $publicProjection;
+$version3Projection['compiledVersion'] = 3;
+unset($version3Projection['grantIndex']['hasFrameLinks']);
+$upgraded = _stattic_authorization_projection_current($version3Projection);
+check(
+    !_stattic_authorization_projection_compiled($version3Projection)
+        && is_array($upgraded)
+        && $upgraded['grantIndex']['hasFrameLinks'] === false
+        && count(_stattic_grant_candidates($upgraded, [])) === 1,
+    'a projection compiled by the previous engine is upgraded on read, not denied'
+);
+$version2Projection = $version3Projection;
+$version2Projection['compiledVersion'] = 2;
+check(
+    _stattic_authorization_projection_current($version2Projection) === null,
+    'a projection older than the upgrade window stays refused'
+);
+
 // --- Grant-decision conformance: the shared corpus ------------------------------------
 //
 // This engine re-implements the Grant vocabulary of
@@ -1159,6 +1182,7 @@ check(
         'ftp://live.example/',
         'https://evil.example@live.example/',
         'https://live.example/;script-src *',
+        'http://[::1]:8080/',
         null,
     ]) === [
         'https://live.example',
@@ -1168,6 +1192,7 @@ check(
         null,
         null,
         'https://live.example',
+        'http://[::1]:8080',
         null,
     ],
     'framing boundary: only an absolute http(s) URL yields an origin, and only its origin'

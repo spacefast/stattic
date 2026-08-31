@@ -106,9 +106,17 @@ pub struct FinalizeTelemetry {
     pub total_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ZeroExecutionMode {
+    Read,
+    Write,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeZeroEndpoint {
+    pub execution_mode: ZeroExecutionMode,
     pub method: String,
     pub path: String,
     pub source: String,
@@ -125,6 +133,7 @@ pub struct RuntimeZeroEndpoint {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeZeroRun {
+    pub execution_mode: ZeroExecutionMode,
     pub run_id: String,
     pub source: String,
     #[serde(default)]
@@ -159,6 +168,7 @@ pub enum PhpActionRecord {
     InvokeZero {
         pattern: String,
         method: String,
+        execution_mode: ZeroExecutionMode,
         endpoint_id: String,
         zero_artifact: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,13 +182,16 @@ pub enum PhpActionRecord {
 pub struct ZeroCapabilities {
     #[serde(default = "default_true")]
     pub db: bool,
-    #[serde(default = "default_true")]
+    // The write-side authorities default closed, so an omitted field can never
+    // hand a `read` handler a grant its execution mode forbids. Publishing one
+    // would compile an artifact the runner rejects on every request.
+    #[serde(default)]
     pub fetch: bool,
     #[serde(default = "default_true")]
     pub auth: bool,
     #[serde(default = "default_true")]
     pub env: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub realtime: bool,
     #[serde(default = "default_true")]
     pub logging: bool,
@@ -186,25 +199,28 @@ pub struct ZeroCapabilities {
     pub gravatar: bool,
     #[serde(default = "default_true")]
     pub spam: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub email: bool,
     #[serde(default)]
     pub content: bool,
+    #[serde(default)]
+    pub storage: bool,
 }
 
 impl Default for ZeroCapabilities {
     fn default() -> Self {
         Self {
             db: true,
-            fetch: true,
+            fetch: false,
             auth: true,
             env: true,
-            realtime: true,
+            realtime: false,
             logging: true,
             gravatar: true,
             spam: true,
-            email: true,
+            email: false,
             content: false,
+            storage: false,
         }
     }
 }
@@ -219,6 +235,7 @@ pub struct ZeroEndpointArtifact {
     pub format: String,
     pub endpoint_id: String,
     pub kind: String,
+    pub execution_mode: ZeroExecutionMode,
     pub method: String,
     pub path: String,
     pub source_path: String,
@@ -237,6 +254,7 @@ pub struct ZeroRunArtifact {
     pub format: String,
     pub run_id: String,
     pub kind: String,
+    pub execution_mode: ZeroExecutionMode,
     pub source_path: String,
     pub bytecode_path: String,
     pub source_sha256: String,
@@ -308,6 +326,7 @@ pub struct ZeroRunIndexArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ZeroRouteEntry {
     pub method: String,
+    pub execution_mode: ZeroExecutionMode,
     pub pattern: String,
     pub endpoint_id: String,
     pub artifact: String,

@@ -442,10 +442,38 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+const ZERO_ADMIN_PLUGIN_ROOT = "wordpress/zero-admin";
+const ZERO_ADMIN_BUILD_SCRIPT = "packages/zero-admin/scripts/build.ts";
+
+/**
+ * Build the zero-admin plugin into the engine tree when it is not already
+ * there.
+ *
+ * Its source lives in packages/zero-admin and its output under
+ * runtime/wordpress/zero-admin is gitignored, so a fresh checkout and every CI
+ * lane that runs `bun test` directly start without it while the manifest ships
+ * it. Left to itself the drift check below then reports manifest staleness
+ * naming eight files nobody edited. Build it lazily here, the way the native
+ * binary is built, so every consumer of this harness gets it — a test lane, a
+ * control-plane test spawning a runtime, or a developer running one file.
+ */
+function ensureZeroAdminPlugin(manifestFiles: string[]): void {
+  const shipped = manifestFiles.filter((file) => file.startsWith(`${ZERO_ADMIN_PLUGIN_ROOT}/`));
+  if (shipped.every((file) => existsSync(path.join(RUNTIME_DIR, file)))) return;
+  const build = spawnSync(process.execPath, [path.join(REPO_ROOT, ZERO_ADMIN_BUILD_SCRIPT)], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  if (build.status !== 0) {
+    throw new Error(`zero-admin plugin build failed:\n${build.stdout}\n${build.stderr}`);
+  }
+}
+
 function installEngine(root: string): void {
   const manifest = JSON.parse(
     readFileSync(path.join(RUNTIME_DIR, "engine-manifest.json"), "utf8"),
   ) as { files: string[]; aliases: Array<{ source: string; path: string }> };
+  ensureZeroAdminPlugin(manifest.files);
   // The manifest is the single authority for what ships, and it is edited by
   // the orchestrator at commit time rather than by the streams that add or
   // delete engine files. A drifted manifest therefore fails here first — report

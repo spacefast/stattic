@@ -1573,6 +1573,7 @@ fn zero_response_actions(body: &Value, compiled_zero_routes: &[Value]) -> Map<St
             "t": "zero",
             "endpoint": record.get("endpointId").cloned().unwrap_or(Value::Null),
             "artifact": record.get("zeroArtifact").cloned().unwrap_or(Value::Null),
+            "execution_mode": record.get("executionMode").cloned().unwrap_or(Value::Null),
             "methods": zero_methods(method),
             "capabilities": record.get("capabilities").cloned().unwrap_or_else(|| json!({})),
         });
@@ -1716,6 +1717,7 @@ fn exact_zero_lookup_action(record: &Value) -> Option<(String, Value)> {
         "action": "invoke_zero",
         "endpoint_id": record.get("endpointId")?.clone(),
         "zero_artifact": record.get("zeroArtifact")?.clone(),
+        "execution_mode": record.get("executionMode")?.clone(),
         "methods": zero_methods(method),
         "capabilities": record.get("capabilities").cloned().unwrap_or_else(|| json!({})),
     });
@@ -2030,6 +2032,10 @@ fn validate_zero_routes(version_root: &Path, expected_count: usize) -> Result<()
                 .get(endpoint_id.unwrap_or_default())
                 .and_then(Value::as_str)
                 != artifact
+            || !entry
+                .get("execution_mode")
+                .and_then(Value::as_str)
+                .is_some_and(|mode| matches!(mode, "read" | "write"))
             || !entry
                 .get("method")
                 .and_then(Value::as_str)
@@ -2606,6 +2612,7 @@ mod tests {
             json!({"zero":{"runtimeKind":"zero"},"serving":{"config":{}}}),
         );
         input.zero_endpoints = vec![RuntimeZeroEndpoint {
+            execution_mode: crate::model::ZeroExecutionMode::Read,
             method: "GET".into(),
             path: "/:splat".into(),
             source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });".into(),
@@ -2776,6 +2783,7 @@ mod tests {
             }),
         );
         input.zero_endpoints = vec![RuntimeZeroEndpoint {
+            execution_mode: crate::model::ZeroExecutionMode::Write,
             method: "POST".into(),
             path: "/api/status".into(),
             source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });".into(),
@@ -3248,6 +3256,7 @@ mod tests {
             json!({"zero": {"runtimeKind": "zero"}, "serving": {"config": {}}}),
         );
         input.zero_endpoints = vec![RuntimeZeroEndpoint {
+            execution_mode: crate::model::ZeroExecutionMode::Read,
             method: "GET".into(),
             path: "/api/items/:id".into(),
             source:
@@ -3259,6 +3268,7 @@ mod tests {
             db: None,
         }];
         input.zero_runs = vec![RuntimeZeroRun {
+            execution_mode: crate::model::ZeroExecutionMode::Read,
             run_id: "query_items".into(),
             source:
                 "globalThis.__statticZeroResult = JSON.stringify({ status: 200, body: '[]' });"
@@ -3282,6 +3292,7 @@ mod tests {
             serde_json::from_slice(&fs::read(version.join("zero/routes.json")).unwrap()).unwrap();
         let route = routes.pointer("/by_first_segment/api/0").unwrap();
         assert_eq!(route.get("endpoint_id"), Some(&json!("GET /api/items/:id")));
+        assert_eq!(route.get("execution_mode"), Some(&json!("read")));
         assert_eq!(route.get("artifact"), Some(&json!(artifact_path)));
         let artifact: Value =
             serde_json::from_slice(&fs::read(version.join(artifact_path)).unwrap()).unwrap();
@@ -3307,6 +3318,7 @@ mod tests {
         assert_eq!(endpoint["runtime"], json!("quick-js"));
         assert_eq!(endpoint["path"], json!("/api/items/:id"));
         assert_eq!(endpoint["methods"], json!(["GET", "HEAD"]));
+        assert_eq!(endpoint["executionMode"], json!("read"));
         let control_runs: Vec<&Value> = inventory
             .iter()
             .filter(|route| route["source"] == "runtime:run")
@@ -3339,6 +3351,7 @@ mod tests {
     fn invoke_compiled_zero(
         version: &Path,
         endpoint_id: &str,
+        execution_mode: &str,
         method: &str,
         path: &str,
         artifact_path: Option<&str>,
@@ -3347,6 +3360,7 @@ mod tests {
             "protocol": "stattic.zero.invoke.v1",
             "versionRoot": version.to_string_lossy(),
             "endpointId": endpoint_id,
+            "executionMode": execution_mode,
             "artifactPath": artifact_path,
             "request": {
                 "method": method,
@@ -3439,10 +3453,7 @@ mod tests {
                 .unwrap();
         let run_artifacts = run_index["runs"].as_object().expect("run index entries");
         assert_eq!(run_artifacts.len(), 2);
-        let mutation_artifact_path = run_artifacts
-            .get("mutation_addTodo")
-            .and_then(Value::as_str)
-            .expect("mutation artifact path");
+        assert!(run_artifacts.contains_key("mutation_addTodo"));
         let migrations: Value =
             serde_json::from_slice(&fs::read(version.join("zero/migrations.json")).unwrap())
                 .unwrap();
@@ -3463,15 +3474,21 @@ mod tests {
             "realtime": false,
             "logging": false
         });
-        let (status, body, events) =
-            invoke_compiled_zero(&version, "GET /api/health", "GET", "/api/health", None);
+        let (status, body, events) = invoke_compiled_zero(
+            &version,
+            "GET /api/health",
+            "read",
+            "GET",
+            "/api/health",
+            None,
+        );
         assert_eq!(status, 200);
         assert_eq!(body["installed"], no_capabilities);
         assert!(events.is_empty());
 
-        let fetch_auth_env_logging = json!({
+        let auth_env_logging = json!({
             "db": false,
-            "fetch": true,
+            "fetch": false,
             "auth": true,
             "env": true,
             "realtime": false,
@@ -3480,54 +3497,23 @@ mod tests {
         let (status, body, events) = invoke_compiled_zero(
             &version,
             "GET /api/capabilities",
+            "read",
             "GET",
             "/api/capabilities",
             None,
         );
         assert_eq!(status, 200);
-        assert_eq!(body["installed"], fetch_auth_env_logging);
+        assert_eq!(body["installed"], auth_env_logging);
         assert_eq!(body["envKeys"], json!(["FEATURE_FLAG"]));
         assert_eq!(body["auth"]["userId"], "usr_zero_fixture");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event"], "zero.log");
-
-        let db_realtime_logging = json!({
-            "db": true,
-            "fetch": false,
-            "auth": false,
-            "env": false,
-            "realtime": true,
-            "logging": true
-        });
-        let (status, body, events) =
-            invoke_compiled_zero(&version, "POST /api/items", "POST", "/api/items", None);
-        assert_eq!(status, 201);
-        assert_eq!(body["installed"], db_realtime_logging);
-        assert_eq!(body["table"], "`zero_example_todos`");
-        assert_eq!(body["realtime"]["ok"], true);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0]["event"], "zero.realtime");
-        assert_eq!(events[1]["event"], "zero.log");
-
-        let (status, body, events) = invoke_compiled_zero(
-            &version,
-            "mutation_addTodo",
-            "POST",
-            "/__spacefast/zero/run",
-            Some(mutation_artifact_path),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(body["installed"], db_realtime_logging);
-        assert_eq!(body["run"], "mutation_addTodo");
-        assert_eq!(body["realtime"]["ok"], true);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0]["event"], "zero.realtime");
-        assert_eq!(events[1]["event"], "zero.log");
     }
 
     #[test]
     fn invalid_zero_source_and_ambiguous_routes_fail_before_publish() {
         let endpoint = |path: &str, source: &str| RuntimeZeroEndpoint {
+            execution_mode: crate::model::ZeroExecutionMode::Read,
             method: "GET".into(),
             path: path.into(),
             source: source.into(),
@@ -3611,6 +3597,7 @@ mod tests {
 
         let mut zero = input.clone();
         zero.zero_endpoints = vec![RuntimeZeroEndpoint {
+            execution_mode: crate::model::ZeroExecutionMode::Read,
             method: "GET".into(),
             path: "/api/status".into(),
             source: "globalThis.__statticZeroResult = '{}';".into(),

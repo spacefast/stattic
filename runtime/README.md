@@ -130,6 +130,34 @@ hostname intent (`production_hostnames`, `noindex_production_hostnames`,
 `config.authorization`. Owner access has no separate deny/firewall policy; platform
 safety and provider takedown controls remain operator-owned.
 
+## WordPress API
+
+A Space with managed content exposes WordPress's own REST API at `/wp-json/`. There is no
+Spacefast-shaped wrapper around it and no per-endpoint proxy: the request reaches
+WordPress, and WordPress answers.
+
+One edge rule makes it reachable. A request to `/wp-json/**` (or `/?rest_route=`, the
+spelling WordPress uses without pretty permalinks) is admitted by the **same access engine
+that serves the Space's pages** — the same Grants, the same fences, the same denials. It is
+never wider than the page-serving policy, because there is no second policy. A credential
+presented in `X-SF-Authorization` is resolved to a principal, and its Grant capabilities
+project the WordPress role for that one request (`content.publish` → `editor`,
+`access.manage` → `administrator`). Without a credential a public Space gives WordPress's
+normal unauthenticated answer, and a protected Space refuses exactly as it refuses a page.
+
+`Authorization` is deliberately untouched — it belongs to the customer's application and to
+WordPress's own auth schemes.
+
+THE canonical example. Copy it verbatim wherever this is documented:
+
+```bash
+curl -H "X-SF-Authorization: Bearer $SPACEFAST_TOKEN" \
+  https://your-space.spacefast.app/wp-json/wp/v2/posts
+```
+
+Discovery is WordPress's own: `/wp-json/` is a self-describing index, and every collection
+publishes its schema at `OPTIONS /wp-json/wp/v2/<collection>`.
+
 ## Storage Layout
 
 ```text

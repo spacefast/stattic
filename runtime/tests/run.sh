@@ -17,6 +17,16 @@ php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 5 ? 0 : 1);' || {
 command -v bun >/dev/null || { echo "bun is required" >&2; exit 1; }
 command -v cargo >/dev/null || { echo "cargo is required" >&2; exit 1; }
 
+# The zero-admin plugin is a build artifact: its source lives in
+# packages/zero-admin and its output under runtime/wordpress/zero-admin is
+# gitignored, so a fresh checkout and every CI runner start without it. The
+# engine manifest ships those files, so harness.ts's installEngine would fail
+# with manifest drift naming entries nobody edited. Build it here, the same way
+# build-runtime-engine-zip.ts builds it for the release zip. It takes ~0.2s, and
+# running it before php -l lints the PHP it emits too.
+echo "==> zero-admin plugin"
+bun run --cwd "$REPO_ROOT/packages/zero-admin" build >/dev/null
+
 echo "==> php -l (all runtime PHP files)"
 while IFS= read -r -d '' file; do
   php -l "$file" >/dev/null || exit 1

@@ -8,16 +8,20 @@
 // answered by the in-process MySQL broker (db-broker.php; service frames still
 // run the real `service-broker` subprocess) against a real MySQL 8.4 container.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
+import type { ApplicationJournalDeliveryClaimV1 } from "@spacefast/common/contracts/application-journal";
+
 import {
+  apiJson,
   deploy,
   get,
   publicAccessConfig,
   putRoute,
+  RUNTIME_HTTP_API_BASE,
   type Runtime,
   RUNTIME_INSTANCE_ID,
   signToken,
@@ -38,6 +42,44 @@ const MYSQL_DATABASE = "fx_relay_test";
 
 let rt: Runtime;
 let mysql: MysqlContainer;
+
+const wpMailCapturePath = path.join(
+  os.tmpdir(),
+  `stattic-relay-wp-mail-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`,
+);
+
+function drainApplicationJournal() {
+  return apiJson<{ claims: ApplicationJournalDeliveryClaimV1[] }>(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/application-journal/drain`,
+    "drain_application_journal",
+    {},
+    { sink: "control-plane:mail", limit: 10, lease_seconds: 60 },
+  );
+}
+
+function deliverApplicationJournalMail(claim: ApplicationJournalDeliveryClaimV1) {
+  return apiJson<{ message_id: string }>(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE_ID}/application-journal/mail`,
+    "deliver_application_journal_mail",
+    { space_id: SPACE_ID },
+    { claim },
+  );
+}
+
+function completeApplicationJournal(receipts: unknown[]) {
+  return apiJson<{ recorded: number; stale: number }>(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/application-journal/complete`,
+    "complete_application_journal",
+    {},
+    { receipts },
+  );
+}
 
 // Must match SPACEFAST_RUNTIME_LOG_MARKER in engine/shared/runtime-log.php and
 // RUNTIME_LOG_MARKER in the control plane's observability.ts.
@@ -137,8 +179,22 @@ beforeAll(async () => {
       // Management state, supplied by the control plane per space. Without it
       // the broker refuses mail rather than queueing what it cannot send.
       SPACEFAST_SERVICE_EMAIL_SENDERS: "hello@example.com",
+      SPACEFAST_TEST_WP_MAIL_CAPTURE: wpMailCapturePath,
     },
   });
+  writeFileSync(
+    path.join(rt.root, "wp-load.php"),
+    [
+      "<?php",
+      "function add_action(string $name, callable $callback): void { $GLOBALS['sf_mail_hook'] = $callback; }",
+      "function remove_action(string $name, callable $callback): void { unset($GLOBALS['sf_mail_hook']); }",
+      "function wp_mail(array $to, string $subject, string $message, array $headers): bool {",
+      "  file_put_contents((string) getenv('SPACEFAST_TEST_WP_MAIL_CAPTURE'), json_encode(compact('to', 'subject', 'message', 'headers')) . PHP_EOL, FILE_APPEND);",
+      "  return true;",
+      "}",
+      "",
+    ].join("\n"),
+  );
   await deploy(rt, {
     spaceId: SPACE_ID,
     versionId: VERSION_ID,
@@ -384,7 +440,7 @@ test("a service frame naming an ungranted service is refused inside the broker",
   });
 });
 
-test("an accepted email is a row in the outbox, written once per invocation", async () => {
+test("an accepted email commits one outbox row and the journal lane delivers it through wp_mail", async () => {
   const token = relayToken({ capabilities: ["email.send"] });
   const message = {
     service: "email",
@@ -420,6 +476,61 @@ test("an accepted email is a row in the outbox, written once per invocation", as
   const replayed = (await replay.json()) as { ok: boolean; result?: { messageId?: string } };
   expect(replayed.result?.messageId).toBe(messageId);
   expect(mysql.exec("SELECT COUNT(*) FROM _spacefast_email_outbox;")).toContain("1");
+
+  const changed = await relay(
+    { ...message, payload: { ...message.payload, subject: "Different" } },
+    token,
+    "services",
+    "inv_outbox_1",
+  );
+  expect(await changed.json()).toMatchObject({ ok: true, result: { messageId } });
+  expect(mysql.exec("SELECT COUNT(*) FROM _spacefast_email_outbox;")).toContain("1");
+
+  const firstPage = await drainApplicationJournal();
+  expect(firstPage.claims).toHaveLength(1);
+  const claim = firstPage.claims[0];
+  if (!claim) throw new Error("journal claim missing");
+  expect(claim.idempotencyKey).toBe(`${claim.entry.id}:control-plane:mail`);
+  expect((await drainApplicationJournal()).claims).toEqual([]);
+
+  const stale = await completeApplicationJournal([
+    {
+      format: "spacefast.application-delivery",
+      version: 1,
+      status: "delivered",
+      fence: { ...claim.fence, leaseId: "lease_stolen" },
+      idempotencyKey: claim.idempotencyKey,
+      downstreamReceipt: "provider_stale",
+      recordedAt: new Date().toISOString(),
+    },
+  ]);
+  expect(stale).toEqual({ recorded: 0, stale: 1 });
+
+  const delivered = await deliverApplicationJournalMail(claim);
+  expect(delivered).toEqual({ message_id: messageId });
+  expect(readFileSync(wpMailCapturePath, "utf8").trim().split("\n")).toHaveLength(1);
+  // The site-local acceptance marker makes a replay safe even before the
+  // control plane settles the delivery receipt.
+  expect(await deliverApplicationJournalMail(claim)).toEqual({ message_id: messageId });
+  expect(readFileSync(wpMailCapturePath, "utf8").trim().split("\n")).toHaveLength(1);
+
+  const settled = await completeApplicationJournal([
+    {
+      format: "spacefast.application-delivery",
+      version: 1,
+      status: "delivered",
+      fence: claim.fence,
+      idempotencyKey: claim.idempotencyKey,
+      downstreamReceipt: "provider_accepted",
+      recordedAt: new Date().toISOString(),
+    },
+  ]);
+  expect(settled).toEqual({ recorded: 1, stale: 0 });
+  expect(
+    mysql.exec(
+      "SELECT state, attempt_count, provider_message_id, accepted_at IS NOT NULL, terminal_at IS NOT NULL FROM _spacefast_email_outbox;",
+    ),
+  ).toContain("delivered");
 });
 
 test("mail from an address the space has not verified is refused, and no row is written", async () => {

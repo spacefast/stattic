@@ -54,8 +54,10 @@ function mintContentAdminSession(host: string, spaceId: string): string {
     JSON.stringify({
       host,
       user_id: 42,
+      principal: { kind: "user", issuer: "spacefast", subject: "sub_media_test" },
       space_id: spaceId,
       access_generation: 7,
+      wordpress_role: "editor",
       frame_origin: DASHBOARD_ORIGIN,
       expires_at: Math.floor(Date.now() / 1000) + 3600,
     }),

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::finalize::{invalid_with_details, FileMeta, Result};
 use crate::hash::stable_json_sha256;
-use crate::model::PhpActionRecord;
+use crate::model::{PhpActionRecord, ZeroExecutionMode};
 use crate::responses::php_function_route;
 use crate::routing::RedirectRule;
 use crate::serving_paths::is_private_serving_path;
@@ -20,12 +20,21 @@ pub(crate) const ROUTE_INVENTORY_FORMAT: &str = "stattic.route-inventory.v1";
 const ALL_METHODS: &[&str] = &["*"];
 
 /// The Zero control routes a version with a Zero runtime always answers, as
-/// `(request path, method, operation)`. Inventory and response-table actions
-/// iterate this one list so neither projection can invent a route alone.
+/// `(request path, method, operation)`. Inventory, response-table actions and
+/// the publisher-collision guard iterate this one list, so no projection can
+/// invent a control route or reserve a path the others do not.
 ///
 /// `/__zero/*` is canonical. The `/__spacefast/zero/*` spellings are permanent
 /// aliases: frozen capsule clients baked them at build time and a republish
 /// cannot be assumed, so both prefixes answer with the same operations.
+///
+/// No row carries an execution mode, and the two spellings of an operation are
+/// therefore identical on that axis by construction. A control route is not a
+/// capsule invocation: `config`, `auth/*` and `realtime/events` run no compiled
+/// handler at all, and `run` is bimodal — a query run declares `read` and a
+/// mutation run declares `write` for that one request, from the mode baked into
+/// the run artifact it names. Stamping either mode on the route would be a lie
+/// about half its traffic.
 pub(crate) const ZERO_CONTROL_ROUTES: &[(&str, &str, &str)] = &[
     ("/__zero/config", "GET", "config"),
     ("/__zero/run", "POST", "run"),
@@ -42,6 +51,14 @@ pub(crate) const ZERO_CONTROL_ROUTES: &[(&str, &str, &str)] = &[
         "realtime_events",
     ),
 ];
+
+/// Whether a compiled Zero endpoint would collide with a generated control
+/// route, on either spelling.
+pub(crate) fn is_zero_control_path(path: &str) -> bool {
+    ZERO_CONTROL_ROUTES
+        .iter()
+        .any(|(control_path, _, _)| *control_path == path)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -78,6 +95,8 @@ pub(crate) struct RouteRecord {
     host: String,
     path: String,
     methods: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_mode: Option<ZeroExecutionMode>,
     /// Access policy is mutable route state, so immutable versions can only
     /// record that the active Space policy is inherited.
     auth: &'static str,
@@ -103,6 +122,7 @@ struct RouteRecordInput {
     host: String,
     path: String,
     methods: Vec<String>,
+    execution_mode: Option<ZeroExecutionMode>,
     cache: Option<&'static str>,
     destination: Option<String>,
     status: Option<u16>,
@@ -117,6 +137,7 @@ impl RouteRecord {
             "host": input.host,
             "path": input.path,
             "methods": input.methods,
+            "executionMode": input.execution_mode,
             "auth": "inherit",
             "cache": input.cache,
             "destination": input.destination,
@@ -130,6 +151,7 @@ impl RouteRecord {
             host: input.host,
             path: input.path,
             methods: input.methods,
+            execution_mode: input.execution_mode,
             auth: "inherit",
             cache: input.cache,
             destination: input.destination,
@@ -197,6 +219,7 @@ pub(crate) fn compile_route_inventory(input: RouteInventoryInput<'_>) -> Result<
             host: rule.host.clone().unwrap_or_else(|| "*".to_string()),
             path: rule.source.clone(),
             methods: all_methods(),
+            execution_mode: None,
             cache: rule.cache,
             destination: Some(rule.destination.clone()),
             status: Some(rule.status),
@@ -254,6 +277,7 @@ pub(crate) fn compile_route_inventory(input: RouteInventoryInput<'_>) -> Result<
             host: "*".to_string(),
             path: route_path,
             methods: all_methods(),
+            execution_mode: None,
             cache: None,
             destination: None,
             status: None,
@@ -269,6 +293,7 @@ pub(crate) fn compile_route_inventory(input: RouteInventoryInput<'_>) -> Result<
                 host: "*".to_string(),
                 path: (*path).to_string(),
                 methods: methods_for(method),
+                execution_mode: None,
                 cache: None,
                 destination: None,
                 status: None,
@@ -280,6 +305,7 @@ pub(crate) fn compile_route_inventory(input: RouteInventoryInput<'_>) -> Result<
         let PhpActionRecord::InvokeZero {
             pattern,
             method,
+            execution_mode,
             endpoint_id,
             ..
         } = route
@@ -293,6 +319,7 @@ pub(crate) fn compile_route_inventory(input: RouteInventoryInput<'_>) -> Result<
             host: "*".to_string(),
             path: pattern.clone(),
             methods: methods_for(method),
+            execution_mode: Some(*execution_mode),
             cache: None,
             destination: None,
             status: None,
@@ -351,6 +378,7 @@ fn push_functions_route(
         host: "*".to_string(),
         path: path.to_string(),
         methods,
+        execution_mode: None,
         cache: None,
         destination: None,
         status: None,
@@ -644,6 +672,7 @@ mod tests {
             host: "*".to_string(),
             path: "/ping".to_string(),
             methods: vec!["*".to_string()],
+            execution_mode: None,
             cache: None,
             destination: None,
             status: None,

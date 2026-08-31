@@ -12,18 +12,68 @@ use crate::constants::{
 use crate::protocol::InvokeEnvelope;
 use crate::response::{error_response, RunnerResponse};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ExecutionMode {
+    Read,
+    Write,
+}
+
+/// The execution mode a capsule published before the execution law never
+/// declared. `runtime/engine/admin/generate.php` stamps exactly this
+/// derivation onto an endpoint entry that arrives without one, and a run keeps
+/// `write` — everything a run could do before the split. The serve path must
+/// agree with the publish path, because both read the same frozen capsule.
+pub(crate) fn derived_execution_mode(kind: &str, method: &str) -> ExecutionMode {
+    if kind == "run" {
+        return ExecutionMode::Write;
+    }
+    match method.to_ascii_uppercase().as_str() {
+        "GET" | "HEAD" | "OPTIONS" => ExecutionMode::Read,
+        _ => ExecutionMode::Write,
+    }
+}
+
+/// The artifact exactly as it sits on disk. Every field a capsule published
+/// before the execution law could omit is optional here so `resolve` can tell
+/// "absent" from "declared", and apply the pre-law reading rather than reject
+/// a version nobody can rebuild.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawEndpointArtifact {
+    format: String,
+    #[serde(default)]
+    endpoint_id: String,
+    #[serde(default)]
+    run_id: String,
+    kind: String,
+    #[serde(default)]
+    execution_mode: Option<ExecutionMode>,
+    #[serde(default)]
+    method: String,
+    #[serde(default)]
+    path: String,
+    source_path: String,
+    bytecode_path: String,
+    source_sha256: String,
+    bytecode_sha256: String,
+    runner_abi: String,
+    quickjs_abi: String,
+    #[serde(default)]
+    capabilities: DeclaredCapabilities,
+    #[serde(default)]
+    db: EndpointDbMetadata,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EndpointArtifact {
     pub format: String,
-    #[serde(default)]
     pub endpoint_id: String,
-    #[serde(default)]
     pub run_id: String,
     pub kind: String,
-    #[serde(default)]
+    pub execution_mode: ExecutionMode,
     pub method: String,
-    #[serde(default)]
     pub path: String,
     pub source_path: String,
     pub bytecode_path: String,
@@ -31,10 +81,50 @@ pub(crate) struct EndpointArtifact {
     pub bytecode_sha256: String,
     pub runner_abi: String,
     pub quickjs_abi: String,
-    #[serde(default)]
     pub capabilities: EndpointCapabilities,
-    #[serde(default)]
     pub db: EndpointDbMetadata,
+    /// True when the artifact declared no execution mode, which only a capsule
+    /// finalized before the execution law does. Its bytes are frozen — the
+    /// version is immutable and its source may be long gone — so the readings
+    /// that changed under the law are applied as that capsule meant them.
+    pub frozen_shape: bool,
+}
+
+impl RawEndpointArtifact {
+    fn resolve(self, envelope: &InvokeEnvelope) -> EndpointArtifact {
+        let frozen_shape = self.execution_mode.is_none();
+        // The engine's mode is the better signal when the artifact has none:
+        // it comes from the compiled route entry, or from the run operation,
+        // which distinguishes a query run from a mutation run where the
+        // artifact's own `POST` cannot. Fall back to the method derivation
+        // only when the engine predates the law too.
+        let execution_mode = self
+            .execution_mode
+            .or(envelope.declared_execution_mode)
+            .unwrap_or_else(|| derived_execution_mode(&self.kind, &self.method));
+        EndpointArtifact {
+            format: self.format,
+            endpoint_id: self.endpoint_id,
+            run_id: self.run_id,
+            kind: self.kind,
+            execution_mode,
+            method: self.method,
+            path: self.path,
+            source_path: self.source_path,
+            bytecode_path: self.bytecode_path,
+            source_sha256: self.source_sha256,
+            bytecode_sha256: self.bytecode_sha256,
+            runner_abi: self.runner_abi,
+            quickjs_abi: self.quickjs_abi,
+            capabilities: self.capabilities.resolve(if frozen_shape {
+                EndpointCapabilities::conservative()
+            } else {
+                EndpointCapabilities::declared_defaults()
+            }),
+            db: self.db,
+            frozen_shape,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,17 +136,21 @@ struct EndpointIndexArtifact {
     endpoints: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct EndpointCapabilities {
     #[serde(default = "default_true")]
     pub db: bool,
-    #[serde(default = "default_true")]
+    // The write-side authorities default closed. A read artifact that never
+    // named them would otherwise inherit an open grant the execution mode
+    // forbids, and `validate_for` would reject at serve time an artifact the
+    // finalizer was happy to publish.
+    #[serde(default)]
     pub fetch: bool,
     #[serde(default = "default_true")]
     pub auth: bool,
     #[serde(default = "default_true")]
     pub env: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub realtime: bool,
     #[serde(default = "default_true")]
     pub logging: bool,
@@ -64,12 +158,12 @@ pub struct EndpointCapabilities {
     pub gravatar: bool,
     #[serde(default = "default_true")]
     pub spam: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub email: bool,
-    // New authority defaults closed. Historical fields predate explicit
-    // capability manifests and retain their compatibility defaults above.
     #[serde(default)]
     pub content: bool,
+    #[serde(default)]
+    pub storage: bool,
 }
 
 impl Default for EndpointCapabilities {
@@ -91,13 +185,77 @@ impl EndpointCapabilities {
             spam: true,
             email: true,
             content: false,
+            storage: false,
+        }
+    }
+
+    /// What an artifact compiled under the execution law gets for a capability
+    /// it left out. Field for field, this is what the `#[serde(default …)]`
+    /// attributes above produce, and a test holds the two together.
+    pub(crate) fn declared_defaults() -> Self {
+        Self {
+            db: true,
+            fetch: false,
+            auth: true,
+            env: true,
+            realtime: false,
+            logging: true,
+            gravatar: true,
+            spam: true,
+            email: false,
+            content: false,
+            storage: false,
         }
     }
 
     /// Whether this handler reaches any brokered platform service. The prelude
-    /// installs one bridge for all three, so this is what gates it.
+    /// installs one bridge for all of them, so this is what gates it.
     pub(crate) fn any_service(&self) -> bool {
-        self.gravatar || self.spam || self.email || self.content
+        self.gravatar || self.spam || self.email || self.content || self.storage
+    }
+}
+
+/// The capability block exactly as written, before any default is applied.
+///
+/// A frozen artifact was compiled against a prelude that installed fetch,
+/// realtime and email unless told otherwise, so an omission there means "open".
+/// An artifact compiled under the execution law means "closed" by the same
+/// omission. Telling absent from declared-false is the only way to read both
+/// generations correctly, and neither can be re-finalized into the other's
+/// shape.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeclaredCapabilities {
+    db: Option<bool>,
+    fetch: Option<bool>,
+    auth: Option<bool>,
+    env: Option<bool>,
+    realtime: Option<bool>,
+    logging: Option<bool>,
+    gravatar: Option<bool>,
+    spam: Option<bool>,
+    email: Option<bool>,
+    content: Option<bool>,
+    storage: Option<bool>,
+}
+
+impl DeclaredCapabilities {
+    /// Fill every omitted capability from `absent`, the reading this
+    /// artifact's generation gives an unstated one.
+    fn resolve(&self, absent: EndpointCapabilities) -> EndpointCapabilities {
+        EndpointCapabilities {
+            db: self.db.unwrap_or(absent.db),
+            fetch: self.fetch.unwrap_or(absent.fetch),
+            auth: self.auth.unwrap_or(absent.auth),
+            env: self.env.unwrap_or(absent.env),
+            realtime: self.realtime.unwrap_or(absent.realtime),
+            logging: self.logging.unwrap_or(absent.logging),
+            gravatar: self.gravatar.unwrap_or(absent.gravatar),
+            spam: self.spam.unwrap_or(absent.spam),
+            email: self.email.unwrap_or(absent.email),
+            content: self.content.unwrap_or(absent.content),
+            storage: self.storage.unwrap_or(absent.storage),
+        }
     }
 }
 
@@ -114,12 +272,15 @@ pub(crate) struct EndpointDbMetadata {
     pub tables: BTreeMap<String, serde_json::Value>,
 }
 
-pub(crate) fn read_endpoint_artifact(path: &Path) -> Result<EndpointArtifact, RunnerResponse> {
+pub(crate) fn read_endpoint_artifact(
+    path: &Path,
+    envelope: &InvokeEnvelope,
+) -> Result<EndpointArtifact, RunnerResponse> {
     let raw = fs::read_to_string(path)
         .map_err(|error| error_response(503, "zero_artifact_unreadable", &error.to_string()))?;
-    let artifact: EndpointArtifact = serde_json::from_str(&raw)
+    let artifact: RawEndpointArtifact = serde_json::from_str(&raw)
         .map_err(|error| error_response(422, "zero_artifact_malformed", &error.to_string()))?;
-    Ok(artifact)
+    Ok(artifact.resolve(envelope))
 }
 
 pub(crate) fn resolve_endpoint_artifact_path(
@@ -162,6 +323,13 @@ pub(crate) fn resolve_endpoint_artifact_path(
 
 impl EndpointArtifact {
     pub(crate) fn validate_for(&self, envelope: &InvokeEnvelope) -> Result<(), RunnerResponse> {
+        if self.execution_mode != envelope.execution_mode() {
+            return Err(error_response(
+                422,
+                "zero_artifact_mode_invalid",
+                "Zero artifact mode does not match the invocation mode.",
+            ));
+        }
         if self.kind == "run" {
             if self.format != RUN_FORMAT {
                 return Err(error_response(
@@ -195,6 +363,24 @@ impl EndpointArtifact {
                 422,
                 "zero_artifact_abi_mismatch",
                 "Endpoint artifact ABI does not match this runner.",
+            ));
+        }
+        // A frozen artifact is exempt: it carries the open write-side grant
+        // every artifact carried before the law, so this check would refuse the
+        // whole generation for holding the only shape it could have been
+        // published in. What a read invocation may actually DO is unchanged —
+        // the service broker refuses mail, spam reports and storage writes on
+        // the invocation's mode, not on the artifact's grant, and the read
+        // transaction is READ ONLY at the server. This check only keeps a NEW
+        // artifact from being finalized with a grant its mode contradicts.
+        if !self.frozen_shape
+            && self.execution_mode == ExecutionMode::Read
+            && (self.capabilities.fetch || self.capabilities.email || self.capabilities.realtime)
+        {
+            return Err(error_response(
+                422,
+                "zero_artifact_mode_invalid",
+                "A read handler cannot carry write-side capabilities.",
             ));
         }
         if !relative_path_valid(&self.source_path) || !relative_path_valid(&self.bytecode_path) {

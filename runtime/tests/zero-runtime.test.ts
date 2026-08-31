@@ -113,6 +113,11 @@ if (($envelope['endpointId'] ?? null) === 'GET /api/env') {
     ];
     $bodyPayload['variables'] = $envelope['variables'] ?? null;
 }
+if (($envelope['endpointId'] ?? null) === 'GET /api/whoami') {
+    // Echoed so a test can compare the identity two CONCURRENT requests saw;
+    // the single capture file only ever holds the last envelope written.
+    $bodyPayload['auth'] = $envelope['auth'] ?? null;
+}
 if (array_key_exists('artifactPath', $envelope)) {
     $bodyPayload['artifactPath'] = $envelope['artifactPath'];
 }
@@ -184,6 +189,7 @@ echo json_encode([
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "write",
           method: "POST",
           path: "/api/status",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -192,6 +198,7 @@ echo json_encode([
           capabilities: { db: false },
         },
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/items/:id",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -201,12 +208,14 @@ echo json_encode([
           db: { schemaHash: "sha256:dynamic" },
         },
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/default-capabilities",
           source: "globalThis.__statticZeroResult = '{}';",
           endpoint_id: "GET /api/default-capabilities",
         },
         {
+          execution_mode: "read",
           method: "GET",
           path: "/foo...bar/:id",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -258,6 +267,7 @@ test("invokes a finalized Zero lookup action through a fresh runner process", as
   expect(envelope.protocol).toBe("stattic.zero.invoke.v1");
   expect(envelope.versionRoot).toEndWith("/spc_zero_runtime/versions/ver_zero_runtime_1");
   expect(envelope.endpointId).toBe("POST /api/status");
+  expect(envelope.executionMode).toBe("write");
   expect(envelope.request).toMatchObject({
     method: "POST",
     path: "/api/status",
@@ -291,6 +301,7 @@ test("finalizes an NFC Unicode Zero endpoint route", async () => {
       serving: {
         zero_endpoints: [
           {
+            execution_mode: "read",
             method: "GET",
             path: "/api/café",
             source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });",
@@ -303,6 +314,64 @@ test("finalizes an NFC Unicode Zero endpoint route", async () => {
 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ zero_endpoint_count: 1 });
+});
+
+/**
+ * `action.run` left the vocabulary this engine compiles, but the Zero clients
+ * baked into already-published capsules still send it and still read an
+ * `action.result` frame back. Those bundles cannot be rebuilt, so both halves
+ * of the exchange stay served — the same standing the `/__spacefast/zero/*`
+ * route spellings have beside `/__zero/*`.
+ */
+test("serves the retired action.run operation and its action.result frame", async () => {
+  const host = "zero-action-run.test";
+  const actionRuntime = await startRuntime({
+    env: { SPACEFAST_RUNTIME_BIN: runtimePath, SPACEFAST_ZERO_RUNNER_CAPTURE: capturePath },
+  });
+  try {
+    await deploy(actionRuntime, {
+      spaceId: "spc_zero_action_run",
+      versionId: "ver_zero_action_run_1",
+      zero: { auth: { provider: "gravatar" } },
+      metadata: { mode: "website", title: "Zero Action Run" },
+      files: { "index.html": "<h1>zero action run</h1>\n" },
+      serving: {
+        zero_runs: [
+          {
+            execution_mode: "write",
+            run_id: "action_notify",
+            source: "globalThis.__statticZeroResult = '{}';",
+            capabilities: { db: false },
+          },
+        ],
+      },
+      activate: {
+        route_name: "production",
+        config: publicAccessConfig({ mode: "website", site_title: "Zero Action Run" }),
+        production_hostnames: [host],
+        noindex_production_hostnames: [],
+        version_hostnames: [],
+      },
+    });
+
+    const response = await get(actionRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "run-1", op: "action.run", name: "notify" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      id: "run-1",
+      op: "action.result",
+      ok: true,
+      result: { ok: true, endpointId: "action_notify" },
+    });
+    // An action was never confined to the read lane, so it keeps the write one.
+    expect(JSON.parse(readFileSync(capturePath, "utf8")).executionMode).toBe("write");
+  } finally {
+    actionRuntime.stop();
+  }
 });
 
 test("Zero identity uses the canonical access session (guest fallback, then member)", async () => {
@@ -323,6 +392,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       serving: {
         zero_endpoints: [
           {
+            execution_mode: "read",
             method: "GET",
             path: "/api/whoami",
             source: "globalThis.__statticZeroResult = '{}';",
@@ -426,15 +496,60 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       );
     }
 
-    rmSync(capturePath, { force: true });
-    const guest = await get(idRuntime, host, "/api/whoami");
-    expect(guest.status).toBe(201);
-    let envelope = JSON.parse(readFileSync(capturePath, "utf8"));
-    expect(envelope.auth).toMatchObject({
-      userId: "guest:local",
-      isGuest: true,
-      isAuthenticated: false,
+    // The DOCUMENT settles the guest session, before the page can open a single
+    // XHR. A Zero client's first render fires auth.get, query.subscribe and
+    // mutation.run together; if each cookie-less request minted its own session
+    // the browser would keep whichever Set-Cookie landed last, and the identity
+    // the page displays would disagree with the one its mutation ran under.
+    // Capsules bake their client at build time and may never be rebuilt, so
+    // client-side serialization cannot be the fix.
+    const document = await get(idRuntime, host, "/");
+    expect(document.status).toBe(200);
+    const documentCookie = (document.headers.get("set-cookie") ?? "").split(";", 1)[0];
+    expect(documentCookie).toMatch(
+      /^spacefast_session(?:_dev)?=sfa1_[A-Za-z0-9_-]+\.[a-f0-9]{64}$/,
+    );
+    // Stateful, so no shared cache may hand one visitor's session to the next.
+    expect(document.headers.get("cache-control")).toBe("private, no-store");
+    expect(document.headers.get("a8c-edge-cache")).toBe("no-cache");
+
+    // The first XHRs now all present that cookie: none of them mints, and every
+    // one of them reports the same guest.
+    const concurrent = await Promise.all([
+      get(idRuntime, host, "/api/whoami", { headers: { cookie: documentCookie } }),
+      get(idRuntime, host, "/api/whoami", { headers: { cookie: documentCookie } }),
+    ]);
+    expect(concurrent.map((response) => response.status)).toEqual([201, 201]);
+    expect(concurrent.map((response) => response.headers.get("set-cookie"))).toEqual([null, null]);
+    const [firstIdentity, secondIdentity] = await Promise.all(
+      concurrent.map(async (response) => (await response.json()).auth),
+    );
+    expect(firstIdentity).toMatchObject({ isGuest: true, isAuthenticated: false });
+    expect(firstIdentity.userId).toMatch(/^guest:anon_[a-f0-9]{32}$/);
+    expect(secondIdentity.userId).toBe(firstIdentity.userId);
+    const guestUserId = firstIdentity.userId;
+
+    // Idempotent: a returning visitor is not re-minted, so that document is an
+    // ordinary shared-cacheable static response again.
+    const returningDocument = await get(idRuntime, host, "/", {
+      headers: { cookie: documentCookie },
     });
+    expect(returningDocument.status).toBe(200);
+    expect(returningDocument.headers.get("set-cookie")).toBeNull();
+    expect(returningDocument.headers.get("a8c-edge-cache")).toBe("cache");
+
+    // The XHR lane still mints for a request that arrives without a document
+    // (a direct API call, or an edge-cached page), and each such visitor is
+    // distinct.
+    rmSync(capturePath, { force: true });
+    const otherGuest = await get(idRuntime, host, "/api/whoami");
+    expect(otherGuest.status).toBe(201);
+    expect((otherGuest.headers.get("set-cookie") ?? "").split(";", 1)[0]).toMatch(
+      /^spacefast_session(?:_dev)?=sfa1_[A-Za-z0-9_-]+\.[a-f0-9]{64}$/,
+    );
+    let envelope = JSON.parse(readFileSync(capturePath, "utf8"));
+    expect(envelope.auth.userId).toMatch(/^guest:anon_[a-f0-9]{32}$/);
+    expect(envelope.auth.userId).not.toBe(guestUserId);
 
     const now = Math.floor(Date.now() / 1000);
     const multibyteName = "界".repeat(120);
@@ -546,10 +661,10 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
     expect(stillGuest.status).toBe(201);
     envelope = JSON.parse(readFileSync(capturePath, "utf8"));
     expect(envelope.auth).toMatchObject({
-      userId: "guest:local",
       isGuest: true,
       isAuthenticated: false,
     });
+    expect(envelope.auth.userId).toMatch(/^guest:anon_[a-f0-9]{32}$/);
 
     // An invited Person who accepted has no platform account and is still
     // somebody: the principal names them, so Zero sees a signed-in identity.
@@ -621,6 +736,7 @@ test("exposes Zero runner metrics only when the metrics header is enabled", asyn
       serving: {
         zero_endpoints: [
           {
+            execution_mode: "read",
             method: "GET",
             path: "/api/metrics",
             source: "globalThis.__statticZeroResult = '{}';",
@@ -663,20 +779,23 @@ test("native compiler defaults omitted Zero capabilities conservatively", () => 
     "GET\n/api/default-capabilities\n2",
   ).slice(0, 12)}`;
 
+  // The write-side authorities default closed: a `read` handler may not carry
+  // one, so an omitted field can never hand it a grant the runner then refuses.
   const partial = JSON.parse(
     readFileSync(path.join(root, `zero/endpoints/${exactSlug}.json`), "utf8"),
   );
   expect(partial.capabilities).toEqual({
     db: false,
-    fetch: true,
+    fetch: false,
     auth: true,
     env: true,
-    realtime: true,
+    realtime: false,
     logging: true,
     gravatar: true,
     spam: true,
-    email: true,
+    email: false,
     content: false,
+    storage: false,
   });
 
   const omitted = JSON.parse(
@@ -684,15 +803,16 @@ test("native compiler defaults omitted Zero capabilities conservatively", () => 
   );
   expect(omitted.capabilities).toEqual({
     db: true,
-    fetch: true,
+    fetch: false,
     auth: true,
     env: true,
-    realtime: true,
+    realtime: false,
     logging: true,
     gravatar: true,
     spam: true,
-    email: true,
+    email: false,
     content: false,
+    storage: false,
   });
 });
 
@@ -708,6 +828,7 @@ test("exact Zero requests dispatch from the compiled response table with their d
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "write",
           method: "POST",
           path: "/api/manifest",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -738,6 +859,7 @@ test("exact Zero requests dispatch from the compiled response table with their d
     t: "zero",
     endpoint: "POST /api/manifest",
     artifact: artifactPath,
+    execution_mode: "write",
     // A PHP list decodes to an index-keyed map (harness `phpArtifact`).
     methods: { 0: "POST" },
     schema_hash: "sha256:manifest",
@@ -775,6 +897,7 @@ test("exact Zero routes beat colliding static files", async () => {
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/exact",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -912,6 +1035,7 @@ test("keeps tenant variables in the envelope and the native runner environment p
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/env",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -963,6 +1087,7 @@ test("an app-declared DATABASE_URL variable reaches the runner labeled applicati
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/env",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -1007,6 +1132,7 @@ test("trusted provider DATABASE_URL provenance survives the finalized runtime ar
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/env",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -1052,6 +1178,7 @@ test("platform-managed headers from the runner never reach the client", async ()
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/spoofed-headers",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -1128,6 +1255,7 @@ test("does not spawn the Zero runner for redirect, header, or fallback paths", a
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/zero",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -1186,6 +1314,7 @@ test("runner and path declarations cannot put Zero responses in shared cache", a
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/cached",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -1193,6 +1322,7 @@ test("runner and path declarations cannot put Zero responses in shared cache", a
           capabilities: { db: false },
         },
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/uncached",
           source: "globalThis.__statticZeroResult = '{}';",
@@ -1256,6 +1386,7 @@ test("an access-protected Zero endpoint pins private revalidation over a runner-
     serving: {
       zero_endpoints: [
         {
+          execution_mode: "read",
           method: "GET",
           path: "/api/private-cached",
           source: "globalThis.__statticZeroResult = '{}';",

@@ -206,16 +206,12 @@ export const CORPUS: CorpusCase[] = [
   ["non-scalar parameter", op({ sql: "SELECT ? AS v", params: [[1, 2]] })],
   ["object parameter", op({ sql: "SELECT ? AS v", params: [{ a: 1 }] })],
   ["too many parameters", op({ sql: "SELECT 1", params: Array.from({ length: 257 }, () => 1) })],
-  ["commit with no transaction", op({ mode: "transaction_commit" })],
-  ["rollback with no transaction", op({ mode: "transaction_rollback" })],
-  ["transaction with no statements", op({ mode: "transaction", statements: [] })],
-  [
-    "transaction with too many statements",
-    op({
-      mode: "transaction",
-      statements: Array.from({ length: 65 }, () => ({ sql: "SELECT 1" })),
-    }),
-  ],
+  // Transaction control is deliberately NOT in this corpus: the execution law
+  // split the lanes. The Rust runner is the handler's interface and refuses
+  // every control spelling with zero_db_transaction_control_denied (pinned by
+  // transaction_control_tests in stattic-zero-runner's db.rs); the PHP broker
+  // is the parent lane, where transactions are a capability and the state
+  // edges answer their own codes (pinned in db-broker.test.ts).
   ["unparsable operation", "{not json", "code"],
   ["operation is a JSON array", "[1,2,3]", "code"],
   ["params is not an array", op({ sql: "SELECT 1", params: 5 }), "code"],

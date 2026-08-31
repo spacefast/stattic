@@ -2,32 +2,25 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { deploy, get, publicAccessConfig, type Runtime, startRuntime } from "./harness.ts";
+import { api, deploy, publicAccessConfig, type Runtime, startRuntime } from "./harness.ts";
 
 const repoRoot = path.resolve(import.meta.dir, "../..");
 const classifier = path.join(repoRoot, "runtime/engine/shared/content-request.php");
 
-test("content requests opt into management authorization before WordPress boots", async () => {
+// Content model data reads and writes execute as Abilities through Zero. This
+// endpoint is a control-plane lane only: every request it accepts names a
+// management action, so there is no anonymous shape to classify.
+async function classify(requests: Record<string, { operation?: string }>) {
   const script = String.raw`
 require $argv[1];
-$query = ['format' => 'spacefast.content.query', 'queries' => ['posts' => ['collection' => 'posts']]];
-echo json_encode([
-  'public' => _stattic_content_management_action($query),
-  'managed' => _stattic_content_management_action($query + ['managed' => true]),
-  'draft' => _stattic_content_management_action([
-    'format' => 'spacefast.content.query',
-    'queries' => ['preview' => ['collection' => 'posts', 'status' => 'draft']],
-  ]),
-  'compile' => _stattic_content_management_action(['operation' => 'schema.compile']),
-  'activate' => _stattic_content_management_action(['operation' => 'schema.activate']),
-  'admin' => _stattic_content_management_action(['operation' => 'admin.launch']),
-  'authorization' => _stattic_content_management_action(['operation' => 'authorization.apply']),
-  'document' => _stattic_content_management_action(['operation' => 'document.upsert']),
-  'markdown' => _stattic_content_management_action(['operation' => 'markdown.sync']),
-  'invalid' => _stattic_content_management_action(['operation' => 'other']),
-]);
+$requests = json_decode($argv[2], true);
+$out = [];
+foreach ($requests as $name => $request) {
+  $out[$name] = _stattic_content_management_action($request);
+}
+echo json_encode($out);
 `;
-  const process = Bun.spawn(["php", "-r", script, classifier], {
+  const process = Bun.spawn(["php", "-r", script, classifier, JSON.stringify(requests)], {
     cwd: repoRoot,
     stderr: "pipe",
     stdout: "pipe",
@@ -37,19 +30,33 @@ echo json_encode([
     new Response(process.stdout).text(),
     new Response(process.stderr).text(),
   ]);
-
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-  expect(JSON.parse(stdout)).toEqual({
+  // SAFETY: the classifier returns one entry per request, each the management
+  // action string or PHP false, which is exactly this union.
+  return JSON.parse(stdout) as Record<string, string | false>;
+}
+
+test("every content request names a management action before WordPress boots", async () => {
+  expect(
+    await classify({
+      admin: { operation: "admin.launch" },
+      authorization: { operation: "authorization.apply" },
+      stage: { operation: "model.stage" },
+      activate: { operation: "model.activate" },
+      reconcile: { operation: "source.reconcile" },
+      acknowledge: { operation: "source.acknowledge" },
+      invalid: { operation: "other" },
+      absent: {},
+    }),
+  ).toEqual({
     admin: "content.admin.launch",
     authorization: "content.authorization.apply",
-    document: "content.document.upsert",
-    draft: "content.query",
+    stage: "content.model.stage",
+    activate: "content.model.activate",
+    reconcile: "content.source.reconcile",
+    acknowledge: "content.source.acknowledge",
     invalid: false,
-    managed: "content.query",
-    markdown: "content.markdown.sync",
-    public: null,
-    compile: "content.schema.compile",
-    activate: "content.schema.activate",
+    absent: false,
   });
 });
 
@@ -92,15 +99,15 @@ beforeAll(async () => {
 
 afterAll(() => runtime?.stop());
 
-test("a public content read is answered but never left publicly storable", async () => {
-  const response = await get(runtime, CONTENT_HOST, "/__spacefast/content.php", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      format: "spacefast.content.query",
-      queries: { posts: { collection: "posts" } },
-    }),
-  });
+test("a managed content answer is never left publicly storable", async () => {
+  const response = await api(
+    runtime,
+    "POST",
+    "/__spacefast/content.php",
+    "content.model.activate",
+    { space_id: CONTENT_SPACE },
+    { operation: "model.activate", revision: null },
+  );
 
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ results: { posts: { items: [], total: 0 } } });

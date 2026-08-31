@@ -843,12 +843,12 @@ function _stattic_runtime_state_route(string $privateRoot): void
 }
 
 // The provider scanner writes artifacts under the site user's `~/logs`, outside
-// the htdocs tree this engine owns. The control plane pushes the exact wp.cloud
-// home before installing an engine. FPM paths remain bounded fallbacks for
-// local/self-hosted dispatchers; FPM's HOME and process identity are not part of
-// this contract.
+// the htdocs tree this engine owns. The control plane carries the exact wp.cloud
+// home in this request's signed management JWT. FPM paths remain bounded
+// fallbacks for local/self-hosted dispatchers; FPM's HOME and process identity
+// are not part of this contract.
 /** @return list<string> */
-function _stattic_runtime_site_home_candidates(string $privateRoot): array
+function _stattic_runtime_site_home_candidates(string $privateRoot, array $claims): array
 {
     $candidates = [];
     $append = static function (mixed $candidate) use (&$candidates): void {
@@ -861,7 +861,10 @@ function _stattic_runtime_site_home_candidates(string $privateRoot): array
         }
     };
 
-    $append(_stattic_config_value('SPACEFAST_WPCLOUD_SITE_HOME'));
+    $providerSiteHome = $claims['provider_site_home'] ?? null;
+    if (is_string($providerSiteHome) && str_starts_with($providerSiteHome, '/')) {
+        $append($providerSiteHome);
+    }
     $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? null;
     if (!is_string($docRoot) || $docRoot === '') {
         $docRoot = getenv('DOCUMENT_ROOT');
@@ -883,10 +886,10 @@ function _stattic_runtime_site_home_candidates(string $privateRoot): array
 // ticket is status-only, never SSH. `log: null` = no artifact on disk.
 const STATTIC_RUNTIME_SCAN_LOG_MAX_BYTES = 1048576;
 
-function _stattic_runtime_scan_log_route(string $privateRoot): void
+function _stattic_runtime_scan_log_route(string $privateRoot, array $claims): void
 {
     $log = null;
-    foreach (_stattic_runtime_site_home_candidates($privateRoot) as $home) {
+    foreach (_stattic_runtime_site_home_candidates($privateRoot, $claims) as $home) {
         $path = $home . '/logs/malware-scanner-results.log';
         if (!is_file($path) || !is_readable($path)) {
             continue;

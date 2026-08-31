@@ -126,40 +126,33 @@ test("state reports unavailable instead of erasing state after a failed read", a
 
 test("scan-log serves the provider's malware-scanner artifact from the site home", async () => {
   // The provider scanner writes `~/logs/malware-scanner-results.log`; the
-  // control plane pushes that home as provider persistent data before every
-  // engine install. PHP-FPM's paths and HOME can both point elsewhere.
+  // control plane carries that home in the signed management request.
+  // PHP-FPM's paths and HOME can both point elsewhere.
   const fakeHome = path.join(rt.root, "fake-home");
   mkdirSync(path.join(fakeHome, "logs"), { recursive: true });
   const unrelatedHome = path.join(rt.root, "unrelated-home");
   mkdirSync(unrelatedHome, { recursive: true });
   const report = "Virus scanning starting up\nVirus scan completed\n";
   writeFileSync(path.join(fakeHome, "logs", "malware-scanner-results.log"), report);
-  const scanRt = await startRuntime();
-
   const request = {
     method: "GET",
     path: runtimeHttpPath("/__spacefast/api.php/scan-log"),
-    authorization: `Bearer ${managementToken("read_scan_log")}`,
+    authorization: `Bearer ${managementToken("read_scan_log", {
+      provider_site_home: fakeHome,
+    })}`,
   };
-  try {
-    const withArtifact = await dispatchCli(scanRt, JSON.stringify(request), {
-      env: {
-        PATH: process.env.PATH,
-        HOME: unrelatedHome,
-        DOCUMENT_ROOT: path.join(unrelatedHome, "htdocs"),
-        SPACEFAST_ATOMIC_PERSISTENT_DATA_JSON: JSON.stringify({
-          SPACEFAST_WPCLOUD_SITE_HOME: fakeHome,
-        }),
-      },
-    });
-    expect(withArtifact.exitCode).toBe(0);
-    // SAFETY: the dispatcher's stdout contract is exactly one {status, body} envelope.
-    const envelope = JSON.parse(withArtifact.stdout) as DispatchEnvelope;
-    expect(envelope.status).toBe(200);
-    expect(envelope.body.log).toBe(report);
-  } finally {
-    scanRt.stop();
-  }
+  const withArtifact = await dispatchCli(rt, JSON.stringify(request), {
+    env: {
+      PATH: process.env.PATH,
+      HOME: unrelatedHome,
+      DOCUMENT_ROOT: path.join(unrelatedHome, "htdocs"),
+    },
+  });
+  expect(withArtifact.exitCode).toBe(0);
+  // SAFETY: the dispatcher's stdout contract is exactly one {status, body} envelope.
+  const envelope = JSON.parse(withArtifact.stdout) as DispatchEnvelope;
+  expect(envelope.status).toBe(200);
+  expect(envelope.body.log).toBe(report);
 
   // No artifact on disk is a normal answer, not an error.
   const emptyHome = path.join(rt.root, "fake-home-empty");

@@ -204,7 +204,6 @@ function _stattic_runtime_admin_management_routes(): array
 {
     $rows = [
         ['GET', '#^/state$#', 'read_state', [], 'none', false, '_stattic_runtime_state_route'],
-        ['GET', '#^/scan-log$#', 'read_scan_log', [], 'none', false, '_stattic_runtime_scan_log_route'],
         ['POST', '#^/events/drain$#', 'drain_events', [], 'none', false, '_stattic_runtime_drain_callback_events'],
         ['POST', '#^/events/ack$#', 'ack_events', [], 'none', false, '_stattic_runtime_ack_callback_events'],
         ['POST', '#^/application-journal/drain$#', 'drain_application_journal', [], 'none', false, '_stattic_runtime_application_journal_drain'],

@@ -124,53 +124,6 @@ test("state reports unavailable instead of erasing state after a failed read", a
   );
 });
 
-test("scan-log serves the provider's malware-scanner artifact from the site home", async () => {
-  // The provider scanner writes `~/logs/malware-scanner-results.log`; the
-  // control plane carries that home in the signed management request.
-  // PHP-FPM's paths and HOME can both point elsewhere.
-  const fakeHome = path.join(rt.root, "fake-home");
-  mkdirSync(path.join(fakeHome, "logs"), { recursive: true });
-  const unrelatedHome = path.join(rt.root, "unrelated-home");
-  mkdirSync(unrelatedHome, { recursive: true });
-  const report = "Virus scanning starting up\nVirus scan completed\n";
-  writeFileSync(path.join(fakeHome, "logs", "malware-scanner-results.log"), report);
-  const request = {
-    method: "GET",
-    path: runtimeHttpPath("/__spacefast/api.php/scan-log"),
-    authorization: `Bearer ${managementToken("read_scan_log", {
-      provider_site_home: fakeHome,
-    })}`,
-  };
-  const withArtifact = await dispatchCli(rt, JSON.stringify(request), {
-    env: {
-      PATH: process.env.PATH,
-      HOME: unrelatedHome,
-      DOCUMENT_ROOT: path.join(unrelatedHome, "htdocs"),
-    },
-  });
-  expect(withArtifact.exitCode).toBe(0);
-  // SAFETY: the dispatcher's stdout contract is exactly one {status, body} envelope.
-  const envelope = JSON.parse(withArtifact.stdout) as DispatchEnvelope;
-  expect(envelope.status).toBe(200);
-  expect(envelope.body.log).toBe(report);
-
-  // No artifact on disk is a normal answer, not an error.
-  const emptyHome = path.join(rt.root, "fake-home-empty");
-  mkdirSync(path.join(emptyHome, "logs"), { recursive: true });
-  const withoutArtifact = await dispatchRaw(
-    JSON.stringify({
-      ...request,
-      authorization: `Bearer ${managementToken("read_scan_log")}`,
-    }),
-    { PATH: process.env.PATH, HOME: emptyHome },
-  );
-  expect(withoutArtifact.exitCode).toBe(0);
-  // SAFETY: the dispatcher's stdout contract is exactly one {status, body} envelope.
-  const emptyEnvelope = JSON.parse(withoutArtifact.stdout) as DispatchEnvelope;
-  expect(emptyEnvelope.status).toBe(200);
-  expect(emptyEnvelope.body.log).toBeNull();
-});
-
 test("dispatch runs through the fake Atomic top-level without runtime config env", async () => {
   // No SPACEFAST_* in the environment: the config the handler runs on has to
   // come from the installed top-level bootstrap the fake Atomic prepends, not

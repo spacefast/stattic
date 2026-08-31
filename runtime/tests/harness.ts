@@ -692,9 +692,8 @@ function shellQuote(value: string): string {
 // Minimal env by default (PATH + HOME only): the atomic prepend resolves
 // runtime config from getcwd(). This deliberately uses a non-login shell: a
 // login shell is allowed to replace caller-controlled HOME and chdir while it
-// sources system profiles, which breaks both runtime discovery and the
-// provider scan-log contract on Linux CI. Callers that need a narrower env
-// pass their own.
+// sources system profiles, which breaks runtime discovery on Linux CI. Callers
+// that need a narrower env pass their own.
 export function dispatchCli(
   rt: Runtime,
   stdin: string,

@@ -134,9 +134,7 @@ test("scan-log serves the provider's malware-scanner artifact from the site home
   mkdirSync(unrelatedHome, { recursive: true });
   const report = "Virus scanning starting up\nVirus scan completed\n";
   writeFileSync(path.join(fakeHome, "logs", "malware-scanner-results.log"), report);
-  const scanRt = await startRuntime({
-    atomicData: { SPACEFAST_WPCLOUD_SITE_HOME: fakeHome },
-  });
+  const scanRt = await startRuntime();
 
   const request = {
     method: "GET",
@@ -149,6 +147,9 @@ test("scan-log serves the provider's malware-scanner artifact from the site home
         PATH: process.env.PATH,
         HOME: unrelatedHome,
         DOCUMENT_ROOT: path.join(unrelatedHome, "htdocs"),
+        SPACEFAST_ATOMIC_PERSISTENT_DATA_JSON: JSON.stringify({
+          SPACEFAST_WPCLOUD_SITE_HOME: fakeHome,
+        }),
       },
     });
     expect(withArtifact.exitCode).toBe(0);

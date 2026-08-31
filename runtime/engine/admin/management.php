@@ -861,7 +861,7 @@ function _stattic_runtime_site_home_candidates(string $privateRoot): array
         }
     };
 
-    $append(defined('SPACEFAST_WPCLOUD_SITE_HOME') ? SPACEFAST_WPCLOUD_SITE_HOME : null);
+    $append(_stattic_config_value('SPACEFAST_WPCLOUD_SITE_HOME'));
     $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? null;
     if (!is_string($docRoot) || $docRoot === '') {
         $docRoot = getenv('DOCUMENT_ROOT');

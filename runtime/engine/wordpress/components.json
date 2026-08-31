@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:faa4ae95e875bf095a599604fbe16cb8ebddde2a60aea88d3f583a64d6c1477f",
+  "digest": "sha256:7c19feab433315824736d04e3154ea7caa112540b2f378811008a740bb5b504b",
   "components": [
     {
       "id": "wordpress-core",
@@ -45,7 +45,7 @@
       "id": "content-kernel",
       "kind": "mu-plugin",
       "version": "source-tree",
-      "sha256": "sha256:002437f10f22f092c44ebd42470b0b50161c1ea40ae5fd522a9d6618b8e8387c",
+      "sha256": "sha256:87ec312cf16b7821da59f60e0b99d2a5f1f82789ddead8947074df45b776c391",
       "source": {
         "kind": "embedded",
         "path": "engine/wordpress/content-kernel.php"

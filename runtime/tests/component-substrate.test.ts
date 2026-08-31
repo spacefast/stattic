@@ -59,6 +59,31 @@ echo json_encode([
   });
 });
 
+test("blocked component receipts report the routing state they observed", () => {
+  const componentApi = path.resolve(import.meta.dir, "../engine/admin/components.php");
+  const script = String.raw`
+require $argv[1];
+$payload = _stattic_component_blocked_receipt(
+    ['format' => 'spacefast.component-placement'],
+    [['code' => 'routing_receipt_stale', 'detail' => 'stale']],
+    ['snapshotRevision' => 'sha256:' . str_repeat('a', 64), 'inventoryDigest' => 'sha256:' . str_repeat('b', 64)]
+);
+echo json_encode($payload, JSON_THROW_ON_ERROR);
+`;
+  const php = Bun.spawnSync(["php", "-r", script, componentApi]);
+
+  expect(php.stderr.toString()).toBe("");
+  expect(JSON.parse(php.stdout.toString())).toEqual({
+    format: "spacefast.component-placement",
+    status: "blocked",
+    observedRouting: {
+      snapshotRevision: `sha256:${"a".repeat(64)}`,
+      inventoryDigest: `sha256:${"b".repeat(64)}`,
+    },
+    problems: [{ code: "routing_receipt_stale", detail: "stale" }],
+  });
+});
+
 test("component staging removes the spent runtime bootstrap before readiness", async () => {
   const componentApi = path.resolve(import.meta.dir, "../engine/admin/components.php");
   const root = await mkdtemp(path.join(os.tmpdir(), "spacefast-component-bootstrap-"));

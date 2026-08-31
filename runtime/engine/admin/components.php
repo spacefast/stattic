@@ -373,6 +373,27 @@ function _stattic_application_substrate_readiness(object $wpdb): array
     ];
 }
 
+/**
+ * A blocked stage still reports the route digests it actually read.
+ *
+ * Legacy Spaces predate placement receipts, so the control plane has no
+ * routing baseline for their first component stage. It can use this observed
+ * value for one exact retry; every later release is checked against the ready
+ * receipt committed by that retry.
+ */
+function _stattic_component_blocked_receipt(array $base, array $problems, array $routing): array
+{
+    return [
+        ...$base,
+        'status' => 'blocked',
+        'observedRouting' => [
+            'snapshotRevision' => (string) ($routing['snapshotRevision'] ?? ''),
+            'inventoryDigest' => (string) ($routing['inventoryDigest'] ?? ''),
+        ],
+        'problems' => $problems,
+    ];
+}
+
 function _stattic_runtime_stage_components(string $privateRoot, array $claims): void
 {
     $body = _stattic_json_body();
@@ -484,7 +505,7 @@ function _stattic_runtime_stage_components(string $privateRoot, array $claims): 
         'expectedInventoryDigest' => $expectedDigest,
     ];
     if ($problems !== []) {
-        _stattic_json_response(200, [...$base, 'status' => 'blocked', 'problems' => $problems]);
+        _stattic_json_response(200, _stattic_component_blocked_receipt($base, $problems, $routing));
     }
     _stattic_json_response(200, [
         ...$base,

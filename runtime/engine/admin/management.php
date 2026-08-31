@@ -843,10 +843,10 @@ function _stattic_runtime_state_route(string $privateRoot): void
 }
 
 // The provider scanner writes artifacts under the site user's `~/logs`, outside
-// the htdocs tree this engine owns. FPM's HOME is not authoritative: it may be
-// absent or point at the process user's unrelated home. Keep the bounded set of
-// platform-derived roots and let each artifact lookup select the root that
-// actually contains its fixed, trusted path.
+// the htdocs tree this engine owns. The control plane pushes the exact wp.cloud
+// home before installing an engine. FPM paths remain bounded fallbacks for
+// local/self-hosted dispatchers; FPM's HOME and process identity are not part of
+// this contract.
 /** @return list<string> */
 function _stattic_runtime_site_home_candidates(string $privateRoot): array
 {
@@ -861,6 +861,7 @@ function _stattic_runtime_site_home_candidates(string $privateRoot): array
         }
     };
 
+    $append(defined('SPACEFAST_WPCLOUD_SITE_HOME') ? SPACEFAST_WPCLOUD_SITE_HOME : null);
     $docRoot = $_SERVER['DOCUMENT_ROOT'] ?? null;
     if (!is_string($docRoot) || $docRoot === '') {
         $docRoot = getenv('DOCUMENT_ROOT');

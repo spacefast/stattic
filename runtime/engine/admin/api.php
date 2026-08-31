@@ -11,6 +11,13 @@ require_once __DIR__ . '/auth.php';
 function _stattic_runtime_admin_entrypoint(string $engineRoot, string $surface): void
 {
     $storageRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
+    // Bind the lazy private root before any auth: the JWT verifier resolves
+    // SPACEFAST_RUNTIME_INSTANCE_ID through _stattic_config_value, which reads
+    // `<privateRoot>/config.php` only through this global. Without the bind the
+    // admin lanes see an empty instance id and refuse every management token
+    // as runtime_instance_mismatch on a box whose identity lives in the config
+    // file rather than provider persist_data.
+    _stattic_access_private_root($storageRoot);
     _stattic_emit_runtime_identity();
     if (!is_dir($storageRoot)) {
         _stattic_problem_response(503, 'runtime_undeployed', 'Runtime storage is not provisioned on this site.');

@@ -1,15 +1,13 @@
 // Containment proof for the in-process tenant hardening prelude
 // (runtime/engine/runtime/tenant-prelude.php). Runs the tenant-PHP probe
 // (runtime/tests/fixtures/tenant-prelude-probe.php) under the local `php` CLI,
-// two spaces on ONE simulated box, and asserts the boundary the prelude
-// actually holds: a jailed filesystem view and a scrubbed environment,
-// symmetric across spaces on the same box.
+// and asserts the boundary the prelude holds: a jailed filesystem view and a
+// scrubbed environment.
 //
 // This is the whole containment story on wp.cloud: a site owns no php-fpm/uid/
 // disable_functions knobs, so the only OS-level isolation is a separate site.
-// Same-team spaces sharing a box rely on this best-effort in-process boundary,
-// which is why the team is the trust unit. A future kernel jail (per-space uid,
-// disable_functions) would need a provider request, not a config file we ship.
+// A separate tenant pool with its own uid and disable_functions policy needs a
+// provider capability, not a config file we ship.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -21,17 +19,13 @@ import { PHP_BINARY, RUNTIME_DIR } from "./harness.ts";
 const PRELUDE_PATH = path.join(RUNTIME_DIR, "engine/runtime/tenant-prelude.php");
 const PROBE_PATH = path.join(RUNTIME_DIR, "tests/fixtures/tenant-prelude-probe.php");
 
-// The env a real worker carries when it reaches tenant dispatch. Two classes:
-//   * FLEET-WIDE — the dispatch token (authenticates to the functions edge for
-//     every site) and the persistent-data blob that embeds it. A tenant reading
-//     either could impersonate another team's site, so the prelude scrubs them.
-//   * SITE-SCOPED — DB creds, an access JWT, a WordPress key. These belong to
-//     the one team that shares the box, so the prelude leaves them: the team
-//     owns its box, and reading its own secret is not an escalation.
-const FLEET_ENV = {
-  SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "fleet-dispatch-token-tenant-must-never-see",
+// The env a real worker carries when it reaches tenant dispatch. Platform
+// control credentials are scrubbed. Application credentials used by the
+// site's PHP runtime remain available.
+const CONTROL_ENV = {
+  SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "box-dispatch-token-tenant-must-never-see",
   SPACEFAST_ATOMIC_PERSISTENT_DATA_JSON:
-    '{"SPACEFAST_FUNCTIONS_DISPATCH_TOKEN":"fleet-dispatch-token-tenant-must-never-see"}',
+    '{"SPACEFAST_FUNCTIONS_DISPATCH_TOKEN":"box-dispatch-token-tenant-must-never-see"}',
 } satisfies Record<string, string>;
 const SITE_ENV = {
   DB_PASSWORD: "s3cr3t-db-pass",
@@ -40,66 +34,68 @@ const SITE_ENV = {
   AUTH_KEY: "wordpress-auth-key",
 } satisfies Record<string, string>;
 
-let box: string;
-type SpaceLayout = { id: string; phpRoot: string; tmp: string; selfSecret: string };
-const spaces: Record<"A" | "B", SpaceLayout> = {} as never;
+let siteRoot: string;
+const SPACE_ID = "spc_prelude";
+let phpRoot: string;
+let scratchTmp: string;
+let selfSecret: string;
+let outsideSecret: string;
 let docrootConfig: string;
 let statticSecret: string;
 
 beforeAll(() => {
-  // One "box": a shared docroot with the platform's secret files, plus two
-  // same-team space php-roots and their scratch tmps.
+  // One site with platform files, the active version's php-root, and its
+  // scratch tmp.
   // realpath so paths match the prelude's own realpath-normalised open_basedir
   // (on macOS /var is a symlink to /private/var).
-  box = realpathSync(mkdtempSync(path.join(os.tmpdir(), "tenant-prelude-box-")));
-  const docroot = path.join(box, "htdocs");
+  siteRoot = realpathSync(mkdtempSync(path.join(os.tmpdir(), "tenant-prelude-site-")));
+  const docroot = path.join(siteRoot, "htdocs");
   mkdirSync(path.join(docroot, ".stattic"), { recursive: true });
   docrootConfig = path.join(docroot, ".atomic-persistent-data.json");
   writeFileSync(docrootConfig, '{"DB_PASSWORD":"s3cr3t-db-pass"}');
   statticSecret = path.join(docroot, ".stattic", "jwks.json");
   writeFileSync(statticSecret, '{"keys":["runtime-signing-secret"]}');
 
-  for (const key of ["A", "B"] as const) {
-    const id = `spc_prelude_${key}`;
-    const phpRoot = path.join(box, "versions", id);
-    const tmp = path.join(box, "tmp", id);
-    mkdirSync(phpRoot, { recursive: true });
-    mkdirSync(tmp, { recursive: true });
-    const selfSecret = path.join(phpRoot, "space-secret.txt");
-    writeFileSync(selfSecret, `owned-by-${id}`);
-    spaces[key] = { id, phpRoot, tmp, selfSecret };
-  }
+  phpRoot = path.join(siteRoot, "versions", SPACE_ID);
+  scratchTmp = path.join(siteRoot, "tmp", SPACE_ID);
+  mkdirSync(phpRoot, { recursive: true });
+  mkdirSync(scratchTmp, { recursive: true });
+  selfSecret = path.join(phpRoot, "space-secret.txt");
+  writeFileSync(selfSecret, `owned-by-${SPACE_ID}`);
+
+  outsideSecret = path.join(siteRoot, "platform", "outside-secret.txt");
+  mkdirSync(path.dirname(outsideSecret), { recursive: true });
+  writeFileSync(outsideSecret, "outside-version-root");
 });
 
-afterAll(() => box && rmSync(box, { recursive: true, force: true }));
+afterAll(() => siteRoot && rmSync(siteRoot, { recursive: true, force: true }));
 
 type ProbeResult = {
   space_id: string;
   open_basedir: string;
-  baseline_read_sibling_before_prelude: { ok: boolean };
+  baseline_read_outside_before_prelude: { ok: boolean };
   read_self: { ok: boolean; bytes: string | null };
-  read_sibling_space: { ok: boolean };
+  read_outside: { ok: boolean };
   read_docroot_config: { ok: boolean };
   read_stattic_secret: { ok: boolean };
-  leaked_fleet_env: Record<string, string[]>;
+  leaked_control_env: Record<string, string[]>;
   surviving_site_env: Record<string, string[]>;
   dangerous_functions_still_callable: Record<string, boolean>;
 };
 
-// Run the probe as the space `self`, with `sibling` as the other same-box space.
-function runProbe(self: SpaceLayout, sibling: SpaceLayout): ProbeResult {
+function runProbe(): ProbeResult {
   const result = spawnSync(PHP_BINARY, [PROBE_PATH], {
     encoding: "utf8",
     env: {
       ...process.env,
-      ...FLEET_ENV,
+      ...CONTROL_ENV,
       ...SITE_ENV,
       STATTIC_PRELUDE_PATH: PRELUDE_PATH,
-      STATTIC_PROBE_SPACE_ID: self.id,
-      STATTIC_PROBE_PHP_ROOT: self.phpRoot,
-      STATTIC_PROBE_SCRATCH_TMP: self.tmp,
-      STATTIC_PROBE_SELF_SECRET: self.selfSecret,
-      STATTIC_PROBE_SIBLING_SECRET: sibling.selfSecret,
+      STATTIC_PROBE_SPACE_ID: SPACE_ID,
+      STATTIC_PROBE_PHP_ROOT: phpRoot,
+      STATTIC_PROBE_SCRATCH_TMP: scratchTmp,
+      STATTIC_PROBE_SELF_SECRET: selfSecret,
+      STATTIC_PROBE_OUTSIDE_SECRET: outsideSecret,
       STATTIC_PROBE_DOCROOT_CONFIG: docrootConfig,
       STATTIC_PROBE_STATTIC_SECRET: statticSecret,
     },
@@ -110,42 +106,33 @@ function runProbe(self: SpaceLayout, sibling: SpaceLayout): ProbeResult {
   return JSON.parse(result.stdout) as ProbeResult;
 }
 
-test("prelude jails each space to its own php-root and scrubs only fleet-wide secrets", () => {
-  const a = runProbe(spaces.A, spaces.B);
-  const b = runProbe(spaces.B, spaces.A);
+test("prelude jails tenant PHP to its version root and scrubs control credentials", () => {
+  const result = runProbe();
 
   // The jail is pinned to this space's php-root + its own tmp, nothing else.
-  expect(a.open_basedir).toBe(`${spaces.A.phpRoot}:${spaces.A.tmp}`);
+  expect(result.open_basedir).toBe(`${phpRoot}:${scratchTmp}`);
 
-  // Baseline: the sibling secret WAS readable before the prelude ran — so the
+  // Baseline: the outside file was readable before the prelude ran, so the
   // block below is the prelude's doing, not an ambient permission.
-  expect(a.baseline_read_sibling_before_prelude.ok).toBe(true);
+  expect(result.baseline_read_outside_before_prelude.ok).toBe(true);
 
   // Own code stays readable; everything outside the jail is denied.
-  expect(a.read_self.ok).toBe(true);
-  expect(a.read_self.bytes).toBe(`owned-by-${spaces.A.id}`);
-  expect(a.read_sibling_space.ok).toBe(false); // another space's php-root
-  expect(a.read_docroot_config.ok).toBe(false); // the raw wp.cloud config blob
-  expect(a.read_stattic_secret.ok).toBe(false); // the .stattic/** runtime namespace
+  expect(result.read_self.ok).toBe(true);
+  expect(result.read_self.bytes).toBe(`owned-by-${SPACE_ID}`);
+  expect(result.read_outside.ok).toBe(false);
+  expect(result.read_docroot_config.ok).toBe(false);
+  expect(result.read_stattic_secret.ok).toBe(false);
 
-  // The pin is per-space and symmetric on a shared box.
-  expect(b.open_basedir).toBe(`${spaces.B.phpRoot}:${spaces.B.tmp}`);
-  expect(b.read_self.ok).toBe(true);
-  expect(b.read_sibling_space.ok).toBe(false); // B cannot read A
-
-  // No FLEET-WIDE secret survives on any surface a handler or subprocess reads:
-  // the dispatch token and the persistent-data blob that embeds it are gone.
+  // No control credential survives on any surface a handler or subprocess reads.
   // (PHP encodes an empty map as `[]`, so assert on the key set.)
-  expect(Object.keys(a.leaked_fleet_env)).toHaveLength(0);
+  expect(Object.keys(result.leaked_control_env)).toHaveLength(0);
 
-  // SITE-SCOPED secrets are deliberately LEFT: the team owns the box, so a
-  // same-team tenant reading the DB password or a WordPress key is not an
-  // escalation. Every seeded one is still readable via getenv.
-  expect(a.surviving_site_env.DB_PASSWORD).toContain("getenv");
-  expect(a.surviving_site_env.AUTH_KEY).toContain("getenv");
-  expect(a.surviving_site_env.SPACEFAST_ACCESS_JWT).toContain("getenv");
+  // Application credentials used by the site's PHP runtime stay readable.
+  expect(result.surviving_site_env.DB_PASSWORD).toContain("getenv");
+  expect(result.surviving_site_env.AUTH_KEY).toContain("getenv");
+  expect(result.surviving_site_env.SPACEFAST_ACCESS_JWT).toContain("getenv");
 
   // The known, documented gap: function removal needs the provider pool, so the
   // exec family is still callable. The proof records it rather than hiding it.
-  expect(a.dangerous_functions_still_callable.exec).toBe(true);
+  expect(result.dangerous_functions_still_callable.exec).toBe(true);
 });

@@ -38,6 +38,10 @@ if ($operation === false) {
 }
 
 $privateRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
+// Bind the lazy private root before the JWT verify below: the verifier
+// resolves SPACEFAST_RUNTIME_INSTANCE_ID through _stattic_config_value, which
+// reads `<privateRoot>/config.php` only through this global.
+_stattic_access_private_root($privateRoot);
 if (!is_dir($privateRoot)) {
     _stattic_problem_response(503, 'runtime_undeployed', 'Runtime storage is not provisioned on this site.');
 }

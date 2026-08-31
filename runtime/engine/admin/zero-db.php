@@ -4,8 +4,8 @@ declare(strict_types=1);
 /**
  * The management read of a version's Zero database. It never takes a table name
  * as SQL: the dumpable set comes from the version's persisted capsule schema,
- * every physical name is recomputed from this space's scoping rule (co-tenant
- * and WordPress core tables fail that equality), and the broker grant is
+ * every physical name is recomputed from this space's scoping rule (foreign
+ * Space and WordPress core tables fail that equality), and the broker grant is
  * db.read only.
  *
  * The read runs on the engine's own MySQL broker (shared/db-broker.php) in this

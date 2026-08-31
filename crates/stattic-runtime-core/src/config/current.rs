@@ -616,7 +616,7 @@ fn validate_placement_config(
     };
     for key in placement
         .keys()
-        .filter(|key| !matches!(key.as_str(), "region" | "mode" | "burstable"))
+        .filter(|key| key.as_str() != "burstable")
         .cloned()
         .collect::<Vec<_>>()
     {
@@ -625,25 +625,6 @@ fn validate_placement_config(
             &format!("placement.{key}"),
             "a supported placement setting",
         );
-    }
-    if placement
-        .get("region")
-        .is_some_and(|value| value.as_str().is_none_or(|value| value.trim().is_empty()))
-    {
-        push_shape_error(diagnostics, "placement.region", "a non-empty string");
-    }
-    if let Some(region) = placement
-        .get("region")
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_string())
-    {
-        placement.insert("region".into(), Value::String(region));
-    }
-    if placement
-        .get("mode")
-        .is_some_and(|value| !matches!(value.as_str(), Some("shared" | "dedicated")))
-    {
-        push_shape_error(diagnostics, "placement.mode", "shared or dedicated");
     }
     validate_optional_bool(placement, "burstable", "placement.burstable", diagnostics);
 }
@@ -1148,8 +1129,6 @@ pub fn public_json_schema() -> Value {
     }));
 
     let placement = closed_object(json!({
-        "region": { "type": "string", "pattern": "\\S" },
-        "mode": { "enum": ["shared", "dedicated"] },
         "burstable": { "type": "boolean" }
     }));
 
@@ -1295,8 +1274,6 @@ export type SpaceBuildSettings = {
 };
 
 export type SpacePlacementConfig = {
-  region?: string;
-  mode?: "shared" | "dedicated";
   burstable?: boolean;
 };
 

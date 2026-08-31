@@ -13,13 +13,13 @@ import {
 import os from "node:os";
 import path from "node:path";
 
-import { residentInstallerTransfer } from "../../apps/control-plane/src/runtime/resident-installer.js";
 import { readActiveReleaseTarget } from "./active-release.ts";
 
 // The URL-mode tests build their own fixture manifest, so a regression in the
 // shipped `runtime/engine-manifest.json` (#1208 dropped `executables`) slipped
-// past them. This one installs from the real manifest through the resident
-// installer, as the /engine/update route runs it.
+// past them. This one installs from the real manifest through the staged
+// shared installer, exactly as the bootstrap plugin's `wp spacefast install`
+// lane runs it (installer.php staged to `<docroot>/__spacefast/engine-update.php`).
 
 const runtimeRoot = path.resolve(import.meta.dirname, "..");
 
@@ -49,14 +49,16 @@ async function installFromShippedManifest(
   roots.push(root);
   const publicRoot = path.join(root, "public");
   const payload = path.join(root, "payload");
-  const transfer = residentInstallerTransfer(path.join(runtimeRoot, "installer.php"));
-  const residentInstaller = path.join(publicRoot, transfer.remotePath.replace(/^htdocs\//, ""));
+  const residentInstaller = path.join(publicRoot, "__spacefast/engine-update.php");
 
-  // Production lands this file over SSH. It is intentionally not an engine
-  // alias: provider cron invokes it through PHP CLI, never php-fpm.
+  // Production stages this file from the bootstrap plugin's bundled copy. It
+  // is intentionally not an engine alias: the plugin invokes it through PHP
+  // CLI, never php-fpm.
   mkdirSync(path.dirname(residentInstaller), { recursive: true });
-  copyFileSync(transfer.localPath, residentInstaller);
+  copyFileSync(path.join(runtimeRoot, "installer.php"), residentInstaller);
 
+  // SAFETY: the shipped manifest is this repo's own build artifact; the file
+  // list is the field under test.
   const manifest = JSON.parse(
     readFileSync(path.join(runtimeRoot, "engine-manifest.json"), "utf8"),
   ) as { files: string[] };

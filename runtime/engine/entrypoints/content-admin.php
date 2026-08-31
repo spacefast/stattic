@@ -13,6 +13,9 @@ header('Cache-Control: ' . (string) _stattic_cache_policy(['private' => true])['
 header('Referrer-Policy: no-referrer', true);
 
 $privateRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
+// Bind the lazy private root before any config-dependent check: config.php is
+// only readable through this global (see _stattic_config_value).
+_stattic_access_private_root($privateRoot);
 $host = _stattic_normalize_hostname((string) ($_SERVER['HTTP_HOST'] ?? ''));
 $ticket = is_string($_GET['ticket'] ?? null) ? $_GET['ticket'] : '';
 $launch = _stattic_content_admin_consume_ticket($privateRoot, $ticket, $host);

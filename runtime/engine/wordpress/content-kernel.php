@@ -230,8 +230,7 @@ function spacefast_content_scope_rest_user_query(array $args, mixed $request): a
     // never on the caller: both REST doors reach this filter, and the WP API
     // door (spacefast_content_disable_rest_api) admits on a principal role
     // while setting no SPACEFAST_CONTENT_ADMIN_USER_ID. Keying on that global
-    // would leave the API door unscoped and enumerate every Space's users on a
-    // shared box, so the guard is the Space alone.
+    // would leave the API door unscoped, so the guard is the Space alone.
     $spaceId = spacefast_content_space_id();
     if ($spaceId !== '') {
         $args['meta_key'] = SPACEFAST_CONTENT_SPACE_META;

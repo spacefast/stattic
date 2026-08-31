@@ -473,10 +473,9 @@ test("rows come back for the capsule's scoped tables, ordered and bounded by the
   expect(staleExport.status).toBe(409);
   expect(await errorCode(staleExport)).toBe("zero_db_export_schema_changed");
 
-  // A second version whose compiled artifacts point at a co-tenant space's
-  // scoped table. This deploy really creates that table, and the dump still
-  // refuses: the physical name is not the one this space's scoping rule
-  // produces for `notes`.
+  // A second version whose compiled artifacts point at another Space's scoped
+  // table. This deploy really creates that table, and the dump still refuses:
+  // the physical name is not the one this Space's scoping rule produces.
   await deploy(runtime, {
     spaceId,
     versionId: UNSCOPED_VERSION_ID,

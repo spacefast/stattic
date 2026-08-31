@@ -243,9 +243,9 @@ function _stattic_component_plugins(array $lock, array &$problems): array
 /** Remove the one-shot bootstrap only after the resident runtime is serving. */
 function _stattic_component_remove_runtime_bootstrap(array &$problems): void
 {
-    $pluginFile = 'spacefast-runtime-bootstrap/spacefast-runtime-bootstrap.php';
+    $pluginFile = 'spacefast-bootstrap/spacefast-bootstrap.php';
     $pluginRoot = defined('WP_PLUGIN_DIR')
-        ? rtrim((string) WP_PLUGIN_DIR, '/\\') . '/spacefast-runtime-bootstrap'
+        ? rtrim((string) WP_PLUGIN_DIR, '/\\') . '/spacefast-bootstrap'
         : '';
     if (function_exists('is_plugin_active') && is_plugin_active($pluginFile)) {
         deactivate_plugins($pluginFile, true);

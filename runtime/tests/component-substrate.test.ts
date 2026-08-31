@@ -87,9 +87,9 @@ echo json_encode($payload, JSON_THROW_ON_ERROR);
 test("component staging removes the spent runtime bootstrap before readiness", async () => {
   const componentApi = path.resolve(import.meta.dir, "../engine/admin/components.php");
   const root = await mkdtemp(path.join(os.tmpdir(), "spacefast-component-bootstrap-"));
-  const pluginRoot = path.join(root, "spacefast-runtime-bootstrap");
+  const pluginRoot = path.join(root, "spacefast-bootstrap");
   await mkdir(pluginRoot);
-  await writeFile(path.join(pluginRoot, "spacefast-runtime-bootstrap.php"), "<?php");
+  await writeFile(path.join(pluginRoot, "spacefast-bootstrap.php"), "<?php");
   try {
     const script = String.raw`
 define('WP_PLUGIN_DIR', $argv[2]);
@@ -97,8 +97,8 @@ $GLOBALS['bootstrap_active'] = true;
 function is_plugin_active(string $plugin): bool { return $GLOBALS['bootstrap_active']; }
 function deactivate_plugins(string|array $plugins, bool $silent = false): void { $GLOBALS['bootstrap_active'] = false; }
 function delete_plugins(array $plugins): bool {
-    $root = WP_PLUGIN_DIR . '/spacefast-runtime-bootstrap';
-    unlink($root . '/spacefast-runtime-bootstrap.php');
+    $root = WP_PLUGIN_DIR . '/spacefast-bootstrap';
+    unlink($root . '/spacefast-bootstrap.php');
     rmdir($root);
     return true;
 }
@@ -107,7 +107,7 @@ $problems = [];
 _stattic_component_remove_runtime_bootstrap($problems);
 echo json_encode([
     'active' => $GLOBALS['bootstrap_active'],
-    'present' => is_dir(WP_PLUGIN_DIR . '/spacefast-runtime-bootstrap'),
+    'present' => is_dir(WP_PLUGIN_DIR . '/spacefast-bootstrap'),
     'problems' => $problems,
 ], JSON_THROW_ON_ERROR);
 `;

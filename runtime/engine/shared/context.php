@@ -1267,6 +1267,30 @@ function _stattic_config_value(string $envName): string
         }
     }
 
+    // The engine's own config file, written at install/confirm time by the
+    // bootstrap route: `<privateRoot>/config.php` returning a string map.
+    // Preferred over env: it is the one config source provisioning owns
+    // end to end, with no provider-side apply latency.
+    static $fileConfig = null;
+    if ($fileConfig === null) {
+        // The private root is set lazily; never cache a miss taken before it is.
+        $privateRoot = _stattic_access_private_root();
+        if ($privateRoot !== '') {
+            $fileConfig = [];
+            $configFile = $privateRoot . '/config.php';
+            if (is_file($configFile)) {
+                $loaded = require $configFile;
+                if (is_array($loaded)) {
+                    $fileConfig = $loaded;
+                }
+            }
+        }
+    }
+    $fromFile = is_array($fileConfig) ? ($fileConfig[$envName] ?? null) : null;
+    if (is_string($fromFile) && trim($fromFile) !== '') {
+        return trim($fromFile);
+    }
+
     $raw = getenv($envName);
     if (is_string($raw) && trim($raw) !== '') {
         return trim($raw);

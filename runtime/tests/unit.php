@@ -2374,10 +2374,9 @@ check(
     'zero dump: another space derives a different name for the same table'
 );
 
-// A site's MySQL is shared. Every name reaching across the space boundary (a
-// WordPress core table, a co-tenant's scoped table, a crafted fragment, a
-// digest that does not belong to this table) is reported out of scope rather
-// than dumped, before any connection exists.
+// Every name outside the capsule's table set (a WordPress core table, another
+// Space's scoped table, a crafted fragment, or a mismatched digest) is reported
+// out of scope before any connection exists.
 $dumpForeign = [[
     'format' => 'stattic.zero.run.v1',
     'db' => ['tables' => [

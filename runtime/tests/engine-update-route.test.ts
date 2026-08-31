@@ -1,22 +1,12 @@
-// POST /engine/update runs the resident installer and relays its receipt.
-// installer-update.test.ts holds the installer's own behavior; this file owns
-// the route seam: validation, the current fast-path, the exec contract
-// (argv URL + env checksums), and how installer verdicts map onto HTTP.
+// POST /engine/update is the FPM receipt lane. Installation belongs to the
+// provider task; this seam validates the requested release, proves an exact
+// active release, and reports divergence without starting a child process.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import {
-  api,
-  dispatchCli,
-  errorCode,
-  managementToken,
-  RUNTIME_HTTP_API_BASE,
-  runtimeHttpPath,
-  startRuntime,
-  type Runtime,
-} from "./harness";
+import { api, errorCode, RUNTIME_HTTP_API_BASE, startRuntime, type Runtime } from "./harness";
 
 let rt: Runtime;
 
@@ -37,28 +27,13 @@ function update(body: unknown, runtime = rt): Promise<Response> {
   return api(runtime, "POST", `${RUNTIME_HTTP_API_BASE}/engine/update`, "update_engine", {}, body);
 }
 
-function plantResidentInstaller(script: string, runtime = rt): void {
-  const dir = path.join(runtime.root, "__spacefast");
-  mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, "engine-update.php");
-  writeFileSync(file, script);
-  chmodSync(file, 0o644);
-}
-
-function removeResidentInstaller(): void {
-  rmSync(path.join(rt.root, "__spacefast/engine-update.php"), { force: true });
-}
-
-test("rejects a plain-http zip_url", async () => {
-  const response = await update({ ...UPDATE_BODY, zip_url: "http://github.example/engine.zip" });
+test("rejects an invalid revision", async () => {
+  const response = await update({ ...UPDATE_BODY, revision: "not a revision" });
   expect(response.status).toBe(422);
   expect(await errorCode(response)).toBe("runtime_engine_update_invalid");
 });
 
 test("answers current for the running revision without spawning anything", async () => {
-  // The tree copy the harness serves carries revision 'source-tree'; no
-  // resident installer exists, so reaching the exec path would 503.
-  removeResidentInstaller();
   const response = await update({ ...UPDATE_BODY, revision: "source-tree" });
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({
@@ -68,95 +43,15 @@ test("answers current for the running revision without spawning anything", async
   });
 });
 
-test("runs the resident installer for the same revision when the lane did not pin a release", async () => {
-  // The SSH dispatch lane loads the engine directly, so no active-release root
-  // is pinned for the process. A revision match alone must not answer
-  // "current" there. Only a pinned release layout proves the running bytes
-  // are the published ones.
-  const lane = await startRuntime();
-  try {
-    plantResidentInstaller(
-      "<?php echo json_encode(['status' => 'installed', 'engine_revision' => getenv('SPACEFAST_RUNTIME_ENGINE_REVISION'), 'layout' => 'release']);",
-      lane,
-    );
-
-    const result = await dispatchCli(
-      lane,
-      JSON.stringify({
-        method: "POST",
-        path: runtimeHttpPath(`${RUNTIME_HTTP_API_BASE}/engine/update`),
-        authorization: `Bearer ${managementToken("update_engine")}`,
-        body: JSON.stringify({ ...UPDATE_BODY, revision: "source-tree" }),
-      }),
-      { env: { PATH: process.env.PATH, HOME: process.env.HOME } },
-    );
-
-    expect(result.exitCode, result.stderr).toBe(0);
-    const envelope: { status?: unknown; body?: unknown } = JSON.parse(result.stdout);
-    expect(envelope.status).toBe(200);
-    expect(envelope.body).toEqual({
-      status: "installed",
-      engine_revision: "source-tree",
-      layout: "release",
-    });
-  } finally {
-    lane.stop();
-  }
-});
-
-test("503s when the resident installer is absent", async () => {
-  removeResidentInstaller();
-  const response = await update(UPDATE_BODY);
-  expect(response.status).toBe(503);
-  expect(await errorCode(response)).toBe("runtime_engine_installer_missing");
-});
-
-test("execs the resident installer with the argv URL and env checksums and relays its receipt", async () => {
-  plantResidentInstaller(
-    [
-      "<?php",
-      "echo json_encode([",
-      "  'status' => 'installed',",
-      "  'engine_revision' => getenv('SPACEFAST_RUNTIME_ENGINE_REVISION'),",
-      "  'layout' => 'release',",
-      "  'seen_zip_url' => $argv[1],",
-      "  'seen_md5' => getenv('SPACEFAST_RUNTIME_ENGINE_MD5'),",
-      "  'seen_native_sha256' => getenv('SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256'),",
-      "]);",
-    ].join("\n"),
-  );
-  const response = await update(UPDATE_BODY);
-  expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({
-    status: "installed",
-    engine_revision: UPDATE_BODY.revision,
-    layout: "release",
-    seen_zip_url: UPDATE_BODY.zip_url,
-    seen_md5: UPDATE_BODY.md5,
-    seen_native_sha256: UPDATE_BODY.native_sha256,
-  });
-});
-
-test("maps a busy installer to 409", async () => {
-  plantResidentInstaller("<?php echo json_encode(['status' => 'busy']);");
+test("reports that a divergent release needs a provider install", async () => {
   const response = await update(UPDATE_BODY);
   expect(response.status).toBe(409);
-  expect(await errorCode(response)).toBe("runtime_engine_update_busy");
+  const body = await response.json();
+  expect(body.code).toBe("runtime_engine_update_required");
+  expect(body.details).toEqual({ active_revision: "source-tree", layout: "release" });
 });
 
-test("surfaces the installer's stderr code on a failed sync", async () => {
-  plantResidentInstaller('<?php fwrite(STDERR, "runtime_engine_md5_mismatch\\n"); exit(1);');
-  const response = await update(UPDATE_BODY);
-  expect(response.status).toBe(424);
-  const body = (await response.json()) as {
-    code?: string;
-    details?: { error?: string; exit_code?: number };
-  };
-  expect(body.code).toBe("runtime_engine_update_failed");
-  expect(body.details).toMatchObject({ error: "runtime_engine_md5_mismatch", exit_code: 1 });
-});
-
-test("invalidates exactly the rewritten-in-place aliases: the loader copies and the resident installer", async () => {
+test("invalidates exactly the rewritten-in-place serving aliases", async () => {
   // These aliases are the ONLY engine files a sync reinstalls under an
   // unchanged path, and the fleet runs opcache.validate_timestamps=Off, so an
   // alias FPM does not invalidate keeps executing its old compiled module. The
@@ -180,12 +75,11 @@ test("invalidates exactly the rewritten-in-place aliases: the loader copies and 
     });
     expect(result.exitCode, result.stderr.toString()).toBe(0);
     const paths: unknown = JSON.parse(result.stdout.toString());
-    expect(paths).toHaveLength(9);
+    expect(paths).toHaveLength(8);
     expect(paths).toEqual(
       expect.arrayContaining([
         `${root}/custom-redirects.php`,
         `${root}/index.php`,
-        `${root}/__spacefast/engine-update.php`,
         `${root}/__spacefast/api.php`,
         `${root}/__spacefast/content-admin.php`,
         `${root}/__spacefast/content.php`,

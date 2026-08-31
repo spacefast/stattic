@@ -42,8 +42,6 @@ afterEach(() => {
 
 async function startUpdateFixture(options?: {
   revision?: string;
-  /** Ship the installer itself in the payload (the self-refresh path). */
-  shipInstaller?: boolean;
   publicRoot?: string;
   visitorEngine?: boolean;
   /** Change the loader payload's bytes, and with them its installed identity. */
@@ -66,13 +64,6 @@ async function startUpdateFixture(options?: {
   mkdirSync(path.join(payload, "engine/shared"), { recursive: true });
   const selfTest = ["#!/bin/sh"];
   const payloadFiles = ["bin/stattic-runtime", "engine-manifest.json", "engine/shared/context.php"];
-  if (options?.shipInstaller) {
-    payloadFiles.push("installer.php");
-    copyFileSync(
-      path.resolve(import.meta.dirname, "../installer.php"),
-      path.join(payload, "installer.php"),
-    );
-  }
   const aliases: Array<{ source: string; path: string }> = [];
   if (options?.visitorEngine) {
     mkdirSync(path.join(payload, "engine/runtime"), { recursive: true });
@@ -266,21 +257,6 @@ echo "embedded-returned\\n";
   expect(stderr).toBe("");
   expect(stdout).toContain('"status": "current"');
   expect(stdout).toContain("embedded-returned");
-});
-
-test("refreshes the resident installer from a payload that ships installer.php", async () => {
-  // The resident copy self-updates from every install, so the updater never
-  // needs a second SSH delivery.
-  const fixture = await startUpdateFixture({ shipInstaller: true });
-  writeFileSync(fixture.installerPath, readFileSync(fixture.installerPath, "utf8"));
-  const payloadInstaller = readFileSync(path.resolve(import.meta.dirname, "../installer.php"));
-
-  const result = await runInstaller(fixture);
-
-  expect(result.exitCode).toBe(0);
-  expect(readFileSync(path.join(fixture.publicRoot, "__spacefast/engine-update.php"))).toEqual(
-    payloadInstaller,
-  );
 });
 
 test("repairs an interrupted loader migration before syncing", async () => {

@@ -1,7 +1,7 @@
 {
-  "revision": "3ac17a058f60de428191c30a7563f0dca799bb74",
-  "sourceHash": "54b2a8d939ffd7ab3369eec0a2042c2b20e18253629dce85ff8cc3a151109b9f",
-  "manifestSha256": "a75adc7016e8c89d03f1776b3434c338e43061512aa8b7ed47a463378f4c5db7",
+  "revision": "e58b904f1f6131ca3e73bbb62ddb0c7f8364ef3f",
+  "sourceHash": "49285e88a3db72964d851ef053d12968e22c01bf494da2547353b79e97d23d0e",
+  "manifestSha256": "b0943270dc83e2122fe4a4a6f32ea383d75b598eeb07180a400193c01ee804a7",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "ff8c6db198125565d060f142ff9426b9c454f6ef66e8df5a3a64e290f08fa2bd"
+      "sha256": "746698c00426c1db5c76c97b2f06c8290446bbc8860df5912d32d347aa480477"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "c84158c189a6b175449ddc89c91ed6b7ee3e5798a4e4c58f1d471a1bd7db4487"
+      "sha256": "a64bcb2ddbb8a2011abccf0ef2c38526f3dadfda4332a24874f8cc5c6dc1666d"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -373,7 +373,7 @@
     },
     {
       "path": "runtime/engine/admin/engine-update.php",
-      "sha256": "8e9f895149eaed1f83aa9e38006813c0b59756d53db11a55d7b1584282baf87c"
+      "sha256": "7857ef4625d32917ce5721d529c0c81ad87b4b962471b7793c6d345672269396"
     },
     {
       "path": "runtime/engine/admin/finalize-rust.php",
@@ -717,7 +717,7 @@
     },
     {
       "path": "runtime/installer.php",
-      "sha256": "abd4943a7b6511f1c201fb3ac59fa71955bf2bf548d56e680d9a8bd45bf97ae1"
+      "sha256": "d19762eb680e86868c0c40c781666f22333ca3756f01c02be71c413264aa94d6"
     },
     {
       "path": "runtime/package.json",
@@ -861,7 +861,7 @@
     },
     {
       "path": "runtime/tests/engine-update-route.test.ts",
-      "sha256": "180c147a6a521a593a2d1c5053e0e4a9e4c3cd67e3dce509a2c9c29f231cc9c7"
+      "sha256": "9290f0f15f5d4ecf7b07364efca78a7e8dfb86f9f08188702960c2e8c2d32f4f"
     },
     {
       "path": "runtime/tests/entrypoint-probes.ts",
@@ -925,7 +925,7 @@
     },
     {
       "path": "runtime/tests/installer-update.test.ts",
-      "sha256": "87dfc92edbbb48775e24662f419161d823287c386a65ef99df7887afd174d819"
+      "sha256": "fc71e2cdaf5ee85187619a8b392471ce84a95865e6ced3a9474a09c881aaf19b"
     },
     {
       "path": "runtime/tests/job-runner.test.ts",

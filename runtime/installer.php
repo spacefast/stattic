@@ -836,19 +836,6 @@ if (
     fail('runtime_engine_post_publication_check_failed');
 }
 
-// Refresh the resident installer only after the release has passed its
-// publication check. It is not part of the serving transaction.
-$stagedInstaller = $releaseRoot . '/installer.php';
-if (is_file($stagedInstaller) && ensure_install_dir($publicRoot . '/__spacefast')) {
-    $resident = $publicRoot . '/__spacefast/engine-update.php';
-    $tmp = $resident . '.tmp.' . getmypid();
-    if (copy($stagedInstaller, $tmp) && chmod($tmp, 0644)) {
-        rename($tmp, $resident);
-    } else {
-        unlink_if_present($tmp);
-    }
-}
-
 unregister_cleanup_path($releaseRoot);
 prune_old_releases($releasesRoot, array_values(array_filter([
     realpath($releaseRoot) ?: null,

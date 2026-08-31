@@ -276,9 +276,8 @@ function spacefast_content_enforce_admin_resource(string $page): void
     }
     if ($page === 'edit.php' || $page === 'post-new.php') {
         $postType = (string) ($_GET['post_type'] ?? ($GLOBALS['typenow'] ?? ''));
-        if ($postType === '' && $page === 'edit.php' && function_exists('wp_safe_redirect') && function_exists('admin_url')) {
-            wp_safe_redirect(admin_url('edit.php'));
-            exit;
+        if ($postType === '' && $page === 'edit.php') {
+            $postType = 'post';
         }
         if (spacefast_content_collection_for_post_type($postType) === null) {
             wp_die('Spacefast manages this WordPress content type.', 'Unavailable', ['response' => 403]);
@@ -307,7 +306,10 @@ function spacefast_content_enforce_admin_resource(string $page): void
         }
     }
     if ($page === 'admin.php') {
-        wp_die('Spacefast manages this WordPress screen.', 'Unavailable', ['response' => 403]);
+        $screen = is_string($_GET['page'] ?? null) ? $_GET['page'] : '';
+        if (!defined('ZERO_ADMIN_PAGE_SLUG') || $screen !== ZERO_ADMIN_PAGE_SLUG) {
+            wp_die('Spacefast manages this WordPress screen.', 'Unavailable', ['response' => 403]);
+        }
     }
 }
 

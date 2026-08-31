@@ -622,6 +622,14 @@ function acquire_installer_lock(string $privateRoot)
 
 function installer_roots(): array
 {
+    $configuredPublicRoot = installer_config_value('SPACEFAST_RUNTIME_PUBLIC_ROOT');
+    if ($configuredPublicRoot !== '') {
+        $resolvedPublicRoot = realpath($configuredPublicRoot);
+        if (!is_string($resolvedPublicRoot) || !is_dir($resolvedPublicRoot)) {
+            fail('runtime_public_root_invalid');
+        }
+        return [$resolvedPublicRoot . '/.stattic', $resolvedPublicRoot];
+    }
     $scriptDir = __DIR__;
     if (basename($scriptDir) === '__spacefast') {
         $publicRoot = dirname($scriptDir);
@@ -690,6 +698,9 @@ if (
     && installed_native_matches($installedReleaseRoot, $expectedNativeSha256)
 ) {
     echo json_encode(['status' => 'current', 'engine_revision' => $expectedRevision, 'layout' => 'release'], JSON_PRETTY_PRINT) . "\n";
+    if (defined('SPACEFAST_RUNTIME_INSTALLER_EMBEDDED') && SPACEFAST_RUNTIME_INSTALLER_EMBEDDED === true) {
+        return;
+    }
     exit(0);
 }
 $suffix = getmypid() . '-' . bin2hex(random_bytes(4));

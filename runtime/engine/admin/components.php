@@ -150,6 +150,32 @@ function _stattic_component_installed_plugin(array $plugins, string $textDomain)
     return null;
 }
 
+function _stattic_component_check_installed_artifact(
+    array $expected,
+    string $pluginRoot,
+    array &$problems,
+): void {
+    $artifact = $expected['installedArtifact'] ?? null;
+    $relative = is_array($artifact) ? ($artifact['path'] ?? null) : null;
+    $digest = is_array($artifact) ? ($artifact['sha256'] ?? null) : null;
+    if (
+        !is_string($relative)
+        || $relative === ''
+        || str_starts_with($relative, '/')
+        || str_contains($relative, '..')
+        || str_contains($relative, '\\')
+        || !is_string($digest)
+    ) {
+        _stattic_component_problem($problems, (string) ($expected['id'] ?? ''), 'component_lock_invalid', 'The installed artifact lock is invalid.');
+        return;
+    }
+    $path = rtrim($pluginRoot, '/\\') . '/' . $relative;
+    $actual = is_file($path) ? 'sha256:' . hash_file('sha256', $path) : null;
+    if (!is_string($actual) || !hash_equals($digest, $actual)) {
+        _stattic_component_problem($problems, (string) ($expected['id'] ?? ''), 'component_digest_mismatch', 'The installed WordPress plugin bytes differ from the platform lock.');
+    }
+}
+
 /**
  * Reconcile the locked WordPress plugins and report the on-demand ones running.
  *
@@ -188,12 +214,65 @@ function _stattic_component_plugins(array $lock, array &$problems): array
         }
     }
 
+    $dataLiberation = _stattic_component_expected($lock, 'data-liberation');
+    $dataLiberationFile = 'data-liberation/plugin.php';
+    if (!is_array($dataLiberation) || !isset($plugins[$dataLiberationFile])) {
+        _stattic_component_problem($problems, 'data-liberation', 'component_missing', 'The locked WordPress plugin is not installed.');
+    } else {
+        _stattic_component_check_installed_artifact(
+            $dataLiberation,
+            defined('WP_PLUGIN_DIR') ? (string) WP_PLUGIN_DIR : '',
+            $problems,
+        );
+        if (is_plugin_active($dataLiberationFile)) {
+            deactivate_plugins($dataLiberationFile, true);
+        }
+        if (is_plugin_active($dataLiberationFile)) {
+            _stattic_component_problem($problems, 'data-liberation', 'component_active', 'The installed-only WordPress plugin is still active.');
+        }
+    }
+
     $onDemandActive = [];
     $jetpack = _stattic_component_installed_plugin($plugins, 'jetpack');
     if (is_array($jetpack) && is_plugin_active($jetpack[0])) {
         $onDemandActive[] = 'jetpack';
     }
     return $onDemandActive;
+}
+
+/** Remove the one-shot bootstrap only after the resident runtime is serving. */
+function _stattic_component_remove_runtime_bootstrap(array &$problems): void
+{
+    $pluginFile = 'spacefast-runtime-bootstrap/spacefast-runtime-bootstrap.php';
+    $pluginRoot = defined('WP_PLUGIN_DIR')
+        ? rtrim((string) WP_PLUGIN_DIR, '/\\') . '/spacefast-runtime-bootstrap'
+        : '';
+    if (function_exists('is_plugin_active') && is_plugin_active($pluginFile)) {
+        deactivate_plugins($pluginFile, true);
+    }
+    if ($pluginRoot !== '' && is_dir($pluginRoot)) {
+        $filesystemApi = defined('ABSPATH') ? ABSPATH . 'wp-admin/includes/file.php' : '';
+        if (!function_exists('WP_Filesystem') && $filesystemApi !== '' && is_file($filesystemApi)) {
+            require_once $filesystemApi;
+        }
+        $deleted = function_exists('delete_plugins') ? delete_plugins([$pluginFile]) : false;
+        if ((function_exists('is_wp_error') && is_wp_error($deleted)) || is_dir($pluginRoot)) {
+            _stattic_component_problem(
+                $problems,
+                null,
+                'runtime_bootstrap_cleanup_failed',
+                'The temporary runtime bootstrap plugin could not be removed.'
+            );
+        }
+    }
+    if (function_exists('is_plugin_active') && is_plugin_active($pluginFile)) {
+        _stattic_component_problem(
+            $problems,
+            null,
+            'runtime_bootstrap_active',
+            'The temporary runtime bootstrap plugin is still active.'
+        );
+    }
 }
 
 function _stattic_component_routing_readiness(string $privateRoot, array $target, array &$problems): array
@@ -234,9 +313,33 @@ function _stattic_component_routing_readiness(string $privateRoot, array $target
     ];
 }
 
+function _stattic_component_table_exists(object $wpdb, string $table): bool
+{
+    if (!method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'get_var')) {
+        return false;
+    }
+    $count = $wpdb->get_var($wpdb->prepare(
+        'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s',
+        $table
+    ));
+    return (int) $count === 1;
+}
+
+function _stattic_component_wordpress_tables_ready(object $wpdb): bool
+{
+    foreach (['options', 'posts', 'postmeta', 'users', 'usermeta', 'terms', 'term_taxonomy', 'term_relationships'] as $property) {
+        $table = $wpdb->{$property} ?? null;
+        if (!is_string($table) || $table === '' || !_stattic_component_table_exists($wpdb, $table)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 function _stattic_component_provision_application_tables(object $wpdb, array &$problems): bool
 {
     $statements = [
+        "CREATE TABLE IF NOT EXISTS _spacefast_email_outbox (message_id VARCHAR(80) NOT NULL PRIMARY KEY, space_id VARCHAR(128) NOT NULL, version_id VARCHAR(128) NOT NULL, invocation_id VARCHAR(96) NOT NULL, effect_index SMALLINT UNSIGNED NOT NULL, state VARCHAR(24) NOT NULL, payload_json MEDIUMBLOB NOT NULL, attempt_count SMALLINT UNSIGNED NOT NULL DEFAULT 0, available_at DATETIME(6) NOT NULL, lease_token VARCHAR(80) NULL, lease_expires_at DATETIME(6) NULL, provider_message_id VARCHAR(255) NULL, last_error_code VARCHAR(96) NULL, accepted_at DATETIME(6) NULL, terminal_at DATETIME(6) NULL, created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL, UNIQUE KEY uniq_invocation_effect (space_id,invocation_id,effect_index), KEY idx_due (state,available_at), KEY idx_space_created (space_id,created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         "CREATE TABLE IF NOT EXISTS _spacefast_application_journal (entry_id VARCHAR(512) NOT NULL PRIMARY KEY, space_id VARCHAR(128) NOT NULL, operation_id VARCHAR(64) NOT NULL, effect_ordinal SMALLINT UNSIGNED NOT NULL, kind VARCHAR(32) NOT NULL, message_id VARCHAR(80) NULL, payload_digest VARCHAR(71) NOT NULL, payload_json MEDIUMBLOB NOT NULL, created_at DATETIME(6) NOT NULL, UNIQUE KEY uniq_operation_effect (space_id,operation_id,effect_ordinal), KEY idx_space_created (space_id,created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         "CREATE TABLE IF NOT EXISTS _spacefast_application_deliveries (entry_id VARCHAR(512) NOT NULL, sink VARCHAR(160) NOT NULL, state VARCHAR(24) NOT NULL, attempt_count SMALLINT UNSIGNED NOT NULL DEFAULT 0, available_at DATETIME(6) NOT NULL, lease_id VARCHAR(80) NULL, lease_expires_at DATETIME(6) NULL, downstream_receipt VARCHAR(2000) NULL, last_problem_json TEXT NULL, delivered_at DATETIME(6) NULL, created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL, PRIMARY KEY(entry_id,sink), CONSTRAINT fk_application_delivery_entry FOREIGN KEY(entry_id) REFERENCES _spacefast_application_journal(entry_id) ON DELETE CASCADE, KEY idx_due(state,available_at,lease_expires_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
     ];
@@ -246,13 +349,28 @@ function _stattic_component_provision_application_tables(object $wpdb, array &$p
             return false;
         }
     }
-    foreach (['_spacefast_application_journal', '_spacefast_application_deliveries'] as $table) {
-        if ($wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table)) !== $table) {
+    foreach (['_spacefast_email_outbox', '_spacefast_application_journal', '_spacefast_application_deliveries'] as $table) {
+        if (!_stattic_component_table_exists($wpdb, $table)) {
             _stattic_component_problem($problems, null, 'application_tables_missing', 'A managed application journal table is missing.');
             return false;
         }
     }
     return true;
+}
+
+function _stattic_application_substrate_readiness(object $wpdb): array
+{
+    return [
+        'mail' => [
+            'state' => _stattic_component_table_exists($wpdb, '_spacefast_email_outbox') ? 'ready' : 'blocked',
+        ],
+        'journal' => [
+            'state' => _stattic_component_table_exists($wpdb, '_spacefast_application_journal')
+                && _stattic_component_table_exists($wpdb, '_spacefast_application_deliveries')
+                ? 'ready'
+                : 'blocked',
+        ],
+    ];
 }
 
 function _stattic_runtime_stage_components(string $privateRoot, array $claims): void
@@ -323,19 +441,16 @@ function _stattic_runtime_stage_components(string $privateRoot, array $claims): 
             _stattic_component_problem($problems, null, 'wordpress_database_unavailable', 'WordPress cannot reach its database.');
         }
         $onDemandActive = _stattic_component_plugins($lock, $problems);
+        _stattic_component_remove_runtime_bootstrap($problems);
         if (function_exists('get_stylesheet') && get_stylesheet() !== 'spacefast-managed' && function_exists('switch_theme')) {
             switch_theme('spacefast-managed');
         }
         if (!function_exists('get_stylesheet') || get_stylesheet() !== 'spacefast-managed') {
             _stattic_component_problem($problems, 'managed-theme', 'managed_theme_inactive', 'The managed WordPress theme is not active.');
         }
-        if (function_exists('spacefast_content_component_observation')) {
-            $content = spacefast_content_component_observation(
-                $privateRoot,
-                $spaceId,
-            );
-            $tables = is_array($content['tables'] ?? null) ? $content['tables'] : ['state' => 'blocked'];
-        }
+        $tables = [
+            'state' => _stattic_component_wordpress_tables_ready($GLOBALS['wpdb']) ? 'ready' : 'blocked',
+        ];
         if (($tables['state'] ?? null) !== 'ready') {
             _stattic_component_problem($problems, null, 'wordpress_tables_unavailable', 'Managed WordPress tables are not ready.');
         }
@@ -351,8 +466,8 @@ function _stattic_runtime_stage_components(string $privateRoot, array $claims): 
     ) {
         _stattic_component_problem($problems, null, 'routing_receipt_stale', 'Runtime routing does not match the requested snapshot and inventory.');
     }
-    $application = function_exists('_stattic_application_substrate_readiness')
-        ? _stattic_application_substrate_readiness($privateRoot)
+    $application = isset($GLOBALS['wpdb']) && is_object($GLOBALS['wpdb'])
+        ? _stattic_application_substrate_readiness($GLOBALS['wpdb'])
         : ['mail' => ['state' => 'blocked'], 'journal' => ['state' => 'blocked']];
     foreach (['mail', 'journal'] as $service) {
         if (($application[$service]['state'] ?? null) !== 'ready') {

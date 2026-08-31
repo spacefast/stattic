@@ -28,10 +28,11 @@ declare(strict_types=1);
 /**
  * Make the php-toolkit classes loadable, or fail closed.
  *
- * On a wp.cloud box the Data Liberation plugin has already required the PHAR by
- * the time WordPress finishes booting, so the first branch is the live one. The
- * explicit PHAR path is how the runtime tests load the identical pinned bytes
- * without a WordPress install.
+ * On a wp.cloud box the Data Liberation plugin is installed but never active:
+ * activating it loads the PHAR before wp-admin's media declarations and can
+ * fatal on a duplicate function. This loader is the single place the PHAR
+ * enters a WordPress process. The explicit PHAR path also lets runtime tests
+ * load the identical pinned bytes without a WordPress install.
  */
 function spacefast_content_sync_require_toolkit(): void
 {
@@ -48,6 +49,7 @@ function spacefast_content_sync_require_toolkit(): void
     }
     foreach ($candidates as $phar) {
         if (is_file($phar)) {
+            spacefast_content_sync_preload_polyfill_targets();
             require_once 'phar://' . $phar . '/vendor/autoload.php';
             if (class_exists('WordPress\\Markdown\\MarkdownConsumer')) {
                 return;
@@ -59,6 +61,18 @@ function spacefast_content_sync_require_toolkit(): void
         'content_markdown_toolkit_unavailable',
         'The WordPress Markdown toolkit is not installed on this site.'
     );
+}
+
+/** Load core's unguarded declaration before the PHAR can polyfill it. */
+function spacefast_content_sync_preload_polyfill_targets(): void
+{
+    if (function_exists('wp_read_audio_metadata') || !defined('ABSPATH')) {
+        return;
+    }
+    $media = ABSPATH . 'wp-admin/includes/media.php';
+    if (is_file($media)) {
+        require_once $media;
+    }
 }
 
 function spacefast_content_markdown_to_blocks(string $markdown): string

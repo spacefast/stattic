@@ -2,17 +2,17 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:2eaaefdfd65ecc97e72f3c292fc99fa59f0095c6133f0167ed95b44a080100c6",
+  "digest": "sha256:faa4ae95e875bf095a599604fbe16cb8ebddde2a60aea88d3f583a64d6c1477f",
   "components": [
     {
       "id": "wordpress-core",
       "kind": "wordpress-core",
-      "version": "7.0.4",
-      "sha256": "sha256:f0885ad10c35ac87e70517bc5789275cd54ccac052222a58acfb7b9f870082b0",
+      "version": "7.1",
+      "sha256": "sha256:d1ae02b5ae18428031ffc3943659fa87ab361d827f4aa804adf9276e4dc75df6",
       "source": {
         "kind": "archive",
-        "url": "https://wordpress.org/wordpress-7.0.4.zip",
-        "bytes": 31438468
+        "url": "https://wordpress.org/wordpress-7.1.zip",
+        "bytes": 37216004
       },
       "provides": ["wordpress.core", "wordpress.blocks", "wordpress.media"],
       "activation": "always"
@@ -45,7 +45,7 @@
       "id": "content-kernel",
       "kind": "mu-plugin",
       "version": "source-tree",
-      "sha256": "sha256:3b1ac178d388d077b072e0c981a796479c3cc08905bd1a4d7a99fd14dae6ec48",
+      "sha256": "sha256:002437f10f22f092c44ebd42470b0b50161c1ea40ae5fd522a9d6618b8e8387c",
       "source": {
         "kind": "embedded",
         "path": "engine/wordpress/content-kernel.php"
@@ -93,12 +93,12 @@
     {
       "id": "redirection",
       "kind": "plugin",
-      "version": "5.9.0",
-      "sha256": "sha256:b6dd341a6b383440cbb1d5647fa59a82fc5e48afe2165539284c56edaf066842",
+      "version": "5.10.0",
+      "sha256": "sha256:966ac6267cd6a99f2d79ec05db1dee2e0aa0cddb6060b1c32cde2ffde739e333",
       "source": {
         "kind": "archive",
-        "url": "https://downloads.wordpress.org/plugin/redirection.5.9.0.zip",
-        "bytes": 382251
+        "url": "https://downloads.wordpress.org/plugin/redirection.5.10.0.zip",
+        "bytes": 494067
       },
       "provides": ["wordpress.redirection"],
       "activation": "always"
@@ -115,6 +115,23 @@
       },
       "provides": ["wordpress.block-transform"],
       "activation": "always"
+    },
+    {
+      "id": "data-liberation",
+      "kind": "plugin",
+      "version": "0.9.0",
+      "sha256": "sha256:ba6e691936699ae7f5ceaa0129ef7e7a10f1db77c559a32f824e8307747b7b54",
+      "source": {
+        "kind": "archive",
+        "url": "https://github.com/WordPress/php-toolkit/releases/download/v0.9.0/data-liberation.zip",
+        "bytes": 883739
+      },
+      "installedArtifact": {
+        "path": "data-liberation/php-toolkit.phar",
+        "sha256": "sha256:bd452b61fd6ee9f4838ff416a3d225e6c82a742ffaf325a57ad327828eda446a"
+      },
+      "provides": ["wordpress.markdown", "wordpress.data-liberation"],
+      "activation": "installed"
     },
     {
       "id": "jetpack",

@@ -25,6 +25,7 @@ const manifest = JSON.parse(
 // Every entry carries its reason: adding a path here is the one way to silence
 // this guard, and it leaves a visible diff a reviewer reads.
 const NOT_SHIPPED = {
+  "bootstrap/": "blank-site bootstrap plugin source, packaged only in the paired bootstrap zip",
   "browser-specs/": "real-browser runtime tests, never installed on a site",
   "node_modules/": "workspace dependency links, never installed on a site",
   "package.json": "the Turbo workspace boundary and test dependency graph, never installed",

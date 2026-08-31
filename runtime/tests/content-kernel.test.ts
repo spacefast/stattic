@@ -276,6 +276,104 @@ echo json_encode([
   });
 });
 
+test("content admin landings reach the native list and Zero Admin without redirecting or refusing", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-content-admin-routes-"));
+  const revision = `sha256:${"a".repeat(64)}`;
+  const releaseRoot = path.join(
+    root,
+    ".stattic/storage/spaces/spc_alpha/content-model/releases",
+    revision.slice("sha256:".length),
+  );
+  mkdirSync(releaseRoot, { recursive: true });
+  const contentModel = `<?php
+return [
+  'format' => 'spacefast.wordpress-content-model.php',
+  'version' => 1,
+  'revision' => '${revision}',
+  'postTypes' => [[
+    'id' => 'posts',
+    'kind' => 'builtin',
+    'postType' => 'post',
+    'publicRead' => true,
+    'fields' => [],
+  ]],
+  'scfFieldGroups' => [],
+  'tables' => [],
+  'pages' => [],
+  'abilities' => [],
+  'hooks' => [],
+  'syncBindings' => [],
+];
+`;
+  writeFileSync(path.join(releaseRoot, "content-model.php"), contentModel);
+  const artifactDigest = new Bun.CryptoHasher("sha256").update(contentModel).digest("hex");
+  writeFileSync(path.join(releaseRoot, "content-model.sha256"), `sha256:${artifactDigest}\n`);
+
+  const script = String.raw`
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+$GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $argv[3];
+$GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $argv[4];
+$GLOBALS['redirects'] = [];
+$GLOBALS['refusals'] = [];
+function admin_url(string $path): string { return '/wp-admin/' . $path; }
+function wp_safe_redirect(string $url): bool {
+  $GLOBALS['redirects'][] = $url;
+  return true;
+}
+function wp_die(string $message, string $title = '', array $args = []): void {
+  $GLOBALS['refusals'][] = [$args['response'] ?? null, $message];
+}
+require $argv[1];
+require $argv[2];
+
+$_GET = [];
+unset($GLOBALS['typenow']);
+spacefast_content_enforce_admin_resource('edit.php');
+
+$_GET = ['page' => ZERO_ADMIN_PAGE_SLUG, 'p' => '/types/post'];
+spacefast_content_enforce_admin_resource('admin.php');
+
+$_GET = ['page' => 'plugins'];
+spacefast_content_enforce_admin_resource('admin.php');
+
+echo json_encode([
+  'redirects' => $GLOBALS['redirects'],
+  'refusals' => $GLOBALS['refusals'],
+]);
+`;
+  try {
+    const process = Bun.spawn(
+      [
+        "php",
+        "-r",
+        script,
+        path.join(repoRoot, "packages/zero-admin/php/routes.php"),
+        kernel,
+        releaseRoot,
+        revision,
+      ],
+      {
+        cwd: repoRoot,
+        stderr: "pipe",
+        stdout: "pipe",
+      },
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
+
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+    expect(JSON.parse(stdout)).toEqual({
+      redirects: [],
+      refusals: [[403, "Spacefast manages this WordPress screen."]],
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("managed API and admin requests converge on durable issuer-subject WordPress principals", async () => {
   const script = String.raw`
 $inserted = [];

@@ -163,6 +163,7 @@ async function runInstaller(
     zipUrl?: string;
     md5?: string;
     nativeSha256?: string;
+    publicRoot?: string;
     failurePhase?: "pointer_publication";
   },
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
@@ -181,6 +182,7 @@ async function runInstaller(
       SPACEFAST_RUNTIME_ENGINE_MD5: options?.md5 ?? fixture.md5,
       SPACEFAST_RUNTIME_ENGINE_REVISION: fixture.revision,
       SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256: options?.nativeSha256 ?? "",
+      SPACEFAST_RUNTIME_PUBLIC_ROOT: options?.publicRoot ?? "",
       SPACEFAST_RUNTIME_INSTALLER_TEST_FAILURE: options?.failurePhase ?? "",
     },
   });
@@ -207,6 +209,63 @@ test("installs the engine tree and prints the receipt", async () => {
   const releaseRoot = activeReleaseRoot(fixture.publicRoot);
   expect(existsSync(path.join(releaseRoot, "engine/shared/context.php"))).toBe(true);
   expect(existsSync(path.join(releaseRoot, "bin/stattic-runtime"))).toBe(true);
+});
+
+test("an out-of-tree bootstrap installer targets the configured public root", async () => {
+  const fixture = await startUpdateFixture();
+  const bootstrapRoot = path.join(fixture.root, "bootstrap-plugin");
+  mkdirSync(bootstrapRoot, { recursive: true });
+  const bootstrapInstaller = path.join(bootstrapRoot, "installer.php");
+  copyFileSync(fixture.installerPath, bootstrapInstaller);
+
+  const result = await runInstaller(
+    { ...fixture, installerPath: bootstrapInstaller },
+    { publicRoot: fixture.publicRoot },
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(existsSync(path.join(fixture.publicRoot, ".stattic/active-release"))).toBe(true);
+  expect(existsSync(path.join(fixture.root, ".stattic/active-release"))).toBe(false);
+});
+
+test("an embedded bootstrap regains control when the exact release is already current", async () => {
+  const fixture = await startUpdateFixture();
+  const installed = await runInstaller(fixture, { nativeSha256: fixture.nativeSha256 });
+  expect(installed.exitCode).toBe(0);
+
+  const wrapper = path.join(fixture.root, "embedded-installer.php");
+  writeFileSync(
+    wrapper,
+    `<?php
+define('SPACEFAST_RUNTIME_INSTALLER_EMBEDDED', true);
+$installer = $argv[1];
+$zip = $argv[2];
+$argv = [$installer, $zip];
+require $installer;
+echo "embedded-returned\\n";
+`,
+  );
+  const child = Bun.spawn({
+    cmd: ["php", "-d", "auto_prepend_file=", wrapper, fixture.installerPath, fixture.zipUrl],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      SPACEFAST_RUNTIME_ENGINE_MD5: fixture.md5,
+      SPACEFAST_RUNTIME_ENGINE_REVISION: fixture.revision,
+      SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256: fixture.nativeSha256,
+    },
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+
+  expect(exitCode).toBe(0);
+  expect(stderr).toBe("");
+  expect(stdout).toContain('"status": "current"');
+  expect(stdout).toContain("embedded-returned");
 });
 
 test("refreshes the resident installer from a payload that ships installer.php", async () => {

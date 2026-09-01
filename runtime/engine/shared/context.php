@@ -27,6 +27,11 @@ require_once __DIR__ . '/finalizer-protocol.generated.php';
 const STATTIC_RUNTIME_SCHEMA = 'static-runtime-v4';
 const SPACEFAST_RUNTIME_ENGINE_VERSION = 'static-runtime-v2';
 const SPACEFAST_RUNTIME_ENGINE_REVISION = 'source-tree';
+// Private and preview hosts stay out of ordinary crawlers while the screenshot
+// service may inspect their signed URLs. The runtime owns this response so an
+// engine promotion also upgrades route bundles compiled by an older engine.
+const STATTIC_NOINDEX_ROBOTS_BODY = "User-agent: WordPress.com mShots\nAllow: /\n\nUser-agent: *\nDisallow: /\n";
+const STATTIC_LEGACY_NOINDEX_ROBOTS_BODY = "User-agent: *\nDisallow: /\n";
 
 function _stattic_runtime_install_root(string $engineRoot): string
 {

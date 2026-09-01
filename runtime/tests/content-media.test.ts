@@ -59,6 +59,7 @@ function mintContentAdminSession(host: string, spaceId: string): string {
       access_generation: 7,
       wordpress_role: "editor",
       frame_origin: DASHBOARD_ORIGIN,
+      access: { surface: "wordpress" },
       expires_at: Math.floor(Date.now() / 1000) + 3600,
     }),
   ).toString("base64url");

@@ -35,7 +35,8 @@ if (!is_file($wpLoad)) {
 _stattic_content_admin_enter_wordpress(
     $privateRoot,
     $launch['authorization']['space_id'],
-    $launch['frame_origin']
+    $launch['frame_origin'],
+    $launch['access']
 );
 require $wpLoad;
 
@@ -49,7 +50,8 @@ $session = _stattic_content_admin_mint_session(
     $launch['principal'],
     $launch['authorization'],
     $launch['wordpress_role'],
-    $launch['frame_origin']
+    $launch['frame_origin'],
+    $launch['access']
 );
 if ($session === null) {
     _stattic_problem_response(503, 'content_admin_session_unavailable', 'The content editor session could not be started.');
@@ -91,7 +93,8 @@ foreach ($wpAuthCookies as $wpAuthCookie) {
 // vocabulary, and spelling them here would be a second copy to keep in step.
 // A launch that named no screen — the dashboard's "Open WordPress admin"
 // escape hatch — lands on WordPress's own list instead.
-$screen = $launch['screen'] ?? null;
+$access = $launch['access'];
+$screen = $access['surface'] === 'zero' ? $access['initial_screen'] : null;
 $landing = $screen !== null && function_exists('zero_admin_route_url')
     ? zero_admin_route_url($screen === 'users' ? '/users' : '/types/post')
     : '/wp-admin/edit.php';

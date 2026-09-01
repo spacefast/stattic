@@ -18,6 +18,7 @@ import {
   deploy,
   get,
   publicAccessConfig,
+  PHP_BINARY,
   RESPONSES,
   responseEntries,
   responseEntry,
@@ -32,6 +33,8 @@ const HOST = "headers.test";
 const CONTRACT_HOST = "headers-contract.test";
 const CONTRACT_404_HOST = "headers-404-contract.test";
 const REJECTED_NAMES_HOST = "headers-rejected-names.test";
+const LEGACY_NOINDEX_ROBOTS = "User-agent: *\nDisallow: /\n";
+const NOINDEX_ROBOTS = "User-agent: WordPress.com mShots\nAllow: /\n\nUser-agent: *\nDisallow: /\n";
 
 // The composed policies, one name each (contracts §15/§16).
 const HTML_OPEN = "public, s-maxage=600, max-age=0, must-revalidate";
@@ -82,6 +85,39 @@ function publicConfig(target: "live" | "live_and_all_versions" = "live") {
 /** The pair every response states together: browser policy + edge intent. */
 function cachePolicy(response: Response): [string | null, string | null] {
   return [response.headers.get("cache-control"), response.headers.get("a8c-edge-cache")];
+}
+
+function installLegacyNoindexRobotsRoute(runtime: Runtime, host: string): void {
+  const inject = Bun.spawnSync([
+    PHP_BINARY,
+    "-r",
+    [
+      "require $argv[1];",
+      "$routesRoot = $argv[2] . '/routes';",
+      "$host = $argv[3];",
+      "$pointer = json_decode((string) file_get_contents($routesRoot . '/current.json'), true, 512, JSON_THROW_ON_ERROR);",
+      "$shard = substr(hash('sha256', $host), 0, 2);",
+      "$name = $pointer['shards'][$shard] ?? null;",
+      "if (!is_string($name)) { fwrite(STDERR, 'no shard owns ' . $host); exit(1); }",
+      "$artifact = include $routesRoot . '/' . $name;",
+      "foreach ($artifact['host_routes'][$host] ?? [] as &$route) {",
+      "  if (($route['route_action']['action'] ?? null) === 'robots_txt') { $route['route_action']['body'] = $argv[4]; }",
+      "}",
+      "unset($route);",
+      "$written = _sf_php_artifact_write($routesRoot . '/shards', 'hosts-' . $shard, _sf_php_artifact_source($artifact));",
+      "_sf_json_write($routesRoot . '/previous.json', $pointer);",
+      "$pointer['shards'][$shard] = 'shards/' . $written;",
+      "$pointer['gen'] = ((int) $pointer['gen']) + 1;",
+      "_sf_json_write($routesRoot . '/current.json', $pointer);",
+    ].join("\n"),
+    `${runtime.engineRoot}/shared/pointers.php`,
+    runtime.storageRoot,
+    host,
+    LEGACY_NOINDEX_ROBOTS,
+  ]);
+  if (inject.exitCode !== 0) {
+    throw new Error(`failed to install legacy robots route: ${inject.stderr.toString()}`);
+  }
 }
 
 beforeAll(async () => {
@@ -457,8 +493,8 @@ test("fallback and not-found responses state a bounded policy", async () => {
 // D138 corrected: robots.txt stops a crawler reading a page, never indexing its
 // URL, so the noindex that binds is X-Robots-Tag on the HTML, which reaches the
 // crawler because HTML never leaves the PHP lane. robots.txt is crawl control
-// only, and only a noindex host serves the platform's deny-all instead of the
-// publisher's file.
+// only, and only a noindex host serves the platform's crawl policy instead of
+// the publisher's file.
 test("noindex hosts own X-Robots-Tag, and robots.txt is only crawl control", async () => {
   const indexable = await get(rt, "indexable.test", "/index.html");
   expect(indexable.headers.get("x-robots-tag")).toBe("all");
@@ -470,9 +506,12 @@ test("noindex hosts own X-Robots-Tag, and robots.txt is only crawl control", asy
     responseEntry(rt, "spc_robots_hdr", "ver_robots_hdr_1", RESPONSES.specialKeys.robots),
   ).not.toBeNull();
 
+  // Existing sites have this route body compiled into their current shard.
+  // An engine promotion must upgrade it without requiring a republish.
+  installLegacyNoindexRobotsRoute(rt, "noindex.test");
   const platformRobots = await get(rt, "noindex.test", "/robots.txt");
   expect(platformRobots.status).toBe(200);
-  expect(await platformRobots.text()).toBe("User-agent: *\nDisallow: /\n");
+  expect(await platformRobots.text()).toBe(NOINDEX_ROBOTS);
 
   // An indexable host publishes its own crawl policy and must keep it.
   const publisherRobots = await get(rt, "indexable.test", "/robots.txt");

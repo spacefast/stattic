@@ -677,7 +677,7 @@ fn run_finalize_pipeline(
     // The previous version's catalog, read ONCE: it gates per-file adoption
     // here and feeds the publish delta at the end of the pipeline.
     let previous_catalog = previous_version_catalog(input, private_root)?;
-    let context_digest = pipeline_context_digest(&config, &viewer, &metadata, files);
+    let context_digest = pipeline_context_digest(&config, &serving, &viewer, &metadata, files);
     let adoptable = adoptable_paths(previous_catalog.as_ref(), &context_digest, files, &blobs);
     let pipeline = timed(&mut telemetry.html_pipeline_ms, || {
         materialize_html_pipeline(
@@ -1107,6 +1107,7 @@ fn previous_version_catalog(
 /// feeds decoration without necessarily reaching the rendered bytes.
 fn pipeline_context_digest(
     config: &Map<String, Value>,
+    serving: &Map<String, Value>,
     viewer: &Map<String, Value>,
     metadata: &Map<String, Value>,
     files: &BTreeMap<String, FileMeta>,
@@ -1122,6 +1123,7 @@ fn pipeline_context_digest(
     stable_json_sha256(&json!({
         "engine": env!("CARGO_PKG_VERSION"),
         "config": Value::Object(config.clone()),
+        "siteThemeCss": serving.get("theme_css").cloned().unwrap_or(Value::Null),
         "viewer": Value::Object(viewer.clone()),
         "siteTitle": metadata.get("title").cloned().unwrap_or(Value::Null),
         "faviconIco": files.contains_key(IMPLICIT_FAVICON_PATH),
@@ -4367,6 +4369,15 @@ mod tests {
                 next_meta: json!({"mode":"website","title":"Adopt"}),
                 first_body: json!({"serving":{"config":{"platform_meta":true,"meta":{"image":"/logo.png"}}}}),
                 next_body: json!({"serving":{"config":{"platform_meta":true,"meta":{"image":"/logo.png"}}}}),
+            },
+            ContextFlip {
+                name: "site-wide customization restyles unchanged HTML",
+                first_files: vec![("index.html", page)],
+                next_files: vec![("index.html", page)],
+                first_meta: json!({"mode":"website","title":"Adopt"}),
+                next_meta: json!({"mode":"website","title":"Adopt"}),
+                first_body: json!({"serving":{"config":{},"theme_css":":root{--sf-accent:#111}"}}),
+                next_body: json!({"serving":{"config":{},"theme_css":":root{--sf-accent:#222}"}}),
             },
         ];
         for ContextFlip {

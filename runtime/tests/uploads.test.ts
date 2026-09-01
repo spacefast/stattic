@@ -10,6 +10,8 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import { strToU8, zipSync } from "fflate";
+
 import { runtimeUploadFileUrl } from "@spacefast/common/utils/runtime-upload";
 
 import {
@@ -381,6 +383,41 @@ test("blob negotiation reports the missing shas and lets an interrupted publish 
     upload_id: deduped.uploadId,
   });
   expect(dedupedFinalize.status).toBe(200);
+});
+
+test("bulk CAS ZIP accepts declared blobs in one upload and completes the session", async () => {
+  const files = {
+    "index.html": "<h1>bulk zip</h1>\n",
+    "assets/app.js": "const highlyCompressibleBuildOutput = true;\n".repeat(20_000),
+  };
+  const session = await createDeclaredSession(rt, SPACE, "ver_bulk_zip", files);
+  const archive = zipSync(
+    Object.fromEntries(Object.values(files).map((content) => [sha256(content), strToU8(content)])),
+  );
+
+  const uploaded = await fetch(uploadUrl(`/${session.uploadId}/blobs`), {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${session.token}`,
+      "content-type": "application/zip",
+      "content-length": String(archive.byteLength),
+    },
+    body: archive,
+  });
+
+  expect({ status: uploaded.status, body: await uploaded.json() }).toEqual({
+    status: 200,
+    body: {
+      ok: true,
+      accepted: {
+        blobs: 2,
+        bytes: Buffer.byteLength(files["index.html"] + files["assets/app.js"]),
+      },
+    },
+  });
+  expect((await finalize(rt, SPACE, "ver_bulk_zip", { upload_id: session.uploadId })).status).toBe(
+    200,
+  );
 });
 
 test("a CAS object damaged to another length is renegotiated and repaired, not deduped away", async () => {

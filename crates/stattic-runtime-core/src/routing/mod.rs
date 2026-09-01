@@ -1265,7 +1265,7 @@ fn server_resolved_variable_redirect_regex() -> &'static Regex {
     static CELL: OnceLock<Regex> = OnceLock::new();
     CELL.get_or_init(|| {
         Regex::new(
-            r"(?i)^\s*\S+\s+(?:[A-Za-z][A-Za-z0-9_-]*=:[A-Za-z][A-Za-z0-9_]*\s+)*\{\{\s*vars\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}(?:[/?#][^\s]*)?\s+(?:200|404)!?(?:\s+(?:Country=[A-Za-z]{2}(?:,[A-Za-z]{2})*|Language=[^=\s,]+(?:,[^=\s,]+)*|Cookie=[^=\s,]+(?:,[^=\s,]+)*|Agent=(?:1|true|yes)(?:,(?:1|true|yes))*))*\s*$",
+            r"(?i)^\s*\S+\s+(?:[A-Za-z_][A-Za-z0-9_-]*=:[A-Za-z][A-Za-z0-9_]*\s+)*\{\{\s*vars\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}(?:[/?#][^\s]*)?\s+(?:200|404)!?(?:\s+(?:Country=[A-Za-z]{2}(?:,[A-Za-z]{2})*|Language=[^=\s,]+(?:,[^=\s,]+)*|Cookie=[^=\s,]+(?:,[^=\s,]+)*|Agent=(?:1|true|yes)(?:,(?:1|true|yes))*))*\s*$",
         )
         .expect("server-resolved redirect regex compiles")
     })
@@ -1281,9 +1281,13 @@ fn absolute_parse_regex() -> &'static Regex {
         Regex::new(r"(?i)^(https?)://([^/?#]+)([^?#]*)(?:\?[^#]*)?(?:#.*)?$").unwrap()
     })
 }
+// The parameter name is whatever the framework puts on the wire, and leading
+// underscores are ordinary there (Next.js asks for its RSC payload with
+// `?_rsc`). The capture name stays letter-leading: it is substituted into the
+// destination through the `:placeholder` grammar, which is letter-leading too.
 fn query_token_regex() -> &'static Regex {
     static CELL: OnceLock<Regex> = OnceLock::new();
-    CELL.get_or_init(|| Regex::new(r"^[A-Za-z][A-Za-z0-9_-]*=:[A-Za-z][A-Za-z0-9_]*$").unwrap())
+    CELL.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_-]*=:[A-Za-z][A-Za-z0-9_]*$").unwrap())
 }
 fn status_regex() -> &'static Regex {
     static CELL: OnceLock<Regex> = OnceLock::new();
@@ -1417,7 +1421,7 @@ mod tests {
     #[test]
     fn classifies_only_complete_variable_redirects_as_deferred() {
         let valid = compile_routing_files(&RoutingInput {
-            redirects: "/api/* id=:id {{ vars.API_HOST }}/:id 200! Country=NL Agent=true".into(),
+            redirects: "/api/* _id=:id {{ vars.API_HOST }}/:id 200! Country=NL Agent=true".into(),
             ..RoutingInput::default()
         });
         assert!(valid.diagnostics.iter().any(|item| {

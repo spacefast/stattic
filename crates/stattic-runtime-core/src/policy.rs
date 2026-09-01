@@ -52,7 +52,7 @@ pub fn validate_finalize_policy(context: FinalizePolicyContext<'_>) -> Result<()
         if theme_css.len() > SPACE_THEME_CSS_MAX_BYTES || style_value_forbidden(theme_css) {
             return invalid(
                 "invalid_serving_config",
-                "serving.theme_css must be a bounded CSS custom-property block.",
+                "serving.theme_css must be bounded platform-generated CSS.",
             );
         }
     }

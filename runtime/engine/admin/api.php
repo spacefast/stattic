@@ -279,6 +279,7 @@ function _stattic_runtime_admin_upload_routes(): array
 {
     $rows = [
         ['POST', '#^/spaces/([^/]+)/blobs/have$#', false, 1, 'Blob negotiation only supports POST.', '_stattic_runtime_upload_blobs_have'],
+        ['PUT', '#^/([^/]+)/blobs$#', true, 1, 'Bulk CAS upload only supports PUT.', '_stattic_runtime_upload_bulk_cas'],
         ['PUT', '#^/([^/]+)/files/(.+)$#', true, 2, 'File upload only supports PUT.', '_stattic_runtime_upload_file'],
         ['PUT', '#^/spaces/([^/]+)/blobs/([^/]+)$#', true, 2, 'Blob upload only supports PUT.', '_stattic_runtime_upload_blob'],
         ['POST', '#^/([^/]+)/fetch/files/(.+)$#', false, 2, null, '_stattic_runtime_upload_file_from_url'],

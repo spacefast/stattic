@@ -31,6 +31,7 @@
     "engine/runtime/access-rules.php",
     "engine/runtime/cli-invoke.php",
     "engine/runtime/collab-frame.php",
+    "engine/runtime/content-page.php",
     "engine/runtime/crons.php",
     "engine/runtime/functions-artifacts.php",
     "engine/runtime/functions-dispatch.php",

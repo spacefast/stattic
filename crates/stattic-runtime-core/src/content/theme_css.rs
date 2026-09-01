@@ -13,10 +13,21 @@ use crate::protocol::THEME_STYLESHEET_PATH;
 pub(super) fn compile_theme(
     files_root: &Path,
     files: &mut BTreeMap<String, FileMeta>,
+    source_theme_enabled: bool,
+    site_theme_css: &str,
     diagnostics: &mut Vec<Value>,
 ) -> Result<()> {
-    if !files.contains_key("theme.json") {
-        return Ok(());
+    if !source_theme_enabled || !files.contains_key("theme.json") {
+        if site_theme_css.is_empty() {
+            return Ok(());
+        }
+        return write_generated(
+            files_root,
+            files,
+            THEME_STYLESHEET_PATH,
+            site_theme_css.as_bytes(),
+            Some("text/css; charset=utf-8"),
+        );
     }
     let Some(source) = pipeline_text(files_root, "theme.json", diagnostics)? else {
         return Ok(());
@@ -25,16 +36,43 @@ pub(super) fn compile_theme(
         Ok(value) => value,
         Err(_) => {
             diagnostics.push(serde_json::json!({"code":"theme_json_invalid","severity":"warning","message":"theme.json is not valid JSON.","path":"theme.json"}));
-            return Ok(());
+            if site_theme_css.is_empty() {
+                return Ok(());
+            }
+            return write_generated(
+                files_root,
+                files,
+                THEME_STYLESHEET_PATH,
+                site_theme_css.as_bytes(),
+                Some("text/css; charset=utf-8"),
+            );
         }
     };
     if !theme.is_object() {
         diagnostics.push(serde_json::json!({"code":"theme_json_invalid","severity":"warning","message":"theme.json must be an object with version 3; no theme stylesheet was generated.","path":"theme.json"}));
-        return Ok(());
+        if site_theme_css.is_empty() {
+            return Ok(());
+        }
+        return write_generated(
+            files_root,
+            files,
+            THEME_STYLESHEET_PATH,
+            site_theme_css.as_bytes(),
+            Some("text/css; charset=utf-8"),
+        );
     }
     if theme.get("version").and_then(Value::as_u64) != Some(3) {
         diagnostics.push(serde_json::json!({"code":"theme_json_invalid","severity":"warning","message":"theme.json must be an object with version 3; no theme stylesheet was generated.","path":"theme.json"}));
-        return Ok(());
+        if site_theme_css.is_empty() {
+            return Ok(());
+        }
+        return write_generated(
+            files_root,
+            files,
+            THEME_STYLESHEET_PATH,
+            site_theme_css.as_bytes(),
+            Some("text/css; charset=utf-8"),
+        );
     }
     let mut css = String::from(":root{\n  --wp--style--global--content-size:42rem;\n  --wp--style--global--wide-size:64rem;\n");
     append_theme_presets(
@@ -159,6 +197,10 @@ pub(super) fn compile_theme(
                 );
             }
         }
+    }
+    if !site_theme_css.is_empty() {
+        css.push_str(site_theme_css);
+        css.push('\n');
     }
     write_generated(
         files_root,

@@ -224,11 +224,20 @@ pub fn materialize_html_pipeline(
             )?;
             generated.insert(page.output_path.clone());
         }
-        let had_theme_stylesheet = files.contains_key(THEME_STYLESHEET_PATH);
-        compile_theme(files_root, files, diagnostics)?;
-        if !had_theme_stylesheet && files.contains_key(THEME_STYLESHEET_PATH) {
-            generated.insert(THEME_STYLESHEET_PATH.to_string());
-        }
+    }
+
+    // Customization is a site-wide serving concern, not a Gutenberg feature.
+    // A source theme.json remains behind the Gutenberg switch, while the
+    // platform theme is generated and linked for ordinary HTML too.
+    let had_theme_stylesheet = files.contains_key(THEME_STYLESHEET_PATH);
+    let site_theme_css = serving
+        .get("theme_css")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    compile_theme(files_root, files, enabled, site_theme_css, diagnostics)?;
+    if !had_theme_stylesheet && files.contains_key(THEME_STYLESHEET_PATH) {
+        generated.insert(THEME_STYLESHEET_PATH.to_string());
     }
 
     let page_by_output: BTreeMap<String, &Page> = pages
@@ -576,6 +585,7 @@ fn decorate_html(
     let has_body = Rc::new(Cell::new(false));
     let has_title = Rc::new(Cell::new(false));
     let has_favicon = Rc::new(Cell::new(false));
+    let has_theme_stylesheet = Rc::new(Cell::new(false));
     let title_text = Rc::new(RefCell::new(String::new()));
     let meta_names = Rc::new(RefCell::new(BTreeSet::<String>::new()));
     let meta_properties = Rc::new(RefCell::new(BTreeSet::<String>::new()));
@@ -621,6 +631,17 @@ fn decorate_html(
                 let has_title = Rc::clone(&has_title);
                 move |_| {
                     has_title.set(true);
+                    Ok(())
+                }
+            }))
+            .append_element_content_handler(element!("head link[href]", {
+                let has_theme_stylesheet = Rc::clone(&has_theme_stylesheet);
+                move |element| {
+                    if element.get_attribute("href").is_some_and(|href| {
+                        href.split(['?', '#']).next() == Some(THEME_STYLESHEET_URL)
+                    }) {
+                        has_theme_stylesheet.set(true);
+                    }
                     Ok(())
                 }
             }))
@@ -713,6 +734,11 @@ fn decorate_html(
             ));
         }
     }
+    if theme_available && !has_theme_stylesheet.get() {
+        head.push(format!(
+            "<link rel=\"stylesheet\" href=\"{THEME_STYLESHEET_URL}\">"
+        ));
+    }
     if meta_tags {
         if !has_title.get() {
             if let Some(value) = &title {
@@ -767,11 +793,6 @@ fn decorate_html(
                 } else {
                     "summary"
                 }
-            ));
-        }
-        if theme_available && page.is_some_and(|p| p.layout_rendered) {
-            head.push(format!(
-                "<link rel=\"stylesheet\" href=\"{THEME_STYLESHEET_URL}\">"
             ));
         }
     }

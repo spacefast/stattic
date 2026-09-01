@@ -52,16 +52,51 @@ function _stattic_content_admin_frame_origin(mixed $value): ?string
 /**
  * The screen a launch lands on, from a closed set.
  *
- * This is an address, not a grant. The session the launch mints admits the
- * Space's whole /wp-admin lane (see _stattic_content_admin_request_path), and
- * that has not changed: a screen only decides where the one-use ticket puts
- * the browser when it is redeemed. It is a closed set rather than a free path
- * so a ticket URL can never be talked into landing somewhere its issuer did
- * not name. `null` is the WordPress-admin landing the editor has always used.
+ * A screen is both a Zero route and part of the signed access grant. It is a
+ * closed set so a ticket cannot be talked into landing on, or authorizing, a
+ * screen its issuer did not name.
  */
 function _stattic_content_admin_screen(mixed $value): ?string
 {
     return is_string($value) && in_array($value, ['collections', 'users'], true) ? $value : null;
+}
+
+function _stattic_content_admin_access(mixed $value): ?array
+{
+    if (!is_array($value)) {
+        return null;
+    }
+    $surface = $value['surface'] ?? null;
+    if ($surface === 'wordpress') {
+        return ['surface' => 'wordpress'];
+    }
+    if ($surface !== 'zero') {
+        return null;
+    }
+    $initialScreen = _stattic_content_admin_screen($value['initialScreen'] ?? $value['initial_screen'] ?? null);
+    $requestedScreens = $value['allowedScreens'] ?? $value['allowed_screens'] ?? null;
+    if ($initialScreen === null || !is_array($requestedScreens)) {
+        return null;
+    }
+    $allowedScreens = [];
+    foreach ($requestedScreens as $screen) {
+        $screen = _stattic_content_admin_screen($screen);
+        if ($screen === null) {
+            return null;
+        }
+        $allowedScreens[] = $screen;
+    }
+    if (
+        ($allowedScreens !== ['collections'] && $allowedScreens !== ['collections', 'users'])
+        || !in_array($initialScreen, $allowedScreens, true)
+    ) {
+        return null;
+    }
+    return [
+        'surface' => 'zero',
+        'initial_screen' => $initialScreen,
+        'allowed_screens' => $allowedScreens,
+    ];
 }
 
 function _stattic_content_admin_authorization(mixed $value): ?array
@@ -181,20 +216,21 @@ function _stattic_content_admin_mint_ticket(
     array $authorization,
     string $wordpressRole,
     string $frameOrigin,
-    mixed $screen = null,
+    mixed $access,
     ?int $now = null
 ): ?array {
     $principal = isset($principal['kind']) ? $principal : null;
     $authorization = _stattic_content_admin_authorization($authorization);
     $wordpressRole = _stattic_content_wordpress_role($wordpressRole) ?? '';
     $frameOrigin = _stattic_content_admin_frame_origin($frameOrigin);
-    $screen = _stattic_content_admin_screen($screen);
+    $access = _stattic_content_admin_access($access);
     $host = strtolower(trim($host));
     if (
         !is_array($principal)
         || $authorization === null
         || $wordpressRole === ''
         || $frameOrigin === null
+        || $access === null
         || $host === ''
     ) {
         return null;
@@ -213,7 +249,7 @@ function _stattic_content_admin_mint_ticket(
             'authorization' => $authorization,
             'wordpress_role' => $wordpressRole,
             'frame_origin' => $frameOrigin,
-            'screen' => $screen,
+            'access' => $access,
             'expires_at' => $expiresAt,
         ], $expiresAt)) {
             return ['token' => $token, 'expires_at' => $expiresAt];
@@ -252,14 +288,15 @@ function _stattic_content_admin_consume_ticket(
             $authorization = _stattic_content_admin_authorization($record['authorization'] ?? null);
             $wordpressRole = _stattic_content_wordpress_role($record['wordpress_role'] ?? null);
             $frameOrigin = _stattic_content_admin_frame_origin($record['frame_origin'] ?? null);
-            return $principal === null || $authorization === null || $wordpressRole === null || $frameOrigin === null
+            $access = _stattic_content_admin_access($record['access'] ?? null);
+            return $principal === null || $authorization === null || $wordpressRole === null || $frameOrigin === null || $access === null
                 ? null
                 : [
                     'principal' => $principal,
                     'authorization' => $authorization,
                     'wordpress_role' => $wordpressRole,
                     'frame_origin' => $frameOrigin,
-                    'screen' => _stattic_content_admin_screen($record['screen'] ?? null),
+                    'access' => $access,
                 ];
         }
     );
@@ -283,12 +320,14 @@ function _stattic_content_admin_mint_session(
     array $authorization,
     string $wordpressRole,
     string $frameOrigin,
+    array $access,
     ?int $now = null
 ): ?array {
     $authorization = _stattic_content_admin_authorization($authorization);
     $principal = isset($principal['kind']) ? $principal : null;
     $wordpressRole = _stattic_content_wordpress_role($wordpressRole);
     $frameOrigin = _stattic_content_admin_frame_origin($frameOrigin);
+    $access = _stattic_content_admin_access($access);
     if (
         $userId < 1
         || trim($host) === ''
@@ -296,6 +335,7 @@ function _stattic_content_admin_mint_session(
         || $authorization === null
         || $wordpressRole === null
         || $frameOrigin === null
+        || $access === null
     ) {
         return null;
     }
@@ -313,6 +353,7 @@ function _stattic_content_admin_mint_session(
         'access_generation' => $authorization['access_generation'],
         'wordpress_role' => $wordpressRole,
         'frame_origin' => $frameOrigin,
+        'access' => $access,
         'expires_at' => $expiresAt,
     ], JSON_UNESCAPED_SLASHES));
     return [
@@ -358,11 +399,13 @@ function _stattic_content_admin_verify_session(
     $principal = is_array($claims['principal'] ?? null) ? $claims['principal'] : null;
     $wordpressRole = _stattic_content_wordpress_role($claims['wordpress_role'] ?? null);
     $frameOrigin = _stattic_content_admin_frame_origin($claims['frame_origin'] ?? null);
+    $access = _stattic_content_admin_access($claims['access'] ?? null);
     if (
         $authorization === null
         || $principal === null
         || $wordpressRole === null
         || $frameOrigin === null
+        || $access === null
         || !_stattic_content_admin_authorization_matches($privateRoot, $authorization)
     ) {
         return null;
@@ -374,6 +417,7 @@ function _stattic_content_admin_verify_session(
         'access_generation' => $authorization['access_generation'],
         'wordpress_role' => $wordpressRole,
         'frame_origin' => $frameOrigin,
+        'access' => $access,
         'expires_at' => $claims['expires_at'],
     ];
 }
@@ -458,7 +502,8 @@ function _stattic_content_rest_access_path(string $path, array $query = []): str
 function _stattic_content_admin_enter_wordpress(
     string $privateRoot,
     string $spaceId,
-    ?string $frameOrigin
+    ?string $frameOrigin,
+    array $access
 ): void {
     $origin = is_string($frameOrigin) && $frameOrigin !== ''
         ? $frameOrigin
@@ -474,6 +519,7 @@ function _stattic_content_admin_enter_wordpress(
     $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
     $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
     $GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] = $origin;
+    $GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = $access;
     foreach ([
         'DISALLOW_FILE_EDIT' => true,
         'DISALLOW_FILE_MODS' => true,

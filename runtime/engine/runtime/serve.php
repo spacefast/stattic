@@ -261,7 +261,13 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         if ($kind === 'redirect') {
             _stattic_send_route_redirect($action, (string) ($matchedRoute['_remainder'] ?? '/'), !$open);
         }
-        if ($kind === 'robots_txt' || $kind === 'platform_error' || $kind === 'tombstone') {
+        if ($kind === 'robots_txt') {
+            // Platform crawl policy contains no customer bytes or access state.
+            // mShots must read its specific allowance before opening the signed
+            // immutable-version URL.
+            _stattic_render_platform_action($action, false);
+        }
+        if ($kind === 'platform_error' || $kind === 'tombstone') {
             _stattic_render_platform_action($action, !$open);
         }
         if ($kind === 'proxy') {
@@ -597,6 +603,12 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // Pattern-matched Zero endpoints and Function routes cannot be table keys;
     // their exact forms already were, so a committed file still wins.
     _stattic_v4_dispatch_pattern_routes($sendContext, $requestPath, $requestMethod, $requestUri);
+
+    // WordPress owns mutable Pages, but only after immutable content and code
+    // routes decline the path. Its one serving function returns on a miss and
+    // terminates on a scoped, published Page.
+    require_once __DIR__ . '/content-page.php';
+    _stattic_wordpress_page_try_serve($sendContext, $requestPath, $requestMethod);
 
     // Every lane that could claim this method has had its chance. A request some
     // lane skipped FOR ITS METHOD alone ends here as the union 405: continuing
@@ -1518,7 +1530,7 @@ function _stattic_render_platform_action(array $action, bool $privateCache = fal
             (string) ($action['cache_control'] ?? 'public, max-age=0, s-maxage=300, must-revalidate')
         );
         if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'HEAD') {
-            echo (string) ($action['body'] ?? "User-agent: *\nDisallow: /\n");
+            echo STATTIC_NOINDEX_ROBOTS_BODY;
         }
         exit;
     }

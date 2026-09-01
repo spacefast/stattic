@@ -201,6 +201,19 @@ $updateAsEditor = call_ability('zero/wp-users-update', ['id' => $ada, 'displayNa
 
 $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = 'administrator';
 $listAsAdministrator = call_ability('zero/wp-users-list', []);
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = [
+  'surface' => 'zero',
+  'initial_screen' => 'collections',
+  'allowed_screens' => ['collections'],
+];
+$listWithoutUsersGrant = call_ability('zero/wp-users-list', []);
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = [
+  'surface' => 'zero',
+  'initial_screen' => 'users',
+  'allowed_screens' => ['collections', 'users'],
+];
+$listWithUsersGrant = call_ability('zero/wp-users-list', []);
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = ['surface' => 'wordpress'];
 $otherSpaceUser = call_ability('zero/wp-users-get', ['id' => $bob]);
 $otherSpaceUpdate = call_ability('zero/wp-users-update', ['id' => $bob, 'displayName' => 'Renamed']);
 
@@ -243,6 +256,8 @@ echo json_encode([
   'create_as_editor' => $createAsEditor,
   'update_as_editor' => $updateAsEditor,
   'list_as_administrator' => $listAsAdministrator,
+  'list_without_users_grant' => $listWithoutUsersGrant,
+  'list_with_users_grant' => $listWithUsersGrant,
   'other_space_user' => $otherSpaceUser,
   'other_space_update' => $otherSpaceUpdate,
   'created_existing' => $createdExisting,
@@ -289,6 +304,8 @@ echo json_encode([
       perPage: number;
       users: Array<{ id: number; displayName: string; principal: Record<string, string> | null }>;
     };
+    list_without_users_grant: { error: string; status: number };
+    list_with_users_grant: { users: Array<{ id: number }> };
     other_space_user: { error: string; status: number };
     other_space_update: { error: string; status: number };
     created_existing: { id: number; displayName: string };
@@ -340,6 +357,8 @@ echo json_encode([
   // One site hosts many Spaces: the directory is the request Space's, and a
   // user from another Space is not there to read or to rename.
   expect(result.list_as_administrator.users.map((user) => user.id)).toEqual([result.ada]);
+  expect(result.list_without_users_grant).toEqual({ error: "permission_denied", status: 403 });
+  expect(result.list_with_users_grant.users.map((user) => user.id)).toEqual([result.ada]);
   expect(result.other_space_user).toEqual({ error: "zero_wp_users_not_found", status: 404 });
   expect(result.other_space_update).toEqual({ error: "zero_wp_users_not_found", status: 404 });
   expect(result.bob_display_name).toBe("Bob");

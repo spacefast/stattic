@@ -182,11 +182,20 @@ async function wpContext(host: string, requestPath: string, headers: Record<stri
 
 beforeAll(async () => {
   runtime = await startRuntime();
-  const files = { "index.html": "<h1>space</h1>\n" };
+  const files = {
+    "index.html": "<!doctype html><html><head></head><body><h1>space</h1></body></html>\n",
+    "collision/index.html":
+      "<!doctype html><html><head></head><body><h1>static collision</h1></body></html>\n",
+  };
   await deploy(runtime, {
     spaceId: OPEN_SPACE,
     versionId: "ver_wp_api_open",
     files,
+    serving: {
+      config: {},
+      theme_css:
+        ":root{--sf-accent:#6d28d9;--sf-bg:#faf7ff;--sf-fg:#20182b;--sf-font:Inter,sans-serif}",
+    },
     activate: {
       route_name: "production",
       config: accessConfig(true),
@@ -272,6 +281,52 @@ beforeAll(async () => {
       "  'themes' => defined('WP_USE_THEMES') ? WP_USE_THEMES : null,",
       "  'rest_admitted' => (bool) ($GLOBALS['SPACEFAST_CONTENT_REST_ADMITTED'] ?? false),",
       "]);",
+      "",
+    ].join("\n"),
+  );
+  // The public Page lane boots WordPress without its front controller or
+  // theme, then resolves one Space-scoped published Page by path. This fixture
+  // is the WordPress boundary: it exposes the same functions the lane calls
+  // while keeping the routing assertion focused on Spacefast's precedence.
+  writeFileSync(
+    path.join(runtime.root, "wp-load.php"),
+    [
+      "<?php",
+      "if (!defined('OBJECT')) define('OBJECT', 'OBJECT');",
+      "function get_page_by_path($path, $output = OBJECT, $postType = 'page') {",
+      "  if (!in_array($path, ['about', 'collision'], true)) return null;",
+      "  return (object) [",
+      "    'ID' => $path === 'about' ? 41 : 42,",
+      "    'post_type' => 'page',",
+      "    'post_status' => 'publish',",
+      "    'post_title' => ucfirst($path),",
+      "    'post_excerpt' => '',",
+      "    'post_content' => '<p>WordPress ' . $path . '</p>',",
+      "    'post_modified_gmt' => '2026-09-01 02:00:00',",
+      "  ];",
+      "}",
+      "function get_post_meta($postId, $key, $single = false) {",
+      "  return $key === '_spacefast_space_id' ? ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? '') : '';",
+      "}",
+      "$GLOBALS['spacefast_test_hooks'] = [];",
+      "$GLOBALS['spacefast_test_scripts'] = [];",
+      "function add_action($hook, $callback) { $GLOBALS['spacefast_test_hooks'][$hook][] = $callback; }",
+      "function do_action($hook) {",
+      "  foreach ($GLOBALS['spacefast_test_hooks'][$hook] ?? [] as $callback) { $callback(); }",
+      "}",
+      "function wp_enqueue_script($handle, $src, $deps = [], $version = false, $args = []) {",
+      "  $GLOBALS['spacefast_test_scripts'][$handle] = ['src' => $src, 'args' => $args];",
+      "}",
+      "function wp_head() { do_action('wp_enqueue_scripts'); do_action('wp_head'); }",
+      "function wp_footer() {",
+      "  do_action('wp_footer');",
+      "  foreach ($GLOBALS['spacefast_test_scripts'] as $handle => $script) {",
+      "    echo '<script id=\"' . $handle . '-js\" src=\"' . $script['src'] . '\"></script>';",
+      "  }",
+      "}",
+      "function apply_filters($hook, $value) { return $value; }",
+      "function setup_postdata($post) { $GLOBALS['post'] = $post; }",
+      "function wp_reset_postdata() {}",
       "",
     ].join("\n"),
   );
@@ -472,4 +527,28 @@ test("a co-hosted static Space never boots WordPress on /wp-json", async () => {
   // The query spelling is the same non-answer.
   const query = await get(runtime, STATIC_HOST, "/?rest_route=/wp/v2/posts");
   expect(await query.text()).not.toContain("served_by");
+});
+
+test("published WordPress Pages fill static misses and share Customization styles", async () => {
+  const page = await get(runtime, OPEN_HOST, "/about");
+  const pageBody = await page.text();
+  expect(page.status).toBe(200);
+  expect(pageBody).toContain("WordPress about");
+  expect(pageBody).toContain("/__spacefast_generated/theme.css");
+  expect(pageBody).toContain('<script id="spacefast-sdk-js" src="/__spacefast/sdk.js"></script>');
+
+  const collision = await get(runtime, OPEN_HOST, "/collision/");
+  const collisionBody = await collision.text();
+  expect(collision.status).toBe(200);
+  expect(collisionBody).toContain("static collision");
+  expect(collisionBody).not.toContain("WordPress collision");
+  expect(collisionBody).toContain("/__spacefast_generated/theme.css");
+
+  const theme = await get(runtime, OPEN_HOST, "/__spacefast_generated/theme.css");
+  expect(theme.status).toBe(200);
+  expect(await theme.text()).toContain("--sf-accent:#6d28d9");
+
+  const unmanaged = await get(runtime, STATIC_HOST, "/about");
+  expect(unmanaged.status).toBe(404);
+  expect(await unmanaged.text()).not.toContain("WordPress about");
 });

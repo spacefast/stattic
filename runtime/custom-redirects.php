@@ -197,7 +197,8 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 _stattic_content_admin_enter_wordpress(
                     $privateRoot,
                     $session['space_id'],
-                    $session['frame_origin']
+                    $session['frame_origin'],
+                    $session['access']
                 );
             } elseif ($restFrontController === null) {
                 // Not the REST lane, so /wp-admin: the editor's own HTML surface,
@@ -268,7 +269,12 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $principal;
                     $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = $principal['wordpress_role'];
                 }
-                _stattic_content_admin_enter_wordpress($privateRoot, $target['space_id'], null);
+                _stattic_content_admin_enter_wordpress(
+                    $privateRoot,
+                    $target['space_id'],
+                    null,
+                    ['surface' => 'wordpress']
+                );
             }
             $bindDatabasePassword();
             // Both REST doors end here. /wp-admin needs none of it: those are

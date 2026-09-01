@@ -389,6 +389,14 @@ function spacefast_content_users_abilities(): array
  */
 function spacefast_content_users_may(string $capability, ...$arguments): bool
 {
+    $access = $GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] ?? null;
+    if (
+        is_array($access)
+        && ($access['surface'] ?? null) === 'zero'
+        && !in_array('users', $access['allowed_screens'] ?? [], true)
+    ) {
+        return false;
+    }
     return function_exists('current_user_can') && current_user_can($capability, ...$arguments);
 }
 

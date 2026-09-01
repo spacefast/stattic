@@ -43,7 +43,7 @@ pub fn public_json_schema() -> Value {
     let query = json!({
         "type": "object",
         "description": "Query parameters the request must carry, as parameter name to capture name: { \"id\": \"id\" } is the name=:capture token id=:id.",
-        "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
+        "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$" },
         "additionalProperties": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" }
     });
     json!({

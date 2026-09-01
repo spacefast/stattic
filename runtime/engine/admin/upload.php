@@ -14,6 +14,9 @@ const STATTIC_RUNTIME_UPLOAD_HAVE_MAX_SHAS = 2048;
 const STATTIC_RUNTIME_INGEST_CONCURRENCY_PER_SPACE = 4;
 const STATTIC_RUNTIME_UPLOAD_SOURCE_URL_TIMEOUT_SECONDS = 30;
 const STATTIC_RUNTIME_UPLOAD_SOURCE_URL_CONNECT_TIMEOUT_SECONDS = 5;
+const STATTIC_RUNTIME_BULK_CAS_MAX_COMPRESSED_BYTES = 134217728; // 128 MiB
+const STATTIC_RUNTIME_BULK_CAS_MAX_EXPANDED_BYTES = 134217728; // 128 MiB
+const STATTIC_RUNTIME_BULK_CAS_MAX_BLOBS = 2000;
 
 // Manifest scale ceilings: the runtime's last-resort boundary, not plan policy.
 // Plan caps are lower and enforced by the control plane. Keep these in parity
@@ -586,6 +589,167 @@ function _stattic_runtime_upload_staged(string $privateRoot, string $noun, array
     }
 
     return [$tmpPath, $receivedSize, strtolower((string) $streamed['sha256'])];
+}
+
+function _stattic_runtime_bulk_cas_problem(string $code, string $message, array $details = []): never
+{
+    _stattic_problem_response(
+        str_contains($code, 'too_large') || str_contains($code, 'exceeded') ? 413 : 422,
+        $code,
+        $message,
+        $details === [] ? [] : ['details' => $details],
+    );
+}
+
+function _stattic_runtime_upload_bulk_cas(string $privateRoot, string $uploadId, array $claims): void
+{
+    if (!class_exists('ZipArchive')) {
+        _stattic_problem_response(503, 'runtime_zip_extension_unavailable', 'Runtime zip support is unavailable.');
+    }
+    set_time_limit(150);
+    $uploadId = _stattic_runtime_id($uploadId, 'upload_id');
+    $session = _stattic_runtime_upload_session($privateRoot, $uploadId, $claims);
+    $spaceId = (string) $session['space_id'];
+    _stattic_runtime_upload_admit($privateRoot, $spaceId);
+
+    $declaredLength = $_SERVER['CONTENT_LENGTH'] ?? null;
+    if (!is_string($declaredLength) || preg_match('/\A[1-9][0-9]*\z/', $declaredLength) !== 1) {
+        _stattic_problem_response(411, 'bulk_cas_length_required', 'Bulk CAS upload requires Content-Length.');
+    }
+    if ((int) $declaredLength > STATTIC_RUNTIME_BULK_CAS_MAX_COMPRESSED_BYTES) {
+        _stattic_runtime_bulk_cas_problem(
+            'bulk_cas_archive_too_large',
+            'Bulk CAS ZIP exceeds the compressed upload limit.',
+            ['size' => (int) $declaredLength, 'limit' => STATTIC_RUNTIME_BULK_CAS_MAX_COMPRESSED_BYTES],
+        );
+    }
+    $stagedArchive = _stattic_runtime_blob_stage_stream(
+        $privateRoot,
+        _stattic_request_body_stream(),
+        STATTIC_RUNTIME_BULK_CAS_MAX_COMPRESSED_BYTES,
+    );
+    if (($stagedArchive['ok'] ?? false) !== true) {
+        if (($stagedArchive['reason'] ?? null) === 'too_large') {
+            _stattic_runtime_bulk_cas_problem(
+                'bulk_cas_archive_too_large',
+                'Bulk CAS ZIP exceeds the compressed upload limit.',
+                ['limit' => STATTIC_RUNTIME_BULK_CAS_MAX_COMPRESSED_BYTES],
+            );
+        }
+        _stattic_problem_response(500, 'bulk_cas_archive_write_failed', 'Bulk CAS ZIP could not be staged.');
+    }
+    $archivePath = (string) $stagedArchive['tmp_path'];
+    $stagedBlobs = [];
+    register_shutdown_function(static function () use ($archivePath, &$stagedBlobs): void {
+        if (is_file($archivePath)) unlink($archivePath);
+        foreach ($stagedBlobs as $staged) {
+            $tmpPath = is_array($staged) ? ($staged['tmp_path'] ?? null) : null;
+            if (is_string($tmpPath) && is_file($tmpPath)) unlink($tmpPath);
+        }
+    });
+    if ((int) ($stagedArchive['size'] ?? -1) !== (int) $declaredLength) {
+        _stattic_runtime_bulk_cas_problem(
+            'bulk_cas_size_mismatch',
+            'Bulk CAS ZIP size does not match Content-Length.',
+            ['declared_size' => (int) $declaredLength, 'received_size' => (int) ($stagedArchive['size'] ?? -1)],
+        );
+    }
+
+    $archive = new ZipArchive();
+    if ($archive->open($archivePath, ZipArchive::RDONLY) !== true || $archive->numFiles < 1) {
+        _stattic_runtime_bulk_cas_problem('bulk_cas_archive_invalid', 'Bulk CAS upload must be a non-empty ZIP archive.');
+    }
+    if ($archive->numFiles > STATTIC_RUNTIME_BULK_CAS_MAX_BLOBS) {
+        _stattic_runtime_bulk_cas_problem(
+            'bulk_cas_blob_count_exceeded',
+            'Bulk CAS ZIP contains too many blobs.',
+            ['count' => $archive->numFiles, 'limit' => STATTIC_RUNTIME_BULK_CAS_MAX_BLOBS],
+        );
+    }
+    $declaredSizes = _stattic_runtime_publish_session_declared_sizes($session);
+    $entries = [];
+    $expandedBytes = 0;
+    for ($index = 0; $index < $archive->numFiles; $index++) {
+        $stat = $archive->statIndex($index, ZipArchive::FL_UNCHANGED);
+        if (!is_array($stat) || !is_string($stat['name'] ?? null)) {
+            _stattic_runtime_bulk_cas_problem('bulk_cas_archive_invalid', 'Bulk CAS ZIP contains unreadable entry metadata.');
+        }
+        $sha = (string) $stat['name'];
+        if (preg_match('/\A[a-f0-9]{64}\z/D', $sha) !== 1) {
+            _stattic_runtime_bulk_cas_problem(
+                'bulk_cas_entry_invalid',
+                'Bulk CAS ZIP entries must be named by their lowercase SHA-256.',
+                ['entry' => $sha],
+            );
+        }
+        if (isset($entries[$sha])) {
+            _stattic_runtime_bulk_cas_problem(
+                'bulk_cas_blob_duplicate',
+                'Bulk CAS ZIP contains the same blob twice.',
+                ['sha256' => $sha],
+            );
+        }
+        $size = (int) ($stat['size'] ?? -1);
+        if ($size < 0 || !array_key_exists($sha, $declaredSizes)) {
+            _stattic_runtime_bulk_cas_problem(
+                'bulk_cas_blob_not_declared',
+                'Bulk CAS ZIP contains a blob that this publish session did not declare.',
+                ['sha256' => $sha],
+            );
+        }
+        if ($declaredSizes[$sha] !== $size) {
+            _stattic_runtime_bulk_cas_problem(
+                'bulk_cas_blob_size_mismatch',
+                'Bulk CAS ZIP entry size does not match the publish manifest.',
+                ['sha256' => $sha, 'declared_size' => $declaredSizes[$sha], 'received_size' => $size],
+            );
+        }
+        if ((int) ($stat['encryption_method'] ?? ZipArchive::EM_NONE) !== ZipArchive::EM_NONE) {
+            _stattic_runtime_bulk_cas_problem('bulk_cas_entry_invalid', 'Bulk CAS ZIP cannot contain encrypted entries.', ['sha256' => $sha]);
+        }
+        $expandedBytes += $size;
+        if ($expandedBytes > STATTIC_RUNTIME_BULK_CAS_MAX_EXPANDED_BYTES) {
+            _stattic_runtime_bulk_cas_problem(
+                'bulk_cas_expanded_size_exceeded',
+                'Bulk CAS ZIP expands beyond the upload limit.',
+                ['size' => $expandedBytes, 'limit' => STATTIC_RUNTIME_BULK_CAS_MAX_EXPANDED_BYTES],
+            );
+        }
+        $entries[$sha] = ['index' => $index, 'size' => $size];
+    }
+
+    foreach ($entries as $sha => $entry) {
+        $stream = $archive->getStreamIndex((int) $entry['index'], ZipArchive::FL_UNCHANGED);
+        if (!is_resource($stream)) {
+            _stattic_runtime_bulk_cas_problem('bulk_cas_archive_invalid', 'Bulk CAS ZIP entry could not be read.', ['sha256' => $sha]);
+        }
+        $staged = _stattic_runtime_blob_stage_stream($privateRoot, $stream, (int) $entry['size']);
+        if (($staged['ok'] ?? false) !== true || (int) ($staged['size'] ?? -1) !== (int) $entry['size']) {
+            _stattic_runtime_bulk_cas_problem('bulk_cas_blob_size_mismatch', 'Bulk CAS ZIP entry bytes do not match their declared size.', ['sha256' => $sha]);
+        }
+        $actualSha = strtolower((string) ($staged['sha256'] ?? ''));
+        if (!hash_equals($sha, $actualSha)) {
+            _stattic_runtime_bulk_cas_problem(
+                'bulk_cas_blob_sha_mismatch',
+                'Bulk CAS ZIP entry bytes do not match their SHA-256 name.',
+                ['declared_sha256' => $sha, 'received_sha256' => $actualSha],
+            );
+        }
+        $stagedBlobs[$sha] = ['tmp_path' => (string) $staged['tmp_path'], 'size' => (int) $staged['size']];
+    }
+    $archive->close();
+    unlink($archivePath);
+
+    $accepted = [];
+    foreach ($stagedBlobs as $sha => $staged) {
+        _stattic_runtime_blob_commit_verified($privateRoot, $spaceId, (string) $staged['tmp_path'], $sha);
+        $accepted[$sha] = (int) $staged['size'];
+    }
+    _stattic_runtime_publish_session_accept_many($privateRoot, $spaceId, $uploadId, $accepted);
+    _stattic_json_response(200, [
+        'ok' => true,
+        'accepted' => ['blobs' => count($accepted), 'bytes' => array_sum($accepted)],
+    ]);
 }
 
 // Shared prelude of both file lanes: resolves a path-addressed upload to its

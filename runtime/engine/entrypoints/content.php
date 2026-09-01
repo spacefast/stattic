@@ -124,12 +124,7 @@ if ($operation === 'content.admin.launch') {
         $privateRoot,
         $requestedAuthorization
     );
-    // A screen names where the ticket lands. Absent is the WordPress-admin
-    // landing; an unrecognized one is refused rather than quietly falling back
-    // to it, so a caller asking for a screen this engine has never heard of
-    // learns that instead of finding itself somewhere else.
-    $requestedScreen = $request['screen'] ?? null;
-    $screen = _stattic_content_admin_screen($requestedScreen);
+    $access = _stattic_content_admin_access($request['access'] ?? null);
     // The editor frame is for humans holding a WordPress role: a service
     // actor, or anyone whose Grants earn no role, gets no ticket.
     $ticket = $frameOrigin === null
@@ -138,7 +133,7 @@ if ($operation === 'content.admin.launch') {
         || $authorization !== $requestedAuthorization
         || ($principal['kind'] ?? null) !== 'user'
         || !is_string($wordpressRole)
-        || ($requestedScreen !== null && $screen === null)
+        || $access === null
         ? null
         : _stattic_content_admin_mint_ticket(
             $privateRoot,
@@ -147,7 +142,7 @@ if ($operation === 'content.admin.launch') {
             $authorization,
             $wordpressRole,
             $frameOrigin,
-            $screen
+            $access
         );
     if ($ticket === null) {
         _stattic_problem_response(422, 'content_admin_launch_invalid', 'The content editor session could not be created.');

@@ -190,7 +190,7 @@ function _stattic_content_access_target(string $root, string $host): array {
         `require ${JSON.stringify(path.join(sharedRoot, "context.php"))};`,
         `require ${JSON.stringify(path.join(sharedRoot, "storage.php"))};`,
         `require ${JSON.stringify(path.join(sharedRoot, "content-admin.php"))};`,
-        `$session = _stattic_content_admin_mint_session(${JSON.stringify(path.join(root, ".stattic/storage"))}, 'space.example', 57, ['kind' => 'user', 'issuer' => 'spacefast', 'subject' => 'sub_entrypoints_test'], ['space_id' => 'spc_test', 'access_generation' => 7], 'editor', 'https://launch.sf.localhost');`,
+        `$session = _stattic_content_admin_mint_session(${JSON.stringify(path.join(root, ".stattic/storage"))}, 'space.example', 57, ['kind' => 'user', 'issuer' => 'spacefast', 'subject' => 'sub_entrypoints_test'], ['space_id' => 'spc_test', 'access_generation' => 7], 'editor', 'https://launch.sf.localhost', ['surface' => 'wordpress']);`,
         `$_SERVER['DOCUMENT_ROOT'] = ${JSON.stringify(root)};`,
         `$_SERVER['SCRIPT_FILENAME'] = ${JSON.stringify(root)} . '/' . (getenv('SPACEFAST_TEST_SCRIPT') ?: 'wp-admin/edit.php');`,
         "$_SERVER['REQUEST_METHOD'] = 'GET';",

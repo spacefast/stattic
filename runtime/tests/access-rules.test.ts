@@ -802,6 +802,16 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   expect(anonymous.headers.get("x-spacefast-version")).toBe(PRIVATE_VERSION);
   expect(await anonymous.text()).not.toContain("<h1>docs</h1>");
 
+  // The noindex policy is platform-owned and reveals no customer content.
+  // mShots must be able to read its specific allowance before it opens the
+  // signed page URL; every other crawler remains excluded.
+  const robots = await get(runtime, PRIVATE_VERSION_HOST, "/robots.txt");
+  expect(robots.status).toBe(200);
+  expect(robots.headers.get("cache-control")).toContain("public");
+  expect(await robots.text()).toBe(
+    "User-agent: WordPress.com mShots\nAllow: /\n\nUser-agent: *\nDisallow: /\n",
+  );
+
   const cookie = await openAuthorities(PRIVATE_HOST, ["member:mem_owner"]);
   const admitted = await get(runtime, PRIVATE_HOST, "/docs/", { headers: { cookie } });
   expect(admitted.status).toBe(200);

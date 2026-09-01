@@ -234,7 +234,7 @@ pub fn compile_listings(
             });
             fragments.push(fragment);
         }
-        let shell = format!("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title><style>:root{{{}}}body{{font-family:system-ui;margin:2rem;line-height:1.5}}</style></head><body><main><h1>{}</h1><ul>{LISTING_ROWS_MARKER}</ul></main></body></html>", escape_html(heading), theme, escape_html(heading));
+        let shell = format!("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title><style>{}body{{font-family:system-ui;margin:2rem;line-height:1.5}}</style></head><body><main><h1>{}</h1><ul>{LISTING_ROWS_MARKER}</ul></main></body></html>", escape_html(heading), theme, escape_html(heading));
         let page = shell.replace(LISTING_ROWS_MARKER, &fragments.join(""));
         compiled.push(CompiledListing {
             directory,
@@ -323,7 +323,7 @@ fn render_file_viewer(
         .map(|description| format!("<p>{}</p>", escape_html(description)))
         .unwrap_or_default();
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title><style>body{{font-family:system-ui,sans-serif;margin:2rem;line-height:1.5}}main{{max-width:880px}}img,video,iframe{{max-width:100%;width:100%;border:0}}iframe{{min-height:70vh}}ul{{padding-left:1.25rem}}</style><style>:root{{{theme}}}</style></head><body><main><h1>{}</h1>{description}{body}</main></body></html>",
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title><style>body{{font-family:system-ui,sans-serif;margin:2rem;line-height:1.5}}main{{max-width:880px}}img,video,iframe{{max-width:100%;width:100%;border:0}}iframe{{min-height:70vh}}ul{{padding-left:1.25rem}}</style><style>{theme}</style></head><body><main><h1>{}</h1>{description}{body}</main></body></html>",
         escape_html(heading),
         escape_html(heading)
     )

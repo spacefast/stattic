@@ -931,7 +931,7 @@ function _stattic_runtime_noindex_robots_route(): array
     return [
         'route_action' => [
             'action' => 'robots_txt',
-            'body' => "User-agent: *\nDisallow: /\n",
+            'body' => STATTIC_NOINDEX_ROBOTS_BODY,
             'content_type' => 'text/plain; charset=utf-8',
             'cache_control' => 'public, max-age=0, s-maxage=300, must-revalidate',
             'methods' => ['GET', 'HEAD'],
@@ -1768,7 +1768,11 @@ function _stattic_runtime_route_action_valid(mixed $action, bool $allowTombstone
         return _stattic_runtime_proxy_route_policy_valid($action);
     }
     if ($action['action'] === 'robots_txt') {
-        return ($action['body'] ?? null) === "User-agent: *\nDisallow: /\n"
+        return in_array(
+            $action['body'] ?? null,
+            [STATTIC_NOINDEX_ROBOTS_BODY, STATTIC_LEGACY_NOINDEX_ROBOTS_BODY],
+            true
+        )
             && ($action['content_type'] ?? null) === 'text/plain; charset=utf-8'
             && is_string($action['cache_control'] ?? null)
             && $action['cache_control'] !== ''

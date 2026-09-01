@@ -1248,7 +1248,6 @@ test("finalize rejects proxy rules targeting internal or non-public upstreams", 
   const upstreams = [
     "https://127.0.0.1/api",
     "https://169.254.169.254/latest/meta-data",
-    "https://api.spacefast.com/v1",
     "https://site.view.fast/x",
     "https://localhost/api",
   ];
@@ -1263,6 +1262,24 @@ test("finalize rejects proxy rules targeting internal or non-public upstreams", 
     expect(response.status, upstream).toBe(422);
     expect(await errorCode(response), upstream).toBe("proxy_upstream_denied");
   }
+});
+
+// The Spacefast API is a public origin, and the serving enforcer in this
+// runtime has never denied it. Finalize must agree, or a route this runtime
+// would proxy happily fails a publish the space owner cannot fix from config.
+test("finalize accepts a proxy rule targeting the Spacefast API", async () => {
+  const response = await finalizeRaw(
+    rt,
+    "spc_proxy_api",
+    "ver_proxy_api_1",
+    {
+      "index.html": "<h1>proxy</h1>\n",
+      _redirects: "/setup.md https://api.spacefast.com/setup.md 200\n",
+    },
+    {},
+  );
+
+  expect(response.status).toBe(200);
 });
 
 test("finalize rejects private config targets in fallbacks and rewrites", async () => {

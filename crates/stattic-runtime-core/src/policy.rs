@@ -390,16 +390,15 @@ fn proxy_destination_hostname(destination: &str) -> String {
         .unwrap_or_else(|| destination.to_string())
 }
 
+/// Publish-time proxy validation refuses exactly what the runtime refuses at
+/// serve time, and no more: the serving hosts, so a space cannot proxy itself
+/// or another space into a loop. The Spacefast API is a public origin and is
+/// allowed, because a proxy rule pointed at it reaches nothing a visitor could
+/// not fetch directly. Widening this beyond `SERVING_INTERNAL_HOSTS` produces
+/// a build that fails validation while the same route would serve fine.
 fn proxy_internal_hosts() -> &'static InternalHosts {
     static HOSTS: OnceLock<InternalHosts> = OnceLock::new();
-    HOSTS.get_or_init(|| {
-        InternalHosts::from_hosts(
-            SERVING_INTERNAL_HOSTS
-                .iter()
-                .copied()
-                .chain(["api.spacefast.com"]),
-        )
-    })
+    HOSTS.get_or_init(|| InternalHosts::from_hosts(SERVING_INTERNAL_HOSTS.iter().copied()))
 }
 
 fn proxy_destination_test_allowlisted(destination: &str, allowlist: Option<&str>) -> bool {
@@ -578,8 +577,8 @@ mod tests {
                 "loopback or malformed hostname",
             ),
             (
-                "https://api.spacefast.com/internal",
-                "api.spacefast.com",
+                "https://tenant.view.fast/loop",
+                "tenant.view.fast",
                 "internal infrastructure endpoint",
             ),
             (
@@ -637,18 +636,26 @@ mod tests {
             }),
             "runtime_artifact_validation_failed",
         );
-        let redirects_pattern = [json!({"action":"proxy","destination":"https://example.com/x"})];
-        validate_finalize_policy(FinalizePolicyContext {
-            config: &Map::new(),
-            files: &BTreeMap::new(),
-            redirects_exact: &Map::new(),
-            redirects_pattern: &redirects_pattern,
-            headers_exact: &Map::new(),
-            headers_pattern: &[],
-            body: &json!({}),
-            private: &BTreeSet::new(),
-        })
-        .unwrap();
+        // The Spacefast API is a public origin, so a space may proxy it: this
+        // is how spacefast.com serves /setup.md from the same document the CLI
+        // and the MCP server read, instead of a copy baked at build time.
+        for destination in [
+            "https://example.com/x",
+            "https://api.spacefast.com/setup.md",
+        ] {
+            let redirects_pattern = [json!({"action":"proxy","destination":destination})];
+            validate_finalize_policy(FinalizePolicyContext {
+                config: &Map::new(),
+                files: &BTreeMap::new(),
+                redirects_exact: &Map::new(),
+                redirects_pattern: &redirects_pattern,
+                headers_exact: &Map::new(),
+                headers_pattern: &[],
+                body: &json!({}),
+                private: &BTreeSet::new(),
+            })
+            .unwrap_or_else(|error| panic!("{destination} must be allowed, got {error:?}"));
+        }
     }
 
     #[test]

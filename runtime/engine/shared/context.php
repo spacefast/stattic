@@ -1138,6 +1138,13 @@ function _stattic_defer(callable $work): void
     }
     $registered = true;
     register_shutdown_function(static function (): void {
+        // Management handlers answer with exit from inside their lock callback,
+        // so PHP does not unwind that callback's finally block. The mutation is
+        // complete once shutdown begins; do not retain its lock while flushing
+        // the response or running slow post-response provider work.
+        if (function_exists('_stattic_lock_release_all')) {
+            _stattic_lock_release_all();
+        }
         if (_stattic_flush_response_before_deferred() && function_exists('fastcgi_finish_request')) {
             fastcgi_finish_request();
         }

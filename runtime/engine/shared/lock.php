@@ -103,6 +103,25 @@ function _stattic_lock_release($handle): void
     fclose($handle);
 }
 
+// A response sent with exit from inside a critical callback never unwinds that
+// callback's finally block. Deferred shutdown work can take seconds, so release
+// every completed request mutation before its post-response queue starts.
+function _stattic_lock_release_all(): void
+{
+    $held = &_stattic_lock_registry();
+    foreach ($held as $entry) {
+        $handle = $entry['handle'] ?? null;
+        if (!is_resource($handle)) {
+            continue;
+        }
+        flock($handle, LOCK_UN);
+        fclose($handle);
+    }
+    $held = [];
+    $paths = &_stattic_lock_registry_paths();
+    $paths = [];
+}
+
 /** @param ?callable $unavailable disposition for a lock this process could not take. */
 function _stattic_lock_with(
     string $path,

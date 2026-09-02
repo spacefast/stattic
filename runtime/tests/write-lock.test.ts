@@ -23,7 +23,7 @@
 // PHP_CLI_SERVER_WORKERS does not reliably hand two near-simultaneous
 // connections to two different workers, which fakes serialized timings.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 
@@ -228,6 +228,41 @@ function updateTombstonesDispatch(spaceId: string) {
     ),
   );
 }
+
+test("deferred shutdown work runs after the request mutation releases its lock", () => {
+  const lockPath = spaceLockPath("spc_deferred_shutdown");
+  const contender = [
+    '$handle = fopen($argv[1], "c+");',
+    "if ($handle !== false && flock($handle, LOCK_EX | LOCK_NB)) {",
+    'fwrite(STDOUT, "acquired\\n");',
+    "flock($handle, LOCK_UN);",
+    "fclose($handle);",
+    "exit(0);",
+    "}",
+    'fwrite(STDOUT, "blocked\\n");',
+    "exit(3);",
+  ].join(" ");
+  const request = [
+    "require $argv[1];",
+    "$lockPath = $argv[2];",
+    "$contender = $argv[3];",
+    "_stattic_lock_with($lockPath, STATTIC_LOCK_WAIT, null, static function () use ($lockPath, $contender): void {",
+    "_stattic_defer(static function () use ($lockPath, $contender): void {",
+    'passthru(escapeshellarg(PHP_BINARY) . " -r " . escapeshellarg($contender) . " " . escapeshellarg($lockPath), $status);',
+    "if ($status !== 0) exit($status);",
+    "});",
+    "exit(0);",
+    "});",
+  ].join(" ");
+  const result = spawnSync(
+    PHP_BINARY,
+    ["-r", request, path.join(rt.engineRoot, "shared", "lock.php"), lockPath, contender],
+    { encoding: "utf8" },
+  );
+
+  expect(result.status).toBe(0);
+  expect(result.stdout).toBe("acquired\n");
+});
 
 test("a per-space write lock does not serialize mutations on a different space", async () => {
   const releaseSpaceALock = await holdFlockUntilReleased(spaceLockPath(SPACE_A));

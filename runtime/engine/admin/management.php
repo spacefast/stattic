@@ -1924,6 +1924,13 @@ function _stattic_runtime_version_source_reset_headers(): void
 // The caller's source-reader contract treats a missing optional file as null.
 function _stattic_runtime_version_source_empty(): never
 {
+    if (defined('STATTIC_RUNTIME_DISPATCH_CLI')) {
+        _stattic_json_response(204, [
+            'body_base64' => '',
+            'size' => 0,
+            'content_type' => 'application/octet-stream',
+        ]);
+    }
     _stattic_runtime_version_source_reset_headers();
     header('Cache-Control: ' . STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
     _stattic_runtime_version_source_status(204);
@@ -1933,6 +1940,22 @@ function _stattic_runtime_version_source_empty(): never
 /** @param resource $stream */
 function _stattic_runtime_version_source_send($stream, int $size, string $contentType): never
 {
+    if (defined('STATTIC_RUNTIME_DISPATCH_CLI')) {
+        $bytes = stream_get_contents($stream);
+        fclose($stream);
+        if (!is_string($bytes) || strlen($bytes) !== $size) {
+            _stattic_problem_response(
+                503,
+                'runtime_version_source_unavailable',
+                'Version source bytes are unavailable on this runtime instance.'
+            );
+        }
+        _stattic_json_response(200, [
+            'body_base64' => base64_encode($bytes),
+            'size' => $size,
+            'content_type' => $contentType,
+        ]);
+    }
     _stattic_runtime_version_source_reset_headers();
     header('Content-Type: ' . $contentType, true);
     header('Content-Length: ' . $size, true);
@@ -1945,16 +1968,17 @@ function _stattic_runtime_version_source_send($stream, int $size, string $conten
 }
 
 /**
- * Read one bounded source object through the instance-pinned management lane.
+ * Read one bounded version object through the instance-pinned management lane.
  *
  * Finalize needs a handful of private compile inputs before the version catalog
  * exists. Those bytes must not round-trip through the public blob/download
  * surface: provider X-Accel handling is a serving concern, and a failure there
  * must not make an already accepted upload unreadable to its own finalizer.
  *
- * A fresh path is selected by upload_id + sha256. A retained path is selected
- * by path against this route's finalized version. Absence is a 204 because the
- * caller's source-reader contract treats a missing optional file as null.
+ * A fresh source object is selected by upload_id + sha256. A finalized object
+ * is selected by path and view against this version's catalog. Absence is a
+ * 204 because the caller's file-reader contract treats a missing optional file
+ * as null.
  */
 function _stattic_runtime_read_version_source_route(
     string $privateRoot,
@@ -1965,7 +1989,15 @@ function _stattic_runtime_read_version_source_route(
     $uploadId = _stattic_runtime_version_files_param('upload_id');
     $sha256 = _stattic_runtime_version_files_param('sha256');
     $path = _stattic_runtime_version_files_param('path');
+    $view = _stattic_runtime_version_files_param('view') ?? 'source';
     $rawMaxBytes = _stattic_runtime_version_files_param('max_bytes');
+    if (!in_array($view, STATTIC_RUNTIME_VERSION_FILE_VIEWS, true)) {
+        _stattic_problem_response(
+            422,
+            'runtime_version_source_request_invalid',
+            'view must be "source" or "served".'
+        );
+    }
     if (
         $rawMaxBytes === null
         || preg_match('/\A[1-9][0-9]{0,7}\z/', $rawMaxBytes) !== 1
@@ -1984,6 +2016,7 @@ function _stattic_runtime_read_version_source_route(
             $uploadId === null
             || $sha256 === null
             || $path !== null
+            || $view !== 'source'
             || !_stattic_id_valid($uploadId)
             || !_stattic_is_sha256_hex(strtolower($sha256))
         ) {
@@ -2009,7 +2042,7 @@ function _stattic_runtime_read_version_source_route(
             $spaceId,
             $versionId,
             $path,
-            'source'
+            $view
         );
     } else {
         _stattic_problem_response(

@@ -66,9 +66,15 @@ function _stattic_runtime_admin_api(string $privateRoot, string $method, string 
                 'message' => $mismatch['message'],
             ]);
         }
-        // SSH dispatch (admin/dispatch.php) carries one JSON envelope on stdout,
-        // so rows that stream bytes or write raw responses stay HTTP-only.
-        if ($route['binary'] && defined('STATTIC_RUNTIME_DISPATCH_CLI')) {
+        // SSH dispatch normally carries JSON. The bounded version-file reader
+        // has its own base64 envelope so provider edge interception cannot make
+        // already accepted source or served bytes unreadable. Other streaming
+        // routes stay HTTP-only.
+        if (
+            $route['binary']
+            && defined('STATTIC_RUNTIME_DISPATCH_CLI')
+            && $route['action'] !== 'read_version_source'
+        ) {
             _stattic_problem_response(400, 'runtime_dispatch_unsupported_path', 'Binary endpoints are not dispatchable over this transport.');
         }
         _stattic_runtime_admin_run_route($privateRoot, $route, $matches);

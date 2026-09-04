@@ -21,12 +21,22 @@ import {
 
 let rt: Runtime;
 
+const DISPATCH_TEMPLATE_SOURCE = "export const API = '{{ vars.API }}';\n";
+const DISPATCH_TEMPLATE_SERVED = "export const API = 'dispatch-served';\n";
+
 beforeAll(async () => {
   rt = await startRuntime();
   await deploy(rt, {
     spaceId: "spc_dsp",
     versionId: "ver_dsp_1",
-    files: { "index.html": "one" },
+    files: {
+      "index.html": "one",
+      "config.js": DISPATCH_TEMPLATE_SOURCE,
+      "sf.jsonc": '{ "templates": ["config.js"] }\n',
+    },
+    finalize: {
+      variable_scopes: [{ kind: "space", values: { API: { value: "dispatch-served" } } }],
+    },
     activate: {
       route_name: "production",
       config: publicAccessConfig(),
@@ -238,16 +248,48 @@ test("replay-guard storage failure answers 503 retryable, never a false 403 repl
   expect(recovered.status).toBe(200);
 });
 
-test("binary endpoints and malformed envelopes are rejected", async () => {
-  // The version-source row streams bytes rather than a JSON body, so it carries
-  // binary => true and is rejected before auth on the JSON-envelope-only
-  // dispatch transport.
+test("bounded version bytes use a dispatch envelope while other binary endpoints stay rejected", async () => {
+  const versionBytes = await dispatch({
+    method: "GET",
+    path: runtimeHttpPath(
+      "/__spacefast/api.php/spaces/spc_dsp/versions/ver_dsp_1/source?path=config.js&view=served&max_bytes=128",
+    ),
+    authorization: `Bearer ${managementToken("read_version_source", {
+      space_id: "spc_dsp",
+      version_id: "ver_dsp_1",
+    })}`,
+  });
+  expect(versionBytes.status).toBe(200);
+  expect(Buffer.from(String(versionBytes.body.body_base64), "base64").toString("utf8")).toBe(
+    DISPATCH_TEMPLATE_SERVED,
+  );
+  expect(versionBytes.body.size).toBe(Buffer.byteLength(DISPATCH_TEMPLATE_SERVED));
+
+  const sourceBytes = await dispatch({
+    method: "GET",
+    path: runtimeHttpPath(
+      "/__spacefast/api.php/spaces/spc_dsp/versions/ver_dsp_1/source?path=config.js&view=source&max_bytes=128",
+    ),
+    authorization: `Bearer ${managementToken("read_version_source", {
+      space_id: "spc_dsp",
+      version_id: "ver_dsp_1",
+    })}`,
+  });
+  expect(sourceBytes.status).toBe(200);
+  expect(Buffer.from(String(sourceBytes.body.body_base64), "base64").toString("utf8")).toBe(
+    DISPATCH_TEMPLATE_SOURCE,
+  );
+
+  // Other binary rows still reject before their handlers can stream raw bytes
+  // into the JSON-only dispatch transport.
   const binaryRoute = await dispatch({
     method: "GET",
-    path: runtimeHttpPath("/__spacefast/api.php/spaces/spc_dispatch/versions/ver_dispatch/source"),
-    authorization: `Bearer ${managementToken("read_version_source", {
+    path: runtimeHttpPath(
+      "/__spacefast/api.php/spaces/spc_dispatch/build-sources/bld_dispatch/body",
+    ),
+    authorization: `Bearer ${managementToken("build_source_read", {
       space_id: "spc_dispatch",
-      version_id: "ver_dispatch",
+      build_id: "bld_dispatch",
     })}`,
   });
   expect(binaryRoute.status).toBe(400);

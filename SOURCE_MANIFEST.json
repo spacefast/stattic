@@ -1,7 +1,7 @@
 {
-  "revision": "fc630e28a957bf18950307e13d3e92a4ce444270",
-  "sourceHash": "8e2ab370702292c46e18845fbddb4ebbec505abee76a02d77e79ccd71ae6b77c",
-  "manifestSha256": "13415ffc54cd0ac2092bf73397b2f152d5345646a42995887a126031a09f9a33",
+  "revision": "8447a47e19aaeeef3d8080a32f3c4d65e73c111f",
+  "sourceHash": "76f302e5cd922e8f699a6d5c26d8c5f186c3067617c75300a19e57b3fe27f332",
+  "manifestSha256": "ea77c77679f6b34f171ac5bebb1efccae2a27153c608068af317254ba1ac4f86",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "38da673250b5d24273610a9e6d45284a3b2ef1359b52505688552277c684d528"
+      "sha256": "546c7a06179ebefda2657a490e5944d3870f835916d6d12b7de70ee2cf251cfe"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "501541acbbe60c3c5660584c6430e6a3c12963a9e62c66ee12c86e5e845db827"
+      "sha256": "8fbf7f5579733aacd893a3d6121694941d8f272082b898eebc34dacba127892b"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -321,7 +321,7 @@
     },
     {
       "path": "runtime/README.md",
-      "sha256": "3a89fee0499b637d91c4114bc955f297c07620962f2c4ec5fecab115746715ba"
+      "sha256": "c9bf1e97db2751249cf6cc8a4836578b633a85779597f0585378bd4ced284303"
     },
     {
       "path": "runtime/SKILL.md",
@@ -465,7 +465,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "7faea89ecf70fa50f19f21fb97f3a128e6373e12d4bebe93ab611c7dc7059c6f"
+      "sha256": "262fe263ab8a75106e7f616aeef45b089ab8f6916c80d14328acaf186e0c296b"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -745,7 +745,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "47c222289379eee102a3af61468480109c554d57d203b536b3f30cace4eee20e"
+      "sha256": "869b9434948e5f6b45c9d59d8408afb5e87b8d3cc5178084dadf433c4af397e1"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",
@@ -1025,7 +1025,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "1ee2dc14b7038ffe9c37639540ee94f4722c11d4418682f1c7d51c6efd5a4a7b"
+      "sha256": "23009fc550f3f6a7eef7feced577cbedac3ac48fc308e147b981d62f8b31e391"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

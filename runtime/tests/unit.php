@@ -608,6 +608,114 @@ check(
     'a projection older than the upgrade window stays refused'
 );
 
+// Team-shaped Grants: one Grant per team, never expanded per member. The epoch
+// rides in the digest so a membership reduction retires every member session
+// on the next revalidation, and adds need no projection write at all.
+$teamGrant = $indexedGrant(0, ['kind' => 'team', 'teamId' => 'team_alpha']);
+$teamProjection = _stattic_compile_authorization_projection([
+    ...$projectionEnvelope([$teamGrant]),
+    'teamId' => 'team_alpha',
+    'membershipEpoch' => 7,
+]);
+check(
+    is_array($teamProjection)
+        && $teamProjection['grantIndex']['teamReference'] === 'team:team_alpha'
+        && $teamProjection['teamId'] === 'team_alpha'
+        && $teamProjection['membershipEpoch'] === 7,
+    'team-shaped projection compiles with its team reference and epoch'
+);
+$teamProjection = is_array($teamProjection) ? $teamProjection : [];
+check(
+    ($teamProjection['grantIndex']['generations']['team:team_alpha'][0]['hash'] ?? null)
+        === hash('sha256', $teamGrant['id'] . ':1:7'),
+    'team Grant digest folds the membership epoch in'
+);
+// The authority generation is the digest of the sorted candidate hashes, so a
+// single team Grant yields sha256(sha256("<id>:<generation>:<epoch>")).
+check(
+    _stattic_authority_generation($teamProjection, 'member:mem_anyone')
+        === hash('sha256', hash('sha256', $teamGrant['id'] . ':1:7')),
+    'any member authority resolves to the team Grant digest'
+);
+check(
+    count(_stattic_grant_candidates($teamProjection, ['member:mem_anyone'])) === 1,
+    'a member authority selects the team Grant as a candidate'
+);
+// The decision reports the member authority, not the team: session touch and
+// verified-email checks only know member entries.
+$teamDecision = _stattic_grant_decision(
+    $teamProjection,
+    '/',
+    ['kind' => 'live'],
+    ['member:mem_anyone']
+);
+check(
+    $teamDecision['capabilities'] === ['page.view']
+        && $teamDecision['references'] === ['member:mem_anyone'],
+    'a team Grant decision names the admitting member authority'
+);
+$verifiedTeamGrant = [
+    ...$teamGrant,
+    'id' => 'grt_team_verified',
+    'constraints' => ['requireVerifiedEmail' => true],
+];
+$verifiedTeamProjection = _stattic_compile_authorization_projection([
+    ...$projectionEnvelope([$verifiedTeamGrant]),
+    'teamId' => 'team_alpha',
+    'membershipEpoch' => 0,
+]);
+$verifiedTeamProjection = is_array($verifiedTeamProjection) ? $verifiedTeamProjection : [];
+check(
+    _stattic_grant_decision($verifiedTeamProjection, '/', ['kind' => 'live'], ['member:mem_anyone'])['capabilities'] === []
+        && _stattic_grant_decision(
+            $verifiedTeamProjection,
+            '/',
+            ['kind' => 'live'],
+            ['member:mem_anyone'],
+            ['member:mem_anyone']
+        )['capabilities'] === ['page.view'],
+    'a verified-email team Grant admits only a member whose email is verified'
+);
+$otherTeamProjection = _stattic_compile_authorization_projection([
+    ...$projectionEnvelope([$indexedGrant(0, ['kind' => 'team', 'teamId' => 'team_beta'])]),
+    'teamId' => 'team_alpha',
+    'membershipEpoch' => 0,
+]);
+check(
+    is_array($otherTeamProjection)
+        && _stattic_authority_generation($otherTeamProjection, 'member:mem_anyone') === null
+        && _stattic_grant_candidates($otherTeamProjection, ['member:mem_anyone']) === [],
+    'a team Grant for another team admits no member authority'
+);
+$epochlessTeamProjection = _stattic_compile_authorization_projection($projectionEnvelope([$teamGrant]));
+check(
+    is_array($epochlessTeamProjection)
+        && $epochlessTeamProjection['grantIndex']['teamReference'] === null
+        && _stattic_authority_generation($epochlessTeamProjection, 'member:mem_anyone') === null,
+    'without a projection teamId, a team Grant admits nobody'
+);
+check(
+    _stattic_compile_authorization_projection([
+        ...$projectionEnvelope([$teamGrant]),
+        'teamId' => 'team_alpha',
+        'membershipEpoch' => -1,
+    ]) === null,
+    'a negative membership epoch is refused'
+);
+// Version 4 overlays predate team-shaped Grants, so their team reference is
+// null by construction. Upgrade on read like version 3.
+$version4Projection = $publicProjection;
+$version4Projection['compiledVersion'] = 4;
+unset($version4Projection['grantIndex']['teamReference']);
+$upgraded4 = _stattic_authorization_projection_current($version4Projection);
+check(
+    !_stattic_authorization_projection_compiled($version4Projection)
+        && is_array($upgraded4)
+        && $upgraded4['grantIndex']['teamReference'] === null
+        && _stattic_authorization_projection_compiled($upgraded4),
+    'version 4 compiled projections upgrade on read with a null team reference'
+);
+
 // --- Grant-decision conformance: the shared corpus ------------------------------------
 //
 // This engine re-implements the Grant vocabulary of

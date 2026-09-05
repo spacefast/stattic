@@ -171,6 +171,18 @@ type ProjectionInput = {
     target?: { kind: "live" } | { kind: "all_versions" };
   }>;
   claimPreview?: { claimId: string; expiresAt: string };
+  /**
+   * Team-shaped manager Grants plus the envelope's `teamId` and
+   * `membershipEpoch`. Any `member:*` authority the control plane signs is
+   * admitted; moving the epoch retires every member session.
+   */
+  team?: {
+    teamId: string;
+    membershipEpoch: number;
+    grantGeneration?: number;
+    /** The team the Grants name; defaults to `teamId`. Set to prove another team's Grant is inert. */
+    grantTeamId?: string;
+  };
 };
 
 function projection(input: ProjectionInput = {}) {
@@ -255,6 +267,27 @@ function projection(input: ProjectionInput = {}) {
       });
     }
   }
+  if (input.team) {
+    const grantTeamId = input.team.grantTeamId ?? input.team.teamId;
+    for (const target of [{ kind: "live" }, { kind: "all_versions" }]) {
+      grants.push({
+        id: `grt_team_${grantTeamId}_${target.kind}`,
+        generation: input.team.grantGeneration ?? 1,
+        audience: { kind: "team", teamId: grantTeamId },
+        resources: { include: ["/**"], exclude: [] },
+        capabilities: [
+          "page.view",
+          "comments.read",
+          "comments.write",
+          "content.publish",
+          "access.manage",
+        ],
+        constraints: {},
+        target,
+        source: { kind: "system", reference: `team:${grantTeamId}` },
+      });
+    }
+  }
   if (input.claimPreview) {
     grants.push({
       id: "grt_claim_preview",
@@ -270,6 +303,11 @@ function projection(input: ProjectionInput = {}) {
 
   const exchange = input.exchange ?? true;
   const generation = (input.accessGeneration ?? 0) + (input.sessionVersion ?? 0);
+  // Present only for team-shaped fixtures; the envelope fields are optional and
+  // an old control plane never sends them.
+  const teamEnvelope = input.team
+    ? { teamId: input.team.teamId, membershipEpoch: input.team.membershipEpoch }
+    : undefined;
   return {
     visitor_issuer: "spacefast-api",
     visitor_jwks: {
@@ -309,6 +347,7 @@ function projection(input: ProjectionInput = {}) {
             },
           }),
       spaceClaimed: true,
+      ...teamEnvelope,
       grants,
     },
   };
@@ -1056,6 +1095,73 @@ test("a durable session survives an access-generation move but not losing its Gr
     const removed = await get(runtime, SESSION_HOST, "/", { headers: { cookie } });
     expect(removed.status).toBe(403);
     expect(existsSync(sessionRecordPath(SESSION_SPACE, cookie))).toBe(false);
+  } finally {
+    await putRoute(runtime, SESSION_SPACE, "production", {
+      version_id: SESSION_VERSION,
+      config: projection({
+        memberRefs: ["member:mem_session"],
+        people: [{ personId: "per_session", grants: [{ id: "pgr_session", scope: "/" }] }],
+      }),
+    });
+  }
+});
+
+test("a team-shaped Grant admits any member authority and an epoch bump retires it", async () => {
+  const team = { teamId: "team_session", membershipEpoch: 0 };
+  await putRoute(runtime, SESSION_SPACE, "production", {
+    version_id: SESSION_VERSION,
+    config: projection({ team }),
+  });
+  try {
+    // The projection names the team, never the member. The control plane
+    // signed this member's authority, so the engine admits it.
+    const cookie = await openAuthorities(SESSION_HOST, ["member:mem_never_projected"]);
+    expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie } })).status).toBe(200);
+
+    // Another team's Grant admits nobody, even with a valid member authority:
+    // the handoff mints no session and the direct header lane is refused.
+    await putRoute(runtime, SESSION_SPACE, "production", {
+      version_id: SESSION_VERSION,
+      config: projection({ team: { ...team, grantTeamId: "team_other" } }),
+    });
+    const foreignToken = callbackToken(SESSION_HOST, ["member:mem_never_projected"]);
+    const foreign = await postAccessCallback(runtime, SESSION_HOST, foreignToken, "/");
+    expect(setCookieValue(foreign)).not.toStartWith(`${COOKIE_NAME}=${SESSION_PREFIX}`);
+    const foreignDirect = await get(runtime, SESSION_HOST, "/", {
+      headers: { "x-sf-authorization": `Bearer ${foreignToken}` },
+    });
+    expect(foreignDirect.status).toBe(403);
+    await putRoute(runtime, SESSION_SPACE, "production", {
+      version_id: SESSION_VERSION,
+      config: projection({ team }),
+    });
+
+    // A reduction moves the epoch and the access generation together. The
+    // session revalidates against the new digest, finds no match, and retires.
+    await putRoute(runtime, SESSION_SPACE, "production", {
+      version_id: SESSION_VERSION,
+      config: projection({ team: { ...team, membershipEpoch: 1 }, accessGeneration: 1 }),
+    });
+    const revoked = await get(runtime, SESSION_HOST, "/", { headers: { cookie } });
+    expect(revoked.status).toBe(403);
+    expect(existsSync(sessionRecordPath(SESSION_SPACE, cookie))).toBe(false);
+
+    // A fresh handoff at the new generation admits again: revocation is per
+    // epoch, not per member, and the control plane decides who gets a new
+    // handoff. Handoffs are bound to the projection generation they were cut
+    // for, so the token names the moved one.
+    const reopenedCallback = await postAccessCallback(
+      runtime,
+      SESSION_HOST,
+      callbackToken(SESSION_HOST, ["member:mem_never_projected"], { generation: 1 }),
+      "/",
+    );
+    expect(reopenedCallback.status).toBe(303);
+    const reopened = setCookieValue(reopenedCallback);
+    expect(reopened).toStartWith(`${COOKIE_NAME}=${SESSION_PREFIX}`);
+    expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie: reopened } })).status).toBe(
+      200,
+    );
   } finally {
     await putRoute(runtime, SESSION_SPACE, "production", {
       version_id: SESSION_VERSION,

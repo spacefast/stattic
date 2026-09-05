@@ -130,6 +130,14 @@ hostname intent (`production_hostnames`, `noindex_production_hostnames`,
 `config.authorization`. Owner access has no separate deny/firewall policy; platform
 safety and provider takedown controls remain operator-owned.
 
+`authorization.teamId` and `authorization.membershipEpoch` (both optional) let a Grant
+with `audience.kind = "team"` admit any `member:<id>` authority the control plane signs
+for that team. The Grant's generation digest is
+`sha256("<grantId>:<generation>:<membershipEpoch>")`, so moving the epoch retires every
+member session at its next revalidation; adding a member needs no projection write.
+Grants expanded per member (`external` audiences with issuer `spacefast-membership`)
+keep working unchanged.
+
 ## WordPress API
 
 A Space with managed content exposes WordPress's own REST API at `/wp-json/`. There is no

@@ -1267,7 +1267,7 @@ function _stattic_grant_valid(mixed $grant): bool
 
 // Must match packages/common's runtime contract.
 const STATTIC_AUTHORIZATION_GRANT_LIMIT = 1024;
-const STATTIC_AUTHORIZATION_COMPILED_VERSION = 4;
+const STATTIC_AUTHORIZATION_COMPILED_VERSION = 5;
 
 // The segment list the matcher runs against: runs of '**' collapse ('**/**' ==
 // '**') so the recursion meets at most one.
@@ -1376,6 +1376,14 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
     // and a grant field this compiler learns tomorrow reaches it automatically.
     $unconditionalTargets = ['live' => false, 'all_versions' => false];
     $spaceClaimed = ($projection['spaceClaimed'] ?? false) === true;
+    // The owning team, when the control plane names it. Team-shaped Grants for
+    // this team are matched by any member authority the control plane signs;
+    // team Grants for any other team are inert.
+    $teamId = is_string($projection['teamId'] ?? null) && $projection['teamId'] !== ''
+        ? $projection['teamId']
+        : null;
+    $teamReference = $teamId === null ? null : 'team:' . $teamId;
+    $membershipEpoch = (int) ($projection['membershipEpoch'] ?? 0);
     foreach ($grants as $grant) {
         if (!_stattic_grant_valid($grant)) {
             return null;
@@ -1399,7 +1407,7 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
         if ($kind === 'password') {
             $lanes['password'][] = $lane;
         }
-        if ($kind === 'external' || $kind === 'person') {
+        if ($kind === 'external' || $kind === 'person' || $kind === 'team') {
             $lanes['identity'][] = $lane;
         }
         if (($grant['source']['kind'] ?? null) === 'config' && !$spaceClaimed) {
@@ -1488,8 +1496,21 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
         } else {
             $authorities[$reference] ??= [];
             _stattic_grant_index_place($authorities[$reference], $compiled);
+            // A team Grant is matched by member authorities the control plane
+            // signs; its digest carries the membership epoch so a reduction
+            // retires every member session without naming any member here.
+            // The control plane does not emit team Grants yet: today
+            // grantGenerationDigest in
+            // apps/control-plane/src/access/authority-generation.ts digests
+            // the per-member derived Grant id without an epoch. When the
+            // control plane switches to team Grants it must digest
+            // `<grantId>:<generation>:<membershipEpoch>` to match this.
+            // A rolled-back engine refuses v5 overlays until every route is
+            // re-PUT, the same way the v3 to v4 upgrade behaved.
             $generationSources[$reference][] = [
-                'source' => (string) $grant['id'] . ':' . (string) $grant['generation'],
+                'source' => $kind === 'team'
+                    ? (string) $grant['id'] . ':' . (string) $grant['generation'] . ':' . $membershipEpoch
+                    : (string) $grant['id'] . ':' . (string) $grant['generation'],
                 'expiresAt' => $expiresAt,
             ];
         }
@@ -1517,6 +1538,7 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
         'lanes' => $lanes,
         'hasFrameLinks' => $hasFrameLinks,
         'unconditionalTargets' => $unconditionalTargets,
+        'teamReference' => $teamReference,
     ];
 }
 
@@ -1531,7 +1553,10 @@ function _stattic_authorization_envelope_valid(mixed $value): bool
         && in_array($value['fence'] ?? null, ['none', 'ownership', 'exposure'], true)
         && is_string($value['acquireUrl'] ?? null)
         && filter_var($value['acquireUrl'], FILTER_VALIDATE_URL) !== false
-        && is_bool($value['spaceClaimed'] ?? null);
+        && is_bool($value['spaceClaimed'] ?? null)
+        && (!array_key_exists('teamId', $value) || $value['teamId'] === null || is_string($value['teamId']))
+        && (!array_key_exists('membershipEpoch', $value)
+            || (is_int($value['membershipEpoch']) && $value['membershipEpoch'] >= 0));
 }
 
 function _stattic_compile_authorization_projection(mixed $value): ?array
@@ -1551,6 +1576,8 @@ function _stattic_compile_authorization_projection(mixed $value): ?array
         'acquireUrl' => $value['acquireUrl'],
         'accessPage' => is_array($value['accessPage'] ?? null) ? $value['accessPage'] : null,
         'spaceClaimed' => $value['spaceClaimed'],
+        'teamId' => is_string($value['teamId'] ?? null) && $value['teamId'] !== '' ? $value['teamId'] : null,
+        'membershipEpoch' => (int) ($value['membershipEpoch'] ?? 0),
         'grantIndex' => $index,
     ];
 }
@@ -1576,7 +1603,9 @@ function _stattic_authorization_projection_compiled(mixed $value): bool
         && is_array($index['lanes']['identity'] ?? null)
         && is_bool($index['hasFrameLinks'] ?? null)
         && is_bool($index['unconditionalTargets']['live'] ?? null)
-        && is_bool($index['unconditionalTargets']['all_versions'] ?? null);
+        && is_bool($index['unconditionalTargets']['all_versions'] ?? null)
+        && array_key_exists('teamReference', $index)
+        && ($index['teamReference'] === null || is_string($index['teamReference']));
 }
 
 /**
@@ -1596,6 +1625,11 @@ function _stattic_authorization_projection_compiled(mixed $value): bool
  * the two per-Grant fields already treats an absent one as null. Deriving the
  * flag here therefore yields exactly what recompiling the same Grants would.
  *
+ * Version 5 added `teamReference` to the index and `teamId` /
+ * `membershipEpoch` to the envelope. A version-4 index predates team-shaped
+ * Grants entirely, so no Grant in it was compiled against a team reference
+ * and null is exactly what recompiling the same Grants would yield.
+ *
  * Anything older stays refused, as it already was before version 4: those
  * shapes are not reconstructible from what the overlay keeps.
  */
@@ -1608,8 +1642,12 @@ function _stattic_authorization_projection_current(mixed $value): ?array
         return $value;
     }
     if (($value['compiledVersion'] ?? null) === 3 && is_array($value['grantIndex'] ?? null)) {
-        $value['compiledVersion'] = STATTIC_AUTHORIZATION_COMPILED_VERSION;
+        $value['compiledVersion'] = 4;
         $value['grantIndex']['hasFrameLinks'] = false;
+    }
+    if (($value['compiledVersion'] ?? null) === 4 && is_array($value['grantIndex'] ?? null)) {
+        $value['compiledVersion'] = STATTIC_AUTHORIZATION_COMPILED_VERSION;
+        $value['grantIndex']['teamReference'] = null;
     }
     return _stattic_authorization_projection_compiled($value) ? $value : null;
 }
@@ -1632,21 +1670,41 @@ function _stattic_grant_candidates(array $projection, array $authorities, string
     $candidates = _stattic_grant_index_bucket_candidates($index['public'] ?? null, $firstSegment);
     $seen = [];
     foreach ($authorities as $authority) {
-        if (
-            !is_string($authority)
-            || isset($seen[$authority])
-            || !is_array($index['authorities'][$authority] ?? null)
-        ) {
+        if (!is_string($authority) || isset($seen[$authority])) {
             continue;
         }
         $seen[$authority] = true;
         foreach (
-            _stattic_grant_index_bucket_candidates($index['authorities'][$authority], $firstSegment) as $grant
+            _stattic_grant_index_bucket_candidates($index['authorities'][$authority] ?? null, $firstSegment) as $grant
         ) {
             $candidates[] = $grant;
         }
+        $teamReference = _stattic_member_authority_team_reference($index, $authority);
+        if ($teamReference === null || !is_array($index['authorities'][$teamReference] ?? null)) {
+            continue;
+        }
+        foreach (
+            _stattic_grant_index_bucket_candidates($index['authorities'][$teamReference], $firstSegment) as $grant
+        ) {
+            // The compiled reference names the team. The decision must name the
+            // member authority that selected it: requireVerifiedEmail is checked
+            // against the session's verified member entries, and session touch
+            // advances only member: entries. A team reference would fail both.
+            $candidates[] = [...$grant, 'reference' => $authority];
+        }
     }
     return $candidates;
+}
+
+// A member authority is matched by the projection's own team Grants as well as
+// by any Grant expanded to that exact member (the pre-epoch shape, kept so a
+// new engine serves an old control plane during rollout).
+function _stattic_member_authority_team_reference(?array $index, string $authority): ?string
+{
+    if (!is_array($index) || !str_starts_with($authority, 'member:')) {
+        return null;
+    }
+    return is_string($index['teamReference'] ?? null) ? $index['teamReference'] : null;
 }
 
 function _stattic_grant_target(array $serving): array
@@ -2640,6 +2698,10 @@ function _stattic_authority_generation_candidates(array $projection, string $aut
     $entries = is_array($index) && is_array($index['generations'][$authority] ?? null)
         ? $index['generations'][$authority]
         : [];
+    $teamReference = _stattic_member_authority_team_reference($index, $authority);
+    if ($teamReference !== null && is_array($index['generations'][$teamReference] ?? null)) {
+        $entries = [...$entries, ...$index['generations'][$teamReference]];
+    }
     $now = time();
     $candidates = [];
     foreach ($entries as $entry) {

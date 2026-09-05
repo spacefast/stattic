@@ -200,8 +200,9 @@ pub struct CatalogDelta {
 /// The serving behaviors that decide whether a scoped purge can be trusted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeltaServing {
-    /// The index document name, or `None` for `index: false`.
+    /// The homepage document name, or `None` for `index: false`.
     pub index: Option<String>,
+    pub directory_index: Option<String>,
     pub listing: bool,
     pub viewer: bool,
 }
@@ -209,12 +210,19 @@ pub struct DeltaServing {
 impl DeltaServing {
     /// Reads the resolved serving config finalize compiled.
     pub fn from_serving_config(config: &Map<String, Value>) -> Self {
+        let index = match config.get("index") {
+            Some(Value::String(index)) => Some(index.clone()),
+            Some(Value::Bool(false)) => None,
+            _ => Some("index.html".into()),
+        };
+        let directory_index = config
+            .get("directory_index")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| index.clone());
         Self {
-            index: match config.get("index") {
-                Some(Value::String(index)) => Some(index.clone()),
-                Some(Value::Bool(false)) => None,
-                _ => Some("index.html".into()),
-            },
+            index,
+            directory_index,
             listing: config
                 .get("listing")
                 .and_then(Value::as_bool)
@@ -546,14 +554,13 @@ pub fn catalog_delta(
         if let Some(clean) = path.strip_suffix(".html") {
             request_paths.insert(format!("/{clean}"));
         }
-        let Some(index) = &serving.index else {
-            continue;
-        };
-        if path == index {
+        if serving.index.as_ref() == Some(path) {
             request_paths.insert("/".into());
-        } else if let Some(directory) = path.strip_suffix(&format!("/{index}")) {
-            request_paths.insert(format!("/{directory}"));
-            request_paths.insert(format!("/{directory}/"));
+        } else if let Some(index) = &serving.directory_index {
+            if let Some(directory) = path.strip_suffix(&format!("/{index}")) {
+                request_paths.insert(format!("/{directory}"));
+                request_paths.insert(format!("/{directory}/"));
+            }
         }
     }
     if request_paths.len() > CHANGED_PATHS_MAX {
@@ -835,6 +842,7 @@ mod tests {
     fn static_serving() -> DeltaServing {
         DeltaServing {
             index: Some("index.html".into()),
+            directory_index: Some("index.html".into()),
             listing: false,
             viewer: false,
         }
@@ -847,27 +855,53 @@ mod tests {
     fn delta_counts_adds_changes_and_removals_and_scopes_the_purge() {
         let delta = delta_between(
             &[
-                ("index.html", b"one"),
+                ("_shell.html", b"one"),
                 ("docs/index.html", b"docs"),
                 ("gone.css", b"old"),
             ],
             &[
-                ("index.html", b"two"),
-                ("docs/index.html", b"docs"),
+                ("_shell.html", b"two"),
+                ("docs/index.html", b"updated docs"),
                 ("new.css", b"new"),
             ],
-            &static_serving(),
+            &DeltaServing::from_serving_config(
+                serde_json::json!({"index": "_shell.html", "directory_index": "index.html"})
+                    .as_object()
+                    .unwrap(),
+            ),
         );
 
-        assert_eq!((delta.added, delta.changed, delta.removed), (1, 1, 1));
+        assert_eq!((delta.added, delta.changed, delta.removed), (1, 2, 1));
         assert_eq!(
             delta.changed_paths,
             Some(vec![
                 "/".to_string(),
+                "/_shell".into(),
+                "/_shell.html".into(),
+                "/docs".into(),
+                "/docs/".into(),
+                "/docs/index".into(),
+                "/docs/index.html".into(),
                 "/gone.css".into(),
-                "/index".into(),
-                "/index.html".into(),
                 "/new.css".into(),
+            ])
+        );
+
+        let removed_custom_index = delta_between(
+            &[("docs/home.htm", b"docs")],
+            &[],
+            &DeltaServing::from_serving_config(
+                serde_json::json!({"index": "home.htm"})
+                    .as_object()
+                    .unwrap(),
+            ),
+        );
+        assert_eq!(
+            removed_custom_index.changed_paths,
+            Some(vec![
+                "/docs".into(),
+                "/docs/".into(),
+                "/docs/home.htm".into()
             ])
         );
     }
@@ -878,9 +912,8 @@ mod tests {
     #[test]
     fn enumerating_serving_modes_force_a_host_wide_purge_on_membership_changes() {
         let listing = DeltaServing {
-            index: Some("index.html".into()),
             listing: true,
-            viewer: false,
+            ..static_serving()
         };
         let added = delta_between(
             &[("a.html", b"a")],

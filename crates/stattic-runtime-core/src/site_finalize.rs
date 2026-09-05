@@ -788,7 +788,7 @@ fn run_finalize_pipeline(
         &redirects_pattern,
         &private,
         serving_config
-            .get("index")
+            .get("directory_index")
             .unwrap_or(&Value::String("index.html".into())),
     );
     let compiled_zero_routes: Vec<Value> = compiled_zero

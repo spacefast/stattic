@@ -95,7 +95,7 @@ function _stattic_application_journal_claim(mysqli $connection, string $sink, in
         return [];
     }
     if (!$connection->begin_transaction()) {
-        throw new RuntimeException('application_journal_transaction_failed');
+        throw new RuntimeException('application_journal_transaction_failed', $connection->errno);
     }
     try {
         // wp_mail returned success, but the control plane did not settle its
@@ -106,7 +106,12 @@ function _stattic_application_journal_claim(mysqli $connection, string $sink, in
                     terminal_at = COALESCE(terminal_at, accepted_at), updated_at = UTC_TIMESTAMP(6)
               WHERE state = 'delivering' AND accepted_at IS NOT NULL"
         )) {
-            throw new RuntimeException('application_journal_acceptance_reconcile_failed');
+            // The first mail producer creates the outbox; until then it is empty.
+            if ($connection->errno === 1146) {
+                $connection->rollback();
+                return [];
+            }
+            throw new RuntimeException('application_journal_acceptance_reconcile_failed', $connection->errno);
         }
         $terminal = $connection->prepare(
             "UPDATE _spacefast_email_outbox
@@ -117,12 +122,12 @@ function _stattic_application_journal_claim(mysqli $connection, string $sink, in
                 AND attempt_count = ? AND lease_expires_at <= UTC_TIMESTAMP(6)"
         );
         if (!$terminal instanceof mysqli_stmt) {
-            throw new RuntimeException('application_journal_claim_prepare_failed');
+            throw new RuntimeException('application_journal_claim_prepare_failed', $connection->errno);
         }
         $maxAttempts = STATTIC_APPLICATION_JOURNAL_MAX_ATTEMPTS;
         $terminal->bind_param('i', $maxAttempts);
         if (!$terminal->execute()) {
-            throw new RuntimeException('application_journal_terminal_settle_failed');
+            throw new RuntimeException('application_journal_terminal_settle_failed', $terminal->errno);
         }
 
         $select = $connection->prepare(
@@ -136,15 +141,15 @@ function _stattic_application_journal_claim(mysqli $connection, string $sink, in
               LIMIT ? FOR UPDATE SKIP LOCKED"
         );
         if (!$select instanceof mysqli_stmt) {
-            throw new RuntimeException('application_journal_claim_prepare_failed');
+            throw new RuntimeException('application_journal_claim_prepare_failed', $connection->errno);
         }
         $select->bind_param('ii', $maxAttempts, $limit);
         if (!$select->execute()) {
-            throw new RuntimeException('application_journal_claim_select_failed');
+            throw new RuntimeException('application_journal_claim_select_failed', $select->errno);
         }
         $result = $select->get_result();
         if (!$result instanceof mysqli_result) {
-            throw new RuntimeException('application_journal_claim_result_failed');
+            throw new RuntimeException('application_journal_claim_result_failed', $select->errno);
         }
         $claims = [];
         foreach ($result->fetch_all(MYSQLI_ASSOC) as $row) {
@@ -159,11 +164,11 @@ function _stattic_application_journal_claim(mysqli $connection, string $sink, in
                   WHERE message_id = ?"
             );
             if (!$update instanceof mysqli_stmt) {
-                throw new RuntimeException('application_journal_claim_update_prepare_failed');
+                throw new RuntimeException('application_journal_claim_update_prepare_failed', $connection->errno);
             }
             $update->bind_param('isss', $attempt, $leaseId, $leaseExpiresAt, $messageId);
             if (!$update->execute() || $update->affected_rows !== 1) {
-                throw new RuntimeException('application_journal_claim_update_failed');
+                throw new RuntimeException('application_journal_claim_update_failed', $update->errno);
             }
             $payload = _stattic_application_journal_mail_payload($row);
             $entryId = _stattic_application_journal_entry_id($row);
@@ -193,7 +198,7 @@ function _stattic_application_journal_claim(mysqli $connection, string $sink, in
             ];
         }
         if (!$connection->commit()) {
-            throw new RuntimeException('application_journal_claim_commit_failed');
+            throw new RuntimeException('application_journal_claim_commit_failed', $connection->errno);
         }
         return $claims;
     } catch (Throwable $error) {
@@ -347,7 +352,7 @@ function _stattic_content_source_journal_claim(mysqli $connection, int $limit, i
     $table = STATTIC_CONTENT_SOURCE_JOURNAL_TABLE;
     $sink = STATTIC_APPLICATION_JOURNAL_CONTENT_SOURCE_SINK;
     if (!$connection->begin_transaction()) {
-        throw new RuntimeException('application_journal_transaction_failed');
+        throw new RuntimeException('application_journal_transaction_failed', $connection->errno);
     }
     try {
         $terminal = $connection->prepare(
@@ -363,12 +368,12 @@ function _stattic_content_source_journal_claim(mysqli $connection, int $limit, i
                 $connection->rollback();
                 return [];
             }
-            throw new RuntimeException('application_journal_claim_prepare_failed');
+            throw new RuntimeException('application_journal_claim_prepare_failed', $connection->errno);
         }
         $maxAttempts = STATTIC_APPLICATION_JOURNAL_MAX_ATTEMPTS;
         $terminal->bind_param('i', $maxAttempts);
         if (!$terminal->execute()) {
-            throw new RuntimeException('application_journal_terminal_settle_failed');
+            throw new RuntimeException('application_journal_terminal_settle_failed', $terminal->errno);
         }
 
         $select = $connection->prepare(
@@ -381,15 +386,15 @@ function _stattic_content_source_journal_claim(mysqli $connection, int $limit, i
               LIMIT ? FOR UPDATE SKIP LOCKED"
         );
         if (!$select instanceof mysqli_stmt) {
-            throw new RuntimeException('application_journal_claim_prepare_failed');
+            throw new RuntimeException('application_journal_claim_prepare_failed', $connection->errno);
         }
         $select->bind_param('ii', $maxAttempts, $limit);
         if (!$select->execute()) {
-            throw new RuntimeException('application_journal_claim_select_failed');
+            throw new RuntimeException('application_journal_claim_select_failed', $select->errno);
         }
         $result = $select->get_result();
         if (!$result instanceof mysqli_result) {
-            throw new RuntimeException('application_journal_claim_result_failed');
+            throw new RuntimeException('application_journal_claim_result_failed', $select->errno);
         }
         $claims = [];
         foreach ($result->fetch_all(MYSQLI_ASSOC) as $row) {
@@ -404,11 +409,11 @@ function _stattic_content_source_journal_claim(mysqli $connection, int $limit, i
                   WHERE entry_id = ?"
             );
             if (!$update instanceof mysqli_stmt) {
-                throw new RuntimeException('application_journal_claim_update_prepare_failed');
+                throw new RuntimeException('application_journal_claim_update_prepare_failed', $connection->errno);
             }
             $update->bind_param('isss', $attempt, $leaseId, $leaseExpiresAt, $entryId);
             if (!$update->execute() || $update->affected_rows !== 1) {
-                throw new RuntimeException('application_journal_claim_update_failed');
+                throw new RuntimeException('application_journal_claim_update_failed', $update->errno);
             }
             $payload = json_decode((string) ($row['payload_json'] ?? ''), true, 512, JSON_THROW_ON_ERROR);
             if (!is_array($payload)) {
@@ -439,7 +444,7 @@ function _stattic_content_source_journal_claim(mysqli $connection, int $limit, i
             ];
         }
         if (!$connection->commit()) {
-            throw new RuntimeException('application_journal_claim_commit_failed');
+            throw new RuntimeException('application_journal_claim_commit_failed', $connection->errno);
         }
         return $claims;
     } catch (Throwable $error) {

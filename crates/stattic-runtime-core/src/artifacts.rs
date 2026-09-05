@@ -378,6 +378,17 @@ pub fn resolve_serving_config(
         }
     }
     let mut file_config = config.clone();
+    if let Some(directory_index) = config.get("directory_index") {
+        if directory_index
+            .as_str()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return invalid(
+                "invalid_serving_config",
+                "directory_index must be a non-empty string.",
+            );
+        }
+    }
     if !file_config.contains_key("fallback")
         && metadata.get("spa").and_then(Value::as_bool) == Some(true)
         && files.contains_key("index.html")
@@ -426,9 +437,12 @@ pub fn resolve_serving_config(
     result.retain(|key, _| {
         matches!(
             key.as_str(),
-            "index" | "fallback" | "clean_urls" | "listing" | "viewer"
+            "index" | "directory_index" | "fallback" | "clean_urls" | "listing" | "viewer"
         )
     });
+    if let Some(directory_index) = config.get("directory_index") {
+        result.insert("directory_index".into(), directory_index.clone());
+    }
     if let Some(viewer) = config.get("viewer") {
         result.insert("viewer".into(), viewer.clone());
     }

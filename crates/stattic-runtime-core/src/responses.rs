@@ -380,6 +380,11 @@ pub(crate) fn compile_response_table(
         .get("clean_urls")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let directory_index = input
+        .serving_config
+        .get("directory_index")
+        .and_then(Value::as_str)
+        .unwrap_or(&index_name);
 
     for (path, meta) in input.files {
         // Private paths and functions-route handlers alike exist but never
@@ -396,7 +401,7 @@ pub(crate) fn compile_response_table(
             key.clone(),
             file_entry(&key, path, meta, input, &rules, 200),
         );
-        for alias in clean_url_keys(path, &index_name, clean_urls) {
+        for alias in clean_url_keys(path, &index_name, directory_index, clean_urls) {
             match alias {
                 CleanUrl::Serve(key) => {
                     // Resolved against the ALIAS key: the cache class and the
@@ -613,14 +618,19 @@ enum CleanUrl {
 
 /// The clean-URL and canonical-slash keys one published path owns. The runtime
 /// owns this redirect because `canonicalize_aliases` is pinned off on wp.cloud.
-fn clean_url_keys(path: &str, index_name: &str, clean_urls: bool) -> Vec<CleanUrl> {
+fn clean_url_keys(
+    path: &str,
+    index_name: &str,
+    directory_index: &str,
+    clean_urls: bool,
+) -> Vec<CleanUrl> {
     let mut keys = Vec::new();
     if path == index_name {
         keys.push(CleanUrl::Serve("/".into()));
         return keys;
     }
     if let Some(directory) = path
-        .strip_suffix(index_name)
+        .strip_suffix(directory_index)
         .and_then(|directory| directory.strip_suffix('/'))
     {
         let served = format!("/{directory}/");
@@ -1242,6 +1252,72 @@ fn render_table<'a>(bodies: impl Iterator<Item = &'a str>) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::finalize::file_meta;
+    use crate::transforms::{
+        build_runtime_payload, resolve_effective_config, ResolveEffectiveInput, RuntimePayloadInput,
+    };
+
+    #[test]
+    fn inferred_homepage_does_not_replace_prerender_directory_indexes() {
+        let entries: &[(&str, &[u8])] = &[
+            ("_shell.html", b"shell"),
+            ("sign-in/index.html", b"sign-in"),
+            ("sign-in/_shell.html", b"custom directory index"),
+        ];
+        for explicit_index in [None, Some("_shell.html")] {
+            let mut file_config = Map::from_iter([("fallback".into(), json!("/_shell.html"))]);
+            if let Some(index) = explicit_index {
+                file_config.insert("index".into(), json!(index));
+            }
+            let effective = resolve_effective_config(ResolveEffectiveInput {
+                manifest_paths: entries.iter().map(|(path, _)| (*path).into()).collect(),
+                file_config: Some(file_config),
+                overlay: None,
+                template_entries: vec![],
+                has_worker: false,
+            });
+            let payload = build_runtime_payload(RuntimePayloadInput {
+                serving: effective.serving,
+                options: Map::new(),
+            });
+            let files = entries
+                .iter()
+                .map(|(path, bytes)| ((*path).to_owned(), file_meta(path, bytes, None)))
+                .collect();
+            let config = crate::artifacts::resolve_serving_config(
+                payload.as_object().unwrap(),
+                &files,
+                &BTreeSet::new(),
+                &Map::new(),
+                false,
+            )
+            .unwrap();
+            let table = compile(
+                entries,
+                Value::Object(config),
+                json!({}),
+                json!([]),
+                json!({}),
+                json!([]),
+            );
+            assert_eq!(table["/"].blob.as_deref(), Some(sha256(b"shell").as_str()));
+            let expected: &[u8] = if explicit_index.is_some() {
+                b"custom directory index"
+            } else {
+                b"sign-in"
+            };
+            assert_eq!(
+                table["/sign-in/"].blob.as_deref(),
+                Some(sha256(expected).as_str())
+            );
+            assert_eq!(
+                table["/sign-in"]
+                    .headers
+                    .get("location")
+                    .map(String::as_str),
+                Some("/sign-in/")
+            );
+        }
+    }
 
     fn compile(
         entries: &[(&str, &[u8])],

@@ -442,7 +442,33 @@ test("a service frame naming an ungranted service is refused inside the broker",
   });
 });
 
-test("an accepted email commits one outbox row and the journal lane delivers it through wp_mail", async () => {
+test("the mail journal stays absent until its first send, then delivers accepted mail through wp_mail", async () => {
+  expect(await drainApplicationJournal()).toEqual({ claims: [] });
+  expect(
+    mysql.exec(
+      "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_spacefast_email_outbox';",
+    ),
+  ).toBe("0");
+
+  mysql.exec("CREATE TABLE _spacefast_email_outbox (message_id VARCHAR(80) PRIMARY KEY);");
+  try {
+    const unavailable = await apiJson(
+      rt,
+      "POST",
+      `${RUNTIME_HTTP_API_BASE}/application-journal/drain`,
+      "drain_application_journal",
+      {},
+      { sink: "control-plane:mail", limit: 10, lease_seconds: 60 },
+      503,
+    );
+    expect(unavailable).toMatchObject({
+      code: "application_journal_unavailable",
+      details: { stage: "claim", driverCode: 1054 },
+    });
+  } finally {
+    mysql.exec("DROP TABLE _spacefast_email_outbox;");
+  }
+
   const token = relayToken({ capabilities: ["email.send"] });
   const message = {
     service: "email",

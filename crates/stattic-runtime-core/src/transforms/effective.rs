@@ -120,12 +120,6 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
     // inferable index means files mode.
     let listing_default = inferred_index.is_none() && !input.has_worker;
     let mut config = Map::new();
-    config.insert(
-        "index".into(),
-        inferred_index
-            .clone()
-            .map_or(Value::Bool(false), Value::String),
-    );
     // `listing` is defaulted AFTER the merge (below), because the inferred
     // default depends on the merged `fallback`.
     for layer in [input.file_config.as_ref(), input.overlay.as_ref()]
@@ -177,11 +171,21 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
     config
         .entry("listing")
         .or_insert_with(|| Value::Bool(listing));
-    let index = config.get("index").cloned().unwrap_or_else(|| {
-        inferred_index
-            .clone()
-            .map_or(Value::Bool(false), Value::String)
-    });
+    // An inferred homepage does not rename directory index files. Only the
+    // publisher's index setting can change that convention.
+    let directory_index = config
+        .get("index")
+        .and_then(Value::as_str)
+        .unwrap_or("index.html")
+        .to_owned();
+    let index = config
+        .entry("index")
+        .or_insert_with(|| {
+            inferred_index
+                .clone()
+                .map_or(Value::Bool(false), Value::String)
+        })
+        .clone();
     let clean_urls = config
         .get("cleanUrls")
         .and_then(Value::as_bool)
@@ -277,6 +281,7 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
 
     let serving = json!({
         "index": index,
+        "directoryIndex": directory_index,
         "fallback": fallback,
         "cleanUrls": clean_urls,
         "listing": listing,
@@ -288,6 +293,7 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
     });
     let mut runtime = Map::new();
     runtime.insert("index".into(), serving["index"].clone());
+    runtime.insert("directory_index".into(), serving["directoryIndex"].clone());
     runtime.insert("fallback".into(), serving["fallback"].clone());
     runtime.insert("clean_urls".into(), Value::Bool(clean_urls));
     runtime.insert("listing".into(), Value::Bool(listing));
@@ -347,6 +353,7 @@ pub fn build_runtime_payload(input: RuntimePayloadInput) -> Value {
     let mut payload = Map::new();
     for (source, target) in [
         ("index", "index"),
+        ("directoryIndex", "directory_index"),
         ("fallback", "fallback"),
         ("cleanUrls", "clean_urls"),
         ("listing", "listing"),

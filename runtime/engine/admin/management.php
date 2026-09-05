@@ -32,6 +32,16 @@ function _stattic_runtime_with_write_lock(string $privateRoot, callable $callbac
     _stattic_runtime_acquire_write_lock($lockDir . '/write.lock', $callback);
 }
 
+/** Bind provider-backed journal management without the current application configuration. */
+function _stattic_runtime_application_journal_bind_db(): void
+{
+    $env = _stattic_zero_runner_base_env();
+    _stattic_db_broker_bind(
+        is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : null,
+        is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
+    );
+}
+
 function _stattic_runtime_application_journal_drain(string $privateRoot, array $claims): void
 {
     unset($privateRoot, $claims);
@@ -46,15 +56,20 @@ function _stattic_runtime_application_journal_drain(string $privateRoot, array $
     ) {
         _stattic_problem_response(422, 'application_journal_drain_invalid', 'Application journal drain request is invalid.');
     }
+    _stattic_runtime_application_journal_bind_db();
     $connection = _stattic_db_broker_connection();
     if (!$connection instanceof mysqli) {
-        _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.');
+        _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.', [
+            'details' => ['stage' => 'connect', 'runtimeCode' => $connection['code']],
+        ]);
     }
     try {
         $claims = _stattic_application_journal_claim($connection, $sink, $limit, $leaseSeconds);
     } catch (Throwable $error) {
-        error_log('spacefast application journal claim failed type=' . get_debug_type($error));
-        _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.');
+        error_log('spacefast application journal claim failed type=' . get_debug_type($error) . ' code=' . (int) $error->getCode());
+        _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.', [
+            'details' => ['stage' => 'claim', 'driverCode' => (int) $error->getCode()],
+        ]);
     }
     _stattic_json_response(200, ['claims' => $claims]);
 }
@@ -67,9 +82,12 @@ function _stattic_runtime_application_journal_complete(string $privateRoot, arra
     if (!is_array($receipts) || !array_is_list($receipts) || count($receipts) > STATTIC_APPLICATION_JOURNAL_MAX_PAGE) {
         _stattic_problem_response(422, 'application_journal_receipts_invalid', 'Application journal receipts are invalid.');
     }
+    _stattic_runtime_application_journal_bind_db();
     $connection = _stattic_db_broker_connection();
     if (!$connection instanceof mysqli) {
-        _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.');
+        _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.', [
+            'details' => ['stage' => 'connect', 'runtimeCode' => $connection['code']],
+        ]);
     }
     $recorded = 0;
     $stale = 0;
@@ -210,6 +228,7 @@ function _stattic_runtime_application_journal_mail(
     unset($claims);
     $body = _stattic_json_body();
     $claim = is_array($body['claim'] ?? null) ? $body['claim'] : [];
+    _stattic_runtime_application_journal_bind_db();
     $connection = _stattic_db_broker_connection();
     if (!$connection instanceof mysqli) {
         _stattic_problem_response(503, 'application_journal_mail_unavailable', 'The Space mail outbox is unavailable.');

@@ -174,8 +174,10 @@ beforeAll(async () => {
     // back what a deployment sees through the provider's log API.
     phpIni: { log_errors: "1", error_log: runtimeLogPath },
     env: {
-      SPACEFAST_ZERO_DATABASE_URL: mysql.url,
-      SPACEFAST_ZERO_DATABASE_URL_SOURCE: "provider",
+      DB_HOST: new URL(mysql.url).host,
+      DB_NAME: MYSQL_DATABASE,
+      DB_USER: "root",
+      DB_PASSWORD: MYSQL_ROOT_PASSWORD,
       // Management state, supplied by the control plane per space. Without it
       // the broker refuses mail rather than queueing what it cannot send.
       SPACEFAST_SERVICE_EMAIL_SENDERS: "hello@example.com",
@@ -486,6 +488,12 @@ test("an accepted email commits one outbox row and the journal lane delivers it 
   expect(await changed.json()).toMatchObject({ ok: true, result: { messageId } });
   expect(mysql.exec("SELECT COUNT(*) FROM _spacefast_email_outbox;")).toContain("1");
 
+  // Journal delivery belongs to the provider database, even when the space
+  // points its application at a different database.
+  await putRoute(rt, SPACE_ID, "production", {
+    version_id: VERSION_ID,
+    config: { variableValues: { DATABASE_URL: "mysql://tenant.invalid/application" } },
+  });
   const firstPage = await drainApplicationJournal();
   expect(firstPage.claims).toHaveLength(1);
   const claim = firstPage.claims[0];
@@ -531,6 +539,10 @@ test("an accepted email commits one outbox row and the journal lane delivers it 
       "SELECT state, attempt_count, provider_message_id, accepted_at IS NOT NULL, terminal_at IS NOT NULL FROM _spacefast_email_outbox;",
     ),
   ).toContain("delivered");
+  await putRoute(rt, SPACE_ID, "production", {
+    version_id: VERSION_ID,
+    config: { variableValues: {} },
+  });
 });
 
 test("mail from an address the space has not verified is refused, and no row is written", async () => {
@@ -797,5 +809,31 @@ test("visitor access policy cannot intercept a Functions machine callback", asyn
       version_id: VERSION_ID,
       config: { policy: null },
     });
+  }
+});
+
+test("journal drain exposes the broker failure stage without its configuration", async () => {
+  const unavailableRuntime = await startRuntime({
+    atomicData: {
+      SPACEFAST_ZERO_DATABASE_URL: "invalid://private-user:private-password@private-host/db",
+    },
+  });
+  try {
+    const response = await apiJson(
+      unavailableRuntime,
+      "POST",
+      `${RUNTIME_HTTP_API_BASE}/application-journal/drain`,
+      "drain_application_journal",
+      {},
+      { sink: "control-plane:mail", limit: 10, lease_seconds: 60 },
+      503,
+    );
+    expect(response).toMatchObject({
+      code: "application_journal_unavailable",
+      details: { stage: "connect", runtimeCode: "zero_db_url_invalid" },
+    });
+    expect(JSON.stringify(response)).not.toContain("private-");
+  } finally {
+    unavailableRuntime.stop();
   }
 });

@@ -1,7 +1,7 @@
 {
-  "revision": "991ca567861aaf7fbcbd7cac31af03123665c3ef",
-  "sourceHash": "451edcaf9b98d83608eba0288b68c336b8d3911332855d6fd7fd8c2ed39457e2",
-  "manifestSha256": "bb08d2330753ec46cf3fe35e4dcdc46fe68d927dad6576522660b5a192ed48ad",
+  "revision": "18d27541338c87fc91be51369f8d5c315f260f2c",
+  "sourceHash": "4e755bf31bd630308f54f3db99747acf85bd7e03ebf74e78009c3751801d1eff",
+  "manifestSha256": "300176a990a527dec8ed39c18e92efeb5abb8abd90b0c3fdd89b200fc7a19b16",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "1f2a4d4acfab7f6ee2f6ab831e47d99c0089a8883c32830b5ba0e8f55acfeee7"
+      "sha256": "549a9e9ca3338b894bd26ebe4d689fafd411a9bb7f7099d3d7b340486f13b645"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "e66068ce20b62f0a24383ef4b1090f41c88760e3b0bc51c5daa06bd7dc41fdf2"
+      "sha256": "55d1132af87b7e89fd5cb5b98fa78afe216cce823e068f669fd5c482f9919b0f"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -328,8 +328,12 @@
       "sha256": "35656fa9fdda92c258a6ebdcd86e795e3cb9761917451de0de6457f720a09563"
     },
     {
+      "path": "runtime/bootstrap-plugin/restore-config.php",
+      "sha256": "cd5a5264d92a5b68917e1bf412eca6803076de09aed126a62644c9aa7efa1790"
+    },
+    {
       "path": "runtime/bootstrap-plugin/spacefast-bootstrap.php",
-      "sha256": "afaaea7b50805ac9966f15b6ffeea9399e3db3c562148c9fdd067cd0dd5e2259"
+      "sha256": "34d03d3e7a8e894d05c46a68f7b1f8b0b85a3536644bcf652304735a85e9bb07"
     },
     {
       "path": "runtime/browser-specs/control-plane-access-fixture.ts",
@@ -389,7 +393,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "92cedaf3eff22d522fd311408f77df4640795a7e495fabe4aef78d960f442f94"
+      "sha256": "f21916e40a6168b6b06052b691c7e0bf01dba57dc725ff7ad527a97ea96407a4"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -769,7 +773,7 @@
     },
     {
       "path": "runtime/tests/bootstrap-plugin.test.ts",
-      "sha256": "1a02a37d583f4d79be2334d4e71484153879200942239ea8ff4eb37be96d7558"
+      "sha256": "0e0d3c2a6f4976ffd0a112df22c319bb1cbe0fbd8bfb94b26369b249db730a8d"
     },
     {
       "path": "runtime/tests/callback-drain.test.ts",
@@ -905,7 +909,7 @@
     },
     {
       "path": "runtime/tests/functions-relay.test.ts",
-      "sha256": "aeda7713c002ced359ab0d2e5ff66f7a5b33f252c404a28bc9c8d34e558a37d2"
+      "sha256": "fc940c41de4af4fa003a1fb6e5d3dbbcacf3be0eda1ee6f0a383b76e0393c1c9"
     },
     {
       "path": "runtime/tests/grant-conformance.php",

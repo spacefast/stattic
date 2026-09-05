@@ -160,7 +160,7 @@ function spacefast_bootstrap_verify_jwt(string $token): ?array
 }
 
 /** Write the engine's config file where the engine reads it: `<docroot>/.stattic/storage/config.php`. */
-function spacefast_bootstrap_write_config(array $config): bool
+function spacefast_bootstrap_write_config(array $config, bool $onlyIfMissing = false): bool
 {
     $installRoot = spacefast_bootstrap_docroot() . '/.stattic/storage';
     if (!is_dir($installRoot) && !mkdir($installRoot, 0755, true) && !is_dir($installRoot)) {
@@ -179,7 +179,55 @@ function spacefast_bootstrap_write_config(array $config): bool
         return false;
     }
     @chmod($tmp, 0644);
+    if ($onlyIfMissing) {
+        $created = link($tmp, $installRoot . '/config.php');
+        unlink($tmp);
+        return $created;
+    }
     return rename($tmp, $installRoot . '/config.php');
+}
+
+class SpacefastBootstrapConfigError extends RuntimeException {}
+
+/** Restore only a missing config after the control plane verifies provider ownership. */
+function spacefast_bootstrap_restore_missing_config(array $config): string
+{
+    if (!class_exists('Atomic_Persistent_Data')) {
+        throw new SpacefastBootstrapConfigError('bootstrap_config_provider_context_missing');
+    }
+    $expectedId = $config['SPACEFAST_RUNTIME_INSTANCE_ID'] ?? '';
+    if (!is_string($expectedId) || $expectedId === '') {
+        throw new SpacefastBootstrapConfigError('bootstrap_config_runtime_id_missing');
+    }
+    $path = spacefast_bootstrap_docroot() . '/.stattic/storage/config.php';
+    $existing = is_file($path) ? require $path : [];
+    $persistent = class_exists('Atomic_Persistent_Data') ? new Atomic_Persistent_Data() : null;
+    $atomicJson = getenv('SPACEFAST_ATOMIC_PERSISTENT_DATA_JSON');
+    $atomic = is_string($atomicJson) ? json_decode($atomicJson, true) : null;
+    $identities = [
+        is_array($existing) ? ($existing['SPACEFAST_RUNTIME_INSTANCE_ID'] ?? '') : '',
+        defined('SPACEFAST_RUNTIME_INSTANCE_ID') ? constant('SPACEFAST_RUNTIME_INSTANCE_ID') : '',
+        $persistent !== null ? $persistent->SPACEFAST_RUNTIME_INSTANCE_ID : '',
+        getenv('SPACEFAST_RUNTIME_INSTANCE_ID'),
+        is_array($atomic) ? ($atomic['SPACEFAST_RUNTIME_INSTANCE_ID'] ?? '') : '',
+    ];
+    foreach ($identities as $identity) {
+        if (is_string($identity) && trim($identity) !== '' && !hash_equals($expectedId, trim($identity))) {
+            throw new SpacefastBootstrapConfigError('bootstrap_config_runtime_id_conflict');
+        }
+    }
+    if (file_exists($path)) {
+        if (!is_array($existing) || ($existing['SPACEFAST_RUNTIME_INSTANCE_ID'] ?? '') !== $expectedId) {
+            throw new SpacefastBootstrapConfigError('bootstrap_config_existing_identity_missing');
+        }
+        return 'unchanged';
+    }
+    // link() publishes the complete file only if no writer created the target
+    // meanwhile. A concurrent confirm can never have its config overwritten.
+    if (!spacefast_bootstrap_write_config($config, true)) {
+        throw new SpacefastBootstrapConfigError('bootstrap_config_restore_failed');
+    }
+    return 'restored';
 }
 
 /**

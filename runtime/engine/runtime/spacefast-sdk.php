@@ -44,9 +44,11 @@ function _stattic_serve_spacefast_sdk(
     // stay short-lived and revalidated, so an engine revision is never frozen
     // into a visitor's cache. `_stattic_send_cache_policy_headers` still
     // downgrades private responses whatever this value is.
-    $publicCacheControl = ($previewToken === null && _stattic_spacefast_sdk_versioned_request())
+    $publicCacheControl = (isset($_GET['review']) || _stattic_system_view_review() !== null)
+        ? STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE
+        : (($previewToken === null && _stattic_spacefast_sdk_versioned_request())
         ? 'public, max-age=31536000, immutable'
-        : STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
+        : STATTIC_DEFAULT_EDGE_CACHE_CONTROL);
     _stattic_send_cache_policy_headers($privateCache, $publicCacheControl);
     header('ETag: ' . $etag, false);
     header('X-Spacefast-Sdk-Revision: ' . $revision, false);
@@ -286,6 +288,7 @@ function _stattic_spacefast_sdk_bootstrap(
     // than fataling on a public Space.
     require_once __DIR__ . '/access-rules.php';
     $sdkConfig = _stattic_spacefast_sdk_config($serving);
+    $review = _stattic_system_view_review();
     $preview = _stattic_spacefast_preview_surface($serving);
     // The whole OverlayConfig inline, so the boot path asks this host nothing.
     // Everything in it is space-level except the room key. One cacheable script
@@ -302,7 +305,7 @@ function _stattic_spacefast_sdk_bootstrap(
     $brokerHost = is_array($exchange) && is_string($exchange['commentsTicketUrl'] ?? null)
         ? parse_url($exchange['commentsTicketUrl'], PHP_URL_HOST)
         : null;
-    $commentsAvailable = $overlay['enabled'] === true
+    $commentsAvailable = $review === null && $overlay['enabled'] === true
         && $collabBase !== null
         && !(
             _stattic_spacefast_sdk_host_is_local(parse_url((string) $collabBase, PHP_URL_HOST))
@@ -353,10 +356,18 @@ function _stattic_spacefast_sdk_bootstrap(
         'o.onerror=function(){var e=new Error("Spacefast Comments module failed to load");console.error(e);var b=document.getElementById("sf-collab-boot-orb");if(b)b.remove();window.dispatchEvent(new CustomEvent("spacefast:collab-error",{detail:{stage:"module",message:e.message}}));};' .
         'root.collabLoader=o;document.head.appendChild(o);'
     );
+    // A public, cached bootstrap uses the frame name only as a reload signal.
+    // The unique URL rechecks the HttpOnly proof before returning review code.
+    // The name contains no credential and cannot authorize a review.
+    $reviewReload = $review !== null ? '' : (
+        'if(/^spacefast-review:[0-9a-f-]{36}$/.test(window.name)&&window.parent!==window){' .
+        'if(!root.reviewLoader){root.reviewLoader=true;var r=document.createElement("script");r.src=' . json_encode(STATTIC_SPACEFAST_SDK_PATH) . '+"?review="+encodeURIComponent(window.name.slice(17));document.head.appendChild(r);}return;}'
+    );
     $loader = '(function(){' .
         'var manifest=' . json_encode($manifest, JSON_UNESCAPED_SLASHES) . ';' .
         'var previewToken=' . json_encode($previewToken, JSON_UNESCAPED_SLASHES) . ';' .
         'var root=window.Spacefast=window.Spacefast||{};' .
+        $reviewReload .
         'root.manifest=manifest;' .
         'if(previewToken&&manifest.apiBase&&manifest.spaceId&&!root.tagLoader){' .
         'var tagUrl=new URL(manifest.apiBase.replace(/\\/+$/,"")+"/v1/spaces/"+encodeURIComponent(manifest.spaceId)+"/tags/sdk.js");' .
@@ -368,6 +379,13 @@ function _stattic_spacefast_sdk_bootstrap(
         '}' .
         $collab .
         '})();';
+    if ($review !== null && $collabBase !== null) {
+        $review['spaceId'] = $manifest['spaceId'];
+        // No proof is exposed to publisher JavaScript. Only the verified bridge identity travels.
+        $reviewJson = json_encode($review, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
+        $reviewUrl = json_encode(rtrim($collabBase, '/') . '/sdk/v1/review.js', JSON_UNESCAPED_SLASHES);
+        $loader .= ';(function(){var c=document.createElement("script");c.type="application/json";c.id="sf-visual-review";c.textContent=' . json_encode($reviewJson) . ';document.head.appendChild(c);var s=document.createElement("script");s.type="module";s.src=' . $reviewUrl . ';document.head.appendChild(s);})();';
+    }
     return $loader . ($embeddedTagBody !== '' ? "\n" . $embeddedTagBody : '');
 }
 

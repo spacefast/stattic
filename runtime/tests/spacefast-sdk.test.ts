@@ -77,6 +77,19 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   runtimes.push(runtime);
 
   const accessConfig = publicAccessConfig({ mode: "website", site_title: "SDK" });
+  const reviewKeys = generateKeyPairSync("ed25519");
+  const reviewIssuer = visitorIssuer(reviewKeys.publicKey);
+  accessConfig.visitor_issuer = "spacefast-api";
+  accessConfig.visitor_jwks = {
+    keys: [
+      {
+        ...reviewKeys.publicKey.export({ format: "jwk" }),
+        kid: reviewIssuer.kid,
+        alg: "EdDSA",
+        use: "sig",
+      },
+    ],
+  };
   // ONE SDK projection: the loader's config and the production tag module in
   // the same section. Nothing here names a second artifact.
   accessConfig.sdk = {
@@ -93,7 +106,7 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
       config: accessConfig,
       production_hostnames: [SITE],
       noindex_production_hostnames: [],
-      version_hostnames: [],
+      version_hostnames: [{ hostname: "review-sdk.site.test", version_id: "ver_sdk_1" }],
     },
   });
 
@@ -268,6 +281,77 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   ]);
   expect(staleIdentity.headers.get("cache-control")).toBe("private, no-store");
   expect(staleIdentity.headers.get("access-control-allow-origin")).toBeNull();
+
+  // Comments stay disabled, but a signed review may load the independent picker.
+  const reviewId = randomUUID();
+  const review = {
+    id: reviewId,
+    versionId: "ver_sdk_1",
+    parentOrigin: "https://review.example.test",
+    ancestors: ["https://chat.example.test"],
+  };
+  const now = Math.floor(Date.now() / 1000);
+  const reviewToken = (versionId = review.versionId) =>
+    "sfv_" +
+    signEd25519Jwt(reviewKeys.privateKey, reviewIssuer.kid, {
+      purpose: "system-view",
+      sub: "system:spc_sdk",
+      capabilities: ["page.view"],
+      iss: "spacefast-api",
+      aud: "spc_sdk",
+      spaceId: "spc_sdk",
+      host: "review-sdk.site.test",
+      generation: 1,
+      sessionVersion: 0,
+      iat: now,
+      nbf: now,
+      exp: now + 3600,
+      embed: review.parentOrigin,
+      review: { ...review, versionId },
+    });
+  expect((await get(runtime, "review-sdk.site.test", "/")).status).toBe(403);
+  expect(
+    (await get(runtime, "review-sdk.site.test", "/?__=" + reviewToken("ver_other"))).status,
+  ).toBe(403);
+  const handoff = await get(runtime, "review-sdk.site.test", "/?__=" + reviewToken());
+  expect(handoff.status).toBe(302);
+  const reviewCookie =
+    handoff.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith("spacefast_system_view_dev="))
+      ?.split(";")[0] ?? "";
+  expect(reviewCookie.length).toBeGreaterThan(0);
+  const reviewedPage = await get(runtime, "review-sdk.site.test", "/", {
+    headers: { cookie: reviewCookie },
+  });
+  expect(reviewedPage.status).toBe(200);
+  expect(reviewedPage.headers.get("content-security-policy")).toContain(review.parentOrigin);
+  expect(reviewedPage.headers.get("content-security-policy")).toContain(
+    "https://chat.example.test",
+  );
+  const reviewedSdk = await get(runtime, "review-sdk.site.test", "/__spacefast/sdk.js?v=cached", {
+    headers: { cookie: reviewCookie },
+  });
+  expect(reviewedSdk.status).toBe(200);
+  expect(reviewedSdk.headers.get("cache-control")).toBe("private, no-store");
+  const reviewNodes: Array<{ id?: string; type?: string; src?: string; textContent?: string }> = [];
+  Function(
+    "window",
+    "document",
+    await reviewedSdk.text(),
+  )(
+    {},
+    {
+      createElement: () => ({}),
+      head: { appendChild: (node: (typeof reviewNodes)[number]) => reviewNodes.push(node) },
+    },
+  );
+  expect(reviewNodes.map((node) => node.src).filter(Boolean)).toEqual([
+    "https://cast.example.test/sdk/v1/review.js",
+  ]);
+  expect(
+    JSON.parse(reviewNodes.find((node) => node.id === "sf-visual-review")?.textContent ?? "null"),
+  ).toEqual({ ...review, spaceId: "spc_sdk" });
 });
 
 test("same-host Spacefast SDK route restores the in-page Comments module", async () => {

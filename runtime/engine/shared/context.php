@@ -693,6 +693,15 @@ function _stattic_system_view_embed(?string $origin = null): ?string
     return $admitted;
 }
 
+function _stattic_system_view_review(?array $review = null): ?array
+{
+    static $admitted = null;
+    if ($review !== null) {
+        $admitted = $review;
+    }
+    return $admitted;
+}
+
 /**
  * The ONE decision about which origins may frame a Space's private content.
  *
@@ -733,6 +742,7 @@ function _stattic_space_frame_ancestors(): string
             ? _stattic_frame_ancestor_origins()
             : []),
         _stattic_system_view_embed(),
+        ...(_stattic_system_view_review()['ancestors'] ?? []),
     ] as $origin) {
         if (is_string($origin) && $origin !== '' && !in_array($origin, $origins, true)) {
             $origins[] = $origin;

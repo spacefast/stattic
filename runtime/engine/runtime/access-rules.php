@@ -4193,6 +4193,27 @@ function _stattic_access_verify_system_view_token(
             return false;
         }
     }
+    $review = $claims['review'] ?? null;
+    if (array_key_exists('review', $claims)) {
+        if (
+            !is_array($review) || !is_string($review['id'] ?? null)
+            || preg_match('/\A[0-9a-f-]{36}\z/', $review['id']) !== 1
+            || !is_string($review['versionId'] ?? null)
+            || empty($serving['immutable']) || $review['versionId'] !== ($serving['version_id'] ?? null)
+            || $embed === null || ($review['parentOrigin'] ?? null) !== $embed
+            || _stattic_absolute_url_origin($review['parentOrigin'] ?? null) !== $embed
+            || !is_array($review['ancestors'] ?? null) || count($review['ancestors']) > 8
+            || !is_int($claims['exp'] ?? null) || $claims['exp'] <= time()
+        ) {
+            return false;
+        }
+        foreach ($review['ancestors'] as $ancestor) {
+            if (!is_string($ancestor) || _stattic_absolute_url_origin($ancestor) !== $ancestor) {
+                return false;
+            }
+        }
+        _stattic_system_view_review($review);
+    }
     _stattic_system_view_scope($scope);
     if ($embed !== null) {
         _stattic_system_view_embed($embed);

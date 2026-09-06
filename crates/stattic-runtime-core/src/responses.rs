@@ -345,6 +345,7 @@ pub(crate) struct ResponseCompileInput<'a> {
     pub files: &'a BTreeMap<String, FileMeta>,
     pub private: &'a BTreeSet<String>,
     pub serving_config: &'a Map<String, Value>,
+    pub pages: Option<&'a [Value]>,
     pub redirects_exact: &'a Map<String, Value>,
     pub redirects_pattern: &'a [Value],
     pub headers_exact: &'a Map<String, Value>,
@@ -421,11 +422,7 @@ pub(crate) fn compile_response_table(
         }
     }
 
-    for listing in input
-        .listings
-        .iter()
-        .filter(|_| !input.serving_config.contains_key("pages"))
-    {
+    for listing in input.listings.iter().filter(|_| input.pages.is_none()) {
         let key = listing_key(&listing.directory);
         let mut headers = BTreeMap::new();
         headers.insert("content-type".into(), "text/html; charset=utf-8".into());
@@ -515,7 +512,7 @@ pub(crate) fn compile_response_table(
         table.insert(key, entry);
     }
 
-    if let Some(pages) = input.serving_config.get("pages").and_then(Value::as_array) {
+    if let Some(pages) = input.pages {
         for page in pages {
             let Some(path) = page.get("path").and_then(Value::as_str) else {
                 continue;
@@ -533,7 +530,7 @@ pub(crate) fn compile_response_table(
     if let Some(fallback) = input
         .serving_config
         .get("fallback")
-        .filter(|_| !input.serving_config.contains_key("pages"))
+        .filter(|_| input.pages.is_none())
         .and_then(Value::as_object)
     {
         let path = fallback.get("path").and_then(Value::as_str).unwrap_or("");
@@ -1297,7 +1294,10 @@ mod tests {
             });
             let payload = build_runtime_payload(RuntimePayloadInput {
                 serving: effective.serving,
-                options: Map::new(),
+                options: Map::from_iter([(
+                    "pagePointers".into(),
+                    json!({"routes": {"/": {"pages": {"404": "platform-not-found"}}}}),
+                )]),
             });
             let files = entries
                 .iter()
@@ -1320,6 +1320,10 @@ mod tests {
                 json!([]),
             );
             assert_eq!(table["/"].blob.as_deref(), Some(sha256(b"shell").as_str()));
+            assert_eq!(
+                table[RESPONSE_KEY_SPA].blob.as_deref(),
+                Some(sha256(b"shell").as_str())
+            );
             let expected: &[u8] = if explicit_index.is_some() {
                 b"custom directory index"
             } else {
@@ -1355,6 +1359,7 @@ mod tests {
             headers_exact,
             headers_pattern,
             false,
+            None,
         )
     }
 
@@ -1367,6 +1372,7 @@ mod tests {
         headers_exact: Value,
         headers_pattern: Value,
         noindex_host: bool,
+        pages: Option<&[Value]>,
     ) -> BTreeMap<String, ResponseEntry> {
         let files: BTreeMap<String, FileMeta> = entries
             .iter()
@@ -1379,6 +1385,7 @@ mod tests {
             files: &files,
             private: &private,
             serving_config: config.as_object().unwrap(),
+            pages,
             redirects_exact: redirects_exact.as_object().unwrap(),
             redirects_pattern: redirects_pattern.as_array().unwrap(),
             headers_exact: headers_exact.as_object().unwrap(),
@@ -1421,11 +1428,23 @@ mod tests {
 
     #[test]
     fn canonical_document_owns_root_without_a_generated_spa_response() {
-        let table = assets(json!({
-            "index": "index.html",
-            "pages": [{"id":"page.home", "path":"/", "render":"document", "bindingId":"sync.pages.home", "params":[]}],
-            "fallback": {"path":"index.html", "status":200}
-        }));
+        let pages = [
+            json!({"id":"page.home", "path":"/", "render":"document", "bindingId":"sync.pages.home", "params":[]}),
+        ];
+        let table = compile_for_host(
+            &[("index.html", b"home"), ("styles.css", b"body{}")],
+            json!({
+                "index": "index.html",
+                "pages": {"routes": {"/": {"pages": {"404": "platform-not-found"}}}},
+                "fallback": {"path":"index.html", "status":200}
+            }),
+            json!({}),
+            json!([]),
+            json!({}),
+            json!([]),
+            false,
+            Some(&pages),
+        );
         assert!(!table.contains_key("/"));
         assert!(!table.contains_key(RESPONSE_KEY_SPA));
         assert_eq!(table["/styles.css"].status, 200);
@@ -1649,6 +1668,7 @@ mod tests {
             }]}),
             json!([]),
             true,
+            None,
         );
         let page = &table["/index.html"];
         assert_eq!(

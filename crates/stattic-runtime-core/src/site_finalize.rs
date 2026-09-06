@@ -719,7 +719,6 @@ fn run_finalize_pipeline(
         resolve_serving_config(&config, files, &private, &metadata, has_worker)?;
     if let Some(pages) = pages {
         serving_config.remove("fallback");
-        serving_config.insert("pages".into(), json!(pages));
         write_php(&stage_root.join("pages.php"), &json!(pages))?;
     }
     // The ONE visibility decision, recorded by the catalog and by nothing else.
@@ -915,6 +914,7 @@ fn run_finalize_pipeline(
             files,
             private: &private,
             serving_config: &serving_config,
+            pages: pages.map(Vec::as_slice),
             redirects_exact: &redirects_exact,
             redirects_pattern: &redirects_pattern,
             headers_exact: &headers_exact,

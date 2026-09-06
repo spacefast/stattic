@@ -42,7 +42,9 @@ test("release activation seeds canonical documents and preserves editor takeover
     { op: "inspectPage" },
     { op: "activatePage", format: "tsx", text: "<p>Stale code.</p>" },
     { op: "inspectPage" },
-    { op: "renderPage" },
+    // A failed replacement may clear the editor's active model while this
+    // version still serves. Its sealed model must keep live editor bytes visible.
+    { op: "renderPage", clearActiveRelease: true },
     { op: "renderPage", snapshot: { text, format: "tsx" } },
   ]);
   const renders = outcomes.filter(
@@ -81,6 +83,43 @@ test("release activation seeds canonical documents and preserves editor takeover
   expect(takeover.blocks).toContain("Editor owns this.");
   expect(problem(results[11]).code).toBe("content_document_editor_owned");
   expect(inspected(results[12]).blocks).toBe(takeover.blocks);
+});
+
+test("documents restore only sealed island modules present in the served version", async () => {
+  const boot = "/_spacefast/islands/0123456789abcdef/boot.js";
+  const script = `<script type="module" src="${boot}"></script>`;
+  const mount = '<div data-zero-component="counter">Clicks: 0</div>';
+  const text = `<!-- wp:html -->${mount}${script}<!-- /wp:html -->`;
+  const results = await runScenario("html", [
+    { op: "activatePage", format: "tsx", text },
+    // The persistence boundary supplies a mount with no script, as KSES does.
+    { op: "editInWordPress", blocks: `<!-- wp:html -->${mount}<!-- /wp:html -->` },
+    { op: "renderPage", assets: [boot] },
+    { op: "renderPage", assets: [] },
+    { op: "renderPage", assets: [boot], snapshot: { text, format: "tsx" } },
+  ]);
+  const live = inspected(results[2]).html;
+  expect(live).toContain(mount);
+  expect(live?.split(script)).toHaveLength(2);
+  expect(inspected(results[3]).html).not.toContain(script);
+  // Immutable content already carries the module and must not duplicate it.
+  expect(inspected(results[4]).html?.split(script)).toHaveLength(2);
+
+  // Editor takeover keeps source text unchanged; only the sealed artifact
+  // carries the regenerated module URL for live and immutable HTML rendering.
+  const htmlSource = "<p>Editor page.</p>";
+  const html = await runScenario("html", [
+    { op: "activatePage", format: "html", text: htmlSource },
+    { op: "renderPage", assets: [boot], islandsBootUrl: boot },
+    {
+      op: "renderPage",
+      assets: [boot],
+      islandsBootUrl: boot,
+      snapshot: { text: htmlSource, format: "html" },
+    },
+  ]);
+  expect(inspected(html[1]).html?.split(script)).toHaveLength(2);
+  expect(inspected(html[2]).html?.split(script)).toHaveLength(2);
 });
 
 test("sealed Markdown activation retains editor-only edits and refuses conflicting or corrupt source", async () => {

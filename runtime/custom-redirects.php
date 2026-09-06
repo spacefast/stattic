@@ -324,26 +324,26 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     null,
                     ['surface' => 'wordpress']
                 );
+                $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] = _stattic_content_version_model_revision(
+                    $privateRoot,
+                    $target['space_id'],
+                    $target['version_id']
+                );
             }
             // Both REST doors end here. /wp-admin needs none of it: those are
             // real WordPress scripts, and returning is exactly how they run.
             if ($restFrontController !== null) {
-                // "Does THIS Space have a WordPress" is a per-Space question,
-                // and the front controller is site-wide — one wp.cloud site
-                // hosts many Spaces (content-storage.php) — so its existence
-                // cannot answer it. The Space's own content-model/active-release
-                // pointer does: absent, this is a static Space that does not
-                // publish /wp-json, and booting the shared kernel for it would
-                // make it pretend to have an editor behind it. Both doors set
-                // SPACEFAST_CONTENT_SPACE_ID before here, so the same check
-                // guards the editor session and the WP API door alike.
+                // Editor sessions follow their active model. Public REST follows
+                // the served version, so an unpublished candidate cannot change
+                // its collection privacy policy.
                 $restSpaceId = (string) ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? '');
-                $contentModelRevision = $restSpaceId === ''
-                    ? null
-                    : _stattic_private_tree_read_pointer(
+                $contentModelRevision = $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] ?? null;
+                if ($session !== null && $restSpaceId !== '') {
+                    $contentModelRevision = _stattic_private_tree_read_pointer(
                         $privateRoot . '/spaces/' . $restSpaceId . '/content-model/active-release',
                         128
                     );
+                }
                 if (
                     !is_string($contentModelRevision)
                     || preg_match('/\Asha256:[a-f0-9]{64}\z/D', $contentModelRevision) !== 1

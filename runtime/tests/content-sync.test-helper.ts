@@ -7,7 +7,7 @@
 // One driver, two formats. The reconciliation is format-blind, so re-running it
 // per format would be nine copies of one proof; each format's suite asserts
 // only what its own serializer decides.
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -55,6 +55,14 @@ function releaseRoot(format: SyncFormat) {
   const revision = `sha256:${"a".repeat(64)}`;
   const dir = path.join(storage, `spaces/${SPACE_ID}/content-model/releases`, revision.slice(7));
   mkdirSync(dir, { recursive: true });
+  const engineRelease = path.join(root, ".stattic/releases/test-engine");
+  mkdirSync(engineRelease, { recursive: true });
+  symlinkSync(path.join(repoRoot, "runtime/engine"), path.join(engineRelease, "engine"));
+  writeFileSync(path.join(root, ".stattic/active-release"), "releases/test-engine");
+  const loader = path.join(root, "wp-content/mu-plugins/spacefast-content.php");
+  mkdirSync(path.dirname(loader), { recursive: true });
+  copyFileSync(path.join(repoRoot, "runtime/wordpress-content-loader.php"), loader);
+  writeFileSync(path.join(root, "wp-load.php"), `<?php require ${JSON.stringify(loader)};`);
   // The content model's own digest is over the generated PHP, and the kernel checks
   // it, so this writes the real one rather than a placeholder.
   const php = contentModelPhp(revision, format);
@@ -211,7 +219,13 @@ export type Step =
       invalidDigest?: boolean;
     }
   | { op: "inspectPage" }
-  | { op: "renderPage"; snapshot?: { text: string; format: SyncFormat | "tsx" } }
+  | {
+      op: "renderPage";
+      snapshot?: { text: string; format: SyncFormat | "tsx" };
+      clearActiveRelease?: boolean;
+      assets?: string[];
+      islandsBootUrl?: string;
+    }
   | { op: "reconcile"; state: "initial" | "bound"; text: string; baseRevision?: string }
   | { op: "editInWordPress"; blocks: string }
   // `ackOp` closes an operation other than the most recent one, which is how a
@@ -363,6 +377,7 @@ foreach ($steps as $step) {
       spacefast_content_model_stage_release($model['revision'], $php, 'sha256:' . hash('sha256', $php), true);
       spacefast_content_handle_request(['operation' => 'model.activate', 'revision' => $model['revision']], true);
       $GLOBALS['firstPublishedRevision'] ??= $model['revision'];
+      $GLOBALS['publishedPageSnapshot'] = [...$binding['documentSeed'], 'bindingId' => $binding['id'], 'format' => $binding['format'], 'modelRevision' => $model['revision']];
       $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'activated']];
       continue;
     }
@@ -382,19 +397,16 @@ foreach ($steps as $step) {
     }
     if ($step['op'] === 'renderPage') {
       $route = ['id' => 'page.' . substr(${JSON.stringify(TSX_BINDING)}, 11), 'path' => '/docs/about', 'render' => 'document', 'bindingId' => ${JSON.stringify(TSX_BINDING)}, 'params' => []];
-      $snapshot = isset($step['snapshot']) ? [...$step['snapshot'], 'bindingId' => $route['bindingId'], 'modelRevision' => $GLOBALS['firstPublishedRevision'], 'sha256' => 'sha256:' . hash('sha256', $step['snapshot']['text'])] : null;
-      $context = ['space_id' => ${JSON.stringify(SPACE_ID)}, 'private_root' => ${JSON.stringify(storage)}, 'serving' => ['immutable' => $snapshot !== null], 'version_id' => 'ver_sealed', 'version_dir' => '/sealed', 'root' => []];
+      $snapshot = isset($step['snapshot']) ? [...$step['snapshot'], 'bindingId' => $route['bindingId'], 'modelRevision' => $GLOBALS['firstPublishedRevision'], 'sha256' => 'sha256:' . hash('sha256', $step['snapshot']['text'])] : $GLOBALS['publishedPageSnapshot'];
+      if (isset($step['islandsBootUrl'])) $snapshot['islandsBootUrl'] = $step['islandsBootUrl'];
+      if (!empty($step['clearActiveRelease'])) spacefast_content_model_activate_release(null, true);
+      $context = ['space_id' => ${JSON.stringify(SPACE_ID)}, 'private_root' => ${JSON.stringify(storage)}, 'serving' => ['immutable' => isset($step['snapshot'])], 'version_id' => 'ver_' . substr(hash('sha256', json_encode($snapshot)), 0, 32), 'version_dir' => '/sealed', 'root' => []];
       $renderScript = '<?php ' . base64_decode('${Buffer.from(WP_STUBS).toString("base64")}');
-      foreach (['SPACEFAST_CONTENT_SPACE_ID', 'SPACEFAST_CONTENT_PRIVATE_ROOT', 'SPACEFAST_CONTENT_MODEL_RELEASE_ROOT', 'SPACEFAST_CONTENT_MODEL_REVISION', 'SPACEFAST_CONTENT_BLOCKS_ENGINE_PLUGIN'] as $key) {
+      foreach (['SPACEFAST_CONTENT_SPACE_ID', 'SPACEFAST_CONTENT_PRIVATE_ROOT', 'SPACEFAST_CONTENT_BLOCKS_ENGINE_PLUGIN'] as $key) {
         $renderScript .= '$GLOBALS[' . var_export($key, true) . '] = ' . var_export($GLOBALS[$key], true) . ';';
-      }
-      if ($snapshot !== null) {
-        $renderScript .= '$GLOBALS["SPACEFAST_CONTENT_MODEL_REVISION"] = ' . var_export($snapshot['modelRevision'], true) . ';';
-        $renderScript .= '$GLOBALS["SPACEFAST_CONTENT_MODEL_RELEASE_ROOT"] = ' . var_export(${JSON.stringify(storage + "/spaces/" + SPACE_ID + "/content-model/releases/")} . substr($snapshot['modelRevision'], 7), true) . ';';
       }
       $renderScript .= '$posts = ' . var_export($posts, true) . '; $meta = ' . var_export($meta, true) . ';';
       $renderScript .= 'require_once ' . var_export('phar://' . ${JSON.stringify(toolkitPhar)} . '/vendor/autoload.php', true) . ';';
-      $renderScript .= 'require_once ' . var_export(${JSON.stringify(kernel)}, true) . ';';
       $renderScript .= 'require_once ' . var_export(${JSON.stringify(path.join(repoRoot, "runtime/engine/runtime/content-page.php"))}, true) . ';';
       $renderScript .= 'define("STATTIC_RUNTIME_THEME_STYLESHEET_URL", "/theme.css"); define("STATTIC_RUNTIME_RESPONSE_ENTRY_BLOB", "b"); define("STATTIC_RUNTIME_RESPONSE_ENTRY_LENGTH", "l");';
       $renderScript .= '$snapshotBytes = ' . var_export(json_encode($snapshot), true) . ';';
@@ -402,12 +414,12 @@ foreach ($steps as $step) {
       $renderScript .= '$context = ' . var_export($context, true) . '; $route = ' . var_export($route, true) . ';';
       $renderScript .= '$versionRoot = _stattic_version_root($context["private_root"], $context["space_id"], $context["version_id"]); if (!is_dir($versionRoot)) mkdir($versionRoot, 0775, true);';
       $renderScript .= 'file_put_contents($versionRoot . "/metadata.json", json_encode(["catalog" => ["format" => STATTIC_RUNTIME_VERSION_CATALOG_FORMAT, "spaceId" => $context["space_id"], "versionId" => $context["version_id"], "paths" => ["_spacefast/pages/documents/" . $route["id"] . ".json" => ["source" => ["sha256" => hash("sha256", $snapshotBytes), "size" => strlen($snapshotBytes), "contentType" => "application/json"]]], "variants" => []]]));';
-      $renderScript .= 'function _stattic_v4_entry($dir, $root, $key) { return null; }';
+      $renderScript .= '$assets = ' . var_export($step['assets'] ?? [], true) . ';';
+      $renderScript .= 'function _stattic_v4_entry($dir, $root, $key) { return in_array($key, $GLOBALS["assets"], true) ? [] : null; }';
       $renderScript .= 'function _stattic_v4_blob_contents($context, $sha) { return $GLOBALS["snapshotBytes"]; }';
       $renderScript .= '_stattic_wordpress_page_try_serve(' . var_export($context, true) . ', "/docs/about", "GET", ' . var_export($route, true) . ');';
       $renderPath = tempnam(sys_get_temp_dir(), 'sf-page-render-');
       file_put_contents($renderPath, $renderScript);
-      file_put_contents(dirname(dirname(${JSON.stringify(storage)})) . '/wp-load.php', '<?php');
       $html = shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($renderPath));
       unlink($renderPath);
       $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'rendered', 'html' => $html]];

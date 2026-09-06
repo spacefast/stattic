@@ -46,17 +46,11 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
     if ($privateRoot === '' || $spaceId === '') {
         return false;
     }
-    $snapshot = $immutable ? _stattic_wordpress_page_snapshot($context, $route) : null;
-    if ($immutable && $snapshot === null) {
+    $snapshot = _stattic_wordpress_page_snapshot($context, $route);
+    if ($snapshot === null) {
         return false;
     }
-    $modelRevision = $immutable ? $snapshot['modelRevision'] : _stattic_private_tree_read_pointer(
-        $privateRoot . '/spaces/' . $spaceId . '/content-model/active-release',
-        128
-    );
-    if (!is_string($modelRevision) || preg_match('/\Asha256:[a-f0-9]{64}\z/D', $modelRevision) !== 1) {
-        return false;
-    }
+    $modelRevision = $snapshot['modelRevision'];
 
     $wpLoad = dirname(dirname($privateRoot)) . '/wp-load.php';
     if (!is_file($wpLoad)) {
@@ -82,9 +76,9 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
     $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
     $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
     $GLOBALS['SPACEFAST_CONTENT_PUBLIC_PAGE_REQUEST'] = true;
-    if ($immutable) {
-        $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] = $modelRevision;
-    }
+    // Activation may stage a newer model before its routes become live. The
+    // selected version owns the model; live posts still supply mutable content.
+    $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] = $modelRevision;
 
     if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
         return true;
@@ -194,6 +188,7 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
         . ($template === null
             ? '<main><article><h1>' . $title . '</h1>' . $content . '</article></main>'
             : $content)
+        . _stattic_wordpress_page_island_scripts($context, $snapshot, $content)
         . $wordpressFooter . '</body></html>';
 
     http_response_code(200);
@@ -262,6 +257,30 @@ function _stattic_wordpress_page_capture_hook(string $hook): string
     $hook();
     $output = ob_get_clean();
     return is_string($output) ? $output : '';
+}
+
+/** Restore compiler-owned modules that WordPress strips when saving post content. */
+function _stattic_wordpress_page_island_scripts(array $context, array $snapshot, string $content): string
+{
+    // The snapshot has passed the version catalog and document digest checks.
+    // Mutable editor markup cannot introduce another module through this lane.
+    preg_match_all(
+        '~<script type="module" src="(/_spacefast/islands/[a-f0-9]{16}/boot\.js)"></script>~',
+        $snapshot['text'],
+        $matches
+    );
+    $bootUrl = $snapshot['islandsBootUrl'] ?? null;
+    $sources = is_string($bootUrl)
+        ? (preg_match('~\A/_spacefast/islands/[a-f0-9]{16}/boot\.js\z~D', $bootUrl) === 1 ? [$bootUrl] : [])
+        : $matches[1];
+    $scripts = '';
+    foreach (array_unique($sources) as $src) {
+        $tag = '<script type="module" src="' . $src . '"></script>';
+        if (!str_contains($content, $tag) && _stattic_wordpress_page_version_has_entry($context, $src)) {
+            $scripts .= $tag;
+        }
+    }
+    return $scripts;
 }
 
 function _stattic_wordpress_page_version_has_entry(array $context, string $path): bool

@@ -698,17 +698,16 @@ fn run_finalize_pipeline(
         .pointer("/serving/pages")
         .and_then(Value::as_array);
     let mut private = pipeline.private;
-    if pages.is_some() {
-        private.extend(
-            files
-                .keys()
-                .chain(pipeline.generated.iter())
-                .filter(|path| {
-                    path.starts_with("pages/") || path.starts_with("_spacefast/pages/documents/")
-                })
-                .cloned(),
-        );
-    }
+    private.extend(
+        files
+            .keys()
+            .chain(pipeline.generated.iter())
+            .filter(|path| {
+                path.starts_with("_spacefast/pages/documents/")
+                    || (pages.is_some() && path.starts_with("pages/"))
+            })
+            .cloned(),
+    );
 
     apply_access_pages(&input.body, stage_root)?;
     apply_page_artifacts(&input.body, stage_root)?;
@@ -2486,6 +2485,10 @@ mod tests {
                 (
                     "__spacefast/zero/deploy.json",
                     br#"{"digest":"sha256:zero"}"#,
+                ),
+                (
+                    "_spacefast/pages/documents/model.json",
+                    br#"{"revision":"sealed"}"#,
                 ),
                 // Smaller than the public proof, but provider-owned in
                 // production and therefore not a valid runtime probe.

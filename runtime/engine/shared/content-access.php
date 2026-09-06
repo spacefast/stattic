@@ -1,6 +1,32 @@
 <?php
 declare(strict_types=1);
 
+/** Resolve the selected version's sealed model without following editor state. */
+function _stattic_content_version_model_revision(string $privateRoot, string $spaceId, string $versionId): ?string
+{
+    require_once __DIR__ . '/storage.php';
+    $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
+    $entry = $catalog['paths']['_spacefast/pages/documents/model.json']['source'] ?? null;
+    $object = _stattic_runtime_catalog_object($entry);
+    $sha = $object['sha'] ?? null;
+    $length = $object['size'] ?? null;
+    if (!is_string($sha) || !is_int($length) || $length < 1 || $length > 256) {
+        return null;
+    }
+    $bytes = _stattic_v4_blob_contents(['private_root' => $privateRoot, 'space_id' => $spaceId], $sha);
+    if (!is_string($bytes) || strlen($bytes) !== $length
+        || !hash_equals(preg_replace('/^sha256:/', '', $sha), hash('sha256', $bytes))) {
+        return null;
+    }
+    $reference = json_decode($bytes, true);
+    $revision = is_array($reference) ? ($reference['revision'] ?? null) : null;
+    if (!is_string($revision) || preg_match('/\Asha256:[a-f0-9]{64}\z/D', $revision) !== 1) {
+        return null;
+    }
+    $model = $privateRoot . '/spaces/' . $spaceId . '/content-model/releases/' . substr($revision, 7) . '/content-model.php';
+    return is_file($model) ? $revision : null;
+}
+
 /**
  * Resolve the Space exposure state for a host without serving a version.
  *

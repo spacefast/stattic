@@ -34,6 +34,7 @@ const FULLY_OPEN_SPACE = "spc_wp_api_fully_open";
 const STATIC_HOST = "wp-api-static.test";
 const STATIC_SPACE = "spc_wp_api_static";
 const MACHINE = "mac_wp_api_agent";
+const SERVED_MODEL_REVISION = `sha256:${"a".repeat(64)}`;
 const EXCHANGE_CREDENTIAL = "runtime-wp-api-exchange-credential-0123456789";
 
 const platformKey = generateKeyPairSync("ed25519");
@@ -208,10 +209,29 @@ beforeAll(async () => {
     "collision/index.html":
       "<!doctype html><html><head></head><body><h1>static collision</h1></body></html>\n",
   };
+  const modelReference = {
+    "_spacefast/pages/documents/model.json": JSON.stringify({ revision: SERVED_MODEL_REVISION }),
+  };
+  const documentSeeds = Object.fromEntries(
+    documentPages.map((page) => [
+      `_spacefast/pages/documents/${page.id}.json`,
+      JSON.stringify({
+        bindingId: page.bindingId,
+        modelRevision: SERVED_MODEL_REVISION,
+        format: "tsx",
+        text: "",
+        sha256: `sha256:${createHash("sha256").update("").digest("hex")}`,
+      }),
+    ]),
+  );
   await deploy(runtime, {
     spaceId: OPEN_SPACE,
     versionId: "ver_wp_api_open",
-    files: { "collision/index.html": files["collision/index.html"] },
+    files: {
+      "collision/index.html": files["collision/index.html"],
+      ...modelReference,
+      ...documentSeeds,
+    },
     serving: {
       pages: documentPages,
       config: {},
@@ -228,7 +248,7 @@ beforeAll(async () => {
   await deploy(runtime, {
     spaceId: CLOSED_SPACE,
     versionId: "ver_wp_api_closed",
-    files,
+    files: { ...files, ...modelReference },
     activate: {
       route_name: "production",
       config: accessConfig(false),
@@ -239,7 +259,7 @@ beforeAll(async () => {
   await deploy(runtime, {
     spaceId: EXCLUDED_SPACE,
     versionId: "ver_wp_api_excluded",
-    files,
+    files: { ...files, ...modelReference },
     activate: {
       route_name: "production",
       config: accessConfig(true, { excludeRest: true }),
@@ -250,7 +270,7 @@ beforeAll(async () => {
   await deploy(runtime, {
     spaceId: FULLY_OPEN_SPACE,
     versionId: "ver_wp_api_fully_open",
-    files,
+    files: { ...files, ...modelReference },
     activate: {
       route_name: "production",
       config: accessConfig(true, { allVersionsPublic: true }),
@@ -271,10 +291,16 @@ beforeAll(async () => {
       version_hostnames: [],
     },
   });
-  // A managed-WordPress Space is one with a content-model/active-release pointer;
-  // that per-Space marker — not the site-wide front controller — is what says a
-  // Space has a REST API. STATIC_SPACE deliberately gets none.
-  for (const spaceId of [OPEN_SPACE, CLOSED_SPACE, EXCLUDED_SPACE, FULLY_OPEN_SPACE]) {
+  // The editor has moved to another model while these versions still serve.
+  // Public REST must use the model each version sealed, including versions
+  // without document pages. STATIC_SPACE deliberately ships no reference.
+  for (const spaceId of [
+    OPEN_SPACE,
+    CLOSED_SPACE,
+    EXCLUDED_SPACE,
+    FULLY_OPEN_SPACE,
+    STATIC_SPACE,
+  ]) {
     const modelRoot = path.join(
       runtime.root,
       ".stattic",
@@ -283,8 +309,10 @@ beforeAll(async () => {
       spaceId,
       "content-model",
     );
-    mkdirSync(modelRoot, { recursive: true });
-    writeFileSync(path.join(modelRoot, "active-release"), `sha256:${"a".repeat(64)}\n`);
+    const release = path.join(modelRoot, "releases", SERVED_MODEL_REVISION.slice(7));
+    mkdirSync(release, { recursive: true });
+    writeFileSync(path.join(release, "content-model.php"), "<?php return [];\n");
+    writeFileSync(path.join(modelRoot, "active-release"), `sha256:${"b".repeat(64)}\n`);
   }
   // The provider's layout, which is what makes finding the front controller a
   // question at all: WordPress core lives under `__wp__/` and only wp-load.php
@@ -309,6 +337,7 @@ beforeAll(async () => {
       "  'actor_id' => is_array($principal) ? ($principal['actor_id'] ?? null) : null,",
       "  'themes' => defined('WP_USE_THEMES') ? WP_USE_THEMES : null,",
       "  'rest_admitted' => (bool) ($GLOBALS['SPACEFAST_CONTENT_REST_ADMITTED'] ?? false),",
+      "  'model_revision' => $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] ?? null,",
       "]);",
       "",
     ].join("\n"),
@@ -482,6 +511,7 @@ test("a Space credential reaches WordPress REST as the principal its Grants earn
     themes: false,
     // The gate admitted this request, so the kernel filter serves REST.
     rest_admitted: true,
+    model_revision: SERVED_MODEL_REVISION,
   });
 
   // The query spelling of the same lane, for a Space without pretty permalinks.
@@ -509,6 +539,7 @@ test("REST without a Spacefast credential is WordPress's own unauthenticated ans
     // request, and the kernel filter serves WordPress's unauthenticated answer
     // rather than 404-ing a request the gate never refused.
     rest_admitted: true,
+    model_revision: SERVED_MODEL_REVISION,
   });
 });
 
@@ -634,8 +665,8 @@ test("a fully-open Space still refuses an unusable credential", async () => {
 test("a co-hosted static Space never boots WordPress on /wp-json", async () => {
   // One wp.cloud site hosts many Spaces, so the site-wide wp-blog-header.php
   // exists for every Space here. Whether THIS Space has a REST API is answered
-  // per Space by its content-model/active-release pointer, which STATIC_SPACE
-  // does not have — so /wp-json is an ordinary URL it does not publish, not a
+  // by the version's model reference, which STATIC_SPACE does not have — so
+  // /wp-json is an ordinary URL it does not publish, not a
   // door into the co-hosted managed Space's kernel. It must 404 without booting
   // WordPress, even with a credential the Space itself issued.
   const anonymous = await get(runtime, STATIC_HOST, "/wp-json/wp/v2/posts");

@@ -17,9 +17,15 @@ import path from "node:path";
 
 const runtimeRoot = path.resolve(import.meta.dirname, "..");
 
+// SAFETY: runtime/installer.php validates this file's shape at install time; this guard reads the same fields.
 const manifest = JSON.parse(
   readFileSync(path.join(runtimeRoot, "engine-manifest.json"), "utf8"),
-) as { files: string[]; executables: string[]; aliases: Array<{ source: string; path: string }> };
+) as {
+  files: string[];
+  executables: string[];
+  aliases: Array<{ source: string; path: string }>;
+  trees: Array<{ source: string; path: string }>;
+};
 
 // Tracked files under runtime/ that deliberately do NOT ship in the engine zip.
 // Every entry carries its reason: adding a path here is the one way to silence
@@ -43,24 +49,22 @@ const BUILD_ARTIFACTS = new Set([
   // Built by scripts/build-runtime-native.mjs into gitignored runtime/bin/;
   // installer-real-manifest.test.ts stubs it for the same reason.
   "bin/stattic-runtime",
-  // The zero-admin plugin, built by packages/zero-admin/scripts/build.ts into
-  // gitignored runtime/wordpress/zero-admin/. Its source lives in that package
-  // (PHP included), and packages/zero-admin/test/engine-manifest.test.ts holds
-  // these entries against it — this guard only needs to know they are built.
-  "wordpress/zero-admin/admin-page.php",
-  "wordpress/zero-admin/assets.php",
-  "wordpress/zero-admin/bootstrap.php",
-  "wordpress/zero-admin/routes.php",
-  "wordpress/zero-admin/zero-admin.php",
-  "wordpress/zero-admin/build/admin.js",
-  "wordpress/zero-admin/build/admin.css",
-  "wordpress/zero-admin/build/admin.asset.php",
 ]);
 
+// Tree entries are whole build-output directories (gitignored), expanded per
+// file by installer.php from the payload it extracts. Pin the shipped set here
+// so a new tree is a reviewed diff, with the script that produces each.
+const EXPECTED_TREES = {
+  // packages/zero-admin/scripts/build.ts
+  "wordpress/zero-admin": "wp-content/mu-plugins/zero-admin",
+  // zero/scripts/build.ts (the vendored Zero dashboard plugin)
+  "wordpress/zero-dashboard": "wp-content/mu-plugins/zero-dashboard",
+} as const;
+
 // Generated roots: present after a build, absent in a fresh checkout, so the
-// walk has to skip them either way and BUILD_ARTIFACTS reconciles their
-// manifest entries instead. Turbo task metadata is build output the same way.
-const GENERATED_ROOTS = [".turbo", "bin", "wordpress/zero-admin"];
+// walk has to skip them either way — trees reconcile their manifest entries
+// instead. Turbo task metadata is build output the same way.
+const GENERATED_ROOTS = [".turbo", "bin", "wordpress/zero-admin", "wordpress/zero-dashboard"];
 
 // Walk the working tree, not Git's index, because the dev engine builder
 // packages the working tree too. An untracked PHP module must be covered before
@@ -104,6 +108,19 @@ test("engine-manifest.json lists exactly the runtime files that ship", () => {
   ).toEqual([]);
 });
 
+test("manifest trees are exactly the pinned build-output directories", () => {
+  const pinned = Object.entries(EXPECTED_TREES).map(([source, treePath]) => ({
+    source,
+    path: treePath,
+  }));
+  expect(manifest.trees.toSorted((a, b) => a.source.localeCompare(b.source))).toEqual(pinned);
+  // A tree root must be excluded from the disk walk, or the file guard above
+  // would demand per-file manifest rows for gitignored build output.
+  for (const { source } of pinned) {
+    expect(GENERATED_ROOTS).toContain(source);
+  }
+});
+
 // An exclusion matching nothing is an unjustified carve-out, and those get
 // reused later to silence a real miss. Keep the list as short as the tree
 // allows.
@@ -119,8 +136,12 @@ test("every NOT_SHIPPED exclusion still covers something on disk", () => {
 // installer.php enforces both at install time, where the symptom is a site-wide
 // `runtime_engine_manifest_invalid` on a real rollout. Asserting here turns that
 // into a CI failure on the commit that caused it.
-test("every manifest alias and executable points at a listed file", () => {
+test("every manifest alias and executable points at a listed file or tree file", () => {
   const listed = new Set(manifest.files);
-  expect(manifest.aliases.filter((alias) => !listed.has(alias.source))).toEqual([]);
+  const underTree = (source: string) =>
+    manifest.trees.some((tree) => source.startsWith(`${tree.source}/`));
+  expect(
+    manifest.aliases.filter((alias) => !listed.has(alias.source) && !underTree(alias.source)),
+  ).toEqual([]);
   expect(manifest.executables.filter((file) => !listed.has(file))).toEqual([]);
 });

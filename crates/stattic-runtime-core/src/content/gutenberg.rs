@@ -26,6 +26,9 @@ pub(super) fn block_page(
         date: None,
         layout: None,
         draft: false,
+        // `raw` is a Markdown frontmatter escape hatch; a block page is
+        // already served as the file it was uploaded as.
+        raw: false,
         layout_rendered: false,
     }
 }

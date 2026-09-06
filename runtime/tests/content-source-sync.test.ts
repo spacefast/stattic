@@ -6,7 +6,108 @@
 import { expect, test } from "bun:test";
 
 import { verifySyncLedgerV1 } from "../../packages/common/src/contracts/content-contract-verification.ts";
-import { problem, receipt, runScenario } from "./content-sync.test-helper.ts";
+import { syncMaterializeReceiptV1Schema } from "../../packages/common/src/contracts/content-sync.ts";
+import {
+  materialized,
+  problem,
+  receipt,
+  runScenario,
+  TSX_BINDING,
+  TSX_SOURCE,
+  type StepResult,
+} from "./content-sync.test-helper.ts";
+
+function inspected(result: StepResult | undefined) {
+  if (!result?.ok || result.receipt.format !== "test.driver")
+    throw new Error(JSON.stringify(result));
+  return result.receipt;
+}
+
+test("release activation seeds canonical documents and preserves editor takeover identity", async () => {
+  const text =
+    '<!-- wp:paragraph --><p>Compiled page.</p><!-- /wp:paragraph --><!-- wp:latest-posts {"postsToShow":3} /-->';
+  const edited = "<!-- wp:paragraph -->\n<p>Editor owns this.</p>\n<!-- /wp:paragraph -->";
+  const outcomes = await runScenario("html", [
+    { op: "activatePage", format: "tsx", text },
+    { op: "renderPage" },
+    { op: "inspectPage" },
+    { op: "editInWordPress", blocks: edited },
+    { op: "activatePage", format: "tsx", text },
+    { op: "inspectPage" },
+    { op: "activatePage", format: "tsx", text: "<p>New code.</p>" },
+    { op: "inspectPage" },
+    { op: "editInWordPress", blocks: edited },
+    { op: "materialize", target: "binding" },
+    { op: "activatePage", format: "html", text: "<p>Editor owns this.</p>" },
+    { op: "inspectPage" },
+    { op: "activatePage", format: "tsx", text: "<p>Stale code.</p>" },
+    { op: "inspectPage" },
+    { op: "renderPage" },
+    { op: "renderPage", snapshot: { text, format: "tsx" } },
+  ]);
+  const renders = outcomes.filter(
+    (outcome) =>
+      outcome.ok &&
+      outcome.receipt.format === "test.driver" &&
+      outcome.receipt.status === "rendered",
+  );
+  const results = outcomes.filter((outcome) => !renders.includes(outcome));
+  expect(inspected(renders[0]).html).toContain("Compiled page.");
+  expect(inspected(renders[1]).html).toContain("Editor owns this.");
+  expect(inspected(renders[1]).html).not.toContain("Compiled page.");
+  expect(inspected(renders[2]).html).toContain("Compiled page.");
+  expect(inspected(renders[2]).html).toContain('<!-- wp:latest-posts {"postsToShow":3} /-->');
+  expect(inspected(renders[2]).html).not.toContain("Editor owns this.");
+  const initial = inspected(results[1]);
+  expect(initial).toMatchObject({
+    postStatus: "publish",
+    externalId: `source:${TSX_BINDING}`,
+    spaceId: "spc_alpha",
+  });
+  expect(initial.blocks).toBe(text);
+  expect(initial.ledger?.textDigest).toBe(
+    `sha256:${new Bun.CryptoHasher("sha256").update(text).digest("hex")}`,
+  );
+  expect(inspected(results[4]).blocks).toBe(edited);
+  expect(inspected(results[6]).blocks).toContain("New code.");
+  expect(materialized(results[8]).sourceWrite.source).toBe("pages/docs/about.html");
+  const takeover = inspected(results[10]);
+  expect(results[9]?.ok).toBe(true);
+  expect(takeover.postId).toBe(initial.postId);
+  expect(takeover.externalId).toBe(initial.externalId);
+  expect(takeover.ledger?.source).toBe("pages/docs/about.html");
+  expect(takeover.blocks).toContain("Editor owns this.");
+  expect(problem(results[11]).code).toBe("content_document_editor_owned");
+  expect(inspected(results[12]).blocks).toBe(takeover.blocks);
+});
+
+test("sealed Markdown activation retains editor-only edits and refuses conflicting or corrupt source", async () => {
+  const original = "Original paragraph.\n";
+  const edited = "<!-- wp:paragraph -->\n<p>Editor paragraph.</p>\n<!-- /wp:paragraph -->";
+  const results = await runScenario("md", [
+    { op: "activatePage", format: "md", text: original },
+    { op: "inspectPage" },
+    { op: "editInWordPress", blocks: edited },
+    { op: "activatePage", format: "md", text: original, release: "new-app-code" },
+    { op: "inspectPage" },
+    { op: "activatePage", format: "md", text: "Conflicting source.\n" },
+    { op: "inspectPage" },
+    { op: "activatePage", format: "md", text: "Editor paragraph.\n" },
+    { op: "inspectPage" },
+    { op: "activatePage", format: "md", text: original, invalidDigest: true },
+    { op: "inspectPage" },
+  ]);
+  expect(inspected(results[1]).postStatus).toBe("publish");
+  expect(inspected(results[4]).blocks).toBe(edited);
+  expect(inspected(results[4]).ledger).toEqual(inspected(results[1]).ledger);
+  expect(problem(results[5]).code).toBe("content_sync_conflict");
+  expect(inspected(results[6]).activeRevision).toBe(inspected(results[4]).activeRevision);
+  expect(inspected(results[6]).blocks).toBe(edited);
+  expect(results[7]?.ok).toBe(true);
+  expect(inspected(results[8]).ledger?.baseText).toContain("Editor paragraph.");
+  expect(problem(results[9]).code).toBe("content_document_seed_invalid");
+  expect(inspected(results[10]).activeRevision).toBe(inspected(results[8]).activeRevision);
+});
 
 test("a repo Markdown file binds, survives a WordPress edit, and round-trips back byte-stable", async () => {
   const source = "# Launch\n\nThe first paragraph.\n\n- alpha\n- beta\n";
@@ -210,4 +311,150 @@ test("the receipt book is bounded, so the oldest operation stops replaying", asy
   expect(receipt(results[2]).status).toBe("pulled");
   expect(receipt(results[3]).status).toBe("acknowledged");
   expect(problem(results[results.length - 1]).code).toBe("content_sync_not_prepared");
+});
+
+// Materialization is the other direction of the same lane: a document WordPress
+// holds and no file backs yet. There is no common base to move, so the answer is
+// a NEW path plus the canonical text of what WordPress holds — never a merge.
+
+// One document per serializer, each spelled the way that serializer's own suite
+// pins as representable: Markdown carries the heading anchor, the blocks-engine
+// HTML transformer does not.
+const MARKDOWN_BLOCKS =
+  '<!-- wp:heading {"level":1} -->\n' +
+  '<h1 class="wp-block-heading" id="hello-world">Hello world</h1>\n' +
+  "<!-- /wp:heading -->\n\n" +
+  "<!-- wp:paragraph -->\n<p>Written in the editor.</p>\n<!-- /wp:paragraph -->\n";
+const HTML_BLOCKS =
+  '<!-- wp:heading {"level":1} -->\n' +
+  '<h1 class="wp-block-heading">Hello world</h1>\n' +
+  "<!-- /wp:heading -->\n\n" +
+  "<!-- wp:paragraph -->\n<p>Written in the editor.</p>\n<!-- /wp:paragraph -->\n";
+
+function digest(text: string) {
+  return `sha256:${new Bun.CryptoHasher("sha256").update(text).digest("hex")}`;
+}
+
+test("an editor-created page materializes once under canonical pages", async () => {
+  const [, first, second, unmanaged] = await runScenario("md", [
+    { op: "createInWordPress", slug: "hello-world", blocks: MARKDOWN_BLOCKS, postType: "page" },
+    { op: "materialize", target: "post" },
+    { op: "materialize", target: "post" },
+    { op: "materialize", target: "post", managed: false },
+  ]);
+
+  const prepared = materialized(first);
+  expect(prepared.status).toBe("materialized");
+  // The glob's directory and suffix decide the path; the slug is the post's own.
+  expect(prepared.sourceWrite.source).toBe("pages/hello-world.md");
+  // A new file: the compare-and-swap the drain performs is "nothing is there".
+  expect(prepared.sourceWrite.expectedSourceRevision).toBe("absent");
+  expect(prepared.sourceWrite.state).toBe("prepared");
+  expect(prepared.sourceWrite.text).toContain("# Hello world");
+  expect(prepared.sourceWrite.text).toContain("Written in the editor.");
+  expect(prepared.sourceWrite.textDigest).toBe(digest(prepared.sourceWrite.text));
+
+  // A post that already has a path keeps it: the second call mints nothing.
+  const repeated = materialized(second);
+  expect(repeated.status).toBe("skipped");
+  expect(repeated.sourceWrite.source).toBe(prepared.sourceWrite.source);
+
+  expect(problem(unmanaged).code).toBe("content_auth_required");
+});
+
+test("a document richer than its materialization format is refused, not flattened", async () => {
+  const [, refused] = await runScenario("md", [
+    {
+      op: "createInWordPress",
+      slug: "styled",
+      // `align` and `className` do not survive a Markdown round trip, so this
+      // document has no honest Markdown spelling — the existing representability
+      // gate is what says so, and materialization must not get a second one.
+      blocks:
+        '<!-- wp:paragraph {"align":"center","className":"lead"} -->\n' +
+        '<p class="has-text-align-center lead">Styled in the editor.</p>\n' +
+        "<!-- /wp:paragraph -->\n",
+    },
+    { op: "materialize", target: "post" },
+  ]);
+  expect(problem(refused).code).toBe("content_markdown_not_representable");
+});
+
+test("the editor taking over a compiled page materializes it as HTML beside the source", async () => {
+  const [, taken] = await runScenario("md", [
+    { op: "createInWordPress", slug: "about", blocks: HTML_BLOCKS, postType: "page", bound: true },
+    { op: "materialize", target: "binding" },
+  ]);
+
+  const prepared = materialized(taken);
+  expect(prepared.status).toBe("materialized");
+  // HTML, not Markdown: a page authored as code must not be handed back in the
+  // format most likely to refuse it. The takeover file sits beside the source it
+  // supersedes, same directory and slug, different extension.
+  expect(TSX_SOURCE).toBe("pages/docs/about.tsx");
+  expect(prepared.sourceWrite.source).toBe("pages/docs/about.html");
+  expect(prepared.sourceWrite.expectedSourceRevision).toBe("absent");
+  expect(prepared.sourceWrite.text).toContain('<h1 class="wp-block-heading">Hello world</h1>');
+  expect(prepared.sourceWrite.text).toContain("Written in the editor.");
+
+  // The wire between the two halves, pinned in one place. The scenario drove the
+  // engine with the exact body `materializeRuntimeContentSource` sends — a
+  // `postId` beside the `bindingId` on the takeover — and what came back has to
+  // be what the drain's own schema accepts, field for field, or the drain
+  // rejects a receipt the engine considers well formed.
+  expect(syncMaterializeReceiptV1Schema.parse(prepared)).toEqual(prepared);
+});
+
+test("canonical document lookup is binding-scoped and source adoption is explicit", async () => {
+  const results = await runScenario("md", [
+    { op: "createInWordPress", slug: "about", blocks: HTML_BLOCKS, postType: "page" },
+    {
+      op: "createInWordPress",
+      slug: "about",
+      blocks: HTML_BLOCKS,
+      postType: "page",
+      bound: true,
+      spaceId: "spc_other",
+    },
+    { op: "lookupPage" },
+    {
+      op: "createInWordPress",
+      slug: "about",
+      blocks: HTML_BLOCKS,
+      postType: "page",
+      source: TSX_SOURCE,
+    },
+    { op: "lookupPage", adopt: true },
+    { op: "lookupPage" },
+    {
+      op: "createInWordPress",
+      slug: "unrelated-slug",
+      blocks: HTML_BLOCKS,
+      postType: "page",
+      bound: true,
+    },
+    { op: "lookupPage" },
+    {
+      op: "createInWordPress",
+      slug: "duplicate",
+      blocks: HTML_BLOCKS,
+      postType: "page",
+      bound: true,
+    },
+    { op: "lookupPage" },
+  ]);
+  expect(results[2]).toEqual({
+    ok: true,
+    receipt: { format: "test.driver", status: "lookup", postId: null },
+  });
+  expect(results[4]).toEqual({
+    ok: true,
+    receipt: { format: "test.driver", status: "lookup", postId: 102 },
+  });
+  expect(results[5]).toEqual(results[2]);
+  expect(results[7]).toEqual({
+    ok: true,
+    receipt: { format: "test.driver", status: "lookup", postId: 103 },
+  });
+  expect(problem(results[9])).toMatchObject({ code: "content_document_identity_conflict" });
 });

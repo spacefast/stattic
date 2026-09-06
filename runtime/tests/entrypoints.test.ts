@@ -180,6 +180,11 @@ function _stattic_content_access_target(string $root, string $host): array {
         "",
       ].join("\n"),
     );
+    // On a managed box WordPress core lives under `__wp__/` and only wp-load.php
+    // is linked into the install root; the REST lane resolves the front
+    // controller beside that link's target, so the gate needs wp-load.php to
+    // exist to hand /wp-json off to WordPress at all.
+    writeFileSync(path.join(root, "wp-load.php"), "<?php");
     const driver = path.join(root, "driver.php");
     writeFileSync(
       driver,

@@ -25,17 +25,20 @@
 //   * bytes live only in the CAS at spaces/<s>/blobs/<aa>/<sha>.
 import { setDefaultTimeout } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { once } from "node:events";
 import {
   chmodSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import net from "node:net";
@@ -452,14 +455,12 @@ const ZERO_ADMIN_BUILD_SCRIPT = "packages/zero-admin/scripts/build.ts";
  * Its source lives in packages/zero-admin and its output under
  * runtime/wordpress/zero-admin is gitignored, so a fresh checkout and every CI
  * lane that runs `bun test` directly start without it while the manifest ships
- * it. Left to itself the drift check below then reports manifest staleness
- * naming eight files nobody edited. Build it lazily here, the way the native
- * binary is built, so every consumer of this harness gets it — a test lane, a
- * control-plane test spawning a runtime, or a developer running one file.
+ * it. Build it lazily here, the way the native binary is built, so every
+ * consumer of this harness gets it — a test lane, a control-plane test spawning
+ * a runtime, or a developer running one file.
  */
-function ensureZeroAdminPlugin(manifestFiles: string[]): void {
-  const shipped = manifestFiles.filter((file) => file.startsWith(`${ZERO_ADMIN_PLUGIN_ROOT}/`));
-  if (shipped.every((file) => existsSync(path.join(RUNTIME_DIR, file)))) return;
+function ensureZeroAdminPlugin(): void {
+  if (existsSync(path.join(RUNTIME_DIR, ZERO_ADMIN_PLUGIN_ROOT, "zero-admin.php"))) return;
   const build = spawnSync(process.execPath, [path.join(REPO_ROOT, ZERO_ADMIN_BUILD_SCRIPT)], {
     cwd: REPO_ROOT,
     encoding: "utf8",
@@ -469,11 +470,84 @@ function ensureZeroAdminPlugin(manifestFiles: string[]): void {
   }
 }
 
+type InstalledEngineManifest = {
+  executables: string[];
+  aliases: Array<{ source: string; path: string }>;
+  trees: Array<{ source: string; path: string }>;
+};
+
+function walkFiles(root: string): string[] {
+  const files: string[] = [];
+  const visit = (directory: string, prefix: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const relative = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) visit(path.join(directory, entry.name), relative);
+      else if (entry.isFile()) files.push(relative);
+      else throw new Error(`unexpected release link: ${relative}`);
+    }
+  };
+  visit(root, "");
+  return files.toSorted();
+}
+
+function hashPayloadEntry(
+  digest: ReturnType<typeof createHash>,
+  servedPath: string,
+  mode: number,
+  source: string,
+): void {
+  const bytes = readFileSync(source);
+  digest.update(`${servedPath}\0${mode}\0${bytes.byteLength}\0`);
+  digest.update(bytes);
+}
+
+function engineLoaderIdentity(releaseRoot: string, manifest: InstalledEngineManifest): string {
+  const digest = createHash("sha256");
+  for (const tree of manifest.trees.toSorted((left, right) =>
+    left.path.localeCompare(right.path),
+  )) {
+    for (const relative of walkFiles(path.join(releaseRoot, tree.source))) {
+      hashPayloadEntry(
+        digest,
+        `${tree.path}/${relative}`,
+        0o644,
+        path.join(releaseRoot, tree.source, relative),
+      );
+    }
+  }
+  for (const alias of manifest.aliases.toSorted((left, right) =>
+    left.path.localeCompare(right.path),
+  )) {
+    hashPayloadEntry(
+      digest,
+      alias.path,
+      manifest.executables.includes(alias.source) ? 0o755 : 0o644,
+      path.join(releaseRoot, alias.source),
+    );
+  }
+  return digest.digest("hex");
+}
+
+function engineReleaseIdentity(releaseRoot: string): string {
+  const digest = createHash("sha256");
+  for (const relative of walkFiles(releaseRoot).filter((file) => file !== ".payload-identity")) {
+    const source = path.join(releaseRoot, relative);
+    hashPayloadEntry(digest, relative, lstatSync(source).mode & 0o7777, source);
+  }
+  return digest.digest("hex");
+}
+
 function installEngine(root: string): void {
+  // SAFETY: runtime/installer.php validates this file's shape at install time; the harness reads the same fields.
   const manifest = JSON.parse(
     readFileSync(path.join(RUNTIME_DIR, "engine-manifest.json"), "utf8"),
-  ) as { files: string[]; aliases: Array<{ source: string; path: string }> };
-  ensureZeroAdminPlugin(manifest.files);
+  ) as {
+    files: string[];
+    aliases: Array<{ source: string; path: string }>;
+    trees: Array<{ source: string; path: string }>;
+    executables: string[];
+  };
+  ensureZeroAdminPlugin();
   // The manifest is the single authority for what ships, and it is edited by
   // the orchestrator at commit time rather than by the streams that add or
   // delete engine files. A drifted manifest therefore fails here first — report
@@ -495,14 +569,94 @@ function installEngine(root: string): void {
     const source =
       file === "bin/stattic-runtime" ? runtimeBinaryPath() : path.join(RUNTIME_DIR, file);
     cpSync(source, target);
+    chmodSync(target, manifest.executables.includes(file) ? 0o755 : 0o644);
+  }
+  // Trees are gitignored build output the installer expands per file. The
+  // harness mirrors the ones that exist: zero-admin is ensured above (a cheap
+  // bun build); the Zero dashboard tree needs its own workspace install
+  // (zero/scripts/build.ts) and no engine behavior under test executes it, so
+  // an absent tree is simply not installed into the fake box.
+  for (const tree of manifest.trees ?? []) {
+    const source = path.join(RUNTIME_DIR, tree.source);
+    if (!existsSync(source)) continue;
+    const releaseTree = path.join(releaseRoot, tree.source);
+    cpSync(source, releaseTree, { recursive: true });
+    for (const file of walkFiles(releaseTree)) chmodSync(path.join(releaseTree, file), 0o644);
   }
   for (const alias of manifest.aliases) {
+    const source = path.join(RUNTIME_DIR, alias.source);
+    if (!existsSync(source)) continue;
     const target = path.join(root, alias.path);
     mkdirSync(path.dirname(target), { recursive: true });
-    cpSync(path.join(RUNTIME_DIR, alias.source), target);
+    cpSync(source, target);
+    chmodSync(target, manifest.executables.includes(alias.source) ? 0o755 : 0o644);
   }
+  const installedManifest: InstalledEngineManifest = {
+    executables: manifest.executables,
+    aliases: manifest.aliases.filter((alias) => existsSync(path.join(releaseRoot, alias.source))),
+    trees: manifest.trees.filter((tree) => existsSync(path.join(releaseRoot, tree.source))),
+  };
+  writeFileSync(
+    path.join(releaseRoot, "engine-manifest.json"),
+    `${JSON.stringify({ ...manifest, ...installedManifest })}\n`,
+  );
+  chmodSync(path.join(releaseRoot, "engine-manifest.json"), 0o644);
+  const loaderIdentity = engineLoaderIdentity(releaseRoot, installedManifest);
+  for (const tree of installedManifest.trees) {
+    const source = path.join(releaseRoot, tree.source);
+    if (!existsSync(source)) continue;
+    const target = path.join(root, tree.path);
+    const version = path.join(
+      path.dirname(target),
+      "spacefast-tree-releases",
+      path.basename(tree.path),
+      `${loaderIdentity}-test`,
+    );
+    mkdirSync(path.dirname(version), { recursive: true });
+    cpSync(source, version, { recursive: true });
+    symlinkSync(
+      path.join("spacefast-tree-releases", path.basename(tree.path), `${loaderIdentity}-test`),
+      target,
+    );
+  }
+  const releaseIdentity = engineReleaseIdentity(releaseRoot);
+  const installRoot = path.join(root, ".stattic");
+  writeFileSync(path.join(releaseRoot, ".payload-identity"), `${releaseIdentity}\n`, {
+    mode: 0o644,
+  });
+  writeFileSync(path.join(installRoot, "loader-version"), `${loaderIdentity}\n`, { mode: 0o644 });
   writeActiveReleasePointer(path.join(root, ".stattic"), release);
-  mkdirSync(path.join(root, ".stattic", "storage"), { recursive: true });
+  const authorityRoot = path.join(installRoot, "release-authorities");
+  mkdirSync(authorityRoot, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    path.join(authorityRoot, "test.json"),
+    `${JSON.stringify({
+      format: "spacefast.runtime.release-authority.v1",
+      release: "test",
+      payload_identity: releaseIdentity,
+      loader_identity: loaderIdentity,
+      revision: "source-tree",
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const nativeSha256 = createHash("sha256")
+    .update(readFileSync(path.join(releaseRoot, "bin/stattic-runtime")))
+    .digest("hex");
+  writeFileSync(
+    path.join(installRoot, "active-release-proof.json"),
+    `${JSON.stringify({
+      format: "spacefast.runtime.active-release-proof.v1",
+      release,
+      revision: "source-tree",
+      payload_identity: releaseIdentity,
+      loader_identity: loaderIdentity,
+      native_sha256: nativeSha256,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(path.join(installRoot, "installer.lock"), "");
+  writeFileSync(path.join(installRoot, "publication.lock"), "");
+  mkdirSync(path.join(installRoot, "storage"), { recursive: true });
 }
 
 function writeGeneratedConfig(root: string): void {
@@ -832,7 +986,9 @@ export async function postAccessCallback(
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
-      origin: `https://${host}`,
+      // Runtime fixtures use SPACEFAST_INSECURE_COOKIES=1 and therefore own
+      // an http origin. The production scheme is always https.
+      origin: `http://${host}`,
       ...(cookie ? { cookie } : {}),
     },
     body: new URLSearchParams({ token, return: returnTo }),

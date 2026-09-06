@@ -27,11 +27,8 @@ pub(super) fn markdown_page(
     let image = string_in(&frontmatter, "image").or_else(|| string_in_opt(site_meta, "image"));
     let date = frontmatter.get("date").and_then(frontmatter_date);
     let layout = string_in(&frontmatter, "layout");
-    let draft = frontmatter.get("draft").is_some_and(|v| {
-        v.as_bool().unwrap_or(false)
-            || v.as_str()
-                .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "true" | "yes" | "1"))
-    });
+    let draft = frontmatter_flag(&frontmatter, "draft");
+    let raw = frontmatter_flag(&frontmatter, "raw");
     let output_path = markdown_output_path(path);
     Ok(Page {
         source_path: path.into(),
@@ -43,7 +40,22 @@ pub(super) fn markdown_page(
         date,
         layout,
         draft,
+        raw,
         layout_rendered: false,
+    })
+}
+
+/// A frontmatter boolean, spelled the way people spell booleans.
+///
+/// YAML gives `true`; hand-written frontmatter gives `yes` or `1` just as
+/// often. Anything else is false: a junk value is not worth a diagnostic when
+/// the honest reading of "not true" is "no".
+fn frontmatter_flag(frontmatter: &Map<String, Value>, key: &str) -> bool {
+    frontmatter.get(key).is_some_and(|value| {
+        value.as_bool().unwrap_or(false)
+            || value.as_str().is_some_and(|text| {
+                matches!(text.to_ascii_lowercase().as_str(), "true" | "yes" | "1")
+            })
     })
 }
 

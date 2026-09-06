@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::constants::{
-    ENDPOINTS_INDEX_FORMAT, ENDPOINTS_INDEX_KIND, ENDPOINT_FORMAT, QUICKJS_ABI, RUNNER_ABI,
-    RUN_FORMAT,
+    DB_CAPABILITY_ABI, ENDPOINTS_INDEX_FORMAT, ENDPOINTS_INDEX_KIND, ENDPOINT_FORMAT, QUICKJS_ABI,
+    RUNNER_ABI, RUN_FORMAT,
 };
 use crate::protocol::InvokeEnvelope;
 use crate::response::{error_response, RunnerResponse};
@@ -60,6 +60,8 @@ struct RawEndpointArtifact {
     runner_abi: String,
     quickjs_abi: String,
     #[serde(default)]
+    db_capability_abi: Option<String>,
+    #[serde(default)]
     capabilities: DeclaredCapabilities,
     #[serde(default)]
     db: EndpointDbMetadata,
@@ -81,6 +83,7 @@ pub(crate) struct EndpointArtifact {
     pub bytecode_sha256: String,
     pub runner_abi: String,
     pub quickjs_abi: String,
+    pub db_capability_abi: Option<String>,
     pub capabilities: EndpointCapabilities,
     pub db: EndpointDbMetadata,
     /// True when the artifact declared no execution mode, which only a capsule
@@ -116,6 +119,7 @@ impl RawEndpointArtifact {
             bytecode_sha256: self.bytecode_sha256,
             runner_abi: self.runner_abi,
             quickjs_abi: self.quickjs_abi,
+            db_capability_abi: self.db_capability_abi,
             capabilities: self.capabilities.resolve(if frozen_shape {
                 EndpointCapabilities::conservative()
             } else {
@@ -164,6 +168,8 @@ pub struct EndpointCapabilities {
     pub content: bool,
     #[serde(default)]
     pub storage: bool,
+    #[serde(default)]
+    pub connectors: bool,
 }
 
 impl Default for EndpointCapabilities {
@@ -186,6 +192,7 @@ impl EndpointCapabilities {
             email: true,
             content: false,
             storage: false,
+            connectors: false,
         }
     }
 
@@ -205,13 +212,14 @@ impl EndpointCapabilities {
             email: false,
             content: false,
             storage: false,
+            connectors: false,
         }
     }
 
     /// Whether this handler reaches any brokered platform service. The prelude
     /// installs one bridge for all of them, so this is what gates it.
     pub(crate) fn any_service(&self) -> bool {
-        self.gravatar || self.spam || self.email || self.content || self.storage
+        self.gravatar || self.spam || self.email || self.content || self.storage || self.connectors
     }
 }
 
@@ -237,6 +245,7 @@ struct DeclaredCapabilities {
     email: Option<bool>,
     content: Option<bool>,
     storage: Option<bool>,
+    connectors: Option<bool>,
 }
 
 impl DeclaredCapabilities {
@@ -255,6 +264,7 @@ impl DeclaredCapabilities {
             email: self.email.unwrap_or(absent.email),
             content: self.content.unwrap_or(absent.content),
             storage: self.storage.unwrap_or(absent.storage),
+            connectors: self.connectors.unwrap_or(absent.connectors),
         }
     }
 }
@@ -263,7 +273,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EndpointDbMetadata {
     #[serde(default)]
@@ -363,6 +373,16 @@ impl EndpointArtifact {
                 422,
                 "zero_artifact_abi_mismatch",
                 "Endpoint artifact ABI does not match this runner.",
+            ));
+        }
+        if self.capabilities.db
+            && !self.db.tables.is_empty()
+            && self.db_capability_abi.as_deref() != Some(DB_CAPABILITY_ABI)
+        {
+            return Err(error_response(
+                422,
+                "zero_db_artifact_republish_required",
+                "Republish this version to use the current Zero DB capability.",
             ));
         }
         // A frozen artifact is exempt: it carries the open write-side grant

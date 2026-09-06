@@ -178,9 +178,17 @@ function _stattic_service_invocation_id(mixed $raw): string
  * The identity triple is the outbox's idempotency key. A replayed invocation
  * must arrive at the same key, or it sends the mail twice.
  */
-function _stattic_service_broker_env(array $identity): array
+function _stattic_service_broker_env(array $identity, array $config = []): array
 {
     $env = [];
+    $token = $config['connectors']['token'] ?? '';
+    $apiUrl = rtrim(_stattic_config_value('SPACEFAST_API_BASE_URL'), '/');
+    if (is_string($token) && $token !== '' && $apiUrl !== '') {
+        $env['SPACEFAST_SERVICE_CONNECTORS_URL'] = $apiUrl . '/v1/runtime/connectors/calls';
+        $env['SPACEFAST_ZERO_CONNECTORS_TOKEN'] = $token;
+        $env['SPACEFAST_SERVICE_CONNECTORS_TOKEN'] = $env['SPACEFAST_ZERO_CONNECTORS_TOKEN'];
+        $env['SPACEFAST_SERVICE_CONNECTORS_VISITOR'] = json_encode($identity['visitor'] ?? null, JSON_UNESCAPED_SLASHES);
+    }
     foreach ([
         'SPACEFAST_SERVICE_AKISMET_KEY',
         'SPACEFAST_SERVICE_GRAVATAR_KEY',

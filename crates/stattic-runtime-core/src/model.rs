@@ -205,6 +205,8 @@ pub struct ZeroCapabilities {
     pub content: bool,
     #[serde(default)]
     pub storage: bool,
+    #[serde(default)]
+    pub connectors: bool,
 }
 
 impl Default for ZeroCapabilities {
@@ -221,6 +223,7 @@ impl Default for ZeroCapabilities {
             email: false,
             content: false,
             storage: false,
+            connectors: false,
         }
     }
 }
@@ -244,6 +247,7 @@ pub struct ZeroEndpointArtifact {
     pub bytecode_sha256: String,
     pub runner_abi: String,
     pub quickjs_abi: String,
+    pub db_capability_abi: String,
     pub capabilities: ZeroCapabilities,
     pub db: Value,
 }
@@ -261,6 +265,7 @@ pub struct ZeroRunArtifact {
     pub bytecode_sha256: String,
     pub runner_abi: String,
     pub quickjs_abi: String,
+    pub db_capability_abi: String,
     pub capabilities: ZeroCapabilities,
     pub db: Value,
 }

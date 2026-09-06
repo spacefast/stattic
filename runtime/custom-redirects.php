@@ -27,6 +27,31 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
     }
     $publicRoot = basename(__DIR__) === '__spacefast' ? dirname(__DIR__) : __DIR__;
     $installRoot = $publicRoot . '/.stattic';
+    $publicationUnavailable = static function (): never {
+        http_response_code(503);
+        header('Retry-After: 1', true);
+        header('Content-Type: application/problem+json', true);
+        echo json_encode([
+            'type' => 'https://spacefast.com/problems/runtime_engine_update_busy',
+            'title' => 'Runtime engine update busy',
+            'status' => 503,
+            'code' => 'runtime_engine_update_busy',
+        ]);
+        exit;
+    };
+    $publicationLockPath = $installRoot . '/publication.lock';
+    if (is_link($installRoot) || is_link($publicationLockPath)) {
+        $publicationUnavailable();
+    }
+    $publicationLock = fopen($publicationLockPath, 'ce');
+    if (!is_resource($publicationLock) || !flock($publicationLock, LOCK_SH | LOCK_NB)) {
+        $publicationUnavailable();
+    }
+    $GLOBALS['SPACEFAST_RUNTIME_PUBLICATION_LOCK'] = $publicationLock;
+    $installTransaction = $installRoot . '/install-transaction.json';
+    if (file_exists($installTransaction) || is_link($installTransaction)) {
+        $publicationUnavailable();
+    }
     $releaseRoot = $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] ?? null;
     if (!is_string($releaseRoot)) {
         $pointerPath = $installRoot . '/active-release';
@@ -65,6 +90,17 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
     };
 
     $script = basename(__FILE__);
+    // Which pass this is, for the one lane that cannot run inside the
+    // provider's auto_prepend: WordPress. /scripts/env.php requires THIS copy
+    // before it defines DB_NAME/DB_USER/DB_HOST, WP_CONTENT_DIR,
+    // WP_CACHE_KEY_SALT and the rest of the WordPress environment, so a boot
+    // here reaches wpdb with an empty database tuple, dies in dead_db(), and
+    // the provider's own header callback reports 502. The provider always runs
+    // a main script after this pass. The engine's front controller resumes the
+    // deferred route directly; the provider's WordPress controller resumes it
+    // through the content loader at wp_loaded.
+    $GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'] = $script === 'custom-redirects.php'
+        && is_file($publicRoot . '/index.php');
     if ($script === 'custom-redirects.php') {
         // This copy is the provider's auto_prepend for every request, and each
         // entrypoint below runs its own script right after, so the visitor
@@ -147,8 +183,20 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 $isContentAdminPath
                 && _stattic_content_rest_request_path($path, is_array($_GET) ? $_GET : [])
             ) {
-                $frontController = dirname($installRoot) . '/wp-blog-header.php';
-                $restFrontController = is_file($frontController) ? $frontController : null;
+                // WordPress core is not the document root on a managed box: the
+                // provider keeps it under `__wp__/` and links only wp-load.php
+                // into the root the engine installs into. A front controller
+                // named beside THAT root is a file which never exists, so the
+                // REST lane declined every request and /wp-json answered with
+                // the Space's own 404. Resolve it beside the wp-load.php the
+                // page lane already boots, which is that link's target wherever
+                // the provider chooses to keep core.
+                $wpLoad = dirname($installRoot) . '/wp-load.php';
+                $wpRoot = is_file($wpLoad) ? dirname(realpath($wpLoad) ?: $wpLoad) : null;
+                $frontController = $wpRoot === null ? null : $wpRoot . '/wp-blog-header.php';
+                $restFrontController = $frontController !== null && is_file($frontController)
+                    ? $frontController
+                    : null;
                 $isContentAdminPath = $restFrontController !== null;
             }
         }
@@ -318,6 +366,19 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 if (!defined('WP_USE_THEMES')) {
                     define('WP_USE_THEMES', false);
                 }
+                // The page lane's reason, on the API door. This pass is the
+                // provider's auto_prepend, and /scripts/env.php defines
+                // DB_NAME/DB_USER/DB_HOST and WP_CONTENT_DIR only AFTER it
+                // returns; WordPress booted here reaches wpdb with an empty
+                // database tuple and dies in dead_db(). The document root's
+                // front controller runs next with the environment complete, and
+                // everything this gate decided — the Space scope, the resolved
+                // principal, the admission marker — is in $GLOBALS, which that
+                // pass shares. Declining here is how the request gets there.
+                if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
+                    $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER'] = $restFrontController;
+                    return;
+                }
                 require $restFrontController;
                 exit;
             }
@@ -335,6 +396,25 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             require $releaseRoot . '/engine/init.php';
         }
         return;
+    }
+
+    // The API door's half of the hand-off below. Nothing is re-entered: the gate
+    // ran to completion in the auto_prepend pass and left its verdict in
+    // $GLOBALS, so all that remains is the WordPress boot it declined to make.
+    $deferredRest = $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER'] ?? null;
+    if (is_string($deferredRest)) {
+        unset($GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER']);
+        require $deferredRest;
+        exit;
+    }
+
+    // A request the auto_prepend pass handed here so WordPress could boot with
+    // the environment /scripts/env.php finishes AFTER that pass. The lane and
+    // everything it loaded are already in this same process, so only the lane
+    // itself repeats — re-requiring init.php would redeclare its functions.
+    $deferred = $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] ?? null;
+    if (is_array($deferred) && function_exists('_sf_serve_fast')) {
+        _stattic_wordpress_page_resume_deferred_request();
     }
 
     if (in_array($script, ['content-admin.php', 'content.php'], true)) {

@@ -40,9 +40,8 @@ pub use artifacts::EndpointCapabilities as ZeroEndpointCapabilities;
 /// without this crate depending on it — the dependency only runs the other way.
 pub use services::SERVICE_UPSTREAM_HOSTS;
 
-/// Runner/QuickJS ABI identifiers, re-exported for protocol codegen so the
-/// generated PHP constants stay sourced from this crate.
-pub use constants::{QUICKJS_ABI, RUNNER_ABI};
+/// Runner and bytecode ABI identifiers shared with the runtime compiler.
+pub use constants::{DB_CAPABILITY_ABI, QUICKJS_ABI, RUNNER_ABI};
 
 /// The MySQL broker's operation shape and session pin. `shared/db-broker.php`
 /// is specified against this engine down to the bytes, so protocol codegen

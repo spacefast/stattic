@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use stattic_zero_runner::{
-    compile_endpoint_program, ZeroEndpointCapabilities, QUICKJS_ABI, RUNNER_ABI,
+    compile_endpoint_program, ZeroEndpointCapabilities, DB_CAPABILITY_ABI, QUICKJS_ABI, RUNNER_ABI,
     ZERO_ENDPOINTS_INDEX_FORMAT, ZERO_ENDPOINTS_INDEX_KIND, ZERO_ENDPOINT_FORMAT,
     ZERO_MIGRATIONS_FORMAT, ZERO_RUN_FORMAT,
 };
@@ -276,6 +276,7 @@ pub(crate) fn compile_zero_endpoints(
             bytecode_sha256: program.bytecode_sha256,
             runner_abi: RUNNER_ABI.to_string(),
             quickjs_abi: QUICKJS_ABI.to_string(),
+            db_capability_abi: DB_CAPABILITY_ABI.to_string(),
             capabilities: endpoint.capabilities.clone(),
             db,
         };
@@ -373,6 +374,7 @@ pub(crate) fn compile_zero_endpoints(
             bytecode_sha256: program.bytecode_sha256,
             runner_abi: RUNNER_ABI.to_string(),
             quickjs_abi: QUICKJS_ABI.to_string(),
+            db_capability_abi: DB_CAPABILITY_ABI.to_string(),
             capabilities: run.capabilities.clone(),
             db,
         };
@@ -603,6 +605,7 @@ fn runner_capabilities(capabilities: &ZeroCapabilities) -> ZeroEndpointCapabilit
         email: capabilities.email,
         content: capabilities.content,
         storage: capabilities.storage,
+        connectors: capabilities.connectors,
     }
 }
 

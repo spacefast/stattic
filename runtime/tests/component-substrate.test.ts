@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -117,6 +117,67 @@ echo json_encode([
       active: false,
       present: false,
       problems: [],
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("component staging rejects stale Zero dashboard tree or loader bytes", async () => {
+  const componentApi = path.resolve(import.meta.dir, "../engine/admin/components.php");
+  const root = await mkdtemp(path.join(os.tmpdir(), "spacefast-component-zero-dashboard-"));
+  const treeRoot = path.join(root, "zero-dashboard");
+  const versionRoot = path.join(root, "spacefast-tree-releases/zero-dashboard/test-release");
+  const entry = path.join(versionRoot, "zero-dashboard.php");
+  const loader = path.join(root, "zero-dashboard.php");
+  const lockedBody = "<?php // locked dashboard\n";
+  await mkdir(versionRoot, { recursive: true });
+  await writeFile(entry, lockedBody);
+  await symlink("spacefast-tree-releases/zero-dashboard/test-release", treeRoot);
+  await writeFile(loader, lockedBody);
+  expect((await lstat(treeRoot)).isSymbolicLink()).toBe(true);
+  expect(await readlink(treeRoot)).toBe("spacefast-tree-releases/zero-dashboard/test-release");
+  const fileDigest = createHash("sha256").update(lockedBody).digest("hex");
+  const treeDigest = createHash("sha256")
+    .update(`zero-dashboard.php\0${fileDigest}\0`)
+    .digest("hex");
+  try {
+    const script = String.raw`
+require $argv[1];
+$lock = ['components' => [[
+    'id' => 'zero-dashboard',
+    'sha256' => 'sha256:' . $argv[3],
+]]];
+$clean = [];
+_stattic_component_check_embedded($lock, 'zero-dashboard', $argv[2], $clean, true);
+_stattic_component_check_loader_alias('zero-dashboard', $argv[2] . '/zero-dashboard.php', $argv[4], $clean);
+file_put_contents($argv[4], "<?php // stale loader\n");
+$staleLoader = [];
+_stattic_component_check_embedded($lock, 'zero-dashboard', $argv[2], $staleLoader, true);
+_stattic_component_check_loader_alias('zero-dashboard', $argv[2] . '/zero-dashboard.php', $argv[4], $staleLoader);
+file_put_contents($argv[2] . '/zero-dashboard.php', "<?php // stale tree\n");
+$staleTree = [];
+_stattic_component_check_embedded($lock, 'zero-dashboard', $argv[2], $staleTree, true);
+echo json_encode(['clean' => $clean, 'staleLoader' => $staleLoader, 'staleTree' => $staleTree], JSON_THROW_ON_ERROR);
+`;
+    const php = Bun.spawnSync(["php", "-r", script, componentApi, treeRoot, treeDigest, loader]);
+    expect(php.stderr.toString()).toBe("");
+    expect(JSON.parse(php.stdout.toString())).toEqual({
+      clean: [],
+      staleLoader: [
+        {
+          componentId: "zero-dashboard",
+          code: "component_digest_mismatch",
+          detail: "Installed component bytes do not match the platform lock.",
+        },
+      ],
+      staleTree: [
+        {
+          componentId: "zero-dashboard",
+          code: "component_digest_mismatch",
+          detail: "Installed component bytes do not match the platform lock.",
+        },
+      ],
     });
   } finally {
     await rm(root, { recursive: true, force: true });

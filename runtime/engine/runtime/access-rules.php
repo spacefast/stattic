@@ -48,6 +48,18 @@ function _stattic_canonicalize_host(string $host): string
     return rtrim(strtolower(trim($host)), '.');
 }
 
+function _stattic_runtime_request_origin(string $requestHost): string
+{
+    $authority = strtolower(trim((string) ($_SERVER['HTTP_HOST'] ?? '')));
+    if (
+        preg_match('/\A[a-z0-9.-]+(?::[0-9]{1,5})?\z/D', $authority) !== 1
+        || _stattic_normalize_hostname($authority) !== _stattic_normalize_hostname($requestHost)
+    ) {
+        $authority = _stattic_canonicalize_host($requestHost);
+    }
+    return _stattic_request_scheme() . '://' . $authority;
+}
+
 function _stattic_request_is_fetch(): bool
 {
     $mode = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_MODE'] ?? '')));
@@ -91,6 +103,9 @@ const STATTIC_ACCESS_SESSION_TOUCH_INTERVAL_SECONDS = 21600;
 // Must match the visitor-token verifier's clock leeway.
 const STATTIC_ACCESS_SESSION_CLOCK_SKEW_SECONDS = 300;
 const STATTIC_ACCESS_SESSION_SWEEP_THROTTLE_SECONDS = 3600;
+const STATTIC_ACCESS_BROWSER_STATE_COOKIE_PREFIX = '__Host-spacefast_access_state_';
+const STATTIC_ACCESS_BROWSER_STATE_DEV_COOKIE_PREFIX = 'spacefast_access_state_dev_';
+const STATTIC_ACCESS_BROWSER_STATE_SECONDS = 600;
 
 function _stattic_page_serving(): array
 {
@@ -3028,6 +3043,61 @@ function _stattic_access_url_with_params(string $url, array $params): string
     return $url . (str_contains($url, '?') ? '&' : '?') . $query;
 }
 
+function _stattic_access_browser_state_cookie_prefix(): string
+{
+    return _stattic_config_value('SPACEFAST_INSECURE_COOKIES') === '1'
+        ? STATTIC_ACCESS_BROWSER_STATE_DEV_COOKIE_PREFIX
+        : STATTIC_ACCESS_BROWSER_STATE_COOKIE_PREFIX;
+}
+
+function _stattic_access_browser_state_cookie_name(string $state): string
+{
+    return _stattic_access_browser_state_cookie_prefix() . substr($state, 0, 16);
+}
+
+function _stattic_access_browser_state_from_request(?string $expected = null): string
+{
+    if ($expected !== null) {
+        $value = $_COOKIE[_stattic_access_browser_state_cookie_name($expected)] ?? '';
+        return is_string($value) && hash_equals($expected, $value) ? $value : '';
+    }
+    $prefix = _stattic_access_browser_state_cookie_prefix();
+    foreach ($_COOKIE as $name => $value) {
+        if (
+            is_string($name)
+            && is_string($value)
+            && str_starts_with($name, $prefix)
+            && preg_match('/\A[a-f0-9]{64}\z/D', $value) === 1
+            && hash_equals($name, _stattic_access_browser_state_cookie_name($value))
+        ) {
+            return $value;
+        }
+    }
+    return '';
+}
+
+// Each nonce gets its own short-lived cookie name, so concurrent first-time
+// starts cannot overwrite each other before their callbacks return. Sequential
+// starts reuse an existing nonce and avoid growing the cookie jar.
+function _stattic_access_browser_state_begin(): string
+{
+    static $state = null;
+    if (is_string($state)) {
+        return $state;
+    }
+    $state = _stattic_access_browser_state_from_request();
+    if ($state !== '') {
+        return $state;
+    }
+    $state = bin2hex(random_bytes(32));
+    _stattic_set_cookie(
+        _stattic_access_browser_state_cookie_name($state),
+        $state,
+        STATTIC_ACCESS_BROWSER_STATE_SECONDS
+    );
+    return $state;
+}
+
 // Flow-state params are stripped so redirects and forms never loop.
 function _stattic_access_clean_return_path(): string
 {
@@ -3111,8 +3181,7 @@ function _stattic_access_lanes_fragment(
     $hasPopup = false;
     if (is_string($lanes['account'])) {
         $hasPopup = true;
-        $accountHref = _stattic_access_url_with_params($lanes['account'], [
-            'host' => $host,
+        $accountHref = _stattic_access_url_with_params(STATTIC_ACCESS_ACCOUNT_START_PATH, [
             'return' => $returnPath,
         ]);
         $buttons .= '<a class="sf-button sf-access-account" data-sf-access-popup href="'
@@ -3122,6 +3191,7 @@ function _stattic_access_lanes_fragment(
         $ssoHref = _stattic_access_url_with_params($connection['startUrl'], [
             'host' => $host,
             'return' => $returnPath,
+            'browserState' => _stattic_access_browser_state_begin(),
         ]);
         $buttons .= '<a class="sf-button sf-access-sso" href="' . _stattic_html_escape($ssoHref)
             . '">Continue with ' . _stattic_html_escape($connection['label']) . '</a>';
@@ -3305,6 +3375,7 @@ function _stattic_render_access_gate(array $serving, string $requestHost, array 
                 'silent' => '1',
                 'host' => $host,
                 'return' => $returnPath,
+                'browserState' => _stattic_access_browser_state_begin(),
             ];
             // A silent recovery with no upstream session must still preserve
             // the expiry diagnosis instead of the generic signed-out page.
@@ -3321,6 +3392,7 @@ function _stattic_render_access_gate(array $serving, string $requestHost, array 
             $redirect = _stattic_access_url_with_params($lanes['connections'][0]['startUrl'], [
                 'host' => $host,
                 'return' => $returnPath,
+                'browserState' => _stattic_access_browser_state_begin(),
             ]);
         }
         if ($redirect !== null) {
@@ -3491,10 +3563,8 @@ function _stattic_access_same_origin_post(string $requestHost): bool
         return $site === 'same-origin';
     }
     if ($origin !== '') {
-        $parsed = parse_url($origin);
-        return is_array($parsed)
-            && _stattic_canonicalize_host((string) ($parsed['host'] ?? ''))
-                === _stattic_canonicalize_host($requestHost);
+        $expectedOrigin = _stattic_runtime_request_origin($requestHost);
+        return hash_equals(strtolower($expectedOrigin), strtolower($origin));
     }
     return $site === 'same-origin';
 }
@@ -3527,6 +3597,30 @@ function _stattic_access_handle_client_script(): void
         . 'fetch(window.location.href,{method:"HEAD"}).then(function(response){if(response.ok){window.location.reload();}}).catch(function(){});});'
         . '})();';
     exit;
+}
+
+function _stattic_access_handle_account_start(array $serving, string $requestHost): void
+{
+    $method = _stattic_runtime_request_method();
+    if (!in_array($method, ['GET', 'HEAD'], true)) {
+        _stattic_method_not_allowed('GET, HEAD');
+    }
+    $descriptor = _stattic_access_page_descriptor($serving);
+    $accountUrl = is_array($descriptor) && is_string($descriptor['accountUrl'] ?? null)
+        ? $descriptor['accountUrl']
+        : '';
+    if ($accountUrl === '') {
+        _stattic_render_access_route_not_found();
+    }
+    $returnPath = _stattic_safe_return_path(
+        is_string($_GET['return'] ?? null) ? (string) $_GET['return'] : '/'
+    ) ?? '/';
+    $redirect = _stattic_access_url_with_params($accountUrl, [
+        'host' => _stattic_canonicalize_host($requestHost),
+        'return' => $returnPath,
+        'browserState' => _stattic_access_browser_state_begin(),
+    ]);
+    _stattic_access_redirect($redirect, 302, STATTIC_CACHE_CONTROL_NO_STORE, true);
 }
 
 function _stattic_access_post_lane_begin(
@@ -3873,6 +3967,16 @@ function _stattic_access_consume_handoff_token(
     if (($claims['purpose'] ?? null) !== STATTIC_HANDOFF_PURPOSE) {
         return null;
     }
+    if (array_key_exists('browserState', $claims)) {
+        $tokenState = is_string($claims['browserState'] ?? null)
+            && preg_match('/\A[a-f0-9]{64}\z/D', $claims['browserState']) === 1
+            ? $claims['browserState']
+            : '';
+        $browserState = _stattic_access_browser_state_from_request($tokenState);
+        if ($tokenState === '' || $browserState === '' || !hash_equals($tokenState, $browserState)) {
+            return null;
+        }
+    }
     $current = _stattic_current_session_identity($serving, $host);
     $currentSid = is_array($current) && is_string($current['sessionId'] ?? null)
         ? $current['sessionId']
@@ -3922,6 +4026,7 @@ function _stattic_access_consume_handoff_token(
 // purpose is REQUIRED positively by its own consumer.
 const STATTIC_SYSTEM_VIEW_PURPOSE = 'system-view';
 const STATTIC_FRAME_SESSION_PURPOSE = 'frame-session';
+const STATTIC_RUNTIME_BEARER_PURPOSE = 'runtime-bearer';
 
 function _stattic_frame_session_cookie_name(): string
 {
@@ -4442,6 +4547,45 @@ function _stattic_access_handle_link_entry(
 }
 
 // The raw access/API token never becomes a cookie and never reaches tenant code.
+function _stattic_access_verify_platform_identity_token(
+    array $serving,
+    string $host,
+    string $token
+): bool {
+    if (_stattic_access_verify_system_view_token($serving, $host, $token)) {
+        return true;
+    }
+    $verifyOptions = _stattic_visitor_verify_options($serving, $host, null, [
+        'requireJti' => false,
+    ]);
+    $verified = _stattic_visitor_verify($token, $verifyOptions);
+    $claims = is_array($verified) && is_array($verified['claims'] ?? null)
+        ? $verified['claims']
+        : [];
+    $purpose = $claims['purpose'] ?? null;
+    // Browser binding belongs only to an interactive handoff. A bearer with
+    // that claim cannot cross this header boundary under any purpose.
+    if (array_key_exists('browserState', $claims)) {
+        return false;
+    }
+    if ($purpose === STATTIC_RUNTIME_BEARER_PURPOSE) {
+        // This purpose is the reusable agent credential. Signature, expiry,
+        // Space generation and host binding were all checked above; its jti is
+        // an identifier, not a one-use redemption nonce.
+        return true;
+    }
+    if ($purpose !== STATTIC_HANDOFF_PURPOSE) {
+        return false;
+    }
+    // A server-to-server credential exchange mints one short-lived handoff for
+    // this request. Consume its jti here so copying that internal result cannot
+    // turn it into a reusable platform bearer.
+    return _stattic_visitor_verify(
+        $token,
+        array_merge($verifyOptions, ['requireJti' => true, 'iatMaxAge' => 60])
+    ) !== null;
+}
+
 function _stattic_platform_identity_token(
     array $serving,
     string $requestHost,
@@ -4455,18 +4599,21 @@ function _stattic_platform_identity_token(
     if ($presented === '') {
         return '';
     }
-    // Header lane, not the `?__=` lane: an integration presents whatever it was
-    // given, and a system view token it already holds is verified here instead
-    // of being re-exchanged. Compact serialization is three dot-separated parts.
-    if (substr_count($presented, '.') === 2) {
-        _stattic_access_verify_system_view_token($serving, _stattic_canonicalize_host($requestHost), $presented);
-        return $presented;
-    }
     $host = _stattic_canonicalize_host($requestHost);
     $landingPath = _stattic_safe_return_path($requestPath) ?? '/';
     $memoKey = $host . "\0" . $landingPath . "\0" . $presented;
     if (array_key_exists($memoKey, $memo)) {
         return $memo[$memoKey];
+    }
+    // Header lane, not the `?__=` lane: an integration presents whatever it was
+    // given, and a system view token it already holds is verified here instead
+    // of being re-exchanged. Compact serialization is three dot-separated parts.
+    if (substr_count($presented, '.') === 2) {
+        return $memo[$memoKey] = _stattic_access_verify_platform_identity_token(
+            $serving,
+            $host,
+            $presented
+        ) ? $presented : '';
     }
     $exchange = _stattic_access_page_exchange($serving);
     if ($exchange === null || !is_string($exchange['tokenUrl'] ?? null)) {
@@ -4489,7 +4636,9 @@ function _stattic_platform_identity_token(
         && is_string($fields['token'] ?? null)
     ) ? $fields['token'] : '';
     if ($identityToken !== '') {
-        _stattic_access_verify_system_view_token($serving, $host, $identityToken);
+        if (!_stattic_access_verify_platform_identity_token($serving, $host, $identityToken)) {
+            $identityToken = '';
+        }
     }
     return $memo[$memoKey] = $identityToken;
 }
@@ -4727,6 +4876,16 @@ function _stattic_access_handle_callback(array $serving, string $requestHost, st
     $requestMethod = _stattic_runtime_request_method();
     if ($requestMethod !== 'POST' && $requestMethod !== 'GET') {
         _stattic_method_not_allowed('GET, POST');
+    }
+    if (
+        $requestMethod === 'POST'
+        && (
+            !_stattic_access_same_origin_post($requestHost)
+            || strtolower(trim((string) strstr(($_SERVER['CONTENT_TYPE'] ?? '') . ';', ';', true)))
+                !== 'application/x-www-form-urlencoded'
+        )
+    ) {
+        _stattic_render_json_or_deny('access_origin_invalid', 'Cross-origin access submissions are not accepted.');
     }
     $fields = $requestMethod === 'POST' ? $_POST : $_GET;
     $tokenField = $requestMethod === 'POST' ? 'token' : 'sf_token';

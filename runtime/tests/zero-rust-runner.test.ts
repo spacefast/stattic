@@ -59,6 +59,27 @@ const MYSQL_TODOS_DB = {
         title: { physicalName: "todo_title" },
       },
     },
+    typedValues: {
+      physicalName: "zero_private_typed_values",
+      primaryKey: "id",
+      columns: {
+        id: "typed_private_id",
+        signed: "typed_private_signed",
+        unsigned: "typed_private_unsigned",
+        decimal: "typed_private_decimal",
+        bits: "typed_private_bits",
+        occurredAt: "typed_private_occurred_at",
+        duration: "typed_private_duration",
+        binary: "typed_private_binary",
+        json: "typed_private_json",
+        bounded: "typed_private_bounded",
+      },
+    },
+    missingValues: {
+      physicalName: "zero_private_missing_values",
+      primaryKey: "id",
+      columns: { id: "missing_private_id" },
+    },
   },
 } as const;
 const SHARED_ZERO_RUNS = [
@@ -150,7 +171,7 @@ globalThis.__statticZeroResult = JSON.stringify({
     params: request.params,
     body: request.bodyBase64,
     spaceId: context.spaceId,
-    dbInstalled: typeof globalThis.__statticDb !== "undefined",
+    dbInstalled: typeof globalThis.__statticDbCapability?.execute === "function",
     dbCapability: capabilities.db === true
   })
 });
@@ -160,6 +181,33 @@ globalThis.__statticZeroResult = JSON.stringify({
     database: MYSQL_DATABASE,
     rootPassword: MYSQL_ROOT_PASSWORD,
   });
+  mysql.exec(`
+    DROP TABLE IF EXISTS zero_private_typed_values;
+    CREATE TABLE zero_private_typed_values (
+      typed_private_id INT PRIMARY KEY,
+      typed_private_signed BIGINT,
+      typed_private_unsigned BIGINT UNSIGNED,
+      typed_private_decimal DECIMAL(30,10),
+      typed_private_bits BIT(8),
+      typed_private_occurred_at DATETIME(6),
+      typed_private_duration TIME(6),
+      typed_private_binary VARBINARY(8),
+      typed_private_json JSON,
+      typed_private_bounded VARCHAR(4)
+    ) ENGINE=InnoDB;
+    INSERT INTO zero_private_typed_values VALUES (
+      1,
+      -9223372036854775808,
+      18446744073709551615,
+      '12345678901234567890.1234567890',
+      b'11111111',
+      '2024-01-15 10:20:30.123456',
+      '100:20:30.123456',
+      UNHEX('C32800FF'),
+      JSON_OBJECT('k', 1, 'a', JSON_ARRAY(1, 2)),
+      'fits'
+    );
+  `);
 
   rt = await startRuntime({
     env: {
@@ -259,20 +307,46 @@ globalThis.__statticZeroResult = JSON.stringify({
           method: "POST",
           path: "/api/generated/db",
           source: `
-const endpoint = globalThis.__statticZeroEndpoint;
-const table = endpoint.db.tables.todos.quotedName;
-const insert = JSON.parse(globalThis.__statticDb(JSON.stringify({
-  mode: "execute",
-  sql: "INSERT INTO " + table + " (todo_title) VALUES (?)",
-  params: ["from-zero"]
-})));
-const rows = JSON.parse(globalThis.__statticDb(JSON.stringify({
-  sql: "SELECT todo_id, todo_title FROM " + table + " ORDER BY todo_id"
-})));
+const db = globalThis.__statticDbCapability;
+const insert = JSON.parse(db.execute({
+  kind: "insert",
+  table: "todos",
+  values: { title: "from-zero" }
+}));
+const rows = JSON.parse(db.execute({
+  kind: "select",
+  table: "todos",
+  order: [{ field: "id", direction: "asc" }]
+}));
+const rawSql = JSON.parse(db.execute({ sql: "DROP TABLE zero_items" }));
+const undeclaredTable = JSON.parse(db.execute({ kind: "select", table: "lifecycle" }));
+const typedWire = db.execute({
+  kind: "select",
+  table: "typedValues",
+  filters: [{ field: "id", op: "eq", value: 1 }]
+});
+const redactedWriteError = JSON.parse(db.execute({
+  kind: "insert",
+  table: "typedValues",
+  values: { id: 2, bounded: "too-long" }
+}));
+const redactedQueryError = JSON.parse(db.execute({
+  kind: "select",
+  table: "missingValues"
+}));
 globalThis.__statticZeroResult = JSON.stringify({
   status: 200,
   headers: { "content-type": "application/json; charset=utf-8" },
-  body: JSON.stringify({ insert, rows: rows.rows })
+  body: JSON.stringify({
+    insert,
+    rows: rows.rows,
+    rawSql,
+    undeclaredTable,
+    typedWire,
+    redactedWriteError,
+    redactedQueryError,
+    tableMetadata: globalThis.__statticZeroEndpoint.db.tables.todos
+  })
 });
 `,
           capabilities: { db: true },
@@ -283,23 +357,21 @@ globalThis.__statticZeroResult = JSON.stringify({
           method: "GET",
           path: "/api/generated/read-law",
           source: `
-const table = globalThis.__statticZeroEndpoint.db.tables.todos.quotedName;
-const count = () => JSON.parse(globalThis.__statticDb(JSON.stringify({
-  sql: "SELECT COUNT(*) AS total FROM " + table + " WHERE todo_title = ?",
-  params: ["repeatable-read-probe"]
-}))).rows[0].total;
-const before = count();
-globalThis.__statticDb(JSON.stringify({ sql: "SELECT SLEEP(1)" }));
-const after = count();
-const write = JSON.parse(globalThis.__statticDb(JSON.stringify({
-  mode: "execute",
-  sql: "INSERT INTO " + table + " (todo_title) VALUES (?)",
-  params: ["read-mode-write"]
-})));
+const db = globalThis.__statticDbCapability;
+const count = JSON.parse(db.execute({
+  kind: "count",
+  table: "todos",
+  filters: [{ field: "title", op: "eq", value: "read-mode-probe" }]
+})).rows[0].count;
+const write = JSON.parse(db.execute({
+  kind: "insert",
+  table: "todos",
+  values: { title: "read-mode-write" }
+}));
 globalThis.__statticZeroResult = JSON.stringify({
   status: 200,
   headers: { "content-type": "application/json; charset=utf-8" },
-  body: JSON.stringify({ before, after, write })
+  body: JSON.stringify({ count, write })
 });
 `,
           capabilities: { db: true },
@@ -425,6 +497,11 @@ const capsule = {
           .withIndex("by_creation")
           .order("desc")
           .collect();
+        const offsetOnly = await ctx.db.messages
+          .withIndex("by_creation")
+          .order("asc")
+          .offset(1)
+          .collect();
         const pageOne = await ctx.db.messages
           .withIndex("by_creation")
           .order("asc")
@@ -473,6 +550,7 @@ const capsule = {
           first: { ...first, createdAt: typeof first.createdAt, updatedAt: typeof first.updatedAt },
           longCursorLength: longPageOne.continueCursor.length,
           longPageTwo: longPageTwo.page.map((row) => row.title.length),
+          offsetOnly: offsetOnly.map((row) => row.title),
           pageOne: pageOne.page.map((row) => row.title),
           pageTwo: pageTwo.page.map((row) => row.title),
           pinned: pinned.map((row) => ({ pinned: row.pinned, title: row.title })),
@@ -856,17 +934,18 @@ async function publishRepublishSpace(versionId: string, withNote: boolean) {
           method: "POST",
           path: "/api/republish/db",
           source: `
-const endpoint = globalThis.__statticZeroEndpoint;
-const table = endpoint.db.tables.todos.quotedName;
-const note = endpoint.db.tables.todos.columns.note.quotedName;
-const insert = JSON.parse(globalThis.__statticDb(JSON.stringify({
-  mode: "execute",
-  sql: "INSERT INTO " + table + " (todo_title, " + note + ") VALUES (?, ?)",
-  params: ["republished", "added-field"]
-})));
-const rows = JSON.parse(globalThis.__statticDb(JSON.stringify({
-  sql: "SELECT todo_title, " + note + " AS note FROM " + table + " WHERE " + note + " IS NOT NULL ORDER BY todo_id"
-})));
+const db = globalThis.__statticDbCapability;
+const insert = JSON.parse(db.execute({
+  kind: "insert",
+  table: "todos",
+  values: { title: "republished", note: "added-field" }
+}));
+const rows = JSON.parse(db.execute({
+  kind: "select",
+  table: "todos",
+  filters: [{ field: "note", op: "eq", value: "added-field" }],
+  order: [{ field: "id", direction: "asc" }]
+}));
 globalThis.__statticZeroResult = JSON.stringify({
   status: 200,
   headers: { "content-type": "application/json; charset=utf-8" },
@@ -973,7 +1052,7 @@ test("republishing with an added schema field adds the column and lets writes us
   }
   expect(JSON.parse(text)).toMatchObject({
     insert: { ok: true, affectedRows: 1 },
-    rows: [{ note: "added-field", todo_title: "republished" }],
+    rows: [{ note: "added-field", title: "republished" }],
   });
 
   // MySQL has no `ADD COLUMN IF NOT EXISTS`, so a later publish replays the
@@ -1028,7 +1107,8 @@ test("applies compiler-produced Zero DB migrations during finalize", () => {
   expect(showIndex.stdout.toString()).toContain("todo_title");
 });
 
-test("executes Zero DB query and mutation through local MySQL", async () => {
+test("enforces the structured Zero DB capability through local MySQL", async () => {
+  mysql.exec("DROP TABLE IF EXISTS zero_private_missing_values");
   const response = await get(rt, GENERATED_HOST, "/api/generated/db", { method: "POST" });
   const text = await response.text();
 
@@ -1043,33 +1123,65 @@ test("executes Zero DB query and mutation through local MySQL", async () => {
     },
     rows: [
       {
-        todo_id: 1,
-        todo_title: "from-zero",
+        id: 1,
+        title: "from-zero",
       },
     ],
+    rawSql: {
+      ok: false,
+      code: "zero_db_capability_invalid",
+      message: "Zero DB accepts only declared structured operations.",
+    },
+    undeclaredTable: {
+      ok: false,
+      code: "zero_db_capability_denied",
+      message: "Zero DB table lifecycle is not declared.",
+    },
+    typedWire: expect.any(String),
+    redactedWriteError: {
+      ok: false,
+      code: "zero_db_execute_failed",
+      message: "The Zero DB write could not be completed.",
+    },
+    redactedQueryError: {
+      ok: false,
+      code: "zero_db_query_failed",
+      message: "The Zero DB query could not be completed.",
+    },
+    tableMetadata: {
+      name: "todos",
+      primaryKey: "id",
+      columns: {
+        id: { name: "id", type: "id" },
+        title: { name: "title", type: "string" },
+      },
+      indexes: {},
+    },
   });
+  const typedWire = JSON.parse(JSON.parse(text).typedWire);
+  expect(typedWire.rows[0]).toMatchObject({
+    binary: "wygA/w==",
+    bits: "/w==",
+    bounded: "fits",
+    decimal: "12345678901234567890.1234567890",
+    duration: "4 04:20:30.123456",
+    json: '{"a": [1, 2], "k": 1}',
+    occurredAt: "2024-01-15T10:20:30.123456Z",
+  });
+  expect(JSON.parse(text).typedWire).toContain('"signed":-9223372036854775808');
+  expect(JSON.parse(text).typedWire).toContain('"unsigned":18446744073709551615');
+  expect(text).not.toContain("zero_private_typed_values");
+  expect(text).not.toContain("typed_private_bounded");
+  expect(text).not.toContain("zero_private_missing_values");
 });
 
-test("holds read handlers on one repeatable-read snapshot and rejects writes", async () => {
-  mysql.exec(
-    "DELETE FROM zero_items WHERE todo_title IN ('repeatable-read-probe', 'read-mode-write')",
-  );
-  const pendingResponse = get(rt, GENERATED_HOST, "/api/generated/read-law");
-  let sleeping = false;
-  for (let attempt = 0; attempt < 100 && !sleeping; attempt += 1) {
-    sleeping =
-      mysql.exec(
-        "SELECT COUNT(*) FROM information_schema.processlist WHERE INFO LIKE 'SELECT SLEEP(1)%'",
-      ) === "1";
-  }
-  expect(sleeping).toBe(true);
-  mysql.exec("INSERT INTO zero_items (todo_title) VALUES ('repeatable-read-probe')");
-
-  const response = await pendingResponse;
+test("rejects writes from a read handler before they reach MySQL", async () => {
+  mysql.exec("DELETE FROM zero_items WHERE todo_title IN ('read-mode-probe', 'read-mode-write')");
+  mysql.exec("INSERT INTO zero_items (todo_title) VALUES ('read-mode-probe')");
+  const response = await get(rt, GENERATED_HOST, "/api/generated/read-law");
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({
-    before: 0,
-    after: 0,
+    count: 1,
     write: {
       ok: false,
       code: "zero_db_read_only",
@@ -1104,6 +1216,7 @@ test("executes the Lakebed database v1 API through the real Rust runner", async 
       updatedAt: "string",
     },
     longPageTwo: [3200],
+    offsetOnly: ["second"],
     pageOne: ["first"],
     pageTwo: ["second"],
     pinned: [{ pinned: true, title: "first" }],

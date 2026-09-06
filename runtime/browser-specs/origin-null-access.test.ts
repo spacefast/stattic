@@ -243,7 +243,11 @@ test("production transitions render every locally reachable state with independe
     await page.locator('input[name="password"]').fill(PASSWORD);
     await page.getByRole("button", { name: "Open" }).click();
     expect((await sessionResponsePromise).status()).toBe(303);
-    expect(await context.cookies(fixture.defaultPageUrl)).toHaveLength(1);
+    expect(
+      (await context.cookies(fixture.defaultPageUrl)).filter((cookie) =>
+        cookie.name.startsWith("spacefast_session"),
+      ),
+    ).toHaveLength(1);
     const expired = await fetch(`${fixture.exchangeControlUrl}/expire-sessions`, {
       method: "POST",
     });

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import path from "node:path";
 
-import { generateContentModelPhp } from "../../apps/control-plane/src/versions/version-content-model.ts";
+import { generateContentModelPhp } from "../../packages/zero-compile/src/content-model-php.ts";
 import {
   compileZeroContentModel,
   parseContentDeclarations,
@@ -15,6 +15,8 @@ const fixturePath = path.join(
   repoRoot,
   "packages/common/src/contracts/fixtures/content-platform-v1.json",
 );
+// The theme every managed Space renders through, as it ships in the engine.
+const managedThemeDirectory = path.join(repoRoot, "runtime/wordpress/managed-theme");
 
 function fixtureContentModel() {
   return JSON.parse(readFileSync(fixturePath, "utf8")).artifacts.model;
@@ -50,6 +52,9 @@ $refused = [];
 $terms = [];
 $savedPosts = [];
 $savedMeta = [];
+$assignedTerms = [];
+// The wp_template rows sitting on this box, across every Space co-hosted on it.
+$templatePosts = [];
 
 // Faithful enough to catch the one thing activation has to survive: it re-runs
 // on every publish, promote and rollback, and MySQL refuses to CREATE a table
@@ -108,19 +113,75 @@ function add_action(string $hook, mixed $callback, int $priority = 10, int $argu
 function add_filter(string $hook, mixed $callback, int $priority = 10, int $arguments = 1): void {
   add_action($hook, $callback, $priority, $arguments);
 }
-function remove_action(string $hook, mixed $callback, int $priority = 10): void {}
+function remove_action(string $hook, mixed $callback, int $priority = 10): void {
+  $GLOBALS['hooks'][$hook][$priority] = array_values(array_filter(
+    $GLOBALS['hooks'][$hook][$priority] ?? [],
+    static fn (mixed $registered): bool => $registered !== $callback
+  ));
+}
+function apply_filters(string $hook, mixed $value, mixed ...$arguments): mixed {
+  $callbacks = $GLOBALS['hooks'][$hook] ?? [];
+  ksort($callbacks);
+  foreach ($callbacks as $priorityGroup) {
+    foreach ($priorityGroup as $callback) $value = $callback($value, ...$arguments);
+  }
+  return $value;
+}
+function __return_false(): bool { return false; }
+// WordPress's option store, seeded the way a managed site actually comes up
+// (measured on a real box): the provider's dated permalink structure, and a
+// default theme that is named but not installed.
+$options = [
+  'permalink_structure' => '/%year%/%monthnum%/%day%/%postname%/',
+  'stylesheet' => 'twentytwentyfive',
+  'template' => 'twentytwentyfive',
+];
+function switch_theme(string $stylesheet): void {
+  $GLOBALS['options']['stylesheet'] = $stylesheet;
+  $GLOBALS['options']['template'] = $stylesheet;
+}
+// Existence is a real filesystem answer: the fixture points $themeDir at the
+// managed theme the engine actually ships, and nothing else is on this box.
+final class ContentModelTestTheme {
+  public function __construct(private string $slug) {}
+  public function exists(): bool {
+    return $this->slug === 'spacefast-managed' && is_dir((string) ($GLOBALS['themeDir'] ?? ''));
+  }
+}
+function wp_get_theme(string $stylesheet = ''): object {
+  return new ContentModelTestTheme($stylesheet === '' ? (string) get_option('stylesheet') : $stylesheet);
+}
+function get_option(string $name, mixed $default = false): mixed {
+  return $GLOBALS['options'][$name] ?? $default;
+}
+function get_stylesheet(): string { return (string) get_option('stylesheet'); }
+function update_option(string $name, mixed $value, mixed $autoload = null): bool {
+  $GLOBALS['options'][$name] = $value;
+  return true;
+}
 function doing_action(string $hook): bool { return $GLOBALS['currentAction'] === $hook; }
-function do_action(string $hook): void {
+function do_action(string $hook, mixed ...$arguments): void {
   $callbacks = $GLOBALS['hooks'][$hook] ?? [];
   ksort($callbacks);
   $GLOBALS['currentAction'] = $hook;
   try {
     foreach ($callbacks as $priorityGroup) {
-      foreach ($priorityGroup as $callback) $callback();
+      foreach ($priorityGroup as $callback) $callback(...$arguments);
     }
   } finally {
     $GLOBALS['currentAction'] = null;
   }
+}
+// The managed theme as it sits on a box, so a template's default markup is the
+// theme's real bytes rather than a transcription of them.
+function get_theme_file_path(string $file = ''): string {
+  return ($GLOBALS['themeDir'] ?? '') . '/' . $file;
+}
+/** Enough of WP_Query for the pre_get_posts scoping filter to act on. */
+final class ContentModelTestQuery {
+  public array $vars = [];
+  public function get(string $key): mixed { return $this->vars[$key] ?? ''; }
+  public function set(string $key, mixed $value): void { $this->vars[$key] = $value; }
 }
 // WP_Abilities_Registry's own admission rules: a name outside the pattern, or a
 // registration made off the API's action, registers nothing. Refusals are
@@ -152,25 +213,29 @@ function wp_insert_term(string $name, string $taxonomy, array $args): array {
   global $terms; $term = ['term_id' => count($terms) + 1]; $terms[$args['slug']] = $term; return $term;
 }
 function update_term_meta(int $termId, string $key, mixed $value): void {}
+function wp_set_object_terms(int $postId, mixed $terms, string $taxonomy): void {
+  $GLOBALS['assignedTerms'][$postId][$taxonomy] = (array) $terms;
+}
 function get_posts(array $args): array {
-  if (($args['post_type'] ?? null) !== 'page') return [];
-  return [(object) [
-    'ID' => 77,
-    'post_status' => 'publish',
-    'post_content' => 'editor-composition',
-  ]];
+  $postType = $args['post_type'] ?? null;
+  if ($postType !== 'wp_template') return [];
+  // The database, not the fence: a query that carries no Space clause gets every
+  // co-hosted Space's row, so dropping the clause shows up as a leak rather than
+  // as a template that quietly went missing.
+  $names = is_array($args['post_name__in'] ?? null) ? $args['post_name__in'] : [];
+  $clause = is_array($args['meta_query'] ?? null) ? ($args['meta_query'][0] ?? null) : null;
+  $scope = is_array($clause) && ($clause['key'] ?? null) === '_spacefast_space_id'
+    ? (string) ($clause['value'] ?? '')
+    : null;
+  $found = [];
+  foreach ($GLOBALS['templatePosts'] as $post) {
+    if (!in_array($post->post_name, $names, true)) continue;
+    if ($scope !== null
+      && ($GLOBALS['savedMeta'][$post->ID]['_spacefast_space_id'] ?? null) !== $scope) continue;
+    $found[] = $post;
+  }
+  return $found;
 }
-// An editor's page: their own blocks around the one block the content model owns,
-// plus a stray second copy the reconcile has to collapse.
-function parse_blocks(string $content): array {
-  return [
-    ['blockName' => 'core/paragraph', 'attrs' => ['content' => 'before']],
-    ['blockName' => 'zero/component', 'attrs' => ['sourceKey' => 'old']],
-    ['blockName' => 'core/quote', 'attrs' => ['content' => 'after']],
-    ['blockName' => 'zero/component', 'attrs' => ['sourceKey' => 'duplicate']],
-  ];
-}
-function serialize_blocks(array $blocks): string { return json_encode($blocks, JSON_UNESCAPED_SLASHES); }
 function wp_insert_post(array $post, bool $returnError): int {
   global $savedPosts; $savedPosts[] = $post; return (int) ($post['ID'] ?? 91);
 }
@@ -185,17 +250,32 @@ function get_post_meta(int $postId, string $key, bool $single): mixed {
 }
 function get_post(int $id): ?object {
   return match ($id) {
-    21, 22 => (object) ['ID' => $id, 'post_type' => 'post'],
+    // 24 is the one that sits in a collection; the rest are plain posts.
+    21, 22, 24 => (object) ['ID' => $id, 'post_type' => 'post'],
     23 => (object) ['ID' => 23, 'post_type' => 'attachment'],
     default => null,
   };
 }
-function is_wp_error(mixed $value): bool { return false; }
+// Core's own semantics, which the by-id read verdict leans on: an empty $term
+// asks whether the object carries ANY term in the taxonomy, and an array asks
+// whether it carries any of them.
+function has_term(mixed $term, string $taxonomy, mixed $post = null): bool {
+  if ($taxonomy !== 'zero_collection') return false;
+  $postId = is_object($post) ? (int) ($post->ID ?? 0) : (int) $post;
+  $carried = $GLOBALS['objectTerms'][$postId] ?? [];
+  if ($term === '' || $term === []) return $carried !== [];
+  foreach ((array) $term as $one) { if (in_array($one, $carried, true)) return true; }
+  return false;
+}
+function is_wp_error(mixed $value): bool { return $value instanceof WP_Error; }
 function esc_attr(string $value): string { return htmlspecialchars($value, ENT_QUOTES); }
+class WP_Error {
+  public function __construct(public string $code = '', public string $message = '', public mixed $data = null) {}
+}
 
 `;
 
-test("a generated PHP ContentModelRelease activates as native WordPress content, Tables, Pages, and Abilities", async () => {
+test("a generated PHP ContentModelRelease activates as native WordPress content, Tables, and Abilities", async () => {
   const contentModel = fixtureContentModel();
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-wordpress-content-model-"));
   const storage = path.join(root, ".stattic/storage");
@@ -210,6 +290,11 @@ test("a generated PHP ContentModelRelease activates as native WordPress content,
   const script = `${WORDPRESS_STUB}
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
 $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $argv[2];
+$GLOBALS['themeDir'] = $argv[6];
+// WordPress registers its canonical redirect in default-filters.php, which runs
+// long before mu-plugins. The kernel therefore loads with it already in place,
+// which is the only state in which removing it means anything.
+add_action('template_redirect', 'redirect_canonical');
 require $argv[1];
 
 $staged = spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5], true);
@@ -246,7 +331,7 @@ $GLOBALS['SPACEFAST_CONTENT_ABILITY_DISPATCHER'] = static fn (array $descriptor,
   ['ability' => $descriptor['id'], 'input' => $input];
 $abilityResult = $ability['execute_callback'](['limit' => 1]);
 $renderedBlock = $registered['blocks']['zero/component']['render_callback']([
-  'sourceKey' => 'client/pages/projects.tsx',
+  'sourceKey' => 'client/components/projects.tsx',
   'componentId' => 'project-grid',
   'props' => ['id' => 'project-list-input', 'sha256' => str_repeat('a', 64)],
 ]);
@@ -264,8 +349,56 @@ $references = [
   $reference(['type' => 'json'], 'not json'),
 ];
 
-$pageBlocks = json_decode($savedPosts[0]['post_content'], true);
+// The site editor's own post types are scoped by the same two hooks every other
+// content type uses: a stamp on save, a meta clause on read. Without both, one
+// co-hosted Space would see and overwrite another's templates and global styles.
+// Two saved rows under one theme on one box: 301 is this Space's edit of the
+// single template, 303 is a co-hosted Space's edit of the page template.
+$templatePosts = [
+  (object) ['ID' => 301, 'post_name' => 'single', 'post_content' => 'alpha-saved-single'],
+  (object) ['ID' => 303, 'post_name' => 'page', 'post_content' => 'beta-saved-page'],
+];
+$savedMeta[303]['_spacefast_space_id'] = 'spc_beta';
+do_action('save_post', 301, (object) ['ID' => 301, 'post_type' => 'wp_template']);
+do_action('save_post', 302, (object) ['ID' => 302, 'post_type' => 'wp_global_styles']);
+$templateQuery = new ContentModelTestQuery();
+spacefast_content_scope_post_query($templateQuery);
+// What core asks for when it resolves a document's template: the hierarchy's
+// slugs, through the kernel's own registered filter.
+$filteredTemplates = array_map(
+  static fn (object $template): array => [
+    'slug' => $template->slug,
+    'content' => $template->content,
+  ],
+  apply_filters('get_block_templates', [], ['slug__in' => ['single', 'page']], 'wp_template')
+);
+
+$templates = array_map(
+  static fn (object $template): array => [
+    'slug' => $template->slug,
+    'type' => $template->type,
+    'content' => $template->content,
+  ],
+  spacefast_content_templates_for_release()
+);
+// A Space with no active release has no templates to offer, and asking must not
+// cost it the screen.
+$GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = null;
+$GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = null;
+$templatesWithoutRelease = spacefast_content_templates_for_release();
+$GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $releaseRoot;
+$GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $argv[3];
+
 echo json_encode([
+  'templates' => $templates,
+  'templates_without_release' => $templatesWithoutRelease,
+  'template_scope' => [
+    $savedMeta[301]['_spacefast_space_id'] ?? null,
+    $savedMeta[302]['_spacefast_space_id'] ?? null,
+  ],
+  'template_query' => $templateQuery->get('meta_query'),
+  'template_theme_term' => $assignedTerms[301]['wp_theme'] ?? null,
+  'filtered_templates' => $filteredTemplates,
   'staged' => $staged,
   'activation' => $activation,
   'reactivation' => $reactivation,
@@ -280,13 +413,6 @@ echo json_encode([
   'tables' => [$alphaReactions, $betaReactions],
   'ledger' => $wpdb->ledger,
   'created_tables' => array_keys($wpdb->created),
-  'page' => [
-    'id' => $savedPosts[0]['ID'],
-    'surrounding' => [$pageBlocks[0]['blockName'], $pageBlocks[2]['blockName']],
-    'component_count' => count(array_filter($pageBlocks, static fn (array $block): bool => $block['blockName'] === 'zero/component')),
-    'component' => $pageBlocks[1]['attrs'],
-    'source_key' => $savedMeta[77]['_zero_page_source_key'],
-  ],
   'rest_meta' => array_keys($registered['meta']),
   'scf_target' => $registered['scf'][0]['location'][0][0],
   'ability' => [$denial, $abilityResult],
@@ -301,6 +427,14 @@ echo json_encode([
   'rendered_block' => $renderedBlock,
   'references' => $references,
   'sync_binding' => spacefast_content_model_sync_binding('sync.projects-body'),
+  'permalink_structure' => get_option('permalink_structure'),
+  'stylesheet' => get_option('stylesheet'),
+  'canonical_redirect_still_hooked' => in_array(
+    'redirect_canonical',
+    array_merge(...array_values($hooks['template_redirect'] ?? [[]])),
+    true
+  ),
+  'canonical_filtered' => apply_filters('redirect_canonical', 'https://space.test/2026/09/01/hello/'),
 ]);
 `;
 
@@ -315,6 +449,7 @@ echo json_encode([
         contentModel.revision,
         generated.php,
         generated.sha256,
+        managedThemeDirectory,
       ],
       { cwd: repoRoot, stderr: "pipe", stdout: "pipe" },
     );
@@ -326,9 +461,63 @@ echo json_encode([
       artifactDigest: generated.sha256,
       staged: true,
     });
-    expect(output.activation).toEqual({ revision: contentModel.revision, tables: 1, pages: 1 });
+    expect(output.activation).toMatchObject({ revision: contentModel.revision, tables: 1 });
+
+    // One template per resource a reader can land on, each opening in the site
+    // editor with exactly the markup the theme already renders — so a Space that
+    // never edits one looks identical to how it looked before it had any.
+    // Media is deliberately absent: an attachment is not a page.
+    const themeMarkup = readFileSync(
+      path.join(managedThemeDirectory, "templates/index.html"),
+      "utf8",
+    );
+    expect(output.templates).toEqual([
+      { slug: "single", type: "wp_template", content: themeMarkup },
+      { slug: "page", type: "wp_template", content: themeMarkup },
+      { slug: "single-projects", type: "wp_template", content: themeMarkup },
+    ]);
+    expect(output.templates_without_release).toEqual([]);
+
+    // Templates and global styles are private to the Space that saved them. A
+    // wp_template row is scoped by the wp_theme taxonomy, not by Space, so
+    // without this stamp every co-hosted Space would edit one shared set.
+    expect(output.template_scope).toEqual(["spc_alpha", "spc_alpha"]);
+    expect(output.template_query).toEqual([
+      { key: "_spacefast_space_id", value: "spc_alpha", compare: "=" },
+    ]);
+    // And it carries the theme association core scopes template rows by.
+    // `get_block_templates()` — the query WordPress's own front controller
+    // resolves a document's template through — is fenced by a wp_theme tax_query,
+    // so a row saved without this term is one core cannot see at all, and every
+    // Space's site-editor edit lost to the release default on the lane that
+    // actually renders.
+    expect(output.template_theme_term).toEqual(["spacefast-managed"]);
+
+    // What that resolution then gets: this Space's saved markup for the slug it
+    // saved, and the release default for the slug it did not. `page` IS saved on
+    // this box — by a co-hosted Space — and answering with it would be a leak,
+    // not a wrong screen.
+    expect(output.filtered_templates).toEqual([
+      { slug: "single", content: "alpha-saved-single" },
+      { slug: "page", content: themeMarkup },
+    ]);
     expect(output.reactivation).toEqual(output.activation);
     expect(output.pointer).toBe(contentModel.revision);
+
+    // A Space publishes flat slugs, so activation makes WordPress's own
+    // permalinks say the same thing. Left on the provider's dated default,
+    // WordPress computed a different canonical URL for the same post and
+    // redirected every published slug away from the URL a reader was given.
+    expect(output.permalink_structure).toBe("/%postname%/");
+    // And the theme the engine ships is the one the site renders through. A
+    // managed site points at a provider default that is not installed, so every
+    // template resolved to nothing and WordPress served an empty document.
+    expect(output.stylesheet).toBe("spacefast-managed");
+    // And the redirect itself is gone, both ways it can be reached: the serving
+    // lane resolves a path and answers it, so nothing downstream gets to decide
+    // that path meant somewhere else.
+    expect(output.canonical_redirect_still_hooked).toBe(false);
+    expect(output.canonical_filtered).toBe(false);
 
     // Every resource lands on a native WordPress post type; only the collection
     // is separated, by term rather than by a bespoke post type.
@@ -348,24 +537,16 @@ echo json_encode([
     expect(output.created_tables).toEqual([
       `${alphaTablePrefix}migrations`,
       `${alphaTablePrefix}reactions`,
+      // The release declares a sync binding, so `init` installs the journal the
+      // binding writes through. It is listed here because the fixture now holds
+      // WordPress's option store: the install gates on get_option/update_option,
+      // which a real site always has and this stub previously did not.
+      "spacefast_content_source_journal",
     ]);
     expect(output.ledger).toEqual({ [`${alphaTablePrefix}migrations`]: [contentModel.revision] });
 
-    // The content model owns one locked block; the editor keeps everything around it,
-    // and a second copy is collapsed rather than duplicated.
-    expect(output.page).toMatchObject({
-      id: 77,
-      surrounding: ["core/paragraph", "core/quote"],
-      component_count: 1,
-      component: {
-        sourceKey: "client/pages/projects.tsx",
-        componentId: "project-grid",
-        lock: { move: true, remove: true },
-      },
-      source_key: "client/pages/projects.tsx",
-    });
     expect(output.rendered_block).toContain('data-zero-component="project-grid"');
-    expect(output.rendered_block).toContain('data-zero-source="client/pages/projects.tsx"');
+    expect(output.rendered_block).toContain('data-zero-source="client/components/projects.tsx"');
 
     // Registration lands where the Abilities API accepts it, under names its
     // registry admits, and nowhere else: nothing registers on `init`, and no
@@ -430,7 +611,7 @@ echo json_encode([
       true,
       "Enter valid JSON.",
     ]);
-    expect(output.sync_binding).toEqual({
+    expect(output.sync_binding).toMatchObject({
       resourceId: "projects",
       fieldId: "project-body",
       source: "content/projects/launch.md",
@@ -662,9 +843,53 @@ do_action('wp_abilities_api_categories_init');
 do_action('wp_abilities_api_init');
 spacefast_content_model_register_scf_field_groups();
 
+// publicRead decides what an anonymous reader may see. 24 sits in the declared
+// projects collection, so publicRead is false; 21 is a plain post, so it is
+// true. Both lanes are asked, because a filtered list beside an open by-id
+// route is the worse half of a half-fix.
+$GLOBALS['objectTerms'] = [24 => [spacefast_content_model_collection_term_slug('spc_alpha', 'projects')]];
+$readQuery = static function (): array {
+  $query = new ContentModelTestQuery();
+  spacefast_content_scope_post_query($query);
+  return ['meta' => $query->get('meta_query'), 'tax' => $query->get('tax_query')];
+};
+$readCaps = static fn (int $userId): array => [
+  'private' => spacefast_content_scope_meta_cap(['read'], 'read_post', $userId, [24]),
+  'public' => spacefast_content_scope_meta_cap(['read'], 'read_post', $userId, [21]),
+];
+$anonymousQuery = $readQuery();
+$anonymousCaps = $readCaps(0);
+$restGuard = static fn (int $postId): mixed =>
+  spacefast_content_rest_guard_single_read(['id' => 'response'], (object) ['ID' => $postId], null);
+$restGuardVerdict = static fn (mixed $result): mixed =>
+  $result instanceof WP_Error ? ['status' => $result->data['status'] ?? null] : $result;
+$anonymousRestGuard = [
+  'private' => $restGuardVerdict($restGuard(24)),
+  'public' => $restGuardVerdict($restGuard(21)),
+];
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = 5;
+$editorQuery = $readQuery();
+$editorCaps = $readCaps(5);
+$editorRestGuard = $restGuardVerdict($restGuard(24));
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = null;
+// A Space with no release has no declared collection to hide, and asking must
+// not cost it the clause that scopes it to its own content.
+$GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = null;
+$GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = null;
+$releaselessQuery = $readQuery();
+$GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $releaseRoot;
+$GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $argv[3];
+
 echo json_encode([
   'staged' => $staged,
   'activation' => $activation,
+  'anonymous_query' => $anonymousQuery,
+  'editor_query' => $editorQuery,
+  'releaseless_query' => $releaselessQuery,
+  'anonymous_caps' => $anonymousCaps,
+  'editor_caps' => $editorCaps,
+  'anonymous_rest_guard' => $anonymousRestGuard,
+  'editor_rest_guard' => $editorRestGuard,
   'post_types' => [
     spacefast_content_model_collection_projection('posts')['post_type'],
     spacefast_content_model_collection_projection('projects')['post_type'],
@@ -717,6 +942,37 @@ echo json_encode([
       "zero/storage-delete",
     ]);
 
+    // `publicRead` is the gate it was always described as. A declared collection
+    // defaults to private, and its items live on `post` behind a term — so an
+    // anonymous reader's query excludes that term while keeping the Space clause,
+    // and the by-id read is refused the same way rather than staying open.
+    const spaceClause = [{ key: "_spacefast_space_id", value: "spc_alpha", compare: "=" }];
+    const projectsTerm = `sf-${spaceDigest("spc_alpha", 16)}-projects`;
+    expect(output.anonymous_query).toEqual({
+      meta: spaceClause,
+      tax: [
+        {
+          taxonomy: "zero_collection",
+          field: "slug",
+          terms: [projectsTerm],
+          operator: "NOT IN",
+        },
+      ],
+    });
+    expect(output.anonymous_caps).toEqual({ private: ["do_not_allow"], public: ["read"] });
+    // The by-id REST read runs through rest_prepare_{post_type}, which WordPress
+    // evaluates even for a published post — unlike the read_post cap. The private
+    // collection item is refused with a 404; the plain post's response is kept.
+    expect(output.anonymous_rest_guard).toEqual({
+      private: { status: 404 },
+      public: { id: "response" },
+    });
+    // An editor session keeps seeing everything in its own Space, on both lanes.
+    expect(output.editor_query).toEqual({ meta: spaceClause, tax: "" });
+    expect(output.editor_caps).toEqual({ private: ["read"], public: ["read"] });
+    expect(output.editor_rest_guard).toEqual({ id: "response" });
+    expect(output.releaseless_query).toEqual({ meta: spaceClause, tax: "" });
+
     // Both land on WordPress's own `post`: the adopted native because it is
     // one, the collection because a collection is a post plus a term — never a
     // generated post type.
@@ -726,6 +982,142 @@ echo json_encode([
     expect(output.rest_meta).toContain("post:_zero_posts_body");
     expect(output.rest_meta).toContain("post:_zero_projects_deck");
     expect(output.scf_titles).toEqual(["Projects fields"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The read half of a collection, which the generated client already asks for.
+ *
+ * `content.<collection>.list()` sends `zero_collection=<term slug>`, because a
+ * slug is the only name a build can know — core's own taxonomy filters take
+ * term ids, which no capsule can predict. Until the kernel honors it, every
+ * collection read answered with every post in the Space, which is a wrong
+ * answer rather than a missing feature.
+ *
+ * The privacy exclusion is the reason this is one test and not two: naming a
+ * private collection's slug must return nothing, so the filter has to compose
+ * with `publicRead` rather than stand in for it.
+ */
+test("a collection read filters by its term and never past publicRead", async () => {
+  const source = `import { capsule } from "@spacefast/zero/server";
+
+export default capsule({
+  collections: {
+    notes: { publicRead: true, fields: { deck: { kind: "text" } } },
+    projects: { fields: { deck: { kind: "text" } } },
+  },
+});
+`;
+  const declarations = parseContentDeclarations(source, source);
+  if (declarations === null) throw new Error("expected content declarations");
+  const { artifacts } = await compileZeroContentModel({
+    declarations,
+    readDirectory: async () => [],
+  });
+  const contentModel = artifacts.model;
+
+  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-capsule-collection-read-"));
+  const storage = path.join(root, ".stattic/storage");
+  mkdirSync(storage, { recursive: true });
+  const generated = await generateContentModelPhp(contentModel);
+
+  const script = `${WORDPRESS_STUB}
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+$GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $argv[2];
+// The lane this parameter travels on: WordPress's own REST front controller,
+// which the WP API door hands an admitted request to.
+define('REST_REQUEST', true);
+require $argv[1];
+
+spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5], true);
+spacefast_content_model_activate_release($argv[3], true);
+$releaseRoot = $argv[2] . '/spaces/spc_alpha/content-model/releases/' . substr($argv[3], 7);
+$GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $releaseRoot;
+$GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $argv[3];
+do_action('init');
+
+$read = static function (?string $slug): mixed {
+  if ($slug === null) { unset($_GET['zero_collection']); } else { $_GET['zero_collection'] = $slug; }
+  $query = new ContentModelTestQuery();
+  spacefast_content_scope_post_query($query);
+  return $query->get('tax_query');
+};
+$notes = spacefast_content_model_collection_term_slug('spc_alpha', 'notes');
+$projects = spacefast_content_model_collection_term_slug('spc_alpha', 'projects');
+
+$anonymousNotes = $read($notes);
+$anonymousProjects = $read($projects);
+$anonymousNone = $read(null);
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = 5;
+$editorProjects = $read($projects);
+$editorJunk = $read('not a slug');
+
+echo json_encode([
+  'terms' => ['notes' => $notes, 'projects' => $projects],
+  'anonymous_notes' => $anonymousNotes,
+  'anonymous_projects' => $anonymousProjects,
+  'anonymous_none' => $anonymousNone,
+  'editor_projects' => $editorProjects,
+  'editor_junk' => $editorJunk,
+]);
+`;
+  try {
+    const result = Bun.spawnSync(
+      [
+        "php",
+        "-r",
+        script,
+        kernel,
+        storage,
+        contentModel.revision,
+        generated.php,
+        generated.sha256,
+      ],
+      { cwd: repoRoot, stderr: "pipe", stdout: "pipe" },
+    );
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    const output = JSON.parse(result.stdout.toString());
+
+    const notesTerm = `sf-${spaceDigest("spc_alpha", 16)}-notes`;
+    const projectsTerm = `sf-${spaceDigest("spc_alpha", 16)}-projects`;
+    expect(output.terms).toEqual({ notes: notesTerm, projects: projectsTerm });
+
+    const isIn = (terms: string[]) => ({
+      taxonomy: "zero_collection",
+      field: "slug",
+      terms,
+      operator: "IN",
+    });
+    const notIn = {
+      taxonomy: "zero_collection",
+      field: "slug",
+      terms: [projectsTerm],
+      operator: "NOT IN",
+    };
+
+    // A publicRead collection: the read narrows to that collection's own items,
+    // and the private exclusion rides along untouched.
+    expect(output.anonymous_notes).toEqual({
+      relation: "AND",
+      0: notIn,
+      1: [isIn([notesTerm])],
+    });
+    // Naming a private collection's slug is not a way past publicRead: the
+    // exclusion still lands, so the two clauses can be satisfied by nothing.
+    expect(output.anonymous_projects).toEqual({
+      relation: "AND",
+      0: notIn,
+      1: [isIn([projectsTerm])],
+    });
+    // Without the parameter, nothing changes — this is the same answer the
+    // publicRead case above pins, reached through a request that named nothing.
+    expect(output.anonymous_none).toEqual([notIn]);
+    // An editor may read the private collection, so the read is the filter alone.
+    expect(output.editor_projects).toEqual([isIn([projectsTerm])]);
+    // A value that is not a term slug names no collection, so it filters nothing.
+    expect(output.editor_junk).toBe("");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

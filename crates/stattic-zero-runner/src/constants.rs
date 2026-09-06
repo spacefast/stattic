@@ -6,6 +6,9 @@ pub const ENDPOINTS_INDEX_KIND: &str = "zero_endpoints_index";
 pub const MIGRATIONS_FORMAT: &str = "stattic.zero.migrations.v1";
 pub const RUNNER_ABI: &str = "stattic-zero-runner-abi-v2";
 pub const QUICKJS_ABI: &str = "rquickjs-0.12";
+/// The database host contract bundled into endpoint bytecode. It is separate
+/// from the runner ABI so a DB cutover does not invalidate static endpoints.
+pub const DB_CAPABILITY_ABI: &str = "stattic-zero-db-capability-v1";
 /// The image renderer this binary links. It is part of every render-cache key,
 /// so an upgrade cannot serve pixels the previous renderer produced. Bump it
 /// with the `takumi` dependency — `image::tests` fails if the two disagree.

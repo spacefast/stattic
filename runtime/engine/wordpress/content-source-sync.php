@@ -48,6 +48,18 @@ const SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX = 'source:';
 const SPACEFAST_CONTENT_SYNC_SERIALIZER_VERSION = 1;
 const SPACEFAST_CONTENT_SYNC_MAX_TEXT_BYTES = 1000000;
 const SPACEFAST_CONTENT_SYNC_FORMATS = ['md', 'html'];
+/**
+ * What a compile-class binding is handed back as when the editor takes its page
+ * over. HTML is the interchange format with the widest block coverage: a page
+ * authored as code must not be returned in the format most likely to refuse it.
+ */
+const SPACEFAST_CONTENT_SYNC_TAKEOVER_FORMATS = ['tsx' => 'html'];
+/**
+ * The path a document's bytes have already been prepared for. A materialization
+ * mints one path per document, once; everything after it is the ordinary
+ * two-way lane against the file that path named.
+ */
+const SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META = '_spacefast_source_materialized';
 
 /** The source text a document becomes, in the binding's format. */
 function spacefast_content_sync_from_blocks(string $format, string $blocks): string
@@ -289,7 +301,7 @@ function spacefast_content_sync_parse_reconcile(array $request): array
     ];
 }
 
-function spacefast_content_sync_find_post(string $bindingId, array $binding): ?object
+function spacefast_content_sync_find_post(string $bindingId, array $binding, bool $adoptUnbound = true): ?object
 {
     $externalId = SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX . $bindingId;
     $posts = get_posts([
@@ -306,16 +318,27 @@ function spacefast_content_sync_find_post(string $bindingId, array $binding): ?o
         throw new Spacefast_Content_Error(409, 'content_document_identity_conflict', 'More than one post uses this sync binding.');
     }
     $post = $posts[0] ?? null;
-    if ($post === null) {
-        // First sync of a binding whose post the ContentModelRelease already
-        // projected: adopt it by slug rather than creating a duplicate.
-        $posts = get_posts([
+    if ($post === null && $adoptUnbound) {
+        $canonicalPage = ($binding['post_type'] ?? null) === 'page'
+            && preg_match('/\Async\.pages\.[a-f0-9]{32}\z/D', $bindingId) === 1;
+        $query = [
             'post_type' => $binding['post_type'],
             'post_status' => 'any',
-            'name' => $binding['slug'],
             'numberposts' => 2,
             'meta_query' => [spacefast_content_space_meta_clause()],
-        ]);
+        ];
+        if ($canonicalPage) {
+            // Editor-created documents are adopted only by their prepared source
+            // path, never by a URL basename that another document could share.
+            $query['meta_query'][] = [
+                'key' => SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META,
+                'value' => $binding['source'],
+                'compare' => '=',
+            ];
+        } else {
+            $query['name'] = $binding['slug'];
+        }
+        $posts = get_posts($query);
         if (count($posts) > 1) {
             throw new Spacefast_Content_Error(409, 'content_document_identity_conflict', 'More than one post matches this sync binding.');
         }
@@ -334,6 +357,66 @@ function spacefast_content_sync_read_blocks(object $post, array $binding): strin
         : (string) get_post_meta((int) $post->ID, $binding['field_storage'], true);
 }
 
+/** Publish consumes a sealed source, not a prepared writeback to a mutable repository. */
+function spacefast_content_sync_publish_document(array $input): array
+{
+    $post = spacefast_content_sync_find_post($input['bindingId'], $input['binding']);
+    $postId = is_object($post) ? (int) $post->ID : 0;
+    if ($postId > 0 && get_post_meta($postId, '_spacefast_document_release', true) === $input['operationId']) {
+        return ['postId' => $postId, 'status' => 'unchanged'];
+    }
+    $ledger = $postId > 0 ? spacefast_content_sync_ledger($postId) : null;
+    $blocks = is_object($post) ? spacefast_content_sync_read_blocks($post, $input['binding']) : '';
+    $materialized = $postId > 0 ? get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META, true) : '';
+    if ($input['format'] === 'tsx') {
+        if (is_string($materialized) && $materialized !== '') {
+            throw new Spacefast_Content_Error(409, 'content_document_editor_owned', 'This document was taken over by the editor. Publish its canonical HTML source.');
+        }
+        // TSX seed bytes are already compiled Gutenberg markup, including dynamic blocks.
+        $nextBlocks = $input['text'];
+    } else {
+        $input['text'] = spacefast_content_sync_canonical_text($input['format'], $input['text']);
+        $sameBinding = is_array($ledger)
+            && ($ledger['source'] ?? null) === $input['source']
+            && ($ledger['format'] ?? null) === $input['format'];
+        if ($sameBinding) {
+            $sourceChanged = !hash_equals((string) $ledger['textDigest'], spacefast_content_sync_digest_text($input['text']));
+            $editorChanged = !hash_equals((string) $ledger['blocksDigest'], spacefast_content_sync_digest_text($blocks));
+            if (!$sourceChanged) {
+                // Keep the common base: activation cannot claim the editor's bytes
+                // were written back to the sealed source when they were not.
+                update_post_meta($postId, '_spacefast_document_release', $input['operationId']);
+                return ['postId' => $postId, 'status' => 'unchanged'];
+            }
+            if ($editorChanged) {
+                $editorText = spacefast_content_sync_pullable_text($input['format'], $blocks);
+                if ($editorText !== $input['text']) {
+                    spacefast_content_sync_throw_conflict($input, (string) $ledger['baseText'], (string) $ledger['revision'], $editorText, spacefast_content_sync_current_revision_id($postId));
+                }
+            }
+        } elseif (is_object($post) && trim($blocks) !== '') {
+            // Adoption and TSX -> HTML takeover must agree with the existing
+            // document. A route-stable ID is not permission to discard edits.
+            $editorText = spacefast_content_sync_pullable_text($input['format'], $blocks);
+            if ((is_string($materialized) && $materialized !== '' && $materialized !== $input['source'])
+                || $editorText !== $input['text']) {
+                spacefast_content_sync_throw_conflict($input, '', 'unbound', $editorText, spacefast_content_sync_current_revision_id($postId));
+            }
+        }
+        $nextBlocks = spacefast_content_sync_to_blocks($input['format'], $input['text']);
+    }
+    $input['publish'] = true;
+    $savedId = spacefast_content_sync_save_document($input, $nextBlocks);
+    $saved = get_post($savedId);
+    if (!is_object($saved)) {
+        throw new Spacefast_Content_Error(500, 'content_write_failed', 'The published document could not be read.');
+    }
+    $next = spacefast_content_sync_make_ledger($input, $input['text'], spacefast_content_sync_read_blocks($saved, $input['binding']), spacefast_content_sync_save_revision($savedId), 'push');
+    spacefast_content_sync_store_ledger($savedId, $next);
+    update_post_meta($savedId, '_spacefast_document_release', $input['operationId']);
+    return ['postId' => $savedId, 'status' => $postId > 0 ? 'pushed' : 'created'];
+}
+
 function spacefast_content_sync_save_document(array $input, string $blocks): int
 {
     $binding = $input['binding'];
@@ -342,13 +425,19 @@ function spacefast_content_sync_save_document(array $input, string $blocks): int
         throw new Spacefast_Content_Error(409, 'content_sync_binding_conflict', 'The binding post type changed.');
     }
     $slug = $binding['slug'];
+    $canonicalPage = $binding['post_type'] === 'page'
+        && preg_match('/\Async\.pages\.[a-f0-9]{32}\z/D', $input['bindingId']) === 1;
+    $titleSource = $canonicalPage ? pathinfo(basename($input['source']), PATHINFO_FILENAME) : $slug;
+    if ($canonicalPage && $titleSource === 'index') {
+        $titleSource = 'Home';
+    }
     $post = [
         'post_type' => $binding['post_type'],
-        'post_status' => is_object($existing) ? (string) $existing->post_status : 'draft',
+        'post_status' => is_object($existing) ? (string) $existing->post_status : ($canonicalPage || !empty($input['publish']) ? 'publish' : 'draft'),
         'post_name' => function_exists('sanitize_title') ? sanitize_title($slug) : $slug,
         'post_title' => is_object($existing) && (string) $existing->post_title !== ''
             ? (string) $existing->post_title
-            : ucwords(str_replace(['-', '_'], ' ', $slug)),
+            : ucwords(str_replace(['-', '_'], ' ', $titleSource)),
     ];
     if (is_object($existing)) {
         $post['ID'] = (int) $existing->ID;
@@ -629,6 +718,7 @@ function spacefast_content_sync_bind(array $input, ?object $existing): array
             );
         }
         $postId = (int) $existing->ID;
+        update_post_meta($postId, SPACEFAST_CONTENT_EXTERNAL_ID_META, SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX . $input['bindingId']);
     } else {
         $postId = spacefast_content_sync_save_document($input, spacefast_content_sync_to_blocks($format, $input['text']));
         $wrote = true;
@@ -801,6 +891,171 @@ function spacefast_content_sync_commit(int $postId, array $input, array $ledger,
         $ledger,
         $status === 'pulled' ? spacefast_content_sync_prepared_source_write($input, $ledger) : null
     );
+    spacefast_content_sync_store_receipt($postId, $input['operationId'], $receipt);
+    return $receipt;
+}
+
+/** `pages/docs/about.tsx` becomes `pages/docs/about.html`. */
+function spacefast_content_sync_takeover_source(string $source, string $format): string
+{
+    $dot = strrpos($source, '.');
+    $slash = strrpos($source, '/');
+    $stem = $dot === false || ($slash !== false && $dot < $slash) ? $source : substr($source, 0, $dot);
+    return $stem . '.' . $format;
+}
+
+function spacefast_content_sync_materialize_invalid(): never
+{
+    throw new Spacefast_Content_Error(400, 'content_sync_invalid', 'The materialization request is invalid.');
+}
+
+/**
+ * Hand the control plane the file this document's bytes belong in.
+ *
+ * Two callers, one answer. A post the editor created under a materializing
+ * collection has never had a file; a compile-class binding's page has a file
+ * nothing can write back to. Both get a NEW path and the canonical text of what
+ * WordPress holds, in the format that path implies.
+ *
+ * There is deliberately no ledger and no acknowledgement here: without a binding
+ * there is no common base to move. The binding is established by the ordinary
+ * `state: "initial"` reconcile after the next build, which finds both sides
+ * already agreeing because the file holds exactly this canonical text.
+ */
+function spacefast_content_materialize_source(array $request, bool $managed): array
+{
+    if (!$managed) {
+        throw new Spacefast_Content_Error(401, 'content_auth_required', 'Source materialization requires Spacefast authorization.');
+    }
+    $input = spacefast_content_sync_parse_materialize($request);
+    return spacefast_content_sync_without_journal(
+        static fn (): array => spacefast_content_sync_locked(
+            static fn (): array => spacefast_content_sync_materialize_locked($input)
+        )
+    );
+}
+
+/** @return array{operationId:string,post:object,format:string,source:string,field_storage:string} */
+function spacefast_content_sync_parse_materialize(array $request): array
+{
+    $operationId = $request['operationId'] ?? null;
+    if (!is_string($operationId) || preg_match('/^op_[A-Za-z0-9]+$/', $operationId) !== 1) {
+        spacefast_content_sync_materialize_invalid();
+    }
+    $bindingId = $request['bindingId'] ?? null;
+    $input = is_string($bindingId)
+        ? spacefast_content_sync_materialize_takeover($operationId, $bindingId)
+        : spacefast_content_sync_materialize_collection($operationId, $request['postId'] ?? null);
+    // The serializer is the binding's or the release's, never the caller's, and
+    // it has to be one this engine actually has.
+    if (!in_array($input['format'], SPACEFAST_CONTENT_SYNC_FORMATS, true)) {
+        throw new Spacefast_Content_Error(409, 'content_sync_binding_conflict', 'The materialization names no known source format.');
+    }
+    return $input;
+}
+
+/** The compile-class takeover: the binding's own source, in the format that can carry it. */
+function spacefast_content_sync_materialize_takeover(string $operationId, string $bindingId): array
+{
+    if (!spacefast_content_model_is_stable_id($bindingId)) {
+        spacefast_content_sync_materialize_invalid();
+    }
+    $binding = spacefast_content_model_sync_binding($bindingId);
+    if (!is_array($binding)) {
+        throw new Spacefast_Content_Error(404, 'content_sync_binding_not_found', 'This ContentModelRelease has no such sync binding.');
+    }
+    $format = SPACEFAST_CONTENT_SYNC_TAKEOVER_FORMATS[$binding['format']] ?? null;
+    if (!is_string($format)) {
+        // A two-way binding already has a file the editor's changes reconcile
+        // into. Taking it over would abandon a source that can be written back.
+        throw new Spacefast_Content_Error(409, 'content_sync_binding_conflict', 'This binding already has a two-way source file.');
+    }
+    $post = spacefast_content_sync_find_post($bindingId, $binding);
+    if (!is_object($post)) {
+        throw new Spacefast_Content_Error(404, 'content_document_not_found', 'This binding has no WordPress document to materialize.');
+    }
+    return [
+        'operationId' => $operationId,
+        'post' => $post,
+        'format' => $format,
+        'source' => spacefast_content_sync_takeover_source((string) $binding['source'], $format),
+        'field_storage' => (string) $binding['field_storage'],
+    ];
+}
+
+/** A document the editor created under a collection that declares where files go. */
+function spacefast_content_sync_materialize_collection(string $operationId, mixed $postId): array
+{
+    if (!is_int($postId) || $postId < 1 || !function_exists('get_post')) {
+        spacefast_content_sync_materialize_invalid();
+    }
+    $post = get_post($postId);
+    // Ownership first, and the refusal says nothing about whether a post another
+    // Space holds exists at all.
+    if (!is_object($post) || !spacefast_content_post_belongs_to_space($postId)) {
+        throw new Spacefast_Content_Error(404, 'content_document_not_found', 'This Space has no such document.');
+    }
+    $collection = spacefast_content_collection_for_post_type((string) ($post->post_type ?? ''));
+    $materialization = is_array($collection)
+        ? spacefast_content_model_materialization((string) $collection['name'])
+        : null;
+    if ($materialization === null) {
+        throw new Spacefast_Content_Error(409, 'content_materialization_not_declared', 'This collection does not materialize source files.');
+    }
+    $slug = (string) ($post->post_name ?? '');
+    $slug = function_exists('sanitize_title') ? (string) sanitize_title($slug) : $slug;
+    $source = rtrim($materialization['directory'], '/') . '/' . $slug . $materialization['suffix'];
+    if ($slug === '' || !spacefast_content_sync_source_valid($source)) {
+        throw new Spacefast_Content_Error(409, 'content_materialization_path_invalid', 'This document has no usable source path.');
+    }
+    return [
+        'operationId' => $operationId,
+        'post' => $post,
+        'format' => $materialization['format'],
+        'source' => $source,
+        'field_storage' => $materialization['field_storage'],
+    ];
+}
+
+function spacefast_content_sync_materialize_locked(array $input): array
+{
+    $post = $input['post'];
+    $postId = (int) $post->ID;
+    // Idempotence, layer two: a retried operationId replays its first answer
+    // rather than deriving a second one against content that has since moved.
+    $replayed = spacefast_content_sync_receipt($postId, $input['operationId']);
+    if (is_array($replayed)) {
+        return $replayed;
+    }
+    $blocks = spacefast_content_sync_read_blocks($post, ['field_storage' => $input['field_storage']]);
+    // The existing serializer and its existing representability gate. A document
+    // richer than its format refuses here exactly as a pull refuses, and the
+    // drain already treats that refusal as terminal.
+    $text = spacefast_content_sync_pullable_text($input['format'], $blocks);
+    $prepared = function_exists('get_post_meta')
+        ? get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META, true)
+        : '';
+    // Idempotence, layer one: a document that already has a path keeps it, so a
+    // second materialization mints nothing and moves nothing.
+    $already = is_string($prepared) && $prepared !== '';
+    $receipt = [
+        'format' => 'spacefast.content-materialize',
+        'version' => 1,
+        'status' => $already ? 'skipped' : 'materialized',
+        'operationId' => $input['operationId'],
+        'sourceWrite' => [
+            'state' => 'prepared',
+            'source' => $already ? $prepared : $input['source'],
+            // A new file has no revision to stand on, so what the drain
+            // compare-and-swaps against is nothing being there.
+            'expectedSourceRevision' => 'absent',
+            'text' => $text,
+            'textDigest' => spacefast_content_sync_digest_text($text),
+        ],
+    ];
+    if (!$already && function_exists('update_post_meta')) {
+        update_post_meta($postId, SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META, $input['source']);
+    }
     spacefast_content_sync_store_receipt($postId, $input['operationId'], $receipt);
     return $receipt;
 }

@@ -385,7 +385,7 @@ test("an anonymous commenter session is the upload grant — budgeted, and only 
     method: "POST",
     headers: {
       "content-type": "application/json",
-      origin: `http://${ANON_HOST}`,
+      origin: `https://${ANON_HOST}`,
       "sec-fetch-site": "same-origin",
     },
     body: JSON.stringify({ pagePath: "/", identity: { name: "Visitor", namedByUser: false } }),

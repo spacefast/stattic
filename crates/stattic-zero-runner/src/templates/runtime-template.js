@@ -21,10 +21,15 @@ globalThis.__statticLog = function __statticLog(level, message, metadata) {
 // @stattic-endif
 
 // @stattic-if db
-if (typeof globalThis.__statticDbHost === "function") {
-  globalThis.__statticDb = function __statticDb(operation) {
-    return globalThis.__statticDbHost(String(operation ?? ""));
-  };
+// oxlint-disable-next-line anti-slop/no-runtime-typeof -- QuickJS injects this native host function only when the finalized artifact grants the database capability.
+if (typeof globalThis.__statticDbCapabilityHost === "function") {
+  const __statticDbCapabilityHost = globalThis.__statticDbCapabilityHost;
+  delete globalThis.__statticDbCapabilityHost;
+  globalThis.__statticDbCapability = Object.freeze({
+    execute(operation) {
+      return __statticDbCapabilityHost(JSON.stringify(operation || {}));
+    },
+  });
 }
 // @stattic-endif
 

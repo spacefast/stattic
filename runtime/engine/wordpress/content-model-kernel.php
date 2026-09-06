@@ -20,6 +20,10 @@ const SPACEFAST_CONTENT_MODEL_REVISION_PATTERN = '/^sha256:[a-f0-9]{64}$/';
 // the bytecode win quietly stops.
 const SPACEFAST_CONTENT_MODEL_PHP_MAX_BYTES = 4194304;
 const SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY = 'zero_collection';
+// A Space publishes flat slugs, so WordPress's permalinks say the same thing.
+const SPACEFAST_CONTENT_MODEL_PERMALINK_STRUCTURE = '/%postname%/';
+// The theme the engine installs, and the only one a managed site renders through.
+const SPACEFAST_CONTENT_MODEL_MANAGED_THEME = 'spacefast-managed';
 const SPACEFAST_CONTENT_MODEL_SPACE_META = '_spacefast_space_id';
 const SPACEFAST_CONTENT_MODEL_PAGE_SOURCE_META = '_zero_page_source_key';
 const SPACEFAST_CONTENT_MODEL_PAGE_PATH_META = '_zero_page_path';
@@ -196,8 +200,48 @@ function spacefast_content_model_sync_binding(string $bindingId): ?array
                 'slug' => $binding['slug'],
                 'post_type' => $binding['postType'],
                 'field_storage' => $binding['fieldStorage'],
+                'compiled' => $binding['compiled'] ?? null,
+                'documentSeed' => $binding['documentSeed'] ?? null,
             ];
         }
+    }
+    return null;
+}
+
+/**
+ * Where a document this resource holds — one WordPress created, that no file
+ * backs — puts its bytes when it becomes a source file.
+ *
+ * Read defensively, like a binding's `format`: a ContentModelRelease compiled
+ * before materializations existed carries no such key, and a Space on one is
+ * simply a Space where nothing materializes. That is a missing capability, never
+ * a broken release.
+ *
+ * @return array{resourceId:string,fieldId:string,directory:string,suffix:string,format:string,post_type:string,field_storage:string}|null
+ */
+function spacefast_content_model_materialization(string $resourceId): ?array
+{
+    $contentModel = spacefast_content_model_active_release();
+    $declared = is_array($contentModel['materializations'] ?? null) ? $contentModel['materializations'] : [];
+    foreach ($declared as $materialization) {
+        if (!is_array($materialization) || ($materialization['resourceId'] ?? null) !== $resourceId) {
+            continue;
+        }
+        $resolved = [
+            'resourceId' => $materialization['resourceId'] ?? null,
+            'fieldId' => $materialization['fieldId'] ?? null,
+            'directory' => $materialization['directory'] ?? null,
+            'suffix' => $materialization['suffix'] ?? null,
+            'format' => $materialization['format'] ?? null,
+            'post_type' => $materialization['postType'] ?? null,
+            'field_storage' => $materialization['fieldStorage'] ?? null,
+        ];
+        foreach ($resolved as $value) {
+            if (!is_string($value) || $value === '') {
+                return null;
+            }
+        }
+        return $resolved;
     }
     return null;
 }
@@ -500,82 +544,6 @@ function spacefast_content_model_apply_ddl(string $sql): void
     }
 }
 
-function spacefast_content_model_reconcile_component_blocks(string $content, array $page): string
-{
-    $required = [
-        ...$page['block'],
-        'innerBlocks' => [],
-        'innerHTML' => '',
-        'innerContent' => [],
-    ];
-    if (!function_exists('parse_blocks') || !function_exists('serialize_blocks')) {
-        return '<!-- wp:zero/component ' . json_encode($required['attrs'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . ' /-->';
-    }
-    $blocks = parse_blocks($content);
-    $result = [];
-    $inserted = false;
-    foreach ($blocks as $block) {
-        if (is_array($block) && ($block['blockName'] ?? null) === 'zero/component') {
-            if (!$inserted) {
-                $result[] = $required;
-                $inserted = true;
-            }
-            continue;
-        }
-        $result[] = $block;
-    }
-    if (!$inserted) {
-        $result[] = $required;
-    }
-    return serialize_blocks($result);
-}
-
-function spacefast_content_model_reconcile_pages(array $contentModel): void
-{
-    if (!function_exists('get_posts') || !function_exists('wp_insert_post') || !function_exists('update_post_meta')) {
-        return;
-    }
-    $spaceId = spacefast_content_require_space_id();
-    foreach ($contentModel['pages'] as $page) {
-        $matches = get_posts([
-            'post_type' => 'page',
-            'post_status' => 'any',
-            'numberposts' => 2,
-            'meta_query' => [
-                'relation' => 'AND',
-                ['key' => SPACEFAST_CONTENT_MODEL_SPACE_META, 'value' => $spaceId, 'compare' => '='],
-                ['key' => SPACEFAST_CONTENT_MODEL_PAGE_SOURCE_META, 'value' => $page['sourceKey'], 'compare' => '='],
-            ],
-        ]);
-        if (count($matches) > 1) {
-            throw new Spacefast_Content_Error(409, 'content_page_source_conflict', 'More than one WordPress Page has this client source key.');
-        }
-        $existing = $matches[0] ?? null;
-        $postId = is_object($existing) ? (int) ($existing->ID ?? 0) : 0;
-        $content = spacefast_content_model_reconcile_component_blocks(
-            is_object($existing) ? (string) ($existing->post_content ?? '') : '',
-            $page
-        );
-        $path = trim($page['path'], '/');
-        $segments = $path === '' ? ['home'] : explode('/', $path);
-        $saved = wp_insert_post([
-            ...($postId > 0 ? ['ID' => $postId] : []),
-            'post_type' => 'page',
-            'post_status' => is_object($existing) ? (string) ($existing->post_status ?? 'draft') : 'draft',
-            'post_name' => (string) end($segments),
-            'post_title' => $page['title'],
-            'post_content' => $content,
-        ], true);
-        if (function_exists('is_wp_error') && is_wp_error($saved)) {
-            throw new Spacefast_Content_Error(500, 'content_page_projection_failed', 'A client Page could not be projected.');
-        }
-        $savedId = (int) $saved;
-        update_post_meta($savedId, SPACEFAST_CONTENT_MODEL_SPACE_META, $spaceId);
-        update_post_meta($savedId, SPACEFAST_CONTENT_MODEL_PAGE_SOURCE_META, $page['sourceKey']);
-        update_post_meta($savedId, SPACEFAST_CONTENT_MODEL_PAGE_PATH_META, $page['path']);
-    }
-}
-
 function spacefast_content_model_admit_ability(array $ability): bool
 {
     $granted = $GLOBALS['SPACEFAST_CONTENT_GRANTED_CAPABILITIES'] ?? [];
@@ -791,6 +759,125 @@ function spacefast_content_model_stage_release(
 }
 
 /** Activate only after immutable verification and every local projection succeeds. */
+/**
+ * WordPress's own permalinks, agreeing with the URLs a Space actually publishes.
+ *
+ * A Space serves its content at a flat `/<slug>`: that is the path the serving
+ * lane resolves, the path the CLI prints, and the path a reader is given. A
+ * managed site nevertheless comes up with the provider's default dated
+ * structure, so WordPress computed a different canonical URL for the same post
+ * and 301'd every bare slug to `/<year>/<month>/<day>/<slug>/`. Making the
+ * structure flat is what stops those two answers from disagreeing at the source,
+ * rather than papering over one of them.
+ *
+ * Idempotent, and only ever a write when the two disagree: activation re-runs on
+ * every publish, promote and rollback.
+ */
+function spacefast_content_model_ensure_flat_permalinks(): void
+{
+    if (!function_exists('get_option') || !function_exists('update_option')) {
+        return;
+    }
+    if ((string) get_option('permalink_structure') === SPACEFAST_CONTENT_MODEL_PERMALINK_STRUCTURE) {
+        return;
+    }
+    $rewrite = $GLOBALS['wp_rewrite'] ?? null;
+    if (is_object($rewrite) && method_exists($rewrite, 'set_permalink_structure')) {
+        $rewrite->set_permalink_structure(SPACEFAST_CONTENT_MODEL_PERMALINK_STRUCTURE);
+    } else {
+        update_option('permalink_structure', SPACEFAST_CONTENT_MODEL_PERMALINK_STRUCTURE);
+    }
+    // Setting the structure only re-reads it. The rules WordPress actually
+    // routes requests with are a separate, derived `rewrite_rules` option, and
+    // until they are rebuilt they still describe the dated structure — which
+    // matches no flat slug, so every published post 404s. A soft flush is the
+    // whole job: there is no .htaccess on this stack to rewrite.
+    if (is_object($rewrite) && method_exists($rewrite, 'flush_rules')) {
+        $rewrite->flush_rules(false);
+    }
+}
+
+/**
+ * The theme a managed site renders through, actually active.
+ *
+ * A managed site comes up pointing at the provider's default theme, which is not
+ * installed on the box — so WordPress resolved every template to nothing and
+ * rendered a 200 with an empty body. The engine ships `spacefast-managed` and
+ * the rest of the system already assumes it: the templates a release implies are
+ * supplied against it, and the page lane falls back to its `templates/index.html`.
+ * Activation is where that assumption becomes true.
+ *
+ * Idempotent, and never a switch away from a theme that is already the managed
+ * one: activation re-runs on every publish, promote and rollback.
+ */
+function spacefast_content_model_ensure_managed_theme(): void
+{
+    if (
+        !function_exists('get_option')
+        || !function_exists('switch_theme')
+        || !function_exists('wp_get_theme')
+    ) {
+        return;
+    }
+    if ((string) get_option('stylesheet') === SPACEFAST_CONTENT_MODEL_MANAGED_THEME) {
+        return;
+    }
+    $theme = wp_get_theme(SPACEFAST_CONTENT_MODEL_MANAGED_THEME);
+    // Only ever a switch TO something that is there. A box mid-engine-install
+    // must not be left pointing at a theme it does not yet have — that is the
+    // failure this exists to end, not one to reproduce.
+    if (!is_object($theme) || !method_exists($theme, 'exists') || !$theme->exists()) {
+        return;
+    }
+    switch_theme(SPACEFAST_CONTENT_MODEL_MANAGED_THEME);
+}
+
+/** The verified release carries seed bytes, so activation never guesses a live version root. */
+function spacefast_content_model_reconcile_documents(array $contentModel): array
+{
+    $documents = [];
+    foreach ($contentModel['syncBindings'] as $binding) {
+        $canonicalPage = ($binding['postType'] ?? null) === 'page'
+            && preg_match('/\Async\.pages\.[a-f0-9]{32}\z/D', (string) ($binding['id'] ?? '')) === 1;
+        $collectionPost = ($binding['postType'] ?? null) === 'post'
+            && ($binding['resourceId'] ?? null) === 'posts'
+            && ($binding['fieldId'] ?? null) === 'posts-content'
+            && isset($binding['documentSeed']);
+        if (!$canonicalPage && !$collectionPost) {
+            continue;
+        }
+        $seed = $binding['documentSeed'] ?? null;
+        $text = is_array($seed) ? ($seed['text'] ?? null) : null;
+        $digest = is_array($seed) ? ($seed['sha256'] ?? null) : null;
+        $format = $binding['format'] ?? null;
+        if (!is_string($text) || strlen($text) > SPACEFAST_CONTENT_SYNC_MAX_TEXT_BYTES
+            || !is_string($digest) || !hash_equals(spacefast_content_sync_digest_text($text), $digest)
+            || !in_array($format, ['md', 'html', 'tsx'], true)
+            || ($binding['fieldStorage'] ?? null) !== 'post_content'
+            || ($format === 'tsx' && ($binding['compiled']['sha256'] ?? null) !== $digest)) {
+            throw new Spacefast_Content_Error(422, 'content_document_seed_invalid', 'A canonical document needs digest-verified seed bytes from its release.');
+        }
+        $documents[] = spacefast_content_sync_publish_document([
+            'bindingId' => $binding['id'],
+            'source' => $binding['source'],
+            'format' => $format,
+            'text' => $text,
+            'observedSourceRevision' => $digest,
+            'operationId' => 'op_publish' . hash('sha256', $contentModel['revision'] . $binding['id']),
+            'binding' => [
+                'resourceId' => $binding['resourceId'],
+                'fieldId' => $binding['fieldId'],
+                'source' => $binding['source'],
+                'format' => $format,
+                'slug' => $binding['slug'],
+                'post_type' => $binding['postType'],
+                'field_storage' => 'post_content',
+            ],
+        ]);
+    }
+    return $documents;
+}
+
 function spacefast_content_model_activate_release(mixed $revision, bool $managed): array
 {
     if (!$managed) {
@@ -805,20 +892,32 @@ function spacefast_content_model_activate_release(mixed $revision, bool $managed
     }
     $contentModelRoot = spacefast_content_model_root($privateRoot, spacefast_content_require_space_id());
     if ($revision === null) {
-        $pointer = $contentModelRoot . '/active-release';
-        if (is_file($pointer) && !_stattic_private_tree_remove($pointer)) {
-            throw new Spacefast_Content_Error(500, 'content_model_pointer_failed', 'The ContentModelRelease pointer could not be cleared.');
-        }
-        return ['revision' => null, 'tables' => 0, 'pages' => 0];
+        return spacefast_content_sync_locked(static function () use ($contentModelRoot): array {
+            $pointer = $contentModelRoot . '/active-release';
+            if (is_file($pointer) && !_stattic_private_tree_remove($pointer)) {
+                throw new Spacefast_Content_Error(500, 'content_model_pointer_failed', 'The ContentModelRelease pointer could not be cleared.');
+            }
+            return ['revision' => null, 'tables' => 0, 'pages' => 0];
+        });
     }
     $releaseRoot = $contentModelRoot . '/releases/' . spacefast_content_model_revision_directory($revision);
     $contentModel = spacefast_content_model_read_release($releaseRoot, $revision);
+    $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $releaseRoot;
+    $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $revision;
     spacefast_content_model_register_wordpress_projection();
+    spacefast_content_model_ensure_flat_permalinks();
+    spacefast_content_model_ensure_managed_theme();
     spacefast_content_model_ensure_collection_terms($contentModel);
     spacefast_content_model_apply_tables($contentModel);
-    spacefast_content_model_reconcile_pages($contentModel);
-    if (!_stattic_private_tree_write_pointer($contentModelRoot . '/active-release', $revision)) {
-        throw new Spacefast_Content_Error(500, 'content_model_pointer_failed', 'The ContentModelRelease pointer could not be switched.');
-    }
-    return ['revision' => $revision, 'tables' => count($contentModel['tables']), 'pages' => count($contentModel['pages'])];
+    return spacefast_content_sync_locked(static function () use ($contentModel, $contentModelRoot, $revision): array {
+        $documents = spacefast_content_sync_without_journal(
+            static fn (): array => spacefast_content_sync_with_transaction(
+                static fn (): array => spacefast_content_model_reconcile_documents($contentModel)
+            )
+        );
+        if (!_stattic_private_tree_write_pointer($contentModelRoot . '/active-release', $revision)) {
+            throw new Spacefast_Content_Error(500, 'content_model_pointer_failed', 'The ContentModelRelease pointer could not be switched.');
+        }
+        return ['revision' => $revision, 'tables' => count($contentModel['tables']), 'pages' => count($documents)];
+    });
 }

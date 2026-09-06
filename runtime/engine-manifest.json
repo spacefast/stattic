@@ -88,6 +88,7 @@
     "engine/wordpress/content-source-sync.php",
     "engine/wordpress/content-model-kernel.php",
     "engine/wordpress/content-source-journal.php",
+    "engine/wordpress/content-templates.php",
     "engine/wordpress/content-kernel.php",
     "engine/admin/components.php",
     "engine/wordpress/components.json",
@@ -99,17 +100,19 @@
     "wordpress/managed-theme/theme.json",
     "wordpress/managed-theme/templates/index.html",
     "installer.php",
-    "custom-redirects.php",
-    "wordpress/zero-admin/admin-page.php",
-    "wordpress/zero-admin/assets.php",
-    "wordpress/zero-admin/bootstrap.php",
-    "wordpress/zero-admin/routes.php",
-    "wordpress/zero-admin/zero-admin.php",
-    "wordpress/zero-admin/build/admin.js",
-    "wordpress/zero-admin/build/admin.css",
-    "wordpress/zero-admin/build/admin.asset.php"
+    "custom-redirects.php"
   ],
   "executables": ["bin/stattic-runtime"],
+  "trees": [
+    {
+      "source": "wordpress/zero-admin",
+      "path": "wp-content/mu-plugins/zero-admin"
+    },
+    {
+      "source": "wordpress/zero-dashboard",
+      "path": "wp-content/mu-plugins/zero-dashboard"
+    }
+  ],
   "aliases": [
     {
       "source": "custom-redirects.php",
@@ -160,36 +163,12 @@
       "path": "wp-content/themes/spacefast-managed/templates/index.html"
     },
     {
-      "source": "wordpress/zero-admin/admin-page.php",
-      "path": "wp-content/mu-plugins/zero-admin/admin-page.php"
-    },
-    {
-      "source": "wordpress/zero-admin/assets.php",
-      "path": "wp-content/mu-plugins/zero-admin/assets.php"
-    },
-    {
-      "source": "wordpress/zero-admin/bootstrap.php",
-      "path": "wp-content/mu-plugins/zero-admin/bootstrap.php"
-    },
-    {
-      "source": "wordpress/zero-admin/routes.php",
-      "path": "wp-content/mu-plugins/zero-admin/routes.php"
-    },
-    {
       "source": "wordpress/zero-admin/zero-admin.php",
       "path": "wp-content/mu-plugins/zero-admin.php"
     },
     {
-      "source": "wordpress/zero-admin/build/admin.js",
-      "path": "wp-content/mu-plugins/zero-admin/build/admin.js"
-    },
-    {
-      "source": "wordpress/zero-admin/build/admin.css",
-      "path": "wp-content/mu-plugins/zero-admin/build/admin.css"
-    },
-    {
-      "source": "wordpress/zero-admin/build/admin.asset.php",
-      "path": "wp-content/mu-plugins/zero-admin/build/admin.asset.php"
+      "source": "wordpress/zero-dashboard/zero-dashboard.php",
+      "path": "wp-content/mu-plugins/zero-dashboard.php"
     }
   ]
 }

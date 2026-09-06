@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use crate::artifacts::{sha256_prefixed, EndpointCapabilities};
-use crate::constants::{ENDPOINT_FORMAT, QUICKJS_ABI, RUNNER_ABI};
+use crate::constants::{DB_CAPABILITY_ABI, ENDPOINT_FORMAT, QUICKJS_ABI, RUNNER_ABI};
 use crate::{compile_file_with_capabilities, handle_invoke};
 
 fn endpoint_source() -> &'static str {
@@ -23,7 +23,7 @@ globalThis.__statticZeroResult = JSON.stringify({
     path: request.path,
     params: request.params,
     spaceId: context.spaceId,
-    dbInstalled: typeof globalThis.__statticDb !== "undefined",
+    dbInstalled: typeof globalThis.__statticDbCapability?.execute === "function",
     dbCapability: caps.db === true,
     fetchInstalled: typeof globalThis.__statticFetch === "function",
     authInstalled: typeof globalThis.__statticAuth === "object",
@@ -73,6 +73,7 @@ fn no_capabilities() -> EndpointCapabilities {
         email: false,
         content: false,
         storage: false,
+        connectors: false,
     }
 }
 
@@ -130,6 +131,7 @@ impl Fixture {
                 "bytecodeSha256": sha256_prefixed(&bytecode),
                 "runnerAbi": RUNNER_ABI,
                 "quickjsAbi": QUICKJS_ABI,
+                "dbCapabilityAbi": DB_CAPABILITY_ABI,
                 "capabilities": {
                     "db": capabilities.db,
                     "fetch": capabilities.fetch,
@@ -288,6 +290,7 @@ fn serves_a_frozen_artifact_that_declares_no_execution_mode() {
     let fixture = Fixture::new(false);
     fixture.edit_artifact(|artifact| {
         artifact.remove("executionMode");
+        artifact.remove("dbCapabilityAbi");
     });
 
     let from_new_engine = handle_invoke(&fixture.envelope()).expect("response");
@@ -320,6 +323,7 @@ fn renders_capability_templates_only_when_declared() {
         email: false,
         content: true,
         storage: true,
+        connectors: false,
     });
 
     let response = handle_invoke(&fixture.envelope()).expect("response");
@@ -446,6 +450,36 @@ globalThis.__statticZeroResult = JSON.stringify({
     assert_eq!(body["email"], true);
     // A key it did state is still its own.
     assert_eq!(body["db"], false);
+}
+
+#[test]
+fn database_artifacts_from_before_the_structured_capability_require_republishing() {
+    let fixture = Fixture::new(true);
+    fixture.edit_artifact(|artifact| {
+        artifact["db"] = json!({
+            "schemaHash": "sha256:legacy-db",
+            "tables": {
+                "todos": {
+                    "physicalName": "sf_spc_test_todos",
+                    "primaryKey": "id",
+                    "columns": {
+                        "id": { "physicalName": "id", "type": "id" }
+                    }
+                }
+            }
+        });
+        artifact.remove("dbCapabilityAbi");
+    });
+
+    let response = handle_invoke(&fixture.envelope()).unwrap_err();
+    let problem = response_body(&response);
+
+    assert_eq!(response.status, 422);
+    assert_eq!(problem["code"], "zero_db_artifact_republish_required");
+    assert_eq!(
+        problem["detail"],
+        "Republish this version to use the current Zero DB capability."
+    );
 }
 
 #[test]

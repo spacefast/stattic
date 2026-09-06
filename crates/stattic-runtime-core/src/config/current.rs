@@ -25,7 +25,6 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "build",
     "cleanUrls",
     "crons",
-    "experimental_gutenberg",
     "fallback",
     // Routing rules in the same grammar the `_redirects` / `_headers` files
     // use. They pass through this lane untouched: the strict v1 compiler
@@ -320,12 +319,7 @@ fn validate_config_shape(
             invalid(diagnostics, key, "a string");
         }
     }
-    for key in [
-        "cleanUrls",
-        "listing",
-        "markdownNegotiation",
-        "experimental_gutenberg",
-    ] {
+    for key in ["cleanUrls", "listing", "markdownNegotiation"] {
         validate_optional_bool(object, key, key, diagnostics);
     }
     if let Some(values) = object.get("templates") {
@@ -1302,7 +1296,6 @@ export type SpaceConfig = {
   build?: SpaceBuildSettings;
   placement?: SpacePlacementConfig;
   markdownNegotiation?: boolean;
-  experimental_gutenberg?: boolean;
   inject?: { head?: string[]; bodyStart?: string[]; bodyEnd?: string[]; noscript?: string[] };
 };
 
@@ -1399,7 +1392,6 @@ mod tests {
             .as_object()
             .expect("schema properties are an object");
 
-        assert!(!properties.contains_key("experimental_gutenberg"));
         assert!(!properties.contains_key("inject"));
         assert_eq!(schema["additionalProperties"], json!(true));
     }

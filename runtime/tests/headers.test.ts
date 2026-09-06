@@ -50,6 +50,11 @@ const TOKENED = "private, no-store";
 // customer share link (context.php: STATTIC_ACCESS_QUERY_TOKEN_LINK_PREFIX).
 const SHARE_TOKEN = "?__=sfl_aBcD-shareLink_0123456789";
 
+// `raw: true` publishes the Markdown source itself. A plain `.md` is private,
+// and the conditional rewrite below targets this file — a rewrite cannot target
+// a private one. The frontmatter rides along in the published bytes.
+const DOC_MD = "---\nraw: true\n---\n# doc markdown\n";
+
 const HASHED_JS = "static/main-D2mDMWBM.js";
 const HASHED_JS_BODY = "void 0;\n";
 const CSS_BODY = "body{color:red}\n";
@@ -132,7 +137,7 @@ beforeAll(async () => {
       "café.html": "<h1>café</h1>\n",
       "café-agent": "agent redirect source\n",
       "target.html": "<h1>target</h1>\n",
-      "doc.md": "# doc markdown\n",
+      "doc.md": DOC_MD,
       "cache.txt": "do not store\n",
       "private.txt": "private cache\n",
       "cached.txt": "publisher window\n",
@@ -458,7 +463,7 @@ test("redirects carry an explicit edge cache policy on both lanes", async () => 
 test("condition-matched responses never enter a shared cache", async () => {
   const matched = await get(rt, HOST, "/doc-rewrite", { headers: { cookie: "beta=1" } });
   expect(matched.status).toBe(200);
-  expect(await matched.text()).toBe("# doc markdown\n");
+  expect(await matched.text()).toBe(DOC_MD);
   expect(cachePolicy(matched)).toEqual(["no-store", "no-cache"]);
 
   const cases = [

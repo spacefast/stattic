@@ -407,6 +407,28 @@ function callbackToken(
   });
 }
 
+function runtimeBearerToken(host: string, authorities: string[]) {
+  const now = Math.floor(Date.now() / 1000);
+  return signEd25519Jwt(keyPair.privateKey, issuer.kid, {
+    sub: authorities[0],
+    purpose: "runtime-bearer",
+    authorities,
+    iss: "spacefast-api",
+    aud: spaceForHost(host),
+    host,
+    spaceId: spaceForHost(host),
+    generation: 0,
+    sid: createHash("sha256").update(randomUUID()).digest("hex"),
+    emailVerified: false,
+    // Older than the handoff redemption window by design: this credential is
+    // governed by its explicit expiry, not handoff freshness.
+    iat: now - 120,
+    nbf: now - 120,
+    exp: now + 300,
+    jti: randomUUID(),
+  });
+}
+
 function setCookieValue(response: Response): string {
   return (response.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
 }
@@ -976,6 +998,11 @@ test("access callback handoffs require both the Space audience and request host"
 
 test("a signed platform header admits directly without creating a browser cookie", async () => {
   const token = callbackToken(PRIVATE_HOST, ["member:mem_owner"]);
+  const wrongHost = await get(runtime, OTHER_PRIVATE_HOST, "/docs/", {
+    headers: { "x-sf-authorization": `Bearer ${token}` },
+  });
+  expect(wrongHost.status).toBe(403);
+
   const admitted = await get(runtime, PRIVATE_HOST, "/docs/", {
     headers: { "x-sf-authorization": `Bearer ${token}` },
   });
@@ -983,10 +1010,22 @@ test("a signed platform header admits directly without creating a browser cookie
   expect(admitted.headers.get("set-cookie")).toBeNull();
   expect(admitted.headers.get("cache-control")).toStartWith("private");
 
-  const wrongHost = await get(runtime, OTHER_PRIVATE_HOST, "/docs/", {
+  const replayed = await get(runtime, PRIVATE_HOST, "/docs/", {
     headers: { "x-sf-authorization": `Bearer ${token}` },
   });
-  expect(wrongHost.status).toBe(403);
+  expect(replayed.status).toBe(403);
+
+  const reusableToken = runtimeBearerToken(PRIVATE_HOST, ["member:mem_owner"]);
+  const bearerHeaders = { "x-sf-authorization": `Bearer ${reusableToken}` };
+  const firstBearerRequest = await get(runtime, PRIVATE_HOST, "/docs/", {
+    headers: bearerHeaders,
+  });
+  expect(firstBearerRequest.status).toBe(200);
+  expect(firstBearerRequest.headers.get("set-cookie")).toBeNull();
+  const secondBearerRequest = await get(runtime, PRIVATE_HOST, "/docs/", {
+    headers: bearerHeaders,
+  });
+  expect(secondBearerRequest.status).toBe(200);
 });
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ function _stattic_content_management_action(array $request): string|false
         'model.activate' => 'content.model.activate',
         'source.reconcile' => 'content.source.reconcile',
         'source.acknowledge' => 'content.source.acknowledge',
+        'source.materialize' => 'content.source.materialize',
         'storage.list' => 'content.storage.list',
         'storage.get' => 'content.storage.get',
         'storage.delete' => 'content.storage.delete',

@@ -78,7 +78,12 @@ const POST = "<h1>post</h1>\n";
 const APP_JS = "console.log('app');\n";
 const APP_JS_GZIP = gzipSync(Buffer.from(APP_JS));
 const GUIDE_HTML = "<h1>browser guide</h1>\n";
-const GUIDE_MD = "# agent guide\n";
+// `raw: true` is how a Markdown file asks to be published as itself. Without
+// it a `.md` source is private and unreachable, so a rewrite could not target
+// it — and an agent negotiation whose whole point is serving the Markdown needs
+// the source on the public tree. The frontmatter block is part of the published
+// bytes, because a raw file is published verbatim.
+const GUIDE_MD = "---\nraw: true\n---\n# agent guide\n";
 // A gzip member under an extension nothing has a MIME for: finalize sniffs the
 // magic bytes so the response describes the bytes, and no lane invents a
 // Content-Encoding for them.
@@ -754,7 +759,10 @@ test("a version with no index compiles a directory listing per directory", async
     metadata: { mode: "files", title: "Drop" },
     files: {
       "report.pdf.txt": "report\n",
-      "notes.md": "# notes\n",
+      // A listing enumerates what is served, so the Markdown in it has to be
+      // served: `raw: true` publishes the source instead of rendering a page
+      // from it and keeping the source private.
+      "notes.md": "---\nraw: true\n---\n# notes\n",
       "data/items.json": "[]\n",
       "SF.JSONC": '{ "private": true }\n',
       ".SF/CONFIG.JSON": '{ "private": true }\n',

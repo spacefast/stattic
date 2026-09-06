@@ -333,7 +333,7 @@ function _stattic_spacefast_sdk_bootstrap(
         'apiBase' => _stattic_spacefast_sdk_api_base_url($sdkConfig),
         // Null while the Space is unclaimed: there is no account to continue with.
         'accountUrl' => is_array($descriptor) && is_string($descriptor['accountUrl'] ?? null)
-            ? $descriptor['accountUrl']
+            ? _stattic_request_scheme() . '://' . $pageHost . STATTIC_ACCESS_ACCOUNT_START_PATH
             : null,
         'layout' => is_string($collabPages['collab'] ?? null)
             ? SPACEFAST_COLLAB_PAGE_PATH

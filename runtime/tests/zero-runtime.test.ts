@@ -19,8 +19,11 @@ import {
   type Runtime,
   sha256,
   signEd25519Jwt,
+  signToken,
+  RUNTIME_INSTANCE_ID,
   startRuntime,
   versionRoot,
+  versionMetadata,
   visitorIssuer,
 } from "./harness.ts";
 
@@ -390,6 +393,26 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       metadata: { mode: "website", title: "Zero Identity" },
       files: { "index.html": "<h1>zero identity</h1>\n" },
       serving: {
+        zero_runs: [
+          {
+            execution_mode: "read",
+            run_id: "query_whoami",
+            source: "globalThis.__statticZeroResult = '{}';",
+            capabilities: { db: false },
+          },
+          {
+            execution_mode: "write",
+            run_id: "mutation_whoami",
+            source: "globalThis.__statticZeroResult = '{}';",
+            capabilities: { db: false },
+          },
+          {
+            execution_mode: "write",
+            run_id: "mutation_updateProfile",
+            source: "globalThis.__statticZeroResult = '{}';",
+            capabilities: { db: false },
+          },
+        ],
         zero_endpoints: [
           {
             execution_mode: "read",
@@ -398,6 +421,15 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
             source: "globalThis.__statticZeroResult = '{}';",
             endpoint_id: "GET /api/whoami",
             schema_hash: "sha256:identity",
+            capabilities: { db: false },
+          },
+          {
+            execution_mode: "write",
+            method: "POST",
+            path: "/api/update-profile",
+            source: "globalThis.__statticZeroResult = '{}';",
+            endpoint_id: "POST /api/update-profile",
+            schema_hash: "sha256:identity-write",
             capabilities: { db: false },
           },
         ],
@@ -491,10 +523,37 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
         status: 302,
         body: "Redirecting.\n",
       });
-      expect(signIn.headers.get("location")).toBe(
-        "https://api.spacefast.test/v1/access/acquire/opaque-zero?host=zero-identity.test&return=%2Faccount%3Ftab%3Dprofile",
+      const signInUrl = new URL(signIn.headers.get("location") ?? "");
+      expect(signInUrl.origin + signInUrl.pathname).toBe(
+        "https://api.spacefast.test/v1/access/acquire/opaque-zero",
       );
+      expect(signInUrl.searchParams.get("host")).toBe(host);
+      expect(signInUrl.searchParams.get("return")).toBe("/account?tab=profile");
+      expect(signInUrl.searchParams.get("browserState")).toMatch(/^[a-f0-9]{64}$/);
+      expect(signIn.headers.get("set-cookie")).toContain("spacefast_access_state_dev_");
     }
+
+    const visitorConnect = await get(
+      idRuntime,
+      host,
+      "/__spacefast/zero/connectors/tracker/connect?return_to=%2Faccount",
+    );
+    expect(visitorConnect.status).toBe(302);
+    const visitorSignIn = new URL(visitorConnect.headers.get("location") ?? "");
+    expect(visitorSignIn.origin).toBe("https://api.spacefast.test");
+    expect(visitorSignIn.searchParams.get("return")).toBe(
+      "/__spacefast/zero/connectors/tracker/connect?return_to=%2Faccount",
+    );
+    expect(visitorConnect.headers.get("cache-control")).toContain("no-store");
+    const expiredCallback = await get(
+      idRuntime,
+      host,
+      "/__spacefast/zero/connectors/tracker/callback?code=private-code&state=private-state",
+    );
+    expect(expiredCallback.status).toBe(302);
+    expect(new URL(expiredCallback.headers.get("location") ?? "").searchParams.get("return")).toBe(
+      "/__spacefast/zero/connectors/tracker/connect",
+    );
 
     // The DOCUMENT settles the guest session, before the page can open a single
     // XHR. A Zero client's first render fires auth.get, query.subscribe and
@@ -608,6 +667,257 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       isGuest: false,
       isAuthenticated: true,
     });
+
+    const workerToken = signToken({
+      aud: "spacefast-functions-relay",
+      runtime_instance_id: RUNTIME_INSTANCE_ID,
+      space_id: "spc_zero_identity",
+      version_id: "ver_zero_identity_1",
+      capabilities: ["zero.call"],
+    });
+    for (const [op, cookie, principal] of [
+      ["query.run", sessionCookie, "account:usr_zero"],
+      ["mutation.run", "", "service:spc_zero_identity"],
+    ]) {
+      const response = await get(idRuntime, host, "/__spacefast/functions/relay", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${workerToken}`,
+          "sf-fx-broker": "zero",
+          "sf-fx-visitor-host": host,
+          cookie: cookie ?? "",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ op, name: "whoami", args: [{ forwarded: true }] }),
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      const frame = await response.json();
+      expect(frame).toMatchObject({
+        ok: true,
+        op: op === "query.run" ? "query.result" : "mutation.result",
+      });
+      const envelope = JSON.parse(readFileSync(capturePath, "utf8"));
+      expect(envelope.auth.userId).toBe(principal);
+      expect(envelope.auth.provider).toBe(cookie ? "gravatar" : "service");
+      expect(envelope.context.versionId).toBe("ver_zero_identity_1");
+      expect(envelope.request.path).toBe("/__spacefast/zero/run");
+      expect(envelope.request.headers.authorization).toBeUndefined();
+      expect(envelope.request.headers["sf-fx-broker"]).toBeUndefined();
+      expect(
+        JSON.parse(Buffer.from(envelope.request.bodyBase64, "base64").toString()).args,
+      ).toEqual([{ forwarded: true }]);
+    }
+
+    // Cookie identity is ambient browser authority. A sibling origin is
+    // same-site and can carry it, but cannot run a mutation. The exact origin
+    // and JSON content type are both required before the runner is spawned.
+    rmSync(capturePath, { force: true });
+    const siblingMutation = await get(idRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        "content-type": "application/json",
+        origin: "http://sibling.zero-identity.test",
+        "sec-fetch-site": "same-site",
+      },
+      body: JSON.stringify({ id: "mutation-sibling", op: "mutation.run", name: "updateProfile" }),
+    });
+    expect(siblingMutation.status).toBe(403);
+    expect(await siblingMutation.json()).toMatchObject({ code: "zero_mutation_origin_invalid" });
+    expect(existsSync(capturePath)).toBe(false);
+
+    const missingFetchMetadata = await get(idRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        "content-type": "application/json",
+        origin: `http://${host}`,
+      },
+      body: JSON.stringify({
+        id: "mutation-no-fetch-site",
+        op: "mutation.run",
+        name: "updateProfile",
+      }),
+    });
+    expect(missingFetchMetadata.status).toBe(403);
+    expect(existsSync(capturePath)).toBe(false);
+
+    const wrongContentType = await get(idRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        "content-type": "text/plain",
+        origin: `http://${host}`,
+        "sec-fetch-site": "same-origin",
+      },
+      body: JSON.stringify({ id: "mutation-text", op: "mutation.run", name: "updateProfile" }),
+    });
+    expect(wrongContentType.status).toBe(403);
+    expect(existsSync(capturePath)).toBe(false);
+
+    const browserMutation = await get(idRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        "content-type": "application/json; charset=utf-8",
+        origin: `http://${host}`,
+        "sec-fetch-site": "same-origin",
+      },
+      body: JSON.stringify({ id: "mutation-browser", op: "mutation.run", name: "updateProfile" }),
+    });
+    expect(browserMutation.status).toBe(200);
+    expect(await browserMutation.json()).toMatchObject({
+      id: "mutation-browser",
+      op: "mutation.result",
+      ok: true,
+    });
+
+    rmSync(capturePath, { force: true });
+    const directFormMutation = await get(idRuntime, host, "/api/update-profile", {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        "content-type": "application/x-www-form-urlencoded",
+        origin: `http://${host}`,
+        "sec-fetch-site": "same-origin",
+      },
+      body: "name=Browser",
+    });
+    expect(directFormMutation.status).toBe(403);
+    expect(existsSync(capturePath)).toBe(false);
+
+    const directMutation = await get(idRuntime, host, "/api/update-profile", {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        "content-type": "application/octet-stream",
+        origin: `http://${host}`,
+        "sec-fetch-site": "same-origin",
+      },
+      body: "profile-update",
+    });
+    expect(directMutation.status).toBe(201);
+
+    // A consumed browser handoff is not platform bearer authority. Replaying
+    // it in the explicit header must fail before tenant code runs, even when a
+    // valid browser cookie is present beside it.
+    rmSync(capturePath, { force: true });
+    const replayedHandoffMutation = await get(idRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        "content-type": "application/json",
+        "x-sf-authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        id: "mutation-replayed-handoff",
+        op: "mutation.run",
+        name: "updateProfile",
+      }),
+    });
+    expect(replayedHandoffMutation.status).toBe(403);
+    expect(existsSync(capturePath)).toBe(false);
+
+    // A signed system-view proof is still read-only. It cannot borrow the
+    // explicit-header exemption to execute a write.
+    const viewToken = signEd25519Jwt(key.privateKey, issuer.kid, {
+      sub: "system:spc_zero_identity",
+      purpose: "system-view",
+      capabilities: ["page.view"],
+      iss: "spacefast-api",
+      aud: "spc_zero_identity",
+      host,
+      spaceId: "spc_zero_identity",
+      generation: 1,
+      iat: now,
+      nbf: now,
+      exp: now + 3600,
+    });
+    const viewMutation = await get(idRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-sf-authorization": `Bearer ${viewToken}`,
+      },
+      body: JSON.stringify({ id: "mutation-view", op: "mutation.run", name: "updateProfile" }),
+    });
+    expect(viewMutation.status).toBe(403);
+    expect(existsSync(capturePath)).toBe(false);
+
+    // A non-browser credential exchange carries a fresh one-use handoff. It
+    // has no ambient cookie to protect and does not need browser-only headers.
+    const bearerToken = signEd25519Jwt(key.privateKey, issuer.kid, {
+      sub: "member:mem_zero",
+      purpose: "handoff",
+      authorities: ["member:mem_zero"],
+      iss: "spacefast-api",
+      aud: "spc_zero_identity",
+      host,
+      spaceId: "spc_zero_identity",
+      generation: 1,
+      sid: "2".repeat(64),
+      iat: now,
+      nbf: now,
+      exp: now + 60,
+      jti: "jti_zero_machine_mutation",
+    });
+    const bearerRequest = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-sf-authorization": `Bearer ${bearerToken}`,
+      },
+      body: JSON.stringify({ id: "mutation-bearer", op: "mutation.run", name: "updateProfile" }),
+    };
+    const bearerMutation = await get(idRuntime, host, "/__zero/run", bearerRequest);
+    expect(bearerMutation.status).toBe(200);
+    const replayedBearerMutation = await get(idRuntime, host, "/__zero/run", bearerRequest);
+    expect(replayedBearerMutation.status).toBe(403);
+
+    // The agent token is a different signed purpose: reusable until expiry,
+    // not a handoff whose jti is consumed by its first request. Its issue time
+    // is deliberately outside the handoff freshness window.
+    const runtimeBearerToken = signEd25519Jwt(key.privateKey, issuer.kid, {
+      sub: "member:mem_zero",
+      purpose: "runtime-bearer",
+      authorities: ["member:mem_zero"],
+      iss: "spacefast-api",
+      aud: "spc_zero_identity",
+      host,
+      spaceId: "spc_zero_identity",
+      generation: 1,
+      sid: "3".repeat(64),
+      iat: now - 120,
+      nbf: now - 120,
+      exp: now + 3600,
+      jti: "jti_zero_reusable_agent_bearer",
+    });
+    const runtimeBearerRequest = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-sf-authorization": `Bearer ${runtimeBearerToken}`,
+      },
+      body: JSON.stringify({
+        id: "mutation-runtime-bearer",
+        op: "mutation.run",
+        name: "updateProfile",
+      }),
+    };
+    const firstRuntimeBearerMutation = await get(
+      idRuntime,
+      host,
+      "/__zero/run",
+      runtimeBearerRequest,
+    );
+    expect(firstRuntimeBearerMutation.status).toBe(200);
+    const secondRuntimeBearerMutation = await get(
+      idRuntime,
+      host,
+      "/__zero/run",
+      runtimeBearerRequest,
+    );
+    expect(secondRuntimeBearerMutation.status).toBe(200);
 
     const sessionToken = sessionCookie.slice(sessionCookie.indexOf("=") + 1);
     const storageUpload = await get(
@@ -795,6 +1105,7 @@ test("native compiler defaults omitted Zero capabilities conservatively", () => 
     spam: true,
     email: false,
     content: false,
+    connectors: false,
     storage: false,
   });
 
@@ -812,6 +1123,7 @@ test("native compiler defaults omitted Zero capabilities conservatively", () => 
     spam: true,
     email: false,
     content: false,
+    connectors: false,
     storage: false,
   });
 });
@@ -1241,7 +1553,7 @@ test("does not spawn the Zero runner for static or not-found requests", async ()
   expect(existsSync(capturePath)).toBe(false);
 });
 
-test("does not spawn the Zero runner for redirect, header, or fallback paths", async () => {
+test("does not spawn the Zero runner for redirects, headers, or canonical client pages", async () => {
   const host = "zero-runtime-nonzero.test";
   await deploy(rt, {
     spaceId: "spc_zero_nonzero",
@@ -1249,6 +1561,7 @@ test("does not spawn the Zero runner for redirect, header, or fallback paths", a
     metadata: { mode: "website", title: "Zero Nonzero" },
     files: {
       "index.html": "<h1>zero nonzero</h1>\n",
+      "_spacefast/pages/client.html": "<h1>client page</h1>\n",
       _redirects: "/old / 302\n",
       _headers: ["/", "  X-Static-Hot-Path: yes"].join("\n"),
     },
@@ -1264,7 +1577,16 @@ test("does not spawn the Zero runner for redirect, header, or fallback paths", a
           capabilities: { db: false },
         },
       ],
-      config: { fallback: { path: "index.html", status: 200 } },
+      config: { index: "index.html" },
+      pages: [
+        {
+          id: "page.client",
+          path: "/client/route",
+          render: "client",
+          shell: "_spacefast/pages/client.html",
+          params: [],
+        },
+      ],
     },
     activate: {
       route_name: "production",
@@ -1274,13 +1596,10 @@ test("does not spawn the Zero runner for redirect, header, or fallback paths", a
       version_hostnames: [],
     },
   });
-  // §5/§6: each of these paths is decided by a compiled entry whose action is
-  // NOT `zero` — the redirect is its own entry, the SPA fallback is the reserved
-  // key, and the header rule rides the static entry's own header set. Only
-  // `/api/zero` dispatches Zero.
+  // Only the endpoint invokes the runner; client pages use their declared shell.
   const entries = responseEntries(rt, "spc_zero_nonzero", "ver_zero_nonzero_1");
   expect(zeroAction(entries["/api/zero"] ?? null)).toMatchObject({ endpoint: "GET /api/zero" });
-  for (const key of ["/old", "/", RESPONSES.specialKeys.spa]) {
+  for (const key of ["/old", "/", "/_spacefast/pages/client.html"]) {
     expect({ key, zero: zeroAction(entries[key] ?? null) }).toEqual({ key, zero: null });
   }
   expect(entries["/old"]?.[RESPONSES.entryKeys.headers]).toMatchObject({ location: "/" });
@@ -1298,9 +1617,8 @@ test("does not spawn the Zero runner for redirect, header, or fallback paths", a
   expect(staticWithHeader.headers.get("x-static-hot-path")).toBe("yes");
   expect(await staticWithHeader.text()).toBe("<h1>zero nonzero</h1>\n");
   expect(fallback.status).toBe(200);
-  expect(await fallback.text()).toBe("<h1>zero nonzero</h1>\n");
-  expect(missing.status).toBe(200);
-  expect(await missing.text()).toBe("<h1>zero nonzero</h1>\n");
+  expect(await fallback.text()).toBe("<h1>client page</h1>\n");
+  expect(missing.status).toBe(404);
   expect(existsSync(capturePath)).toBe(false);
 });
 
@@ -1491,4 +1809,128 @@ test("an access-protected Zero endpoint pins private revalidation over a runner-
   expect(response.headers.get("surrogate-control")).toBeNull();
   // §16: private never opts the edge in, whatever the runner declared.
   expect(response.headers.get("a8c-edge-cache")).toBe("no-cache");
+});
+
+test("declared Zero pages serve the shell while unknown paths use the normal 404", async () => {
+  await deploy(rt, {
+    spaceId: "spc_zero_pages",
+    versionId: "ver_zero_pages",
+    files: {
+      "_spacefast/pages/client.html": "<main>Page shell</main>",
+      "pages/source.md": "---\nraw: true\n---\nPrivate source",
+      "_spacefast/pages/documents/page.document.html": "<p>Document seed</p>",
+      "asset.txt": "Asset",
+      _redirects: "/about /moved 302!\n/issues/* /asset.txt 200\n",
+    },
+    serving: {
+      config: { index: "index.html" },
+      pages: [
+        {
+          id: "page.document",
+          render: "document",
+          bindingId: "sync.pages.document",
+          path: "/issues/new",
+          params: [],
+        },
+        {
+          id: "page.about",
+          render: "client",
+          shell: "_spacefast/pages/client.html",
+          path: "/about",
+          params: [],
+        },
+        {
+          id: "page.issue",
+          render: "client",
+          shell: "_spacefast/pages/client.html",
+          path: "/issues/:id",
+          params: ["id"],
+        },
+        {
+          id: "page.docs",
+          render: "client",
+          shell: "_spacefast/pages/client.html",
+          path: "/docs/*slug",
+          params: ["slug"],
+        },
+      ],
+    },
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig({ mode: "website" }),
+      production_hostnames: ["zero-pages.test"],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+  expect(versionMetadata(rt, "spc_zero_pages", "ver_zero_pages")?.diagnostics).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ code: "page_redirect_overlap", path: "/about" }),
+    ]),
+  );
+  const resolver = Bun.spawnSync([
+    Bun.which("php") ?? "/usr/bin/php",
+    "-r",
+    `require $argv[1]; $paths = json_decode($argv[3], true); echo json_encode(array_map(fn($path) => _stattic_page_resolve($argv[2], $path), $paths));`,
+    path.resolve(import.meta.dir, "../engine/runtime/zero.php"),
+    versionRoot(rt, "spc_zero_pages", "ver_zero_pages"),
+    JSON.stringify([
+      "/issues/new",
+      "/issues/%6eew",
+      "/issues/123",
+      "/docs/a/b",
+      "/docs",
+      "/issues/a%2fb",
+    ]),
+  ]);
+  expect(resolver.exitCode).toBe(0);
+  expect(
+    JSON.parse(resolver.stdout.toString()).map((page: { id: string } | null) => page?.id ?? null),
+  ).toEqual(["page.document", "page.document", "page.issue", "page.docs", null, null]);
+  for (const path of ["/issues/123", "/docs/a/b"]) {
+    const response = await get(rt, "zero-pages.test", path);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("<main>Page shell</main>");
+  }
+  expect((await get(rt, "zero-pages.test", "/pages/source.md")).status).toBe(404);
+  expect(
+    (await get(rt, "zero-pages.test", "/_spacefast/pages/documents/page.document.html")).status,
+  ).toBe(404);
+  expect((await get(rt, "zero-pages.test", "/docs")).status).toBe(404);
+  expect((await get(rt, "zero-pages.test", "/")).status).toBe(404);
+  expect((await get(rt, "zero-pages.test", "/issues/123", { method: "POST" })).status).toBe(405);
+  expect((await get(rt, "zero-pages.test", "/unknown")).status).toBe(404);
+  expect((await get(rt, "zero-pages.test", "/missing.js")).status).toBe(404);
+  expect(await (await get(rt, "zero-pages.test", "/asset.txt")).text()).toBe("Asset");
+  expect((await get(rt, "zero-pages.test", "/about")).status).toBe(302);
+});
+
+test("explicit page inventories replace the standalone Zero app fallback", async () => {
+  for (const pages of [undefined, []]) {
+    const suffix = pages === undefined ? "absent" : "empty";
+    const host = `zero-api-only-${suffix}.test`;
+    await deploy(rt, {
+      spaceId: `spc_zero_api_only_${suffix}`,
+      versionId: `ver_zero_api_only_${suffix}`,
+      zero: {},
+      metadata: { mode: "website" },
+      files: { "index.html": "<main>Authored static home</main>" },
+      serving: {
+        config: { fallback: { path: "index.html", status: 200 } },
+        pages,
+      },
+      activate: {
+        route_name: "production",
+        config: publicAccessConfig({ mode: "website" }),
+        production_hostnames: [host],
+        noindex_production_hostnames: [],
+        version_hostnames: [],
+      },
+    });
+    const deepLink = await get(rt, host, "/not-a-page");
+    expect(deepLink.status).toBe(pages === undefined ? 200 : 404);
+    if (pages === undefined)
+      expect(await deepLink.text()).toBe("<main>Authored static home</main>");
+    expect(await (await get(rt, host, "/")).text()).toBe("<main>Authored static home</main>");
+  }
 });

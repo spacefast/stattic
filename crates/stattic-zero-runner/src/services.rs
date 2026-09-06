@@ -70,6 +70,7 @@ pub(crate) struct ServiceGrant {
     pub email: bool,
     pub content: bool,
     pub storage: bool,
+    pub connectors: bool,
 }
 
 impl ServiceGrant {
@@ -79,6 +80,7 @@ impl ServiceGrant {
         email: false,
         content: false,
         storage: false,
+        connectors: false,
     };
 
     /// Parses the comma-separated wire grant the relay passes to the executor.
@@ -93,6 +95,7 @@ impl ServiceGrant {
             // one vocabulary across tiers rather than a second spelling here.
             storage: granted("storage.read"),
             content: granted("content.query"),
+            connectors: granted("connectors.call"),
         }
     }
 
@@ -103,6 +106,7 @@ impl ServiceGrant {
             "email" => self.email,
             "content" => self.content,
             "storage" => self.storage,
+            "connectors" => self.connectors,
             _ => false,
         }
     }
@@ -133,7 +137,11 @@ struct ServiceFrame {
 /// The blog URL is the space's own canonical origin and is supplied by the
 /// runtime, never by the caller: Akismet partitions reputation by it, so a
 /// tenant that could name it could spend — or poison — another space's standing.
+#[derive(Default)]
 struct ServiceConfig {
+    connectors_url: Option<String>,
+    connectors_token: Option<String>,
+    connectors_visitor: Option<String>,
     akismet_key: Option<String>,
     gravatar_key: Option<String>,
     blog_url: Option<String>,
@@ -158,6 +166,9 @@ impl ServiceConfig {
                 .filter(|value| !value.is_empty())
         };
         Self {
+            connectors_url: value("SPACEFAST_SERVICE_CONNECTORS_URL"),
+            connectors_token: value("SPACEFAST_SERVICE_CONNECTORS_TOKEN"),
+            connectors_visitor: value("SPACEFAST_SERVICE_CONNECTORS_VISITOR"),
             akismet_key: value("SPACEFAST_SERVICE_AKISMET_KEY"),
             gravatar_key: value("SPACEFAST_SERVICE_GRAVATAR_KEY"),
             blog_url: value("SPACEFAST_SERVICE_BLOG_URL"),
@@ -231,6 +242,7 @@ fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
     }
     let config = ServiceConfig::from_env();
     match (frame.service.as_str(), frame.operation.as_str()) {
+        ("connectors", "call") => connectors_call(&config, &frame.payload, read_only),
         ("gravatar", "profile") => gravatar_profile(&config, &frame.payload),
         ("spam", "check") => spam_check(&config, &frame.payload),
         ("spam", "report_spam") => spam_report(&config, &frame.payload, "submit-spam"),
@@ -249,6 +261,84 @@ fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
             ),
         )),
     }
+}
+
+fn connector_body(config: &ServiceConfig, payload: &Map<String, Value>, read_only: bool) -> Value {
+    let mut body = payload.clone();
+    body.insert(
+        "visitor".into(),
+        config
+            .connectors_visitor
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or(Value::Null),
+    );
+    body.insert(
+        "requestId".into(),
+        Value::String(config.invocation_id.clone()),
+    );
+    let name = payload
+        .get("handler")
+        .and_then(|handler| handler.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    body.insert(
+        "handler".into(),
+        json!({ "name": name, "mode": if read_only { "read" } else { "write" }, "callIndex": payload.get("handler").and_then(|handler| handler.get("callIndex")).and_then(Value::as_u64).unwrap_or(0) }),
+    );
+    Value::Object(body)
+}
+
+fn connectors_call(
+    config: &ServiceConfig,
+    payload: &Map<String, Value>,
+    read_only: bool,
+) -> Result<Value, BrokerRefusal> {
+    let unavailable = || {
+        BrokerRefusal::new(
+            "service_upstream_unavailable",
+            "The connector service could not be reached.",
+        )
+    };
+    let (Some(url), Some(token)) = (
+        config.connectors_url.as_deref(),
+        config.connectors_token.as_deref(),
+    ) else {
+        return Err(BrokerRefusal::new(
+            "service_not_configured",
+            "This version has no connector credential.",
+        ));
+    };
+    // Both URL and credential are supplied by PHP; tenant frames cannot choose an upstream.
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(Duration::from_secs(27)))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .build(),
+    );
+    let response = agent
+        .post(url)
+        .header("content-type", "application/json")
+        .header("authorization", &format!("Bearer {token}"))
+        .send(
+            connector_body(config, payload, read_only)
+                .to_string()
+                .as_bytes(),
+        )
+        .map_err(|_| unavailable())?;
+    let status = response.status().as_u16();
+    let value: Value =
+        serde_json::from_str(&read_content_body(response)?).map_err(|_| unavailable())?;
+    if status >= 400 {
+        let code = match value.get("code").and_then(Value::as_str) {
+            Some("connector_write_in_read_handler") => "connector_write_in_read_handler",
+            _ if status == 403 => "connector_forbidden",
+            _ => "service_upstream_unavailable",
+        };
+        return Err(BrokerRefusal::new(code, "The connector call was refused."));
+    }
+    Ok(value.get("data").cloned().unwrap_or(value))
 }
 
 /* -------------------------------------------------------------------------- */
@@ -772,6 +862,7 @@ mod tests {
             email: true,
             content: true,
             storage: true,
+            connectors: true,
         });
         handle_service_frame(
             &json!({ "service": service, "operation": operation, "payload": payload }).to_string(),
@@ -936,6 +1027,7 @@ mod tests {
             spam: false,
             email: false,
             storage: false,
+            connectors: false,
             content: false,
         });
         let (code, message) = refusal(&handle_service_frame(
@@ -951,6 +1043,64 @@ mod tests {
     }
 
     #[test]
+    fn connector_calls_forward_runtime_identity_and_authoritative_read_mode() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/v1/runtime/connectors/calls",
+            listener.local_addr().unwrap()
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 4096];
+            loop {
+                let count = stream.read(&mut chunk).unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&chunk[..count]);
+                if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let answer = r#"{"data":{"state":{"code":"approval_pending","message":"Waiting for approval.","runId":"run_test"}}}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", answer.len(), answer).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let config = ServiceConfig {
+            connectors_url: Some(url),
+            connectors_token: Some("version-test-token".into()),
+            connectors_visitor: Some(r#"{"subject":"visitor:alice"}"#.into()),
+            invocation_id: "request_test".into(),
+            ..Default::default()
+        };
+        let payload = json!({"role":"tracker", "tool":"issues.create", "args":{"title":"New"}, "visitor":{"subject":"forged"}, "requestId":"forged", "handler":{"name":"issues", "mode":"write"}});
+        let answer = connectors_call(&config, payload.as_object().unwrap(), true).unwrap();
+        assert_eq!(answer["state"]["code"], "approval_pending");
+        let request = server.join().unwrap();
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer version-test-token"));
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            body,
+            json!({"role":"tracker", "tool":"issues.create", "args":{"title":"New"}, "visitor":{"subject":"visitor:alice"}, "requestId":"request_test", "handler":{"name":"issues", "mode":"read", "callIndex":0}})
+        );
+    }
+
+    #[test]
     fn an_empty_wire_grant_reaches_nothing() {
         assert_eq!(ServiceGrant::from_wire(""), ServiceGrant::NONE);
         assert_eq!(ServiceGrant::from_wire("db.read,log"), ServiceGrant::NONE);
@@ -962,6 +1112,7 @@ mod tests {
                 email: true,
                 content: false,
                 storage: false,
+                connectors: false,
             }
         );
     }
@@ -984,6 +1135,9 @@ mod tests {
     #[test]
     fn content_requests_forward_runtime_owned_access_evidence() {
         let config = ServiceConfig {
+            connectors_url: None,
+            connectors_token: None,
+            connectors_visitor: None,
             akismet_key: None,
             gravatar_key: None,
             blog_url: None,

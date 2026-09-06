@@ -18,7 +18,6 @@ const CONFIG_KEYS: &[&str] = &[
     "build",
     "placement",
     "markdownNegotiation",
-    "experimental_gutenberg",
     "inject",
     "access",
 ];
@@ -202,10 +201,6 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
         .filter(|value| !value.is_empty())
         .cloned()
         .map(Value::Object);
-    let experimental = config
-        .get("experimental_gutenberg")
-        .and_then(Value::as_bool)
-        == Some(true);
     let inject = config
         .get("inject")
         .cloned()
@@ -288,7 +283,6 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
         "viewer": listing,
         "meta": meta,
         "pagesTheme": pages_theme,
-        "experimentalGutenberg": experimental,
         "inject": inject,
     });
     let mut runtime = Map::new();
@@ -299,11 +293,8 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
     runtime.insert("listing".into(), Value::Bool(listing));
     runtime.insert("viewer".into(), Value::Bool(listing));
     runtime.insert("meta".into(), serving["meta"].clone());
-    if experimental {
-        runtime.insert("experimental_gutenberg".into(), Value::Bool(true));
-        if let Some(inject) = inject {
-            runtime.insert("inject".into(), inject);
-        }
+    if let Some(inject) = inject {
+        runtime.insert("inject".into(), inject);
     }
 
     ResolveEffectiveOutput {
@@ -318,13 +309,7 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
 
 pub fn build_runtime_payload(input: RuntimePayloadInput) -> Value {
     let serving = input.serving.as_object().cloned().unwrap_or_default();
-    let experimental = serving
-        .get("experimentalGutenberg")
-        .and_then(Value::as_bool)
-        == Some(true);
-    let user_inject = experimental
-        .then(|| serving.get("inject").and_then(Value::as_object))
-        .flatten();
+    let user_inject = serving.get("inject").and_then(Value::as_object);
     let platform_inject = input
         .options
         .get("platformInject")
@@ -364,9 +349,6 @@ pub fn build_runtime_payload(input: RuntimePayloadInput) -> Value {
             target.into(),
             serving.get(source).cloned().unwrap_or(Value::Null),
         );
-    }
-    if experimental {
-        payload.insert("experimental_gutenberg".into(), Value::Bool(true));
     }
     if !inject.is_empty() {
         payload.insert("inject".into(), Value::Object(inject));

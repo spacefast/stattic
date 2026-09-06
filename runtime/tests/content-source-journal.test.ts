@@ -29,6 +29,8 @@ const applicationJournal = path.join(repoRoot, "runtime/engine/shared/applicatio
 const SPACE_ID = "spc_alpha";
 const SOURCE = "content/projects/launch.md";
 const BINDING = "sync.projects-body";
+const TSX_BINDING = "sync.pages-about";
+const TSX_SOURCE = "content/pages/about.tsx";
 const CONTAINER_NAME_PREFIX = "stattic-content-source-journal";
 const ROOT_PASSWORD = "content-source-journal-secret";
 const DATABASE = "content_source_journal_test";
@@ -67,6 +69,30 @@ function releaseRoot() {
     `'postType' => 'post'`,
     `'fieldStorage' => 'post_content'`,
   ].join(", ");
+  // A compile-class binding beside the two-way one. Nothing writes back to a
+  // `.tsx`, so its post has no ledger and today's ledger lookup is what stops it
+  // journalling at all.
+  const tsxBinding = [
+    `'id' => '${TSX_BINDING}'`,
+    `'resourceId' => 'pages'`,
+    `'fieldId' => 'page-body'`,
+    `'source' => '${TSX_SOURCE}'`,
+    `'format' => 'tsx'`,
+    `'slug' => 'about'`,
+    `'postType' => 'page'`,
+    `'fieldStorage' => 'post_content'`,
+  ].join(", ");
+  const materialization = [
+    `'resourceId' => 'posts'`,
+    `'fieldId' => 'post-body'`,
+    `'directory' => 'content/posts'`,
+    `'suffix' => '.md'`,
+    `'format' => 'md'`,
+    `'postType' => 'post'`,
+    `'fieldStorage' => 'post_content'`,
+  ].join(", ");
+  const resource = (id: string, postType: string) =>
+    `['id' => '${id}', 'label' => '${id}', 'kind' => 'builtin', 'postType' => '${postType}', 'publicRead' => true, 'fields' => []]`;
   const php = [
     "<?php",
     "declare(strict_types=1);",
@@ -75,9 +101,11 @@ function releaseRoot() {
     "    'format' => 'spacefast.wordpress-content-model.php',",
     "    'version' => 1,",
     `    'revision' => '${revision}',`,
-    "    'postTypes' => [], 'scfFieldGroups' => [], 'tables' => [],",
+    `    'postTypes' => [${resource("posts", "post")}, ${resource("pages", "page")}],`,
+    "    'scfFieldGroups' => [], 'tables' => [],",
     "    'pages' => [], 'abilities' => [], 'hooks' => [],",
-    `    'syncBindings' => [[${binding}]],`,
+    `    'syncBindings' => [[${binding}], [${tsxBinding}]],`,
+    `    'materializations' => [[${materialization}]],`,
     "];",
     "",
   ].join("\n");
@@ -333,6 +361,35 @@ $completed = _stattic_application_journal_complete($link, [
 $probes[] = ['step' => 'completed', 'rows' => $completed];
 probe('after-complete', $link);
 
+// A post the editor created under a materializing collection. It has no file
+// behind it, so it has no binding and no ledger — today's two skips — and the
+// only thing to record is that a path has to be minted for it.
+$createdId = wp_insert_post([
+  'post_type' => 'post',
+  'post_status' => 'draft',
+  'post_name' => 'hello-world',
+  'post_title' => 'Hello world',
+  'post_content' => "<!-- wp:paragraph -->\n<p>Editor draft.</p>\n<!-- /wp:paragraph -->",
+]);
+update_post_meta($createdId, SPACEFAST_CONTENT_SPACE_META, ${JSON.stringify(SPACE_ID)});
+probe('after-editor-create', $link);
+editor_save($createdId, "<!-- wp:paragraph -->\n<p>Second draft.</p>\n<!-- /wp:paragraph -->");
+probe('after-editor-second-save', $link);
+
+// A page whose only source is the TSX the compiler owns. A compile-class
+// binding never gets a ledger, so the ledger lookup is what stops this save
+// journalling today.
+$pageId = wp_insert_post([
+  'post_type' => 'page',
+  'post_status' => 'publish',
+  'post_name' => 'about',
+  'post_title' => 'About',
+  'post_content' => "<!-- wp:paragraph -->\n<p>Compiled page.</p>\n<!-- /wp:paragraph -->",
+]);
+update_post_meta($pageId, SPACEFAST_CONTENT_SPACE_META, ${JSON.stringify(SPACE_ID)});
+probe('after-compile-class-save', $link);
+$probes[] = ['step' => 'ids', 'rows' => ['created' => $createdId, 'page' => $pageId]];
+
 echo json_encode($probes, JSON_UNESCAPED_SLASHES);
 `;
   const scriptPath = path.join(
@@ -362,10 +419,40 @@ function rows(probes: Probe[], step: string): JournalRow[] {
   return journalRowSchema.array().parse(at(probes, step).rows);
 }
 
+// A materialization has no binding and no common base, so its payload names the
+// resource and the document instead of a binding and a base revision.
+const materializeRowSchema = z.object({
+  entry_id: z.string(),
+  binding_id: z.string(),
+  open_binding_id: z.string().nullable(),
+  state: z.string(),
+  payload: z.object({
+    resourceId: z.string(),
+    postId: z.number(),
+    wordpressRevisionId: z.number(),
+    author: z.object({ name: z.string(), email: z.string() }),
+  }),
+});
+
+const anyRowSchema = z.object({ binding_id: z.string() }).loose();
+
+/** The rows a step left whose binding id starts with `prefix`. */
+function rowsFor(probes: Probe[], step: string, prefix: string) {
+  return anyRowSchema
+    .array()
+    .parse(at(probes, step).rows)
+    .filter((row) => row.binding_id.startsWith(prefix));
+}
+
+// One scenario, two behaviors. Standing up MariaDB and replaying the whole save
+// sequence twice would buy nothing: both tests read probes from the same run.
+let scenario: Promise<Probe[]> | null = null;
+const probesOnce = () => (scenario ??= runScenario());
+
 test(
   "an editor change to a bound field journals exactly once, and only if its save commits",
   async () => {
-    const probes = await runScenario();
+    const probes = await probesOnce();
 
     // The reconciliation writes the post itself. Journalling that write would
     // hand the drain back the answer it had just produced.
@@ -415,6 +502,45 @@ test(
 
     expect(at(probes, "completed").rows).toBe(true);
     expect(rows(probes, "after-complete")[0]?.state).toBe("delivered");
+  },
+  MYSQL_SETUP_TIMEOUT_MS + 60_000,
+);
+
+test(
+  "an editor save journals content no file backs and content only a compiler wrote",
+  async () => {
+    const probes = await probesOnce();
+    const ids = z.object({ created: z.number(), page: z.number() }).parse(at(probes, "ids").rows);
+
+    // A post the editor created has no binding to name, so the journal names the
+    // synthetic one, which cannot collide with a compiler-minted `sync.*` id and
+    // gives the same burst coalescing for free.
+    const created = rowsFor(probes, "after-editor-create", "materialize.");
+    expect(created).toHaveLength(1);
+    const first = materializeRowSchema.parse(created[0]);
+    expect(first.binding_id).toBe(`materialize.${ids.created}`);
+    expect(first.open_binding_id).toBe(`materialize.${ids.created}`);
+    expect(first.state).toBe("queued");
+    expect(first.payload.resourceId).toBe("posts");
+    expect(first.payload.postId).toBe(ids.created);
+    expect(first.payload.author).toEqual({ name: "Robin Vega", email: "robin@example.com" });
+
+    // A burst of saves on the same unbound document is one pending change.
+    const second = rowsFor(probes, "after-editor-second-save", "materialize.");
+    expect(second).toHaveLength(1);
+    expect(second[0]?.entry_id).toBe(first.entry_id);
+    expect(materializeRowSchema.parse(second[0]).payload.wordpressRevisionId).toBeGreaterThan(
+      first.payload.wordpressRevisionId,
+    );
+
+    // The compile-class binding: no ledger, so the blocks digest alone is what
+    // this intent stands on. Today this save journals nothing at all.
+    const compiled = rowsFor(probes, "after-compile-class-save", TSX_BINDING);
+    expect(compiled).toHaveLength(1);
+    const row = journalRowSchema.parse(compiled[0]);
+    expect(row.open_binding_id).toBe(TSX_BINDING);
+    expect(row.payload.source).toBe(TSX_SOURCE);
+    expect(row.payload.postId).toBe(ids.page);
   },
   MYSQL_SETUP_TIMEOUT_MS + 60_000,
 );

@@ -48,6 +48,8 @@ pub(crate) struct Page {
     pub(crate) date: Option<String>,
     pub(crate) layout: Option<String>,
     pub(crate) draft: bool,
+    /// `raw: true` — publish the source file itself and render no page from it.
+    pub(crate) raw: bool,
     pub(crate) layout_rendered: bool,
 }
 
@@ -82,10 +84,6 @@ pub fn materialize_html_pipeline(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let enabled = config
-        .get("experimental_gutenberg")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let platform_meta = config
         .get("platform_meta")
         .and_then(Value::as_bool)
@@ -161,81 +159,128 @@ pub fn materialize_html_pipeline(
             generated.insert(path);
         }
     }
-    if enabled {
-        let paths: Vec<String> = files.keys().cloned().collect();
-        for path in &paths {
-            let lower = path.to_ascii_lowercase();
-            let basename = path.rsplit('/').next().unwrap_or(path);
-            if basename.starts_with('_')
-                || basename.starts_with('.')
-                || lower.ends_with(".md")
-                || lower.ends_with(".markdown")
-                || path == "theme.json"
-            {
+    // Which files are content is decided per file, not by a switch: a
+    // `.md`/`.markdown` source is a page, an `.html` file carrying `<!-- wp:`
+    // is a block page, and a leading `_` or `.` marks a partial that is
+    // authored but never served.
+    let paths: Vec<String> = files.keys().cloned().collect();
+    for path in &paths {
+        let lower = path.to_ascii_lowercase();
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        // A leading `_` or `.` marks a partial, but only on a file this
+        // pipeline reads. Markdown is always a participant, so the marker
+        // always binds there. Anything else is content the pipeline never
+        // touches — `_HEADERS` is an ordinary upload, and the exact convention
+        // names (`_headers`, `_redirects`, `_layout.html`, `_pages/…`) are
+        // held back by serving policy, which owns those spellings.
+        let partial_name = basename.starts_with('_') || basename.starts_with('.');
+        if lower.ends_with(".md") || lower.ends_with(".markdown") {
+            // Markdown privacy waits for the frontmatter, because `raw: true`
+            // is the file asking to be published as itself rather than
+            // rendered — and only the file can say so. A source we could not
+            // read or that blew the size bound has said nothing, so it stays
+            // private and produces nothing: fail closed.
+            let page = match pipeline_text(files_root, path, diagnostics)? {
+                Some(source) => match markdown_page(
+                    path,
+                    &source,
+                    config.get("meta").and_then(Value::as_object),
+                    diagnostics,
+                ) {
+                    Ok(page) => Some(page),
+                    Err(message) => {
+                        diagnostics.push(json!({"code":"markdown_render_failed","severity":"warning","message":message,"path":path}));
+                        None
+                    }
+                },
+                None => None,
+            };
+            if partial_name || !page.as_ref().is_some_and(|page| page.raw) {
                 private.insert(path.clone());
             }
-            if lower.ends_with(".md") || lower.ends_with(".markdown") {
-                let Some(source) = pipeline_text(files_root, path, diagnostics)? else {
-                    continue;
-                };
-                match markdown_page(path, &source, config.get("meta").and_then(Value::as_object), diagnostics) {
-                    Ok(page) if page.draft => diagnostics.push(json!({"code":"page_draft_skipped","severity":"info","message":"A draft page was skipped.","path":path})),
-                    Ok(page) => pages.push(page),
-                    Err(message) => diagnostics.push(json!({"code":"markdown_render_failed","severity":"warning","message":message,"path":path})),
-                }
-            } else if (lower.ends_with(".html") || lower.ends_with(".htm"))
-                && !basename.starts_with('_')
-            {
-                let Some(source) = pipeline_text(files_root, path, diagnostics)? else {
-                    continue;
-                };
-                if source.contains("<!-- wp:") {
-                    pages.push(block_page(
-                        path,
-                        &source,
-                        config.get("meta").and_then(Value::as_object),
-                        diagnostics,
-                    ));
-                }
+            match page {
+                // A raw file has no generated page, so there is none for
+                // `draft` to suppress either.
+                Some(page) if page.raw => {}
+                Some(page) if page.draft => diagnostics.push(json!({"code":"page_draft_skipped","severity":"info","message":"A draft page was skipped.","path":path})),
+                Some(page) => pages.push(page),
+                None => {}
             }
+            continue;
         }
-
-        let mut layout_sources = BTreeMap::new();
-        for page in &mut pages {
-            if files.contains_key(&page.output_path) && page.output_path != page.source_path {
-                diagnostics.push(json!({"code":"page_output_conflict","severity":"warning","message":"A generated page would overwrite an uploaded file and was skipped.","path":page.output_path}));
-                continue;
+        // A compile input for the generated stylesheet, never content.
+        if path == "theme.json" {
+            private.insert(path.clone());
+            continue;
+        }
+        if !(lower.ends_with(".html") || lower.ends_with(".htm")) {
+            continue;
+        }
+        if partial_name {
+            // A partial-named document is the content lane's to hide only when
+            // the content lane claims its bytes: files mode makes every HTML a
+            // block document, and `<!-- wp:` declares one anywhere else. A
+            // source we could not read has said nothing, so it stays private:
+            // fail closed. Serving policy already holds back the names it owns.
+            let claimed = files_mode_gutenberg
+                || crate::serving_paths::is_private_serving_path(path)
+                || match pipeline_text(files_root, path, diagnostics)? {
+                    Some(source) => source.contains("<!-- wp:"),
+                    None => true,
+                };
+            if claimed {
+                private.insert(path.clone());
             }
-            let document = apply_layouts(
-                page,
-                files_root,
-                files,
-                site_title,
-                &mut layout_sources,
+            continue;
+        }
+        let Some(source) = pipeline_text(files_root, path, diagnostics)? else {
+            continue;
+        };
+        if source.contains("<!-- wp:") {
+            pages.push(block_page(
+                path,
+                &source,
+                config.get("meta").and_then(Value::as_object),
                 diagnostics,
-            )?;
-            page.layout_rendered = true;
-            write_generated(
-                files_root,
-                files,
-                &page.output_path,
-                document.as_bytes(),
-                Some("text/html; charset=utf-8"),
-            )?;
-            generated.insert(page.output_path.clone());
+            ));
         }
     }
 
-    // Customization is a site-wide serving concern, not a Gutenberg feature.
-    // A source theme.json remains behind the Gutenberg switch, while the
-    // platform theme is generated and linked for ordinary HTML too.
+    let mut layout_sources = BTreeMap::new();
+    for page in &mut pages {
+        if files.contains_key(&page.output_path) && page.output_path != page.source_path {
+            diagnostics.push(json!({"code":"page_output_conflict","severity":"warning","message":"A generated page would overwrite an uploaded file and was skipped.","path":page.output_path}));
+            continue;
+        }
+        let document = apply_layouts(
+            page,
+            files_root,
+            files,
+            site_title,
+            &mut layout_sources,
+            diagnostics,
+        )?;
+        page.layout_rendered = true;
+        write_generated(
+            files_root,
+            files,
+            &page.output_path,
+            document.as_bytes(),
+            Some("text/html; charset=utf-8"),
+        )?;
+        generated.insert(page.output_path.clone());
+    }
+
+    // Customization is a site-wide serving concern. A committed theme.json is
+    // compiled because it is there; the platform theme is generated and linked
+    // for ordinary HTML too.
     let had_theme_stylesheet = files.contains_key(THEME_STYLESHEET_PATH);
     let site_theme_css = serving
         .get("theme_css")
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    compile_theme(files_root, files, enabled, site_theme_css, diagnostics)?;
+    compile_theme(files_root, files, site_theme_css, diagnostics)?;
     if !had_theme_stylesheet && files.contains_key(THEME_STYLESHEET_PATH) {
         generated.insert(THEME_STYLESHEET_PATH.to_string());
     }
@@ -308,7 +353,7 @@ pub fn materialize_html_pipeline(
                 config: &config,
                 viewer,
                 files,
-                meta_tags: enabled || platform_meta,
+                meta_tags: page_by_output.contains_key(&path) || platform_meta,
                 theme_available: files.contains_key(THEME_STYLESHEET_PATH),
                 path: &path,
             },
@@ -1068,7 +1113,7 @@ mod tests {
                 ("theme.json", valid_theme),
             ],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
+            json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
         let css = read(&run, "__spacefast_generated/theme.css");
@@ -1087,7 +1132,7 @@ mod tests {
                 ("theme.json", br#"{"version":2}"#),
             ],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
+            json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
         assert!(has_diagnostic(&run, "theme_json_invalid"));
@@ -1166,7 +1211,7 @@ mod tests {
                 ("theme.json", theme),
             ],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
+            json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
         let css = read(&run, "__spacefast_generated/theme.css");
@@ -1264,7 +1309,7 @@ mod tests {
                 ("theme.json", globally_fluid),
             ],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
+            json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
         let css = read(&run, "__spacefast_generated/theme.css");
@@ -1292,7 +1337,7 @@ mod tests {
                 ("theme.json", locally_fluid),
             ],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
+            json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
         let css = read(&run, "__spacefast_generated/theme.css");
@@ -1326,7 +1371,7 @@ mod tests {
                 ("theme.json", theme),
             ],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
+            json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
         let css = read(&run, "__spacefast_generated/theme.css");
@@ -1344,24 +1389,77 @@ mod tests {
             &[
                 ("page.md", b"# Published"),
                 ("draft.md", b"---\ndraft: true\n---\n# Secret draft"),
+                ("_partial.md", b"shared prose"),
                 (
                     "_layout.html",
                     b"<html><head></head><body>{{ content }}</body></html>",
                 ),
                 ("theme.json", br#"{"version":3}"#),
                 ("download.txt", b"public"),
+                // A `_` name is only a partial marker on a file this pipeline
+                // actually reads. A plain HTML shell carries no block markup,
+                // and an extensionless file is not content at all — neither is
+                // the content lane's to hide.
+                ("_shell.html", b"<h1>app shell</h1>\n"),
+                ("_HEADERS", b"ordinary uppercase file\n"),
             ],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true,"listing":true,"viewer":false}}),
+            json!({"config":{"listing":true,"viewer":false}}),
         );
         let private = &run.result.as_ref().unwrap().private;
         assert!(has_diagnostic(&run, "page_draft_skipped"));
-        for private_path in ["page.md", "draft.md", "_layout.html", "theme.json"] {
+        for private_path in [
+            "page.md",
+            "draft.md",
+            "_partial.md",
+            "_layout.html",
+            "theme.json",
+        ] {
             assert!(private.contains(private_path), "{private_path} not private");
         }
-        assert!(!private.contains("download.txt"));
+        for public_path in ["download.txt", "_shell.html", "_HEADERS"] {
+            assert!(!private.contains(public_path), "{public_path} is private");
+        }
         assert!(run.files.contains_key("page/index.html"));
         assert!(!run.files.contains_key("draft/index.html"));
+    }
+
+    #[test]
+    fn raw_markdown_is_published_as_its_own_source_and_generates_no_page() {
+        let oversized = vec![b'm'; PIPELINE_SOURCE_MAX_BYTES + 1];
+        let files: Vec<(&str, &[u8])> = vec![
+            ("raw.md", b"---\nraw: true\n---\n# Read me"),
+            ("raw-draft.md", b"---\nraw: yes\ndraft: true\n---\n# Notes"),
+            ("normal.md", b"# Rendered"),
+            // A name-private partial stays private whatever its frontmatter
+            // claims: `_` is a structural rule, not a content one.
+            ("_partial.md", b"---\nraw: true\n---\nshared"),
+            // Nothing readable said `raw`, so nothing opts out of privacy.
+            ("huge.md", &oversized),
+            (
+                "_layout.html",
+                b"<html><head></head><body>{{ content }}</body></html>",
+            ),
+        ];
+        let run = run_pipeline(&files, json!({"mode":"website"}), json!({"config":{}}));
+        let private = &run.result.as_ref().unwrap().private;
+
+        // The source itself is the published artifact.
+        assert!(!private.contains("raw.md"));
+        assert!(!run.files.contains_key("raw/index.html"));
+        // `draft` suppresses a generated page, and a raw file has none to
+        // suppress — it is still published as source.
+        assert!(!private.contains("raw-draft.md"));
+        assert!(!run.files.contains_key("raw-draft/index.html"));
+
+        for still_private in ["normal.md", "_partial.md", "huge.md"] {
+            assert!(
+                private.contains(still_private),
+                "{still_private} not private"
+            );
+        }
+        assert!(run.files.contains_key("normal/index.html"));
+        assert!(!run.files.contains_key("huge/index.html"));
     }
 
     #[test]
@@ -1375,11 +1473,7 @@ mod tests {
             ("_layout.html", &oversized_layout),
             ("theme.json", &oversized_theme),
         ];
-        let run = run_pipeline(
-            &files,
-            json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
-        );
+        let run = run_pipeline(&files, json!({"mode":"website"}), json!({"config":{}}));
         run.result.as_ref().unwrap();
         let oversized_paths: BTreeSet<_> = run
             .diagnostics
@@ -1411,7 +1505,7 @@ mod tests {
                 ),
             ],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
+            json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
         assert!(run.diagnostics.iter().any(|diagnostic| {
@@ -1453,20 +1547,33 @@ mod tests {
 
     #[test]
     fn shared_gutenberg_walker_renders_self_closing_and_reports_unknown_blocks() {
-        let source = b"<!-- wp:group --><div><!-- wp:separator /--><!-- wp:vendor/card --><p>Fallback</p><!-- /wp:vendor/card --></div><!-- /wp:group -->";
+        // The core/html block is the island mount: this lane is the one that
+        // actually serves an island page, because an island page is static and
+        // ships an artifact. The walker has to pass its inner markup — the mount
+        // div and the boot module tag — through verbatim and say nothing about it.
+        let source = b"<!-- wp:group --><div><!-- wp:separator /--><!-- wp:vendor/card --><p>Fallback</p><!-- /wp:vendor/card --></div><!-- /wp:group --><!-- wp:html --><div data-zero-source=\"client/c.tsx\" data-zero-export=\"Counter\"></div><script type=\"module\" src=\"/_spacefast/islands/abc123/boot.js\"></script><!-- /wp:html -->";
         let run = run_pipeline(
             &[("page.html", source)],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
+            json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
         assert!(run.diagnostics.iter().any(|diagnostic| {
             diagnostic.get("code") == Some(&json!("block_unsupported"))
                 && diagnostic.pointer("/details/block") == Some(&json!("vendor/card"))
         }));
+        assert!(!run.diagnostics.iter().any(|diagnostic| {
+            diagnostic.pointer("/details/block") == Some(&json!("core/html"))
+        }));
         let html = read(&run, "page.html");
         assert!(html.contains("<hr class=\"wp-block-separator\">"));
         assert!(html.contains("<p>Fallback</p>"));
+        assert!(html.contains(
+            "<div data-zero-source=\"client/c.tsx\" data-zero-export=\"Counter\"></div>"
+        ));
+        assert!(html.contains(
+            "<script type=\"module\" src=\"/_spacefast/islands/abc123/boot.js\"></script>"
+        ));
         assert!(!html.contains("<!-- wp:"));
     }
 
@@ -1511,7 +1618,7 @@ mod tests {
         let run = run_pipeline(
             &[("page.md", source)],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
+            json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
         let html = read(&run, "page/index.html");
@@ -1537,7 +1644,7 @@ mod tests {
                 ("_layout.html", layout),
             ],
             json!({"mode":"website"}),
-            json!({"config":{"experimental_gutenberg":true}}),
+            json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
         let unresolved: Vec<_> = run

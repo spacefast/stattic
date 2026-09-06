@@ -37,9 +37,10 @@ const SPACEFAST_FUNCTIONS_RELAY_BROKERS = [
     'database' => [
         'capabilities' => ['db.read', 'db.write'],
     ],
+    'zero' => ['capabilities' => ['zero.call']],
     'services' => [
         'executor' => 'service-broker',
-        'capabilities' => ['gravatar.profile', 'spam.check', 'email.send'],
+        'capabilities' => ['gravatar.profile', 'spam.check', 'email.send', 'connectors.call'],
         'grant_env' => 'SPACEFAST_SERVICE_BROKER_GRANT',
         'identity' => true,
     ],
@@ -112,7 +113,7 @@ function _stattic_functions_relay_bearer(): string
  * row in this space's outbox. The grant it receives names services, and an
  * ungranted one is refused inside the broker as well as here.
  */
-function _stattic_functions_relay_executor_env(array $claims, string $broker, array $grant): array
+function _stattic_functions_relay_executor_env(array $claims, string $broker, array $grant, array $config = [], ?array $visitor = null): array
 {
     $definition = SPACEFAST_FUNCTIONS_RELAY_BROKERS[$broker];
     $env = _stattic_zero_runner_base_env();
@@ -128,7 +129,8 @@ function _stattic_functions_relay_executor_env(array $claims, string $broker, ar
             'spaceId' => is_string($claims['space_id'] ?? null) ? $claims['space_id'] : '',
             'versionId' => is_string($claims['version_id'] ?? null) ? $claims['version_id'] : '',
             'invocationId' => _stattic_functions_relay_invocation_id(),
-        ]);
+            'visitor' => $visitor,
+        ], $config);
     }
     return $env;
 }
@@ -159,7 +161,7 @@ function _stattic_functions_relay_broker(): ?string
 }
 
 // Never returns.
-function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, string $requestMethod): void
+function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, string $requestMethod, array $serving = []): void
 {
     if ($requestMethod !== 'POST') {
         _stattic_method_not_allowed('POST', ['code' => 'method_not_allowed', 'message' => 'Relay accepts POST.']);
@@ -208,9 +210,42 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
         ]);
     }
 
+    require_once __DIR__ . '/zero.php';
+    $versionRoot = _stattic_version_root($privateRoot, $spaceId, $claims['version_id']);
+    $config = _stattic_zero_runtime_config($versionRoot);
+    if ($config === []) {
+        $functions = _stattic_functions_config_read($versionRoot . '/files');
+        $config = $functions['kind'] === 'present' ? $functions['value'] : [];
+    }
+    $serving['space_id'] = $spaceId;
+    $serving['version_id'] = $claims['version_id'];
+    $host = is_string($_SERVER['HTTP_SF_FX_VISITOR_HOST'] ?? null)
+        ? $_SERVER['HTTP_SF_FX_VISITOR_HOST'] : (string) ($_SERVER['HTTP_HOST'] ?? '');
+    // Read only the signed cookie. The Authorization header is the relay grant,
+    // not a visitor credential, and must not shadow the cookie.
+    $identity = _stattic_zero_identity_from_principal(_stattic_current_session_identity_uncached(
+        $serving, _stattic_canonicalize_host($host), null, _stattic_visitor_cookie_from_request()
+    ));
+    $visitor = $identity['isAuthenticated'] ? ['subject' => $identity['userId']] : null;
+    if ($broker === 'zero') {
+        $frame = json_decode($body, true);
+        if (!is_array($frame) || !in_array($frame['op'] ?? null, ['query.run', 'mutation.run'], true)) {
+            _stattic_problem_refused(400, 'zero_run_operation_unsupported', 'Use query or mutate to call the capsule.');
+        }
+        if ($visitor === null) {
+            $principal = 'service:' . $spaceId;
+            $identity = [
+                'user' => ['id' => $principal, 'displayName' => 'Worker'],
+                'userId' => $principal, 'displayName' => 'Worker', 'provider' => 'service',
+                'isGuest' => false, 'isAuthenticated' => true,
+            ];
+        }
+        _stattic_zero_send_run_response($config, $versionRoot, $serving, 'POST', $host, $body, $identity);
+    }
+
     $result = _stattic_runtime_run_subprocess(
         [_stattic_runtime_native_binary(), SPACEFAST_FUNCTIONS_RELAY_BROKERS[$broker]['executor']],
-        _stattic_functions_relay_executor_env($claims, $broker, $grant),
+        _stattic_functions_relay_executor_env($claims, $broker, $grant, $config, $visitor),
         $body,
         null,
         STATTIC_FUNCTIONS_RELAY_EXECUTOR_TIMEOUT_MS,

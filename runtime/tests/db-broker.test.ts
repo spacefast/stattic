@@ -1,107 +1,35 @@
-// Differential and behavioural coverage for the MySQL capability broker in
-// engine/shared/db-broker.php.
-//
-// The broker must be indistinguishable from
-// crates/stattic-zero-runner/src/db.rs. Two engines that disagree about how a
-// DECIMAL, an unsigned BIGINT, a BIT column or a DATETIME becomes JSON diverge
-// silently in production, so the corpus below drives the same operation text
-// through the real Rust runner and through the PHP library against the same
-// MySQL instance, then compares the response bytes.
-//
-// The Rust side runs end to end: a Zero endpoint hands its request body to the
-// `__statticDbHost` host function and returns the answer verbatim, so the
-// comparison covers the real binary. The PHP side goes through db-broker-cli.php
-// the way s3.test.ts drives s3-cli.php; the broker has no HTTP surface of its
-// own.
+// Behavioural coverage for the parent-process MySQL broker in
+// engine/shared/db-broker.php. Tenant QuickJS no longer shares this raw SQL
+// protocol; its native host accepts only structured, artifact-scoped operations.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { CORPUS, ECHO_ENDPOINT, FIXTURE_DDL, op } from "./db-broker-corpus.ts";
-import { deploy, get, publicAccessConfig, type Runtime, startRuntime } from "./harness.ts";
+import { FIXTURE_DDL, op } from "./db-broker-corpus.ts";
 import {
   type MysqlContainer,
   startMysqlContainer,
   stopMysqlContainers,
 } from "./mysql-container.ts";
 
-const HOST = "db-broker.test";
-const REPO_ROOT = path.resolve(import.meta.dir, "../..");
 const CLI_PATH = path.resolve(import.meta.dir, "db-broker-cli.php");
 const MYSQL_ROOT_PASSWORD = "br0k3r-secret-pw";
 const MYSQL_DATABASE = "broker_test";
 
-let rt: Runtime;
 let mysql: MysqlContainer;
 const artifactRoot = mkdtempSync(path.join(os.tmpdir(), "stattic-db-broker-migrations-"));
 
 beforeAll(async () => {
-  const build = Bun.spawnSync({
-    cmd: [
-      "cargo",
-      "build",
-      "--locked",
-      "-p",
-      "stattic-runtime-compiler",
-      "--bin",
-      "stattic-runtime",
-    ],
-    cwd: REPO_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (build.exitCode !== 0) {
-    throw new Error(`cargo build failed:\n${build.stderr.toString()}`);
-  }
-
   mysql = await startMysqlContainer({
     namePrefix: "stattic-db-broker",
     database: MYSQL_DATABASE,
     rootPassword: MYSQL_ROOT_PASSWORD,
   });
   mysql.exec(FIXTURE_DDL);
-
-  rt = await startRuntime({
-    env: {
-      SPACEFAST_ZERO_DATABASE_URL: mysql.url,
-      SPACEFAST_ZERO_RUNNER_DEBUG: "1",
-    },
-  });
-  await deploy(rt, {
-    spaceId: "spc_db_broker",
-    versionId: "ver_db_broker_1",
-    metadata: { mode: "website", title: "DB broker" },
-    files: { "index.html": "<h1>db broker</h1>\n" },
-    serving: {
-      zero_endpoints: [
-        {
-          method: "POST",
-          path: "/api/db",
-          source: ECHO_ENDPOINT,
-          schema_hash: "sha256:broker",
-          capabilities: { db: true },
-          db: {
-            schemaHash: "sha256:broker",
-            tables: {
-              rows: { physicalName: "dt", primaryKey: "id", columns: { id: "id" } },
-            },
-          },
-        },
-      ],
-    },
-    activate: {
-      route_name: "production",
-      config: publicAccessConfig({ mode: "website", site_title: "DB broker" }),
-      production_hostnames: [HOST],
-      noindex_production_hostnames: [],
-      version_hostnames: [],
-    },
-  });
 }, 600_000);
 
 afterAll(() => {
-  rt?.stop();
   stopMysqlContainers();
   rmSync(artifactRoot, { recursive: true, force: true });
 });
@@ -157,44 +85,6 @@ async function php(request: CliRequest, env: Record<string, string> = {}): Promi
   }
   return JSON.parse(stdout.trim().split("\n").pop() as string) as CliResponse;
 }
-
-/** Runs one operation through the real Rust runner and returns its response text. */
-async function rust(operation: string): Promise<string> {
-  const response = await get(rt, HOST, "/api/db", {
-    method: "POST",
-    headers: { "content-type": "application/octet-stream" },
-    body: operation,
-  });
-  const text = await response.text();
-  if (response.status !== 200) {
-    throw new Error(`rust runner returned ${response.status}: ${text}`);
-  }
-  return text;
-}
-
-// --- the differential corpus ------------------------------------------------------------
-
-test("PHP and Rust encode every operation identically", async () => {
-  const phpResponses =
-    (await php({ operations: CORPUS.map(([, operation]) => operation) })).responses ?? [];
-  expect(phpResponses.length).toBe(CORPUS.length);
-
-  const mismatches: string[] = [];
-  for (const [index, [name, operation, compare, rustBody]] of CORPUS.entries()) {
-    const fromRust = await rust(rustBody ?? operation);
-    const fromPhp = phpResponses[index];
-    const same =
-      compare === "code"
-        ? (JSON.parse(fromRust) as { code?: string }).code ===
-          (JSON.parse(fromPhp) as { code?: string }).code
-        : fromRust === fromPhp;
-    if (!same) {
-      mismatches.push(`${name}\n    rust: ${fromRust}\n    php : ${fromPhp}`);
-    }
-  }
-
-  expect(mismatches.join("\n\n")).toBe("");
-}, 300_000);
 
 // --- transaction semantics ---------------------------------------------------------------
 
@@ -507,7 +397,7 @@ test("no failure path leaks the database URL", async () => {
 
 // --- session pinning ---------------------------------------------------------------------------
 
-test("the PHP broker and Rust runner pin the same database session", async () => {
+test("the PHP broker pins its database session", async () => {
   const sessionSql =
     "SELECT @@session.sql_mode AS sql_mode, @@session.time_zone AS time_zone," +
     " @@session.transaction_isolation AS isolation," +
@@ -521,12 +411,6 @@ test("the PHP broker and Rust runner pin the same database session", async () =>
   expect(pinned.time_zone).toBe("+00:00");
   expect(pinned.isolation).toBe("REPEATABLE-READ");
   expect(pinned.sql_mode).toContain("STRICT_TRANS_TABLES");
-
-  const fromRust = JSON.parse(await rust(op({ sql: sessionSql }))).rows[0] as Record<
-    string,
-    string
-  >;
-  expect(fromRust).toEqual(pinned);
 });
 
 // --- migrations ----------------------------------------------------------------------------------

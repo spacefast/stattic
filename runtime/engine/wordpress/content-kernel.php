@@ -18,6 +18,9 @@ require_once __DIR__ . '/content-markdown.php';
 require_once __DIR__ . '/content-html.php';
 require_once __DIR__ . '/content-source-sync.php';
 require_once __DIR__ . '/content-source-journal.php';
+// The site editor's half: the templates a release implies, supplied per request
+// so they are per Space, plus the scoping that keeps a human's edits private.
+require_once __DIR__ . '/content-templates.php';
 // The users feature: WordPress's own user model over the principal substrate,
 // exposed through the Abilities API. Default-on, like every other capability
 // this kernel activates by registering WordPress hooks at load.
@@ -62,9 +65,20 @@ if (function_exists('add_action')) {
     add_action('send_headers', 'spacefast_content_admin_frame_headers', 1);
     add_action('admin_head', 'spacefast_content_admin_frame_headers', 1);
     remove_action('admin_init', 'send_frame_options_header');
+    // Spacefast owns this site's URL space: the serving lane resolves a path and
+    // answers it, and a Space's content is published at a flat `/<slug>`.
+    // WordPress's canonical redirect exists to move readers to the URL WordPress
+    // would have chosen, which on a managed site is a different answer to the
+    // same question — it 301'd every published slug at the URL we handed out.
+    // Removing it leaves exactly one authority for what a path means. Both
+    // halves are needed: the action is what fires on a front-controller request,
+    // and the filter is what any direct caller of redirect_canonical() consults.
+    remove_action('template_redirect', 'redirect_canonical');
+    add_filter('redirect_canonical', '__return_false');
     add_filter('xmlrpc_enabled', '__return_false');
     add_filter('wp_is_application_passwords_available', '__return_false');
     add_filter('rest_authentication_errors', 'spacefast_content_disable_rest_api', 1);
+    add_filter('rest_request_before_callbacks', 'spacefast_content_gate_users_rest', 10, 3);
     add_filter('pre_option_blogname', 'spacefast_content_managed_site_title');
     add_filter('rest_user_query', 'spacefast_content_scope_rest_user_query', 10, 2);
     add_filter('site_url', 'spacefast_content_request_url', 1, 4);
@@ -82,6 +96,13 @@ if (function_exists('add_action')) {
     add_filter('admin_footer_text', 'spacefast_content_admin_footer');
     add_filter('ajax_query_attachments_args', 'spacefast_content_scope_attachment_query');
     add_filter('map_meta_cap', 'spacefast_content_scope_meta_cap', 10, 4);
+    // The by-id half of publicRead: check_read_permission short-circuits on a
+    // published post, so the read_post cap gate never runs for the single-item
+    // REST route. rest_prepare_{post_type} does, for every served post type.
+    add_filter('rest_prepare_post', 'spacefast_content_rest_guard_single_read', 10, 3);
+    add_filter('rest_prepare_page', 'spacefast_content_rest_guard_single_read', 10, 3);
+    add_filter('rest_prepare_attachment', 'spacefast_content_rest_guard_single_read', 10, 3);
+    add_filter('get_block_templates', 'spacefast_content_templates_filter', 10, 3);
     add_filter('update_footer', '__return_empty_string', 999);
     add_filter('acf/settings/show_admin', '__return_false');
     add_filter('acf/settings/show_updates', '__return_false');
@@ -222,6 +243,38 @@ function spacefast_content_disable_rest_api(mixed $result): mixed
     );
 }
 
+/**
+ * A content-admin session carries the control plane's signed content.users
+ * decision. WordPress administrators otherwise satisfy core's users endpoint
+ * permissions, so hiding the Zero route alone would leave the same directory
+ * reachable through a nonce-bearing REST request. WordPress launches and the
+ * separate WP API door carry no Zero allowlist and keep their existing access.
+ */
+function spacefast_content_gate_users_rest(mixed $response, mixed $handler, mixed $request): mixed
+{
+    $access = $GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] ?? null;
+    if (
+        $response !== null
+        || !class_exists('WP_Error')
+        || !is_array($access)
+        || ($access['surface'] ?? null) !== 'zero'
+        || in_array('users', $access['allowed_screens'] ?? [], true)
+        || !is_object($request)
+        || !method_exists($request, 'get_route')
+    ) {
+        return $response;
+    }
+    $route = $request->get_route();
+    if (!is_string($route) || preg_match('#^/wp/v2/users(?:/|$)#', $route) !== 1) {
+        return $response;
+    }
+    return new WP_Error(
+        'spacefast_content_users_unavailable',
+        'Users are not enabled for this content editor session.',
+        ['status' => 403]
+    );
+}
+
 function spacefast_content_scope_rest_user_query(array $args, mixed $request): array
 {
     // Scope core's user queries to this request's Space, the same membership
@@ -304,16 +357,46 @@ function spacefast_content_enforce_admin_resource(string $page): void
             wp_die('This content belongs to another Space.', 'Unavailable', ['response' => 403]);
         }
     }
+    if ($page === 'site-editor.php') {
+        // The editor addresses one resource at a time. A template id belonging
+        // to another Space is a 403 here rather than a rendered editor, which is
+        // the same answer post.php gives for another Space's post.
+        $resourceId = is_string($_GET['postId'] ?? null) ? $_GET['postId'] : '';
+        $postType = is_string($_GET['postType'] ?? null) ? $_GET['postType'] : '';
+        if ($postType !== '' && !in_array($postType, SPACEFAST_CONTENT_TEMPLATE_POST_TYPES, true)) {
+            wp_die('Spacefast manages this WordPress content type.', 'Unavailable', ['response' => 403]);
+        }
+        if (!spacefast_content_templates_resource_allowed($resourceId)) {
+            wp_die('This content belongs to another Space.', 'Unavailable', ['response' => 403]);
+        }
+    }
     if ($page === 'admin.php') {
         $screen = is_string($_GET['page'] ?? null) ? $_GET['page'] : '';
         if (!defined('ZERO_ADMIN_PAGE_SLUG') || $screen !== ZERO_ADMIN_PAGE_SLUG) {
             wp_die('Spacefast manages this WordPress screen.', 'Unavailable', ['response' => 403]);
         }
     }
+    if ($page === 'tools.php' && !spacefast_content_redirection_screen_requested()) {
+        wp_die('Spacefast manages this WordPress screen.', 'Unavailable', ['response' => 403]);
+    }
 }
 
 function spacefast_content_admin_page_allowed(string $page): bool
 {
+    if ($page === 'site-editor.php') {
+        // The one screen this task admits, and only on a Space that has content
+        // to edit — the same gate every other content surface uses. A release
+        // the kernel cannot read is not a Space with an editor.
+        try {
+            return spacefast_content_model_active_release() !== null;
+        } catch (Throwable $error) {
+            error_log('spacefast content site editor refused: ' . get_debug_type($error));
+            return false;
+        }
+    }
+    if ($page === 'tools.php') {
+        return spacefast_content_redirection_screen_requested();
+    }
     return in_array($page, [
         'admin-ajax.php',
         'admin.php',
@@ -330,6 +413,12 @@ function spacefast_content_admin_page_allowed(string $page): bool
         'term.php',
         'upload.php',
     ], true);
+}
+
+function spacefast_content_redirection_screen_requested(): bool
+{
+    $screen = $_GET['page'] ?? null;
+    return is_string($screen) && $screen === 'redirection.php';
 }
 
 function spacefast_content_admin_frame_headers(): void
@@ -607,14 +696,24 @@ function spacefast_content_scope_post(int $postId, object $post): void
     $postType = (string) ($post->post_type ?? '');
     $parentId = (int) ($post->post_parent ?? 0);
     $scopedRevision = $postType === 'revision' && spacefast_content_post_belongs_to_space($parentId);
+    // The site editor's own post types are stamped as an explicit branch rather
+    // than by widening the collection map: a template is not a collection, but
+    // an unstamped one leaks into every co-hosted Space's editor, and an
+    // unstamped wp_global_styles gives them all one shared appearance.
+    $scopedTemplate = in_array($postType, SPACEFAST_CONTENT_TEMPLATE_POST_TYPES, true);
     if (
         spacefast_content_space_id() === ''
-        || (!$scopedRevision && spacefast_content_collection_for_post_type($postType) === null)
+        || (!$scopedRevision
+            && !$scopedTemplate
+            && spacefast_content_collection_for_post_type($postType) === null)
         || !function_exists('update_post_meta')
     ) {
         return;
     }
     update_post_meta($postId, SPACEFAST_CONTENT_SPACE_META, spacefast_content_space_id());
+    if ($scopedTemplate) {
+        spacefast_content_templates_scope_theme($postId, $postType);
+    }
 }
 
 function spacefast_content_scope_attachment(int $attachmentId): void
@@ -669,6 +768,125 @@ function spacefast_content_scope_meta_query(mixed $query): array
     ];
 }
 
+/**
+ * Whether this request may read a resource that is not publicRead.
+ *
+ * True for an editor session and for a caller the access engine resolved to a
+ * WordPress role; false for an anonymous visitor, which is what an island on a
+ * public page is. Deliberately not `is_user_logged_in()`: the WP API door
+ * admits a machine caller without ever creating a user for a person, and the
+ * role is the thing that says how much of WordPress a request may touch. It is
+ * the same pair spacefast_content_disable_rest_api() reads, for the same reason
+ * — there is one policy here, not two.
+ */
+function spacefast_content_may_read_private_resources(): bool
+{
+    return (int) ($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? 0) > 0
+        || spacefast_content_principal_role() !== null;
+}
+
+/**
+ * Resource ids the active release marks `publicRead: false`.
+ *
+ * Collections only: a collection is projected as a term, and a term is the one
+ * thing a query can exclude. Throws exactly where the release read throws, so a
+ * caller can tell "nothing is private" from "the private set is unknown".
+ *
+ * @return list<string>
+ */
+function spacefast_content_private_resource_ids(): array
+{
+    $contentModel = spacefast_content_model_active_release();
+    $ids = [];
+    foreach (is_array($contentModel['postTypes'] ?? null) ? $contentModel['postTypes'] : [] as $resource) {
+        if (
+            is_array($resource)
+            && ($resource['kind'] ?? '') === 'collection'
+            && ($resource['publicRead'] ?? true) !== true
+            && is_string($resource['id'] ?? null)
+        ) {
+            $ids[] = $resource['id'];
+        }
+    }
+    return $ids;
+}
+
+/**
+ * The collection terms this request may not read: a list of term slugs, the
+ * empty string for "every collection term", or null when nothing is hidden.
+ *
+ * The empty string is the fail-closed answer for a release that exists but
+ * cannot be read. An unknown private set admits nothing private, and costs
+ * nothing readable: every declared collection carries a term and posts, pages
+ * and media carry none, so they answer exactly as they did. A Space with no
+ * release at all has no declared collection to hide, and gets no clause.
+ *
+ * @return list<string>|string|null
+ */
+function spacefast_content_private_collection_terms(): array|string|null
+{
+    if (spacefast_content_may_read_private_resources()) {
+        return null;
+    }
+    try {
+        $resourceIds = spacefast_content_private_resource_ids();
+    } catch (Throwable $error) {
+        error_log('spacefast content privacy set unavailable: ' . get_debug_type($error));
+        return '';
+    }
+    $terms = [];
+    foreach ($resourceIds as $resourceId) {
+        $terms[] = spacefast_content_model_collection_term_slug(
+            spacefast_content_require_space_id(),
+            $resourceId
+        );
+    }
+    return $terms === [] ? null : $terms;
+}
+
+function spacefast_content_scope_tax_query(mixed $query, array $clause): array
+{
+    $query = is_array($query) ? $query : [];
+    if ($query === []) {
+        return [$clause];
+    }
+    // pre_get_posts can reach one query object twice; the clause is idempotent
+    // and must not stack, exactly like the Space meta clause above.
+    foreach ($query as $existing) {
+        if ($existing === $clause) {
+            return $query;
+        }
+    }
+    return ['relation' => 'AND', $clause, $query];
+}
+
+/**
+ * The collection a REST read named, or null when it named none.
+ *
+ * The generated typed client's `content.<collection>.list()` sends
+ * `zero_collection=<term slug>`, because a slug is the only name a build can
+ * know — core's own taxonomy filters take term ids, which no capsule can
+ * predict. Nothing in WordPress reads an unregistered collection parameter, so
+ * without this the read answered with every post in the Space.
+ *
+ * REST only: this is the lane the typed client speaks on, and the page-serving
+ * lane resolves what a path means from the route, never from a query string a
+ * visitor could append. The value is matched against the term-slug shape
+ * `spacefast_content_model_collection_term_slug()` mints rather than trusted;
+ * a slug that names no term simply matches nothing, and one that names a
+ * private collection is still excluded by the clause below.
+ */
+function spacefast_content_requested_collection_term(): ?string
+{
+    if (!defined('REST_REQUEST') || REST_REQUEST !== true) {
+        return null;
+    }
+    $requested = $_GET[SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY] ?? null;
+    return is_string($requested) && preg_match('/\A[a-z0-9-]{1,190}\z/D', $requested) === 1
+        ? $requested
+        : null;
+}
+
 function spacefast_content_scope_post_query(mixed $query): void
 {
     if (
@@ -680,6 +898,31 @@ function spacefast_content_scope_post_query(mixed $query): void
         return;
     }
     $query->set('meta_query', spacefast_content_scope_meta_query($query->get('meta_query')));
+    $requested = spacefast_content_requested_collection_term();
+    if ($requested !== null) {
+        // Narrowing, never widening: the privacy exclusion is added after this
+        // and both clauses must hold, so naming a private collection's slug
+        // asks for the intersection of "in it" and "not in it" — nothing.
+        $query->set('tax_query', spacefast_content_scope_tax_query($query->get('tax_query'), [
+            'taxonomy' => SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY,
+            'field' => 'slug',
+            'terms' => [$requested],
+            'operator' => 'IN',
+        ]));
+    }
+    $private = spacefast_content_private_collection_terms();
+    if ($private === null) {
+        return;
+    }
+    $clause = $private === ''
+        ? ['taxonomy' => SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY, 'operator' => 'NOT EXISTS']
+        : [
+            'taxonomy' => SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY,
+            'field' => 'slug',
+            'terms' => $private,
+            'operator' => 'NOT IN',
+        ];
+    $query->set('tax_query', spacefast_content_scope_tax_query($query->get('tax_query'), $clause));
 }
 
 function spacefast_content_scope_attachment_query(array $query): array
@@ -715,7 +958,56 @@ function spacefast_content_scope_meta_cap(array $caps, string $cap, int $userId,
     if (!$allowedType || !spacefast_content_post_belongs_to_space($postId)) {
         return ['do_not_allow'];
     }
+    // The by-id half of publicRead. Without it the list lane is closed and the
+    // single-item route stays open, which is the worse half of a half-fix.
+    if ($cap === 'read_post' && spacefast_content_post_is_private($postId)) {
+        return ['do_not_allow'];
+    }
     return $caps;
+}
+
+/**
+ * The single-item REST read gate.
+ *
+ * WordPress core answers `WP_REST_Posts_Controller::check_read_permission()`
+ * true for any `publish` post before it ever maps the `read_post` cap, so the
+ * map_meta_cap gate above never fires for the by-id REST route the way it does
+ * for a front-end permalink — `get_item` would hand a private-collection post
+ * back in full. `rest_prepare_{$post_type}` does run for a published single
+ * read, so it is where the by-id half of publicRead has to live. A post the
+ * list lane hides is refused here with the same 404 the exclusion produces.
+ * A privileged reader is unaffected: `spacefast_content_post_is_private()`
+ * returns false whenever the request may read private resources.
+ */
+function spacefast_content_rest_guard_single_read(mixed $response, mixed $post, mixed $request): mixed
+{
+    if (!is_object($post) || !class_exists('WP_Error')) {
+        return $response;
+    }
+    $postId = (int) ($post->ID ?? 0);
+    if ($postId > 0 && spacefast_content_post_is_private($postId)) {
+        return new WP_Error(
+            'spacefast_content_not_found',
+            'This document is not available.',
+            ['status' => 404]
+        );
+    }
+    return $response;
+}
+
+/** Whether this post sits in a collection the current request may not read. */
+function spacefast_content_post_is_private(int $postId): bool
+{
+    $private = spacefast_content_private_collection_terms();
+    if ($private === null) {
+        return false;
+    }
+    if (!function_exists('has_term')) {
+        // Something is private and there is no way to ask whether this is it.
+        // Refusing costs a readable post; admitting costs a private one.
+        return true;
+    }
+    return has_term($private, SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY, $postId) === true;
 }
 
 function spacefast_content_collection_for_post_type(string $postType): ?array
@@ -740,6 +1032,7 @@ function spacefast_content_handle_request(array $request, bool $managed): array
         'model.activate' => spacefast_content_model_activate_release($request['revision'] ?? null, $managed),
         'source.reconcile' => spacefast_content_reconcile_source($request, $managed),
         'source.acknowledge' => spacefast_content_acknowledge_source($request, $managed),
+        'source.materialize' => spacefast_content_materialize_source($request, $managed),
         // Storage answers over this endpoint for a caller that can reach it.
         // No Zero handler can today -- ctx.storage is withdrawn until the
         // service transport lands -- but the dispatcher runs the ability's own

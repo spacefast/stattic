@@ -693,7 +693,22 @@ fn run_finalize_pipeline(
     telemetry.generated_files = pipeline.generated.len();
     telemetry.decorated_files = pipeline.decorated;
     telemetry.skipped_files = pipeline.adopted.len();
-    let private = pipeline.private;
+    let pages = input
+        .body
+        .pointer("/serving/pages")
+        .and_then(Value::as_array);
+    let mut private = pipeline.private;
+    if pages.is_some() {
+        private.extend(
+            files
+                .keys()
+                .chain(pipeline.generated.iter())
+                .filter(|path| {
+                    path.starts_with("pages/") || path.starts_with("_spacefast/pages/documents/")
+                })
+                .cloned(),
+        );
+    }
 
     apply_access_pages(&input.body, stage_root)?;
     apply_page_artifacts(&input.body, stage_root)?;
@@ -701,7 +716,13 @@ fn run_finalize_pipeline(
     // dispatch configuration rides in: the control plane sends `functions` only
     // for a version whose compiled metadata carries a worker.
     let has_worker = input.body.get("functions").is_some_and(Value::is_object);
-    let serving_config = resolve_serving_config(&config, files, &private, &metadata, has_worker)?;
+    let mut serving_config =
+        resolve_serving_config(&config, files, &private, &metadata, has_worker)?;
+    if let Some(pages) = pages {
+        serving_config.remove("fallback");
+        serving_config.insert("pages".into(), json!(pages));
+        write_php(&stage_root.join("pages.php"), &json!(pages))?;
+    }
     // The ONE visibility decision, recorded by the catalog and by nothing else.
     let public_files = public_files(files, &private);
     let public_set: BTreeSet<String> = public_files.iter().cloned().collect();
@@ -757,6 +778,24 @@ fn run_finalize_pipeline(
         .clone()
         .unwrap_or_else(|| convention_files.clone());
     let route_redirects = compiled_conventions.route_redirects;
+    if let Some(pages) = pages {
+        for page in pages {
+            let Some(page_path) = page.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            for rule in &route_redirects {
+                if page_paths_overlap(page_path, &rule.source) {
+                    diagnostics.push(json!({
+                        "severity": "warning",
+                        "code": "page_redirect_overlap",
+                        "message": format!("Page {page_path} overlaps routing rule {}.", rule.source),
+                        "path": page_path,
+                        "details": {"page": page_path, "source": rule.source}
+                    }));
+                }
+            }
+        }
+    }
     let routing_summary = compiled_conventions.routing;
     let redirects_exact = compiled_conventions.redirects_exact.unwrap_or_default();
     let redirects_pattern = compiled_conventions.redirects_pattern.unwrap_or_default();
@@ -914,6 +953,7 @@ fn run_finalize_pipeline(
             .map(|(path, _)| path.as_str()),
         functions: input.body.get("functions"),
         zero_routes: &compiled_zero.php_routes,
+        pages,
         has_zero: input.body.get("zero").is_some_and(Value::is_object),
         assigned_hostnames: &assigned_hostnames,
         exact_response_paths: &exact_response_paths,
@@ -2229,6 +2269,20 @@ fn runtime_diagnostics(values: Vec<Value>) -> Vec<RuntimeDiagnostic> {
         .collect()
 }
 
+fn page_paths_overlap(left: &str, right: &str) -> bool {
+    let mut left = left.trim_matches('/').split('/');
+    let mut right = right.trim_matches('/').split('/');
+    loop {
+        match (left.next(), right.next()) {
+            (Some(a), _) if a.starts_with('*') || a == ":splat" => return true,
+            (_, Some(b)) if b.starts_with('*') || b == ":splat" => return true,
+            (Some(a), Some(b)) if a == b || a.starts_with(':') || b.starts_with(':') => (),
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
 fn flatten_rules(exact: &Map<String, Value>, pattern: &[Value]) -> Value {
     let mut out = Vec::new();
     for value in exact.values() {
@@ -2439,7 +2493,7 @@ mod tests {
                 ("assets/public proof.txt", b"this object is publicly served"),
             ],
             json!({"mode":"website"}),
-            json!({"serving":{"config":{"experimental_gutenberg":true},"redirects_exact":{},"redirects_pattern":[],"headers_exact":{},"headers_pattern":[]}}),
+            json!({"serving":{"config":{},"redirects_exact":{},"redirects_pattern":[],"headers_exact":{},"headers_pattern":[]}}),
         );
         output.unwrap();
         assert_eq!(
@@ -2816,7 +2870,7 @@ mod tests {
                 ),
             ],
             json!({"mode":"website"}),
-            json!({"serving":{"config":{"experimental_gutenberg":true},"redirects_exact":{},"redirects_pattern":[],"headers_exact":{},"headers_pattern":[]}}),
+            json!({"serving":{"config":{},"redirects_exact":{},"redirects_pattern":[],"headers_exact":{},"headers_pattern":[]}}),
         );
         output.unwrap();
         assert_eq!(
@@ -2857,7 +2911,7 @@ mod tests {
             &private,
             manifest,
             json!({"title":"Heavy"}),
-            json!({"serving":{"config":{"experimental_gutenberg":true,"meta":{"title":"Heavy"}}}}),
+            json!({"serving":{"config":{"meta":{"title":"Heavy"}}}}),
         );
         let output = finalize_site(input, false).unwrap();
         assert!(output.file_count >= 10_000);
@@ -3111,14 +3165,14 @@ mod tests {
             &[
                 ("index.html", b"home"),
                 ("agents-doc/index.html", b"human"),
-                ("agents-doc.md", b"agent"),
+                ("agents-doc/agents.html", b"agent"),
                 ("forced.html", b"forced"),
                 ("blog/404.html", b"gone"),
                 (
                     "_redirects",
                     b"/old /legacy 301\n\
 /found /about.html 302\n\
-/agents-doc /agents-doc.md 200! Agent=true\n\
+/agents-doc /agents-doc/agents.html 200! Agent=true\n\
 /app/* /index.html 200\n\
 /forced/* /forced.html 200!\n\
 /gone/* /blog/404.html 404",
@@ -3142,7 +3196,7 @@ mod tests {
         }));
         assert!(redirects.iter().any(|rule| {
             rule["action"] == "rewrite"
-                && rule["destination"] == "/agents-doc.md"
+                && rule["destination"] == "/agents-doc/agents.html"
                 && rule["conditions"][0]["kind"] == "agent"
         }));
         assert!(redirects.iter().any(|rule| {

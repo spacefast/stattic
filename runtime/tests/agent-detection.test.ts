@@ -34,7 +34,10 @@ const table: AgentDetectionTable = JSON.parse(readFileSync(FIXTURE_PATH, "utf8")
 
 const SITE = "agent-detect.test";
 const HTML = "<h1>probe html</h1>\n";
-const MARKDOWN = "# probe markdown\n";
+// `raw: true` publishes the source itself rather than a page rendered from it.
+// A plain `.md` is private, and a rewrite cannot target a private file — so the
+// agent branch of this negotiation has nothing to serve without it.
+const MARKDOWN = "---\nraw: true\n---\n# probe markdown\n";
 
 let rt: Runtime;
 

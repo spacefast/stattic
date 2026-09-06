@@ -676,7 +676,7 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   // The manifest still names where a guest goes to become themselves, so the
   // SDK's identity CTA has somewhere to send them.
   expect(bakedBody).toContain(
-    '"accountUrl":"https://api.spacefast.com/v1/access/acquire/opaque-comments-target"',
+    '"accountUrl":"http://baked-local.site.test/__spacefast/access/account"',
   );
 
   // The other half of the same rule: a wholly local stack (dev, docker e2e)

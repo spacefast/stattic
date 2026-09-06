@@ -88,15 +88,21 @@ foreach ($wpAuthCookies as $wpAuthCookie) {
 // 503 content_kernel_unavailable; kernel readiness is already proven above by
 // the principal and auth-cookie calls, which fail closed on their own.
 //
-// The Content screens live in the zero-admin plugin, and its own route builder
-// composes their URL: the page slug and the `p` parameter are that plugin's
-// vocabulary, and spelling them here would be a second copy to keep in step.
+// The Content screens live in the Zero dashboard plugins. Their route builders
+// own the page slug and `p` parameter. The newer dashboard is preferred while
+// zero-admin remains the fallback during the bundle cutover.
 // A launch that named no screen — the dashboard's "Open WordPress admin"
 // escape hatch — lands on WordPress's own list instead.
 $access = $launch['access'];
 $screen = $access['surface'] === 'zero' ? $access['initial_screen'] : null;
-$landing = $screen !== null && function_exists('zero_admin_route_url')
-    ? zero_admin_route_url($screen === 'users' ? '/users' : '/types/post')
-    : '/wp-admin/edit.php';
+$landing = '/wp-admin/edit.php';
+if ($screen !== null) {
+    $route = $screen === 'users' ? '/users' : '/types/post';
+    if (function_exists('next_admin_url')) {
+        $landing = next_admin_url($route);
+    } elseif (function_exists('zero_admin_route_url')) {
+        $landing = zero_admin_route_url($route);
+    }
+}
 header('Location: ' . $landing, true, 303);
 exit;

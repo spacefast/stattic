@@ -13,11 +13,10 @@ use crate::protocol::THEME_STYLESHEET_PATH;
 pub(super) fn compile_theme(
     files_root: &Path,
     files: &mut BTreeMap<String, FileMeta>,
-    source_theme_enabled: bool,
     site_theme_css: &str,
     diagnostics: &mut Vec<Value>,
 ) -> Result<()> {
-    if !source_theme_enabled || !files.contains_key("theme.json") {
+    if !files.contains_key("theme.json") {
         if site_theme_css.is_empty() {
             return Ok(());
         }

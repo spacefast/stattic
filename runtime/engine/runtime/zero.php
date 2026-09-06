@@ -64,6 +64,13 @@ function _stattic_invoke_zero(
         _stattic_zero_send_run_response($config, $parentRoot, $serving, $requestMethod, $requestHost);
     }
 
+    $executionMode = is_string($action['execution_mode'] ?? null) && $action['execution_mode'] !== ''
+        ? $action['execution_mode']
+        : _stattic_zero_derived_execution_mode('endpoint', $requestMethod);
+    if ($executionMode === 'write') {
+        _stattic_zero_enforce_cookie_mutation_request($serving, $requestHost, false);
+    }
+
     $body = _stattic_bounded_request_body(STATTIC_ZERO_REQUEST_BODY_MAX_BYTES);
     if ($body === null) {
         _stattic_problem_refused(413, 'zero_request_body_too_large', 'Zero request body is too large.');
@@ -76,9 +83,7 @@ function _stattic_invoke_zero(
         $parentRoot,
         $serving,
         (string) $action['endpoint'],
-        is_string($action['execution_mode'] ?? null) && $action['execution_mode'] !== ''
-            ? $action['execution_mode']
-            : _stattic_zero_derived_execution_mode('endpoint', $requestMethod),
+        $executionMode,
         is_string($action['schema_hash'] ?? null) ? $action['schema_hash'] : null,
         [
             'method' => $requestMethod,
@@ -135,7 +140,14 @@ function _stattic_zero_service_identity(array $envelope): array
     $contentUrl = preg_match('#^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?$#', $origin) === 1
         ? $origin . STATTIC_RUNTIME_CONTENT_API_PATH
         : '';
+    $auth = is_array($envelope['auth'] ?? null) ? $envelope['auth'] : [];
+    $subject = $auth['subject'] ?? $auth['userId'] ?? null;
+    $visitor = ($auth['provider'] ?? '') !== 'service' && ($auth['isAuthenticated'] ?? false) === true && is_string($subject)
+        ? ['subject' => $subject] : null;
+    if ($visitor !== null && is_string($auth['email'] ?? null)) $visitor['email'] = $auth['email'];
+    if ($visitor !== null && is_bool($auth['emailVerified'] ?? null)) $visitor['emailVerified'] = $auth['emailVerified'];
     return [
+        'visitor' => $visitor,
         'spaceId' => is_string($context['spaceId'] ?? null) ? $context['spaceId'] : '',
         'versionId' => is_string($context['versionId'] ?? null) ? $context['versionId'] : '',
         // Constrained rather than trusted: it becomes half of a primary key.
@@ -156,7 +168,7 @@ function _stattic_zero_run_process(string $payload, array $config, array $identi
 {
     $result = _stattic_runtime_run_subprocess(
         [_stattic_runtime_native_binary(), 'invoke'],
-        _stattic_zero_runner_base_env($config) + _stattic_service_broker_env($identity),
+        _stattic_zero_runner_base_env($config) + _stattic_service_broker_env($identity, $config),
         $payload,
         null,
         STATTIC_ZERO_RUNNER_TIMEOUT_MS,
@@ -278,6 +290,51 @@ function _stattic_zero_request_headers(): array
     return _stattic_relay_inbound_headers(true);
 }
 
+function _stattic_page_resolve(string $versionRoot, string $requestPath): ?array
+{
+    $artifact = $versionRoot . '/pages.php';
+    if (!is_file($artifact)) {
+        return null;
+    }
+    $pages = require $artifact;
+    if (!is_array($pages)) {
+        return null;
+    }
+    $segments = array_values(array_filter(explode('/', trim($requestPath, '/')), static fn ($part) => $part !== ''));
+    foreach ($segments as &$segment) {
+        if (preg_match('/%(?![0-9a-f]{2})/i', $segment)) {
+            return null;
+        }
+        $segment = rawurldecode($segment);
+        if (str_contains($segment, '/') || str_contains($segment, "\\") || str_contains($segment, "\0") || preg_match('//u', $segment) !== 1) {
+            return null;
+        }
+    }
+    unset($segment);
+    usort($pages, static function (array $left, array $right): int {
+        $a = trim($left['path'], '/') === '' ? [] : explode('/', trim($left['path'], '/'));
+        $b = trim($right['path'], '/') === '' ? [] : explode('/', trim($right['path'], '/'));
+        $rank = static fn (string $part): int => str_starts_with($part, '*') ? 1 : (str_starts_with($part, ':') ? 2 : 3);
+        for ($index = 0; $index < min(count($a), count($b)); $index++) {
+            $priority = $rank($b[$index]) - $rank($a[$index]);
+            if ($priority !== 0) return $priority;
+            if ($rank($a[$index]) === 3 && $a[$index] !== $b[$index]) return strcmp($a[$index], $b[$index]);
+        }
+        return count($a) - count($b) ?: strcmp($left['path'], $right['path']);
+    });
+    require_once __DIR__ . '/../shared/artifacts.php';
+    foreach ($pages as $page) {
+        $pattern = preg_replace('~\*[^/]+~', ':splat', $page['path']);
+        if (str_contains($page['path'], '*') && count($segments) < count(explode('/', trim($page['path'], '/')))) {
+            continue;
+        }
+        if (_stattic_match_route_pattern_segments($pattern, implode('/', $segments)) !== null) {
+            return $page;
+        }
+    }
+    return null;
+}
+
 function _stattic_zero_runtime_config(string $versionRoot): array
 {
     $decoded = _stattic_runtime_read_json($versionRoot . '/' . STATTIC_ZERO_CONFIG_PATH);
@@ -317,7 +374,7 @@ function _stattic_zero_send_config_response(array $config, array $serving = []):
     ]);
 }
 
-function _stattic_zero_send_run_response(array $config, string $versionRoot, array $serving, string $requestMethod, string $requestHost): void
+function _stattic_zero_send_run_response(array $config, string $versionRoot, array $serving, string $requestMethod, string $requestHost, ?string $relayBody = null, ?array $relayAuth = null): void
 {
     if ($requestMethod !== 'POST') {
         _stattic_method_not_allowed('POST', [
@@ -325,7 +382,7 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
             'message' => 'Zero run route requires POST.',
         ]);
     }
-    $body = _stattic_bounded_request_body(STATTIC_ZERO_REQUEST_BODY_MAX_BYTES);
+    $body = $relayBody ?? _stattic_bounded_request_body(STATTIC_ZERO_REQUEST_BODY_MAX_BYTES);
     if ($body === null) {
         _stattic_problem_refused(413, 'zero_request_body_too_large', 'Zero request body is too large.');
     }
@@ -336,6 +393,9 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
             'ok' => true,
             'auth' => _stattic_zero_auth_context($serving, $requestHost),
         ]);
+    }
+    if ($relayAuth === null && ($op === 'mutation.run' || $op === 'action.run')) {
+        _stattic_zero_enforce_cookie_mutation_request($serving, $requestHost, true);
     }
     $name = is_array($decoded) && is_string($decoded['name'] ?? null) ? trim((string) $decoded['name']) : '';
     $runId = _stattic_zero_run_id($op, $name);
@@ -384,10 +444,81 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
         ],
         is_string($body) ? $body : '',
         $config,
-        $artifactPath
+        $artifactPath,
+        $relayAuth
     );
+    if ($relayAuth !== null) {
+        $headers = (array) $envelope['request']['headers'];
+        foreach (array_keys($headers) as $name) {
+            if ($name === 'authorization' || str_starts_with($name, 'sf-fx-')) unset($headers[$name]);
+        }
+        $envelope['request']['headers'] = _stattic_runtime_json_object($headers);
+    }
     [$runnerResponse, $runnerBody] = _stattic_zero_execute_envelope($envelope, $config, 'Zero run envelope could not be encoded.');
     _stattic_zero_send_run_frame($op, $name, is_array($decoded) ? $decoded : [], $runnerResponse, $runnerBody);
+}
+
+function _stattic_zero_enforce_cookie_mutation_request(
+    array $serving,
+    string $requestHost,
+    bool $requireJson
+): void {
+    if (_stattic_platform_bearer_token_from_request() !== null) {
+        $platformIdentity = _stattic_platform_identity_token(
+            $serving,
+            $requestHost,
+            _stattic_runtime_request_path()
+        );
+        $identity = $platformIdentity !== ''
+            ? _stattic_current_session_identity($serving, $requestHost)
+            : null;
+        $claims = is_array($identity) && is_array($identity['claims'] ?? null)
+            ? $identity['claims']
+            : [];
+        if (in_array(
+            $claims['purpose'] ?? null,
+            [STATTIC_HANDOFF_PURPOSE, STATTIC_RUNTIME_BEARER_PURPOSE],
+            true
+        )) {
+            return;
+        }
+        // Explicit machine authority never falls back to an ambient cookie or
+        // a public Grant. A malformed, wrong-purpose, or failed exchange is a
+        // hard denial before tenant code runs.
+        _stattic_problem_refused(403, 'access_denied', 'Access denied.');
+    }
+    if (
+        _stattic_visitor_cookie_from_request() === ''
+        || _stattic_verify_cookie_identity($serving, $requestHost) === null
+    ) {
+        return;
+    }
+    $origin = strtolower(trim((string) ($_SERVER['HTTP_ORIGIN'] ?? '')));
+    $expectedOrigin = strtolower(_stattic_runtime_request_origin($requestHost));
+    $fetchSite = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));
+    $contentType = strtolower(trim((string) strstr(($_SERVER['CONTENT_TYPE'] ?? '') . ';', ';', true)));
+    $contentTypeAllowed = $requireJson
+        ? $contentType === 'application/json'
+        : !in_array($contentType, [
+            '',
+            'application/x-www-form-urlencoded',
+            'multipart/form-data',
+            'text/plain',
+        ], true);
+    if (
+        $origin === ''
+        || !hash_equals($expectedOrigin, $origin)
+        || $fetchSite !== 'same-origin'
+        || !$contentTypeAllowed
+    ) {
+        _stattic_problem_refused(
+            403,
+            'zero_mutation_origin_invalid',
+            $requireJson
+                ? 'Cookie-authenticated Zero mutations require a same-origin JSON request.'
+                : 'Cookie-authenticated Zero writes require a same-origin request with a non-safelisted content type.'
+        );
+    }
 }
 
 function _stattic_zero_run_id(string $op, string $name): ?string
@@ -471,7 +602,8 @@ function _stattic_zero_envelope(
     array $request,
     string $body,
     array $config,
-    ?string $artifactPath
+    ?string $artifactPath,
+    ?array $auth = null
 ): array {
     $envelope = [
         'protocol' => 'stattic.zero.invoke.v1',
@@ -497,7 +629,7 @@ function _stattic_zero_envelope(
             'authRef' => 'current',
             'variablesRef' => 'finalized',
         ],
-        'auth' => _stattic_zero_auth_context($serving, (string) ($request['host'] ?? '')),
+        'auth' => $auth ?? _stattic_zero_auth_context($serving, (string) ($request['host'] ?? '')),
         'variables' => _stattic_runtime_json_object(_stattic_zero_string_map(is_array($config['variableValues'] ?? null) ? $config['variableValues'] : [])),
     ];
     if ($artifactPath !== null) {
@@ -589,6 +721,75 @@ function _stattic_zero_run_changed_values(array $runnerResponse): array
     return ['tables' => array_values($tables), 'queries' => array_values($queries)];
 }
 
+function _stattic_zero_send_connector_response(array $config, array $serving, string $host, string $path, string $method, array $route): never
+{
+    $operation = $route['operation'];
+    $methods = $operation === 'disconnect' ? (str_ends_with($path, '/disconnect') ? ['POST'] : ['DELETE']) : ['GET'];
+    if (!in_array($method, $methods, true)) _stattic_render_method_not_allowed_lazy($methods);
+    $origin = 'https://' . $host;
+    if ($operation === 'disconnect' && ($_SERVER['HTTP_ORIGIN'] ?? '') !== $origin) {
+        _stattic_problem_refused(403, 'connector_origin_required', 'Disconnect from this Space.');
+    }
+    $identity = _stattic_zero_auth_context($serving, $host);
+    if (($identity['isAuthenticated'] ?? false) !== true) {
+        $return = $origin . ($operation === 'callback' ? '/__spacefast/zero/connectors/' . $route['role'] . '/connect' : $path);
+        if ($operation === 'connect' && is_string($_GET['return_to'] ?? null)) $return .= '?return_to=' . rawurlencode($_GET['return_to']);
+        $returnParam = $config['auth']['returnToParam'] ?? 'returnTo';
+        $_GET[is_string($returnParam) ? $returnParam : 'returnTo'] = $return;
+        _stattic_zero_send_auth_redirect($config, $serving, 'auth_start', $method, $host);
+        exit;
+    }
+    $token = $config['connectors']['token'] ?? '';
+    $apiUrl = rtrim(_stattic_config_value('SPACEFAST_API_BASE_URL'), '/');
+    if (!is_string($token) || $token === '' || !_stattic_platform_destination_allowed($apiUrl)) {
+        _stattic_problem_refused(503, 'connectors_unavailable', 'Connections are unavailable. Try again.');
+    }
+    $payload = ['role' => $route['role'], 'visitorSubject' => $identity['userId']];
+    if ($operation === 'connect') {
+        $payload['origin'] = $origin;
+        $payload['returnTo'] = _stattic_zero_auth_return_to($host, 'return_to');
+    } elseif ($operation === 'callback') {
+        if (!is_string($_GET['code'] ?? null) || !is_string($_GET['state'] ?? null)) {
+            _stattic_problem_refused(400, 'connector_authorization_cancelled', 'The account was not connected. Close this window and try again.');
+        }
+        $payload['code'] = $_GET['code'];
+        $payload['state'] = $_GET['state'];
+    }
+    require_once __DIR__ . '/../shared/http.php';
+    $action = match ($operation) { 'connect' => 'start', 'callback' => 'complete', default => 'revoke' };
+    $result = _stattic_http_request([
+        'url' => $apiUrl . '/v1/runtime/connectors/visitor-connections/' . $action,
+        'method' => 'POST', 'headers' => ['Authorization: Bearer ' . $token, 'Content-Type: application/json'],
+        'body' => json_encode($payload, JSON_UNESCAPED_SLASHES),
+        'connect_timeout' => 5, 'timeout' => 30, 'schemes' => ['https', 'http'],
+    ]);
+    if (!$result['ok'] || $result['status'] < 200 || $result['status'] >= 300) {
+        _stattic_problem_refused(502, 'connector_authorization_failed', 'The account could not be connected. Close this window and try again.');
+    }
+    $data = json_decode($result['body'], true)['data'] ?? null;
+    if ($operation === 'connect') {
+        $authorizeUrl = is_array($data) ? ($data['authorizeUrl'] ?? null) : null;
+        if (!is_string($authorizeUrl) || parse_url($authorizeUrl, PHP_URL_SCHEME) !== 'https') {
+            _stattic_problem_refused(502, 'connector_authorization_failed', 'The sign-in page is unavailable.');
+        }
+        _stattic_response_send(302, "Redirecting.\n", 'text/plain', ['Location' => $authorizeUrl, 'Cache-Control' => 'private, no-store']);
+    }
+    if ($operation === 'disconnect') _stattic_zero_json_response(200, ['data' => null]);
+    $returnTo = is_array($data) && is_string($data['returnTo'] ?? null) ? _stattic_zero_safe_return_to($data['returnTo'], $host) : null;
+    $returnTo ??= $origin . '/';
+    $nonce = base64_encode(random_bytes(18));
+    $message = json_encode(['type' => 'spacefast:connector-connected', 'role' => $route['role']], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    $originJson = json_encode($origin, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    $returnJson = json_encode($returnTo, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    $html = '<!doctype html><html><meta charset="utf-8"><title>Account connected</title><p>Account connected. You can close this window.</p>'
+        . '<script nonce="' . $nonce . '">if(window.opener){window.opener.postMessage(' . $message . ',' . $originJson . ');window.close();}else{location.replace(' . $returnJson . ');}</script></html>';
+    _stattic_response_send(200, $html, 'text/html; charset=utf-8', [
+        'Cache-Control' => 'private, no-store', 'Referrer-Policy' => 'no-referrer',
+        'Content-Security-Policy' => "default-src 'none'; script-src 'nonce-" . $nonce . "'; base-uri 'none'; frame-ancestors 'none'",
+    ]);
+    exit;
+}
+
 function _stattic_zero_send_auth_redirect(
     array $config,
     array $serving,
@@ -610,6 +811,7 @@ function _stattic_zero_send_auth_redirect(
         // cookie. There is no Zero-specific cookie.
         $redirect = 'https://' . $requestHost . STATTIC_ACCESS_LOGOUT_PATH . '?return=' . rawurlencode($returnPath);
     } else {
+        $browserState = _stattic_access_browser_state_begin();
         $descriptor = _stattic_access_page_descriptor($serving);
         $accountUrl = is_array($descriptor) && is_string($descriptor['accountUrl'] ?? null)
             ? $descriptor['accountUrl']
@@ -618,13 +820,19 @@ function _stattic_zero_send_auth_redirect(
             $separator = str_contains($accountUrl, '?') ? '&' : '?';
             $redirect = $accountUrl
                 . $separator . 'host=' . rawurlencode(_stattic_zero_hostname_without_port($requestHost))
-                . '&return=' . rawurlencode($returnPath);
+                . '&return=' . rawurlencode($returnPath)
+                . '&browserState=' . rawurlencode($browserState);
         } else {
             $target = is_string($auth['signInUrl'] ?? null) ? trim((string) $auth['signInUrl']) : '';
             if (!_stattic_platform_destination_allowed($target)) {
                 _stattic_problem_refused(404, 'zero_auth_unavailable', 'Zero hosted auth is not configured.');
             }
-            $redirect = _stattic_zero_auth_url_with_return_to($target, $returnToParam, $requestHost);
+            $redirect = _stattic_zero_auth_url_with_return_to(
+                $target,
+                $returnToParam,
+                $requestHost,
+                $browserState
+            );
         }
     }
     http_response_code(302);
@@ -715,11 +923,17 @@ function _stattic_zero_gravatar_profile_url(?string $avatarUrl): ?string
     return 'https://gravatar.com/' . strtolower($matches[1]);
 }
 
-function _stattic_zero_auth_url_with_return_to(string $target, string $returnToParam, string $requestHost): string
+function _stattic_zero_auth_url_with_return_to(
+    string $target,
+    string $returnToParam,
+    string $requestHost,
+    string $browserState
+): string
 {
     $returnTo = _stattic_zero_auth_return_to($requestHost, $returnToParam);
     $separator = str_contains($target, '?') ? '&' : '?';
-    return $target . $separator . rawurlencode($returnToParam) . '=' . rawurlencode($returnTo);
+    return $target . $separator . rawurlencode($returnToParam) . '=' . rawurlencode($returnTo)
+        . '&browserState=' . rawurlencode($browserState);
 }
 
 function _stattic_zero_auth_return_to(string $requestHost, string $returnToParam): string

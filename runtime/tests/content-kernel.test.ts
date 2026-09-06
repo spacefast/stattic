@@ -238,6 +238,11 @@ $scfMedia = spacefast_content_scf_field('articles_01k4t7x8', 'gallery', [
   'label' => 'Gallery',
   'multiple' => true,
 ]);
+$_GET = ['page' => 'redirection.php'];
+$redirectionToolsAllowed = spacefast_content_admin_page_allowed('tools.php');
+$_GET = ['page' => 'site-health.php'];
+$otherToolsBlocked = spacefast_content_admin_page_allowed('tools.php');
+$_GET = [];
 echo json_encode([
   'bootstrap_calls' => $bootstrapCalls,
   'allowed' => array_map('spacefast_content_admin_page_allowed', [
@@ -249,6 +254,8 @@ echo json_encode([
     'plugins.php', 'themes.php', 'users.php', 'options-general.php',
     'tools.php', 'profile.php', 'edit-comments.php', 'site-health.php',
   ]),
+  'redirection_tools_allowed' => $redirectionToolsAllowed,
+  'other_tools_blocked' => $otherToolsBlocked,
   'scf' => [
     [$scfText['type'], $scfText['rows'], $scfText['maxlength']],
     [$scfMedia['type'], $scfMedia['return_format']],
@@ -272,6 +279,8 @@ echo json_encode([
     bootstrap_calls: 1,
     allowed: Array(10).fill(true),
     blocked: Array(8).fill(false),
+    redirection_tools_allowed: true,
+    other_tools_blocked: false,
     scf: [["textarea", 8, 280], ["gallery", "id"], true],
   });
 });
@@ -333,6 +342,12 @@ spacefast_content_enforce_admin_resource('edit.php');
 $_GET = ['page' => ZERO_ADMIN_PAGE_SLUG, 'p' => '/types/post'];
 spacefast_content_enforce_admin_resource('admin.php');
 
+$_GET = ['page' => 'redirection.php'];
+spacefast_content_enforce_admin_resource('tools.php');
+
+$_GET = ['page' => 'site-health.php'];
+spacefast_content_enforce_admin_resource('tools.php');
+
 $_GET = ['page' => 'plugins'];
 spacefast_content_enforce_admin_resource('admin.php');
 
@@ -367,7 +382,10 @@ echo json_encode([
     expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
     expect(JSON.parse(stdout)).toEqual({
       redirects: [],
-      refusals: [[403, "Spacefast manages this WordPress screen."]],
+      refusals: [
+        [403, "Spacefast manages this WordPress screen."],
+        [403, "Spacefast manages this WordPress screen."],
+      ],
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -733,7 +751,7 @@ echo json_encode(['ready' => $ready, 'expired' => $expired]);
   });
 });
 
-test("a verified content session enables Gutenberg REST and scopes users to the Space on both REST doors", async () => {
+test("a verified content session enables Gutenberg REST and gates Space users on the admin door", async () => {
   const script = String.raw`
 class WP_Error {
   public function __construct(
@@ -742,26 +760,58 @@ class WP_Error {
     public array $data,
   ) {}
 }
+final class TestRestRequest {
+  public function __construct(private string $route) {}
+  public function get_route(): string { return $this->route; }
+}
 require $argv[1];
+function verdict(mixed $result): mixed {
+  return $result instanceof WP_Error ? [$result->code, $result->data['status']] : $result;
+}
 $closed = spacefast_content_disable_rest_api(null);
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-// Door 1: the editor session, keyed by SPACEFAST_CONTENT_ADMIN_USER_ID.
+// Door 1: the editor session, constrained by its signed Zero access grant.
 $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = 57;
+$usersRoute = new TestRestRequest('/wp/v2/users');
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = [
+  'surface' => 'zero',
+  'initial_screen' => 'collections',
+  'allowed_screens' => ['collections'],
+];
 $sessionDoor = [
   'rest' => spacefast_content_disable_rest_api(null),
   'user_query' => spacefast_content_scope_rest_user_query(['orderby' => 'name'], null),
+  'users_disabled' => verdict(spacefast_content_gate_users_rest(null, null, $usersRoute)),
+  'posts_unchanged' => spacefast_content_gate_users_rest(
+    null,
+    null,
+    new TestRestRequest('/wp/v2/posts')
+  ),
 ];
-// Door 2: the WP API door, admitted by a principal role with no editor user
-// id. The user scope must still apply, or /wp/v2/users enumerates every Space.
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = [
+  'surface' => 'zero',
+  'initial_screen' => 'users',
+  'allowed_screens' => ['collections', 'users'],
+];
+$sessionDoor['users_enabled'] = spacefast_content_gate_users_rest(null, null, $usersRoute);
+// WordPress admin launches do not carry a Zero screen allowlist.
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = ['surface' => 'wordpress'];
+$wordpressDoor = spacefast_content_gate_users_rest(null, null, $usersRoute);
+// Door 2: the WP API door has no content-admin access claim. The user scope
+// must still apply, or /wp/v2/users enumerates every Space; the admin-session
+// feature decision must not replace this door's Grant.
 unset($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID']);
+unset($GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS']);
 $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = 'administrator';
 $apiDoor = [
   'rest' => spacefast_content_disable_rest_api(null),
   'user_query' => spacefast_content_scope_rest_user_query(['orderby' => 'name'], null),
+  'users' => spacefast_content_gate_users_rest(null, null, $usersRoute),
 ];
 echo json_encode([
   'closed' => [$closed->code, $closed->data['status']],
   'session_door' => $sessionDoor,
+  'wordpress_door' => $wordpressDoor,
   'api_door' => $apiDoor,
 ]);
 `;
@@ -784,8 +834,15 @@ echo json_encode([
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
   expect(JSON.parse(stdout)).toEqual({
     closed: ["spacefast_rest_disabled", 404],
-    session_door: { rest: null, user_query: scopedQuery },
-    api_door: { rest: null, user_query: scopedQuery },
+    session_door: {
+      rest: null,
+      user_query: scopedQuery,
+      users_disabled: ["spacefast_content_users_unavailable", 403],
+      posts_unchanged: null,
+      users_enabled: null,
+    },
+    wordpress_door: null,
+    api_door: { rest: null, user_query: scopedQuery, users: null },
   });
 });
 

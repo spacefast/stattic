@@ -139,6 +139,23 @@ function _stattic_component_check_embedded(
     }
 }
 
+function _stattic_component_check_loader_alias(
+    string $id,
+    string $treeEntry,
+    string $loaderAlias,
+    array &$problems,
+): void {
+    $entryDigest = is_file($treeEntry) ? hash_file('sha256', $treeEntry) : false;
+    $aliasDigest = is_file($loaderAlias) ? hash_file('sha256', $loaderAlias) : false;
+    if (
+        !is_string($entryDigest)
+        || !is_string($aliasDigest)
+        || !hash_equals($entryDigest, $aliasDigest)
+    ) {
+        _stattic_component_problem($problems, $id, 'component_digest_mismatch', 'Installed component bytes do not match the platform lock.');
+    }
+}
+
 /** The installed plugin whose text domain matches, as `[file, plugin]`. */
 function _stattic_component_installed_plugin(array $plugins, string $textDomain): ?array
 {
@@ -439,6 +456,20 @@ function _stattic_runtime_stage_components(string $privateRoot, array $claims): 
     _stattic_component_check_embedded($lock, 'runtime-engine', dirname($engineRoot) . '/bin/stattic-runtime', $problems);
     _stattic_component_check_embedded($lock, 'immutable-loader', $publicRoot . '/wp-content/mu-plugins/spacefast-content.php', $problems);
     _stattic_component_check_embedded($lock, 'content-kernel', $engineRoot . '/wordpress/content-kernel.php', $problems);
+    _stattic_component_check_embedded($lock, 'zero-admin', $publicRoot . '/wp-content/mu-plugins/zero-admin', $problems, true);
+    _stattic_component_check_embedded($lock, 'zero-dashboard', $publicRoot . '/wp-content/mu-plugins/zero-dashboard', $problems, true);
+    _stattic_component_check_loader_alias(
+        'zero-admin',
+        $publicRoot . '/wp-content/mu-plugins/zero-admin/zero-admin.php',
+        $publicRoot . '/wp-content/mu-plugins/zero-admin.php',
+        $problems,
+    );
+    _stattic_component_check_loader_alias(
+        'zero-dashboard',
+        $publicRoot . '/wp-content/mu-plugins/zero-dashboard/zero-dashboard.php',
+        $publicRoot . '/wp-content/mu-plugins/zero-dashboard.php',
+        $problems,
+    );
     _stattic_component_check_embedded($lock, 'managed-theme', $publicRoot . '/wp-content/themes/spacefast-managed', $problems, true);
     $quickjs = _stattic_component_expected($lock, 'quickjs-abi');
     if (!is_array($quickjs) || ($quickjs['version'] ?? null) !== STATTIC_RUNTIME_ZERO_QUICKJS_ABI) {

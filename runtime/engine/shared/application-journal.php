@@ -428,7 +428,12 @@ function _stattic_content_source_journal_claim(mysqli $connection, int $limit, i
                     'operationId' => (string) ($row['operation_id'] ?? ''),
                     'effectOrdinal' => (int) ($row['effect_index'] ?? 0),
                     'store' => 'wordpress',
-                    'kind' => 'content-source-changed',
+                    // The payload says which: a change to a bound source names
+                    // the binding it reconciles, a materialization has none to
+                    // name and carries the resource whose file it needs minted.
+                    'kind' => isset($payload['bindingId'])
+                        ? 'content-source-changed'
+                        : 'content-source-materialized',
                     'payloadDigest' => 'sha256:' . hash('sha256', _stattic_application_journal_canonical_json($payload)),
                     'payload' => $payload,
                     'createdAt' => _stattic_application_journal_iso((string) ($row['created_at'] ?? '')),

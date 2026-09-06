@@ -71,6 +71,7 @@ enum RouteKind {
     PhpFunction,
     ZeroControl,
     ZeroEndpoint,
+    Page,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -166,6 +167,7 @@ impl RouteRecord {
                 | RouteKind::PhpFunction
                 | RouteKind::ZeroControl
                 | RouteKind::ZeroEndpoint
+                | RouteKind::Page
         ) && !self.path.contains(':')
     }
 }
@@ -176,6 +178,7 @@ pub(crate) struct RouteInventoryInput<'a> {
     pub redirects: &'a [RedirectRule],
     pub config_path: Option<&'a str>,
     pub functions: Option<&'a Value>,
+    pub pages: Option<&'a Vec<Value>>,
     pub zero_routes: &'a [PhpActionRecord],
     pub has_zero: bool,
     pub assigned_hostnames: &'a [String],
@@ -190,6 +193,7 @@ pub(crate) fn compile_route_inventory(input: RouteInventoryInput<'_>) -> Result<
         config_path,
         functions,
         zero_routes,
+        pages,
         has_zero,
         assigned_hostnames,
         exact_response_paths,
@@ -323,6 +327,36 @@ pub(crate) fn compile_route_inventory(input: RouteInventoryInput<'_>) -> Result<
             cache: None,
             destination: None,
             status: None,
+        }));
+    }
+
+    for page in pages.into_iter().flatten() {
+        let Some(path) = page.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        routes.push(RouteRecord::from_input(RouteRecordInput {
+            kind: RouteKind::Page,
+            source: page
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("pages")
+                .into(),
+            runtime: if page.get("render").and_then(Value::as_str) == Some("document") {
+                RouteRuntime::Php
+            } else {
+                RouteRuntime::Routing
+            },
+            host: "*".into(),
+            path: path.into(),
+            methods: methods_for("GET"),
+            execution_mode: None,
+            cache: None,
+            destination: page
+                .get("shell")
+                .or_else(|| page.get("bindingId"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            status: Some(200),
         }));
     }
 
@@ -693,6 +727,44 @@ mod tests {
     }
 
     #[test]
+    fn pages_share_one_owner_with_renderer_specific_destinations() {
+        let pages = vec![
+            json!({"id":"page.home", "path":"/", "render":"document", "bindingId":"sync.pages.home", "params":[]}),
+            json!({"id":"page.issue", "path":"/issues/:id", "render":"client", "shell":"_spacefast/pages/client.html", "params":["id"]}),
+            json!({"id":"page.docs", "path":"/docs/*rest", "render":"client", "shell":"_spacefast/pages/client.html", "params":["rest"]}),
+        ];
+        let inventory = compile_route_inventory(RouteInventoryInput {
+            files: &BTreeMap::new(),
+            private: &BTreeSet::new(),
+            redirects: &[],
+            config_path: None,
+            functions: None,
+            zero_routes: &[],
+            pages: Some(&pages),
+            has_zero: false,
+            assigned_hostnames: &[],
+            exact_response_paths: &BTreeSet::new(),
+        })
+        .unwrap();
+        assert_eq!(inventory.routes.len(), 3);
+        for (route, page) in inventory.routes.iter().zip(&pages) {
+            assert!(matches!(route.kind, RouteKind::Page));
+            assert_eq!(route.source, page["id"].as_str().unwrap());
+            assert_eq!(route.path, page["path"].as_str().unwrap());
+            assert_eq!(route.methods, ["GET", "HEAD"]);
+        }
+        assert!(matches!(inventory.routes[0].runtime, RouteRuntime::Php));
+        assert_eq!(
+            inventory.routes[0].destination.as_deref(),
+            Some("sync.pages.home")
+        );
+        assert_eq!(
+            inventory.routes[1].destination.as_deref(),
+            Some("_spacefast/pages/client.html")
+        );
+    }
+
+    #[test]
     fn functions_subtrees_inventory_the_exact_and_pattern_routes() {
         let functions = json!({
             "artifact": {
@@ -707,6 +779,7 @@ mod tests {
             config_path: None,
             functions: Some(&functions),
             zero_routes: &[],
+            pages: None,
             has_zero: false,
             assigned_hostnames: &[],
             exact_response_paths: &BTreeSet::new(),

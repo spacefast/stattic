@@ -42,6 +42,22 @@ const MYSQL_DATABASE = "fx_relay_test";
 
 let rt: Runtime;
 let mysql: MysqlContainer;
+const connectorFrames: Array<{ authorization: string | null; path: string; body: unknown }> = [];
+const connectorServer = Bun.serve({
+  hostname: "127.0.0.1",
+  port: 0,
+  async fetch(request) {
+    connectorFrames.push({
+      authorization: request.headers.get("authorization"),
+      path: new URL(request.url).pathname,
+      body: await request.json(),
+    });
+    return Response.json({
+      state: { code: "ok", message: "Connected." },
+      run: { result: { id: "issue_relay" } },
+    });
+  },
+});
 
 const wpMailCapturePath = path.join(
   os.tmpdir(),
@@ -172,6 +188,10 @@ beforeAll(async () => {
     // The log intake exists so a record reaches PHP's error log, the only stream
     // the provider ships off the box. Pointing it at a file lets the test read
     // back what a deployment sees through the provider's log API.
+    atomicData: {
+      SPACEFAST_API_BASE_URL: connectorServer.url.toString(),
+      SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "",
+    },
     phpIni: { log_errors: "1", error_log: runtimeLogPath },
     env: {
       DB_HOST: new URL(mysql.url).host,
@@ -201,6 +221,10 @@ beforeAll(async () => {
     spaceId: SPACE_ID,
     versionId: VERSION_ID,
     metadata: { mode: "website", title: "Functions relay" },
+    functions: {
+      ...functionsFinalize("functions.test"),
+      connectors: { token: "version-connectors-token" },
+    },
     files: { "index.html": "<h1>static</h1>\n" },
     activate: {
       route_name: "production",
@@ -215,6 +239,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await rt?.stop?.();
   stopMysqlContainers();
+  connectorServer.stop(true);
 });
 
 test("a granted credential brokers real SQL against real MySQL", async () => {
@@ -413,6 +438,41 @@ test("the named broker decides which executor runs, and the grant is narrowed to
   // No Akismet key is configured for this runtime, so the executor refuses on
   // configuration — which is the proof it ran and reached no network.
   expect(matchedBody.code).toBe("service_not_configured");
+});
+
+test("connector frames use the version token and ignore a forged visitor", async () => {
+  const frame = {
+    service: "connectors",
+    operation: "call",
+    payload: {
+      role: "tracker",
+      tool: "issues.create",
+      args: { title: "From Worker" },
+      handler: { name: "fetch", mode: "write", callIndex: 2 },
+      visitor: { subject: "forged" },
+      requestId: "forged",
+    },
+  };
+  const denied = await relay(frame, relayToken({ capabilities: ["spam.check"] }), "services");
+  expect(await denied.json()).toMatchObject({ ok: false, code: "service_capability_denied" });
+  const response = await relay(
+    frame,
+    relayToken({ capabilities: ["connectors.call"] }),
+    "services",
+    "inv_worker_connectors",
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect(await response.json()).toMatchObject({
+    ok: true,
+    result: { run: { result: { id: "issue_relay" } } },
+  });
+  expect(connectorFrames).toEqual([
+    {
+      authorization: "Bearer version-connectors-token",
+      path: "/v1/runtime/connectors/calls",
+      body: { ...frame.payload, visitor: null, requestId: "inv_worker_connectors" },
+    },
+  ]);
 });
 
 test("an unrecognised broker is refused rather than defaulted", async () => {

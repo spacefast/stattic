@@ -45,6 +45,7 @@ test("every content request names a management action before WordPress boots", a
       activate: { operation: "model.activate" },
       reconcile: { operation: "source.reconcile" },
       acknowledge: { operation: "source.acknowledge" },
+      materialize: { operation: "source.materialize" },
       invalid: { operation: "other" },
       absent: {},
     }),
@@ -55,6 +56,7 @@ test("every content request names a management action before WordPress boots", a
     activate: "content.model.activate",
     reconcile: "content.source.reconcile",
     acknowledge: "content.source.acknowledge",
+    materialize: "content.source.materialize",
     invalid: false,
     absent: false,
   });

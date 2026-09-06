@@ -1232,6 +1232,7 @@ function _stattic_runtime_functions_config_artifact(array $functions): array
         // Fail closed at the relay: a grant the control plane did not send is no
         // grant, so a malformed or truncated config must default to empty.
         'grantedCapabilities' => _stattic_runtime_functions_capabilities($functions['grantedCapabilities'] ?? null),
+        'connectors' => is_array($functions['connectors'] ?? null) ? $functions['connectors'] : null,
         'relay' => is_array($functions['relay'] ?? null) ? $functions['relay'] : null,
         // Where invocation counts go, which is the control plane and not this
         // origin. Absent means uncounted, never unserved.
@@ -1273,6 +1274,9 @@ function _stattic_runtime_zero_config_artifact(array $zero): array
         'realtime' => is_array($zero['realtime'] ?? null) ? $zero['realtime'] : [],
         'inspect' => is_array($zero['inspect'] ?? null) ? $zero['inspect'] : [],
     ];
+    if (is_string($zero['connectors']['token'] ?? null) && $zero['connectors']['token'] !== '') {
+        $artifact['connectors'] = ['token' => $zero['connectors']['token']];
+    }
     if (in_array($zero['databaseUrlSource'] ?? null, ['application', 'provider'], true)) {
         // Only ever from the authenticated control-plane finalize request; never
         // inferred from tenant variable contents.

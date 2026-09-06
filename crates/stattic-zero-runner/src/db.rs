@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::env;
 use std::time::Instant;
 
@@ -8,11 +9,12 @@ use mysql::{Opts, Params, Pool, PoolConstraints, PoolOpts, PooledConn, Row, Valu
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::artifacts::EndpointDbMetadata;
 use crate::artifacts::ExecutionMode;
 
-// The tenant-facing operation shape. `shared/db-broker.php` enforces the same
-// numbers under the same names; it consumes them from the generated protocol
-// file rather than restating them, so this declaration is the only authority.
+// Request and parameter limits shared with the parent-process PHP broker. The
+// protocols differ, but both consume these values from generated code so the
+// resource ceilings stay aligned.
 pub const DB_OPERATION_MAX_BYTES: usize = 64 * 1024;
 pub const DB_PARAM_MAX_COUNT: usize = 256;
 pub const DB_TRANSACTION_MAX_STATEMENTS: usize = 64;
@@ -33,8 +35,6 @@ pub const DB_SESSION_PIN: &str = "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_0900_as_c
 thread_local! {
     static DB_METRICS: RefCell<DbMetrics> = RefCell::new(DbMetrics::default());
     static DB_TRANSACTION: RefCell<Option<InvocationTransaction>> = const { RefCell::new(None) };
-    // What this handler's own `transaction_begin` opened, if it called one.
-    static HANDLER_TRANSACTION: RefCell<Option<HandlerTransaction>> = const { RefCell::new(None) };
     // One pool per process: statements in one invocation share a connection
     // instead of paying a handshake each.
     static DB_POOL: RefCell<Option<Pool>> = const { RefCell::new(None) };
@@ -49,25 +49,6 @@ struct InvocationTransaction {
     mode: ExecutionMode,
 }
 
-/// The savepoint a handler's own transaction control runs against.
-const HANDLER_SAVEPOINT: &str = "zero_handler_transaction";
-
-/// What a bundle's `transaction_begin` actually opened.
-///
-/// Bundles compiled before the invocation owned a transaction bracket their own
-/// work with `transaction_begin`/`transaction_commit`, and their bytecode is
-/// frozen. Those calls still mean what they meant — all of it lands or none of
-/// it does — but where they now sit inside the invocation's transaction they
-/// have to be a savepoint in it rather than a second transaction beside it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HandlerTransaction {
-    /// A savepoint inside a transaction the invocation already owns.
-    Savepoint,
-    /// The transaction itself, opened because none was running — the Functions
-    /// relay tier, where this is exactly what the call always did.
-    Whole,
-}
-
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DbMetrics {
@@ -75,19 +56,6 @@ pub struct DbMetrics {
     pub connect_ms: f64,
     pub query_ms: f64,
     pub execute_ms: f64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DbOperation {
-    #[serde(default)]
-    sql: Option<String>,
-    #[serde(default)]
-    params: Vec<Value>,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    statements: Vec<DbStatement>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +68,131 @@ struct DbStatement {
     mode: Option<String>,
 }
 
+/// The complete database authority tenant bytecode can exercise. SQL and
+/// physical identifiers never cross the QuickJS boundary; each logical name is
+/// resolved against the finalized endpoint artifact before a statement exists.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum DbCapabilityOperation {
+    Select {
+        table: String,
+        #[serde(default)]
+        filters: Vec<DbCapabilityFilter>,
+        #[serde(default)]
+        order: Vec<DbCapabilityOrder>,
+        #[serde(default)]
+        cursor: Option<Vec<Value>>,
+        #[serde(default)]
+        limit: Option<u64>,
+        #[serde(default)]
+        offset: Option<u64>,
+    },
+    Count {
+        table: String,
+        #[serde(default)]
+        filters: Vec<DbCapabilityFilter>,
+    },
+    Get {
+        table: String,
+        id: Value,
+    },
+    Insert {
+        table: String,
+        values: BTreeMap<String, Value>,
+    },
+    Update {
+        table: String,
+        id: Value,
+        values: BTreeMap<String, Value>,
+    },
+    Delete {
+        table: String,
+        id: Value,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DbCapabilityFilter {
+    field: String,
+    op: DbCapabilityComparison,
+    value: Value,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DbCapabilityComparison {
+    Eq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DbCapabilityOrder {
+    field: String,
+    direction: DbCapabilityDirection,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum DbCapabilityDirection {
+    Asc,
+    Desc,
+}
+
+struct ResolvedTable<'a> {
+    logical_name: String,
+    physical_name: &'a str,
+    primary_key: &'a str,
+    columns: &'a serde_json::Map<String, Value>,
+    indexes: Option<&'a serde_json::Map<String, Value>>,
+}
+
+impl ResolvedTable<'_> {
+    fn column(&self, logical_name: &str) -> Result<&str, BrokerRefusal> {
+        self.columns
+            .get(logical_name)
+            .and_then(|column| column.get("physicalName"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                BrokerRefusal::new(
+                    "zero_db_capability_denied",
+                    format!(
+                        "Zero DB field {}.{} is not declared.",
+                        self.logical_name, logical_name
+                    ),
+                )
+            })
+    }
+
+    fn projection(&self) -> Result<String, BrokerRefusal> {
+        if self.columns.is_empty() {
+            return Err(BrokerRefusal::new(
+                "zero_db_capability_invalid",
+                format!(
+                    "Zero DB table {} has no declared fields.",
+                    self.logical_name
+                ),
+            ));
+        }
+        self.columns
+            .iter()
+            .map(|(logical, _)| {
+                Ok(format!(
+                    "{} AS {}",
+                    quote_mysql_identifier(self.column(logical)?),
+                    quote_mysql_identifier(logical)
+                ))
+            })
+            .collect::<Result<Vec<_>, BrokerRefusal>>()
+            .map(|columns| columns.join(", "))
+    }
+}
+
 pub(crate) fn reset_metrics() {
     DB_METRICS.with(|metrics| {
         *metrics.borrow_mut() = DbMetrics::default();
@@ -107,20 +200,11 @@ pub(crate) fn reset_metrics() {
 }
 
 pub(crate) fn rollback_open_transaction() {
-    set_handler_transaction(None);
     DB_TRANSACTION.with(|transaction| {
         if let Some(mut transaction) = transaction.borrow_mut().take() {
             let _ = transaction.conn.query_drop("ROLLBACK");
         }
     });
-}
-
-fn handler_transaction() -> Option<HandlerTransaction> {
-    HANDLER_TRANSACTION.with(|state| *state.borrow())
-}
-
-fn set_handler_transaction(scope: Option<HandlerTransaction>) {
-    HANDLER_TRANSACTION.with(|state| *state.borrow_mut() = scope);
 }
 
 pub(crate) fn begin_invocation(mode: ExecutionMode) -> Result<(), BrokerRefusal> {
@@ -132,20 +216,27 @@ pub(crate) fn begin_invocation(mode: ExecutionMode) -> Result<(), BrokerRefusal>
     }
     let mut conn = connect_db()?;
     if mode == ExecutionMode::Read {
-        conn.query_drop("SET TRANSACTION READ ONLY")
-            .map_err(|error| {
-                BrokerRefusal::new("zero_db_transaction_start_failed", error.to_string())
-            })?;
+        conn.query_drop("SET TRANSACTION READ ONLY").map_err(|_| {
+            BrokerRefusal::new(
+                "zero_db_transaction_start_failed",
+                "The Zero DB transaction could not be started.",
+            )
+        })?;
         conn.query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT")
-            .map_err(|error| {
-                BrokerRefusal::new("zero_db_transaction_start_failed", error.to_string())
+            .map_err(|_| {
+                BrokerRefusal::new(
+                    "zero_db_transaction_start_failed",
+                    "The Zero DB transaction could not be started.",
+                )
             })?;
     } else {
-        conn.query_drop("START TRANSACTION").map_err(|error| {
-            BrokerRefusal::new("zero_db_transaction_start_failed", error.to_string())
+        conn.query_drop("START TRANSACTION").map_err(|_| {
+            BrokerRefusal::new(
+                "zero_db_transaction_start_failed",
+                "The Zero DB transaction could not be started.",
+            )
         })?;
     }
-    set_handler_transaction(None);
     DB_TRANSACTION.with(|transaction| {
         *transaction.borrow_mut() = Some(InvocationTransaction { conn, mode });
     });
@@ -153,7 +244,6 @@ pub(crate) fn begin_invocation(mode: ExecutionMode) -> Result<(), BrokerRefusal>
 }
 
 pub(crate) fn commit_invocation() -> Result<(), BrokerRefusal> {
-    set_handler_transaction(None);
     let mut transaction = DB_TRANSACTION
         .with(|state| state.borrow_mut().take())
         .ok_or_else(|| {
@@ -162,10 +252,12 @@ pub(crate) fn commit_invocation() -> Result<(), BrokerRefusal> {
                 "No Zero invocation transaction is active.",
             )
         })?;
-    transaction
-        .conn
-        .query_drop("COMMIT")
-        .map_err(|error| BrokerRefusal::new("zero_db_transaction_commit_failed", error.to_string()))
+    transaction.conn.query_drop("COMMIT").map_err(|_| {
+        BrokerRefusal::new(
+            "zero_db_transaction_commit_failed",
+            "The Zero DB transaction could not be committed.",
+        )
+    })
 }
 
 pub(crate) fn take_metrics() -> Option<DbMetrics> {
@@ -178,164 +270,397 @@ pub(crate) fn take_metrics() -> Option<DbMetrics> {
     })
 }
 
-pub(crate) fn handle_db_operation(raw: &str) -> String {
-    match execute_db_operation(raw) {
+pub(crate) fn handle_db_capability_operation(raw: &str, metadata: &EndpointDbMetadata) -> String {
+    match execute_db_capability_operation(raw, metadata) {
         Ok(value) => value.to_string(),
         Err(error) => error.refusal_json(),
     }
 }
 
-fn execute_db_operation(raw: &str) -> Result<Value, BrokerRefusal> {
+/// The metadata tenant code needs to build logical operations. Physical table
+/// and column names stay on the native side of the capability boundary.
+pub(crate) fn tenant_db_metadata(metadata: &EndpointDbMetadata) -> Result<Value, BrokerRefusal> {
+    let mut tables = serde_json::Map::new();
+    for logical_table in metadata.tables.keys() {
+        let table = resolve_table(metadata, logical_table)?;
+        let mut columns = serde_json::Map::new();
+        for (logical_column, column) in table.columns {
+            let column_type =
+                column
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or(if logical_column == "id" {
+                        "id"
+                    } else {
+                        "string"
+                    });
+            columns.insert(
+                logical_column.clone(),
+                json!({ "name": logical_column, "type": column_type }),
+            );
+        }
+        let indexes = table.indexes.cloned().unwrap_or_default();
+        tables.insert(
+            logical_table.clone(),
+            json!({
+                "name": logical_table,
+                "primaryKey": table.primary_key,
+                "columns": columns,
+                "indexes": indexes,
+            }),
+        );
+    }
+    Ok(json!({
+        "schemaHash": metadata.schema_hash,
+        "tables": tables,
+    }))
+}
+
+fn execute_db_capability_operation(
+    raw: &str,
+    metadata: &EndpointDbMetadata,
+) -> Result<Value, BrokerRefusal> {
     if raw.len() > DB_OPERATION_MAX_BYTES {
         return Err(BrokerRefusal::new(
             "zero_db_operation_too_large",
             "Zero DB operation exceeded the request size limit.",
         ));
     }
-    let operation: DbOperation = serde_json::from_str(raw)
-        .map_err(|error| BrokerRefusal::new("zero_db_operation_invalid", error.to_string()))?;
-
-    // Handler-controlled transaction ops, as bundles compiled before the
-    // invocation owned a transaction still emit them. Their bytecode is frozen,
-    // so the ops keep working; `begin_handler_transaction` explains how.
-    match operation.mode.as_deref() {
-        Some("transaction_begin") => {
-            return begin_handler_transaction().map(|()| json!({"ok": true}))
-        }
-        Some("transaction_commit") => {
-            return commit_handler_transaction().map(|()| json!({"ok": true}))
-        }
-        Some("transaction_rollback") => {
-            return rollback_handler_transaction().map(|()| json!({"ok": true}))
-        }
-        Some("transaction") => return run_statement_batch(&operation.statements),
-        _ => {}
-    }
-    if !operation.statements.is_empty() {
-        return run_statement_batch(&operation.statements);
-    }
-
-    let statement = DbStatement {
-        sql: operation.sql.unwrap_or_default(),
-        params: operation.params,
-        mode: operation.mode,
-    };
-    // Validation and the capability check run before any connection exists: an
-    // ungranted or malformed statement must be refused without touching the
-    // database at all.
+    let operation: DbCapabilityOperation = serde_json::from_str(raw).map_err(|_| {
+        BrokerRefusal::new(
+            "zero_db_capability_invalid",
+            "Zero DB accepts only declared structured operations.",
+        )
+    })?;
+    let statement = capability_statement(operation, metadata)?;
     let ready = ready_statement(&statement)?;
     with_invocation_conn(|conn| run_ready_statement(conn, ready))
 }
 
-/// Open the handler's own transaction.
-///
-/// Inside an invocation transaction this is a savepoint, which is the only
-/// sound reading: the handler asked for all-or-nothing over the statements it
-/// brackets, and that is exactly what a savepoint gives it without a second
-/// transaction on a second connection that could not see the invocation's own
-/// uncommitted writes. Its commit no longer decides whether the work survives —
-/// the invocation's does — but a handler that runs to completion commits either
-/// way, so the outcome it can observe is unchanged.
-///
-/// With no invocation transaction running, this opens the real thing, which is
-/// what the call always did.
-fn begin_handler_transaction() -> Result<(), BrokerRefusal> {
-    if handler_transaction().is_some() {
-        return Err(BrokerRefusal::new(
-            "zero_db_transaction_active",
-            "A Zero DB transaction is already active.",
-        ));
-    }
-    if !transaction_active() {
-        begin_invocation(ExecutionMode::Write)?;
-        set_handler_transaction(Some(HandlerTransaction::Whole));
-        return Ok(());
-    }
-    with_invocation_conn(|conn| {
-        conn.query_drop(format!("SAVEPOINT {HANDLER_SAVEPOINT}"))
-            .map_err(|error| {
-                BrokerRefusal::new("zero_db_transaction_start_failed", error.to_string())
+fn capability_statement(
+    operation: DbCapabilityOperation,
+    metadata: &EndpointDbMetadata,
+) -> Result<DbStatement, BrokerRefusal> {
+    match operation {
+        DbCapabilityOperation::Select {
+            table,
+            filters,
+            order,
+            cursor,
+            limit,
+            offset,
+        } => select_statement(metadata, &table, filters, order, cursor, limit, offset),
+        DbCapabilityOperation::Count { table, filters } => {
+            let table = resolve_table(metadata, &table)?;
+            let (where_sql, params) = capability_filters(&table, filters)?;
+            Ok(DbStatement {
+                sql: format!(
+                    "SELECT COUNT(*) AS `count` FROM {}{where_sql}",
+                    quote_mysql_identifier(table.physical_name)
+                ),
+                params,
+                mode: None,
             })
-    })?;
-    set_handler_transaction(Some(HandlerTransaction::Savepoint));
-    Ok(())
-}
-
-fn commit_handler_transaction() -> Result<(), BrokerRefusal> {
-    match handler_transaction() {
-        Some(HandlerTransaction::Savepoint) => {
-            with_invocation_conn(|conn| {
-                conn.query_drop(format!("RELEASE SAVEPOINT {HANDLER_SAVEPOINT}"))
-                    .map_err(|error| {
-                        BrokerRefusal::new("zero_db_transaction_commit_failed", error.to_string())
-                    })
-            })?;
-            set_handler_transaction(None);
-            Ok(())
         }
-        Some(HandlerTransaction::Whole) => commit_invocation(),
-        None => Err(BrokerRefusal::new(
-            "zero_db_transaction_missing",
-            "No Zero DB transaction is active.",
-        )),
+        DbCapabilityOperation::Get { table, id } => {
+            let table = resolve_table(metadata, &table)?;
+            let key = table.column(table.primary_key)?;
+            Ok(DbStatement {
+                sql: format!(
+                    "SELECT {} FROM {} WHERE {} = ? LIMIT 1",
+                    table.projection()?,
+                    quote_mysql_identifier(table.physical_name),
+                    quote_mysql_identifier(key)
+                ),
+                params: vec![id],
+                mode: None,
+            })
+        }
+        DbCapabilityOperation::Insert { table, values } => {
+            let table = resolve_table(metadata, &table)?;
+            if values.is_empty() {
+                return Err(invalid_capability_operation(
+                    "Zero DB insert values must not be empty.",
+                ));
+            }
+            let columns = values
+                .keys()
+                .map(|field| table.column(field).map(quote_mysql_identifier))
+                .collect::<Result<Vec<_>, _>>()?;
+            let placeholders = vec!["?"; columns.len()].join(", ");
+            Ok(DbStatement {
+                sql: format!(
+                    "INSERT INTO {} ({}) VALUES ({placeholders})",
+                    quote_mysql_identifier(table.physical_name),
+                    columns.join(", ")
+                ),
+                params: values.into_values().collect(),
+                mode: Some("execute".to_string()),
+            })
+        }
+        DbCapabilityOperation::Update { table, id, values } => {
+            let table = resolve_table(metadata, &table)?;
+            if values.is_empty() {
+                return Err(invalid_capability_operation(
+                    "Zero DB update values must not be empty.",
+                ));
+            }
+            let assignments = values
+                .keys()
+                .map(|field| {
+                    Ok(format!(
+                        "{} = ?",
+                        quote_mysql_identifier(table.column(field)?)
+                    ))
+                })
+                .collect::<Result<Vec<_>, BrokerRefusal>>()?;
+            let key = table.column(table.primary_key)?;
+            let mut params = values.into_values().collect::<Vec<_>>();
+            params.push(id);
+            Ok(DbStatement {
+                sql: format!(
+                    "UPDATE {} SET {} WHERE {} = ?",
+                    quote_mysql_identifier(table.physical_name),
+                    assignments.join(", "),
+                    quote_mysql_identifier(key)
+                ),
+                params,
+                mode: Some("execute".to_string()),
+            })
+        }
+        DbCapabilityOperation::Delete { table, id } => {
+            let table = resolve_table(metadata, &table)?;
+            let key = table.column(table.primary_key)?;
+            Ok(DbStatement {
+                sql: format!(
+                    "DELETE FROM {} WHERE {} = ?",
+                    quote_mysql_identifier(table.physical_name),
+                    quote_mysql_identifier(key)
+                ),
+                params: vec![id],
+                mode: Some("execute".to_string()),
+            })
+        }
     }
 }
 
-fn rollback_handler_transaction() -> Result<(), BrokerRefusal> {
-    match handler_transaction() {
-        Some(HandlerTransaction::Savepoint) => {
-            with_invocation_conn(|conn| {
-                conn.query_drop(format!("ROLLBACK TO SAVEPOINT {HANDLER_SAVEPOINT}"))
-                    .and_then(|()| {
-                        conn.query_drop(format!("RELEASE SAVEPOINT {HANDLER_SAVEPOINT}"))
-                    })
-                    .map_err(|error| {
-                        BrokerRefusal::new("zero_db_transaction_rollback_failed", error.to_string())
-                    })
-            })?;
-            set_handler_transaction(None);
-            Ok(())
-        }
-        Some(HandlerTransaction::Whole) => {
-            rollback_open_transaction();
-            Ok(())
-        }
-        None => Err(BrokerRefusal::new(
-            "zero_db_transaction_missing",
-            "No Zero DB transaction is active.",
-        )),
-    }
-}
-
-/// The batched form of the same thing: one bracket around every statement,
-/// where a failure anywhere discards all of them.
-fn run_statement_batch(statements: &[DbStatement]) -> Result<Value, BrokerRefusal> {
-    if statements.is_empty() || statements.len() > DB_TRANSACTION_MAX_STATEMENTS {
-        return Err(BrokerRefusal::new(
-            "zero_db_transaction_invalid",
-            "Zero DB transaction statements are invalid.",
+fn select_statement(
+    metadata: &EndpointDbMetadata,
+    logical_table: &str,
+    filters: Vec<DbCapabilityFilter>,
+    order: Vec<DbCapabilityOrder>,
+    cursor: Option<Vec<Value>>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+) -> Result<DbStatement, BrokerRefusal> {
+    let table = resolve_table(metadata, logical_table)?;
+    if limit.is_some_and(|value| value > 1001) {
+        return Err(invalid_capability_operation(
+            "Zero DB select limit exceeds 1001 rows.",
         ));
     }
-    // Validation and the capability check run before any connection exists: an
-    // ungranted or malformed statement must be refused without touching the
-    // database at all.
-    let ready = statements
-        .iter()
-        .map(ready_statement)
-        .collect::<Result<Vec<_>, _>>()?;
-    begin_handler_transaction()?;
-    let mut results = Vec::with_capacity(ready.len());
-    for statement in ready {
-        match with_invocation_conn(|conn| run_ready_statement(conn, statement)) {
-            Ok(value) => results.push(value),
-            Err(error) => {
-                let _ = rollback_handler_transaction();
-                return Err(error);
+    if cursor.is_some() && (order.is_empty() || offset.is_some()) {
+        return Err(invalid_capability_operation(
+            "Zero DB cursors require an order and cannot use an offset.",
+        ));
+    }
+    let (base_where, mut params) = capability_filters(&table, filters)?;
+    let mut conditions = base_where
+        .strip_prefix(" WHERE ")
+        .map(str::to_string)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(keys) = cursor {
+        if keys.len() != order.len() {
+            return Err(invalid_capability_operation(
+                "Zero DB cursor does not match the operation order.",
+            ));
+        }
+        let (cursor_sql, cursor_params) = capability_cursor(&table, &order, keys)?;
+        conditions.push(cursor_sql);
+        params.extend(cursor_params);
+    }
+    let order_sql = if order.is_empty() {
+        String::new()
+    } else {
+        let fields = order
+            .iter()
+            .map(|entry| {
+                Ok(format!(
+                    "{} {}",
+                    quote_mysql_identifier(table.column(&entry.field)?),
+                    direction_sql(entry.direction)
+                ))
+            })
+            .collect::<Result<Vec<_>, BrokerRefusal>>()?;
+        format!(" ORDER BY {}", fields.join(", "))
+    };
+    let where_sql = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    // MySQL does not accept a bare OFFSET. Its documented maximum unsigned
+    // LIMIT preserves the public offset-only builder semantics without
+    // introducing a lower native cap.
+    let limit_sql = match (limit, offset) {
+        (Some(value), _) => format!(" LIMIT {value}"),
+        (None, Some(_)) => " LIMIT 18446744073709551615".to_string(),
+        (None, None) => String::new(),
+    };
+    let offset_sql = offset.map_or_else(String::new, |value| format!(" OFFSET {value}"));
+    Ok(DbStatement {
+        sql: format!(
+            "SELECT {} FROM {}{where_sql}{order_sql}{limit_sql}{offset_sql}",
+            table.projection()?,
+            quote_mysql_identifier(table.physical_name)
+        ),
+        params,
+        mode: None,
+    })
+}
+
+fn capability_filters(
+    table: &ResolvedTable<'_>,
+    filters: Vec<DbCapabilityFilter>,
+) -> Result<(String, Vec<Value>), BrokerRefusal> {
+    let mut clauses = Vec::with_capacity(filters.len());
+    let mut params = Vec::with_capacity(filters.len());
+    for filter in filters {
+        let column = quote_mysql_identifier(table.column(&filter.field)?);
+        if filter.value.is_null() {
+            if matches!(filter.op, DbCapabilityComparison::Eq) {
+                clauses.push(format!("{column} IS NULL"));
+                continue;
+            }
+            return Err(invalid_capability_operation(
+                "Zero DB range filters cannot compare against null.",
+            ));
+        }
+        let operator = match filter.op {
+            DbCapabilityComparison::Eq => "=",
+            DbCapabilityComparison::Gt => ">",
+            DbCapabilityComparison::Gte => ">=",
+            DbCapabilityComparison::Lt => "<",
+            DbCapabilityComparison::Lte => "<=",
+        };
+        clauses.push(format!("{column} {operator} ?"));
+        params.push(filter.value);
+    }
+    Ok((
+        if clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", clauses.join(" AND "))
+        },
+        params,
+    ))
+}
+
+fn capability_cursor(
+    table: &ResolvedTable<'_>,
+    order: &[DbCapabilityOrder],
+    keys: Vec<Value>,
+) -> Result<(String, Vec<Value>), BrokerRefusal> {
+    let mut branches = Vec::with_capacity(order.len());
+    let mut params = Vec::new();
+    for index in 0..order.len() {
+        let mut parts = Vec::new();
+        let mut branch_params = Vec::new();
+        for prefix in 0..index {
+            let column = quote_mysql_identifier(table.column(&order[prefix].field)?);
+            if keys[prefix].is_null() {
+                parts.push(format!("{column} IS NULL"));
+            } else {
+                parts.push(format!("{column} = ?"));
+                branch_params.push(keys[prefix].clone());
             }
         }
+        let column = quote_mysql_identifier(table.column(&order[index].field)?);
+        if keys[index].is_null() {
+            if order[index].direction == DbCapabilityDirection::Asc {
+                parts.push(format!("{column} IS NOT NULL"));
+            } else {
+                continue;
+            }
+        } else if order[index].direction == DbCapabilityDirection::Desc {
+            parts.push(format!("({column} < ? OR {column} IS NULL)"));
+            branch_params.push(keys[index].clone());
+        } else {
+            parts.push(format!("{column} > ?"));
+            branch_params.push(keys[index].clone());
+        }
+        branches.push(format!("({})", parts.join(" AND ")));
+        params.extend(branch_params);
     }
-    commit_handler_transaction()?;
-    Ok(json!({ "ok": true, "results": results }))
+    Ok((
+        if branches.is_empty() {
+            "0 = 1".to_string()
+        } else {
+            format!("({})", branches.join(" OR "))
+        },
+        params,
+    ))
+}
+
+fn resolve_table<'a>(
+    metadata: &'a EndpointDbMetadata,
+    logical_name: &str,
+) -> Result<ResolvedTable<'a>, BrokerRefusal> {
+    let table = metadata
+        .tables
+        .get(logical_name)
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            BrokerRefusal::new(
+                "zero_db_capability_denied",
+                format!("Zero DB table {logical_name} is not declared."),
+            )
+        })?;
+    let physical_name = table
+        .get("physicalName")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            BrokerRefusal::new(
+                "zero_db_capability_invalid",
+                format!("Zero DB table {logical_name} has no physical binding."),
+            )
+        })?;
+    let columns = table
+        .get("columns")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            BrokerRefusal::new(
+                "zero_db_capability_invalid",
+                format!("Zero DB table {logical_name} has invalid fields."),
+            )
+        })?;
+    Ok(ResolvedTable {
+        logical_name: logical_name.to_string(),
+        physical_name,
+        primary_key: table
+            .get("primaryKey")
+            .and_then(Value::as_str)
+            .unwrap_or("id"),
+        columns,
+        indexes: table.get("indexes").and_then(Value::as_object),
+    })
+}
+
+fn quote_mysql_identifier(identifier: &str) -> String {
+    format!("`{}`", identifier.replace('`', "``"))
+}
+
+fn direction_sql(direction: DbCapabilityDirection) -> &'static str {
+    match direction {
+        DbCapabilityDirection::Asc => "ASC",
+        DbCapabilityDirection::Desc => "DESC",
+    }
+}
+
+fn invalid_capability_operation(message: impl Into<String>) -> BrokerRefusal {
+    BrokerRefusal::new("zero_db_capability_invalid", message)
 }
 
 /// Runs on the connection an open transaction holds, or on a pooled one when
@@ -470,7 +795,12 @@ pub(crate) fn insert_email_outbox_row(row: EmailOutboxRow<'_>) -> Result<(), Str
         Err(error) => Err(error.to_string()),
     };
     with_invocation_conn(|conn| {
-        run(conn).map_err(|message| BrokerRefusal::new("email_outbox_unavailable", message))
+        run(conn).map_err(|_| {
+            BrokerRefusal::new(
+                "email_outbox_unavailable",
+                "The email outbox could not be updated.",
+            )
+        })
     })
     .map_err(|error| error.message)
 }
@@ -481,15 +811,23 @@ fn connect_db() -> Result<PooledConn, BrokerRefusal> {
         let mut state = state.borrow_mut();
         if state.is_none() {
             let opts = database_opts()?;
-            *state = Some(Pool::new(opts).map_err(|error| {
-                BrokerRefusal::new("zero_db_connect_failed", error.to_string())
+            *state = Some(Pool::new(opts).map_err(|_| {
+                BrokerRefusal::new(
+                    "zero_db_connect_failed",
+                    "The Zero DB connection could not be established.",
+                )
             })?);
         }
         state
             .as_ref()
             .expect("pool constructed above")
             .get_conn()
-            .map_err(|error| BrokerRefusal::new("zero_db_connect_failed", error.to_string()))
+            .map_err(|_| {
+                BrokerRefusal::new(
+                    "zero_db_connect_failed",
+                    "The Zero DB connection could not be established.",
+                )
+            })
     })?;
     record_connect(connect_started);
     Ok(conn)
@@ -505,13 +843,10 @@ struct ReadyStatement<'a> {
     execute_shape: bool,
 }
 
-/// Everything that can be decided without a connection: SQL shape and
-/// parameter marshalling. There is no capability mask here — the QuickJS host
-/// function this engine serves is installed or withheld whole, by the
-/// endpoint's compiled `db` capability, before an operation can be issued at
-/// all. The read/write split lives in `shared/db-broker.php`, whose callers
-/// (the Functions relay, PHP Functions, the management dump) each hold a
-/// narrower grant than the credential they run under.
+/// Everything that can be decided without a connection: the host-generated SQL
+/// shape, parameter marshalling, and the invocation's read/write grant. Logical
+/// table and field authority has already been resolved from finalized metadata
+/// before a statement reaches this point.
 fn ready_statement(statement: &DbStatement) -> Result<ReadyStatement<'_>, BrokerRefusal> {
     let sql = statement.sql.trim();
     if sql.is_empty() || sql.contains('\0') {
@@ -660,8 +995,12 @@ fn run_ready_statement(
     } = ready;
     if execute_shape {
         let query_started = Instant::now();
-        conn.exec_drop(sql, params)
-            .map_err(|error| BrokerRefusal::new("zero_db_execute_failed", error.to_string()))?;
+        conn.exec_drop(sql, params).map_err(|_| {
+            BrokerRefusal::new(
+                "zero_db_execute_failed",
+                "The Zero DB write could not be completed.",
+            )
+        })?;
         record_execute(query_started);
         return Ok(json!({
             "ok": true,
@@ -675,14 +1014,21 @@ fn run_ready_statement(
     let rows_max = db_rows_max();
     let bytes_max = db_result_bytes_max();
     let query_started = Instant::now();
-    let mut result = conn
-        .exec_iter(sql, params)
-        .map_err(|error| BrokerRefusal::new("zero_db_query_failed", error.to_string()))?;
+    let mut result = conn.exec_iter(sql, params).map_err(|_| {
+        BrokerRefusal::new(
+            "zero_db_query_failed",
+            "The Zero DB query could not be completed.",
+        )
+    })?;
     let mut rows_json: Vec<Value> = Vec::new();
     let mut encoded_bytes: usize = 0;
     for row in result.by_ref() {
-        let row =
-            row.map_err(|error| BrokerRefusal::new("zero_db_query_failed", error.to_string()))?;
+        let row = row.map_err(|_| {
+            BrokerRefusal::new(
+                "zero_db_query_failed",
+                "The Zero DB query could not be completed.",
+            )
+        })?;
         if rows_json.len() >= rows_max {
             return Err(BrokerRefusal::new(
                 "zero_db_result_too_many_rows",
@@ -1045,53 +1391,6 @@ mod database_url_tests {
         )
         .unwrap();
         assert_eq!(provider.get_socket(), Some("/var/run/mysql.sock"));
-    }
-}
-
-#[cfg(test)]
-mod transaction_control_tests {
-    use serde_json::{json, Value};
-
-    use super::handle_db_operation;
-
-    fn refusal(frame: Value) -> Value {
-        serde_json::from_str(&handle_db_operation(&frame.to_string())).expect("broker response")
-    }
-
-    /// Bundles compiled before the invocation owned a transaction bracket their
-    /// own work, and their bytecode is frozen. The ops answer on their own
-    /// terms again — the codes here are the ones that broker produced — rather
-    /// than one blanket denial. Everything asserted here is decided before a
-    /// connection exists, which is why it needs no database.
-    #[test]
-    fn handler_transaction_control_answers_on_its_own_terms() {
-        for mode in ["transaction_commit", "transaction_rollback"] {
-            assert_eq!(
-                refusal(json!({ "mode": mode }))["code"],
-                json!("zero_db_transaction_missing"),
-                "{mode}"
-            );
-        }
-
-        // A batch is the other way to ask for an atomic unit, and its own
-        // bounds are checked before anything is dialled.
-        assert_eq!(
-            refusal(json!({ "mode": "transaction", "statements": [] }))["code"],
-            json!("zero_db_transaction_invalid")
-        );
-        let oversized: Vec<Value> = (0..=super::DB_TRANSACTION_MAX_STATEMENTS)
-            .map(|_| json!({ "sql": "SELECT 1" }))
-            .collect();
-        assert_eq!(
-            refusal(json!({ "mode": "transaction", "statements": oversized }))["code"],
-            json!("zero_db_transaction_invalid")
-        );
-        // Statement validation still runs across the whole batch first, so a
-        // malformed one is refused without a connection either.
-        assert_eq!(
-            refusal(json!({ "statements": [{ "sql": "SELECT 1" }, { "sql": "  " }] }))["code"],
-            json!("zero_db_sql_invalid")
-        );
     }
 }
 

@@ -163,11 +163,24 @@ function frameSessionSetCookie(response: Response): string {
   );
 }
 
+function browserStateCookie(response: Response): string {
+  return (
+    response.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith("__Host-spacefast_access_state_"))
+      ?.split(";")[0] ?? ""
+  );
+}
+
 function handoffToken(
   host: string,
   spaceId: string,
   authorities: string[],
-  identity: { principal?: string; profile?: Record<string, string> } = {},
+  identity: {
+    principal?: string;
+    profile?: Record<string, string>;
+    browserState?: string;
+  } = {},
 ): string {
   const now = Math.floor(Date.now() / 1000);
   return signEd25519Jwt(keyPair.privateKey, issuer.kid, {
@@ -746,6 +759,7 @@ test("the deny surface renders the access page with every configured lane", asyn
   const html = await response.text();
   expect(html).toContain("Design Handbook is private");
   expect(html).toContain("Continue with Spacefast");
+  expect(html).toContain('href="/__spacefast/access/account?return=%2Fdocs%2F"');
   expect(html).toContain("Continue with Okta");
   expect(html).toContain('action="/__spacefast/access/password"');
   expect(html).toContain('name="password"');
@@ -937,6 +951,12 @@ const originMetadataCases: Array<{
   {
     name: "absent Origin + Sec-Fetch-Site same-site",
     secFetchSite: "same-site",
+    accepted: false,
+  },
+  {
+    name: "same host with a different scheme",
+    origin: `http://${LANES_HOST}`,
+    secFetchSite: "same-origin",
     accepted: false,
   },
   {
@@ -1145,10 +1165,12 @@ test("a sole SSO lane skips the chooser entirely", async () => {
   const location = probe.headers.get("location") ?? "";
   expect(location.startsWith(SSO_START_URL)).toBe(true);
   expect(location).toContain(`host=${SOLE_SSO_HOST}`);
-  // This projection carries no exchange credential, so no key exists to sign a
-  // stateless session and the probe cannot be remembered. It degrades to
-  // bouncing again next time, never to writing a session nobody can verify.
-  expect(probe.headers.getSetCookie()).toEqual([]);
+  // The browser binding is the only cookie this redirect needs. This projection
+  // carries no exchange credential, so it cannot write an access session.
+  expect(browserStateCookie(probe)).toMatch(
+    /^__Host-spacefast_access_state_[a-f0-9]{16}=[a-f0-9]{64}$/,
+  );
+  expect(sessionCookie(probe)).toBe("");
   expect(sessionRecords(SOLE_SSO_SPACE)).toEqual([]);
 
   const rendered = await get(runtime, SOLE_SSO_HOST, "/?sf_access=checked");
@@ -1192,11 +1214,71 @@ test("a publisher access template keeps the working lane blocks", async () => {
 // The account lane: the control plane 303s a signed handoff straight at the
 // runtime, so a signed-in visitor with authority never sees an interstitial.
 test("the account lane redeems by GET, in the page or in a popup", async () => {
-  const token = handoffToken(LANES_HOST, LANES_SPACE, ["password:pwd_page_test"]);
+  const gate = await get(runtime, LANES_HOST, "/docs/");
+  expect(gate.status).toBe(403);
+  const stateCookie = browserStateCookie(gate);
+  expect(stateCookie).toMatch(/^__Host-spacefast_access_state_[a-f0-9]{16}=[a-f0-9]{64}$/);
+  const browserState = stateCookie.slice(stateCookie.indexOf("=") + 1);
+  expect(await gate.text()).toContain(`browserState=${browserState}`);
+
+  const token = handoffToken(LANES_HOST, LANES_SPACE, ["password:pwd_page_test"], {
+    browserState,
+  });
+  const otherBrowserStart = await get(
+    runtime,
+    LANES_HOST,
+    "/__spacefast/access/account?return=%2Fdocs%2F",
+  );
+  expect(otherBrowserStart.status).toBe(302);
+  const otherBrowserCookie = browserStateCookie(otherBrowserStart);
+  expect(otherBrowserCookie).toMatch(/^__Host-spacefast_access_state_[a-f0-9]{16}=[a-f0-9]{64}$/);
+  expect(otherBrowserCookie).not.toBe(stateCookie);
+  expect(otherBrowserStart.headers.get("location") ?? "").toContain(
+    `browserState=${otherBrowserCookie.slice(otherBrowserCookie.indexOf("=") + 1)}`,
+  );
+
+  // Two first-time starts can race before either Set-Cookie reaches the jar.
+  // Distinct cookie names let the browser retain both proofs, so neither
+  // callback is rejected just because the other response arrived last.
+  const [parallelStartA, parallelStartB] = await Promise.all([
+    get(runtime, LANES_HOST, "/__spacefast/access/account?return=%2Fdocs%2F"),
+    get(runtime, LANES_HOST, "/__spacefast/access/account?return=%2Fdocs%2F"),
+  ]);
+  const parallelCookieA = browserStateCookie(parallelStartA);
+  const parallelCookieB = browserStateCookie(parallelStartB);
+  expect(parallelCookieA).not.toBe(parallelCookieB);
+  const parallelStateA = parallelCookieA.slice(parallelCookieA.indexOf("=") + 1);
+  const parallelStateB = parallelCookieB.slice(parallelCookieB.indexOf("=") + 1);
+  const parallelJar = `${parallelCookieA}; ${parallelCookieB}`;
+  for (const parallelState of [parallelStateA, parallelStateB]) {
+    const parallelToken = handoffToken(LANES_HOST, LANES_SPACE, ["password:pwd_page_test"], {
+      browserState: parallelState,
+    });
+    const completed = await get(
+      runtime,
+      LANES_HOST,
+      `/__sf/redeem?sf_token=${encodeURIComponent(parallelToken)}&return=%2Fdocs%2F`,
+      { headers: { cookie: parallelJar } },
+    );
+    expect(completed.status).toBe(303);
+  }
+
+  // First use in another browser with its own valid state proves nothing and,
+  // importantly, does not consume the jti before the initiating browser returns.
+  const swapped = await get(
+    runtime,
+    LANES_HOST,
+    `/__sf/redeem?sf_token=${encodeURIComponent(token)}&return=%2Fdocs%2F`,
+    { headers: { cookie: otherBrowserCookie } },
+  );
+  expect(swapped.status).toBe(403);
+  expect(swapped.headers.get("set-cookie")).toBeNull();
+
   const redeem = await get(
     runtime,
     LANES_HOST,
     `/__sf/redeem?sf_token=${encodeURIComponent(token)}&return=%2Fdocs%2F`,
+    { headers: { cookie: stateCookie } },
   );
   expect(redeem.status).toBe(303);
   expect(redeem.headers.get("location")).toBe("/docs/");
@@ -1212,15 +1294,19 @@ test("the account lane redeems by GET, in the page or in a popup", async () => {
     runtime,
     LANES_HOST,
     `/__sf/redeem?sf_token=${encodeURIComponent(token)}&return=%2Fdocs%2F`,
+    { headers: { cookie: `${stateCookie}; ${cookie}` } },
   );
   expect(replayed.status).toBe(403);
   expect(replayed.headers.get("set-cookie")).toBeNull();
 
-  const popupToken = handoffToken(LANES_HOST, LANES_SPACE, ["password:pwd_page_test"]);
+  const popupToken = handoffToken(LANES_HOST, LANES_SPACE, ["password:pwd_page_test"], {
+    browserState,
+  });
   const popup = await get(
     runtime,
     LANES_HOST,
     `/__sf/redeem?sf_token=${encodeURIComponent(popupToken)}&return=%2Fdocs%2F&display=popup`,
+    { headers: { cookie: stateCookie } },
   );
   expect(popup.status).toBe(200);
   expect(popup.headers.get("set-cookie") ?? "").toContain(RECORDED_SESSION_PREFIX);
@@ -1568,7 +1654,7 @@ test("a system view token serves the page and its same-origin assets without a s
       `${outside}?__=${SYSTEM_VIEW_PREFIX}${scopedToken}`,
     );
     expect(refused.status).toBe(403);
-    expect(refused.headers.get("set-cookie")).toBeNull();
+    expect(sessionCookie(refused)).toBe("");
   }
 });
 
@@ -1782,7 +1868,7 @@ test.each(systemViewRefusals)("a system view token $name opens nothing", async (
   const refused = await get(runtime, LANES_HOST, `/docs/?__=${SYSTEM_VIEW_PREFIX}${entry.token()}`);
   // Exactly as if the parameter were absent: the gate, and no session.
   expect(refused.status).toBe(403);
-  expect(refused.headers.get("set-cookie")).toBeNull();
+  expect(sessionCookie(refused)).toBe("");
   expect(refused.headers.get("cache-control")).toBe("private, no-store");
 });
 

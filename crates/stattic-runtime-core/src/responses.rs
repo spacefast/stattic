@@ -421,7 +421,11 @@ pub(crate) fn compile_response_table(
         }
     }
 
-    for listing in input.listings {
+    for listing in input
+        .listings
+        .iter()
+        .filter(|_| !input.serving_config.contains_key("pages"))
+    {
         let key = listing_key(&listing.directory);
         let mut headers = BTreeMap::new();
         headers.insert("content-type".into(), "text/html; charset=utf-8".into());
@@ -511,9 +515,25 @@ pub(crate) fn compile_response_table(
         table.insert(key, entry);
     }
 
+    if let Some(pages) = input.serving_config.get("pages").and_then(Value::as_array) {
+        for page in pages {
+            let Some(path) = page.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            if page.get("render").and_then(Value::as_str) == Some("document")
+                && table
+                    .get(path)
+                    .is_some_and(|entry| entry.status == 200 && entry.action.is_none())
+            {
+                table.remove(path);
+            }
+        }
+    }
+
     if let Some(fallback) = input
         .serving_config
         .get("fallback")
+        .filter(|_| !input.serving_config.contains_key("pages"))
         .and_then(Value::as_object)
     {
         let path = fallback.get("path").and_then(Value::as_str).unwrap_or("");
@@ -1397,6 +1417,18 @@ mod tests {
             json!({}),
             json!([]),
         )
+    }
+
+    #[test]
+    fn canonical_document_owns_root_without_a_generated_spa_response() {
+        let table = assets(json!({
+            "index": "index.html",
+            "pages": [{"id":"page.home", "path":"/", "render":"document", "bindingId":"sync.pages.home", "params":[]}],
+            "fallback": {"path":"index.html", "status":200}
+        }));
+        assert!(!table.contains_key("/"));
+        assert!(!table.contains_key(RESPONSE_KEY_SPA));
+        assert_eq!(table["/styles.css"].status, 200);
     }
 
     /// The whole functions-route reversal of the inert-`.php` rule, at the

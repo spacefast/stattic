@@ -157,6 +157,7 @@ const STATTIC_ACCESS_PASSWORD_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/p
 const STATTIC_ACCESS_EMAIL_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/email';
 const STATTIC_ACCESS_REQUEST_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/request';
 const STATTIC_ACCESS_CLIENT_SCRIPT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/client.js';
+const STATTIC_ACCESS_ACCOUNT_START_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/account';
 // The namespace is private-by-default: a Zero control route missing from this
 // table silently 403s at the front door (init.php).
 const STATTIC_ZERO_CONTROL_ROUTES = [
@@ -207,6 +208,7 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => '/__stattic_probe', 'match' => 'exact', 'visitor' => true, 'tenant' => true, 'stage' => 'probe', 'handler' => 'probe'],
     ['path' => STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH . '/redeem', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_callback'],
     ['path' => STATTIC_ACCESS_CLIENT_SCRIPT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_client_script'],
+    ['path' => STATTIC_ACCESS_ACCOUNT_START_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_account_start'],
     ['path' => STATTIC_ACCESS_LOGOUT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_logout'],
     ['path' => STATTIC_ACCESS_PASSWORD_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_password'],
     ['path' => STATTIC_ACCESS_EMAIL_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_email'],
@@ -246,7 +248,13 @@ const SPACEFAST_CONTROL_PATHS = [
 
 function _stattic_control_path_is_zero_route(string $path): bool
 {
-    return isset(STATTIC_ZERO_CONTROL_ROUTES[trim(strtolower($path), '/')]);
+    return isset(STATTIC_ZERO_CONTROL_ROUTES[trim(strtolower($path), '/')]) || _stattic_zero_connector_route($path) !== null;
+}
+
+function _stattic_zero_connector_route(string $path): ?array
+{
+    if (preg_match('~^/__spacefast/zero/connectors/([a-z][a-zA-Z0-9]{0,63})(?:/(connect|callback|disconnect))?$~D', $path, $matches) !== 1) return null;
+    return ['role' => $matches[1], 'operation' => $matches[2] ?? 'disconnect'];
 }
 
 // Response tables compiled before the /__zero cutover carry only the legacy

@@ -22,10 +22,15 @@ function _sf_serve_fast(
     string $requestUri,
     string $requestPath,
     string $requestHost
-): never {
+): void {
     _sf_load_generated_config($privateRoot);
     _stattic_serve_request($privateRoot, $requestMethod, $requestUri, $requestPath, $requestHost);
-    exit;
+    // The lane returns for exactly one request shape: a WordPress page deferred
+    // to the document root's front controller (content-page.php). Every other
+    // outcome has already exited, so returning here would be a silent empty 200.
+    if (empty($GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'])) {
+        exit;
+    }
 }
 
 function _sf_load_generated_config(string $privateRoot): void
@@ -324,7 +329,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     if ($requestPath === '/' . STATTIC_FUNCTIONS_RELAY_PATH || $requestPath === '/' . STATTIC_FUNCTIONS_LOGS_PATH) {
         require_once __DIR__ . '/functions-relay.php';
         if ($requestPath === '/' . STATTIC_FUNCTIONS_RELAY_PATH) {
-            _stattic_functions_relay_serve($privateRoot, $spaceId, $requestMethod);
+            _stattic_functions_relay_serve($privateRoot, $spaceId, $requestMethod, $serving);
         }
         _stattic_functions_logs_serve($privateRoot, $spaceId, $requestMethod);
     }
@@ -365,6 +370,10 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // before it answers. An entry without the flag has already won first-match,
     // and a miss runs the rules because a rewrite may still find bytes.
     $rulesEntry = _stattic_v4_entry($versionDir, $root, STATTIC_RUNTIME_RESPONSE_KEY_RULES);
+    $hasPages = is_file($versionDir . '/pages.php');
+    if ($hasPages) {
+        require_once __DIR__ . '/zero.php';
+    }
     $entry = _stattic_v4_entry($versionDir, $root, $requestPath);
     if ($entry === null) {
         // Tables frozen before the /__zero cutover only know the legacy
@@ -399,8 +408,9 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             // Already resolved above; reuse it instead of re-hashing the same
             // table key per matching rule.
             static fn (string $candidate): bool => $candidate === $requestPath
-                ? $entry !== null
-                : _stattic_v4_entry($versionDir, $root, $candidate) !== null,
+                ? $entry !== null || ($hasPages && _stattic_page_resolve($versionDir, $candidate) !== null)
+                : _stattic_v4_entry($versionDir, $root, $candidate) !== null
+                    || ($hasPages && _stattic_page_resolve($versionDir, $candidate) !== null),
             $requestHost,
             $requestPath,
             $requestMethod,
@@ -562,7 +572,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         }
     }
 
-    if (is_array($entry)) {
+    $page = $hasPages && !_stattic_path_is_reserved($requestPath)
+        && !_stattic_lookup_not_found_is_terminal(ltrim($requestPath, '/'))
+        ? _stattic_page_resolve($versionDir, $requestPath) : null;
+    if (is_array($entry) && ($page === null || isset($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION])
+        || (($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS] ?? 200) >= 300 && ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS] ?? 200) < 400))) {
         // A draft/preview session must not be answered from an extracted file:
         // when the request carries one of the version's declared bypass cookies
         // AND the worker claims this path, the file yields to the pattern lane
@@ -604,21 +618,36 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // their exact forms already were, so a committed file still wins.
     _stattic_v4_dispatch_pattern_routes($sendContext, $requestPath, $requestMethod, $requestUri);
 
-    // WordPress owns mutable Pages, but only after immutable content and code
-    // routes decline the path. Its one serving function returns on a miss and
-    // terminates on a scoped, published Page.
-    require_once __DIR__ . '/content-page.php';
-    _stattic_wordpress_page_try_serve($sendContext, $requestPath, $requestMethod);
-
-    // Every lane that could claim this method has had its chance. A request some
-    // lane skipped FOR ITS METHOD alone ends here as the union 405: continuing
-    // into the SPA/404 tail would misreport an existing path as absent.
+    // Endpoint method claims must settle before a page renderer can answer.
     _stattic_render_method_declined_405_if_any();
+    if ($page !== null) {
+        if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
+            _stattic_method_decline(['GET', 'HEAD']);
+            _stattic_render_method_declined_405_if_any();
+        }
+        if (($page['render'] ?? null) === 'document') {
+            require_once __DIR__ . '/content-page.php';
+            if (_stattic_wordpress_page_try_serve($sendContext, $requestPath, $requestMethod, $page)) {
+                $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] = [
+                    'private_root' => $privateRoot,
+                    'method' => $requestMethod,
+                    'uri' => $requestUri,
+                    'path' => $requestPath,
+                    'host' => $requestHost,
+                ];
+                return;
+            }
+        } elseif (($page['render'] ?? null) === 'client' && is_string($page['shell'] ?? null)) {
+            $shell = _stattic_v4_entry($versionDir, $root, '/' . ltrim($page['shell'], '/'));
+            if (is_array($shell)) {
+                _stattic_v4_send_entry($sendContext, $shell, $requestPath);
+            }
+        }
+    }
 
     $lookup = ltrim($requestPath, '/');
-    // A 200 SPA index is an application-route fallback, not a catch-all asset
-    // server.
-    if (!_stattic_lookup_not_found_is_terminal($lookup) && !_stattic_lookup_is_known_asset_extension($lookup)) {
+    if (!$hasPages && !_stattic_lookup_not_found_is_terminal($lookup)
+        && !_stattic_lookup_is_known_asset_extension($lookup)) {
         $spa = _stattic_v4_entry($versionDir, $root, STATTIC_RUNTIME_RESPONSE_KEY_SPA);
         if (is_array($spa)) {
             _stattic_v4_send_entry($sendContext, $spa, $requestPath);
@@ -1361,6 +1390,14 @@ function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath
     $versionDir = (string) $context['version_dir'];
     $versionRoot = (string) $context['version_root'];
     $lookup = ltrim($requestPath, '/');
+    $connectorRoute = _stattic_zero_connector_route($requestPath);
+    if ($connectorRoute !== null && is_file(dirname($versionRoot) . '/zero/config.json')) {
+        require_once __DIR__ . '/zero.php';
+        _stattic_zero_send_connector_response(
+            _stattic_zero_runtime_config(dirname($versionRoot)), $context['serving'],
+            (string) $context['host'], $requestPath, $requestMethod, $connectorRoute
+        );
+    }
 
     // The gate is the pattern artifact, not `zero/config.json`: the latter only
     // exists when the finalize body also carried a `zero` block.
@@ -1453,6 +1490,7 @@ function _stattic_dispatch_control_path(array $serving, string $requestPath, str
     match ($handler) {
         'access_callback' => _stattic_access_handle_callback($serving, $requestHost, $privateRoot),
         'access_client_script' => _stattic_access_handle_client_script(),
+        'access_account_start' => _stattic_access_handle_account_start($serving, $requestHost),
         'access_logout' => _stattic_access_handle_logout($requestHost),
         'access_password' => _stattic_access_handle_password($serving, $requestHost, $privateRoot),
         'access_email' => _stattic_access_handle_email_verification($serving, $requestHost, $privateRoot),

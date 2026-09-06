@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
-import { readFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { deploy, get, type Runtime, startRuntime } from "./harness.ts";
@@ -13,6 +13,8 @@ import { deploy, get, type Runtime, startRuntime } from "./harness.ts";
 // role is content-kernel.php's own (user_has_cap, rest_authentication_errors).
 
 let runtime: Runtime;
+/** Where the provider keeps WordPress core: not the document root. */
+let wordpressCoreRoot: string;
 
 const OPEN_HOST = "wp-api-open.test";
 const OPEN_SPACE = "spc_wp_api_open";
@@ -42,7 +44,7 @@ process.env.AUTH_WPCOM_CLIENT_ID = "runtime-wp-api-test";
 process.env.AUTH_WPCOM_CLIENT_SECRET = "runtime-wp-api-test-secret";
 process.env.WP_CLOUD_API_TOKEN = "runtime-wp-api-test-token";
 
-const [{ mintAuthorityToken }, { runtimeJwks }] = await Promise.all([
+const [{ mintRuntimeBearerToken }, { runtimeJwks }] = await Promise.all([
   import("../../apps/control-plane/src/access/authorize.ts"),
   import("../../apps/control-plane/src/runtime/auth.ts"),
 ]);
@@ -157,9 +159,8 @@ async function machineToken({
   spaceId = OPEN_SPACE,
 }: { host?: string; spaceId?: string } = {}) {
   return (
-    await mintAuthorityToken({
-      sub: `machine:${MACHINE}`,
-      authorities: [`machine:${MACHINE}`],
+    await mintRuntimeBearerToken({
+      machineAuthority: `machine:${MACHINE}`,
       spaceId,
       sessionId: createHash("sha256").update(randomUUID()).digest("hex"),
       generation: 1,
@@ -180,8 +181,28 @@ async function wpContext(host: string, requestPath: string, headers: Record<stri
   };
 }
 
+const documentFixtures = {
+  "/": "hello",
+  "/about": "about",
+  "/docs/about": "launch",
+  "/archive": "archive",
+  "/foreign": "foreign",
+};
+const documentTargets = new Map(Object.entries(documentFixtures));
+const documentPages = Object.keys(documentFixtures).map((route) => {
+  const digest = createHash("sha256").update(route).digest("hex").slice(0, 32);
+  return {
+    id: `page.${digest}`,
+    path: route,
+    params: [],
+    render: "document",
+    bindingId: `sync.pages.${digest}`,
+  };
+});
+
 beforeAll(async () => {
   runtime = await startRuntime();
+  wordpressCoreRoot = path.join(runtime.root, "__wp__");
   const files = {
     "index.html": "<!doctype html><html><head></head><body><h1>space</h1></body></html>\n",
     "collision/index.html":
@@ -190,8 +211,9 @@ beforeAll(async () => {
   await deploy(runtime, {
     spaceId: OPEN_SPACE,
     versionId: "ver_wp_api_open",
-    files,
+    files: { "collision/index.html": files["collision/index.html"] },
     serving: {
+      pages: documentPages,
       config: {},
       theme_css:
         ":root{--sf-accent:#6d28d9;--sf-bg:#faf7ff;--sf-fg:#20182b;--sf-font:Inter,sans-serif}",
@@ -264,10 +286,17 @@ beforeAll(async () => {
     mkdirSync(modelRoot, { recursive: true });
     writeFileSync(path.join(modelRoot, "active-release"), `sha256:${"a".repeat(64)}\n`);
   }
+  // The provider's layout, which is what makes finding the front controller a
+  // question at all: WordPress core lives under `__wp__/` and only wp-load.php
+  // is linked into the root the engine installs into. A lane that names a core
+  // file beside that root names a file which does not exist.
+  mkdirSync(wordpressCoreRoot, { recursive: true });
+  symlinkSync(path.join("__wp__", "wp-load.php"), path.join(runtime.root, "wp-load.php"));
+
   // WordPress's front controller. Reaching it at all is the hand-off the gate
   // owes the REST lane; the globals are the identity it hands over.
   writeFileSync(
-    path.join(runtime.root, "wp-blog-header.php"),
+    path.join(wordpressCoreRoot, "wp-blog-header.php"),
     [
       "<?php",
       "header('Content-Type: application/json', true);",
@@ -285,32 +314,51 @@ beforeAll(async () => {
     ].join("\n"),
   );
   // The public Page lane boots WordPress without its front controller or
-  // theme, then resolves one Space-scoped published Page by path. This fixture
+  // theme, then resolves the selected document by binding. This fixture
   // is the WordPress boundary: it exposes the same functions the lane calls
   // while keeping the routing assertion focused on Spacefast's precedence.
   writeFileSync(
-    path.join(runtime.root, "wp-load.php"),
+    path.join(wordpressCoreRoot, "wp-load.php"),
     [
       "<?php",
       "if (!defined('OBJECT')) define('OBJECT', 'OBJECT');",
-      "function get_page_by_path($path, $output = OBJECT, $postType = 'page') {",
-      "  if (!in_array($path, ['about', 'collision'], true)) return null;",
+      // Published documents cover Space ownership, blocks, and island mounts.
+      "$GLOBALS['spacefast_test_documents'] = [",
+      "  'about' => [41, 'page', '<p>WordPress about</p>'],",
+      "  'collision' => [42, 'page', '<p>WordPress collision</p>'],",
+      "  'hello' => [43, 'page', '<p>WordPress hello</p>'],",
+      "  'foreign' => [44, 'page', '<p>WordPress foreign</p>'],",
+      "  'archive' => [45, 'page', '<!-- wp:query {\"queryId\":7} --><!-- /wp:query -->'],",
+      // A collection document carrying an island: same post type as `hello`, told
+      // apart only by its collection term, and holding the core/html mount that
+      // do_blocks has to pass through untouched.
+      '  \'launch\' => [46, \'page\', \'<!-- wp:html --><div data-zero-component="counter" data-zero-source="client/components/counter.tsx" data-zero-export="Counter" data-zero-props="{&quot;label&quot;:&quot;Hi&quot;}">Prerendered</div><script type="module" src="/_spacefast/islands/abc123/boot.js"></script><!-- /wp:html -->\'],',
+      "];",
+      `$GLOBALS['spacefast_test_binding_paths'] = json_decode('${JSON.stringify(Object.fromEntries(documentPages.map((page) => [page.bindingId, documentTargets.get(page.path)])))}', true);`,
+      "function spacefast_content_model_sync_binding($bindingId) { return isset($GLOBALS['spacefast_test_binding_paths'][$bindingId]) ? ['post_type' => 'page'] : null; }",
+      "function spacefast_content_sync_find_post($bindingId, $binding, $adopt = true) {",
+      "  $path = $GLOBALS['spacefast_test_binding_paths'][$bindingId] ?? '';",
+      "  $entry = $GLOBALS['spacefast_test_documents'][$path] ?? null;",
+      "  if ($entry === null) return null;",
       "  return (object) [",
-      "    'ID' => $path === 'about' ? 41 : 42,",
-      "    'post_type' => 'page',",
+      "    'ID' => $entry[0],",
+      "    'post_type' => $entry[1],",
       "    'post_status' => 'publish',",
       "    'post_title' => ucfirst($path),",
       "    'post_excerpt' => '',",
-      "    'post_content' => '<p>WordPress ' . $path . '</p>',",
+      "    'post_content' => $entry[2],",
       "    'post_modified_gmt' => '2026-09-01 02:00:00',",
       "  ];",
       "}",
       "function get_post_meta($postId, $key, $single = false) {",
-      "  return $key === '_spacefast_space_id' ? ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? '') : '';",
+      "  if ($key !== '_spacefast_space_id') return '';",
+      "  return $postId === 44 ? 'spc_wp_api_other' : ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? '');",
       "}",
       "$GLOBALS['spacefast_test_hooks'] = [];",
+      "$GLOBALS['spacefast_test_filters'] = [];",
       "$GLOBALS['spacefast_test_scripts'] = [];",
       "function add_action($hook, $callback) { $GLOBALS['spacefast_test_hooks'][$hook][] = $callback; }",
+      "function add_filter($hook, $callback) { $GLOBALS['spacefast_test_filters'][$hook][] = $callback; }",
       "function do_action($hook) {",
       "  foreach ($GLOBALS['spacefast_test_hooks'][$hook] ?? [] as $callback) { $callback(); }",
       "}",
@@ -324,7 +372,86 @@ beforeAll(async () => {
       "    echo '<script id=\"' . $handle . '-js\" src=\"' . $script['src'] . '\"></script>';",
       "  }",
       "}",
-      "function apply_filters($hook, $value) { return $value; }",
+      "function apply_filters($hook, $value) {",
+      "  foreach ($GLOBALS['spacefast_test_filters'][$hook] ?? [] as $callback) { $value = $callback($value); }",
+      "  return $value;",
+      "}",
+      // WordPress registers do_blocks on `the_content`, and do_blocks is what
+      // runs render_block. The lane's whole archive story is that it must not
+      // break that filter; this stand-in renders the three block shapes the lane
+      // depends on: a template's core/post-content, a static core/html rendered
+      // as its own inner markup, and the one dynamic block.
+      "add_filter('the_content', function ($content) {",
+      "  $content = str_replace(",
+      "    '<!-- wp:post-content /-->',",
+      "    (string) ($GLOBALS['post']->post_content ?? ''),",
+      "    $content",
+      "  );",
+      "  $content = preg_replace('/<!-- wp:html -->(.*?)<!-- \\/wp:html -->/s', '$1', $content);",
+      "  return preg_replace(",
+      "    '/<!-- wp:query .*?<!-- \\/wp:query -->/s',",
+      "    '<ul class=\"wp-block-post-template\"><li>Hello</li></ul>',",
+      "    $content",
+      "  );",
+      "});",
+      // The real content-templates.php resolves the template, so what this lane
+      // serves is the kernel's own answer rather than a transcription of it. The
+      // release is supplied as data — which is what a fixture is for — and it
+      // deliberately declares no `posts` resource, so `hello` and `launch` are
+      // the same post type with no post-type template between them and the
+      // collection term is the only thing that can tell them apart.
+      "const SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY = 'zero_collection';",
+      "function spacefast_content_model_collection_term_slug($spaceId, $resourceId) {",
+      "  return 'sf-' . substr(hash('sha256', $spaceId), 0, 16) . '-' . str_replace(['.', '_'], '-', $resourceId);",
+      "}",
+      "function spacefast_content_space_id() { return (string) ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? ''); }",
+      "function spacefast_content_require_space_id() { return spacefast_content_space_id(); }",
+      "function spacefast_content_space_meta_clause() {",
+      "  return ['key' => '_spacefast_space_id', 'value' => spacefast_content_space_id(), 'compare' => '='];",
+      "}",
+      "function spacefast_content_model_active_release() {",
+      "  return ['postTypes' => [",
+      "    ['id' => 'pages', 'kind' => 'pages', 'postType' => 'page', 'label' => 'Pages'],",
+      "    ['id' => 'projects', 'kind' => 'collection', 'postType' => 'post', 'label' => 'Projects'],",
+      "  ]];",
+      "}",
+      "function spacefast_content_model_resource($resourceId) {",
+      "  foreach (spacefast_content_model_active_release()['postTypes'] as $resource) {",
+      "    if ($resource['id'] === $resourceId) return $resource;",
+      "  }",
+      "  return null;",
+      "}",
+      "function spacefast_content_collection_for_post_type($postType) {",
+      "  return match ($postType) {",
+      "    'post' => ['name' => 'posts'],",
+      "    'page' => ['name' => 'pages'],",
+      "    default => null,",
+      "  };",
+      "}",
+      "function wp_get_object_terms($postId, $taxonomy, $args = []) {",
+      "  if ($taxonomy !== 'zero_collection' || (int) $postId !== 46) return [];",
+      "  return [spacefast_content_model_collection_term_slug(spacefast_content_space_id(), 'projects')];",
+      "}",
+      // A Space's own saved edits, which win over the release's default markup.
+      "function get_posts($args) {",
+      "  $saved = [",
+      "    'page' => '<div class=\"sf-space-template\"><!-- wp:post-content /--></div>',",
+      "    'single-projects' => '<div class=\"sf-collection-template\"><!-- wp:post-content /--></div>',",
+      "  ];",
+      "  if (($args['post_type'] ?? '') !== 'wp_template') return [];",
+      "  $found = [];",
+      "  foreach ((array) ($args['post_name__in'] ?? []) as $index => $name) {",
+      "    if (!isset($saved[$name])) continue;",
+      "    $found[] = (object) [",
+      "      'ID' => 900 + $index,",
+      "      'post_name' => $name,",
+      "      'post_status' => 'publish',",
+      "      'post_content' => $saved[$name],",
+      "    ];",
+      "  }",
+      "  return $found;",
+      "}",
+      `require ${JSON.stringify(path.join(import.meta.dir, "../engine/wordpress/content-templates.php"))};`,
       "function setup_postdata($post) { $GLOBALS['post'] = $post; }",
       "function wp_reset_postdata() {}",
       "",
@@ -435,7 +562,7 @@ test("a Space with no WordPress never claims /wp-json", async () => {
   // Most Spaces are static. On those /wp-json is an ordinary URL the Space does
   // not publish, so it gets the Space's own answer — not an editor-session gate
   // for an editor that does not exist.
-  const frontController = path.join(runtime.root, "wp-blog-header.php");
+  const frontController = path.join(wordpressCoreRoot, "wp-blog-header.php");
   const saved = readFileSync(frontController);
   rmSync(frontController);
   try {
@@ -529,7 +656,7 @@ test("a co-hosted static Space never boots WordPress on /wp-json", async () => {
   expect(await query.text()).not.toContain("served_by");
 });
 
-test("published WordPress Pages fill static misses and share Customization styles", async () => {
+test("canonical WordPress documents share Customization styles", async () => {
   const page = await get(runtime, OPEN_HOST, "/about");
   const pageBody = await page.text();
   expect(page.status).toBe(200);
@@ -551,4 +678,58 @@ test("published WordPress Pages fill static misses and share Customization style
   const unmanaged = await get(runtime, STATIC_HOST, "/about");
   expect(unmanaged.status).toBe(404);
   expect(await unmanaged.text()).not.toContain("WordPress about");
+});
+
+test("canonical root and nested documents preserve templates and islands", async () => {
+  const post = await get(runtime, OPEN_HOST, "/");
+  const postBody = await post.text();
+  expect(post.status).toBe(200);
+  expect(postBody).toContain("WordPress hello");
+
+  expect(postBody).toContain('<script id="spacefast-sdk-js" src="/__spacefast/sdk.js"></script>');
+  expect(postBody).toContain('<div class="sf-space-template">');
+
+  // Ownership is checked before the method gate, so a co-hosted Space's post is
+  // a miss that says nothing rather than a 405 that confirms it exists.
+  const foreign = await get(runtime, OPEN_HOST, "/foreign");
+  const foreignBody = await foreign.text();
+  expect(foreign.status).toBe(404);
+  expect(foreignBody).not.toContain("WordPress foreign");
+  expect(foreignBody).not.toContain("Foreign");
+
+  const written = await get(runtime, OPEN_HOST, "/", { method: "POST" });
+  expect(written.status).toBe(405);
+
+  // An archive needs no archive machinery: its markup holds core/query, and
+  // `the_content` already runs do_blocks. What this lane must do is not break
+  // that — no main query, and postdata set around the filter.
+  const archive = await get(runtime, OPEN_HOST, "/archive");
+  const archiveBody = await archive.text();
+  expect(archive.status).toBe(200);
+  expect(archiveBody).toContain('<ul class="wp-block-post-template"><li>Hello</li></ul>');
+  expect(archiveBody).not.toContain("<!-- wp:query");
+  // A Space-owned template renders INSTEAD of the lane's heading-and-content
+  // frame, and its own markup is what `the_content` ran over — which is what
+  // makes core/post-content and core/post-title mean anything at all.
+  expect(archiveBody).toContain('<div class="sf-space-template">');
+  expect(archiveBody).not.toContain("<article><h1>Archive</h1>");
+
+  // The collection term selects its own template instead of the page template.
+  const item = await get(runtime, OPEN_HOST, "/docs/about");
+  const itemBody = await item.text();
+  expect(item.status).toBe(200);
+  expect(itemBody).toContain('<div class="sf-collection-template">');
+  expect(itemBody).not.toContain("<article><h1>Launch</h1>");
+
+  // do_blocks renders a static core/html block as its own inner HTML, so an
+  // island's mount and its boot module reach the reader intact on this lane —
+  // which is why the island block is core/html and must stay that way.
+  expect(itemBody).toContain('data-zero-source="client/components/counter.tsx"');
+  expect(itemBody).toContain('data-zero-export="Counter"');
+  expect(itemBody).toContain(
+    '<script type="module" src="/_spacefast/islands/abc123/boot.js"></script>',
+  );
+  expect(itemBody).toContain("Prerendered");
+  expect(itemBody).not.toContain("<!-- wp:html");
+  expect(itemBody).toContain('<script id="spacefast-sdk-js" src="/__spacefast/sdk.js"></script>');
 });

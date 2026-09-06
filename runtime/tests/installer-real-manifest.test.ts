@@ -3,9 +3,12 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
+  cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -35,6 +38,8 @@ type RealManifestInstall = {
   publicRoot: string;
   residentInstaller: string;
   revision: string;
+  /** Docroot-relative path of every file the payload's trees expand into. */
+  treeSitePaths: string[];
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -61,7 +66,11 @@ async function installFromShippedManifest(
   // list is the field under test.
   const manifest = JSON.parse(
     readFileSync(path.join(runtimeRoot, "engine-manifest.json"), "utf8"),
-  ) as { files: string[] };
+  ) as {
+    files: string[];
+    aliases: Array<{ source: string; path: string }>;
+    trees?: Array<{ source: string; path: string }>;
+  };
   for (const file of manifest.files) {
     mkdirSync(path.dirname(path.join(payload, file)), { recursive: true });
     if (file === "bin/stattic-runtime") {
@@ -72,6 +81,40 @@ async function installFromShippedManifest(
       continue;
     }
     copyFileSync(path.join(runtimeRoot, file), path.join(payload, file));
+  }
+
+  // Trees are whole build-output directories the manifest ships recursively,
+  // and a real payload always carries them — the installer refuses one that is
+  // missing. Both are gitignored build output, so a fresh checkout has neither
+  // and no test may produce them (the Zero dashboard needs its own nested
+  // workspace install). Stand one in the same way `bin/stattic-runtime` is
+  // stubbed above: this test's subject is the manifest, not a tree's contents.
+  //
+  // A stand-in is still a payload the installer has to accept, which fixes its
+  // shape: every alias the manifest points inside a tree must resolve to a file
+  // the payload carries, and a tree with no files at all is rejected outright.
+  const treeSitePaths: string[] = [];
+  for (const tree of manifest.trees ?? []) {
+    const source = path.join(runtimeRoot, tree.source);
+    const staged = path.join(payload, tree.source);
+    if (existsSync(source)) {
+      cpSync(source, staged, { recursive: true });
+    } else {
+      const aliased = manifest.aliases
+        .filter((alias) => alias.source.startsWith(`${tree.source}/`))
+        .map((alias) => alias.source.slice(tree.source.length + 1));
+      mkdirSync(staged, { recursive: true });
+      for (const relative of aliased.length > 0 ? aliased : ["index.php"]) {
+        const file = path.join(staged, relative);
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, "<?php\n// build output stand-in\n");
+      }
+    }
+    for (const relative of readdirSync(staged, { recursive: true, withFileTypes: true })) {
+      if (!relative.isFile()) continue;
+      const inTree = path.relative(staged, path.join(relative.parentPath, relative.name));
+      treeSitePaths.push(`${tree.path}/${inTree.split(path.sep).join("/")}`);
+    }
   }
 
   // Read the revision by evaluating the engine's own constant, not by
@@ -91,7 +134,13 @@ async function installFromShippedManifest(
   const revision = revisionProbe;
 
   const zipPath = path.join(root, "engine.zip");
-  execFileSync("zip", ["-qr", zipPath, ...manifest.files], { cwd: payload });
+  // Trees ride the zip as whole directories, exactly as the engine-zip build
+  // ships them; `-r` walks each one.
+  execFileSync(
+    "zip",
+    ["-qr", zipPath, ...manifest.files, ...(manifest.trees ?? []).map((tree) => tree.source)],
+    { cwd: payload },
+  );
   const zipBytes = readFileSync(zipPath);
   const md5 = createHash("md5").update(zipBytes).digest("hex");
   const nativeSha256 = createHash("sha256")
@@ -121,6 +170,7 @@ async function installFromShippedManifest(
     publicRoot,
     residentInstaller,
     revision: revision ?? "",
+    treeSitePaths,
     stdout,
     stderr,
     exitCode,
@@ -165,13 +215,17 @@ test("the shipped manifest installs executable engine bytes without owning the r
 
 /**
  * Aliases land one at a time, so a request can arrive with only a prefix of
- * them installed — and stay that way forever if the install aborts in between.
+ * them installed. A failed first install must roll the new tree back out rather
+ * than leave an unreferenced partial public plugin behind.
  * `wp-content/mu-plugins/zero-admin.php` is what WordPress auto-loads and it
  * reaches into the sibling `zero-admin/` directory, which is a separate set of
- * aliases. Both halves of that hazard are closed here: the directory is
- * deposited first, and the entry file is inert on its own regardless.
+ * aliases, so the directory has to be complete before the entry file appears.
+ *
+ * (The other half of that hazard — the entry file staying inert when the
+ * directory is absent anyway — is the plugin's own behavior, held by
+ * packages/zero-admin/test/build.test.ts.)
  */
-test("a half-installed zero-admin mu-plugin cannot fatal a WordPress request", async () => {
+test("a failed zero-admin loader publication rolls back its fresh tree", async () => {
   // A directory sitting where the entry file must land makes its rename fail,
   // which stops the install exactly there and leaves on disk precisely the
   // aliases ordered before it.
@@ -185,28 +239,23 @@ test("a half-installed zero-admin mu-plugin cannot fatal a WordPress request", a
   expect(install.stderr).toContain(
     "runtime_engine_alias_install_failed:wp-content/mu-plugins/zero-admin.php",
   );
-  const muPlugins = path.join(install.publicRoot, "wp-content/mu-plugins");
-  expect(statSync(path.join(muPlugins, "zero-admin/routes.php")).isFile()).toBe(true);
-  expect(statSync(path.join(muPlugins, "zero-admin/bootstrap.php")).isFile()).toBe(true);
-
-  // And with the directory gone the entry file still loads to a no-op, so a
-  // window opened by anything else — a partial rollback, a manual copy — costs
-  // WordPress nothing.
-  rmSync(path.join(muPlugins, "zero-admin"), { recursive: true, force: true });
-  copyFileSync(
-    path.join(runtimeRoot, "wordpress/zero-admin/zero-admin.php"),
-    path.join(muPlugins, "zero-admin-entry.php"),
+  // No part of a never-committed tree remains public after the alias failure.
+  const treeFiles = install.treeSitePaths.filter((file) =>
+    file.startsWith("wp-content/mu-plugins/zero-admin/"),
   );
-  const probe = Bun.spawnSync({
-    cmd: [
-      "php",
-      "-d",
-      "auto_prepend_file=",
-      "-r",
-      "require $argv[1]; echo 'inert';",
-      path.join(muPlugins, "zero-admin-entry.php"),
-    ],
-  });
-  expect(probe.stderr.toString()).toBe("");
-  expect(probe.stdout.toString()).toBe("inert");
+  expect(treeFiles.length).toBeGreaterThan(0);
+  expect(treeFiles.filter((file) => existsSync(path.join(install.publicRoot, file)))).toEqual([]);
+  const treeReleases = path.join(
+    install.publicRoot,
+    "wp-content/mu-plugins/spacefast-tree-releases",
+  );
+  const publishedTreeFiles = existsSync(treeReleases)
+    ? readdirSync(treeReleases, { recursive: true, withFileTypes: true }).filter(
+        (entry) => entry.isFile() || entry.isSymbolicLink(),
+      )
+    : [];
+  expect(publishedTreeFiles).toEqual([]);
+  expect(existsSync(path.join(install.publicRoot, "index.php"))).toBe(false);
+  expect(existsSync(path.join(install.publicRoot, ".stattic/loader-version"))).toBe(false);
+  expect(existsSync(path.join(install.publicRoot, ".stattic/active-release"))).toBe(false);
 });

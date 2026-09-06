@@ -69,6 +69,7 @@ pub(crate) fn execute_endpoint_module(
     let context = Context::full(&runtime)
         .map_err(|error| error_response(500, "zero_js_context_init_failed", &error.to_string()))?;
     record_js_runtime_init(runtime_started);
+    let mut rollback = false;
     let result = context.with(|ctx| {
         let js_error = |error: rquickjs::Error| {
             js_execution_error_response(
@@ -90,6 +91,7 @@ pub(crate) fn execute_endpoint_module(
             serde_json::from_str(&result_json).map_err(|error| {
                 error_response(502, "zero_js_response_malformed", &error.to_string())
             })?;
+        rollback = result.rollback;
         let events_json: String = ctx
             .eval("JSON.stringify(globalThis.__statticZeroEvents || [])")
             .map_err(js_error)?;
@@ -115,13 +117,15 @@ pub(crate) fn execute_endpoint_module(
             headers,
             body: enforce_response_body_limit(body)?,
             body_base64: enforce_response_body_base64_limit(body_base64)?,
-            events,
+            events: if rollback { Vec::new() } else { events },
             metrics: None,
         })
     });
     match result {
         Ok(response) => {
-            transaction.commit()?;
+            if !rollback {
+                transaction.commit()?;
+            }
             Ok(response)
         }
         Err(response) => Err(response),
@@ -208,6 +212,8 @@ fn install_globals(
     envelope: &InvokeEnvelope,
     artifact: &EndpointArtifact,
 ) -> Result<(), RunnerResponse> {
+    let tenant_db = crate::db::tenant_db_metadata(&artifact.db)
+        .map_err(crate::db::BrokerRefusal::runner_response)?;
     let bootstrap_json = serde_json::to_string(&serde_json::json!({
         "request": envelope.request,
         "context": envelope.context,
@@ -218,7 +224,7 @@ fn install_globals(
             "endpointId": if artifact.kind == "run" { &artifact.run_id } else { &artifact.endpoint_id },
             "method": if artifact.kind == "run" { "POST" } else { artifact.method.as_str() },
             "path": if artifact.kind == "run" { "/__spacefast/zero/run" } else { artifact.path.as_str() },
-            "db": artifact.db,
+            "db": tenant_db,
         },
     }))
     .map_err(|error| error_response(500, "zero_bootstrap_encode_failed", &error.to_string()))?;
@@ -230,12 +236,13 @@ fn install_globals(
         .map_err(|error| error_response(500, "zero_js_globals_failed", &error.to_string()))?;
 
     if artifact.capabilities.db {
+        let metadata = artifact.db.clone();
         let globals = ctx.globals();
         globals
             .set(
-                "__statticDbHost",
-                Func::from(|operation: String| -> String {
-                    crate::db::handle_db_operation(&operation)
+                "__statticDbCapabilityHost",
+                Func::from(move |operation: String| -> String {
+                    crate::db::handle_db_capability_operation(&operation, &metadata)
                 }),
             )
             .map_err(|error| {
@@ -262,6 +269,7 @@ fn install_globals(
         email: artifact.capabilities.email,
         content: artifact.capabilities.content,
         storage: artifact.capabilities.storage,
+        connectors: artifact.capabilities.connectors,
     });
     if artifact.capabilities.any_service() {
         let globals = ctx.globals();
@@ -394,6 +402,8 @@ fn enforce_response_body_base64_limit(
 
 #[derive(Debug, Deserialize)]
 struct EndpointExecutionResult {
+    #[serde(default)]
+    rollback: bool,
     status: Option<u16>,
     headers: Option<BTreeMap<String, String>>,
     body: Option<String>,

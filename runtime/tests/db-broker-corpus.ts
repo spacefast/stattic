@@ -1,53 +1,5 @@
-// Shared fixture for the MySQL capability broker's differential test: the
-// schema, the passthrough Zero endpoint that exposes the Rust engine, and the
-// corpus. It sits beside the test so the same corpus can be driven from a
-// scratch harness without the test runner.
-
-// A raw passthrough to the DB host function. The runner hands the request body
-// to JavaScript base64-encoded; decoding it here keeps the operation text exact
-// without a UTF-8 decoder inside QuickJS, which is why operations stay ASCII.
-export const ECHO_ENDPOINT = `
-const request = globalThis.__statticZeroRequest;
-const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-// Charcode-indexed lookup and block-wise fromCharCode, not indexOf and string
-// append: the oversized case decodes ~90KB inside a 500ms CPU budget, which the
-// naive form does not fit.
-const INDEX = [];
-for (let i = 0; i < 128; i++) { INDEX[i] = -1; }
-for (let i = 0; i < ALPHABET.length; i++) { INDEX[ALPHABET.charCodeAt(i)] = i; }
-function decodeBase64(input) {
-  const bytes = [];
-  let bits = 0;
-  let held = 0;
-  for (let i = 0; i < input.length; i++) {
-    const index = INDEX[input.charCodeAt(i)];
-    if (index === undefined || index < 0) { continue; }
-    held = (held << 6) | index;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      bytes[bytes.length] = (held >> bits) & 255;
-    }
-  }
-  let out = "";
-  for (let i = 0; i < bytes.length; i += 4096) {
-    out += String.fromCharCode.apply(null, bytes.slice(i, i + 4096));
-  }
-  return out;
-}
-let operation = decodeBase64(request.bodyBase64 || "");
-// Shorthand for the over-the-limit case: the engine still receives a genuine
-// >64KB operation, but base64-decoding ~90KB of request body here does not
-// reliably fit the 500ms CPU budget on a loaded machine.
-if (operation.indexOf("__repeat__:") === 0) {
-  operation = '{"sql":"' + "x".repeat(parseInt(operation.slice(11), 10)) + '"}';
-}
-globalThis.__statticZeroResult = JSON.stringify({
-  status: 200,
-  headers: { "content-type": "application/json; charset=utf-8" },
-  body: globalThis.__statticDbHost(operation)
-});
-`;
+// Shared schema and raw-operation helpers for the parent-process PHP broker.
+// Tenant QuickJS uses the native structured capability instead of this protocol.
 
 export const FIXTURE_DDL = `
     DROP TABLE IF EXISTS dt;

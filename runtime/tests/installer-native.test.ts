@@ -43,6 +43,7 @@ test("installer stages the native tool executable and leaves engine files read-o
     `${JSON.stringify({
       files: ["bin/stattic-runtime", "engine-manifest.json", "engine/shared/context.php"],
       executables: ["bin/stattic-runtime"],
+      trees: [],
       aliases: [],
     })}\n`,
   );
@@ -104,6 +105,7 @@ test("installer rejects a hung native self-test within its deadline", async () =
     `${JSON.stringify({
       files: ["bin/stattic-runtime", "engine-manifest.json", "engine/shared/context.php"],
       executables: ["bin/stattic-runtime"],
+      trees: [],
       aliases: [],
     })}\n`,
   );

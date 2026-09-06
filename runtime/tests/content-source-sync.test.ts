@@ -61,6 +61,7 @@ test("release activation seeds canonical documents and preserves editor takeover
   const initial = inspected(results[1]);
   expect(initial).toMatchObject({
     postStatus: "publish",
+    permalink: "https://space.test/docs/about",
     externalId: `source:${TSX_BINDING}`,
     spaceId: "spc_alpha",
   });
@@ -74,6 +75,7 @@ test("release activation seeds canonical documents and preserves editor takeover
   const takeover = inspected(results[10]);
   expect(results[9]?.ok).toBe(true);
   expect(takeover.postId).toBe(initial.postId);
+  expect(takeover.permalink).toBe(initial.permalink);
   expect(takeover.externalId).toBe(initial.externalId);
   expect(takeover.ledger?.source).toBe("pages/docs/about.html");
   expect(takeover.blocks).toContain("Editor owns this.");

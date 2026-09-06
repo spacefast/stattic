@@ -1,3 +1,5 @@
+mod legacy;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::env;
@@ -68,9 +70,9 @@ struct DbStatement {
     mode: Option<String>,
 }
 
-/// The complete database authority tenant bytecode can exercise. SQL and
-/// physical identifiers never cross the QuickJS boundary; each logical name is
-/// resolved against the finalized endpoint artifact before a statement exists.
+/// Current bundles use logical database operations. Each name is resolved
+/// against the finalized endpoint artifact before a statement exists; frozen
+/// query builders reach the same authority through the bounded legacy dialect.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum DbCapabilityOperation {
@@ -270,6 +272,13 @@ pub(crate) fn take_metrics() -> Option<DbMetrics> {
     })
 }
 
+pub(crate) fn handle_legacy_db_operation(raw: &str, metadata: &EndpointDbMetadata) -> String {
+    match legacy::execute(raw, metadata) {
+        Ok(value) => value.to_string(),
+        Err(error) => error.refusal_json(),
+    }
+}
+
 pub(crate) fn handle_db_capability_operation(raw: &str, metadata: &EndpointDbMetadata) -> String {
     match execute_db_capability_operation(raw, metadata) {
         Ok(value) => value.to_string(),
@@ -277,8 +286,9 @@ pub(crate) fn handle_db_capability_operation(raw: &str, metadata: &EndpointDbMet
     }
 }
 
-/// The metadata tenant code needs to build logical operations. Physical table
-/// and column names stay on the native side of the capability boundary.
+/// The enumerable metadata for logical operations. The runner attaches the
+/// frozen query builder's physical aliases separately, without changing this
+/// modern response shape. Both hosts resolve authority against native metadata.
 pub(crate) fn tenant_db_metadata(metadata: &EndpointDbMetadata) -> Result<Value, BrokerRefusal> {
     let mut tables = serde_json::Map::new();
     for logical_table in metadata.tables.keys() {

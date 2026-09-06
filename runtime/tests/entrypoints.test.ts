@@ -96,7 +96,17 @@ test("the content admin gate refuses a platform hold before it honors a session"
     mkdirSync(sharedRoot, { recursive: true });
     writeFileSync(
       path.join(sharedRoot, "bootstrap-config.php"),
-      "<?php define('SPACEFAST_DASHBOARD_ORIGIN', 'https://box-default.sf.localhost');",
+      `<?php
+class Atomic_Persistent_Data implements IteratorAggregate {
+  public function getIterator(): Traversable {
+    return new ArrayIterator([
+      'SPACEFAST_RUNTIME_JWKS_B64' => DB_PASSWORD,
+      'SPACEFAST_DASHBOARD_ORIGIN' => 'https://box-default.sf.localhost',
+    ]);
+  }
+}
+require ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/bootstrap-config.php"))};
+`,
     );
     writeFileSync(
       path.join(sharedRoot, "context.php"),
@@ -175,6 +185,7 @@ function _stattic_content_access_target(string $root, string $host): array {
         "  'private_root' => $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? null,",
         "  'frame_origin' => $GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] ?? null,",
         "  'file_edit_locked' => defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT,",
+        "  'trust_anchor' => defined('SPACEFAST_RUNTIME_JWKS_B64') ? SPACEFAST_RUNTIME_JWKS_B64 : null,",
         "  'served_by' => 'wordpress',",
         "]);",
         "",
@@ -190,6 +201,7 @@ function _stattic_content_access_target(string $root, string $host): array {
       driver,
       [
         "<?php",
+        "putenv('DB_PASSWORD=encrypted-data-key');",
         // Mint the session with the same code the launch entry uses, carrying a
         // launch origin the box env deliberately does not match.
         `require ${JSON.stringify(path.join(sharedRoot, "context.php"))};`,
@@ -205,12 +217,14 @@ function _stattic_content_access_target(string $root, string $host): array {
         "if (is_string($restRoute) && $restRoute !== '') { $_GET['rest_route'] = $restRoute; }",
         "$_COOKIE[_stattic_content_admin_cookie_name()] = getenv('SPACEFAST_TEST_NO_COOKIE') ? '' : $session['token'];",
         `require ${JSON.stringify(path.join(root, "custom-redirects.php"))};`,
+        "define('WP_AUTO_UPDATE_CORE', false);",
         "echo json_encode([",
         "  'user_id' => $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? null,",
         "  'space_id' => $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? null,",
         "  'private_root' => $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? null,",
         "  'frame_origin' => $GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] ?? null,",
         "  'file_edit_locked' => defined('DISALLOW_FILE_EDIT') && DISALLOW_FILE_EDIT,",
+        "  'trust_anchor' => defined('SPACEFAST_RUNTIME_JWKS_B64') ? SPACEFAST_RUNTIME_JWKS_B64 : null,",
         "]);",
       ].join("\n"),
     );
@@ -223,6 +237,7 @@ function _stattic_content_access_target(string $root, string $host): array {
         env: { ...process.env, ...env },
       });
       expect(result.exitCode, result.stderr.toString()).toBe(0);
+      expect(result.stderr.toString()).toBe("");
       return JSON.parse(result.stdout.toString());
     };
 
@@ -234,6 +249,7 @@ function _stattic_content_access_target(string $root, string $host): array {
       private_root: path.join(root, ".stattic/storage"),
       frame_origin: "https://launch.sf.localhost",
       file_edit_locked: true,
+      trust_anchor: "encrypted-data-key",
     };
     // The admin screens are real WordPress scripts: the gate establishes the
     // context and returns, and PHP runs them next.

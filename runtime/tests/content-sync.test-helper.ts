@@ -89,6 +89,7 @@ function contentModelPhp(revision: string, format: SyncFormat) {
     `'resourceId' => 'pages'`,
     `'fieldId' => 'page-body'`,
     `'source' => '${TSX_SOURCE}'`,
+    `'publicPath' => '/docs/about'`,
     `'format' => 'tsx'`,
     `'slug' => 'page.${TSX_BINDING.slice(11)}'`,
     `'postType' => 'page'`,
@@ -193,6 +194,7 @@ function get_post_meta(int $id, string $key, bool $single = false): mixed {
   global $meta; return $meta[$id][$key] ?? '';
 }
 function is_wp_error(mixed $value): bool { return false; }
+function home_url(string $path): string { return "https://space.test" . $path; }
 function sanitize_title(string $value): string { return strtolower($value); }
 function wp_save_post_revision(int $id): int { return $id + 1000; }
 function wp_get_post_revisions(int $id, array $args = []): array {
@@ -277,6 +279,7 @@ type DriverReceipt = {
   status: string;
   postId?: number | null;
   postStatus?: string;
+  permalink?: string;
   blocks?: string;
   externalId?: string;
   spaceId?: string;
@@ -371,6 +374,7 @@ foreach ($steps as $step) {
         'postId' => $id, 'postStatus' => $found->post_status ?? null, 'blocks' => $found->post_content ?? null,
         'externalId' => get_post_meta($id, SPACEFAST_CONTENT_EXTERNAL_ID_META, true),
         'spaceId' => get_post_meta($id, SPACEFAST_CONTENT_SPACE_META, true),
+        'permalink' => spacefast_content_model_page_link('https://space.test/' . ($found->post_name ?? ''), $id),
         'ledger' => spacefast_content_sync_ledger($id),
         'activeRevision' => _stattic_private_tree_read_pointer(${JSON.stringify(storage + "/spaces/" + SPACE_ID + "/content-model/active-release")}, 128),
       ]];

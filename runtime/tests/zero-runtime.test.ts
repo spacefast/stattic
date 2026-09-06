@@ -4,6 +4,8 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from "node:os";
 import path from "node:path";
 
+import { routeInventoryRecordV1Schema } from "../../packages/common/src/contracts/route-inventory.ts";
+import { runtimeVersionFinalizeResponseSchema } from "../../packages/common/src/contracts/runtime-api.ts";
 import {
   deploy,
   finalizeRaw,
@@ -1812,57 +1814,69 @@ test("an access-protected Zero endpoint pins private revalidation over a runner-
 });
 
 test("declared Zero pages serve the shell while unknown paths use the normal 404", async () => {
-  await deploy(rt, {
-    spaceId: "spc_zero_pages",
-    versionId: "ver_zero_pages",
-    files: {
+  const finalizeResponse = await finalizeRaw(
+    rt,
+    "spc_zero_pages",
+    "ver_zero_pages",
+    {
       "_spacefast/pages/client.html": "<main>Page shell</main>",
       "pages/source.md": "---\nraw: true\n---\nPrivate source",
       "_spacefast/pages/documents/page.document.html": "<p>Document seed</p>",
       "asset.txt": "Asset",
       _redirects: "/about /moved 302!\n/issues/* /asset.txt 200\n",
     },
-    serving: {
-      config: { index: "index.html" },
-      pages: [
-        {
-          id: "page.document",
-          render: "document",
-          bindingId: "sync.pages.document",
-          path: "/issues/new",
-          params: [],
-        },
-        {
-          id: "page.about",
-          render: "client",
-          shell: "_spacefast/pages/client.html",
-          path: "/about",
-          params: [],
-        },
-        {
-          id: "page.issue",
-          render: "client",
-          shell: "_spacefast/pages/client.html",
-          path: "/issues/:id",
-          params: ["id"],
-        },
-        {
-          id: "page.docs",
-          render: "client",
-          shell: "_spacefast/pages/client.html",
-          path: "/docs/*slug",
-          params: ["slug"],
-        },
-      ],
+    {
+      serving: {
+        config: { index: "index.html" },
+        pages: [
+          {
+            id: "page.document",
+            render: "document",
+            bindingId: "sync.pages.document",
+            path: "/issues/new",
+            params: [],
+          },
+          {
+            id: "page.about",
+            render: "client",
+            shell: "_spacefast/pages/client.html",
+            path: "/about",
+            params: [],
+          },
+          {
+            id: "page.issue",
+            render: "client",
+            shell: "_spacefast/pages/client.html",
+            path: "/issues/:id",
+            params: ["id"],
+          },
+          {
+            id: "page.docs",
+            render: "client",
+            shell: "_spacefast/pages/client.html",
+            path: "/docs/*slug",
+            params: ["slug"],
+          },
+        ],
+      },
+      activate: {
+        route_name: "production",
+        config: publicAccessConfig({ mode: "website" }),
+        production_hostnames: ["zero-pages.test"],
+        noindex_production_hostnames: [],
+        version_hostnames: [],
+      },
     },
-    activate: {
-      route_name: "production",
-      config: publicAccessConfig({ mode: "website" }),
-      production_hostnames: ["zero-pages.test"],
-      noindex_production_hostnames: [],
-      version_hostnames: [],
-    },
-  });
+  );
+  expect(finalizeResponse.status).toBe(200);
+  const receipt = runtimeVersionFinalizeResponseSchema.parse(await finalizeResponse.json());
+  const pages = receipt.route_inventory?.routes.filter((route) => route.kind === "page");
+  expect(pages?.map((route) => routeInventoryRecordV1Schema.parse(route).runtime)).toEqual([
+    "php",
+    "routing",
+    "routing",
+    "routing",
+  ]);
   expect(versionMetadata(rt, "spc_zero_pages", "ver_zero_pages")?.diagnostics).toEqual(
     expect.arrayContaining([
       expect.objectContaining({ code: "page_redirect_overlap", path: "/about" }),

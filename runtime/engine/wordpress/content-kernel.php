@@ -83,6 +83,7 @@ if (function_exists('add_action')) {
     add_filter('rest_user_query', 'spacefast_content_scope_rest_user_query', 10, 2);
     add_filter('site_url', 'spacefast_content_request_url', 1, 4);
     add_filter('home_url', 'spacefast_content_request_url', 1, 4);
+    add_filter('page_link', 'spacefast_content_model_page_link', 10, 2);
     add_filter('upload_dir', 'spacefast_content_scope_upload_dir');
     add_filter('show_admin_bar', '__return_false');
     add_filter('automatic_updater_disabled', '__return_true');

@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:b0ab36ddee932b35e8f1e995db4858fcd165cb6569408fc068e43619d06a0cc7",
+  "digest": "sha256:d8a6f429e6848ca088955d6d1fc1d91f246a8fd776fceb84dac992c2ad26bcc0",
   "components": [
     {
       "id": "wordpress-core",
@@ -26,7 +26,13 @@
         "kind": "embedded",
         "path": "bin/stattic-runtime"
       },
-      "provides": ["runtime.serving", "runtime.routing", "runtime.zero"],
+      "provides": [
+        "runtime.serving",
+        "runtime.routing",
+        "runtime.zero",
+        "runtime.zero.db.v1",
+        "runtime.zero.pages.v1"
+      ],
       "activation": "always"
     },
     {
@@ -45,7 +51,7 @@
       "id": "content-kernel",
       "kind": "mu-plugin",
       "version": "source-tree",
-      "sha256": "sha256:184e0e831ffeff9cac80a455e5110396791f2e8301ee39e51cfb95226e828920",
+      "sha256": "sha256:4b028b7bd5bd0b840a156f8bf93a12501403ab5792447376882c297845051a7c",
       "source": {
         "kind": "embedded",
         "path": "engine/wordpress/content-kernel.php"

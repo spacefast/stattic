@@ -236,6 +236,7 @@ fn install_globals(
         .map_err(|error| error_response(500, "zero_js_globals_failed", &error.to_string()))?;
 
     if artifact.capabilities.db {
+        install_legacy_db_adapter(ctx, artifact)?;
         let metadata = artifact.db.clone();
         let globals = ctx.globals();
         globals
@@ -285,6 +286,58 @@ fn install_globals(
             })?;
     }
     Ok(())
+}
+
+// Settings-only finalization historically stamped the current ABI onto retained
+// source. The bounded adapter is therefore available to both DB generations.
+// Its non-enumerable aliases let the old query builder use its physical binding
+// while modern metadata responses keep their logical shape.
+fn install_legacy_db_adapter(
+    ctx: &Ctx<'_>,
+    artifact: &EndpointArtifact,
+) -> Result<(), RunnerResponse> {
+    let install_error = |error: rquickjs::Error| {
+        error_response(500, "zero_db_host_install_failed", &error.to_string())
+    };
+    for name in ["__statticDbHost", "__statticDb"] {
+        let metadata = artifact.db.clone();
+        ctx.globals()
+            .set(
+                name,
+                Func::from(move |operation: String| -> String {
+                    crate::db::handle_legacy_db_operation(&operation, &metadata)
+                }),
+            )
+            .map_err(install_error)?;
+    }
+    let metadata = serde_json::to_string(&artifact.db)
+        .map_err(|error| error_response(500, "zero_bootstrap_encode_failed", &error.to_string()))?;
+    ctx.globals()
+        .set(
+            "__statticLegacyDbMetadata",
+            ctx.json_parse(metadata).map_err(install_error)?,
+        )
+        .map_err(install_error)?;
+    ctx.eval::<(), _>(
+        r#"
+        (() => {
+            const bindings = globalThis.__statticLegacyDbMetadata.tables;
+            delete globalThis.__statticLegacyDbMetadata;
+            const tables = globalThis.__statticZeroBootstrap.endpoint.db.tables;
+            const bind = (target, physicalName) => Object.defineProperties(target, {
+                physicalName: { value: physicalName },
+                quotedName: { value: "`" + physicalName.replaceAll("`", "``") + "`" },
+            });
+            for (const [name, binding] of Object.entries(bindings)) {
+                bind(tables[name], binding.physicalName);
+                for (const [field, column] of Object.entries(binding.columns)) {
+                    bind(tables[name].columns[field], column.physicalName);
+                }
+            }
+        })();
+    "#,
+    )
+    .map_err(install_error)
 }
 
 /// The interrupt handler is the only thing that stops a handler at the budget,

@@ -524,7 +524,6 @@ function _stattic_content_admin_enter_wordpress(
         'DISALLOW_FILE_EDIT' => true,
         'DISALLOW_FILE_MODS' => true,
         'AUTOMATIC_UPDATER_DISABLED' => true,
-        'WP_AUTO_UPDATE_CORE' => false,
     ] as $name => $value) {
         if (!defined($name)) {
             define($name, $value);

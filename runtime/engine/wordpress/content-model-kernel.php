@@ -191,6 +191,7 @@ function spacefast_content_model_sync_binding(string $bindingId): ?array
                 'resourceId' => $binding['resourceId'],
                 'fieldId' => $binding['fieldId'],
                 'source' => $binding['source'],
+                'publicPath' => $binding['publicPath'] ?? null,
                 // A ContentModelRelease compiled before the HTML sync format
                 // carried no `format`: the only serializer then was Markdown, so
                 // a format-less binding is a Markdown one. Defaulting here keeps
@@ -756,6 +757,23 @@ function spacefast_content_model_stage_release(
         _stattic_private_tree_remove($stageRoot);
     }
     return ['revision' => $revision, 'artifactDigest' => $artifactDigest, 'staged' => true];
+}
+
+function spacefast_content_model_page_link(string $link, int $postId): string
+{
+    if (!function_exists('get_post_meta') || !function_exists('home_url')
+        || !spacefast_content_post_belongs_to_space($postId)) {
+        return $link;
+    }
+    $externalId = get_post_meta($postId, SPACEFAST_CONTENT_EXTERNAL_ID_META, true);
+    if (!is_string($externalId) || !str_starts_with($externalId, SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX)) {
+        return $link;
+    }
+    $binding = spacefast_content_model_sync_binding(substr($externalId, strlen(SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX)));
+    $path = $binding['publicPath'] ?? null;
+    return ($binding['post_type'] ?? null) === 'page' && is_string($path)
+        ? home_url($path)
+        : $link;
 }
 
 /** Activate only after immutable verification and every local projection succeeds. */

@@ -375,9 +375,14 @@ impl EndpointArtifact {
                 "Endpoint artifact ABI does not match this runner.",
             ));
         }
+        // Frozen bundles omit the ABI; the bounded legacy interpreter serves
+        // that generation. An explicit unknown ABI still requires a rebuild.
         if self.capabilities.db
             && !self.db.tables.is_empty()
-            && self.db_capability_abi.as_deref() != Some(DB_CAPABILITY_ABI)
+            && self
+                .db_capability_abi
+                .as_deref()
+                .is_some_and(|abi| abi != DB_CAPABILITY_ABI)
         {
             return Err(error_response(
                 422,

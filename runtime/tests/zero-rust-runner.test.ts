@@ -1175,6 +1175,137 @@ test("enforces the structured Zero DB capability through local MySQL", async () 
   expect(text).not.toContain("zero_private_missing_values");
 });
 
+test("serves frozen SQL-host DB artifacts without changing their files or authority", async () => {
+  const host = "zero-legacy-db.test";
+  const spaceId = "spc_zero_legacy_db";
+  const versionId = "ver_zero_legacy_db_1";
+  // The bridge and SQL shapes are frozen from 45334b39a5, before dbCapabilityAbi.
+  // The write artifact predates the ABI. The read artifact represents a later
+  // settings-only finalize that stamped the new ABI onto the old caller.
+  const frozenBridge = `
+if (typeof globalThis.__statticDbHost === "function") {
+  globalThis.__statticDb = function __statticDb(operation) {
+    return globalThis.__statticDbHost(String(operation ?? ""));
+  };
+}
+`;
+  const source = `
+const db = (operation) => JSON.parse(globalThis.__statticDb(JSON.stringify(operation)));
+const table = globalThis.__statticZeroEndpoint.db.tables.todos;
+const insert = db({
+  mode: "execute",
+  sql: "INSERT INTO " + table.quotedName + " (" + table.columns.title.quotedName + ") VALUES (?)",
+  params: ["legacy message"]
+});
+const rows = db({
+  sql: "SELECT * FROM " + table.quotedName + " ORDER BY " + table.columns.id.quotedName + " ASC LIMIT 1",
+  params: []
+});
+const hiddenColumn = db({
+  sql: "SELECT * FROM " + table.quotedName + " WHERE \`legacy_secret\` = ?",
+  params: ["private"]
+});
+const foreignRead = db({ sql: "SELECT * FROM \`zero_legacy_foreign\`", params: [] });
+const foreignWrite = db({
+  mode: "execute",
+  sql: "UPDATE \`zero_legacy_foreign\` SET \`private_value\` = ? WHERE \`private_id\` = ?",
+  params: ["bad", 1]
+});
+globalThis.__statticZeroResult = JSON.stringify({
+  status: 200,
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ insert, rows: rows.rows, hiddenColumn, foreignRead, foreignWrite })
+});
+`;
+  await deploy(rt, {
+    spaceId,
+    versionId,
+    metadata: { mode: "website", title: "Frozen Zero DB" },
+    files: { "index.html": "<h1>Frozen Zero DB</h1>" },
+    serving: {
+      zero_endpoints: [
+        { method: "POST", execution_mode: "write", path: "/messages/add" },
+        { method: "GET", execution_mode: "read", path: "/messages/list" },
+      ].map((endpoint) => ({
+        ...endpoint,
+        source: endpoint.method === "POST" ? frozenBridge + source : source,
+        capabilities: { db: true },
+        db: {
+          schemaHash: "sha256:legacy",
+          tables: {
+            todos: {
+              physicalName: "zero_legacy_items",
+              primaryKey: "id",
+              columns: { id: "todo_id", title: "todo_title" },
+            },
+          },
+        },
+      })),
+    },
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig({ mode: "website", site_title: "Frozen Zero DB" }),
+      production_hostnames: [host],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+  mysql.exec(
+    "ALTER TABLE zero_legacy_items ADD COLUMN legacy_secret VARCHAR(20) DEFAULT 'private'",
+  );
+  mysql.exec(
+    "CREATE TABLE zero_legacy_foreign (private_id INT PRIMARY KEY, private_value VARCHAR(10))",
+  );
+  mysql.exec("INSERT INTO zero_legacy_foreign VALUES (1, 'fits')");
+  const root = versionRoot(rt, spaceId, versionId);
+  const index = JSON.parse(readFileSync(path.join(root, "zero/endpoints-index.json"), "utf8"));
+  const frozenFiles = [];
+  for (const endpoint of ["POST /messages/add", "GET /messages/list"]) {
+    const artifactPath = path.join(root, index.endpoints[endpoint]);
+    const artifact = JSON.parse(readFileSync(artifactPath, "utf8"));
+    if (endpoint === "POST /messages/add") {
+      delete artifact.dbCapabilityAbi;
+      writeFileSync(artifactPath, JSON.stringify(artifact));
+    } else {
+      expect(artifact.dbCapabilityAbi).toBe("stattic-zero-db-capability-v1");
+    }
+    for (const file of [
+      artifactPath,
+      path.join(root, artifact.sourcePath),
+      path.join(root, artifact.bytecodePath),
+    ]) {
+      frozenFiles.push({ file, bytes: readFileSync(file) });
+    }
+  }
+  for (const method of ["POST", "GET"]) {
+    const response = await get(rt, host, method === "POST" ? "/messages/add" : "/messages/list", {
+      method,
+    });
+    const text = await response.text();
+    if (response.status !== 200) {
+      throw new Error(`expected 200, got ${response.status}: ${text}`);
+    }
+    const body = JSON.parse(text);
+    expect(body).toMatchObject({
+      insert:
+        method === "POST"
+          ? { ok: true, affectedRows: 1, lastInsertId: 1 }
+          : { ok: false, code: "zero_db_read_only" },
+      hiddenColumn: { ok: false, code: "zero_db_capability_denied" },
+      foreignRead: { ok: false, code: "zero_db_capability_denied" },
+      foreignWrite: { ok: false, code: "zero_db_capability_denied" },
+    });
+    expect(body.rows).toEqual([{ todo_id: 1, todo_title: "legacy message" }]);
+  }
+  expect(mysql.exec("SELECT COUNT(*) FROM zero_legacy_items")).toBe("1");
+  expect(mysql.exec("SELECT private_value FROM zero_legacy_foreign WHERE private_id = 1")).toBe(
+    "fits",
+  );
+  for (const { file, bytes } of frozenFiles) {
+    expect(readFileSync(file)).toEqual(bytes);
+  }
+});
+
 test("rejects writes from a read handler before they reach MySQL", async () => {
   mysql.exec("DELETE FROM zero_items WHERE todo_title IN ('read-mode-probe', 'read-mode-write')");
   mysql.exec("INSERT INTO zero_items (todo_title) VALUES ('read-mode-probe')");

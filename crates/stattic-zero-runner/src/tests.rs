@@ -453,7 +453,7 @@ globalThis.__statticZeroResult = JSON.stringify({
 }
 
 #[test]
-fn database_artifacts_from_before_the_structured_capability_require_republishing() {
+fn database_artifacts_with_an_unknown_capability_require_republishing() {
     let fixture = Fixture::new(true);
     fixture.edit_artifact(|artifact| {
         artifact["db"] = json!({
@@ -468,7 +468,7 @@ fn database_artifacts_from_before_the_structured_capability_require_republishing
                 }
             }
         });
-        artifact.remove("dbCapabilityAbi");
+        artifact["dbCapabilityAbi"] = json!("unknown-db-capability");
     });
 
     let response = handle_invoke(&fixture.envelope()).unwrap_err();

@@ -201,6 +201,7 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             }
         }
         if ($isContentAdminPath) {
+            $bindDatabasePassword();
             require_once $releaseRoot . '/engine/shared/bootstrap-config.php';
             require_once $releaseRoot . '/engine/shared/cache-policy.php';
             require_once $releaseRoot . '/engine/shared/context.php';
@@ -324,7 +325,6 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     ['surface' => 'wordpress']
                 );
             }
-            $bindDatabasePassword();
             // Both REST doors end here. /wp-admin needs none of it: those are
             // real WordPress scripts, and returning is exactly how they run.
             if ($restFrontController !== null) {

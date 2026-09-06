@@ -217,12 +217,14 @@ function _stattic_content_admin_mint_ticket(
     string $wordpressRole,
     string $frameOrigin,
     mixed $access,
+    string $publicOrigin,
     ?int $now = null
 ): ?array {
     $principal = isset($principal['kind']) ? $principal : null;
     $authorization = _stattic_content_admin_authorization($authorization);
     $wordpressRole = _stattic_content_wordpress_role($wordpressRole) ?? '';
     $frameOrigin = _stattic_content_admin_frame_origin($frameOrigin);
+    $publicOrigin = _stattic_content_admin_frame_origin($publicOrigin);
     $access = _stattic_content_admin_access($access);
     $host = strtolower(trim($host));
     if (
@@ -230,6 +232,7 @@ function _stattic_content_admin_mint_ticket(
         || $authorization === null
         || $wordpressRole === ''
         || $frameOrigin === null
+        || $publicOrigin === null
         || $access === null
         || $host === ''
     ) {
@@ -249,6 +252,7 @@ function _stattic_content_admin_mint_ticket(
             'authorization' => $authorization,
             'wordpress_role' => $wordpressRole,
             'frame_origin' => $frameOrigin,
+            'public_origin' => $publicOrigin,
             'access' => $access,
             'expires_at' => $expiresAt,
         ], $expiresAt)) {
@@ -288,14 +292,16 @@ function _stattic_content_admin_consume_ticket(
             $authorization = _stattic_content_admin_authorization($record['authorization'] ?? null);
             $wordpressRole = _stattic_content_wordpress_role($record['wordpress_role'] ?? null);
             $frameOrigin = _stattic_content_admin_frame_origin($record['frame_origin'] ?? null);
+            $publicOrigin = _stattic_content_admin_frame_origin($record['public_origin'] ?? null);
             $access = _stattic_content_admin_access($record['access'] ?? null);
-            return $principal === null || $authorization === null || $wordpressRole === null || $frameOrigin === null || $access === null
+            return $principal === null || $authorization === null || $wordpressRole === null || $frameOrigin === null || $publicOrigin === null || $access === null
                 ? null
                 : [
                     'principal' => $principal,
                     'authorization' => $authorization,
                     'wordpress_role' => $wordpressRole,
                     'frame_origin' => $frameOrigin,
+                    'public_origin' => $publicOrigin,
                     'access' => $access,
                 ];
         }
@@ -321,12 +327,14 @@ function _stattic_content_admin_mint_session(
     string $wordpressRole,
     string $frameOrigin,
     array $access,
+    string $publicOrigin,
     ?int $now = null
 ): ?array {
     $authorization = _stattic_content_admin_authorization($authorization);
     $principal = isset($principal['kind']) ? $principal : null;
     $wordpressRole = _stattic_content_wordpress_role($wordpressRole);
     $frameOrigin = _stattic_content_admin_frame_origin($frameOrigin);
+    $publicOrigin = _stattic_content_admin_frame_origin($publicOrigin);
     $access = _stattic_content_admin_access($access);
     if (
         $userId < 1
@@ -335,6 +343,7 @@ function _stattic_content_admin_mint_session(
         || $authorization === null
         || $wordpressRole === null
         || $frameOrigin === null
+        || $publicOrigin === null
         || $access === null
     ) {
         return null;
@@ -353,6 +362,7 @@ function _stattic_content_admin_mint_session(
         'access_generation' => $authorization['access_generation'],
         'wordpress_role' => $wordpressRole,
         'frame_origin' => $frameOrigin,
+        'public_origin' => $publicOrigin,
         'access' => $access,
         'expires_at' => $expiresAt,
     ], JSON_UNESCAPED_SLASHES));
@@ -399,12 +409,14 @@ function _stattic_content_admin_verify_session(
     $principal = is_array($claims['principal'] ?? null) ? $claims['principal'] : null;
     $wordpressRole = _stattic_content_wordpress_role($claims['wordpress_role'] ?? null);
     $frameOrigin = _stattic_content_admin_frame_origin($claims['frame_origin'] ?? null);
+    $publicOrigin = _stattic_content_admin_frame_origin($claims['public_origin'] ?? null);
     $access = _stattic_content_admin_access($claims['access'] ?? null);
     if (
         $authorization === null
         || $principal === null
         || $wordpressRole === null
         || $frameOrigin === null
+        || $publicOrigin === null
         || $access === null
         || !_stattic_content_admin_authorization_matches($privateRoot, $authorization)
     ) {
@@ -417,6 +429,7 @@ function _stattic_content_admin_verify_session(
         'access_generation' => $authorization['access_generation'],
         'wordpress_role' => $wordpressRole,
         'frame_origin' => $frameOrigin,
+        'public_origin' => $publicOrigin,
         'access' => $access,
         'expires_at' => $claims['expires_at'],
     ];
@@ -503,7 +516,8 @@ function _stattic_content_admin_enter_wordpress(
     string $privateRoot,
     string $spaceId,
     ?string $frameOrigin,
-    array $access
+    array $access,
+    ?string $publicOrigin = null
 ): void {
     $origin = is_string($frameOrigin) && $frameOrigin !== ''
         ? $frameOrigin
@@ -520,6 +534,7 @@ function _stattic_content_admin_enter_wordpress(
     $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
     $GLOBALS['SPACEFAST_CONTENT_ADMIN_FRAME_ORIGIN'] = $origin;
     $GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = $access;
+    $GLOBALS['SPACEFAST_CONTENT_PUBLIC_ORIGIN'] = $publicOrigin;
     foreach ([
         'DISALLOW_FILE_EDIT' => true,
         'DISALLOW_FILE_MODS' => true,

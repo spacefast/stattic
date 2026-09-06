@@ -247,7 +247,8 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     $privateRoot,
                     $session['space_id'],
                     $session['frame_origin'],
-                    $session['access']
+                    $session['access'],
+                    $session['public_origin']
                 );
             } elseif ($restFrontController === null) {
                 // Not the REST lane, so /wp-admin: the editor's own HTML surface,

@@ -1,7 +1,7 @@
 {
-  "revision": "2b7f8b989cec7d0b5e03d53323ab979c78a58576",
-  "sourceHash": "f70f4d7a2728e54884f4a4bfcab0e3df7378264dc907b771c818ecf2dc3edd7b",
-  "manifestSha256": "b40324f913584afe56d750baec5307eab79cf314d0695e21499621e457506077",
+  "revision": "633f3228f9ca34409e230feabc95d0c4185fec0f",
+  "sourceHash": "7764328831c713c59916153be1c04234c4477c4313560349a4b72b82eac89937",
+  "manifestSha256": "8f81641246c9156c4aa333003959a2329ef4f3e52f5697816c0ff11b925fd68a",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "441813f2e762171d308fc86a3279ccb48b4bbebdbcd30ec0732de26c7794e214"
+      "sha256": "d05172093dac3e9d7b547e9c229e4a0b342d6fa0699f4caf47bf3e71d67ba5d6"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "f2c0f993ec952c1a20abfc08ad6623dfc5c5f6dc21afbe92fe9ee0fa13c8aaa4"
+      "sha256": "c000b4d1241bb3ee6afe3696d8025732dfcd3077ff4032f01b41f4951f47c424"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -353,7 +353,7 @@
     },
     {
       "path": "runtime/custom-redirects.php",
-      "sha256": "78aa4a258b2147f6d17fa6a010c2781ca97e9b982ce1a024cb91906cdbdce368"
+      "sha256": "a453f8ad892baba9e363a793e74272f753468d0f41e4164a7ead59aaebae6787"
     },
     {
       "path": "runtime/engine-manifest.json",
@@ -433,7 +433,7 @@
     },
     {
       "path": "runtime/engine/entrypoints/content-admin.php",
-      "sha256": "ff2c841899b7822611cf7bf689ee9458a86dcd750159367bc51799323bdc61bd"
+      "sha256": "242a788680f9a7dca664434c81e692c0332c93d7b3bfb23872c75b6265fd7af7"
     },
     {
       "path": "runtime/engine/entrypoints/content-media.php",
@@ -441,7 +441,7 @@
     },
     {
       "path": "runtime/engine/entrypoints/content.php",
-      "sha256": "d06841483307954d7dff660bfc8212693a41286b4c3e0023a75ecfad2921f15d"
+      "sha256": "0b1d8a23e36ff5dc98accb1b090e9c2a785defb9eb7b42c9fff33d08b23cf933"
     },
     {
       "path": "runtime/engine/entrypoints/cron.php",
@@ -577,7 +577,7 @@
     },
     {
       "path": "runtime/engine/shared/content-admin.php",
-      "sha256": "8adc6d190e080d604470ab9a8a2596fffc5ab783a9c68dfe4adf2b2637fdb6be"
+      "sha256": "25997be81489b14ab0d2bc7f6690178e692276653e67a9a34c699b0418f88f2d"
     },
     {
       "path": "runtime/engine/shared/content-principal.php",
@@ -689,7 +689,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "5b968b50fdf8f871279228393421d0fe2300942d1825d030ab9300f9cf4b71f7"
+      "sha256": "3150798c546df2756127fdce98d7dbb8749c32a7c98d87ec8d9400c3014c046a"
     },
     {
       "path": "runtime/engine/wordpress/content-html.php",
@@ -697,7 +697,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-kernel.php",
-      "sha256": "4b028b7bd5bd0b840a156f8bf93a12501403ab5792447376882c297845051a7c"
+      "sha256": "68b01cedeca2af1da5b760ab7699ae16f5b4a953db90e569dd7506a500604af3"
     },
     {
       "path": "runtime/engine/wordpress/content-markdown.php",
@@ -801,7 +801,7 @@
     },
     {
       "path": "runtime/tests/content-admin.test.ts",
-      "sha256": "60967368b3027451b6c61d10bc0b2a74aa036f76a284c8dfc609c2129129222e"
+      "sha256": "59d27b4696fec5b7385c1d83aabeaf17232f1ccd19f1802d20682dc633a6c8a2"
     },
     {
       "path": "runtime/tests/content-html-sync.test.ts",
@@ -809,7 +809,7 @@
     },
     {
       "path": "runtime/tests/content-kernel.test.ts",
-      "sha256": "2f37fc17fc0e01bb896f4603498244e7d16aabf1b72ac3ce88aad2ee06b80741"
+      "sha256": "10baa7e3f78876fa2ff5d7e5e03509157b5760999809d221d3e2b6a2cab93eaa"
     },
     {
       "path": "runtime/tests/content-markdown-toolkit.test.ts",
@@ -817,7 +817,7 @@
     },
     {
       "path": "runtime/tests/content-media.test.ts",
-      "sha256": "06def7de95de2ae609da0215a6ca8c1c7995933acba09c4bd353a2d8adf03032"
+      "sha256": "59817562357431fb35590ada995bfe10728e06573f25fae1e217e81e59b0211d"
     },
     {
       "path": "runtime/tests/content-request.test.ts",
@@ -889,7 +889,7 @@
     },
     {
       "path": "runtime/tests/entrypoints.test.ts",
-      "sha256": "040499d94c0ed564713473968a9e43ae8f1bdeb828f1a109973f8b3e44a0b0e2"
+      "sha256": "c87090f92c145916fd380d508fd8d26789467b430c902d1c606ccd152526d154"
     },
     {
       "path": "runtime/tests/finalize-rust.test.ts",

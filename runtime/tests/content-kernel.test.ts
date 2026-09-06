@@ -151,6 +151,13 @@ $uploads = spacefast_content_scope_upload_dir([
   'baseurl' => 'https://space.example/wp-content/uploads',
   'subdir' => '/2026/08',
 ]);
+$visitorHome = spacefast_content_public_url('https://provider.example/hey/');
+$GLOBALS['SPACEFAST_CONTENT_PUBLIC_ORIGIN'] = 'https://public.example';
+$editorUploads = spacefast_content_scope_upload_dir([
+  'basedir' => '/srv/uploads',
+  'baseurl' => 'https://provider.example/wp-content/uploads',
+  'subdir' => '/2026/08',
+]);
 echo json_encode([
   'attachment_stamp' => $savedMeta[11][SPACEFAST_CONTENT_SPACE_META],
   'post_query' => $postQuery->get('meta_query'),
@@ -168,6 +175,10 @@ echo json_encode([
   'capabilities' => $capabilities,
   'ownership' => [$alphaOwnsNine, $betaOwnsNine, $betaCapability],
   'upload_scope' => [$uploads['basedir'], $uploads['baseurl'], $uploads['path'], $uploads['url']],
+  'visitor_home' => $visitorHome,
+  'editor_home' => spacefast_content_public_url('https://provider.example/hey/?preview=1#content'),
+  'editor_rest' => spacefast_content_request_url('https://public.example/wp-json/wp/v2/posts'),
+  'editor_media' => $editorUploads['url'],
   'request_url' => spacefast_content_request_url('https://provider.example/wp-admin/edit.php?post_type=post'),
 ]);
 `;
@@ -210,6 +221,10 @@ echo json_encode([
       `https://alpha.spacefast.test/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}/2026/08`,
     ],
     // WordPress must never hand the provider's own hostname to the browser.
+    visitor_home: "https://alpha.spacefast.test/hey/",
+    editor_home: "https://public.example/hey/?preview=1#content",
+    editor_rest: "https://alpha.spacefast.test/wp-json/wp/v2/posts",
+    editor_media: `https://alpha.spacefast.test/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}/2026/08`,
     request_url: "https://alpha.spacefast.test/wp-admin/edit.php?post_type=post",
   });
 });

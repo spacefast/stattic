@@ -81,8 +81,12 @@ if (function_exists('add_action')) {
     add_filter('rest_request_before_callbacks', 'spacefast_content_gate_users_rest', 10, 3);
     add_filter('pre_option_blogname', 'spacefast_content_managed_site_title');
     add_filter('rest_user_query', 'spacefast_content_scope_rest_user_query', 10, 2);
+    // Public links use the Space origin carried by the editor session; admin
+    // assets and REST stay on its cookie-bearing host. Visitor aliases keep
+    // their request origin because they have no editor public-origin claim.
     add_filter('site_url', 'spacefast_content_request_url', 1, 4);
-    add_filter('home_url', 'spacefast_content_request_url', 1, 4);
+    add_filter('home_url', 'spacefast_content_public_url', 1, 4);
+    add_filter('rest_url', 'spacefast_content_request_url', 1, 4);
     add_filter('page_link', 'spacefast_content_model_page_link', 10, 2);
     add_filter('upload_dir', 'spacefast_content_scope_upload_dir');
     add_filter('show_admin_bar', '__return_false');
@@ -153,7 +157,24 @@ function spacefast_content_request_origin(): string
 
 function spacefast_content_request_url(mixed $url): mixed
 {
-    $origin = spacefast_content_request_origin();
+    return spacefast_content_url_origin($url, spacefast_content_request_origin());
+}
+
+function spacefast_content_public_origin(): string
+{
+    $origin = $GLOBALS['SPACEFAST_CONTENT_PUBLIC_ORIGIN'] ?? null;
+    return spacefast_content_space_id() !== '' && is_string($origin) && $origin !== ''
+        ? $origin
+        : spacefast_content_request_origin();
+}
+
+function spacefast_content_public_url(mixed $url): mixed
+{
+    return spacefast_content_url_origin($url, spacefast_content_public_origin());
+}
+
+function spacefast_content_url_origin(mixed $url, string $origin): mixed
+{
     if ($origin === '' || !is_string($url)) {
         return $url;
     }

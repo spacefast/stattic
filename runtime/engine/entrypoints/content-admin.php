@@ -36,7 +36,8 @@ _stattic_content_admin_enter_wordpress(
     $privateRoot,
     $launch['authorization']['space_id'],
     $launch['frame_origin'],
-    $launch['access']
+    $launch['access'],
+    $launch['public_origin']
 );
 require $wpLoad;
 
@@ -51,7 +52,8 @@ $session = _stattic_content_admin_mint_session(
     $launch['authorization'],
     $launch['wordpress_role'],
     $launch['frame_origin'],
-    $launch['access']
+    $launch['access'],
+    $launch['public_origin']
 );
 if ($session === null) {
     _stattic_problem_response(503, 'content_admin_session_unavailable', 'The content editor session could not be started.');

@@ -120,6 +120,7 @@ if ($operation === 'content.authorization.apply') {
 }
 if ($operation === 'content.admin.launch') {
     $frameOrigin = _stattic_content_admin_frame_origin($request['frameOrigin'] ?? null);
+    $publicOrigin = _stattic_content_admin_frame_origin($request['publicOrigin'] ?? null);
     $authorization = _stattic_content_admin_apply_authorization(
         $privateRoot,
         $requestedAuthorization
@@ -128,6 +129,7 @@ if ($operation === 'content.admin.launch') {
     // The editor frame is for humans holding a WordPress role: a service
     // actor, or anyone whose Grants earn no role, gets no ticket.
     $ticket = $frameOrigin === null
+        || $publicOrigin === null
         || $requestedAuthorization === null
         || $authorization === null
         || $authorization !== $requestedAuthorization
@@ -142,7 +144,8 @@ if ($operation === 'content.admin.launch') {
             $authorization,
             $wordpressRole,
             $frameOrigin,
-            $access
+            $access,
+            $publicOrigin
         );
     if ($ticket === null) {
         _stattic_problem_response(422, 'content_admin_launch_invalid', 'The content editor session could not be created.');

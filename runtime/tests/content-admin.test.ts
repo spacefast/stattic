@@ -94,34 +94,37 @@ $zeroUsersAccess = [
   'initialScreen' => 'users',
   'allowedScreens' => ['collections', 'users'],
 ];
-$ticket = _stattic_content_admin_mint_ticket('/private', 'space.example', $principal, $authorization, 'editor', 'https://my.spacefast.test', $wordpressAccess, 1000);
+$ticket = _stattic_content_admin_mint_ticket('/private', 'space.example', $principal, $authorization, 'editor', 'https://my.spacefast.test', $wordpressAccess, 'https://public.example', 1000);
 $first = _stattic_content_admin_consume_ticket('/private', $ticket['token'], 'space.example', 1001);
 $again = _stattic_content_admin_consume_ticket('/private', $ticket['token'], 'space.example', 1001);
-$wrongHostTicket = _stattic_content_admin_mint_ticket('/private', 'space.example', $principal, $authorization, 'editor', 'https://my.spacefast.test', $wordpressAccess, 1000);
+$wrongHostTicket = _stattic_content_admin_mint_ticket('/private', 'space.example', $principal, $authorization, 'editor', 'https://my.spacefast.test', $wordpressAccess, 'https://public.example', 1000);
 $wrongHost = _stattic_content_admin_consume_ticket('/private', $wrongHostTicket['token'], 'other.example', 1001);
 // A landing screen rides the ticket, and only from the closed set. The launch
 // entrypoint refuses an unrecognized one outright; the mint refuses to carry it
 // either way, so a record can never name a screen redemption would honour.
-$usersTicket = _stattic_content_admin_mint_ticket('/private', 'space.example', $principal, $authorization, 'editor', 'https://my.spacefast.test', $zeroUsersAccess, 1000);
+$usersTicket = _stattic_content_admin_mint_ticket('/private', 'space.example', $principal, $authorization, 'editor', 'https://my.spacefast.test', $zeroUsersAccess, 'https://public.example', 1000);
 $usersLaunch = _stattic_content_admin_consume_ticket('/private', $usersTicket['token'], 'space.example', 1001);
 $inventedTicket = _stattic_content_admin_mint_ticket('/private', 'space.example', $principal, $authorization, 'editor', 'https://my.spacefast.test', [
   'surface' => 'zero',
   'initialScreen' => 'plugins',
   'allowedScreens' => ['collections'],
-], 1000);
+], 'https://public.example', 1000);
 $duplicateTicket = _stattic_content_admin_mint_ticket('/private', 'space.example', $principal, $authorization, 'editor', 'https://my.spacefast.test', [
   'surface' => 'zero',
   'initialScreen' => 'collections',
   'allowedScreens' => ['collections', 'collections'],
-], 1000);
+], 'https://public.example', 1000);
 $reorderedTicket = _stattic_content_admin_mint_ticket('/private', 'space.example', $principal, $authorization, 'editor', 'https://my.spacefast.test', [
   'surface' => 'zero',
   'initialScreen' => 'users',
   'allowedScreens' => ['users', 'collections'],
-], 1000);
-$session = _stattic_content_admin_mint_session('/private', 'space.example', 42, $principal, $authorization, 'editor', 'https://my.spacefast.test', $zeroCollectionsAccess, 1000);
+], 'https://public.example', 1000);
+$session = _stattic_content_admin_mint_session('/private', 'space.example', 42, $principal, $authorization, 'editor', 'https://my.spacefast.test', $zeroCollectionsAccess, 'https://public.example', 1000);
 $valid = _stattic_content_admin_verify_session('/private', $session['token'], 'space.example', 1001);
-$tampered = substr($session['token'], 0, -1) . (str_ends_with($session['token'], 'A') ? 'B' : 'A');
+[$payload, $signature] = explode('.', $session['token']);
+$tamperedClaims = json_decode(_stattic_content_admin_base64url_decode($payload), true);
+$tamperedClaims['public_origin'] = 'https://another-space.example';
+$tampered = _stattic_content_admin_base64url_encode(json_encode($tamperedClaims)) . '.' . $signature;
 $nextAuthorization = _stattic_content_admin_apply_authorization('/private', [
   'spaceId' => 'spc_123',
   'accessGeneration' => 8,
@@ -228,6 +231,7 @@ echo json_encode([
       authorization: { space_id: "spc_123", access_generation: 7 },
       wordpress_role: "editor",
       frame_origin: "https://my.spacefast.test",
+      public_origin: "https://public.example",
       access: { surface: "wordpress" },
     },
     again: null,
@@ -258,6 +262,7 @@ echo json_encode([
       access_generation: 7,
       wordpress_role: "editor",
       frame_origin: "https://my.spacefast.test",
+      public_origin: "https://public.example",
       access: {
         surface: "zero",
         initial_screen: "collections",

@@ -49,6 +49,8 @@ const BUILD_ARTIFACTS = new Set([
   // Built by scripts/build-runtime-native.mjs into gitignored runtime/bin/;
   // installer-real-manifest.test.ts stubs it for the same reason.
   "bin/stattic-runtime",
+  // scripts/fetch-wp-php-toolkit.mjs verifies and extracts the pinned library.
+  "engine/vendor/php-toolkit.phar",
 ]);
 
 // Tree entries are whole build-output directories (gitignored), expanded per
@@ -64,7 +66,13 @@ const EXPECTED_TREES = {
 // Generated roots: present after a build, absent in a fresh checkout, so the
 // walk has to skip them either way — trees reconcile their manifest entries
 // instead. Turbo task metadata is build output the same way.
-const GENERATED_ROOTS = [".turbo", "bin", "wordpress/zero-admin", "wordpress/zero-dashboard"];
+const GENERATED_ROOTS = [
+  ".turbo",
+  "bin",
+  "engine/vendor",
+  "wordpress/zero-admin",
+  "wordpress/zero-dashboard",
+];
 
 // Walk the working tree, not Git's index, because the dev engine builder
 // packages the working tree too. An untracked PHP module must be covered before

@@ -47,6 +47,7 @@ import path from "node:path";
 
 import { errorDocsUrl, errorTitle } from "../../packages/common/src/contracts/error-codes.ts";
 import { FINALIZER_PROTOCOL } from "../../packages/routing/src/protocol.generated.ts";
+import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
 import { writeActiveReleasePointer } from "./active-release.ts";
 
 // The canonical runner (tests/run.sh) passes `--timeout 30000`; encode the
@@ -674,6 +675,7 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
   // to PHP (e.g. rt.storageRoot into a CLI spawn) must already be resolved —
   // in-server requests get this for free because getcwd() resolves symlinks.
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "stattic-runtime-test-")));
+  await fetchToolkitPhar();
   installEngine(root);
   const atomicData = { ...RUNTIME_ATOMIC_DATA, ...options.atomicData };
   writeFileSync(path.join(root, ".atomic-persistent-data.json"), `${JSON.stringify(atomicData)}\n`);

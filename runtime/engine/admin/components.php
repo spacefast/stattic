@@ -167,32 +167,6 @@ function _stattic_component_installed_plugin(array $plugins, string $textDomain)
     return null;
 }
 
-function _stattic_component_check_installed_artifact(
-    array $expected,
-    string $pluginRoot,
-    array &$problems,
-): void {
-    $artifact = $expected['installedArtifact'] ?? null;
-    $relative = is_array($artifact) ? ($artifact['path'] ?? null) : null;
-    $digest = is_array($artifact) ? ($artifact['sha256'] ?? null) : null;
-    if (
-        !is_string($relative)
-        || $relative === ''
-        || str_starts_with($relative, '/')
-        || str_contains($relative, '..')
-        || str_contains($relative, '\\')
-        || !is_string($digest)
-    ) {
-        _stattic_component_problem($problems, (string) ($expected['id'] ?? ''), 'component_lock_invalid', 'The installed artifact lock is invalid.');
-        return;
-    }
-    $path = rtrim($pluginRoot, '/\\') . '/' . $relative;
-    $actual = is_file($path) ? 'sha256:' . hash_file('sha256', $path) : null;
-    if (!is_string($actual) || !hash_equals($digest, $actual)) {
-        _stattic_component_problem($problems, (string) ($expected['id'] ?? ''), 'component_digest_mismatch', 'The installed WordPress plugin bytes differ from the platform lock.');
-    }
-}
-
 /**
  * Reconcile the locked WordPress plugins and report the on-demand ones running.
  *
@@ -228,24 +202,6 @@ function _stattic_component_plugins(array $lock, array &$problems): array
             if ((function_exists('is_wp_error') && is_wp_error($activated)) || !is_plugin_active($pluginFile)) {
                 _stattic_component_problem($problems, $componentId, 'component_inactive', 'The locked WordPress plugin could not be activated.');
             }
-        }
-    }
-
-    $dataLiberation = _stattic_component_expected($lock, 'data-liberation');
-    $dataLiberationFile = 'data-liberation/plugin.php';
-    if (!is_array($dataLiberation) || !isset($plugins[$dataLiberationFile])) {
-        _stattic_component_problem($problems, 'data-liberation', 'component_missing', 'The locked WordPress plugin is not installed.');
-    } else {
-        _stattic_component_check_installed_artifact(
-            $dataLiberation,
-            defined('WP_PLUGIN_DIR') ? (string) WP_PLUGIN_DIR : '',
-            $problems,
-        );
-        if (is_plugin_active($dataLiberationFile)) {
-            deactivate_plugins($dataLiberationFile, true);
-        }
-        if (is_plugin_active($dataLiberationFile)) {
-            _stattic_component_problem($problems, 'data-liberation', 'component_active', 'The installed-only WordPress plugin is still active.');
         }
     }
 
@@ -456,6 +412,7 @@ function _stattic_runtime_stage_components(string $privateRoot, array $claims): 
     _stattic_component_check_embedded($lock, 'runtime-engine', dirname($engineRoot) . '/bin/stattic-runtime', $problems);
     _stattic_component_check_embedded($lock, 'immutable-loader', $publicRoot . '/wp-content/mu-plugins/spacefast-content.php', $problems);
     _stattic_component_check_embedded($lock, 'content-kernel', $engineRoot . '/wordpress/content-kernel.php', $problems);
+    _stattic_component_check_embedded($lock, 'php-toolkit', $engineRoot . '/vendor/php-toolkit.phar', $problems);
     _stattic_component_check_embedded($lock, 'zero-admin', $publicRoot . '/wp-content/mu-plugins/zero-admin', $problems, true);
     _stattic_component_check_embedded($lock, 'zero-dashboard', $publicRoot . '/wp-content/mu-plugins/zero-dashboard', $problems, true);
     _stattic_component_check_loader_alias(

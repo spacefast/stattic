@@ -3,8 +3,7 @@
  * The Markdown serializer: one of the two formats `content-source-sync.php`
  * reconciles through.
  *
- * Serialization is WordPress's own php-toolkit (the Data Liberation plugin
- * `SPACEFAST_WORDPRESS_SUBSTRATE.dataLiberationPlugin` pins): MarkdownConsumer
+ * Serialization is WordPress's pinned php-toolkit: MarkdownConsumer
  * for Markdown -> blocks and MarkdownProducer for blocks -> Markdown. Nothing
  * here hand-rolls a Markdown parser, and the blocks engine is never asked to
  * run backwards.
@@ -28,11 +27,9 @@ declare(strict_types=1);
 /**
  * Make the php-toolkit classes loadable, or fail closed.
  *
- * On a wp.cloud box the Data Liberation plugin is installed but never active:
- * activating it loads the PHAR before wp-admin's media declarations and can
- * fatal on a duplicate function. This loader is the single place the PHAR
- * enters a WordPress process. The explicit PHAR path also lets runtime tests
- * load the identical pinned bytes without a WordPress install.
+ * The immutable engine release ships the PHAR. Load it lazily after core's
+ * media declarations so its polyfills cannot collide with WordPress.
+ * The explicit PHAR path lets runtime tests use the same pinned bytes.
  */
 function spacefast_content_sync_require_toolkit(): void
 {
@@ -44,9 +41,7 @@ function spacefast_content_sync_require_toolkit(): void
     if (is_string($configured) && $configured !== '') {
         $candidates[] = $configured;
     }
-    if (defined('WP_PLUGIN_DIR')) {
-        $candidates[] = WP_PLUGIN_DIR . '/data-liberation/php-toolkit.phar';
-    }
+    $candidates[] = __DIR__ . '/../vendor/php-toolkit.phar';
     foreach ($candidates as $phar) {
         if (is_file($phar)) {
             spacefast_content_sync_preload_polyfill_targets();

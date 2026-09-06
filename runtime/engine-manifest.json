@@ -84,6 +84,7 @@
     "engine/shared/streaming.php",
     "engine/shared/upstream-relay.php",
     "engine/wordpress/content-html.php",
+    "engine/vendor/php-toolkit.phar",
     "engine/wordpress/content-markdown.php",
     "engine/wordpress/content-source-sync.php",
     "engine/wordpress/content-model-kernel.php",

@@ -184,70 +184,41 @@ echo json_encode(['clean' => $clean, 'staleLoader' => $staleLoader, 'staleTree' 
   }
 });
 
-test("component staging verifies Data Liberation bytes and keeps its plugin inactive", async () => {
+test("component staging verifies the embedded Markdown library against its release lock", async () => {
   const componentApi = path.resolve(import.meta.dir, "../engine/admin/components.php");
   const root = await mkdtemp(path.join(os.tmpdir(), "spacefast-component-toolkit-"));
-  const includes = path.join(root, "wp-admin/includes");
-  const pluginRoot = path.join(root, "plugins/data-liberation");
-  const pharBody = "locked toolkit";
-  await mkdir(includes, { recursive: true });
-  await mkdir(pluginRoot, { recursive: true });
-  await writeFile(path.join(includes, "plugin.php"), "<?php");
-  await writeFile(path.join(pluginRoot, "plugin.php"), "<?php");
-  await writeFile(path.join(pluginRoot, "php-toolkit.phar"), pharBody);
+  const artifact = path.join(root, "php-toolkit.phar");
+  const body = "locked toolkit";
+  await writeFile(artifact, body);
   try {
     const script = String.raw`
-define('ABSPATH', $argv[2] . '/');
-define('WP_PLUGIN_DIR', $argv[3]);
-$GLOBALS['active'] = ['data-liberation/plugin.php' => true];
-function get_plugins(): array {
-    return [
-        'secure-custom-fields/scf.php' => ['TextDomain' => 'secure-custom-fields', 'Version' => '6.9.5'],
-        'redirection/redirection.php' => ['TextDomain' => 'redirection', 'Version' => '5.10.0'],
-        'block-transformer/plugin.php' => ['TextDomain' => 'blocks-engine-php-transformer', 'Version' => '0.6.2'],
-        'data-liberation/plugin.php' => ['TextDomain' => '', 'Version' => ''],
-    ];
-}
-function is_plugin_active(string $plugin): bool { return $GLOBALS['active'][$plugin] ?? true; }
-function activate_plugin(string $plugin, string $redirect = '', bool $networkWide = false, bool $silent = false): null {
-    $GLOBALS['active'][$plugin] = true;
-    return null;
-}
-function deactivate_plugins(string|array $plugins, bool $silent = false): void {
-    foreach ((array) $plugins as $plugin) $GLOBALS['active'][$plugin] = false;
-}
 require $argv[1];
-$lock = ['components' => [
-    ['id' => 'secure-custom-fields', 'version' => '6.9.5'],
-    ['id' => 'redirection', 'version' => '5.10.0'],
-    ['id' => 'block-transformer', 'version' => '0.6.2'],
-    ['id' => 'data-liberation', 'installedArtifact' => [
-        'path' => 'data-liberation/php-toolkit.phar',
-        'sha256' => 'sha256:' . $argv[4],
-    ]],
-]];
-$problems = [];
-$onDemand = _stattic_component_plugins($lock, $problems);
-echo json_encode([
-    'active' => is_plugin_active('data-liberation/plugin.php'),
-    'problems' => $problems,
-    'onDemand' => $onDemand,
-], JSON_THROW_ON_ERROR);
+$lock = ['components' => [['id' => 'php-toolkit', 'sha256' => 'sha256:' . $argv[3]]]];
+$clean = [];
+_stattic_component_check_embedded($lock, 'php-toolkit', $argv[2], $clean);
+file_put_contents($argv[2], 'changed toolkit');
+$changed = [];
+_stattic_component_check_embedded($lock, 'php-toolkit', $argv[2], $changed);
+echo json_encode(['clean' => $clean, 'changed' => $changed], JSON_THROW_ON_ERROR);
 `;
     const php = Bun.spawnSync([
       "php",
       "-r",
       script,
       componentApi,
-      root,
-      path.join(root, "plugins"),
-      createHash("sha256").update(pharBody).digest("hex"),
+      artifact,
+      createHash("sha256").update(body).digest("hex"),
     ]);
     expect(php.stderr.toString()).toBe("");
     expect(JSON.parse(php.stdout.toString())).toEqual({
-      active: false,
-      problems: [],
-      onDemand: [],
+      clean: [],
+      changed: [
+        {
+          componentId: "php-toolkit",
+          code: "component_digest_mismatch",
+          detail: "Installed component bytes do not match the platform lock.",
+        },
+      ],
     });
   } finally {
     await rm(root, { recursive: true, force: true });

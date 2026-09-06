@@ -16,6 +16,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 
+import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
 import { readActiveReleaseTarget } from "./active-release.ts";
 
 // The URL-mode tests build their own fixture manifest, so a regression in the
@@ -50,6 +51,7 @@ type RealManifestInstall = {
 async function installFromShippedManifest(
   prepare?: (publicRoot: string) => void,
 ): Promise<RealManifestInstall> {
+  await fetchToolkitPhar();
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-real-manifest-"));
   roots.push(root);
   const publicRoot = path.join(root, "public");
@@ -208,6 +210,19 @@ test("the shipped manifest installs executable engine bytes without owning the r
     engine_revision: install.revision,
     site_state: "configured",
   });
+  const markdown = execFileSync(
+    "php",
+    [
+      "-d",
+      "auto_prepend_file=",
+      "-r",
+      "require $argv[1]; echo spacefast_content_markdown_to_blocks('# Installed Markdown');",
+      path.join(activeRelease, "engine/wordpress/content-markdown.php"),
+    ],
+    { encoding: "utf8" },
+  );
+  expect(markdown).toContain("<!-- wp:heading");
+  expect(markdown).toContain(">Installed Markdown</h1>");
   // The shipped manifest carries installer.php, so the install refreshed the
   // resident copy in place.
   expect(statSync(install.residentInstaller).isFile()).toBe(true);

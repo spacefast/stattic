@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:d8a6f429e6848ca088955d6d1fc1d91f246a8fd776fceb84dac992c2ad26bcc0",
+  "digest": "sha256:5e37426e1a887a260519268c260eae530f964b1a8fcc1a9233a0b74626fb224d",
   "components": [
     {
       "id": "wordpress-core",
@@ -135,21 +135,16 @@
       "activation": "always"
     },
     {
-      "id": "data-liberation",
-      "kind": "plugin",
+      "id": "php-toolkit",
+      "kind": "runtime-library",
       "version": "0.9.0",
-      "sha256": "sha256:ba6e691936699ae7f5ceaa0129ef7e7a10f1db77c559a32f824e8307747b7b54",
+      "sha256": "sha256:bd452b61fd6ee9f4838ff416a3d225e6c82a742ffaf325a57ad327828eda446a",
       "source": {
-        "kind": "archive",
-        "url": "https://github.com/WordPress/php-toolkit/releases/download/v0.9.0/data-liberation.zip",
-        "bytes": 883739
+        "kind": "embedded",
+        "path": "engine/vendor/php-toolkit.phar"
       },
-      "installedArtifact": {
-        "path": "data-liberation/php-toolkit.phar",
-        "sha256": "sha256:bd452b61fd6ee9f4838ff416a3d225e6c82a742ffaf325a57ad327828eda446a"
-      },
-      "provides": ["wordpress.markdown", "wordpress.data-liberation"],
-      "activation": "installed"
+      "provides": ["wordpress.markdown"],
+      "activation": "always"
     },
     {
       "id": "jetpack",

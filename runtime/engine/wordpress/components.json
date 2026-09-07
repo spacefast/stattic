@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:f6b49915164dd765d70bc0b9070d112adf3365c88a92f217b2ca2049d119975a",
+  "digest": "sha256:bc8878ed49a6ccdfe2c41384bc23c128a1ea9dd6ec11609b732f1b3d9d2802dc",
   "components": [
     {
       "id": "wordpress-core",
@@ -27,6 +27,7 @@
         "path": "bin/stattic-runtime"
       },
       "provides": [
+        "runtime.access.browser-state.v1",
         "runtime.serving",
         "runtime.routing",
         "runtime.zero",

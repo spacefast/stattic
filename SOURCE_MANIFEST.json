@@ -1,7 +1,7 @@
 {
-  "revision": "bc1ccc6c1443516815c2e394706a59044be9ff33",
-  "sourceHash": "8aa8024b43d2903bd82cdc71ca837ca5ed24c2f1502c7940df7d525e3976bdea",
-  "manifestSha256": "98e4a5ecb498b34e2eae406fa237e457f912687250cb9d4933b4a080efc359b6",
+  "revision": "98a84811a0e34f8d04da13620bb4cce4d3f0ff10",
+  "sourceHash": "43d755296973823369c4d7acb2b13805d199a301cca380f2b84b7e13ab16a131",
+  "manifestSha256": "af7ddbd6f34dc08b49c23fb4f7d68bdde8ab8c9bfe78064b6b1306c2ae077b5b",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "2d8be28acdbf2915f2b17f8b93915c89c5f157293d28db5d65939262fc5d98f4"
+      "sha256": "0ddf867b4217c0970085ce720e5dd8f0921ae45d946bb4bab6fb25d5c3a03965"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "cddf49cbb556a118b92035a1e57f0e8492066fd7945e1485bb96420abf277fff"
+      "sha256": "5065e4bb4875c53874a78215f99a8421bdd9f8a1f51b5af48fe40b4dd7a02b81"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -45,7 +45,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/artifacts.rs",
-      "sha256": "a3bd3a8db254c3027787be29ef01a4e4f174a06b5293f936dcb000d1a5510bff"
+      "sha256": "195932dfae987384362f037b5d3c5279594f34b1a28d3418c5b8bde9f0e4c736"
     },
     {
       "path": "crates/stattic-runtime-core/src/catalog.rs",
@@ -177,11 +177,11 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/serving_paths.rs",
-      "sha256": "cc170db938739406157460df6666dff97cadb7597616e55da7c29f3e1d1cdc57"
+      "sha256": "fb920891a6ef7d0010865566c2b4b602e0136a2ace8e59587d3185e6bf7ca703"
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "6fa44916c096095cf3892f20545ecd3c548d8407b67e8003f9fbadcb512c7ff6"
+      "sha256": "87441f1ed10b34238666f8c6703ecbb8e0287abc0be004c12c13ba2a9a5d15a0"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -193,7 +193,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/transforms/effective.rs",
-      "sha256": "eadc66207eb278c2afdfc464ad6208471b829c2daa0df05411738e7603dd70e0"
+      "sha256": "c2c4d5d43a81b862015c05019146a5499e79d1385f6b4858cf48a3f6695bff5d"
     },
     {
       "path": "crates/stattic-runtime-core/src/transforms/html.rs",
@@ -961,7 +961,7 @@
     },
     {
       "path": "runtime/tests/php-functions.test.ts",
-      "sha256": "72b8ae50a62b63578944c55338d86f58b4700e83bada3151183f86aba8d2b4a2"
+      "sha256": "a04d2d8597d29a4e7ed4377ffb4aaf7b31114c5fa02d7b23e5437d658a59a96a"
     },
     {
       "path": "runtime/tests/php-router.php",
@@ -981,7 +981,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "ed8f8708c2d848ed824ed5f58a5ce8cf288d87bd0b8da581e088dc9e3363004c"
+      "sha256": "5fb28881daa276c150ef8003d7ab106a9470a8ce489a9dd084c2f99a0ad21621"
     },
     {
       "path": "runtime/tests/run-ci.sh",

@@ -15,6 +15,7 @@
 //     shape, the outbox row): services.rs and functions-relay.test.ts.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 
 import { deploy, get, publicAccessConfig, type Runtime, startRuntime } from "./harness.ts";
 
@@ -135,6 +136,7 @@ beforeAll(async () => {
     files: {
       "index.html": "<h1>static home</h1>\n",
       "functions/hello.php": HELLO_PHP,
+      "functions/hello.php.gz": gzipSync(Buffer.from(HELLO_PHP)),
       "functions/probe.php": PROBE_PHP,
       "functions/spam.php": SPAM_PHP,
       "functions/spam-evidence.php": SPAM_EVIDENCE_PHP,
@@ -292,6 +294,8 @@ test("the route/non-route boundary under functions/", async () => {
   // The handler source never serves: same answer as a genuine miss.
   const source = await get(rt, HOST, "/functions/hello.php");
   expect(source.status).toBe(404);
+  const compressedSource = await get(rt, HOST, "/functions/hello.php.gz");
+  expect(compressedSource.status).toBe(404);
 
   // A pattern-named .php is not routable in this slice and stays inert.
   const inert = await get(rt, HOST, "/functions/%5Bid%5D.php");

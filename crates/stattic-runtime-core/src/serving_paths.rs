@@ -61,11 +61,7 @@ pub(crate) fn is_private_serving_path(path: &str) -> bool {
     })
 }
 
-pub(crate) fn is_public_serving_path(path: &str, source_exists: impl FnOnce(&str) -> bool) -> bool {
-    !is_private_serving_path(path) && !precompressed_source(path).is_some_and(source_exists)
-}
-
-fn precompressed_source(path: &str) -> Option<&str> {
+pub(crate) fn precompressed_source(path: &str) -> Option<&str> {
     (ends_with_ignore_ascii_case(path, ".br") || ends_with_ignore_ascii_case(path, ".gz"))
         .then(|| &path[..path.len() - 3])
 }
@@ -118,9 +114,8 @@ mod tests {
         assert!(is_private_serving_path("SF.JSONC.GZ"));
         assert!(!is_private_serving_path("_HEADERS"));
         assert!(!is_private_serving_path("_REDIRECTS"));
-        assert!(!is_public_serving_path("docs/page.html.gz", |source| {
-            source == "docs/page.html"
-        }));
-        assert!(is_public_serving_path("standalone.gz", |_| false));
+        assert!(is_private_serving_path("SF.JSONC.GZ.BR"));
+        assert!(!is_private_serving_path("docs/page.html.gz"));
+        assert!(!is_private_serving_path("standalone.gz"));
     }
 }

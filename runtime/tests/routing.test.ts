@@ -35,7 +35,7 @@ import {
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { gzipSync } from "node:zlib";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 
 import {
   api,
@@ -77,6 +77,7 @@ const BLOG_404 = "<h1>blog 404</h1>\n";
 const POST = "<h1>post</h1>\n";
 const APP_JS = "console.log('app');\n";
 const APP_JS_GZIP = gzipSync(Buffer.from(APP_JS));
+const APP_JS_BROTLI = brotliCompressSync(Buffer.from(APP_JS));
 const GUIDE_HTML = "<h1>browser guide</h1>\n";
 // `raw: true` is how a Markdown file asks to be published as itself. Without
 // it a `.md` source is private and unreachable, so a rewrite could not target
@@ -84,6 +85,8 @@ const GUIDE_HTML = "<h1>browser guide</h1>\n";
 // the source on the public tree. The frontmatter block is part of the published
 // bytes, because a raw file is published verbatim.
 const GUIDE_MD = "---\nraw: true\n---\n# agent guide\n";
+const GUIDE_MD_GZIP = gzipSync(Buffer.from(GUIDE_MD));
+const DRAFT_MD = "---\ndraft: true\n---\n# Private draft\n";
 // A gzip member under an extension nothing has a MIME for: finalize sniffs the
 // magic bytes so the response describes the bytes, and no lane invents a
 // Content-Encoding for them.
@@ -156,10 +159,14 @@ beforeAll(async () => {
       // A published `.gz` is an ordinary file at its own URL: v4 compiles no
       // sidecar relationship and never negotiates an encoding.
       "assets/app.js.gz": APP_JS_GZIP,
+      "assets/app.js.br": APP_JS_BROTLI,
       "pagefind/index.pf_index": GZIP_PAYLOAD,
       "yield/keep.txt": "kept\n",
       "guide.html": GUIDE_HTML,
       "guide.md": GUIDE_MD,
+      "guide.md.gz": GUIDE_MD_GZIP,
+      "draft.md": DRAFT_MD,
+      "draft.md.gz": gzipSync(Buffer.from(DRAFT_MD)),
       "inert.php": "<?php echo 'never executed';\n",
       _headers: [
         "/inert.php",
@@ -245,6 +252,15 @@ test("compressed uploads are served as the bytes they are, never as an encoding"
   expect(sidecar.headers.get("content-encoding")).toBeNull();
   expect(new Uint8Array(await sidecar.arrayBuffer())).toEqual(new Uint8Array(APP_JS_GZIP));
 
+  const brotli = await get(rt, SITE, "/assets/app.js.br");
+  expect(brotli.status).toBe(200);
+  expect(brotli.headers.get("content-encoding")).toBeNull();
+  expect(new Uint8Array(await brotli.arrayBuffer())).toEqual(new Uint8Array(APP_JS_BROTLI));
+
+  const rawMarkdown = await get(rt, SITE, "/guide.md.gz");
+  expect(rawMarkdown.status).toBe(200);
+  expect(new Uint8Array(await rawMarkdown.arrayBuffer())).toEqual(new Uint8Array(GUIDE_MD_GZIP));
+
   // Its source keeps serving identity bytes whatever the client accepts.
   const source = await get(rt, SITE, "/assets/app.js", {
     headers: { "accept-encoding": "br, gzip" },
@@ -300,10 +316,16 @@ test("the nearest custom 404 answers, walking up from the requested directory", 
   expect(await ruled.text()).toBe(BLOG_404);
 });
 
-test("convention and config files are never served, under any spelling", async () => {
+test("private source files and their companions are never served", async () => {
   // Committed content that compiles to a not-found action: the miss is
   // indistinguishable from any other, so nothing confirms the file exists.
-  for (const requestPath of ["/_redirects", "/%5Fredirects", "/SF.JSONC", "/SF.JSONC.gz"]) {
+  for (const requestPath of [
+    "/_redirects",
+    "/%5Fredirects",
+    "/SF.JSONC",
+    "/SF.JSONC.gz",
+    "/draft.md.gz",
+  ]) {
     const response = await get(rt, SITE, requestPath);
     expect(response.status, requestPath).toBe(404);
     expect(await response.text(), requestPath).toBe(ROOT_404);

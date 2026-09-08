@@ -19,7 +19,7 @@ use crate::finalize::read_bounded;
 use crate::finalize::{invalid, php_like, sha256, FileMeta, Result};
 #[cfg(not(target_family = "wasm"))]
 use crate::protocol::{LISTING_ROWS_MARKER, PAGE_MAX_BYTES};
-use crate::serving_paths::{is_private_serving_path as is_private, is_public_serving_path};
+use crate::serving_paths::is_private_serving_path as is_private;
 #[cfg(not(target_family = "wasm"))]
 use crate::storage::put_blob;
 use crate::transforms::{resolve_effective_config, ResolveEffectiveInput};
@@ -28,13 +28,11 @@ pub(crate) const DEFAULT_EDGE_CACHE_CONTROL: &str =
     "public, max-age=0, s-maxage=600, stale-while-revalidate=60";
 
 /// The committed paths that are publicly served: not convention/config files,
-/// not dotfiles, and not precompressed sidecars of another committed file.
+/// not dotfiles. Explicit compressed files keep their own public URLs.
 pub fn public_files(files: &BTreeMap<String, FileMeta>, private: &BTreeSet<String>) -> Vec<String> {
     files
         .keys()
-        .filter(|p| {
-            !private.contains(*p) && is_public_serving_path(p, |source| files.contains_key(source))
-        })
+        .filter(|p| !private.contains(*p) && !is_private(p))
         .cloned()
         .collect()
 }

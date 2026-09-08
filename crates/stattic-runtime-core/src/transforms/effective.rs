@@ -3,7 +3,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::serving_paths::is_public_serving_path;
+use crate::serving_paths::{is_private_serving_path, precompressed_source};
 
 const CONFIG_KEYS: &[&str] = &[
     "index",
@@ -75,7 +75,11 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
     let (templates, template_issues) = resolve_templates(&input.template_entries, &manifest);
     let public_manifest = manifest
         .iter()
-        .filter(|path| is_public_serving_path(path, |source| manifest.contains(source)))
+        .filter(|path| {
+            // Companions have public URLs but do not change the inferred page mode.
+            !is_private_serving_path(path)
+                && !precompressed_source(path).is_some_and(|source| manifest.contains(source))
+        })
         .cloned()
         .collect::<BTreeSet<_>>();
     let public_html = public_manifest

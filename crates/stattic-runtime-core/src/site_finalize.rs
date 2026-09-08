@@ -708,6 +708,22 @@ fn run_finalize_pipeline(
             })
             .cloned(),
     );
+    // Carry source privacy into every compiled view, including rewrites and listings.
+    let private_companions: Vec<String> = files
+        .keys()
+        .filter(|path| {
+            let mut source = crate::serving_paths::precompressed_source(path);
+            while let Some(path) = source {
+                if private.contains(path) || crate::responses::php_function_route(path).is_some() {
+                    return true;
+                }
+                source = crate::serving_paths::precompressed_source(path);
+            }
+            false
+        })
+        .cloned()
+        .collect();
+    private.extend(private_companions);
 
     apply_access_pages(&input.body, stage_root)?;
     apply_page_artifacts(&input.body, stage_root)?;
@@ -3761,7 +3777,21 @@ mod tests {
                 (".hidden/secret.txt", b"nope"),
                 (".well-known/security.txt", b"contact: x"),
                 ("assets/app.js", b"console.log(1)"),
-                ("assets/app.js.gz", b"gzipped"),
+                (
+                    "assets/app.js.gz",
+                    b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x13\x4b\xce\xcf\x2b\xce\xcf\x49\xd5\xcb\xc9\x4f\xd7\x30\xd4\x04\x00\x68\xfe\x01\x43\x0e\x00\x00\x00",
+                ),
+                (
+                    "assets/app.js.br",
+                    b"\x8b\x06\x80console.log(1)\x03",
+                ),
+                ("sf.jsonc.gz", b"private compressed config"),
+                ("draft.md", b"---\ndraft: true\n---\n# Private draft"),
+                ("draft.md.gz", b"compressed private draft"),
+                ("draft.md.gz.br", b"nested compressed private draft"),
+                ("_partial.html", b"<!-- wp:paragraph --><p>Private</p><!-- /wp:paragraph -->"),
+                ("_partial.html.br", b"compressed private partial"),
+                ("functions/handler.php.gz", b"compressed handler source"),
                 ("standalone.gz", b"lonely"),
                 ("_pagespeed/report.html", b"<p>ok</p>"),
                 (
@@ -3787,6 +3817,8 @@ mod tests {
                 ".well-known/security.txt".to_string(),
                 "_pagespeed/report.html".into(),
                 "assets/app.js".into(),
+                "assets/app.js.br".into(),
+                "assets/app.js.gz".into(),
                 "index.html".into(),
                 "standalone.gz".into(),
             ]
@@ -3794,9 +3826,24 @@ mod tests {
         // A private path resolves to nothing in the served view, so a
         // `view=served` read of one cannot reach bytes — while its source view
         // still names the object the publisher uploaded.
-        for path in ["sf.jsonc", "_pages/404.html", ".hidden/secret.txt"] {
+        for path in [
+            "sf.jsonc",
+            "sf.jsonc.gz",
+            "draft.md",
+            "draft.md.gz",
+            "draft.md.gz.br",
+            "_partial.html",
+            "_partial.html.br",
+            "functions/handler.php.gz",
+            "_pages/404.html",
+            ".hidden/secret.txt",
+        ] {
             assert!(catalog.paths[path].served.is_none(), "{path} serves");
             assert_eq!(catalog.paths[path].source.sha256.len(), 64);
+        }
+        for path in ["assets/app.js.gz", "assets/app.js.br"] {
+            let entry = &catalog.paths[path];
+            assert_eq!(entry.served.as_ref().unwrap().sha256, entry.source.sha256);
         }
         assert_eq!(
             catalog.format, "spacefast.runtime.file-catalog.v1",

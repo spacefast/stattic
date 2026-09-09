@@ -1,7 +1,7 @@
 {
-  "revision": "98a84811a0e34f8d04da13620bb4cce4d3f0ff10",
-  "sourceHash": "43d755296973823369c4d7acb2b13805d199a301cca380f2b84b7e13ab16a131",
-  "manifestSha256": "af7ddbd6f34dc08b49c23fb4f7d68bdde8ab8c9bfe78064b6b1306c2ae077b5b",
+  "revision": "08f1e1e62da48171ac9086f0fc1816d7d133246d",
+  "sourceHash": "bf2263b68f0fc99b2833669558f1f73f9f30d9d59a3c226223feeed776b25655",
+  "manifestSha256": "b0073a32309755043f4605618b839b4905f9a6d23b10a6771c2c616293fd3401",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "0ddf867b4217c0970085ce720e5dd8f0921ae45d946bb4bab6fb25d5c3a03965"
+      "sha256": "5e024397bb83df202cf001dbeafadfbd53ae80239273d4eab0148e5e65215b96"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "5065e4bb4875c53874a78215f99a8421bdd9f8a1f51b5af48fe40b4dd7a02b81"
+      "sha256": "5f9323a331fe650b1fb838681eeea507363cfe8375df4bfce88346624d037832"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -689,7 +689,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "b36e66aa2e4dfea5ad4bc28db76d6a46c94d67c43369302567c3adfebec17cf1"
+      "sha256": "aae9658062f44f162d11c04a40087a4ad18ba06b686b878f53bccc44a30d7591"
     },
     {
       "path": "runtime/engine/wordpress/content-html.php",
@@ -697,7 +697,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-kernel.php",
-      "sha256": "68b01cedeca2af1da5b760ab7699ae16f5b4a953db90e569dd7506a500604af3"
+      "sha256": "00f978f9df2a354e650dacd1792930e041b335ac9d6597acbac57a6a25ce8d5c"
     },
     {
       "path": "runtime/engine/wordpress/content-markdown.php",
@@ -809,7 +809,7 @@
     },
     {
       "path": "runtime/tests/content-kernel.test.ts",
-      "sha256": "10baa7e3f78876fa2ff5d7e5e03509157b5760999809d221d3e2b6a2cab93eaa"
+      "sha256": "09d6e3c7894aaa1f7c7cf5ac1110f36ad18578589e5d0d86dd949c1dceacccb3"
     },
     {
       "path": "runtime/tests/content-markdown-toolkit.test.ts",

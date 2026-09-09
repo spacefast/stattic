@@ -646,34 +646,6 @@ echo json_encode([
   expect(result.metas["57"]?._spacefast_principal_id).toBe(result.authority_agrees[0]);
 });
 
-test("the managed Space title shadows WordPress blogname", async () => {
-  const script = String.raw`
-$options = [
-  'blogname' => 'Changed in WordPress',
-  'spacefast_space_title' => 'The docs Space',
-];
-function get_option(string $name, mixed $default = false): mixed {
-  return $GLOBALS['options'][$name] ?? $default;
-}
-require $argv[1];
-echo json_encode([
-  'stored_blogname' => get_option('blogname'),
-  'effective_blogname' => spacefast_content_managed_site_title(false),
-]);
-`;
-  const process = Bun.spawnSync(["php", "-r", script, kernel], {
-    cwd: repoRoot,
-    stderr: "pipe",
-    stdout: "pipe",
-  });
-
-  expect(process.exitCode, process.stderr.toString()).toBe(0);
-  expect(JSON.parse(process.stdout.toString())).toEqual({
-    stored_blogname: "Changed in WordPress",
-    effective_blogname: "The docs Space",
-  });
-});
-
 test("content admin authentication mints matching WordPress admin and REST cookies", async () => {
   const script = String.raw`
 define('SECURE_AUTH_COOKIE', 'wordpress_sec_test');

@@ -28,7 +28,6 @@ require_once __DIR__ . '/content-users.php';
 // The storage feature: WordPress attachments as a Space's files — a folder
 // taxonomy, registered meta, and the abilities that publish them.
 require_once __DIR__ . '/content-storage.php';
-const SPACEFAST_CONTENT_SITE_TITLE_OPTION = 'spacefast_space_title';
 const SPACEFAST_CONTENT_EXTERNAL_ID_META = '_spacefast_external_id';
 const SPACEFAST_CONTENT_SPACE_META = '_spacefast_space_id';
 final class Spacefast_Content_Error extends RuntimeException
@@ -79,7 +78,6 @@ if (function_exists('add_action')) {
     add_filter('wp_is_application_passwords_available', '__return_false');
     add_filter('rest_authentication_errors', 'spacefast_content_disable_rest_api', 1);
     add_filter('rest_request_before_callbacks', 'spacefast_content_gate_users_rest', 10, 3);
-    add_filter('pre_option_blogname', 'spacefast_content_managed_site_title');
     add_filter('rest_user_query', 'spacefast_content_scope_rest_user_query', 10, 2);
     // Public links use the Space origin carried by the editor session; admin
     // assets and REST stay on its cookie-bearing host. Visitor aliases keep
@@ -208,17 +206,6 @@ function spacefast_content_scope_upload_dir(array $uploads): array
     $uploads['path'] = $uploads['basedir'] . $subdir;
     $uploads['url'] = $uploads['baseurl'] . $subdir;
     return $uploads;
-}
-
-function spacefast_content_managed_site_title(mixed $pre): mixed
-{
-    if (!function_exists('get_option')) {
-        return $pre;
-    }
-    $siteTitle = get_option(SPACEFAST_CONTENT_SITE_TITLE_OPTION, null);
-    return is_string($siteTitle) && trim($siteTitle) !== '' && strlen($siteTitle) <= 1020
-        ? $siteTitle
-        : $pre;
 }
 
 function spacefast_content_block_wordpress_login(): void

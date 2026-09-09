@@ -67,6 +67,12 @@ beforeAll(async () => {
           authorization: request.headers.get("authorization") ?? "",
           realtimeToken: request.headers.get("x-spacefast-runtime-realtime-token") ?? "",
         });
+        if (requestUrl.searchParams.get("afterEventId") === "expired-cursor") {
+          return Response.json(
+            { code: "realtime_cursor_expired", status: 422 },
+            { status: 422, headers: { "content-type": "application/problem+json" } },
+          );
+        }
         return Response.json({ events: [{ id: "evt_atomic_config" }] });
       }
       return new Response("not found", { status: 404 });
@@ -269,4 +275,18 @@ test("Zero realtime uses per-version config and stays silent without it", async 
   const fallbackReplay = await get(rt, HOST, "/__spacefast/zero/realtime/events");
   expect(fallbackReplay.status).toBe(200);
   expect(replays[1]).toEqual({ authorization: "", realtimeToken: REALTIME_TOKEN });
+
+  const expired = await get(
+    rt,
+    HOST,
+    "/__spacefast/zero/realtime/events?afterEventId=expired-cursor",
+  );
+  expect(expired.status).toBe(422);
+  expect(expired.headers.get("content-type")).toContain("application/problem+json");
+  expect(await expired.json()).toEqual({ code: "realtime_cursor_expired", status: 422 });
+
+  await receiver.stop(true);
+  const unavailable = await get(rt, HOST, "/__spacefast/zero/realtime/events");
+  expect(unavailable.status).toBe(502);
+  expect((await unavailable.json()).code).toBe("zero_replay_failed");
 });

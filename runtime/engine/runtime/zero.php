@@ -1016,10 +1016,11 @@ function _stattic_zero_send_realtime_events(array $config, string $requestMethod
         'timeout' => STATTIC_ZERO_CALLBACK_TIMEOUT_SECONDS,
         'schemes' => ['https', 'http'],
     ]);
-    if (!$result['ok']) {
+    if ($result['error'] !== null) {
         _stattic_problem_refused(502, 'zero_replay_failed', 'Zero realtime replay failed.');
     }
-    _stattic_response_send(200, $result['body'], 'application/json; charset=utf-8', ['Cache-Control' => 'no-store']);
+    $headers = _stattic_http_header_map($result['headers']);
+    _stattic_response_send($result['status'], $result['body'], $headers['content-type'] ?? 'application/json; charset=utf-8', ['Cache-Control' => 'no-store']);
 }
 
 // `x-spacefast-runtime-realtime-token` is the upstream credential name emitted

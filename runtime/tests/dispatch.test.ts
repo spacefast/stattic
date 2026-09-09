@@ -10,6 +10,7 @@ import path from "node:path";
 import {
   deploy,
   dispatchCli,
+  PHP_BINARY,
   get,
   managementToken,
   publicAccessConfig,
@@ -207,38 +208,103 @@ test("management JWTs are verified identically: bad signature, wrong action, rep
     authorization: `Bearer ${replayedToken}`,
   });
   expect(first.status).toBe(200);
-  const replay = await dispatch({
-    method: "GET",
-    path: runtimeHttpPath("/__spacefast/api.php/state"),
-    authorization: `Bearer ${replayedToken}`,
+  const replay = await dispatchRaw(
+    JSON.stringify({
+      method: "GET",
+      path: runtimeHttpPath("/__spacefast/api.php/state"),
+      authorization: `Bearer ${replayedToken}`,
+    }),
+  );
+  expect(JSON.parse(replay.stdout)).toMatchObject({
+    status: 403,
+    body: { code: "runtime_jti_replayed" },
   });
-  expect(replay.status).toBe(403);
-  expect(errorCode(replay)).toBe("runtime_jti_replayed");
+  expect(replay.stderr).not.toContain("replay_guard_unavailable ");
 });
 
 test("replay-guard storage failure answers 503 retryable, never a false 403 replay", async () => {
-  // A replay verdict requires a marker on disk. When the marker write fails
-  // (disk quota, read-only mount) a fresh token must get a retryable 503 —
-  // a 403 here once masked a disk-full outage as an auth failure and blocked
-  // the rescue operations that would have freed the disk.
-  // Simulate the storage failure by occupying the jti directory path with a
-  // regular file: every marker write then fails exactly as it does on a full
-  // or read-only disk. (chmod can't simulate this — the engine re-chmods the
-  // directory writable on every request.)
+  // A real directory obstruction must retain its native cause without logging
+  // token identity or claiming that the disk is full.
+  const diagnostics = (stderr: string) => {
+    const prefix = "spacefast runtime replay_guard_unavailable ";
+    return stderr
+      .split("\n")
+      .filter((line) => line.includes(prefix))
+      .map((line) => JSON.parse(line.slice(line.indexOf(prefix) + prefix.length)));
+  };
   const jtiDir = path.join(rt.storageRoot, "runtime", "jti");
   rmSync(jtiDir, { recursive: true, force: true });
   writeFileSync(jtiDir, "not a directory");
   try {
-    const blocked = await dispatch({
-      method: "GET",
-      path: runtimeHttpPath("/__spacefast/api.php/state"),
-      authorization: `Bearer ${managementToken("read_state")}`,
+    const blocked = await dispatchRaw(
+      JSON.stringify({
+        method: "GET",
+        path: runtimeHttpPath("/__spacefast/api.php/state"),
+        authorization: `Bearer ${managementToken("read_state")}`,
+      }),
+    );
+    expect(JSON.parse(blocked.stdout)).toMatchObject({
+      status: 503,
+      body: {
+        code: "runtime_replay_guard_unavailable",
+        detail: "Runtime token replay guard storage is unavailable.",
+      },
     });
-    expect(blocked.status).toBe(503);
-    expect(errorCode(blocked)).toBe("runtime_replay_guard_unavailable");
+    expect(diagnostics(blocked.stderr)).toEqual([
+      {
+        phase: "directory",
+        operation: "mkdir",
+        reason: "File exists",
+      },
+    ]);
   } finally {
     rmSync(jtiDir, { force: true });
   }
+  // A real per-process file-size limit fails fwrite after exclusive create.
+  // The later stat check must not replace that original cause in the diagnostic.
+  // Sync capture uses regular files on Linux, which the same limit would block.
+  const limited = Bun.spawn(
+    [
+      PHP_BINARY,
+      "-r",
+      `
+    require $argv[1] . '/shared/context.php';
+    require $argv[1] . '/shared/jwt.php';
+    mkdir($argv[2] . '/runtime/jti', 0775, true);
+    $limits = posix_getrlimit();
+    $soft = $limits['soft filesize'] === 'unlimited' ? POSIX_RLIMIT_INFINITY : $limits['soft filesize'];
+    $hard = $limits['hard filesize'] === 'unlimited' ? POSIX_RLIMIT_INFINITY : $limits['hard filesize'];
+    pcntl_signal(SIGXFSZ, SIG_IGN);
+    posix_setrlimit(POSIX_RLIMIT_FSIZE, 0, $hard);
+    try {
+        $verdict = _stattic_jwt_consume_jti($argv[2], 'management', 'local-size-limit', time() + 60, time());
+    } finally {
+        posix_setrlimit(POSIX_RLIMIT_FSIZE, $soft, $hard);
+    }
+    echo $verdict;
+  `,
+      rt.engineRoot,
+      rt.storageRoot,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const [exitCode, stdout, stderr] = await Promise.all([
+    limited.exited,
+    new Response(limited.stdout).text(),
+    new Response(limited.stderr).text(),
+  ]);
+  expect({
+    exitCode,
+    failure: exitCode === 0 ? null : { stdout, stderr },
+  }).toEqual({ exitCode: 0, failure: null });
+  expect(stdout).toBe("unavailable");
+  expect(diagnostics(stderr)).toEqual([
+    {
+      phase: "claim",
+      operation: "fwrite",
+      reason: "File too large",
+    },
+  ]);
   // Writable again: the same action with a fresh token recovers.
   const recovered = await dispatch({
     method: "GET",

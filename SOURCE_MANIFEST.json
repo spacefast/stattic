@@ -1,7 +1,7 @@
 {
-  "revision": "2f0acd333e4e3d6b4f4e084dd646adb2f3cce0f7",
+  "revision": "242a312b1b460c4c74b4fd135514fedcd6b4653d",
   "sourceHash": "5e7f5e70caab15a4be560d8fad21295bd0c8e6179f7d12818568c06dd5834e35",
-  "manifestSha256": "f18159efe668ac869dd1640986453204204a284db8143b9891ea993ea8ac1623",
+  "manifestSha256": "e79bf2d18418973cfd322fc259b06bcda2b324c67a483dffe6de29598e1db810",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "9b5d1b8e68806e2ab9b5b26eeb7f4de96035f6f1ade1283ddf00fa03c716b21b"
+      "sha256": "5e609128233743d0003ef7ec8576e28a3645b2efc89ae87538ec2a766f37512b"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "487289b74d9dc0ec436e9e8a6558825ae24b660aa38675d33b7ff286a49a8b6f"
+      "sha256": "f35d1ccb1d15ed3ab4a887a474e2f7275628bcf7827fa577d6b741402eefa312"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -97,7 +97,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/content/mod.rs",
-      "sha256": "c14b09893d6cb718146315a4c73351c78a841e2254af2ffd8b87e7668ca48663"
+      "sha256": "062d43744bdd49b433d505a793245064b6cc63343a5475762b978871a92eb74f"
     },
     {
       "path": "crates/stattic-runtime-core/src/content/support.rs",
@@ -157,7 +157,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/responses.rs",
-      "sha256": "b9a02708351a77b30dee3a30213d50ac8a775bccaf9c744a1bc6ea14273e2214"
+      "sha256": "b75041f0a87e8dc1640df18729d6a86e4d407c8b080db69af3cd89e03f625618"
     },
     {
       "path": "crates/stattic-runtime-core/src/route_inventory.rs",

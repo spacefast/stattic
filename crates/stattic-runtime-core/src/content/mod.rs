@@ -1101,6 +1101,23 @@ mod tests {
     }
 
     #[test]
+    fn identical_html_sources_can_materialize_differently_by_path() {
+        let source = b"<html><head></head><body>Same</body></html>";
+        let run = run_pipeline(
+            &[("docs.html", source), ("docs/index.html", source)],
+            json!({"mode":"website"}),
+            json!({"config":{}}),
+        );
+        run.result.as_ref().unwrap();
+
+        let flat = read(&run, "docs.html");
+        let directory_index = read(&run, "docs/index.html");
+        assert_ne!(flat, directory_index);
+        assert!(flat.contains("href=\"data:image/svg+xml,"));
+        assert!(directory_index.contains("href=\"data:image/svg+xml,"));
+    }
+
+    #[test]
     fn theme_json_requires_version_three_and_links_only_committed_css() {
         let valid_theme = br##"{"version":3,"settings":{"color":{"palette":[{"slug":"accent","color":"#f00"}]},"typography":{"fontFamilies":[{"slug":"body","fontFamily":"Inter, sans-serif"}]}},"styles":{"typography":{"fontFamily":"var(--wp--preset--font-family--body)"}}}"##;
         let run = run_pipeline(

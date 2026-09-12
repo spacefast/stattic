@@ -1,7 +1,7 @@
 {
-  "revision": "a16f9a082f8bae7ca2b1fd3eebc3e98c4b0868c5",
+  "revision": "49a7b1898e3d7693c2268d4a172bc9e6c333bf72",
   "sourceHash": "5e7f5e70caab15a4be560d8fad21295bd0c8e6179f7d12818568c06dd5834e35",
-  "manifestSha256": "f61ff7088abfcd3a8254a836c8522b673e0af5ea96d7457d129c4ff016c6f6e0",
+  "manifestSha256": "a617c10e3ee525d8650355cdc528958af55da89775f38613776bd2facc5a480f",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "f6c159e5dd99b9dcad66b82fbbce6e1dde5e913a36ace878f130ca8734e0f008"
+      "sha256": "fc02fab31ad13f13343cef7006e0db20c832ed03af832ec76faaabdec9a35b98"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "c06823c0f9795c3cbe3d1efb8162c0a8c10cc0bf930774f87aea84b28c550fae"
+      "sha256": "43dfcb8d08f5a1395d4466ac764d2e302c85a1a35b410bc870a20af56a2c4c5f"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -350,6 +350,10 @@
     {
       "path": "runtime/browser-specs/run.ts",
       "sha256": "34f078844a2fda367a42bb8b8fabe240215e8ee70f095af428c0d9cea133cf3f"
+    },
+    {
+      "path": "runtime/bunfig.toml",
+      "sha256": "e18821f0ef5b98947c02cdbc2ff90021f4cf82241fe336dac8c63d5ac14fc122"
     },
     {
       "path": "runtime/custom-redirects.php",
@@ -780,6 +784,10 @@
       "sha256": "a631c91b2f4c67a0408c6617110efbbb51fc3d4902bc02f6a51c35f70373a944"
     },
     {
+      "path": "runtime/tests/blocks-engine-cache.test.ts",
+      "sha256": "ed07121c84b4b17792c284b342cc7342474855c187b7f45777b06f223aa05ad5"
+    },
+    {
       "path": "runtime/tests/bootstrap-plugin.test.ts",
       "sha256": "d2b78ae5813e09113c9349a5292e3c8ec854ee6bf2c5e04ed6957dfd5fac6e74"
     },
@@ -877,7 +885,7 @@
     },
     {
       "path": "runtime/tests/engine-manifest-drift.test.ts",
-      "sha256": "277d36c283ec0cb639b0e4b0b3360e0ea24fa6cba6486b10815e7237adff97f6"
+      "sha256": "d1c3c9a902c2aced0d44f764bf491bce05fb97e376c2202eb99dcf0a1a7db444"
     },
     {
       "path": "runtime/tests/engine-update-route.test.ts",
@@ -989,7 +997,7 @@
     },
     {
       "path": "runtime/tests/run.sh",
-      "sha256": "ea9ed5793ccd58a7ae2ee2e838d72a7b7d3bbfe4766c797bac1a4559863512a5"
+      "sha256": "522166d464fe5481a2396287e141f5c8a6cf263b62daa108c85927355128b034"
     },
     {
       "path": "runtime/tests/s3-cli.php",

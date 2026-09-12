@@ -56,10 +56,18 @@ if [[ -n "${SPACEFAST_BUN_COVERAGE_DIR:-}" ]]; then
   test_args+=(
     --coverage
     --coverage-reporter=lcov
-    "--coverage-dir=$SPACEFAST_BUN_COVERAGE_DIR"
   )
 fi
+workers="${SPACEFAST_RUNTIME_TEST_WORKER_COUNT:-1}"
+[[ "$workers" =~ ^[1-8]$ ]] || {
+  echo "invalid SPACEFAST_RUNTIME_TEST_WORKER_COUNT: $workers" >&2
+  exit 2
+}
 if [[ -n "${SPACEFAST_RUNTIME_TEST_SHARD:-}" ]]; then
+  [[ "$workers" = 1 ]] || {
+    echo "SPACEFAST_RUNTIME_TEST_SHARD requires one worker" >&2
+    exit 2
+  }
   [[ "$SPACEFAST_RUNTIME_TEST_SHARD" =~ ^[1-9][0-9]*/[1-9][0-9]*$ ]] || {
     echo "invalid SPACEFAST_RUNTIME_TEST_SHARD: $SPACEFAST_RUNTIME_TEST_SHARD" >&2
     exit 2
@@ -67,4 +75,35 @@ if [[ -n "${SPACEFAST_RUNTIME_TEST_SHARD:-}" ]]; then
   test_args+=("--shard=$SPACEFAST_RUNTIME_TEST_SHARD")
 fi
 test_args+=(tests --timeout 30000)
-exec bun "${test_args[@]}"
+if [[ "$workers" = 1 ]]; then
+  if [[ -n "${SPACEFAST_BUN_COVERAGE_DIR:-}" ]]; then
+    test_args+=("--coverage-dir=$SPACEFAST_BUN_COVERAGE_DIR")
+  fi
+  exec bun "${test_args[@]}"
+fi
+
+# Lint, PHP units and the instrumented compiler build run once. Independent
+# Bun processes divide the files and release their application state on exit.
+pids=()
+reports=()
+for ((worker = 1; worker <= workers; worker++)); do
+  worker_args=("${test_args[@]}" "--shard=$worker/$workers")
+  if [[ -n "${SPACEFAST_BUN_COVERAGE_DIR:-}" ]]; then
+    worker_coverage="$SPACEFAST_BUN_COVERAGE_DIR/shard-$worker"
+    mkdir -p "$worker_coverage"
+    worker_args+=("--coverage-dir=$worker_coverage")
+    reports+=("$worker_coverage/lcov.info")
+  fi
+  bun "${worker_args[@]}" &
+  pids+=("$!")
+done
+status=0
+for pid in "${pids[@]}"; do
+  wait "$pid" || status=1
+done
+if [[ "${#reports[@]}" -gt 0 ]]; then
+  for report in "${reports[@]}"; do test -s "$report" || status=1; done
+  cat "${reports[@]}" > "$SPACEFAST_BUN_COVERAGE_DIR/lcov.info"
+  rm -- "${reports[@]}"
+fi
+exit "$status"

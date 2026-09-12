@@ -1,0 +1,3 @@
+[test]
+# Keep dependency bundles and declaration output out of source coverage.
+coveragePathIgnorePatterns = ["**/node_modules/**", "**/dist/**", "**/dist-types/**"]

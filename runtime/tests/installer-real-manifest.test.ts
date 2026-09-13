@@ -157,6 +157,10 @@ async function installFromShippedManifest(
     stderr: "pipe",
     env: {
       ...process.env,
+      SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID: "installer-test-instance",
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE: "initial",
+      SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: crypto.randomUUID(),
       SPACEFAST_RUNTIME_ENGINE_MD5: md5,
       SPACEFAST_RUNTIME_ENGINE_REVISION: revision,
       SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256: nativeSha256,

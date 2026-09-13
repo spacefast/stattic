@@ -1403,7 +1403,9 @@ function _stattic_runtime_route_shard_gc(string $privateRoot): int
 }
 
 // Every capability the publish path recognizes, with the grant applied when the
-// descriptor omits it. The write-side authorities default closed: a `read`
+// descriptor omits it. `fetch` is open to every handler kind — where a request
+// may reach is the space's egress scope at request time, not a per-version
+// declaration. The remaining write-side authorities default closed: a `read`
 // handler may not carry one, so an open default would compile an artifact the
 // runner refuses on every request.
 // Mirrors ZeroCapabilities in stattic-runtime-core's model.rs, key for key
@@ -1412,7 +1414,7 @@ function _stattic_runtime_route_shard_gc(string $privateRoot): int
 // drift between the two lists silently strips grants from every artifact.
 const STATTIC_RUNTIME_ZERO_CAPABILITIES = [
     'db' => true,
-    'fetch' => false,
+    'fetch' => true,
     'auth' => true,
     'env' => true,
     'realtime' => false,
@@ -1824,7 +1826,7 @@ function _stattic_runtime_proxy_upstream_public(string $upstream): bool
     // and pins curl to it.
     return in_array($scheme, ['http', 'https'], true)
         && $host !== ''
-        && _stattic_egress_host_allowed($host, $port)
+        && _stattic_egress_host_allowed($host, $port, STATTIC_EGRESS_SCOPE_OPEN)
         && !isset($parts['user'])
         && !isset($parts['pass']);
 }
@@ -1859,15 +1861,13 @@ function _stattic_runtime_zero_compiler_entries(array $input, string $snakeIdKey
         if (!array_key_exists('executionMode', $entry)) {
             // Capsules built before the execution law declare no mode. Derive
             // it, sharing the one rule the serve path applies to the same
-            // capsule: a legacy run keeps write, what every run could do before
-            // the split. The runner still cross-checks the declared mode
-            // against the invoked operation at serve time and refuses on
-            // disagreement, so this default can never widen what a request may
-            // actually do.
-            $entry['executionMode'] = _stattic_zero_derived_execution_mode(
-                $camelIdKey === 'endpointId' ? 'endpoint' : 'run',
-                (string) ($entry['method'] ?? '')
-            );
+            // capsule: an endpoint from its HTTP method, a run from the
+            // operation its id names. The engine forwards this stamped mode on
+            // every invocation and the runner refuses an envelope that disagrees
+            // with the artifact, so the default is the lane, not a widening.
+            $entry['executionMode'] = $camelIdKey === 'endpointId'
+                ? _stattic_zero_derived_endpoint_execution_mode((string) ($entry['method'] ?? ''))
+                : _stattic_zero_derived_run_execution_mode((string) ($entry[$camelIdKey] ?? ''));
         }
         $entry['capabilities'] = _stattic_runtime_zero_endpoint_capabilities($entry['capabilities'] ?? []);
         unset($entry[$snakeIdKey], $entry['schema_hash'], $entry['execution_mode']);
@@ -1947,7 +1947,7 @@ function _stattic_runtime_redirect_target_safe(string $destination, string $acti
         // passes; the authoritative SSRF enforcement is request-time in
         // runtime/proxy.php (_stattic_egress_resolve_public_ips). Not a
         // complete safety check on its own.
-        if (!_stattic_egress_host_allowed($host, $port)) {
+        if (!_stattic_egress_host_allowed($host, $port, STATTIC_EGRESS_SCOPE_OPEN)) {
             $failureDetails = ['path' => $path, 'host' => $host, 'reason' => 'proxy_host_not_allowed'];
             return false;
         }

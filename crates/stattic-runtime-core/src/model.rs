@@ -111,6 +111,10 @@ pub struct FinalizeTelemetry {
 pub enum ZeroExecutionMode {
     Read,
     Write,
+    /// Reads the database outside any invocation transaction, reaches the
+    /// network, and emits effects on success. What a handler that talks to the
+    /// outside world needs, without holding a write transaction open across it.
+    Action,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -182,10 +186,12 @@ pub enum PhpActionRecord {
 pub struct ZeroCapabilities {
     #[serde(default = "default_true")]
     pub db: bool,
-    // The write-side authorities default closed, so an omitted field can never
-    // hand a `read` handler a grant its execution mode forbids. Publishing one
-    // would compile an artifact the runner rejects on every request.
-    #[serde(default)]
+    // Outbound fetch is a global in every handler kind, on both tiers: what a
+    // request may reach is decided by the space's egress scope at request time,
+    // not by a per-version declaration. The remaining write-side authorities
+    // still default closed, so an omitted field cannot hand a `read` handler a
+    // grant its execution mode forbids.
+    #[serde(default = "default_true")]
     pub fetch: bool,
     #[serde(default = "default_true")]
     pub auth: bool,
@@ -213,7 +219,7 @@ impl Default for ZeroCapabilities {
     fn default() -> Self {
         Self {
             db: true,
-            fetch: false,
+            fetch: true,
             auth: true,
             env: true,
             realtime: false,

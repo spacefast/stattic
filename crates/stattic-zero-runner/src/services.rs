@@ -120,6 +120,14 @@ pub(crate) fn set_zero_execution_mode(mode: Option<ExecutionMode>) {
     ZERO_EXECUTION_MODE.with(|state| *state.borrow_mut() = mode);
 }
 
+/// The mode the invocation on this thread is running under, for the brokers
+/// that answer differently per mode: the database broker refuses a write under
+/// `Action`, and the fetch broker spends a shorter budget under `Write`, where
+/// the call is holding an open transaction. `None` outside an invocation.
+pub(crate) fn zero_execution_mode() -> Option<ExecutionMode> {
+    ZERO_EXECUTION_MODE.with(|state| *state.borrow())
+}
+
 fn grant() -> ServiceGrant {
     SERVICE_GRANT.with(|state| *state.borrow())
 }
@@ -219,11 +227,7 @@ fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
             ),
         ));
     }
-    let read_only = ZERO_EXECUTION_MODE.with(|state| {
-        state
-            .borrow()
-            .is_some_and(|mode| mode == ExecutionMode::Read)
-    });
+    let read_only = zero_execution_mode().is_some_and(|mode| mode == ExecutionMode::Read);
     if read_only
         && matches!(
             (frame.service.as_str(), frame.operation.as_str()),

@@ -819,7 +819,7 @@ function _stattic_runtime_assert_fetch_url(string $url): array
         _stattic_problem_response(422, 'upload_source_url_invalid', 'URL uploads require an absolute HTTPS URL without credentials.');
     }
     $port = (int) ($parts['port'] ?? 443);
-    if ($port < 1 || $port > 65535 || !_stattic_egress_host_allowed($host, $port)) {
+    if ($port < 1 || $port > 65535 || !_stattic_egress_host_allowed($host, $port, STATTIC_EGRESS_SCOPE_OPEN)) {
         _stattic_problem_response(422, 'upload_source_url_forbidden', 'URL upload host is not allowed.');
     }
     $ips = _stattic_egress_resolve_public_ips($host, $port);

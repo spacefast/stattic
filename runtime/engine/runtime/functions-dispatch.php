@@ -27,9 +27,10 @@ const SPACEFAST_FUNCTIONS_DISPATCH_HEADER_PREFIX = 'sf-fx-';
 const STATTIC_FUNCTIONS_DISPATCH_TIMEOUT_SECONDS = 30;
 const STATTIC_FUNCTIONS_DISPATCH_CONNECT_TIMEOUT_SECONDS = 5;
 
-// Storage, database and platform services transit the relay. The Next cache and
-// tenant fetch live with the worker, and log delivery degrades on its own.
-const STATTIC_FUNCTIONS_RELAY_FREE_CAPABILITIES = ['fetch', 'log', 'next.cache'];
+// Storage, database and platform services transit the relay. The Next cache
+// lives with the worker, and log delivery degrades on its own. Tenant fetch is
+// not a capability at all: every worker has it, bounded by `sf-fx-egress`.
+const STATTIC_FUNCTIONS_RELAY_FREE_CAPABILITIES = ['log', 'next.cache'];
 
 // Compiled beside the version's file tree, never inside it, like the config.
 // The non-terminal reader lets the static lane tell verified absence from a
@@ -212,7 +213,8 @@ function _stattic_functions_dispatch_headers(
     string $versionId,
     string $requestId,
     string $dispatchToken,
-    string $originBaseUrl
+    string $originBaseUrl,
+    string $egressScope
 ): array {
     $host = $config['host'];
     $artifact = $config['artifact'];
@@ -256,6 +258,10 @@ function _stattic_functions_dispatch_headers(
         'sf-fx-version' => $versionId,
         'sf-fx-request' => $requestId,
         'sf-fx-dispatch-token' => $dispatchToken,
+        // How far the worker's outbound fetch may reach. Origin-decided, like
+        // the grant: the host reads it and never infers it. Stripped inbound by
+        // the `sf-fx-` prefix rule below, so a visitor cannot send their own.
+        'sf-fx-egress' => $egressScope,
         // Base64 so a value containing a newline cannot inject a header.
         'sf-fx-env' => base64_encode($encodedVariableValues),
     ];
@@ -419,7 +425,8 @@ function _stattic_functions_dispatch(
         $versionId,
         $requestId,
         $dispatchToken,
-        'https://' . $requestHost
+        'https://' . $requestHost,
+        _stattic_egress_scope($serving)
     ) as $name => $value) {
         $headers[$name] = $value;
     }

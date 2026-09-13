@@ -213,9 +213,20 @@ function readVisitor(publicRoot: string): { context: string; module: string } {
   ) as { context: string; module: string };
 }
 
+function publicationNonce(publicRoot: string): string {
+  const proofPath = path.join(installRootOf(publicRoot), "active-release-proof.json");
+  if (!existsSync(proofPath)) return "initial";
+  const raw = readFileSync(proofPath, "utf8");
+  const proof = JSON.parse(raw);
+  return proof.publication?.nonce ?? createHash("sha256").update(raw).digest("hex");
+}
+
 async function runInstaller(
   fixture: UpdateFixture,
   options?: {
+    runtimeInstanceId?: string;
+    expectedNonce?: string;
+    commandId?: string;
     zipUrl?: string;
     md5?: string;
     nativeSha256?: string;
@@ -239,6 +250,12 @@ async function runInstaller(
     stderr: "pipe",
     env: {
       ...process.env,
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE:
+        options?.expectedNonce ?? publicationNonce(options?.publicRoot ?? fixture.publicRoot),
+      SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: options?.commandId ?? crypto.randomUUID(),
+      SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID:
+        options?.runtimeInstanceId ?? "installer-test-instance",
       SPACEFAST_RUNTIME_ENGINE_MD5: options?.md5 ?? fixture.md5,
       SPACEFAST_RUNTIME_ENGINE_REVISION: fixture.revision,
       SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256: options?.nativeSha256 ?? "",
@@ -411,6 +428,10 @@ echo "embedded-returned\\n";
     stderr: "pipe",
     env: {
       ...process.env,
+      SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID: "installer-test-instance",
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE: publicationNonce(fixture.publicRoot),
+      SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: crypto.randomUUID(),
       SPACEFAST_RUNTIME_ENGINE_MD5: fixture.md5,
       SPACEFAST_RUNTIME_ENGINE_REVISION: fixture.revision,
       SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256: fixture.nativeSha256,
@@ -915,12 +936,18 @@ test("a hard-killed publication stays gated until a retry fully converges", asyn
     publicRoot: old.publicRoot,
   });
   const pauseFile = path.join(next.root, "publication-paused");
+  const expectedNonce = publicationNonce(old.publicRoot);
+  const commandId = crypto.randomUUID();
   const child = Bun.spawn({
     cmd: ["php", "-d", "auto_prepend_file=", next.installerPath, next.zipUrl],
     stdout: "pipe",
     stderr: "pipe",
     env: {
       ...process.env,
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE: expectedNonce,
+      SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: commandId,
+      SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID: "installer-test-instance",
       SPACEFAST_RUNTIME_ENGINE_MD5: next.md5,
       SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256: next.nativeSha256,
       SPACEFAST_RUNTIME_ENGINE_REVISION: next.revision,
@@ -928,11 +955,13 @@ test("a hard-killed publication stays gated until a retry fully converges", asyn
       SPACEFAST_RUNTIME_INSTALLER_TEST_PAUSE_FILE: pauseFile,
     },
   });
-  const stdout = new Response(child.stdout).text();
+  const stdout = child.stdout.getReader().read();
   const stderr = new Response(child.stderr).text();
-  const pauseDeadline = Date.now() + 5_000;
-  while (!existsSync(pauseFile) && Date.now() < pauseDeadline) {
-    await Bun.sleep(10);
+  try {
+    const signal = await stdout;
+    expect(new TextDecoder().decode(signal.value)).toBe("runtime_engine_test_paused\n");
+  } finally {
+    child.kill(9);
   }
   expect(existsSync(pauseFile)).toBe(true);
   child.kill(9);
@@ -958,7 +987,11 @@ test("a hard-killed publication stays gated until a retry fully converges", asyn
     status: 503,
   });
 
+  const reservedNonce = publicationNonce(old.publicRoot);
+  expect(reservedNonce).not.toBe(expectedNonce);
   const failedRetry = await runInstaller(next, {
+    expectedNonce,
+    commandId,
     failurePhase: "post_publication_check",
     nativeSha256: next.nativeSha256,
   });
@@ -974,7 +1007,12 @@ test("a hard-killed publication stays gated until a retry fully converges", asyn
     status: 503,
   });
 
-  const repaired = await runInstaller(next, { nativeSha256: next.nativeSha256 });
+  const repaired = await runInstaller(next, {
+    expectedNonce,
+    commandId,
+    nativeSha256: next.nativeSha256,
+  });
+  expect(publicationNonce(old.publicRoot)).toBe(reservedNonce);
   expect(repaired.exitCode, repaired.stderr).toBe(0);
   expect(readVisitor(old.publicRoot)).toEqual({ context: next.revision, module: next.revision });
   expect(existsSync(transaction)).toBe(false);
@@ -1107,3 +1145,92 @@ test("serves only complete old or new revisions while the real installer flips t
     await php.exited;
   }
 }, 20_000);
+
+test("publication ownership rejects late commands after rollback and retries the same command", async () => {
+  const a = await startUpdateFixture({ revision: "a".repeat(40), visitorEngine: true });
+  const first = await runInstaller(a, { nativeSha256: a.nativeSha256 });
+  expect(first.exitCode).toBe(0);
+  const originalNonce = publicationNonce(a.publicRoot);
+  const readProof = (identity: string) =>
+    Bun.spawnSync({
+      cmd: ["php", "-d", "auto_prepend_file=", a.installerPath, "--proof"],
+      cwd: a.publicRoot,
+      stdin: new TextEncoder().encode(JSON.stringify({ runtime_instance_id: identity })),
+      env: { ...process.env, SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance" },
+    });
+  const unboundEnvironment = { ...process.env };
+  delete unboundEnvironment.SPACEFAST_RUNTIME_INSTANCE_ID;
+  const noIdentityProof = Bun.spawnSync({
+    cmd: ["php", "-d", "auto_prepend_file=", a.installerPath, "--proof"],
+    cwd: a.publicRoot,
+    stdin: new TextEncoder().encode(
+      JSON.stringify({ runtime_instance_id: "installer-test-instance" }),
+    ),
+    env: unboundEnvironment,
+  });
+  expect(noIdentityProof.exitCode).toBe(1);
+  expect(noIdentityProof.stderr.toString()).toContain("runtime_engine_proof_instance_missing");
+  const boundProof = readProof("installer-test-instance");
+  expect(boundProof.exitCode).toBe(0);
+  expect(JSON.parse(boundProof.stdout.toString())).toMatchObject({
+    nonce: originalNonce,
+    runtime_instance_id: "installer-test-instance",
+    in_progress: false,
+  });
+  const foreignProof = readProof("another-instance");
+  expect(foreignProof.exitCode).toBe(1);
+  expect(foreignProof.stderr.toString()).toContain("runtime_engine_proof_instance_mismatch");
+  const foreignInstall = await runInstaller(a, {
+    runtimeInstanceId: "another-instance",
+    nativeSha256: a.nativeSha256,
+  });
+  expect(foreignInstall.exitCode).toBe(1);
+  expect(publicationNonce(a.publicRoot)).toBe(originalNonce);
+
+  const b = await startUpdateFixture({
+    revision: "b".repeat(40),
+    publicRoot: a.publicRoot,
+    visitorEngine: true,
+  });
+  const commandId = crypto.randomUUID();
+  const failure = await runInstaller(b, {
+    expectedNonce: originalNonce,
+    commandId,
+    nativeSha256: b.nativeSha256,
+    failurePhase: "post_publication_check",
+  });
+  expect(failure.exitCode).toBe(1);
+  expect(publicationNonce(a.publicRoot)).not.toBe(originalNonce);
+  const repaired = await runInstaller(b, {
+    expectedNonce: originalNonce,
+    commandId,
+    nativeSha256: b.nativeSha256,
+  });
+  expect(repaired.exitCode).toBe(0);
+  const repairedNonce = publicationNonce(a.publicRoot);
+  const retry = await runInstaller(b, {
+    expectedNonce: originalNonce,
+    commandId,
+    nativeSha256: b.nativeSha256,
+  });
+  expect(retry.exitCode).toBe(0);
+  expect(publicationNonce(a.publicRoot)).toBe(repairedNonce);
+  const changed = await runInstaller(a, {
+    expectedNonce: originalNonce,
+    commandId,
+    nativeSha256: a.nativeSha256,
+  });
+  expect(changed.exitCode).toBe(1);
+  expect(changed.stderr).toContain("runtime_engine_publication_command_conflict");
+  const rollback = await runInstaller(a, { nativeSha256: a.nativeSha256 });
+  expect(rollback.exitCode).toBe(0);
+  expect(publicationNonce(a.publicRoot)).not.toBe(originalNonce);
+  const late = await runInstaller(b, {
+    expectedNonce: originalNonce,
+    commandId: crypto.randomUUID(),
+    nativeSha256: b.nativeSha256,
+  });
+  expect(late.exitCode).toBe(1);
+  expect(late.stderr).toContain("runtime_engine_publication_conflict");
+  expect(readVisitor(a.publicRoot)).toEqual({ context: "a".repeat(40), module: "a".repeat(40) });
+});

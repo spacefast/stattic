@@ -5,4 +5,5 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 url.workspace = true

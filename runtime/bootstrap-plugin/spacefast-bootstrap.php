@@ -278,6 +278,9 @@ function spacefast_bootstrap_run_installer(array $spec): array
     }
     putenv('SPACEFAST_RUNTIME_ENGINE_MD5=' . strtolower($spec['md5']));
     putenv('SPACEFAST_RUNTIME_ENGINE_REVISION=' . $spec['revision']);
+    putenv('SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE=' . ($spec['expected_nonce'] ?? ''));
+    putenv('SPACEFAST_RUNTIME_ENGINE_COMMAND_ID=' . ($spec['command_id'] ?? ''));
+    putenv('SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID=' . ($spec['runtime_instance_id'] ?? ''));
     if (($spec['native_sha256'] ?? '') !== '') {
         putenv('SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256=' . strtolower($spec['native_sha256']));
     }
@@ -457,8 +460,17 @@ if (defined('WP_CLI') && WP_CLI && class_exists('WP_CLI')) {
          * <revision>
          * : Engine revision being installed.
          *
-         * [<native-sha256>]
+         * <native-sha256>
          * : Expected sha256 of the native binary.
+         *
+         * <expected-nonce>
+         * : Publication nonce read before choosing the desired release.
+         *
+         * <command-id>
+         * : Stable identity for this publication attempt.
+         *
+         * <runtime-instance-id>
+         * : Expected physical runtime identity.
          */
         public function install(array $args): void
         {
@@ -467,11 +479,15 @@ if (defined('WP_CLI') && WP_CLI && class_exists('WP_CLI')) {
                 'md5' => strtolower($args[1] ?? ''),
                 'revision' => $args[2] ?? '',
                 'native_sha256' => strtolower($args[3] ?? ''),
+                'expected_nonce' => $args[4] ?? '',
+                'command_id' => $args[5] ?? '',
+                'runtime_instance_id' => $args[6] ?? '',
             ];
             if (
                 !str_starts_with($spec['zip_url'], 'http') ||
                 !preg_match('/^[a-f0-9]{32}$/', $spec['md5']) ||
-                $spec['revision'] === ''
+                $spec['revision'] === '' ||
+                $spec['expected_nonce'] === '' || $spec['command_id'] === '' || $spec['runtime_instance_id'] === ''
             ) {
                 WP_CLI::error('install_spec_invalid');
             }

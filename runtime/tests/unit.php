@@ -135,8 +135,62 @@ foreach ([
     check(!_stattic_egress_host_allowed($host), "egress denies host: {$host}");
 }
 foreach (['example.com', 'api.github.com', 'my-static.example.net'] as $host) {
-    check(_stattic_egress_host_allowed($host), "egress allows host: {$host}");
+    check(_stattic_egress_host_allowed($host, null, STATTIC_EGRESS_SCOPE_OPEN), "egress allows host: {$host}");
 }
+// The scope parameter fails closed: a caller that names none gets the trusted
+// list, never the open web.
+check(_stattic_egress_host_allowed('api.github.com'), 'egress default scope admits a trusted host');
+check(!_stattic_egress_host_allowed('example.com'), 'egress default scope is trusted, not open');
+
+// --- Egress scope: who owns the Space decides how far it reaches --------------------
+
+check(
+    _stattic_egress_scope(['space_claimed' => true]) === 'open',
+    'egress scope: a claimed Space reaches any public host'
+);
+foreach ([[], ['space_claimed' => false], ['space_claimed' => 'yes']] as $serving) {
+    check(
+        _stattic_egress_scope($serving) === 'trusted',
+        'egress scope: anything but a claimed Space is trusted'
+    );
+}
+// The trusted list narrows what survives the denylist; it never widens it.
+check(
+    !_stattic_egress_host_allowed('example.com', 443, 'trusted'),
+    'egress scope: an unclaimed Space cannot reach an arbitrary public host'
+);
+check(
+    _stattic_egress_host_allowed('API.GitHub.com', 443, 'trusted'),
+    'egress scope: the trusted list matches exactly, case-insensitively'
+);
+check(
+    !_stattic_egress_host_allowed('evil.api.github.com', 443, 'trusted'),
+    'egress scope: the trusted list carries no wildcards'
+);
+check(
+    !_stattic_egress_host_allowed('8.8.8.8', 443, 'trusted'),
+    'egress scope: a public IP literal names no trusted host'
+);
+foreach (['127.0.0.1', 'site.view.fast', 'localhost'] as $denied) {
+    check(
+        !_stattic_egress_host_allowed($denied, 443, 'open')
+            && !_stattic_egress_host_allowed($denied, 443, 'trusted'),
+        "egress scope: the denylist is one policy under both scopes: {$denied}"
+    );
+}
+// The test escape is how the suites reach a local fake upstream, and it must
+// keep working for an unclaimed Space too.
+putenv('SPACEFAST_EGRESS_TEST_ALLOWLIST=fake.upstream.test:8099');
+check(
+    _stattic_egress_host_allowed('fake.upstream.test', 8099, 'trusted')
+        && _stattic_egress_host_allowed('fake.upstream.test', 8099, 'open'),
+    'egress scope: the test allowlist escapes both scopes'
+);
+check(
+    !_stattic_egress_host_allowed('other.upstream.test', 8099, 'trusted'),
+    'egress scope: a non-matching target still faces the whole policy'
+);
+putenv('SPACEFAST_EGRESS_TEST_ALLOWLIST');
 
 // --- Proxy egress policy: IPv4 ------------------------------------------------------
 
@@ -1881,11 +1935,17 @@ $fxConfig = [
 // The dispatch credential is opaque here: a per-box JWT the control plane
 // minted. Serving forwards it verbatim, so the fixture is a shape, not a secret.
 $fxDispatchToken = 'eyJhbGciOiJFZERTQSJ9.eyJhdWQiOiJzcGFjZWZhc3QtZnVuY3Rpb25zLWRpc3BhdGNoIn0.c2ln';
-$fxHeaders = _stattic_functions_dispatch_headers($fxConfig, 'spc_1', 'ver_1', 'fxr_abc', $fxDispatchToken, 'https://shop.example');
+$fxHeaders = _stattic_functions_dispatch_headers($fxConfig, 'spc_1', 'ver_1', 'fxr_abc', $fxDispatchToken, 'https://shop.example', 'open');
 check($fxHeaders['sf-fx-bundle'] === 'https://shop.example/b/x/t/bundle.json', 'dispatch: carries the signed bundle URL');
 check($fxHeaders['sf-fx-main'] === 'index.js', 'dispatch: carries the entry module');
 check($fxHeaders['sf-fx-caps'] === 'db.read,db.write', 'dispatch: carries the grant the control plane decided');
 check($fxHeaders['sf-fx-relay-token'] === 'relay-tok', 'dispatch: carries the relay credential');
+// Egress scope is the origin's to decide and the host's to obey.
+check($fxHeaders['sf-fx-egress'] === 'open', 'dispatch: carries the egress scope the origin derived');
+check(
+    _stattic_functions_dispatch_headers($fxConfig, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example', 'trusted')['sf-fx-egress'] === 'trusted',
+    'dispatch: an unclaimed Space dispatches the trusted scope'
+);
 check($fxHeaders['sf-fx-dispatch-token'] === $fxDispatchToken, 'dispatch: forwards this box\'s own dispatch credential unaltered');
 // A blank flag entry would be rejected by the runtime.
 check($fxHeaders['sf-fx-compat-flags'] === 'nodejs_compat', 'dispatch: drops empty compatibility flags');
@@ -1905,26 +1965,26 @@ check($fxHeaders['sf-fx-purge-token'] === 'purge-tok', 'dispatch: purge carries 
 check(!isset($fxHeaders['sf-fx-seed']), 'dispatch: no seed URL when finalize minted none');
 $fxSeed = $fxConfig;
 $fxSeed['host']['seedUrl'] = 'https://shop.example/__spacefast/functions/b/y/t/seed.json';
-$fxSeedHeaders = _stattic_functions_dispatch_headers($fxSeed, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example');
+$fxSeedHeaders = _stattic_functions_dispatch_headers($fxSeed, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example', 'open');
 check(
     $fxSeedHeaders['sf-fx-seed'] === 'https://shop.example/__spacefast/functions/b/y/t/seed.json',
     'dispatch: carries the signed cache seed URL when the version has one'
 );
 $fxBlankSeed = $fxConfig;
 $fxBlankSeed['host']['seedUrl'] = '';
-$fxBlankSeedHeaders = _stattic_functions_dispatch_headers($fxBlankSeed, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example');
+$fxBlankSeedHeaders = _stattic_functions_dispatch_headers($fxBlankSeed, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example', 'open');
 check(!isset($fxBlankSeedHeaders['sf-fx-seed']), 'dispatch: a blank seed URL is no seed, not an empty header');
 
 $fxEmptyEnv = $fxConfig;
 $fxEmptyEnv['variableValues'] = [];
-$fxEmptyEnvHeaders = _stattic_functions_dispatch_headers($fxEmptyEnv, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example');
+$fxEmptyEnvHeaders = _stattic_functions_dispatch_headers($fxEmptyEnv, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example', 'open');
 check(base64_decode($fxEmptyEnvHeaders['sf-fx-env']) === '{}', 'dispatch: an empty environment remains a JSON object');
 
 // A grant without a relay to serve it is dropped here, not discovered inside
 // tenant code.
 $fxNoRelay = $fxConfig;
 $fxNoRelay['relay'] = null;
-$fxHeadersNoRelay = _stattic_functions_dispatch_headers($fxNoRelay, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example');
+$fxHeadersNoRelay = _stattic_functions_dispatch_headers($fxNoRelay, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example', 'open');
 check($fxHeadersNoRelay['sf-fx-caps'] === '', 'dispatch: database capabilities without a relay are not granted');
 check(!isset($fxHeadersNoRelay['sf-fx-relay']), 'dispatch: no relay URL when there is no relay');
 check(!isset($fxHeadersNoRelay['sf-fx-log']), 'dispatch: no log channel without the credential that authorizes it');
@@ -1939,13 +1999,13 @@ check($fxHeadersNoRelay['sf-fx-purge-token'] === 'purge-tok', 'dispatch: purge s
 // just wait out the CDN's own TTL.
 $fxNoPurge = $fxConfig;
 unset($fxNoPurge['purge']);
-$fxHeadersNoPurge = _stattic_functions_dispatch_headers($fxNoPurge, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example');
+$fxHeadersNoPurge = _stattic_functions_dispatch_headers($fxNoPurge, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example', 'open');
 check(!isset($fxHeadersNoPurge['sf-fx-purge']) && !isset($fxHeadersNoPurge['sf-fx-purge-token']), 'dispatch: no purge channel without a minted credential');
 
 // A config predating usage reporting must still dispatch, uncounted.
 $fxNoUsage = $fxConfig;
 unset($fxNoUsage['usage']);
-$fxHeadersNoUsage = _stattic_functions_dispatch_headers($fxNoUsage, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example');
+$fxHeadersNoUsage = _stattic_functions_dispatch_headers($fxNoUsage, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example', 'open');
 check(!isset($fxHeadersNoUsage['sf-fx-usage']), 'dispatch: no usage intake without one configured');
 check($fxHeadersNoUsage['sf-fx-bundle'] === 'https://shop.example/b/x/t/bundle.json', 'dispatch: a config without usage still dispatches');
 
@@ -2079,6 +2139,7 @@ stage_inbound_headers([
     'Authorization' => 'Bearer tenant-api-key',
     'X-Sf-Authorization' => 'Bearer platform-secret',
     'Sf-Fx-Caps' => 'db.write',
+    'Sf-Fx-Egress' => 'open',
     'Spacefast-Access-Sub' => 'user:forged',
     'Accept-Encoding' => 'gzip',
     'Host' => 'shop.example',
@@ -2090,7 +2151,7 @@ foreach (_stattic_relay_request_headers(_stattic_functions_relay_request_lane())
 }
 check($fxForwarded['authorization'] === 'Bearer tenant-api-key', 'dispatch: Authorization reaches the customer application unchanged');
 check($fxForwarded['content-type'] === 'application/json', 'dispatch: ordinary request headers forward');
-foreach (['x-sf-authorization', 'sf-fx-caps', 'spacefast-access-sub', 'accept-encoding', 'host'] as $denied) {
+foreach (['x-sf-authorization', 'sf-fx-caps', 'sf-fx-egress', 'spacefast-access-sub', 'accept-encoding', 'host'] as $denied) {
     check(!isset($fxForwarded[$denied]), 'dispatch: refuses to forward inbound ' . $denied);
 }
 stage_inbound_headers([

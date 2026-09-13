@@ -124,17 +124,46 @@ function _stattic_runtime_tombstone_route_action_valid(mixed $action): bool
 }
 
 /**
- * The execution mode a route or artifact from before the execution law never
- * declared. `admin/generate.php` stamps exactly this derivation onto an entry
- * that arrives without one, and a run keeps `write` — everything a run could do
- * before the split. The serve path applies the same rule, because a capsule
+ * The execution mode an endpoint from before the execution law never declared.
+ * `admin/generate.php` stamps exactly this derivation onto an entry that
+ * arrives without one. The serve path applies the same rule, because a capsule
  * published before the law is immutable and both paths read the same bytes.
  */
-function _stattic_zero_derived_execution_mode(string $kind, string $method): string
+function _stattic_zero_derived_endpoint_execution_mode(string $method): string
 {
-    return $kind === 'endpoint' && in_array(strtoupper($method), ['GET', 'HEAD', 'OPTIONS'], true)
-        ? 'read'
-        : 'write';
+    return in_array(strtoupper($method), ['GET', 'HEAD', 'OPTIONS'], true) ? 'read' : 'write';
+}
+
+/**
+ * The execution lanes a run id is allowed to declare.
+ *
+ * A run's operation and its lane are one fact named twice: the client sends
+ * `query.run`, `query.subscribe`, `mutation.run` or `action.run`, and the
+ * engine derives the run id from that operation. A query is a read-only
+ * snapshot; a mutation is the write transaction the cookie mutation gate
+ * guards; an action owns no transaction — or, for a capsule published before
+ * the split, the write lane every run used to share. An id with none of those
+ * prefixes is undispatchable and gets no lane at all.
+ */
+function _stattic_zero_run_execution_modes(string $runId): array
+{
+    return match (true) {
+        str_starts_with($runId, 'query_') => ['read'],
+        str_starts_with($runId, 'mutation_') => ['write'],
+        str_starts_with($runId, 'action_') => ['action', 'write'],
+        default => [],
+    };
+}
+
+/**
+ * The lane a run from before the execution law always had: a query was already
+ * confined to the read-only snapshot, and everything else shared the one write
+ * transaction. `admin/generate.php` stamps this onto a run that arrives with no
+ * mode, and the serve path falls back to it for an artifact that carries none.
+ */
+function _stattic_zero_derived_run_execution_mode(string $runId): string
+{
+    return str_starts_with($runId, 'query_') ? 'read' : 'write';
 }
 
 function _stattic_zero_route_entry_shape_valid(mixed $entry): bool
@@ -668,6 +697,10 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
         'version_id' => $versionId,
         'space_id' => $spaceId,
         'authorization' => _stattic_v4_authorization_projection($overlay),
+        // Read straight off the overlay, not through the authorization
+        // projection: that projection is null for a Space with no grants, which
+        // is most of them, and egress scope must answer for those too.
+        'space_claimed' => ($overlay['space_claimed'] ?? null) === true,
         'visitor_issuer' => is_string($exchange['issuer'] ?? null) ? $exchange['issuer'] : null,
         'visitor_jwks' => is_array($exchange['jwks'] ?? null) ? $exchange['jwks'] : null,
         'projection_generation' => is_int($overlay['access_gen'] ?? null) ? $overlay['access_gen'] : null,

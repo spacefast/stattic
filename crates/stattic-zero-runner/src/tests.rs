@@ -375,12 +375,14 @@ fn capability_shims_read_bootstrap_and_emit_events() {
 }
 
 #[test]
-fn endpoint_capabilities_default_conservatively_when_metadata_is_absent_or_partial() {
-    // The write-side authorities default closed: an artifact that never named
-    // one cannot inherit a grant a `read` execution mode forbids.
+fn endpoint_capabilities_default_with_fetch_open_and_the_write_side_closed() {
+    // Outbound fetch is open to every mode — the space's egress scope decides
+    // where a request may reach. The remaining write-side authorities default
+    // closed: an artifact that never named one cannot inherit a grant a `read`
+    // execution mode forbids.
     let missing: EndpointCapabilities = serde_json::from_value(json!({})).expect("capabilities");
     assert!(missing.db);
-    assert!(!missing.fetch);
+    assert!(missing.fetch);
     assert!(missing.auth);
     assert!(missing.env);
     assert!(!missing.realtime);
@@ -391,7 +393,7 @@ fn endpoint_capabilities_default_conservatively_when_metadata_is_absent_or_parti
     let partial: EndpointCapabilities =
         serde_json::from_value(json!({ "db": false })).expect("capabilities");
     assert!(!partial.db);
-    assert!(!partial.fetch);
+    assert!(partial.fetch);
     assert!(partial.auth);
     assert!(partial.env);
     assert!(!partial.realtime);
@@ -713,5 +715,145 @@ globalThis.__statticZeroResult = JSON.stringify({ status: 200, body: "unreachabl
     assert_eq!(
         response_body(&response)["code"],
         "zero_js_execution_timeout"
+    );
+}
+
+// --- Action execution mode ---------------------------------------------------
+
+/// One declared table, so a capability operation resolves to real SQL and
+/// reaches the read/write gate instead of being refused for naming nothing.
+fn todos_db_metadata() -> Value {
+    json!({
+        "schemaHash": "sha256:action",
+        "tables": {
+            "todos": {
+                "physicalName": "sf_spc_test_todos",
+                "primaryKey": "id",
+                "columns": {
+                    "id": { "physicalName": "id", "type": "id" },
+                    "title": { "physicalName": "title", "type": "string" }
+                }
+            }
+        }
+    })
+}
+
+/// Rewrites the fixture's artifact as the run artifact a capsule compiles for
+/// `actions: { lookup }`, and returns the envelope `action.run` sends for it.
+/// `mode` is the one knob: the same bytes served as a mutation say what the
+/// action mode changes.
+fn run_fixture_envelope(fixture: &Fixture, mode: &str) -> String {
+    fixture.edit_artifact(|artifact| {
+        artifact.insert(
+            "format".to_string(),
+            json!(crate::constants::RUN_FORMAT.to_string()),
+        );
+        artifact.insert("kind".to_string(), json!("run"));
+        artifact.insert("runId".to_string(), json!(format!("{mode}_lookup")));
+        artifact.insert("executionMode".to_string(), json!(mode));
+        artifact.insert("db".to_string(), todos_db_metadata());
+    });
+    let mut envelope: Value = serde_json::from_str(&fixture.envelope()).expect("envelope json");
+    envelope["endpointId"] = json!(format!("{mode}_lookup"));
+    envelope["executionMode"] = json!(mode);
+    envelope["artifactPath"] = json!("zero/endpoints/test.json");
+    envelope["request"]["method"] = json!("POST");
+    envelope.to_string()
+}
+
+/// An action reads between network calls, so it holds no invocation
+/// transaction: nothing is opened before the handler runs, and its reads take a
+/// pooled connection when they ask for one. A write invocation of the very same
+/// artifact opens one up front — which is why it never reaches the module here,
+/// with no database configured for this process.
+#[test]
+fn an_action_invocation_opens_no_transaction_where_a_mutation_opens_one() {
+    let fixture = Fixture::with_source_and_capabilities(
+        r#"
+const select = globalThis.__statticDbCapability.execute({ kind: "select", table: "todos" });
+globalThis.__statticZeroResult = JSON.stringify({
+  status: 200,
+  headers: { "content-type": "application/json; charset=utf-8" },
+  body: JSON.stringify({ select: JSON.parse(select) }),
+});
+"#,
+        EndpointCapabilities {
+            db: true,
+            ..no_capabilities()
+        },
+    );
+
+    let response = handle_invoke(&run_fixture_envelope(&fixture, "action")).expect("response");
+
+    assert_eq!(response.status, 200);
+    // The read was attempted on its own pooled connection, not refused by the
+    // mode: only the missing database stopped it.
+    assert_eq!(
+        response_body(&response)["select"]["code"],
+        "zero_db_url_missing"
+    );
+
+    let as_mutation = handle_invoke(&run_fixture_envelope(&fixture, "write")).unwrap_err();
+
+    assert_eq!(response_body(&as_mutation)["code"], "zero_db_url_missing");
+}
+
+/// The invocation transaction is what refuses a read handler's writes at the
+/// server. An action has none, so the broker is the only gate — and it holds.
+#[test]
+fn an_action_cannot_write_to_the_database() {
+    let fixture = Fixture::with_source_and_capabilities(
+        r#"
+const insert = globalThis.__statticDbCapability.execute({
+  kind: "insert",
+  table: "todos",
+  values: { title: "from an action" },
+});
+globalThis.__statticZeroResult = JSON.stringify({
+  status: 200,
+  headers: { "content-type": "application/json; charset=utf-8" },
+  body: insert,
+});
+"#,
+        EndpointCapabilities {
+            db: true,
+            ..no_capabilities()
+        },
+    );
+
+    let response = handle_invoke(&run_fixture_envelope(&fixture, "action")).expect("response");
+    let refusal = response_body(&response);
+
+    assert_eq!(refusal["ok"], false);
+    assert_eq!(refusal["code"], "zero_db_read_only");
+}
+
+/// `realtime` publishes an invalidation describing writes the action mode
+/// cannot make, so an action carrying it is refused the way a read handler
+/// carrying one is. `fetch` is no longer in that set: every mode reaches the
+/// network, and the egress scope decides where.
+#[test]
+fn a_mode_refuses_only_the_capabilities_it_contradicts() {
+    let fetching_read = Fixture::with_capabilities(EndpointCapabilities {
+        fetch: true,
+        ..no_capabilities()
+    });
+
+    let allowed = handle_invoke(&fetching_read.envelope()).expect("response");
+
+    assert_eq!(allowed.status, 202);
+    assert_eq!(response_body(&allowed)["fetchInstalled"], true);
+
+    let publishing_action = Fixture::with_capabilities(EndpointCapabilities {
+        realtime: true,
+        ..no_capabilities()
+    });
+
+    let refused = handle_invoke(&run_fixture_envelope(&publishing_action, "action")).unwrap_err();
+
+    assert_eq!(refused.status, 422);
+    assert_eq!(
+        response_body(&refused)["code"],
+        "zero_artifact_mode_invalid"
     );
 }

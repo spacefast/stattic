@@ -45,8 +45,13 @@ pub(crate) fn execute_endpoint_module(
 ) -> Result<RunnerResponse, RunnerResponse> {
     crate::db::rollback_open_transaction();
     let _execution_mode = ExecutionModeGuard::enter(artifact.execution_mode);
-    let owns_transaction = artifact.capabilities.db
-        || artifact.execution_mode == crate::artifacts::ExecutionMode::Write;
+    // An action holds no invocation transaction: it reads the database between
+    // network calls that can take seconds, and a transaction open across one
+    // pins a pooled connection the rest of the space is waiting on. Its reads
+    // autocommit instead, and the broker refuses its writes.
+    let owns_transaction = artifact.execution_mode != crate::artifacts::ExecutionMode::Action
+        && (artifact.capabilities.db
+            || artifact.execution_mode == crate::artifacts::ExecutionMode::Write);
     let mut transaction =
         InvocationTransactionGuard::begin(owns_transaction, artifact.execution_mode)?;
     let runtime_started = Instant::now();

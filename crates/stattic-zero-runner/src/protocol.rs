@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use stattic_runtime_egress::EgressScope;
 
 use crate::artifacts::ExecutionMode;
 
@@ -65,6 +66,64 @@ pub(crate) struct InvokeContext {
     /// boundary.
     #[serde(default)]
     pub visitor_ip: Option<String>,
+    /// How far this space's code may reach: `open` once the space is claimed,
+    /// `trusted` while it is anonymous. An engine that predates the scope sends
+    /// none, and the serde default is the narrow one — a frozen envelope must
+    /// not be the way out of the trusted list.
+    #[serde(default)]
+    pub egress_scope: EgressScope,
     pub auth_ref: String,
     pub variables_ref: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envelope(context: serde_json::Value) -> InvokeEnvelope {
+        serde_json::from_value(serde_json::json!({
+            "protocol": "stattic.zero.invoke.v1",
+            "versionRoot": "/versions/ver_1",
+            "endpointId": "GET /api/thing",
+            "request": {
+                "method": "GET",
+                "path": "/api/thing",
+                "uri": "/api/thing",
+                "host": "space.test",
+                "query": "",
+                "headers": {},
+                "bodyBase64": "",
+            },
+            "context": context,
+        }))
+        .expect("envelope")
+    }
+
+    #[test]
+    fn an_envelope_without_a_scope_reaches_the_trusted_list_only() {
+        let base = serde_json::json!({
+            "spaceId": "spc_1",
+            "versionId": "ver_1",
+            "authRef": "current",
+            "variablesRef": "finalized",
+        });
+        // An engine that predates the scope sends none, and a frozen capsule is
+        // not a way out of the trusted list.
+        assert_eq!(
+            envelope(base.clone()).context.egress_scope,
+            EgressScope::Trusted
+        );
+        for (declared, expected) in [
+            ("open", EgressScope::Open),
+            ("trusted", EgressScope::Trusted),
+        ] {
+            let mut context = base.clone();
+            context["egressScope"] = serde_json::json!(declared);
+            assert_eq!(
+                envelope(context).context.egress_scope,
+                expected,
+                "{declared}"
+            );
+        }
+    }
 }

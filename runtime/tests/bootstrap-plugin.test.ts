@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -244,8 +245,12 @@ while (true) { usleep(10000); }
   expect(lockProbe.exitCode).toBe(0);
 });
 
-async function restoreConfig(root: string, config: Record<string, string>, providerContext = true) {
-  const entrypoint = new URL("../bootstrap-plugin/restore-config.php", import.meta.url).pathname;
+async function restoreConfig(
+  root: string,
+  config: Record<string, string>,
+  providerContext = true,
+  entrypoint = new URL("../bootstrap-plugin/restore-config.php", import.meta.url).pathname,
+) {
   const process = Bun.spawn(
     ["php", "-d", `auto_prepend_file=${providerContext ? atomicPrependPath : ""}`, entrypoint],
     {
@@ -274,7 +279,47 @@ test("restoring missing runtime config preserves tenant files and existing match
     SPACEFAST_RUNTIME_INSTANCE_ID: "box_owned",
     SPACEFAST_API_BASE_URL: "https://api.example.test",
   };
-  expect(await restoreConfig(root, config)).toEqual({ status: "restored" });
+  const files = {
+    "installer.php": await readFile(new URL("../installer.php", import.meta.url), "utf8"),
+    "spacefast-bootstrap.php": await readFile(pluginPath, "utf8"),
+    "restore-config.php": await readFile(
+      new URL("../bootstrap-plugin/restore-config.php", import.meta.url),
+      "utf8",
+    ),
+  };
+  const digest = createHash("sha256")
+    .update(
+      Object.values(files)
+        .map((source) => createHash("sha256").update(source).digest("hex"))
+        .join(""),
+    )
+    .digest("hex");
+  const stage = () =>
+    Bun.spawnSync({
+      cmd: ["php", new URL("../bootstrap-plugin/stage-installer.php", import.meta.url).pathname],
+      cwd: root,
+      stdin: new TextEncoder().encode(JSON.stringify({ files, digest })),
+    });
+  const staged = stage();
+  expect(staged.exitCode, staged.stderr.toString()).toBe(0);
+  expect(JSON.parse(staged.stdout.toString())).toEqual({ digest, config_present: false });
+  expect(stage().exitCode).toBe(0);
+  const directory = path.join(root, ".stattic/installers", digest);
+  expect(
+    await restoreConfig(root, config, true, path.join(directory, "restore-config.php")),
+  ).toEqual({ status: "restored" });
+  const proof = Bun.spawnSync({
+    cmd: ["php", "-d", "auto_prepend_file=", path.join(directory, "installer.php"), "--proof"],
+    cwd: root,
+    stdin: new TextEncoder().encode(JSON.stringify({ runtime_instance_id: "box_owned" })),
+  });
+  expect(proof.exitCode, proof.stderr.toString()).toBe(0);
+  expect(JSON.parse(proof.stdout.toString())).toMatchObject({
+    runtime_instance_id: "box_owned",
+    config_present: true,
+    nonce: "initial",
+  });
+
   const configPath = path.join(root, ".stattic/storage/config.php");
   const original = await readFile(configPath, "utf8");
   expect(

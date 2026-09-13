@@ -1628,6 +1628,8 @@ function installer_test_pause(string $phase): void
         fail('runtime_engine_test_pause_failed');
     }
     $GLOBALS['spacefast_test_pause_reached'] = true;
+    fwrite(STDOUT, "runtime_engine_test_paused\n");
+    fflush(STDOUT);
     while (true) {
         usleep(10000);
     }
@@ -2640,9 +2642,11 @@ function write_install_transaction(
     string $payloadIdentity,
     string $loaderIdentity,
     array $recoveries,
+    array $publication,
 ): bool {
     $payload = json_encode([
         'format' => 'spacefast.runtime.install-transaction.v2',
+        'publication' => $publication,
         'release' => $newTarget,
         'revision' => $revision,
         'payload_identity' => $payloadIdentity,
@@ -2664,6 +2668,108 @@ function clear_regular_state_file(string $path): bool
         && sync_directory(dirname($path));
 }
 
+/** Read one atomically published proof; legacy proofs get a stable initial CAS token. */
+function read_engine_publication_proof(string $installRoot): array
+{
+    $path = $installRoot . '/active-release-proof.json';
+    if (is_link($path) || (file_exists($path) && !is_file($path))) {
+        fail('runtime_engine_publication_proof_invalid');
+    }
+    $raw = is_file($path) ? file_get_contents($path) : false;
+    $proof = is_string($raw) ? json_decode($raw, true) : [];
+    if (!is_array($proof)) {
+        fail('runtime_engine_publication_proof_invalid');
+    }
+    $previous = $proof['publication'] ?? null;
+    $nonce = is_array($previous) && is_string($previous['nonce'] ?? null)
+        ? $previous['nonce']
+        : (is_string($raw) ? hash('sha256', $raw) : 'initial');
+    return [$proof, $nonce];
+}
+
+function assert_engine_publication_instance(string $publicRoot, string $expected): bool
+{
+    if ($expected === '') fail('runtime_engine_proof_instance_required');
+    $installRoot = $publicRoot . '/.stattic';
+    $configPath = $installRoot . '/storage/config.php';
+    if (is_link($installRoot) || is_link($configPath)) fail('runtime_engine_proof_root_invalid');
+    clearstatcache(true, $configPath);
+    if (function_exists('opcache_invalidate')) opcache_invalidate($configPath, true);
+    $config = is_file($configPath) ? require $configPath : [];
+    $persistent = class_exists('Atomic_Persistent_Data') ? new Atomic_Persistent_Data() : null;
+    $identities = [
+        is_array($config) ? ($config['SPACEFAST_RUNTIME_INSTANCE_ID'] ?? '') : '',
+        $persistent !== null ? $persistent->SPACEFAST_RUNTIME_INSTANCE_ID : '',
+        defined('SPACEFAST_RUNTIME_INSTANCE_ID') ? constant('SPACEFAST_RUNTIME_INSTANCE_ID') : '',
+        getenv('SPACEFAST_RUNTIME_INSTANCE_ID'),
+    ];
+    $matched = false;
+    foreach ($identities as $identity) {
+        if (!is_string($identity) || trim($identity) === '') continue;
+        if (!hash_equals($expected, trim($identity))) fail('runtime_engine_proof_instance_mismatch');
+        $matched = true;
+    }
+    if (!$matched) fail('runtime_engine_proof_instance_missing');
+    return is_file($configPath);
+}
+
+function print_engine_publication_proof(): never
+{
+    $input = json_decode(stream_get_contents(STDIN), true);
+    $expected = is_array($input) ? ($input['runtime_instance_id'] ?? null) : null;
+    if (!is_string($expected) || $expected === '') {
+        fail('runtime_engine_proof_instance_required');
+    }
+    $publicRoot = realpath(getcwd());
+    if (!is_string($publicRoot)) fail('runtime_engine_proof_root_invalid');
+    $installRoot = $publicRoot . '/.stattic';
+    $configPresent = assert_engine_publication_instance($publicRoot, $expected);
+    [$proof, $nonce] = read_engine_publication_proof($installRoot);
+    echo json_encode([
+        'runtime_instance_id' => $expected,
+        'config_present' => $configPresent,
+        'nonce' => $nonce,
+        'publication' => $proof['publication'] ?? null,
+        'engine_revision' => $proof['revision'] ?? null,
+        'in_progress' => is_file($installRoot . '/install-transaction.json'),
+    ], JSON_THROW_ON_ERROR) . "\n";
+    exit;
+}
+
+/** Reserve publication ownership before staging. The nonce survives failed installs. */
+function reserve_engine_publication(string $installRoot, string $payloadDigest): array
+{
+    $expected = installer_config_value('SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE');
+    $command = installer_config_value('SPACEFAST_RUNTIME_ENGINE_COMMAND_ID');
+    if ($expected === '' || preg_match('/^[A-Za-z0-9._:-]{1,160}$/', $command) !== 1) {
+        fail('runtime_engine_publication_identity_required');
+    }
+    [$proof, $nonce] = read_engine_publication_proof($installRoot);
+    $previous = $proof['publication'] ?? null;
+    $path = $installRoot . '/active-release-proof.json';
+    if (is_array($previous) && ($previous['command_id'] ?? null) === $command) {
+        if (($previous['payload_digest'] ?? null) !== $payloadDigest || ($previous['expected_nonce'] ?? null) !== $expected) {
+            fail('runtime_engine_publication_command_conflict');
+        }
+        return $previous;
+    }
+    if (!hash_equals($nonce, $expected)) {
+        fail('runtime_engine_publication_conflict');
+    }
+    $publication = [
+        'nonce' => bin2hex(random_bytes(32)),
+        'expected_nonce' => $expected,
+        'command_id' => $command,
+        'payload_digest' => $payloadDigest,
+    ];
+    $proof['publication'] = $publication;
+    $encoded = json_encode($proof, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    if (!is_string($encoded) || !publish_regular_file($path, $encoded . "\n", 0600)) {
+        fail('runtime_engine_publication_reservation_failed');
+    }
+    return $publication;
+}
+
 function write_active_release_proof(
     string $installRoot,
     string $target,
@@ -2671,9 +2777,11 @@ function write_active_release_proof(
     string $payloadIdentity,
     string $loaderIdentity,
     string $nativeSha256,
+    array $publication,
 ): bool {
     $payload = json_encode([
         'format' => 'spacefast.runtime.active-release-proof.v1',
+        'publication' => $publication,
         'release' => $target,
         'revision' => $revision,
         'payload_identity' => $payloadIdentity,
@@ -2733,9 +2841,12 @@ function validate_expected_md5(string $zipPath, string $expectedMd5): void
     }
 }
 
+if (($argv[1] ?? null) === '--proof') print_engine_publication_proof();
+
 [$privateRoot, $publicRoot] = installer_roots();
 $installRoot = prepare_install_root($publicRoot);
 $installerLock = acquire_installer_lock($installRoot);
+assert_engine_publication_instance($publicRoot, installer_config_value('SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID'));
 $GLOBALS['spacefast_install_phase'] = 'staging';
 $recoveryTransaction = read_install_transaction($installRoot);
 $recoveryRecords = install_transaction_recovery_records($recoveryTransaction);
@@ -2796,6 +2907,11 @@ if ($expectedRevision === '') {
     fail('runtime_engine_revision_expected_missing');
 }
 $expectedNativeSha256 = strtolower(installer_config_value('SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256'));
+$publication = reserve_engine_publication(
+    $installRoot,
+    hash('sha256', json_encode([strtolower($expectedMd5), $expectedRevision, $expectedNativeSha256], JSON_THROW_ON_ERROR)),
+);
+
 
 // Keep malformed, missing, and corrupt regular targets in place until a fully
 // staged replacement is ready. Links and special filesystem objects fail
@@ -2865,7 +2981,7 @@ if (
     )
 ) {
     $GLOBALS['spacefast_installer_running'] = false;
-    echo json_encode(['status' => 'current', 'engine_revision' => $expectedRevision, 'layout' => 'release'], JSON_PRETTY_PRINT) . "\n";
+    echo json_encode(['status' => 'current', 'engine_revision' => $expectedRevision, 'layout' => 'release', 'publication_nonce' => $publication['nonce']], JSON_PRETTY_PRINT) . "\n";
     if (defined('SPACEFAST_RUNTIME_INSTALLER_EMBEDDED') && SPACEFAST_RUNTIME_INSTALLER_EMBEDDED === true) {
         return;
     }
@@ -2975,6 +3091,7 @@ if (!write_install_transaction(
     $releaseIdentity,
     $loaderIdentity,
     compact_install_transaction_recoveries($recoveryRecords, $releaseIdentity),
+    $publication,
 )) {
     fail('runtime_engine_transaction_write_failed');
 }
@@ -3045,6 +3162,7 @@ $treeFileCount = array_sum(array_map(
 ));
 $fileCount = count($manifest['staged']) + $treeFileCount + count($manifest['alias']);
 $receipt = [
+    'publication_nonce' => $publication['nonce'],
     'file_count' => $fileCount,
     'engine_revision' => $actualRevision,
     'layout' => 'release',
@@ -3125,6 +3243,7 @@ if (!write_active_release_proof(
     $releaseIdentity,
     $loaderIdentity,
     $expectedNativeSha256,
+    $publication,
 )) {
     fail('runtime_engine_release_proof_failed');
 }

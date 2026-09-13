@@ -445,7 +445,7 @@ fn validate_runtime_config(
     };
 
     if kind == "zero" {
-        runtime.retain(|key, _| matches!(key.as_str(), "kind" | "server" | "client"));
+        retain_runtime_keys(runtime, &["kind", "server", "client"], diagnostics);
         // Zero is never inferred, so a declaration that names neither entry has
         // nothing to compile.
         for key in ["server", "client"] {
@@ -472,12 +472,11 @@ fn validate_runtime_config(
         return;
     }
 
-    runtime.retain(|key, _| {
-        matches!(
-            key.as_str(),
-            "kind" | "entry" | "database" | "compatibilityDate"
-        )
-    });
+    retain_runtime_keys(
+        runtime,
+        &["kind", "entry", "compatibilityDate"],
+        diagnostics,
+    );
     // Functions keeps zero-config detection: `entry` is optional, but naming one
     // that cannot be a module is an error rather than a silent static publish.
     if runtime
@@ -492,7 +491,6 @@ fn validate_runtime_config(
             Some("runtime.entry".into()),
         ));
     }
-    validate_optional_bool(runtime, "database", "runtime.database", diagnostics);
     if runtime.get("compatibilityDate").is_some_and(|value| {
         value
             .as_str()
@@ -1146,7 +1144,6 @@ pub fn public_json_schema() -> Value {
                 "properties": {
                     "kind": { "const": "functions" },
                     "entry": { "type": "string", "minLength": 1 },
-                    "database": { "type": "boolean" },
                     "compatibilityDate": { "type": "string", "pattern": COMPATIBILITY_DATE_PATTERN }
                 },
                 "additionalProperties": false
@@ -1308,7 +1305,6 @@ export type SpaceRuntimeZeroConfig = {
 export type SpaceRuntimeFunctionsConfig = {
   kind: "functions";
   entry?: string;
-  database?: boolean;
   compatibilityDate?: string;
 };
 
@@ -1322,6 +1318,30 @@ export type SpaceConfigFile = SpaceConfig & {
   access?: { public: string[] };
 };
 "#;
+
+/// Strips everything a runtime kind does not declare, warning per key the way
+/// top-level unknown keys warn: a `database` or `fetch` left over from when
+/// capabilities were config would otherwise vanish without a word.
+fn retain_runtime_keys(
+    runtime: &mut Map<String, Value>,
+    known: &[&str],
+    diagnostics: &mut Vec<PrepareDiagnostic>,
+) {
+    let unknown: Vec<String> = runtime
+        .keys()
+        .filter(|key| !known.contains(&key.as_str()))
+        .cloned()
+        .collect();
+    for key in unknown {
+        diagnostics.push(diagnostic(
+            DiagnosticSeverity::Warning,
+            "config_invalid",
+            format!("Unknown runtime key \"{key}\" was ignored."),
+            Some(format!("runtime.{key}")),
+        ));
+        runtime.remove(&key);
+    }
+}
 
 fn validate_optional_bool(
     object: &Map<String, Value>,
@@ -1453,7 +1473,7 @@ mod tests {
     }
 
     #[test]
-    fn functions_runtime_keeps_optional_entries_and_drops_unknown_fields() {
+    fn functions_runtime_keeps_optional_entries_and_warns_on_unknown_fields() {
         let mut diagnostics = Vec::new();
         let config = parse_config(
             r#"{"runtime":{"kind":"functions","entry":"handler.ts","database":true,"compatibilityDate":"2026-07-01","bogus":1}}"#,
@@ -1461,13 +1481,32 @@ mod tests {
             &mut diagnostics,
         );
 
-        assert_eq!(diagnostics, Vec::new());
+        // `database` is no longer config — every worker has one — so it is
+        // diagnosed like any other stray key, not silently accepted.
+        let ignored: Vec<_> = diagnostics
+            .iter()
+            .map(|item| (item.severity, item.code.as_str(), item.path.as_deref()))
+            .collect();
+        assert_eq!(
+            ignored,
+            vec![
+                (
+                    DiagnosticSeverity::Warning,
+                    "config_invalid",
+                    Some("runtime.bogus")
+                ),
+                (
+                    DiagnosticSeverity::Warning,
+                    "config_invalid",
+                    Some("runtime.database")
+                ),
+            ]
+        );
         assert_eq!(
             config.and_then(|value| value.pointer("/runtime").cloned()),
             Some(json!({
                 "kind": "functions",
                 "entry": "handler.ts",
-                "database": true,
                 "compatibilityDate": "2026-07-01"
             }))
         );
@@ -1671,7 +1710,6 @@ mod tests {
     #[test]
     fn runtime_functions_rejects_malformed_optional_fields() {
         for raw in [
-            r#"{"runtime":{"kind":"functions","database":"yes"}}"#,
             r#"{"runtime":{"kind":"functions","compatibilityDate":"2026-7-1"}}"#,
             r#"{"runtime":{"kind":"functions","compatibilityDate":true}}"#,
         ] {

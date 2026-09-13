@@ -322,13 +322,17 @@ test("finalizes an NFC Unicode Zero endpoint route", async () => {
 });
 
 /**
- * `action.run` left the vocabulary this engine compiles, but the Zero clients
- * baked into already-published capsules still send it and still read an
- * `action.result` frame back. Those bundles cannot be rebuilt, so both halves
- * of the exchange stay served — the same standing the `/__spacefast/zero/*`
- * route spellings have beside `/__zero/*`.
+ * An action is its own execution lane: `action.run` in, `action.result` out,
+ * and the envelope asks the runner for the mode that owns no transaction. The
+ * frame carries `result` and nothing else, because an action writes nothing a
+ * subscriber would need invalidated.
+ *
+ * The operation bounds the lane its artifact may declare. `action.run` keeps
+ * both of its own — the untransacted one and the `write` a pre-law action was
+ * published with — but a `query_*` run declaring a lane it can never hold is a
+ * malformed artifact, refused before the runner is spawned.
  */
-test("serves the retired action.run operation and its action.result frame", async () => {
+test("a run invocation runs the lane its operation allows and refuses any other", async () => {
   const host = "zero-action-run.test";
   const actionRuntime = await startRuntime({
     env: { SPACEFAST_RUNTIME_BIN: runtimePath, SPACEFAST_ZERO_RUNNER_CAPTURE: capturePath },
@@ -343,8 +347,26 @@ test("serves the retired action.run operation and its action.result frame", asyn
       serving: {
         zero_runs: [
           {
-            execution_mode: "write",
+            execution_mode: "action",
             run_id: "action_notify",
+            source: "globalThis.__statticZeroResult = '{}';",
+            capabilities: { db: false },
+          },
+          // A run published before the execution law: no mode of its own. The
+          // intake stamps the write lane it always had, and `action.run` must
+          // forward that rather than name a lane the artifact never declared.
+          {
+            run_id: "action_legacy",
+            source: "globalThis.__statticZeroResult = '{}';",
+            capabilities: { db: false },
+          },
+          // A query that declares a lane it can never hold. `query.run` skips
+          // the cookie mutation gate and answers a `query.result` frame with no
+          // changed-table bookkeeping, so honouring this would run a mutation
+          // with a query's protections.
+          {
+            execution_mode: "action",
+            run_id: "query_overreaching",
             source: "globalThis.__statticZeroResult = '{}';",
             capabilities: { db: false },
           },
@@ -372,8 +394,32 @@ test("serves the retired action.run operation and its action.result frame", asyn
       ok: true,
       result: { ok: true, endpointId: "action_notify" },
     });
-    // An action was never confined to the read lane, so it keeps the write one.
+    expect(JSON.parse(readFileSync(capturePath, "utf8")).executionMode).toBe("action");
+
+    const legacy = await get(actionRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "run-2", op: "action.run", name: "legacy" }),
+    });
+
+    expect(legacy.status).toBe(200);
+    expect(await legacy.json()).toMatchObject({ id: "run-2", op: "action.result", ok: true });
     expect(JSON.parse(readFileSync(capturePath, "utf8")).executionMode).toBe("write");
+
+    const overreaching = await get(actionRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "run-3", op: "query.run", name: "overreaching" }),
+    });
+
+    expect(overreaching.status).toBe(422);
+    expect(await overreaching.json()).toMatchObject({ code: "zero_artifact_invalid" });
+    // Refused before any envelope was built: the capture still holds the
+    // previous invocation, so no runner ran in a lane the query cannot hold.
+    expect(JSON.parse(readFileSync(capturePath, "utf8"))).toMatchObject({
+      endpointId: "action_legacy",
+      executionMode: "write",
+    });
   } finally {
     actionRuntime.stop();
   }
@@ -1084,21 +1130,23 @@ test("exposes Zero runner metrics only when the metrics header is enabled", asyn
   }
 });
 
-test("native compiler defaults omitted Zero capabilities conservatively", () => {
+test("native compiler defaults omitted Zero capabilities with fetch open", () => {
   const root = versionRoot(rt, "spc_zero_runtime", "ver_zero_runtime_1");
   const exactSlug = `post_api_status_${sha256("POST\n/api/status\n0").slice(0, 12)}`;
   const defaultSlug = `get_api_default_capabilities_${sha256(
     "GET\n/api/default-capabilities\n2",
   ).slice(0, 12)}`;
 
-  // The write-side authorities default closed: a `read` handler may not carry
-  // one, so an omitted field can never hand it a grant the runner then refuses.
+  // Outbound fetch is open to every handler kind — the space's egress scope
+  // bounds it at request time. The write-side authorities still default closed:
+  // a `read` handler may not carry one, so an omitted field can never hand it a
+  // grant the runner then refuses.
   const partial = JSON.parse(
     readFileSync(path.join(root, `zero/endpoints/${exactSlug}.json`), "utf8"),
   );
   expect(partial.capabilities).toEqual({
     db: false,
-    fetch: false,
+    fetch: true,
     auth: true,
     env: true,
     realtime: false,
@@ -1116,7 +1164,7 @@ test("native compiler defaults omitted Zero capabilities conservatively", () => 
   );
   expect(omitted.capabilities).toEqual({
     db: true,
-    fetch: false,
+    fetch: true,
     auth: true,
     env: true,
     realtime: false,

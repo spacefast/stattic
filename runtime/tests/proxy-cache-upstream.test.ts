@@ -25,6 +25,10 @@ const PUBLIC_HOST = "proxy-upstream.test";
 const PUBLIC_HOST_ROUTE = "proxy-route-public.test";
 const ACCESS_HOST = "proxy-access-cache.test";
 const ACCESS_HOST_ROUTE = "proxy-route-private.test";
+const UNCLAIMED_HOST = "proxy-unclaimed.test";
+// A public host the platform does not own, so it is exactly what the trusted
+// scope refuses. The refusal is lexical, so nothing here resolves or connects.
+const UNTRUSTED_UPSTREAM = "https://example.com/api";
 const ETAG = '"proxy-upstream-v1"';
 
 // A proxy upstream is a user-supplied URL. Under nginx these headers do not
@@ -365,6 +369,31 @@ beforeAll(async () => {
       proxy_host_routes: [{ hostname: ACCESS_HOST_ROUTE, upstream: upstreamBaseUrl }],
     },
   });
+  // An anonymous Space: its proxy routes reach the trusted list only, and the
+  // refusal is the upsell. Everything else in this file is claimed, so nothing
+  // else exercises the narrow scope at the serve seam.
+  await deploy(rt, {
+    spaceId: "spc_proxy_unclaimed",
+    versionId: "ver_proxy_unclaimed_1",
+    files: {
+      "index.html": "proxy unclaimed fixture\n",
+      _redirects: [
+        proxyRule("/untrusted", UNTRUSTED_UPSTREAM),
+        proxyRule("/allowlisted", `${upstreamBaseUrl}/upstream/public`),
+        "",
+      ].join("\n"),
+    },
+    activate: {
+      route_name: "production",
+      config: {
+        ...accessProjection(),
+        authorization: { ...accessProjection().authorization, spaceClaimed: false },
+      },
+      production_hostnames: [UNCLAIMED_HOST],
+      version_hostnames: [],
+    },
+  });
+
   // The internal-redirect fixtures below are only a real attack if the path they
   // name holds another Space's private bytes. In v4 that is the CAS blob, so
   // prove it exists before asserting the runtime refuses to relay a pointer to it.
@@ -478,6 +507,22 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     expect(identity.grants).toBeNull();
     expect(admitted.headers.get("cache-control")).toBe(PROTECTED);
     expect(admitted.headers.get("x-spacefast-version")).toBeNull();
+  });
+
+  test("an unclaimed Space's proxy routes reach the trusted list only", async () => {
+    const beforeRequestCount = upstreamMethods.length;
+
+    const untrusted = await get(rt, UNCLAIMED_HOST, "/untrusted");
+    expect(untrusted.status).toBe(403);
+    expect(await untrusted.text()).toContain("Claim the space to reach any public host.");
+    // Lexical refusal: the hop never happened.
+    expect(upstreamMethods.length).toBe(beforeRequestCount);
+
+    // The suites' own escape survives the narrow scope, or every other proxy
+    // fixture on this box would stop reaching its local upstream.
+    const allowlisted = await get(rt, UNCLAIMED_HOST, "/allowlisted");
+    expect(allowlisted.status).toBe(200);
+    expect(await allowlisted.text()).toBe("GET /upstream/public\n");
   });
 
   test("residual encoded dot segments cannot escape a proxy route's upstream prefix", async () => {

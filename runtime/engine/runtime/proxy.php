@@ -102,7 +102,7 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
     if ($query !== '') {
         $target .= (str_contains($target, '?') ? '&' : '?') . $query;
     }
-    $targetParts = _stattic_assert_proxy_target_allowed($target);
+    $targetParts = _stattic_assert_proxy_target_allowed($target, _stattic_egress_scope($serving));
     if (_stattic_path_has_residual_dot_segment((string) ($targetParts['path'] ?? '/'))) {
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy request path is invalid.\n");
     }
@@ -303,7 +303,7 @@ function _stattic_proxy_allowed_methods(array $methods): array
     return array_keys($normalized);
 }
 
-function _stattic_assert_proxy_target_allowed(string $target): array
+function _stattic_assert_proxy_target_allowed(string $target, string $egressScope): array
 {
     $parts = parse_url($target);
     if (!is_array($parts)) {
@@ -315,8 +315,15 @@ function _stattic_assert_proxy_target_allowed(string $target): array
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy target must be an absolute HTTP(S) URL.\n");
     }
     $port = (int) ($parts['port'] ?? ($parts['scheme'] === 'https' ? 443 : 80));
-    if (!_stattic_egress_host_allowed($host, $port)) {
-        _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy target host is not allowed.\n");
+    if (!_stattic_egress_host_allowed($host, $port, $egressScope)) {
+        // Only a trusted-scope miss gets the upsell. Every other denial keeps
+        // the generic refusal, so nobody is told to claim a Space to reach a
+        // metadata address.
+        $untrusted = $egressScope === STATTIC_EGRESS_SCOPE_TRUSTED
+            && _stattic_egress_host_allowed($host, $port, STATTIC_EGRESS_SCOPE_OPEN);
+        _stattic_render_platform_page('proxy-disabled', 403, [], $untrusted
+            ? "This host isn't reachable from an unclaimed space. Claim the space to reach any public host.\n"
+            : "Proxy target host is not allowed.\n");
     }
     if (isset($parts['user']) || isset($parts['pass'])) {
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy target must not include credentials.\n");

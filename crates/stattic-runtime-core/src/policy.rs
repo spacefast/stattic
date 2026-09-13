@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use crate::egress::{
-    target_allowed, EgressDenial, EgressProfile, InternalHosts, SERVING_INTERNAL_HOSTS,
+    target_allowed, EgressDenial, EgressProfile, EgressScope, InternalHosts, SERVING_INTERNAL_HOSTS,
 };
 use crate::finalize::{invalid, invalid_with_details, FileMeta, Result};
 use crate::protocol::SPACE_THEME_CSS_MAX_BYTES;
@@ -364,8 +364,13 @@ fn public_proxy_destination(destination: &str) -> std::result::Result<(), Egress
     if proxy_destination_test_allowlisted(destination, test_allowlist.as_deref()) {
         return Ok(());
     }
+    // Compile-time acceptance, not the serve-time verdict: a space's claim
+    // state can change after this config is written (claiming re-pushes the
+    // route config without republishing), so the scope narrowing belongs at
+    // the proxy hop, not here. This only screens the shape.
     target_allowed(
         EgressProfile::ProxyRoute,
+        EgressScope::Open,
         destination,
         proxy_internal_hosts(),
     )
@@ -379,6 +384,7 @@ fn egress_denial_reason(denial: EgressDenial) -> &'static str {
         EgressDenial::Host => "loopback or malformed hostname",
         EgressDenial::InternalHost => "internal infrastructure endpoint",
         EgressDenial::Address => "denied IP address range",
+        EgressDenial::Untrusted => "host is not reachable from an unclaimed space",
         EgressDenial::RedirectLimit => "too many redirect hops",
     }
 }

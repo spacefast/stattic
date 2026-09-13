@@ -17,6 +17,8 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// Redirects are where SSRF actually lands: a permitted public host answers 302
 /// to a metadata address. Following is never automatic — the caller drives the
 /// hop loop and re-applies the whole policy on every hop.
@@ -72,6 +74,24 @@ pub const DENIED_IPV6_NETWORKS: &[(Ipv6Addr, u8)] = &[
 
 pub const SERVING_INTERNAL_HOSTS: &[&str] = &["view.fast", "atomicsites.net"];
 
+/// The hosts an anonymous space may reach. Sorted, exact hostnames, no
+/// wildcards: a reviewer reads the whole policy in one column.
+///
+/// Inclusion rule: the API needs the caller's own credential and cannot be
+/// turned into a spam or scrape vector. No chat webhooks, no email senders —
+/// those are what an unaccountable space would be rented for.
+pub const TRUSTED_EGRESS_HOSTS: &[&str] = &[
+    "api.anthropic.com",
+    "api.github.com",
+    "api.groq.com",
+    "api.mistral.ai",
+    "api.openai.com",
+    "api.stripe.com",
+    "api.together.xyz",
+    "generativelanguage.googleapis.com",
+    "openrouter.ai",
+];
+
 /// Egress surfaces share address and hostname policy but have deliberately
 /// different transport requirements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +116,42 @@ impl EgressProfile {
     }
 }
 
+/// Who owns the space, and therefore how far its code may reach. A second axis
+/// to [`EgressProfile`], not a replacement: the profile fixes the transport,
+/// the scope fixes the destination set.
+///
+/// The default is [`EgressScope::Trusted`] so an envelope, header or config
+/// that omits the scope reaches the narrow set rather than the whole internet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressScope {
+    /// A claimed space: anyone reachable through the denylist.
+    Open,
+    /// An anonymous space: [`TRUSTED_EGRESS_HOSTS`] only. The refusal is the
+    /// upsell — claiming the space is how an author widens it.
+    #[default]
+    Trusted,
+}
+
+impl EgressScope {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Trusted => "trusted",
+        }
+    }
+
+    /// `host` must already be normalized; [`host_allowed`] is the only caller
+    /// and normalizes first.
+    fn trusts(self, host: &str) -> bool {
+        match self {
+            Self::Open => true,
+            Self::Trusted => TRUSTED_EGRESS_HOSTS.contains(&host),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressDenial {
     Scheme,
@@ -103,6 +159,9 @@ pub enum EgressDenial {
     Host,
     InternalHost,
     Address,
+    /// Survived the denylist, but an anonymous space only reaches
+    /// [`TRUSTED_EGRESS_HOSTS`].
+    Untrusted,
     RedirectLimit,
 }
 
@@ -158,7 +217,11 @@ pub fn address_allowed(address: IpAddr) -> bool {
 
 /// Lexical only — a hostname that is not an IP literal is allowed here and must
 /// still be resolved and pinned by the caller.
-pub fn host_allowed(host: &str, internal: &InternalHosts) -> Result<(), EgressDenial> {
+pub fn host_allowed(
+    host: &str,
+    scope: EgressScope,
+    internal: &InternalHosts,
+) -> Result<(), EgressDenial> {
     let host = normalize_host(host);
     if host.is_empty() || host == "localhost" || host.ends_with(".localhost") {
         return Err(EgressDenial::Host);
@@ -167,9 +230,15 @@ pub fn host_allowed(host: &str, internal: &InternalHosts) -> Result<(), EgressDe
         return Err(EgressDenial::InternalHost);
     }
     if let Ok(address) = IpAddr::from_str(&host) {
-        return address_allowed(address)
-            .then_some(())
-            .ok_or(EgressDenial::Address);
+        if !address_allowed(address) {
+            return Err(EgressDenial::Address);
+        }
+    }
+    // Last, so the infrastructure denials keep their own reasons: an anonymous
+    // space asking for a metadata address is told the address is denied, not
+    // that it should claim the space to reach it.
+    if !scope.trusts(&host) {
+        return Err(EgressDenial::Untrusted);
     }
     Ok(())
 }
@@ -178,6 +247,7 @@ pub fn host_allowed(host: &str, internal: &InternalHosts) -> Result<(), EgressDe
 /// upstream it does not own.
 pub fn target_allowed(
     profile: EgressProfile,
+    scope: EgressScope,
     url: &str,
     internal: &InternalHosts,
 ) -> Result<EgressTarget, EgressDenial> {
@@ -189,7 +259,7 @@ pub fn target_allowed(
         return Err(EgressDenial::Credentials);
     }
     let host = url.host_str().ok_or(EgressDenial::Host)?;
-    host_allowed(host, internal)?;
+    host_allowed(host, scope, internal)?;
     Ok(EgressTarget {
         host: normalize_host(host),
         port: url.port_or_known_default().unwrap_or(443),
@@ -394,26 +464,97 @@ mod tests {
             "\t[ sub.localhost ].\r",
         ] {
             assert_eq!(
-                host_allowed(host, &internal),
+                host_allowed(host, EgressScope::Open, &internal),
                 Err(EgressDenial::Host),
                 "{host:?}"
             );
         }
         assert_eq!(
-            host_allowed("site.view.fast", &internal),
+            host_allowed("site.view.fast", EgressScope::Open, &internal),
             Err(EgressDenial::InternalHost)
         );
         assert_eq!(
-            host_allowed("view.fast", &internal),
+            host_allowed("view.fast", EgressScope::Open, &internal),
             Err(EgressDenial::InternalHost)
         );
-        assert_eq!(host_allowed("notview.fast", &internal), Ok(()));
+        assert_eq!(
+            host_allowed("notview.fast", EgressScope::Open, &internal),
+            Ok(())
+        );
         assert!(!address_allowed(ip("169.254.169.254")));
         assert!(!address_allowed(ip("fd00:ec2::254")));
         assert!(!address_allowed(ip("::ffff:127.0.0.1")));
         assert!(address_allowed(ip("::ffff:8.8.8.8")));
         assert!(address_allowed(ip("8.8.8.8")));
         assert!(address_allowed(ip("2606:4700:4700::1111")));
+    }
+
+    #[test]
+    fn trusted_scope_admits_the_platform_list_and_nothing_else_it_would_otherwise_allow() {
+        let internal = InternalHosts::from_hosts(["view.fast"]);
+        // The denylist is one policy under both scopes; scope only narrows what
+        // survives it.
+        for scope in [EgressScope::Open, EgressScope::Trusted] {
+            assert_eq!(
+                host_allowed("127.0.0.1", scope, &internal),
+                Err(EgressDenial::Address)
+            );
+            assert_eq!(
+                host_allowed("site.view.fast", scope, &internal),
+                Err(EgressDenial::InternalHost)
+            );
+        }
+        assert_eq!(
+            host_allowed("example.com", EgressScope::Open, &internal),
+            Ok(())
+        );
+        assert_eq!(
+            host_allowed("example.com", EgressScope::Trusted, &internal),
+            Err(EgressDenial::Untrusted)
+        );
+        assert_eq!(
+            host_allowed("api.github.com", EgressScope::Trusted, &internal),
+            Ok(())
+        );
+        // Exact and case-insensitive: a subdomain of a trusted host is not one.
+        assert_eq!(
+            host_allowed("API.GitHub.Com", EgressScope::Trusted, &internal),
+            Ok(())
+        );
+        assert_eq!(
+            host_allowed("evil.api.github.com", EgressScope::Trusted, &internal),
+            Err(EgressDenial::Untrusted)
+        );
+        // A public IP literal names no trusted host, so it is a scope miss
+        // rather than an address one.
+        assert_eq!(
+            host_allowed("8.8.8.8", EgressScope::Trusted, &internal),
+            Err(EgressDenial::Untrusted)
+        );
+        assert_eq!(
+            target_allowed(
+                EgressProfile::TenantFetch,
+                EgressScope::Trusted,
+                "https://example.com",
+                &internal
+            ),
+            Err(EgressDenial::Untrusted)
+        );
+        // Scope is a second axis: it never widens the scheme the profile fixes.
+        assert_eq!(
+            target_allowed(
+                EgressProfile::TenantFetch,
+                EgressScope::Open,
+                "http://api.github.com",
+                &internal
+            ),
+            Err(EgressDenial::Scheme)
+        );
+        // Fail closed, and stay readable as a set.
+        assert_eq!(EgressScope::default(), EgressScope::Trusted);
+        assert!(TRUSTED_EGRESS_HOSTS
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
@@ -426,41 +567,83 @@ mod tests {
             "https://site.view.fast",
         ] {
             assert_eq!(
-                target_allowed(EgressProfile::TenantFetch, target, &internal),
-                target_allowed(EgressProfile::ProxyRoute, target, &internal),
+                target_allowed(
+                    EgressProfile::TenantFetch,
+                    EgressScope::Open,
+                    target,
+                    &internal
+                ),
+                target_allowed(
+                    EgressProfile::ProxyRoute,
+                    EgressScope::Open,
+                    target,
+                    &internal
+                ),
                 "{target}"
             );
         }
         assert_eq!(
-            target_allowed(EgressProfile::TenantFetch, "http://example.com", &internal),
+            target_allowed(
+                EgressProfile::TenantFetch,
+                EgressScope::Open,
+                "http://example.com",
+                &internal
+            ),
             Err(EgressDenial::Scheme)
         );
-        assert!(target_allowed(EgressProfile::ProxyRoute, "http://example.com", &internal).is_ok());
+        assert!(target_allowed(
+            EgressProfile::ProxyRoute,
+            EgressScope::Open,
+            "http://example.com",
+            &internal
+        )
+        .is_ok());
         for profile in [EgressProfile::TenantFetch, EgressProfile::ProxyRoute] {
             assert_eq!(
-                target_allowed(profile, "ftp://example.com/files", &internal),
+                target_allowed(
+                    profile,
+                    EgressScope::Open,
+                    "ftp://example.com/files",
+                    &internal
+                ),
                 Err(EgressDenial::Scheme)
             );
             assert_eq!(
-                target_allowed(profile, "https://user:pass@example.com", &internal),
+                target_allowed(
+                    profile,
+                    EgressScope::Open,
+                    "https://user:pass@example.com",
+                    &internal
+                ),
                 Err(EgressDenial::Credentials)
             );
         }
         assert_eq!(
-            target_allowed(EgressProfile::TenantFetch, "https://example.com", &internal)
-                .unwrap()
-                .port,
+            target_allowed(
+                EgressProfile::TenantFetch,
+                EgressScope::Open,
+                "https://example.com",
+                &internal
+            )
+            .unwrap()
+            .port,
             443
         );
         assert_eq!(
-            target_allowed(EgressProfile::ProxyRoute, "http://example.com", &internal)
-                .unwrap()
-                .port,
+            target_allowed(
+                EgressProfile::ProxyRoute,
+                EgressScope::Open,
+                "http://example.com",
+                &internal
+            )
+            .unwrap()
+            .port,
             80
         );
         assert_eq!(
             target_allowed(
                 EgressProfile::TenantFetch,
+                EgressScope::Open,
                 "https://example.com:8443",
                 &internal
             )

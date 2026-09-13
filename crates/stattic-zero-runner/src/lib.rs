@@ -266,6 +266,9 @@ fn handle_invoke_inner(input: &str) -> Result<RunnerResponse, RunnerResponse> {
     let bytecode = artifact.read_verified_bytecode(&bytecode_path);
     record_bytecode_read(bytecode_started);
 
+    // Bound here rather than inside the JS layer because the fetch bridge is
+    // called from tenant code, which never sees the envelope.
+    let _egress_scope = fetch::EgressScopeGuard::enter(envelope.context.egress_scope);
     execute_endpoint_module(&envelope, &artifact, &bytecode?)
 }
 

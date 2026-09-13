@@ -64,6 +64,10 @@ test("installer stages the native tool executable and leaves engine files read-o
       encoding: "utf8",
       env: {
         ...process.env,
+        SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
+        SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID: "installer-test-instance",
+        SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE: "initial",
+        SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: crypto.randomUUID(),
         SPACEFAST_RUNTIME_ENGINE_MD5: md5,
         SPACEFAST_RUNTIME_ENGINE_REVISION: revision,
       },
@@ -129,6 +133,10 @@ test("installer rejects a hung native self-test within its deadline", async () =
         timeout: 10_000,
         env: {
           ...process.env,
+          SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
+          SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID: "installer-test-instance",
+          SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE: "initial",
+          SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: crypto.randomUUID(),
           SPACEFAST_RUNTIME_ENGINE_MD5: md5,
           SPACEFAST_RUNTIME_ENGINE_REVISION: revision,
         },

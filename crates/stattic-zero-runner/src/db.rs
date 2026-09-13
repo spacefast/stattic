@@ -882,16 +882,29 @@ fn ready_statement(statement: &DbStatement) -> Result<ReadyStatement<'_>, Broker
         statement.mode.as_deref(),
         Some("execute") | Some("exec") | Some("mutation")
     );
-    let read_only = DB_TRANSACTION.with(|transaction| {
+    // A read invocation is inside a READ ONLY transaction, so the server
+    // refuses whatever this classifier cannot; an action is inside no
+    // transaction at all, so the broker is the only thing standing between it
+    // and a committed write — under an action, a statement the classifier
+    // cannot call a read is refused too.
+    let in_read_transaction = DB_TRANSACTION.with(|transaction| {
         transaction
             .borrow()
             .as_ref()
             .is_some_and(|transaction| transaction.mode == ExecutionMode::Read)
     });
-    if read_only && statement_shape(sql) == StatementShape::Mutation {
+    let in_action =
+        crate::services::zero_execution_mode().is_some_and(|mode| mode == ExecutionMode::Action);
+    let shape = statement_shape(sql);
+    let refused = match shape {
+        StatementShape::Read => false,
+        StatementShape::Mutation => in_read_transaction || in_action,
+        StatementShape::Ambiguous => in_action,
+    };
+    if refused {
         return Err(BrokerRefusal::new(
             "zero_db_read_only",
-            "A Zero read handler cannot execute a database write.",
+            "A Zero read or action handler cannot execute a database write.",
         ));
     }
     Ok(ReadyStatement {
@@ -911,7 +924,8 @@ enum StatementShape {
     /// Neither, to this classifier. A read invocation runs inside a READ ONLY
     /// transaction, so the server refuses anything here that turns out to
     /// write — and refusing it locally instead would only ever refuse
-    /// statements the server would have run.
+    /// statements the server would have run. An action has no such backstop,
+    /// so there the broker refuses this shape itself.
     Ambiguous,
 }
 

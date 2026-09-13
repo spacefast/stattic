@@ -8,13 +8,36 @@ require_once __DIR__ . '/finalizer-protocol.generated.php';
 // link-local, cloud-metadata, RFC1918/ULA/private ranges, or Spacefast-internal
 // hosts. Policy tables are generated from stattic-runtime-core.
 
+// How far a Space's code may reach. A claimed Space is accountable, so it gets
+// the whole public internet the denylist permits; an anonymous one reaches the
+// platform-owned list only, and the refusal is the upsell.
+const STATTIC_EGRESS_SCOPE_OPEN = 'open';
+const STATTIC_EGRESS_SCOPE_TRUSTED = 'trusted';
+
+// THE derivation, used by every surface that carries a scope outward: the Zero
+// invoke envelope, the `sf-fx-egress` dispatch header, and proxy routes. Reads
+// the overlay's claim flag off serving, so claiming a Space upgrades its egress
+// on the next config push with no republish. Fail closed: absent means
+// unclaimed.
+function _stattic_egress_scope(array $serving): string
+{
+    return ($serving['space_claimed'] ?? null) === true
+        ? STATTIC_EGRESS_SCOPE_OPEN
+        : STATTIC_EGRESS_SCOPE_TRUSTED;
+}
+
 // PARTIAL check, a name/literal-level screen only, NOT the SSRF verdict. The
 // name overstates it. It rejects empty/localhost, Spacefast-internal hosts and
 // non-public IP literals, but returns true for every resolvable hostname
 // WITHOUT resolving it. The binding check is _stattic_egress_resolve_public_ips,
 // which pins the connect IPs; callers must gate the connection on that, never
 // on this predicate alone.
-function _stattic_egress_host_allowed(string $host, ?int $port = null): bool
+//
+// `$scope` fails closed like every other reading of it. The compile-time
+// callers (generate.php's proxy acceptance, upload.php) pass open explicitly:
+// they hold no claim state and must not, since a Space can be claimed after
+// its config is written, and the serve-time hop is what enforces the scope.
+function _stattic_egress_host_allowed(string $host, ?int $port = null, string $scope = STATTIC_EGRESS_SCOPE_TRUSTED): bool
 {
     $normalized = strtolower(trim($host, "[] \t\n\r\0\x0B."));
     if (_stattic_egress_test_target_allowlisted($normalized, $port)) {
@@ -26,10 +49,15 @@ function _stattic_egress_host_allowed(string $host, ?int $port = null): bool
     if (_stattic_egress_host_is_stattic_internal($normalized)) {
         return false;
     }
-    if (filter_var($normalized, FILTER_VALIDATE_IP)) {
-        return _stattic_egress_ip_public($normalized);
+    if (filter_var($normalized, FILTER_VALIDATE_IP) && !_stattic_egress_ip_public($normalized)) {
+        return false;
     }
-    return true;
+    // Last, so an infrastructure denial keeps its own reason: an anonymous Space
+    // reaching for a metadata address is refused as an address, not told to
+    // claim the Space. Exact hostname, case-insensitive, no wildcards — a public
+    // IP literal names no trusted host either.
+    return $scope !== STATTIC_EGRESS_SCOPE_TRUSTED
+        || in_array($normalized, STATTIC_RUNTIME_EGRESS_TRUSTED_HOSTS, true);
 }
 
 // The inverse problem to the tenant policy above, and why there are two: a

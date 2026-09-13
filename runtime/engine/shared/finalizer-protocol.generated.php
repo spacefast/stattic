@@ -15,6 +15,7 @@ const STATTIC_RUNTIME_EGRESS_PROXY_ROUTE_ALLOWED_SCHEMES = ['http', 'https'];
 const STATTIC_RUNTIME_EGRESS_DENIED_IPV4 = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24', '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/3'];
 const STATTIC_RUNTIME_EGRESS_DENIED_IPV6 = ['::/96', '::ffff:0.0.0.0/96', '64:ff9b::/96', '100::/64', '2001:db8::/32', 'fc00::/7', 'fe80::/10', 'ff00::/8'];
 const STATTIC_RUNTIME_EGRESS_INTERNAL_HOSTS = ['view.fast', 'atomicsites.net'];
+const STATTIC_RUNTIME_EGRESS_TRUSTED_HOSTS = ['api.anthropic.com', 'api.github.com', 'api.groq.com', 'api.mistral.ai', 'api.openai.com', 'api.stripe.com', 'api.together.xyz', 'generativelanguage.googleapis.com', 'openrouter.ai'];
 const STATTIC_RUNTIME_BROKER_PROTOCOL = 'spacefast.broker.v1';
 const STATTIC_RUNTIME_EXECUTION_TIMEOUT_MS_DEFAULT = 5000;
 const STATTIC_RUNTIME_EXECUTION_TIMEOUT_MS_MAX = 30000;

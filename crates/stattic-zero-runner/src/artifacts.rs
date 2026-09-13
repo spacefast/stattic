@@ -17,6 +17,10 @@ use crate::response::{error_response, RunnerResponse};
 pub(crate) enum ExecutionMode {
     Read,
     Write,
+    /// No invocation transaction: every statement autocommits on a pooled
+    /// connection, and only reads are allowed. A handler that calls out to the
+    /// network gets to do so without a write transaction open behind it.
+    Action,
 }
 
 /// The execution mode a capsule published before the execution law never
@@ -144,11 +148,13 @@ struct EndpointIndexArtifact {
 pub struct EndpointCapabilities {
     #[serde(default = "default_true")]
     pub db: bool,
-    // The write-side authorities default closed. A read artifact that never
-    // named them would otherwise inherit an open grant the execution mode
-    // forbids, and `validate_for` would reject at serve time an artifact the
-    // finalizer was happy to publish.
-    #[serde(default)]
+    // Outbound fetch is a global in every mode: the space's egress scope
+    // decides what a request may reach, so there is nothing left for a version
+    // to declare. The remaining write-side authorities still default closed —
+    // a read artifact that named none of them would otherwise inherit an open
+    // grant the execution mode forbids, and `validate_for` would reject at
+    // serve time an artifact the finalizer was happy to publish.
+    #[serde(default = "default_true")]
     pub fetch: bool,
     #[serde(default = "default_true")]
     pub auth: bool,
@@ -202,7 +208,7 @@ impl EndpointCapabilities {
     pub(crate) fn declared_defaults() -> Self {
         Self {
             db: true,
-            fetch: false,
+            fetch: true,
             auth: true,
             env: true,
             realtime: false,
@@ -398,14 +404,21 @@ impl EndpointArtifact {
         // the invocation's mode, not on the artifact's grant, and the read
         // transaction is READ ONLY at the server. This check only keeps a NEW
         // artifact from being finalized with a grant its mode contradicts.
-        if !self.frozen_shape
-            && self.execution_mode == ExecutionMode::Read
-            && (self.capabilities.fetch || self.capabilities.email || self.capabilities.realtime)
-        {
+        // `fetch` is no longer one of them: every mode reaches the network, and
+        // the space's egress scope is what bounds where.
+        let carries_a_grant_its_mode_forbids = match self.execution_mode {
+            ExecutionMode::Read => self.capabilities.email || self.capabilities.realtime,
+            // An action owns no transaction, so it has nothing for a realtime
+            // publish to ride: the invalidation a subscriber would act on
+            // describes writes this mode cannot make.
+            ExecutionMode::Action => self.capabilities.realtime,
+            ExecutionMode::Write => false,
+        };
+        if !self.frozen_shape && carries_a_grant_its_mode_forbids {
             return Err(error_response(
                 422,
                 "zero_artifact_mode_invalid",
-                "A read handler cannot carry write-side capabilities.",
+                "A read or action handler cannot carry write-side capabilities.",
             ));
         }
         if !relative_path_valid(&self.source_path) || !relative_path_valid(&self.bytecode_path) {

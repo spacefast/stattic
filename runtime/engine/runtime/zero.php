@@ -6,6 +6,7 @@ require_once __DIR__ . '/../shared/response.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
 require_once __DIR__ . '/../shared/content-access.php';
 require_once __DIR__ . '/../shared/artifacts.php';
+require_once __DIR__ . '/../shared/egress.php';
 require_once __DIR__ . '/../shared/native-process.php';
 require_once __DIR__ . '/../shared/safety.php';
 require_once __DIR__ . '/../shared/html-insert.php';
@@ -66,7 +67,7 @@ function _stattic_invoke_zero(
 
     $executionMode = is_string($action['execution_mode'] ?? null) && $action['execution_mode'] !== ''
         ? $action['execution_mode']
-        : _stattic_zero_derived_execution_mode('endpoint', $requestMethod);
+        : _stattic_zero_derived_endpoint_execution_mode($requestMethod);
     if ($executionMode === 'write') {
         _stattic_zero_enforce_cookie_mutation_request($serving, $requestHost, false);
     }
@@ -427,9 +428,7 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
         $versionRoot,
         $serving,
         $runId,
-        // Only a query run is a read. An action predates the split entirely and
-        // was never confined to one, so it keeps the write lane it always had.
-        $op === 'query.subscribe' || $op === 'query.run' ? 'read' : 'write',
+        _stattic_zero_run_execution_mode($runId, $artifact),
         $schemaHash,
         [
             'method' => 'POST',
@@ -532,15 +531,44 @@ function _stattic_zero_run_id(string $op, string $name): ?string
     if ($op === 'mutation.run') {
         return 'mutation_' . $name;
     }
-    // The vocabulary this engine compiles no longer emits actions, but the
-    // clients baked into already-published capsules still send `action.run`
-    // and still expect an `action.result` frame back. Those bundles cannot be
-    // rebuilt, so the operation stays a permanent alias — the same reason the
-    // route inventory keeps serving `/__spacefast/zero/*` beside `/__zero/*`.
     if ($op === 'action.run') {
         return 'action_' . $name;
     }
     return null;
+}
+
+/**
+ * The execution lane a run invocation runs under.
+ *
+ * The artifact declares it — a post-law compiler stamps `read`, `write` or
+ * `action` on every run — but only within what the operation allows. The two
+ * are one fact named twice, and the engine is the only place both are in hand:
+ * the run id comes from the request's operation, the mode from the compiled
+ * artifact. Let them disagree and `query.run` reaches the write or action lane
+ * while the cookie mutation gate above guards only `mutation.run` and
+ * `action.run` and the reply frame still says `query.result` — a query
+ * committing writes with neither the origin check nor the changed-table
+ * bookkeeping a mutation gets. So a disagreement is a malformed artifact, and
+ * `action.run` keeps its two lanes: the untransacted one and the `write` a
+ * pre-law action was published with.
+ *
+ * Only an artifact finalized before the intake stamped modes carries none; for
+ * that one the operation says what it always meant.
+ */
+function _stattic_zero_run_execution_mode(string $runId, array $artifact): string
+{
+    $declared = $artifact['executionMode'] ?? null;
+    if (!is_string($declared) || $declared === '') {
+        return _stattic_zero_derived_run_execution_mode($runId);
+    }
+    if (!in_array($declared, _stattic_zero_run_execution_modes($runId), true)) {
+        _stattic_problem_refused(
+            422,
+            'zero_artifact_invalid',
+            'Zero run artifact declares an execution mode its operation does not allow.'
+        );
+    }
+    return $declared;
 }
 
 function _stattic_zero_run_artifact_path(string $versionRoot, string $runId): ?string
@@ -626,6 +654,7 @@ function _stattic_zero_envelope(
             'versionId' => is_string($serving['version_id'] ?? null) ? $serving['version_id'] : '',
             'schemaHash' => $schemaHash,
             'visitorIp' => _stattic_zero_trusted_visitor_ip(),
+            'egressScope' => _stattic_egress_scope($serving),
             'authRef' => 'current',
             'variablesRef' => 'finalized',
         ],
@@ -666,8 +695,9 @@ function _stattic_zero_send_run_frame(string $op, string $name, array $request, 
         ], static fn($entry) => $entry !== null));
     }
     if ($op === 'action.run') {
-        // An old client reads `result` and nothing else off this frame; it has
-        // no changed-table bookkeeping to feed.
+        // An action writes nothing, so there is no changed-table bookkeeping to
+        // feed a subscriber: the client reads `result` and nothing else. Work
+        // that must land in the database goes through a mutation.
         _stattic_zero_json_response(200, array_filter([
             'id' => is_scalar($id) ? $id : null,
             'op' => 'action.result',

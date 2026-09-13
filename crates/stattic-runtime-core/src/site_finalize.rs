@@ -3527,8 +3527,9 @@ mod tests {
             serde_json::from_slice(&fs::read(version.join("zero/runs-index.json")).unwrap())
                 .unwrap();
         let run_artifacts = run_index["runs"].as_object().expect("run index entries");
-        assert_eq!(run_artifacts.len(), 2);
+        assert_eq!(run_artifacts.len(), 3);
         assert!(run_artifacts.contains_key("mutation_addTodo"));
+        assert!(run_artifacts.contains_key("action_lookupTodo"));
         let migrations: Value =
             serde_json::from_slice(&fs::read(version.join("zero/migrations.json")).unwrap())
                 .unwrap();

@@ -2016,9 +2016,9 @@ mod tests {
     }
 
     #[test]
-    fn equivalent_flat_and_directory_index_artifacts_use_stable_clean_url_precedence() {
+    fn flat_html_wins_the_clean_url_when_a_directory_index_also_exists() {
         let table = compile(
-            &[("docs.html", b"docs"), ("docs/index.html", b"docs")],
+            &[("docs.html", b"flat"), ("docs/index.html", b"nested")],
             json!({"index": "index.html", "clean_urls": true}),
             json!({}),
             json!([]),
@@ -2026,10 +2026,9 @@ mod tests {
             json!([]),
         );
 
-        let expected = Some(sha256(b"docs"));
-        assert_eq!(table["/docs.html"].blob, expected);
-        assert_eq!(table["/docs/index.html"].blob, expected);
-        assert_eq!(table["/docs"].blob, expected);
+        assert_eq!(table["/docs.html"].blob, Some(sha256(b"flat")));
+        assert_eq!(table["/docs/index.html"].blob, Some(sha256(b"nested")));
+        assert_eq!(table["/docs"].blob, Some(sha256(b"flat")));
         assert_eq!(table["/docs/"].status, 308);
         assert_eq!(
             table["/docs/"].headers.get("location").map(String::as_str),

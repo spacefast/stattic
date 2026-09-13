@@ -18,14 +18,14 @@ const STATTIC_RUNTIME_BULK_CAS_MAX_COMPRESSED_BYTES = 134217728; // 128 MiB
 const STATTIC_RUNTIME_BULK_CAS_MAX_EXPANDED_BYTES = 134217728; // 128 MiB
 const STATTIC_RUNTIME_BULK_CAS_MAX_BLOBS = 2000;
 
-// Manifest scale ceilings: the runtime's last-resort boundary, not plan policy.
-// Plan caps are lower and enforced by the control plane. Keep these in parity
+// Manifest scale ceilings: the runtime's last-resort boundary. No plan lowers
+// them; only the anonymous tier does, in the control plane. Keep these in parity
 // with MANIFEST_MAX_FILES_CEILING, MANIFEST_MAX_PATH_BYTES and
 // MAX_VERSION_FILE_SIZE_BYTES in packages/common/src/utils/publish-policy.ts;
 // a skipped or compromised control plane is why the boundary exists.
 const STATTIC_RUNTIME_MANIFEST_MAX_FILES = 100000;
 const STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES = 1024;
-const STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES = 67108864; // 64 MiB
+const STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES = 1073741824; // 1 GiB
 
 function _stattic_runtime_publish_pins_store(string $privateRoot, string $spaceId): array
 {

@@ -58,8 +58,6 @@ const BUILD_ARTIFACTS = new Set([
 // file by installer.php from the payload it extracts. Pin the shipped set here
 // so a new tree is a reviewed diff, with the script that produces each.
 const EXPECTED_TREES = {
-  // packages/zero-admin/scripts/build.ts
-  "wordpress/zero-admin": "wp-content/mu-plugins/zero-admin",
   // zero/scripts/build.ts (the vendored Zero dashboard plugin)
   "wordpress/zero-dashboard": "wp-content/mu-plugins/zero-dashboard",
 } as const;
@@ -67,13 +65,7 @@ const EXPECTED_TREES = {
 // Generated roots: present after a build, absent in a fresh checkout, so the
 // walk has to skip them either way — trees reconcile their manifest entries
 // instead. Turbo task metadata is build output the same way.
-const GENERATED_ROOTS = [
-  ".turbo",
-  "bin",
-  "engine/vendor",
-  "wordpress/zero-admin",
-  "wordpress/zero-dashboard",
-];
+const GENERATED_ROOTS = [".turbo", "bin", "engine/vendor", "wordpress/zero-dashboard"];
 
 // Walk the working tree, not Git's index, because the dev engine builder
 // packages the working tree too. An untracked PHP module must be covered before

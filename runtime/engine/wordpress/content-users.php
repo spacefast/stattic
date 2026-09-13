@@ -20,7 +20,8 @@ declare(strict_types=1);
  *    user_has_cap filter), so no ability here reads or writes a role. Who may
  *    do what changes through Grants, and these abilities answer to whatever
  *    WordPress capability that projection carries — `list_users`,
- *    `create_users`, `edit_user` — exactly as WordPress applies them.
+ *    `spacefast_create_users`, `edit_user` — through WordPress's capability API.
+ *    The scoped creation ability never grants installation-wide `create_users`.
  *
  *  - One authority, one user. Creating a user IS establishing the durable
  *    principal for an (issuer, subject) pair, through the same function the
@@ -357,7 +358,7 @@ function spacefast_content_users_abilities(): array
                 ],
             ], ['issuer', 'subject']),
             'output_schema' => $user,
-            'permission_callback' => static fn (): bool => spacefast_content_users_may('create_users'),
+            'permission_callback' => static fn (): bool => spacefast_content_users_may('spacefast_create_users'),
             'execute_callback' => 'spacefast_content_users_create',
         ],
         'zero/wp-users-update' => [

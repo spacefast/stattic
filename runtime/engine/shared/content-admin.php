@@ -68,7 +68,22 @@ function _stattic_content_admin_access(mixed $value): ?array
     }
     $surface = $value['surface'] ?? null;
     if ($surface === 'wordpress') {
-        return ['surface' => 'wordpress'];
+        $path = $value['path'] ?? null;
+        if ($path === null) {
+            return ['surface' => 'wordpress'];
+        }
+        if (!is_string($path) || strlen($path) > 4096 || preg_match('/[\\\\#\x00-\x20]/', $path)
+            || ($path !== '/wp-admin' && !str_starts_with($path, '/wp-admin/'))) {
+            return null;
+        }
+        $pathname = explode('?', $path, 2)[0];
+        for ($i = 0; $i < 4; $i++) {
+            $pathname = rawurldecode($pathname);
+        }
+        if (preg_match('#(?:^|/)\.\.?(?:/|$)#', $pathname) || preg_match('/[\\\\#\x00-\x20]/', $pathname)) {
+            return null;
+        }
+        return ['surface' => 'wordpress', 'path' => $path];
     }
     if ($surface !== 'zero') {
         return null;
@@ -449,7 +464,10 @@ function _stattic_content_admin_verify_session(
  */
 function _stattic_content_admin_request_path(string $path, array $query = []): bool
 {
-    return $path === '/wp-admin'
+    return $path === '/zero-admin'
+        || str_starts_with($path, '/zero-admin/')
+        || $path === '/wp-login.php'
+        || $path === '/wp-admin'
         || str_starts_with($path, '/wp-admin/')
         || _stattic_content_rest_request_path($path, $query);
 }

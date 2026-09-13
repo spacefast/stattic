@@ -617,7 +617,13 @@ test("SPA mode serves the shell for app routes, never for asset-looking paths", 
     },
   });
 
+  const wordpressLoader = path.join(rt.root, "wp-load.php");
+  writeFileSync(
+    wordpressLoader,
+    "<?php throw new RuntimeException('An unclaimed SPA route booted WordPress');",
+  );
   const fallback = await get(rt, "spa.test", "/client/route/42");
+  rmSync(wordpressLoader);
   expect(fallback.status).toBe(200);
   expect(await fallback.text()).toBe("<h1>spa</h1>\n");
 
@@ -645,6 +651,43 @@ test("SPA mode serves the shell for app routes, never for asset-looking paths", 
     expect(ambiguous.headers.get("cache-control"), `depth ${depth}`).toBe("no-store");
   }
 
+  writeFileSync(
+    storagePath(rt, "spaces", "spc_spa", "content-redirects.json"),
+    JSON.stringify({
+      exact: {
+        "/old-slug": [{ action: "redirect", destination: "/new-slug", status: 301, order: 0 }],
+        "/unpublished-rename": [
+          {
+            action: "redirect",
+            destination: "/not-published",
+            status: 301,
+            order: 0,
+            requiresPublishedDestination: true,
+          },
+        ],
+        "/published-rename": [
+          {
+            action: "redirect",
+            destination: "/main.js",
+            status: 301,
+            order: 0,
+            requiresPublishedDestination: true,
+          },
+        ],
+        "/main.js": [{ action: "redirect", destination: "/wrong", status: 301, order: 0 }],
+      },
+      pattern: [],
+    }),
+  );
+  const unpublished = await get(rt, "spa.test", "/unpublished-rename");
+  expect(unpublished.status).toBe(200);
+  expect(await unpublished.text()).toBe("<h1>spa</h1>\n");
+  const published = await get(rt, "spa.test", "/published-rename");
+  expect(published.status).toBe(301);
+  expect(published.headers.get("location")).toBe("/main.js");
+  const renamed = await get(rt, "spa.test", "/old-slug");
+  expect(renamed.status).toBe(301);
+  expect(renamed.headers.get("location")).toBe("/new-slug");
   const asset = await get(rt, "spa.test", "/main.js");
   expect(asset.status).toBe(200);
   expect(await asset.text()).toBe("void 0;\n");

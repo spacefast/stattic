@@ -446,28 +446,14 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-const ZERO_ADMIN_PLUGIN_ROOT = "wordpress/zero-admin";
-const ZERO_ADMIN_BUILD_SCRIPT = "packages/zero-admin/scripts/build.ts";
-
-/**
- * Build the zero-admin plugin into the engine tree when it is not already
- * there.
- *
- * Its source lives in packages/zero-admin and its output under
- * runtime/wordpress/zero-admin is gitignored, so a fresh checkout and every CI
- * lane that runs `bun test` directly start without it while the manifest ships
- * it. Build it lazily here, the way the native binary is built, so every
- * consumer of this harness gets it — a test lane, a control-plane test spawning
- * a runtime, or a developer running one file.
- */
-function ensureZeroAdminPlugin(): void {
-  if (existsSync(path.join(RUNTIME_DIR, ZERO_ADMIN_PLUGIN_ROOT, "zero-admin.php"))) return;
-  const build = spawnSync(process.execPath, [path.join(REPO_ROOT, ZERO_ADMIN_BUILD_SCRIPT)], {
+function ensureZeroDashboardPlugin(): void {
+  if (existsSync(path.join(RUNTIME_DIR, "wordpress/zero-dashboard/next-admin.php"))) return;
+  const build = spawnSync(process.execPath, [path.join(REPO_ROOT, "zero/scripts/build.ts")], {
     cwd: REPO_ROOT,
     encoding: "utf8",
   });
   if (build.status !== 0) {
-    throw new Error(`zero-admin plugin build failed:\n${build.stdout}\n${build.stderr}`);
+    throw new Error(`Zero dashboard build failed:\n${build.stdout}\n${build.stderr}`);
   }
 }
 
@@ -548,7 +534,7 @@ function installEngine(root: string): void {
     trees: Array<{ source: string; path: string }>;
     executables: string[];
   };
-  ensureZeroAdminPlugin();
+  ensureZeroDashboardPlugin();
   // The manifest is the single authority for what ships, and it is edited by
   // the orchestrator at commit time rather than by the streams that add or
   // delete engine files. A drifted manifest therefore fails here first — report
@@ -572,11 +558,7 @@ function installEngine(root: string): void {
     cpSync(source, target);
     chmodSync(target, manifest.executables.includes(file) ? 0o755 : 0o644);
   }
-  // Trees are gitignored build output the installer expands per file. The
-  // harness mirrors the ones that exist: zero-admin is ensured above (a cheap
-  // bun build); the Zero dashboard tree needs its own workspace install
-  // (zero/scripts/build.ts) and no engine behavior under test executes it, so
-  // an absent tree is simply not installed into the fake box.
+  // Install the same built plugin trees that the release installer ships.
   for (const tree of manifest.trees ?? []) {
     const source = path.join(RUNTIME_DIR, tree.source);
     if (!existsSync(source)) continue;

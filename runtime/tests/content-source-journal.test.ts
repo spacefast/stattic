@@ -14,6 +14,7 @@ import path from "node:path";
 
 import { z } from "zod";
 
+import { fetchBlocksEnginePlugin } from "../../scripts/fetch-blocks-engine.mjs";
 import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
 import {
   MYSQL_SETUP_TIMEOUT_MS,
@@ -36,6 +37,7 @@ const ROOT_PASSWORD = "content-source-journal-secret";
 const DATABASE = "content_source_journal_test";
 
 const toolkitPhar = await fetchToolkitPhar();
+const blocksEnginePlugin = await fetchBlocksEnginePlugin();
 let mysql: MysqlContainer;
 
 beforeAll(async () => {
@@ -82,6 +84,14 @@ function releaseRoot() {
     `'postType' => 'page'`,
     `'fieldStorage' => 'post_content'`,
   ].join(", ");
+  const materializedBinding = binding
+    .replace(BINDING, "sync.posts-created")
+    .replace(SOURCE, "content/posts/hello-world.md")
+    .replace("'launch'", "'hello-world'");
+  const scheduledBinding = binding
+    .replace(BINDING, "sync.posts-scheduled")
+    .replace(SOURCE, "content/posts/scheduled.md")
+    .replace("'launch'", "'scheduled'");
   const materialization = [
     `'resourceId' => 'posts'`,
     `'fieldId' => 'post-body'`,
@@ -104,7 +114,7 @@ function releaseRoot() {
     `    'postTypes' => [${resource("posts", "post")}, ${resource("pages", "page")}],`,
     "    'scfFieldGroups' => [], 'tables' => [],",
     "    'pages' => [], 'abilities' => [], 'hooks' => [],",
-    `    'syncBindings' => [[${binding}], [${tsxBinding}]],`,
+    `    'syncBindings' => [[${binding}], [${tsxBinding}], [${binding.replace(BINDING, "sync.projects-meta").replace(SOURCE, "content/projects/details.md").replace("'launch'", "'details'").replace("'post_content'", "'project_body'")}], [${materializedBinding}], [${scheduledBinding}]],`,
     `    'materializations' => [[${materialization}]],`,
     "];",
     "",
@@ -114,6 +124,7 @@ function releaseRoot() {
     path.join(dir, "content-model.sha256"),
     `sha256:${new Bun.CryptoHasher("sha256").update(php).digest("hex")}`,
   );
+  writeFileSync(path.join(storage, `spaces/${SPACE_ID}/content-model/active-release`), revision);
   return { storage, revision, releaseDir: dir };
 }
 
@@ -158,6 +169,13 @@ function wp_insert_post(array $post, bool $returnError = false): int {
   do_action('save_post', $id, (object) $posts[$id]);
   return $id;
 }
+function check_and_publish_future_post(int $postId): void {
+  $post = get_post($postId);
+  if ($post && $post->post_status === 'future') {
+    wp_insert_post(['ID' => $postId, 'post_status' => 'publish']);
+  }
+}
+function get_permalink(object $post): string { return 'https://space.test/' . $post->post_name; }
 function get_post(int $id): ?object {
   global $posts;
   return isset($posts[$id]) ? (object) $posts[$id] : null;
@@ -167,11 +185,13 @@ function get_posts(array $args): array {
   $out = [];
   foreach ($posts as $id => $post) {
     $ok = true;
+    if (isset($args['post_status']) && $args['post_status'] !== 'any' && !in_array($post['post_status'] ?? '', (array) $args['post_status'], true)) $ok = false;
     foreach (($args['meta_query'] ?? []) as $key => $clause) {
       if ($key === 'relation' || !is_array($clause)) continue;
       if (($meta[$id][$clause['key']] ?? null) !== $clause['value']) { $ok = false; }
     }
     if (isset($args['name']) && ($post['post_name'] ?? null) !== $args['name']) $ok = false;
+    if (isset($args['post_name__in']) && !in_array($post['post_name'] ?? '', $args['post_name__in'], true)) $ok = false;
     if (isset($args['post_type']) && $args['post_type'] !== 'any'
         && ($post['post_type'] ?? null) !== $args['post_type']) $ok = false;
     if ($ok) $out[] = (object) $post;
@@ -179,7 +199,27 @@ function get_posts(array $args): array {
   return $out;
 }
 function update_post_meta(int $id, string $key, mixed $value): void {
-  global $meta; $meta[$id][$key] = $value;
+  global $meta;
+  $existed = array_key_exists($key, $meta[$id] ?? []);
+  $meta[$id][$key] = $value;
+  do_action($existed ? 'updated_post_meta' : 'added_post_meta', 1, $id, $key, $value);
+}
+function wp_update_post(array $post, bool $error = false): int { return wp_insert_post($post, $error); }
+function wp_untrash_post(int $id): object|false {
+  global $posts;
+  if (!isset($posts[$id])) return false;
+  $posts[$id]['post_status'] = 'draft';
+  return get_post($id);
+}
+function wp_trash_post(int $id): object|false {
+  $post = get_post($id);
+  if (!$post) return false;
+  update_post_meta($id, '_wp_trash_meta_status', $post->post_status);
+  wp_insert_post(['ID' => $id, 'post_status' => 'trash']);
+  return get_post($id);
+}
+function delete_post_meta(int $id, string $key): bool {
+  global $meta; unset($meta[$id][$key]); return true;
 }
 function get_post_meta(int $id, string $key, bool $single = false): mixed {
   global $meta; return $meta[$id][$key] ?? '';
@@ -189,6 +229,7 @@ function update_option(string $key, $value, $autoload = null): bool {
   global $options; $options[$key] = $value; return true;
 }
 function is_wp_error(mixed $value): bool { return false; }
+function get_date_from_gmt(string $value): string { return $value; }
 function sanitize_title(string $value): string { return strtolower($value); }
 // Every save cuts a revision, so the newest revision id moves with the post.
 $revisions = [];
@@ -212,11 +253,15 @@ function wp_get_current_user(): object {
  * prepare follows WordPress's contract: bare %s/%d placeholders that the
  * method itself quotes.
  */
+if (!defined('ARRAY_A')) define('ARRAY_A', 'ARRAY_A');
 final class Test_Wpdb {
   public function __construct(public mysqli $link) {}
   public function query(string $sql) {
     $result = $this->link->query($sql);
     return $result === false ? false : $this->link->affected_rows;
+  }
+  public function get_results(string $sql, string $mode): array {
+    return $this->link->query($sql)->fetch_all(MYSQLI_ASSOC);
   }
   public function prepare(string $sql, ...$args): string {
     $index = 0;
@@ -269,6 +314,7 @@ ${WP_STUBS}
 require_once 'phar://' . ${JSON.stringify(toolkitPhar)} . '/vendor/autoload.php';
 require_once ${JSON.stringify(journalTable)};
 require_once ${JSON.stringify(applicationJournal)};
+$GLOBALS['SPACEFAST_CONTENT_BLOCKS_ENGINE_PLUGIN'] = ${JSON.stringify(blocksEnginePlugin)};
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = ${JSON.stringify(SPACE_ID)};
 $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = ${JSON.stringify(releaseDir)};
 $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = ${JSON.stringify(revision)};
@@ -322,12 +368,15 @@ function editor_save(int $postId, string $blocks): void {
   do_action('save_post', $postId, (object) $posts[$postId]);
 }
 
-// A save that leaves the bound field byte-identical to the ledger is not a
-// source change, however much else about the post moved.
+// Metadata edits carry source intent even when the body stays unchanged.
+$titleBefore = $posts[$postId]['post_title'];
+$link->query('START TRANSACTION');
 $posts[$postId]['post_title'] = 'Renamed';
 wp_save_post_revision($postId);
 do_action('save_post', $postId, (object) $posts[$postId]);
 probe('after-title-only-save', $link);
+$link->query('ROLLBACK');
+$posts[$postId]['post_title'] = $titleBefore;
 
 // An editor save whose transaction rolls back.
 $link->query('START TRANSACTION');
@@ -375,6 +424,46 @@ update_post_meta($createdId, SPACEFAST_CONTENT_SPACE_META, ${JSON.stringify(SPAC
 probe('after-editor-create', $link);
 editor_save($createdId, "<!-- wp:paragraph -->\n<p>Second draft.</p>\n<!-- /wp:paragraph -->");
 probe('after-editor-second-save', $link);
+$firstMaterialized = spacefast_content_materialize_source(['operationId' => 'op_firstmaterialize', 'postId' => $createdId], true);
+$pendingInspection = spacefast_content_inspect_source(['bindingId' => 'materialize.' . $createdId], true);
+$pendingResolution = [
+  'operationId' => 'op_pendingresolution', 'bindingId' => 'materialize.' . $createdId,
+  'source' => $pendingInspection['source'], 'observedSourceRevision' => 'blob-occupied',
+  'expectedBaseRevision' => $pendingInspection['baseRevision'], 'expectedWordpressDigest' => $pendingInspection['wordpressDigest'],
+  'text' => "Resolved first draft.\\n",
+];
+$pendingStale = [];
+foreach (['expectedBaseRevision', 'expectedWordpressDigest'] as $field) {
+  try {
+    spacefast_content_resolve_source([...$pendingResolution, $field => 'sha256:' . str_repeat('0', 64)], true);
+    $pendingStale[$field] = 'unexpected_success';
+  } catch (Spacefast_Content_Error $error) { $pendingStale[$field] = $error->codeName; }
+}
+$pendingResolved = spacefast_content_resolve_source($pendingResolution, true);
+$pendingReplay = spacefast_content_resolve_source($pendingResolution, true);
+$resolvedMaterialized = spacefast_content_sync_receipt($createdId, 'op_pendingresolution');
+$probes[] = ['step' => 'pending-resolution', 'rows' => [
+  'inspection' => $pendingInspection, 'stale' => $pendingStale, 'resolved' => $pendingResolved,
+  'replay' => $pendingReplay, 'receipt' => $resolvedMaterialized,
+]];
+probe('after-pending-resolution', $link);
+$posts[$createdId]['post_title'] = 'Updated during build';
+$posts[$createdId]['post_name'] = 'renamed-during-build';
+editor_save($createdId, "<!-- wp:paragraph -->\n<p>Third draft during build.</p>\n<!-- /wp:paragraph -->");
+probe('after-materialization-pending-save', $link);
+$repeatMaterialized = spacefast_content_materialize_source(['operationId' => 'op_repeatmaterialize', 'postId' => $createdId], true);
+$adopted = spacefast_content_sync_without_journal(static fn () => spacefast_content_sync_publish_document([
+  'bindingId' => 'sync.posts-created', 'source' => 'content/posts/hello-world.md', 'format' => 'md',
+  'text' => $resolvedMaterialized['sourceWrite']['text'], 'observedSourceRevision' => 'blob-resolved-materialized',
+  'operationId' => 'op_activatematerialized', 'binding' => spacefast_content_model_sync_binding('sync.posts-created'),
+]));
+spacefast_content_source_journal_record_save($createdId);
+probe('after-materialization-adopted', $link);
+$probes[] = ['step' => 'materialization-adoption', 'rows' => [
+  'first' => $firstMaterialized, 'resolved' => $resolvedMaterialized, 'repeat' => $repeatMaterialized, 'adopted' => $adopted,
+  'post' => get_post($createdId), 'ledger' => spacefast_content_sync_ledger($createdId),
+]];
+
 
 // A page whose only source is the TSX the compiler owns. A compile-class
 // binding never gets a ledger, so the ledger lookup is what stops this save
@@ -387,7 +476,88 @@ $pageId = wp_insert_post([
   'post_content' => "<!-- wp:paragraph -->\n<p>Compiled page.</p>\n<!-- /wp:paragraph -->",
 ]);
 update_post_meta($pageId, SPACEFAST_CONTENT_SPACE_META, ${JSON.stringify(SPACE_ID)});
+update_post_meta($pageId, SPACEFAST_CONTENT_EXTERNAL_ID_META, SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX . ${JSON.stringify(TSX_BINDING)});
 probe('after-compile-class-save', $link);
+$conversion = ['operation' => 'source.convert', 'operationId' => 'op_explicitconversion', 'postId' => $pageId, 'bindingId' => '${TSX_BINDING}'];
+spacefast_content_request_conversion($conversion, true);
+spacefast_content_request_conversion($conversion, true);
+probe('after-explicit-conversion', $link);
+spacefast_content_materialize_source(['operationId' => 'op_prepareconversion', 'bindingId' => '${TSX_BINDING}'], true);
+$conversionInspection = spacefast_content_inspect_source(['bindingId' => '${TSX_BINDING}'], true);
+spacefast_content_resolve_source([
+  'operationId' => 'op_resolveconversion', 'bindingId' => '${TSX_BINDING}',
+  'source' => $conversionInspection['source'], 'observedSourceRevision' => 'blob-existing-html',
+  'expectedBaseRevision' => $conversionInspection['baseRevision'], 'expectedWordpressDigest' => $conversionInspection['wordpressDigest'],
+  'text' => '<p>Resolved component page.</p>',
+], true);
+$probes[] = ['step' => 'conversion-resolution', 'rows' => [
+  'inspection' => $conversionInspection, 'receipt' => spacefast_content_sync_receipt($pageId, 'op_resolveconversion'),
+]];
+probe('after-conversion-resolution', $link);
+$inspection = spacefast_content_inspect_source(['bindingId' => ${JSON.stringify(BINDING)}], true);
+$resolution = [
+  'operationId' => 'op_explicitresolution', 'bindingId' => ${JSON.stringify(BINDING)},
+  'source' => ${JSON.stringify(SOURCE)}, 'observedSourceRevision' => 'blob-current',
+  'expectedBaseRevision' => $inspection['baseRevision'], 'expectedWordpressDigest' => $inspection['wordpressDigest'],
+  'text' => "# Resolved\n\nThe selected result.\n",
+];
+try {
+  spacefast_content_resolve_source([...$resolution, 'expectedWordpressDigest' => 'sha256:' . str_repeat('0', 64)], true);
+  $probes[] = ['step' => 'stale-resolution', 'rows' => ['code' => 'unexpected_success']];
+} catch (Spacefast_Content_Error $error) {
+  $probes[] = ['step' => 'stale-resolution', 'rows' => ['code' => $error->codeName]];
+}
+spacefast_content_resolve_source($resolution, true);
+spacefast_content_resolve_source($resolution, true);
+probe('after-resolution', $link);
+$probes[] = ['step' => 'resolved-receipt', 'rows' => spacefast_content_sync_receipt($postId, 'op_explicitresolution')];
+$probes[] = ['step' => 'sync-status', 'rows' => spacefast_content_source_journal_status()];
+
+$retryClaims = _stattic_application_journal_claim($link, STATTIC_APPLICATION_JOURNAL_CONTENT_SOURCE_SINK, 25, 120);
+foreach ($retryClaims as $retryClaim) {
+  if ($retryClaim['entry']['operationId'] !== 'op_explicitresolution') continue;
+  _stattic_application_journal_complete($link, [
+    'format' => 'spacefast.application-delivery', 'version' => 1,
+    'fence' => $retryClaim['fence'], 'idempotencyKey' => $retryClaim['idempotencyKey'],
+    'recordedAt' => gmdate('Y-m-d\\TH:i:s\\Z'), 'status' => 'retry',
+    'retryAt' => gmdate('Y-m-d\\TH:i:s\\Z', time() + 60),
+    'problem' => ['code' => 'content_sync_transient', 'message' => 'Try again.'],
+  ]);
+}
+$probes[] = ['step' => 'retry-status', 'rows' => spacefast_content_source_journal_status()];
+spacefast_content_source_journal_retry('op_explicitresolution');
+$probes[] = ['step' => 'retried-status', 'rows' => spacefast_content_source_journal_status()];
+
+spacefast_content_handle_request([
+  'operation' => 'source.reconcile', 'state' => 'initial',
+  'bindingId' => 'sync.projects-meta', 'source' => 'content/projects/details.md',
+  'text' => "# Details\n\nOriginal field.\n", 'observedSourceRevision' => 'blob-meta',
+  'operationId' => 'op_initialmeta',
+], true);
+$metaPost = spacefast_content_sync_find_post('sync.projects-meta', spacefast_content_model_sync_binding('sync.projects-meta'));
+update_post_meta((int) $metaPost->ID, 'unrelated_field', 'Keep this in WordPress.');
+probe('after-unrelated-meta', $link);
+update_post_meta((int) $metaPost->ID, 'project_body', "<!-- wp:paragraph -->\n<p>Updated field.</p>\n<!-- /wp:paragraph -->");
+probe('after-bound-meta', $link);
+
+spacefast_content_handle_request([
+  'operation' => 'source.reconcile', 'state' => 'initial', 'bindingId' => 'sync.posts-scheduled',
+  'source' => 'content/posts/scheduled.md',
+  'text' => '<!-- spacefast:document {"version":1,"title":"Scheduled","slug":"scheduled","status":"future","dateGmt":"2099-01-01T12:00:00Z"} -->' . "\nScheduled body.\n",
+  'observedSourceRevision' => 'blob-scheduled', 'operationId' => 'op_initialscheduled',
+], true);
+$scheduledPost = spacefast_content_sync_find_post('sync.posts-scheduled', spacefast_content_model_sync_binding('sync.posts-scheduled'));
+$GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = ${JSON.stringify(path.join(path.dirname(storage), "releases/test-engine"))};
+unset($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'], $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'], $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION']);
+do_action('publish_future_post', (int) $scheduledPost->ID);
+probe('after-scheduled-publication', $link);
+$probes[] = ['step' => 'scheduled-context', 'rows' => [
+  'postStatus' => get_post((int) $scheduledPost->ID)->post_status,
+  'space' => $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? null,
+  'model' => $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] ?? null,
+  'routes' => json_decode(file_get_contents(${JSON.stringify(storage + "/spaces/" + SPACE_ID + "/wordpress-routes.json")}), true),
+]];
+
 $probes[] = ['step' => 'ids', 'rows' => ['created' => $createdId, 'page' => $pageId]];
 
 echo json_encode($probes, JSON_UNESCAPED_SLASHES);
@@ -457,9 +627,8 @@ test(
     // The reconciliation writes the post itself. Journalling that write would
     // hand the drain back the answer it had just produced.
     expect(rows(probes, "bound")).toEqual([]);
-    // Neither is a save that moved everything about the post except the field
-    // the binding names.
-    expect(rows(probes, "after-title-only-save")).toEqual([]);
+    // A title-only edit still needs to reach source metadata.
+    expect(rows(probes, "after-title-only-save")).toHaveLength(1);
 
     // Intent is visible inside the transaction that appended it...
     expect(rows(probes, "inside-rolled-back-save")).toHaveLength(1);
@@ -502,12 +671,31 @@ test(
 
     expect(at(probes, "completed").rows).toBe(true);
     expect(rows(probes, "after-complete")[0]?.state).toBe("delivered");
+    expect(rowsFor(probes, "after-unrelated-meta", "sync.projects-meta")).toEqual([]);
+    const metaRows = rowsFor(probes, "after-bound-meta", "sync.projects-meta");
+    expect(metaRows).toHaveLength(1);
+    expect(journalRowSchema.parse(metaRows[0]).payload.source).toBe("content/projects/details.md");
+    const scheduledRows = rowsFor(probes, "after-scheduled-publication", "sync.posts-scheduled");
+    expect(scheduledRows).toHaveLength(1);
+    expect(journalRowSchema.parse(scheduledRows[0]).payload.source).toBe(
+      "content/posts/scheduled.md",
+    );
+    const scheduledContext = z
+      .object({
+        postStatus: z.string(),
+        space: z.null(),
+        model: z.null(),
+        routes: z.record(z.string(), z.unknown()),
+      })
+      .parse(at(probes, "scheduled-context").rows);
+    expect(scheduledContext.postStatus).toBe("publish");
+    expect(scheduledContext.routes["/scheduled"]).toMatchObject({ postType: "post" });
   },
   MYSQL_SETUP_TIMEOUT_MS + 60_000,
 );
 
 test(
-  "an editor save journals content no file backs and content only a compiler wrote",
+  "editor content sync and explicit component conversion share the durable journal",
   async () => {
     const probes = await probesOnce();
     const ids = z.object({ created: z.number(), page: z.number() }).parse(at(probes, "ids").rows);
@@ -533,14 +721,114 @@ test(
       first.payload.wordpressRevisionId,
     );
 
-    // The compile-class binding: no ledger, so the blocks digest alone is what
-    // this intent stands on. Today this save journals nothing at all.
-    const compiled = rowsFor(probes, "after-compile-class-save", TSX_BINDING);
+    expect(rowsFor(probes, "after-materialization-pending-save", "materialize.")).toEqual(
+      rowsFor(probes, "after-pending-resolution", "materialize."),
+    );
+    const pending = z
+      .object({
+        inspection: z.object({ bindingId: z.string(), source: z.string(), baseText: z.string() }),
+        stale: z.record(z.string(), z.string()),
+        resolved: z.object({ status: z.string(), postId: z.number() }),
+        replay: z.object({ status: z.string(), postId: z.number() }),
+        receipt: z.object({
+          sourceWrite: z.object({ text: z.string(), expectedSourceRevision: z.string() }),
+        }),
+      })
+      .parse(at(probes, "pending-resolution").rows);
+    expect(pending.inspection.bindingId).toBe(`materialize.${ids.created}`);
+    expect(pending.inspection.source).toBe("content/posts/hello-world.md");
+    expect(pending.inspection.baseText).toContain("Second draft.");
+    expect(pending.stale).toEqual({
+      expectedBaseRevision: "content_sync_resolution_stale",
+      expectedWordpressDigest: "content_sync_resolution_stale",
+    });
+    expect(pending.resolved).toEqual({ status: "queued", postId: ids.created });
+    expect(pending.replay).toEqual(pending.resolved);
+    expect(pending.receipt.sourceWrite).toMatchObject({ expectedSourceRevision: "blob-occupied" });
+    expect(pending.receipt.sourceWrite.text).toContain("Resolved first draft.");
+    const adoption = z
+      .object({
+        first: z.object({
+          sourceWrite: z.object({ text: z.string(), expectedSourceRevision: z.string() }),
+        }),
+        resolved: z.object({
+          sourceWrite: z.object({ text: z.string(), expectedSourceRevision: z.string() }),
+        }),
+        repeat: z.object({
+          sourceWrite: z.object({ text: z.string(), expectedSourceRevision: z.string() }),
+        }),
+        adopted: z.object({ status: z.string(), postId: z.number() }),
+        post: z.object({ post_content: z.string(), post_title: z.string(), post_name: z.string() }),
+        ledger: z.object({ baseText: z.string() }),
+      })
+      .parse(at(probes, "materialization-adoption").rows);
+    expect(adoption.repeat.sourceWrite).toEqual(adoption.resolved.sourceWrite);
+    expect(adoption.first.sourceWrite.expectedSourceRevision).toBe("absent");
+    expect(adoption.adopted).toEqual({ status: "adopted", postId: ids.created });
+    expect(adoption.post.post_content).toContain("Third draft during build.");
+    expect(adoption.post.post_title).toBe("Updated during build");
+    expect(adoption.post.post_name).toBe("renamed-during-build");
+    expect(adoption.ledger.baseText).toBe(adoption.resolved.sourceWrite.text);
+    expect(rowsFor(probes, "after-materialization-adopted", "sync.posts-created")).toHaveLength(1);
+
+    expect(rowsFor(probes, "after-compile-class-save", TSX_BINDING)).toEqual([]);
+    const compiled = rowsFor(probes, "after-explicit-conversion", TSX_BINDING);
     expect(compiled).toHaveLength(1);
     const row = journalRowSchema.parse(compiled[0]);
-    expect(row.open_binding_id).toBe(TSX_BINDING);
+    expect(row.entry_id).toBe(`${SPACE_ID}:op_explicitconversion:0`);
     expect(row.payload.source).toBe(TSX_SOURCE);
     expect(row.payload.postId).toBe(ids.page);
+    const conversion = z
+      .object({
+        inspection: z.object({ source: z.string() }),
+        receipt: z.object({
+          sourceWrite: z.object({ text: z.string(), expectedSourceRevision: z.string() }),
+        }),
+      })
+      .parse(at(probes, "conversion-resolution").rows);
+    expect(conversion.inspection.source).toBe(TSX_SOURCE.replace(/\.tsx$/, ".html"));
+    expect(conversion.receipt.sourceWrite.expectedSourceRevision).toBe("blob-existing-html");
+    expect(conversion.receipt.sourceWrite.text).toContain(`"componentSource":"${TSX_SOURCE}"`);
+    expect(conversion.receipt.sourceWrite.text).toContain("Resolved component page.");
+    const resolvedConversion = rowsFor(probes, "after-conversion-resolution", TSX_BINDING).find(
+      (entry) => entry.entry_id === `${SPACE_ID}:op_resolveconversion:0`,
+    );
+    expect(
+      z.object({ payload: z.object({ intent: z.string() }) }).parse(resolvedConversion).payload
+        .intent,
+    ).toBe("convert");
+    expect(z.object({ code: z.string() }).parse(at(probes, "stale-resolution").rows).code).toBe(
+      "content_sync_resolution_stale",
+    );
+    const resolved = rowsFor(probes, "after-resolution", BINDING).filter(
+      (entry) => entry.entry_id === `${SPACE_ID}:op_explicitresolution:0`,
+    );
+    expect(resolved).toHaveLength(1);
+    const prepared = z
+      .object({
+        status: z.literal("pulled"),
+        sourceWrite: z.object({ text: z.string(), expectedSourceRevision: z.string() }),
+      })
+      .parse(at(probes, "resolved-receipt").rows);
+    expect(prepared.sourceWrite.text).toContain("The selected result.");
+    expect(prepared.sourceWrite.expectedSourceRevision).toBe("blob-current");
+    const sync = z
+      .object({ operations: z.array(z.object({ operationId: z.string(), state: z.string() })) })
+      .parse(at(probes, "sync-status").rows);
+    expect(
+      sync.operations.find((entry) => entry.operationId === "op_explicitresolution")?.state,
+    ).toBe("queued");
+    const operationStatus = (step: string) =>
+      z
+        .object({
+          operations: z.array(
+            z.object({ operationId: z.string(), state: z.string(), attemptCount: z.number() }),
+          ),
+        })
+        .parse(at(probes, step).rows)
+        .operations.find((entry) => entry.operationId === "op_explicitresolution");
+    expect(operationStatus("retry-status")).toMatchObject({ state: "retry", attemptCount: 1 });
+    expect(operationStatus("retried-status")).toMatchObject({ state: "queued", attemptCount: 0 });
   },
   MYSQL_SETUP_TIMEOUT_MS + 60_000,
 );

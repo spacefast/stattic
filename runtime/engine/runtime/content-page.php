@@ -119,10 +119,6 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
         || ($binding['documentSeed']['sha256'] ?? null) !== $snapshot['sha256'])) {
         return false;
     }
-    if ($immutable && (($binding['documentSeed']['sha256'] ?? null) !== $snapshot['sha256']
-        || ($binding['format'] ?? null) !== $snapshot['format'])) {
-        return false;
-    }
     $page = $immutable
         ? _stattic_wordpress_page_snapshot_post($route, $snapshot)
         : spacefast_content_sync_find_post($route['bindingId'], $binding, false);
@@ -330,16 +326,18 @@ function _stattic_wordpress_page_snapshot(array $context, array $route): ?array
 
 function _stattic_wordpress_page_snapshot_post(array $route, array $seed): object
 {
+    $document = $seed['format'] !== 'tsx' && str_starts_with($seed['text'], '<!-- spacefast:document ')
+        ? spacefast_content_sync_document($seed['text']) : ['metadata' => null, 'body' => $seed['text']];
     $post = (object) [
         'ID' => 0,
         'post_type' => ($seed['postType'] ?? null) === 'post' ? 'post' : 'page',
-        'post_status' => 'publish',
-        'post_name' => $route['id'],
-        'post_title' => is_string($seed['title'] ?? null) ? $seed['title'] : ($route['path'] === '/' ? 'Home' : ucwords(str_replace('-', ' ', basename($route['path'])))),
+        'post_status' => $document['metadata']['status'] ?? 'publish',
+        'post_name' => $document['metadata']['slug'] ?? $route['id'],
+        'post_title' => $document['metadata']['title'] ?? (is_string($seed['title'] ?? null) ? $seed['title'] : ($route['path'] === '/' ? 'Home' : ucwords(str_replace('-', ' ', basename($route['path']))))),
         'post_excerpt' => '',
         'post_content' => $seed['format'] === 'tsx'
             ? $seed['text']
-            : spacefast_content_sync_to_blocks($seed['format'], $seed['text']),
+            : spacefast_content_sync_to_blocks($seed['format'], $document['body']),
         'post_author' => 0,
         'post_date' => '1970-01-01 00:00:00',
         'post_date_gmt' => '1970-01-01 00:00:00',
@@ -351,4 +349,75 @@ function _stattic_wordpress_page_snapshot_post(array $route, array $seed): objec
 function _stattic_wordpress_page_escape(string $value): string
 {
     return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML5, 'UTF-8');
+}
+
+/** Resolve WordPress content only after the deployment has declined the path. */
+function _stattic_wordpress_fallback_try_serve(array $context, string $requestPath, string $requestMethod): bool
+{
+    if (!in_array($requestMethod, ['GET', 'HEAD'], true)
+        || _stattic_path_is_reserved($requestPath)
+        || !empty($context['serving']['immutable'])) {
+        return false;
+    }
+    $privateRoot = (string) $context['private_root'];
+    $routeFile = $privateRoot . '/spaces/' . $context['space_id'] . '/wordpress-routes.json';
+    $paths = is_file($routeFile) ? json_decode((string) file_get_contents($routeFile), true) : null;
+    if (!is_array($paths)) {
+        return false;
+    }
+    $route = $paths[rtrim($requestPath, '/') ?: '/'] ?? null;
+    if ($route === null) {
+        foreach ($paths['__rewrites'] ?? [] as $rule) {
+            if (preg_match('~^' . str_replace('~', '\~', $rule['pattern']) . '~', ltrim($requestPath, '/'), $matches) !== 1) {
+                continue;
+            }
+            if (isset($rule['query'])) {
+                $route = ['query' => $rule['query'] + ['paged' => (int) $matches[$rule['pagedMatch']]]];
+            } else {
+                $target = preg_replace_callback('/\$matches\[([0-9]+)\]/', static fn (array $match): string => urlencode($matches[(int) $match[1]] ?? ''), $rule['target']);
+                parse_str(explode('?', $target, 2)[1] ?? '', $query);
+                $route = ['query' => $query];
+            }
+            break;
+        }
+    }
+    if ($route === null) {
+        return false;
+    }
+    $wpLoad = dirname(dirname($privateRoot)) . '/wp-load.php';
+    if (!is_file($wpLoad)) {
+        return false;
+    }
+    $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $context['space_id'];
+    $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
+    require_once __DIR__ . '/../shared/content-access.php';
+    $revision = _stattic_content_version_model_revision($privateRoot, $context['space_id'], $context['version_id']);
+    if ($revision !== null) {
+        $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] = $revision;
+    }
+    if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
+        return true;
+    }
+    if (!defined('WP_USE_THEMES')) {
+        define('WP_USE_THEMES', true);
+    }
+    require_once $wpLoad;
+    if (!function_exists('wp') || !function_exists('is_404')) {
+        return false;
+    }
+    $resolveRequest = static fn (array $query): array => isset($route['postId'])
+        ? ['p' => $route['postId'], 'post_type' => $route['postType']]
+        : ($route['query'] ?? ['feed' => 'rss2']);
+    add_filter('request', $resolveRequest, PHP_INT_MAX);
+    try {
+        wp();
+    } finally {
+        remove_filter('request', $resolveRequest, PHP_INT_MAX);
+    }
+    if (is_404()) {
+        http_response_code(200);
+        return false;
+    }
+    require ABSPATH . WPINC . '/template-loader.php';
+    exit;
 }

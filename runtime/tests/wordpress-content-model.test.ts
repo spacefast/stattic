@@ -216,6 +216,8 @@ function update_term_meta(int $termId, string $key, mixed $value): void {}
 function wp_set_object_terms(int $postId, mixed $terms, string $taxonomy): void {
   $GLOBALS['assignedTerms'][$postId][$taxonomy] = (array) $terms;
 }
+function get_permalink(object $post): string { return '/' . $post->post_name . '/'; }
+function wp_parse_url(string $url, int $component): mixed { return parse_url($url, $component); }
 function get_posts(array $args): array {
   $postType = $args['post_type'] ?? null;
   if ($postType !== 'wp_template') return [];
@@ -341,10 +343,12 @@ $renderedBlock = $registered['blocks']['zero/component']['render_callback']([
 $reference = static fn (array $definition, mixed $value): mixed =>
   spacefast_content_validate_scf_value(true, $value, ['spacefast_definition' => $definition], null);
 $projectsRelation = ['type' => 'relation', 'collection' => 'projects'];
+$GLOBALS['objectTerms'] = [24 => [spacefast_content_model_collection_term_slug('spc_alpha', 'projects')]];
 $references = [
-  $reference($projectsRelation, 21),
+  $reference($projectsRelation, 24),
   $reference($projectsRelation, 22),
-  $reference($projectsRelation, 23),
+  $reference($projectsRelation, 21),
+  $reference(['type' => 'media'], 23),
   $reference(['type' => 'json'], '{"theme":"news"}'),
   $reference(['type' => 'json'], 'not json'),
 ];
@@ -402,7 +406,7 @@ echo json_encode([
   'staged' => $staged,
   'activation' => $activation,
   'reactivation' => $reactivation,
-  'pointer' => trim((string) file_get_contents($argv[2] . '/spaces/spc_alpha/content-model/active-release')),
+  'pointer' => _stattic_private_tree_read_pointer($argv[2] . '/spaces/spc_alpha/content-model/active-release'),
   'post_types' => [
     $projects['post_type'],
     spacefast_content_model_collection_projection('pages')['post_type'],
@@ -482,9 +486,9 @@ echo json_encode([
     // wp_template row is scoped by the wp_theme taxonomy, not by Space, so
     // without this stamp every co-hosted Space would edit one shared set.
     expect(output.template_scope).toEqual(["spc_alpha", "spc_alpha"]);
-    expect(output.template_query).toEqual([
-      { key: "_spacefast_space_id", value: "spc_alpha", compare: "=" },
-    ]);
+    expect(output.template_query).toEqual(
+      expect.arrayContaining([{ key: "_spacefast_space_id", value: "spc_alpha", compare: "=" }]),
+    );
     // And it carries the theme association core scopes template rows by.
     // `get_block_templates()` — the query WordPress's own front controller
     // resolves a document's template through — is fenced by a wp_theme tax_query,
@@ -502,7 +506,7 @@ echo json_encode([
       { slug: "page", content: themeMarkup },
     ]);
     expect(output.reactivation).toEqual(output.activation);
-    expect(output.pointer).toBe(contentModel.revision);
+    expect(output.pointer).toBeNull();
 
     // A Space publishes flat slugs, so activation makes WordPress's own
     // permalinks say the same thing. Left on the provider's dated default,
@@ -609,6 +613,7 @@ echo json_encode([
       "The referenced content does not belong to this Space or resource.",
       "The referenced content does not belong to this Space or resource.",
       true,
+      true,
       "Enter valid JSON.",
     ]);
     expect(output.sync_binding).toMatchObject({
@@ -630,7 +635,7 @@ echo json_encode([
 // Staging and activation are separate so the live content model can follow the
 // live version. This pins the half rollback depends on: pointing at an
 // already-staged release, and clearing the pointer for a version with none.
-test("content model activation follows the live version and refuses unknown releases", async () => {
+test("content model preparation preserves committed ownership and refuses unknown releases", async () => {
   const contentModel = fixtureContentModel();
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-wordpress-content-model-pointer-"));
   const storage = path.join(root, ".stattic/storage");
@@ -645,6 +650,7 @@ test("content model activation follows the live version and refuses unknown rele
   // stand down when their WordPress functions are absent, which leaves the
   // pointer as the one thing under test.
   const script = String.raw`
+function get_posts(array $args): array { return []; }
 final class PointerTestWpdb {
   public string $prefix = 'wp_';
   public function prepare(string $query, mixed ...$values): string { return $query; }
@@ -663,6 +669,7 @@ $catch = static function (callable $run): string {
 };
 spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5], true);
 spacefast_content_model_stage_release($argv[6], $argv[7], $argv[8], true);
+_stattic_private_tree_write_pointer($pointer, $argv[6]);
 spacefast_content_model_activate_release($argv[3], true);
 $afterActivate = $read();
 spacefast_content_model_activate_release($argv[6], true);
@@ -698,12 +705,11 @@ echo json_encode([
     );
     expect(result.exitCode, result.stderr.toString()).toBe(0);
     expect(JSON.parse(result.stdout.toString())).toEqual({
-      after_activate: contentModel.revision,
-      // Rolling back to the release an older version bound restores that model.
+      after_activate: olderRevision,
+      // Preparation cannot change the committed model before the serving switch.
       after_rollback: olderRevision,
       cleared: { revision: null, tables: 0, pages: 0 },
-      // A version that shipped no content model leaves the Space with none.
-      after_clear: null,
+      after_clear: olderRevision,
       unknown_release: "content_model_not_found",
       malformed_revision: "content_model_revision_invalid",
       unmanaged: "content_auth_required",
@@ -860,7 +866,11 @@ $readCaps = static fn (int $userId): array => [
 $anonymousQuery = $readQuery();
 $anonymousCaps = $readCaps(0);
 $restGuard = static fn (int $postId): mixed =>
-  spacefast_content_rest_guard_single_read(['id' => 'response'], (object) ['ID' => $postId], null);
+  spacefast_content_rest_guard_single_read(null, [], new class($postId) {
+    public function __construct(private int $id) {}
+    public function get_method(): string { return 'GET'; }
+    public function get_route(): string { return '/wp/v2/posts/' . $this->id; }
+  }) ?? ['id' => 'response'];
 $restGuardVerdict = static fn (mixed $result): mixed =>
   $result instanceof WP_Error ? ['status' => $result->data['status'] ?? null] : $result;
 $anonymousRestGuard = [
@@ -949,7 +959,7 @@ echo json_encode([
     const spaceClause = [{ key: "_spacefast_space_id", value: "spc_alpha", compare: "=" }];
     const projectsTerm = `sf-${spaceDigest("spc_alpha", 16)}-projects`;
     expect(output.anonymous_query).toEqual({
-      meta: spaceClause,
+      meta: expect.arrayContaining(spaceClause),
       tax: [
         {
           taxonomy: "zero_collection",
@@ -960,9 +970,8 @@ echo json_encode([
       ],
     });
     expect(output.anonymous_caps).toEqual({ private: ["do_not_allow"], public: ["read"] });
-    // The by-id REST read runs through rest_prepare_{post_type}, which WordPress
-    // evaluates even for a published post — unlike the read_post cap. The private
-    // collection item is refused with a 404; the plain post's response is kept.
+    // Before core prepares a single REST response, private collection reads
+    // return 404 while a public document continues through the controller.
     expect(output.anonymous_rest_guard).toEqual({
       private: { status: 404 },
       public: { id: "response" },
@@ -971,7 +980,10 @@ echo json_encode([
     expect(output.editor_query).toEqual({ meta: spaceClause, tax: "" });
     expect(output.editor_caps).toEqual({ private: ["read"], public: ["read"] });
     expect(output.editor_rest_guard).toEqual({ id: "response" });
-    expect(output.releaseless_query).toEqual({ meta: spaceClause, tax: "" });
+    expect(output.releaseless_query).toEqual({
+      meta: expect.arrayContaining(spaceClause),
+      tax: "",
+    });
 
     // Both land on WordPress's own `post`: the adopted native because it is
     // one, the collection because a collection is a post plus a term — never a
@@ -1053,6 +1065,10 @@ $anonymousNone = $read(null);
 $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = 5;
 $editorProjects = $read($projects);
 $editorJunk = $read('not a slug');
+$_GET['zero_collection'] = '2';
+$nativeNumeric = new ContentModelTestQuery();
+$nativeNumeric->set('tax_query', [['taxonomy' => 'zero_collection', 'field' => 'term_id', 'terms' => [2]]]);
+spacefast_content_scope_post_query($nativeNumeric);
 
 echo json_encode([
   'terms' => ['notes' => $notes, 'projects' => $projects],
@@ -1061,6 +1077,7 @@ echo json_encode([
   'anonymous_none' => $anonymousNone,
   'editor_projects' => $editorProjects,
   'editor_junk' => $editorJunk,
+  'native_numeric' => $nativeNumeric->get('tax_query'),
 ]);
 `;
   try {
@@ -1116,6 +1133,9 @@ echo json_encode([
     expect(output.anonymous_none).toEqual([notIn]);
     // An editor may read the private collection, so the read is the filter alone.
     expect(output.editor_projects).toEqual([isIn([projectsTerm])]);
+    expect(output.native_numeric).toEqual([
+      { taxonomy: "zero_collection", field: "term_id", terms: [2] },
+    ]);
     // A value that is not a term slug names no collection, so it filters nothing.
     expect(output.editor_junk).toBe("");
   } finally {

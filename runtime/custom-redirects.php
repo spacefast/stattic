@@ -132,7 +132,7 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             $path
         ) === 1;
         $isWordPressCron = $path === '/wp-cron.php' || str_starts_with($path, '/wp-cron.php/');
-        $isBlockedWordPressEntrypoint = ($isWordPressCorePhp && !$isWordPressCron)
+        $isBlockedWordPressEntrypoint = ($isWordPressCorePhp && !$isWordPressCron && $path !== '/wp-login.php')
             || $path === '/xmlrpc.php'
             || str_starts_with($path, '/xmlrpc.php/');
         if ($isBlockedWordPressEntrypoint) {
@@ -181,7 +181,8 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             // editor behind it.
             if (
                 $isContentAdminPath
-                && _stattic_content_rest_request_path($path, is_array($_GET) ? $_GET : [])
+                && (_stattic_content_rest_request_path($path, is_array($_GET) ? $_GET : [])
+                    || $path === '/zero-admin' || str_starts_with($path, '/zero-admin/'))
             ) {
                 // WordPress core is not the document root on a managed box: the
                 // provider keeps it under `__wp__/` and links only wp-load.php
@@ -193,7 +194,10 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 // the provider chooses to keep core.
                 $wpLoad = dirname($installRoot) . '/wp-load.php';
                 $wpRoot = is_file($wpLoad) ? dirname(realpath($wpLoad) ?: $wpLoad) : null;
-                $frontController = $wpRoot === null ? null : $wpRoot . '/wp-blog-header.php';
+                $frontController = $wpRoot === null ? null : $wpRoot . (
+                    $path === '/zero-admin' || str_starts_with($path, '/zero-admin/')
+                        ? '/wp-admin/admin.php' : '/wp-blog-header.php'
+                );
                 $restFrontController = $frontController !== null && is_file($frontController)
                     ? $frontController
                     : null;
@@ -233,6 +237,10 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     'This Space is not editable right now.'
                 );
             }
+            if (_stattic_content_deployment_claims_path($privateRoot, $host, _stattic_content_rest_access_path($path, is_array($_GET) ? $_GET : []), strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')))) {
+                require $releaseRoot . '/engine/init.php';
+                return;
+            }
             $cookieName = _stattic_content_admin_cookie_name();
             $token = is_string($_COOKIE[$cookieName] ?? null)
                 ? $_COOKIE[$cookieName]
@@ -249,14 +257,6 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     $session['frame_origin'],
                     $session['access'],
                     $session['public_origin']
-                );
-            } elseif ($restFrontController === null) {
-                // Not the REST lane, so /wp-admin: the editor's own HTML surface,
-                // with exactly one door — the session its launch minted.
-                _stattic_problem_response(
-                    401,
-                    'content_admin_session_invalid',
-                    'The content editor session is invalid or expired.'
                 );
             } else {
                 // THE WP API door. WordPress's REST API is reached as the
@@ -334,6 +334,11 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             // Both REST doors end here. /wp-admin needs none of it: those are
             // real WordPress scripts, and returning is exactly how they run.
             if ($restFrontController !== null) {
+                if ($path === '/zero-admin' || str_starts_with($path, '/zero-admin/')) {
+                    $_GET['page'] = 'zero';
+                    $_REQUEST['page'] = 'zero';
+                    $_SERVER['PHP_SELF'] = '/wp-admin/admin.php';
+                }
                 // Editor sessions follow their active model. Public REST follows
                 // the served version, so an unpublished candidate cannot change
                 // its collection privacy policy.
@@ -343,16 +348,6 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     $contentModelRevision = _stattic_private_tree_read_pointer(
                         $privateRoot . '/spaces/' . $restSpaceId . '/content-model/active-release',
                         128
-                    );
-                }
-                if (
-                    !is_string($contentModelRevision)
-                    || preg_match('/\Asha256:[a-f0-9]{64}\z/D', $contentModelRevision) !== 1
-                ) {
-                    _stattic_problem_response(
-                        404,
-                        'content_admin_space_not_found',
-                        'No editable Space is active for this host.'
                     );
                 }
                 // The gate admitted this request; whether WordPress answers REST

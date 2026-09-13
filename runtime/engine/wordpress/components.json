@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:9395daef6e6aa2cf21a6a1e26be4e0f49683fa941a4cd5792d55126e6c4fed0c",
+  "digest": "sha256:05ccaa39236b3b11b87fcdb70236bb63e783dafb4e85a2e7af2190c0230986f9",
   "components": [
     {
       "id": "wordpress-core",
@@ -52,24 +52,12 @@
       "id": "content-kernel",
       "kind": "mu-plugin",
       "version": "source-tree",
-      "sha256": "sha256:00f978f9df2a354e650dacd1792930e041b335ac9d6597acbac57a6a25ce8d5c",
+      "sha256": "sha256:775975204b7012a2e058d93ba9f79b41a3b08c0d889d0b133d643cd47b1d44ff",
       "source": {
         "kind": "embedded",
         "path": "engine/wordpress/content-kernel.php"
       },
       "provides": ["wordpress.content-kernel", "wordpress.tables", "wordpress.sync"],
-      "activation": "always"
-    },
-    {
-      "id": "zero-admin",
-      "kind": "mu-plugin",
-      "version": "source-tree",
-      "sha256": "sha256:f8f7cedeaf3e59806073ee15983bbabc7d4df34593dc1c9894a2ac3a7f4e8e55",
-      "source": {
-        "kind": "embedded",
-        "path": "wordpress/zero-admin"
-      },
-      "provides": ["wordpress.zero-admin"],
       "activation": "always"
     },
     {

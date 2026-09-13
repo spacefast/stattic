@@ -40,6 +40,7 @@ test("every content request names a management action before WordPress boots", a
   expect(
     await classify({
       admin: { operation: "admin.launch" },
+      rest: { operation: "rest.request" },
       authorization: { operation: "authorization.apply" },
       stage: { operation: "model.stage" },
       activate: { operation: "model.activate" },
@@ -51,6 +52,7 @@ test("every content request names a management action before WordPress boots", a
     }),
   ).toEqual({
     admin: "content.admin.launch",
+    rest: "content.rest.request",
     authorization: "content.authorization.apply",
     stage: "content.model.stage",
     activate: "content.model.activate",

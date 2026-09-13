@@ -290,7 +290,7 @@ function _stattic_engine_update_alias_paths(string $privateRoot): array
         $aliases[] = $entrypoint;
     }
     $paths = array_map(static fn (string $alias): string => $publicRoot . $alias, $aliases);
-    // The engine also aliases whole mu-plugin trees (zero-admin, the Zero
+    // The engine also aliases whole mu-plugin trees (the Zero
     // dashboard) into place under unchanged paths, so their PHP goes stale in
     // FPM's SHM the same way the loader copies do. Walk what is actually on
     // disk rather than re-deriving the manifest: invalidating an unchanged

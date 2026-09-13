@@ -203,6 +203,7 @@ function _stattic_content_access_target(string $root, string $host): array {
       [
         "<?php",
         "putenv('DB_PASSWORD=encrypted-data-key');",
+        "function _stattic_content_deployment_claims_path(string $root, string $host, string $path, string $method): bool { return false; }",
         // Mint the session with the same code the launch entry uses, carrying a
         // launch origin the box env deliberately does not match.
         `require ${JSON.stringify(path.join(sharedRoot, "context.php"))};`,
@@ -280,9 +281,6 @@ function _stattic_content_access_target(string $root, string $host): array {
     });
     expect(run({ SPACEFAST_TEST_HOLD: "platform_error" })).toEqual({
       refused: [503, "content_admin_space_unavailable"],
-    });
-    expect(run({ SPACEFAST_TEST_NO_COOKIE: "1" })).toEqual({
-      refused: [401, "content_admin_session_invalid"],
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -388,7 +386,6 @@ test("custom-redirects passes a nonce-bound FPM readiness probe through the priv
 
 test("the provider gate refuses unmanaged WordPress entrypoints before WordPress runs", async () => {
   for (const pathname of [
-    "/wp-login.php",
     "/wp-login.php/continue",
     "/xmlrpc.php",
     "/wp-comments-post.php",

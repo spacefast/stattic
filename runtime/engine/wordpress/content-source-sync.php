@@ -10,12 +10,10 @@
  * - The **ledger** is the common base binding the two, keyed by revision and
  *   digest, stored on the post it binds.
  *
- * Nothing in this file knows what a Markdown or an HTML document looks like.
- * The reconciliation — common base, compare-and-swap, three-way merge,
- * idempotent receipts — is the same algorithm whichever format a binding names,
- * so the format-aware code is exactly four functions wide and lives next door
- * in `content-markdown.php` and `content-html.php`. Adding a third format is a
- * new file and a new arm of the match below; it is not an edit to the merge.
+ * A versioned document envelope carries title, slug, publication state and
+ * original component provenance. Body serialization lives in content-markdown.php
+ * and content-html.php. Metadata and body merge independently against the same
+ * common base.
  *
  * Both serializers share two properties, and both are measured rather than
  * assumed (runtime/tests/content-source-sync.test.ts and
@@ -60,6 +58,82 @@ const SPACEFAST_CONTENT_SYNC_TAKEOVER_FORMATS = ['tsx' => 'html'];
  * two-way lane against the file that path named.
  */
 const SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META = '_spacefast_source_materialized';
+const SPACEFAST_CONTENT_SOURCE_PREPARED_META = '_spacefast_source_prepared';
+const SPACEFAST_CONTENT_SOURCE_RETIRED_META = '_spacefast_source_retired';
+
+/** A source document carries metadata separately from its editable body. */
+function spacefast_content_sync_document(string $text): array
+{
+    if (!str_starts_with($text, '<!-- spacefast:document ')) {
+        return ['metadata' => null, 'body' => $text];
+    }
+    $end = strpos($text, ' -->');
+    $metadata = $end === false ? null : json_decode(substr($text, 24, $end - 24), true);
+    if (!is_array($metadata) || array_diff(array_keys($metadata), ['version', 'title', 'slug', 'status', 'componentSource', 'dateGmt']) !== []
+        || ($metadata['version'] ?? null) !== 1
+        || !is_string($metadata['title'] ?? null) || strlen($metadata['title']) > 2000
+        || !is_string($metadata['slug'] ?? null) || strlen($metadata['slug']) > 200
+        || !in_array($metadata['status'] ?? null, ['draft', 'pending', 'publish', 'private', 'future', 'trash'], true)
+        || (isset($metadata['componentSource']) && !spacefast_content_sync_source_valid($metadata['componentSource']))
+        || (array_key_exists('dateGmt', $metadata) && !spacefast_content_sync_date_valid($metadata['dateGmt']))
+        || (($metadata['status'] ?? null) === 'future' && !isset($metadata['dateGmt']))) {
+        throw new Spacefast_Content_Error(422, 'content_document_metadata_invalid', 'The source document metadata is invalid.');
+    }
+    return ['metadata' => $metadata, 'body' => ltrim(substr($text, $end + 4), "\r\n")];
+}
+
+function spacefast_content_sync_date_valid(mixed $date): bool
+{
+    if (!is_string($date)) return false;
+    $parsed = DateTimeImmutable::createFromFormat('!Y-m-d\TH:i:s\Z', $date, new DateTimeZone('UTC'));
+    return $parsed !== false && $parsed->format('Y-m-d\TH:i:s\Z') === $date;
+}
+
+function spacefast_content_sync_envelope(?array $metadata, string $body): string
+{
+    if ($metadata === null) {
+        return $body;
+    }
+    $json = str_replace(['<', '>'], ['\\u003c', '\\u003e'], spacefast_content_sync_canonical_json($metadata));
+    return '<!-- spacefast:document ' . $json . " -->\n" . $body;
+}
+
+/** Missing metadata leaves the database fields unchanged during source adoption. */
+function spacefast_content_sync_source_agrees(string $source, string $wordpress): bool
+{
+    $left = spacefast_content_sync_document($source);
+    $right = spacefast_content_sync_document($wordpress);
+    if ($left['body'] !== $right['body']) return false;
+    foreach ($left['metadata'] ?? [] as $key => $value) {
+        if (($right['metadata'][$key] ?? null) !== $value) return false;
+    }
+    return true;
+}
+
+function spacefast_content_sync_document_metadata(object $post): array
+{
+    $metadata = [
+        'version' => 1,
+        'title' => (string) ($post->post_title ?? ''),
+        'slug' => (string) ($post->post_name ?? ''),
+        'status' => (string) ($post->post_status ?? 'draft'),
+    ];
+    $date = str_replace(' ', 'T', (string) ($post->post_date_gmt ?? '')) . 'Z';
+    if (spacefast_content_sync_date_valid($date)) $metadata['dateGmt'] = $date;
+    return $metadata;
+}
+
+function spacefast_content_sync_metadata_digest(object $post): string
+{
+    return spacefast_content_sync_digest_text(spacefast_content_sync_canonical_json(spacefast_content_sync_document_metadata($post)));
+}
+
+function spacefast_content_sync_document_changed(array $ledger, object $post, array $binding): bool
+{
+    return !hash_equals((string) ($ledger['blocksDigest'] ?? ''), spacefast_content_sync_digest_text(spacefast_content_sync_read_blocks($post, $binding)))
+        || !isset($ledger['metadataDigest'])
+        || !hash_equals($ledger['metadataDigest'], spacefast_content_sync_metadata_digest($post));
+}
 
 /** The source text a document becomes, in the binding's format. */
 function spacefast_content_sync_from_blocks(string $format, string $blocks): string
@@ -73,6 +147,7 @@ function spacefast_content_sync_from_blocks(string $format, string $blocks): str
 /** The blocks a source document becomes, in the binding's format. */
 function spacefast_content_sync_to_blocks(string $format, string $text): string
 {
+    $text = spacefast_content_sync_document($text)['body'];
     return match ($format) {
         'md' => spacefast_content_markdown_to_blocks($text),
         'html' => spacefast_content_html_to_blocks($text),
@@ -87,10 +162,12 @@ function spacefast_content_sync_to_blocks(string $format, string $text): string
  */
 function spacefast_content_sync_canonical_text(string $format, string $text): string
 {
-    return match ($format) {
-        'md' => spacefast_content_markdown_canonical($text),
-        'html' => spacefast_content_html_canonical($text),
+    $document = spacefast_content_sync_document($text);
+    $body = match ($format) {
+        'md' => spacefast_content_markdown_canonical($document['body']),
+        'html' => spacefast_content_html_canonical($document['body']),
     };
+    return spacefast_content_sync_envelope($document['metadata'], $body);
 }
 
 /** Whether these blocks survive being written out as this format. */
@@ -123,6 +200,29 @@ function spacefast_content_sync_not_representable(string $format, string $conseq
  */
 function spacefast_content_sync_three_way(string $base, string $source, string $wordpress): array
 {
+    $baseDocument = spacefast_content_sync_document($base);
+    $sourceDocument = spacefast_content_sync_document($source);
+    $wordpressDocument = spacefast_content_sync_document($wordpress);
+    $baseMetadata = $baseDocument['metadata'];
+    $sourceMetadata = $sourceDocument['metadata'] ?? $baseMetadata;
+    $wordpressMetadata = $wordpressDocument['metadata'] ?? $baseMetadata;
+    $metadata = null;
+    if ($sourceMetadata !== null || $wordpressMetadata !== null) {
+        $metadata = [];
+        foreach (['version', 'title', 'slug', 'status', 'componentSource', 'dateGmt'] as $key) {
+            $before = $baseMetadata[$key] ?? null;
+            $left = $sourceMetadata[$key] ?? $before;
+            $right = $wordpressMetadata[$key] ?? $before;
+            if ($left !== $before && $right !== $before && $left !== $right) {
+                return ['merged' => '', 'conflicts' => true];
+            }
+            $value = $left === $before ? $right : $left;
+            if ($value !== null) $metadata[$key] = $value;
+        }
+    }
+    $base = $baseDocument['body'];
+    $source = $sourceDocument['body'];
+    $wordpress = $wordpressDocument['body'];
     spacefast_content_sync_require_toolkit();
     try {
         $strategy = new WordPress\Merge\MergeStrategy(
@@ -132,7 +232,7 @@ function spacefast_content_sync_three_way(string $base, string $source, string $
         );
         $result = $strategy->merge($base, $source, $wordpress);
         return [
-            'merged' => (string) $result->get_merged_content(),
+            'merged' => spacefast_content_sync_envelope($metadata, (string) $result->get_merged_content()),
             'conflicts' => (bool) $result->has_conflicts(),
         ];
     } catch (Throwable $error) {
@@ -182,10 +282,16 @@ function spacefast_content_sync_revision(array $ledger): string
 function spacefast_content_sync_make_ledger(
     array $input,
     string $text,
-    string $blocks,
+    object $post,
     int $wordpressRevisionId,
     string $direction
 ): array {
+    $metadataPost = clone $post;
+    $metadata = $input['format'] === 'tsx' ? null : spacefast_content_sync_document($text)['metadata'];
+    foreach (['title' => 'post_title', 'slug' => 'post_name', 'status' => 'post_status'] as $key => $column) {
+        if (isset($metadata[$key])) $metadataPost->{$column} = $metadata[$key];
+    }
+    if (isset($metadata['dateGmt'])) $metadataPost->post_date_gmt = str_replace('T', ' ', substr($metadata['dateGmt'], 0, -1));
     $ledger = [
         'version' => 1,
         'bindingId' => $input['bindingId'],
@@ -193,7 +299,8 @@ function spacefast_content_sync_make_ledger(
         'format' => $input['format'],
         'baseText' => $text,
         'textDigest' => spacefast_content_sync_digest_text($text),
-        'blocksDigest' => spacefast_content_sync_digest_text($blocks),
+        'blocksDigest' => spacefast_content_sync_digest_text(spacefast_content_sync_read_blocks($post, $input['binding'])),
+        'metadataDigest' => spacefast_content_sync_metadata_digest($metadataPost),
         'wordpressRevisionId' => $wordpressRevisionId,
         'serializerVersion' => SPACEFAST_CONTENT_SYNC_SERIALIZER_VERSION,
         'lastDirection' => $direction,
@@ -306,7 +413,7 @@ function spacefast_content_sync_find_post(string $bindingId, array $binding, boo
     $externalId = SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX . $bindingId;
     $posts = get_posts([
         'post_type' => 'any',
-        'post_status' => 'any',
+        'post_status' => ['publish', 'future', 'draft', 'pending', 'private', 'trash'],
         'numberposts' => 2,
         'meta_query' => [
             'relation' => 'AND',
@@ -323,10 +430,11 @@ function spacefast_content_sync_find_post(string $bindingId, array $binding, boo
             && preg_match('/\Async\.pages\.[a-f0-9]{32}\z/D', $bindingId) === 1;
         $query = [
             'post_type' => $binding['post_type'],
-            'post_status' => 'any',
+            'post_status' => ['publish', 'future', 'draft', 'pending', 'private', 'trash'],
             'numberposts' => 2,
             'meta_query' => [spacefast_content_space_meta_clause()],
         ];
+        $preparedMatch = null;
         if ($canonicalPage) {
             // Editor-created documents are adopted only by their prepared source
             // path, never by a URL basename that another document could share.
@@ -336,13 +444,34 @@ function spacefast_content_sync_find_post(string $bindingId, array $binding, boo
                 'compare' => '=',
             ];
         } else {
-            $query['name'] = $binding['slug'];
+            $preparedQuery = $query;
+            $preparedQuery['meta_query'][] = ['key' => SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META, 'value' => $binding['source'], 'compare' => '='];
+            $preparedPosts = get_posts($preparedQuery);
+            if (count($preparedPosts) > 1) {
+                throw new Spacefast_Content_Error(409, 'content_document_identity_conflict', 'More than one post prepared this source.');
+            }
+            if (count($preparedPosts) === 1) {
+                $preparedMatch = $preparedPosts;
+            }
+            $query['post_name__in'] = [$binding['slug']];
+            $collection = spacefast_content_model_collection_projection($binding['resourceId']);
+            $term = $collection['collection_term'] ?? null;
+            $query['tax_query'] = [is_string($term)
+                ? ['taxonomy' => SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY, 'field' => 'slug', 'terms' => [$term]]
+                : ['taxonomy' => SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY, 'operator' => 'NOT EXISTS']];
         }
-        $posts = get_posts($query);
+        $posts = $preparedMatch ?? get_posts($query);
         if (count($posts) > 1) {
             throw new Spacefast_Content_Error(409, 'content_document_identity_conflict', 'More than one post matches this sync binding.');
         }
         $post = $posts[0] ?? null;
+        if (is_int($post)) $post = get_post($post);
+        if (is_object($post)) {
+            $owner = get_post_meta((int) $post->ID, SPACEFAST_CONTENT_EXTERNAL_ID_META, true);
+            if (is_string($owner) && $owner !== '' && $owner !== $externalId) {
+                throw new Spacefast_Content_Error(409, 'content_document_identity_conflict', 'This document belongs to a different source binding.');
+            }
+        }
     }
     if (is_int($post)) {
         $post = get_post($post);
@@ -357,10 +486,103 @@ function spacefast_content_sync_read_blocks(object $post, array $binding): strin
         : (string) get_post_meta((int) $post->ID, $binding['field_storage'], true);
 }
 
+/** Retired source ownership cannot become a mutable WordPress fallback. */
+function spacefast_content_source_is_retired(int $postId): bool
+{
+    return is_array(get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_RETIRED_META, true));
+}
+
+function spacefast_content_sync_track_post(int $postId): void
+{
+    if (isset($GLOBALS['SPACEFAST_CONTENT_SYNC_TRANSACTION_POSTS']) && $postId > 0) {
+        $GLOBALS['SPACEFAST_CONTENT_SYNC_TRANSACTION_POSTS'][$postId] = true;
+    }
+}
+
+function spacefast_content_sync_lock_post(int $postId): void
+{
+    spacefast_content_sync_track_post($postId);
+    global $wpdb;
+    if (isset($wpdb->posts, $wpdb->postmeta)) {
+        if ($wpdb->query($wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE ID = %d FOR UPDATE", $postId)) === false
+            || $wpdb->query($wpdb->prepare("SELECT meta_id FROM {$wpdb->postmeta} WHERE post_id = %d FOR UPDATE", $postId)) === false) {
+            throw new Spacefast_Content_Error(503, 'content_sync_busy', 'The document could not be locked.');
+        }
+        clean_post_cache($postId);
+    }
+}
+
+function spacefast_content_sync_retire_documents(?array $previous, ?array $next, bool $commit): array
+{
+    $retired = [];
+    $retainedIds = array_column($next['syncBindings'] ?? [], 'id');
+    foreach ($previous['syncBindings'] ?? [] as $declaration) {
+        if (in_array($declaration['id'], $retainedIds, true)) continue;
+        $binding = [
+            'resourceId' => $declaration['resourceId'], 'source' => $declaration['source'],
+            'post_type' => $declaration['postType'], 'slug' => $declaration['slug'],
+            'field_storage' => $declaration['fieldStorage'],
+        ];
+        $post = spacefast_content_sync_find_post($declaration['id'], $binding, false);
+        if (!is_object($post)) continue;
+        $postId = (int) $post->ID;
+        spacefast_content_sync_lock_post($postId);
+        $post = get_post($postId);
+        if (!is_object($post) || !spacefast_content_post_belongs_to_space($postId)) {
+            throw new Spacefast_Content_Error(409, 'content_document_identity_conflict', 'The removed source no longer owns its document.');
+        }
+        if (spacefast_content_source_is_retired($postId)) continue;
+        $ledger = spacefast_content_sync_ledger($postId);
+        if (!is_array($ledger) || ($ledger['bindingId'] ?? null) !== $declaration['id']
+            || (!$commit && spacefast_content_sync_document_changed($ledger, $post, $binding))) {
+            throw new Spacefast_Content_Error(409, 'content_document_retirement_conflict', 'The source was removed while its WordPress document had unpublished edits. Reconcile the document before removing its source.');
+        }
+        if (!$commit) continue;
+        $before = ['status' => $post->post_status, 'slug' => $post->post_name];
+        if ($post->post_status !== 'trash' && !wp_trash_post($postId)) {
+            throw new Spacefast_Content_Error(500, 'content_document_retirement_failed', 'The removed source document could not be moved to trash.');
+        }
+        $trashed = get_post($postId);
+        update_post_meta($postId, SPACEFAST_CONTENT_SOURCE_RETIRED_META, [
+            'bindingId' => $declaration['id'], 'source' => $declaration['source'],
+            'status' => $before['status'], 'slug' => $before['slug'],
+            'blocksDigest' => spacefast_content_sync_digest_text(spacefast_content_sync_read_blocks($trashed, $binding)),
+            'metadataDigest' => spacefast_content_sync_metadata_digest($trashed),
+        ]);
+        if (function_exists('wp_cache_set_comments_last_changed')) wp_cache_set_comments_last_changed();
+        $retired[] = $postId;
+    }
+    return $retired;
+}
+
+function spacefast_content_sync_restore_retired(array $input, object $post): object
+{
+    $postId = (int) $post->ID;
+    $retired = get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_RETIRED_META, true);
+    if (!is_array($retired)) return $post;
+    spacefast_content_sync_lock_post($postId);
+    $post = get_post($postId);
+    if ($retired['bindingId'] !== $input['bindingId'] || $retired['source'] !== $input['source']
+        || !hash_equals($retired['blocksDigest'], spacefast_content_sync_digest_text(spacefast_content_sync_read_blocks($post, $input['binding'])))
+        || !hash_equals($retired['metadataDigest'], spacefast_content_sync_metadata_digest($post))) {
+        throw new Spacefast_Content_Error(409, 'content_document_retirement_conflict', 'The retired document changed. Resolve its WordPress edits before restoring source ownership.');
+    }
+    if ($retired['status'] !== 'trash' && !wp_untrash_post($postId)) {
+        throw new Spacefast_Content_Error(500, 'content_write_failed', 'The retired document could not be restored from trash.');
+    }
+    $saved = wp_update_post(['ID' => $postId, 'post_status' => $retired['status'], 'post_name' => $retired['slug']], true);
+    if (is_wp_error($saved)) throw new Spacefast_Content_Error(500, 'content_write_failed', 'The retired document could not be restored.');
+    delete_post_meta($postId, SPACEFAST_CONTENT_SOURCE_RETIRED_META);
+    if (function_exists('wp_cache_set_comments_last_changed')) wp_cache_set_comments_last_changed();
+    delete_post_meta($postId, '_spacefast_document_release');
+    return get_post($postId);
+}
+
 /** Publish consumes a sealed source, not a prepared writeback to a mutable repository. */
 function spacefast_content_sync_publish_document(array $input): array
 {
     $post = spacefast_content_sync_find_post($input['bindingId'], $input['binding']);
+    if (is_object($post)) $post = spacefast_content_sync_restore_retired($input, $post);
     $postId = is_object($post) ? (int) $post->ID : 0;
     if ($postId > 0 && get_post_meta($postId, '_spacefast_document_release', true) === $input['operationId']) {
         return ['postId' => $postId, 'status' => 'unchanged'];
@@ -381,7 +603,7 @@ function spacefast_content_sync_publish_document(array $input): array
             && ($ledger['format'] ?? null) === $input['format'];
         if ($sameBinding) {
             $sourceChanged = !hash_equals((string) $ledger['textDigest'], spacefast_content_sync_digest_text($input['text']));
-            $editorChanged = !hash_equals((string) $ledger['blocksDigest'], spacefast_content_sync_digest_text($blocks));
+            $editorChanged = spacefast_content_sync_document_changed($ledger, $post, $input['binding']);
             if (!$sourceChanged) {
                 // Keep the common base: activation cannot claim the editor's bytes
                 // were written back to the sealed source when they were not.
@@ -389,17 +611,31 @@ function spacefast_content_sync_publish_document(array $input): array
                 return ['postId' => $postId, 'status' => 'unchanged'];
             }
             if ($editorChanged) {
-                $editorText = spacefast_content_sync_pullable_text($input['format'], $blocks);
-                if ($editorText !== $input['text']) {
+                $editorText = spacefast_content_sync_pullable_text($input['format'], $blocks, $post, is_array($ledger) ? $ledger['baseText'] : null);
+                if (!spacefast_content_sync_source_agrees($input['text'], $editorText)) {
                     spacefast_content_sync_throw_conflict($input, (string) $ledger['baseText'], (string) $ledger['revision'], $editorText, spacefast_content_sync_current_revision_id($postId));
                 }
             }
+        } elseif (is_object($post) && is_array($preparedBase = get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_PREPARED_META, true))
+            && ($preparedBase['source'] ?? null) === $input['source']
+            && ($preparedBase['format'] ?? null) === $input['format']
+            && hash_equals(spacefast_content_sync_digest_text($preparedBase['text']), spacefast_content_sync_digest_text($input['text']))) {
+            // This exact source was prepared here. Adopt its common base while
+            // keeping edits made while its commit and build were in flight.
+            $next = spacefast_content_sync_make_ledger($input, $input['text'], $post, $preparedBase['wordpressRevisionId'], 'push');
+            $next['blocksDigest'] = $preparedBase['blocksDigest'];
+            $next['metadataDigest'] = $preparedBase['metadataDigest'];
+            $next['revision'] = spacefast_content_sync_revision($next);
+            update_post_meta($postId, SPACEFAST_CONTENT_EXTERNAL_ID_META, SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX . $input['bindingId']);
+            spacefast_content_sync_store_ledger($postId, $next);
+            update_post_meta($postId, '_spacefast_document_release', $input['operationId']);
+            return ['postId' => $postId, 'status' => 'adopted'];
         } elseif (is_object($post) && trim($blocks) !== '') {
             // Adoption and TSX -> HTML takeover must agree with the existing
             // document. A route-stable ID is not permission to discard edits.
-            $editorText = spacefast_content_sync_pullable_text($input['format'], $blocks);
+            $editorText = spacefast_content_sync_pullable_text($input['format'], $blocks, $post, is_array($ledger) ? $ledger['baseText'] : null);
             if ((is_string($materialized) && $materialized !== '' && $materialized !== $input['source'])
-                || $editorText !== $input['text']) {
+                || !spacefast_content_sync_source_agrees($input['text'], $editorText)) {
                 spacefast_content_sync_throw_conflict($input, '', 'unbound', $editorText, spacefast_content_sync_current_revision_id($postId));
             }
         }
@@ -411,7 +647,7 @@ function spacefast_content_sync_publish_document(array $input): array
     if (!is_object($saved)) {
         throw new Spacefast_Content_Error(500, 'content_write_failed', 'The published document could not be read.');
     }
-    $next = spacefast_content_sync_make_ledger($input, $input['text'], spacefast_content_sync_read_blocks($saved, $input['binding']), spacefast_content_sync_save_revision($savedId), 'push');
+    $next = spacefast_content_sync_make_ledger($input, $input['text'], $saved, spacefast_content_sync_save_revision($savedId), 'push');
     spacefast_content_sync_store_ledger($savedId, $next);
     update_post_meta($savedId, '_spacefast_document_release', $input['operationId']);
     return ['postId' => $savedId, 'status' => $postId > 0 ? 'pushed' : 'created'];
@@ -427,6 +663,9 @@ function spacefast_content_sync_save_document(array $input, string $blocks): int
     $slug = $binding['slug'];
     $canonicalPage = $binding['post_type'] === 'page'
         && preg_match('/\Async\.pages\.[a-f0-9]{32}\z/D', $input['bindingId']) === 1;
+    if ($canonicalPage && is_string($binding['publicPath'] ?? null)) {
+        $slug = trim($binding['publicPath'], '/') === '' ? 'home' : basename($binding['publicPath']);
+    }
     $titleSource = $canonicalPage ? pathinfo(basename($input['source']), PATHINFO_FILENAME) : $slug;
     if ($canonicalPage && $titleSource === 'index') {
         $titleSource = 'Home';
@@ -434,24 +673,45 @@ function spacefast_content_sync_save_document(array $input, string $blocks): int
     $post = [
         'post_type' => $binding['post_type'],
         'post_status' => is_object($existing) ? (string) $existing->post_status : ($canonicalPage || !empty($input['publish']) ? 'publish' : 'draft'),
-        'post_name' => function_exists('sanitize_title') ? sanitize_title($slug) : $slug,
+        'post_name' => is_object($existing) && (string) ($existing->post_name ?? '') !== ''
+            ? (string) $existing->post_name
+            : (function_exists('sanitize_title') ? sanitize_title($slug) : $slug),
         'post_title' => is_object($existing) && (string) $existing->post_title !== ''
             ? (string) $existing->post_title
             : ucwords(str_replace(['-', '_'], ' ', $titleSource)),
     ];
+    $metadata = $input['format'] === 'tsx' ? null : spacefast_content_sync_document($input['text'])['metadata'];
+    if ($metadata !== null) {
+        $post['post_title'] = $metadata['title'];
+        $post['post_name'] = $metadata['slug'];
+        $post['post_status'] = $metadata['status'];
+        if (isset($metadata['dateGmt'])) {
+            $post['post_date_gmt'] = str_replace('T', ' ', substr($metadata['dateGmt'], 0, -1));
+            $post['post_date'] = get_date_from_gmt($post['post_date_gmt']);
+        }
+    }
     if (is_object($existing)) {
         $post['ID'] = (int) $existing->ID;
+        spacefast_content_sync_track_post((int) $existing->ID);
     }
     if ($binding['field_storage'] === 'post_content') {
         $post['post_content'] = $blocks;
     }
-    $saved = wp_insert_post($post, true);
+    $previousCollection = $GLOBALS['SPACEFAST_CONTENT_WRITE_COLLECTION'] ?? null;
+    $GLOBALS['SPACEFAST_CONTENT_WRITE_COLLECTION'] = $binding['resourceId'];
+    try {
+        $saved = wp_insert_post($post, true);
+    } finally {
+        $GLOBALS['SPACEFAST_CONTENT_WRITE_COLLECTION'] = $previousCollection;
+    }
     if (function_exists('is_wp_error') && is_wp_error($saved)) {
         throw new Spacefast_Content_Error(500, 'content_write_failed', 'The synchronized post could not be written.');
     }
     $postId = (int) $saved;
+    spacefast_content_sync_track_post($postId);
     update_post_meta($postId, SPACEFAST_CONTENT_EXTERNAL_ID_META, SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX . $input['bindingId']);
     update_post_meta($postId, SPACEFAST_CONTENT_SPACE_META, spacefast_content_require_space_id());
+    spacefast_content_assign_collection($postId, $binding['resourceId']);
     if ($binding['field_storage'] !== 'post_content') {
         update_post_meta($postId, $binding['field_storage'], $blocks);
     }
@@ -593,6 +853,7 @@ function spacefast_content_sync_with_transaction(callable $operation): array
     if ($transactional && $wpdb->query('START TRANSACTION') === false) {
         throw new Spacefast_Content_Error(503, 'content_transaction_unavailable', 'WordPress could not start a content transaction.');
     }
+    $GLOBALS['SPACEFAST_CONTENT_SYNC_TRANSACTION_POSTS'] = [];
     try {
         $result = $operation();
         if ($transactional && $wpdb->query('COMMIT') === false) {
@@ -603,7 +864,12 @@ function spacefast_content_sync_with_transaction(callable $operation): array
         if ($transactional) {
             $wpdb->query('ROLLBACK');
         }
+        if (function_exists('clean_post_cache')) {
+            foreach (array_keys($GLOBALS['SPACEFAST_CONTENT_SYNC_TRANSACTION_POSTS']) as $postId) clean_post_cache($postId);
+        }
         throw $error;
+    } finally {
+        unset($GLOBALS['SPACEFAST_CONTENT_SYNC_TRANSACTION_POSTS']);
     }
 }
 
@@ -704,11 +970,8 @@ function spacefast_content_sync_bind(array $input, ?object $existing): array
         if (!spacefast_content_sync_representable($format, $blocks)) {
             spacefast_content_sync_not_representable($format, 'Bind it from WordPress instead.');
         }
-        $wordpressText = spacefast_content_sync_canonical_text(
-            $format,
-            spacefast_content_sync_from_blocks($format, $blocks)
-        );
-        if ($wordpressText !== $input['text']) {
+        $wordpressText = spacefast_content_sync_pullable_text($format, $blocks, $existing, $input['text']);
+        if (!spacefast_content_sync_source_agrees($input['text'], $wordpressText)) {
             spacefast_content_sync_throw_conflict(
                 $input,
                 '',
@@ -733,7 +996,7 @@ function spacefast_content_sync_bind(array $input, ?object $existing): array
     $ledger = spacefast_content_sync_make_ledger(
         $input,
         $input['text'],
-        spacefast_content_sync_read_blocks($post, $binding),
+        $post,
         $revisionId,
         'push'
     );
@@ -783,16 +1046,13 @@ function spacefast_content_sync_reconcile_bound(array $input, ?object $post): ar
         (string) $ledger['textDigest'],
         spacefast_content_sync_digest_text($input['text'])
     );
-    $wordpressChanged = !hash_equals(
-        (string) $ledger['blocksDigest'],
-        spacefast_content_sync_digest_text($wordpressBlocks)
-    );
+    $wordpressChanged = spacefast_content_sync_document_changed($ledger, $post, $binding);
 
     if (!$sourceChanged && !$wordpressChanged) {
         $next = spacefast_content_sync_make_ledger(
             $input,
             (string) $ledger['baseText'],
-            $wordpressBlocks,
+            $post,
             $wordpressRevisionId,
             (string) $ledger['lastDirection']
         );
@@ -805,13 +1065,13 @@ function spacefast_content_sync_reconcile_bound(array $input, ?object $post): ar
 
     // Anything below writes WordPress content back out to the source file, so
     // the representability gate applies before the content is flattened.
-    $wordpressText = spacefast_content_sync_pullable_text($format, $wordpressBlocks);
+    $wordpressText = spacefast_content_sync_pullable_text($format, $wordpressBlocks, $post, (string) $ledger['baseText']);
 
     if (!$sourceChanged) {
         $next = spacefast_content_sync_make_ledger(
             $input,
             $wordpressText,
-            $wordpressBlocks,
+            $post,
             $wordpressRevisionId,
             'pull'
         );
@@ -846,7 +1106,7 @@ function spacefast_content_sync_reconcile_bound(array $input, ?object $post): ar
     $next = spacefast_content_sync_make_ledger(
         $mergedInput,
         $merged,
-        spacefast_content_sync_read_blocks($savedPost, $binding),
+        $savedPost,
         spacefast_content_sync_save_revision($savedId),
         'pull'
     );
@@ -856,12 +1116,17 @@ function spacefast_content_sync_reconcile_bound(array $input, ?object $post): ar
 }
 
 /** The source text for a document that is about to overwrite a repo file. */
-function spacefast_content_sync_pullable_text(string $format, string $blocks): string
+function spacefast_content_sync_pullable_text(string $format, string $blocks, ?object $post = null, ?string $baseText = null): string
 {
     if (!spacefast_content_sync_representable($format, $blocks)) {
         spacefast_content_sync_not_representable($format, 'Its source file was left untouched.');
     }
-    return spacefast_content_sync_canonical_text($format, spacefast_content_sync_from_blocks($format, $blocks));
+    $text = spacefast_content_sync_canonical_text($format, spacefast_content_sync_from_blocks($format, $blocks));
+    if ($post === null) return $text;
+    $metadata = spacefast_content_sync_document_metadata($post);
+    $base = $baseText === null ? null : spacefast_content_sync_document($baseText)['metadata'];
+    if (isset($base['componentSource'])) $metadata['componentSource'] = $base['componentSource'];
+    return spacefast_content_sync_envelope($metadata, $text);
 }
 
 function spacefast_content_sync_push(int $postId, array $input): array
@@ -875,7 +1140,7 @@ function spacefast_content_sync_push(int $postId, array $input): array
     $next = spacefast_content_sync_make_ledger(
         $input,
         $input['text'],
-        spacefast_content_sync_read_blocks($post, $input['binding']),
+        $post,
         spacefast_content_sync_save_revision($savedId),
         'push'
     );
@@ -917,10 +1182,9 @@ function spacefast_content_sync_materialize_invalid(): never
  * nothing can write back to. Both get a NEW path and the canonical text of what
  * WordPress holds, in the format that path implies.
  *
- * There is deliberately no ledger and no acknowledgement here: without a binding
- * there is no common base to move. The binding is established by the ordinary
- * `state: "initial"` reconcile after the next build, which finds both sides
- * already agreeing because the file holds exactly this canonical text.
+ * The first prepared document remains the common base until a release adopts
+ * it. Later saves keep their WordPress bytes; activation binds that exact source
+ * and journals any difference for the next normal reconciliation.
  */
 function spacefast_content_materialize_source(array $request, bool $managed): array
 {
@@ -979,6 +1243,7 @@ function spacefast_content_sync_materialize_takeover(string $operationId, string
         'post' => $post,
         'format' => $format,
         'source' => spacefast_content_sync_takeover_source((string) $binding['source'], $format),
+        'componentSource' => (string) $binding['source'],
         'field_storage' => (string) $binding['field_storage'],
     ];
 }
@@ -995,7 +1260,7 @@ function spacefast_content_sync_materialize_collection(string $operationId, mixe
     if (!is_object($post) || !spacefast_content_post_belongs_to_space($postId)) {
         throw new Spacefast_Content_Error(404, 'content_document_not_found', 'This Space has no such document.');
     }
-    $collection = spacefast_content_collection_for_post_type((string) ($post->post_type ?? ''));
+    $collection = spacefast_content_collection_for_post($postId);
     $materialization = is_array($collection)
         ? spacefast_content_model_materialization((string) $collection['name'])
         : null;
@@ -1027,11 +1292,30 @@ function spacefast_content_sync_materialize_locked(array $input): array
     if (is_array($replayed)) {
         return $replayed;
     }
+    $preparedBase = get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_PREPARED_META, true);
+    if (is_array($preparedBase)) {
+        $receipt = [
+            'format' => 'spacefast.content-materialize', 'version' => 1, 'status' => 'skipped',
+            'operationId' => $input['operationId'],
+            'sourceWrite' => [
+                'state' => 'prepared', 'source' => $preparedBase['source'],
+                'expectedSourceRevision' => $preparedBase['expectedSourceRevision'] ?? 'absent', 'text' => $preparedBase['text'],
+                'textDigest' => spacefast_content_sync_digest_text($preparedBase['text']),
+            ],
+        ];
+        spacefast_content_sync_store_receipt($postId, $input['operationId'], $receipt);
+        return $receipt;
+    }
     $blocks = spacefast_content_sync_read_blocks($post, ['field_storage' => $input['field_storage']]);
     // The existing serializer and its existing representability gate. A document
     // richer than its format refuses here exactly as a pull refuses, and the
     // drain already treats that refusal as terminal.
-    $text = spacefast_content_sync_pullable_text($input['format'], $blocks);
+    $text = spacefast_content_sync_pullable_text($input['format'], $blocks, $post);
+    if (isset($input['componentSource'])) {
+        $document = spacefast_content_sync_document($text);
+        $document['metadata']['componentSource'] = $input['componentSource'];
+        $text = spacefast_content_sync_envelope($document['metadata'], $document['body']);
+    }
     $prepared = function_exists('get_post_meta')
         ? get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META, true)
         : '';
@@ -1056,6 +1340,13 @@ function spacefast_content_sync_materialize_locked(array $input): array
     if (!$already && function_exists('update_post_meta')) {
         update_post_meta($postId, SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META, $input['source']);
     }
+    update_post_meta($postId, SPACEFAST_CONTENT_SOURCE_PREPARED_META, [
+        'source' => $receipt['sourceWrite']['source'], 'format' => $input['format'], 'text' => $text,
+        'expectedSourceRevision' => 'absent',
+        'blocksDigest' => spacefast_content_sync_digest_text($blocks),
+        'metadataDigest' => spacefast_content_sync_metadata_digest($post),
+        'wordpressRevisionId' => spacefast_content_sync_current_revision_id($postId),
+    ]);
     spacefast_content_sync_store_receipt($postId, $input['operationId'], $receipt);
     return $receipt;
 }
@@ -1116,4 +1407,185 @@ function spacefast_content_acknowledge_source(array $request, bool $managed): ar
             'ledger' => $ledger,
         ];
     });
+}
+
+/** Prepared source exists before its first release establishes a normal binding. */
+function spacefast_content_sync_pending_source(string $bindingId): ?array
+{
+    $binding = spacefast_content_model_sync_binding($bindingId);
+    $synthetic = preg_match('/\Amaterialize\.([1-9][0-9]*)\z/D', $bindingId, $match) === 1;
+    $post = $synthetic ? get_post((int) $match[1])
+        : (is_array($binding) ? spacefast_content_sync_find_post($bindingId, $binding, false) : null);
+    if (!is_object($post) || !spacefast_content_post_belongs_to_space((int) $post->ID)) return null;
+    $prepared = get_post_meta((int) $post->ID, SPACEFAST_CONTENT_SOURCE_PREPARED_META, true);
+    if (!is_array($prepared)) return null;
+    $ledger = spacefast_content_sync_ledger((int) $post->ID);
+    if (is_array($ledger) && ($ledger['source'] ?? null) === $prepared['source'] && ($ledger['format'] ?? null) === $prepared['format']) return null;
+    $declaration = $synthetic
+        ? spacefast_content_sync_materialize_collection('op_inspectmaterialization', (int) $post->ID)
+        : spacefast_content_sync_materialize_takeover('op_inspectmaterialization', $bindingId);
+    return [
+        'post' => $post, 'binding' => $binding, 'synthetic' => $synthetic,
+        'field_storage' => $declaration['field_storage'], 'prepared' => $prepared,
+    ];
+}
+
+function spacefast_content_sync_pending_inspection(string $bindingId, array $pending): array
+{
+    $post = $pending['post'];
+    $prepared = $pending['prepared'];
+    $text = spacefast_content_sync_pullable_text($prepared['format'], spacefast_content_sync_read_blocks($post, $pending), $post, $prepared['text']);
+    return [
+        'bindingId' => $bindingId, 'postId' => (int) $post->ID, 'source' => $prepared['source'],
+        'baseRevision' => spacefast_content_sync_digest_text(spacefast_content_sync_canonical_json($prepared)),
+        'baseText' => $prepared['text'], 'wordpressText' => $text,
+        'wordpressDigest' => spacefast_content_sync_digest_text($text),
+        'wordpressRevisionId' => spacefast_content_sync_current_revision_id((int) $post->ID),
+    ];
+}
+
+function spacefast_content_sync_resolve_pending(array $request): array
+{
+    foreach (['expectedBaseRevision', 'expectedWordpressDigest'] as $field) {
+        if (!is_string($request[$field] ?? null) || preg_match(SPACEFAST_CONTENT_MODEL_REVISION_PATTERN, $request[$field]) !== 1) {
+            throw new Spacefast_Content_Error(400, 'content_sync_invalid', 'The expected document revision is invalid.');
+        }
+    }
+    if (!is_string($request['operationId'] ?? null) || preg_match('/\Aop_[A-Za-z0-9]+\z/D', $request['operationId']) !== 1
+        || !is_string($request['text'] ?? null) || strlen($request['text']) > SPACEFAST_CONTENT_SYNC_MAX_TEXT_BYTES
+        || !is_string($request['observedSourceRevision'] ?? null) || $request['observedSourceRevision'] === '' || strlen($request['observedSourceRevision']) > 512) {
+        throw new Spacefast_Content_Error(400, 'content_sync_invalid', 'The materialization resolution is invalid.');
+    }
+    return spacefast_content_sync_without_journal(static fn (): array => spacefast_content_sync_locked(
+        static fn (): array => spacefast_content_sync_with_transaction(static function () use ($request): array {
+            $pending = spacefast_content_sync_pending_source($request['bindingId']);
+            if ($pending === null) throw new Spacefast_Content_Error(409, 'content_sync_resolution_stale', 'Source ownership changed. Refresh the comparison.');
+            $postId = (int) $pending['post']->ID;
+            spacefast_content_sync_lock_post($postId);
+            $pending = spacefast_content_sync_pending_source($request['bindingId']);
+            if ($pending === null) throw new Spacefast_Content_Error(409, 'content_sync_resolution_stale', 'Source ownership changed. Refresh the comparison.');
+            $replay = spacefast_content_sync_receipt($postId, $request['operationId']);
+            if (is_array($replay) && ($replay['format'] ?? null) === 'spacefast.content-materialize') {
+                return ['operationId' => $request['operationId'], 'bindingId' => $request['bindingId'], 'postId' => $postId, 'status' => 'queued'];
+            }
+            $observed = spacefast_content_sync_pending_inspection($request['bindingId'], $pending);
+            if (($request['source'] ?? null) !== $observed['source']
+                || !hash_equals($request['expectedBaseRevision'], $observed['baseRevision'])
+                || !hash_equals($request['expectedWordpressDigest'], $observed['wordpressDigest'])) {
+                throw new Spacefast_Content_Error(409, 'content_sync_resolution_stale', 'The document changed. Refresh the comparison.');
+            }
+            $prepared = $pending['prepared'];
+            $document = spacefast_content_sync_document($request['text']);
+            $original = spacefast_content_sync_document($prepared['text']);
+            if (isset($original['metadata']['componentSource'])) {
+                $document['metadata'] ??= spacefast_content_sync_document_metadata($pending['post']);
+                $document['metadata']['componentSource'] = $original['metadata']['componentSource'];
+            }
+            $text = spacefast_content_sync_canonical_text($prepared['format'], spacefast_content_sync_envelope($document['metadata'], $document['body']));
+            $blocks = spacefast_content_sync_to_blocks($prepared['format'], $text);
+            $update = ['ID' => $postId];
+            $metadata = spacefast_content_sync_document($text)['metadata'];
+            if ($metadata !== null) {
+                $update += ['post_title' => $metadata['title'], 'post_name' => $metadata['slug'], 'post_status' => $metadata['status']];
+                if (isset($metadata['dateGmt'])) {
+                    $update['post_date_gmt'] = str_replace('T', ' ', substr($metadata['dateGmt'], 0, -1));
+                    $update['post_date'] = get_date_from_gmt($update['post_date_gmt']);
+                }
+            }
+            if ($pending['field_storage'] === 'post_content') $update['post_content'] = $blocks;
+            $saved = wp_update_post($update, true);
+            if (is_wp_error($saved)) throw new Spacefast_Content_Error(500, 'content_write_failed', 'The resolved document could not be saved.');
+            if ($pending['field_storage'] !== 'post_content') update_post_meta($postId, $pending['field_storage'], $blocks);
+            $post = get_post($postId);
+            $base = spacefast_content_sync_make_ledger(['bindingId' => $request['bindingId'], 'source' => $prepared['source'], 'format' => $prepared['format'], 'binding' => $pending], $text, $post, spacefast_content_sync_save_revision($postId), 'pull');
+            $prepared = [
+                'source' => $prepared['source'], 'format' => $prepared['format'], 'text' => $text,
+                'expectedSourceRevision' => $request['observedSourceRevision'],
+                'blocksDigest' => $base['blocksDigest'], 'metadataDigest' => $base['metadataDigest'],
+                'wordpressRevisionId' => $base['wordpressRevisionId'],
+            ];
+            update_post_meta($postId, SPACEFAST_CONTENT_SOURCE_PREPARED_META, $prepared);
+            spacefast_content_sync_store_receipt($postId, $request['operationId'], [
+                'format' => 'spacefast.content-materialize', 'version' => 1, 'status' => 'materialized', 'operationId' => $request['operationId'],
+                'sourceWrite' => ['state' => 'prepared', 'source' => $prepared['source'], 'expectedSourceRevision' => $request['observedSourceRevision'], 'text' => $text, 'textDigest' => spacefast_content_sync_digest_text($text)],
+            ]);
+            $entry = $pending['synthetic']
+                ? ['bindingId' => $request['bindingId'], 'payload' => ['resourceId' => spacefast_content_collection_for_post($postId)['name'], 'postId' => $postId, 'wordpressRevisionId' => $base['wordpressRevisionId'], 'author' => spacefast_content_source_journal_author()]]
+                : spacefast_content_source_journal_binding_entry($request['bindingId'], $pending['binding'], $postId, $observed['baseRevision']);
+            if (!$pending['synthetic']) $entry['payload']['intent'] = 'convert';
+            spacefast_content_source_journal_install();
+            spacefast_content_source_journal_write($entry, $request['operationId'], false);
+            spacefast_content_public_routes_refresh();
+            return ['operationId' => $request['operationId'], 'bindingId' => $request['bindingId'], 'postId' => $postId, 'status' => 'queued'];
+        })
+    ));
+}
+
+function spacefast_content_inspect_source(array $request, bool $managed): array
+{
+    if (!$managed) throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content synchronization requires Spacefast authorization.');
+    $bindingId = $request['bindingId'] ?? null;
+    $pending = is_string($bindingId) ? spacefast_content_sync_pending_source($bindingId) : null;
+    if ($pending !== null) return spacefast_content_sync_pending_inspection($bindingId, $pending);
+    $binding = is_string($bindingId) ? spacefast_content_model_sync_binding($bindingId) : null;
+    $post = is_array($binding) ? spacefast_content_sync_find_post($bindingId, $binding, false) : null;
+    $ledger = is_object($post) ? spacefast_content_sync_ledger((int) $post->ID) : null;
+    if (!is_object($post) || !is_array($ledger) || !spacefast_content_post_belongs_to_space((int) $post->ID)) {
+        throw new Spacefast_Content_Error(404, 'content_sync_not_bound', 'This source has no bound document.');
+    }
+    $text = spacefast_content_sync_pullable_text($binding['format'], spacefast_content_sync_read_blocks($post, $binding), $post, $ledger['baseText']);
+    return [
+        'bindingId' => $bindingId,
+        'postId' => (int) $post->ID,
+        'source' => $binding['source'],
+        'baseRevision' => $ledger['revision'],
+        'baseText' => $ledger['baseText'],
+        'wordpressText' => $text,
+        'wordpressDigest' => spacefast_content_sync_digest_text($text),
+        'wordpressRevisionId' => spacefast_content_sync_current_revision_id((int) $post->ID),
+    ];
+}
+
+/** The selected merge becomes a prepared source write in the existing durable lane. */
+function spacefast_content_resolve_source(array $request, bool $managed): array
+{
+    if (!$managed) throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content resolution requires Spacefast authorization.');
+    if (is_string($request['bindingId'] ?? null) && spacefast_content_sync_pending_source($request['bindingId']) !== null) {
+        return spacefast_content_sync_resolve_pending($request);
+    }
+    $input = spacefast_content_sync_parse_reconcile([
+        ...$request,
+        'state' => 'bound',
+        'baseRevision' => $request['expectedBaseRevision'] ?? null,
+    ]);
+    $expectedWordpressDigest = $request['expectedWordpressDigest'] ?? null;
+    if (!is_string($expectedWordpressDigest) || preg_match(SPACEFAST_CONTENT_MODEL_REVISION_PATTERN, $expectedWordpressDigest) !== 1) {
+        throw new Spacefast_Content_Error(400, 'content_sync_invalid', 'The expected document revision is invalid.');
+    }
+    spacefast_content_source_journal_install();
+    return spacefast_content_sync_without_journal(static fn (): array => spacefast_content_sync_locked(
+        static fn (): array => spacefast_content_sync_with_transaction(static function () use ($input, $expectedWordpressDigest): array {
+            $post = spacefast_content_sync_find_post($input['bindingId'], $input['binding'], false);
+            $postId = is_object($post) ? (int) $post->ID : 0;
+            $replay = $postId > 0 ? spacefast_content_sync_receipt($postId, $input['operationId']) : null;
+            if (is_array($replay) && ($replay['status'] ?? null) === 'pulled') {
+                return ['operationId' => $input['operationId'], 'bindingId' => $input['bindingId'], 'postId' => $postId, 'status' => 'queued'];
+            }
+            $observed = spacefast_content_inspect_source(['bindingId' => $input['bindingId']], true);
+            if (!hash_equals($input['baseRevision'], $observed['baseRevision'])
+                || !hash_equals($expectedWordpressDigest, $observed['wordpressDigest'])) {
+                throw new Spacefast_Content_Error(409, 'content_sync_resolution_stale', 'The document changed while this conflict was being resolved. Refresh the comparison.');
+            }
+            $resolved = $input;
+            $resolved['text'] = spacefast_content_sync_canonical_text($input['format'], $input['text']);
+            $savedId = spacefast_content_sync_save_document($resolved, spacefast_content_sync_to_blocks($input['format'], $resolved['text']));
+            $saved = get_post($savedId);
+            if (!is_object($saved)) throw new Spacefast_Content_Error(500, 'content_write_failed', 'The resolved document could not be read.');
+            $ledger = spacefast_content_sync_make_ledger($resolved, $resolved['text'], $saved, spacefast_content_sync_save_revision($savedId), 'pull');
+            spacefast_content_sync_commit($savedId, $resolved, $ledger, 'pulled');
+            $entry = spacefast_content_source_journal_binding_entry($input['bindingId'], $input['binding'], $savedId, $ledger['revision']);
+            spacefast_content_source_journal_write($entry, $input['operationId'], false);
+            return ['operationId' => $input['operationId'], 'bindingId' => $input['bindingId'], 'postId' => $savedId, 'status' => 'queued'];
+        })
+    ));
 }

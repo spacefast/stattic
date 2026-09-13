@@ -197,7 +197,7 @@ echo json_encode([
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
   expect(JSON.parse(stdout)).toEqual({
     attachment_stamp: "spc_alpha",
-    post_query: [spaceClause],
+    post_query: expect.arrayContaining([spaceClause]),
     attachment_query: { post_status: "inherit", meta_query: [spaceClause] },
     nested_or: {
       relation: "AND",
@@ -228,7 +228,7 @@ echo json_encode([
     request_url: "https://alpha.spacefast.test/wp-admin/edit.php?post_type=post",
   });
 });
-test("the managed WordPress surface admits content work and rejects Spacefast-owned screens", async () => {
+test("the WordPress content editor initializes scoped field controls", async () => {
   const script = String.raw`
 $bootstrapCalls = 0;
 function _stattic_runtime_bootstrap_config(): void {
@@ -253,24 +253,8 @@ $scfMedia = spacefast_content_scf_field('articles_01k4t7x8', 'gallery', [
   'label' => 'Gallery',
   'multiple' => true,
 ]);
-$_GET = ['page' => 'redirection.php'];
-$redirectionToolsAllowed = spacefast_content_admin_page_allowed('tools.php');
-$_GET = ['page' => 'site-health.php'];
-$otherToolsBlocked = spacefast_content_admin_page_allowed('tools.php');
-$_GET = [];
 echo json_encode([
   'bootstrap_calls' => $bootstrapCalls,
-  'allowed' => array_map('spacefast_content_admin_page_allowed', [
-    'edit.php', 'post.php', 'post-new.php', 'upload.php', 'media.php',
-    'revision.php', 'edit-tags.php', 'admin-ajax.php', 'load-scripts.php',
-    'admin.php',
-  ]),
-  'blocked' => array_map('spacefast_content_admin_page_allowed', [
-    'plugins.php', 'themes.php', 'users.php', 'options-general.php',
-    'tools.php', 'profile.php', 'edit-comments.php', 'site-health.php',
-  ]),
-  'redirection_tools_allowed' => $redirectionToolsAllowed,
-  'other_tools_blocked' => $otherToolsBlocked,
   'scf' => [
     [$scfText['type'], $scfText['rows'], $scfText['maxlength']],
     [$scfMedia['type'], $scfMedia['return_format']],
@@ -292,119 +276,8 @@ echo json_encode([
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
   expect(JSON.parse(stdout)).toEqual({
     bootstrap_calls: 1,
-    allowed: Array(10).fill(true),
-    blocked: Array(8).fill(false),
-    redirection_tools_allowed: true,
-    other_tools_blocked: false,
     scf: [["textarea", 8, 280], ["gallery", "id"], true],
   });
-});
-
-test("content admin landings reach the native list and Zero Admin without redirecting or refusing", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-content-admin-routes-"));
-  const revision = `sha256:${"a".repeat(64)}`;
-  const releaseRoot = path.join(
-    root,
-    ".stattic/storage/spaces/spc_alpha/content-model/releases",
-    revision.slice("sha256:".length),
-  );
-  mkdirSync(releaseRoot, { recursive: true });
-  const contentModel = `<?php
-return [
-  'format' => 'spacefast.wordpress-content-model.php',
-  'version' => 1,
-  'revision' => '${revision}',
-  'postTypes' => [[
-    'id' => 'posts',
-    'kind' => 'builtin',
-    'postType' => 'post',
-    'publicRead' => true,
-    'fields' => [],
-  ]],
-  'scfFieldGroups' => [],
-  'tables' => [],
-  'pages' => [],
-  'abilities' => [],
-  'hooks' => [],
-  'syncBindings' => [],
-];
-`;
-  writeFileSync(path.join(releaseRoot, "content-model.php"), contentModel);
-  const artifactDigest = new Bun.CryptoHasher("sha256").update(contentModel).digest("hex");
-  writeFileSync(path.join(releaseRoot, "content-model.sha256"), `sha256:${artifactDigest}\n`);
-
-  const script = String.raw`
-$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-$GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $argv[3];
-$GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $argv[4];
-$GLOBALS['redirects'] = [];
-$GLOBALS['refusals'] = [];
-function admin_url(string $path): string { return '/wp-admin/' . $path; }
-function wp_safe_redirect(string $url): bool {
-  $GLOBALS['redirects'][] = $url;
-  return true;
-}
-function wp_die(string $message, string $title = '', array $args = []): void {
-  $GLOBALS['refusals'][] = [$args['response'] ?? null, $message];
-}
-require $argv[1];
-require $argv[2];
-
-$_GET = [];
-unset($GLOBALS['typenow']);
-spacefast_content_enforce_admin_resource('edit.php');
-
-$_GET = ['page' => ZERO_ADMIN_PAGE_SLUG, 'p' => '/types/post'];
-spacefast_content_enforce_admin_resource('admin.php');
-
-$_GET = ['page' => 'redirection.php'];
-spacefast_content_enforce_admin_resource('tools.php');
-
-$_GET = ['page' => 'site-health.php'];
-spacefast_content_enforce_admin_resource('tools.php');
-
-$_GET = ['page' => 'plugins'];
-spacefast_content_enforce_admin_resource('admin.php');
-
-echo json_encode([
-  'redirects' => $GLOBALS['redirects'],
-  'refusals' => $GLOBALS['refusals'],
-]);
-`;
-  try {
-    const process = Bun.spawn(
-      [
-        "php",
-        "-r",
-        script,
-        path.join(repoRoot, "packages/zero-admin/php/routes.php"),
-        kernel,
-        releaseRoot,
-        revision,
-      ],
-      {
-        cwd: repoRoot,
-        stderr: "pipe",
-        stdout: "pipe",
-      },
-    );
-    const [exitCode, stdout, stderr] = await Promise.all([
-      process.exited,
-      new Response(process.stdout).text(),
-      new Response(process.stderr).text(),
-    ]);
-
-    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-    expect(JSON.parse(stdout)).toEqual({
-      redirects: [],
-      refusals: [
-        [403, "Spacefast manages this WordPress screen."],
-        [403, "Spacefast manages this WordPress screen."],
-      ],
-    });
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
 });
 
 test("managed API and admin requests converge on durable issuer-subject WordPress principals", async () => {
@@ -456,6 +329,7 @@ function update_option(string $name, mixed $value, bool $autoload = false): bool
 function update_user_meta(int $userId, string $name, mixed $value): void {
   $GLOBALS['metas'][$userId][$name] = $value;
 }
+function get_user_meta(int $userId, string $name, bool $single = true): mixed { return $GLOBALS['metas'][$userId][$name] ?? ''; }
 function delete_user_meta(int $userId, string $name): void { unset($GLOBALS['metas'][$userId][$name]); }
 function get_role(string $name): object {
   return (object) ['capabilities' => match ($name) {
@@ -534,7 +408,23 @@ $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = ['kind' => 'anonymous'];
 $anonymousUser = spacefast_content_principal_establish_user();
 unset($GLOBALS['SPACEFAST_CONTENT_PRINCIPAL']);
 $afterRevocation = spacefast_content_principal_current_user(0);
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+$GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = 'administrator';
+$scopedAdmin = spacefast_content_principal_capabilities(['install_plugins' => true], [], [], get_user_by('id', get_current_user_id()));
+$GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = null;
+$GLOBALS['metas'][get_current_user_id()]['_spacefast_native_role_spc_alpha'] = 'administrator';
+$nativeAdmin = spacefast_content_principal_capabilities(['manage_options' => true], [], [], get_user_by('id', get_current_user_id()));
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_beta';
+$otherSpace = spacefast_content_principal_capabilities(['manage_options' => true, 'edit_posts' => true], [], [], get_user_by('id', get_current_user_id()));
 echo json_encode([
+  'scope_capabilities' => [
+    'admin_can_manage_content' => $scopedAdmin['spacefast_manage_content'],
+    'admin_can_manage_installation' => $scopedAdmin['manage_options'],
+    'admin_can_install_plugins' => $scopedAdmin['install_plugins'],
+    'native_can_edit' => $nativeAdmin['edit_posts'],
+    'other_space_can_edit' => $otherSpace['edit_posts'] ?? false,
+    'other_space_can_manage' => $otherSpace['spacefast_manage_content'],
+  ],
   'api_user' => $apiUser,
   'admin_user' => $adminUser,
   'repeat_user' => $repeatUser,
@@ -608,7 +498,16 @@ echo json_encode([
     other_user_capabilities: Record<string, boolean>;
     roleless_capabilities: Record<string, boolean>;
     authority_agrees: string[];
+    scope_capabilities: Record<string, boolean>;
   };
+  expect(result.scope_capabilities).toEqual({
+    admin_can_manage_content: true,
+    admin_can_manage_installation: false,
+    admin_can_install_plugins: false,
+    native_can_edit: true,
+    other_space_can_edit: false,
+    other_space_can_manage: false,
+  });
   expect(result.api_user).toBe(57);
   expect(result.admin_user).toBe(57);
   expect(result.repeat_user).toBe(57);
@@ -738,107 +637,7 @@ echo json_encode(['ready' => $ready, 'expired' => $expired]);
   });
 });
 
-test("a verified content session enables Gutenberg REST and gates Space users on the admin door", async () => {
-  const script = String.raw`
-class WP_Error {
-  public function __construct(
-    public string $code,
-    public string $message,
-    public array $data,
-  ) {}
-}
-final class TestRestRequest {
-  public function __construct(private string $route) {}
-  public function get_route(): string { return $this->route; }
-}
-require $argv[1];
-function verdict(mixed $result): mixed {
-  return $result instanceof WP_Error ? [$result->code, $result->data['status']] : $result;
-}
-$closed = spacefast_content_disable_rest_api(null);
-$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-// Door 1: the editor session, constrained by its signed Zero access grant.
-$GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = 57;
-$usersRoute = new TestRestRequest('/wp/v2/users');
-$GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = [
-  'surface' => 'zero',
-  'initial_screen' => 'collections',
-  'allowed_screens' => ['collections'],
-];
-$sessionDoor = [
-  'rest' => spacefast_content_disable_rest_api(null),
-  'user_query' => spacefast_content_scope_rest_user_query(['orderby' => 'name'], null),
-  'users_disabled' => verdict(spacefast_content_gate_users_rest(null, null, $usersRoute)),
-  'posts_unchanged' => spacefast_content_gate_users_rest(
-    null,
-    null,
-    new TestRestRequest('/wp/v2/posts')
-  ),
-];
-$GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = [
-  'surface' => 'zero',
-  'initial_screen' => 'users',
-  'allowed_screens' => ['collections', 'users'],
-];
-$sessionDoor['users_enabled'] = spacefast_content_gate_users_rest(null, null, $usersRoute);
-// WordPress admin launches do not carry a Zero screen allowlist.
-$GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] = ['surface' => 'wordpress'];
-$wordpressDoor = spacefast_content_gate_users_rest(null, null, $usersRoute);
-// Door 2: the WP API door has no content-admin access claim. The user scope
-// must still apply, or /wp/v2/users enumerates every Space; the admin-session
-// feature decision must not replace this door's Grant.
-unset($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID']);
-unset($GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS']);
-$GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = 'administrator';
-$apiDoor = [
-  'rest' => spacefast_content_disable_rest_api(null),
-  'user_query' => spacefast_content_scope_rest_user_query(['orderby' => 'name'], null),
-  'users' => spacefast_content_gate_users_rest(null, null, $usersRoute),
-];
-echo json_encode([
-  'closed' => [$closed->code, $closed->data['status']],
-  'session_door' => $sessionDoor,
-  'wordpress_door' => $wordpressDoor,
-  'api_door' => $apiDoor,
-]);
-`;
-  const process = Bun.spawn(["php", "-r", script, kernel], {
-    cwd: repoRoot,
-    stderr: "pipe",
-    stdout: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    process.exited,
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
-  ]);
-
-  const scopedQuery = {
-    orderby: "name",
-    meta_key: "_spacefast_space_id",
-    meta_value: "spc_alpha",
-  };
-  expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-  expect(JSON.parse(stdout)).toEqual({
-    closed: ["spacefast_rest_disabled", 404],
-    session_door: {
-      rest: null,
-      user_query: scopedQuery,
-      users_disabled: ["spacefast_content_users_unavailable", 403],
-      posts_unchanged: null,
-      users_enabled: null,
-    },
-    wordpress_door: null,
-    api_door: { rest: null, user_query: scopedQuery, users: null },
-  });
-});
-
-test("the REST gate's admission enables WordPress REST, with or without a role", async () => {
-  // spacefast_content_disable_rest_api is not a second authorization: the WP API
-  // door already ran the access engine and, on admission, set
-  // SPACEFAST_CONTENT_REST_ADMITTED. An admitted anonymous request (no editor
-  // user, no resolved role) must therefore get WordPress's own unauthenticated
-  // answer, while a request that reached WordPress without the gate still 404s.
+test("a Space scope enables public WordPress REST without a separate opt-in", async () => {
   const script = String.raw`
 class WP_Error {
   public function __construct(
@@ -852,11 +651,11 @@ function verdict(mixed $result): mixed {
   return $result instanceof WP_Error ? [$result->code, $result->data['status']] : $result;
 }
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-// Reached WordPress with a Space scope but no gate admission: still closed.
-$noGate = verdict(spacefast_content_disable_rest_api(null));
+// WordPress REST is available with a tenant scope, without an editor session.
+$noGate = verdict(spacefast_content_require_rest_scope(null));
 // The gate admitted an anonymous request: no editor user, no role, marker set.
 $GLOBALS['SPACEFAST_CONTENT_REST_ADMITTED'] = true;
-$anonymousAdmitted = verdict(spacefast_content_disable_rest_api(null));
+$anonymousAdmitted = verdict(spacefast_content_require_rest_scope(null));
 echo json_encode(['no_gate' => $noGate, 'anonymous_admitted' => $anonymousAdmitted]);
 `;
   const process = Bun.spawn(["php", "-r", script, kernel], {
@@ -872,7 +671,7 @@ echo json_encode(['no_gate' => $noGate, 'anonymous_admitted' => $anonymousAdmitt
 
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
   expect(JSON.parse(stdout)).toEqual({
-    no_gate: ["spacefast_rest_disabled", 404],
+    no_gate: null,
     anonymous_admitted: null,
   });
 });

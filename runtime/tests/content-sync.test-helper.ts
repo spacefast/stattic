@@ -7,7 +7,14 @@
 // One driver, two formats. The reconciliation is format-blind, so re-running it
 // per format would be nine copies of one proof; each format's suite asserts
 // only what its own serializer decides.
-import { copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -50,7 +57,7 @@ const blocksEnginePlugin = await fetchBlocksEnginePlugin();
  * from the request, so the test builds one instead of stubbing the lookup.
  */
 function releaseRoot(format: SyncFormat) {
-  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-source-sync-"));
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "spacefast-source-sync-")));
   const storage = path.join(root, ".stattic/storage");
   const revision = `sha256:${"a".repeat(64)}`;
   const dir = path.join(storage, `spaces/${SPACE_ID}/content-model/releases`, revision.slice(7));
@@ -188,7 +195,12 @@ function get_posts(array $args): array {
       if ($key === 'relation' || !is_array($clause)) continue;
       if (($meta[$id][$clause['key']] ?? null) !== $clause['value']) { $ok = false; }
     }
+    $status = $args['post_status'] ?? 'publish';
+    if (is_array($status) && !in_array($post['post_status'] ?? '', $status, true)) $ok = false;
+    if ($status === 'any' && in_array($post['post_status'] ?? '', ['trash', 'auto-draft', 'inherit'], true)) $ok = false;
+    if (is_string($status) && $status !== 'any' && ($post['post_status'] ?? '') !== $status) $ok = false;
     if (isset($args['name']) && ($post['post_name'] ?? null) !== $args['name']) $ok = false;
+    if (isset($args['post_name__in']) && !in_array($post['post_name'] ?? '', $args['post_name__in'], true)) $ok = false;
     if (isset($args['post_type']) && $args['post_type'] !== 'any'
         && ($post['post_type'] ?? null) !== $args['post_type']) $ok = false;
     if ($ok) $out[] = (object) $post;
@@ -198,11 +210,33 @@ function get_posts(array $args): array {
 function update_post_meta(int $id, string $key, mixed $value): void {
   global $meta; $meta[$id][$key] = $value;
 }
+function wp_update_post(array $post, bool $error = false): int { return wp_insert_post($post, $error); }
+function wp_untrash_post(int $id): object|false {
+  global $posts;
+  if (!isset($posts[$id])) return false;
+  $posts[$id]['post_status'] = 'draft';
+  return get_post($id);
+}
+function wp_trash_post(int $id): object|false {
+  $post = get_post($id);
+  if (!$post) return false;
+  update_post_meta($id, '_wp_trash_meta_status', $post->post_status);
+  wp_insert_post(['ID' => $id, 'post_status' => 'trash']);
+  return get_post($id);
+}
+function delete_post_meta(int $id, string $key): bool {
+  global $meta; unset($meta[$id][$key]); return true;
+}
 function get_post_meta(int $id, string $key, bool $single = false): mixed {
   global $meta; return $meta[$id][$key] ?? '';
 }
 function is_wp_error(mixed $value): bool { return false; }
 function home_url(string $path): string { return "https://space.test" . $path; }
+function get_permalink(object|int $post): string {
+  $post = is_object($post) ? $post : get_post($post);
+  return spacefast_content_model_page_link(home_url('/' . ($post->post_name ?? '')), (int) ($post->ID ?? 0));
+}
+function get_date_from_gmt(string $value): string { return $value; }
 function sanitize_title(string $value): string { return strtolower($value); }
 function wp_save_post_revision(int $id): int { return $id + 1000; }
 function wp_get_post_revisions(int $id, array $args = []): array {
@@ -219,6 +253,8 @@ export type Step =
       invalidDigest?: boolean;
     }
   | { op: "inspectPage" }
+  | { op: "removePage"; prepareOnly?: boolean }
+  | { op: "commitPage"; stale?: boolean }
   | {
       op: "renderPage";
       snapshot?: { text: string; format: SyncFormat | "tsx" };
@@ -227,7 +263,14 @@ export type Step =
       islandsBootUrl?: string;
     }
   | { op: "reconcile"; state: "initial" | "bound"; text: string; baseRevision?: string }
-  | { op: "editInWordPress"; blocks: string }
+  | {
+      op: "editInWordPress";
+      blocks?: string;
+      title?: string;
+      slug?: string;
+      status?: string;
+      dateGmt?: string;
+    }
   // `ackOp` closes an operation other than the most recent one, which is how a
   // test reaches back to a receipt the store may since have evicted.
   | { op: "acknowledge"; baseRevision: string; ackOp?: number }
@@ -255,6 +298,7 @@ export type SyncLedger = {
   baseText: string;
   textDigest: string;
   blocksDigest: string;
+  metadataDigest?: string;
   wordpressRevisionId: number;
   serializerVersion: 1;
   revision: string;
@@ -292,7 +336,11 @@ type DriverReceipt = {
   format: "test.driver";
   status: string;
   postId?: number | null;
+  postSlug?: string;
   postStatus?: string;
+  postTitle?: string;
+  retired?: boolean;
+  postDateGmt?: string;
   permalink?: string;
   blocks?: string;
   externalId?: string;
@@ -326,6 +374,23 @@ $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = ${JSON.stringify(storage)};
 $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = ${JSON.stringify(releaseDir)};
 $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = ${JSON.stringify(revision)};
 require_once ${JSON.stringify(kernel)};
+function select_and_commit_test_model(string $revision, bool $stale = false): array {
+  require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/shared/storage.php"))};
+  $storage = ${JSON.stringify(storage)};
+  $space = ${JSON.stringify(SPACE_ID)};
+  $version = 'ver_' . substr(hash('sha256', $revision), 0, 32);
+  $reference = json_encode(['revision' => $revision]);
+  $sha = hash('sha256', $reference);
+  $blob = _stattic_runtime_blob_path($storage, $space, $sha);
+  if (!is_dir(dirname($blob))) mkdir(dirname($blob), 0775, true);
+  file_put_contents($blob, $reference);
+  _stattic_runtime_write_json_atomic(_stattic_version_root($storage, $space, $version) . '/metadata.json', [
+    'catalog' => ['format' => STATTIC_RUNTIME_VERSION_CATALOG_FORMAT, 'spaceId' => $space, 'versionId' => $version,
+      'paths' => ['_spacefast/pages/documents/model.json' => ['source' => ['sha256' => $sha, 'size' => strlen($reference), 'contentType' => 'application/json']]], 'variants' => []],
+  ]);
+  _stattic_runtime_write_json_atomic(_stattic_route_pointer_path($storage, $space, 'production'), ['version_id' => $version]);
+  return spacefast_content_handle_request(['operation' => 'model.commit', 'revision' => $revision, 'versionId' => $stale ? 'ver_wrong' : $version], true);
+}
 
 $steps = json_decode(${JSON.stringify(JSON.stringify(steps))}, true);
 $results = [];
@@ -341,7 +406,11 @@ foreach ($steps as $step) {
     // Stand in for a human editing in wp-admin: the post content changes
     // underneath the ledger, which is exactly what the pull path reconciles.
     global $posts;
-    foreach ($posts as $id => $post) { $posts[$id]['post_content'] = $step['blocks']; }
+    foreach ($posts as $id => $post) {
+      foreach (['blocks' => 'post_content', 'title' => 'post_title', 'slug' => 'post_name', 'status' => 'post_status', 'dateGmt' => 'post_date_gmt'] as $field => $column) {
+        if (array_key_exists($field, $step)) $posts[$id][$column] = $step[$field];
+      }
+    }
     $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'edited']];
     continue;
   }
@@ -376,17 +445,37 @@ foreach ($steps as $step) {
       $php = '<?php return ' . var_export($model, true) . ';';
       spacefast_content_model_stage_release($model['revision'], $php, 'sha256:' . hash('sha256', $php), true);
       spacefast_content_handle_request(['operation' => 'model.activate', 'revision' => $model['revision']], true);
+      select_and_commit_test_model($model['revision']);
       $GLOBALS['firstPublishedRevision'] ??= $model['revision'];
       $GLOBALS['publishedPageSnapshot'] = [...$binding['documentSeed'], 'bindingId' => $binding['id'], 'format' => $binding['format'], 'modelRevision' => $model['revision']];
       $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'activated']];
       continue;
     }
+    if ($step['op'] === 'removePage') {
+      $model = spacefast_content_model_active_release();
+      $model['syncBindings'] = [];
+      $model['revision'] = 'sha256:' . hash('sha256', json_encode($model));
+      $php = '<?php return ' . var_export($model, true) . ';';
+      spacefast_content_model_stage_release($model['revision'], $php, 'sha256:' . hash('sha256', $php), true);
+      spacefast_content_handle_request(['operation' => 'model.activate', 'revision' => $model['revision']], true);
+      $GLOBALS['preparedRemovalRevision'] = $model['revision'];
+      if (empty($step['prepareOnly'])) select_and_commit_test_model($model['revision']);
+      $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'removed']];
+      continue;
+    }
+    if ($step['op'] === 'commitPage') {
+      select_and_commit_test_model($GLOBALS['preparedRemovalRevision'], $step['stale'] ?? false);
+      $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'committed']];
+      continue;
+    }
     if ($step['op'] === 'inspectPage') {
-      $binding = spacefast_content_model_sync_binding(${JSON.stringify(TSX_BINDING)});
+      $originalModel = require ${JSON.stringify(path.join(releaseDir, "content-model.php"))};
+      $binding = spacefast_content_model_sync_binding(${JSON.stringify(TSX_BINDING)}) ?? $originalModel['syncBindings'][1];
       $found = spacefast_content_sync_find_post(${JSON.stringify(TSX_BINDING)}, $binding, false);
       $id = is_object($found) ? (int) $found->ID : 0;
       $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'inspected',
-        'postId' => $id, 'postStatus' => $found->post_status ?? null, 'blocks' => $found->post_content ?? null,
+        'retired' => spacefast_content_source_is_retired($id), 'postDateGmt' => $found->post_date_gmt ?? null,
+        'postTitle' => $found->post_title ?? null, 'postId' => $id, 'postSlug' => $found->post_name ?? null, 'postStatus' => $found->post_status ?? null, 'blocks' => $found->post_content ?? null,
         'externalId' => get_post_meta($id, SPACEFAST_CONTENT_EXTERNAL_ID_META, true),
         'spaceId' => get_post_meta($id, SPACEFAST_CONTENT_SPACE_META, true),
         'permalink' => spacefast_content_model_page_link('https://space.test/' . ($found->post_name ?? ''), $id),
@@ -399,7 +488,7 @@ foreach ($steps as $step) {
       $route = ['id' => 'page.' . substr(${JSON.stringify(TSX_BINDING)}, 11), 'path' => '/docs/about', 'render' => 'document', 'bindingId' => ${JSON.stringify(TSX_BINDING)}, 'params' => []];
       $snapshot = isset($step['snapshot']) ? [...$step['snapshot'], 'bindingId' => $route['bindingId'], 'modelRevision' => $GLOBALS['firstPublishedRevision'], 'sha256' => 'sha256:' . hash('sha256', $step['snapshot']['text'])] : $GLOBALS['publishedPageSnapshot'];
       if (isset($step['islandsBootUrl'])) $snapshot['islandsBootUrl'] = $step['islandsBootUrl'];
-      if (!empty($step['clearActiveRelease'])) spacefast_content_model_activate_release(null, true);
+      if (!empty($step['clearActiveRelease'])) { unset($GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'], $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION']); }
       $context = ['space_id' => ${JSON.stringify(SPACE_ID)}, 'private_root' => ${JSON.stringify(storage)}, 'serving' => ['immutable' => isset($step['snapshot'])], 'version_id' => 'ver_' . substr(hash('sha256', json_encode($snapshot)), 0, 32), 'version_dir' => '/sealed', 'root' => []];
       $renderScript = '<?php ' . base64_decode('${Buffer.from(WP_STUBS).toString("base64")}');
       foreach (['SPACEFAST_CONTENT_SPACE_ID', 'SPACEFAST_CONTENT_PRIVATE_ROOT', 'SPACEFAST_CONTENT_BLOCKS_ENGINE_PLUGIN'] as $key) {

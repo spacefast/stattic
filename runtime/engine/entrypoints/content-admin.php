@@ -78,33 +78,12 @@ foreach ($wpAuthCookies as $wpAuthCookie) {
         true
     );
 }
-// Where the launch lands.
-//
-// `post` is the type both landings open. A ContentModel projects its
-// collections as a taxonomy over WordPress's own posts — see
-// register_taxonomy(SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY, ['post'])
-// in wordpress/content-model-kernel.php — so there is no per-collection post
-// type to resolve, and asking for one is what the removed
-// spacefast_content_builtin_post_type() call was doing. That function has not
-// existed since the ContentModel rename, so every redemption was answering
-// 503 content_kernel_unavailable; kernel readiness is already proven above by
-// the principal and auth-cookie calls, which fail closed on their own.
-//
-// The Content screens live in the Zero dashboard plugins. Their route builders
-// own the page slug and `p` parameter. The newer dashboard is preferred while
-// zero-admin remains the fallback during the bundle cutover.
-// A launch that named no screen — the dashboard's "Open WordPress admin"
-// escape hatch — lands on WordPress's own list instead.
 $access = $launch['access'];
 $screen = $access['surface'] === 'zero' ? $access['initial_screen'] : null;
-$landing = '/wp-admin/edit.php';
+$landing = is_string($access['path'] ?? null) ? $access['path'] : '/wp-admin/index.php';
+$landing .= (str_contains($landing, '?') ? '&' : '?') . 'classic=1';
 if ($screen !== null) {
-    $route = $screen === 'users' ? '/users' : '/types/post';
-    if (function_exists('next_admin_url')) {
-        $landing = next_admin_url($route);
-    } elseif (function_exists('zero_admin_route_url')) {
-        $landing = zero_admin_route_url($route);
-    }
+    $landing = '/zero-admin' . ($screen === 'users' ? '/users' : '/collections');
 }
 header('Location: ' . $landing, true, 303);
 exit;

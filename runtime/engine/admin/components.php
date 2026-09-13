@@ -205,6 +205,18 @@ function _stattic_component_plugins(array $lock, array &$problems): array
         }
     }
 
+    // Activation does not install Redirection's tables; its interactive setup normally does.
+    // Managed components must be ready before a Space opens its redirect editor.
+    if (class_exists('Redirection\\Database\\Status')) {
+        $status = new \Redirection\Database\Status();
+        if ($status->needs_installing()) {
+            $installed = (new \Redirection\Database\Schema\Latest())->install();
+            if (is_wp_error($installed)) {
+                _stattic_component_problem($problems, 'redirection', 'component_schema_unavailable', 'The Redirection database could not be installed.');
+            }
+        }
+    }
+
     $onDemandActive = [];
     $jetpack = _stattic_component_installed_plugin($plugins, 'jetpack');
     if (is_array($jetpack) && is_plugin_active($jetpack[0])) {
@@ -413,14 +425,7 @@ function _stattic_runtime_stage_components(string $privateRoot, array $claims): 
     _stattic_component_check_embedded($lock, 'immutable-loader', $publicRoot . '/wp-content/mu-plugins/spacefast-content.php', $problems);
     _stattic_component_check_embedded($lock, 'content-kernel', $engineRoot . '/wordpress/content-kernel.php', $problems);
     _stattic_component_check_embedded($lock, 'php-toolkit', $engineRoot . '/vendor/php-toolkit.phar', $problems);
-    _stattic_component_check_embedded($lock, 'zero-admin', $publicRoot . '/wp-content/mu-plugins/zero-admin', $problems, true);
     _stattic_component_check_embedded($lock, 'zero-dashboard', $publicRoot . '/wp-content/mu-plugins/zero-dashboard', $problems, true);
-    _stattic_component_check_loader_alias(
-        'zero-admin',
-        $publicRoot . '/wp-content/mu-plugins/zero-admin/zero-admin.php',
-        $publicRoot . '/wp-content/mu-plugins/zero-admin.php',
-        $problems,
-    );
     _stattic_component_check_loader_alias(
         'zero-dashboard',
         $publicRoot . '/wp-content/mu-plugins/zero-dashboard/zero-dashboard.php',

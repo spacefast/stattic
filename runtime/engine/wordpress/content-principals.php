@@ -266,8 +266,19 @@ function spacefast_content_principal_capabilities(
         return $allCapabilities;
     }
     $roleName = spacefast_content_principal_role();
+    if (spacefast_content_space_id() !== '') {
+        if ($roleName === null && function_exists('get_user_meta')) {
+            $nativeRole = get_user_meta($subjectId, '_spacefast_native_role_' . spacefast_content_space_id(), true);
+            $roleName = in_array($nativeRole, ['subscriber', 'editor', 'administrator'], true) ? $nativeRole : null;
+        }
+        // Installation roles and a membership in another Space convey no authority here.
+        $allCapabilities = [
+            'spacefast_manage_content' => $roleName === 'administrator',
+            'spacefast_create_users' => $roleName === 'administrator',
+        ];
+    }
     if ($roleName === null || !function_exists('get_role')) {
-        return $allCapabilities;
+        return spacefast_content_principal_scope_capabilities($allCapabilities);
     }
     $role = get_role($roleName);
     $capabilities = is_object($role) && is_array($role->capabilities ?? null)
@@ -278,7 +289,18 @@ function spacefast_content_principal_capabilities(
             $allCapabilities[$capability] = true;
         }
     }
-    return $allCapabilities;
+    return spacefast_content_principal_scope_capabilities($allCapabilities);
+}
+
+function spacefast_content_principal_scope_capabilities(array $capabilities): array
+{
+    if (spacefast_content_space_id() === '') {
+        return $capabilities;
+    }
+    foreach (['manage_options', 'promote_users', 'create_users', 'delete_users', 'remove_users', 'activate_plugins', 'install_plugins', 'update_plugins', 'delete_plugins', 'edit_plugins', 'install_themes', 'update_themes', 'delete_themes', 'switch_themes', 'edit_themes', 'update_core', 'manage_network', 'manage_network_options', 'manage_network_plugins', 'manage_network_themes', 'manage_sites', 'create_sites', 'delete_sites'] as $capability) {
+        $capabilities[$capability] = false;
+    }
+    return $capabilities;
 }
 
 function spacefast_content_principal_establish_user(): int

@@ -546,8 +546,8 @@ function installed_engine_manifest(string $root): ?array
  *
  * Aliases land one at a time, so a request can arrive with only a prefix of
  * them installed. A directory must therefore be complete before the file that
- * loads it appears: `wp-content/mu-plugins/zero-admin.php` is what WordPress
- * auto-loads, and it reaches into `wp-content/mu-plugins/zero-admin/`. Plain
+ * loads it appears: `wp-content/mu-plugins/zero-dashboard.php` is what WordPress
+ * auto-loads, and it reaches into `wp-content/mu-plugins/zero-dashboard/`. Plain
  * strcmp puts it first — '.' sorts below '/' — which opens a window where every
  * WordPress request on the box fatals, and leaves it open forever if the
  * install aborts inside it.

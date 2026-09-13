@@ -607,16 +607,18 @@ test("a Space with no WordPress never claims /wp-json", async () => {
   }
 });
 
-test("/wp-admin keeps its single door", async () => {
-  // The REST door is deliberately narrower than the editor lane: a credential
-  // that reaches the API does not open the editor's HTML surface, which is
-  // reachable only through the session its launch minted.
+test("classic WordPress admin receives the same authenticated Space scope", async () => {
+  mkdirSync(path.join(runtime.root, "wp-admin"), { recursive: true });
+  writeFileSync(
+    path.join(runtime.root, "wp-admin/edit.php"),
+    "<?php header('Content-Type: application/json'); echo json_encode(['space' => $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'], 'role' => $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE']]);",
+  );
   const token = await machineToken();
   const response = await get(runtime, OPEN_HOST, "/wp-admin/edit.php", {
     headers: { "x-sf-authorization": `Bearer ${token}` },
   });
-  expect(response.status).toBe(401);
-  expect(await response.text()).toContain("content_admin_session_invalid");
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ space: OPEN_SPACE, role: "editor" });
 });
 
 test("both REST spellings honour a Grant that scopes /wp-json", async () => {
@@ -662,29 +664,17 @@ test("a fully-open Space still refuses an unusable credential", async () => {
   expect(admitted.context).toMatchObject({ served_by: "wordpress", role: "editor" });
 });
 
-test("a co-hosted static Space never boots WordPress on /wp-json", async () => {
-  // One wp.cloud site hosts many Spaces, so the site-wide wp-blog-header.php
-  // exists for every Space here. Whether THIS Space has a REST API is answered
-  // by the version's model reference, which STATIC_SPACE does not have — so
-  // /wp-json is an ordinary URL it does not publish, not a
-  // door into the co-hosted managed Space's kernel. It must 404 without booting
-  // WordPress, even with a credential the Space itself issued.
-  const anonymous = await get(runtime, STATIC_HOST, "/wp-json/wp/v2/posts");
-  const anonymousBody = await anonymous.text();
-  expect(anonymous.status).toBe(404);
-  expect(anonymousBody).not.toContain("served_by");
-
-  const token = await machineToken({ spaceId: STATIC_SPACE, host: STATIC_HOST });
-  const credentialed = await get(runtime, STATIC_HOST, "/wp-json/wp/v2/posts", {
-    headers: { "x-sf-authorization": `Bearer ${token}` },
+test("WordPress REST is available by default and retains the static Space's scope", async () => {
+  const anonymous = await wpContext(STATIC_HOST, "/wp-json/wp/v2/posts");
+  expect(anonymous.status).toBe(200);
+  expect(anonymous.context).toMatchObject({
+    served_by: "wordpress",
+    space_id: STATIC_SPACE,
+    role: null,
   });
-  const credentialedBody = await credentialed.text();
-  expect(credentialed.status).toBe(404);
-  expect(credentialedBody).not.toContain("served_by");
-
-  // The query spelling is the same non-answer.
-  const query = await get(runtime, STATIC_HOST, "/?rest_route=/wp/v2/posts");
-  expect(await query.text()).not.toContain("served_by");
+  const query = await wpContext(STATIC_HOST, "/?rest_route=/wp/v2/posts");
+  expect(query.status).toBe(200);
+  expect(query.context).toMatchObject({ served_by: "wordpress", space_id: STATIC_SPACE });
 });
 
 test("canonical WordPress documents share Customization styles", async () => {

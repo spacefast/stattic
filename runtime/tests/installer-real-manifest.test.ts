@@ -236,31 +236,28 @@ test("the shipped manifest installs executable engine bytes without owning the r
  * Aliases land one at a time, so a request can arrive with only a prefix of
  * them installed. A failed first install must roll the new tree back out rather
  * than leave an unreferenced partial public plugin behind.
- * `wp-content/mu-plugins/zero-admin.php` is what WordPress auto-loads and it
- * reaches into the sibling `zero-admin/` directory, which is a separate set of
+ * `wp-content/mu-plugins/zero-dashboard.php` is what WordPress auto-loads and it
+ * reaches into the sibling `zero-dashboard/` directory, which is a separate set of
  * aliases, so the directory has to be complete before the entry file appears.
  *
- * (The other half of that hazard — the entry file staying inert when the
- * directory is absent anyway — is the plugin's own behavior, held by
- * packages/zero-admin/test/build.test.ts.)
  */
-test("a failed zero-admin loader publication rolls back its fresh tree", async () => {
+test("a failed zero-dashboard loader publication rolls back its fresh tree", async () => {
   // A directory sitting where the entry file must land makes its rename fail,
   // which stops the install exactly there and leaves on disk precisely the
   // aliases ordered before it.
   const install = await installFromShippedManifest((publicRoot) => {
-    const blocked = path.join(publicRoot, "wp-content/mu-plugins/zero-admin.php");
+    const blocked = path.join(publicRoot, "wp-content/mu-plugins/zero-dashboard.php");
     mkdirSync(blocked, { recursive: true });
     writeFileSync(path.join(blocked, "occupied"), "");
   });
 
   expect(install.exitCode).toBe(1);
   expect(install.stderr).toContain(
-    "runtime_engine_alias_install_failed:wp-content/mu-plugins/zero-admin.php",
+    "runtime_engine_alias_install_failed:wp-content/mu-plugins/zero-dashboard.php",
   );
   // No part of a never-committed tree remains public after the alias failure.
   const treeFiles = install.treeSitePaths.filter((file) =>
-    file.startsWith("wp-content/mu-plugins/zero-admin/"),
+    file.startsWith("wp-content/mu-plugins/zero-dashboard/"),
   );
   expect(treeFiles.length).toBeGreaterThan(0);
   expect(treeFiles.filter((file) => existsSync(path.join(install.publicRoot, file)))).toEqual([]);

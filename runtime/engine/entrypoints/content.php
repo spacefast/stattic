@@ -13,7 +13,7 @@ require_once $engineRoot . '/admin/auth.php';
 
 _stattic_emit_runtime_identity();
 
-const SPACEFAST_CONTENT_REQUEST_MAX_BYTES = 4194304;
+const SPACEFAST_CONTENT_REQUEST_MAX_BYTES = 25165824;
 
 $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 if ($method !== 'POST') {
@@ -25,7 +25,7 @@ if ($method !== 'POST') {
 
 $rawBody = _stattic_bounded_request_body(SPACEFAST_CONTENT_REQUEST_MAX_BYTES);
 if ($rawBody === null) {
-    _stattic_problem_response(413, 'content_request_too_large', 'The content request exceeds 4 MiB.');
+    _stattic_problem_response(413, 'content_request_too_large', 'The content request exceeds 24 MiB.');
 }
 $request = json_decode($rawBody, true);
 if (!is_array($request)) {
@@ -64,6 +64,13 @@ if (!_stattic_id_valid($spaceId)) {
 }
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
 $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
+if (isset($request['publicOrigin'])) {
+    $publicOrigin = _stattic_content_admin_frame_origin($request['publicOrigin']);
+    if ($publicOrigin === null) {
+        _stattic_problem_response(400, 'content_public_origin_invalid', 'A valid public origin is required.');
+    }
+    $GLOBALS['SPACEFAST_CONTENT_PUBLIC_ORIGIN'] = $publicOrigin;
+}
 $host = _stattic_normalize_hostname((string) ($_SERVER['HTTP_HOST'] ?? ''));
 // The principal assertion carries the acting identity for operations performed
 // on behalf of a person. The content-model/document lanes act on management-JWT
@@ -74,6 +81,11 @@ $principalGated = in_array(
     [
         'content.authorization.apply',
         'content.admin.launch',
+        'content.rest.request',
+        'content.media.read',
+        'content.source.convert',
+        'content.source.inspect',
+        'content.source.resolve',
         // Storage authorizes against the caller's projected WordPress role,
         // so it acts for a person and needs the assertion that names one.
         'content.storage.list',
@@ -82,6 +94,7 @@ $principalGated = in_array(
     ],
     true
 );
+$GLOBALS['SPACEFAST_CONTENT_SYSTEM_OPERATION'] = !$principalGated;
 $principal = _stattic_content_principal_assertion(
     $request['principal'] ?? null,
     $spaceId,

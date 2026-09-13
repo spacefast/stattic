@@ -1,49 +1,13 @@
 <?php
 /**
- * Back to the repo: the kernel half.
+ * WordPress saves content and appends source intent on the same database connection.
+ * A rolled-back save therefore rolls back its journal row. Install the table at
+ * init, outside saves, because MySQL DDL implicitly commits a transaction.
  *
- * When a bound field changes in the editor, its source file is out of date. The
- * only thing WordPress does about that is append the intent — one journal row
- * naming the binding, the revision the editor produced and the common base the
- * ledger stood on. It never serializes anything and it never talks to a
- * repository: `source.reconcile` owns the canonical source text, and the control
- * plane's drain owns the commit.
- *
- * The one property that makes this safe is where the row is written.
- * `$wpdb->insert` runs on the same connection and inside the same transaction
- * as the save that triggered it, so a rolled-back save takes its intent with
- * it. Intent cannot outlive the write. That is also why the table is created at
- * `init` and never here: MySQL commits implicitly on DDL, and a CREATE issued
- * inside a save's transaction would commit that save's writes behind its back.
- *
- * Three kinds of save reach the drain, and they differ only in what the row
- * names:
- *
- * 1. A bound field the editor changed — the original case. The row names the
- *    binding and the common base the ledger stands on.
- * 2. A document no file backs at all: a post the editor created under a
- *    collection whose release declares where its files go. There is no binding
- *    to name, so the row carries the synthetic `materialize.<postId>`, which
- *    cannot collide with a compiler-minted `sync.<resource>.<slug>` and
- *    coalesces a burst of saves exactly as a real binding id does.
- * 3. A page whose only source is compile-class. Nothing can write back to a
- *    `.tsx`, so that binding never gets a ledger; this branch stands on the
- *    blocks digest alone, and what the drain lands is a NEW file in a format
- *    that can carry the document.
- *
- * Deliberately not journalled:
- *
- * - Saves the sync lane makes itself. `source.reconcile` writes posts on the
- *   push and merge paths; that write IS the reconciliation, and journalling it
- *   would ask the drain to reconcile the answer it just produced.
- * - Two-way bindings with no ledger. Without a common base there is nothing to
- *   reconcile against, and the first `source.reconcile` establishes both the
- *   base and the file. Fail closed rather than guess a base. Case 3 is not an
- *   exception to this: it never reconciles, it materializes.
- * - Saves that left the bound field's blocks byte-identical to the ledger's.
- *   A title-only edit is not a source change.
- * - Pages the content model projected from the capsule's own client source.
- *   Activation rewrites those on every publish, and they are the compiler's.
+ * Bound document body or metadata changes name their common base. New documents
+ * name the collection that declares their source directory. Component conversion
+ * is an explicit operation; saving a TSX-backed page never converts its owner.
+ * The runtime serializes documents and the control plane commits their source.
  */
 declare(strict_types=1);
 
@@ -70,7 +34,7 @@ function spacefast_content_source_journal_install(): void
         return;
     }
     $release = spacefast_content_model_active_release();
-    if (!is_array($release['syncBindings'] ?? null) || $release['syncBindings'] === []) {
+    if (($release['syncBindings'] ?? []) === [] && ($release['materializations'] ?? []) === []) {
         return;
     }
     if ($wpdb->query(_stattic_content_source_journal_ddl()) === false) {
@@ -78,6 +42,59 @@ function spacefast_content_source_journal_install(): void
         return;
     }
     update_option(SPACEFAST_CONTENT_SOURCE_JOURNAL_OPTION, '1', true);
+}
+
+/** A trusted cron event selects its scope from stored post ownership. */
+function spacefast_content_source_journal_publish_scheduled(int $postId): void
+{
+    $spaceId = get_post_meta($postId, SPACEFAST_CONTENT_SPACE_META, true);
+    if (!is_string($spaceId) || preg_match('/\Aspc_[A-Za-z0-9_-]+\z/D', $spaceId) !== 1) {
+        check_and_publish_future_post($postId);
+        return;
+    }
+    $releaseRoot = $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] ?? null;
+    if (!is_string($releaseRoot)) {
+        throw new Spacefast_Content_Error(503, 'content_runtime_unavailable', 'Scheduled publication needs the installed runtime.');
+    }
+    $privateRoot = dirname($releaseRoot, 2) . '/storage';
+    $modelRoot = spacefast_content_model_root($privateRoot, $spaceId);
+    $revision = _stattic_private_tree_read_pointer($modelRoot . '/active-release', 128);
+    $context = [
+        'SPACEFAST_CONTENT_SPACE_ID' => $spaceId,
+        'SPACEFAST_CONTENT_PRIVATE_ROOT' => $privateRoot,
+        'SPACEFAST_CONTENT_MODEL_RELEASE_ROOT' => null,
+        'SPACEFAST_CONTENT_MODEL_REVISION' => null,
+        'SPACEFAST_CONTENT_PINNED_MODEL_REVISION' => null,
+        'SPACEFAST_CONTENT_WRITE_COLLECTION' => null,
+        'SPACEFAST_CONTENT_ROUTES_SCHEDULED' => true,
+    ];
+    if ($revision !== null) {
+        if (preg_match(SPACEFAST_CONTENT_MODEL_REVISION_PATTERN, $revision) !== 1) {
+            throw new Spacefast_Content_Error(503, 'content_model_revision_invalid', 'The scheduled document content model is unavailable.');
+        }
+        $modelRelease = $modelRoot . '/releases/' . spacefast_content_model_revision_directory($revision);
+        spacefast_content_model_read_release($modelRelease, $revision);
+        $context['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $modelRelease;
+        $context['SPACEFAST_CONTENT_MODEL_REVISION'] = $revision;
+    }
+    $previous = [];
+    foreach ($context as $key => $value) {
+        $previous[$key] = ['exists' => array_key_exists($key, $GLOBALS), 'value' => $GLOBALS[$key] ?? null];
+        $GLOBALS[$key] = $value;
+    }
+    try {
+        spacefast_content_source_journal_install();
+        check_and_publish_future_post($postId);
+        spacefast_content_public_routes_refresh();
+    } finally {
+        foreach ($previous as $key => $saved) {
+            if ($saved['exists']) {
+                $GLOBALS[$key] = $saved['value'];
+            } else {
+                unset($GLOBALS[$key]);
+            }
+        }
+    }
 }
 
 /** The binding this post is the WordPress side of, or null. */
@@ -140,7 +157,7 @@ function spacefast_content_source_journal_record_save(int $postId, mixed $post =
     if (!is_object($post) && function_exists('get_post')) {
         $post = get_post($postId);
     }
-    if (!is_object($post) || (string) ($post->post_status ?? '') === 'auto-draft') {
+    if (!is_object($post) || (string) ($post->post_status ?? '') === 'auto-draft' || spacefast_content_source_is_retired($postId)) {
         return;
     }
     try {
@@ -150,6 +167,19 @@ function spacefast_content_source_journal_record_save(int $postId, mixed $post =
         // edit, or the next reconcile from any transport, catches the file up.
         // Raising here would turn a sync-lane fault into a failed edit.
         error_log('spacefast content source journal append failed: ' . get_debug_type($error));
+    }
+}
+
+/** REST and SCF write bound block meta after save_post. */
+function spacefast_content_source_journal_record_meta(mixed $metaId, int $postId, string $metaKey): void
+{
+    $bindingId = spacefast_content_source_journal_binding_id($postId);
+    if ($bindingId === null) {
+        return;
+    }
+    $binding = spacefast_content_model_sync_binding($bindingId);
+    if (is_array($binding) && ($binding['field_storage'] ?? null) === $metaKey) {
+        spacefast_content_source_journal_record_save($postId);
     }
 }
 
@@ -206,7 +236,10 @@ function spacefast_content_source_journal_binding_entry(
 /** The synthetic entry for a document its collection says where to put. */
 function spacefast_content_source_journal_materialize_entry(int $postId, object $post): ?array
 {
-    $collection = spacefast_content_collection_for_post_type((string) ($post->post_type ?? ''));
+    if (is_array(get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_PREPARED_META, true))) {
+        return null;
+    }
+    $collection = spacefast_content_collection_for_post($postId);
     $resourceId = is_array($collection) ? (string) $collection['name'] : '';
     if ($resourceId === '' || spacefast_content_model_materialization($resourceId) === null) {
         return null;
@@ -232,7 +265,7 @@ function spacefast_content_source_journal_materialize_entry(int $postId, object 
 }
 
 /**
- * Which of the three cases this save is, and what its row says.
+ * The source intent associated with this document save.
  *
  * @return array{bindingId:string,payload:array<string,mixed>}|null
  */
@@ -244,25 +277,15 @@ function spacefast_content_source_journal_entry(int $postId, object $post): ?arr
         return spacefast_content_source_journal_materialize_entry($postId, $post);
     }
     $binding = spacefast_content_model_sync_binding($bindingId);
-    if (!is_array($binding)) {
+    if (!is_array($binding) || isset(SPACEFAST_CONTENT_SYNC_TAKEOVER_FORMATS[(string) $binding['format']])) {
         return null;
     }
     $blocks = spacefast_content_sync_read_blocks($post, $binding);
     $ledger = spacefast_content_sync_ledger($postId);
     if (!is_array($ledger) || ($ledger['bindingId'] ?? null) !== $bindingId) {
-        // A compile-class binding has no ledger and never will, so the blocks
-        // digest alone is what this intent stands on. Every other unbound
-        // binding stays skipped: no common base, nothing to reconcile against.
-        return isset(SPACEFAST_CONTENT_SYNC_TAKEOVER_FORMATS[(string) $binding['format']])
-            ? spacefast_content_source_journal_binding_entry(
-                $bindingId,
-                $binding,
-                $postId,
-                spacefast_content_sync_digest_text($blocks)
-            )
-            : null;
+        return null;
     }
-    if (hash_equals((string) ($ledger['blocksDigest'] ?? ''), spacefast_content_sync_digest_text($blocks))) {
+    if (!spacefast_content_sync_document_changed($ledger, $post, $binding)) {
         return null;
     }
     return spacefast_content_source_journal_binding_entry(
@@ -284,9 +307,15 @@ function spacefast_content_source_journal_append(int $postId, object $post): voi
     if ($entry === null) {
         return;
     }
+    spacefast_content_source_journal_write($entry, 'op_' . bin2hex(random_bytes(16)), true);
+}
+
+function spacefast_content_source_journal_write(array $entry, string $operationId, bool $coalesce): void
+{
+    global $wpdb;
+    $spaceId = spacefast_content_require_space_id();
     $bindingId = $entry['bindingId'];
     $payload = $entry['payload'];
-    $operationId = 'op_' . bin2hex(random_bytes(16));
     $entryId = $spaceId . ':' . $operationId . ':0';
     $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
     // A burst of saves on one binding folds onto the single pending entry
@@ -302,10 +331,86 @@ function spacefast_content_source_journal_append(int $postId, object $post): voi
         $spaceId,
         $operationId,
         $bindingId,
-        $bindingId,
+        $coalesce ? $bindingId : 'operation.' . $operationId,
         $encoded
     );
     if (!is_string($statement) || $wpdb->query($statement) === false) {
         throw new RuntimeException('content_source_journal_append_failed');
     }
+}
+
+/** Conversion is a requested operation, never a side effect of saving blocks. */
+function spacefast_content_request_conversion(array $request, bool $managed): array
+{
+    if (!$managed) {
+        throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content conversion requires Spacefast authorization.');
+    }
+    $operationId = $request['operationId'] ?? null;
+    $bindingId = $request['bindingId'] ?? null;
+    if (!is_string($operationId) || preg_match('/^op_[A-Za-z0-9]+$/', $operationId) !== 1
+        || !is_string($bindingId) || !spacefast_content_model_is_stable_id($bindingId)) {
+        spacefast_content_sync_materialize_invalid();
+    }
+    $input = spacefast_content_sync_materialize_takeover($operationId, $bindingId);
+    $post = $input['post'];
+    $postId = (int) $post->ID;
+    if (($request['postId'] ?? null) !== $postId || !spacefast_content_post_belongs_to_space($postId)) {
+        throw new Spacefast_Content_Error(404, 'content_document_not_found', 'This binding has no matching document.');
+    }
+    $binding = spacefast_content_model_sync_binding($bindingId);
+    $entry = spacefast_content_source_journal_binding_entry($bindingId, $binding, $postId,
+        spacefast_content_sync_digest_text(spacefast_content_sync_read_blocks($post, $binding)));
+    $entry['payload']['intent'] = 'convert';
+    spacefast_content_source_journal_install();
+    spacefast_content_source_journal_write($entry, $operationId, false);
+    return ['operationId' => $operationId, 'status' => 'queued', 'bindingId' => $bindingId, 'postId' => $postId];
+}
+
+/** Journal delivery is separate from the build named by its downstream receipt. */
+function spacefast_content_source_journal_status(): array
+{
+    global $wpdb;
+    spacefast_content_source_journal_install();
+    if (get_option(SPACEFAST_CONTENT_SOURCE_JOURNAL_OPTION) !== '1') {
+        return ['operations' => []];
+    }
+    $rows = $wpdb->get_results($wpdb->prepare(
+        'SELECT operation_id, binding_id, state, payload_json, attempt_count, available_at, lease_expires_at, downstream_receipt, last_error_code, updated_at FROM '
+        . STATTIC_CONTENT_SOURCE_JOURNAL_TABLE . ' WHERE space_id = %s ORDER BY updated_at DESC, entry_id DESC LIMIT 100',
+        spacefast_content_require_space_id()
+    ), ARRAY_A);
+    if (!is_array($rows)) {
+        throw new Spacefast_Content_Error(503, 'content_sync_status_unavailable', 'Content synchronization status is unavailable.');
+    }
+    return ['operations' => array_map(static function (array $row): array {
+        $payload = json_decode((string) $row['payload_json'], true, 512, JSON_THROW_ON_ERROR);
+        return [
+            'operationId' => $row['operation_id'],
+            'bindingId' => $row['binding_id'],
+            'postId' => (int) ($payload['postId'] ?? 0),
+            'state' => $row['state'],
+            'attemptCount' => (int) $row['attempt_count'],
+            'availableAt' => $row['available_at'],
+            'leaseExpiresAt' => $row['lease_expires_at'],
+            'receipt' => $row['downstream_receipt'],
+            'errorCode' => $row['last_error_code'],
+            'updatedAt' => $row['updated_at'],
+        ];
+    }, $rows)];
+}
+
+function spacefast_content_source_journal_retry(string $operationId): array
+{
+    global $wpdb;
+    if (preg_match('/^op_[A-Za-z0-9]+$/', $operationId) !== 1) {
+        throw new Spacefast_Content_Error(400, 'content_sync_invalid', 'The operation ID is invalid.');
+    }
+    $updated = $wpdb->query($wpdb->prepare(
+        "UPDATE " . STATTIC_CONTENT_SOURCE_JOURNAL_TABLE . " SET state = 'queued', attempt_count = 0, available_at = UTC_TIMESTAMP(6), lease_token = NULL, lease_expires_at = NULL, terminal_at = NULL, updated_at = UTC_TIMESTAMP(6) WHERE space_id = %s AND operation_id = %s AND state IN ('retry', 'ambiguous')",
+        spacefast_content_require_space_id(), $operationId
+    ));
+    if ($updated !== 1) {
+        throw new Spacefast_Content_Error(409, 'content_sync_retry_unavailable', 'This operation is not waiting for a retry. Resolve any content conflict before trying again.');
+    }
+    return ['operationId' => $operationId, 'status' => 'queued'];
 }

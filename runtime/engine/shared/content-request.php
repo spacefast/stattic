@@ -9,10 +9,16 @@ declare(strict_types=1);
 function _stattic_content_management_action(array $request): string|false
 {
     return match ((string) ($request['operation'] ?? '')) {
+        'media.read' => 'content.media.read',
+        'rest.request' => 'content.rest.request',
+        'source.inspect' => 'content.source.inspect',
+        'source.resolve' => 'content.source.resolve',
+        'source.convert' => 'content.source.convert',
         'admin.launch' => 'content.admin.launch',
         'authorization.apply' => 'content.authorization.apply',
         'model.stage' => 'content.model.stage',
         'model.activate' => 'content.model.activate',
+        'model.commit' => 'content.model.commit',
         'source.reconcile' => 'content.source.reconcile',
         'source.acknowledge' => 'content.source.acknowledge',
         'source.materialize' => 'content.source.materialize',

@@ -140,13 +140,22 @@ function spacefast_content_model_collection_term_slug(string $spaceId, string $r
 /** @return array<string,mixed>|null */
 function spacefast_content_model_resource(string $resourceId): ?array
 {
-    $contentModel = spacefast_content_model_active_release();
-    foreach (is_array($contentModel['postTypes'] ?? null) ? $contentModel['postTypes'] : [] as $resource) {
+    foreach (spacefast_content_model_resources() as $resource) {
         if (is_array($resource) && ($resource['id'] ?? null) === $resourceId) {
             return $resource;
         }
     }
     return null;
+}
+
+function spacefast_content_model_resources(): array
+{
+    $contentModel = spacefast_content_model_active_release();
+    return is_array($contentModel['postTypes'] ?? null) ? $contentModel['postTypes'] : [
+        ['id' => 'posts', 'label' => 'Posts', 'kind' => 'builtin', 'postType' => 'post', 'publicRead' => true, 'fields' => []],
+        ['id' => 'pages', 'label' => 'Pages', 'kind' => 'builtin', 'postType' => 'page', 'publicRead' => true, 'fields' => []],
+        ['id' => 'media', 'label' => 'Media', 'kind' => 'media', 'postType' => 'attachment', 'publicRead' => true, 'fields' => []],
+    ];
 }
 
 function spacefast_content_model_collection_projection(string $resourceId): ?array
@@ -191,7 +200,6 @@ function spacefast_content_model_sync_binding(string $bindingId): ?array
                 'resourceId' => $binding['resourceId'],
                 'fieldId' => $binding['fieldId'],
                 'source' => $binding['source'],
-                'publicPath' => $binding['publicPath'] ?? null,
                 // A ContentModelRelease compiled before the HTML sync format
                 // carried no `format`: the only serializer then was Markdown, so
                 // a format-less binding is a Markdown one. Defaulting here keeps
@@ -199,9 +207,11 @@ function spacefast_content_model_sync_binding(string $bindingId): ?array
                 // instead of failing parse_reconcile as an unknown format.
                 'format' => $binding['format'] ?? 'md',
                 'slug' => $binding['slug'],
+                'publicPath' => $binding['publicPath'] ?? null,
                 'post_type' => $binding['postType'],
                 'field_storage' => $binding['fieldStorage'],
                 'compiled' => $binding['compiled'] ?? null,
+                'componentSource' => $binding['componentSource'] ?? null,
                 'documentSeed' => $binding['documentSeed'] ?? null,
             ];
         }
@@ -256,6 +266,7 @@ function spacefast_content_model_register_wordpress_projection(): void
             'show_ui' => false,
             'show_in_rest' => true,
             'hierarchical' => false,
+            'capabilities' => ['manage_terms' => 'do_not_allow', 'edit_terms' => 'do_not_allow', 'delete_terms' => 'do_not_allow', 'assign_terms' => 'edit_posts'],
             'rewrite' => false,
         ]);
     }
@@ -303,20 +314,78 @@ function spacefast_content_model_register_rest_meta(array $contentModel): void
         return;
     }
     foreach ($contentModel['postTypes'] as $resource) {
+        add_filter('rest_pre_insert_' . $resource['postType'], 'spacefast_content_model_preserve_absent_meta', 10, 2);
+        add_filter('rest_prepare_' . $resource['postType'], 'spacefast_content_model_project_absent_meta', 10, 2);
         foreach ($resource['fields'] as $field) {
             if (!empty($field['native'])) {
                 continue;
             }
             $schema = $field['restSchema'];
             register_post_meta($resource['postType'], $field['storageName'], [
-                'single' => ($schema['type'] ?? null) !== 'array',
+                'single' => true,
                 'type' => $schema['type'],
                 'show_in_rest' => ['schema' => $schema],
+                ...($schema['type'] === 'boolean' ? [
+                    'sanitize_callback' => static fn (mixed $value): string => rest_sanitize_boolean($value) ? '1' : '0',
+                ] : []),
                 'auth_callback' => static fn (bool $allowed, string $key, int $postId): bool =>
-                    $allowed && spacefast_content_model_authorize_post($postId),
+                    spacefast_content_model_authorize_post($postId) && current_user_can('edit_post', $postId)
+                    && (spacefast_content_collection_for_post($postId)['name'] ?? null) === $resource['id'],
             ]);
         }
     }
+}
+
+/** WordPress scalar defaults must not turn an absent optional value into zero. */
+function spacefast_content_model_project_absent_meta(mixed $response, mixed $post): mixed
+{
+    if (!($response instanceof WP_REST_Response)) {
+        return $response;
+    }
+    $data = $response->get_data();
+    if (!is_array($data) || !is_array($data['meta'] ?? null)) {
+        return $response;
+    }
+    $resourceId = spacefast_content_collection_for_post((int) $post->ID)['name'] ?? null;
+    foreach (spacefast_content_model_resources() as $resource) {
+        if ($resource['id'] !== $resourceId) {
+            continue;
+        }
+        foreach ($resource['fields'] as $field) {
+            $key = $field['storageName'];
+            if (empty($field['native']) && empty($field['definition']['required'])
+                && array_key_exists($key, $data['meta']) && !metadata_exists('post', (int) $post->ID, $key)) {
+                $data['meta'][$key] = null;
+            }
+        }
+    }
+    $response->set_data($data);
+    return $response;
+}
+
+/** Gutenberg sends the full meta object; an unset optional value remains absent. */
+function spacefast_content_model_preserve_absent_meta(mixed $post, mixed $request): mixed
+{
+    $meta = $request['meta'] ?? null;
+    if (!is_array($meta)) {
+        return $post;
+    }
+    $postId = (int) ($request['id'] ?? 0);
+    foreach (spacefast_content_model_resources() as $resource) {
+        foreach ($resource['fields'] as $field) {
+            if (!empty($field['native'])) {
+                continue;
+            }
+            $key = $field['storageName'];
+            if (empty($field['definition']['required'])
+                && array_key_exists($key, $meta) && $meta[$key] === null
+                && ($postId === 0 || !metadata_exists('post', $postId, $key))) {
+                unset($meta[$key]);
+            }
+        }
+    }
+    $request['meta'] = $meta;
+    return $post;
 }
 
 function spacefast_content_model_authorize_post(int $postId): bool
@@ -335,32 +404,17 @@ function spacefast_content_model_validate_reference_value(array $definition, mix
     if (!function_exists('get_post')) {
         return false;
     }
-    $resourceIds = is_array($definition['collections'] ?? null)
-        ? $definition['collections']
-        : [$definition['collection'] ?? null];
-    $postTypes = [];
-    foreach ($resourceIds as $resourceId) {
-        if (!is_string($resourceId)) {
-            continue;
-        }
-        $projection = spacefast_content_model_collection_projection($resourceId);
-        if ($projection !== null) {
-            $postTypes[] = $projection['post_type'];
-        }
-    }
+    $resourceIds = ($definition['type'] ?? null) === 'media' ? ['media']
+        : (is_array($definition['collections'] ?? null) ? $definition['collections'] : [$definition['collection'] ?? null]);
     $ids = is_array($value) ? $value : [$value];
     foreach ($ids as $id) {
-        if ((int) $id < 1) {
-            continue;
-        }
-        $post = get_post((int) $id);
-        if (!is_object($post)
-            || !in_array((string) ($post->post_type ?? ''), $postTypes, true)
-            || !spacefast_content_model_authorize_post((int) $id)) {
+        if ((int) $id < 1) continue;
+        if (!spacefast_content_model_authorize_post((int) $id)
+            || !in_array(spacefast_content_collection_for_post((int) $id)['name'] ?? null, $resourceIds, true)) {
             return false;
         }
     }
-    return $postTypes !== [];
+    return array_filter($resourceIds, 'is_string') !== [];
 }
 
 function spacefast_content_model_ensure_collection_terms(array $contentModel): void
@@ -759,7 +813,7 @@ function spacefast_content_model_stage_release(
     return ['revision' => $revision, 'artifactDigest' => $artifactDigest, 'staged' => true];
 }
 
-function spacefast_content_model_page_link(string $link, int $postId): string
+function spacefast_content_model_page_link(string $link, int $postId, bool $sample = false): string
 {
     if (!function_exists('get_post_meta') || !function_exists('home_url')
         || !spacefast_content_post_belongs_to_space($postId)) {
@@ -772,7 +826,7 @@ function spacefast_content_model_page_link(string $link, int $postId): string
     $binding = spacefast_content_model_sync_binding(substr($externalId, strlen(SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX)));
     $path = $binding['publicPath'] ?? null;
     return ($binding['post_type'] ?? null) === 'page' && is_string($path)
-        ? home_url($path)
+        ? home_url($sample ? spacefast_content_permalink_template($path, '%pagename%') : $path)
         : $link;
 }
 
@@ -857,10 +911,7 @@ function spacefast_content_model_reconcile_documents(array $contentModel): array
     foreach ($contentModel['syncBindings'] as $binding) {
         $canonicalPage = ($binding['postType'] ?? null) === 'page'
             && preg_match('/\Async\.pages\.[a-f0-9]{32}\z/D', (string) ($binding['id'] ?? '')) === 1;
-        $collectionPost = ($binding['postType'] ?? null) === 'post'
-            && ($binding['resourceId'] ?? null) === 'posts'
-            && ($binding['fieldId'] ?? null) === 'posts-content'
-            && isset($binding['documentSeed']);
+        $collectionPost = isset($binding['documentSeed']);
         if (!$canonicalPage && !$collectionPost) {
             continue;
         }
@@ -871,7 +922,7 @@ function spacefast_content_model_reconcile_documents(array $contentModel): array
         if (!is_string($text) || strlen($text) > SPACEFAST_CONTENT_SYNC_MAX_TEXT_BYTES
             || !is_string($digest) || !hash_equals(spacefast_content_sync_digest_text($text), $digest)
             || !in_array($format, ['md', 'html', 'tsx'], true)
-            || ($binding['fieldStorage'] ?? null) !== 'post_content'
+            || !is_string($binding['fieldStorage'] ?? null)
             || ($format === 'tsx' && ($binding['compiled']['sha256'] ?? null) !== $digest)) {
             throw new Spacefast_Content_Error(422, 'content_document_seed_invalid', 'A canonical document needs digest-verified seed bytes from its release.');
         }
@@ -888,12 +939,109 @@ function spacefast_content_model_reconcile_documents(array $contentModel): array
                 'source' => $binding['source'],
                 'format' => $format,
                 'slug' => $binding['slug'],
+                'publicPath' => $binding['publicPath'] ?? null,
                 'post_type' => $binding['postType'],
-                'field_storage' => 'post_content',
+                'field_storage' => $binding['fieldStorage'],
             ],
         ]);
     }
     return $documents;
+}
+
+function spacefast_content_model_current_release(string $contentModelRoot): ?array
+{
+    $revision = _stattic_private_tree_read_pointer($contentModelRoot . '/active-release', 128);
+    return $revision === null ? null : spacefast_content_model_read_release(
+        $contentModelRoot . '/releases/' . spacefast_content_model_revision_directory($revision), $revision
+    );
+}
+
+function spacefast_content_model_retirement_path(string $root, ?string $revision): string
+{
+    return $root . '/retirement-' . ($revision === null ? 'none' : spacefast_content_model_revision_directory($revision)) . '.json';
+}
+
+function spacefast_content_model_retirement_read(string $root, ?string $revision): array
+{
+    $path = spacefast_content_model_retirement_path($root, $revision);
+    if (!is_file($path)) return ['syncBindings' => []];
+    $bytes = _stattic_private_tree_read_pointer($path, SPACEFAST_CONTENT_MODEL_PHP_MAX_BYTES);
+    $pending = is_string($bytes) ? json_decode($bytes, true) : null;
+    if (!is_array($pending) || !is_array($pending['syncBindings'] ?? null)) {
+        throw new Spacefast_Content_Error(503, 'content_retirement_unavailable', 'The pending source retirement inventory could not be read.');
+    }
+    return $pending;
+}
+
+/** Carry removed ownership through interrupted and superseding preparations. */
+function spacefast_content_model_prepare_retirement(string $root, ?array $previous, ?array $next): array
+{
+    $bindings = [];
+    foreach ([spacefast_content_model_retirement_read($root, $next['revision'] ?? null),
+        spacefast_content_model_retirement_read($root, $previous['revision'] ?? null), $previous] as $inventory) {
+        foreach ($inventory['syncBindings'] ?? [] as $binding) $bindings[$binding['id']] = $binding;
+    }
+    $pending = ['syncBindings' => array_values($bindings)];
+    spacefast_content_sync_retire_documents($pending, $next, false);
+    if ($bindings !== []) {
+        if (!_stattic_private_tree_write_pointer(spacefast_content_model_retirement_path($root, $next['revision'] ?? null), json_encode($pending, JSON_THROW_ON_ERROR))) {
+            throw new Spacefast_Content_Error(503, 'content_retirement_unavailable', 'The pending source retirement inventory could not be saved.');
+        }
+    }
+    return $pending;
+}
+
+/** Cleanup follows the proven serving switch, never candidate preparation. */
+function spacefast_content_model_commit_release(array $request, bool $managed): array
+{
+    if (!$managed) throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content model commit requires Spacefast authorization.');
+    $revision = $request['revision'] ?? null;
+    $versionId = $request['versionId'] ?? null;
+    if (($revision !== null && (!is_string($revision) || preg_match(SPACEFAST_CONTENT_MODEL_REVISION_PATTERN, $revision) !== 1))
+        || !is_string($versionId) || preg_match('/\Aver_[A-Za-z0-9]+\z/D', $versionId) !== 1) {
+        throw new Spacefast_Content_Error(400, 'content_model_revision_invalid', 'The selected content version is invalid.');
+    }
+    $privateRoot = $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? null;
+    if (!is_string($privateRoot) || $privateRoot === '') throw new Spacefast_Content_Error(503, 'content_model_storage_unavailable', 'ContentModelRelease storage is unavailable.');
+    $spaceId = spacefast_content_require_space_id();
+    require_once dirname(__DIR__) . '/shared/lock.php';
+    require_once dirname(__DIR__) . '/shared/content-access.php';
+    require_once dirname(__DIR__) . '/runtime/serve.php';
+    return _stattic_space_write_lock_with($privateRoot, $spaceId, STATTIC_LOCK_WAIT,
+        static fn () => throw new Spacefast_Content_Error(503, 'content_sync_busy', 'The serving version could not be locked.'),
+        static fn (): array => spacefast_content_sync_locked(static function () use ($privateRoot, $spaceId, $revision, $versionId): array {
+            $routeBytes = _stattic_private_tree_read_pointer(_stattic_route_pointer_path($privateRoot, $spaceId, 'production'), SPACEFAST_CONTENT_MODEL_PHP_MAX_BYTES);
+            $route = is_string($routeBytes) ? json_decode($routeBytes, true) : null;
+            if (($route['version_id'] ?? null) !== $versionId
+                || _stattic_content_version_model_revision($privateRoot, $spaceId, $versionId) !== $revision) {
+                throw new Spacefast_Content_Error(409, 'content_model_commit_stale', 'This content version is not the selected production version.');
+            }
+            $root = spacefast_content_model_root($privateRoot, $spaceId);
+            $pending = spacefast_content_model_retirement_read($root, $revision);
+            $model = $revision === null ? null : spacefast_content_model_read_release($root . '/releases/' . spacefast_content_model_revision_directory($revision), $revision);
+            $retired = spacefast_content_sync_without_journal(static fn (): array => spacefast_content_sync_with_transaction(
+                static fn (): array => spacefast_content_sync_retire_documents($pending, $model, true)
+            ));
+            $pointer = $root . '/active-release';
+            if ($revision === null) {
+                if (is_file($pointer) && !_stattic_private_tree_remove($pointer)) throw new Spacefast_Content_Error(503, 'content_model_pointer_failed', 'The ContentModelRelease pointer could not be cleared.');
+                unset($GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'], $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION']);
+            } else {
+                if (!_stattic_private_tree_write_pointer($pointer, $revision)) throw new Spacefast_Content_Error(503, 'content_model_pointer_failed', 'The ContentModelRelease pointer could not be switched.');
+                $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $root . '/releases/' . spacefast_content_model_revision_directory($revision);
+                $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $revision;
+            }
+            $path = spacefast_content_model_retirement_path($root, $revision);
+            if (is_file($path) && !_stattic_private_tree_remove($path)) throw new Spacefast_Content_Error(503, 'content_retirement_unavailable', 'The completed source retirement inventory could not be cleared.');
+            spacefast_content_public_routes_refresh();
+            foreach ($model['syncBindings'] ?? [] as $declaration) {
+                $binding = spacefast_content_model_sync_binding($declaration['id']);
+                $post = spacefast_content_sync_find_post($declaration['id'], $binding, false);
+                if (is_object($post)) spacefast_content_source_journal_record_save((int) $post->ID);
+            }
+            return ['revision' => $revision, 'versionId' => $versionId, 'retired' => count($retired)];
+        })
+    );
 }
 
 function spacefast_content_model_activate_release(mixed $revision, bool $managed): array
@@ -911,10 +1059,12 @@ function spacefast_content_model_activate_release(mixed $revision, bool $managed
     $contentModelRoot = spacefast_content_model_root($privateRoot, spacefast_content_require_space_id());
     if ($revision === null) {
         return spacefast_content_sync_locked(static function () use ($contentModelRoot): array {
-            $pointer = $contentModelRoot . '/active-release';
-            if (is_file($pointer) && !_stattic_private_tree_remove($pointer)) {
-                throw new Spacefast_Content_Error(500, 'content_model_pointer_failed', 'The ContentModelRelease pointer could not be cleared.');
-            }
+            $previous = spacefast_content_model_current_release($contentModelRoot);
+            spacefast_content_sync_without_journal(static fn (): array => spacefast_content_sync_with_transaction(
+                static fn (): array => spacefast_content_model_prepare_retirement($contentModelRoot, $previous, null)
+            ));
+            unset($GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'], $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION']);
+            spacefast_content_public_routes_refresh();
             return ['revision' => null, 'tables' => 0, 'pages' => 0];
         });
     }
@@ -928,13 +1078,27 @@ function spacefast_content_model_activate_release(mixed $revision, bool $managed
     spacefast_content_model_ensure_collection_terms($contentModel);
     spacefast_content_model_apply_tables($contentModel);
     return spacefast_content_sync_locked(static function () use ($contentModel, $contentModelRoot, $revision): array {
+        $previous = spacefast_content_model_current_release($contentModelRoot);
+        $previousPaths = [];
+        foreach ($previous['syncBindings'] ?? [] as $binding) {
+            if (isset($binding['publicPath'])) $previousPaths[$binding['id']] = $binding['publicPath'];
+        }
         $documents = spacefast_content_sync_without_journal(
-            static fn (): array => spacefast_content_sync_with_transaction(
-                static fn (): array => spacefast_content_model_reconcile_documents($contentModel)
-            )
+            static fn (): array => spacefast_content_sync_with_transaction(static function () use ($previous, $contentModel, $contentModelRoot): array {
+                spacefast_content_model_prepare_retirement($contentModelRoot, $previous, $contentModel);
+                return spacefast_content_model_reconcile_documents($contentModel);
+            })
         );
-        if (!_stattic_private_tree_write_pointer($contentModelRoot . '/active-release', $revision)) {
-            throw new Spacefast_Content_Error(500, 'content_model_pointer_failed', 'The ContentModelRelease pointer could not be switched.');
+        spacefast_content_public_routes_refresh();
+        foreach ($contentModel['syncBindings'] as $binding) {
+            $previousPath = $previousPaths[$binding['id']] ?? null;
+            $nextPath = $binding['publicPath'] ?? null;
+            if (is_string($previousPath) && is_string($nextPath) && $previousPath !== $nextPath) {
+                $redirect = spacefast_content_redirect_save(['source' => $previousPath, 'destination' => $nextPath, 'status' => 301, 'requiresPublishedDestination' => true]);
+                if (is_wp_error($redirect)) {
+                    throw new Spacefast_Content_Error(503, 'content_redirect_unavailable', $redirect->get_error_message());
+                }
+            }
         }
         return ['revision' => $revision, 'tables' => count($contentModel['tables']), 'pages' => count($documents)];
     });

@@ -312,7 +312,7 @@ echo json_encode([
       expires_at: 1050,
       wordpress_role: null,
     },
-    paths: [true, true, true, true, true, false, false, false, false],
+    paths: [true, true, true, true, true, false, false, true, false],
   });
 });
 

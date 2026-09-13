@@ -575,8 +575,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $page = $hasPages && !_stattic_path_is_reserved($requestPath)
         && !_stattic_lookup_not_found_is_terminal(ltrim($requestPath, '/'))
         ? _stattic_page_resolve($versionDir, $requestPath) : null;
-    if (is_array($entry) && ($page === null || isset($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION])
-        || (($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS] ?? 200) >= 300 && ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS] ?? 200) < 400))) {
+    if (is_array($entry)) {
         // A draft/preview session must not be answered from an extracted file:
         // when the request carries one of the version's declared bypass cookies
         // AND the worker claims this path, the file yields to the pattern lane
@@ -618,8 +617,27 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // their exact forms already were, so a committed file still wins.
     _stattic_v4_dispatch_pattern_routes($sendContext, $requestPath, $requestMethod, $requestUri);
 
-    // Endpoint method claims must settle before a page renderer can answer.
     _stattic_render_method_declined_405_if_any();
+
+    // WordPress redirects are scoped to the space and follow deployed route claims.
+    if ($page === null && !_stattic_path_is_reserved($requestPath) && empty($serving['immutable'])) {
+        $contentRedirectFile = $privateRoot . '/spaces/' . $spaceId . '/content-redirects.json';
+        if (is_file($contentRedirectFile)) {
+            $contentRedirects = json_decode((string) file_get_contents($contentRedirectFile), true);
+            if (is_array($contentRedirects)) {
+                foreach ($contentRedirects['exact'] ?? [] as $source => $rules) {
+                    $contentRedirects['exact'][$source] = array_values(array_filter($rules, static fn (array $rule): bool =>
+                        empty($rule['requiresPublishedDestination'])
+                        || _stattic_v4_entry($versionDir, $root, $rule['destination']) !== null
+                        || ($hasPages && _stattic_page_resolve($versionDir, $rule['destination']) !== null)
+                    ));
+                }
+                require_once __DIR__ . '/redirects.php';
+                _stattic_apply_redirects($contentRedirects, $serving, static fn (): bool => false, $requestHost, $requestPath, $requestMethod);
+            }
+        }
+    }
+
     if ($page !== null) {
         if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
             _stattic_method_decline(['GET', 'HEAD']);
@@ -645,8 +663,17 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         }
     }
 
+    require_once __DIR__ . '/content-page.php';
+    if ($page === null && _stattic_wordpress_fallback_try_serve($sendContext, $requestPath, $requestMethod)) {
+        $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] = [
+            'private_root' => $privateRoot, 'method' => $requestMethod, 'uri' => $requestUri,
+            'path' => $requestPath, 'host' => $requestHost,
+        ];
+        return;
+    }
+
     $lookup = ltrim($requestPath, '/');
-    if (!$hasPages && !_stattic_lookup_not_found_is_terminal($lookup)
+    if ($page === null && !_stattic_lookup_not_found_is_terminal($lookup)
         && !_stattic_lookup_is_known_asset_extension($lookup)) {
         $spa = _stattic_v4_entry($versionDir, $root, STATTIC_RUNTIME_RESPONSE_KEY_SPA);
         if (is_array($spa)) {

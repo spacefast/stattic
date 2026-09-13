@@ -247,6 +247,7 @@ $foreignCreate = call_ability('zero/wp-users-create', [
 $listAfterForeignCreate = call_ability('zero/wp-users-list', []);
 
 echo json_encode([
+  'installation_create_users' => current_user_can('create_users'),
   'ada' => $ada,
   'bob' => $bob,
   'ability_names' => $abilityNames,
@@ -288,6 +289,7 @@ echo json_encode([
   // SAFETY: the shape is the echo statement at the end of the PHP script above;
   // the expectations below fail loudly if the script stops emitting it.
   const result = JSON.parse(stdout) as {
+    installation_create_users: boolean;
     ada: number;
     bob: number;
     ability_names: string[];
@@ -367,6 +369,7 @@ echo json_encode([
   // lands on that row rather than opening a second account for one person — and
   // returns it unchanged, since create never rewrites an existing profile (the
   // "Ada Lovelace" it was called with does not overwrite "Ada").
+  expect(result.installation_create_users).toBe(false);
   expect(result.created_existing.id).toBe(result.ada);
   expect(result.created_existing.displayName).toBe("Ada");
   expect(result.created.id).not.toBe(result.ada);

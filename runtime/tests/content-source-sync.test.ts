@@ -6,7 +6,10 @@
 import { expect, test } from "bun:test";
 
 import { verifySyncLedgerV1 } from "../../packages/common/src/contracts/content-contract-verification.ts";
-import { syncMaterializeReceiptV1Schema } from "../../packages/common/src/contracts/content-sync.ts";
+import {
+  parseContentSourceDocument,
+  syncMaterializeReceiptV1Schema,
+} from "../../packages/common/src/contracts/content-sync.ts";
 import {
   materialized,
   problem,
@@ -63,6 +66,7 @@ test("release activation seeds canonical documents and preserves editor takeover
   const initial = inspected(results[1]);
   expect(initial).toMatchObject({
     postStatus: "publish",
+    postSlug: "about",
     permalink: "https://space.test/docs/about",
     externalId: `source:${TSX_BINDING}`,
     spaceId: "spc_alpha",
@@ -137,6 +141,24 @@ test("sealed Markdown activation retains editor-only edits and refuses conflicti
     { op: "inspectPage" },
     { op: "activatePage", format: "md", text: original, invalidDigest: true },
     { op: "inspectPage" },
+    {
+      op: "editInWordPress",
+      blocks: "<!-- wp:paragraph -->\n<p>Unsynced.</p>\n<!-- /wp:paragraph -->",
+    },
+    { op: "removePage" },
+    { op: "inspectPage" },
+    { op: "activatePage", format: "md", text: "Unsynced.\n" },
+    { op: "removePage" },
+    { op: "inspectPage" },
+    { op: "activatePage", format: "md", text: "Unsynced.\n" },
+    { op: "inspectPage" },
+    { op: "removePage" },
+    {
+      op: "editInWordPress",
+      blocks: "<!-- wp:paragraph -->\n<p>Edited in trash.</p>\n<!-- /wp:paragraph -->",
+    },
+    { op: "activatePage", format: "md", text: "Unsynced.\n" },
+    { op: "inspectPage" },
   ]);
   expect(inspected(results[1]).postStatus).toBe("publish");
   expect(inspected(results[4]).blocks).toBe(edited);
@@ -148,16 +170,59 @@ test("sealed Markdown activation retains editor-only edits and refuses conflicti
   expect(inspected(results[8]).ledger?.baseText).toContain("Editor paragraph.");
   expect(problem(results[9]).code).toBe("content_document_seed_invalid");
   expect(inspected(results[10]).activeRevision).toBe(inspected(results[8]).activeRevision);
+  expect(problem(results[12]).code).toBe("content_document_retirement_conflict");
+  expect(inspected(results[13]).postStatus).toBe("publish");
+  expect(inspected(results[13]).blocks).toContain("Unsynced.");
+  expect(inspected(results[16])).toMatchObject({
+    retired: true,
+    postStatus: "trash",
+    postId: inspected(results[1]).postId,
+  });
+  expect(inspected(results[18])).toMatchObject({
+    retired: false,
+    postStatus: "publish",
+    postId: inspected(results[1]).postId,
+  });
+  expect(problem(results[21]).code).toBe("content_document_retirement_conflict");
+  expect(inspected(results[22])).toMatchObject({ retired: true, postStatus: "trash" });
+  expect(inspected(results[22]).blocks).toContain("Edited in trash.");
+  const prepared = await runScenario("md", [
+    { op: "activatePage", format: "md", text: original },
+    { op: "removePage", prepareOnly: true },
+    { op: "inspectPage" },
+    { op: "commitPage", stale: true },
+    { op: "editInWordPress", title: "Saved between prepare and serving" },
+    { op: "commitPage" },
+    { op: "inspectPage" },
+    { op: "commitPage" },
+  ]);
+  expect(inspected(prepared[2])).toMatchObject({ postStatus: "publish", retired: false });
+  expect(problem(prepared[3]).code).toBe("content_model_commit_stale");
+  expect(inspected(prepared[6])).toMatchObject({
+    postStatus: "trash",
+    retired: true,
+    postTitle: "Saved between prepare and serving",
+  });
+  expect(prepared[7]?.ok).toBe(true);
 });
 
 test("a repo Markdown file binds, survives a WordPress edit, and round-trips back byte-stable", async () => {
   const source = "# Launch\n\nThe first paragraph.\n\n- alpha\n- beta\n";
+  expect(() =>
+    parseContentSourceDocument(
+      '<!-- spacefast:document {"version":1,"title":"Schedule","slug":"schedule","status":"future"} -->\nBody.',
+    ),
+  ).toThrow();
   const [bound, , pulled] = await runScenario("md", [
     { op: "reconcile", state: "initial", text: source },
     // The editor rewrites the body. Blocks are what WordPress stores, so the
     // pull has to come back through the serializer, not through stored text.
     {
       op: "editInWordPress",
+      title: "Renamed launch",
+      slug: "renamed-launch",
+      status: "future",
+      dateGmt: "2099-02-01 12:30:00",
       blocks:
         '<!-- wp:heading {"level":1} -->\n' +
         '<h1 class="wp-block-heading" id="launch">Launch</h1>\n' +
@@ -181,6 +246,27 @@ test("a repo Markdown file binds, survives a WordPress edit, and round-trips bac
   expect(pull.status).toBe("pulled");
   expect(pull.sourceWrite?.text).toBe(pull.ledger.baseText);
   expect(pull.sourceWrite?.text).toContain("Edited in WordPress.");
+  expect(parseContentSourceDocument(pull.ledger.baseText).metadata).toEqual({
+    version: 1,
+    title: "Renamed launch",
+    slug: "renamed-launch",
+    status: "future",
+    dateGmt: "2099-02-01T12:30:00Z",
+  });
+  const [restored, published] = await runScenario("md", [
+    { op: "reconcile", state: "initial", text: pull.ledger.baseText },
+    {
+      op: "reconcile",
+      state: "bound",
+      text: pull.ledger.baseText.replace('"status":"future"', '"status":"publish"'),
+      baseRevision: "@previous",
+    },
+  ]);
+  expect(receipt(restored).ledger.baseText).toBe(pull.ledger.baseText);
+  expect(receipt(restored).ledger.metadataDigest).toBe(pull.ledger.metadataDigest);
+  expect(receipt(published).status).toBe("pushed");
+  expect(receipt(published).ledger.metadataDigest).not.toBe(pull.ledger.metadataDigest);
+
   // SAFETY: same branded-digest reason as the ledger verified above.
   await verifySyncLedgerV1(pull.ledger as never);
 });

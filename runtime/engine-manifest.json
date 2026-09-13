@@ -91,6 +91,8 @@
     "engine/wordpress/content-source-journal.php",
     "engine/wordpress/content-templates.php",
     "engine/wordpress/content-kernel.php",
+    "engine/wordpress/content-admin-api.php",
+    "engine/wordpress/content-native-scope.php",
     "engine/admin/components.php",
     "engine/wordpress/components.json",
     "engine/wordpress/content-principals.php",
@@ -105,10 +107,6 @@
   ],
   "executables": ["bin/stattic-runtime"],
   "trees": [
-    {
-      "source": "wordpress/zero-admin",
-      "path": "wp-content/mu-plugins/zero-admin"
-    },
     {
       "source": "wordpress/zero-dashboard",
       "path": "wp-content/mu-plugins/zero-dashboard"
@@ -162,10 +160,6 @@
     {
       "source": "wordpress/managed-theme/templates/index.html",
       "path": "wp-content/themes/spacefast-managed/templates/index.html"
-    },
-    {
-      "source": "wordpress/zero-admin/zero-admin.php",
-      "path": "wp-content/mu-plugins/zero-admin.php"
     },
     {
       "source": "wordpress/zero-dashboard/zero-dashboard.php",

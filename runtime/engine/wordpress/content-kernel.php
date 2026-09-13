@@ -28,6 +28,8 @@ require_once __DIR__ . '/content-users.php';
 // The storage feature: WordPress attachments as a Space's files — a folder
 // taxonomy, registered meta, and the abilities that publish them.
 require_once __DIR__ . '/content-storage.php';
+require_once __DIR__ . '/content-admin-api.php';
+require_once __DIR__ . '/content-native-scope.php';
 const SPACEFAST_CONTENT_EXTERNAL_ID_META = '_spacefast_external_id';
 const SPACEFAST_CONTENT_SPACE_META = '_spacefast_space_id';
 final class Spacefast_Content_Error extends RuntimeException
@@ -51,16 +53,29 @@ if (function_exists('add_action')) {
     add_action('wp_abilities_api_init', 'spacefast_content_model_register_active_abilities');
     add_action('acf/init', 'spacefast_content_model_register_scf_field_groups', 5);
     add_action('init', 'spacefast_content_source_journal_install', 4);
+    remove_action('publish_future_post', 'check_and_publish_future_post');
+    add_action('publish_future_post', 'spacefast_content_source_journal_publish_scheduled');
     add_action('add_attachment', 'spacefast_content_scope_attachment');
     add_action('save_post', 'spacefast_content_scope_post', 1, 2);
     // Late, so the Space meta and the revision the save cut are both in place.
     add_action('save_post', 'spacefast_content_source_journal_record_save', 20, 2);
+    foreach (['added_post_meta', 'updated_post_meta', 'deleted_post_meta'] as $hook) {
+        add_action($hook, 'spacefast_content_source_journal_record_meta', 20, 3);
+    }
+    add_action('save_post', 'spacefast_content_public_routes_schedule', 30);
+    add_action('deleted_post', 'spacefast_content_public_routes_schedule');
+    add_action('post_updated', 'spacefast_content_slug_redirect', 30, 3);
     add_action('pre_get_posts', 'spacefast_content_scope_post_query');
+    add_filter('the_posts', 'spacefast_content_scope_posts', 10, 2);
+    // Retirement moves a source-owned document to Trash and rollback brings it
+    // back with the same id, fields and comments. WordPress's own sweep would
+    // destroy that identity after EMPTY_TRASH_DAYS, so this Space's Trash is
+    // the recoverable one the content contract promises, not a 30-day queue.
+    remove_action('wp_scheduled_delete', 'wp_scheduled_delete');
     add_action('admin_init', 'spacefast_content_lock_admin', 1);
-    add_action('admin_menu', 'spacefast_content_admin_menu', 999);
+    add_action('admin_init', 'spacefast_content_guard_global_theme_admin', 2);
     add_action('admin_enqueue_scripts', 'spacefast_content_admin_assets', 1000);
     add_action('admin_footer', 'spacefast_content_admin_handshake', 1000);
-    add_action('login_init', 'spacefast_content_block_wordpress_login', 1);
     add_action('send_headers', 'spacefast_content_admin_frame_headers', 1);
     add_action('admin_head', 'spacefast_content_admin_frame_headers', 1);
     remove_action('admin_init', 'send_frame_options_header');
@@ -76,35 +91,65 @@ if (function_exists('add_action')) {
     add_filter('redirect_canonical', '__return_false');
     add_filter('xmlrpc_enabled', '__return_false');
     add_filter('wp_is_application_passwords_available', '__return_false');
-    add_filter('rest_authentication_errors', 'spacefast_content_disable_rest_api', 1);
-    add_filter('rest_request_before_callbacks', 'spacefast_content_gate_users_rest', 10, 3);
+    add_filter('rest_authentication_errors', 'spacefast_content_require_rest_scope', 1);
+    add_action('rest_api_init', 'spacefast_content_admin_register_rest_routes');
+    add_filter('rest_pre_dispatch', 'spacefast_content_redirection_rest', 10, 3);
+    add_filter('rest_pre_dispatch', 'spacefast_content_guard_global_theme_rest', 10, 3);
+    add_filter('redirection_role', static fn (): string => 'spacefast_manage_content');
+    add_filter('redirection_monitor_types', static fn (): array => []);
+    add_action('redirection_redirect_updated', 'spacefast_content_redirection_updated', 20, 2);
+    add_action('redirection_redirect_enabled', 'spacefast_content_redirection_updated', 20);
+    add_action('redirection_redirect_disabled', 'spacefast_content_redirection_updated', 20);
+    add_action('redirection_redirect_deleted', static fn ($item) => spacefast_content_redirection_updated($item->get_id(), $item), 20);
+    // Public redirects run from the scoped runtime artifact, never the plugin's installation-wide lookup.
+    if (spacefast_content_space_id() !== '' && !defined('REDIRECTION_DISABLE')) {
+        define('REDIRECTION_DISABLE', true);
+    }
+    add_filter('next_admin_get_admin_menu_items', 'spacefast_content_admin_menu_items');
     add_filter('rest_user_query', 'spacefast_content_scope_rest_user_query', 10, 2);
+    add_action('pre_get_users', 'spacefast_content_scope_user_query');
+    add_filter('pre_wp_unique_post_slug', 'spacefast_content_unique_slug', 10, 5);
+    add_filter('wp_insert_post_data', 'spacefast_content_unique_draft_slug', 10, 2);
+    add_filter('rest_request_before_callbacks', 'spacefast_content_rest_write_collection', 10, 3);
+    add_filter('rest_request_before_callbacks', 'spacefast_content_rest_validate_references', 20, 3);
+    add_filter('rest_request_before_callbacks', 'spacefast_content_rest_guard_source_delete', 20, 3);
+    add_filter('pre_delete_post', 'spacefast_content_guard_source_delete', 10, 2);
+    // Media never reaches pre_delete_post: wp_delete_attachment() deletes the
+    // row itself. This is the attachment half of the same destruction gate.
+    add_filter('pre_delete_attachment', 'spacefast_content_guard_source_delete', 10, 2);
+    add_action('admin_action_delete', 'spacefast_content_admin_guard_source_delete');
+    add_filter('rest_request_after_callbacks', static function ($response) { unset($GLOBALS['SPACEFAST_CONTENT_WRITE_COLLECTION']); return $response; });
+    add_action('post_updated', 'spacefast_content_remember_editor_slug', 10, 3);
+    add_action('pre_get_terms', 'spacefast_content_scope_term_query');
+    add_action('created_term', 'spacefast_content_scope_new_term');
+    add_action('edited_term', 'spacefast_content_public_routes_schedule');
+    add_action('deleted_term', 'spacefast_content_public_routes_schedule');
+    add_filter('comments_clauses', 'spacefast_content_scope_comment_clauses');
+    add_action('pre_get_comments', 'spacefast_content_scope_comment_cache');
+    add_filter('map_meta_cap', 'spacefast_content_native_meta_cap', 20, 4);
+    add_filter('rest_prepare_comment', 'spacefast_content_native_rest_read', 10, 2);
+    add_action('rest_api_init', 'spacefast_content_native_rest_hooks');
     // Public links use the Space origin carried by the editor session; admin
     // assets and REST stay on its cookie-bearing host. Visitor aliases keep
     // their request origin because they have no editor public-origin claim.
     add_filter('site_url', 'spacefast_content_request_url', 1, 4);
     add_filter('home_url', 'spacefast_content_public_url', 1, 4);
     add_filter('rest_url', 'spacefast_content_request_url', 1, 4);
-    add_filter('page_link', 'spacefast_content_model_page_link', 10, 2);
+    add_filter('page_link', 'spacefast_content_model_page_link', 10, 3);
+    add_filter('post_link', 'spacefast_content_collection_permalink', 20, 3);
+    add_filter('post_type_link', 'spacefast_content_collection_permalink', 20, 3);
     add_filter('upload_dir', 'spacefast_content_scope_upload_dir');
     add_filter('show_admin_bar', '__return_false');
     add_filter('automatic_updater_disabled', '__return_true');
     add_filter('auto_update_core', '__return_false');
     add_filter('auto_update_plugin', '__return_false');
     add_filter('auto_update_theme', '__return_false');
-    add_filter('comments_open', '__return_false', 20);
-    add_filter('pings_open', '__return_false', 20);
     add_filter('wp_is_site_protected_by_basic_auth', '__return_false');
     add_filter('admin_email_check_interval', '__return_zero');
     add_filter('admin_footer_text', 'spacefast_content_admin_footer');
     add_filter('ajax_query_attachments_args', 'spacefast_content_scope_attachment_query');
     add_filter('map_meta_cap', 'spacefast_content_scope_meta_cap', 10, 4);
-    // The by-id half of publicRead: check_read_permission short-circuits on a
-    // published post, so the read_post cap gate never runs for the single-item
-    // REST route. rest_prepare_{post_type} does, for every served post type.
-    add_filter('rest_prepare_post', 'spacefast_content_rest_guard_single_read', 10, 3);
-    add_filter('rest_prepare_page', 'spacefast_content_rest_guard_single_read', 10, 3);
-    add_filter('rest_prepare_attachment', 'spacefast_content_rest_guard_single_read', 10, 3);
+    add_filter('rest_request_before_callbacks', 'spacefast_content_rest_guard_single_read', 5, 3);
     add_filter('get_block_templates', 'spacefast_content_templates_filter', 10, 3);
     add_filter('update_footer', '__return_empty_string', 999);
     add_filter('acf/settings/show_admin', '__return_false');
@@ -208,80 +253,13 @@ function spacefast_content_scope_upload_dir(array $uploads): array
     return $uploads;
 }
 
-function spacefast_content_block_wordpress_login(): void
+/** WordPress owns endpoint permissions; the runtime supplies the tenant boundary. */
+function spacefast_content_require_rest_scope(mixed $result): mixed
 {
-    if (function_exists('wp_die')) {
-        wp_die('WordPress sign-in is managed by Spacefast.', 'Not found', ['response' => 404]);
-    }
-    http_response_code(404);
-    exit;
-}
-
-/**
- * REST is reachable by exactly the doors the gate opens it for: an editor
- * session, and the WP API door in custom-redirects.php, which asks the access
- * engine and, on admission, sets SPACEFAST_CONTENT_REST_ADMITTED. Everything
- * else — a stray front-end request, a request that reached WordPress with no
- * Spacefast context — still gets the 404 that keeps a managed Space from
- * exposing WordPress's API by accident. This filter is not the authorization:
- * the gate already ran the access engine, so whether REST answers at all is the
- * gate's admission, not the resolved role. The role, when there is one, is what
- * user_has_cap projects; a null role on an admitted request is an anonymous
- * caller, which WordPress answers unauthenticated exactly as it would on its own.
- */
-function spacefast_content_disable_rest_api(mixed $result): mixed
-{
-    if (
-        $result !== null
-        || !class_exists('WP_Error')
-        || (
-            spacefast_content_space_id() !== ''
-            && (
-                (int) ($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? 0) > 0
-                || spacefast_content_principal_role() !== null
-                || ($GLOBALS['SPACEFAST_CONTENT_REST_ADMITTED'] ?? false) === true
-            )
-        )
-    ) {
+    if ($result !== null || spacefast_content_space_id() !== '' || !class_exists('WP_Error')) {
         return $result;
     }
-    return new WP_Error(
-        'spacefast_rest_disabled',
-        'WordPress REST access is managed by Spacefast.',
-        ['status' => 404]
-    );
-}
-
-/**
- * A content-admin session carries the control plane's signed content.users
- * decision. WordPress administrators otherwise satisfy core's users endpoint
- * permissions, so hiding the Zero route alone would leave the same directory
- * reachable through a nonce-bearing REST request. WordPress launches and the
- * separate WP API door carry no Zero allowlist and keep their existing access.
- */
-function spacefast_content_gate_users_rest(mixed $response, mixed $handler, mixed $request): mixed
-{
-    $access = $GLOBALS['SPACEFAST_CONTENT_ADMIN_ACCESS'] ?? null;
-    if (
-        $response !== null
-        || !class_exists('WP_Error')
-        || !is_array($access)
-        || ($access['surface'] ?? null) !== 'zero'
-        || in_array('users', $access['allowed_screens'] ?? [], true)
-        || !is_object($request)
-        || !method_exists($request, 'get_route')
-    ) {
-        return $response;
-    }
-    $route = $request->get_route();
-    if (!is_string($route) || preg_match('#^/wp/v2/users(?:/|$)#', $route) !== 1) {
-        return $response;
-    }
-    return new WP_Error(
-        'spacefast_content_users_unavailable',
-        'Users are not enabled for this content editor session.',
-        ['status' => 403]
-    );
+    return new WP_Error('content_space_scope_invalid', 'Content requires a Space scope.', ['status' => 403]);
 }
 
 function spacefast_content_scope_rest_user_query(array $args, mixed $request): array
@@ -290,7 +268,7 @@ function spacefast_content_scope_rest_user_query(array $args, mixed $request): a
     // meta spacefast_content_users_list() filters on, so /wp/v2/users is the
     // Space's directory and not the box's. The scope depends only on the Space,
     // never on the caller: both REST doors reach this filter, and the WP API
-    // door (spacefast_content_disable_rest_api) admits on a principal role
+    // door (spacefast_content_require_rest_scope) admits on a principal role
     // while setting no SPACEFAST_CONTENT_ADMIN_USER_ID. Keying on that global
     // would leave the API door unscoped, so the guard is the Space alone.
     $spaceId = spacefast_content_space_id();
@@ -320,12 +298,10 @@ function spacefast_content_lock_admin(): void
     }
     spacefast_content_admin_frame_headers();
     $page = basename((string) ($GLOBALS['pagenow'] ?? ''));
-    if ($page === 'index.php' && function_exists('wp_safe_redirect') && function_exists('admin_url')) {
-        wp_safe_redirect(admin_url('edit.php'));
+    if ($page === 'index.php' && ($_GET['classic'] ?? null) !== '1'
+        && spacefast_content_preferred_dashboard() === 'zero' && function_exists('wp_safe_redirect')) {
+        wp_safe_redirect(site_url('/zero-admin/collections'));
         exit;
-    }
-    if ($page !== '' && !spacefast_content_admin_page_allowed($page) && function_exists('wp_die')) {
-        wp_die('Spacefast manages this WordPress screen.', 'Unavailable', ['response' => 403]);
     }
     spacefast_content_enforce_admin_resource($page);
 }
@@ -334,15 +310,6 @@ function spacefast_content_enforce_admin_resource(string $page): void
 {
     if (!function_exists('wp_die')) {
         return;
-    }
-    if ($page === 'edit.php' || $page === 'post-new.php') {
-        $postType = (string) ($_GET['post_type'] ?? ($GLOBALS['typenow'] ?? ''));
-        if ($postType === '' && $page === 'edit.php') {
-            $postType = 'post';
-        }
-        if (spacefast_content_collection_for_post_type($postType) === null) {
-            wp_die('Spacefast manages this WordPress content type.', 'Unavailable', ['response' => 403]);
-        }
     }
     if (in_array($page, ['post.php', 'revision.php', 'media.php'], true) && function_exists('get_post')) {
         $postId = (int) (
@@ -379,55 +346,6 @@ function spacefast_content_enforce_admin_resource(string $page): void
             wp_die('This content belongs to another Space.', 'Unavailable', ['response' => 403]);
         }
     }
-    if ($page === 'admin.php') {
-        $screen = is_string($_GET['page'] ?? null) ? $_GET['page'] : '';
-        if (!defined('ZERO_ADMIN_PAGE_SLUG') || $screen !== ZERO_ADMIN_PAGE_SLUG) {
-            wp_die('Spacefast manages this WordPress screen.', 'Unavailable', ['response' => 403]);
-        }
-    }
-    if ($page === 'tools.php' && !spacefast_content_redirection_screen_requested()) {
-        wp_die('Spacefast manages this WordPress screen.', 'Unavailable', ['response' => 403]);
-    }
-}
-
-function spacefast_content_admin_page_allowed(string $page): bool
-{
-    if ($page === 'site-editor.php') {
-        // The one screen this task admits, and only on a Space that has content
-        // to edit — the same gate every other content surface uses. A release
-        // the kernel cannot read is not a Space with an editor.
-        try {
-            return spacefast_content_model_active_release() !== null;
-        } catch (Throwable $error) {
-            error_log('spacefast content site editor refused: ' . get_debug_type($error));
-            return false;
-        }
-    }
-    if ($page === 'tools.php') {
-        return spacefast_content_redirection_screen_requested();
-    }
-    return in_array($page, [
-        'admin-ajax.php',
-        'admin.php',
-        'async-upload.php',
-        'edit-tags.php',
-        'edit.php',
-        'load-scripts.php',
-        'load-styles.php',
-        'media-new.php',
-        'media.php',
-        'post-new.php',
-        'post.php',
-        'revision.php',
-        'term.php',
-        'upload.php',
-    ], true);
-}
-
-function spacefast_content_redirection_screen_requested(): bool
-{
-    $screen = $_GET['page'] ?? null;
-    return is_string($screen) && $screen === 'redirection.php';
 }
 
 function spacefast_content_admin_frame_headers(): void
@@ -484,28 +402,6 @@ function spacefast_content_admin_handshake(): void
         return;
     }
     echo '<script>window.parent.postMessage(' . $encodedPayload . ',' . $encodedOrigin . ');</script>';
-}
-
-function spacefast_content_admin_menu(): void
-{
-    if (!function_exists('remove_menu_page')) {
-        return;
-    }
-    foreach ([
-        'index.php',
-        'edit.php',
-        'edit.php?post_type=page',
-        'edit-comments.php',
-        'themes.php',
-        'plugins.php',
-        'users.php',
-        'tools.php',
-        'options-general.php',
-        'profile.php',
-        'edit.php?post_type=acf-field-group',
-    ] as $slug) {
-        remove_menu_page($slug);
-    }
 }
 
 function spacefast_content_admin_assets(): void
@@ -575,6 +471,8 @@ function spacefast_content_scf_field(string $resourceId, string $name, array $de
         $field['type'] = 'number';
     } elseif ($type === 'boolean') {
         $field += ['type' => 'true_false', 'ui' => 1, 'default_value' => 0];
+    } elseif ($type === 'datetime') {
+        $field += ['type' => 'text', 'placeholder' => '2026-01-01T12:00:00Z'];
     } elseif ($type === 'date') {
         $field += [
             'type' => 'date_picker',
@@ -646,6 +544,11 @@ function spacefast_content_validate_scf_value(
         return $valid;
     }
     $definition = $field['spacefast_definition'];
+    if (($definition['type'] ?? null) === 'datetime') {
+        return ($value === '' && empty($definition['required']))
+            || (is_string($value) && preg_match('/(?:Z|[+-][0-9]{2}:[0-9]{2})\z/i', $value) && rest_parse_date($value) !== false)
+            ? true : 'Enter a date and time with a timezone, such as 2026-01-01T12:00:00Z.';
+    }
     if (($definition['type'] ?? null) === 'json') {
         json_decode((string) $value, true);
         return json_last_error() === JSON_ERROR_NONE ? true : 'Enter valid JSON.';
@@ -785,13 +688,15 @@ function spacefast_content_scope_meta_query(mixed $query): array
  * public page is. Deliberately not `is_user_logged_in()`: the WP API door
  * admits a machine caller without ever creating a user for a person, and the
  * role is the thing that says how much of WordPress a request may touch. It is
- * the same pair spacefast_content_disable_rest_api() reads, for the same reason
+ * the same pair spacefast_content_require_rest_scope() reads, for the same reason
  * — there is one policy here, not two.
  */
 function spacefast_content_may_read_private_resources(): bool
 {
-    return (int) ($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? 0) > 0
-        || spacefast_content_principal_role() !== null;
+    return ($GLOBALS['SPACEFAST_CONTENT_SYSTEM_OPERATION'] ?? false) === true
+        || (int) ($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? 0) > 0
+        || spacefast_content_principal_role() !== null
+        || (function_exists('current_user_can') && current_user_can('edit_posts'));
 }
 
 /**
@@ -891,7 +796,7 @@ function spacefast_content_requested_collection_term(): ?string
         return null;
     }
     $requested = $_GET[SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY] ?? null;
-    return is_string($requested) && preg_match('/\A[a-z0-9-]{1,190}\z/D', $requested) === 1
+    return is_string($requested) && preg_match('/\Asf-[a-f0-9]{16}-[a-z0-9-]{1,170}\z/D', $requested) === 1
         ? $requested
         : null;
 }
@@ -907,6 +812,18 @@ function spacefast_content_scope_post_query(mixed $query): void
         return;
     }
     $query->set('meta_query', spacefast_content_scope_meta_query($query->get('meta_query')));
+    if (!spacefast_content_may_read_private_resources()) {
+        $visible = ['relation' => 'OR',
+            ['key' => SPACEFAST_CONTENT_EXTERNAL_ID_META, 'compare' => 'NOT EXISTS'],
+            ['key' => SPACEFAST_CONTENT_EXTERNAL_ID_META, 'value' => '^' . SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX, 'compare' => 'NOT REGEXP'],
+        ];
+        $selected = spacefast_content_selected_source_ids();
+        if ($selected !== []) $visible[] = ['key' => SPACEFAST_CONTENT_EXTERNAL_ID_META, 'value' => $selected, 'compare' => 'IN'];
+        $meta = $query->get('meta_query');
+        $meta[] = $visible;
+        $meta[] = ['key' => SPACEFAST_CONTENT_SOURCE_RETIRED_META, 'compare' => 'NOT EXISTS'];
+        $query->set('meta_query', $meta);
+    }
     $requested = spacefast_content_requested_collection_term();
     if ($requested !== null) {
         // Narrowing, never widening: the privacy exclusion is added after this
@@ -934,6 +851,45 @@ function spacefast_content_scope_post_query(mixed $query): void
     $query->set('tax_query', spacefast_content_scope_tax_query($query->get('tax_query'), $clause));
 }
 
+/** Source rows are public only while their binding belongs to the selected serving model. */
+function spacefast_content_selected_source_ids(): array
+{
+    try {
+        $release = spacefast_content_model_active_release();
+        return array_map(static fn (array $binding): string => SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX . $binding['id'], $release['syncBindings'] ?? []);
+    } catch (Throwable $error) {
+        error_log('spacefast content source visibility unavailable: ' . get_debug_type($error));
+        return [];
+    }
+}
+
+function spacefast_content_source_is_unselected(int $postId): bool
+{
+    $externalId = get_post_meta($postId, SPACEFAST_CONTENT_EXTERNAL_ID_META, true);
+    return is_string($externalId) && str_starts_with($externalId, SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX)
+        && !in_array($externalId, spacefast_content_selected_source_ids(), true);
+}
+
+/** Enforce singular privacy after WordPress and provider caches hydrate the final posts. */
+function spacefast_content_scope_posts(array $posts, mixed $query = null): array
+{
+    if (spacefast_content_space_id() === '' || spacefast_content_may_read_private_resources()) {
+        return $posts;
+    }
+    $visible = array_values(array_filter($posts, static fn (object $post): bool => !spacefast_content_post_is_private((int) $post->ID)));
+    $removed = count($posts) - count($visible);
+    // `found_posts` is the COUNT(*) taken before this filter runs, so a row the
+    // SQL scope could not express — a cached query, a privacy state that is not
+    // a term — would still be counted. Left alone it overcounts REST's
+    // X-WP-Total, which is itself a disclosure, and leaves an empty last page.
+    if ($removed > 0 && is_object($query) && isset($query->found_posts)) {
+        $query->found_posts = max(0, (int) $query->found_posts - $removed);
+        $perPage = (int) $query->get('posts_per_page');
+        $query->max_num_pages = $perPage > 0 ? (int) ceil($query->found_posts / $perPage) : 0;
+    }
+    return $visible;
+}
+
 function spacefast_content_scope_attachment_query(array $query): array
 {
     if (spacefast_content_space_id() !== '') {
@@ -944,6 +900,10 @@ function spacefast_content_scope_attachment_query(array $query): array
 
 function spacefast_content_scope_meta_cap(array $caps, string $cap, int $userId, array $args): array
 {
+    if (spacefast_content_space_id() !== '' && in_array($cap, ['edit_user', 'delete_user', 'remove_user', 'promote_user'], true) && (int) ($args[0] ?? 0) !== $userId) {
+        return ['do_not_allow'];
+    }
+
     if (
         spacefast_content_space_id() === ''
         || !in_array($cap, ['delete_post', 'edit_post', 'read_post'], true)
@@ -963,6 +923,7 @@ function spacefast_content_scope_meta_cap(array $caps, string $cap, int $userId,
     }
     $postId = is_object($post) ? (int) ($post->ID ?? 0) : 0;
     $allowedType = $postType === 'attachment'
+        || in_array($postType, SPACEFAST_CONTENT_TEMPLATE_POST_TYPES, true)
         || spacefast_content_collection_for_post_type($postType) !== null;
     if (!$allowedType || !spacefast_content_post_belongs_to_space($postId)) {
         return ['do_not_allow'];
@@ -975,25 +936,14 @@ function spacefast_content_scope_meta_cap(array $caps, string $cap, int $userId,
     return $caps;
 }
 
-/**
- * The single-item REST read gate.
- *
- * WordPress core answers `WP_REST_Posts_Controller::check_read_permission()`
- * true for any `publish` post before it ever maps the `read_post` cap, so the
- * map_meta_cap gate above never fires for the by-id REST route the way it does
- * for a front-end permalink — `get_item` would hand a private-collection post
- * back in full. `rest_prepare_{$post_type}` does run for a published single
- * read, so it is where the by-id half of publicRead has to live. A post the
- * list lane hides is refused here with the same 404 the exclusion produces.
- * A privileged reader is unaffected: `spacefast_content_post_is_private()`
- * returns false whenever the request may read private resources.
- */
-function spacefast_content_rest_guard_single_read(mixed $response, mixed $post, mixed $request): mixed
+/** Check single reads before core prepares a response and appends link headers. */
+function spacefast_content_rest_guard_single_read(mixed $response, mixed $handler, mixed $request): mixed
 {
-    if (!is_object($post) || !class_exists('WP_Error')) {
+    if ($response !== null || !in_array($request->get_method(), ['GET', 'HEAD'], true)
+        || !preg_match('#\A/wp/v2/(posts|pages|media|comments)/([1-9][0-9]*)(?:/|$)#', $request->get_route(), $match)) {
         return $response;
     }
-    $postId = (int) ($post->ID ?? 0);
+    $postId = $match[1] === 'comments' ? (int) (get_comment((int) $match[2])->comment_post_ID ?? 0) : (int) $match[2];
     if ($postId > 0 && spacefast_content_post_is_private($postId)) {
         return new WP_Error(
             'spacefast_content_not_found',
@@ -1007,6 +957,10 @@ function spacefast_content_rest_guard_single_read(mixed $response, mixed $post, 
 /** Whether this post sits in a collection the current request may not read. */
 function spacefast_content_post_is_private(int $postId): bool
 {
+    if (!spacefast_content_may_read_private_resources()
+        && (spacefast_content_source_is_retired($postId) || spacefast_content_source_is_unselected($postId))) {
+        return true;
+    }
     $private = spacefast_content_private_collection_terms();
     if ($private === null) {
         return false;
@@ -1031,6 +985,9 @@ function spacefast_content_collection_for_post_type(string $postType): ?array
 
 function spacefast_content_handle_request(array $request, bool $managed): array
 {
+    if (in_array($request['operation'] ?? '', ['source.convert', 'source.inspect', 'source.resolve'], true)) {
+        spacefast_content_principal_establish_user();
+    }
     return match ((string) ($request['operation'] ?? '')) {
         'model.stage' => spacefast_content_model_stage_release(
             $request['revision'] ?? null,
@@ -1039,9 +996,15 @@ function spacefast_content_handle_request(array $request, bool $managed): array
             $managed
         ),
         'model.activate' => spacefast_content_model_activate_release($request['revision'] ?? null, $managed),
+        'model.commit' => spacefast_content_model_commit_release($request, $managed),
         'source.reconcile' => spacefast_content_reconcile_source($request, $managed),
         'source.acknowledge' => spacefast_content_acknowledge_source($request, $managed),
         'source.materialize' => spacefast_content_materialize_source($request, $managed),
+        'source.convert' => spacefast_content_request_conversion($request, $managed),
+        'source.inspect' => spacefast_content_inspect_source($request, $managed),
+        'source.resolve' => spacefast_content_resolve_source($request, $managed),
+        'rest.request' => spacefast_content_rest_dispatch($request, $managed),
+        'media.read' => spacefast_content_admin_media_read($request, $managed),
         // Storage answers over this endpoint for a caller that can reach it.
         // No Zero handler can today -- ctx.storage is withdrawn until the
         // service transport lands -- but the dispatcher runs the ability's own

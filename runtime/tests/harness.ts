@@ -1251,6 +1251,8 @@ export type DeploySpec = {
   pageArtifacts?: Record<string, string>;
   zero?: Record<string, unknown>;
   functions?: Record<string, unknown>;
+  /** The PHP execution lane's private values, for a version with no worker or capsule. */
+  php?: { variableValues: Record<string, string> };
   activate?: Record<string, unknown>;
   /** Passed to the create-version call (retained files, convention files, ...). */
   session?: CreateSessionOptions;
@@ -1277,6 +1279,9 @@ export async function deploy(rt: Runtime, spec: DeploySpec): Promise<void> {
       ...(spec.pageArtifacts ? { page_artifacts: spec.pageArtifacts } : {}),
       ...(spec.zero ? { zero: spec.zero } : {}),
       ...(spec.functions ? { functions: spec.functions } : {}),
+      // Absent rather than conditional: JSON omits an undefined value, so a
+      // spec without it sends the same body it always did.
+      php: spec.php,
       ...(spec.activate ? { activate: spec.activate } : {}),
       ...spec.finalize,
     },

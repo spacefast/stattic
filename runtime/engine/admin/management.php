@@ -565,6 +565,10 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     if ($functionsFinalize !== null) {
         _stattic_runtime_write_functions_config_artifact($versionRoot, $functionsFinalize);
     }
+    $phpFinalize = is_array($body['php'] ?? null) ? $body['php'] : null;
+    if ($phpFinalize !== null) {
+        _stattic_runtime_write_php_config_artifact($versionRoot, $phpFinalize);
+    }
     _stattic_runtime_apply_zero_migrations($versionRoot);
     $finalizedEvent = [
         'event' => 'version_finalized',
@@ -1134,6 +1138,24 @@ function _stattic_runtime_version_has_zero_pack(string $versionRoot): bool
     return is_file($versionRoot . '/zero/routes.php')
         || is_file($versionRoot . '/zero/endpoints-index.json')
         || is_file($versionRoot . '/zero/runs-index.json');
+}
+
+/**
+ * The PHP execution lane's private values, for a version whose only code is
+ * committed `functions/*.php`. Same placement and the same reason as the two
+ * runtime configs: BESIDE the version's file tree, where a publish cannot
+ * reach, because these are the Space's secrets. Only `variableValues` is
+ * copied, so an unrecognised key cannot land here either.
+ */
+function _stattic_runtime_write_php_config_artifact(string $versionRoot, array $php): void
+{
+    _stattic_runtime_mkdir($versionRoot . '/php');
+    _stattic_runtime_write_json_atomic($versionRoot . '/php/config.json', [
+        'runtimeKind' => 'php',
+        'variableValues' => is_array($php['variableValues'] ?? null)
+            ? _stattic_zero_string_map($php['variableValues'])
+            : [],
+    ]);
 }
 
 function _stattic_runtime_write_zero_config_artifact(string $versionRoot, array $zero): void

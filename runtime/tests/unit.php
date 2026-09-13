@@ -22,6 +22,7 @@ require_once __DIR__ . '/../engine/runtime/functions-artifacts.php'; // signed b
 require_once __DIR__ . '/../engine/runtime/functions-dispatch.php'; // origin -> host dispatch contract
 require_once __DIR__ . '/../engine/shared/runtime-log.php'; // the one runtime log writer
 require_once __DIR__ . '/../engine/shared/db-broker.php'; // MySQL broker value encoding (pure helpers only here)
+require_once __DIR__ . '/../engine/runtime/php-functions.php'; // sf_env()/sf_fetch() decisions (pure helpers only here)
 
 $assertions = 0;
 $failures = [];
@@ -191,6 +192,101 @@ check(
     'egress scope: a non-matching target still faces the whole policy'
 );
 putenv('SPACEFAST_EGRESS_TEST_ALLOWLIST');
+
+// --- PHP Functions: the author-facing helpers, as pure functions --------------------
+//
+// The serve-side wiring (a version's configuration reaching sf_env(), the
+// Space's own scope reaching sf_fetch()) is php-functions.test.ts; these are the
+// decisions those helpers make once the inputs are in hand.
+
+// sf_env() answers a Space's own selection and nothing the platform owns. The
+// control plane already filters both groups out of the selection, so this is the
+// engine refusing to be the one surface that leaks one back.
+$variableValues = _stattic_php_functions_variable_values([
+    'variableValues' => [
+        'GITHUB_TOKEN' => 'gh-secret',
+        'SPACEFAST_FUNCTIONS_DISPATCH_TOKEN' => 'fleet-credential',
+        'zero_internal' => 'platform',
+        'DATABASE_URL' => 'mysql://user:pw@db.internal/app',
+        'EMPTY_NAME_VALUE' => 42,
+    ],
+]);
+check(
+    $variableValues === ['GITHUB_TOKEN' => 'gh-secret'],
+    'sf_env: the Space keeps its own variables and the platform keeps its namespaces'
+);
+
+// A relative Location is an RFC 3986 reference, not a path suffix. The forms
+// that separate a real resolver from string surgery are the ones redirects
+// actually send: a query-only reference keeps the current path, a fragment-only
+// one keeps the query too, and dot segments collapse. Getting these wrong
+// fetches a different resource and says nothing about it. The query-only case
+// is proven again over a real hop in php-functions-fetch.test.ts, which is what
+// shows the destination server the request it really received.
+foreach ([
+    // Query-only and fragment-only: the path survives, and so does the query
+    // under a fragment. A fragment is the client's and never travels.
+    ['https://api.github.com/dir/item?old=1', '?new=2', 'https://api.github.com/dir/item?new=2'],
+    ['https://api.github.com/dir/item?old=1', '#section', 'https://api.github.com/dir/item?old=1'],
+    // Relative references replace the last segment, and dot segments collapse.
+    ['https://api.github.com/repos/a/b/contents/x?ref=main', 'blob', 'https://api.github.com/repos/a/b/contents/blob'],
+    ['https://api.github.com/repos/a/b/c', '../up', 'https://api.github.com/repos/a/up'],
+    ['https://api.github.com/repos/a/b', '/other', 'https://api.github.com/other'],
+    ['https://api.github.com/repos/a/b', '//cdn.example.com/x', 'https://cdn.example.com/x'],
+    ['https://api.github.com/repos/a/b', 'https://objects.example.com/x', 'https://objects.example.com/x'],
+    ['https://api.github.com:8443/a/b', '/c', 'https://api.github.com:8443/c'],
+] as [$base, $location, $expected]) {
+    check(
+        _stattic_php_functions_fetch_redirect_target($base, $location) === $expected,
+        "sf_fetch: redirect {$location} resolves against {$base}"
+    );
+}
+
+// The budget belongs to the call, and a hop that has none left must refuse
+// before it starts work this process could not cancel.
+check(
+    _stattic_php_functions_fetch_remaining_ms(microtime(true) + 5) > 4000,
+    'sf_fetch: an unspent budget reports what is left of it'
+);
+$spentCode = null;
+try {
+    _stattic_php_functions_fetch_remaining_ms(microtime(true) - 0.001);
+} catch (SpacefastFetchError $error) {
+    $spentCode = $error->errorCode;
+}
+check(
+    $spentCode === 'zero_fetch_upstream_unavailable',
+    'sf_fetch: a spent budget refuses the hop rather than resolving it'
+);
+
+// Hop-by-hop names describe the connection the engine owns, so they are dropped
+// rather than refused; a name or value that would rewrite the request is a
+// handler bug and says so.
+check(
+    _stattic_php_functions_fetch_request_headers([
+        'Authorization' => 'Bearer t',
+        'Host' => 'evil.test',
+        'Transfer-Encoding' => 'chunked',
+        'X-GitHub-Api-Version' => '2022-11-28',
+    ]) === ['authorization' => 'Bearer t', 'x-github-api-version' => '2022-11-28'],
+    'sf_fetch: transport-owned request headers are dropped, the rest are lower-cased'
+);
+foreach ([
+    ['X-Smuggle' => "one\r\nHost: evil.test"],
+    ['X Bad Name' => 'v'],
+    ['X-Object' => ['not', 'a', 'string']],
+] as $rejected) {
+    $code = null;
+    try {
+        _stattic_php_functions_fetch_request_headers($rejected);
+    } catch (SpacefastFetchError $error) {
+        $code = $error->errorCode;
+    }
+    check(
+        $code === 'zero_fetch_payload_invalid',
+        'sf_fetch: a header that would rewrite the request is refused: ' . array_key_first($rejected)
+    );
+}
 
 // --- Proxy egress policy: IPv4 ------------------------------------------------------
 

@@ -195,6 +195,7 @@ beforeAll(async () => {
         "/guide/* /guide.md 200! Agent=true",
         "/guide/* /guide.html 200!",
         `/preserve/* ${redirectReceiverUrl("/receiver")} 307`,
+        "/escape/* /:splat 302",
       ].join("\n"),
     },
     activate: {
@@ -476,6 +477,12 @@ test("ordered redirects preserve the request query and RFC method semantics", as
   expect(rejected.status).toBe(405);
   expect(rejected.headers.get("allow")).toBe("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS");
   expect(rejected.headers.get("location")).toBeNull();
+});
+
+test("capture expansion cannot turn a same-origin redirect into an authority", async () => {
+  const response = await get(rt, SITE, "/escape//evil.example/path");
+  expect(response.status).toBe(404);
+  expect(response.headers.get("location")).toBeNull();
 });
 
 test("forced rewrites override committed bytes; non-forced ones yield to them", async () => {

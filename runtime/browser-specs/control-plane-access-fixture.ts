@@ -117,6 +117,7 @@ try {
     id: assignedDomainId,
     tenantId: MAIN_TENANT_ID,
     teamId: seed.teamId,
+    recordKind: "attachment",
     spaceId: seed.spaceId,
     hostname,
     apexHostname: hostname,

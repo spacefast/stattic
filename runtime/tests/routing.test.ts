@@ -564,9 +564,11 @@ test("static entries answer GET and HEAD only", async () => {
 
 test("host classes: canonical redirects, and a version-pinned host serves its version", async () => {
   // Host canonicalization keeps the path and the query.
-  const canonical = await get(rt, WWW, "/blog/post.html");
+  const canonical = await get(rt, WWW, "/blog/post.html?from=www&return=%2Fdocs%3Fa%3D1");
   expect(canonical.status).toBe(308);
-  expect(canonical.headers.get("location")).toBe("https://site.test/blog/post.html");
+  expect(canonical.headers.get("location")).toBe(
+    "https://site.test/blog/post.html?from=www&return=%2Fdocs%3Fa%3D1",
+  );
   // No version was selected, so the response names none.
   expect(canonical.headers.get("x-spacefast-version")).toBeNull();
 

@@ -93,6 +93,9 @@ const BOUNDARY_SPACE = "spc_access_boundary";
 const BOUNDARY_VERSION = "ver_access_boundary";
 const ALLOWED_FALLBACK_HOST = "allowed-fallback.access.test";
 const ALLOWED_NEAREST_HOST = "allowed-nearest.access.test";
+const TEAM_ACTIVATION_HOST = "team-activation.access.test";
+const TEAM_ACTIVATION_SPACE = "spc_access_team_activation";
+const TEAM_ACTIVATION_VERSION = "ver_access_team_activation";
 const CREDENTIAL_SCOPE_HOST = "credential-scope.access.test";
 const CREDENTIAL_SCOPE_SPACE = "spc_access_credential_scope";
 const CREDENTIAL_SCOPE_VERSION = "ver_access_credential_scope";
@@ -136,6 +139,7 @@ function spaceForHost(host: string): string {
     [BOUNDARY_SPACE, [BOUNDARY_HOST]],
     ["spc_access_allowed_fallback", [ALLOWED_FALLBACK_HOST]],
     ["spc_access_allowed_nearest", [ALLOWED_NEAREST_HOST]],
+    [TEAM_ACTIVATION_SPACE, [TEAM_ACTIVATION_HOST]],
     [CREDENTIAL_SCOPE_SPACE, [CREDENTIAL_SCOPE_HOST]],
   ];
   return groups.find(([, hosts]) => hosts.includes(host))?.[0] ?? PRIVATE_SPACE;
@@ -781,6 +785,16 @@ beforeAll(async () => {
       }),
     },
     {
+      // A Space whose team-shaped Grant arrives through activation, not a later
+      // route PUT. The control plane projects team Grants this way now, so the
+      // finalize/activate path has to compile one — putRoute alone never
+      // exercised the overlay the activation writes.
+      spaceId: TEAM_ACTIVATION_SPACE,
+      versionId: TEAM_ACTIVATION_VERSION,
+      hosts: [TEAM_ACTIVATION_HOST],
+      config: projection({ team: { teamId: "team_activation", membershipEpoch: 2 } }),
+    },
+    {
       spaceId: AUTHORITY_LRU_SPACE,
       versionId: AUTHORITY_LRU_VERSION,
       hosts: [AUTHORITY_LRU_HOST],
@@ -1143,6 +1157,20 @@ test("a durable session survives an access-generation move but not losing its Gr
       }),
     });
   }
+});
+
+test("a team-shaped Grant activated with the version serves its Space", async () => {
+  // The whole point: the overlay this asserts on was written by finalize's
+  // activation, not by a later route PUT. A Space whose first serving state
+  // already names a team must still admit, refuse and render normally.
+  const anonymous = await get(runtime, TEAM_ACTIVATION_HOST, "/");
+  expect(anonymous.status).toBe(403);
+  expect(anonymous.headers.get("x-spacefast-version")).toBe(TEAM_ACTIVATION_VERSION);
+
+  const cookie = await openAuthorities(TEAM_ACTIVATION_HOST, ["member:mem_activation"]);
+  const admitted = await get(runtime, TEAM_ACTIVATION_HOST, "/", { headers: { cookie } });
+  expect(admitted.status).toBe(200);
+  expect(await admitted.text()).toContain("<h1>home</h1>");
 });
 
 test("a team-shaped Grant admits any member authority and an epoch bump retires it", async () => {

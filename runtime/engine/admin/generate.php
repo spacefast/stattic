@@ -1366,40 +1366,69 @@ const STATTIC_RUNTIME_ROUTE_SHARD_GRACE_SECONDS = 300;
 // previous.json may be genuinely absent, but not unreadable. The index lock
 // (try, skip on miss: the pass is idempotent and reruns every tick) closes
 // the stat-then-unlink race against a concurrent writer's is_file+touch reuse.
-function _stattic_runtime_route_shard_gc(string $privateRoot): int
+// Null is that lock miss: no shard was examined. Reporting it as zero deletions
+// made a skipped pass indistinguishable from one that found nothing to reclaim,
+// and the maintenance pass carrying it counted the step as run either way.
+//
+// A pointer this pass could not read is the SAME answer, not a successful zero.
+// Skipping the unlink is right; calling that a completed hook is not — the
+// control plane then banks a successful housekeeping receipt for work nobody
+// did, and retrying its durable operation hands back a job that already
+// finished. Unavailable is retryable; zero is a promise the tree was examined.
+//
+// A box with no shard tree is the other thing null must NOT mean. There the lock
+// file cannot even be opened, which _stattic_lock_acquire cannot tell apart from
+// a lock held elsewhere — and a box that has never published would report this
+// step skipped on every pass, forever, so its maintenance could never complete.
+// Nothing to examine is a finished pass that reclaimed nothing.
+//
+// $budgetDeadline is the tick's, consulted between shards. A walk it cut short
+// is the third thing null covers: the tree was only partly examined, so the next
+// tick owes the rest.
+function _stattic_runtime_route_shard_gc(string $privateRoot, ?float $budgetDeadline = null): ?int
 {
+    $shards = _stattic_runtime_directory_entries($privateRoot . '/routes/shards');
+    if ($shards === null) {
+        return null;
+    }
+    if ($shards === []) {
+        return 0;
+    }
     $deleted = _stattic_lock_with(
         $privateRoot . '/routes/index.lock',
         STATTIC_LOCK_TRY,
         null,
-        static function () use ($privateRoot): int {
+        static function () use ($privateRoot, $budgetDeadline): ?int {
             $current = _stattic_runtime_read_route_pointer($privateRoot);
             if (!is_array($current)) {
-                return 0;
+                return null;
             }
             $previous = _stattic_runtime_read_json($privateRoot . '/routes/previous.json');
             if ($previous === false) {
-                return 0;
+                return null;
             }
             $named = _stattic_runtime_referenced_route_shards([
                 $current,
                 is_array($previous) ? $previous : null,
             ]);
-            $deadline = time() - STATTIC_RUNTIME_ROUTE_SHARD_GRACE_SECONDS;
+            $unreferencedBefore = time() - STATTIC_RUNTIME_ROUTE_SHARD_GRACE_SECONDS;
             $deleted = 0;
             foreach (glob($privateRoot . '/routes/shards/*.php') ?: [] as $path) {
+                if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+                    return null;
+                }
                 if (!is_string($path) || isset($named[basename($path)])) {
                     continue;
                 }
                 $mtime = filemtime($path);
-                if (is_int($mtime) && $mtime < $deadline && unlink($path)) {
+                if (is_int($mtime) && $mtime < $unreferencedBefore && unlink($path)) {
                     $deleted += 1;
                 }
             }
             return $deleted;
         },
     );
-    return is_int($deleted) ? $deleted : 0;
+    return is_int($deleted) ? $deleted : null;
 }
 
 // Every capability the publish path recognizes, with the grant applied when the

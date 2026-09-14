@@ -329,23 +329,55 @@ function _stattic_sweep_throttled(
 
 // Reclaims whole entries, file or tree, under a glob whose mtime is older than
 // $maxAgeSeconds. admin/retention.php decides what gets one of these.
-function _stattic_reclaim_stale_paths(string $pattern, int $maxAgeSeconds, ?int $now = null): int
-{
+//
+// $budgetDeadline is the CALLER's clock, and it is consulted INSIDE the entry as
+// well as between entries. An entry is not a bounded unit of work: one abandoned
+// finalizer stage is a whole version tree, and deleting it to completion held the
+// bulk lane for hundreds of milliseconds whatever budget the tick asked for
+// (measured: 12,000 children removed after entering one nominal unit, on a 20 ms
+// budget). Callers tell a truncated pass from a finished one by re-reading that
+// clock — being past it is exactly what stopped the walk.
+function _stattic_reclaim_stale_paths(
+    string $pattern,
+    int $maxAgeSeconds,
+    ?int $now = null,
+    ?float $budgetDeadline = null
+): int {
     $now ??= time();
-    $deadline = $now - max(0, $maxAgeSeconds);
+    $staleBefore = $now - max(0, $maxAgeSeconds);
     $reclaimed = 0;
     foreach (glob($pattern) ?: [] as $path) {
+        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+            break;
+        }
         if (!is_string($path)) {
             continue;
         }
         $mtime = filemtime($path);
-        if ($mtime === false || $mtime > $deadline) {
+        if ($mtime === false || $mtime > $staleBefore) {
             continue;
         }
-        _stattic_runtime_rm_recursive($path);
-        $reclaimed += 1;
+        if (_stattic_runtime_rm_recursive_bounded($path, $budgetDeadline)) {
+            $reclaimed += 1;
+            continue;
+        }
+        _stattic_reclaim_keep_resumable($path, $mtime);
     }
     return $reclaimed;
+}
+
+// The resumable half of a truncated tree delete. Removing children moves the
+// entry's OWN mtime to now, which would hide a half-reclaimed tree from the
+// staleness filter for a whole retention window — the tree would then be
+// reclaimed a slice per window and effectively leak. Stamping the entry back to
+// the mtime that made it stale is what lets the next pass resume on a strictly
+// smaller tree instead of starting the window again.
+function _stattic_reclaim_keep_resumable(string $path, int $mtime): void
+{
+    clearstatcache(true, $path);
+    if (file_exists($path)) {
+        @touch($path, $mtime);
+    }
 }
 
 // THE atomic private-write primitive: every private-root write goes through it,
@@ -1332,6 +1364,73 @@ function _stattic_runtime_rm_recursive(string $path): void
     // could not unlink leaves debris for the retention sweep, it does not fail
     // the mutation that asked for the delete.
     _stattic_private_tree_remove($path);
+}
+
+/**
+ * The deadline-aware spelling of the same delete, for the maintenance lane.
+ *
+ * Containment rules are identical — the engine assert on the root, then
+ * per-entry containment on the way down, so a symlinked directory is unlinked
+ * rather than descended into. What differs is that the walk is iterative and
+ * consults $budgetDeadline between single filesystem operations, because a tree
+ * is not a bounded unit of work: the recursive spelling above deletes whatever
+ * it is handed to completion, and a maintenance tick that entered one abandoned
+ * stage held the bulk lane until that stage was gone.
+ *
+ * True means the tree is gone. False means the budget ran out mid-walk, or an
+ * entry could not be unlinked — either way something is still there and the
+ * caller MUST keep it reclaimable (see _stattic_reclaim_keep_resumable). Every
+ * pass leaves a strictly smaller tree, so restarting the walk always progresses.
+ */
+function _stattic_runtime_rm_recursive_bounded(string $path, ?float $budgetDeadline): bool
+{
+    if (!file_exists($path) && !is_link($path)) {
+        return true;
+    }
+    _stattic_runtime_assert_private_path($path);
+    if ($budgetDeadline === null) {
+        _stattic_private_tree_remove($path);
+        clearstatcache(true, $path);
+        return !file_exists($path) && !is_link($path);
+    }
+    // Post-order without recursion: a directory is re-visited for its rmdir only
+    // after its children were handled, and the stack is this pass's only state —
+    // the next pass re-enumerates what survived.
+    $stack = [[$path, false]];
+    $removed = true;
+    while ($stack !== []) {
+        if (microtime(true) >= $budgetDeadline) {
+            return false;
+        }
+        [$current, $descended] = array_pop($stack);
+        if (!_stattic_private_tree_contains($current)) {
+            $removed = false;
+            continue;
+        }
+        if (!file_exists($current) && !is_link($current)) {
+            continue;
+        }
+        if (is_link($current) || !is_dir($current)) {
+            $removed = unlink($current) && $removed;
+            continue;
+        }
+        if ($descended) {
+            $removed = rmdir($current) && $removed;
+            continue;
+        }
+        $entries = scandir($current);
+        if (!is_array($entries)) {
+            $removed = false;
+            continue;
+        }
+        $stack[] = [$current, true];
+        foreach ($entries as $entry) {
+            if ($entry !== '.' && $entry !== '..') {
+                $stack[] = [$current . '/' . $entry, false];
+            }
+        }
+    }
+    return $removed;
 }
 
 function _stattic_runtime_assert_private_path(string $path): void

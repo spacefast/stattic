@@ -117,9 +117,15 @@ function _stattic_tier_collect_shas_from_artifact(string $path, array &$shas, in
  * Null means one live declaration was unreadable, so this space cannot be
  * reasoned about and the caller touches nothing in it.
  *
+ * $budgetDeadline makes running out of clock mean exactly the same thing. This
+ * set is a WHOLE-SPACE answer — a partial one reads as "nothing declares these
+ * bytes" and is a delete-live-data hazard — so the walk never returns what it
+ * had when the budget expired. It aborts, having spent at most one directory
+ * read past the deadline instead of every version of a large space.
+ *
  * @return array{shas:array<string,int>,version_ids:list<string>}|null
  */
-function _stattic_tier_space_live_set(string $privateRoot, string $spaceId): ?array
+function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?float $budgetDeadline = null): ?array
 {
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
     $shas = [];
@@ -129,6 +135,9 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId): ?ar
         return null;
     }
     foreach ($versionRoots as $versionRoot) {
+        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+            return null;
+        }
         if (!is_dir($versionRoot)) {
             continue;
         }
@@ -183,6 +192,9 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId): ?ar
             return null;
         }
         foreach ($declarationEntries as $path) {
+            if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+                return null;
+            }
             if (is_file($path) && str_ends_with($path, '.json') && _stattic_tier_collect_shas_from_json($path, $shas) === null) {
                 return null;
             }
@@ -205,9 +217,9 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId): ?ar
 }
 
 /** @return array<string,int>|null sha => publish timestamp */
-function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId): ?array
+function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId, ?float $budgetDeadline = null): ?array
 {
-    $live = _stattic_tier_space_live_set($privateRoot, $spaceId);
+    $live = _stattic_tier_space_live_set($privateRoot, $spaceId, $budgetDeadline);
     return $live === null ? null : $live['shas'];
 }
 
@@ -218,8 +230,12 @@ function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId): ?a
  *
  * @return array<string,true>|null
  */
-function _stattic_tier_space_pinned_shas(string $privateRoot, string $spaceId, int $now): ?array
-{
+function _stattic_tier_space_pinned_shas(
+    string $privateRoot,
+    string $spaceId,
+    int $now,
+    ?float $budgetDeadline = null
+): ?array {
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
     $pinned = [];
     $pinEntries = _stattic_runtime_directory_entries($spaceRoot . '/pins');
@@ -227,6 +243,11 @@ function _stattic_tier_space_pinned_shas(string $privateRoot, string $spaceId, i
         return null;
     }
     foreach ($pinEntries as $path) {
+        // Same whole-answer rule as the live set: a pin the budget cut off is
+        // indistinguishable from no pin at all, and that difference is bytes.
+        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+            return null;
+        }
         if (!is_file($path) || !str_ends_with($path, '.json')) {
             continue;
         }
@@ -333,6 +354,69 @@ function _stattic_tier_gc_marks_path(string $privateRoot, string $spaceId): stri
 }
 
 /**
+ * Where a truncated GC pass says it stopped, so the next one resumes there.
+ *
+ * Without this the walk restarts at the first prefix every tick: a pass that a
+ * 20 ms budget cut short observed nothing durable, and the prefixes behind the
+ * obstruction were never reached at ANY number of equal-budget ticks. The
+ * per-space file holds the 2-hex prefix to resume at; the box-wide one holds the
+ * space id, for the same reason one level up.
+ */
+function _stattic_tier_gc_cursor_path(string $privateRoot, string $spaceId): string
+{
+    return _stattic_space_root($privateRoot, $spaceId) . '/gc/cursor.json';
+}
+
+function _stattic_tier_read_cursor(string $path): ?string
+{
+    $stored = _stattic_runtime_read_json($path);
+    if (!is_array($stored)) {
+        // Absent OR unreadable: a cursor is an optimization about where to
+        // resume, never a safety property, so losing one costs a restart.
+        return null;
+    }
+    $at = $stored['at'] ?? null;
+    return is_string($at) && $at !== '' ? $at : null;
+}
+
+function _stattic_tier_write_cursor(string $path, ?string $at): void
+{
+    if ($at === null) {
+        if (is_file($path)) {
+            unlink($path);
+        }
+        return;
+    }
+    _stattic_runtime_write_json_atomic($path, ['at' => $at]);
+}
+
+/**
+ * The ascending walk order rotated to start at $cursor and wrap back around to
+ * the entries before it, so one tick's resume point still yields a whole pass
+ * when the budget allows. A cursor whose entry is gone starts over.
+ *
+ * @param list<string> $items
+ * @return list<string>
+ */
+function _stattic_tier_resume_order(array $items, ?string $cursor): array
+{
+    if ($cursor === null || $items === []) {
+        return $items;
+    }
+    $start = null;
+    foreach ($items as $index => $item) {
+        if ($item >= $cursor) {
+            $start = $index;
+            break;
+        }
+    }
+    if ($start === null || $start === 0) {
+        return $items;
+    }
+    return [...array_slice($items, $start), ...array_slice($items, 0, $start)];
+}
+
+/**
  * Pass 2. Every deletion in $deletions is `[sha, path, drop_mark, size]`,
  * applied in batches under one short per-space write lock each, so the
  * O(all blobs) scan above never holds the lock a publish needs. Nothing is
@@ -340,13 +424,24 @@ function _stattic_tier_gc_marks_path(string $privateRoot, string $spaceId): stri
  *
  * @return array{collected: list<string>, evicted: list<string>, bytes: int, complete: bool}
  */
-function _stattic_tier_gc_apply_deletions(string $privateRoot, string $spaceId, array $deletions): array
-{
+function _stattic_tier_gc_apply_deletions(
+    string $privateRoot,
+    string $spaceId,
+    array $deletions,
+    ?float $budgetDeadline = null
+): array {
     $collected = [];
     $evicted = [];
     $bytes = 0;
     $complete = true;
     foreach (array_chunk($deletions, STATTIC_TIER_GC_DELETE_BATCH) as $batch) {
+        // A batch is the bounded unit here: it is one short lock hold, and a
+        // batch this pass never applied simply keeps its mark, so the next pass
+        // re-decides it against a freshly read live set.
+        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+            $complete = false;
+            break;
+        }
         $applied = _stattic_space_write_lock_with(
             $privateRoot,
             $spaceId,
@@ -389,20 +484,45 @@ function _stattic_tier_gc_apply_deletions(string $privateRoot, string $spaceId, 
  * (in gc/marks.json) one grace period ago, so a publish that declares a blob
  * between two ticks cannot lose it to an earlier scan.
  *
+ * A pass the budget cuts short must do two things AT ONCE, and doing only the
+ * first is how a GC stops collecting anything at all:
+ *
+ *   - it must not publish a partial replacement mark set. The map it built
+ *     covers only the prefixes it walked, so writing it as-is would erase the
+ *     elapsed grace of every sha behind the truncation point and restart their
+ *     clocks — a mark map that can be reset is a mark map that never matures.
+ *   - it must still persist what it DID observe. Discarding every new
+ *     observation means no garbage ever acquires a first-seen time, the grace
+ *     period never starts, and repeating the same budget collects nothing
+ *     forever (measured: three 20 ms passes over 12,000 blobs, two logical days
+ *     apart, deleted 0 and wrote no marks at all).
+ *
+ * So marks are MERGED: visited prefixes take this pass's observations, unvisited
+ * prefixes keep their stored ones untouched. gc/cursor.json then carries where
+ * the walk stopped, so the next tick starts there instead of re-walking the same
+ * head of the CAS — without it a populated early prefix starves every prefix
+ * behind it at any number of equal budgets. Deletion still revalidates the live
+ * set and pins on every pass; the cursor only decides walk ORDER.
+ *
  * @return array{complete: bool, deleted: int, bytes: int}
  */
-function _stattic_tier_space_blob_gc(string $privateRoot, string $spaceId, int $now, int $grace): array
-{
+function _stattic_tier_space_blob_gc(
+    string $privateRoot,
+    string $spaceId,
+    int $now,
+    int $grace,
+    ?float $budgetDeadline = null
+): array {
     $skipped = ['complete' => false, 'deleted' => 0, 'bytes' => 0];
     $prefixes = _stattic_tier_space_blob_prefixes($privateRoot, $spaceId);
     if ($prefixes === null) {
         return $skipped;
     }
-    $live = _stattic_tier_space_live_shas($privateRoot, $spaceId);
+    $live = _stattic_tier_space_live_shas($privateRoot, $spaceId, $budgetDeadline);
     if ($live === null) {
         return $skipped;
     }
-    $pinned = _stattic_tier_space_pinned_shas($privateRoot, $spaceId, $now);
+    $pinned = _stattic_tier_space_pinned_shas($privateRoot, $spaceId, $now, $budgetDeadline);
     if ($pinned === null) {
         return $skipped;
     }
@@ -414,6 +534,8 @@ function _stattic_tier_space_blob_gc(string $privateRoot, string $spaceId, int $
         return $skipped;
     }
     $storedMarks = is_array($stored) ? $stored : [];
+    $cursorPath = _stattic_tier_gc_cursor_path($privateRoot, $spaceId);
+    $order = _stattic_tier_resume_order($prefixes, _stattic_tier_read_cursor($cursorPath));
     $deadline = $now - max(0, $grace);
     // With grace pinned to 0 both passes run inside one tick, so the two-pass
     // rule closes to nothing and the GC would delete bytes a publish is mid-way
@@ -421,11 +543,20 @@ function _stattic_tier_space_blob_gc(string $privateRoot, string $spaceId, int $
     $undeclaredDeadline = $now - max(0, $grace, _stattic_tier_gc_undeclared_min_grace_seconds());
 
     $marks = [];
+    $visited = [];
+    $resumeAt = null;
     $collected = [];
     $evicted = [];
     $bytes = 0;
     $complete = true;
-    foreach ($prefixes as $prefix) {
+    foreach ($order as $prefix) {
+        // One CAS prefix is the bounded unit: it is enumerated whole, so the
+        // marks for it are a whole answer about it.
+        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+            $resumeAt = $prefix;
+            $complete = false;
+            break;
+        }
         $blobs = _stattic_tier_prefix_blobs($blobsRoot, $prefix);
         if ($blobs === null) {
             // An unreadable prefix makes the space unreasonable-about, same as
@@ -472,10 +603,14 @@ function _stattic_tier_space_blob_gc(string $privateRoot, string $spaceId, int $
                 $deletions[] = [$sha, $path, true, $blob['size']];
             }
         }
+        // The prefix is walked, so this pass's marks for it are authoritative —
+        // including the shas it did NOT re-observe, whose stored marks are meant
+        // to be dropped.
+        $visited[$prefix] = true;
         if ($deletions === []) {
             continue;
         }
-        $applied = _stattic_tier_gc_apply_deletions($privateRoot, $spaceId, $deletions);
+        $applied = _stattic_tier_gc_apply_deletions($privateRoot, $spaceId, $deletions, $budgetDeadline);
         $collected = [...$collected, ...$applied['collected']];
         $evicted = [...$evicted, ...$applied['evicted']];
         $bytes += $applied['bytes'];
@@ -498,9 +633,21 @@ function _stattic_tier_space_blob_gc(string $privateRoot, string $spaceId, int $
     foreach ($deleted as $sha) {
         unset($marks[$sha]);
     }
+    if ($resumeAt !== null) {
+        // The merge, and the whole reason a truncated pass may write at all: a
+        // sha whose prefix this pass never reached keeps exactly the mark it
+        // had. Nothing about it was observed, so nothing about it is replaced.
+        foreach ($storedMarks as $sha => $seen) {
+            if (!is_string($sha) || !is_int($seen) || isset($visited[substr($sha, 0, 2)])) {
+                continue;
+            }
+            $marks[$sha] ??= $seen;
+        }
+    }
     if ($marks !== $storedMarks && !($marks === [] && !is_array($stored))) {
         _stattic_runtime_write_json_atomic($marksPath, $marks);
     }
+    _stattic_tier_write_cursor($cursorPath, $resumeAt);
     return ['complete' => $complete, 'deleted' => count($deleted), 'bytes' => $bytes];
 }
 
@@ -518,54 +665,93 @@ function _stattic_tier_space_ids(string $privateRoot): array|false
             $spaceIds[] = $entry;
         }
     }
+    // Ascending, because the GC's resume cursor is a position in this order.
+    sort($spaceIds);
     return $spaceIds;
 }
 
-function _stattic_tier_local_blob_gc_run(string $privateRoot, int $now, int $grace, int $scanInterval, ?callable $clock = null): void
-{
+/**
+ * True when this call left no collectable byte behind: either the scan was not
+ * due (a deliberate cadence, nothing owed) or it walked every space and every
+ * prefix. False is the honest answer the throttle alone cannot give — a space
+ * tree it could not enumerate, or a per-space pass that a held write lock or an
+ * unreadable declaration stopped — and the pass carrying it must not report a
+ * step it did not finish.
+ */
+function _stattic_tier_local_blob_gc_run(
+    string $privateRoot,
+    int $now,
+    int $grace,
+    int $scanInterval,
+    ?callable $clock = null,
+    ?float $budgetDeadline = null
+): bool {
     $marker = $privateRoot . '/runtime/blob-gc.marker';
     _stattic_runtime_assert_private_path($marker);
     _stattic_runtime_mkdir_soft(dirname($marker));
 
+    // The same resume rule the per-space walk keeps for its prefixes, one level
+    // up: without it the first Space on the box is re-walked every tick and the
+    // Spaces behind it are collected only on a tick whose budget covers all of
+    // them at once.
+    $spaceCursorPath = $privateRoot . '/runtime/blob-gc-cursor.json';
+    _stattic_runtime_assert_private_path($spaceCursorPath);
+
+    $complete = true;
     _stattic_sweep_throttled(
         $marker,
         // Grace zero means "collect on every call" (test/ops pin).
         $grace === 0 ? 0 : max(0, $scanInterval),
-        static function () use ($privateRoot, $now, $grace): bool {
+        static function () use ($privateRoot, $now, $grace, $budgetDeadline, $spaceCursorPath, &$complete): bool {
             $spaceIds = _stattic_tier_space_ids($privateRoot);
             if (!is_array($spaceIds)) {
+                $complete = false;
                 return false;
             }
-            $complete = true;
-            foreach ($spaceIds as $spaceId) {
-                if (!_stattic_tier_space_blob_gc($privateRoot, $spaceId, $now, $grace)['complete']) {
+            $order = _stattic_tier_resume_order($spaceIds, _stattic_tier_read_cursor($spaceCursorPath));
+            $resumeAt = null;
+            foreach ($order as $spaceId) {
+                if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+                    $resumeAt = $spaceId;
+                    $complete = false;
+                    break;
+                }
+                if (
+                    !_stattic_tier_space_blob_gc($privateRoot, $spaceId, $now, $grace, $budgetDeadline)['complete']
+                ) {
                     $complete = false;
                 }
             }
+            _stattic_tier_write_cursor($spaceCursorPath, $resumeAt);
             return $complete;
         },
         STATTIC_SWEEP_ADVANCE_ON_COMPLETE,
         $now,
         $clock,
     );
+    return $complete;
 }
 
-function _stattic_runtime_job_housekeeping_local_blob_gc(string $privateRoot, array $claims = []): void
+function _stattic_runtime_job_housekeeping_local_blob_gc(string $privateRoot, array $claims, float $deadline): bool
 {
     $lockPath = $privateRoot . '/runtime/blob-gc.lock';
     _stattic_runtime_mkdir(dirname($lockPath));
-    _stattic_lock_with(
+    // Try-once by contract. A lock held elsewhere means this pass collected
+    // nothing, so it reports a skipped step rather than a clean sweep.
+    return _stattic_lock_with(
         $lockPath,
         STATTIC_LOCK_TRY,
-        null,
-        static function () use ($privateRoot): void {
-            _stattic_tier_local_blob_gc_run(
-                $privateRoot,
-                time(),
-                _stattic_tier_gc_grace_seconds(),
-                _stattic_tier_gc_scan_interval_seconds(),
-            );
-        },
+        static fn (): bool => false,
+        static fn (): bool => _stattic_tier_local_blob_gc_run(
+            $privateRoot,
+            time(),
+            _stattic_tier_gc_grace_seconds(),
+            _stattic_tier_gc_scan_interval_seconds(),
+            null,
+            // The tick's clock, so the CAS walk stops on it rather than running
+            // every Space's prefixes to the end inside the bulk lane lock.
+            $deadline,
+        ),
     );
 }
 
@@ -649,10 +835,15 @@ function _stattic_tier_upload_blobs(string $privateRoot, string $spaceId, array 
  * Per-blob reclamation is a bucket lifecycle rule's job; the whole-space case
  * is reclaimed at delete (_stattic_tier_reclaim_space_bucket_objects).
  */
-function _stattic_runtime_job_step_tier_demote(string $privateRoot, array $job): array
+// $deadline is the tick's own: demote bounds itself by chunk, so it yields on a
+// chunk boundary and the runner's own budget check ends the tick.
+function _stattic_runtime_job_step_tier_demote(string $privateRoot, array $job, float $deadline): array
 {
     $payload = is_array($job['payload'] ?? null) ? $job['payload'] : [];
-    $spaceId = _stattic_runtime_id((string) ($payload['space_id'] ?? ''), 'space_id');
+    // The Space is the record's OWN attested resource, taken from the signed
+    // create scope. A payload field naming a Space would be the caller telling
+    // the step which tenant's blobs to move.
+    $spaceId = _stattic_runtime_id((string) ($job['space_id'] ?? ''), 'space_id');
     $prefixes = _stattic_tier_space_blob_prefixes($privateRoot, $spaceId);
     if ($prefixes === null) {
         throw new StatticJobRetry('tier_demote_scan_failed');
@@ -710,7 +901,7 @@ function _stattic_runtime_job_step_tier_demote(string $privateRoot, array $job):
         // only delivers entries carrying an event_id.
         _stattic_runtime_record_management_event(
             $privateRoot,
-            is_array($job['payload']['_claims'] ?? null) ? $job['payload']['_claims'] : [],
+            _stattic_runtime_job_event_claims($job),
             [
                 'event' => 'space.tier.demoted',
                 'space_id' => $spaceId,
@@ -803,7 +994,16 @@ function _stattic_tier_reclaim_space_bucket_objects(string $privateRoot, string 
     ]);
 }
 
-function _stattic_tier_space_disk_usage(string $spaceRoot): array
+/**
+ * A Space's whole file tree, deduped by inode.
+ *
+ * `complete` is false when $budgetDeadline stopped the walk. A partial total is
+ * not a smaller total — it is a wrong one — so the caller reports nothing rather
+ * than a usage figure that under-counts by however much budget was left.
+ *
+ * @return array{bytes:int, inodes:int, complete:bool}
+ */
+function _stattic_tier_space_disk_usage(string $spaceRoot, ?float $budgetDeadline = null): array
 {
     // Hardlink dedupe over a million-file space: int-keyed dev/ino maps, never
     // one "dev:ino" string per file. Those strings are a memory hazard at CAS
@@ -812,9 +1012,12 @@ function _stattic_tier_space_disk_usage(string $spaceRoot): array
     $bytes = 0;
     $inodes = 0;
     if (!is_dir($spaceRoot)) {
-        return ['bytes' => 0, 'inodes' => 0];
+        return ['bytes' => 0, 'inodes' => 0, 'complete' => true];
     }
     foreach (_stattic_runtime_walk_private_files($spaceRoot) as $real) {
+        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+            return ['bytes' => $bytes, 'inodes' => $inodes, 'complete' => false];
+        }
         $stat = stat($real);
         if (!is_array($stat)) {
             continue;
@@ -830,23 +1033,41 @@ function _stattic_tier_space_disk_usage(string $spaceRoot): array
         $bytes += (int) ($stat['size'] ?? 0);
         $inodes += 1;
     }
-    return ['bytes' => $bytes, 'inodes' => $inodes];
+    return ['bytes' => $bytes, 'inodes' => $inodes, 'complete' => true];
 }
 
 const STATTIC_TIER_DISK_REPORT_INTERVAL_SECONDS = 21600;
 
-function _stattic_runtime_job_housekeeping_disk_report(string $privateRoot, array $claims = []): void
+function _stattic_runtime_job_housekeeping_disk_report(string $privateRoot, array $claims, float $deadline): bool
 {
     $now = time();
-    // null = unenumerable this tick; report nothing rather than "no spaces".
-    foreach (_stattic_runtime_space_roots($privateRoot) ?? [] as $spaceRoot) {
+    // null = unenumerable this tick; report nothing rather than "no spaces",
+    // and say the step did not run rather than let an empty walk read as one.
+    $spaceRoots = _stattic_runtime_space_roots($privateRoot);
+    if ($spaceRoots === null) {
+        return false;
+    }
+    $complete = true;
+    foreach ($spaceRoots as $spaceRoot) {
+        // One Space is the bounded unit: its report is a single total, so the
+        // budget is spent between Spaces and inside one walk, never on half a
+        // figure.
+        if (microtime(true) >= $deadline) {
+            return false;
+        }
         _stattic_runtime_assert_private_path($spaceRoot);
         $spaceId = basename($spaceRoot);
         _stattic_sweep_throttled(
             $spaceRoot . '/disk-report.marker',
             STATTIC_TIER_DISK_REPORT_INTERVAL_SECONDS,
-            static function () use ($privateRoot, $spaceRoot, $spaceId, $claims, $now): void {
-                $usage = _stattic_tier_space_disk_usage($spaceRoot);
+            static function () use ($privateRoot, $spaceRoot, $spaceId, $claims, $now, $deadline, &$complete): bool {
+                $usage = _stattic_tier_space_disk_usage($spaceRoot, $deadline);
+                if (!$usage['complete']) {
+                    // An under-count is worse than no report: the control plane
+                    // would bank it as this Space's size for the whole interval.
+                    $complete = false;
+                    return false;
+                }
                 _stattic_runtime_record_management_event($privateRoot, $claims, [
                     'event' => 'space.disk.report',
                     'spaceId' => $spaceId,
@@ -854,9 +1075,13 @@ function _stattic_runtime_job_housekeeping_disk_report(string $privateRoot, arra
                     'inodes' => $usage['inodes'],
                     'generatedAt' => gmdate('c', $now),
                 ]);
+                return true;
             },
-            STATTIC_SWEEP_ADVANCE_ALWAYS,
+            // The six-hourly cadence advances only for a Space this pass really
+            // measured; a walk the budget cut short is due again next tick.
+            STATTIC_SWEEP_ADVANCE_ON_COMPLETE,
             $now,
         );
     }
+    return $complete;
 }

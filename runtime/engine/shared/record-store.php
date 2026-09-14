@@ -50,10 +50,34 @@ function _stattic_record_store_ids(array $store): array
     return $ids;
 }
 
+/**
+ * THE unavailable-aware read: absent is a CONCLUSION, everything else is a
+ * read this process could not complete. `_stattic_runtime_read_json` already
+ * separates "verifiably not there" (null) from "there and unusable" (false);
+ * a stored literal `null` or scalar is likewise a record this process cannot
+ * act on. Callers whose correctness depends on "there is provably no record"
+ * — admission, terminal-state reads — read through this instead of get().
+ *
+ * @return array{state:'absent'|'present'|'unavailable', record:?array}
+ */
+function _stattic_record_store_read(array $store, string $id): array
+{
+    $path = _stattic_record_store_path($store, $id);
+    $decoded = _stattic_runtime_read_json($path);
+    if (is_array($decoded)) {
+        return ['state' => 'present', 'record' => $decoded];
+    }
+    if ($decoded === null && !is_file($path)) {
+        return ['state' => 'absent', 'record' => null];
+    }
+    return ['state' => 'unavailable', 'record' => null];
+}
+
+// Absence and unavailability collapse here on purpose: callers that only need a
+// record when there is one. Anything that must tell them apart reads above.
 function _stattic_record_store_get(array $store, string $id): ?array
 {
-    $record = _stattic_runtime_read_json(_stattic_record_store_path($store, $id));
-    return is_array($record) ? $record : null;
+    return _stattic_record_store_read($store, $id)['record'];
 }
 
 /** @return array<string,array> readable records keyed by id. */
@@ -125,26 +149,44 @@ function _stattic_record_store_mutate(array $store, string $id, callable $critic
     );
 }
 
-function _stattic_record_store_sweep(array $store, ?int $now = null): int
+/**
+ * $budgetDeadline is the CALLER's clock, consulted between records: one record
+ * is the bounded unit of work, so a tick that runs out mid-store leaves the rest
+ * for the next pass. A truncated pass does NOT stamp the cadence marker, because
+ * the cadence is meant to say "this store was walked", and a caller tells the
+ * two apart by re-reading the clock it handed in.
+ */
+function _stattic_record_store_sweep(array $store, ?int $now = null, ?float $budgetDeadline = null): int
 {
     $retention = $store['retention'];
     if ($retention === null || !is_dir($store['root'])) {
         return 0;
     }
     $now ??= time();
-    if (
-        isset($retention['throttle_seconds'])
-        && !_stattic_marker_throttle($retention['marker'], (int) $retention['throttle_seconds'], $now)
-    ) {
+    $throttled = isset($retention['throttle_seconds']);
+    if ($throttled && !_stattic_marker_due($retention['marker'], (int) $retention['throttle_seconds'], $now)) {
         return 0;
     }
+    // Stamped up front when nothing can cut the walk short: concurrent callers
+    // racing a stale marker may both run, and this is what keeps that to one.
+    if ($throttled && $budgetDeadline === null) {
+        _stattic_marker_stamp($retention['marker'], $now);
+    }
     $swept = 0;
+    $complete = true;
     foreach (_stattic_record_store_ids($store) as $id) {
+        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+            $complete = false;
+            break;
+        }
         $expiresAt = _stattic_record_store_expires_at($store, $id, $retention);
         if ($expiresAt !== null && $expiresAt < $now) {
             _stattic_record_store_delete($store, $id);
             $swept += 1;
         }
+    }
+    if ($throttled && $budgetDeadline !== null && $complete) {
+        _stattic_marker_stamp($retention['marker'], $now);
     }
     return $swept;
 }

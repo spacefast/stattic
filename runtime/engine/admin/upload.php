@@ -365,10 +365,16 @@ function _stattic_runtime_materialize_lazy_upload_session(string $privateRoot, s
         _stattic_problem_response(409, 'version_already_committed', 'Version already exists.');
     }
     $manifest = _stattic_runtime_manifest_files($descriptor['files'] ?? []);
-    $retained = $includeRetained ? _stattic_runtime_manifest_files($descriptor['retained_files'] ?? [], true) : [];
-    $reusableVersionId = $includeRetained && is_string($descriptor['reusable_version_id'] ?? null)
+    // The base's identity travels on both lanes, so both charge the ceiling
+    // base-aware. The retention INTENT does not travel on the PUT lane, so the
+    // record below still keeps its reusable version null there; finalize's own
+    // descriptor is what binds retention to a base.
+    $declaredReusableVersionId = is_string($descriptor['reusable_version_id'] ?? null)
         ? _stattic_runtime_id($descriptor['reusable_version_id'], 'reusable_version_id')
         : null;
+    _stattic_runtime_assert_manifest_total_bytes($manifest, $privateRoot, $spaceId, $declaredReusableVersionId);
+    $retained = $includeRetained ? _stattic_runtime_manifest_files($descriptor['retained_files'] ?? [], true) : [];
+    $reusableVersionId = $includeRetained ? $declaredReusableVersionId : null;
     $record = [
         'upload_id' => $uploadId,
         'space_id' => $spaceId,
@@ -459,7 +465,15 @@ function _stattic_runtime_manifest_files(mixed $files, bool $allowInternalArtifa
         if (!is_array($file) || !is_string($file['path'] ?? null) || !isset($file['size'])) {
             _stattic_problem_response(422, 'invalid_file', 'Each version file requires path and size.');
         }
-        $entry = ['path' => _stattic_runtime_file_path($file['path']), 'size' => max(0, (int) $file['size'])];
+        // Sizes arrive as JSON integers or they do not arrive. Coercing is how
+        // a declaration gets a size past a ceiling: `(int)` turns "9e99", 1.5
+        // and any float beyond PHP_INT_MAX into some plausible number, and the
+        // `max(0, ...)` that used to stand here turned a negative declaration
+        // into a free path — one that shrinks every aggregate it is summed into.
+        if (!is_int($file['size']) || $file['size'] < 0) {
+            _stattic_problem_response(422, 'invalid_file', 'Each version file size must be a non-negative integer.', ['details' => ['path' => $file['path']]]);
+        }
+        $entry = ['path' => _stattic_runtime_file_path($file['path']), 'size' => $file['size']];
         if (!$allowInternalArtifacts || !_stattic_path_is_internal_artifact($entry['path'])) {
             _stattic_runtime_assert_static_upload_path($entry['path']);
         }
@@ -490,6 +504,75 @@ function _stattic_runtime_manifest_files(mixed $files, bool $allowInternalArtifa
         $normalized[] = $entry;
     }
     return $normalized;
+}
+
+/**
+ * The aggregate ceiling, charged against what a publish DECLARES, before a
+ * session record or a pin exists. It is the last-resort boundary for a skipped
+ * or compromised control plane, same as the scale ceilings above.
+ *
+ * Retained declarations never enter the sum: they are advisory, and the
+ * finalizer resolves each retained path to its CAS object and owns the
+ * authoritative total. But the fresh declaration alone cannot decide this
+ * either. The ceiling carries one escape — an already-oversized base may be
+ * republished as long as the publish does not grow it — so the verdict depends
+ * on what the reusable base materializes. Charging the declaration without it
+ * refused exactly the shrinking publish that escape exists for: a 3 GiB base
+ * republished as 2.5 GiB never reached the finalizer that would have staged it.
+ *
+ * So the base is consulted, the same way [`reusable_total_bytes`] in the Rust
+ * finalizer consults it — from the base's own catalog, and only for a
+ * declaration already over the ceiling, which is the only time it can matter.
+ * Recorded sizes, not CAS lengths: a catalog that overstates leaves this side
+ * looser than the finalizer, which is the safe direction. The finalizer is the
+ * authority and refuses on the real lengths; this side must never be the
+ * stricter of the two.
+ */
+function _stattic_runtime_assert_manifest_total_bytes(array $manifest, string $privateRoot, string $spaceId, ?string $reusableVersionId): void
+{
+    $total = 0;
+    foreach ($manifest as $entry) {
+        $total += $entry['size'];
+    }
+    if ($total <= STATTIC_RUNTIME_VERSION_MAX_TOTAL_BYTES) {
+        return;
+    }
+    $baseTotal = $reusableVersionId === null
+        ? null
+        : _stattic_runtime_reusable_version_total_bytes($privateRoot, $spaceId, $reusableVersionId);
+    if ($baseTotal !== null && $baseTotal > STATTIC_RUNTIME_VERSION_MAX_TOTAL_BYTES && $total <= $baseTotal) {
+        return;
+    }
+    _stattic_problem_response(
+        413,
+        'version_total_bytes_exceeded',
+        'Version manifest declares ' . $total . ' bytes, over the ' . STATTIC_RUNTIME_VERSION_MAX_TOTAL_BYTES . ' byte per-version limit.',
+        ['details' => ['total_bytes' => $total, 'limit' => STATTIC_RUNTIME_VERSION_MAX_TOTAL_BYTES, 'base_total_bytes' => $baseTotal]],
+    );
+}
+
+/**
+ * What the reusable version records that it materializes, or null when no such
+ * catalog can be read — an absent, unreadable or malformed one proves no
+ * nongrowth claim, which is the conservative answer here rather than an error:
+ * this is only consulted for a publish already destined for refusal.
+ */
+function _stattic_runtime_reusable_version_total_bytes(string $privateRoot, string $spaceId, string $reusableVersionId): ?int
+{
+    $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $reusableVersionId);
+    if ($catalog === null) {
+        return null;
+    }
+    $total = 0;
+    foreach ($catalog['paths'] as $entry) {
+        $source = is_array($entry) ? ($entry['source'] ?? null) : null;
+        $size = is_array($source) ? ($source['size'] ?? null) : null;
+        if (!is_int($size) || $size < 0) {
+            return null;
+        }
+        $total += $size;
+    }
+    return $total;
 }
 
 // Every ingest lane charges the same per-space slot, but the call point differs

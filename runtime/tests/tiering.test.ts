@@ -62,6 +62,7 @@ import { startFakeS3, type FakeS3 } from "./s3-fake.ts";
 
 type JobRecord = {
   id: string;
+  space_id: string | null;
   status: string;
   result?: unknown;
   progress?: { done: number; total: number };
@@ -173,49 +174,74 @@ async function createJob(
   spaceId: string,
   payload: Record<string, unknown>,
 ): Promise<JobRecord> {
+  // Type, key and payload are signed into the management token; the body is
+  // not a second representation the engine could execute instead.
   const created = await apiJson<{ job: JobRecord }>(
     runtime,
     "POST",
     "/__spacefast/api.php/jobs",
     "create_engine_job",
-    { space_id: spaceId },
-    { type, idempotency_key: `${type}:${spaceId}:${nextId("idem")}`, payload },
+    {
+      space_id: spaceId,
+      operation_id: `op_${type}_${spaceId}`,
+      job_scope: {
+        type,
+        idempotency_key: `${type}:${spaceId}:${nextId("idem")}`,
+        payload: JSON.stringify(payload),
+      },
+    },
+    {},
     201,
   );
   return created.job;
 }
 
-/** One bulk tick: claims a job if there is one, then runs the maintenance pass. */
-async function tick(runtime: Runtime): Promise<TickResponse> {
+/** One tick of ONE signed job: the engine has no lane-wide tick. */
+async function tickJob(runtime: Runtime, job: JobRecord, budgetMs = 50000): Promise<TickResponse> {
   return apiJson<TickResponse>(
     runtime,
     "POST",
-    "/__spacefast/api.php/jobs/tick?lane=bulk&budget_ms=50000",
+    `/__spacefast/api.php/jobs/tick?lane=bulk&budget_ms=${budgetMs}`,
     "tick_engine_jobs",
+    // The whole immutable scope admission stamped: a tick is a capability for
+    // one job, under the one operation that asked for it.
+    { job_id: job.id, space_id: job.space_id, operation_id: job.operation_id },
     {},
   );
 }
 
-async function runJob(runtime: Runtime, jobId: string, maxTicks = 30): Promise<JobRecord> {
+async function runJob(runtime: Runtime, job: JobRecord, maxTicks = 30): Promise<JobRecord> {
   for (let i = 0; i < maxTicks; i += 1) {
-    const response = await tick(runtime);
-    if (response.job?.id === jobId && ["complete", "failed"].includes(response.job.status)) {
+    const response = await tickJob(runtime, job);
+    if (response.job?.id === job.id && ["complete", "failed"].includes(response.job.status)) {
       return response.job;
     }
   }
-  throw new Error(`job ${jobId} did not finish`);
+  throw new Error(`job ${job.id} did not finish`);
+}
+
+/**
+ * The box-wide housekeeping pass: retention, blob GC, the disk report. Every
+ * hook runs in ONE stepper call, so a pass either completes in a single tick or
+ * yields with work it could not finish — `complete` when it swept, `pending`
+ * when a hook was skipped or threw.
+ */
+async function maintenancePass(runtime: Runtime, spaceId: string): Promise<JobRecord> {
+  const job = await createJob(runtime, "maintenance_tick", spaceId, {});
+  const response = await tickJob(runtime, job);
+  if (response.job?.id !== job.id) {
+    throw new Error(`maintenance pass ${job.id} was not the job the tick reported`);
+  }
+  return response.job;
 }
 
 /**
  * The one demote operation (contracts §10). `shas` absent means "release this
- * space's cold bytes"; a list targets exactly those blobs.
+ * space's cold bytes"; a list targets exactly those blobs. The Space itself is
+ * the job record's attested resource, never a payload field.
  */
 async function demote(runtime: Runtime, spaceId: string, shas?: string[]): Promise<JobRecord> {
-  const job = await createJob(runtime, "tier_demote", spaceId, {
-    space_id: spaceId,
-    ...(shas ? { shas } : {}),
-  });
-  return runJob(runtime, job.id);
+  return runJob(runtime, await createJob(runtime, "tier_demote", spaceId, shas ? { shas } : {}));
 }
 
 async function deployFixture(
@@ -362,22 +388,16 @@ test("a demote larger than one chunk moves at most 200 blobs per step, persists 
   const before = casBlobs(rt, spaceId).length;
   expect(before).toBeGreaterThan(200);
 
-  const job = await createJob(rt, "tier_demote", spaceId, { space_id: spaceId });
+  const job = await createJob(rt, "tier_demote", spaceId, {});
   // budget_ms=0: the runner's deadline is already past after the first step,
   // so this tick is exactly one stepper invocation.
-  const one = await apiJson<TickResponse>(
-    rt,
-    "POST",
-    "/__spacefast/api.php/jobs/tick?lane=bulk&budget_ms=0",
-    "tick_engine_jobs",
-    {},
-  );
+  const one = await tickJob(rt, job, 0);
   expect(one.job?.id).toBe(job.id);
   expect(one.job?.status).toBe("pending");
   expect(one.job?.progress).toEqual({ done: 200, total: before });
   expect(casBlobs(rt, spaceId)).toHaveLength(before - 200);
 
-  const completed = await runJob(rt, job.id);
+  const completed = await runJob(rt, job);
   expect(completed.status).toBe("complete");
   expect(completed.result).toMatchObject({ blobCount: before });
   expect(casBlobs(rt, spaceId)).toEqual([]);
@@ -508,7 +528,7 @@ test("a publish session in flight keeps its declared bytes out of the GC's reach
   expect(put.status).toBe(200);
   expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(content);
 
-  await tick(rt);
+  await maintenancePass(rt, spaceId);
 
   expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(content);
   expect(
@@ -532,7 +552,13 @@ test("the blob GC deletes nothing when a live response table cannot be read", as
 
   chmodSync(tablePath, 0o000);
   try {
-    await tick(rt);
+    // A GC that could not read the live set collected nothing, so the pass says
+    // it is unfinished and stays resumable rather than completing on a sweep it
+    // never made.
+    const blocked = await maintenancePass(rt, spaceId);
+    expect(blocked.status).toBe("pending");
+    // SAFETY: the maintenance stepper persists its pass report on every step.
+    expect((blocked.result as { complete: boolean }).complete).toBe(false);
     expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(body);
     expect(
       journalRecords(rt).some(
@@ -545,7 +571,8 @@ test("the blob GC deletes nothing when a live response table cannot be read", as
     chmodSync(tablePath, 0o644);
   }
 
-  await tick(rt);
+  const recovered = await maintenancePass(rt, spaceId);
+  expect(recovered.status).toBe("complete");
   expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(body);
 });
 
@@ -582,7 +609,7 @@ test("targeted version deletion makes its exclusive blobs collectable and leaves
     status: "deleted",
   });
 
-  await tick(rt);
+  await maintenancePass(rt, spaceId);
 
   expect(existsSync(versionRoot(rt, spaceId, versionOld))).toBe(false);
   expect(existsSync(versionRoot(rt, spaceId, versionLive))).toBe(true);

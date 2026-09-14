@@ -41,8 +41,16 @@ pub const DENIED_IPV4_NETWORKS: &[(Ipv4Addr, u8)] = &[
     (Ipv4Addr::new(192, 0, 0, 0), 24),
     // TEST-NET-1
     (Ipv4Addr::new(192, 0, 2, 0), 24),
+    // AS112-v4
+    (Ipv4Addr::new(192, 31, 196, 0), 24),
+    // AMT
+    (Ipv4Addr::new(192, 52, 193, 0), 24),
+    // deprecated 6to4 relay anycast
+    (Ipv4Addr::new(192, 88, 99, 0), 24),
     // RFC1918
     (Ipv4Addr::new(192, 168, 0, 0), 16),
+    // direct delegation AS112
+    (Ipv4Addr::new(192, 175, 48, 0), 24),
     // benchmarking
     (Ipv4Addr::new(198, 18, 0, 0), 15),
     // TEST-NET-2
@@ -58,16 +66,35 @@ pub const DENIED_IPV6_NETWORKS: &[(Ipv6Addr, u8)] = &[
     (Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0), 96),
     // IPv4-mapped, denied raw (mapped forms are unwrapped first)
     (Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0, 0), 96),
+    // deprecated IPv4-translated ::ffff:0:a.b.c.d, embeds IPv4 like the
+    // transition ranges below
+    (Ipv6Addr::new(0, 0, 0, 0, 0xffff, 0, 0, 0), 96),
     // NAT64 well-known prefix
     (Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0), 96),
+    // local-use NAT64
+    (Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0), 48),
     // discard-only
     (Ipv6Addr::new(0x100, 0, 0, 0, 0, 0, 0, 0), 64),
+    // IETF protocol assignments: Teredo, benchmarking, AMT, AS112-v6, ORCHIDv2
+    // and Drone Remote ID in one range. Teredo embeds IPv4.
+    (Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 23),
     // documentation
     (Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32),
+    // 6to4: the low 32 bits of the prefix are an IPv4 address, so 2002:7f00:1::
+    // is a route to 127.0.0.1
+    (Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16),
+    // direct delegation AS112
+    (Ipv6Addr::new(0x2620, 0x4f, 0x8000, 0, 0, 0, 0, 0), 48),
+    // documentation
+    (Ipv6Addr::new(0x3fff, 0, 0, 0, 0, 0, 0, 0), 20),
+    // SRv6 SIDs
+    (Ipv6Addr::new(0x5f00, 0, 0, 0, 0, 0, 0, 0), 16),
     // ULA incl. cloud metadata fd00:ec2::254
     (Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7),
     // link-local
     (Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
+    // deprecated site-local
+    (Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0), 10),
     // multicast
     (Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
 ];
@@ -354,10 +381,34 @@ mod tests {
                 Some("192.0.3.0"),
             ),
             (
+                "192.31.196.0",
+                "192.31.196.255",
+                Some("192.31.195.255"),
+                Some("192.31.197.0"),
+            ),
+            (
+                "192.52.193.0",
+                "192.52.193.255",
+                Some("192.52.192.255"),
+                Some("192.52.194.0"),
+            ),
+            (
+                "192.88.99.0",
+                "192.88.99.255",
+                Some("192.88.98.255"),
+                Some("192.88.100.0"),
+            ),
+            (
                 "192.168.0.0",
                 "192.168.255.255",
                 Some("192.167.255.255"),
                 Some("192.169.0.0"),
+            ),
+            (
+                "192.175.48.0",
+                "192.175.48.255",
+                Some("192.175.47.255"),
+                Some("192.175.49.0"),
             ),
             (
                 "198.18.0.0",
@@ -406,10 +457,22 @@ mod tests {
                 Some("::1:0:0:0"),
             ),
             (
+                "::ffff:0:0:0",
+                "::ffff:0:ffff:ffff",
+                Some("::fffe:ffff:ffff:ffff"),
+                Some("::ffff:1:0:0"),
+            ),
+            (
                 "64:ff9b::",
                 "64:ff9b::ffff:ffff",
                 Some("64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff"),
                 Some("64:ff9b:0:1::"),
+            ),
+            (
+                "64:ff9b:1::",
+                "64:ff9b:1:ffff:ffff:ffff:ffff:ffff",
+                Some("64:ff9b:0:ffff:ffff:ffff:ffff:ffff"),
+                Some("64:ff9b:2::"),
             ),
             (
                 "100::",
@@ -418,10 +481,40 @@ mod tests {
                 Some("100:0:0:1::"),
             ),
             (
+                "2001::",
+                "2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff",
+                Some("2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+                Some("2001:200::"),
+            ),
+            (
                 "2001:db8::",
                 "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff",
                 Some("2001:db7:ffff:ffff:ffff:ffff:ffff:ffff"),
                 Some("2001:db9::"),
+            ),
+            (
+                "2002::",
+                "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                Some("2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+                Some("2003::"),
+            ),
+            (
+                "2620:4f:8000::",
+                "2620:4f:8000:ffff:ffff:ffff:ffff:ffff",
+                Some("2620:4f:7fff:ffff:ffff:ffff:ffff:ffff"),
+                Some("2620:4f:8001::"),
+            ),
+            (
+                "3fff::",
+                "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff",
+                Some("3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+                Some("3fff:1000::"),
+            ),
+            (
+                "5f00::",
+                "5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                Some("5eff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+                Some("5f01::"),
             ),
             (
                 "fc00::",
@@ -429,16 +522,25 @@ mod tests {
                 Some("fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
                 Some("fe00::"),
             ),
+            // fe80::/10, fec0::/10 and ff00::/8 are contiguous to the top of the
+            // address space, so only the bottom edge of fe80::/10 has an
+            // allowed neighbour to assert.
             (
                 "fe80::",
                 "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
                 Some("fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
-                Some("fec0::"),
+                None,
+            ),
+            (
+                "fec0::",
+                "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                None,
+                None,
             ),
             (
                 "ff00::",
                 "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
-                Some("feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+                None,
                 None,
             ),
         ] {

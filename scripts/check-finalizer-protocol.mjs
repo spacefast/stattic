@@ -175,6 +175,10 @@ try {
       name: "STATTIC_RUNTIME_CONFIG_INJECT_SNIPPET_MAX_BYTES",
       read: (p) => p.limits.configInjectSnippetMaxBytes,
     },
+    {
+      name: "STATTIC_RUNTIME_VERSION_MAX_TOTAL_BYTES",
+      read: (p) => p.limits.versionMaxTotalBytes,
+    },
     { name: "STATTIC_RUNTIME_ZERO_BUNDLE_MAX_BYTES", read: (p) => p.limits.zeroBundleMaxBytes },
     { name: "STATTIC_RUNTIME_ZERO_BUNDLE_LIMIT", read: (p) => p.limits.zeroBundleLimit },
     { name: "STATTIC_RUNTIME_ARTIFACT_SCHEMA", read: (p) => p.responses.schema },

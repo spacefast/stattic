@@ -7,11 +7,12 @@
 // its new seam (manifest declaration, D26), and finalize consuming the
 // publish session.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { strToU8, zipSync } from "fflate";
 
+import { MAX_VERSION_TOTAL_BYTES } from "@spacefast/common/utils/publish-policy";
 import { runtimeUploadFileUrl } from "@spacefast/common/utils/runtime-upload";
 
 import {
@@ -40,6 +41,7 @@ import {
   startRuntime,
   uploadSessionBlobs,
   uploadToken,
+  versionRoot,
 } from "./harness.ts";
 
 let rt: Runtime;
@@ -957,6 +959,181 @@ test("manifest declaration is where upload path policy is enforced", async () =>
   );
   expect(conflicting.status).toBe(422);
   expect(await errorCode(conflicting)).toBe("manifest_sha_size_conflict");
+
+  // A declared size is a JSON integer or it is nothing. PHP's `(int)` would
+  // read a plausible number out of every one of these, and the `max(0, ...)`
+  // that used to follow it turned a negative declaration into a free path.
+  let bad = 0;
+  for (const size of ["9e99", 1.5, -1]) {
+    bad += 1;
+    const coerced = await api(
+      rt,
+      "POST",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions`,
+      "create_version",
+      { space_id: SPACE },
+      {
+        version_id: `ver_policy_size_${bad}`,
+        files: [{ path: "index.html", size, sha256: sha256("a") }],
+      },
+    );
+    expect([size, coerced.status]).toEqual([size, 422]);
+    expect([size, await errorCode(coerced)]).toEqual([size, "invalid_file"]);
+  }
+
+  // Every file here is individually legal; only their sum is not publishable.
+  // The runtime charges the aggregate at declaration, before a session record
+  // or a pin exists, so a skipped control plane cannot buy an unbounded tree
+  // with many small legal uploads. Exactly at the ceiling still publishes.
+  const chunk = 64 * 1024 * 1024;
+  const atCeiling = Array.from({ length: MAX_VERSION_TOTAL_BYTES / chunk }, (_, entry) => ({
+    path: `media/chunk-${entry}.bin`,
+    size: chunk,
+    sha256: sha256(`chunk-${entry}`),
+  }));
+  const admitted = await api(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions`,
+    "create_version",
+    { space_id: SPACE },
+    { version_id: "ver_policy_at_ceiling", files: atCeiling },
+  );
+  expect(admitted.status).toBe(201);
+
+  const overCeiling = await api(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions`,
+    "create_version",
+    { space_id: SPACE },
+    {
+      version_id: "ver_policy_over_ceiling",
+      files: [...atCeiling, { path: "one-byte.txt", size: 1, sha256: sha256("one-byte") }],
+    },
+  );
+  expect(overCeiling.status).toBe(413);
+  expect(await errorCode(overCeiling)).toBe("version_total_bytes_exceeded");
+
+  // The ceiling's one escape, at the seam that has to let it through: a base
+  // already over the ceiling may be republished as long as the publish does not
+  // grow it. The republish is itself an upload, so its DECLARATION is over the
+  // ceiling too — charging that declaration alone refused the only publish that
+  // can shrink the Space, and the finalizer that would have staged it was never
+  // reached. The verdict belongs to the base, so the base is read.
+  const base = versionRoot(rt, SPACE, "ver_policy_oversized_base");
+  mkdirSync(base, { recursive: true });
+  const oversizedPaths = [0, 1, 2].map((index) => ({
+    path: `media/big-${index}.bin`,
+    size: 1024 * 1024 * 1024,
+    sha256: sha256(`big-${index}`),
+  }));
+  writeFileSync(
+    path.join(base, "metadata.json"),
+    JSON.stringify({
+      spaceId: SPACE,
+      versionId: "ver_policy_oversized_base",
+      catalog: {
+        format: "spacefast.runtime.file-catalog.v1",
+        spaceId: SPACE,
+        versionId: "ver_policy_oversized_base",
+        paths: Object.fromEntries(
+          oversizedPaths.map((file) => [
+            file.path,
+            {
+              source: {
+                sha256: file.sha256,
+                size: file.size,
+                contentType: "application/octet-stream",
+              },
+              served: null,
+              public: true,
+            },
+          ]),
+        ),
+        variants: {},
+      },
+    }),
+  );
+  // 2.5 GiB declared against a 3 GiB base: over the ceiling on its own, and
+  // still a shrink.
+  const shrinking = oversizedPaths.map((file, index) => ({
+    ...file,
+    size: index === 2 ? file.size / 2 : file.size,
+    sha256: sha256(`shrunk-${index}`),
+  }));
+  const reusing = {
+    retention: "all",
+    reusable_version_id: "ver_policy_oversized_base",
+  };
+  const shrunk = await api(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions`,
+    "create_version",
+    { space_id: SPACE },
+    { version_id: "ver_policy_shrinking", files: shrinking, ...reusing },
+  );
+  expect(shrunk.status).toBe(201);
+
+  // A declaration past the base's own total is growth however oversized the
+  // base already was, and stays refused — as does one that names no base at
+  // all. What the version finally materializes is still the finalizer's to
+  // count: retained declarations never enter the sum here.
+  const grown = await api(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions`,
+    "create_version",
+    { space_id: SPACE },
+    {
+      version_id: "ver_policy_oversized_grown",
+      files: [
+        ...shrinking,
+        { path: "extra.bin", size: 1024 * 1024 * 1024, sha256: sha256("extra") },
+      ],
+      ...reusing,
+    },
+  );
+  expect(grown.status).toBe(413);
+  expect(await errorCode(grown)).toBe("version_total_bytes_exceeded");
+
+  const baseless = await api(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions`,
+    "create_version",
+    { space_id: SPACE },
+    { version_id: "ver_policy_baseless", files: shrinking },
+  );
+  expect(baseless.status).toBe(413);
+  expect(await errorCode(baseless)).toBe("version_total_bytes_exceeded");
+
+  // The other lane that charges a declaration, and the one the control plane
+  // actually uses for a small file list: a lazy session, materialized on first
+  // contact out of the descriptor its token carries. Same verdict, which is why
+  // the base's identity travels in that descriptor even though the retained
+  // list — unbounded, and unused while accepting bytes — does not.
+  const lazyUpload = "upl_policy_lazy_shrink";
+  const lazyVersion = "ver_policy_lazy_shrink";
+  const lazy = await fetch(uploadUrl(`/spaces/${SPACE}/blobs/have`), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${uploadToken(SPACE, lazyUpload, lazyVersion, {
+        session: {
+          upload_id: lazyUpload,
+          space_id: SPACE,
+          version_id: lazyVersion,
+          files: shrinking,
+          reusable_version_id: "ver_policy_oversized_base",
+        },
+      })}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ shas: shrinking.map((file) => file.sha256) }),
+  });
+  expect(lazy.status).toBe(200);
+  expect(await lazy.json()).toEqual({ missing: shrinking.map((file) => file.sha256) });
 });
 
 // URL fetch is the path-addressed remote ingest route. Unlike direct-byte path

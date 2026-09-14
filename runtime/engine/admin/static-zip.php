@@ -6,7 +6,6 @@ require_once __DIR__ . '/upload.php';
 require_once __DIR__ . '/upload-policy.php';
 
 const STATTIC_RUNTIME_STATIC_ZIP_MAX_COMPRESSED_BYTES = 134217728; // 128 MiB
-const STATTIC_RUNTIME_STATIC_ZIP_MAX_EXPANDED_BYTES = 2147483648; // 2 GiB
 const STATTIC_RUNTIME_STATIC_ZIP_MAX_COMPRESSION_RATIO = 100;
 const STATTIC_RUNTIME_STATIC_ZIP_PIN_TTL_SECONDS = 600;
 const STATTIC_RUNTIME_STATIC_ZIP_SNIFF_BYTES = 512;
@@ -98,7 +97,10 @@ function _stattic_runtime_static_zip_caps(array $claims): array
     $limits = [
         'max_files' => STATTIC_RUNTIME_MANIFEST_MAX_FILES,
         'max_file_bytes' => STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES,
-        'max_total_bytes' => STATTIC_RUNTIME_STATIC_ZIP_MAX_EXPANDED_BYTES,
+        // An archive expands into exactly one version, so its expansion ceiling
+        // IS the per-version ceiling. Generated from the protocol rather than
+        // restated, so ingest and the finalizer cannot disagree about it.
+        'max_total_bytes' => STATTIC_RUNTIME_VERSION_MAX_TOTAL_BYTES,
     ];
     if ($caps === null) {
         _stattic_problem_response(403, 'static_zip_caps_required', 'Static zip ingest requires signed publish caps.');

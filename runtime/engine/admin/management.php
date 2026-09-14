@@ -187,6 +187,9 @@ function _stattic_runtime_create_version(string $privateRoot, string $spaceId, a
     $reusableVersionId = isset($body['reusable_version_id']) && is_string($body['reusable_version_id'])
         ? _stattic_runtime_id($body['reusable_version_id'], 'reusable_version_id')
         : null;
+    // After the base is known: the ceiling's nongrowth escape is about what the
+    // reusable version materializes, not about this declaration alone.
+    _stattic_runtime_assert_manifest_total_bytes($files, $privateRoot, $spaceId, $reusableVersionId);
     $retention = _stattic_runtime_retention_mode($body['retention'] ?? null, $reusableVersionId, $retainedFiles);
     $uploadId = _stattic_runtime_new_id('upl');
     $createdAt = gmdate('c');

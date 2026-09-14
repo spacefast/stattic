@@ -120,12 +120,23 @@ function _stattic_runtime_retention_roots(string $privateRoot): array
  *
  * @return int releases reclaimed
  */
-function _stattic_runtime_reclaim_content_releases(string $privateRoot, ?int $now = null): int
-{
+function _stattic_runtime_reclaim_content_releases(
+    string $privateRoot,
+    ?int $now = null,
+    ?float $budgetDeadline = null
+): int {
     $now ??= time();
-    $deadline = $now - STATTIC_RUNTIME_CONTENT_RELEASE_RETENTION_SECONDS;
+    $staleBefore = $now - STATTIC_RUNTIME_CONTENT_RELEASE_RETENTION_SECONDS;
     $reclaimed = 0;
     foreach (glob($privateRoot . '/spaces/*/content') ?: [] as $contentRoot) {
+        // RANKING one Space is the indivisible part: its releases are ranked
+        // against each other, so stopping inside that decision would reclaim by
+        // an order the rest of the Space never saw. DELETING a release the
+        // ranking already rejected is not — that tree is unreachable, and
+        // finishing it is what used to carry the tick past its budget.
+        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+            break;
+        }
         $active = _stattic_private_tree_read_pointer($contentRoot . '/active-release', 128);
         $releases = [];
         foreach (glob($contentRoot . '/releases/*') ?: [] as $release) {
@@ -142,43 +153,86 @@ function _stattic_runtime_reclaim_content_releases(string $privateRoot, ?int $no
                 $kept += 1;
                 continue;
             }
-            if ($mtime > $deadline) {
+            if ($mtime > $staleBefore) {
                 continue;
             }
-            _stattic_runtime_rm_recursive($release);
-            $reclaimed += 1;
+            if (_stattic_runtime_rm_recursive_bounded($release, $budgetDeadline)) {
+                $reclaimed += 1;
+            } else {
+                // Its mtime is the rank AND the staleness test, so a partial
+                // delete has to keep it — otherwise the next pass ranks a
+                // half-empty tree as the newest release in the Space.
+                _stattic_reclaim_keep_resumable($release, $mtime);
+            }
+            if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+                return $reclaimed;
+            }
         }
     }
     return $reclaimed;
 }
 
-function _stattic_runtime_job_housekeeping_retention(string $privateRoot, array $claims = []): void
+/**
+ * Throws rather than half-sweep: an unenumerable space tree is a
+ * RuntimeException from _stattic_runtime_retention_stores. The glob pass not
+ * being due is a deliberate cadence, not work left behind, so that still
+ * finishes the hook.
+ *
+ * $deadline is the TICK's, and it is consulted while walking — not only before
+ * the hook starts. Deciding only at the door bounded which hooks ran, never how
+ * long one ran for: a 20 ms budget over a real staging backlog reclaimed the
+ * ENTIRE set, hundreds of milliseconds inside the bulk lane lock, and then
+ * reported the hooks behind it skipped. Every loop here stops at a bounded unit
+ * of work, and the hourly cadence marker advances only for a pass that finished,
+ * so what is left behind is the next tick's rather than an hour away.
+ */
+function _stattic_runtime_job_housekeeping_retention(string $privateRoot, array $claims, float $deadline): bool
 {
     foreach (_stattic_runtime_retention_stores($privateRoot) as $store) {
-        _stattic_record_store_sweep($store);
+        if (microtime(true) >= $deadline) {
+            return false;
+        }
+        _stattic_record_store_sweep($store, null, $deadline);
+    }
+    if (microtime(true) >= $deadline) {
+        return false;
     }
 
+    $complete = true;
     _stattic_sweep_throttled(
         $privateRoot . '/runtime/reclaim.marker',
         STATTIC_RUNTIME_RECLAIM_INTERVAL_SECONDS,
-        static function () use ($privateRoot): void {
+        static function () use ($privateRoot, $deadline, &$complete): bool {
             $reclaimed = [];
             foreach (_stattic_runtime_retention_roots($privateRoot) as [$pattern, $maxAgeSeconds]) {
-                $count = _stattic_reclaim_stale_paths($pattern, $maxAgeSeconds);
+                $count = _stattic_reclaim_stale_paths($pattern, $maxAgeSeconds, null, $deadline);
                 if ($count > 0) {
                     $reclaimed[_stattic_runtime_relative_to($privateRoot, $pattern)] = $count;
                 }
+                // Being past the deadline is what stopped the glob above, so it
+                // is also what says this pass left roots unwalked.
+                if (microtime(true) >= $deadline) {
+                    $complete = false;
+                    break;
+                }
             }
-            $releases = _stattic_runtime_reclaim_content_releases($privateRoot);
-            if ($releases > 0) {
-                $reclaimed['spaces/*/content/releases'] = $releases;
+            if ($complete) {
+                $releases = _stattic_runtime_reclaim_content_releases($privateRoot, null, $deadline);
+                if ($releases > 0) {
+                    $reclaimed['spaces/*/content/releases'] = $releases;
+                }
+                $complete = microtime(true) < $deadline;
             }
+            // Whatever this pass did reclaim is reported, finished or not.
             if ($reclaimed !== []) {
                 _stattic_runtime_append_journal($privateRoot, [
                     'event' => 'runtime_staging_reclaimed',
                     'roots' => $reclaimed,
                 ]);
             }
+            return $complete;
         },
+        STATTIC_SWEEP_ADVANCE_ON_COMPLETE,
     );
+    return $complete;
 }

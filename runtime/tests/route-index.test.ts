@@ -613,25 +613,42 @@ const SHARD_GC = shardFor(GC_HOST_1);
 const GC_HOST_2 = hostInShard("shard-gc-b", SHARD_GC);
 const GC_HOST_3 = hostInShard("shard-gc-c", SHARD_GC);
 
-async function maintenanceTick(rt: Runtime, spaceId: string, run = "1"): Promise<void> {
-  const claims = { space_id: spaceId, operation_id: "op_shard_gc" };
+async function maintenanceTick(
+  rt: Runtime,
+  spaceId: string,
+  run = "1",
+  expected = "complete",
+): Promise<void> {
   const created = await apiJson<{ job: { id: string } }>(
     rt,
     "POST",
     "/__spacefast/api.php/jobs",
     "create_engine_job",
-    claims,
-    { type: "maintenance_tick", payload: {}, idempotency_key: `idem-shard-gc-${run}` },
+    {
+      space_id: spaceId,
+      operation_id: "op_shard_gc",
+      job_scope: {
+        type: "maintenance_tick",
+        idempotency_key: `idem-shard-gc-${run}`,
+        payload: "{}",
+      },
+    },
+    {},
     201,
   );
   const ran = await apiJson<{ job: { status: string } | null }>(
     rt,
     "POST",
-    `/__spacefast/api.php/jobs/tick?lane=bulk&budget_ms=5000&job_id=${created.job.id}`,
+    "/__spacefast/api.php/jobs/tick?lane=bulk&budget_ms=5000",
     "tick_engine_jobs",
+    // A tick carries the operation that admitted the job: the engine refuses a
+    // token scoped to any other operation.
+    { job_id: created.job.id, space_id: spaceId, operation_id: "op_shard_gc" },
     {},
   );
-  expect(ran.job?.status).toBe("complete");
+  // `complete` is a finished pass; `pending` is one that yielded because a hook
+  // could not finish, which leaves the same job claimable under the same key.
+  expect(ran.job?.status).toBe(expected);
 }
 
 test("the maintenance tick reclaims only shards no pointer names and only past the grace window", async () => {
@@ -698,16 +715,31 @@ test("the maintenance tick reclaims only shards no pointer names and only past t
     // treats the live set as unknown and deletes nothing; reading the failed
     // read as "nothing is referenced" would unlink every live shard and 503 the
     // site until the next route write.
+    //
+    // Skipping the unlink is only half of it. An examination the pass could not
+    // make is UNAVAILABLE, not a completed zero-work pass: reporting it complete
+    // hands the control plane a successful housekeeping receipt for work nobody
+    // did, and its retry then gets a finished job that can never perform the
+    // omitted sweep.
     chmodSync(storagePath(rt, "routes", "current.json"), 0o000);
     try {
       utimesSync(storagePath(rt, "routes", String(withinGrace)), staleAt, staleAt);
-      await maintenanceTick(rt, spaceId, "unreadable-pointer");
+      await maintenanceTick(rt, spaceId, "unreadable-pointer", "pending");
       expect(existsSync(storagePath(rt, "routes", String(withinGrace)))).toBe(true);
       for (const name of referenced) {
         expect(existsSync(storagePath(rt, "routes", name))).toBe(true);
       }
     } finally {
       chmodSync(storagePath(rt, "routes", "current.json"), 0o644);
+    }
+
+    // The SAME job, resumed under the same idempotency key once the pointer
+    // reads again: the retry is what performs the examination the incomplete
+    // pass skipped, and only now is the unreferenced shard reclaimed.
+    await maintenanceTick(rt, spaceId, "unreadable-pointer");
+    expect(existsSync(storagePath(rt, "routes", String(withinGrace)))).toBe(false);
+    for (const name of referenced) {
+      expect(existsSync(storagePath(rt, "routes", name))).toBe(true);
     }
   } finally {
     rt.stop();

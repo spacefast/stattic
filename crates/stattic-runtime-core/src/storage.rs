@@ -19,7 +19,7 @@ use crate::finalize::{
     mime_for_path, sha256, stamp_content_mtime, validate_id, validate_relative_path,
     write_generated, FileMeta, FinalizeError, Result,
 };
-use crate::protocol::{TEMPLATE_MAX_BYTES, TEMPLATE_VARIANT_FILE_LIMIT};
+use crate::protocol::{TEMPLATE_MAX_BYTES, TEMPLATE_VARIANT_FILE_LIMIT, VERSION_MAX_TOTAL_BYTES};
 
 /// Remembers the stage directories a commit already created, so staging costs
 /// one `mkdir` per directory rather than one per file.
@@ -54,12 +54,10 @@ pub fn commit_session_files(
 ) -> Result<()> {
     let blobs = blob_root(private_root, space_id);
     let files_root = stage_root.join("files");
-    let mut directories = StagedDirs::default();
 
     let reusable = session.get("reusable_version_id").and_then(Value::as_str);
     let retained = retained_files(session, space_id, private_root, reusable)?;
-    let mut planned =
-        plan_retained_files(&blobs, &files_root, &mut directories, &retained, reusable)?;
+    let mut planned = plan_retained_files(&blobs, &retained, reusable)?;
 
     let manifest = match session.get("manifest") {
         None | Some(Value::Null) => Vec::new(),
@@ -81,15 +79,91 @@ pub fn commit_session_files(
             );
         }
     };
-    planned.extend(plan_accepted_files(
-        &blobs,
-        &files_root,
-        &mut directories,
-        &manifest,
-        &accepted,
-    )?);
+    planned.extend(plan_accepted_files(&blobs, &manifest, &accepted)?);
 
-    stage_planned_files(&blobs, &files_root, &dedupe_planned(planned), files)
+    let planned = dedupe_planned(planned);
+    assert_version_total_bytes(&blobs, private_root, space_id, &planned, reusable)?;
+    // Nothing above this line has touched the filesystem. Directory creation is
+    // the first act of materialization, so it waits until the plan is whole and
+    // admitted, and it happens here rather than in the staging threads, which
+    // share no mutable state.
+    let mut directories = StagedDirs::default();
+    for plan in &planned {
+        directories.ensure(files_root.join(&plan.path).parent().unwrap_or(&files_root))?;
+    }
+    stage_planned_files(&blobs, &files_root, &planned, files)
+}
+
+/// THE aggregate byte guard, and the authoritative one: it runs before a single
+/// directory or hardlink of the version tree exists.
+///
+/// It runs on the deduplicated plan, so every path is counted once and a fresh
+/// upload that replaces a retained path is counted at its own length — the
+/// declared sizes never enter, only what the CAS objects turned out to be
+/// ([`plan_retained_files`] adopts the object's length over a stale catalog
+/// entry, and [`plan_accepted_files`] has already proven the accepted length).
+///
+/// One escape, and only one: a base version that is ALREADY over the ceiling
+/// may be republished as long as the publish does not grow it. Without that, a
+/// Space that got oversized before this guard existed could never publish
+/// again — not even the publish that shrinks it — because retention carries the
+/// oversized set forward into every successor. Growing it stays refused, and a
+/// full replacement (no reusable base) still has to fit.
+fn assert_version_total_bytes(
+    blobs: &Path,
+    private_root: &Path,
+    space_id: &str,
+    planned: &[PlannedFile<'_>],
+    reusable: Option<&str>,
+) -> Result<()> {
+    let total: u64 = planned.iter().map(|plan| plan.size).sum();
+    if total <= VERSION_MAX_TOTAL_BYTES {
+        return Ok(());
+    }
+    let base_total =
+        reusable.and_then(|reusable| reusable_total_bytes(blobs, private_root, space_id, reusable));
+    if base_total.is_some_and(|base| base > VERSION_MAX_TOTAL_BYTES && total <= base) {
+        return Ok(());
+    }
+    invalid_with_details(
+        "version_total_bytes_exceeded",
+        format!(
+            "Version materializes {total} bytes, over the {VERSION_MAX_TOTAL_BYTES} byte per-version limit."
+        ),
+        json!({
+            "totalBytes": total,
+            "limit": VERSION_MAX_TOTAL_BYTES,
+            "fileCount": planned.len(),
+            "baseTotalBytes": base_total,
+        }),
+    )
+}
+
+/// What the reusable version actually materializes, measured the same way the
+/// plan above is: the CAS object each path resolves to. A catalog that cannot
+/// be read is `None` rather than an error — this is only ever consulted on a
+/// publish already destined for refusal, and an unreadable base simply proves
+/// no nongrowth claim.
+fn reusable_total_bytes(
+    blobs: &Path,
+    private_root: &Path,
+    space_id: &str,
+    reusable: &str,
+) -> Option<u64> {
+    validate_id(reusable, "reusable_version_id").ok()?;
+    let version_root = private_root
+        .join("spaces")
+        .join(space_id)
+        .join("versions")
+        .join(reusable);
+    let catalog = read_version_catalog(&version_root).ok()??;
+    Some(
+        catalog
+            .paths
+            .values()
+            .map(|entry| cas_object_size(blobs, &entry.source.sha256).unwrap_or(entry.source.size))
+            .sum(),
+    )
 }
 
 /// One path resolved to the CAS object that carries it, and the length that
@@ -212,8 +286,6 @@ fn retained_from_catalog(
 /// Validates the retained set and resolves each path to its CAS object.
 fn plan_retained_files<'a>(
     blobs: &Path,
-    files_root: &Path,
-    directories: &mut StagedDirs,
     retained: &'a [Value],
     reusable: Option<&str>,
 ) -> Result<Vec<PlannedFile<'a>>> {
@@ -248,7 +320,6 @@ fn plan_retained_files<'a>(
                 format!("A retained CAS object is missing: {path}."),
             );
         };
-        directories.ensure(files_root.join(&path).parent().unwrap_or(files_root))?;
         planned.push(PlannedFile {
             path,
             sha,
@@ -266,8 +337,6 @@ fn plan_retained_files<'a>(
 /// `POST /spaces/<s>/blobs/have`.
 fn plan_accepted_files<'a>(
     blobs: &Path,
-    files_root: &Path,
-    directories: &mut StagedDirs,
     manifest: &'a [Value],
     accepted: &serde_json::Map<String, Value>,
 ) -> Result<Vec<PlannedFile<'a>>> {
@@ -290,7 +359,6 @@ fn plan_accepted_files<'a>(
             missing_paths.push(path);
             continue;
         }
-        directories.ensure(files_root.join(&path).parent().unwrap_or(files_root))?;
         planned.push(PlannedFile {
             path,
             sha,
@@ -610,6 +678,26 @@ mod tests {
         )
     }
 
+    /// The same, for an object too big to spend disk on: the blob is sparse, and
+    /// every length the byte accounting reads comes from `stat(2)` rather than
+    /// from its bytes. `seed` stands in for the content that would name it, so
+    /// two objects of one size are still distinct.
+    fn accept_sparse(
+        private: &Path,
+        path: &str,
+        seed: &str,
+        size: u64,
+    ) -> (Value, (String, Value)) {
+        let hash = sha256(seed.as_bytes());
+        let blob = private.join(format!("spaces/s/blobs/{}/{hash}", &hash[..2]));
+        fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        File::create(&blob).unwrap().set_len(size).unwrap();
+        (
+            json!({"path": path, "size": size, "sha256": hash}),
+            (hash, json!(size)),
+        )
+    }
+
     /// A publish session in the shape the durable session record hands over.
     fn session(manifest: Vec<Value>, accepted: Vec<(String, Value)>) -> Value {
         json!({
@@ -816,6 +904,11 @@ mod tests {
     /// staged once, from this publish's object, and no CAS object may be
     /// touched — a second placement copies through the first one's hardlink and
     /// rewrites the blob that earlier versions still serve from.
+    ///
+    /// The byte accounting reads the same deduplicated plan, so a replaced path
+    /// is charged once, at the replacement's length. `big.bin` is declared both
+    /// ways at five eighths of the ceiling here: counted once it fits, counted
+    /// twice it is over, and this publish must succeed.
     #[cfg(unix)]
     #[test]
     fn a_path_planned_both_ways_is_staged_once_from_the_accepted_bytes() {
@@ -829,16 +922,19 @@ mod tests {
         let (kept_entry, kept_accepted) = accept(&private, "other.html", b"<p>kept</p>");
         // Changed by this publish, under a new sha.
         let (new_entry, new_accepted) = accept(&private, "index.html", b"<h1>v2 changed</h1>");
+        let heavy = VERSION_MAX_TOTAL_BYTES / 8 * 5;
+        let (base_heavy, _) = accept_sparse(&private, "big.bin", "big v1", heavy);
+        let (new_heavy, new_heavy_accepted) = accept_sparse(&private, "big.bin", "big v2", heavy);
 
         let stage = private.join("spaces/s/versions/.v.rust-finalizing");
         fs::create_dir_all(stage.join("files")).unwrap();
 
         let mut record = session(
-            vec![new_entry.clone(), kept_entry.clone()],
-            vec![new_accepted, kept_accepted],
+            vec![new_entry.clone(), kept_entry.clone(), new_heavy.clone()],
+            vec![new_accepted, kept_accepted, new_heavy_accepted],
         );
         record["reusable_version_id"] = json!("prev");
-        record["retained_files"] = json!([base_entry.clone(), kept_entry.clone()]);
+        record["retained_files"] = json!([base_entry.clone(), kept_entry.clone(), base_heavy]);
 
         let mut files = BTreeMap::new();
         commit_session_files("s", &record, &private, &stage, &mut files).unwrap();
@@ -847,7 +943,11 @@ mod tests {
             let hash = entry["sha256"].as_str().unwrap().to_owned();
             private.join(format!("spaces/s/blobs/{}/{hash}", &hash[..2]))
         };
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 3);
+        assert_eq!(
+            files["big.bin"].sha256,
+            new_heavy["sha256"].as_str().unwrap()
+        );
         assert_eq!(
             files["index.html"].sha256,
             new_entry["sha256"].as_str().unwrap()
@@ -1056,6 +1156,10 @@ mod tests {
     /// stale metadata, not a user error: the CAS bytes are what the reusable
     /// version already serves. Finalize adopts the actual length and proceeds,
     /// so one stale catalog entry can never wedge every future retain.
+    ///
+    /// The byte accounting takes that same authority. The declaration here is
+    /// over the whole per-version ceiling while the object is 25 bytes, and a
+    /// guard that believed the declaration would refuse the publish outright.
     #[test]
     fn retained_finalize_adopts_the_cas_objects_actual_length() {
         let temp = tempdir().unwrap();
@@ -1072,7 +1176,11 @@ mod tests {
             "s",
             &json!({
                 "reusable_version_id": "prev",
-                "retained_files": [{"path":"index.html","size":14,"sha256":hash}],
+                "retained_files": [{
+                    "path": "index.html",
+                    "size": VERSION_MAX_TOTAL_BYTES + 1,
+                    "sha256": hash,
+                }],
             }),
             &private,
             &stage,
@@ -1086,6 +1194,136 @@ mod tests {
             fs::read(stage.join("files/index.html")).unwrap(),
             b"declared bytes but longer"
         );
+    }
+
+    /// THE aggregate ceiling, and where it has to bite: before the version tree
+    /// exists. Every file here is individually legal and the CAS holds every
+    /// byte; only their sum is not publishable. A guard that ran during staging
+    /// would leave a partial tree behind, so the proof is that the staging root
+    /// was never created at all.
+    #[test]
+    fn a_plan_over_the_ceiling_is_refused_before_anything_is_materialized() {
+        let temp = tempdir().unwrap();
+        let private = temp.path().join("storage");
+        let stage = private.join("spaces/s/versions/.v.rust-finalizing");
+        fs::create_dir_all(&stage).unwrap();
+        let half = VERSION_MAX_TOTAL_BYTES / 2;
+        let (first, first_accepted) = accept_sparse(&private, "media/one.bin", "one", half);
+        let (second, second_accepted) = accept_sparse(&private, "media/two.bin", "two", half);
+        let (last, last_accepted) = accept(&private, "index.html", b"<h1>over</h1>");
+
+        let error = commit_session_files(
+            "s",
+            &session(
+                vec![first, second, last],
+                vec![first_accepted, second_accepted, last_accepted],
+            ),
+            &private,
+            &stage,
+            &mut BTreeMap::new(),
+        )
+        .unwrap_err();
+
+        match error {
+            FinalizeError::Invalid {
+                code, ref details, ..
+            } => {
+                assert_eq!(code, "version_total_bytes_exceeded");
+                assert_eq!(
+                    details.as_ref().unwrap()["totalBytes"],
+                    json!(VERSION_MAX_TOTAL_BYTES + 13)
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        assert!(!stage.join("files").exists());
+    }
+
+    /// The one escape, and why it exists: retention carries a base version's
+    /// whole path set into its successor, so a Space that is already over the
+    /// ceiling could never publish again — not even the publish that shrinks
+    /// it. A republish that does not grow an already-oversized base is allowed;
+    /// one that adds a single byte to it is not.
+    #[test]
+    fn an_already_oversized_base_may_be_republished_but_never_grown() {
+        use crate::catalog::{
+            CatalogPath, FileCatalog, ObjectIdentity, FILE_CATALOG_FORMAT,
+            VERSION_CATALOG_METADATA_KEY,
+        };
+
+        let temp = tempdir().unwrap();
+        let private = temp.path().join("storage");
+        let stage = private.join("spaces/s/versions/.v.rust-finalizing");
+        fs::create_dir_all(stage.join("files")).unwrap();
+        // A base version published before this guard existed: two objects that
+        // together are over the ceiling.
+        let oversized = VERSION_MAX_TOTAL_BYTES / 4 * 3;
+        let (base_one, _) = accept_sparse(&private, "media/one.bin", "one", oversized);
+        let (base_two, _) = accept_sparse(&private, "media/two.bin", "two", oversized);
+        let previous = FileCatalog {
+            format: FILE_CATALOG_FORMAT.into(),
+            space_id: "s".into(),
+            version_id: "prev".into(),
+            paths: [&base_one, &base_two]
+                .into_iter()
+                .map(|entry| {
+                    (
+                        entry["path"].as_str().unwrap().to_string(),
+                        CatalogPath {
+                            source: ObjectIdentity {
+                                sha256: entry["sha256"].as_str().unwrap().into(),
+                                size: entry["size"].as_u64().unwrap(),
+                                content_type: "application/octet-stream".into(),
+                            },
+                            served: None,
+                            public: true,
+                        },
+                    )
+                })
+                .collect(),
+            variants: BTreeMap::new(),
+            serving_digest: "sha256:serving".into(),
+            template_paths: Vec::new(),
+            generated_at: "2026-09-13T00:00:00Z".into(),
+            pipeline_context_digest: None,
+        };
+        let previous_root = private.join("spaces/s/versions/prev");
+        fs::create_dir_all(&previous_root).unwrap();
+        crate::finalize::write_json(
+            &previous_root.join("metadata.json"),
+            &json!({
+                "spaceId": "s",
+                "versionId": "prev",
+                VERSION_CATALOG_METADATA_KEY: serde_json::to_value(&previous).unwrap(),
+            }),
+        )
+        .unwrap();
+        let retain_all = json!({"retention": "all", "reusable_version_id": "prev"});
+
+        let mut files = BTreeMap::new();
+        commit_session_files("s", &retain_all, &private, &stage, &mut files).unwrap();
+        assert_eq!(files.len(), 2);
+
+        // The same republish plus one more path is growth, and growth above the
+        // ceiling is refused however oversized the base already was.
+        let (extra, extra_accepted) = accept(&private, "index.html", b"<h1>grown</h1>");
+        let mut grown = session(vec![extra], vec![extra_accepted]);
+        grown["retention"] = json!("all");
+        grown["reusable_version_id"] = json!("prev");
+        let error =
+            commit_session_files("s", &grown, &private, &stage, &mut BTreeMap::new()).unwrap_err();
+        match error {
+            FinalizeError::Invalid {
+                code, ref details, ..
+            } => {
+                assert_eq!(code, "version_total_bytes_exceeded");
+                assert_eq!(
+                    details.as_ref().unwrap()["baseTotalBytes"],
+                    json!(oversized * 2)
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     /// Finalize does not re-hash an accepted blob, so the session is the

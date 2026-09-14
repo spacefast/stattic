@@ -1087,9 +1087,11 @@ try {
 }
 check($unknownLaneThrew, 'job lane: unknown type throws StatticJobFatal(unknown_job_type)');
 
-// job_create is filesystem I/O, not pure logic, but it has no HTTP surface of its
-// own (only /jobs/tick and GET /jobs/{jobId} are routes), so it is exercised here
-// against a throwaway private root rather than through an invented test-only route.
+// Admission and the transition primitive are filesystem I/O, not pure logic.
+// job-runner.test.ts owns their HTTP surface; what lives here is the state the
+// routes cannot reach — a runner holding a claim across another writer's
+// transition — exercised against a throwaway private root rather than through
+// an invented test-only route or a barrier in production code.
 function _stattic_job_runner_unit_temp_private_root(): string
 {
     // realpath() the base first: storage.php re-resolves ancestors on every write,
@@ -1123,15 +1125,23 @@ function _stattic_job_runner_unit_rm_recursive(string $path): void
 }
 
 $jobsPrivateRoot = _stattic_job_runner_unit_temp_private_root();
-$claims = ['operation_id' => 'op_test', 'space_id' => 'spc_unit', 'action' => 'create_engine_job'];
-$created = _stattic_runtime_job_create($jobsPrivateRoot, 'tier_demote', 'idem-1', ['target' => 3], $claims);
-check($created['type'] === 'tier_demote', 'job_create: stamps the requested type');
+$jobScope = [
+    'type' => 'tier_demote',
+    'idempotency_key' => 'idem-1',
+    'payload' => ['target' => 3],
+    'space_id' => 'spc_unit',
+    'operation_id' => 'op_test',
+];
+$jobBudget = static fn (): float => microtime(true) + 2.0;
+$admitted = _stattic_runtime_job_create($jobsPrivateRoot, $jobScope, $jobBudget());
+check($admitted['outcome'] === 'created', 'job_create: a new identity is admitted');
+$created = $admitted['job'];
+check($created['type'] === 'tier_demote', 'job_create: stamps the signed type');
 check($created['lane'] === 'bulk', 'job_create: lane derived from type');
 check($created['status'] === 'pending', 'job_create: starts pending');
-check($created['space_id'] === 'spc_unit', 'job_create: lifts space_id from claims onto the record');
-check($created['operation_id'] === 'op_test', 'job_create: lifts operation_id from claims onto the record');
-check($created['payload']['target'] === 3, 'job_create: keeps job-specific payload fields');
-check($created['payload']['_claims']['action'] === 'create_engine_job', 'job_create: stashes claims under payload._claims');
+check($created['space_id'] === 'spc_unit', 'job_create: takes space_id from the signed scope');
+check($created['operation_id'] === 'op_test', 'job_create: takes operation_id from the signed scope');
+check($created['payload'] === ['target' => 3], 'job_create: the record payload IS the signed payload');
 check(
     is_file(_stattic_runtime_job_path($jobsPrivateRoot, $created['id'])),
     'job_create: writes the queue record to disk'
@@ -1142,15 +1152,74 @@ $journalLines = is_file($journalPath) ? array_filter(explode("\n", (string) file
 $createdEvents = array_filter($journalLines, static fn ($line) => str_contains($line, '"job_created"'));
 check(count($createdEvents) === 1, 'job_create: journals exactly one job_created event');
 
-$again = _stattic_runtime_job_create($jobsPrivateRoot, 'tier_demote', 'idem-1', ['target' => 999], $claims);
-check($again['id'] === $created['id'], 'job_create: upserts by idempotency_key instead of duplicating');
-check($again['payload']['target'] === 3, 'job_create: upsert returns the ORIGINAL record, not a re-created one');
+$again = _stattic_runtime_job_create($jobsPrivateRoot, $jobScope, $jobBudget());
+check(
+    $again['outcome'] === 'existing' && $again['job']['id'] === $created['id'],
+    'job_create: one identity admits one job'
+);
 $queueFiles = glob(_stattic_runtime_jobs_queue_dir($jobsPrivateRoot) . '/*.json') ?: [];
-check(count($queueFiles) === 1, 'job_create: idempotency key collision creates no second file');
+check(count($queueFiles) === 1, 'job_create: a repeated identity creates no second file');
+
+$conflicting = _stattic_runtime_job_create(
+    $jobsPrivateRoot,
+    ['payload' => ['target' => 999]] + $jobScope,
+    $jobBudget()
+);
+check(
+    $conflicting['outcome'] === 'conflict' && $conflicting['job'] === null,
+    'job_create: the same key carrying different work is refused, not answered with the old job'
+);
 
 $publicResponse = _stattic_runtime_job_public_response($created);
-check(!array_key_exists('_claims', $publicResponse['payload']), 'job public response: strips payload._claims');
-check($publicResponse['payload']['target'] === 3, 'job public response: keeps non-secret payload fields');
+check(
+    !array_key_exists('attestation', $publicResponse) && !array_key_exists('generation', $publicResponse),
+    'job public response: never hands back the engine envelope or its fencing state'
+);
+check($publicResponse['payload']['target'] === 3, 'job public response: keeps the job payload');
+
+// A stale runner must never resurrect work another writer moved on. The claim
+// generation is the fence: the runner holds the generation it claimed, and
+// every write it makes afterwards is compared against it. There is no HTTP
+// surface that can hold a claim across another writer's transition, so the
+// primitive is exercised here rather than through an invented test-only route.
+$fenceRoot = _stattic_job_runner_unit_temp_private_root();
+$fenced = _stattic_runtime_job_create($fenceRoot, [
+    'type' => 'maintenance_tick',
+    'idempotency_key' => 'idem-fence',
+    'payload' => [],
+    'space_id' => 'spc_fence',
+    'operation_id' => 'op_fence',
+], $jobBudget())['job'];
+$claimed = _stattic_runtime_job_claim($fenceRoot, $fenced['id'], 'bulk', time(), $jobBudget());
+check(
+    $claimed['outcome'] === 'applied' && $claimed['record']['status'] === 'running',
+    'job claim: a pending job is claimed into running'
+);
+$runner = $claimed['record'];
+
+// Another writer takes the job terminal while that runner is mid-step.
+check(
+    _stattic_runtime_job_record_failure($fenceRoot, $runner, 'canceled', null, true, time(), $jobBudget()) === 'dead_letter',
+    'job failure: a fatal transition moves the claimed job to terminal storage'
+);
+check(
+    !is_file(_stattic_runtime_job_path($fenceRoot, $fenced['id'])),
+    'dead-letter: the queue record is unlinked'
+);
+
+$stale = $runner;
+$stale['status'] = 'complete';
+$resurrect = _stattic_runtime_job_persist($fenceRoot, $stale, $jobBudget());
+check($resurrect['outcome'] === 'conflict', 'stale runner: a write fenced on an overtaken generation is refused');
+check(
+    !is_file(_stattic_runtime_job_path($fenceRoot, $fenced['id'])),
+    'stale runner: the refused write left no resurrected queue record'
+);
+$fencedRead = _stattic_runtime_job_read($fenceRoot, $fenced['id']);
+check(
+    $fencedRead['terminal'] === true && $fencedRead['record']['status'] === 'failed',
+    'stale runner: the terminal record still stands, and is what a read returns'
+);
 
 // --- CAS install (§8) ----------------------------------------------------------------
 
@@ -1215,6 +1284,126 @@ check(
 check(
     $gcPeakDelta < 12 * 1048576,
     'blob gc at scale: the scan streams prefix directories, so peak memory stays bounded (used ' . $gcPeakDelta . ' bytes)'
+);
+
+// The same CAS under a budget that CANNOT cover it, repeated at an UNCHANGED
+// budget. A truncated pass used to persist nothing at all: no sha in it ever
+// acquired a first-seen time, so the grace period never started and three 20 ms
+// passes two logical days apart collected zero — forever, at any repetition.
+// Only a final pass with a much larger budget ever collected, which is exactly
+// the shape a test must not use to declare progress.
+//
+// Grace is 1 here, not 0, because grace 0 collects inside the first pass it
+// reaches a blob in and so never consults a mark at all.
+$gcBudgetShas = [];
+for ($p = 0; $p < 64; $p++) {
+    $gcPrefix = sprintf('%02x', $p);
+    _stattic_runtime_mkdir($gcBlobsRoot . '/' . $gcPrefix);
+    for ($j = 0; $j < 190; $j++) {
+        $gcSha = $gcPrefix . sprintf('%062x', $p * 1000 + $j);
+        touch($gcBlobsRoot . '/' . $gcPrefix . '/' . $gcSha);
+        $gcBudgetShas[$gcSha] = true;
+    }
+}
+putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS=0');
+$gcMarksPath = _stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_scale');
+$gcNow = time();
+// 5 ms against a pass measured in tens of ms: truncation is the direction a
+// loaded box makes MORE certain, never less.
+$gcBudgetSeconds = 0.005;
+$gcPasses = 0;
+$gcDeleted = 0;
+$gcFirstMarks = [];
+$gcMarksAfterSecond = [];
+$gcPeakBefore = memory_get_usage(false);
+memory_reset_peak_usage();
+while ($gcPasses < 200 && $gcBudgetShas !== []) {
+    $gcPasses += 1;
+    // Logical time advances two seconds a pass, so a mark this pass rewrote
+    // rather than preserved would be visible as a later first-seen value.
+    $gcPass = _stattic_tier_space_blob_gc(
+        $gcPrivateRoot,
+        'spc_gc_scale',
+        $gcNow + $gcPasses * 2,
+        1,
+        microtime(true) + $gcBudgetSeconds
+    );
+    $gcDeleted += $gcPass['deleted'];
+    if ($gcPasses === 1) {
+        $gcFirstMarks = _stattic_runtime_read_json($gcMarksPath);
+        $gcFirstMarks = is_array($gcFirstMarks) ? $gcFirstMarks : [];
+    }
+    if ($gcPasses === 2) {
+        $gcMarksAfterSecond = _stattic_runtime_read_json($gcMarksPath);
+        $gcMarksAfterSecond = is_array($gcMarksAfterSecond) ? $gcMarksAfterSecond : [];
+    }
+    foreach (array_keys($gcBudgetShas) as $gcSha) {
+        if (!is_file($gcBlobsRoot . '/' . substr($gcSha, 0, 2) . '/' . $gcSha)) {
+            unset($gcBudgetShas[$gcSha]);
+        }
+    }
+}
+$gcBudgetPeak = memory_get_peak_usage(false) - $gcPeakBefore;
+putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS');
+check(
+    $gcFirstMarks !== [],
+    'blob gc across ticks: a pass the budget truncated still persists what it observed, so a grace clock starts'
+);
+$gcMarksPreserved = true;
+foreach ($gcFirstMarks as $gcSha => $gcSeen) {
+    if (array_key_exists($gcSha, $gcMarksAfterSecond) && $gcMarksAfterSecond[$gcSha] !== $gcSeen) {
+        $gcMarksPreserved = false;
+    }
+}
+check(
+    $gcMarksPreserved,
+    'blob gc across ticks: the second pass never republishes a first-seen time the first pass recorded'
+);
+check(
+    $gcBudgetShas === [] && $gcDeleted === $gcBlobCount,
+    "blob gc across ticks: {$gcPasses} passes at one unchanged budget collect all {$gcBlobCount} blobs (deleted {$gcDeleted})"
+);
+check(
+    $gcPasses > 2,
+    'blob gc across ticks: the budget really did truncate, so this is cumulative progress and not one lucky pass'
+);
+check(
+    $gcBudgetPeak < 12 * 1048576,
+    'blob gc across ticks: carrying marks between ticks stays streamed too (used ' . $gcBudgetPeak . ' bytes)'
+);
+
+// One level up, the box-wide driver walks Spaces the same way it walks prefixes,
+// so a Space whose CAS eats the whole budget must not be the only Space this box
+// ever collects. Exactly two Spaces on the box, so the resume point is decidable.
+_stattic_job_runner_unit_rm_recursive($gcPrivateRoot . '/spaces/spc_gc_scale');
+foreach (['spc_gc_first', 'spc_gc_second'] as $gcSpace) {
+    for ($p = 0; $p < 16; $p++) {
+        $gcPrefix = sprintf('%02x', $p);
+        _stattic_runtime_mkdir($gcPrivateRoot . '/spaces/' . $gcSpace . '/blobs/' . $gcPrefix);
+        for ($j = 0; $j < 120; $j++) {
+            touch(
+                $gcPrivateRoot . '/spaces/' . $gcSpace . '/blobs/' . $gcPrefix
+                    . '/' . $gcPrefix . sprintf('%062x', $p * 1000 + $j)
+            );
+        }
+    }
+}
+$gcSpaceCursorPath = $gcPrivateRoot . '/runtime/blob-gc-cursor.json';
+_stattic_tier_local_blob_gc_run($gcPrivateRoot, time(), 1, 0, null, microtime(true) + 0.005);
+check(
+    _stattic_tier_read_cursor($gcSpaceCursorPath) === 'spc_gc_second',
+    'blob gc across ticks: a truncated box-wide pass resumes at the Space it did not reach'
+);
+$gcSecondMarks = _stattic_runtime_read_json(_stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_second'));
+check(
+    !is_array($gcSecondMarks),
+    'blob gc across ticks: the Space the pass never reached is left entirely untouched'
+);
+_stattic_tier_local_blob_gc_run($gcPrivateRoot, time() + 2, 1, 0, null, microtime(true) + 0.005);
+$gcSecondMarks = _stattic_runtime_read_json(_stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_second'));
+check(
+    is_array($gcSecondMarks) && $gcSecondMarks !== [],
+    'blob gc across ticks: the next pass at the same budget observes that Space rather than re-walking the first'
 );
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($gcPrivateRoot)));
 

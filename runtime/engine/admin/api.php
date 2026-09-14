@@ -221,7 +221,6 @@ function _stattic_runtime_admin_management_routes(): array
         ['POST', '#^/events/ack$#', 'ack_events', [], 'none', false, '_stattic_runtime_ack_callback_events'],
         ['POST', '#^/application-journal/drain$#', 'drain_application_journal', [], 'none', false, '_stattic_runtime_application_journal_drain'],
         ['POST', '#^/application-journal/complete$#', 'complete_application_journal', [], 'none', false, '_stattic_runtime_application_journal_complete'],
-        ['POST', '#^/spaces/([^/]+)/application-journal/mail$#', 'deliver_application_journal_mail', ['space_id' => 1], 'none', false, '_stattic_runtime_application_journal_mail'],
         ['POST', '#^/jobs$#', 'create_engine_job', [], 'none', false, '_stattic_runtime_jobs_create_route'],
         ['POST', '#^/jobs/tick$#', 'tick_engine_jobs', [], 'none', false, '_stattic_runtime_jobs_tick_route'],
         ['GET', '#^/jobs/([^/]+)$#', 'get_engine_job', ['job_id' => 1], 'none', false, '_stattic_runtime_jobs_get_route'],

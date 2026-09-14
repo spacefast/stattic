@@ -2456,6 +2456,63 @@ check(
 ini_set('error_log', $previousErrorLog);
 @unlink($runtimeLogPath);
 
+// --- Brand document -----------------------------------------------------------------
+
+// The compiled-in document is Spacefast's, so a site that configures nothing
+// answers exactly as it always has.
+$brandDefaults = _stattic_brand_resolve('');
+check(
+    $brandDefaults['name'] === 'Spacefast'
+        && $brandDefaults['problem_docs_base_url'] === 'https://spacefast.com/docs/errors'
+        && $brandDefaults['mail_domain'] === 'mail.spacefast.com'
+        && $brandDefaults['wordmark_url'] === '',
+    'brand: the compiled-in document is Spacefast'
+);
+check(
+    array_column(array_filter($brandDefaults['fonts'], static fn (array $font): bool => $font['preload']), 'url')
+        === ['https://wordpress.com/i/fonts/recoleta/400.woff2'],
+    'brand: only the rendered weight is preloaded'
+);
+
+$partnerBrand = _stattic_brand_resolve('{"name":"Partner Cloud","problemDocsBaseUrl":"https://partner.example/errors/","fonts":[]}');
+check(
+    $partnerBrand['name'] === 'Partner Cloud'
+        && $partnerBrand['problem_docs_base_url'] === 'https://partner.example/errors/'
+        && $partnerBrand['fonts'] === []
+        && $partnerBrand['help_url'] === $brandDefaults['help_url']
+        && $partnerBrand['mail_domain'] === 'mail.spacefast.com',
+    'brand: an override replaces only the members it names, and may empty the fonts'
+);
+check(
+    _stattic_brand_resolve('{"fonts":[{"url":"https://partner.example/f.woff2","family":"Sans","weight":"400","preload":true},{"family":"broken"}]}')['fonts']
+        === [['url' => 'https://partner.example/f.woff2', 'family' => 'Sans', 'weight' => '400', 'preload' => true]],
+    'brand: a font entry missing a member is dropped rather than emitted half-formed'
+);
+foreach (['', 'not json', '[]', 'null', '{"name":null,"url":"   ","helpUrl":""}'] as $brokenDocument) {
+    check(
+        _stattic_brand_resolve($brokenDocument) === $brandDefaults,
+        "brand: a broken or blanked document falls back instead of unbranding the pages ({$brokenDocument})"
+    );
+}
+
+// The runner mints its own problem documents, so an override has to reach the
+// subprocess — and its absence must not invent an environment entry.
+check(
+    !array_key_exists('SPACEFAST_BRAND_JSON', _stattic_zero_runner_base_env()),
+    'brand: an unconfigured site forwards no brand document to the runner'
+);
+$previousBrandDocument = getenv('SPACEFAST_BRAND_JSON');
+putenv('SPACEFAST_BRAND_JSON={"name":"Partner Cloud"}');
+check(
+    (_stattic_zero_runner_base_env()['SPACEFAST_BRAND_JSON'] ?? null) === '{"name":"Partner Cloud"}',
+    'brand: a configured document reaches the Zero runner subprocess verbatim'
+);
+if (is_string($previousBrandDocument)) {
+    putenv('SPACEFAST_BRAND_JSON=' . $previousBrandDocument);
+} else {
+    putenv('SPACEFAST_BRAND_JSON');
+}
+
 $trustedProviderEnv = _stattic_zero_runner_base_env([
     'variableValues' => ['DATABASE_URL' => 'mysql://provider.internal/app'],
     'databaseUrlSource' => 'provider',
@@ -3231,6 +3288,100 @@ check(
     'the engine-lane delete removes a whole tree through the shared walk'
 );
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($contentRetentionRoot)));
+
+// --- Mail outbox delivery accounting ------------------------------------------
+require_once __DIR__ . '/../engine/shared/mail-outbox.php';
+
+// A settle that committed credits its own bucket; one that did not — a lost or
+// expired lease, or a failed write — is counted `lost`, never as a completed
+// transition, so a pass can never report a send it did not commit.
+$mailTally = ['claimed' => 0, 'delivered' => 0, 'retried' => 0, 'dead' => 0, 'lost' => 0, 'unavailable' => false];
+_stattic_mail_outbox_tally($mailTally, 'delivered', true);
+_stattic_mail_outbox_tally($mailTally, 'retried', false);
+_stattic_mail_outbox_tally($mailTally, 'dead', false);
+check($mailTally['delivered'] === 1, 'a committed settle credits its own bucket');
+check(
+    $mailTally['retried'] === 0 && $mailTally['dead'] === 0,
+    'an uncommitted settle credits no delivery bucket'
+);
+check($mailTally['lost'] === 2, 'each uncommitted settle is counted lost');
+
+// A claim whose lease has already lapsed is never handed to wp_mail: settling it
+// would commit nothing and the row is about to be re-served, so sending would be
+// a second delivery.
+check(
+    _stattic_mail_outbox_lease_expired(['lease_expires_at' => gmdate('Y-m-d H:i:s', time() - 1)]),
+    'a lapsed lease reads as expired'
+);
+check(
+    !_stattic_mail_outbox_lease_expired(['lease_expires_at' => gmdate('Y-m-d H:i:s', time() + 120)]),
+    'a live lease does not read as expired'
+);
+check(
+    _stattic_mail_outbox_lease_expired(['lease_expires_at' => '']),
+    'an unparseable lease is treated as expired rather than sent'
+);
+
+// The scheduled drain runs where NOTHING has bound the broker's database. An
+// unbound broker resolves only the reserved `SPACEFAST_ZERO_DATABASE_URL`, so on
+// a provider box that exposes the ordinary `DB_*` tuple the drain reported
+// `unavailable` and never claimed a row — mail queued fine and then never left.
+// The drain has to run the same provider resolution the rest of the engine does.
+define('DB_HOST', '127.0.0.1');
+define('DB_NAME', 'outbox_unit_db');
+define('DB_USER', 'outbox_unit_user');
+define('DB_PASSWORD', 'outbox-unit-secret');
+
+$unboundDsn = _stattic_db_broker_dsn();
+check(
+    ($unboundDsn['code'] ?? '') === 'zero_db_url_missing',
+    'an unbound broker cannot see the provider DB_* tuple'
+);
+
+_stattic_mail_outbox_bind_provider_database();
+$boundDsn = _stattic_db_broker_dsn();
+check(
+    ($boundDsn['db'] ?? '') === 'outbox_unit_db' && ($boundDsn['user'] ?? '') === 'outbox_unit_user',
+    'the drain binds the provider DB_* credentials before claiming'
+);
+check(
+    !array_key_exists('code', $boundDsn),
+    'the bound drain resolves a connection instead of a missing-URL refusal'
+);
+
+// --- CLI private-root binding -------------------------------------------------
+// A CLI lane resolved the storage path but never BOUND it, so
+// `_stattic_config_value()` could not reach the installed `<privateRoot>/config.php`
+// — the one config source provisioning owns end to end. A scheduled send
+// therefore ignored the SPACEFAST_BRAND_JSON that web requests on the same box
+// honored, and used the default mail domain instead.
+require_once __DIR__ . '/../engine/runtime/cli-invoke.php';
+
+$cliPrivateRoot = sys_get_temp_dir() . '/sf-cli-root-' . bin2hex(random_bytes(6)) . '/storage';
+mkdir($cliPrivateRoot, 0755, true);
+file_put_contents(
+    $cliPrivateRoot . '/config.php',
+    "<?php\nreturn ['SPACEFAST_BRAND_JSON' => '{\"mailDomain\":\"mail.provider.test\"}'];\n"
+);
+
+check(
+    _stattic_access_private_root() === '',
+    'a CLI process starts with no private root bound'
+);
+check(
+    _stattic_cli_private_root('/nonexistent-engine-root', $cliPrivateRoot) === $cliPrivateRoot,
+    'an explicit --private-root is returned as the private root'
+);
+check(
+    _stattic_access_private_root() === $cliPrivateRoot,
+    'resolving a CLI private root binds it, so configuration reads can see it'
+);
+check(
+    _stattic_config_value('SPACEFAST_BRAND_JSON') === '{"mailDomain":"mail.provider.test"}',
+    'a CLI lane reads the installed engine config, including mail branding'
+);
+
+_stattic_job_runner_unit_rm_recursive(dirname($cliPrivateRoot));
 
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");

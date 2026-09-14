@@ -330,7 +330,7 @@ function _stattic_spacefast_sdk_bootstrap(
         'host' => $pageHost,
         'spaceId' => is_string($serving['space_id'] ?? null) ? $serving['space_id'] : null,
         'versionId' => is_string($serving['version_id'] ?? null) ? $serving['version_id'] : null,
-        'apiBase' => _stattic_spacefast_sdk_api_base_url($sdkConfig),
+        'apiBase' => _stattic_spacefast_sdk_api_base_url(),
         // Null while the Space is unclaimed: there is no account to continue with.
         'accountUrl' => is_array($descriptor) && is_string($descriptor['accountUrl'] ?? null)
             ? _stattic_request_scheme() . '://' . $pageHost . STATTIC_ACCESS_ACCOUNT_START_PATH
@@ -430,23 +430,24 @@ function _stattic_spacefast_sdk_placeholder_orb(array $overlay): string
         '}catch(e){}';
 }
 
-// The SDK manifest contract requires an apiBase (packages' readManifest
-// refuses a null one), so a deployment without SPACEFAST_API_BASE_URL, a
-// self-host or local harness, derives it from the Cast origin.
-function _stattic_spacefast_sdk_api_base_url(array $sdkConfig): ?string
+// The API base comes from configuration, and from nowhere else.
+//
+// This used to fall back to rewriting the relay's hostname (`cast.` -> `api.`)
+// when SPACEFAST_API_BASE_URL was absent. That guess only ever held for one
+// naming convention on one host: it silently produced a wrong-but-plausible
+// origin for any deployment whose relay is not a `cast.` sibling of its API,
+// and it tied the API's address to the relay's, which is exactly the coupling
+// the realtime transport seam exists to break. Every serving path provides the
+// value explicitly — wp.cloud sites get it from the control plane's persistent
+// data push (`syncWpCloudRuntimePersistentData`, which sets it unconditionally
+// from `env.SPACEFAST_API_URL`) — so an absent one is a misconfigured
+// deployment, and the manifest says so by omitting `apiBase` rather than
+// inventing it. `readManifest` refuses a manifest without one, so the SDK
+// stays headless instead of talking to a host nobody configured.
+function _stattic_spacefast_sdk_api_base_url(): ?string
 {
     $base = rtrim(_stattic_config_value('SPACEFAST_API_BASE_URL'), '/');
-    if ($base !== '' && filter_var($base, FILTER_VALIDATE_URL)) {
-        return $base;
-    }
-
-    $castBase = _stattic_spacefast_sdk_base_url($sdkConfig);
-    $derived = is_string($castBase)
-        ? preg_replace('~^(https?://)cast(?=\.)~i', '$1api', $castBase)
-        : null;
-    return is_string($derived) && $derived !== $castBase && filter_var($derived, FILTER_VALIDATE_URL)
-        ? rtrim($derived, '/')
-        : null;
+    return $base !== '' && filter_var($base, FILTER_VALIDATE_URL) ? $base : null;
 }
 
 function _stattic_spacefast_sdk_host_is_local(mixed $host): bool

@@ -104,8 +104,10 @@ function _stattic_page_status_reason(int $status): string
 }
 
 // `optional` never swaps mid-view: a cold visitor keeps the fallback for that
-// one view while the preload warms the shared spacefast.com cache; every later
-// page on any space hostname renders the brand fonts immediately.
+// one view while the preload warms the shared font-CDN cache; every later page
+// on any space hostname renders the brand fonts immediately. The faces come
+// from the brand document, so a host that dresses its pages in system stacks
+// declares no fonts and these emit nothing.
 function _stattic_page_font_faces(): string
 {
     static $css = null;
@@ -113,8 +115,8 @@ function _stattic_page_font_faces(): string
         return $css;
     }
     $css = '';
-    foreach (STATTIC_PLATFORM_PAGE_FONTS as $url => [$family, $weight]) {
-        $css .= '@font-face{font-family:"' . $family . '";src:url("' . $url . '") format("woff2");font-style:normal;font-weight:' . $weight . ';font-display:optional}';
+    foreach (_stattic_brand()['fonts'] as $font) {
+        $css .= '@font-face{font-family:"' . $font['family'] . '";src:url("' . $font['url'] . '") format("woff2");font-style:normal;font-weight:' . $font['weight'] . ';font-display:optional}';
     }
     return $css;
 }
@@ -129,18 +131,26 @@ function _stattic_page_font_preloads(): string
         return $html;
     }
     $html = '';
-    foreach (STATTIC_PLATFORM_PAGE_FONTS as $url => [, , $preload]) {
-        if ($preload) {
-            $html .= '<link rel="preload" href="' . $url . '" as="font" type="font/woff2" crossorigin>';
+    foreach (_stattic_brand()['fonts'] as $font) {
+        if ($font['preload']) {
+            $html .= '<link rel="preload" href="' . $font['url'] . '" as="font" type="font/woff2" crossorigin>';
         }
     }
     return $html;
 }
 
-function _stattic_spacefast_wordmark(): string
+// The compiled-in mark, drawn rather than fetched so a fault page never depends
+// on an asset load. A brand document naming a `wordmark_url` swaps in that image
+// instead; the accessible label is the product name either way.
+function _stattic_brand_wordmark(): string
 {
+    $name = _stattic_html_escape(_stattic_brand_value('name'));
+    $wordmarkUrl = _stattic_brand_value('wordmark_url');
+    if ($wordmarkUrl !== '') {
+        return '<img class="sf-wordmark" src="' . _stattic_html_escape($wordmarkUrl) . '" alt="' . $name . '">';
+    }
     $path = 'M20 15h24v7H27v7h17v20H20v-7h17v-7H20V15ZM51 15h24v18H58v16h-7V15Zm7 11h10v-4H58v4ZM83 15h24l9 34h-8l-2-8H84l-2 8h-8l9-34Zm3 19h18l-4-12H90l-4 12ZM145 22h-19v20h19v7h-26V15h26v7ZM152 15h26v7h-19v6h15v7h-15v7h19v7h-26V15ZM185 15h25v7h-18v6h15v7h-15v14h-7V15ZM215 15h24l9 34h-8l-2-8h-22l-2 8h-8l9-34Zm3 19h18l-4-12h-10l-4 12ZM250 15h24v7h-17v7h17v20h-24v-7h17v-7h-17V15ZM279 15h27v7h-10v27h-7V22h-10v-7Z';
-    return '<svg class="sf-wordmark" viewBox="0 0 326 62" role="img" aria-label="Spacefast"><rect x="14" y="12" width="306" height="48" fill="#ff4217"/><rect x="10" y="8" width="306" height="48" fill="#141419"/><path fill="#fbf8f1" d="' . $path . '"/></svg>';
+    return '<svg class="sf-wordmark" viewBox="0 0 326 62" role="img" aria-label="' . $name . '"><rect x="14" y="12" width="306" height="48" fill="#ff4217"/><rect x="10" y="8" width="306" height="48" fill="#141419"/><path fill="#fbf8f1" d="' . $path . '"/></svg>';
 }
 
 const STATTIC_PLATFORM_PAGE_COPY = [
@@ -166,7 +176,7 @@ const STATTIC_PLATFORM_PAGE_COPY = [
 function _stattic_platform_page_html(string $pageId, int $status, string $message, string $fragment = '', string $requestPath = '', string $titleOverride = ''): string
 {
     $copy = STATTIC_PLATFORM_PAGE_COPY[$pageId]
-        ?? ['Spacefast could not serve this page', $message !== '' ? trim($message) : 'Try again in a moment.'];
+        ?? [_stattic_brand_value('name') . ' could not serve this page', $message !== '' ? trim($message) : 'Try again in a moment.'];
     $title = _stattic_html_escape($titleOverride !== '' ? $titleOverride : $copy[0]);
     $description = $copy[1] === '' ? '' : '<p class="sf-copy">' . _stattic_html_escape($copy[1]) . '</p>';
     $sitePage = in_array($pageId, ['404', 'denied', 'access', 'index', 'preview', 'collab'], true);
@@ -184,11 +194,11 @@ function _stattic_platform_page_html(string $pageId, int $status, string $messag
     }
     $brand = $sitePage
         ? '<a class="sf-site-brand" href="/" aria-label="Homepage"><span aria-hidden="true"></span><b>This space</b></a>'
-        : _stattic_spacefast_wordmark();
+        : _stattic_brand_wordmark();
     $footerWordmark = $sitePage
-        ? '<span class="sf-powered" tabindex="0">' . _stattic_spacefast_wordmark() . '<span class="sf-powered-line"><a href="https://spacefast.com">Best way to share what your agent made</a></span></span>'
+        ? '<span class="sf-powered" tabindex="0">' . _stattic_brand_wordmark() . '<span class="sf-powered-line"><a href="' . _stattic_html_escape(_stattic_brand_value('url')) . '">' . _stattic_html_escape(_stattic_brand_value('tagline')) . '</a></span></span>'
         : '';
-    $footer = '<footer><div class="sf-colophon-row">' . $footerWordmark . '<a class="sf-help" href="https://spacefast.com/help">Need help?</a></div></footer>';
+    $footer = '<footer><div class="sf-colophon-row">' . $footerWordmark . '<a class="sf-help" href="' . _stattic_html_escape(_stattic_brand_value('help_url')) . '">Need help?</a></div></footer>';
     $css = <<<'CSS'
 :root{color-scheme:light dark;--bg:#f9f8f4;--fg:#1a1913;--muted:#6f6b62;--accent:#ff4217;--on-accent:#1a1913;--display:"Recoleta",Georgia,serif;--body:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Segoe UI",system-ui,Roboto,"Helvetica Neue",Arial,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace}*{box-sizing:border-box}html{min-width:320px;background:var(--bg);-webkit-font-smoothing:antialiased}body{margin:0;min-height:100vh;background:var(--bg);color:var(--fg);font:14px/1.65 var(--body)}.sf-page{min-height:100vh;display:flex;flex-direction:column;padding:clamp(22px,4vw,44px)}header{display:flex;min-height:32px;align-items:center;justify-content:center}.sf-page.plain header{justify-content:flex-start}.sf-wordmark{display:block;width:auto;height:17px}.sf-site-brand{display:inline-flex;align-items:center;gap:10px;color:var(--fg);text-decoration:none}.sf-site-brand span{width:7px;height:7px;flex:none;background:var(--accent)}.sf-site-brand b{font-size:13px;font-weight:600}main{flex:1;width:100%;max-width:620px;margin:auto;padding:clamp(34px,9vh,84px) 0;display:flex;flex-direction:column;align-items:center;text-align:center}.sf-page.plain main{max-width:680px;margin:0;padding:clamp(24px,6vh,56px) 0;align-items:flex-start;text-align:left}.sf-eyebrow{margin:0 0 16px;color:var(--muted);font:500 11px/1.5 var(--mono);letter-spacing:.12em;text-transform:uppercase}.sf-page.plain .sf-eyebrow{margin-bottom:14px}h1{max-width:20ch;margin:0 0 12px;font:400 clamp(1.9rem,5vw,2.8rem)/1.22 var(--display);letter-spacing:-.012em;text-wrap:balance}.sf-copy{max-width:52ch;margin:0;color:var(--muted);text-wrap:pretty}.sf-copy+.sf-copy{margin-top:12px}.sf-inline-path{color:var(--fg);font-family:var(--mono);font-size:.9em;overflow-wrap:anywhere}.sf-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:14px;margin-top:22px}.sf-button,.sf-access{display:inline-flex;min-height:44px;align-items:center;justify-content:center;border:0;background:var(--accent);color:var(--on-accent);padding:10px 16px;font:600 13px/1.4 var(--body);text-decoration:none;cursor:pointer}.sf-button:hover,.sf-access:hover{filter:brightness(1.06)}a:focus-visible{outline:2px solid #a93115;outline-offset:2px}footer{display:flex;flex-direction:column;align-items:center;gap:10px;padding:44px 0 26px;margin-top:auto;color:var(--muted)}.sf-page.plain footer{align-items:flex-start}.sf-colophon-row{display:flex;align-items:center;gap:20px;flex-wrap:wrap}.sf-powered{display:inline-flex;align-items:center;gap:10px;cursor:pointer;outline:none}.sf-powered .sf-wordmark{height:11px}.sf-powered-line{display:none;font-size:12px;color:var(--muted)}.sf-powered:hover .sf-powered-line,.sf-powered:focus .sf-powered-line,.sf-powered:focus-within .sf-powered-line{display:inline}.sf-powered-line a{color:var(--accent);text-decoration:underline;text-underline-offset:3px}.sf-help{font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px}.sf-help:hover{color:var(--fg)}@media(max-width:520px){.sf-page{padding:20px}.sf-button,.sf-access{min-height:48px}footer{padding-top:32px}}@media(prefers-color-scheme:dark){:root{--bg:#141313;--fg:#e9e7e2;--muted:#8f8b84}.sf-button,.sf-access{--on-accent:#141313}}@media(forced-colors:active){.sf-site-brand span{background:CanvasText}.sf-powered:focus{outline:1px solid CanvasText;outline-offset:3px}.sf-button,.sf-access{border:1px solid ButtonText}}
 CSS;

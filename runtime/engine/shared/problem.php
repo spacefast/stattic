@@ -7,12 +7,16 @@ declare(strict_types=1);
 // `requestId` is deliberately absent: the runtime mints no request ids, and a
 // reflected caller-supplied header would correlate with nothing.
 
-const STATTIC_PROBLEM_MEDIA_TYPE = 'application/problem+json';
-const STATTIC_ERROR_DOCS_BASE_URL = 'https://spacefast.com/docs/errors';
+require_once __DIR__ . '/brand.php';
 
+const STATTIC_PROBLEM_MEDIA_TYPE = 'application/problem+json';
+
+// The base is the brand document's, so a white-label host's problem documents
+// point at its own error reference. Unconfigured, that is spacefast.com's.
 function _stattic_error_docs_url(string $code): string
 {
-    return STATTIC_ERROR_DOCS_BASE_URL . '/' . rawurlencode($code);
+    $base = rtrim(_stattic_brand_value('problem_docs_base_url'), '/');
+    return $base . '/' . rawurlencode($code);
 }
 
 /** "version_not_found" → "Version not found". */

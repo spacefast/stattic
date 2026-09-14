@@ -1,11 +1,21 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use stattic_runtime_policy::brand::Brand;
 
 use crate::db::DbMetrics;
+
+/// The site's brand document, resolved once per runner process. The runner is
+/// spawned per invocation with the serving engine's environment, so this is the
+/// same document the PHP pages resolve.
+fn brand() -> &'static Brand {
+    static BRAND: OnceLock<Brand> = OnceLock::new();
+    BRAND.get_or_init(Brand::from_env)
+}
 
 thread_local! {
     static STAGE_METRICS: RefCell<RunnerStageMetrics> = RefCell::new(RunnerStageMetrics::default());
@@ -144,7 +154,7 @@ pub(crate) fn error_response(status: u16, code: &str, message: &str) -> RunnerRe
     let mut response = json_response(
         status,
         json!({
-            "type": format!("https://spacefast.com/docs/errors/{code}"),
+            "type": brand().problem_type_url(code),
             "title": title_for_code(code),
             "status": status,
             "detail": message,

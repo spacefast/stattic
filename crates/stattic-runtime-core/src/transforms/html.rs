@@ -7,20 +7,37 @@ use lol_html::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use stattic_runtime_policy::brand::Brand;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-fn badge_fragment() -> String {
+// BADGE_MARKER is a format identifier, not brand: the serving engine matches on
+// it to find the slot. Only the name and the link it wraps come from the brand
+// document.
+fn badge_fragment(brand: &Brand) -> String {
     format!(
         concat!(
             "<div data-sf=\"badge\" style=\"margin:12px 0 0;padding:0;color:#646b67;font-size:12px;",
-            "font-weight:700;text-transform:uppercase;text-align:center\">{}",
-            "<a href=\"https://spacefast.com\" rel=\"noopener\" style=\"color:inherit;text-decoration:none\">",
-            "Protected by Spacefast</a></div>"
+            "font-weight:700;text-transform:uppercase;text-align:center\">{marker}",
+            "<a href=\"{url}\" rel=\"noopener\" style=\"color:inherit;text-decoration:none\">",
+            "Protected by {name}</a></div>"
         ),
-        BADGE_MARKER
+        marker = BADGE_MARKER,
+        url = escape_html(&brand.url),
+        name = escape_html(&brand.name),
     )
+}
+
+/// The brand document is host configuration, not visitor input, but it still
+/// lands inside an attribute and a text node — an unescaped quote there would
+/// silently break the badge rather than fail loudly.
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -61,6 +78,11 @@ pub enum PageCompileInput {
         slot: AccessSlot,
         #[serde(rename = "whiteLabel")]
         white_label: bool,
+        /// The site's brand document. Absent — and any member it leaves out —
+        /// resolves to the compiled-in Spacefast values, which is what keeps
+        /// first-party badges byte-stable.
+        #[serde(default)]
+        brand: Brand,
     },
     Layout {
         html: String,
@@ -109,7 +131,8 @@ pub fn compile_page(input: PageCompileInput) -> PageCompileOutput {
             html,
             slot,
             white_label,
-        } => compile_access_page(html, slot, white_label),
+            brand,
+        } => compile_access_page(html, slot, white_label, &brand),
         PageCompileInput::Layout { html } => compile_layout_page(html),
         PageCompileInput::PagesLayout { html } => validate_pages_layout(html),
     }
@@ -132,7 +155,12 @@ pub fn validate_installed_page(
     Ok(())
 }
 
-fn compile_access_page(html: String, slot: AccessSlot, white_label: bool) -> PageCompileOutput {
+fn compile_access_page(
+    html: String,
+    slot: AccessSlot,
+    white_label: bool,
+    brand: &Brand,
+) -> PageCompileOutput {
     let file = slot.file();
     if html.len() > PAGE_MAX_BYTES {
         return page_failure(access_too_large(file, slot, false));
@@ -143,7 +171,7 @@ fn compile_access_page(html: String, slot: AccessSlot, white_label: bool) -> Pag
         Err(failure) => return page_failure(access_bake_diagnostic(file, slot, failure)),
     };
     if !white_label {
-        output = inject_badge(&output);
+        output = inject_badge(&output, brand);
     }
     if output.len() > PAGE_MAX_BYTES {
         return page_failure(access_too_large(file, slot, true));
@@ -420,9 +448,9 @@ fn marker_comment_text(marker: &str) -> &str {
         .unwrap_or(marker)
 }
 
-fn inject_badge(html: &str) -> String {
+fn inject_badge(html: &str, brand: &Brand) -> String {
     let inserted = Rc::new(Cell::new(false));
-    let fragment = Rc::new(badge_fragment());
+    let fragment = Rc::new(badge_fragment(brand));
     let rewritten = rewrite_str(
         html,
         RewriteStrSettings::new().append_element_content_handler(element!("body", {
@@ -446,18 +474,53 @@ fn inject_badge(html: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn access_slot_and_badge_are_baked() {
-        let compiled = compile_page(PageCompileInput::Access {
-            html: "<body><div data-sf='challenge'><div>old</div></div></body>".into(),
+    fn access_input(html: &str, brand: Brand) -> PageCompileInput {
+        PageCompileInput::Access {
+            html: html.into(),
             slot: AccessSlot::Challenge,
             white_label: false,
-        });
+            brand,
+        }
+    }
+
+    #[test]
+    fn access_slot_and_badge_are_baked() {
+        let compiled = compile_page(access_input(
+            "<body><div data-sf='challenge'><div>old</div></div></body>",
+            Brand::default(),
+        ));
         assert!(compiled.diagnostics.is_empty());
         let html = compiled.html.expect("access page compiles");
         assert!(html.contains("<div data-sf='challenge'><!--spacefast:slot:challenge:v1--></div>"));
-        assert!(html.contains("<!--spacefast:slot:badge:v1-->"));
+        // The compiled-in document reproduces the badge byte-for-byte.
+        assert!(html.contains(
+            "<!--spacefast:slot:badge:v1--><a href=\"https://spacefast.com\" rel=\"noopener\" \
+             style=\"color:inherit;text-decoration:none\">Protected by Spacefast</a></div>"
+        ));
         assert!(html.ends_with("</body>"));
+    }
+
+    #[test]
+    fn a_brand_document_renames_and_relinks_the_badge_without_moving_its_marker() {
+        // The marker is a format identifier the serving engine matches on, so a
+        // rebranded badge still installs; only the name and link change.
+        let input: PageCompileInput = serde_json::from_value(json!({
+            "kind": "access",
+            "html": "<body><div data-sf='challenge'>old</div></body>",
+            "slot": "challenge",
+            "whiteLabel": false,
+            "brand": {"name": "Partner Cloud", "url": "https://partner.example"},
+        }))
+        .expect("access input with a brand document");
+        let html = compile_page(input).html.expect("access page compiles");
+        assert!(html.contains(
+            "<!--spacefast:slot:badge:v1--><a href=\"https://partner.example\" rel=\"noopener\" \
+             style=\"color:inherit;text-decoration:none\">Protected by Partner Cloud</a></div>"
+        ));
+        assert_eq!(
+            validate_installed_page(&html, InstalledPageKind::Access(AccessSlot::Challenge)),
+            Ok(())
+        );
     }
 
     #[test]
@@ -483,6 +546,7 @@ mod tests {
             html: html.into(),
             slot: AccessSlot::Challenge,
             white_label: true,
+            brand: Brand::default(),
         });
         let output = output.html.expect("real slot compiles");
         assert!(

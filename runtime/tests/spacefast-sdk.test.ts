@@ -354,9 +354,76 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   ).toEqual({ ...review, spaceId: "spc_sdk" });
 });
 
-test("same-host Spacefast SDK route restores the in-page Comments module", async () => {
+// A deployment that never configured an API base is misconfigured, and the
+// manifest says so. It does NOT guess one from the relay's hostname: that
+// rewrite (`cast.` -> `api.`) held for exactly one naming convention and
+// silently produced a wrong-but-plausible origin for every other, while tying
+// the API's address to the relay's.
+test("an unconfigured API base leaves the SDK headless instead of guessing one", async () => {
   const runtime = await startRuntime({
     atomicData: { SPACEFAST_API_BASE_URL: "" },
+  });
+  runtimes.push(runtime);
+
+  const accessConfig = publicAccessConfig({ mode: "website", site_title: "Unconfigured" });
+  accessConfig.sdk = {
+    revision: "sdk-unconfigured-1",
+    // The old heuristic would have turned this into `https://api.example.test`.
+    config: { cast_api_base: "https://cast.example.test" },
+    body: "window.__unconfiguredTagLoaded=true;",
+  };
+  await deploy(runtime, {
+    spaceId: "spc_sdk_unconfigured",
+    versionId: "ver_sdk_unconfigured_1",
+    files: { "index.html": '<h1>Unconfigured</h1><script src="/__spacefast/sdk.js"></script>\n' },
+    activate: {
+      route_name: "production",
+      config: accessConfig,
+      production_hostnames: ["unconfigured-sdk.site.test"],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+
+  const response = await get(
+    runtime,
+    "unconfigured-sdk.site.test",
+    "/__spacefast/sdk.js?preview=preview-token",
+  );
+  expect(response.status).toBe(200);
+  const body = await response.text();
+  const appended: Array<{ src: string }> = [];
+  // SAFETY: the loader does `window.Spacefast = window.Spacefast || {}` and then
+  // assigns the manifest onto it, so seeding `manifest` as `unknown` lets this
+  // test hold the very object the loader mutates without asserting its shape.
+  const spacefast = { manifest: undefined as unknown };
+  Function(
+    "window",
+    "document",
+    body,
+  )(
+    { Spacefast: spacefast },
+    {
+      createElement: () => ({ async: false, dataset: {}, src: "", type: "" }),
+      head: { appendChild: (script: { src: string }) => appended.push(script) },
+    },
+  );
+
+  expect(spacefast.manifest).toMatchObject({ apiBase: null });
+  // ...and the SDK's own parser is the one that has to accept it. It refuses,
+  // so the page stays headless rather than calling an origin nobody named.
+  expect(readManifest(spacefast.manifest)).toBeNull();
+  // The preview tag loader is gated on the same value, so no script goes out to
+  // a guessed host either.
+  expect(appended).toHaveLength(0);
+});
+
+test("same-host Spacefast SDK route restores the in-page Comments module", async () => {
+  // The API base is configuration and nothing else: this deployment names one
+  // that is not the default and not a sibling of its relay's `cast.` origin,
+  // and that is exactly the origin the manifest carries.
+  const runtime = await startRuntime({
+    atomicData: { SPACEFAST_API_BASE_URL: "https://api.example.test" },
   });
   runtimes.push(runtime);
 

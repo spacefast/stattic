@@ -268,6 +268,13 @@ function _stattic_cli_receipt(array $request, int $status): never
  * The deployed layout is <siteRoot>/.stattic/storage, and the release lives at
  * <siteRoot>/.stattic/releases/<release>/engine, so the engine's own location
  * already names it and the crontab entry does not have to.
+ *
+ * Resolving it BINDS it, because every serving lane binds the private root before
+ * reading configuration and a CLI lane has the same need: `_stattic_config_value()`
+ * can only reach the installed `<privateRoot>/config.php` — the one config source
+ * provisioning owns end to end — once it is bound. Without this, a scheduled pass
+ * silently disagreed with a web request on the same box about anything supplied
+ * only through that file, mail branding included.
  */
 function _stattic_cli_private_root(string $engineRoot, string $override): string
 {
@@ -275,5 +282,6 @@ function _stattic_cli_private_root(string $engineRoot, string $override): string
     if (!is_dir($root)) {
         _stattic_cli_fail('runtime storage is not provisioned: ' . $root, STATTIC_RUNTIME_INVOKE_EXIT_UNRESOLVED);
     }
+    _stattic_access_private_root($root);
     return $root;
 }

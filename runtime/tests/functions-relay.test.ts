@@ -8,21 +8,22 @@
 // answered by the in-process MySQL broker (db-broker.php; service frames still
 // run the real `service-broker` subprocess) against a real MySQL 8.4 container.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-import type { ApplicationJournalDeliveryClaimV1 } from "@spacefast/common/contracts/application-journal";
-
 import {
   apiJson,
   deploy,
   get,
+  PHP_BINARY,
   publicAccessConfig,
   putRoute,
-  RUNTIME_HTTP_API_BASE,
   type Runtime,
+  RUNTIME_HTTP_API_BASE,
   RUNTIME_INSTANCE_ID,
   signToken,
   startRuntime,
@@ -42,6 +43,23 @@ const MYSQL_DATABASE = "fx_relay_test";
 
 let rt: Runtime;
 let mysql: MysqlContainer;
+
+/**
+ * The provider's own `DB_*` tuple, which is what a wp.cloud box actually
+ * exposes. Deliberately NOT `SPACEFAST_ZERO_DATABASE_URL`: that reserved name is
+ * the one an unbound broker can already see, so injecting it hid a drain that
+ * never resolved provider credentials at all. Supplying the tuple keeps the real
+ * credential handoff under test.
+ */
+function providerDatabaseEnv() {
+  const url = new URL(mysql.url);
+  return {
+    DB_HOST: `${url.hostname}${url.port ? `:${url.port}` : ""}`,
+    DB_NAME: decodeURIComponent(url.pathname.replace(/^\//, "")),
+    DB_USER: decodeURIComponent(url.username),
+    DB_PASSWORD: decodeURIComponent(url.password),
+  };
+}
 const connectorFrames: Array<{ authorization: string | null; path: string; body: unknown }> = [];
 const connectorServer = Bun.serve({
   hostname: "127.0.0.1",
@@ -64,36 +82,68 @@ const wpMailCapturePath = path.join(
   `stattic-relay-wp-mail-${Date.now()}-${Math.random().toString(16).slice(2)}.jsonl`,
 );
 
-function drainApplicationJournal() {
-  return apiJson<{ claims: ApplicationJournalDeliveryClaimV1[] }>(
-    rt,
-    "POST",
-    `${RUNTIME_HTTP_API_BASE}/application-journal/drain`,
-    "drain_application_journal",
-    {},
-    { sink: "control-plane:mail", limit: 10, lease_seconds: 60 },
+type MailOutboxSummary = {
+  claimed: number;
+  delivered: number;
+  retried: number;
+  dead: number;
+  lost: number;
+  unavailable: boolean;
+};
+
+/**
+ * The scheduled delivery pass, run the way a box scheduler runs it: its own OS
+ * process, no HTTP, no credential, nothing but this site's database and this
+ * site's WordPress.
+ */
+async function runMailOutboxCli(): Promise<{ exitCode: number; summary: MailOutboxSummary }> {
+  const child = spawn(
+    PHP_BINARY,
+    [
+      "-d",
+      "opcache.enable_cli=0",
+      path.join(rt.engineRoot, "entrypoints", "mail-outbox.php"),
+      `--private-root=${rt.storageRoot}`,
+    ],
+    {
+      cwd: rt.root,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        ...providerDatabaseEnv(),
+        SPACEFAST_TEST_WP_MAIL_CAPTURE: wpMailCapturePath,
+      },
+      stdio: "pipe",
+    },
   );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  child.stdin.end("");
+  const [code] = await once(child, "close");
+  // SAFETY: node's "close" event carries the exit code, null when signalled.
+  const exitCode = (code as number | null) ?? 1;
+  if (stdout.trim() === "") {
+    throw new Error(`mail-outbox.php wrote no summary (exit ${exitCode}): ${stderr}`);
+  }
+  // SAFETY: the entrypoint's only stdout is the summary object it prints.
+  return { exitCode, summary: JSON.parse(stdout.trim()) as MailOutboxSummary };
 }
 
-function deliverApplicationJournalMail(claim: ApplicationJournalDeliveryClaimV1) {
-  return apiJson<{ message_id: string }>(
-    rt,
-    "POST",
-    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE_ID}/application-journal/mail`,
-    "deliver_application_journal_mail",
-    { space_id: SPACE_ID },
-    { claim },
-  );
-}
-
-function completeApplicationJournal(receipts: unknown[]) {
-  return apiJson<{ recorded: number; stale: number }>(
-    rt,
-    "POST",
-    `${RUNTIME_HTTP_API_BASE}/application-journal/complete`,
-    "complete_application_journal",
-    {},
-    { receipts },
+/** Every message wp_mail() has been handed on this site so far. */
+function wpMailCaptures(): Array<{ to: string[]; subject: string; headers: string[] }> {
+  const lines = readFileSync(wpMailCapturePath, "utf8")
+    .split("\n")
+    .filter((line) => line.trim() !== "");
+  // SAFETY: the wp-load.php stub in beforeAll writes exactly this shape, one
+  // JSON object per line, and nothing else appends to the capture file.
+  return lines.map(
+    (line) => JSON.parse(line) as { to: string[]; subject: string; headers: string[] },
   );
 }
 
@@ -194,10 +244,7 @@ beforeAll(async () => {
     },
     phpIni: { log_errors: "1", error_log: runtimeLogPath },
     env: {
-      DB_HOST: new URL(mysql.url).host,
-      DB_NAME: MYSQL_DATABASE,
-      DB_USER: "root",
-      DB_PASSWORD: MYSQL_ROOT_PASSWORD,
+      ...providerDatabaseEnv(),
       // Management state, supplied by the control plane per space. Without it
       // the broker refuses mail rather than queueing what it cannot send.
       SPACEFAST_SERVICE_EMAIL_SENDERS: "hello@example.com",
@@ -502,33 +549,7 @@ test("a service frame naming an ungranted service is refused inside the broker",
   });
 });
 
-test("the mail journal stays absent until its first send, then delivers accepted mail through wp_mail", async () => {
-  expect(await drainApplicationJournal()).toEqual({ claims: [] });
-  expect(
-    mysql.exec(
-      "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_spacefast_email_outbox';",
-    ),
-  ).toBe("0");
-
-  mysql.exec("CREATE TABLE _spacefast_email_outbox (message_id VARCHAR(80) PRIMARY KEY);");
-  try {
-    const unavailable = await apiJson(
-      rt,
-      "POST",
-      `${RUNTIME_HTTP_API_BASE}/application-journal/drain`,
-      "drain_application_journal",
-      {},
-      { sink: "control-plane:mail", limit: 10, lease_seconds: 60 },
-      503,
-    );
-    expect(unavailable).toMatchObject({
-      code: "application_journal_unavailable",
-      details: { stage: "claim", driverCode: 1054 },
-    });
-  } finally {
-    mysql.exec("DROP TABLE _spacefast_email_outbox;");
-  }
-
+test("an accepted email commits one outbox row and the box delivers it through wp_mail", async () => {
   const token = relayToken({ capabilities: ["email.send"] });
   const message = {
     service: "email",
@@ -551,15 +572,28 @@ test("the mail journal stays absent until its first send, then delivers accepted
 
   // The assertion is that the row is in MySQL, not that the broker said so.
   // The table is created by the broker itself on first use.
-  const rows = mysql.exec("SELECT message_id, state, invocation_id FROM _spacefast_email_outbox;");
+  const rows = mysql.exec("SELECT message_id, invocation_id FROM _spacefast_email_outbox;");
   expect(rows).toContain(messageId);
-  expect(rows).toContain("queued");
   expect(rows).toContain("inv_outbox_1");
   // Recipients and body live in the payload column and nowhere else.
   expect(rows).not.toContain("someone@example.com");
 
+  // Nothing left the box to make this happen: the request that accepted the
+  // message is the one that handed it to WordPress, post-response.
+  const captured = wpMailCaptures();
+  expect(captured).toHaveLength(1);
+  expect(captured[0]?.to).toEqual(["someone@example.com"]);
+  expect(captured[0]?.headers).toContain(`Message-ID: <${messageId}@mail.spacefast.com>`);
+  expect(captured[0]?.headers).toContain("From: hello@example.com");
+  expect(
+    mysql.exec(
+      "SELECT state, attempt_count, provider_message_id, accepted_at IS NOT NULL, terminal_at IS NOT NULL FROM _spacefast_email_outbox;",
+    ),
+  ).toBe(`delivered\t1\t${messageId}\t1\t1`);
+
   // The same invocation replayed is the same message, not a second send. This
-  // is the property the deterministic id and the unique key exist for.
+  // is the property the deterministic id and the unique key exist for, and a
+  // settled row is never re-served to a later pass.
   const replay = await relay(message, token, "services", "inv_outbox_1");
   const replayed = (await replay.json()) as { ok: boolean; result?: { messageId?: string } };
   expect(replayed.result?.messageId).toBe(messageId);
@@ -573,62 +607,86 @@ test("the mail journal stays absent until its first send, then delivers accepted
   );
   expect(await changed.json()).toMatchObject({ ok: true, result: { messageId } });
   expect(mysql.exec("SELECT COUNT(*) FROM _spacefast_email_outbox;")).toContain("1");
+  expect(wpMailCaptures()).toHaveLength(1);
 
-  // Journal delivery belongs to the provider database, even when the space
-  // points its application at a different database.
-  await putRoute(rt, SPACE_ID, "production", {
-    version_id: VERSION_ID,
-    config: { variableValues: { DATABASE_URL: "mysql://tenant.invalid/application" } },
+  // And the scheduled pass agrees there is nothing left to do.
+  expect(await runMailOutboxCli()).toEqual({
+    exitCode: 0,
+    summary: { claimed: 0, delivered: 0, retried: 0, dead: 0, lost: 0, unavailable: false },
   });
-  const firstPage = await drainApplicationJournal();
-  expect(firstPage.claims).toHaveLength(1);
-  const claim = firstPage.claims[0];
-  if (!claim) throw new Error("journal claim missing");
-  expect(claim.idempotencyKey).toBe(`${claim.entry.id}:control-plane:mail`);
-  expect((await drainApplicationJournal()).claims).toEqual([]);
+  expect(wpMailCaptures()).toHaveLength(1);
+});
 
-  const stale = await completeApplicationJournal([
-    {
-      format: "spacefast.application-delivery",
-      version: 1,
-      status: "delivered",
-      fence: { ...claim.fence, leaseId: "lease_stolen" },
-      idempotencyKey: claim.idempotencyKey,
-      downstreamReceipt: "provider_stale",
-      recordedAt: new Date().toISOString(),
-    },
-  ]);
-  expect(stale).toEqual({ recorded: 0, stale: 1 });
+// The other half of the lane: a message whose own request could not ship it (a
+// PHP worker already jailed to a Space's tree cannot read wp-load.php) is
+// carried by the scheduled pass instead. Queued directly, because what is under
+// test is the pass, not how the row got there.
+test("the scheduled pass delivers a message its own request left behind", async () => {
+  const messageId = `msg_${"9".repeat(32)}`;
+  const payload = JSON.stringify({
+    from: { email: "hello@example.com" },
+    to: [{ email: "later@example.com" }],
+    subject: "Queued earlier",
+    html: "<p>Queued earlier</p>",
+    text: "Queued earlier",
+  });
+  mysql.exec(
+    `INSERT INTO _spacefast_email_outbox
+       (message_id, space_id, version_id, invocation_id, effect_index, state, payload_json,
+        attempt_count, available_at, created_at, updated_at)
+     VALUES ('${messageId}', '${SPACE_ID}', '${VERSION_ID}', 'inv_scheduled', 0, 'queued',
+             '${payload}', 0, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6));`,
+  );
+  const before = wpMailCaptures().length;
 
-  const delivered = await deliverApplicationJournalMail(claim);
-  expect(delivered).toEqual({ message_id: messageId });
-  expect(readFileSync(wpMailCapturePath, "utf8").trim().split("\n")).toHaveLength(1);
-  // The site-local acceptance marker makes a replay safe even before the
-  // control plane settles the delivery receipt.
-  expect(await deliverApplicationJournalMail(claim)).toEqual({ message_id: messageId });
-  expect(readFileSync(wpMailCapturePath, "utf8").trim().split("\n")).toHaveLength(1);
-
-  const settled = await completeApplicationJournal([
-    {
-      format: "spacefast.application-delivery",
-      version: 1,
-      status: "delivered",
-      fence: claim.fence,
-      idempotencyKey: claim.idempotencyKey,
-      downstreamReceipt: "provider_accepted",
-      recordedAt: new Date().toISOString(),
-    },
-  ]);
-  expect(settled).toEqual({ recorded: 1, stale: 0 });
+  expect(await runMailOutboxCli()).toEqual({
+    exitCode: 0,
+    summary: { claimed: 1, delivered: 1, retried: 0, dead: 0, lost: 0, unavailable: false },
+  });
+  const sent = wpMailCaptures();
+  expect(sent).toHaveLength(before + 1);
+  expect(sent.at(-1)?.to).toEqual(["later@example.com"]);
+  // An HTML body carries the type header the alternative text rides beside.
+  expect(sent.at(-1)?.headers).toContain("Content-Type: text/html; charset=UTF-8");
   expect(
     mysql.exec(
-      "SELECT state, attempt_count, provider_message_id, accepted_at IS NOT NULL, terminal_at IS NOT NULL FROM _spacefast_email_outbox;",
+      `SELECT state, attempt_count FROM _spacefast_email_outbox WHERE message_id = '${messageId}';`,
     ),
-  ).toContain("delivered");
-  await putRoute(rt, SPACE_ID, "production", {
-    version_id: VERSION_ID,
-    config: { variableValues: {} },
+  ).toBe("delivered\t1");
+
+  // Terminal, so a second pass neither re-serves it nor sends it again.
+  expect((await runMailOutboxCli()).summary.claimed).toBe(0);
+  expect(wpMailCaptures()).toHaveLength(before + 1);
+});
+
+// A message no transport could ever carry stops instead of burning twelve
+// attempts on a payload that will never become deliverable.
+test("an unaddressable message dead-letters rather than retrying forever", async () => {
+  const messageId = `msg_${"8".repeat(32)}`;
+  mysql.exec(
+    `INSERT INTO _spacefast_email_outbox
+       (message_id, space_id, version_id, invocation_id, effect_index, state, payload_json,
+        attempt_count, available_at, created_at, updated_at)
+     VALUES ('${messageId}', '${SPACE_ID}', '${VERSION_ID}', 'inv_broken', 0, 'queued',
+             '{"from":{"email":"hello@example.com"},"to":[],"subject":"No one"}',
+             0, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6));`,
+  );
+  const before = wpMailCaptures().length;
+
+  expect((await runMailOutboxCli()).summary).toEqual({
+    claimed: 1,
+    delivered: 0,
+    retried: 0,
+    dead: 1,
+    lost: 0,
+    unavailable: false,
   });
+  expect(wpMailCaptures()).toHaveLength(before);
+  expect(
+    mysql.exec(
+      `SELECT state, last_error_code, terminal_at IS NOT NULL FROM _spacefast_email_outbox WHERE message_id = '${messageId}';`,
+    ),
+  ).toBe("dead-letter\tmail_payload_invalid\t1");
 });
 
 test("mail from an address the space has not verified is refused, and no row is written", async () => {

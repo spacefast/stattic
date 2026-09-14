@@ -223,6 +223,52 @@ test("CSAM stays byte-identical to undeployed for every negotiated representatio
   );
 });
 
+// The other de-branding lane: instead of compiling a replacement artifact per
+// version, a white-label host sets ONE brand document and the built-in pages
+// follow. This is the whole config lane end to end — the engine's config value
+// reaches both the rendered page and the problem document it negotiates to.
+test("a brand document rebrands the built-in pages a version can never own", async () => {
+  const branded = await startRuntime({
+    env: {
+      SPACEFAST_BRAND_JSON: JSON.stringify({
+        name: "Partner Cloud",
+        url: "https://partner.example",
+        helpUrl: "https://partner.example/help",
+        tagline: "Ship what you made",
+        problemDocsBaseUrl: "https://partner.example/errors",
+        wordmarkUrl: "https://partner.example/logo.svg",
+        fonts: [],
+      }),
+    },
+  });
+  try {
+    // An unknown host takes the built-in undeployed page, the one response no
+    // Space can supply an artifact for — so nothing but the document can brand it.
+    const host = "pages-branded.test";
+    const page = await get(branded, host, "/", { headers: { Accept: "text/html" } });
+    expect(page.status).toBe(503);
+    const html = await page.text();
+    // The mark is the host's image, not the compiled-in Spacefast letterforms
+    // relabelled — a wordmark URL is what makes a rebrand honest.
+    expect(html).toContain(
+      '<img class="sf-wordmark" src="https://partner.example/logo.svg" alt="Partner Cloud">',
+    );
+    expect(html).not.toContain('<svg class="sf-wordmark"');
+    expect(html).toContain('href="https://partner.example/help"');
+    expect(html).not.toContain("Spacefast");
+    expect(html).not.toContain("spacefast.com");
+    // Declaring no faces downloads none: no @font-face rule, no preload link.
+    expect(html).not.toContain("@font-face");
+    expect(html).not.toContain('rel="preload"');
+
+    const problem = await get(branded, host, "/", { headers: { Accept: "application/json" } });
+    expect(problem.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
+    expect((await problem.json()).type).toBe("https://partner.example/errors/undeployed");
+  } finally {
+    branded.stop();
+  }
+});
+
 test("finalize rejects malformed page artifact keys", async () => {
   const response = await finalizeRaw(
     rt,

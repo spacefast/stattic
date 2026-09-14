@@ -1839,6 +1839,10 @@ dependencies = [
 [[package]]
 name = "stattic-runtime-policy"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "stattic-runtime-wasi"

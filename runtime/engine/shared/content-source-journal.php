@@ -10,18 +10,22 @@
  *   WordPress bootstrapped at all.
  *
  * So this file holds only what both sides must agree on — the table name, the
- * sink name and the schema — and requires nothing. The claim/complete half
- * lives beside the mail lane's in shared/application-journal.php, which owns
- * the delivery protocol.
+ * default sink name and the schema — and requires nothing. The claim/complete
+ * half lives in shared/application-journal.php, which owns the delivery
+ * protocol and the configured sink set.
  */
 declare(strict_types=1);
 
 const STATTIC_CONTENT_SOURCE_JOURNAL_TABLE = '_spacefast_content_source_journal';
 
 /**
+ * The DEFAULT sink this site serves, used when nothing configures the set
+ * (`SPACEFAST_APPLICATION_JOURNAL_SINKS`, shared/application-journal.php).
+ *
  * The TS twin is `APPLICATION_JOURNAL_CONTENT_SOURCE_SINK` in
- * packages/common/src/contracts/application-journal.ts. A drain naming any
- * other sink gets an empty page, so the two spellings must match.
+ * packages/common/src/contracts/application-journal.ts: it is the name
+ * Spacefast's own drainer sends, so on a default site the two spellings must
+ * match or the drain gets an empty page.
  */
 const STATTIC_APPLICATION_JOURNAL_CONTENT_SOURCE_SINK = 'control-plane:content-source';
 

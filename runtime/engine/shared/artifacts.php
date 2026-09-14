@@ -197,12 +197,17 @@ function _stattic_service_invocation_id(mixed $raw): string
 /**
  * The environment the platform-service broker runs with.
  *
- * Every value here is the runtime's, never the caller's. The Akismet key and
- * the Gravatar token must never exist inside tenant code. The blog URL is the
- * space's own canonical origin: Akismet partitions reputation by it, so a
- * caller that could name it could spend another space's standing. Each space is
- * its own site with its own generated config, which makes a site-level constant
- * a per-space value.
+ * Every value here is the runtime's, never the caller's, and none of it may
+ * exist inside tenant code. The blog URL is the space's own canonical origin:
+ * Akismet partitions reputation by it, so a caller that could name it could
+ * spend another space's standing. Each space is its own site with its own
+ * generated config, which makes a site-level constant a per-space value.
+ *
+ * `WPCOM_API_KEY` is the SITE's own Akismet key, provisioned by its Jetpack
+ * connection — not a platform credential lent to it. It travels under the name
+ * Akismet itself resolves rather than a Spacefast-prefixed one, because the
+ * platform brokers no third-party service key: it forwards what the site
+ * already holds, and a site holding none gets a refusal.
  *
  * The identity triple is the outbox's idempotency key. A replayed invocation
  * must arrive at the same key, or it sends the mail twice.
@@ -219,8 +224,7 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
         $env['SPACEFAST_SERVICE_CONNECTORS_VISITOR'] = json_encode($identity['visitor'] ?? null, JSON_UNESCAPED_SLASHES);
     }
     foreach ([
-        'SPACEFAST_SERVICE_AKISMET_KEY',
-        'SPACEFAST_SERVICE_GRAVATAR_KEY',
+        'WPCOM_API_KEY',
         'SPACEFAST_SERVICE_BLOG_URL',
         'SPACEFAST_SERVICE_EMAIL_SENDERS',
     ] as $name) {
@@ -242,12 +246,29 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
             $env[$name] = $value;
         }
     }
+    // Every lane that can accept a message binds the broker through here — a
+    // capsule, a Functions worker over the relay, tenant PHP — so this is where
+    // the outbox gets its post-response pass: the request that COULD have
+    // queued mail is the one that ships it. A Space with no verified sender can
+    // queue nothing and schedules nothing.
+    if (isset($env['SPACEFAST_SERVICE_EMAIL_SENDERS'])) {
+        require_once __DIR__ . '/mail-outbox.php';
+        _stattic_mail_outbox_deliver_after_response();
+    }
     return $env;
 }
 
 function _stattic_zero_runner_base_env(array $config = []): array
 {
     $env = _stattic_zero_internal_hosts_env(_stattic_config_value('SPACEFAST_API_BASE_URL'));
+    // The runner mints its own RFC 9457 problem documents, so it needs the same
+    // brand document the pages resolve. Forwarded only when this site overrides
+    // it: absent, the runner's compiled-in defaults already agree with ours.
+    require_once __DIR__ . '/brand.php';
+    $brand = _stattic_brand_config_env();
+    if ($brand !== '') {
+        $env[STATTIC_BRAND_CONFIG_KEY] = $brand;
+    }
     // DATABASE_URL travels under a reserved name with explicit provenance so
     // the runner can tell an application URL from the provider database and
     // reject ambient configuration.

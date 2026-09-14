@@ -1,6 +1,7 @@
-//! The single authority for platform-managed response headers.
+//! The shared floor for platform facts that both halves of the runtime must
+//! answer identically: managed response headers, and the [`brand`] document.
 //!
-//! Three enforcement points ask this question and must give one answer: the
+//! Three enforcement points ask the header question and must give one answer: the
 //! `_headers` compiler in `stattic-runtime-core` (which also builds for
 //! `wasm32-wasip1`), the Zero runner's response validator in
 //! `stattic-zero-runner`, and the PHP serving engine. The first two sit on
@@ -22,6 +23,12 @@
 //! --write`, then `bun --filter @spacefast/control-plane
 //! runtime:codegen-policy` — in that order, because PHP is generated from the
 //! generated TypeScript.
+//!
+//! The brand document is hand-mirrored into PHP instead
+//! (`runtime/engine/shared/brand.php`), the same convention
+//! `runtime/engine/shared/problem.php` already uses for its error-code rules.
+
+pub mod brand;
 
 /// Reserved response-header namespaces owned by the platform's own serving
 /// signature (`X-Spacefast-Runtime`, `X-Spacefast-Version`,

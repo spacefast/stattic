@@ -12,9 +12,15 @@
 //! and [`SERVICE_UPSTREAM_HOSTS`] names them so the runtime's egress allowlist
 //! can be built from that list rather than a second copy of it.
 //!
-//! Credentials arrive in the process environment under the `SPACEFAST_` prefix
-//! the execution contract reserves, so tenant variables cannot shadow them, and
-//! they never cross back into JavaScript in any form.
+//! Identity arrives in the process environment under the `SPACEFAST_` prefix the
+//! execution contract reserves, so tenant variables cannot shadow it, and it
+//! never crosses back into JavaScript in any form.
+//!
+//! The platform brokers no third-party service key. Gravatar profiles are public
+//! and are read as such. Spam checking spends the SITE's own Akismet key — the
+//! one its Jetpack connection provisions — under
+//! [`SITE_AKISMET_KEY_ENV`], the name Akismet itself resolves first. A space that
+//! has no such key gets a refusal, not a key belonging to somebody else.
 
 use std::cell::RefCell;
 use std::io::Read;
@@ -37,6 +43,18 @@ const AKISMET_BASE: &str = "https://rest.akismet.com/1.1/";
 
 /// Akismet asks integrators to identify themselves in this exact shape.
 const AKISMET_USER_AGENT: &str = "Spacefast/1.0 | Akismet/1.1";
+
+/// Where a space's Akismet key comes from: the site's own configuration, under
+/// the name Akismet resolves before anything else.
+///
+/// Akismet's `get_api_key()` reads `WPCOM_API_KEY` when it is defined and falls
+/// back to the `wordpress_api_key` option otherwise, and on a Jetpack-connected
+/// site that option is filled by an `akismet.getAPIKey` call over the site's own
+/// Jetpack connection. Both of those live above the WordPress boot line, which
+/// this runner serves below — it can reach neither an option row nor Jetpack's
+/// XML-RPC client. So it reads the one form that is site configuration rather
+/// than site state, and the platform keeps no key of its own to lend.
+const SITE_AKISMET_KEY_ENV: &str = "WPCOM_API_KEY";
 
 /// A visitor is waiting behind every one of these calls, on a PHP-FPM worker
 /// this space shares. A slow upstream must surface as a refusal quickly rather
@@ -140,7 +158,7 @@ struct ServiceFrame {
     payload: Map<String, Value>,
 }
 
-/// Per-invocation identity and credentials, read once from the environment.
+/// Per-invocation identity, read once from the environment.
 ///
 /// The blog URL is the space's own canonical origin and is supplied by the
 /// runtime, never by the caller: Akismet partitions reputation by it, so a
@@ -150,8 +168,8 @@ struct ServiceConfig {
     connectors_url: Option<String>,
     connectors_token: Option<String>,
     connectors_visitor: Option<String>,
+    /// The site's own key, not the platform's. See [`SITE_AKISMET_KEY_ENV`].
     akismet_key: Option<String>,
-    gravatar_key: Option<String>,
     blog_url: Option<String>,
     /// The addresses this space may send as, comma separated. Management state,
     /// not version content: rolling a version back must not roll back who a
@@ -167,9 +185,15 @@ struct ServiceConfig {
 
 impl ServiceConfig {
     fn from_env() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// Split from [`Self::from_env`] so which name carries which value can be
+    /// asserted without mutating the process environment out from under every
+    /// other test sharing it.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let value = |name: &str| {
-            std::env::var(name)
-                .ok()
+            lookup(name)
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         };
@@ -177,8 +201,7 @@ impl ServiceConfig {
             connectors_url: value("SPACEFAST_SERVICE_CONNECTORS_URL"),
             connectors_token: value("SPACEFAST_SERVICE_CONNECTORS_TOKEN"),
             connectors_visitor: value("SPACEFAST_SERVICE_CONNECTORS_VISITOR"),
-            akismet_key: value("SPACEFAST_SERVICE_AKISMET_KEY"),
-            gravatar_key: value("SPACEFAST_SERVICE_GRAVATAR_KEY"),
+            akismet_key: value(SITE_AKISMET_KEY_ENV),
             blog_url: value("SPACEFAST_SERVICE_BLOG_URL"),
             email_senders: value("SPACEFAST_SERVICE_EMAIL_SENDERS")
                 .map(|raw| {
@@ -247,7 +270,7 @@ fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
     let config = ServiceConfig::from_env();
     match (frame.service.as_str(), frame.operation.as_str()) {
         ("connectors", "call") => connectors_call(&config, &frame.payload, read_only),
-        ("gravatar", "profile") => gravatar_profile(&config, &frame.payload),
+        ("gravatar", "profile") => gravatar_profile(&frame.payload),
         ("spam", "check") => spam_check(&config, &frame.payload),
         ("spam", "report_spam") => spam_report(&config, &frame.payload, "submit-spam"),
         ("spam", "report_ham") => spam_report(&config, &frame.payload, "submit-ham"),
@@ -484,10 +507,13 @@ fn content_url_valid(url: &str) -> bool {
 /* Gravatar                                                                    */
 /* -------------------------------------------------------------------------- */
 
-fn gravatar_profile(
-    config: &ServiceConfig,
-    payload: &Map<String, Value>,
-) -> Result<Value, BrokerRefusal> {
+/// A Gravatar profile, read straight from Gravatar.
+///
+/// Unauthenticated on purpose: a profile is a public document, and the only
+/// credential that could go on this request would be a platform-held developer
+/// token — a key the platform brokers on a space's behalf, which is precisely
+/// what this module does not do.
+fn gravatar_profile(payload: &Map<String, Value>) -> Result<Value, BrokerRefusal> {
     let hash = required_str(payload, "hash")?;
     // The client hashes; this only proves the frame is a hash, so a malformed
     // one cannot be pasted into a URL path.
@@ -498,12 +524,9 @@ fn gravatar_profile(
         ));
     }
 
-    let mut request = agent()
+    let request = agent()
         .get(format!("{GRAVATAR_PROFILE_BASE}{hash}"))
         .header("accept", "application/json");
-    if let Some(key) = &config.gravatar_key {
-        request = request.header("authorization", &format!("Bearer {key}"));
-    }
 
     let response = match request.call() {
         Ok(response) => response,
@@ -622,7 +645,7 @@ fn akismet_call(
     let Some(key) = &config.akismet_key else {
         return Err(BrokerRefusal::new(
             "service_not_configured",
-            "Spam checking is not configured for this runtime.",
+            "This site has no Akismet key, so spam checking is unavailable. Its Jetpack connection provisions one.",
         ));
     };
     let Some(blog) = &config.blog_url else {
@@ -633,6 +656,10 @@ fn akismet_call(
     };
 
     let mut form: Vec<(String, String)> = vec![
+        // The site's own key, travelling as a request parameter against the
+        // bare API host — the same shape Akismet's own client uses, which is
+        // what keeps this reachable from a single declared upstream rather than
+        // a per-key subdomain no allowlist could name.
         ("api_key".to_string(), key.clone()),
         // Runtime-owned, never from the payload: it is the reputation
         // partition, and a caller that could set it could spend another
@@ -941,9 +968,21 @@ mod tests {
     }
 
     #[test]
-    fn spam_refuses_before_calling_when_the_runtime_has_no_key() {
-        // No AKISMET key is set in the test environment, so this proves the
-        // order: configuration is checked before any network work.
+    fn spam_spends_the_sites_own_key_and_refuses_before_calling_without_one() {
+        // The key is the site's, under the name Akismet resolves. The name the
+        // platform used to broker one under carries nothing now: a value there
+        // leaves spam unconfigured rather than lending a key to a space.
+        let brokered = ServiceConfig::from_lookup(|name| {
+            (name == "SPACEFAST_SERVICE_AKISMET_KEY").then(|| "brokered-key".to_string())
+        });
+        assert_eq!(brokered.akismet_key, None);
+        let site_owned = ServiceConfig::from_lookup(|name| {
+            (name == SITE_AKISMET_KEY_ENV).then(|| "  site-key  ".to_string())
+        });
+        assert_eq!(site_owned.akismet_key.as_deref(), Some("site-key"));
+
+        // No site key is set in the test environment, so this proves the order:
+        // configuration is checked before any network work.
         let (code, _) = refusal(&frame(
             "spam",
             "check",
@@ -1143,7 +1182,6 @@ mod tests {
             connectors_token: None,
             connectors_visitor: None,
             akismet_key: None,
-            gravatar_key: None,
             blog_url: None,
             email_senders: Vec::new(),
             space_id: String::new(),

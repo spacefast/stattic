@@ -1517,9 +1517,13 @@ test("public requests load only the modules their request class needs", async ()
     // emitter alone. Nothing else pins that: a `require_once
     // shared/bootstrap-config.php` added to health.php would keep answering 200
     // with the same body while paying a persistent-data decrypt on every poll.
+    // shared/brand.php rides problem.php (the `type` base is the brand
+    // document's) and is load-time inert: constants and function declarations,
+    // no config read until a problem document is actually built.
     expect(modulesFor("/__spacefast/health.php")).toEqual(
       [
         "entrypoints/health.php",
+        "shared/brand.php",
         "shared/context.php",
         "shared/finalizer-protocol.generated.php",
         "shared/problem.php",

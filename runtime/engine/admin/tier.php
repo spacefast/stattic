@@ -684,8 +684,10 @@ function _stattic_tier_local_blob_gc_run(
     int $grace,
     int $scanInterval,
     ?callable $clock = null,
-    ?float $budgetDeadline = null
+    ?float $budgetDeadline = null,
+    ?callable $budgetClock = null
 ): bool {
+    $budgetClock ??= static fn (): float => microtime(true);
     $marker = $privateRoot . '/runtime/blob-gc.marker';
     _stattic_runtime_assert_private_path($marker);
     _stattic_runtime_mkdir_soft(dirname($marker));
@@ -702,7 +704,7 @@ function _stattic_tier_local_blob_gc_run(
         $marker,
         // Grace zero means "collect on every call" (test/ops pin).
         $grace === 0 ? 0 : max(0, $scanInterval),
-        static function () use ($privateRoot, $now, $grace, $budgetDeadline, $spaceCursorPath, &$complete): bool {
+        static function () use ($privateRoot, $now, $grace, $budgetDeadline, $budgetClock, $spaceCursorPath, &$complete): bool {
             $spaceIds = _stattic_tier_space_ids($privateRoot);
             if (!is_array($spaceIds)) {
                 $complete = false;
@@ -711,7 +713,7 @@ function _stattic_tier_local_blob_gc_run(
             $order = _stattic_tier_resume_order($spaceIds, _stattic_tier_read_cursor($spaceCursorPath));
             $resumeAt = null;
             foreach ($order as $spaceId) {
-                if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+                if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
                     $resumeAt = $spaceId;
                     $complete = false;
                     break;

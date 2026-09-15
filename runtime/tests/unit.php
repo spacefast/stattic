@@ -1372,24 +1372,23 @@ check(
     'blob gc across ticks: carrying marks between ticks stays streamed too (used ' . $gcBudgetPeak . ' bytes)'
 );
 
-// One level up, the box-wide driver walks Spaces the same way it walks prefixes,
-// so a Space whose CAS eats the whole budget must not be the only Space this box
-// ever collects. Exactly two Spaces on the box, so the resume point is decidable.
+// Exhaust the box-wide budget after the first Space persists its observations.
+// A fixed 5 ms budget let fast CI runners reach both Spaces before it expired.
 _stattic_job_runner_unit_rm_recursive($gcPrivateRoot . '/spaces/spc_gc_scale');
 foreach (['spc_gc_first', 'spc_gc_second'] as $gcSpace) {
-    for ($p = 0; $p < 16; $p++) {
-        $gcPrefix = sprintf('%02x', $p);
-        _stattic_runtime_mkdir($gcPrivateRoot . '/spaces/' . $gcSpace . '/blobs/' . $gcPrefix);
-        for ($j = 0; $j < 120; $j++) {
-            touch(
-                $gcPrivateRoot . '/spaces/' . $gcSpace . '/blobs/' . $gcPrefix
-                    . '/' . $gcPrefix . sprintf('%062x', $p * 1000 + $j)
-            );
-        }
-    }
+    $gcPrefixRoot = $gcPrivateRoot . '/spaces/' . $gcSpace . '/blobs/00';
+    _stattic_runtime_mkdir($gcPrefixRoot);
+    touch($gcPrefixRoot . '/' . str_repeat('0', 64));
 }
 $gcSpaceCursorPath = $gcPrivateRoot . '/runtime/blob-gc-cursor.json';
-_stattic_tier_local_blob_gc_run($gcPrivateRoot, time(), 1, 0, null, microtime(true) + 0.005);
+$gcObservedMarksPath = _stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_first');
+$gcSpaceClock = static function () use (&$gcObservedMarksPath): float {
+    return is_file($gcObservedMarksPath) ? PHP_FLOAT_MAX : 0.0;
+};
+check(
+    !_stattic_tier_local_blob_gc_run($gcPrivateRoot, time(), 1, 0, null, PHP_FLOAT_MAX, $gcSpaceClock),
+    'blob gc across ticks: a budget-truncated box-wide pass reports incomplete'
+);
 check(
     _stattic_tier_read_cursor($gcSpaceCursorPath) === 'spc_gc_second',
     'blob gc across ticks: a truncated box-wide pass resumes at the Space it did not reach'
@@ -1399,7 +1398,8 @@ check(
     !is_array($gcSecondMarks),
     'blob gc across ticks: the Space the pass never reached is left entirely untouched'
 );
-_stattic_tier_local_blob_gc_run($gcPrivateRoot, time() + 2, 1, 0, null, microtime(true) + 0.005);
+$gcObservedMarksPath = _stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_second');
+_stattic_tier_local_blob_gc_run($gcPrivateRoot, time() + 2, 1, 0, null, PHP_FLOAT_MAX, $gcSpaceClock);
 $gcSecondMarks = _stattic_runtime_read_json(_stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_second'));
 check(
     is_array($gcSecondMarks) && $gcSecondMarks !== [],

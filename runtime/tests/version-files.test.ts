@@ -208,7 +208,8 @@ test("path, public_only, prefix, q and cursor bound what a reader has to hold", 
 });
 
 test("a path claim serves the view it names, as an attachment the dashboard may read", async () => {
-  const served = await getBlob(rt, HOST, pathToken("config.js", "served"));
+  // Downloads use the box hostname, which has no Space serving route.
+  const served = await getBlob(rt, "box.files.test", pathToken("config.js", "served"));
   expect(served.status).toBe(200);
   expect(await served.text()).toBe(SERVED_CONFIG);
 

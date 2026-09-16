@@ -158,7 +158,7 @@ if (($envelope['endpointId'] ?? null) === 'GET /api/spoofed-headers') {
 }
 $body = json_encode($bodyPayload, JSON_UNESCAPED_SLASHES);
 echo json_encode([
-    'status' => 201,
+    'status' => ($envelope['request']['query'] ?? '') === 'redirect=1' ? 303 : 201,
     'headers' => $headers,
     'body' => $body,
     'metrics' => [
@@ -1568,6 +1568,11 @@ test("platform-managed headers from the runner never reach the client", async ()
   expect(response.headers.get("x-stattic-internal")).toBeNull();
   expect(response.headers.get("set-cookie")).toBeNull();
   expect(response.headers.get("location")).toBeNull();
+  const redirected = await get(rt, host, "/api/spoofed-headers?redirect=1", { redirect: "manual" });
+  expect(redirected.status).toBe(303);
+  expect(redirected.headers.get("location")).toBe("/pwned");
+  expect(redirected.headers.get("set-cookie")).toBeNull();
+  expect(redirected.headers.get("x-spacefast-zero-runner-metrics")).toBeNull();
   // §16: the provider's own channel is not the tenant's to write. The runner
   // asked for `A8C-Edge-Cache: cache`; the engine is the only writer of that
   // header and its own no-store verdict opts this response out instead.

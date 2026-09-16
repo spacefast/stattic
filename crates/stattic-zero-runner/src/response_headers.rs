@@ -27,6 +27,7 @@ pub use stattic_runtime_policy::platform_managed_response_header;
 
 pub fn validate_response_headers(
     headers: BTreeMap<String, String>,
+    status: u16,
 ) -> Result<BTreeMap<String, String>, ResponseHeaderPolicyError> {
     if headers.len() > RESPONSE_HEADER_MAX_COUNT {
         return Err(invalid("Zero response contains too many headers."));
@@ -50,7 +51,10 @@ pub fn validate_response_headers(
         {
             return Err(invalid("Zero response contains an invalid header."));
         }
-        if platform_managed_response_header(&name) {
+        // Static header rules cannot redirect. An endpoint response can, through
+        // the SDK redirect helper and an explicit HTTP redirect status.
+        let redirect_location = name == "location" && matches!(status, 301 | 302 | 303 | 307 | 308);
+        if platform_managed_response_header(&name) && !redirect_location {
             return Err(ResponseHeaderPolicyError {
                 code: "zero_response_header_forbidden",
                 message: "Zero response attempted to set a platform-managed header.",
@@ -90,21 +94,43 @@ mod tests {
             "X-Spacefast-Zero-Runner-Metrics",
             "x-stattic-anything",
         ] {
-            let error = validate_response_headers(BTreeMap::from([(
-                name.to_string(),
-                "attempted".to_string(),
-            )]))
+            let error = validate_response_headers(
+                BTreeMap::from([(name.to_string(), "attempted".to_string())]),
+                200,
+            )
             .unwrap_err();
             assert_eq!(error.code, "zero_response_header_forbidden", "{name}");
         }
     }
 
     #[test]
+    fn allows_location_only_on_redirect_responses() {
+        let headers = BTreeMap::from([(
+            "Location".to_string(),
+            "https://my.example.test/push".to_string(),
+        )]);
+        assert_eq!(
+            validate_response_headers(headers.clone(), 303)
+                .unwrap()
+                .get("location")
+                .map(String::as_str),
+            Some("https://my.example.test/push")
+        );
+        assert_eq!(
+            validate_response_headers(headers, 200).unwrap_err().code,
+            "zero_response_header_forbidden"
+        );
+    }
+
+    #[test]
     fn normalizes_safe_headers_and_rejects_ambiguous_duplicates() {
-        let headers = validate_response_headers(BTreeMap::from([
-            ("Content-Type".to_string(), "application/json".to_string()),
-            ("X-App-Result".to_string(), "ready".to_string()),
-        ]))
+        let headers = validate_response_headers(
+            BTreeMap::from([
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("X-App-Result".to_string(), "ready".to_string()),
+            ]),
+            200,
+        )
         .unwrap();
         assert_eq!(
             headers.get("content-type").map(String::as_str),
@@ -115,10 +141,13 @@ mod tests {
             Some("ready")
         );
 
-        let error = validate_response_headers(BTreeMap::from([
-            ("X-App".to_string(), "one".to_string()),
-            ("x-app".to_string(), "two".to_string()),
-        ]))
+        let error = validate_response_headers(
+            BTreeMap::from([
+                ("X-App".to_string(), "one".to_string()),
+                ("x-app".to_string(), "two".to_string()),
+            ]),
+            200,
+        )
         .unwrap_err();
         assert_eq!(error.code, "zero_response_header_invalid");
     }
@@ -140,8 +169,8 @@ mod tests {
                 "value".to_string(),
             ),
         ] {
-            let error =
-                validate_response_headers(BTreeMap::from([(name.to_string(), value)])).unwrap_err();
+            let error = validate_response_headers(BTreeMap::from([(name.to_string(), value)]), 200)
+                .unwrap_err();
             assert_eq!(error.code, "zero_response_header_invalid", "{name}");
         }
     }
@@ -152,7 +181,7 @@ mod tests {
             .map(|index| (format!("x-h-{index}"), "v".to_string()))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(
-            validate_response_headers(too_many).unwrap_err().code,
+            validate_response_headers(too_many, 200).unwrap_err().code,
             "zero_response_header_invalid"
         );
 
@@ -167,7 +196,9 @@ mod tests {
             })
             .collect::<BTreeMap<_, _>>();
         assert_eq!(
-            validate_response_headers(oversized_total).unwrap_err().code,
+            validate_response_headers(oversized_total, 200)
+                .unwrap_err()
+                .code,
             "zero_response_header_invalid"
         );
     }

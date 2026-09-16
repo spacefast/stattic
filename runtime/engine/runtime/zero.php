@@ -231,7 +231,7 @@ function _stattic_zero_send_runner_response(
 
     http_response_code($status);
     _stattic_zero_send_headers($baseHeaders, $cachePolicy['suppress']);
-    _stattic_zero_send_headers($runnerHeaders, $cachePolicy['suppress']);
+    _stattic_zero_send_headers($runnerHeaders, $cachePolicy['suppress'], in_array($status, [301, 302, 303, 307, 308], true));
     _stattic_cache_policy_send($cachePolicy);
     if (_stattic_config_value('SPACEFAST_ZERO_METRICS_HEADER') === '1' && is_array($runnerResponse['metrics'] ?? null)) {
         $metrics = json_encode($runnerResponse['metrics'], JSON_UNESCAPED_SLASHES);
@@ -253,7 +253,7 @@ function _stattic_zero_send_runner_response(
     exit;
 }
 
-function _stattic_zero_send_headers(array $headers, array $suppressLowerNames = []): void
+function _stattic_zero_send_headers(array $headers, array $suppressLowerNames = [], bool $allowLocation = false): void
 {
     foreach ($headers as $name => $value) {
         if (!is_string($name) || $name === '' || preg_match('/^[A-Za-z0-9-]+$/', $name) !== 1) {
@@ -263,7 +263,7 @@ function _stattic_zero_send_headers(array $headers, array $suppressLowerNames = 
         if (
             $lower === 'content-length'
             || in_array($lower, $suppressLowerNames, true)
-            || _stattic_platform_managed_header($lower)
+            || (_stattic_platform_managed_header($lower) && !($allowLocation && $lower === 'location'))
             // The send-time boundary as well as the publisher-input one: a
             // runner must not emit platform-owned headers (a8c-*, x-ac, …)
             // whatever the cache-policy sender clears afterwards.

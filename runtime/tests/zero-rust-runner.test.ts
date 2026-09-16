@@ -608,6 +608,7 @@ await globalThis.__statticRunZeroEndpoint(capsule, route);`,
           source: `
 const query = globalThis.__statticZeroRequest.query;
 const headers = { "Content-Type": "application/json; charset=utf-8", "X-App-Result": "ready" };
+if (query === "mode=redirect") headers["Location"] = "/push?spaceId=spc_redirect";
 if (query === "mode=forbidden") {
   headers["x-spacefast-zero-injected"] = "1";
 }
@@ -618,7 +619,7 @@ if (query === "mode=duplicate") {
   headers["X-App"] = "one";
   headers["x-app"] = "two";
 }
-globalThis.__statticZeroResult = JSON.stringify({ status: 200, headers, body: "{}" });
+globalThis.__statticZeroResult = JSON.stringify({ status: query === "mode=redirect" ? 303 : 200, headers, body: "{}" });
 `,
           capabilities: { db: false },
         },
@@ -1451,6 +1452,16 @@ test("applies the native response-header policy to every endpoint response", asy
   const clean = await get(rt, GENERATED_HOST, "/api/generated/response-headers");
   expect(clean.status).toBe(200);
   expect(clean.headers.get("x-app-result")).toBe("ready");
+
+  const redirected = await get(
+    rt,
+    GENERATED_HOST,
+    "/api/generated/response-headers?mode=redirect",
+    { redirect: "manual" },
+  );
+  expect(redirected.status).toBe(303);
+  expect(redirected.headers.get("location")).toBe("/push?spaceId=spc_redirect");
+  expect(redirected.headers.get("cache-control")).toContain("no-store");
 
   // A platform-reserved x-spacefast-* header fails the response closed.
   const forbidden = await get(rt, GENERATED_HOST, "/api/generated/response-headers?mode=forbidden");

@@ -103,7 +103,8 @@ pub(crate) fn execute_endpoint_module(
         let events: Vec<Value> = serde_json::from_str(&events_json)
             .map_err(|error| error_response(502, "zero_js_events_malformed", &error.to_string()))?;
         record_js_execution(execution_started);
-        let mut headers = validate_response_headers(result.headers.unwrap_or_default())
+        let status = http_status(result.status, 200);
+        let mut headers = validate_response_headers(result.headers.unwrap_or_default(), status)
             .map_err(|error| error_response(502, error.code, error.message))?;
         let mut body = result.body.unwrap_or_default();
         let mut body_base64 = result.body_base64;
@@ -118,7 +119,7 @@ pub(crate) fn execute_endpoint_module(
             body = String::new();
         }
         Ok(RunnerResponse {
-            status: http_status(result.status, 200),
+            status,
             headers,
             body: enforce_response_body_limit(body)?,
             body_base64: enforce_response_body_base64_limit(body_base64)?,

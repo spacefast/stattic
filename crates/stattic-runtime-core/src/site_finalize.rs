@@ -696,8 +696,7 @@ fn run_finalize_pipeline(
     let pages = input
         .body
         .pointer("/serving/pages")
-        .and_then(Value::as_array)
-        .filter(|pages| !pages.is_empty());
+        .and_then(Value::as_array);
     let mut private = pipeline.private;
     private.extend(
         files
@@ -3231,20 +3230,6 @@ mod tests {
         assert!(redirects
             .iter()
             .any(|rule| rule["destination"] == "/legacy"));
-    }
-
-    #[test]
-    fn endpoint_only_capsules_preserve_the_authored_spa_fallback() {
-        let (_temp, private, output) = finalize_fixture(
-            &[("_shell.html", b"dashboard shell")],
-            json!({"mode":"website"}),
-            json!({"serving":{"pages":[],"config":{"index":"_shell.html","fallback":{"path":"_shell.html","status":200}}}}),
-        );
-        output.unwrap();
-        assert_eq!(
-            finalized_metadata(&private)["servingConfig"]["fallback"],
-            json!({"path":"_shell.html","status":200})
-        );
     }
 
     #[test]

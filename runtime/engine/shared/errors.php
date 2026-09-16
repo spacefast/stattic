@@ -160,7 +160,6 @@ const STATTIC_PLATFORM_PAGE_COPY = [
     'access' => ['This space is private', ''],
     'index' => ['Files unavailable', 'The directory listing could not be loaded.'],
     'preview' => ['Preview unavailable', 'This file preview could not be loaded.'],
-    'collab' => ['Review room unavailable', 'This space’s review room could not be loaded.'],
     'undeployed' => ['Waiting for launch', 'This space hasn’t been published yet. Check back soon.'],
     'suspended' => ['This space is paused', 'Serving is on hold until billing is sorted out.'],
     'legal' => ['Unavailable for legal reasons', 'This space is blocked in response to a legal demand.'],
@@ -179,8 +178,8 @@ function _stattic_platform_page_html(string $pageId, int $status, string $messag
         ?? [_stattic_brand_value('name') . ' could not serve this page', $message !== '' ? trim($message) : 'Try again in a moment.'];
     $title = _stattic_html_escape($titleOverride !== '' ? $titleOverride : $copy[0]);
     $description = $copy[1] === '' ? '' : '<p class="sf-copy">' . _stattic_html_escape($copy[1]) . '</p>';
-    $sitePage = in_array($pageId, ['404', 'denied', 'access', 'index', 'preview', 'collab'], true);
-    $plain = in_array($pageId, ['index', 'preview', 'collab'], true);
+    $sitePage = in_array($pageId, ['404', 'denied', 'access', 'index', 'preview'], true);
+    $plain = in_array($pageId, ['index', 'preview'], true);
     $showStatus = !$sitePage || $pageId === '404';
     $eyebrow = $showStatus ? '<p class="sf-eyebrow">' . $status . ' · ' . _stattic_html_escape(_stattic_page_status_reason($status)) . '</p>' : '';
     if ($pageId === '404') {

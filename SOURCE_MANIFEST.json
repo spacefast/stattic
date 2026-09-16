@@ -1,7 +1,7 @@
 {
-  "revision": "a12e7a50f87a1bc1854d3b3fecddb58f62948c4d",
-  "sourceHash": "ae73197a2a1c738ae4f0ee4306708233b297905975fb8efcec4227c594604e6c",
-  "manifestSha256": "1d7bc5c8cb50ce2f96b8ecb8bd326fb43cc5e21961f86eab2fabaa20cdd2d694",
+  "revision": "8ffdcf1d4ce7d5990aa62e3f4a529c2e59c2f4f0",
+  "sourceHash": "8bcba4aa1d78e965c0280cbd0ff4ca7963bb1aa5831e9eb65892050a166a2a83",
+  "manifestSha256": "13d37469f1d59814a673ecfeb7dea3e74c9ba0f9bc44ca266e2a1ced2f7bbc11",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "d5e1be42f40580e37d1b3d7895baed6b432842146487ff60f9e23bcca8ad887e"
+      "sha256": "a851f82e0c4b5783b11606d71013b037b65a366815289f9318681772157515ad"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "feba57087649e897dfd8ce22911d2470146ea0f71d2c402bf29aef9b3c68e351"
+      "sha256": "38d3e14a667ef0ad903714c0fec0d7dc09230b9f6e62f986c920c601e09b2014"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -369,7 +369,7 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "60b7e13c6c04b5f6a88dd649264abc75119fd80c6d251eeeb7b825c7e032cee0"
+      "sha256": "cfbba239fc1d35abbad0da112d488a13a0369b5a7573c31b128d6fc4838ca353"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -492,10 +492,6 @@
       "sha256": "57bc6cdba46dc23027b1f6f2f456b0fff6cef9c66f61080d3eb14c322efe260e"
     },
     {
-      "path": "runtime/engine/runtime/collab-frame.php",
-      "sha256": "63935c4ded75e810c07cdc5903314b610a29189f19632b9a81e6b53307ad20ed"
-    },
-    {
       "path": "runtime/engine/runtime/content-page.php",
       "sha256": "132408715f82358638412fd9cbcb80e33af998c507e532e9cb27a11d15494e9b"
     },
@@ -541,11 +537,11 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "f070a22ad68571f312c40f223c72e6d827548a206035dee67b3a05ae391e956e"
+      "sha256": "08b80d03bf212fab1e059aec992c5d945214fc780ab99e75acca5a7849ba2e06"
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
-      "sha256": "b6bb5f18c3f70d5e616e77e11ca53493a78a82adfa5225b28bf712268c6f1504"
+      "sha256": "f02da93df5b98d616d73fcfbd614bd67af54588737a129146368094ececf71e4"
     },
     {
       "path": "runtime/engine/runtime/storage.php",
@@ -613,7 +609,7 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "786c4ba6c198a2183257dbd31d2fe52f18fd6e8d3c6f84e94b1d76ae124a8ef1"
+      "sha256": "92427c67547b6f3578a1ebc9cd5f17b41f03b73b179f7d32ac626c896496eaa8"
     },
     {
       "path": "runtime/engine/shared/db-broker.php",
@@ -625,7 +621,7 @@
     },
     {
       "path": "runtime/engine/shared/errors.php",
-      "sha256": "891a5a1fe136d76863bbfa42c633c79da8d5efe7a38eb215026cd5009637ee5a"
+      "sha256": "44ade55946923bd3bb29c9f5ffa0aa95e936268669f763811bffcf890e672f4f"
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
@@ -781,7 +777,7 @@
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "b96d7f21d330f209e5d7a05fc9d990f9cfd1a2ae9508df757e8478825ea12232"
+      "sha256": "844299640e54f99dbe76f16d9c44b6efd67defb610fa51805ae447d433f40723"
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
@@ -789,7 +785,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "ade4da036aeb46a07ccb1796b30636f51448ef35901ac97d1a6f2a6bcec252e9"
+      "sha256": "a412ad9b0ebef643ef315b74cf54a4798718cb5600b95088d3cfab3f18b6e537"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",
@@ -826,10 +822,6 @@
     {
       "path": "runtime/tests/callback-drain.test.ts",
       "sha256": "5a2363fd40336355908a4293a61cdf8e8bc5605c34942aef0984dbcfee0561e1"
-    },
-    {
-      "path": "runtime/tests/collab-frame.test.ts",
-      "sha256": "e1f3426737ef685affda07b92fbafcd43ddc9a9dfc47e1145f7411b3b369bb13"
     },
     {
       "path": "runtime/tests/component-substrate.test.ts",
@@ -1001,7 +993,7 @@
     },
     {
       "path": "runtime/tests/pages-system.test.ts",
-      "sha256": "a43ad70b84416729cb25091f889357baf673e09523e279e59c17c9073b34a9eb"
+      "sha256": "fae7890fd8a2ed2d758cfb665fc36d2354153c0e407fe4b0bbf36dcf14cbde89"
     },
     {
       "path": "runtime/tests/php-functions-fetch.test.ts",
@@ -1021,7 +1013,7 @@
     },
     {
       "path": "runtime/tests/proxy-cache-upstream.test.ts",
-      "sha256": "4af8fc4be1d042a386864bd644e4079f7646acb400a447ba094c62cbc65031fb"
+      "sha256": "85854fff2b135b379a4542aca6b7d817a6d197f698229f6a5ac594b8e05b024b"
     },
     {
       "path": "runtime/tests/route-index.test.ts",
@@ -1053,7 +1045,7 @@
     },
     {
       "path": "runtime/tests/spacefast-sdk.test.ts",
-      "sha256": "5d730a97804c7423da3a3d755fe6db8bef957a4e2114694b8cbf17d9668836cc"
+      "sha256": "c3d2d1e6ddb3d8284bb9ab811392ee7a640ba368113785249155da2a537ecd91"
     },
     {
       "path": "runtime/tests/static-zip.test.ts",
@@ -1081,7 +1073,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "de72c82a9e2135c3a729f7b9c0a36cc33c29b4a57e9774bcc5e693735396e3f3"
+      "sha256": "cc80b593dee5238ccd192a9d7fde247c571b3f203a06e41450d20268c9124d56"
     },
     {
       "path": "runtime/tests/uploads.test.ts",
@@ -1117,7 +1109,7 @@
     },
     {
       "path": "runtime/tests/zero-runtime.test.ts",
-      "sha256": "87b2bd67214725fa7b252f5c84bef0147f3bc674454a0ff53c72103914c779eb"
+      "sha256": "a241e4c65ce4df27a8cd2a8b8d65b1a6912204a4dba71da876eba4a1935ad07d"
     },
     {
       "path": "runtime/tests/zero-rust-runner.test.ts",

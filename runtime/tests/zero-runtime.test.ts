@@ -1858,7 +1858,7 @@ test("an access-protected Zero endpoint pins private revalidation over a runner-
   expect(response.headers.get("vary")).toContain("Cookie");
   expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
-  expect(response.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
+  expect(response.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
   expect(response.headers.get("access-control-allow-origin")).toBeNull();
   expect(response.headers.get("cdn-cache-control")).toBeNull();
   expect(response.headers.get("surrogate-control")).toBeNull();

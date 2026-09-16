@@ -594,7 +594,7 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     expect(identity.headers.get("vary")).toContain("Cookie");
     expect(identity.headers.get("x-robots-tag")).toBe("noindex, nofollow");
     expect(identity.headers.get("cross-origin-resource-policy")).toBe("same-origin");
-    expect(identity.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
+    expect(identity.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
     expect(identity.headers.get("access-control-allow-origin")).toBeNull();
     expect(await identity.json()).toEqual({
       jwt: null,

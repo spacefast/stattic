@@ -1612,7 +1612,7 @@ check(
         ['Vary', 'Cookie'],
         ['X-Robots-Tag', 'noindex, nofollow'],
         ['Cross-Origin-Resource-Policy', 'same-origin'],
-        ['Content-Security-Policy', "frame-ancestors 'self'"],
+        ['Content-Security-Policy', "frame-ancestors 'none'"],
     ],
     'cache policy: access-protected responses pin private revalidation and the canonical private boundary'
 );

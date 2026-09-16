@@ -1694,7 +1694,7 @@ test("an embed proof spends its token on one hop, then names its framer", async 
   // The embed origin joins the parents the Link projection already admitted —
   // the proof widens the set, it does not replace it — and nothing else gets in.
   expect(document.headers.get("content-security-policy")).toBe(
-    `frame-ancestors 'self' ${FRAME_ORIGIN} ${EMBED_ORIGIN}`,
+    `frame-ancestors ${FRAME_ORIGIN} ${EMBED_ORIGIN}`,
   );
 
   // Permission is per-request and per-proof: the same page opened by a system
@@ -1706,7 +1706,7 @@ test("an embed proof spends its token on one hop, then names its framer", async 
     `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken()}`,
   );
   expect(topLevel.status).toBe(200);
-  expect(topLevel.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+  expect(topLevel.headers.get("content-security-policy")).toBe(`frame-ancestors ${FRAME_ORIGIN}`);
   expect(topLevel.headers.get("content-security-policy")).not.toContain(EMBED_ORIGIN);
   const echo = topLevel.headers
     .getSetCookie()
@@ -1763,9 +1763,7 @@ test("a private Frame proof is origin, target, revision, and Link-resource bound
   );
   expect(opened.status).toBe(200);
   expect(opened.headers.get("cache-control")).toBe("private, no-store");
-  expect(opened.headers.get("content-security-policy")).toBe(
-    `frame-ancestors 'self' ${FRAME_ORIGIN}`,
-  );
+  expect(opened.headers.get("content-security-policy")).toBe(`frame-ancestors ${FRAME_ORIGIN}`);
   const cookie = frameSessionCookie(opened);
   expect(cookie).toStartWith("__Host-spacefast_frame=");
   expect(frameSessionSetCookie(opened)).toContain("; Secure; Partitioned");
@@ -1823,9 +1821,7 @@ test("a public Frame path keeps its clean shared-cache response and projects onl
   expect(response.headers.get("cache-control")).not.toContain("no-store");
   expect(response.headers.get("vary")).toBeNull();
   expect(response.headers.get("set-cookie")).toBeNull();
-  expect(response.headers.get("content-security-policy")).toBe(
-    `frame-ancestors 'self' ${FRAME_ORIGIN}`,
-  );
+  expect(response.headers.get("content-security-policy")).toBe(`frame-ancestors ${FRAME_ORIGIN}`);
 
   const outside = await get(runtime, PUBLIC_HOST, "/admin/");
   expect(outside.status).toBe(200);

@@ -911,15 +911,11 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
     (await get(runtime, PRIVATE_VERSION_HOST, "/", { headers: { cookie: versionLinkCookie } }))
       .status,
   ).toBe(200);
-  // Private content is framable by the Space's own surfaces and nothing else.
-  // `'self'` is the Collab shell framing the page it reviews; the live origin is
-  // time travel framing a version host from the live Space. The equality is the
-  // refusal: the publisher's `*` is gone, and no other origin is admitted, not
-  // even OTHER_PRIVATE_HOST, a sibling host of this Space that the runtime
-  // cannot enumerate.
-  expect(admitted.headers.get("content-security-policy")).toBe(
-    `frame-ancestors 'self' ${SPACE_LIVE_ORIGIN}`,
-  );
+  // Private content is framable only by a framer this request PROVED, and this
+  // request proved none. Nothing is standing any more — not the Space's own
+  // origin, not its live origin, which is why the publisher's `*` collapses all
+  // the way to `'none'` rather than to a narrower allowlist.
+  expect(admitted.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
   expect(admitted.headers.get("access-control-allow-origin")).toBeNull();
 
   // The cookie is signed with the host inside the message, so a sibling host
@@ -942,10 +938,7 @@ test("a Space with no visitor lanes denies uniformly and discloses nothing", asy
   expect(denied.headers.get("cache-control")).toBe("private, no-store");
   expect(denied.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   expect(denied.headers.get("cross-origin-resource-policy")).toBe("same-origin");
-  // This Space's overlay carries a scheme-relative `live_url`. A value that is
-  // not a parseable origin contributes nothing, so the boundary narrows to
-  // `'self'` rather than degrading to something an attacker chose.
-  expect(denied.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
+  expect(denied.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
   expect(denied.headers.get("access-control-allow-origin")).toBeNull();
   const body = await denied.text();
   expect(body).toContain("This page is private");

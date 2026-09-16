@@ -60,7 +60,14 @@ const SPACEFAST_RUNTIME_ENTRYPOINT_PATHS = [
 ];
 // END GENERATED runtime entrypoints
 const STATTIC_SPACEFAST_SDK_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sdk.js';
-const STATTIC_COMMENTS_CONFIG_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/config';
+// The two documents any collaboration client boots from — Spacefast's own
+// overlay bundle or a UI somebody built themselves. The manifest says what this
+// surface is and where to join it; the stylesheet is the Space's customization,
+// rendered by the control plane and served here verbatim. The TS mirrors are
+// RUNTIME_COLLAB_MANIFEST_PATH / RUNTIME_COLLAB_THEME_PATH in
+// packages/common/src/utils/runtime-paths.ts.
+const STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/collab.json';
+const STATTIC_SPACEFAST_COLLAB_THEME_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/collab.css';
 const STATTIC_COMMENTS_TICKET_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/ticket';
 const STATTIC_ZERO_REALTIME_TICKET_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/realtime-ticket';
 // The canonical Zero control namespace. `/__spacefast/zero/*` is served forever
@@ -142,16 +149,6 @@ const STATTIC_ACCESS_QUERY_TOKEN_SYSTEM_VIEW_PREFIX = 'sfv_';
 // verified locally against the Space's own keys. Mirrors
 // FRAME_SESSION_TOKEN_PREFIX in apps/control-plane/src/access/frame-session-token.ts.
 const STATTIC_ACCESS_QUERY_TOKEN_FRAME_SESSION_PREFIX = 'sff_';
-// The Collab frame shell. Short and shareable because this URL IS the review
-// link people paste; it sits inside the token-entry prefix and therefore ahead
-// of it in the table below. The TS mirror is RUNTIME_COLLAB_FRAME_PATH in
-// packages/common/src/utils/runtime-paths.ts.
-const SPACEFAST_COLLAB_FRAME_PATH = '/__/collab';
-// The Space's own review room, when it publishes one. The source template is
-// private like every `_pages` file; this URL answers with the document finalize
-// compiled from it. The TS mirror is COLLAB_PAGE_PATH in
-// packages/common/src/contracts/pages.ts.
-const SPACEFAST_COLLAB_PAGE_PATH = '/_pages/collab.html';
 const STATTIC_ACCESS_LOGOUT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/logout';
 const STATTIC_ACCESS_PASSWORD_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/password';
 const STATTIC_ACCESS_EMAIL_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/email';
@@ -213,18 +210,14 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_ACCESS_PASSWORD_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_password'],
     ['path' => STATTIC_ACCESS_EMAIL_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_email'],
     ['path' => STATTIC_ACCESS_REQUEST_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_request'],
-    ['path' => STATTIC_COMMENTS_CONFIG_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_COMMENTS_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_COMMENTS_VERSION_URLS_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_ZERO_REALTIME_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
-    // Reserved (tenant false) so no publisher can shadow the review link, and
-    // ahead of the token-entry prefix it sits inside, because first match wins.
-    // serve.php dispatches it AFTER the access check: the shell's bytes vary by
-    // Space and must ride the host session that check just minted.
-    ['path' => SPACEFAST_COLLAB_FRAME_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'frame', 'handler' => 'collab_frame'],
     ['path' => STATTIC_ACCESS_ENTRY_PREFIX, 'match' => 'prefix', 'admit' => '_stattic_access_entry_token', 'visitor' => true, 'tenant' => true, 'stage' => 'entry', 'handler' => 'access_link_entry'],
     ['path' => STATTIC_SPACEFAST_SDK_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
+    ['path' => STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
+    ['path' => STATTIC_SPACEFAST_COLLAB_THEME_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
     // Each is authorized by its own signed token rather than by being a known path.
     ['path' => '/' . STATTIC_FUNCTIONS_BUNDLE_PREFIX, 'match' => 'prefix', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_artifact'],
     ['path' => '/' . STATTIC_FUNCTIONS_RELAY_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_relay'],
@@ -713,39 +706,23 @@ function _stattic_system_view_review(?array $review = null): ?array
 /**
  * The ONE decision about which origins may frame a Space's private content.
  *
- * `'self'` is the main path: the Collab shell at `/__/collab` and the page it
- * frames are the same origin, so a Space behind an access gate can review its
- * own work. The Space's live origin is the one OTHER origin the runtime can
- * PROVE belongs to this same Space. An immutable version host is framed from the
- * live Space for time travel, and both hosts serve this Space under one
- * authorization projection, so the live origin is already trusted with these
- * bytes and its publisher already controls them.
+ * Every entry arrives PROVEN, per request: the parents the Space's own Link
+ * projection admitted for this response (the Frame verifier and the public Link
+ * projection are the only writers), a system-view proof minted with an `embed`
+ * origin (a dashboard preview session) naming the one framer the platform
+ * vouched for, and a review proof's ancestors. The embed claim is already an
+ * origin by the time it lands here — a claim that is not one fails the whole
+ * token — so nothing unvalidated can reach the header.
  *
- * The remaining entries only ever arrive proven, per request: the parents the
- * Space's own Link projection admitted for this response (the Frame verifier
- * and the public Link projection are the only writers), and a system-view
- * proof minted with an `embed` origin (a dashboard preview session) naming the
- * one framer the platform vouched for, for that request alone.
- *
- * Nothing here is caller-stated. A Space with no live origin, an overlay that
- * states one in a form that is not an origin, or a request carrying no framing
- * proof each contribute nothing and land on `'self'`, never on a value someone
- * else chose.
+ * Nothing is standing: not `'self'`, not the Space's own live origin. Spacefast
+ * stopped framing Spaces when the review frame went away, and an overlay that
+ * rides the page itself needs no framer at all. A request carrying no framing
+ * proof is unframeable — `'none'`, never a value someone else chose.
  */
 function _stattic_space_frame_ancestors(): string
 {
-    $serving = is_array($GLOBALS['SPACEFAST_PAGE_SERVING'] ?? null)
-        ? $GLOBALS['SPACEFAST_PAGE_SERVING']
-        : [];
-    $sdk = is_array($serving['sdk'] ?? null) ? $serving['sdk'] : [];
-    $config = is_array($sdk['config'] ?? null) ? $sdk['config'] : [];
-    $comments = is_array($config['comments'] ?? null) ? $config['comments'] : [];
-    $origins = ["'self'"];
-    // The embed claim is already an origin by the time it lands here (a claim
-    // that is not one fails the whole token), so nothing unvalidated can reach
-    // the header.
+    $origins = [];
     foreach ([
-        _stattic_absolute_url_origin($comments['live_url'] ?? null),
         ...(function_exists('_stattic_frame_ancestor_origins')
             ? _stattic_frame_ancestor_origins()
             : []),
@@ -756,7 +733,7 @@ function _stattic_space_frame_ancestors(): string
             $origins[] = $origin;
         }
     }
-    return implode(' ', $origins);
+    return $origins === [] ? "'none'" : implode(' ', $origins);
 }
 
 /**

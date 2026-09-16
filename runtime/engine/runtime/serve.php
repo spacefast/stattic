@@ -444,11 +444,12 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // launder a URL whose own Grants are narrower than the effective path's.
     if (!$open) {
         require_once __DIR__ . '/access-rules.php';
-        // The SDK is a subresource of the page that embedded it and owns no
-        // scope, so no page Grant lists it. The authority comes from the
-        // session (_stattic_spacefast_sdk_access_path).
-        $accessPath = $requestPath === STATTIC_SPACEFAST_SDK_PATH
-            && $originalRequestPath === STATTIC_SPACEFAST_SDK_PATH
+        // The SDK, the collaboration manifest and its theme are subresources of
+        // the page that embedded them and own no scope, so no page Grant lists
+        // them. The authority comes from the session
+        // (_stattic_spacefast_sdk_access_path).
+        $accessPath = _stattic_spacefast_sdk_access_dests($requestPath) !== []
+            && $originalRequestPath === $requestPath
             ? _stattic_spacefast_sdk_access_path($serving, $requestHost, $requestPath)
             : $requestPath;
         _stattic_access_enforce_v4(
@@ -488,36 +489,21 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         exit;
     }
 
-    // The SDK varies by Space and version: content, not public infrastructure.
-    if ($requestPath === STATTIC_SPACEFAST_SDK_PATH) {
+    // The SDK, the collaboration manifest and its theme tokens all vary by
+    // Space and version: content, not public infrastructure.
+    if ($requestPath === STATTIC_SPACEFAST_SDK_PATH
+        || $requestPath === STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH
+        || $requestPath === STATTIC_SPACEFAST_COLLAB_THEME_PATH) {
         require_once __DIR__ . '/../shared/bootstrap-config.php';
         require_once __DIR__ . '/spacefast-sdk.php';
-        _stattic_serve_spacefast_sdk($privateRoot, $serving, $requestHost, $requestMethod, $privateCache);
-    }
-
-    // Same reasoning for the Collab frame shell, and the URL the VISITOR asked
-    // for: the review link is reserved, so no publisher rewrite may claim it.
-    if ($originalRequestPath === SPACEFAST_COLLAB_FRAME_PATH) {
-        require_once __DIR__ . '/collab-frame.php';
-        _stattic_serve_collab_frame($serving, $requestHost, $requestMethod, $privateCache);
-    }
-
-    // A Space that published its own review room answers it here, from the
-    // finalized document. The `_pages/collab.html` SOURCE stays private like
-    // every page template. No pointer means no room: the request falls through
-    // to the private-path 404, not a platform page.
-    if ($originalRequestPath === SPACEFAST_COLLAB_PAGE_PATH
-        && in_array($requestMethod, ['GET', 'HEAD'], true)) {
-        $collabPages = is_array($serving['pages'] ?? null) ? $serving['pages'] : [];
-        if (is_string($collabPages['collab'] ?? null)) {
-            _stattic_v4_serve_artifact_page(
-                'collab',
-                $collabPages['collab'],
-                $originalRequestPath,
-                $serving,
-                $privateCache
-            );
-        }
+        _stattic_serve_spacefast_sdk(
+            $privateRoot,
+            $serving,
+            $requestHost,
+            $requestMethod,
+            $privateCache,
+            $requestPath
+        );
     }
 
     // ---- entry resolution ------------------------------------------------
@@ -1821,14 +1807,29 @@ function _stattic_render_method_declined_405_if_any(): void
     _stattic_render_method_not_allowed_lazy($allow === [] ? ['GET', 'HEAD'] : $allow);
 }
 
+// How each collaboration document is loaded, as the `sec-fetch-dest` the
+// browser sets: the `<script>` tag fetches sdk.js as `script`, the manifest
+// arrives through the SDK's `fetch()` as `empty`, and the theme arrives both
+// ways — as the `<link>` sdk.js writes for a self-built UI (`style`), and as
+// the default UI's own `fetch()` of the same bytes to adopt them inside its
+// shadow root (`empty`). A dest outside this list is not the page's subresource
+// and gets no Referer scope.
+function _stattic_spacefast_sdk_access_dests(string $requestPath): array
+{
+    return match ($requestPath) {
+        STATTIC_SPACEFAST_SDK_PATH => ['script'],
+        STATTIC_SPACEFAST_COLLAB_THEME_PATH => ['style', 'empty'],
+        STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH => ['empty'],
+        default => [],
+    };
+}
+
 // The session supplies the authority; the Referer only selects which scoped page
 // Grant to evaluate. Never authorize on Referer alone.
 function _stattic_spacefast_sdk_access_path(array $serving, string $requestHost, string $requestPath): string
 {
-    if (
-        $requestPath !== STATTIC_SPACEFAST_SDK_PATH
-        || strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_DEST'] ?? ''))) !== 'script'
-    ) {
+    $dest = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_DEST'] ?? '')));
+    if (!in_array($dest, _stattic_spacefast_sdk_access_dests($requestPath), true)) {
         return $requestPath;
     }
     require_once __DIR__ . '/access-rules.php';

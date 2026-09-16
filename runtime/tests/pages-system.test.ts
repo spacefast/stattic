@@ -190,7 +190,7 @@ test("reserved access-path variants deny uniformly instead of falling through to
     expect(response.headers.get("x-robots-tag"), requestPath).toBe("noindex, nofollow");
     expect(response.headers.get("cross-origin-resource-policy"), requestPath).toBe("same-origin");
     expect(response.headers.get("content-security-policy"), requestPath).toBe(
-      "frame-ancestors 'self'",
+      "frame-ancestors 'none'",
     );
     const body = await response.text();
     expect(body, requestPath).not.toContain("Acme home");

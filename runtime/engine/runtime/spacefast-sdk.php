@@ -6,12 +6,19 @@ declare(strict_types=1);
 require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/response.php';
 
+/**
+ * The three documents the collaboration layer boots from: `sdk.js`, the
+ * manifest, and the theme stylesheet. One serving function because they share
+ * everything that matters — the same serving state, the same revision ETag, the
+ * same cache policy, the same preview-token selection.
+ */
 function _stattic_serve_spacefast_sdk(
     string $privateRoot,
     array $serving,
     string $requestHost,
     string $requestMethod,
-    bool $privateCache
+    bool $privateCache,
+    string $requestPath
 ): void
 {
     if (!$privateCache) {
@@ -23,21 +30,49 @@ function _stattic_serve_spacefast_sdk(
         exit;
     }
     if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
-        // JavaScript, not a problem document: this URL is loaded by a <script>
-        // tag, and a JSON body there is a parse error instead of a refusal.
-        _stattic_method_not_allowed('GET, HEAD, OPTIONS', [
-            'body' => "window.Spacefast=window.Spacefast||{error:'method_not_allowed'};",
-            'media_type' => 'application/javascript; charset=utf-8',
-        ]);
+        // JavaScript, not a problem document: the SDK URL is loaded by a
+        // <script> tag, and a JSON body there is a parse error instead of a
+        // refusal. The two fetched documents take the ordinary problem shape.
+        _stattic_method_not_allowed(
+            'GET, HEAD, OPTIONS',
+            $requestPath === STATTIC_SPACEFAST_SDK_PATH ? [
+                'body' => "window.Spacefast=window.Spacefast||{error:'method_not_allowed'};",
+                'media_type' => 'application/javascript; charset=utf-8',
+            ] : [
+                'code' => 'method_not_allowed',
+                'message' => 'This is a document: fetch it with GET.',
+            ]
+        );
     }
 
     $previewToken = _stattic_spacefast_sdk_preview_token();
-    $body = _stattic_spacefast_sdk_bootstrap($privateRoot, $serving, $requestHost, $previewToken);
+    [$body, $mediaType] = match ($requestPath) {
+        STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH => [
+            (string) json_encode(
+                _stattic_spacefast_collab_manifest($privateRoot, $serving, $requestHost),
+                JSON_UNESCAPED_SLASHES
+            ),
+            'application/json; charset=utf-8',
+        ],
+        STATTIC_SPACEFAST_COLLAB_THEME_PATH => [
+            _stattic_spacefast_collab_theme_css($serving),
+            'text/css; charset=utf-8',
+        ],
+        STATTIC_SPACEFAST_SDK_PATH => [
+            _stattic_spacefast_sdk_bootstrap($privateRoot, $serving, $requestHost, $previewToken),
+            'application/javascript; charset=utf-8',
+        ],
+        // serve.php admits exactly the three paths above. Anything else reached
+        // this function by mistake and must not be answered with one of their
+        // bodies — a wrong guess here would serve a Space's manifest under some
+        // other URL.
+        default => _stattic_problem_response(404, 'not_found', 'No such document.'),
+    };
     $revision = _stattic_spacefast_sdk_revision($body);
     $etag = '"' . $revision . '"';
 
     http_response_code(200);
-    header('Content-Type: application/javascript; charset=utf-8', false);
+    header('Content-Type: ' . $mediaType, false);
     // A versioned SDK URL (?v=<engine/content token>, baked in by the control
     // plane) is content-addressed: the token changes whenever the body would,
     // so this response may pin immutably. The unversioned URL and every preview
@@ -144,17 +179,9 @@ function _stattic_comments_handle_exchange(
     if (_stattic_enforce_scoped_admission($serving, $requestHost, $pagePath, true) === null) {
         _stattic_render_json_unauthenticated('comments_denied');
     }
-    // The boot copy of this configuration is embedded in the SDK bootstrap, so
-    // this lane is the background revalidate that syncs a toggle flipped
-    // since the page's sdk.js response was generated. Only the lanes below it,
-    // which MINT something, reach the control plane: a ticket is auth, and auth
-    // is not this host's to issue.
-    if ($requestPath === STATTIC_COMMENTS_CONFIG_PATH) {
-        _stattic_comments_render_json(200, [
-            'data' => _stattic_comments_local_config($privateRoot, $serving, $requestHost),
-        ]);
-    }
-
+    // Every lane here MINTS something and so reaches the control plane: a ticket
+    // is auth, and auth is not this host's to issue. Configuration is not minted
+    // — it is served as the collaboration manifest.
     $isTicket = $requestPath === STATTIC_COMMENTS_TICKET_PATH;
     $isVersionUrls = $requestPath === STATTIC_COMMENTS_VERSION_URLS_PATH;
     // Both spellings identify the same mint: the config response advertises the
@@ -246,12 +273,6 @@ function _stattic_comments_handle_exchange(
             'name' => $name,
             'namedByUser' => $browserIdentity['namedByUser'],
         ];
-        // Whether this Space's overlay watches the Space feed is serving
-        // configuration, written at publish time. The mint signs the second
-        // ticket from the decision it already reached, so this says which rooms
-        // the session needs, never what it may do in them.
-        $overlay = _stattic_comments_local_config($privateRoot, $serving, $requestHost);
-        $payload['notices'] = ($overlay['features']['notices'] ?? null) === true;
     }
     $context = _stattic_access_context($serving, $requestHost, $pagePath);
     $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES);
@@ -289,72 +310,49 @@ function _stattic_spacefast_sdk_bootstrap(
     require_once __DIR__ . '/access-rules.php';
     $sdkConfig = _stattic_spacefast_sdk_config($serving);
     $review = _stattic_system_view_review();
-    $preview = _stattic_spacefast_preview_surface($serving);
-    // The whole OverlayConfig inline, so the boot path asks this host nothing.
-    // Everything in it is space-level except the room key. One cacheable script
-    // URL serves every page of the Space, so the SDK derives the room key from
-    // location.pathname.
+    // Only what this response has to PAINT: the orb's accent and whether this
+    // surface speaks at all. Everything else a client needs is one fetch away
+    // at the manifest, which is cacheable on its own terms.
     $overlay = _stattic_comments_local_config($privateRoot, $serving, $requestHost);
     $collabBase = _stattic_spacefast_sdk_base_url($sdkConfig);
-    $descriptor = _stattic_access_page_descriptor($serving);
-    $exchange = _stattic_access_page_exchange($serving);
     $pageHost = _stattic_normalize_hostname($requestHost);
-    // A machine-local Cast origin under a public control plane came from a
-    // deployment wired against a developer's machine. No visitor can reach it,
-    // so refuse to inject it.
-    $brokerHost = is_array($exchange) && is_string($exchange['commentsTicketUrl'] ?? null)
-        ? parse_url($exchange['commentsTicketUrl'], PHP_URL_HOST)
-        : null;
-    $commentsAvailable = $review === null && $overlay['enabled'] === true
-        && $collabBase !== null
-        && !(
-            _stattic_spacefast_sdk_host_is_local(parse_url((string) $collabBase, PHP_URL_HOST))
-            && !_stattic_spacefast_sdk_host_is_local($brokerHost)
-        )
-        && is_array($exchange)
-        && is_string($exchange['commentsTicketUrl'] ?? null);
+    $commentsAvailable = _stattic_spacefast_collab_available($serving, $overlay);
     // Preview tag artifacts stay capability-selected at the control plane (the
     // preview token names a session, not a release); the production release is
     // one module of this same response.
     $embeddedTagBody = $previewToken === null
         ? _stattic_spacefast_sdk_tag_body($privateRoot, $serving)
         : '';
-    // Where the orb expands (collab-public-api §1). A Space that published a
-    // review room gets its own; every other gets the platform frame. The
-    // pointer's absence IS the signal, resolved here so the browser never has
-    // to know a Space can have a layout.
-    $collabPages = is_array($serving['pages'] ?? null) ? $serving['pages'] : [];
-    $manifest = [
-        'version' => 4,
-        'environment' => $preview ? 'preview' : 'production',
-        'host' => $pageHost,
-        'spaceId' => is_string($serving['space_id'] ?? null) ? $serving['space_id'] : null,
-        'versionId' => is_string($serving['version_id'] ?? null) ? $serving['version_id'] : null,
-        'apiBase' => _stattic_spacefast_sdk_api_base_url(),
-        // Null while the Space is unclaimed: there is no account to continue with.
-        'accountUrl' => is_array($descriptor) && is_string($descriptor['accountUrl'] ?? null)
-            ? _stattic_request_scheme() . '://' . $pageHost . STATTIC_ACCESS_ACCOUNT_START_PATH
-            : null,
-        'layout' => is_string($collabPages['collab'] ?? null)
-            ? SPACEFAST_COLLAB_PAGE_PATH
-            : SPACEFAST_COLLAB_FRAME_PATH,
-        // Absent unless Comments are actually available for this surface. The
-        // SDK refuses a manifest without it, so this key is the whole gate.
-        ...($commentsAvailable ? ['config' => $overlay] : []),
-    ];
-    // Comments off for this surface costs the page zero Comments bytes: no
-    // config, no placeholder orb, no module loader, not even a disabled copy.
+    $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : null;
+    // The token this response was selected by, carried onto the two URLs it
+    // writes so they resolve against the same draft serving state. It selects a
+    // tag release, never a surface (`_stattic_spacefast_preview_surface` owns
+    // that); its only other effect here is that the two new URLs, like this one,
+    // stay short-lived and revalidated instead of pinning immutably.
+    $query = $previewToken === null ? '' : '?preview=' . rawurlencode($previewToken);
+    $ui = _stattic_spacefast_collab_ui($serving);
+    // Nothing to join costs the page zero collaboration bytes: no stylesheet,
+    // no placeholder orb, no module loader, not even a disabled copy. `custom`
+    // gets the Space's look and nothing else — the page brought its own UI and
+    // the runtime stays out of it.
     $collab = !$commentsAvailable ? '' : (
-        'if(root.collabLoader)return;' .
-        _stattic_spacefast_sdk_placeholder_orb($overlay) .
-        'var o=document.createElement("script");' .
-        'o.async=true;o.type="module";' .
-        'o.src=' . json_encode(rtrim((string) $collabBase, '/') . '/sdk/v1/collab.js', JSON_UNESCAPED_SLASHES) . ';' .
-        // The placeholder orb stands in for an arriving overlay. When the
-        // module never arrives, remove it: a disc that pulses forever is a
-        // worse lie than no orb.
-        'o.onerror=function(){var e=new Error("Spacefast Comments module failed to load");console.error(e);var b=document.getElementById("sf-collab-boot-orb");if(b)b.remove();window.dispatchEvent(new CustomEvent("spacefast:collab-error",{detail:{stage:"module",message:e.message}}));};' .
-        'root.collabLoader=o;document.head.appendChild(o);'
+        'if(root.collabLoader)return;root.collabLoader=true;' .
+        'var l=document.createElement("link");l.rel="stylesheet";l.href=' .
+        json_encode(STATTIC_SPACEFAST_COLLAB_THEME_PATH . $query, JSON_UNESCAPED_SLASHES) . ';' .
+        'document.head.appendChild(l);' .
+        ($ui !== 'default' ? '' : (
+            _stattic_spacefast_sdk_placeholder_orb($overlay) .
+            'var o=document.createElement("script");' .
+            'o.async=true;o.type="module";' .
+            'o.src=' . json_encode(rtrim((string) $collabBase, '/') . '/sdk/v1/collab.js', JSON_UNESCAPED_SLASHES) . ';' .
+            'o.setAttribute("data-sf-config",' .
+            json_encode(STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH . $query, JSON_UNESCAPED_SLASHES) . ');' .
+            // The placeholder orb stands in for an arriving overlay. When the
+            // module never arrives, remove it: a disc that pulses forever is a
+            // worse lie than no orb.
+            'o.onerror=function(){var e=new Error("Spacefast Comments module failed to load");console.error(e);var b=document.getElementById("sf-collab-boot-orb");if(b)b.remove();window.dispatchEvent(new CustomEvent("spacefast:collab-error",{detail:{stage:"module",message:e.message}}));};' .
+            'document.head.appendChild(o);'
+        ))
     );
     // A public, cached bootstrap uses the frame name only as a reload signal.
     // The unique URL rechecks the HttpOnly proof before returning review code.
@@ -363,24 +361,29 @@ function _stattic_spacefast_sdk_bootstrap(
         'if(/^spacefast-review:[0-9a-f-]{36}$/.test(window.name)&&window.parent!==window){' .
         'if(!root.reviewLoader){root.reviewLoader=true;var r=document.createElement("script");r.src=' . json_encode(STATTIC_SPACEFAST_SDK_PATH) . '+"?review="+encodeURIComponent(window.name.slice(17));document.head.appendChild(r);}return;}'
     );
+    // A preview session loads the draft tag release from the control plane
+    // instead of the published body. PHP knows every part of that URL, so the
+    // page gets it finished rather than assembling one.
+    $apiBase = _stattic_spacefast_sdk_api_base_url();
+    $tagLoader = ($previewToken === null || $apiBase === null || $spaceId === null) ? '' : (
+        'if(!root.tagLoader){var t=document.createElement("script");t.async=true;t.src=' .
+        json_encode(
+            $apiBase . '/v1/spaces/' . rawurlencode($spaceId) . '/tags/sdk.js'
+                . '?host=' . rawurlencode($pageHost) . '&preview=' . rawurlencode($previewToken),
+            JSON_UNESCAPED_SLASHES
+        ) . ';' .
+        't.dataset.spacefastSdk="v1";root.tagLoader=t;document.head.appendChild(t);}'
+    );
+    // `window.Spacefast` is a private latch, not an API: it holds the three
+    // "already loading" flags so a page carrying two SDK tags boots once.
     $loader = '(function(){' .
-        'var manifest=' . json_encode($manifest, JSON_UNESCAPED_SLASHES) . ';' .
-        'var previewToken=' . json_encode($previewToken, JSON_UNESCAPED_SLASHES) . ';' .
         'var root=window.Spacefast=window.Spacefast||{};' .
         $reviewReload .
-        'root.manifest=manifest;' .
-        'if(previewToken&&manifest.apiBase&&manifest.spaceId&&!root.tagLoader){' .
-        'var tagUrl=new URL(manifest.apiBase.replace(/\\/+$/,"")+"/v1/spaces/"+encodeURIComponent(manifest.spaceId)+"/tags/sdk.js");' .
-        'tagUrl.searchParams.set("host",manifest.host||location.host);' .
-        'if(previewToken)tagUrl.searchParams.set("preview",previewToken);' .
-        'var t=document.createElement("script");' .
-        't.async=true;t.src=tagUrl.toString();t.dataset.spacefastSdk="v1";' .
-        'root.tagLoader=t;document.head.appendChild(t);' .
-        '}' .
+        $tagLoader .
         $collab .
         '})();';
     if ($review !== null && $collabBase !== null) {
-        $review['spaceId'] = $manifest['spaceId'];
+        $review['spaceId'] = $spaceId;
         // No proof is exposed to publisher JavaScript. Only the verified bridge identity travels.
         $reviewJson = json_encode($review, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
         $reviewUrl = json_encode(rtrim($collabBase, '/') . '/sdk/v1/review.js', JSON_UNESCAPED_SLASHES);
@@ -390,24 +393,49 @@ function _stattic_spacefast_sdk_bootstrap(
 }
 
 /**
+ * Ink that reads on a filled accent: dark on light accents, white on dark ones.
+ * Mirrors the SDK's `deriveAccent` (theme/adaptive.ts), which draws the same
+ * line at 0.45 relative luminance — the placeholder and the real orb must not
+ * disagree about the colour of the glyph they both paint.
+ */
+function _stattic_spacefast_sdk_accent_ink(string $accent): string
+{
+    if (!preg_match('/^#[0-9a-fA-F]{6}$/', $accent)) {
+        return '#ffffff';
+    }
+    $channel = static function (int $value): float {
+        $srgb = $value / 255;
+        return $srgb <= 0.04045 ? $srgb / 12.92 : (($srgb + 0.055) / 1.055) ** 2.4;
+    };
+    $luminance = 0.2126 * $channel((int) hexdec(substr($accent, 1, 2)))
+        + 0.7152 * $channel((int) hexdec(substr($accent, 3, 2)))
+        + 0.0722 * $channel((int) hexdec(substr($accent, 5, 2)));
+    return $luminance > 0.45 ? '#16161b' : '#ffffff';
+}
+
+/**
  * The orb, painted before a single Cast byte is fetched.
  *
- * A static disc in the placement the visitor last dragged it to, wearing the
- * Space accent and the `connecting` pulse, the same visuals the real orb boots
- * into (theme/stylesheet.ts `.sf-orb`). It has no behaviour: the SDK removes it
- * when the real overlay mounts (shell/mount.ts). Placement mirrors the store's
+ * An accent-filled disc carrying the comment glyph, in the placement the
+ * visitor last dragged it to, with the `connecting` pulse — the same visuals the
+ * real orb boots into (react/styles.ts `.sf-orb`, theme/icons.ts `comment`), so
+ * the handover swaps no shape and no colour. It has no behaviour: the SDK
+ * removes it when the real overlay mounts. Placement mirrors the store's
  * `restoreOrbPlacement` + `orbDockStyle`; a rejected stored value falls back to
  * the default bottom-right dock.
- *
- * Framed documents paint nothing: inside the Collab frame or anyone else's
- * iframe the orb is suppressed for the whole page life (collab-frame-plan §2),
- * so painting one here would only flash it. The SDK still boots there to run
- * the frame handshake.
  */
 function _stattic_spacefast_sdk_placeholder_orb(array $overlay): string
 {
+    // This value is written into a CSS declaration, so only a literal 6-hex is
+    // ever accepted here; anything else is the overlay's own fallback.
     $accent = $overlay['theme']['accent'] ?? null;
-    return 'if(window.self===window.top)try{' .
+    $accent = is_string($accent) && preg_match('/^#[0-9a-fA-F]{6}$/', $accent)
+        ? $accent
+        : '#ff603d';
+    // Kept in one place with the SDK's copy: runtime/tests/spacefast-sdk.test.ts
+    // pins this path against `ICON_PATHS.comment`.
+    $glyph = 'M6 4h12a2 2 0 012 2v7a2 2 0 01-2 2h-7l-4 4v-4H6a2 2 0 01-2-2V6a2 2 0 012-2z';
+    return 'try{' .
         'var pr=JSON.parse(localStorage.getItem("spacefast:collab:orb-corner"))||{};' .
         'var pe=/^(left|right|top|bottom)$/.test(pr.edge)?pr.edge:"right";' .
         'var pa=pr.along>=0&&pr.along<=1?pr.along:1;' .
@@ -417,15 +445,15 @@ function _stattic_spacefast_sdk_placeholder_orb(array $overlay): string
         'var pc=Math.min(Math.max(pa*ps-22,16),Math.max(16,ps-60));' .
         'var b=document.createElement("div");b.id="sf-collab-boot-orb";' .
         'b.style.cssText="position:fixed;z-index:2147483000;width:44px;height:44px;border-radius:999px;' .
-        'pointer-events:none;color-scheme:light dark;display:grid;place-items:center;' .
-        'background:light-dark(rgba(255,255,255,.72),rgba(24,24,28,.72));' .
-        '-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);' .
-        'box-shadow:0 2px 8px rgba(0,0,0,.12),inset 0 0 0 1px light-dark(rgba(0,0,0,.08),rgba(255,255,255,.1));"+' .
+        'pointer-events:none;display:grid;place-items:center;background:' .
+        $accent . ';' .
+        'box-shadow:0 2px 8px rgba(0,0,0,.12);"+' .
         'pe+":"+pi+"px;"+(pv?"top:":"left:")+pc+"px";' .
         'b.innerHTML=\'<style>@keyframes sf-boot-pulse{0%,100%{opacity:1}50%{opacity:.35}}</style>\'+' .
-        '\'<i style="width:10px;height:10px;border-radius:999px;background:\'+' .
-        json_encode(is_string($accent) ? $accent : '#ff603d', JSON_UNESCAPED_SLASHES) .
-        '+\';animation:sf-boot-pulse 1.6s ease-in-out infinite"></i>\';' .
+        '\'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="\'+' .
+        json_encode(_stattic_spacefast_sdk_accent_ink($accent), JSON_UNESCAPED_SLASHES) .
+        '+\'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ' .
+        'style="animation:sf-boot-pulse 1.6s ease-in-out infinite"><path d="' . $glyph . '"/></svg>\';' .
         '(document.body||document.documentElement).appendChild(b);' .
         '}catch(e){}';
 }
@@ -536,13 +564,204 @@ function _stattic_comments_enabled_for_surface(array $serving): bool
 
 function _stattic_comments_overlay_theme(array $comments): array
 {
-    $theme = is_array($comments['theme'] ?? null) ? $comments['theme'] : [];
-    $accent = $theme['accent'] ?? null;
+    $theme = _stattic_spacefast_collab_theme($comments);
     return [
-        'accent' => is_string($accent) && preg_match('/\A#[0-9a-fA-F]{6}\z/', $accent) === 1
-            ? $accent
+        'accent' => $theme['accent'],
+        'hide_branding' => $theme['hideBranding'],
+    ];
+}
+
+/**
+ * THE one predicate for "can anything collaborate on this surface".
+ *
+ * `sdk.js` and `collab.json` must answer this identically or a `ui: "custom"`
+ * client — which boots from the manifest alone and never reads the bootstrap —
+ * would join a room the page itself refused to load. It is deliberately
+ * stricter than the overlay's own `enabled` bit:
+ *
+ * - a review session replaces the overlay entirely, so nothing else boots;
+ * - no Cast base is nowhere to connect;
+ * - a machine-local Cast origin under a public control plane came from a
+ *   deployment wired against a developer's machine. No visitor can reach it, so
+ *   refuse to advertise it;
+ * - no `commentsTicketUrl` is no way to mint auth, and a ticket is the whole
+ *   join.
+ *
+ * `$overlay` is passed in rather than recomputed: it costs a storage read, and
+ * both callers already hold it.
+ */
+function _stattic_spacefast_collab_available(array $serving, array $overlay): bool
+{
+    $collabBase = _stattic_spacefast_sdk_base_url(_stattic_spacefast_sdk_config($serving));
+    $exchange = _stattic_access_page_exchange($serving);
+    $ticketUrl = is_array($exchange) && is_string($exchange['commentsTicketUrl'] ?? null)
+        ? $exchange['commentsTicketUrl']
+        : null;
+    return _stattic_system_view_review() === null
+        && ($overlay['enabled'] ?? null) === true
+        && $collabBase !== null
+        && $ticketUrl !== null
+        && !(
+            _stattic_spacefast_sdk_host_is_local(parse_url($collabBase, PHP_URL_HOST))
+            && !_stattic_spacefast_sdk_host_is_local(parse_url($ticketUrl, PHP_URL_HOST))
+        );
+}
+
+/**
+ * How the overlay is delivered for this Space: `default` (Spacefast's own UI)
+ * or `custom` (the Space brought its own and wants only the theme). Anything
+ * else in the projection, including its absence, is `default` — the control
+ * plane is the only writer and it validates the enum. Whether the Space has
+ * comments at all is a different question, answered by the availability
+ * predicate, not by this one.
+ */
+function _stattic_spacefast_collab_ui(array $serving): string
+{
+    $sdkConfig = _stattic_spacefast_sdk_config($serving);
+    $comments = is_array($sdkConfig['comments'] ?? null) ? $sdkConfig['comments'] : [];
+    return ($comments['ui'] ?? null) === 'custom' ? 'custom' : 'default';
+}
+
+/**
+ * The Space's customization, exactly as the control plane projected it.
+ *
+ * Every value arrives already parsed, validated and normalized — colors are
+ * 6-hex lowercase, fonts are safe in a style context — because the writer is
+ * the only place that can do it once per publish instead of once per request.
+ * This function names the keys and their types; it derives nothing.
+ *
+ * The accent is the one exception, and it is not derivation: it is re-checked
+ * against 6-hex here because it is the only theme value that leaves JSON. The
+ * placeholder orb concatenates it into an HTML attribute inside `innerHTML`, so
+ * a serving state carrying anything else would be markup injection on every page
+ * of the Space. Invalid is null, and the orb paints its own default. The check
+ * accepts either case so an older serving state still paints, but the manifest
+ * publishes the lowercase spelling `collabThemeSchema` requires — a client
+ * parsing this document must not fail on how the value happens to be written.
+ */
+function _stattic_spacefast_collab_theme(array $comments): array
+{
+    $theme = is_array($comments['theme'] ?? null) ? $comments['theme'] : [];
+    $string = static fn (string $key): ?string =>
+        is_string($theme[$key] ?? null) ? $theme[$key] : null;
+    $accent = $string('accent');
+    return [
+        'accent' => $accent !== null && preg_match('/\A#[0-9a-fA-F]{6}\z/', $accent) === 1
+            ? strtolower($accent)
             : null,
-        'hide_branding' => ($theme['hide_branding'] ?? null) === true,
+        'background' => $string('background'),
+        'font' => $string('font'),
+        'name' => $string('name'),
+        'logo' => $string('logo'),
+        'hideBranding' => ($theme['hideBranding'] ?? null) === true,
+    ];
+}
+
+// The theme stylesheet, rendered by the control plane from the same theme block
+// and served byte-for-byte. No color math happens on this host.
+function _stattic_spacefast_collab_theme_css(array $serving): string
+{
+    $sdkConfig = _stattic_spacefast_sdk_config($serving);
+    $comments = is_array($sdkConfig['comments'] ?? null) ? $sdkConfig['comments'] : [];
+    return is_string($comments['css'] ?? null) ? $comments['css'] : '';
+}
+
+/**
+ * The collaboration manifest (`collabManifestSchema` v5): everything a client
+ * needs to boot, and nothing it must not have.
+ *
+ * One document per Space, not per page — the room key stays client-derived from
+ * `location.pathname` so this response is cacheable. A Space with nothing to
+ * join still answers, with `cast` and `ticketUrl` null: the client learns it is
+ * on a surface that does not speak rather than guessing from a 404.
+ */
+function _stattic_spacefast_collab_manifest(
+    string $privateRoot,
+    array $serving,
+    string $requestHost
+): array {
+    // Same reason the bootstrap does it: an OPEN Space reaches this lane with no
+    // access code loaded, and the page descriptor lives there.
+    require_once __DIR__ . '/access-rules.php';
+    $sdkConfig = _stattic_spacefast_sdk_config($serving);
+    $comments = is_array($sdkConfig['comments'] ?? null) ? $sdkConfig['comments'] : [];
+    $features = is_array($comments['features'] ?? null) ? $comments['features'] : [];
+    $overlay = _stattic_comments_local_config($privateRoot, $serving, $requestHost);
+    // THE availability predicate, the same call the bootstrap makes. A client
+    // that only ever reads this document gets exactly the verdict `sdk.js`
+    // reached for a client that reads both.
+    $available = _stattic_spacefast_collab_available($serving, $overlay);
+    $descriptor = _stattic_access_page_descriptor($serving);
+    $origin = _stattic_comments_request_origin($requestHost);
+    $previewHost = _stattic_spacefast_preview_surface($serving);
+    $versionId = is_string($serving['version_id'] ?? null) ? $serving['version_id'] : null;
+    $liveVersionId = is_string($serving['live_version_id'] ?? null)
+        ? $serving['live_version_id']
+        : null;
+    $attachments = ($features['attachments'] ?? null) === true;
+    // The same `{base, key}` the overlay config lane serves, from the same
+    // place. Withheld unless there is actually somewhere to upload to, so the
+    // UI can never offer an endpoint this manifest did not address.
+    $uploads = is_array($overlay['uploads'] ?? null) ? $overlay['uploads'] : null;
+
+    return [
+        'version' => 5,
+        'environment' => $previewHost ? 'preview' : 'production',
+        'space' => [
+            'id' => is_string($serving['space_id'] ?? null) ? $serving['space_id'] : '',
+            'name' => is_array($descriptor) && is_string($descriptor['displayName'] ?? null)
+                ? $descriptor['displayName']
+                : null,
+            // Only a version host has somewhere else to go: on the live host
+            // this page already IS the live Space.
+            'liveUrl' => $previewHost && is_string($comments['live_url'] ?? null)
+                ? $comments['live_url']
+                : null,
+        ],
+        'artifact' => [
+            'id' => $versionId,
+            // Whether commenting here is commenting on the live Space or on an
+            // older version — the one thing that changes what the UI says. The
+            // live host is structurally current: a serving state that has not
+            // recorded `live_version_id` yet must not push the SDK into a draft
+            // room on the Space's own published surface.
+            'current' => !$previewHost || ($versionId !== null && $versionId === $liveVersionId),
+            'url' => $previewHost && $origin !== null ? $origin . '/' : null,
+        ],
+        'cast' => $available ? [
+            'wsUrl' => (string) $overlay['ws_url'],
+            'resourceKey' => (string) $overlay['resource_key'],
+        ] : null,
+        // Same-origin: a ticket is auth, and auth is minted through this host's
+        // own exchange lane, never by the page reaching the control plane.
+        'ticketUrl' => $available && is_string($overlay['endpoints']['ticket'] ?? null)
+            ? $overlay['endpoints']['ticket']
+            : null,
+        // The control plane itself, for the one lane the page pulls on its own
+        // behalf with its own bearer (reply-email consent). Null when a
+        // deployment names none — a self-host, a local harness — so the page
+        // refuses that lane instead of guessing an origin.
+        'apiBase' => _stattic_spacefast_sdk_api_base_url(),
+        // Null while the Space is unclaimed: there is no account to continue
+        // with. The descriptor's own `accountUrl` is the gate; the URL the page
+        // goes to is this host's account start route.
+        'accountUrl' => is_array($descriptor)
+            && is_string($descriptor['accountUrl'] ?? null)
+            && $origin !== null
+            ? $origin . STATTIC_ACCESS_ACCOUNT_START_PATH
+            : null,
+        'features' => [
+            'picker' => ($features['picker'] ?? null) !== false,
+            'drawing' => ($features['drawing'] ?? null) === true,
+            'capture' => ($features['capture'] ?? null) === true,
+            'attachments' => $attachments,
+        ],
+        'uploads' => $available && $attachments && $uploads !== null ? [
+            'base' => (string) $uploads['base'],
+            'key' => (string) $uploads['key'],
+        ] : null,
+        'ui' => _stattic_spacefast_collab_ui($serving),
+        'theme' => _stattic_spacefast_collab_theme($comments),
     ];
 }
 
@@ -580,7 +799,6 @@ function _stattic_comments_local_config(string $privateRoot, array $serving, str
             'drawing' => false,
             'capture' => false,
             'attachments' => false,
-            'notices' => false,
         ],
     ];
 
@@ -629,7 +847,6 @@ function _stattic_comments_local_config(string $privateRoot, array $serving, str
             'drawing' => ($features['drawing'] ?? null) === true,
             'capture' => ($features['capture'] ?? null) === true,
             'attachments' => ($features['attachments'] ?? null) === true,
-            'notices' => ($features['notices'] ?? null) === true,
         ],
     ];
 }

@@ -3,8 +3,16 @@ import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { canonicalPagePath, parseOverlayConfig } from "../../packages/collab-sdk/src/entry.ts";
-import { readManifest } from "../../packages/collab-sdk/src/manifest.ts";
+import { canonicalPagePath, commentRoomKey } from "../../packages/collab-sdk/src/core.ts";
+import { ICON_PATHS } from "../../packages/collab-sdk/src/theme/icons.ts";
+import { collabManifestSchema } from "../../packages/common/src/contracts/collab-manifest.ts";
+// Fetched through the shipped constants, not string literals: PHP and TypeScript
+// name these two URLs independently, and this suite is where a drift between
+// them surfaces.
+import {
+  RUNTIME_COLLAB_MANIFEST_PATH,
+  RUNTIME_COLLAB_THEME_PATH,
+} from "../../packages/common/src/utils/runtime-paths.ts";
 import {
   deploy,
   errorCode,
@@ -33,8 +41,19 @@ const LOCAL_COMMENTS = {
   live: true,
   preview: true,
   live_url: "https://live.example.test/",
-  theme: { accent: null, hide_branding: false },
-  features: { picker: true, drawing: true, capture: false, attachments: true, notices: true },
+  ui: "default",
+  // The control plane already parsed, validated and normalized every value
+  // here, and rendered `css` from them. The runtime copies both verbatim.
+  theme: {
+    accent: "#4f46e5",
+    background: "#101014",
+    font: '"Inter", sans-serif',
+    name: "Local SDK",
+    logo: "https://cdn.example.test/logo.svg",
+    hideBranding: false,
+  },
+  css: ":host,:root{--sf-collab-accent:#4f46e5}\n",
+  features: { picker: true, drawing: true, capture: false, attachments: true },
 };
 
 // Contracts §7 (D33/D85/D120): the cookie IS the session — `<prefix><base64url
@@ -55,6 +74,105 @@ function sessionPayload(cookie: string): Record<string, unknown> {
   }
   const encoded = value.slice(prefix.length).split(".")[0] ?? "";
   return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>;
+}
+
+type FakeElement = {
+  async: boolean;
+  attributes: Record<string, string>;
+  dataset: Record<string, string>;
+  href: string;
+  id: string;
+  innerHTML: string;
+  onerror?: () => void;
+  rel: string;
+  remove: () => void;
+  setAttribute: (name: string, value: string) => void;
+  src: string;
+  style: { cssText: string };
+  tagName: string;
+  type: string;
+};
+
+type FakeWindow = {
+  Spacefast?: { collabLoader?: unknown };
+  __localTagLoaded?: boolean;
+};
+
+// Run an `sdk.js` body the way a browser would, against a DOM thin enough that
+// every element it creates stays observable. The head is where the SDK puts the
+// theme stylesheet and the overlay module; the body is where the placeholder
+// orb lands.
+function runSdk(
+  source: string,
+  options: { host?: string; pathname?: string; storedPlacement?: string } = {},
+) {
+  const head: FakeElement[] = [];
+  const body: FakeElement[] = [];
+  const events: string[] = [];
+  const host = options.host ?? "local-sdk.site.test";
+  const fakeWindow: FakeWindow & {
+    dispatchEvent: (event: { type: string }) => boolean;
+    CustomEvent: typeof CustomEvent;
+  } = {
+    dispatchEvent: (event) => {
+      events.push(event.type);
+      return true;
+    },
+    CustomEvent,
+  };
+  const fakeDocument = {
+    body: {
+      appendChild: (node: FakeElement) => {
+        body.push(node);
+      },
+    },
+    createElement: (tagName: string): FakeElement => {
+      const element: FakeElement = {
+        async: false,
+        attributes: {},
+        dataset: {},
+        href: "",
+        id: "",
+        innerHTML: "",
+        rel: "",
+        setAttribute: (name: string, value: string) => {
+          element.attributes[name] = value;
+        },
+        src: "",
+        style: { cssText: "" },
+        tagName,
+        type: "",
+        remove: () => {
+          const at = body.indexOf(element);
+          if (at !== -1) body.splice(at, 1);
+        },
+      };
+      return element;
+    },
+    getElementById: (id: string) => body.find((node) => node.id === id) ?? null,
+    head: {
+      appendChild: (node: FakeElement) => {
+        head.push(node);
+      },
+    },
+  };
+  Function(
+    "window",
+    "document",
+    "location",
+    "localStorage",
+    "innerWidth",
+    "innerHeight",
+    source,
+  )(
+    fakeWindow,
+    fakeDocument,
+    { host, origin: `https://${host}`, pathname: options.pathname ?? "/" },
+    { getItem: () => options.storedPlacement ?? null },
+    1_000,
+    900,
+  );
+  return { head, body, events, window: fakeWindow };
 }
 
 function sessionRecords(runtime: Runtime, spaceId: string): string[] {
@@ -119,11 +237,11 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   expect(response.status).toBe(200);
   const body = await response.text();
   expect(body).toContain("window.Spacefast=window.Spacefast||{}");
-  expect(body).toContain('"apiBase":"https://api.spacefast.com"');
   // Comments are not available for this surface, so the response carries no
-  // Comments bytes at all: no embedded config, no placeholder orb, no module
+  // Comments bytes at all: no theme stylesheet, no placeholder orb, no module
   // loader. The permissions toggle is a byte budget, not a disabled flag.
-  expect(body).not.toContain('"config"');
+  expect(body).not.toContain("collab.css");
+  expect(body).not.toContain("collab.json");
   expect(body).not.toContain("sf-collab-boot-orb");
   expect(body).not.toContain("collab.js");
   expect(body).not.toContain("resource_key");
@@ -202,13 +320,21 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
     "public, max-age=0, s-maxage=600, stale-while-revalidate=60",
   );
   // A `?preview=` token names a tag release, never a surface. The live host is
-  // the live surface whatever the script URL is decorated with — otherwise the
-  // preview Comments lane could be consulted from the live site by anyone who
-  // appended a query parameter.
-  expect(await preview.text()).toContain('"environment":"production"');
-  expect(await (await get(runtime, SITE, "/__spacefast/sdk.js")).text()).toContain(
-    '"environment":"production"',
-  );
+  // the live surface whatever the URL is decorated with — otherwise the preview
+  // Comments lane could be consulted from the live site by anyone who appended
+  // a query parameter. The manifest is where that verdict is now published.
+  expect(await preview.text()).toContain("preview=preview-token");
+  for (const url of [
+    `${RUNTIME_COLLAB_MANIFEST_PATH}?preview=preview-token`,
+    RUNTIME_COLLAB_MANIFEST_PATH,
+  ]) {
+    const manifest = await get(runtime, SITE, url);
+    expect(manifest.status, url).toBe(200);
+    // SAFETY: collabManifestSchema is asserted against a full manifest above;
+    // this lane only reads back the one field the surface verdict writes.
+    const parsed = (await manifest.json()) as { environment: string };
+    expect(parsed.environment, url).toBe("production");
+  }
 
   const genericPreview = await get(runtime, SITE, "/__spacefast/sdk.js", {
     headers: { referer: `https://${SITE}/docs?preview=true` },
@@ -238,31 +364,14 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   expect(previewHead.headers.get("content-length")).toBe(previewPage.headers.get("content-length"));
   expect(await previewHead.text()).toBe("");
 
-  // Configuration is answered on this host, out of the overlay — the lane never
-  // leaves the serving host, so "no Comments here" is a disabled config rather
-  // than a refusal that would be indistinguishable from an outage.
-  const unconfigured = await get(runtime, SITE, "/__spacefast/comments/config", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      origin: `http://${SITE}`,
-      "sec-fetch-site": "same-origin",
-    },
-    body: JSON.stringify({ pagePath: "/" }),
-  });
+  // A Space with nothing to join still answers, and says so: no socket and no
+  // ticket URL, rather than a 404 the client would have to guess at. Nothing
+  // named here that the page could not already see.
+  const unconfigured = await get(runtime, SITE, RUNTIME_COLLAB_MANIFEST_PATH);
   expect(unconfigured.status).toBe(200);
-  const unconfiguredConfig = (await unconfigured.json()) as {
-    data: { enabled: boolean; resource_key: string | null; ws_url: string | null };
-  };
-  // Nothing to connect to, and nothing named that the page could not already
-  // see: no resource key, no socket. The room key is not here at all — it is
-  // per page, and this response is not.
-  expect(unconfiguredConfig.data).toMatchObject({
-    enabled: false,
-    resource_key: null,
-    ws_url: null,
-  });
-  expect(unconfiguredConfig.data).not.toHaveProperty("room_key");
+  const unconfiguredManifest = collabManifestSchema.parse(await unconfigured.json());
+  expect(unconfiguredManifest.cast).toBeNull();
+  expect(unconfiguredManifest.ticketUrl).toBeNull();
 
   const staleIdentity = await get(runtime, SITE, "/__spacefast/sdk.js", {
     headers: {
@@ -385,6 +494,22 @@ test("an unconfigured API base leaves the SDK headless instead of guessing one",
     },
   });
 
+  const manifestResponse = await get(
+    runtime,
+    "unconfigured-sdk.site.test",
+    RUNTIME_COLLAB_MANIFEST_PATH,
+  );
+  expect(manifestResponse.status).toBe(200);
+  const manifest: unknown = await manifestResponse.json();
+  // ...and the SDK's own parser is the one that has to accept it, so a
+  // producer/consumer drift fails here rather than at a visitor's first paint.
+  // Comments still join (that gate is `cast` + `ticketUrl`); it is the lanes the
+  // page pulls on its own behalf that refuse — see `registerReplyEmail` in
+  // react/composer.tsx, which throws rather than POST at a guessed origin.
+  expect(collabManifestSchema.parse(manifest).apiBase).toBeNull();
+
+  // The preview tag loader is gated on the same value, so no script goes out to
+  // a guessed host either.
   const response = await get(
     runtime,
     "unconfigured-sdk.site.test",
@@ -393,28 +518,17 @@ test("an unconfigured API base leaves the SDK headless instead of guessing one",
   expect(response.status).toBe(200);
   const body = await response.text();
   const appended: Array<{ src: string }> = [];
-  // SAFETY: the loader does `window.Spacefast = window.Spacefast || {}` and then
-  // assigns the manifest onto it, so seeding `manifest` as `unknown` lets this
-  // test hold the very object the loader mutates without asserting its shape.
-  const spacefast = { manifest: undefined as unknown };
   Function(
     "window",
     "document",
     body,
   )(
-    { Spacefast: spacefast },
+    { Spacefast: {} },
     {
       createElement: () => ({ async: false, dataset: {}, src: "", type: "" }),
       head: { appendChild: (script: { src: string }) => appended.push(script) },
     },
   );
-
-  expect(spacefast.manifest).toMatchObject({ apiBase: null });
-  // ...and the SDK's own parser is the one that has to accept it. It refuses,
-  // so the page stays headless rather than calling an origin nobody named.
-  expect(readManifest(spacefast.manifest)).toBeNull();
-  // The preview tag loader is gated on the same value, so no script goes out to
-  // a guessed host either.
   expect(appended).toHaveLength(0);
 });
 
@@ -435,23 +549,25 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   if (typeof authorization !== "object" || authorization === null) {
     throw new Error("public access fixture is missing authorization");
   }
+  const accessPage = {
+    displayName: "Local SDK",
+    // Claimed: the descriptor naming an account is the gate the manifest
+    // reads, and what it hands the page is this host's own start route.
+    accountUrl: "https://api.spacefast.com/acquire/opaque-comments-target/account",
+    connections: [],
+    exchange: {
+      passwordUrl: "https://api.spacefast.com/acquire/opaque-comments-target/password",
+      tokenUrl: "https://api.spacefast.com/acquire/opaque-comments-target/token",
+      emailUrl: "https://api.spacefast.com/acquire/opaque-comments-target/email",
+      requestUrl: "https://api.spacefast.com/acquire/opaque-comments-target/request",
+      logoutUrl: "https://api.spacefast.com/runtime/collaboration-sessions/revoke",
+      commentsTicketUrl: "https://api.spacefast.com/runtime/comments/opaque-comments-target/ticket",
+      credential: "runtime-comments-credential-0000000000000000000000000000",
+    },
+  };
   Object.assign(authorization, {
     acquireUrl: "https://api.spacefast.com/acquire/opaque-comments-target",
-    accessPage: {
-      displayName: "Local SDK",
-      accountUrl: null,
-      connections: [],
-      exchange: {
-        passwordUrl: "https://api.spacefast.com/acquire/opaque-comments-target/password",
-        tokenUrl: "https://api.spacefast.com/acquire/opaque-comments-target/token",
-        emailUrl: "https://api.spacefast.com/acquire/opaque-comments-target/email",
-        requestUrl: "https://api.spacefast.com/acquire/opaque-comments-target/request",
-        logoutUrl: "https://api.spacefast.com/runtime/collaboration-sessions/revoke",
-        commentsTicketUrl:
-          "https://api.spacefast.com/runtime/comments/opaque-comments-target/ticket",
-        credential: "runtime-comments-credential-0000000000000000000000000000",
-      },
-    },
+    accessPage,
   });
   accessConfig.sdk = {
     revision: "sdk-local-1",
@@ -484,169 +600,92 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
 
   const response = await get(runtime, "local-sdk.site.test", "/__spacefast/sdk.js");
   expect(response.status).toBe(200);
+  expect(response.headers.get("etag")).toMatch(/^"runtime:[a-f0-9]{64}"$/);
   const body = await response.text();
-  const appendedScripts: Array<{
-    async: boolean;
-    dataset: Record<string, string>;
-    src: string;
-    type: string;
-  }> = [];
-  type FakeElement = {
-    async: boolean;
-    dataset: Record<string, string>;
-    id: string;
-    innerHTML: string;
-    onerror?: () => void;
-    remove: () => void;
-    src: string;
-    style: { cssText: string };
-    tagName: string;
-    type: string;
-  };
-  const appendedToBody: FakeElement[] = [];
-  const collabErrors: string[] = [];
-  const fakeWindow: {
-    Spacefast?: {
-      collabLoader?: unknown;
-      manifest?: { apiBase?: string; config?: Record<string, unknown> };
-    };
-    __localTagLoaded?: boolean;
-    dispatchEvent?: (event: { type: string }) => boolean;
-    CustomEvent?: typeof CustomEvent;
-  } = {
-    dispatchEvent: (event) => {
-      collabErrors.push(event.type);
-      return true;
+
+  // The manifest is its own document now, fetched by whoever boots the overlay
+  // — Spacefast's bundle or a self-built UI. `collabManifestSchema` is the
+  // contract both sides hold, so a producer/consumer drift on any field fails
+  // here instead of at a visitor's first paint.
+  const manifestResponse = await get(runtime, "local-sdk.site.test", RUNTIME_COLLAB_MANIFEST_PATH);
+  expect(manifestResponse.status).toBe(200);
+  expect(manifestResponse.headers.get("content-type")).toContain("application/json");
+  expect(manifestResponse.headers.get("etag")).toMatch(/^"runtime:[a-f0-9]{64}"$/);
+  const manifest: unknown = await manifestResponse.json();
+  expect(collabManifestSchema.safeParse(manifest).success).toBe(true);
+  expect(manifest).toEqual({
+    version: 5,
+    environment: "production",
+    space: { id: "spc_sdk_local", name: "Local SDK", liveUrl: null },
+    // The live host serves the live artifact: `current` is true and there is no
+    // separate immutable URL to point at.
+    artifact: { id: "ver_sdk_local_1", current: true, url: null },
+    cast: {
+      wsUrl: "wss://cast.example.test/socket/websocket",
+      resourceKey: "resource_local",
     },
-    CustomEvent,
-  };
-  const fakeDocument = {
-    body: {
-      appendChild: (node: FakeElement) => {
-        appendedToBody.push(node);
-      },
+    ticketUrl: "http://local-sdk.site.test/__spacefast/comments/ticket",
+    // Configuration and nothing else: this runtime names an API base that is
+    // not a `cast.` sibling of its relay, and that is what the manifest carries.
+    apiBase: "https://api.example.test",
+    // Never the descriptor's own URL: the page goes to this host's account
+    // start route, which is what mints browser state before the handoff.
+    accountUrl: "http://local-sdk.site.test/__spacefast/access/account",
+    features: { picker: true, drawing: true, capture: false, attachments: true },
+    // The revocable read key rides the manifest: that IS the fresh-URL
+    // mechanism, so its exact value is asserted against the box's key file.
+    uploads: {
+      base: "http://local-sdk.site.test/__stattic/u/",
+      key: expect.stringMatching(/^[a-f0-9]{32}$/),
     },
-    createElement: (tagName: string) => {
-      const element = {
-        async: false,
-        dataset: {},
-        href: "",
-        id: "",
-        innerHTML: "",
-        rel: "",
-        setAttribute: () => undefined,
-        src: "",
-        style: { cssText: "" },
-        tagName,
-        target: "",
-        textContent: "",
-        type: "",
-        remove: () => {
-          const at = appendedToBody.indexOf(element as unknown as FakeElement);
-          if (at !== -1) appendedToBody.splice(at, 1);
-        },
-      };
-      return element;
-    },
-    getElementById: (id: string) => appendedToBody.find((node) => node.id === id) ?? null,
-    head: {
-      appendChild: (script: (typeof appendedScripts)[number]) => {
-        appendedScripts.push(script);
-      },
-    },
-  };
+    ui: "default",
+    theme: LOCAL_COMMENTS.theme,
+  });
+  // The room key is the one thing NOT here: it is per page and this document is
+  // shared across every page of the Space. The client derives it.
+  expect(manifest).not.toHaveProperty("room_key");
+
+  // The stylesheet is the control plane's rendering of that same theme, served
+  // byte-for-byte. The runtime derives no colors.
+  const themeResponse = await get(runtime, "local-sdk.site.test", RUNTIME_COLLAB_THEME_PATH);
+  expect(themeResponse.status).toBe(200);
+  expect(themeResponse.headers.get("content-type")).toContain("text/css");
+  expect(themeResponse.headers.get("etag")).toMatch(/^"runtime:[a-f0-9]{64}"$/);
+  expect(await themeResponse.text()).toBe(LOCAL_COMMENTS.css);
+
+  // Both are read-only documents, and they refuse a write the way the rest of
+  // the API does: a problem document, not the SDK's JavaScript refusal.
+  const written = await get(runtime, "local-sdk.site.test", RUNTIME_COLLAB_MANIFEST_PATH, {
+    method: "POST",
+  });
+  expect(written.status).toBe(405);
+  expect(written.headers.get("allow")).toBe("GET, HEAD, OPTIONS");
+  expect(await errorCode(written)).toBe("method_not_allowed");
 
   // The visitor last parked the orb on the left edge, a third of the way down.
   const storedPlacement = JSON.stringify({ edge: "left", along: 0.33, inset: 16 });
-  Function(
-    "window",
-    "document",
-    "location",
-    "localStorage",
-    "innerWidth",
-    "innerHeight",
-    body,
-  )(
-    fakeWindow,
-    fakeDocument,
-    {
-      host: "local-sdk.site.test",
-      origin: "https://local-sdk.site.test",
-      pathname: "/docs/getting-started",
-    },
-    { getItem: () => storedPlacement },
-    1_000,
-    900,
-  );
-
-  // The whole OverlayConfig arrives inline: boot asks this host for nothing.
-  expect(fakeWindow.Spacefast?.manifest).toEqual({
-    version: 4,
-    environment: "production",
-    host: "local-sdk.site.test",
-    spaceId: "spc_sdk_local",
-    versionId: "ver_sdk_local_1",
-    apiBase: "https://api.example.test",
-    accountUrl: null,
-    layout: "/__/collab",
-    config: {
-      enabled: true,
-      resource_key: "resource_local",
-      version: { id: null, current: "ver_sdk_local_1", url: null },
-      space: { live_url: null },
-      theme: { accent: null, hide_branding: false },
-      ws_url: "wss://cast.example.test/socket/websocket",
-      endpoints: {
-        ticket: "http://local-sdk.site.test/__spacefast/comments/ticket",
-        storage: "http://local-sdk.site.test/storage",
-      },
-      // The revocable read key rides the served config: that IS the fresh-URL
-      // mechanism, so its exact value is asserted against the box's key file.
-      uploads: {
-        base: "http://local-sdk.site.test/__stattic/u/",
-        key: expect.stringMatching(/^[a-f0-9]{32}$/),
-      },
-      features: { picker: true, drawing: true, capture: false, attachments: true, notices: true },
-    },
+  const run = runSdk(body, {
+    pathname: "/docs/getting-started",
+    storedPlacement,
   });
-  // The room key is the one thing NOT here: it is per page and this response
-  // is shared across every page of the Space. The SDK derives it.
-  expect(fakeWindow.Spacefast?.manifest?.config).not.toHaveProperty("room_key");
 
-  // ...and the shape above is not just the shape this test wrote down: the
-  // SDK's own parsers are the ones that have to accept it. `readManifest` and
-  // `parseOverlayConfig` are exactly what `boot()` runs, in the same order,
-  // against exactly what PHP emitted. A producer/consumer drift on any field
-  // either parser insists on fails here instead of at a visitor's first paint.
-  const parsedManifest = readManifest(fakeWindow.Spacefast?.manifest);
-  expect(parsedManifest).not.toBeNull();
-  const pagePath = canonicalPagePath("/docs/getting-started");
-  const parsedConfig = parseOverlayConfig(
-    parsedManifest?.config,
-    parsedManifest?.spaceId ?? "",
-    pagePath,
-  );
-  expect(parsedConfig).toMatchObject({
-    enabled: true,
-    resource_key: "resource_local",
-    room_key: "space:spc_sdk_local:path:%2Fdocs%2Fgetting-started",
-    ws_url: "wss://cast.example.test/socket/websocket",
-    endpoints: { ticket: "http://local-sdk.site.test/__spacefast/comments/ticket" },
-    features: { picker: true, drawing: true, capture: false, attachments: true, notices: true },
-  });
   expect(body).not.toContain("document.cookie");
   expect(body).not.toContain("runtime-comments-credential-0000000000000000000000000000");
-  expect(appendedScripts).toHaveLength(1);
-  expect(appendedScripts[0]).toMatchObject({
+  // Two tags and no third: the theme stylesheet, and the overlay module told
+  // where its manifest lives.
+  expect(run.head.map((node) => node.tagName)).toEqual(["link", "script"]);
+  expect(run.head[0]).toMatchObject({ rel: "stylesheet", href: RUNTIME_COLLAB_THEME_PATH });
+  expect(run.head[1]).toMatchObject({
     async: true,
     src: "https://cast.example.test/sdk/v1/collab.js",
     type: "module",
   });
+  expect(run.head[1]?.attributes["data-sf-config"]).toBe(RUNTIME_COLLAB_MANIFEST_PATH);
 
   // The orb is painted before a single Cast byte is fetched, in the placement
   // the visitor last chose, at the top of the stacking order.
-  expect(appendedToBody).toHaveLength(1);
-  const placeholderOrb = appendedToBody[0];
+  expect(run.body).toHaveLength(1);
+  const placeholderOrb = run.body[0];
   expect(placeholderOrb?.id).toBe("sf-collab-boot-orb");
   expect(placeholderOrb?.style.cssText).toContain("position:fixed");
   expect(placeholderOrb?.style.cssText).toContain("z-index:2147483000");
@@ -655,54 +694,44 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   // centred on a 44px disc -> top:275px (0.33*900-22).
   expect(placeholderOrb?.style.cssText).toContain("left:16px");
   expect(placeholderOrb?.style.cssText).toContain("top:275px");
-  expect(placeholderOrb?.innerHTML).toContain("#ff603d");
+  // It wears the Space's accent, straight off the serving state — as the disc's
+  // fill, which is what the real orb boots into.
+  expect(placeholderOrb?.style.cssText).toContain("background:#4f46e5");
   expect(placeholderOrb?.innerHTML).toContain("sf-boot-pulse");
+  // The glyph and its ink are the SDK's, not a lookalike: a placeholder drawing
+  // a different shape or a different ink is a visible swap at boot. #4f46e5 is
+  // dark, so the ink is white.
+  expect(placeholderOrb?.innerHTML).toContain(ICON_PATHS.comment);
+  expect(placeholderOrb?.innerHTML).toContain('stroke="#ffffff"');
 
   // ...and it stands in for an overlay that is ARRIVING. A module that never
   // loads leaves it standing in for nothing, so the failure takes it down: a
   // disc pulsing forever is a worse lie than no orb at all.
-  (appendedScripts[0] as unknown as { onerror?: () => void }).onerror?.();
-  expect(appendedToBody).toHaveLength(0);
-  expect(collabErrors).toEqual(["spacefast:collab-error"]);
+  run.head[1]?.onerror?.();
+  expect(run.body).toHaveLength(0);
+  expect(run.events).toEqual(["spacefast:collab-error"]);
 
-  // The same response inside an iframe paints nothing: framed documents
-  // suppress the orb for their whole life (collab-frame-plan §2), so a
-  // placeholder there could only flash. The SDK module still loads — the frame
-  // handshake is what it does in there.
-  const framedScripts: typeof appendedScripts = [];
-  const framedBody: FakeElement[] = [];
-  Function(
-    "window",
-    "document",
-    "location",
-    "localStorage",
-    "innerWidth",
-    "innerHeight",
-    body,
-  )(
-    { self: { name: "iframe" }, top: { name: "shell" } },
-    {
-      ...fakeDocument,
-      body: { appendChild: (node: FakeElement) => framedBody.push(node) },
-      head: {
-        appendChild: (script: (typeof appendedScripts)[number]) => framedScripts.push(script),
-      },
-    },
-    {
-      host: "local-sdk.site.test",
-      origin: "https://local-sdk.site.test",
-      pathname: "/docs/getting-started",
-    },
-    { getItem: () => storedPlacement },
-    1_000,
-    900,
+  // A preview session carries its token to BOTH documents, so all three resolve
+  // against the same serving state and stay out of the immutable cache
+  // together. One rewritten script tag is all the page needs: the token travels
+  // from there into the tags `sdk.js` writes. It selects a tag release, not a
+  // surface and not a draft serving state — whether this host is live or
+  // preview is the serving state's own verdict, asserted above.
+  const previewSdk = await get(
+    runtime,
+    "local-sdk.site.test",
+    "/__spacefast/sdk.js?preview=tok_draft",
   );
-  expect(framedBody).toHaveLength(0);
-  expect(framedScripts.map((script) => script.src)).toEqual([
-    "https://cast.example.test/sdk/v1/collab.js",
-  ]);
+  expect(previewSdk.status).toBe(200);
+  const previewRun = runSdk(await previewSdk.text(), { pathname: "/docs/getting-started" });
+  expect(previewRun.head.find((node) => node.rel === "stylesheet")?.href).toBe(
+    `${RUNTIME_COLLAB_THEME_PATH}?preview=tok_draft`,
+  );
+  expect(previewRun.head.find((node) => node.type === "module")?.attributes["data-sf-config"]).toBe(
+    `${RUNTIME_COLLAB_MANIFEST_PATH}?preview=tok_draft`,
+  );
 
-  expect(fakeWindow.__localTagLoaded).toBe(true);
+  expect(run.window.__localTagLoaded).toBe(true);
   expect(response.headers.get("access-control-allow-origin")).toBe("*");
 
   // Insurance against a version baked against a developer machine: a Cast
@@ -740,11 +769,17 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   expect(bakedBody).not.toContain("collab.js");
   expect(bakedBody).not.toContain("sf-collab-boot-orb");
   expect(bakedBody).not.toContain("resource_baked_local");
-  // The manifest still names where a guest goes to become themselves, so the
-  // SDK's identity CTA has somewhere to send them.
-  expect(bakedBody).toContain(
-    '"accountUrl":"http://baked-local.site.test/__spacefast/access/account"',
-  );
+  expect(bakedBody).not.toContain("collab.css");
+  expect(runSdk(bakedBody, { host: "baked-local.site.test" }).head).toEqual([]);
+  // ...and the manifest reaches the SAME verdict. It has to: a `ui: "custom"`
+  // client boots from this document alone and never sees the bootstrap, so a
+  // weaker gate here would hand it a room the page itself refused to load.
+  const bakedManifest = await get(runtime, "baked-local.site.test", RUNTIME_COLLAB_MANIFEST_PATH);
+  expect(bakedManifest.status).toBe(200);
+  const parsedBaked = collabManifestSchema.parse(await bakedManifest.json());
+  expect(parsedBaked.cast).toBeNull();
+  expect(parsedBaked.ticketUrl).toBeNull();
+  expect(parsedBaked.uploads).toBeNull();
 
   // The other half of the same rule: a wholly local stack (dev, docker e2e)
   // reaches its own control plane locally too, so a local Cast origin is
@@ -782,6 +817,157 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   const localStack = await get(runtime, "local-stack.site.test", "/__spacefast/sdk.js");
   expect(localStack.status).toBe(200);
   expect(await localStack.text()).toContain('"http://localhost:4400/sdk/v1/collab.js"');
+  // `apiBase` is this runtime's configured one whatever the relay looks like —
+  // the unconfigured case is its own test above.
+
+  // `ui` says WHOSE UI shows the comments, never whether there are any: that
+  // switch is the Space's Comments setting, and it reaches here as
+  // availability. `custom` hands over the theme and stays out of the page —
+  // and when there is nothing to join, not one byte, stylesheet included.
+  for (const [label, spaceSuffix, host, available] of [
+    ["custom", "custom", "ui-custom.site.test", true],
+    ["custom, nothing to join", "unavailable", "ui-unavailable.site.test", false],
+  ] as const) {
+    const uiConfig = structuredClone(accessConfig);
+    uiConfig.sdk = {
+      revision: `sdk-ui-${spaceSuffix}-1`,
+      config: {
+        cast_api_base: "https://cast.example.test",
+        cast_ws_url: "wss://cast.example.test/socket/websocket",
+        cast_resource_key: "resource_local",
+        comments: {
+          ...LOCAL_COMMENTS,
+          ui: "custom",
+          live: available,
+          theme: { ...LOCAL_COMMENTS.theme, accent: "#4F46E5" },
+        },
+      },
+    };
+    await deploy(runtime, {
+      spaceId: `spc_sdk_ui_${spaceSuffix}`,
+      versionId: `ver_sdk_ui_${spaceSuffix}_1`,
+      files: { "index.html": `<h1>${label}</h1>\n` },
+      activate: {
+        route_name: "production",
+        config: uiConfig,
+        production_hostnames: [host],
+        noindex_production_hostnames: [],
+        version_hostnames: [],
+      },
+    });
+    const uiSdk = await get(runtime, host, "/__spacefast/sdk.js");
+    expect(uiSdk.status, label).toBe(200);
+    const uiRun = runSdk(await uiSdk.text(), { host });
+    expect(
+      uiRun.head.map((node) => (node.rel === "stylesheet" ? node.href : node.src)),
+      label,
+    ).toEqual(available ? [RUNTIME_COLLAB_THEME_PATH] : []);
+    expect(uiRun.body, label).toEqual([]);
+
+    // ...and the manifest says the same thing to whoever fetches it.
+    const uiManifest = await get(runtime, host, RUNTIME_COLLAB_MANIFEST_PATH);
+    expect(uiManifest.status, label).toBe(200);
+    const parsed = collabManifestSchema.parse(await uiManifest.json());
+    expect(parsed.ui, label).toBe("custom");
+    expect(parsed.cast === null, label).toBe(!available);
+    // Whatever case the serving state wrote the accent in, the manifest
+    // publishes the lowercase spelling `collabThemeSchema` requires — a client
+    // parsing this document must not fail on how the value happens to be typed.
+    expect(parsed.theme.accent, label).toBe("#4f46e5");
+  }
+
+  // Attachments off leaves nothing to upload to, so the manifest withholds the
+  // base and the read key rather than advertising a store the UI must not use.
+  // Unclaimed too, which is the other half of the account handoff: no account
+  // to continue with means no URL to offer.
+  const noUploadsConfig = structuredClone(accessConfig);
+  noUploadsConfig.authorization = {
+    ...authorization,
+    accessPage: { ...accessPage, accountUrl: null },
+  };
+  noUploadsConfig.sdk = {
+    revision: "sdk-no-uploads-1",
+    config: {
+      cast_api_base: "https://cast.example.test",
+      cast_ws_url: "wss://cast.example.test/socket/websocket",
+      cast_resource_key: "resource_local",
+      comments: {
+        ...LOCAL_COMMENTS,
+        features: { ...LOCAL_COMMENTS.features, attachments: false },
+      },
+    },
+  };
+  await deploy(runtime, {
+    spaceId: "spc_sdk_no_uploads",
+    versionId: "ver_sdk_no_uploads_1",
+    files: { "index.html": "<h1>No uploads</h1>\n" },
+    activate: {
+      route_name: "production",
+      config: noUploadsConfig,
+      production_hostnames: ["no-uploads.site.test"],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+  // The accent is the one theme value that leaves JSON: the placeholder orb
+  // concatenates it into an HTML attribute inside `innerHTML`. A serving state
+  // carrying markup instead of a color must paint the default, not the markup —
+  // otherwise one bad projection is stored XSS on every page of the Space.
+  const hostileConfig = structuredClone(accessConfig);
+  hostileConfig.sdk = {
+    revision: "sdk-hostile-accent-1",
+    config: {
+      cast_api_base: "https://cast.example.test",
+      cast_ws_url: "wss://cast.example.test/socket/websocket",
+      cast_resource_key: "resource_local",
+      comments: {
+        ...LOCAL_COMMENTS,
+        theme: { ...LOCAL_COMMENTS.theme, accent: 'x"><img src=x onerror=1>' },
+      },
+    },
+  };
+  await deploy(runtime, {
+    spaceId: "spc_sdk_hostile_accent",
+    versionId: "ver_sdk_hostile_accent_1",
+    files: { "index.html": "<h1>Hostile accent</h1>\n" },
+    activate: {
+      route_name: "production",
+      config: hostileConfig,
+      production_hostnames: ["hostile-accent.site.test"],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+  const hostileSdk = await get(runtime, "hostile-accent.site.test", "/__spacefast/sdk.js");
+  expect(hostileSdk.status).toBe(200);
+  const hostileRun = runSdk(await hostileSdk.text(), { host: "hostile-accent.site.test" });
+  const hostileOrb = hostileRun.body[0];
+  expect(hostileOrb?.id).toBe("sf-collab-boot-orb");
+  // The accent fills the disc, so it lands in a CSS declaration: only a literal
+  // 6-hex is ever written there, and anything else is the overlay's fallback.
+  expect(hostileOrb?.style.cssText).toContain("background:#ff603d");
+  for (const painted of [hostileOrb?.style.cssText, hostileOrb?.innerHTML]) {
+    expect(painted).not.toContain("<img");
+    expect(painted).not.toContain("onerror");
+  }
+  // The manifest refuses it the same way, so a self-built UI reading `theme`
+  // never receives it either.
+  const hostileManifest = await get(
+    runtime,
+    "hostile-accent.site.test",
+    RUNTIME_COLLAB_MANIFEST_PATH,
+  );
+  expect(collabManifestSchema.parse(await hostileManifest.json()).theme.accent).toBeNull();
+
+  const noUploads = await get(runtime, "no-uploads.site.test", RUNTIME_COLLAB_MANIFEST_PATH);
+  expect(noUploads.status).toBe(200);
+  const parsedNoUploads = collabManifestSchema.parse(await noUploads.json());
+  expect(parsedNoUploads.features.attachments).toBe(false);
+  expect(parsedNoUploads.uploads).toBeNull();
+  // An unclaimed Space names no account to continue with.
+  expect(parsedNoUploads.accountUrl).toBeNull();
+  // The rest of the Space still speaks: withholding the store is not a shutdown.
+  expect(parsedNoUploads.cast).not.toBeNull();
 });
 
 test("Comments configuration stays on-origin while the runtime authenticates upstream", async () => {
@@ -880,45 +1066,23 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     const response = await get(
       runtime,
       "comments-exchange.site.test",
-      "/__spacefast/comments/config",
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          origin: "http://comments-exchange.site.test",
-          "sec-fetch-site": "same-origin",
-        },
-        body: JSON.stringify({ pagePath: "/docs" }),
-      },
+      RUNTIME_COLLAB_MANIFEST_PATH,
     );
     expect(response.status).toBe(200);
     // THE headline: configuration is assembled here, from the overlay. The
-    // control plane is not called at all. This lane is no longer on the boot
-    // path — the same bytes ride the SDK bootstrap — so all it does now is let
-    // a running overlay sync on a toggle flipped since that response was
-    // generated.
+    // control plane is not called at all — only the mint below reaches it.
     expect(exchanges).toHaveLength(0);
-    const payload = (await response.json()) as { data: Record<string, unknown> };
-    expect(payload.data).toEqual({
-      enabled: true,
-      resource_key: "resource_local",
-      // Comments-on-live IS the live context: nothing to link back to.
-      version: { id: null, current: "ver_sdk_exchange_1", url: null },
-      space: { live_url: null },
-      theme: { accent: null, hide_branding: false },
-      ws_url: "wss://cast.example.test/socket/websocket",
-      endpoints: {
-        ticket: "http://comments-exchange.site.test/__spacefast/comments/ticket",
-        storage: "http://comments-exchange.site.test/storage",
-      },
-      uploads: {
-        base: "http://comments-exchange.site.test/__stattic/u/",
-        key: expect.stringMatching(/^[a-f0-9]{32}$/),
-      },
-      features: { picker: true, drawing: true, capture: false, attachments: true, notices: true },
+    const manifest = collabManifestSchema.parse(await response.json());
+    expect(manifest.cast).toEqual({
+      wsUrl: "wss://cast.example.test/socket/websocket",
+      resourceKey: "resource_local",
     });
-    expect(response.headers.get("cache-control")).toContain("no-store");
-    // A config request costs the visitor no session: only the mint below does.
+    expect(manifest.ticketUrl).toBe(
+      "http://comments-exchange.site.test/__spacefast/comments/ticket",
+    );
+    // Commenting on the live host IS the live context: nothing to link back to.
+    expect(manifest.artifact).toEqual({ id: "ver_sdk_exchange_1", current: true, url: null });
+    // Reading the manifest costs the visitor no session: only the mint below does.
     expect(response.headers.getSetCookie()).toHaveLength(0);
 
     const ticket = (headers: Record<string, string> = {}) =>
@@ -1194,18 +1358,17 @@ test("a promote repoints the room key the overlay derives on a version host", as
       ],
     };
   };
-  // The room key the SDK's own parser derives from what this host serves —
-  // `parseOverlayConfig` is what boot() runs, so this is the key the overlay
-  // would put in the join topic.
+  // The room key the SDK's own derivation produces from what this host serves —
+  // `commentRoomKey` is what the overlay puts in the join topic, run against
+  // exactly the version block PHP emitted.
   const derivedRoomKey = async (host: string) => {
-    const response = await get(runtime, host, "/__spacefast/comments/config", {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: `http://${host}` },
-      body: JSON.stringify({ pagePath: "/" }),
-    });
+    const response = await get(runtime, host, RUNTIME_COLLAB_MANIFEST_PATH);
     expect(response.status).toBe(200);
-    const payload = (await response.json()) as { data: unknown };
-    return parseOverlayConfig(payload.data, spaceId, canonicalPagePath("/"))?.room_key ?? null;
+    const { artifact } = collabManifestSchema.parse(await response.json());
+    return commentRoomKey(spaceId, canonicalPagePath("/"), {
+      id: artifact.id,
+      current: artifact.current,
+    });
   };
 
   await deploy(runtime, {
@@ -1228,9 +1391,12 @@ test("a promote repoints the room key the overlay derives on a version host", as
   expect(await derivedRoomKey(versionHost)).toBe(`space:${spaceId}:path:%2F`);
   expect(await derivedRoomKey("promote.site.test")).toBe(`space:${spaceId}:path:%2F`);
 
-  // ...and a rollback hands it back its draft room.
+  // ...and a rollback hands it back its draft room. The live host never gets
+  // one: whatever the route map says, the Space's published surface IS the live
+  // artifact, so its threads are the permanent record.
   await putRoute(runtime, spaceId, "production", routeBody(first));
   expect(await derivedRoomKey(versionHost)).toBe(`space:${spaceId}:draft:${second}:path:%2F`);
+  expect(await derivedRoomKey("promote.site.test")).toBe(`space:${spaceId}:path:%2F`);
 });
 
 test("a secure runtime reports the https published origin to the exchange", async () => {
@@ -1313,21 +1479,12 @@ test("a secure runtime reports the https published origin to the exchange", asyn
     expect(exchanges[0]?.["origin"]).toBe("https://secure-comments.site.test");
     // The same origin the runtime reports upstream is the one it hands the
     // browser for its own ticket endpoint.
-    const configLane = (await get(
-      runtime,
-      "secure-comments.site.test",
-      "/__spacefast/comments/config",
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          origin: "https://secure-comments.site.test",
-          "sec-fetch-site": "same-origin",
-        },
-        body: JSON.stringify({ pagePath: "/docs" }),
-      },
-    ).then((r) => r.json())) as { data: { endpoints: { ticket: string } } };
-    expect(configLane.data.endpoints.ticket).toBe(
+    const published = collabManifestSchema.parse(
+      await get(runtime, "secure-comments.site.test", RUNTIME_COLLAB_MANIFEST_PATH).then((r) =>
+        r.json(),
+      ),
+    );
+    expect(published.ticketUrl).toBe(
       "https://secure-comments.site.test/__spacefast/comments/ticket",
     );
   } finally {
@@ -1501,7 +1658,6 @@ test("private SDK bytes require admission before any body", async () => {
   });
   expect(admitted.status).toBe(200);
   const admittedBody = await admitted.text();
-  expect(admittedBody).toContain('"spaceId":"spc_sdk_private"');
   expect(admittedBody).toContain("private-tag-marker");
   expect(admitted.headers.get("cache-control")).toBe("private, no-store");
   expect(admitted.headers.get("vary")).toContain("Cookie");
@@ -1515,35 +1671,50 @@ test("private SDK bytes require admission before any body", async () => {
   const privateEtag = admitted.headers.get("etag") ?? "";
   expect(privateEtag).toContain("runtime:");
 
+  // The manifest and the theme are subresources of the same admitted page and
+  // reach the runtime with the `sec-fetch-dest` each is loaded with: `empty`
+  // for the SDK's `fetch()`, `style` for the `<link>` sdk.js writes — and the
+  // theme arrives both ways, because the default UI fetches the same bytes to
+  // adopt them inside its shadow root. Without the page's Referer scope they
+  // would be enforced against their own URL, which no Grant lists — a 403 for a
+  // visitor who is admitted to the page that embeds them.
+  for (const [path, dest] of [
+    [RUNTIME_COLLAB_MANIFEST_PATH, "empty"],
+    [RUNTIME_COLLAB_THEME_PATH, "style"],
+    [RUNTIME_COLLAB_THEME_PATH, "empty"],
+  ] as const) {
+    const scoped = await get(runtime, host, path, {
+      headers: { cookie, referer: `https://${host}/docs/`, "sec-fetch-dest": dest },
+    });
+    expect(scoped.status).toBe(200);
+    expect(scoped.headers.get("cache-control")).toBe("private, no-store");
+    expect(scoped.headers.get("vary")).toContain("Cookie");
+
+    // No session: the Referer selects a scope, it never grants one.
+    const bareDocument = await get(runtime, host, path, {
+      headers: { referer: `https://${host}/docs/`, "sec-fetch-dest": dest },
+    });
+    expect(bareDocument.status).toBe(403);
+    expect(bareDocument.headers.get("etag")).toBeNull();
+
+    // A session, but pointed at a page no Grant covers.
+    const forgedDocument = await get(runtime, host, path, {
+      headers: { cookie, referer: `https://${host}/hidden/`, "sec-fetch-dest": dest },
+    });
+    expect(forgedDocument.status).toBe(403);
+    expect(forgedDocument.headers.get("etag")).toBeNull();
+
+    // The dest has to match how the document is actually loaded: a `script`
+    // fetch of the manifest is not the page's subresource.
+    const wrongDest = await get(runtime, host, path, {
+      headers: { cookie, referer: `https://${host}/docs/`, "sec-fetch-dest": "script" },
+    });
+    expect(wrongDest.status).toBe(403);
+  }
+
   try {
-    const commentsConfig = (extra: Record<string, string> = {}) =>
-      get(runtime, host, "/__spacefast/comments/config", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          origin: `http://${host}`,
-          "sec-fetch-site": "same-origin",
-          ...extra,
-        },
-        // Inside the member Grant's scope: the session admits this page, and
-        // the same request without the cookie does not.
-        body: JSON.stringify({ pagePath: "/docs" }),
-      });
-
-    // A denied page answers the Comments fetch lane with the JSON envelope,
-    // never the HTML access gate.
-    const denied = await commentsConfig();
-    expect(denied.status).toBe(401);
-    expect(await errorCode(denied)).toBe("comments_denied");
-    expect(denied.headers.get("content-type") ?? "").toContain("application/problem+json");
-
-    // Configuration for an admitted visitor is still answered locally: the
-    // admission check is the runtime's, and so is the answer.
-    const admittedConfig = await commentsConfig({ cookie });
-    expect(admittedConfig.status).toBe(200);
-    expect(exchanges).toHaveLength(0);
     // An admitted visitor's session authorities ride the MINT — the one lane
-    // that still reaches the control plane.
+    // that reaches the control plane at all.
     const mintTicket = (extra: Record<string, string> = {}) =>
       get(runtime, host, "/__spacefast/comments/ticket", {
         method: "POST",
@@ -1558,6 +1729,14 @@ test("private SDK bytes require admission before any body", async () => {
           identity: { name: "Member", namedByUser: false },
         }),
       });
+    // A denied page answers the Comments lane with the JSON envelope, never the
+    // HTML access gate — and without ever reaching the control plane.
+    const denied = await mintTicket();
+    expect(denied.status).toBe(401);
+    expect(await errorCode(denied)).toBe("comments_denied");
+    expect(denied.headers.get("content-type") ?? "").toContain("application/problem+json");
+    expect(exchanges).toHaveLength(0);
+
     const admittedMint = await mintTicket({ cookie });
     expect(admittedMint.status).toBe(200);
     // An admitted visitor carries their Comments identity in the access session

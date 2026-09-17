@@ -273,6 +273,8 @@ function _stattic_comments_handle_exchange(
             'name' => $name,
             'namedByUser' => $browserIdentity['namedByUser'],
         ];
+        $overlay = _stattic_comments_local_config($privateRoot, $serving, $requestHost);
+        $payload['notices'] = ($overlay['features']['notices'] ?? null) === true;
     }
     $context = _stattic_access_context($serving, $requestHost, $pagePath);
     $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES);
@@ -799,6 +801,7 @@ function _stattic_comments_local_config(string $privateRoot, array $serving, str
             'drawing' => false,
             'capture' => false,
             'attachments' => false,
+            'notices' => false,
         ],
     ];
 
@@ -847,6 +850,7 @@ function _stattic_comments_local_config(string $privateRoot, array $serving, str
             'drawing' => ($features['drawing'] ?? null) === true,
             'capture' => ($features['capture'] ?? null) === true,
             'attachments' => ($features['attachments'] ?? null) === true,
+            'notices' => ($features['notices'] ?? null) === true,
         ],
     ];
 }

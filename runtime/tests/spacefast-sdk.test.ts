@@ -53,7 +53,7 @@ const LOCAL_COMMENTS = {
     hideBranding: false,
   },
   css: ":host,:root{--sf-collab-accent:#4f46e5}\n",
-  features: { picker: true, drawing: true, capture: false, attachments: true },
+  features: { picker: true, drawing: true, capture: false, attachments: true, notices: true },
 };
 
 // Contracts §7 (D33/D85/D120): the cookie IS the session — `<prefix><base64url
@@ -1135,6 +1135,7 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
         pagePath: "/docs",
         principal: "anonymous",
         authorities: [],
+        notices: true,
       },
     });
     const firstIdentity = forwardedIdentity(exchanges[0]);

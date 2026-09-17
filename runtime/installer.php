@@ -21,7 +21,7 @@ if (PHP_SAPI !== 'cli') {
     exit(1);
 }
 
-function fail(string $message): never
+function fail(string $message, int $exitCode = 1): never
 {
     static $cleaning = false;
     $rollbackComplete = true;
@@ -37,7 +37,7 @@ function fail(string $message): never
         fwrite(STDERR, "runtime_engine_rollback_incomplete\n");
     }
     fwrite(STDERR, $message . "\n");
-    exit(1);
+    exit($rollbackComplete ? $exitCode : 1);
 }
 
 // Idempotent. Absence is a no-op; a path that exists but cannot be removed
@@ -2635,6 +2635,35 @@ function acquire_publication_lock(string $installRoot)
     return $handle;
 }
 
+// The HTTP loader holds publication.lock shared for each management request.
+// Call only with the exclusive lock: an old create/tick has finished, and no
+// new request can admit a legacy job between this check and the release swap.
+// Legacy records have no admission attestation. Their original engine must
+// finish them; neither the installer nor a new engine may invent that proof.
+function require_legacy_engine_jobs_drained(string $installRoot): void
+{
+    $queue = $installRoot . '/storage/runtime/jobs/queue';
+    if (!file_exists($queue) && !is_link($queue)) return;
+    if (!is_dir($queue) || realpath($queue) !== $queue) {
+        fail('runtime_engine_job_queue_unreadable');
+    }
+    $entries = scandir($queue);
+    if (!is_array($entries)) fail('runtime_engine_job_queue_unreadable');
+    foreach ($entries as $entry) {
+        if (!str_ends_with($entry, '.json')) continue;
+        $path = $queue . '/' . $entry;
+        $raw = !is_link($path) && is_file($path) ? file_get_contents($path) : false;
+        $job = is_string($raw) ? json_decode($raw, true) : null;
+        if (!is_array($job) || !in_array($job['status'] ?? null, ['pending', 'running', 'complete', 'failed'], true)) {
+            fail('runtime_engine_job_queue_unreadable');
+        }
+        if (in_array($job['status'], ['complete', 'failed'], true)) continue;
+        if (!is_string($job['attestation'] ?? null) || $job['attestation'] === '') {
+            fail('runtime_engine_legacy_jobs_pending', 75);
+        }
+    }
+}
+
 function write_install_transaction(
     string $installRoot,
     string $newTarget,
@@ -3075,6 +3104,7 @@ if (!sync_tree($releaseRoot) || !sync_directory($releasesRoot)) {
 }
 
 $publicationLock = acquire_publication_lock($installRoot);
+require_legacy_engine_jobs_drained($installRoot);
 $recoveryScratchClean = cleanup_install_transaction_scratch(
     $installRoot,
     $publicRoot,

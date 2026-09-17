@@ -617,12 +617,11 @@ test("an accepted email commits one outbox row and the box delivers it through w
   expect(wpMailCaptures()).toHaveLength(1);
 });
 
-// The other half of the lane: a message whose own request could not ship it (a
-// PHP worker already jailed to a Space's tree cannot read wp-load.php) is
-// carried by the scheduled pass instead. Queued directly, because what is under
-// test is the pass, not how the row got there.
-test("the scheduled pass delivers a message its own request left behind", async () => {
+// Previous control-plane deliveries leave the same outbox rows and leases.
+// The scheduled pass takes over expired work and settles recorded acceptance.
+test("the scheduled pass resumes expired mail and settles accepted mail from the previous drainer", async () => {
   const messageId = `msg_${"9".repeat(32)}`;
+  const acceptedId = `msg_${"7".repeat(32)}`;
   const payload = JSON.stringify({
     from: { email: "hello@example.com" },
     to: [{ email: "later@example.com" }],
@@ -633,9 +632,13 @@ test("the scheduled pass delivers a message its own request left behind", async 
   mysql.exec(
     `INSERT INTO _spacefast_email_outbox
        (message_id, space_id, version_id, invocation_id, effect_index, state, payload_json,
-        attempt_count, available_at, created_at, updated_at)
-     VALUES ('${messageId}', '${SPACE_ID}', '${VERSION_ID}', 'inv_scheduled', 0, 'queued',
-             '${payload}', 0, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6));`,
+        attempt_count, available_at, lease_token, lease_expires_at, accepted_at, created_at, updated_at)
+     VALUES ('${messageId}', '${SPACE_ID}', '${VERSION_ID}', 'inv_scheduled', 0, 'delivering',
+             '${payload}', 1, UTC_TIMESTAMP(6), 'lease_previous', UTC_TIMESTAMP(6) - INTERVAL 1 SECOND,
+             NULL, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)),
+            ('${acceptedId}', '${SPACE_ID}', '${VERSION_ID}', 'inv_previously_accepted', 0, 'delivering',
+             '${payload}', 12, UTC_TIMESTAMP(6), 'lease_accepted', UTC_TIMESTAMP(6) - INTERVAL 1 SECOND,
+             UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6));`,
   );
   const before = wpMailCaptures().length;
 
@@ -652,7 +655,14 @@ test("the scheduled pass delivers a message its own request left behind", async 
     mysql.exec(
       `SELECT state, attempt_count FROM _spacefast_email_outbox WHERE message_id = '${messageId}';`,
     ),
-  ).toBe("delivered\t1");
+  ).toBe("delivered\t2");
+  expect(
+    mysql.exec(
+      `SELECT state, attempt_count, lease_token IS NULL, lease_expires_at IS NULL,
+              terminal_at = accepted_at
+         FROM _spacefast_email_outbox WHERE message_id = '${acceptedId}';`,
+    ),
+  ).toBe("delivered\t12\t1\t1\t1");
 
   // Terminal, so a second pass neither re-serves it nor sends it again.
   expect((await runMailOutboxCli()).summary.claimed).toBe(0);

@@ -288,6 +288,56 @@ test("installs the engine tree and prints the receipt", async () => {
   expect(existsSync(path.join(releaseRoot, "bin/stattic-runtime"))).toBe(true);
 });
 
+test("keeps serving the old engine until its unattested jobs finish", async () => {
+  const old = await startUpdateFixture({ revision: "old-job-admission", visitorEngine: true });
+  expect((await runInstaller(old)).exitCode).toBe(0);
+  const next = await startUpdateFixture({
+    revision: "signed-job-admission",
+    visitorEngine: true,
+    publicRoot: old.publicRoot,
+  });
+  const queue = path.join(installRootOf(old.publicRoot), "storage/runtime/jobs/queue");
+  mkdirSync(queue, { recursive: true });
+  const jobPath = path.join(queue, "job_legacy.json");
+  const legacy = {
+    id: "job_legacy",
+    status: "pending",
+    payload: { _claims: { job_scope: { type: "maintenance_tick" } } },
+  };
+  // A request admitted by the previous HTTP loader writes its queue record
+  // before releasing the same shared lock the real loader holds.
+  const request = Bun.spawn({
+    cmd: [
+      "php",
+      "-r",
+      '$lock = fopen($argv[1], "ce"); flock($lock, LOCK_SH); echo "admitted\\n"; fflush(STDOUT); fgets(STDIN); file_put_contents($argv[2], $argv[3]); flock($lock, LOCK_UN);',
+      path.join(installRootOf(old.publicRoot), "publication.lock"),
+      jobPath,
+      JSON.stringify(legacy),
+    ],
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const signal = await request.stdout.getReader().read();
+  expect(new TextDecoder().decode(signal.value)).toBe("admitted\n");
+  const installing = runInstaller(next);
+  request.stdin.write("finish\n");
+  request.stdin.end();
+  expect(await request.exited).toBe(0);
+  const blocked = await installing;
+  expect(blocked.exitCode).toBe(75);
+  expect(blocked.stderr).toContain("runtime_engine_legacy_jobs_pending");
+  expect(JSON.parse(readFileSync(jobPath, "utf8"))).toEqual(legacy);
+  expect(readVisitor(old.publicRoot)).toEqual({ context: old.revision, module: old.revision });
+
+  writeFileSync(jobPath, JSON.stringify({ ...legacy, status: "complete" }));
+  const installed = await runInstaller(next);
+  expect(installed.exitCode, installed.stderr).toBe(0);
+  expect(readVisitor(old.publicRoot)).toEqual({ context: next.revision, module: next.revision });
+  expect(JSON.parse(readFileSync(jobPath, "utf8")).status).toBe("complete");
+});
+
 test("a manifest tree publishes one complete docroot directory", async () => {
   const fixture = await startUpdateFixture({ tree: true });
   const publicParents = ["wp-content", "wp-content/mu-plugins"].map((relative) =>

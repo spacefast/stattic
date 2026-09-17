@@ -1,15 +1,3 @@
-// Generated↔source drift guard: the control plane's authority generation
-// digest against the engine's.
-//
-// Both sides derive one hash per live Grant and then a hash over the sorted
-// set. A team-shaped Grant folds the membership epoch into its source string
-// (`<grantId>:<generation>:<membershipEpoch>`) so one epoch bump retires every
-// member session; everything else digests `<grantId>:<generation>`. If the two
-// implementations ever disagree, the control plane mints a generation the
-// engine refuses and every session on a team-owned Space fails closed — which
-// is exactly the failure this file exists to catch before deploy.
-//
-// This runs the real PHP and the real TypeScript. Nothing here reads source.
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
@@ -17,11 +5,14 @@ import path from "node:path";
 import { z } from "zod";
 
 import type { SpaceGrant } from "@spacefast/common/contracts/grants";
+import { RUNTIME_AUTHORIZATION_GRANT_LIMIT } from "@spacefast/common/contracts/runtime-api";
 
 import {
   authorityGrantGeneration,
+  authorityGrantGenerationMatches,
   type TeamGrantScope,
 } from "../../apps/control-plane/src/access/authority-generation.ts";
+import { projectRuntimeMembershipGrants } from "../../apps/control-plane/src/runtime/access-projection.ts";
 import { PHP_BINARY } from "./harness.ts";
 
 type ParityGrant = {
@@ -84,7 +75,15 @@ function controlPlaneGrants(): SpaceGrant[] {
 const engineGenerationSchema = z.union([z.string().regex(/^[a-f0-9]{64}$/), z.null()]);
 
 /** The serving engine's own input shape, decided by the engine's own code. */
-function engineGeneration(membershipEpoch: number, authority: string): string | null {
+function engineGeneration(
+  team: TeamGrantScope,
+  authority: string,
+  format: "members" | "team",
+): string | null {
+  const runtimeGrants = controlPlaneGrants().map(({ grant, generation }) => ({
+    ...grant,
+    generation,
+  }));
   const projection = {
     generation: 1,
     sessionVersion: 0,
@@ -93,17 +92,11 @@ function engineGeneration(membershipEpoch: number, authority: string): string | 
     accessPage: null,
     spaceClaimed: true,
     teamId: TEAM_ID,
-    membershipEpoch,
-    grants: grants().map((grant) => ({
-      id: grant.id,
-      generation: grant.generation,
-      audience: grant.audience,
-      resources: { include: ["/**"], exclude: [] },
-      capabilities: ["page.view"],
-      constraints: {},
-      target: { kind: "live" },
-      source: { kind: "system", reference: grant.id },
-    })),
+    membershipEpoch: team.membershipEpoch,
+    grants:
+      format === "members"
+        ? projectRuntimeMembershipGrants(runtimeGrants, team.teamId, team.memberIds)
+        : runtimeGrants,
   };
   const accessRulesPath = path.resolve(import.meta.dir, "../engine/runtime/access-rules.php");
   const probe = spawnSync(
@@ -136,33 +129,79 @@ function engineGeneration(membershipEpoch: number, authority: string): string | 
   return engineGenerationSchema.parse(JSON.parse(probe.stdout));
 }
 
-test("the control plane and the engine derive the same member authority generation", () => {
-  for (const membershipEpoch of [0, 1, 42]) {
-    const team: TeamGrantScope = { teamId: TEAM_ID, membershipEpoch };
-    const controlPlane = authorityGrantGeneration(
-      controlPlaneGrants(),
-      team,
-      MEMBER_AUTHORITY,
-      true,
-    );
-    expect(controlPlane).toBeTruthy();
-    expect(controlPlane).toBe(engineGeneration(membershipEpoch, MEMBER_AUTHORITY));
-  }
-});
+test("installed member and team projections validate only live identities and current grants", () => {
+  const memberId = MEMBER_AUTHORITY.slice("member:".length);
+  const team: TeamGrantScope = { teamId: TEAM_ID, membershipEpoch: 4, memberIds: [memberId] };
+  const active = controlPlaneGrants();
+  const legacy = engineGeneration(team, MEMBER_AUTHORITY, "members");
+  const epochDigest = engineGeneration(team, MEMBER_AUTHORITY, "team");
+  expect(legacy).toMatch(/^[a-f0-9]{64}$/);
+  expect(epochDigest).toMatch(/^[a-f0-9]{64}$/);
+  if (!legacy || !epochDigest) throw new Error("member generation missing");
+  expect(authorityGrantGeneration(active, team, MEMBER_AUTHORITY)).toBe(legacy);
+  expect(authorityGrantGenerationMatches(active, team, MEMBER_AUTHORITY, legacy)).toBe(true);
+  expect(authorityGrantGenerationMatches(active, team, MEMBER_AUTHORITY, epochDigest)).toBe(true);
 
-test("moving only the membership epoch moves the generation on both sides", () => {
-  const before = authorityGrantGeneration(
-    controlPlaneGrants(),
-    { teamId: TEAM_ID, membershipEpoch: 0 },
-    MEMBER_AUTHORITY,
+  const reduced = { ...team, membershipEpoch: team.membershipEpoch + 1 };
+  expect(authorityGrantGenerationMatches(active, reduced, MEMBER_AUTHORITY, epochDigest)).toBe(
+    false,
+  );
+  const removed = { ...reduced, memberIds: [] };
+  expect(authorityGrantGenerationMatches(active, removed, MEMBER_AUTHORITY, legacy)).toBe(false);
+  expect(authorityGrantGenerationMatches(active, removed, MEMBER_AUTHORITY, epochDigest)).toBe(
+    false,
+  );
+  const restored = { ...removed, memberIds: ["mbr_restored"] };
+  expect(authorityGrantGenerationMatches(active, restored, MEMBER_AUTHORITY, legacy)).toBe(false);
+  expect(authorityGrantGenerationMatches(active, restored, MEMBER_AUTHORITY, epochDigest)).toBe(
+    false,
+  );
+
+  const edited = active.map((grant) => ({ ...grant, generation: grant.generation + 1 }));
+  expect(authorityGrantGenerationMatches(edited, team, MEMBER_AUTHORITY, legacy)).toBe(false);
+  expect(authorityGrantGenerationMatches(edited, team, MEMBER_AUTHORITY, epochDigest)).toBe(false);
+  expect(
+    authorityGrantGenerationMatches(
+      active,
+      { ...team, teamId: "team_transferred" },
+      MEMBER_AUTHORITY,
+      legacy,
+    ),
+  ).toBe(false);
+  expect(
+    authorityGrantGenerationMatches(
+      active,
+      { ...team, teamId: "team_transferred" },
+      MEMBER_AUTHORITY,
+      epochDigest,
+    ),
+  ).toBe(false);
+
+  const runtimeGrants = active.map(({ grant, generation }) => ({ ...grant, generation }));
+  const memberIds = Array.from(
+    { length: Math.floor((RUNTIME_AUTHORIZATION_GRANT_LIMIT - 1) / 2) },
+    (_, index) => `mbr_large_${index}`,
+  );
+  const underLimit = projectRuntimeMembershipGrants(runtimeGrants, TEAM_ID, memberIds);
+  expect(underLimit.length).toBe(memberIds.length * 2 + 1);
+  expect(underLimit.some((grant) => grant.audience.kind === "team")).toBe(false);
+  const largeTeam = { ...team, memberIds: [...memberIds, memberId, "mbr_extra"] };
+  expect(projectRuntimeMembershipGrants(runtimeGrants, TEAM_ID, largeTeam.memberIds)).toEqual(
+    runtimeGrants,
+  );
+  const largeDigest = engineGeneration(largeTeam, MEMBER_AUTHORITY, "members");
+  expect(largeDigest).toBe(epochDigest);
+  if (!largeDigest) throw new Error("large-team generation missing");
+  const reducedLargeTeam = {
+    ...largeTeam,
+    membershipEpoch: largeTeam.membershipEpoch + 1,
+    memberIds: largeTeam.memberIds.filter((id) => id !== memberId),
+  };
+  expect(engineGeneration(reducedLargeTeam, MEMBER_AUTHORITY, "members")).not.toBe(largeDigest);
+  expect(authorityGrantGenerationMatches(active, largeTeam, MEMBER_AUTHORITY, largeDigest)).toBe(
     true,
   );
-  const after = authorityGrantGeneration(
-    controlPlaneGrants(),
-    { teamId: TEAM_ID, membershipEpoch: 1 },
-    MEMBER_AUTHORITY,
-    true,
-  );
-  expect(before).not.toBe(after);
-  expect(engineGeneration(0, MEMBER_AUTHORITY)).not.toBe(engineGeneration(1, MEMBER_AUTHORITY));
+  expect(
+    authorityGrantGenerationMatches(active, reducedLargeTeam, MEMBER_AUTHORITY, largeDigest),
+  ).toBe(false);
 });

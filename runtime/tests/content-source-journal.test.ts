@@ -314,6 +314,7 @@ ${WP_STUBS}
 require_once 'phar://' . ${JSON.stringify(toolkitPhar)} . '/vendor/autoload.php';
 require_once ${JSON.stringify(journalTable)};
 require_once ${JSON.stringify(applicationJournal)};
+putenv('SPACEFAST_APPLICATION_JOURNAL_SINKS=control-plane:mail,control-plane:content-source');
 $GLOBALS['SPACEFAST_CONTENT_BLOCKS_ENGINE_PLUGIN'] = ${JSON.stringify(blocksEnginePlugin)};
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = ${JSON.stringify(SPACE_ID)};
 $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = ${JSON.stringify(releaseDir)};
@@ -393,6 +394,7 @@ probe('after-first-save', $link);
 editor_save($postId, "<!-- wp:paragraph -->\n<p>Second edit.</p>\n<!-- /wp:paragraph -->");
 probe('after-second-save', $link);
 
+$probes[] = ['step' => 'legacy-mail-drain', 'rows' => _stattic_application_journal_claim($link, 'control-plane:mail', 25, 120)];
 $claims = _stattic_application_journal_claim($link, STATTIC_APPLICATION_JOURNAL_CONTENT_SOURCE_SINK, 25, 120);
 $probes[] = ['step' => 'claims', 'rows' => $claims];
 probe('after-claim', $link);
@@ -652,6 +654,7 @@ test(
     expect(second[0]?.entry_id).toBe(first[0]?.entry_id);
     expect(second[0]?.payload).not.toEqual(first[0]?.payload);
 
+    expect(at(probes, "legacy-mail-drain").rows).toEqual([]);
     const claims = claimSchema.array().parse(at(probes, "claims").rows);
     expect(claims).toHaveLength(1);
     const claim = claimSchema.parse(claims[0]);

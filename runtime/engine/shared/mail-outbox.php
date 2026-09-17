@@ -203,6 +203,18 @@ function _stattic_mail_outbox_claim(mysqli $connection, int $limit, int $leaseSe
         throw new RuntimeException('mail_outbox_transaction_failed');
     }
     try {
+        if (!$connection->query(
+            "UPDATE {$table}
+                SET state = 'delivered', lease_token = NULL, lease_expires_at = NULL,
+                    terminal_at = COALESCE(terminal_at, accepted_at), updated_at = UTC_TIMESTAMP(6)
+              WHERE state = 'delivering' AND accepted_at IS NOT NULL"
+        )) {
+            if ($connection->errno === 1146) {
+                $connection->rollback();
+                return [];
+            }
+            throw new RuntimeException('mail_outbox_acceptance_reconcile_failed');
+        }
         $terminal = $connection->prepare(
             "UPDATE {$table}
                 SET state = 'ambiguous', lease_token = NULL, lease_expires_at = NULL,
@@ -212,11 +224,6 @@ function _stattic_mail_outbox_claim(mysqli $connection, int $limit, int $leaseSe
                 AND attempt_count = ? AND lease_expires_at <= UTC_TIMESTAMP(6)"
         );
         if (!$terminal instanceof mysqli_stmt) {
-            // 1146: this site has never accepted a message, so nothing can be due.
-            if ($connection->errno === 1146) {
-                $connection->rollback();
-                return [];
-            }
             throw new RuntimeException('mail_outbox_claim_prepare_failed');
         }
         $maxAttempts = STATTIC_MAIL_OUTBOX_MAX_ATTEMPTS;

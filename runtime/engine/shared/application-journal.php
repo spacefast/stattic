@@ -56,7 +56,10 @@ function _stattic_application_journal_sinks(): array
 
 function _stattic_application_journal_sink_configured(string $sink): bool
 {
-    return in_array($sink, _stattic_application_journal_sinks(), true);
+    // The rolling control-plane drainer still owns this old wire name. Never
+    // let it lease editor changes, even if configuration repeats that name.
+    return $sink !== 'control-plane:mail'
+        && in_array($sink, _stattic_application_journal_sinks(), true);
 }
 
 function _stattic_application_journal_iso(string $mysqlTimestamp): string

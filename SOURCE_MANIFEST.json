@@ -1,7 +1,7 @@
 {
-  "revision": "8ffdcf1d4ce7d5990aa62e3f4a529c2e59c2f4f0",
-  "sourceHash": "8bcba4aa1d78e965c0280cbd0ff4ca7963bb1aa5831e9eb65892050a166a2a83",
-  "manifestSha256": "13d37469f1d59814a673ecfeb7dea3e74c9ba0f9bc44ca266e2a1ced2f7bbc11",
+  "revision": "6822f108154f787c2081b008f0944a56b2813e58",
+  "sourceHash": "2fa74c6257945dcd14db10d7e65b301fbd2eb2e6c9dd382918368693884c90d6",
+  "manifestSha256": "61d46db0ee549e72ad19c4702d9d562b62be5d4b1e94fe3535ec52f60f1202b8",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "a851f82e0c4b5783b11606d71013b037b65a366815289f9318681772157515ad"
+      "sha256": "00f84bbd89b1761cca629b3764dede2f861fa16ee0590b31f2c44c946fdf830b"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "38d3e14a667ef0ad903714c0fec0d7dc09230b9f6e62f986c920c601e09b2014"
+      "sha256": "271935d41aca04c0a4a776a18c961b053e50804f1ba61b9881c85f30bdbd9e26"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -569,7 +569,7 @@
     },
     {
       "path": "runtime/engine/shared/application-journal.php",
-      "sha256": "247013f2aadee61a01dc837a31a55272aeb809eb9f4eb14abde22f3838660dfe"
+      "sha256": "615e785a5ae93954ed8dd3aa1379c7c4e6efef278b70aedabde8ef8926ba4579"
     },
     {
       "path": "runtime/engine/shared/artifacts.php",
@@ -645,7 +645,7 @@
     },
     {
       "path": "runtime/engine/shared/mail-outbox.php",
-      "sha256": "f60a036d9a274ff546fe14345ae93e783e254f56216d24a0400bd311fcc1b3fa"
+      "sha256": "5d1d0e2ced913bffa82600110eaf273f2e341a2ca001da6a2d5cb7bf0c058ebc"
     },
     {
       "path": "runtime/engine/shared/native-process.php",
@@ -761,7 +761,7 @@
     },
     {
       "path": "runtime/installer.php",
-      "sha256": "7d191b4ae32c5b99af5c0421cc86ce2cf8bb4ff52dc0bb98786da43b9769e7fa"
+      "sha256": "7ac23390a3bb590ee014dded638229699c7b250aacbdf2df4a2587ca6c6690d2"
     },
     {
       "path": "runtime/package.json",
@@ -781,7 +781,7 @@
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
-      "sha256": "f53fa7fda24caa2e572d495d8bb0211fd244e9cfa6f98907293a2bb9e95bf84d"
+      "sha256": "5c93ce9933561318937377535eb9c99b9fe701395e842fd87d923555cbc6cae3"
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
@@ -857,7 +857,7 @@
     },
     {
       "path": "runtime/tests/content-source-journal.test.ts",
-      "sha256": "3dc71b76038e5f1497f94e6a90518b85e8decb8e80d95559fcd91e4ad4c362ad"
+      "sha256": "1f15f04101cb45ca06a8df6c870a5d89c0cab247504d0e8fb9ad92252c640494"
     },
     {
       "path": "runtime/tests/content-source-sync.test.ts",
@@ -953,7 +953,7 @@
     },
     {
       "path": "runtime/tests/functions-relay.test.ts",
-      "sha256": "bbe502fcd8e4c6de32341949d9944d17af9e2b6db78da9cdbe24a4a1033c3d4d"
+      "sha256": "5e02e6b87f9b8c68e98679a4f75ebe84e2d580262f601615e7bfa80b88351fc8"
     },
     {
       "path": "runtime/tests/grant-conformance.php",
@@ -981,11 +981,11 @@
     },
     {
       "path": "runtime/tests/installer-update.test.ts",
-      "sha256": "1ae844cb1b5087486158e1a1dde4493969ac83898b87c5ff686a0ea1052e5e40"
+      "sha256": "4ab846c39e44ae1ac33ea621fb065220ac59d602c16f3424eab5b6ed4cbffae8"
     },
     {
       "path": "runtime/tests/job-runner.test.ts",
-      "sha256": "ebc4fe58c1d424ffe792097785b9f7392e25b109c9610db139b150c9c12f858c"
+      "sha256": "4fcc168745ca9e28d9916fd57ff9288fccb45d04ac477824cf7b2121215cdd20"
     },
     {
       "path": "runtime/tests/mysql-container.ts",

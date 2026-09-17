@@ -267,7 +267,15 @@ test("a targeted tick runs its signed job, bounds its execution, and leaves the 
   const target = await createJob({ type: "maintenance_tick" });
   const bystander = await createJob({ type: "maintenance_tick" });
 
-  const first = await tick(target, 2500);
+  const first = await apiJson<TickResponse>(
+    rt,
+    "POST",
+    `/__spacefast/api.php/jobs/tick?lane=bulk&job_id=${bystander.id}`,
+    "tick_engine_jobs",
+    tickScope(target),
+    { budget_ms: 2500 },
+    200,
+  );
   expect(first.job?.id).toBe(target.id);
   expect(first.tick_status).toBe("complete");
   expect(first.job?.status).toBe("complete");
@@ -287,7 +295,7 @@ test("a targeted tick runs its signed job, bounds its execution, and leaves the 
   expect(result.failed).toEqual([]);
   expect(result.complete).toBe(true);
 
-  // A tick signed for one job never touches another, however eligible it is.
+  // The compatibility query cannot redirect a tick away from its signed job.
   expect(readJob(bystander.id).status).toBe("pending");
 
   const second = await tick(bystander, 2500);
@@ -545,8 +553,7 @@ test("POST /jobs takes the whole job from the signed scope, never the request bo
       operationId: "op_create_route",
       payload: { note: "kept" },
     }),
-    // D54: identity comes from the verified token. The body is not a second,
-    // unsigned representation the engine could prefer — it carries nothing.
+    // D54: the rollout compatibility body cannot override the verified token.
     { type: "tier_demote", space_id: "spc_body_lie", payload: { note: "ignored" } },
     201,
   );

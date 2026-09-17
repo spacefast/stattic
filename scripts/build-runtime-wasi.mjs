@@ -3,8 +3,10 @@
 // JavaScript consumers ship it as `stattic-runtime-core.wasm`.
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
+
+import { copyFileAtomic } from "../packages/routing/scripts/copy-file-atomic.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const toolchainFile = readFileSync(path.join(repoRoot, "rust-toolchain.toml"), "utf8");
@@ -44,6 +46,5 @@ if (result.status !== 0) process.exit(result.status ?? 1);
 const source = path.join(repoRoot, "target/wasm32-wasip1/release/stattic_runtime_wasi.wasm");
 for (const output of process.argv.slice(2)) {
   const destination = path.resolve(output);
-  mkdirSync(path.dirname(destination), { recursive: true });
-  copyFileSync(source, destination);
+  copyFileAtomic(source, destination);
 }

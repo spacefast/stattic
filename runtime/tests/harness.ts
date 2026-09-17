@@ -41,7 +41,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -80,20 +79,6 @@ export const RESPONSES = FINALIZER_PROTOCOL.responses;
 
 const REPO_ROOT = path.resolve(RUNTIME_DIR, "..");
 const nativeBinaryPaths = new Map<string, string>();
-let runtimeStartTail = Promise.resolve();
-
-function noOpRuntimeStartRelease() {}
-
-export async function acquireRuntimeStartLock(): Promise<() => void> {
-  const previous = runtimeStartTail;
-  let release = noOpRuntimeStartRelease;
-  runtimeStartTail = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  await previous;
-  return release;
-}
-
 function cargoDebugBinary(binary: string) {
   const metadata = spawnSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], {
     cwd: REPO_ROOT,
@@ -437,15 +422,6 @@ export type RuntimeOptions = {
   captureEdgePurges?: boolean;
 };
 
-async function freePort(): Promise<number> {
-  const server = net.createServer();
-  server.listen(0, "127.0.0.1");
-  await new Promise((resolve) => server.once("listening", resolve));
-  const port = (server.address() as net.AddressInfo).port;
-  server.close();
-  return port;
-}
-
 function ensureZeroDashboardPlugin(): void {
   if (existsSync(path.join(RUNTIME_DIR, "wordpress/zero-dashboard/next-admin.php"))) return;
   const build = spawnSync(process.execPath, [path.join(REPO_ROOT, "zero/scripts/build.ts")], {
@@ -685,9 +661,6 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
   for (const [name, value] of Object.entries(options.phpIni ?? {})) {
     phpArgs.push("-d", `${name}=${value}`);
   }
-  // freePort() necessarily closes its reservation before PHP can bind. Tests in
-  // one Bun process can call startRuntime concurrently, so serialize only the
-  // allocate+bind window; once health responds, every fixture runs in parallel.
   const edgePurges: EdgePurgeCall[] = [];
   const edgeCapture = options.captureEdgePurges ? startEdgePurgeCapture(edgePurges) : null;
   // Point the runtime's purge lane at the capture server (shared/purge.php reads
@@ -701,16 +674,11 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
       }
     : {};
 
-  const releaseStartLock = await acquireRuntimeStartLock();
-  const port = await freePort();
-  const baseUrl = `http://127.0.0.1:${port}`;
-  phpArgs.push("-S", `127.0.0.1:${port}`, RUNTIME_TEST_ROUTER);
+  // PHP owns the ephemeral port from bind onward, including across Bun shards.
+  phpArgs.push("-S", "127.0.0.1:0", RUNTIME_TEST_ROUTER);
   const server = spawn(options.phpBinary ?? PHP_BINARY, phpArgs, {
     cwd: root,
-    // The CLI server logs every request. Nobody consumes these streams, so
-    // pipes eventually fill and can reset an otherwise valid long-running
-    // fixture request. Keep the harness silent instead of backpressuring PHP.
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
     // PHP_CLI_SERVER_WORKERS forks children. Give the fixture its own process
     // group so stop() can reap the whole server instead of leaking listeners
     // after killing only the parent process.
@@ -722,6 +690,20 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
       ...edgeCaptureEnv,
       ...options.env,
     },
+  });
+  const listening = Promise.withResolvers<string>();
+  let diagnostics = "";
+  // Drain for the fixture's whole lifetime: PHP logs every request to stderr.
+  server.stderr.on("data", (chunk: Buffer) => {
+    diagnostics = (diagnostics + chunk.toString()).slice(-8192);
+    const match = diagnostics.match(
+      /Development Server \(http:\/\/127\.0\.0\.1:([1-9]\d*)\) started/,
+    );
+    if (match?.[1]) listening.resolve(`http://127.0.0.1:${match[1]}`);
+  });
+  server.once("error", listening.reject);
+  server.once("exit", (code, signal) => {
+    listening.reject(new Error(`php_exited:${code ?? signal}`));
   });
   const stopServer = () => {
     if (process.platform !== "win32" && server.pid !== undefined) {
@@ -735,26 +717,27 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
     server.kill("SIGKILL");
   };
 
+  const readiness = AbortSignal.timeout(10_000);
+  const abortStartup = () => listening.reject(new Error("php_server_start_timeout"));
+  readiness.addEventListener("abort", abortStartup, { once: true });
+  let baseUrl: string;
   try {
-    const deadline = Date.now() + 10_000;
-    for (;;) {
-      if (server.exitCode !== null) {
-        throw new Error(`php_exited:${server.exitCode}`);
-      }
-      // oxlint-disable-next-line no-await-in-loop -- readiness poll: each probe depends on the previous one failing
-      const response = await fetch(`${baseUrl}/__spacefast/health.php`).catch(() => null);
-      if (response?.ok) {
-        break;
-      }
-      if (Date.now() > deadline) {
-        stopServer();
-        throw new Error("php_server_start_timeout");
-      }
-      // oxlint-disable-next-line no-await-in-loop -- readiness poll backoff
-      await new Promise((resolve) => setTimeout(resolve, 25));
+    baseUrl = await listening.promise;
+    if (server.exitCode !== null || server.signalCode !== null) {
+      throw new Error(`php_exited:${server.exitCode ?? server.signalCode}`);
     }
+    const response = await fetch(`${baseUrl}/__spacefast/health.php`, { signal: readiness });
+    if (server.exitCode !== null || server.signalCode !== null) {
+      throw new Error(`php_exited:${server.exitCode ?? server.signalCode}`);
+    }
+    if (!response.ok) throw new Error(`php_health_failed:${response.status}`);
+  } catch (cause) {
+    stopServer();
+    edgeCapture?.stop();
+    rmSync(root, { recursive: true, force: true });
+    throw new Error(`PHP fixture startup failed.\n${diagnostics}`, { cause });
   } finally {
-    releaseStartLock();
+    readiness.removeEventListener("abort", abortStartup);
   }
 
   if (server.pid === undefined) throw new Error("php_server_pid_missing");

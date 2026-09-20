@@ -958,12 +958,15 @@ function _stattic_runtime_compile_route(string $privateRoot, string $spaceId, ar
         ) {
             return null;
         }
+        // A host redirect answers every visitor method, like a path redirect:
+        // 307/308 exist so a POST can be replayed at the canonical host, and a
+        // 405 here would make the chosen status meaningless.
         $hostAction = [
             'action' => 'redirect',
             'destination' => (string) $target['destination'],
             'status' => $status,
             'cache_control' => STATTIC_DEFAULT_EDGE_CACHE_CONTROL,
-            'methods' => ['GET', 'HEAD'],
+            'methods' => STATTIC_VISITOR_METHODS,
         ];
     } elseif (($target['type'] ?? null) === 'host_proxy') {
         if (!is_string($target['upstream'] ?? null)) {
@@ -1795,7 +1798,7 @@ function _stattic_runtime_route_action_valid(mixed $action, bool $allowTombstone
             && in_array($status, [301, 302, 303, 307, 308], true)
             && is_string($action['cache_control'] ?? null)
             && $action['cache_control'] !== ''
-            && ($action['methods'] ?? null) === ['GET', 'HEAD'];
+            && ($action['methods'] ?? null) === STATTIC_VISITOR_METHODS;
     }
     if ($action['action'] === 'proxy') {
         return _stattic_runtime_proxy_route_policy_valid($action);

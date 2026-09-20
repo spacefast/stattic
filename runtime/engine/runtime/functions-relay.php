@@ -201,7 +201,16 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
             is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
         );
         _stattic_db_broker_grant($grant);
-        $answer = _stattic_db_broker_execute($body);
+        $versionRoot = _stattic_version_root($privateRoot, $spaceId, $claims['version_id']);
+        $functions = _stattic_functions_config_read($versionRoot . '/files');
+        $databases = $functions['kind'] === 'present' ? ($functions['value']['artifact']['d1'] ?? []) : [];
+        $frame = json_decode($body, true);
+        if ($databases !== [] || (is_array($frame) && array_key_exists('d1', $frame))) {
+            require_once __DIR__ . '/../shared/d1-broker.php';
+            $answer = _sf_d1_execute($body, $spaceId, $databases);
+        } else {
+            $answer = _stattic_db_broker_execute($body);
+        }
         // A frame must never leave an open transaction behind, holding row
         // locks, so the rollback lands before the answer does.
         _stattic_db_broker_rollback_open_transaction();

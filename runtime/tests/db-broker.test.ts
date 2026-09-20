@@ -37,6 +37,9 @@ afterAll(() => {
 // --- drivers --------------------------------------------------------------------------
 
 type CliRequest = {
+  space?: string;
+  databases?: typeof d1Databases;
+  migrate?: boolean;
   action?: string;
   url?: string;
   source?: string | null;
@@ -47,6 +50,7 @@ type CliRequest = {
 };
 
 type CliResponse = {
+  error?: string;
   responses?: string[];
   migrate?: { ok: true } | { ok: false; code: string; message: string };
   metrics?: {
@@ -501,4 +505,145 @@ test("an artifact this engine did not compile is refused before it connects", as
     code: "zero_migration_artifact_invalid",
     message: "Zero migration artifact format is unsupported.",
   });
+});
+
+const d1Databases = [
+  {
+    binding: "DB",
+    databaseName: "links",
+    migrations: [
+      {
+        name: "0001.sql",
+        sql: "CREATE TABLE links (slug TEXT PRIMARY KEY, url TEXT NOT NULL, clicks INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now'))); CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+      },
+      {
+        name: "0002.sql",
+        sql: "ALTER TABLE links ADD COLUMN country TEXT; CREATE INDEX IF NOT EXISTS by_country ON links(country, created_at);",
+      },
+    ],
+  },
+];
+
+type D1Statement = { sql: string; params?: Array<string | number | null> };
+type D1Operation = (D1Statement | { mode: "transaction"; statements: D1Statement[] }) & {
+  d1?: string | null;
+};
+
+async function d1(input: {
+  space?: string;
+  databases?: typeof d1Databases;
+  migrate?: boolean;
+  operations?: D1Operation[];
+}) {
+  const result = await php({
+    action: "d1",
+    space: input.space ?? "spc_d1",
+    databases: input.databases ?? d1Databases,
+    migrate: input.migrate ?? false,
+    capabilities: ["db.read", "db.write"],
+    operations: input.operations?.map((operation) => JSON.stringify({ d1: "DB", ...operation })),
+  });
+  return { ...result, responses: result.responses?.map((response) => JSON.parse(response)) };
+}
+
+test("D1 migrations replay without data loss, and prepared SQL preserves conflicts, dates and atomic batches", async () => {
+  expect(await d1({ migrate: true })).toEqual({ responses: [] });
+  const setup = await Promise.all(
+    ["first", "second"].map((value) =>
+      d1({
+        operations: [
+          {
+            sql: "INSERT INTO settings (key,value) VALUES ('setup',?) ON CONFLICT(key) DO NOTHING",
+            params: [value],
+          },
+        ],
+      }),
+    ),
+  );
+  expect(setup.map((r) => r.responses?.[0].affectedRows).sort()).toEqual([0, 1]);
+  const inserted = await d1({
+    operations: [
+      {
+        sql: "INSERT INTO links (slug,url) VALUES (?,?)",
+        params: ["Launch", "https://example.com/a'\\b"],
+      },
+      {
+        sql: "INSERT INTO links (slug,url) VALUES (?,?)",
+        params: ["launch", "https://example.com/other"],
+      },
+      {
+        sql: "INSERT INTO settings (key,value) VALUES ('password','first') ON CONFLICT(key) DO NOTHING",
+      },
+      {
+        sql: "INSERT INTO settings (key,value) VALUES ('password','ignored') ON CONFLICT(key) DO NOTHING",
+      },
+      {
+        sql: "INSERT INTO settings (key,value) VALUES ('password','updated') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      },
+      {
+        sql: "INSERT INTO settings (key,value) VALUES ('password','updated') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      },
+    ],
+  });
+  expect(inserted.responses?.map((r) => r.affectedRows)).toEqual([1, 1, 1, 0, 1, 1]);
+  expect(await d1({ migrate: true })).toEqual({ responses: [] });
+  const read = await d1({
+    operations: [
+      { sql: "SELECT url, clicks FROM links WHERE slug=?", params: ["Launch"] },
+      { sql: "SELECT value FROM settings WHERE key='password'" },
+      {
+        sql: "SELECT date(created_at) AS day, count(*) AS n FROM links WHERE created_at >= datetime('now','-7 days') GROUP BY day ORDER BY day",
+      },
+      {
+        mode: "transaction",
+        statements: [
+          { sql: "UPDATE links SET clicks=clicks+1 WHERE slug='Launch'" },
+          { sql: "INSERT INTO links (slug,url) VALUES ('Launch','duplicate')" },
+        ],
+      },
+      { sql: "SELECT clicks FROM links WHERE slug='Launch'" },
+    ],
+  });
+  expect(read.responses?.[0]).toMatchObject({
+    ok: true,
+    rows: [{ url: "https://example.com/a'\\b", clicks: 0 }],
+  });
+  expect(read.responses?.[1]).toMatchObject({ rows: [{ value: "updated" }] });
+  expect(read.responses?.[2]).toMatchObject({
+    rows: [{ day: new Date().toISOString().slice(0, 10), n: 2 }],
+  });
+  expect(read.responses?.[3]).toEqual({
+    ok: false,
+    code: "d1_error",
+    message: "UNIQUE constraint failed",
+  });
+  expect(read.responses?.[4]).toMatchObject({ rows: [{ clicks: 0 }] });
+  const edited = structuredClone(d1Databases);
+  const migration = edited[0]?.migrations[0];
+  if (!migration) throw new Error("Missing migration fixture");
+  migration.sql += " -- edited";
+  expect((await d1({ migrate: true, databases: edited })).error).toStartWith(
+    "D1_MIGRATION_CHANGED:",
+  );
+});
+
+test("D1 refuses table escapes and unsupported SQL before execution and isolates database identities", async () => {
+  expect(await d1({ space: "spc_other", migrate: true })).toEqual({ responses: [] });
+  const result = await d1({
+    space: "spc_other",
+    operations: [
+      { sql: "SELECT * FROM links" },
+      { sql: "SELECT * FROM links, notes" },
+      { sql: "SELECT * FROM links JOIN notes ON 1=1" },
+      { sql: "SELECT (SELECT body FROM notes) FROM links" },
+      { sql: "SELECT * FROM links; DROP TABLE notes" },
+      { sql: "SELECT LOAD_FILE('/etc/passwd') FROM links" },
+      { sql: "SELECT * FROM links", d1: "OTHER" },
+      { sql: "SELECT * FROM links", d1: null },
+    ],
+  });
+  expect(result.responses?.[0]).toEqual({ ok: true, rows: [] });
+  expect(result.responses?.slice(1).map((r) => [r.ok, r.code])).toEqual(
+    Array.from({ length: 7 }, () => [false, "d1_error"]),
+  );
 });

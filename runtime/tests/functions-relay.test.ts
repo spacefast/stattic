@@ -18,6 +18,7 @@ import path from "node:path";
 import {
   apiJson,
   deploy,
+  finalizeRaw,
   get,
   PHP_BINARY,
   publicAccessConfig,
@@ -793,7 +794,7 @@ test("the relay is not reachable as static content", async () => {
 // `host.hostname` the compiled config names.
 
 /** A functions config exactly as the control plane finalizes one for a version. */
-function functionsFinalize(hostname: string): Record<string, unknown> {
+function functionsFinalize(hostname: string) {
   return {
     artifact: {
       appName: "fx-dispatch",
@@ -990,4 +991,101 @@ test("journal drain exposes the broker failure stage without its configuration",
   } finally {
     unavailableRuntime.stop();
   }
+});
+
+test("finalize provisions D1 before serving and the relay restricts its credential to declared databases", async () => {
+  const versionId = "ver_fx_relay_d1";
+  const functions = functionsFinalize("functions.test");
+  await deploy(rt, {
+    spaceId: SPACE_ID,
+    versionId,
+    metadata: { mode: "website", title: "D1 relay" },
+    files: { "index.html": "D1" },
+    functions: {
+      ...functions,
+      artifact: {
+        ...functions.artifact,
+        d1: [
+          {
+            binding: "DB",
+            databaseName: "relay-links",
+            migrations: [
+              {
+                name: "0001.sql",
+                sql: "CREATE TABLE links (slug TEXT PRIMARY KEY, url TEXT NOT NULL);",
+              },
+            ],
+          },
+        ],
+      },
+      grantedCapabilities: ["db.read", "db.write"],
+    },
+  });
+  const token = relayToken({ version_id: versionId });
+  const inserted = await relay(
+    {
+      d1: "DB",
+      sql: "INSERT INTO links (slug,url) VALUES (?,?)",
+      params: ["a", "https://example.com"],
+    },
+    token,
+  );
+  expect(await inserted.json()).toMatchObject({ ok: true, affectedRows: 1 });
+  const read = await relay(
+    { d1: "DB", sql: "SELECT url FROM links WHERE slug=?", params: ["a"] },
+    token,
+  );
+  expect(await read.json()).toEqual({ ok: true, rows: [{ url: "https://example.com" }] });
+  const raw = await relay({ mode: "query", sql: "SELECT * FROM notes" }, token);
+  expect(await raw.json()).toMatchObject({ ok: false, code: "d1_error" });
+  const readonly = await relay(
+    { d1: "DB", sql: "DELETE FROM links" },
+    relayToken({ version_id: versionId, capabilities: ["db.read"] }),
+  );
+  expect(await readonly.json()).toMatchObject({ ok: false, code: "d1_error" });
+  await putRoute(rt, SPACE_ID, "production", {
+    version_id: VERSION_ID,
+    config: publicAccessConfig({ mode: "website", site_title: "Functions relay" }),
+    production_hostnames: [HOST],
+    noindex_production_hostnames: [],
+    version_hostnames: [],
+  });
+  const tablesBefore = mysql.exec("SHOW TABLES");
+  const failed = await finalizeRaw(
+    rt,
+    SPACE_ID,
+    "ver_fx_d1_failed",
+    { "index.html": "must not activate" },
+    {
+      functions: {
+        ...functions,
+        artifact: {
+          ...functions.artifact,
+          d1: [
+            {
+              binding: "DB",
+              databaseName: "failed-plan",
+              migrations: [
+                {
+                  name: "0001.sql",
+                  sql: "CREATE TABLE first (id INTEGER PRIMARY KEY); CREATE TRIGGER unsupported;",
+                },
+              ],
+            },
+          ],
+        },
+      },
+      activate: {
+        route_name: "production",
+        config: publicAccessConfig({ mode: "website", site_title: "failed" }),
+        production_hostnames: [HOST],
+        noindex_production_hostnames: [],
+        version_hostnames: [],
+      },
+    },
+  );
+  expect(failed.status).toBe(422);
+  expect(await failed.json()).toMatchObject({ code: "d1_migration_failed" });
+  expect(mysql.exec("SHOW TABLES")).toBe(tablesBefore);
+  expect(await (await get(rt, HOST, "/")).text()).toContain("<h1>static</h1>");
 });

@@ -375,6 +375,8 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     }
 
     _stattic_runtime_publish_session_require_complete($session);
+    $functionsFinalize = is_array($body['functions'] ?? null) ? $body['functions'] : null;
+    if ($functionsFinalize !== null) _stattic_runtime_apply_d1_migrations($functionsFinalize, $spaceId);
     $finalized = _stattic_runtime_finalize_with_rust(
         $privateRoot,
         $spaceId,
@@ -391,7 +393,6 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     if ($zeroFinalize !== null || _stattic_runtime_version_has_zero_pack($versionRoot)) {
         _stattic_runtime_write_zero_config_artifact($versionRoot, $zeroFinalize ?? []);
     }
-    $functionsFinalize = is_array($body['functions'] ?? null) ? $body['functions'] : null;
     if ($functionsFinalize !== null) {
         _stattic_runtime_write_functions_config_artifact($versionRoot, $functionsFinalize);
     }

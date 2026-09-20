@@ -206,6 +206,19 @@ function _stattic_functions_dispatchable(string $requestPath, string $requestMet
     return true;
 }
 
+// These are FastCGI parameters, never HTTP_* headers or the provider's REMOTE_ADDR.
+function _stattic_functions_visitor_context(): array
+{
+    $context = [];
+    $ip = $_SERVER['SPACEFAST_VISITOR_IP'] ?? getenv('SPACEFAST_VISITOR_IP');
+    if (is_string($ip) && filter_var($ip, FILTER_VALIDATE_IP) !== false) $context['ip'] = $ip;
+    $country = strtoupper((string) ($_SERVER['GEOIP_COUNTRY_CODE'] ?? ''));
+    if (preg_match('/^[A-Z]{2}$/D', $country)) $context['country'] = $country;
+    $city = $_SERVER['GEOIP_CITY'] ?? null;
+    if (is_string($city) && $city !== '' && strlen($city) <= 128) $context['city'] = $city;
+    return $context;
+}
+
 // The grant and the relay credential travel together or not at all.
 function _stattic_functions_dispatch_headers(
     array $config,
@@ -253,6 +266,8 @@ function _stattic_functions_dispatch_headers(
         'sf-fx-main' => (string) $artifact['mainModule'],
         'sf-fx-compat-date' => (string) $artifact['compatibilityDate'],
         'sf-fx-compat-flags' => implode(',', $flags),
+        'sf-fx-visitor' => base64_encode((string) json_encode((object) _stattic_functions_visitor_context(), JSON_INVALID_UTF8_SUBSTITUTE)),
+        'sf-fx-d1' => implode(',', array_column($artifact['d1'] ?? [], 'binding')),
         'sf-fx-caps' => implode(',', $capabilities),
         'sf-fx-space' => $spaceId,
         'sf-fx-version' => $versionId,

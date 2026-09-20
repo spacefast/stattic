@@ -62,6 +62,8 @@
     "engine/shared/content-request.php",
     "engine/shared/context.php",
     "engine/shared/db-broker.php",
+    "engine/shared/d1-sql.php",
+    "engine/shared/d1-broker.php",
     "engine/shared/egress.php",
     "engine/shared/errors.php",
     "engine/shared/finalizer-protocol.generated.php",

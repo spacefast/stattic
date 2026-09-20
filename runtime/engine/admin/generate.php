@@ -2010,3 +2010,23 @@ function _stattic_runtime_redirect_target_safe(string $destination, string $acti
 
     return true;
 }
+
+/** Finalize must complete D1 migrations before any route pointer can activate. */
+function _stattic_runtime_apply_d1_migrations(array $functions, string $spaceId): void
+{
+    $databases = $functions['artifact']['d1'] ?? [];
+    if ($databases === []) return;
+    require_once __DIR__ . '/../shared/d1-broker.php';
+    $env = _stattic_zero_runner_base_env();
+    _stattic_db_broker_bind($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null, $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null);
+    _stattic_db_broker_grant(['db.read', 'db.write']);
+    try {
+        _sf_d1_migrate($spaceId, $databases);
+    } catch (Throwable $error) {
+        $message = $error->getMessage();
+        if (!str_starts_with($message, 'D1_')) $message = 'D1 database migrations failed.';
+        _stattic_problem_response(422, 'd1_migration_failed', $message);
+    } finally {
+        _stattic_db_broker_close();
+    }
+}

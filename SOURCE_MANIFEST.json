@@ -1,7 +1,7 @@
 {
-  "revision": "2564cb2a0f3eb959929209953216c3b7b628641d",
-  "sourceHash": "71233ea7b27a31cf61fa0a4336b9d2ca8a39cd5d1aa0903afdef1252beb239e8",
-  "manifestSha256": "decf97e2f3ec600018570d3cf8df02dfcc82d8e933d9ad6e98f9cb0eae2bf771",
+  "revision": "34331681795a4cbe47cef05ef5baf8d773ba32f7",
+  "sourceHash": "1bbf04345a8b697a126f10da660555ae380b2becf3247ba89a41c1437401bddb",
+  "manifestSha256": "a6bca59d61a9f6001f78826bb2fed2b880b27bdcdd66389e62221f4806317197",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "b58926dd20af5579ca2349f158a6305a674fcea6762d75d6cf73a83e51bacd62"
+      "sha256": "48fd4687d936b297bb2a19b88467a425b5ca156eb6656c27dace85de1503481a"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "7f71f90d4db008e30c5f408c3461f7f96b25dba1d9b7eb9cab19912b62ac9372"
+      "sha256": "9adfdc419d37910fdacb20f1d0ba3b7ad94b591d690748b2ec0688247c506d04"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -373,7 +373,7 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "cfbba239fc1d35abbad0da112d488a13a0369b5a7573c31b128d6fc4838ca353"
+      "sha256": "e02ca2c47427da78f2d9e3a0c9420d93c7a076b6a2e8e46ba845b33a22a0ec94"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -405,7 +405,7 @@
     },
     {
       "path": "runtime/engine/admin/generate.php",
-      "sha256": "70c8490e5f6073ed8354906caa7645f48e8180b1d4f499e0a4880fb3a81072bc"
+      "sha256": "a4b46786541906dd7c6083d495ac6086b128e99f1753b99ac5e599e9c39eade9"
     },
     {
       "path": "runtime/engine/admin/jobs.php",
@@ -413,7 +413,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "80db19828c0464e608b07b6a0b599489a5a5786b378bf166967fe40eead4bd5c"
+      "sha256": "1162474790050b8e47d7846d7d64468d2c5673557c58f3ab18a08f8e5c6f583b"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -509,7 +509,7 @@
     },
     {
       "path": "runtime/engine/runtime/functions-dispatch.php",
-      "sha256": "5a83d4907ea63e40ad012b022ca474fc02ca3d3accc63b06945a90dfc26c1e55"
+      "sha256": "e08eaa0a317d1957a25477d236b3046b45d58ba3f3dbe3803356b0305a3a9b91"
     },
     {
       "path": "runtime/engine/runtime/functions-purge.php",
@@ -517,7 +517,7 @@
     },
     {
       "path": "runtime/engine/runtime/functions-relay.php",
-      "sha256": "3a70f3730a740818cbbc2638ff12f79a1251761cbfb27c7d27a5d083953cf125"
+      "sha256": "a32f2316a20e39cae3b186ff0136c7f784430f8eb014b9907fc1ebdfcaa2c52b"
     },
     {
       "path": "runtime/engine/runtime/headers.php",
@@ -614,6 +614,14 @@
     {
       "path": "runtime/engine/shared/context.php",
       "sha256": "92427c67547b6f3578a1ebc9cd5f17b41f03b73b179f7d32ac626c896496eaa8"
+    },
+    {
+      "path": "runtime/engine/shared/d1-broker.php",
+      "sha256": "5b566c551765321eeaf2dda05ea6e3368a5a8a275264bcf30c1ec7925b8ccae8"
+    },
+    {
+      "path": "runtime/engine/shared/d1-sql.php",
+      "sha256": "e6c058e5f84ab8350aeb6a170d2cdbdd986ceb28a2c90d449805865c1771a855"
     },
     {
       "path": "runtime/engine/shared/db-broker.php",
@@ -893,7 +901,7 @@
     },
     {
       "path": "runtime/tests/db-broker-cli.php",
-      "sha256": "3ca14d5b3a1ea46cc4e06d8779292b4bc4bc5016253f4d7b9b6d875b598d4a92"
+      "sha256": "8f7fc402d881fd89010e81fd460be34584ae55a33623039ceac421cfe1ca70d3"
     },
     {
       "path": "runtime/tests/db-broker-corpus.ts",
@@ -905,7 +913,7 @@
     },
     {
       "path": "runtime/tests/db-broker.test.ts",
-      "sha256": "bf79d4655e72161435317d0a4261e41035d0647836e03e95c576046638a2fe55"
+      "sha256": "0135fca42eadb079258a037ada439f0f13524da44b2cb17e5094991af118a4d1"
     },
     {
       "path": "runtime/tests/dispatch.test.ts",
@@ -957,7 +965,7 @@
     },
     {
       "path": "runtime/tests/functions-relay.test.ts",
-      "sha256": "5e02e6b87f9b8c68e98679a4f75ebe84e2d580262f601615e7bfa80b88351fc8"
+      "sha256": "2ce0d867bd94dee6b30c0f5c50326af436b9d4e90eb3e69de5352ae5cdb17b8a"
     },
     {
       "path": "runtime/tests/grant-conformance.php",
@@ -1081,7 +1089,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "cc80b593dee5238ccd192a9d7fde247c571b3f203a06e41450d20268c9124d56"
+      "sha256": "9aa21bdbef6e9dceaf1e95da797b5113abfba1140f76b49a2447e4a7fed74a8a"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

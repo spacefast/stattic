@@ -2220,7 +2220,18 @@ $fxConfig = [
 // The dispatch credential is opaque here: a per-box JWT the control plane
 // minted. Serving forwards it verbatim, so the fixture is a shape, not a secret.
 $fxDispatchToken = 'eyJhbGciOiJFZERTQSJ9.eyJhdWQiOiJzcGFjZWZhc3QtZnVuY3Rpb25zLWRpc3BhdGNoIn0.c2ln';
+$fxConfig['artifact']['d1'] = [['binding' => 'DB']];
+$_SERVER['HTTP_CF_IPCOUNTRY'] = 'XX';
+$_SERVER['HTTP_CF_CONNECTING_IP'] = '203.0.113.99';
+$_SERVER['SPACEFAST_VISITOR_IP'] = '198.51.100.7';
+$_SERVER['GEOIP_COUNTRY_CODE'] = 'GB';
+$_SERVER['GEOIP_CITY'] = 'London';
 $fxHeaders = _stattic_functions_dispatch_headers($fxConfig, 'spc_1', 'ver_1', 'fxr_abc', $fxDispatchToken, 'https://shop.example', 'open');
+check($fxHeaders['sf-fx-d1'] === 'DB', 'dispatch: imports the declared D1 binding');
+check(json_decode(base64_decode($fxHeaders['sf-fx-visitor']), true) === ['ip' => '198.51.100.7', 'country' => 'GB', 'city' => 'London'], 'dispatch: visitor context uses only server-owned values');
+unset($_SERVER['SPACEFAST_VISITOR_IP'], $_SERVER['GEOIP_COUNTRY_CODE'], $_SERVER['GEOIP_CITY']);
+check(_stattic_functions_visitor_context() === [], 'dispatch: forged forwarding headers supply no visitor context');
+unset($_SERVER['HTTP_CF_IPCOUNTRY'], $_SERVER['HTTP_CF_CONNECTING_IP']);
 check($fxHeaders['sf-fx-bundle'] === 'https://shop.example/b/x/t/bundle.json', 'dispatch: carries the signed bundle URL');
 check($fxHeaders['sf-fx-main'] === 'index.js', 'dispatch: carries the entry module');
 check($fxHeaders['sf-fx-caps'] === 'db.read,db.write', 'dispatch: carries the grant the control plane decided');

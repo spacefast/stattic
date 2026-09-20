@@ -41,6 +41,16 @@ switch ((string) ($request['action'] ?? 'operations')) {
         $out['metrics'] = _stattic_db_broker_take_metrics();
         break;
 
+    case 'd1':
+        require_once __DIR__ . '/../engine/shared/d1-broker.php';
+        try {
+            if ($request['migrate'] ?? false) _sf_d1_migrate($request['space'], $request['databases']);
+            $out['responses'] = array_map(fn ($operation) => _sf_d1_execute($operation, $request['space'], $request['databases']), $request['operations'] ?? []);
+        } catch (Throwable $error) {
+            $out['error'] = $error->getMessage();
+        }
+        break;
+
     case 'migrate':
         // Applies one migrations.json the way generate.php does at publish, so
         // artifact validation, replay tolerance and a real failure are all

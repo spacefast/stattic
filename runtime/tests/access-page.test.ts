@@ -684,7 +684,7 @@ beforeAll(async () => {
         "index.html": `<html><body>home of ${fixture.spaceId}</body></html>`,
         "docs/index.html": `<html><head><link rel="stylesheet" href="site.css"></head><body>docs of ${fixture.spaceId}</body></html>`,
         "docs/site.css": "body { color: #123456; }",
-        "docs/app-D2mDMWBM.js": "globalThis.spacefastProtectedAsset = true;\n",
+        "docs/[section]/app-D2mDMWBM.js": "globalThis.spacefastProtectedAsset = true;\n",
         "docs/guide/index.html": `<html><body>guide of ${fixture.spaceId}</body></html>`,
         "admin/index.html": `<html><body>admin of ${fixture.spaceId}</body></html>`,
       },
@@ -1616,18 +1616,23 @@ test("a system view token serves the page and its same-origin assets without a s
   // wp.cloud claims ordinary .js URLs before PHP can set their cache policy, so
   // the authenticated request moves to a reserved extension-safe URL that
   // re-verifies the same proof before serving.
-  const protectedAsset = await get(runtime, LANES_HOST, "/docs/app-D2mDMWBM.js", {
+  const assetPath = "/docs/%5Bsection%5D/app-D2mDMWBM.js";
+  const protectedAsset = await get(runtime, LANES_HOST, `${assetPath}?v=1`, {
     headers: { cookie: assetCookie },
   });
   expect(protectedAsset.status).toBe(307);
-  expect(protectedAsset.headers.get("location")).toBe("/docs/app-D2mDMWBM.js;sf-private");
+  const assetLocation = protectedAsset.headers.get("location") ?? "";
+  expect(assetLocation).toBe(`${assetPath};sf-private?v=1`);
   expect(protectedAsset.headers.get("cache-control")).toBe("private, no-store");
-  const aliasedAsset = await get(runtime, LANES_HOST, "/docs/app-D2mDMWBM.js;sf-private", {
+  const aliasedAsset = await get(runtime, LANES_HOST, assetLocation, {
     headers: { cookie: assetCookie },
   });
   expect(aliasedAsset.status).toBe(200);
   expect(await aliasedAsset.text()).toContain("spacefastProtectedAsset");
   expect(aliasedAsset.headers.get("cache-control")).toBe("private, no-store");
+  const unauthenticatedAsset = await get(runtime, LANES_HOST, assetLocation);
+  expect(unauthenticatedAsset.status).toBe(403);
+  expect(await unauthenticatedAsset.text()).not.toContain("spacefastProtectedAsset");
   // Verified locally against the runtime's own keys. The exchange never hears
   // about a system token.
   expect(exchangeRequests.length).toBe(before);

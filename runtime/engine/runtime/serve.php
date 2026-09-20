@@ -94,7 +94,8 @@ function _stattic_private_file_alias_not_found(): never
 function _stattic_private_file_alias_redirect(string $sourcePath): never
 {
     $query = _stattic_strip_access_query_token((string) ($_SERVER['QUERY_STRING'] ?? ''));
-    $location = $sourcePath . STATTIC_PRIVATE_FILE_ALIAS_SUFFIX
+    // Matchers use decoded paths; Location must encode each segment again.
+    $location = implode('/', array_map('rawurlencode', explode('/', $sourcePath))) . STATTIC_PRIVATE_FILE_ALIAS_SUFFIX
         . ($query === '' ? '' : '?' . $query);
     _stattic_send_response_headers([
         'cache-control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,

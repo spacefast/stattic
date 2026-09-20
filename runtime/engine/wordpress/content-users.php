@@ -1,5 +1,6 @@
 <?php
 declare(strict_types=1);
+require_once __DIR__ . '/space-users.php';
 
 /**
  * The users feature: a Space's WordPress users, reachable through WordPress's
@@ -380,7 +381,7 @@ function spacefast_content_users_abilities(): array
             ),
             'execute_callback' => 'spacefast_content_users_update',
         ],
-    ];
+    ] + spacefast_space_users_abilities();
 }
 
 /**

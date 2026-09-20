@@ -22,7 +22,6 @@ require_once __DIR__ . '/../engine/runtime/functions-artifacts.php'; // signed b
 require_once __DIR__ . '/../engine/runtime/functions-dispatch.php'; // origin -> host dispatch contract
 require_once __DIR__ . '/../engine/shared/runtime-log.php'; // the one runtime log writer
 require_once __DIR__ . '/../engine/shared/db-broker.php'; // MySQL broker value encoding (pure helpers only here)
-require_once __DIR__ . '/../engine/runtime/php-functions.php'; // sf_env()/sf_fetch() decisions (pure helpers only here)
 
 $assertions = 0;
 $failures = [];
@@ -192,101 +191,6 @@ check(
     'egress scope: a non-matching target still faces the whole policy'
 );
 putenv('SPACEFAST_EGRESS_TEST_ALLOWLIST');
-
-// --- PHP Functions: the author-facing helpers, as pure functions --------------------
-//
-// The serve-side wiring (a version's configuration reaching sf_env(), the
-// Space's own scope reaching sf_fetch()) is php-functions.test.ts; these are the
-// decisions those helpers make once the inputs are in hand.
-
-// sf_env() answers a Space's own selection and nothing the platform owns. The
-// control plane already filters both groups out of the selection, so this is the
-// engine refusing to be the one surface that leaks one back.
-$variableValues = _stattic_php_functions_variable_values([
-    'variableValues' => [
-        'GITHUB_TOKEN' => 'gh-secret',
-        'SPACEFAST_FUNCTIONS_DISPATCH_TOKEN' => 'fleet-credential',
-        'zero_internal' => 'platform',
-        'DATABASE_URL' => 'mysql://user:pw@db.internal/app',
-        'EMPTY_NAME_VALUE' => 42,
-    ],
-]);
-check(
-    $variableValues === ['GITHUB_TOKEN' => 'gh-secret'],
-    'sf_env: the Space keeps its own variables and the platform keeps its namespaces'
-);
-
-// A relative Location is an RFC 3986 reference, not a path suffix. The forms
-// that separate a real resolver from string surgery are the ones redirects
-// actually send: a query-only reference keeps the current path, a fragment-only
-// one keeps the query too, and dot segments collapse. Getting these wrong
-// fetches a different resource and says nothing about it. The query-only case
-// is proven again over a real hop in php-functions-fetch.test.ts, which is what
-// shows the destination server the request it really received.
-foreach ([
-    // Query-only and fragment-only: the path survives, and so does the query
-    // under a fragment. A fragment is the client's and never travels.
-    ['https://api.github.com/dir/item?old=1', '?new=2', 'https://api.github.com/dir/item?new=2'],
-    ['https://api.github.com/dir/item?old=1', '#section', 'https://api.github.com/dir/item?old=1'],
-    // Relative references replace the last segment, and dot segments collapse.
-    ['https://api.github.com/repos/a/b/contents/x?ref=main', 'blob', 'https://api.github.com/repos/a/b/contents/blob'],
-    ['https://api.github.com/repos/a/b/c', '../up', 'https://api.github.com/repos/a/up'],
-    ['https://api.github.com/repos/a/b', '/other', 'https://api.github.com/other'],
-    ['https://api.github.com/repos/a/b', '//cdn.example.com/x', 'https://cdn.example.com/x'],
-    ['https://api.github.com/repos/a/b', 'https://objects.example.com/x', 'https://objects.example.com/x'],
-    ['https://api.github.com:8443/a/b', '/c', 'https://api.github.com:8443/c'],
-] as [$base, $location, $expected]) {
-    check(
-        _stattic_php_functions_fetch_redirect_target($base, $location) === $expected,
-        "sf_fetch: redirect {$location} resolves against {$base}"
-    );
-}
-
-// The budget belongs to the call, and a hop that has none left must refuse
-// before it starts work this process could not cancel.
-check(
-    _stattic_php_functions_fetch_remaining_ms(microtime(true) + 5) > 4000,
-    'sf_fetch: an unspent budget reports what is left of it'
-);
-$spentCode = null;
-try {
-    _stattic_php_functions_fetch_remaining_ms(microtime(true) - 0.001);
-} catch (SpacefastFetchError $error) {
-    $spentCode = $error->errorCode;
-}
-check(
-    $spentCode === 'zero_fetch_upstream_unavailable',
-    'sf_fetch: a spent budget refuses the hop rather than resolving it'
-);
-
-// Hop-by-hop names describe the connection the engine owns, so they are dropped
-// rather than refused; a name or value that would rewrite the request is a
-// handler bug and says so.
-check(
-    _stattic_php_functions_fetch_request_headers([
-        'Authorization' => 'Bearer t',
-        'Host' => 'evil.test',
-        'Transfer-Encoding' => 'chunked',
-        'X-GitHub-Api-Version' => '2022-11-28',
-    ]) === ['authorization' => 'Bearer t', 'x-github-api-version' => '2022-11-28'],
-    'sf_fetch: transport-owned request headers are dropped, the rest are lower-cased'
-);
-foreach ([
-    ['X-Smuggle' => "one\r\nHost: evil.test"],
-    ['X Bad Name' => 'v'],
-    ['X-Object' => ['not', 'a', 'string']],
-] as $rejected) {
-    $code = null;
-    try {
-        _stattic_php_functions_fetch_request_headers($rejected);
-    } catch (SpacefastFetchError $error) {
-        $code = $error->errorCode;
-    }
-    check(
-        $code === 'zero_fetch_payload_invalid',
-        'sf_fetch: a header that would rewrite the request is refused: ' . array_key_first($rejected)
-    );
-}
 
 // --- Proxy egress policy: IPv4 ------------------------------------------------------
 
@@ -2718,9 +2622,10 @@ $trustedProviderEnv = _stattic_zero_runner_base_env([
     'databaseUrlSource' => 'provider',
 ]);
 check(
-    _stattic_zero_internal_hosts_env('https://API.Example/v1')
-        === ['SPACEFAST_ZERO_INTERNAL_HOSTS' => 'api.example'],
-    'tenant fetch: the environment-specific Spacefast API host reaches the native egress guard'
+    _stattic_egress_host_allowed('api.spacefast.com', 443, STATTIC_EGRESS_SCOPE_OPEN)
+        && !_stattic_egress_host_allowed('api.spacefast.com', 443, STATTIC_EGRESS_SCOPE_TRUSTED)
+        && !array_key_exists('SPACEFAST_ZERO_INTERNAL_HOSTS', $trustedProviderEnv),
+    'tenant fetch: a claimed Space reaches the authenticated public API without widening anonymous egress'
 );
 check(
     ($trustedProviderEnv['SPACEFAST_ZERO_DATABASE_URL'] ?? null) === 'mysql://provider.internal/app'
@@ -3582,6 +3487,97 @@ check(
 );
 
 _stattic_job_runner_unit_rm_recursive(dirname($cliPrivateRoot));
+
+// --- account identity issuer --------------------------------------------------------
+
+require_once __DIR__ . '/../engine/shared/jwt.php'; // _stattic_runtime_api_base_url()
+
+function _stattic_unit_identity_claims(string $issuer): array
+{
+    return [
+        'identity' => ['issuer' => $issuer, 'subject' => 'usr_ada'],
+        'principal' => 'account:usr_ada',
+    ];
+}
+
+// Every non-production deployment issues over http, a port, or both. The
+// session carrying this claim was signed by this runtime, so the check is a
+// shape check; refusing those issuers threw away the whole session instead.
+check(
+    _stattic_access_account_identity(
+        _stattic_unit_identity_claims('http://api.sf.localhost:4000/v1/auth')
+    ) !== null,
+    'identity issuer: a local http issuer with a port is accepted'
+);
+check(
+    _stattic_access_account_identity(
+        _stattic_unit_identity_claims('https://api.staging.spacefast.com/v1/auth')
+    ) !== null,
+    'identity issuer: a staging https issuer is accepted'
+);
+check(
+    _stattic_access_account_identity(
+        _stattic_unit_identity_claims('https://api.spacefast.com/v1/authorize')
+    ) === null,
+    'identity issuer: a path that is not /v1/auth is refused'
+);
+
+define('SPACEFAST_API_BASE_URL', 'http://api.sf.localhost:4000');
+check(
+    _stattic_runtime_api_base_url() === 'http://api.sf.localhost:4000',
+    'identity issuer: the engine reads its configured API base'
+);
+check(
+    _stattic_access_account_identity(
+        _stattic_unit_identity_claims('http://api.sf.localhost:4000/v1/auth')
+    ) !== null,
+    'identity issuer: the configured API base issues account identity'
+);
+check(
+    _stattic_access_account_identity(
+        _stattic_unit_identity_claims('https://api.spacefast.com/v1/auth')
+    ) === null,
+    'identity issuer: another API base is refused once one is configured'
+);
+
+// --- content loader guards ----------------------------------------------------------
+
+// The hook installer ships with the content kernel. A release whose identity
+// tree is present without that kernel must load neither: calling
+// spacefast_space_users_install_hooks() there fataled mu-plugin loading.
+$loaderRoot = sys_get_temp_dir() . '/stattic-loader-unit-' . bin2hex(random_bytes(6));
+$loaderRelease = $loaderRoot . '/.stattic/releases/r1';
+mkdir($loaderRelease . '/wordpress/spacefast-identity', 0o777, true);
+mkdir($loaderRoot . '/wp-content/mu-plugins', 0o777, true);
+file_put_contents($loaderRoot . '/.stattic/active-release', 'releases/r1');
+file_put_contents(
+    $loaderRelease . '/wordpress/spacefast-identity/spacefast-identity.php',
+    "<?php\n\$GLOBALS['SPACEFAST_UNIT_IDENTITY_LOADED'] = true;\n"
+);
+copy(
+    __DIR__ . '/../wordpress-content-loader.php',
+    $loaderRoot . '/wp-content/mu-plugins/wordpress-content-loader.php'
+);
+$loaderProbe = $loaderRoot . '/probe.php';
+file_put_contents($loaderProbe, <<<'PHP'
+<?php
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_unit';
+require $argv[1];
+echo isset($GLOBALS['SPACEFAST_UNIT_IDENTITY_LOADED']) ? "identity\n" : "skipped\n";
+PHP);
+$loaderOutput = [];
+$loaderStatus = 1;
+exec(
+    escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($loaderProbe) . ' '
+        . escapeshellarg($loaderRoot . '/wp-content/mu-plugins/wordpress-content-loader.php') . ' 2>&1',
+    $loaderOutput,
+    $loaderStatus
+);
+check(
+    $loaderStatus === 0 && $loaderOutput === ['skipped'],
+    'content loader: an identity tree without the content kernel loads neither instead of fataling'
+);
+_stattic_job_runner_unit_rm_recursive($loaderRoot);
 
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");

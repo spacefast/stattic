@@ -439,7 +439,7 @@ function migrationsArtifact(name: string, statements: string[]): string {
 }
 
 test("compiled migrations apply, and applying the same artifact again is a no-op", async () => {
-  // The four statement shapes the compiler emits, in order. `DROP INDEX` names
+  // The statement shapes the compiler emits, in order. `DROP INDEX` names
   // an index that never existed, the ordinary case: the artifact cannot know
   // whether the last publish created the index it drops.
   const artifact = migrationsArtifact("apply", [
@@ -447,6 +447,7 @@ test("compiled migrations apply, and applying the same artifact again is a no-op
     "ALTER TABLE mig_notes ADD COLUMN title TEXT NULL",
     "DROP INDEX mig_notes_retired ON mig_notes",
     "CREATE INDEX mig_notes_title ON mig_notes (title(32))",
+    "CREATE UNIQUE INDEX mig_notes_unique_title ON mig_notes (title(32))",
   ]);
 
   expect((await php({ action: "migrate", path: artifact })).migrate).toEqual({ ok: true });

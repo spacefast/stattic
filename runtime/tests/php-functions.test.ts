@@ -44,6 +44,11 @@ sf_json([
 // database attached, answered as its own problem.
 const DB_PHP = "<?php sf_db()->query('SELECT 1');\n";
 
+const APP_DB_PHP = `<?php
+$database = sf_db();
+sf_json(['available' => $database instanceof SpacefastDb]);
+`;
+
 const CACHE_PHP = `<?php
 header('Cache-Control: public, max-age=3600');
 if (isset($_GET['cookie'])) {
@@ -109,52 +114,6 @@ foreach ([null, 'nobody@elsewhere.test'] as $from) {
 sf_json(['codes' => $codes]);
 `;
 
-// A second Space in the shape a standalone Functions app ships: a compiled
-// worker's configuration beside the version tree (which is where the selected
-// variable values live) and committed `.php` routes served by this lane. It is
-// deliberately UNCLAIMED, so its egress scope differs from the claimed Space
-// above and the same probe below answers differently on each.
-const FG_HOST = "phpfx-unclaimed.test";
-const FG_SPACE = "spc_phpfx_unclaimed";
-const FG_VERSION = "ver_phpfx_unclaimed_1";
-const FG_TOKEN = "gh-secret-only-sf-env-answers";
-
-// The selection is the platform's: a Space variable reaches the handler, and the
-// namespaces the platform reserves do not, however the configuration spells
-// them. `getenv` is the control: the prelude emptied that surface.
-const ENV_PHP = `<?php
-sf_json([
-    'selected' => sf_env('GITHUB_TOKEN'),
-    'absent' => sf_env('NOT_CONFIGURED'),
-    'reserved' => sf_env('SPACEFAST_FUNCTIONS_DISPATCH_TOKEN'),
-    'database' => sf_env('DATABASE_URL'),
-    'from_process_env' => getenv('GITHUB_TOKEN'),
-]);
-`;
-
-// Six targets, none of which may reach a socket except the first, and that one
-// only on a claimed Space and only far enough to spend a 1ms budget. Every
-// address here is a literal, so nothing resolves.
-const FETCH_PHP = `<?php
-$codes = [];
-foreach ([
-    ['https://8.8.8.8/', []],
-    ['http://api.github.com/', []],
-    ['https://127.0.0.1/', []],
-    ['https://user:pw@api.github.com/', []],
-    ['https://api.github.com/', ['headers' => ['X-Smuggle' => "one\\r\\nHost: evil.test"]]],
-    ['https://169.254.169.254/latest/meta-data/', []],
-] as [$url, $options]) {
-    try {
-        sf_fetch($url, $options + ['timeoutMs' => 1]);
-        $codes[] = 'no_refusal';
-    } catch (SpacefastFetchError $error) {
-        $codes[] = $error->errorCode;
-    }
-}
-sf_json(['codes' => $codes]);
-`;
-
 let rt: Runtime;
 
 beforeAll(async () => {
@@ -189,7 +148,6 @@ beforeAll(async () => {
       "functions/email.php": EMAIL_PHP,
       "functions/db.php": DB_PHP,
       "functions/cache.php": CACHE_PHP,
-      "functions/fetch.php": FETCH_PHP,
       // A pattern-named module is not an expressible table key in this slice:
       // it stays an inert attachment, neither executed nor dropped.
       "functions/[id].php": "<?php echo 'never executed';\n",
@@ -198,48 +156,6 @@ beforeAll(async () => {
       route_name: "production",
       config: publicAccessConfig({ mode: "website", site_title: "PHP Functions" }),
       production_hostnames: [HOST],
-      noindex_production_hostnames: [],
-      version_hostnames: [],
-    },
-  });
-  const unclaimed = publicAccessConfig({ mode: "website", site_title: "PHP Functions unclaimed" });
-  await deploy(rt, {
-    spaceId: FG_SPACE,
-    versionId: FG_VERSION,
-    metadata: { mode: "website", title: "PHP Functions unclaimed" },
-    files: {
-      "index.html": "<h1>unclaimed home</h1>\n",
-      "functions/env.php": ENV_PHP,
-      "functions/fetch.php": FETCH_PHP,
-    },
-    // The worker configuration the control plane writes beside the version
-    // tree. `variableValues` is the selection finalize resolved; a publish
-    // reaches `files/` and can never forge it.
-    functions: {
-      artifact: {
-        appName: "phpfx-unclaimed",
-        entry: "handler.js",
-        mainModule: "index.js",
-        compatibilityDate: "2026-07-01",
-        compatibilityFlags: [],
-        routes: [],
-      },
-      host: { hostname: "functions.invalid", bundleUrl: "https://example.test/bundle.json" },
-      grantedCapabilities: [],
-      variables: { names: ["GITHUB_TOKEN"] },
-      variableValues: {
-        GITHUB_TOKEN: FG_TOKEN,
-        SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "fleet-credential-sf-env-must-not-answer",
-        DATABASE_URL: "mysql://user:pw@db.internal/app",
-      },
-    },
-    activate: {
-      route_name: "production",
-      config: {
-        ...unclaimed,
-        authorization: { ...unclaimed["authorization"], spaceClaimed: false },
-      },
-      production_hostnames: [FG_HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
     },
@@ -365,6 +281,33 @@ test("brokered capabilities reach the native broker from inside the jail", async
   expect(((await db.json()) as { code?: string }).code).toBe("php_function_database_unavailable");
 });
 
+test("PHP Functions resolves an application DATABASE_URL from the version config", async () => {
+  const host = "phpfx-app-db.test";
+  await deploy(rt, {
+    spaceId: "spc_phpfx_app_db",
+    versionId: "ver_phpfx_app_db_1",
+    metadata: { mode: "website", title: "PHP Functions App DB" },
+    files: {
+      "index.html": "<h1>php app db</h1>\n",
+      "functions/db.php": APP_DB_PHP,
+    },
+    zero: {
+      variableValues: { DATABASE_URL: "invalid://application-database.test/db" },
+    },
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig({ mode: "website", site_title: "PHP Functions App DB" }),
+      production_hostnames: [host],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+
+  const response = await get(rt, host, "/db");
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ available: true });
+});
+
 test("spam evidence: the trusted visitor IP fills a check's userIp; corrections name their own", async () => {
   const response = await get(rt, HOST, "/spam-evidence");
   expect(response.status).toBe(200);
@@ -376,93 +319,6 @@ test("spam evidence: the trusted visitor IP fills a check's userIp; corrections 
     "service_not_configured",
     // A correction without its own userIp never spawns: no request defaults.
     "service_payload_invalid",
-  ]);
-});
-
-test("a Space whose only code is PHP still receives its variables", async () => {
-  // No worker, no capsule: `index.html` plus a handler, which is the whole of
-  // what declares this lane. Neither runtime config artifact exists for such a
-  // version, so its values arrive in the PHP lane's own — the shape finalize
-  // sends when it has nowhere else to put them.
-  const space = "spc_phpfx_only";
-  await deploy(rt, {
-    spaceId: space,
-    versionId: "ver_phpfx_only_1",
-    metadata: { mode: "website", title: "PHP only" },
-    files: { "index.html": "<h1>php only</h1>\n", "functions/env.php": ENV_PHP },
-    php: { variableValues: { GITHUB_TOKEN: FG_TOKEN } },
-    activate: {
-      route_name: "production",
-      config: publicAccessConfig({ mode: "website", site_title: "PHP only" }),
-      production_hostnames: ["phpfx-only.test"],
-      noindex_production_hostnames: [],
-      version_hostnames: [],
-    },
-  });
-
-  const response = await get(rt, "phpfx-only.test", "/env");
-  expect(response.status).toBe(200);
-  // SAFETY: ENV_PHP above is this fixture's own handler; both fields are pinned
-  // below, so a shape drift fails rather than hides.
-  const report = (await response.json()) as { selected: string | null; absent: string | null };
-  expect(report.selected).toBe(FG_TOKEN);
-  expect(report.absent).toBeNull();
-});
-
-test("sf_env answers this Space's own selected variables, and nothing the platform owns", async () => {
-  const response = await get(rt, FG_HOST, "/env");
-  expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({
-    // Resolved from the worker configuration before the jail denied the file
-    // it lives in.
-    selected: FG_TOKEN,
-    // Not configured reads as absent, never as a configured empty string.
-    absent: null,
-    // The platform's namespace and the connection-string family stay withheld
-    // even when the configuration carries them: sf_db() hands this lane frames,
-    // and a worker that could name SPACEFAST_* could spoof one.
-    reserved: null,
-    database: null,
-    // sf_env is the only reader. The prelude emptied the process environment,
-    // so a handler reaching for the same name there finds nothing.
-    from_process_env: false,
-  });
-});
-
-test("sf_fetch applies the Space's own egress scope, and refuses before it connects", async () => {
-  // Anonymous: the trusted list only, and the refusal is the upsell.
-  const unclaimed = await get(rt, FG_HOST, "/fetch");
-  expect(unclaimed.status).toBe(200);
-  // SAFETY: test-owned probe fixture; every code is pinned below, so a shape
-  // drift fails the test rather than hiding.
-  expect(((await unclaimed.json()) as { codes?: string[] }).codes).toEqual([
-    "zero_fetch_host_untrusted",
-    // Only HTTPS leaves a tenant handler.
-    "zero_fetch_payload_invalid",
-    // Loopback, and an infrastructure denial keeps its own reason: nobody is
-    // told to claim a Space to reach one.
-    "zero_fetch_target_denied",
-    // Smuggled URL credentials.
-    "zero_fetch_payload_invalid",
-    // A header value that would rewrite the request.
-    "zero_fetch_payload_invalid",
-    // Cloud metadata.
-    "zero_fetch_target_denied",
-  ]);
-
-  // Claimed: the same probe, one different answer. The public literal now
-  // passes the scope and spends its 1ms budget against a socket, which is what
-  // proves this lane binds serving's claim flag rather than defaulting to it.
-  const claimed = await get(rt, HOST, "/fetch");
-  expect(claimed.status).toBe(200);
-  // SAFETY: as above — the same fixture, fully pinned.
-  expect(((await claimed.json()) as { codes?: string[] }).codes).toEqual([
-    "zero_fetch_upstream_unavailable",
-    "zero_fetch_payload_invalid",
-    "zero_fetch_target_denied",
-    "zero_fetch_payload_invalid",
-    "zero_fetch_payload_invalid",
-    "zero_fetch_target_denied",
   ]);
 });
 

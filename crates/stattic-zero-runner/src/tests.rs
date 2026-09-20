@@ -857,3 +857,36 @@ fn a_mode_refuses_only_the_capabilities_it_contradicts() {
         "zero_artifact_mode_invalid"
     );
 }
+
+#[test]
+fn actions_bound_arguments_result_size_and_wall_time() {
+    let fixture = Fixture::with_source(
+        "globalThis.__statticZeroResult = JSON.stringify({status: 200, body: 'null'});",
+    );
+    let mut envelope: Value =
+        serde_json::from_str(&run_fixture_envelope(&fixture, "action")).expect("envelope");
+    envelope["request"]["bodyBase64"] = json!(base64::engine::general_purpose::STANDARD
+        .encode(serde_json::json!({"args": ["x".repeat(16 * 1024)]}).to_string()));
+    assert_eq!(
+        handle_invoke(&envelope.to_string())
+            .expect_err("arguments limit")
+            .status,
+        413
+    );
+    for (source, status) in [
+        (
+            r#"globalThis.__statticZeroResult = JSON.stringify({status: 200, body: JSON.stringify("x".repeat(48 * 1024))});"#,
+            502,
+        ),
+        ("while (true) {}", 504),
+    ] {
+        let fixture = Fixture::with_source(source);
+        let started = std::time::Instant::now();
+        let response = handle_invoke(&run_fixture_envelope(&fixture, "action"))
+            .expect_err("action resource limit");
+        assert_eq!(response.status, status);
+        if status == 504 {
+            assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+        }
+    }
+}

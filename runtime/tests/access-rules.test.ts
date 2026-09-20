@@ -381,12 +381,14 @@ function callbackToken(
     // Only the account lane states a principal. Every other lane proves a
     // capability and says nothing about who is holding it.
     principal,
+    identity,
     generation = 0,
   }: {
     audience?: string | null;
     tokenHost?: string | null;
     emailVerified?: boolean;
     principal?: string;
+    identity?: { issuer: string; subject: string };
     generation?: number;
   } = {},
 ) {
@@ -398,6 +400,7 @@ function callbackToken(
     authorities,
     iss: "spacefast-api",
     ...(principal === undefined ? {} : { principal }),
+    identity,
     ...(audience === null ? {} : { aud: audience }),
     ...(tokenHost === null ? {} : { host: tokenHost }),
     spaceId: spaceForHost(host),
@@ -444,12 +447,14 @@ async function openAuthorities(
     cookie?: string;
     emailVerified?: boolean;
     principal?: string;
+    identity?: { issuer: string; subject: string };
     now?: number;
   } = {},
 ): Promise<string> {
   const token = callbackToken(host, authorities, {
     emailVerified: options.emailVerified,
     principal: options.principal,
+    identity: options.identity,
   });
   const callback = await postAccessCallback(runtime, host, token, "/", options.cookie);
   expect(callback.status).toBe(303);
@@ -479,6 +484,7 @@ type SessionClaims = {
   v: number;
   sid: string;
   principal: string;
+  identity?: { issuer: string; subject: string };
   authorities: SessionAuthority[];
   sessionVersion: number;
   accessGeneration: number;
@@ -486,10 +492,8 @@ type SessionClaims = {
   host: string;
   iat: number;
   exp: number;
-  sid?: string;
   anonymousId?: string;
   identityCheckedAt?: number;
-  [key: string]: unknown;
 };
 
 // SPACEFAST_ACCESS_SESSION_AUTHORITY_KEYS: entries travel under one-letter keys
@@ -1738,12 +1742,24 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
   // proves only a capability and must not re-anonymize them.
   const accountCookie = await openAuthorities(SCOPED_HOST, ["member:mem_owner"], {
     principal: "account:usr_scoped",
+    identity: { issuer: "https://api.spacefast.com/v1/auth", subject: "usr_scoped" },
   });
   expect(decodeSession(accountCookie).principal).toBe("account:usr_scoped");
   const accountByLink = await openAuthorities(SCOPED_HOST, ["link:lnk_shared"], {
     cookie: accountCookie,
   });
   expect(decodeSession(accountByLink).principal).toBe("account:usr_scoped");
+  expect(decodeSession(accountByLink).identity).toEqual({
+    issuer: "https://api.spacefast.com/v1/auth",
+    subject: "usr_scoped",
+  });
+  const mismatchedIdentity = callbackToken(SCOPED_HOST, ["member:mem_owner"], {
+    principal: "account:usr_scoped",
+    identity: { issuer: "https://api.spacefast.com/v1/auth", subject: "another_user" },
+  });
+  expect((await postAccessCallback(runtime, SCOPED_HOST, mismatchedIdentity, "/")).status).toBe(
+    403,
+  );
   expect(authorityReferences(accountByLink)).toEqual(["link:lnk_shared", "member:mem_owner"]);
 
   // The authority-less form: what a visitor holds before they prove anything.

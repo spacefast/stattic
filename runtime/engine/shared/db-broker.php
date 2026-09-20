@@ -209,7 +209,7 @@ function _stattic_db_broker_apply_migrations(string $path): array
 /** Whether this driver error is this statement shape's own "already applied". */
 function _stattic_db_broker_migration_replay(string $sql, int $errno): bool
 {
-    return (str_starts_with($sql, 'CREATE INDEX ') && $errno === 1061)
+    return ((str_starts_with($sql, 'CREATE INDEX ') || str_starts_with($sql, 'CREATE UNIQUE INDEX ')) && $errno === 1061)
         || (str_starts_with($sql, 'DROP INDEX ') && $errno === 1091)
         || (str_starts_with($sql, 'ALTER TABLE ') && $errno === 1060);
 }

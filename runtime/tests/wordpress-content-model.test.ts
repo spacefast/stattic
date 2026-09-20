@@ -3,11 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import path from "node:path";
 
+import { ZERO_PLATFORM_ABILITIES } from "../../packages/common/src/contracts/zero-platform-abilities.generated.ts";
 import { generateContentModelPhp } from "../../packages/zero-compile/src/content-model-php.ts";
 import {
   compileZeroContentModel,
   parseContentDeclarations,
 } from "../../packages/zero-compile/src/content-model.ts";
+
+const platformAbilityNames = ZERO_PLATFORM_ABILITIES.map((ability) => ability.name).toSorted();
 
 const repoRoot = path.resolve(import.meta.dir, "../..");
 const kernel = path.join(repoRoot, "runtime/engine/wordpress/content-kernel.php");
@@ -559,7 +562,7 @@ echo json_encode([
       afterInit: output.abilities_after_init,
       refused: output.refused,
       categories: output.ability_categories,
-      names: output.ability_names,
+      names: output.ability_names.toSorted(),
     }).toEqual({
       afterInit: [],
       refused: [],
@@ -568,21 +571,13 @@ echo json_encode([
       // content model's.
       categories: ["zero-wp-users", "zero-storage", "zero-content"],
       names: [
-        "zero/wp-users-list",
-        "zero/wp-users-get",
-        "zero/wp-users-create",
-        "zero/wp-users-update",
-        "zero/storage-list",
-        "zero/storage-get",
-        "zero/storage-upload",
-        "zero/storage-move",
-        "zero/storage-delete",
+        ...platformAbilityNames,
         "zero/content-projects-list",
         "zero/query-featured-projects",
         "zero/mutation-react",
         "zero/endpoint-webhook",
         "zero/endpoint-preview",
-      ],
+      ].toSorted(),
     });
     // The wire name is the registry's key alone. The content model id stays the
     // Ability's label, and stays what the dispatcher is addressed by.
@@ -940,17 +935,7 @@ echo json_encode([
     // the registry is the platform's own user and storage surface, which every Space gets
     // whether or not it declared anything — so the model added nothing and,
     // just as importantly, took nothing away.
-    expect(output.abilities).toEqual([
-      "zero/wp-users-list",
-      "zero/wp-users-get",
-      "zero/wp-users-create",
-      "zero/wp-users-update",
-      "zero/storage-list",
-      "zero/storage-get",
-      "zero/storage-upload",
-      "zero/storage-move",
-      "zero/storage-delete",
-    ]);
+    expect(output.abilities.toSorted()).toEqual(platformAbilityNames);
 
     // `publicRead` is the gate it was always described as. A declared collection
     // defaults to private, and its items live on `post` behind a term — so an

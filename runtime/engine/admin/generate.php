@@ -1650,6 +1650,8 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
     $open = _stattic_runtime_overlay_open($config, $authorization, $grantIndex, $fence, $versions);
 
     _stattic_runtime_write_space_overlay($privateRoot, $spaceId, [
+        'users' => $config['users'] ?? null,
+        'usersProviderConfig' => $config['usersProviderConfig'] ?? null,
         'open' => $open,
         'fence' => $fence === 'none' ? null : $fence,
         // A tuple, never summed (D30).

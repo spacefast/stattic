@@ -5,7 +5,7 @@ require_once __DIR__ . '/context.php';
 require_once __DIR__ . '/finalizer-protocol.generated.php';
 
 // SSRF policy for every proxy surface: upstreams must never reach loopback,
-// link-local, cloud-metadata, RFC1918/ULA/private ranges, or Spacefast-internal
+// link-local, cloud-metadata, RFC1918/ULA/private ranges, or Spacefast serving
 // hosts. Policy tables are generated from stattic-runtime-core.
 
 // How far a Space's code may reach. A claimed Space is accountable, so it gets
@@ -27,7 +27,7 @@ function _stattic_egress_scope(array $serving): string
 }
 
 // PARTIAL check, a name/literal-level screen only, NOT the SSRF verdict. The
-// name overstates it. It rejects empty/localhost, Spacefast-internal hosts and
+// name overstates it. It rejects empty/localhost, Spacefast serving hosts and
 // non-public IP literals, but returns true for every resolvable hostname
 // WITHOUT resolving it. The binding check is _stattic_egress_resolve_public_ips,
 // which pins the connect IPs; callers must gate the connection on that, never
@@ -100,10 +100,6 @@ function _stattic_egress_host_is_stattic_internal(string $host): bool
         if ($host === $internal || str_ends_with($host, '.' . $internal)) {
             return true;
         }
-    }
-    $apiHost = strtolower((string) parse_url(_stattic_config_value('SPACEFAST_API_BASE_URL'), PHP_URL_HOST));
-    if ($apiHost !== '' && $host === $apiHost) {
-        return true;
     }
     return false;
 }

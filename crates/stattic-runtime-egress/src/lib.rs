@@ -2,7 +2,7 @@
 //!
 //! The denylist is generic infrastructure policy and carries no tenant data:
 //! upstreams must never reach loopback, link-local, cloud-metadata, CGNAT,
-//! RFC1918/ULA ranges, or Spacefast-internal hosts. It is a denylist and not a
+//! RFC1918/ULA ranges, or Spacefast serving hosts. It is a denylist and not a
 //! per-tenant allowlist on purpose — making people declare every API they call
 //! is exactly the hand-holding the product rules out.
 //!
@@ -198,9 +198,7 @@ pub struct EgressTarget {
     pub port: u16,
 }
 
-/// Spacefast-internal hosts, supplied by the caller rather than baked in: the
-/// serving provider suffixes are fixed, but the API host is resolved from
-/// configuration at runtime. An entry covers its own subdomains.
+/// Spacefast serving hosts. An entry covers its own subdomains.
 #[derive(Debug, Default, Clone)]
 pub struct InternalHosts {
     hosts: BTreeSet<String>,

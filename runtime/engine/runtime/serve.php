@@ -469,6 +469,17 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             $accessPath === $requestPath ? $originalRequestPath : $accessPath
         );
     }
+    require_once __DIR__ . '/space-users.php';
+    if (_stattic_space_users_prepare($privateRoot, $serving, $requestHost, $requestPath, $requestUri, $requestMethod, $overlay['usersProviderConfig'] ?? null)) {
+        return;
+    }
+    $authControl = STATTIC_ZERO_CONTROL_ROUTES[trim($requestPath, '/')] ?? null;
+    if (is_array($authControl) && in_array($authControl['operation'], ['config', 'auth_start', 'auth_sign_out', 'run'], true)) {
+        if (!in_array($requestMethod, $authControl['methods'], true)) _stattic_method_not_allowed(implode(', ', $authControl['methods']));
+        require_once __DIR__ . '/zero.php';
+        _stattic_invoke_zero($authControl, $versionRoot, $serving, $requestHost, $requestPath, $requestUri, $requestMethod);
+    }
+
     // The enforcement verdict, not the overlay flag: a Space that HAS grants but
     // admits this URL anonymously and unconditionally is still URL-stable and
     // keeps its shared-cache policy. Token presence, valid or not, pins the

@@ -178,17 +178,7 @@ impl Resolver for GuardedResolver {
 
 fn internal_hosts() -> &'static InternalHosts {
     static INTERNAL_HOSTS: OnceLock<InternalHosts> = OnceLock::new();
-    INTERNAL_HOSTS.get_or_init(|| {
-        let configured = std::env::var("SPACEFAST_ZERO_INTERNAL_HOSTS").unwrap_or_default();
-        InternalHosts::from_hosts(
-            SERVING_INTERNAL_HOSTS.iter().copied().chain(
-                configured
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|host| !host.is_empty()),
-            ),
-        )
-    })
+    INTERNAL_HOSTS.get_or_init(|| InternalHosts::from_hosts(SERVING_INTERNAL_HOSTS.iter().copied()))
 }
 
 /// One agent for the whole process, for the same reason the service broker
@@ -225,7 +215,26 @@ pub(crate) fn handle_fetch_frame(raw: &str) -> String {
     }
 }
 
+pub(crate) fn handle_fetch_frame_with_timeout(raw: &str, timeout: Duration) -> String {
+    match execute_fetch_frame_with_timeout(raw, timeout.min(fetch_timeout())) {
+        Ok(result) => json!({ "ok": true, "result": result }).to_string(),
+        Err(error) => error.refusal_json(),
+    }
+}
+
 fn execute_fetch_frame(raw: &str) -> Result<Value, FetchRefusal> {
+    execute_fetch_frame_with_timeout(raw, fetch_timeout())
+}
+
+fn execute_fetch_frame_with_timeout(raw: &str, timeout: Duration) -> Result<Value, FetchRefusal> {
+    if timeout.is_zero() {
+        return Err(FetchRefusal::new(
+            "zero_fetch_upstream_unavailable",
+            504,
+            "Zero action exceeded its request budget.",
+        ));
+    }
+
     if raw.len() > FETCH_FRAME_MAX_BYTES {
         return Err(FetchRefusal::payload_invalid(
             "The fetch request is too large.",
@@ -276,7 +285,7 @@ fn execute_fetch_frame(raw: &str) -> Result<Value, FetchRefusal> {
     let agent = fetch_agent();
     let request = agent
         .configure_request(request)
-        .timeout_global(Some(fetch_timeout()))
+        .timeout_global(Some(timeout))
         .build();
     let mut response = agent.run(request).map_err(|_| {
         FetchRefusal::new(
@@ -386,6 +395,22 @@ mod tests {
         assert_eq!(refused["code"], "zero_fetch_host_untrusted");
         assert_eq!(refused["status"], 403);
         assert_eq!(refused["message"], UNTRUSTED_HOST_MESSAGE);
+
+        let api_refused: Value = serde_json::from_str(&handle_fetch_frame(
+            &json!({ "url": "https://api.spacefast.com/v1/me", "method": "CONNECT" }).to_string(),
+        ))
+        .expect("response");
+        assert_eq!(api_refused["code"], "zero_fetch_host_untrusted");
+
+        {
+            let _claimed = EgressScopeGuard::enter(EgressScope::Open);
+            let api_allowed: Value = serde_json::from_str(&handle_fetch_frame(
+                &json!({ "url": "https://api.spacefast.com/v1/me", "method": "CONNECT" })
+                    .to_string(),
+            ))
+            .expect("response");
+            assert_eq!(api_allowed["code"], "zero_fetch_method_denied");
+        }
 
         // Same scope, a host the platform owns: the refusal is about the list,
         // not about fetch being off.

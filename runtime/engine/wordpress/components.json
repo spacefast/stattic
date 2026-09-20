@@ -2,8 +2,20 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:05ccaa39236b3b11b87fcdb70236bb63e783dafb4e85a2e7af2190c0230986f9",
+  "digest": "sha256:d9ab24872b6459f5f047e80fc52dddfa63112dbf736cfb481dea95b4c5e84a1c",
   "components": [
+    {
+      "id": "spacefast-identity",
+      "kind": "mu-plugin",
+      "version": "source-tree",
+      "sha256": "sha256:f8f7cedeaf3e59806073ee15983bbabc7d4df34593dc1c9894a2ac3a7f4e8e55",
+      "source": {
+        "kind": "embedded",
+        "path": "wordpress/spacefast-identity"
+      },
+      "provides": ["wordpress.space-users.v1"],
+      "activation": "always"
+    },
     {
       "id": "wordpress-core",
       "kind": "wordpress-core",
@@ -32,6 +44,7 @@
         "runtime.routing",
         "runtime.zero",
         "runtime.zero.db.v1",
+        "runtime.zero.app-contract.v2",
         "runtime.zero.pages.v1"
       ],
       "activation": "always"
@@ -40,7 +53,7 @@
       "id": "immutable-loader",
       "kind": "mu-plugin",
       "version": "source-tree",
-      "sha256": "sha256:74555dfa8dc21fda0109bdb4f070a8d1d9c417632a8f872ef73d0dad7462495a",
+      "sha256": "sha256:a2a7b737cca0a12ddf15e363096169a38da80e6bb8dd77d08cc45077e0232c4e",
       "source": {
         "kind": "embedded",
         "path": "wordpress-content-loader.php"

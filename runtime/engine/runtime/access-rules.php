@@ -170,6 +170,38 @@ function _stattic_access_principal_is_account(string $principal): bool
     return str_starts_with($principal, 'account:');
 }
 
+/** Valid only inside an already verified handoff or host-bound session. */
+/**
+ * The account-identity issuer this runtime accepts.
+ *
+ * The claim arrives inside a cookie this runtime signed, so this is a shape
+ * check, not a trust boundary. It is pinned to the API base the engine is
+ * configured against when there is one: the old literal
+ * `https://<host>/v1/auth` pattern threw away every session on dev and
+ * staging, whose issuers are `http://` or carry a port.
+ */
+function _stattic_access_identity_issuer_accepted(string $issuer): bool
+{
+    $configured = function_exists('_stattic_runtime_api_base_url') ? _stattic_runtime_api_base_url() : '';
+    if ($configured !== '') {
+        return $issuer === rtrim($configured, '/') . '/v1/auth';
+    }
+    return preg_match('~\Ahttps?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/v1/auth\z~', $issuer) === 1;
+}
+
+function _stattic_access_account_identity(array $claims): ?array
+{
+    $identity = $claims['identity'] ?? null;
+    if (!is_array($identity) || array_diff(array_keys($identity), ['issuer', 'subject']) !== []
+        || !is_string($identity['issuer'] ?? null) || !is_string($identity['subject'] ?? null)
+        || !_stattic_access_identity_issuer_accepted($identity['issuer'])
+        || preg_match('/\A[A-Za-z0-9_.-]{1,128}\z/', $identity['subject']) !== 1
+        || ($claims['principal'] ?? null) !== 'account:' . $identity['subject']) {
+        return null;
+    }
+    return ['issuer' => $identity['issuer'], 'subject' => $identity['subject']];
+}
+
 function _stattic_access_principal_is_identified(string $principal): bool
 {
     return $principal !== STATTIC_SESSION_PRINCIPAL_ANONYMOUS;
@@ -525,6 +557,7 @@ function _stattic_access_session_decode(array $serving, string $host, string $cr
     if (!_stattic_access_session_claims_valid($claims)) {
         return null;
     }
+    if (array_key_exists('identity', $claims) && _stattic_access_account_identity($claims) === null) return null;
     if (array_key_exists('profile', $claims)) {
         $profile = _stattic_access_public_profile($claims['profile']);
         if ($profile === null) {
@@ -726,8 +759,12 @@ function _stattic_access_session_create(
         'iat' => $now,
         'exp' => $now + STATTIC_ACCESS_SESSION_CLAIM_TTL_SECONDS,
         ...($profile !== null ? ['profile' => $profile] : []),
+        ...(in_array($claims['authProvider'] ?? null, ['google', 'gravatar'], true) ? ['authProvider' => $claims['authProvider']] : []),
         ..._stattic_access_session_carried_identity($inherit),
     ];
+    $accountIdentity = _stattic_access_account_identity($claims)
+        ?? (_stattic_access_principal_from_claims($claims) === null ? _stattic_access_account_identity($inherit) : null);
+    if ($accountIdentity !== null) $session['identity'] = $accountIdentity;
     // The record before the cookie: a cookie whose record never landed would be
     // denied at its first revalidation anyway.
     if (!_stattic_access_session_record_write($privateRoot, $sessionId, [
@@ -774,6 +811,7 @@ function _stattic_access_session_inheritable(?array $identity): array
     $record = _stattic_access_identity_record($identity) ?? [];
     return [
         'principal' => $record['principal'] ?? null,
+        'identity' => $record['identity'] ?? null,
         'anonymousId' => $record['anonymousId'] ?? null,
         'identityCheckedAt' => $record['identityCheckedAt'] ?? null,
         'accessRequestedPath' => $record['accessRequestedPath'] ?? null,
@@ -2243,14 +2281,21 @@ function _stattic_access_wordpress_principal(
     }
     $actorId = _stattic_access_machine_actor_id($identity);
     if ($actorId === null) {
-        // A person reaching this door has no (issuer, subject) pair here: the
-        // session names them by authority reference, and `external:<sha256>` is
-        // not invertible into the pair content-principals.php keys WordPress
-        // users by. Minting a user from anything else would open a SECOND
-        // account for somebody who already has one through the editor. Until
-        // the handoff carries the pair, a person gets WordPress's
-        // unauthenticated REST answer.
-        return null;
+        $account = _stattic_access_account_identity(_stattic_access_identity_record($identity) ?? []);
+        if ($account === null) return null;
+        $profile = is_array($identity['profile'] ?? null) ? $identity['profile'] : [];
+        return [
+            'kind' => 'user', 'actor_id' => $account['subject'],
+            'issuer' => $account['issuer'], 'subject' => $account['subject'],
+            'session_version' => _stattic_session_version($serving),
+            'access_generation' => _stattic_projection_generation($serving),
+            'expires_at' => is_int($identity['exp'] ?? null) ? $identity['exp'] : 0,
+            'wordpress_role' => $role,
+            'profile' => [
+                ...isset($profile['name']) ? ['display_name' => $profile['name']] : [],
+                ...isset($profile['avatar_url']) ? ['avatar_url' => $profile['avatar_url']] : [],
+            ],
+        ];
     }
     return [
         // An API key is not a person: shared/content-principal.php gives every
@@ -2617,6 +2662,7 @@ function _stattic_access_session_verify(
         'authorityEntries' => $authorityEntries,
         'sessionId' => $claims['sid'],
         'sessionRecord' => $claims,
+        ...(in_array($claims['authProvider'] ?? null, ['google', 'gravatar'], true) ? ['authProvider' => $claims['authProvider']] : []),
         'exp' => $exp,
         ...($profile !== null ? ['profile' => $profile] : []),
         'claims' => [
@@ -3967,6 +4013,7 @@ function _stattic_access_consume_handoff_token(
     if (($claims['purpose'] ?? null) !== STATTIC_HANDOFF_PURPOSE) {
         return null;
     }
+    if (array_key_exists('identity', $claims) && _stattic_access_account_identity($claims) === null) return null;
     if (array_key_exists('browserState', $claims)) {
         $tokenState = is_string($claims['browserState'] ?? null)
             && preg_match('/\A[a-f0-9]{64}\z/D', $claims['browserState']) === 1

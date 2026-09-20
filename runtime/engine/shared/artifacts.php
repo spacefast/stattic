@@ -260,7 +260,7 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
 
 function _stattic_zero_runner_base_env(array $config = []): array
 {
-    $env = _stattic_zero_internal_hosts_env(_stattic_config_value('SPACEFAST_API_BASE_URL'));
+    $env = [];
     // The runner mints its own RFC 9457 problem documents, so it needs the same
     // brand document the pages resolve. Forwarded only when this site overrides
     // it: absent, the runner's compiled-in defaults already agree with ours.
@@ -302,23 +302,6 @@ function _stattic_zero_runner_base_env(array $config = []): array
         'SPACEFAST_ZERO_DATABASE_URL' => $providerDatabaseUrl,
         'SPACEFAST_ZERO_DATABASE_URL_SOURCE' => 'provider',
     ];
-}
-
-/**
- * Spacefast-owned hosts that tenant fetch must never reach.
- *
- * The native runner owns DNS resolution and address pinning. PHP only supplies
- * the environment-specific hostnames that cannot live in its compiled policy.
- */
-function _stattic_zero_internal_hosts_env(string $apiBaseUrl): array
-{
-    $hosts = [];
-    $apiHostname = strtolower((string) parse_url($apiBaseUrl, PHP_URL_HOST));
-    if ($apiHostname !== '') {
-        $hosts[] = $apiHostname;
-    }
-    $hosts = array_values(array_unique($hosts));
-    return $hosts === [] ? [] : ['SPACEFAST_ZERO_INTERNAL_HOSTS' => implode(',', $hosts)];
 }
 
 function _stattic_zero_mysql_database_url_from_config(): string
@@ -776,6 +759,7 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
         'version_id' => $versionId,
         'space_id' => $spaceId,
         'authorization' => _stattic_v4_authorization_projection($overlay),
+        'users' => is_array($overlay['users'] ?? null) ? $overlay['users'] : [],
         // Read straight off the overlay, not through the authorization
         // projection: that projection is null for a Space with no grants, which
         // is most of them, and egress scope must answer for those too.

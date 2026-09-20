@@ -707,6 +707,17 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
       header_rule_count: number;
       proxy_rule_count: number;
       proxy_rules: Array<{ source: string; destination: string }>;
+      placement: Array<{
+        kind: string;
+        origin: string;
+        ruleOrder: number;
+        at: string;
+        reason?: string;
+        source: string;
+        destination?: string;
+        status?: number;
+        headers?: string[];
+      }>;
     };
     route_inventory: {
       format: "stattic.route-inventory.v1";
@@ -740,6 +751,31 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
     header_rule_count: 1,
     proxy_rule_count: 1,
     proxy_rules: [{ source: "/api/*", destination: "https://api.example.com/:splat" }],
+    // A finalize without `placement_enabled` still names every rule, each
+    // staying at the origin because it was never judged. A proxy is reported
+    // as the rewrite it is, not as a redirect.
+    placement: [
+      {
+        kind: "rewrite",
+        origin: "file",
+        ruleOrder: 0,
+        at: "origin",
+        reason: "placement_off",
+        source: "/api/*",
+        destination: "https://api.example.com/:splat",
+        status: 200,
+        force: false,
+      },
+      {
+        kind: "header",
+        origin: "file",
+        ruleOrder: 0,
+        at: "origin",
+        reason: "placement_off",
+        source: "/*",
+        headers: ["X-Region"],
+      },
+    ],
   });
   expect(finalized.route_inventory.format).toBe("stattic.route-inventory.v1");
   expect(finalized.route_inventory.routes).toContainEqual(

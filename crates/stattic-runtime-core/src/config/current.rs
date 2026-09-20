@@ -23,9 +23,11 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "$schema",
     "access",
     "build",
+    "cache",
     "cleanUrls",
     "crons",
     "fallback",
+    "firewall",
     // Routing rules in the same grammar the `_redirects` / `_headers` files
     // use. They pass through this lane untouched: the strict v1 compiler
     // validates them and the routing compiler merges them behind the files.
@@ -351,6 +353,7 @@ fn validate_config_shape(
     }
     validate_space_name(object, diagnostics);
     validate_crons_config(object, diagnostics);
+    validate_traffic_rules_config(object, diagnostics);
     validate_runtime_config(object, diagnostics);
     validate_build_config(object, diagnostics);
     validate_access_config(object, diagnostics);
@@ -402,6 +405,24 @@ fn validate_crons_config(
             DiagnosticSeverity::Error,
             issue.code(),
             issue.message(),
+            Some(path),
+        ));
+    }
+}
+
+/// Requests to block, challenge, or serve past the cache. Blocking on purpose,
+/// for the same reason crons are: publishing a version whose declared firewall
+/// rule silently never fires is worse than refusing the publish.
+fn validate_traffic_rules_config(
+    object: &Map<String, Value>,
+    diagnostics: &mut Vec<PrepareDiagnostic>,
+) {
+    for issue in super::traffic_rules::validate(object) {
+        let path = issue.dotted_path();
+        diagnostics.push(diagnostic(
+            DiagnosticSeverity::Error,
+            issue.code,
+            issue.message,
             Some(path),
         ));
     }
@@ -608,7 +629,7 @@ fn validate_placement_config(
     };
     for key in placement
         .keys()
-        .filter(|key| key.as_str() != "burstable")
+        .filter(|key| !matches!(key.as_str(), "burstable" | "edge"))
         .cloned()
         .collect::<Vec<_>>()
     {
@@ -619,6 +640,7 @@ fn validate_placement_config(
         );
     }
     validate_optional_bool(placement, "burstable", "placement.burstable", diagnostics);
+    validate_optional_bool(placement, "edge", "placement.edge", diagnostics);
 }
 
 fn validate_superpowers_config(
@@ -1121,7 +1143,8 @@ pub fn public_json_schema() -> Value {
     }));
 
     let placement = closed_object(json!({
-        "burstable": { "type": "boolean" }
+        "burstable": { "type": "boolean" },
+        "edge": { "type": "boolean" }
     }));
 
     // Runtime is a documented public key, not a hidden one: the published docs
@@ -1156,7 +1179,7 @@ pub fn public_json_schema() -> Value {
     // lives next to its validator in `config::crons`.
     let crons = super::crons::json_schema();
 
-    json!({
+    super::traffic_rules::extend_json_schema(json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
         "$id": "https://spacefast.com/schemas/sf.json",
         "title": "Spacefast space configuration (sf.jsonc)",
@@ -1235,7 +1258,7 @@ pub fn public_json_schema() -> Value {
             "placement": placement
         },
         "additionalProperties": true
-    })
+    }))
 }
 
 /// Generated TypeScript structures for the normalized config returned by the
@@ -1266,6 +1289,7 @@ export type SpaceBuildSettings = {
 
 export type SpacePlacementConfig = {
   burstable?: boolean;
+  edge?: boolean;
 };
 
 export type SpaceConfig = {
@@ -1556,6 +1580,38 @@ mod tests {
                 .map(|item| (item.code.as_str(), item.path.as_deref()))
                 .collect::<Vec<_>>(),
             [("config_cron_invalid_schedule", Some("crons.0.schedule"))]
+        );
+    }
+
+    /// The rule grammar is proven in `config::traffic_rules`; what this lane
+    /// adds is that `firewall` and `cache` survive as known keys and that a
+    /// rejected rule blocks the publish at its own dotted path.
+    #[test]
+    fn traffic_rules_survive_the_current_lane_and_a_bad_rule_blocks_the_publish() {
+        let declared = r#"{"firewall":[{"action":"block","match":{"path":"/wp-login.php*"}}],"cache":{"bypass":[{"match":{"query":{"preview":{"op":"exists"}}}}]}}"#;
+        let mut diagnostics = Vec::new();
+        let config = parse_config(declared, "sf.jsonc", &mut diagnostics);
+        assert_eq!(diagnostics, Vec::new());
+        assert_eq!(
+            config,
+            Some(serde_json::from_str::<serde_json::Value>(declared).expect("valid JSON"))
+        );
+
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            parse_config(
+                r#"{"firewall":[{"action":"challenge","status":403,"match":{"path":"/x"}}]}"#,
+                "sf.jsonc",
+                &mut diagnostics,
+            ),
+            None
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|item| (item.code.as_str(), item.path.as_deref()))
+                .collect::<Vec<_>>(),
+            [("config_invalid", Some("firewall.0.status"))]
         );
     }
 

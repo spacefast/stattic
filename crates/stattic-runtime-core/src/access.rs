@@ -2,13 +2,21 @@
 //! buckets. Authorization is configured through Spacefast sharing, never
 //! through uploaded convention files.
 
+use std::collections::BTreeSet;
+
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::csp::{merge_platform_csp_value, PlatformCspSources};
 use crate::finalize::Result;
-use crate::protocol::{PLATFORM_OWNED_HEADERS, PLATFORM_OWNED_HEADER_PREFIXES};
-use crate::routing::{compile_routing_files, HeaderRule, RedirectRule, RoutingInput};
+use crate::protocol::{
+    PLATFORM_OWNED_HEADERS, PLATFORM_OWNED_HEADER_PREFIXES, RESPONSE_ENTRY_PLACED_HOSTNAMES,
+    RESPONSE_ENTRY_PLACEMENT, RESPONSE_PLACEMENT_EDGE,
+};
+use crate::routing::{
+    compile_routing_files, EdgeRuleSpec, HeaderRule, OverlayRouting, PlacementReportEntry,
+    RedirectRule, RoutingInput,
+};
 use crate::transforms::{lower_runtime_conventions, RuntimeConventionsInput};
 
 const CSP_HEADER_NAME: &str = "content-security-policy";
@@ -24,6 +32,12 @@ pub struct CompiledConventions {
     /// Typed rules retained for finalizer-owned route inventory and graph
     /// validation. Serving still reads only the lowered buckets above.
     pub(crate) route_redirects: Vec<RedirectRule>,
+    /// The provider rules the edge-placed half compiles to, and every judged
+    /// rule's verdict. Finalizer provenance carried through to the control
+    /// plane, which reconciles the first onto the edge and reports the second;
+    /// serving reads neither. Both are empty whenever placement is off.
+    pub edge_rules: Vec<EdgeRuleSpec>,
+    pub routing_placement: Vec<PlacementReportEntry>,
 }
 
 /// What the version's routing compiled TO, counted before the rules are lowered
@@ -59,6 +73,22 @@ pub struct ConventionCompileInput {
     /// that works in one grammar and blocks the platform overlay in the other
     /// is a trap, not a feature.
     pub platform_csp_sources: PlatformCspSources,
+    /// Whether this finalize asks for edge placement at all. Off by default:
+    /// nothing is placed, no rule carries a placement marker, and the compiled
+    /// artifact is what it was before placement existed.
+    pub placement_enabled: bool,
+    /// The Space's PRODUCTION hostnames — its default hostname and its attached
+    /// custom ones, and nothing else. Version, immutable and branch hostnames
+    /// serve other content and keep the full runtime ruleset.
+    pub production_hostnames: Vec<String>,
+    /// The version's PUBLIC file paths, manifest-relative and without a leading
+    /// slash: what placement checks a rule source against before letting the
+    /// edge answer ahead of a published file.
+    pub manifest_paths: BTreeSet<String>,
+    /// The Space overlay's own routing sections. The overlay is not staged
+    /// content — the finalizer cannot read it off disk — so the control plane
+    /// hands it over, and the compiler runs it ahead of both file lanes.
+    pub overlay_routing: Option<OverlayRouting>,
 }
 
 pub fn compile_conventions(
@@ -73,7 +103,13 @@ pub fn compile_conventions(
     };
     let has_redirects = raw.get("redirects").and_then(Value::as_str).is_some();
     let has_headers = raw.get("headers").and_then(Value::as_str).is_some();
-    if !has_redirects && !has_headers && config_source.is_none() {
+    // A Space whose only rules are dashboard rules still has rules: the
+    // overlay counts as a declaring lane exactly like the two file ones.
+    let has_overlay = input
+        .overlay_routing
+        .as_ref()
+        .is_some_and(|overlay| !overlay.is_empty());
+    if !has_redirects && !has_headers && config_source.is_none() && !has_overlay {
         return Ok(CompiledConventions::default());
     }
     let mut compilation = compile_routing_files(&RoutingInput {
@@ -90,6 +126,10 @@ pub fn compile_conventions(
         assigned_hostnames: input.assigned_hostnames.clone(),
         config_source,
         config_path,
+        placement_enabled: input.placement_enabled,
+        production_hostnames: input.production_hostnames.clone(),
+        manifest_paths: input.manifest_paths.clone(),
+        overlay_routing: input.overlay_routing.clone(),
     });
     merge_platform_csp_sources(&mut compilation.headers, &input.platform_csp_sources);
     // `has_headers` stays the FILE flag: the sanitized text written back below
@@ -113,12 +153,12 @@ pub fn compile_conventions(
         redirects: compilation
             .redirects
             .iter()
-            .filter_map(|rule| serde_json::to_value(rule).ok())
+            .filter_map(|rule| serving_rule_value(rule, &input.production_hostnames))
             .collect(),
         headers: compilation
             .headers
             .iter()
-            .filter_map(|rule| serde_json::to_value(rule).ok())
+            .filter_map(|rule| serving_rule_value(rule, &input.production_hostnames))
             .collect(),
     });
     Ok(CompiledConventions {
@@ -128,6 +168,8 @@ pub fn compile_conventions(
         headers_pattern: serves_headers.then_some(lowered.headers_pattern),
         metadata_convention_files: Some(Value::Object(metadata_convention_files)),
         route_redirects: compilation.redirects.clone(),
+        edge_rules: compilation.edge_rules.clone(),
+        routing_placement: compilation.placement.clone(),
         routing: ConventionRoutingSummary {
             redirect_rule_count: compilation.stats.redirect_rule_count,
             header_rule_count: compilation.stats.header_rule_count,
@@ -143,6 +185,43 @@ pub fn compile_conventions(
                 .collect(),
         },
     })
+}
+
+/// One compiled rule in the spelling the SERVING artifact carries.
+///
+/// The placement pass stamps every rule with its whole verdict — where it runs
+/// and, at the origin, the reason code that says why it could not move. That
+/// verdict is finalizer diagnostics. The origin needs one bit of it: whether the
+/// edge already answers this rule, so a production host can stand back and let
+/// it. So an edge-placed rule carries [`RESPONSE_ENTRY_PLACEMENT`] and an
+/// origin-placed one carries nothing at all — which is also what keeps a
+/// placement-off artifact byte-identical to one compiled before placement
+/// existed.
+fn serving_rule_value<T: Serialize>(rule: &T, placed_hostnames: &[String]) -> Option<Value> {
+    let mut value = serde_json::to_value(rule).ok()?;
+    let object = value.as_object_mut()?;
+    // `placement` is the serde name of `RedirectRule::placement` /
+    // `HeaderRule::placement`, whose `{at, reason}` shape never reaches serving.
+    let placed = object
+        .remove(RESPONSE_ENTRY_PLACEMENT)
+        .and_then(|placement| {
+            placement
+                .get("at")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .is_some_and(|at| at == RESPONSE_PLACEMENT_EDGE);
+    if placed {
+        object.insert(
+            RESPONSE_ENTRY_PLACEMENT.into(),
+            Value::String(RESPONSE_PLACEMENT_EDGE.into()),
+        );
+        object.insert(
+            RESPONSE_ENTRY_PLACED_HOSTNAMES.into(),
+            json!(placed_hostnames),
+        );
+    }
+    Some(value)
 }
 
 /// Adds the platform's sources to every CSP this version sets, before the rules
@@ -246,6 +325,14 @@ pub(crate) fn rule_is_request_dependent(rule: &Value) -> bool {
         || rule_value_is_set(rule.get("conditions"))
 }
 
+/// Whether a lowered rule is one the placement pass gave to the edge. Its
+/// answer belongs to the HOST the request arrived on — the edge answers it
+/// ahead of the origin on a production host, and nowhere else — so nothing may
+/// reduce it to one compile-time answer for every host.
+pub(crate) fn rule_is_placed_at_edge(rule: &Value) -> bool {
+    rule.get(RESPONSE_ENTRY_PLACEMENT).and_then(Value::as_str) == Some(RESPONSE_PLACEMENT_EDGE)
+}
+
 pub(crate) fn bucket_pattern_rules(rules: &[Value], field: &str) -> Value {
     if rules.is_empty() {
         return Value::Array(Vec::new());
@@ -276,6 +363,68 @@ pub(crate) fn bucket_pattern_rules(rules: &[Value], field: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one rule shape serving reads. An edge-placed rule names the scope
+    /// the origin checks a request host against; a rule that stayed carries
+    /// neither key, so its `{at, reason}` verdict — finalizer diagnostics —
+    /// never reaches the artifact.
+    #[test]
+    fn only_an_edge_placed_rule_carries_its_scope_into_the_artifact() {
+        let compiled = compile_conventions(
+            // Forced past the published file so it places; the splat below
+            // cannot move, whatever the flag says.
+            &json!({"redirects": "/legacy.html /new.html 301!\n/docs/* /guide 301"}),
+            None,
+            None,
+            &ConventionCompileInput {
+                placement_enabled: true,
+                production_hostnames: vec!["example.com".into()],
+                manifest_paths: BTreeSet::from(["legacy.html".to_string()]),
+                ..ConventionCompileInput::default()
+            },
+            &mut Vec::new(),
+        )
+        .expect("the conventions compile");
+        let placed = &compiled.redirects_exact.expect("the exact rule")["/legacy.html"][0];
+        assert_eq!(
+            placed[RESPONSE_ENTRY_PLACEMENT],
+            json!(RESPONSE_PLACEMENT_EDGE)
+        );
+        assert_eq!(
+            placed[RESPONSE_ENTRY_PLACED_HOSTNAMES],
+            json!(["example.com"])
+        );
+        let kept = &compiled.redirects_pattern.expect("the splat rule")[0];
+        assert_eq!(kept.get(RESPONSE_ENTRY_PLACEMENT), None);
+        assert_eq!(kept.get(RESPONSE_ENTRY_PLACED_HOSTNAMES), None);
+    }
+
+    /// A Space whose ONLY rules are dashboard rules still serves them. Nothing
+    /// is staged for this version — no `_redirects`, no `_headers`, no
+    /// `sf.jsonc` — so the early return that skips the compile when a version
+    /// declares no routing has to count the overlay as a declaring lane.
+    #[test]
+    fn an_overlay_only_space_still_compiles_its_rules() {
+        let compiled = compile_conventions(
+            &json!({}),
+            None,
+            None,
+            &ConventionCompileInput {
+                overlay_routing: Some(OverlayRouting {
+                    redirects: Some(
+                        json!([{ "source": "/old", "destination": "/new.html", "status": 301 }]),
+                    ),
+                    ..OverlayRouting::default()
+                }),
+                ..ConventionCompileInput::default()
+            },
+            &mut Vec::new(),
+        )
+        .expect("the conventions compile");
+        let rule = &compiled.redirects_exact.expect("the overlay rule")["/old"][0];
+        assert_eq!(rule["destination"], json!("/new.html"));
+        assert_eq!(rule["status"], json!(301));
+    }
 
     #[test]
     fn non_response_operations_never_enter_response_header_artifacts() {
@@ -350,11 +499,11 @@ mod tests {
             ),
             Some("sf.jsonc".into()),
             &ConventionCompileInput {
-                assigned_hostnames: Vec::new(),
                 platform_csp_sources: PlatformCspSources::from([(
                     "connect-src".to_string(),
                     vec!["https://api.spacefast.test".to_string()],
                 )]),
+                ..ConventionCompileInput::default()
             },
             &mut diagnostics,
         )

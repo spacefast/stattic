@@ -41,7 +41,7 @@ test("connector broker credentials and visitor identity stay in the runtime envi
   });
 });
 
-test("connector states survive the PHP query and mutation envelopes", () => {
+test("connector states and null results survive the PHP run envelopes", () => {
   const state = {
     code: "approval_pending",
     message: "This action is waiting for approval.",
@@ -51,21 +51,26 @@ test("connector states survive the PHP query and mutation envelopes", () => {
   for (const [op, field] of [
     ["query.run", "data"],
     ["mutation.run", "result"],
+    ["action.run", "result"],
   ]) {
-    const probe = spawnSync(
-      PHP_BINARY,
-      [
-        "-r",
-        'require $argv[1]; _stattic_zero_send_run_frame($argv[2], "issues", [], ["status" => 200], $argv[3]);',
-        path.resolve(import.meta.dir, "../engine/runtime/zero.php"),
-        op,
-        JSON.stringify({ __connector: state }),
-      ],
-      { encoding: "utf8" },
-    );
-    expect(probe.status).toBe(0);
-    expect(probe.stderr).toBe("");
-    expect(JSON.parse(probe.stdout)).toMatchObject({ ok: true, [field]: { __connector: state } });
+    for (const value of [{ __connector: state }, null]) {
+      const probe = spawnSync(
+        PHP_BINARY,
+        [
+          "-r",
+          'require $argv[1]; _stattic_zero_send_run_frame($argv[2], "issues", [], ["status" => 200], $argv[3]);',
+          path.resolve(import.meta.dir, "../engine/runtime/zero.php"),
+          op,
+          JSON.stringify(value),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(probe.status).toBe(0);
+      expect(probe.stderr).toBe("");
+      const frame = JSON.parse(probe.stdout);
+      expect(frame).toMatchObject({ ok: true, [field]: value });
+      expect(Object.hasOwn(frame, "id")).toBe(false);
+    }
   }
 });
 

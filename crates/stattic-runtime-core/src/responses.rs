@@ -12,7 +12,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::access::{bucket_pattern_rules, rule_is_request_dependent, rule_value_is_set};
+use crate::access::{
+    bucket_pattern_rules, rule_is_placed_at_edge, rule_is_request_dependent, rule_value_is_set,
+};
 use crate::artifacts::CompiledListing;
 use crate::finalize::{
     content_mtime, create_dir_all, immutable_path, invalid_with_details, mime_for_path, php_like,
@@ -24,11 +26,12 @@ use crate::protocol::{
     PROVIDER_ASSET_EXTENSIONS, RESPONSE_ACTION_LISTING, RESPONSE_ACTION_NOT_FOUND,
     RESPONSE_ACTION_PHP, RESPONSE_ENTRY_ACTION, RESPONSE_ENTRY_ALLOWLISTED_EXT,
     RESPONSE_ENTRY_BLOB, RESPONSE_ENTRY_CACHE_CLASS, RESPONSE_ENTRY_ETAG, RESPONSE_ENTRY_HEADERS,
-    RESPONSE_ENTRY_LANE, RESPONSE_ENTRY_LENGTH, RESPONSE_ENTRY_RULES_FIRST, RESPONSE_ENTRY_STATUS,
-    RESPONSE_KEY_NOT_FOUND, RESPONSE_KEY_NOT_FOUND_PREFIX, RESPONSE_KEY_ROBOTS, RESPONSE_KEY_RULES,
-    RESPONSE_KEY_SPA, RESPONSE_LANE_ACCEL, RESPONSE_LANE_PHP, RESPONSE_TABLE_BASENAME,
-    RESPONSE_TABLE_MAX_BYTES, RESPONSE_TABLE_SINGLE_KEY, RESPONSE_TABLE_SPLIT_BYTES,
-    THEME_STYLESHEET_URL, VERSION_ROOT_BASENAME, VERSION_ROOT_POINTER_FILE,
+    RESPONSE_ENTRY_LANE, RESPONSE_ENTRY_LENGTH, RESPONSE_ENTRY_PLACED_HOSTNAMES,
+    RESPONSE_ENTRY_RULES_FIRST, RESPONSE_ENTRY_STATUS, RESPONSE_KEY_NOT_FOUND,
+    RESPONSE_KEY_NOT_FOUND_PREFIX, RESPONSE_KEY_ROBOTS, RESPONSE_KEY_RULES, RESPONSE_KEY_SPA,
+    RESPONSE_LANE_ACCEL, RESPONSE_LANE_PHP, RESPONSE_TABLE_BASENAME, RESPONSE_TABLE_MAX_BYTES,
+    RESPONSE_TABLE_SINGLE_KEY, RESPONSE_TABLE_SPLIT_BYTES, THEME_STYLESHEET_URL,
+    VERSION_ROOT_BASENAME, VERSION_ROOT_POINTER_FILE,
 };
 use crate::serving_paths::is_private_serving_path;
 
@@ -950,6 +953,14 @@ impl<'a> RuleIndex<'a> {
             if rule_is_request_dependent(rule) {
                 continue;
             }
+            // An edge-placed rule is answered per HOST: the production host
+            // stands back and lets the edge have it, every other host runs it.
+            // A compiled entry cannot say that — it is one precomputed answer
+            // for every host — so a placed rule keeps its place in the ordered
+            // residue, where the serve path can skip it.
+            if rule_is_placed_at_edge(rule) {
+                continue;
+            }
             let order = rule
                 .get("order")
                 .and_then(Value::as_i64)
@@ -1016,6 +1027,7 @@ impl<'a> RuleIndex<'a> {
     /// plus first-segment-bucketed patterns — so `order` still decides between
     /// them and redirects stay first-match-wins.
     fn residue(&self) -> Option<Value> {
+        let mut placed_hostnames = BTreeSet::new();
         let redirects_exact: Map<String, Value> = self
             .redirects_exact
             .iter()
@@ -1023,10 +1035,17 @@ impl<'a> RuleIndex<'a> {
                 self.redirect_exact_keys
                     .contains(&normalized_rule_key(path))
             })
-            .map(|(path, rules)| (path.clone(), rules.clone()))
+            .map(|(path, rules)| (path.clone(), hoist_bucket(rules, &mut placed_hostnames)))
             .collect();
-        let redirects = !redirects_exact.is_empty() || !self.redirects_pattern.is_empty();
-        let headers = !self.headers_exact.is_empty() || !self.headers_pattern.is_empty();
+        let redirects_pattern = hoist_rules(self.redirects_pattern, &mut placed_hostnames);
+        let headers_exact: Map<String, Value> = self
+            .headers_exact
+            .iter()
+            .map(|(path, rules)| (path.clone(), hoist_bucket(rules, &mut placed_hostnames)))
+            .collect();
+        let headers_pattern = hoist_rules(self.headers_pattern, &mut placed_hostnames);
+        let redirects = !redirects_exact.is_empty() || !redirects_pattern.is_empty();
+        let headers = !headers_exact.is_empty() || !headers_pattern.is_empty();
         if !redirects && !headers {
             return None;
         }
@@ -1036,7 +1055,7 @@ impl<'a> RuleIndex<'a> {
                 "redirects".into(),
                 json!({
                     "exact": redirects_exact,
-                    "pattern": bucket_pattern_rules(self.redirects_pattern, "source"),
+                    "pattern": bucket_pattern_rules(&redirects_pattern, "source"),
                     "has_conditions": self.has_conditional_redirect(),
                 }),
             );
@@ -1045,13 +1064,65 @@ impl<'a> RuleIndex<'a> {
             residue.insert(
                 "headers".into(),
                 json!({
-                    "exact": self.headers_exact,
-                    "pattern": bucket_pattern_rules(self.headers_pattern, "path"),
+                    "exact": headers_exact,
+                    "pattern": bucket_pattern_rules(&headers_pattern, "path"),
                 }),
+            );
+        }
+        // The hostnames the edge answers this version's placed rules on,
+        // spelled once for the whole table: the scope is a property of the
+        // VERSION, so every placed rule carries the same list and repeating it
+        // per rule would only grow the one `\0rules` entry.
+        if !placed_hostnames.is_empty() {
+            residue.insert(
+                RESPONSE_ENTRY_PLACED_HOSTNAMES.into(),
+                json!(placed_hostnames.into_iter().collect::<Vec<String>>()),
             );
         }
         Some(Value::Object(residue))
     }
+}
+
+/// One rule as the artifact carries it: its edge scope taken off and folded
+/// into `placed`. See [`RESPONSE_ENTRY_PLACED_HOSTNAMES`].
+fn hoist_placed_hostnames(rule: &Value, placed: &mut BTreeSet<String>) -> Value {
+    let mut rule = rule.clone();
+    let Some(hostnames) = rule
+        .as_object_mut()
+        .and_then(|object| object.remove(RESPONSE_ENTRY_PLACED_HOSTNAMES))
+    else {
+        return rule;
+    };
+    placed.extend(
+        hostnames
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string),
+    );
+    rule
+}
+
+/// [`hoist_placed_hostnames`] over one exact bucket, which is an array of the
+/// rules declared at one path.
+fn hoist_bucket(bucket: &Value, placed: &mut BTreeSet<String>) -> Value {
+    Value::Array(
+        bucket
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|rule| hoist_placed_hostnames(rule, placed))
+            .collect(),
+    )
+}
+
+/// [`hoist_placed_hostnames`] over an ordered pattern list.
+fn hoist_rules(rules: &[Value], placed: &mut BTreeSet<String>) -> Vec<Value> {
+    rules
+        .iter()
+        .map(|rule| hoist_placed_hostnames(rule, placed))
+        .collect()
 }
 
 /// `_redirects` keys carry a leading slash and no trailing one; request keys

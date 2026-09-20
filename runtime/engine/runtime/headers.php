@@ -15,12 +15,18 @@ require_once __DIR__ . '/../shared/safety.php';
 // compiled set carries, not just one an earlier rule set.
 //
 // @return array{0: array<string, string>, 1: array<string, array{origin: string}>}
-function _stattic_collect_response_headers(array $rules, string $requestHost, string $requestPath): array
+function _stattic_collect_response_headers(array $rules, string $requestHost, string $requestPath, bool $edgeOwnsPlacedRules): array
 {
     $applied = [];
     $removed = [];
 
-    _stattic_for_each_ordered_rule($rules, $requestPath, function (array $rule, bool $useExact) use (&$applied, &$removed, $requestHost, $requestPath): null {
+    _stattic_for_each_ordered_rule($rules, $requestPath, function (array $rule, bool $useExact) use (&$applied, &$removed, $requestHost, $requestPath, $edgeOwnsPlacedRules): null {
+        // The edge already set this rule's headers on a production host. A
+        // rule moves whole or not at all, so skipping it here skips its
+        // removals too — exactly what the edge did or did not do.
+        if ($edgeOwnsPlacedRules && _stattic_rule_placed_at_edge($rule)) {
+            return null;
+        }
         $pathMatches = [];
         $hostMatches = [];
         if (!_stattic_ordered_rule_request_matches($rule, $useExact, $requestPath, $requestHost, $pathMatches, $hostMatches)) {
@@ -44,10 +50,28 @@ function _stattic_collect_response_headers(array $rules, string $requestHost, st
     return [$headers, $removed];
 }
 
+// Which lane wins when two rules set the same header name. The Space's
+// dashboard rules override the version, and within the version `_headers` is
+// authoritative over `sf.jsonc`. An unrecognized lane is the file lane — that
+// is what an absent `origin` means. Mirrored by `headerLanePrecedence` in
+// packages/routing/src/match.ts.
+function _stattic_header_lane_precedence(string $origin): int
+{
+    if ($origin === 'overlay') {
+        return 2;
+    }
+
+    if ($origin === 'config') {
+        return 0;
+    }
+
+    return 1;
+}
+
 // Repeated `set` ops for one name fold into a comma-joined value, but only
-// within a grammar: `_headers` is authoritative, so a sf.jsonc rule naming a
-// header a file rule already set is skipped, because folding would produce
-// values browsers discard outright (`X-Frame-Options: DENY,SAMEORIGIN`).
+// within a lane: across lanes the lower-precedence rule is skipped, because
+// folding would produce values browsers discard outright
+// (`X-Frame-Options: DENY,SAMEORIGIN`).
 function _stattic_apply_header_operations(array &$applied, array $operations, array $captures, string $origin = 'file', ?array &$removed = null): void
 {
     foreach ($operations as $operation) {
@@ -71,14 +95,17 @@ function _stattic_apply_header_operations(array &$applied, array $operations, ar
         }
 
         if ($removed !== null) {
-            if ($origin === 'config' && ($removed[$lower]['origin'] ?? null) === 'file') {
+            $removed_by = $removed[$lower]['origin'] ?? null;
+            if ($removed_by !== null
+                && _stattic_header_lane_precedence($origin) < _stattic_header_lane_precedence($removed_by)) {
                 continue;
             }
             unset($removed[$lower]);
         }
         $value = _stattic_expand_template((string) ($operation['value'] ?? ''), $captures);
         if (isset($applied[$lower])) {
-            if ($origin === 'config' && ($applied[$lower]['origin'] ?? 'file') === 'file') {
+            if (_stattic_header_lane_precedence($origin)
+                < _stattic_header_lane_precedence((string) ($applied[$lower]['origin'] ?? 'file'))) {
                 continue;
             }
             $applied[$lower]['value'] .= ',' . $value;

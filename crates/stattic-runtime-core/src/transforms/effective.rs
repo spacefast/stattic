@@ -5,6 +5,9 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::serving_paths::{is_private_serving_path, precompressed_source};
 
+/// Overlay-writable keys the effective config takes by REPLACEMENT: whatever
+/// the overlay declares stands in for the file's value, and a key the overlay
+/// is silent about keeps the file's.
 const CONFIG_KEYS: &[&str] = &[
     "index",
     "fallback",
@@ -20,7 +23,21 @@ const CONFIG_KEYS: &[&str] = &[
     "markdownNegotiation",
     "inject",
     "access",
+    "firewall",
+    "cache",
 ];
+
+/// Overlay-writable rule lists that CONCATENATE instead of replacing, overlay
+/// entries first.
+///
+/// These three are ordered rule sections: first match wins for `redirects` and
+/// `rewrites`, and `headers` applies in order. A dashboard rule therefore has
+/// to sit AHEAD of the file's rules to take precedence — and replacing the
+/// list would silently delete rules the publisher committed, which is not what
+/// "override this one rule" means. So the effective list is the overlay's
+/// entries followed by the file's, and a `sf.jsonc` rule the overlay says
+/// nothing about still runs.
+const LIST_PREPEND_CONFIG_KEYS: &[&str] = &["redirects", "rewrites", "headers"];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +151,34 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
                 config.insert((*key).into(), value.clone());
             }
         }
+    }
+    // The rule sections merge the other way round: overlay entries first, then
+    // the file's, so a dashboard rule matches ahead of a committed one without
+    // deleting it. A layer that declares something other than a list has no
+    // entries to contribute, so that key falls back to replacement and the
+    // config validators report the shape.
+    for key in LIST_PREPEND_CONFIG_KEYS {
+        let declared = [input.overlay.as_ref(), input.file_config.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|layer| layer.get(*key))
+            .collect::<Vec<_>>();
+        let Some(overlay_first) = declared.first() else {
+            continue;
+        };
+        let value = if declared.iter().all(|value| value.is_array()) {
+            Value::Array(
+                declared
+                    .iter()
+                    .filter_map(|value| value.as_array())
+                    .flatten()
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            (*overlay_first).clone()
+        };
+        config.insert((*key).into(), value);
     }
 
     let fallback = normalize_fallback(config.get("fallback"));
@@ -614,6 +659,66 @@ mod tests {
             options: Map::from_iter([("pagePointers".into(), page_pointers.clone())]),
         });
         assert_eq!(output["pages"], page_pointers);
+    }
+
+    /// Traffic rules are overlay-writable config like the rest: the dashboard
+    /// layer replaces the file's `firewall` outright rather than merging into
+    /// it, and a key the overlay is silent about keeps the file's value.
+    #[test]
+    fn the_overlay_replaces_a_traffic_rules_key_it_declares() {
+        let firewall = |path: &str| json!([{ "action": "block", "match": { "path": path } }]);
+        let cache =
+            json!({ "bypass": [{ "match": { "query": { "preview": { "op": "exists" } } } }] });
+        let output = resolve_effective_config(ResolveEffectiveInput {
+            manifest_paths: vec!["index.html".into()],
+            file_config: Some(Map::from_iter([
+                ("firewall".into(), firewall("/wp-login.php*")),
+                ("cache".into(), cache.clone()),
+            ])),
+            overlay: Some(Map::from_iter([("firewall".into(), firewall("/admin/*"))])),
+            template_entries: Vec::new(),
+            has_worker: false,
+        });
+        assert_eq!(output.config.get("firewall"), Some(&firewall("/admin/*")));
+        assert_eq!(output.config.get("cache"), Some(&cache));
+    }
+
+    /// The rule sections are ordered and first-match-wins, so the overlay
+    /// cannot replace them the way it replaces `firewall`: a dashboard rule
+    /// has to run AHEAD of the committed ones, and the committed ones have to
+    /// survive underneath. Each key merges on its own, and a section only one
+    /// layer declares is that layer's list.
+    #[test]
+    fn the_overlay_prepends_its_rule_lists_ahead_of_the_file_rules() {
+        let redirect = |source: &str| json!({ "source": source, "destination": "/new" });
+        let rewrite = |source: &str| json!({ "source": source, "destination": "/app.html" });
+        let header =
+            |source: &str| json!({ "source": source, "headers": [{ "key": "X-A", "value": "1" }] });
+        let output = resolve_effective_config(ResolveEffectiveInput {
+            manifest_paths: vec!["index.html".into()],
+            file_config: Some(Map::from_iter([
+                ("redirects".into(), json!([redirect("/file")])),
+                ("headers".into(), json!([header("/file")])),
+            ])),
+            overlay: Some(Map::from_iter([
+                ("redirects".into(), json!([redirect("/overlay")])),
+                ("rewrites".into(), json!([rewrite("/overlay")])),
+            ])),
+            template_entries: Vec::new(),
+            has_worker: false,
+        });
+        assert_eq!(
+            output.config.get("redirects"),
+            Some(&json!([redirect("/overlay"), redirect("/file")]))
+        );
+        assert_eq!(
+            output.config.get("rewrites"),
+            Some(&json!([rewrite("/overlay")]))
+        );
+        assert_eq!(
+            output.config.get("headers"),
+            Some(&json!([header("/file")]))
+        );
     }
 
     #[test]

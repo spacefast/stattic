@@ -33,7 +33,7 @@ function _stattic_rewrite_target(string $target, string $requestPath, int $statu
 // A redirect answers before the access lane runs and sends the same Location to
 // every caller, so it makes no per-visitor privacy verdict. cache-policy.php's
 // sticky per-request flags decide that for every lane.
-function _stattic_apply_redirects(array $redirects, array $serving, callable $pathExists, string $requestHost, string $requestPath, string $requestMethod, int $initialStatus = 200): array
+function _stattic_apply_redirects(array $redirects, array $serving, callable $pathExists, string $requestHost, string $requestPath, string $requestMethod, bool $edgeOwnsPlacedRules = false, int $initialStatus = 200): array
 {
     // One walk answers both questions: the winning rule, and whether any
     // conditional rule's path/host/query matched on the way. A non-matching
@@ -43,7 +43,13 @@ function _stattic_apply_redirects(array $redirects, array $serving, callable $pa
     // this URL.
     $conditionalCandidate = false;
     $conditionalVary = [];
-    $routeResult = _stattic_for_each_ordered_rule($redirects, $requestPath, function (array $rule, bool $useExact) use ($serving, $pathExists, $requestHost, $requestPath, $requestMethod, &$conditionalCandidate, &$conditionalVary): ?array {
+    $routeResult = _stattic_for_each_ordered_rule($redirects, $requestPath, function (array $rule, bool $useExact) use ($serving, $pathExists, $requestHost, $requestPath, $requestMethod, $edgeOwnsPlacedRules, &$conditionalCandidate, &$conditionalVary): ?array {
+        // Skipped whole, before it can match: a placed rule the edge already
+        // answered must not also mark this URL request-varying or decline a
+        // method, or the production host would still carry its effects.
+        if ($edgeOwnsPlacedRules && _stattic_rule_placed_at_edge($rule)) {
+            return null;
+        }
         $destination = (string) ($rule['destination'] ?? '');
         $status = (int) ($rule['status'] ?? 302);
         $action = (string) ($rule['action'] ?? 'redirect');

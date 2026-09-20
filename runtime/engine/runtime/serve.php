@@ -391,6 +391,15 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $rulesFirst = $entry === null
         || !empty($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_RULES_FIRST]);
     $redirectRules = _stattic_v4_rule_section($rulesEntry, 'redirects');
+    // Resolved once per request: whether the edge already answers this
+    // version's placed rules for THIS host. Both rule lanes read the same
+    // answer, so a redirect and a `_headers` rule can never disagree about
+    // which side owns them.
+    $edgeOwnsPlacedRules = _stattic_edge_owns_placed_rules(
+        $serving,
+        _stattic_v4_rule_placed_hostnames($rulesEntry),
+        $requestHost
+    );
     // The rules stage runs ahead of the control ladder below: a rewrite mutates
     // the path that ladder compares, and a redirect terminates here before the
     // ladder runs at all. So path reservation is honoured HERE too, not only at
@@ -415,6 +424,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             $requestHost,
             $requestPath,
             $requestMethod,
+            $edgeOwnsPlacedRules,
             200
         );
         $next = (string) $result['path'];
@@ -526,6 +536,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         'content_type_policy' => _stattic_serving_content_type_policy($serving),
         'open' => $open,
         'header_rules' => _stattic_v4_rule_section($rulesEntry, 'headers'),
+        'edge_owns_placed_rules' => $edgeOwnsPlacedRules,
         'route_status' => $routeStatus,
         'private_file_alias' => $privateFileAlias,
         'request_uri' => $requestUri,
@@ -1321,6 +1332,14 @@ function _stattic_v4_blob_contents(array $context, string $sha): ?string
 // The "\0rules" entry carries both sections under the entry's ACTION key, the
 // same slot every other non-file entry uses, with `redirects`/`headers`
 // sections: the only shape the compiler emits.
+// The hostnames this version's edge-placed rules were scoped to at finalize,
+// carried once beside the rule sections. Empty whenever nothing was placed.
+function _stattic_v4_rule_placed_hostnames(?array $rulesEntry): array
+{
+    $hostnames = $rulesEntry[STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION][STATTIC_RUNTIME_RESPONSE_ENTRY_PLACED_HOSTNAMES] ?? null;
+    return is_array($hostnames) ? array_values($hostnames) : [];
+}
+
 function _stattic_v4_rule_section(?array $rulesEntry, string $section): ?array
 {
     $rules = $rulesEntry[STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION][$section] ?? null;
@@ -1387,7 +1406,12 @@ function _stattic_v4_rule_headers(array $context): array
     $clientPath = is_string($context['client_path'] ?? null) && $context['client_path'] !== ''
         ? (string) $context['client_path']
         : '/';
-    [$headers, $removed] = _stattic_collect_response_headers($rules, (string) $context['host'], $clientPath);
+    [$headers, $removed] = _stattic_collect_response_headers(
+        $rules,
+        (string) $context['host'],
+        $clientPath,
+        !empty($context['edge_owns_placed_rules'])
+    );
     $lowered = [];
     foreach ($headers as $name => $value) {
         if (is_string($name) && is_string($value)) {

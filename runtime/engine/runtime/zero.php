@@ -682,6 +682,8 @@ function _stattic_zero_send_run_frame(string $op, string $name, array $request, 
         ]);
     }
     $value = _stattic_zero_run_body_json($runnerBody);
+    // Null is a handler result. Filter only absent envelope metadata, never
+    // the data/result payload a client uses to distinguish null from missing.
     $args = is_array($request['args'] ?? null) ? $request['args'] : [];
     $id = $request['id'] ?? null;
     if ($op === 'query.subscribe' || $op === 'query.run') {
@@ -691,8 +693,7 @@ function _stattic_zero_send_run_frame(string $op, string $name, array $request, 
             'ok' => true,
             'name' => $name,
             'args' => $args === [] ? null : $args,
-            'data' => $value,
-        ], static fn($entry) => $entry !== null));
+        ], static fn($entry) => $entry !== null) + ['data' => $value]);
     }
     if ($op === 'action.run') {
         // An action writes nothing, so there is no changed-table bookkeeping to
@@ -702,18 +703,16 @@ function _stattic_zero_send_run_frame(string $op, string $name, array $request, 
             'id' => is_scalar($id) ? $id : null,
             'op' => 'action.result',
             'ok' => true,
-            'result' => $value,
-        ], static fn($entry) => $entry !== null));
+        ], static fn($entry) => $entry !== null) + ['result' => $value]);
     }
     $changes = _stattic_zero_run_changed_values($runnerResponse);
     _stattic_zero_json_response(200, array_filter([
         'id' => is_scalar($id) ? $id : null,
         'op' => 'mutation.result',
         'ok' => true,
-        'result' => $value,
         'changedTables' => $changes['tables'],
         'changedQueries' => $changes['queries'],
-    ], static fn($entry) => $entry !== null));
+    ], static fn($entry) => $entry !== null) + ['result' => $value]);
 }
 
 function _stattic_zero_run_body_json(string $body): mixed

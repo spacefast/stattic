@@ -83,6 +83,7 @@ pub(super) fn compile_headers(
                 operations: normalized,
                 headers,
                 origin: "file",
+                placement: None,
             });
         }
     };

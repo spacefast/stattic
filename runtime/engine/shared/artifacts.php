@@ -624,6 +624,64 @@ function _stattic_v4_overlay(string $privateRoot, string $spaceId, mixed $space)
     return $overlay;
 }
 
+// The Space's live production surface, or one of the surfaces that stand in
+// front of it. Same three-way split `_stattic_grant_target` makes in
+// access-rules.php: an immutable version host is a preview, a host following a
+// route other than `production` is a branch, and everything else is live.
+//
+// Which matters to anything the edge answers on the Space's behalf: the WP
+// Cloud edge holds rules scoped to the PRODUCTION hostnames only, so those are
+// the hosts where the origin can stand back. Version and branch hosts serve
+// other content and keep the full runtime ruleset.
+function _stattic_serving_is_production_host(array $serving): bool
+{
+    // No serving context is no evidence. Answering "production" here would let
+    // a caller that never resolved a host drop rules the edge may not hold.
+    if ($serving === [] || !empty($serving['immutable'])) {
+        return false;
+    }
+    $routeName = is_string($serving['route_name'] ?? null) ? $serving['route_name'] : '';
+    return $routeName === '' || $routeName === 'production';
+}
+
+/**
+ * Whether the WP Cloud edge answers this version's placed rules for THIS
+ * request, which is the one condition under which the origin may leave them
+ * alone.
+ *
+ * Two facts, both required. The surface has to be the live production one. And
+ * the request host has to be one the edge was actually told about: the placed
+ * rules were scoped, at finalize, to the production hostnames the Space had
+ * then, and that scope is frozen in the version's artifact. A domain attached
+ * afterwards serves the same live route but holds none of those rules at the
+ * edge, so the origin keeps answering them for it until a republish widens the
+ * scope. Erring this way costs an answer the edge would have given; erring the
+ * other way loses the rule outright.
+ *
+ * @param list<mixed> $placedHostnames the version's edge scope, empty when nothing was placed
+ */
+function _stattic_edge_owns_placed_rules(array $serving, array $placedHostnames, string $requestHost): bool
+{
+    if ($placedHostnames === [] || !_stattic_serving_is_production_host($serving)) {
+        return false;
+    }
+    $host = _stattic_edge_scope_hostname($requestHost);
+    foreach ($placedHostnames as $hostname) {
+        if (is_string($hostname) && _stattic_edge_scope_hostname($hostname) === $host) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Host comparison for the edge scope: case, port and the root dot are spellings
+// of one name, and the finalizer's list and the request line need not agree on
+// them.
+function _stattic_edge_scope_hostname(string $hostname): string
+{
+    return rtrim(_stattic_normalize_hostname(trim($hostname)), '.');
+}
+
 function _stattic_v4_version_for_host(array $hostEntry, array $overlay): ?string
 {
     // A version-pinned host names its version outright; a route-following host

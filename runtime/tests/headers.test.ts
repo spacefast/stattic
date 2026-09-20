@@ -134,6 +134,7 @@ beforeAll(async () => {
       "index.html": "<h1>headers</h1>\n",
       "about.html": "<h1>about</h1>\n",
       "owned.html": "<h1>provider headers</h1>\n",
+      "framed.html": "<h1>framed</h1>\n",
       "café.html": "<h1>café</h1>\n",
       "café-agent": "agent redirect source\n",
       "target.html": "<h1>target</h1>\n",
@@ -175,6 +176,10 @@ beforeAll(async () => {
         "  ! Content-Type",
         "  ! X-Content-Type-Options",
         // Provider-owned channels a publisher must never reach.
+        // The file's clickjacking policy, which the Space's own rule below
+        // replaces rather than folds with.
+        "/framed.html",
+        "  X-Frame-Options: DENY",
         "/owned.html",
         "  A8C-Edge-Cache: no-cache",
         "  X-AC: hit",
@@ -186,6 +191,15 @@ beforeAll(async () => {
         "/beta /target.html 302 Cookie=beta",
         "/doc-rewrite /doc.md 200! Cookie=beta",
       ].join("\n"),
+    },
+    finalize: {
+      // The Space's own header rules — what the Headers tab writes. They are
+      // not staged content, so they ride the finalize body.
+      routing_overlay: {
+        headers: [
+          { source: "/framed.html", headers: [{ key: "X-Frame-Options", value: "SAMEORIGIN" }] },
+        ],
+      },
     },
     activate: {
       route_name: "production",
@@ -276,6 +290,21 @@ test("exact header rules apply only to their path, in declaration order", async 
 
   const index = await get(rt, HOST, "/");
   expect(index.headers.get("x-i18n-rule")).toBeNull();
+});
+
+/**
+ * Which lane owns a header name is decided in the compiler, and the engine
+ * has to read the same precedence back off the compiled entry — it carries
+ * every lane's operations and applies them at send time.
+ * `X-Frame-Options: DENY,SAMEORIGIN` is a value browsers discard outright, so
+ * folding is not an option and somebody has to lose: a Space that saves an
+ * override in its Headers tab and still gets the file's `DENY` on the wire has
+ * been told a save happened that did not.
+ */
+test("the Space's own header rule replaces the file's on the wire", async () => {
+  const framed = await get(rt, HOST, "/framed.html");
+  expect(framed.status).toBe(200);
+  expect(framed.headers.get("x-frame-options")).toBe("SAMEORIGIN");
 });
 
 test("browser paths keep one identity across compiled rules, access, and lookup", async () => {

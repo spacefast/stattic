@@ -4,7 +4,9 @@
 use super::access::{normalized_public_patterns, CONFIG_ACCESS_PUBLIC_SOURCE_REFERENCE};
 use super::crons;
 use super::jsonc::parse_document;
+use super::suggest::nearest;
 use super::system;
+use super::traffic_rules;
 use crate::protocol::{
     CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT, CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS,
     CONFIG_BUILD_TIMEOUT_MAX_SECONDS, CONFIG_BUILD_TIMEOUT_MIN_SECONDS, CONFIG_FILE_MAX_BYTES,
@@ -12,9 +14,10 @@ use crate::protocol::{
     CONFIG_TEMPLATE_LIMIT,
 };
 use crate::routing::{
-    compile_config_header, compile_config_redirect, compile_config_rewrite, has_variable_marker,
-    ConfigHeaderEntry, ConfigHeaderRule, ConfigRedirect, ConfigRewrite, ConfigRouting, RuleIssue,
-    RuleLocation, CONFIG_REDIRECT_DEFAULT_STATUS, CONFIG_REDIRECT_STATUSES,
+    compile_config_header, compile_config_redirect, compile_config_rewrite, entry_path,
+    has_variable_marker, ConfigHeaderEntry, ConfigHeaderRule, ConfigRedirect, ConfigRewrite,
+    ConfigRouting, OverlayRouting, RuleIssue, RuleLocation, CONFIG_REDIRECT_DEFAULT_STATUS,
+    CONFIG_REDIRECT_STATUSES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -35,18 +38,24 @@ pub fn public_json_schema() -> Value {
     };
     // The `!` and `name=:capture` of a `_redirects` line, shared by both rule
     // sections so the two grammars stay one grammar.
+    //
+    // What an omitted key resolves to is stated in prose, never as a JSON
+    // Schema `default`: the zod twin of this block reaches the OpenAPI
+    // document, where a generated client reads a defaulted property as one the
+    // caller has to send. The two are compared key for key by
+    // packages/routing/src/traffic-rules-contract.test.ts, so a `default` here
+    // would break that guard rather than drift past it.
     let force = json!({
         "type": "boolean",
-        "default": false,
-        "description": "Answer even when the request path resolves to a committed file — the ! of a _redirects rule."
+        "description": "Answer even when the request path resolves to a committed file, the ! of a _redirects rule."
     });
     let query = json!({
         "type": "object",
         "description": "Query parameters the request must carry, as parameter name to capture name: { \"id\": \"id\" } is the name=:capture token id=:id.",
-        "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$" },
+        "propertyNames": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$" },
         "additionalProperties": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" }
     });
-    json!({
+    traffic_rules::extend_json_schema(json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
         "$id": SCHEMA,
         "title": "Spacefast strict configuration v1 (sf.jsonc)",
@@ -80,17 +89,19 @@ pub fn public_json_schema() -> Value {
                         "source": {
                             "type": "string",
                             "minLength": 1,
-                            "description": "Request path to match. Same grammar as _redirects: * splat, :placeholder segments."
+                            "description": "Request path to match. * is a splat, :name captures a segment."
                         },
                         "destination": {
                             "type": "string",
                             "minLength": 1,
-                            "description": "Path or absolute URL. :splat and :placeholder from the source are substituted."
+                            "description": "Path or absolute URL. :splat and :name from the source are substituted."
                         },
                         "status": {
+                            "type": "number",
                             "enum": CONFIG_REDIRECT_STATUSES,
-                            "default": CONFIG_REDIRECT_DEFAULT_STATUS,
-                            "description": "Redirect status. To serve other content under this URL, use rewrites."
+                            "description": format!(
+                                "Redirect status, {CONFIG_REDIRECT_DEFAULT_STATUS} when omitted. To serve other content under this URL, use rewrites."
+                            )
                         },
                         "force": force,
                         "query": query
@@ -98,7 +109,7 @@ pub fn public_json_schema() -> Value {
                     "required": ["source", "destination"],
                     "additionalProperties": false
                 },
-                "description": "Browser redirect rules. _redirects rules match first."
+                "description": "Browser redirect rules. Same matcher grammar as _redirects, and _redirects rules match first."
             },
             "rewrites": {
                 "type": "array",
@@ -108,23 +119,23 @@ pub fn public_json_schema() -> Value {
                         "source": {
                             "type": "string",
                             "minLength": 1,
-                            "description": "Request path to match. Same grammar as _redirects: * splat, :placeholder segments."
+                            "description": "Request path to match. * is a splat, :name captures a segment."
                         },
                         "destination": {
                             "type": "string",
                             "minLength": 1,
-                            "description": "Path to serve under this URL, or an absolute URL to proxy. :splat and :placeholder from the source are substituted."
+                            "description": "Path to serve under this URL, or an absolute URL to proxy. :splat and :name from the source are substituted."
                         },
                         "cache": {
+                            "type": "string",
                             "const": "shared",
-                            "description": "Let shared caches store the proxy response. Only valid when the destination is an absolute URL."
+                            "description": "Let shared caches store the proxy response. Absolute-URL destinations only."
                         },
                         "force": force,
                         "query": query,
                         "notFound": {
                             "type": "boolean",
-                            "default": false,
-                            "description": "Serve the destination with status 404 — the 404 of a _redirects rule. The destination must be a path."
+                            "description": "Serve the destination with status 404, the 404 of a _redirects rule. The destination must be a path."
                         }
                     },
                     "required": ["source", "destination"],
@@ -140,13 +151,13 @@ pub fn public_json_schema() -> Value {
                         "source": {
                             "type": "string",
                             "minLength": 1,
-                            "description": "Request path to match. Same grammar as _headers."
+                            "description": "Request path to match."
                         },
                         "headers": {
                             "type": "array",
                             "minItems": 1,
                             "items": {
-                                "oneOf": [
+                                "anyOf": [
                                     {
                                         "type": "object",
                                         "properties": {
@@ -161,8 +172,9 @@ pub fn public_json_schema() -> Value {
                                         "properties": {
                                             "key": { "type": "string", "minLength": 1 },
                                             "remove": {
+                                                "type": "boolean",
                                                 "const": true,
-                                                "description": "Remove this header instead of setting it — the !Name line of a _headers block."
+                                                "description": "Remove this header instead of setting it, the !Name line of a _headers block."
                                             }
                                         },
                                         "required": ["key", "remove"],
@@ -228,7 +240,7 @@ pub fn public_json_schema() -> Value {
             }
         },
         "additionalProperties": false
-    })
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +348,7 @@ pub fn compile(input: Input) -> Output {
     }
     validate_shape(root, &locations, &mut issues);
     validate_crons(root, &locations, &mut issues);
+    validate_traffic_rules(root, &locations, &mut issues);
     validate_routing(root, &document.object_keys, &locations, &mut issues);
     validate_templates(root, &input.template_sources, &locations, &mut issues);
     validate_artifacts(
@@ -413,6 +426,8 @@ fn validate_keys(
         "substitute",
         "access",
         "crons",
+        "firewall",
+        "cache",
         "system",
     ];
     let renamed = [
@@ -749,7 +764,7 @@ fn validate_routing(
     locations: &BTreeMap<String, Location>,
     issues: &mut Vec<Issue>,
 ) {
-    for entry in collect_config_redirects(root, order, locations, issues) {
+    for entry in collect_config_redirects(CONFIG_ROUTING_PREFIX, root, order, locations, issues) {
         if pending_substitution(rule_strings(
             &entry.source,
             &entry.destination,
@@ -761,7 +776,7 @@ fn validate_routing(
             push_rule_issue(issues, locations, &entry.path, &issue);
         }
     }
-    for entry in collect_config_rewrites(root, order, locations, issues) {
+    for entry in collect_config_rewrites(CONFIG_ROUTING_PREFIX, root, order, locations, issues) {
         if pending_substitution(rule_strings(
             &entry.source,
             &entry.destination,
@@ -773,7 +788,7 @@ fn validate_routing(
             push_rule_issue(issues, locations, &entry.path, &issue);
         }
     }
-    for entry in collect_config_headers(root, order, locations, issues) {
+    for entry in collect_config_headers(CONFIG_ROUTING_PREFIX, root, order, locations, issues) {
         if pending_substitution(
             std::iter::once(&entry.source).chain(
                 entry
@@ -808,6 +823,122 @@ fn pending_substitution<'a>(values: impl IntoIterator<Item = &'a String>) -> boo
     values.into_iter().any(|value| has_variable_marker(value))
 }
 
+/// The address space a COMMITTED rule's diagnostics are reported under:
+/// `$.redirects[2].source`, the JSONPath into the config document.
+pub const CONFIG_ROUTING_PREFIX: &str = "$";
+
+/// The address space a SPACE OVERLAY rule's diagnostics are reported under.
+/// `overlay.redirects[2].source` denotes JSON pointer `/redirects/2/source`
+/// into the Space's stored `config` — the overlay has no document to point
+/// into, so the dashboard maps an issue back to the row it owns instead.
+pub const OVERLAY_ROUTING_PREFIX: &str = "overlay";
+
+/// The `file` an overlay rule's diagnostics name. Not a committed path — no
+/// such file exists — and deliberately inside the reserved `sf.` namespace so
+/// it cannot collide with one a publisher could ship.
+pub const OVERLAY_ROUTING_FILE: &str = "sf.overlay";
+
+/// The three routing sections of the Space's `config` overlay, read with the
+/// grammar the committed file's sections are read with.
+///
+/// The overlay is JSON the control plane stores, not a document with an
+/// authored layout, so there are no byte offsets to point a diagnostic at.
+/// Every entry is located at its own 1-based position in its list, column 0:
+/// `overlay.redirects[2]` is reported at line 3, which is the index the
+/// dashboard addresses that row by. The rest is identical to the file lane on
+/// purpose — same required keys, same unknown-key detection, same codes — so a
+/// rule that is refused in `sf.jsonc` is refused in the dashboard, with the
+/// same words.
+pub fn overlay_routing_sections(overlay: &OverlayRouting) -> (ConfigRouting, Vec<Issue>) {
+    let mut issues = Vec::new();
+    let root = overlay.sections();
+    let mut locations = BTreeMap::from([(
+        OVERLAY_ROUTING_PREFIX.to_string(),
+        Location { line: 0, column: 0 },
+    )]);
+    let mut order = BTreeMap::new();
+    for (section, value) in &root {
+        let path = format!("{OVERLAY_ROUTING_PREFIX}.{section}");
+        locations.insert(path.clone(), Location { line: 0, column: 0 });
+        let Some(entries) = value.as_array() else {
+            continue;
+        };
+        for (index, entry) in entries.iter().enumerate() {
+            let entry_path = format!("{path}[{index}]");
+            locate_overlay_entry(&mut locations, &mut order, &entry_path, index, entry);
+            // A header rule's operations are addressed one level deeper, and
+            // each carries its own position for the same reason the rule does.
+            if section != "headers" {
+                continue;
+            }
+            let Some(operations) = entry.get("headers").and_then(Value::as_array) else {
+                continue;
+            };
+            for (position, operation) in operations.iter().enumerate() {
+                let operation_path = format!("{entry_path}.headers[{position}]");
+                locate_overlay_entry(
+                    &mut locations,
+                    &mut order,
+                    &operation_path,
+                    index,
+                    operation,
+                );
+            }
+        }
+    }
+    let redirects = collect_config_redirects(
+        OVERLAY_ROUTING_PREFIX,
+        &root,
+        &order,
+        &locations,
+        &mut issues,
+    );
+    let rewrites = collect_config_rewrites(
+        OVERLAY_ROUTING_PREFIX,
+        &root,
+        &order,
+        &locations,
+        &mut issues,
+    );
+    let headers = collect_config_headers(
+        OVERLAY_ROUTING_PREFIX,
+        &root,
+        &order,
+        &locations,
+        &mut issues,
+    );
+    (
+        ConfigRouting {
+            redirects,
+            rewrites,
+            headers,
+            locations,
+        },
+        issues,
+    )
+}
+
+/// One overlay entry's address: the row it is, and the keys it wrote, which is
+/// all `validate_entry_keys` needs to name an unknown one.
+fn locate_overlay_entry(
+    locations: &mut BTreeMap<String, Location>,
+    order: &mut BTreeMap<String, Vec<String>>,
+    path: &str,
+    index: usize,
+    entry: &Value,
+) {
+    locations.insert(
+        path.to_string(),
+        Location {
+            line: index + 1,
+            column: 0,
+        },
+    );
+    if let Some(object) = entry.as_object() {
+        order.insert(path.to_string(), object.keys().cloned().collect());
+    }
+}
+
 /// The routing sections of a `sf.jsonc`, read on their own terms.
 ///
 /// This is deliberately NOT gated on the rest of the file compiling: `redirects`,
@@ -835,9 +966,27 @@ pub fn routing_sections(source: &str) -> (ConfigRouting, Vec<Issue>) {
         .map(|(path, offset)| (path.clone(), locate(source, &newlines, *offset)))
         .collect::<BTreeMap<_, _>>();
     locations.insert("$".into(), Location { line: 1, column: 1 });
-    let redirects = collect_config_redirects(root, &document.object_keys, &locations, &mut issues);
-    let rewrites = collect_config_rewrites(root, &document.object_keys, &locations, &mut issues);
-    let headers = collect_config_headers(root, &document.object_keys, &locations, &mut issues);
+    let redirects = collect_config_redirects(
+        CONFIG_ROUTING_PREFIX,
+        root,
+        &document.object_keys,
+        &locations,
+        &mut issues,
+    );
+    let rewrites = collect_config_rewrites(
+        CONFIG_ROUTING_PREFIX,
+        root,
+        &document.object_keys,
+        &locations,
+        &mut issues,
+    );
+    let headers = collect_config_headers(
+        CONFIG_ROUTING_PREFIX,
+        root,
+        &document.object_keys,
+        &locations,
+        &mut issues,
+    );
     (
         ConfigRouting {
             redirects,
@@ -874,17 +1023,18 @@ pub fn routing_string_spans(source: &str) -> Vec<(usize, usize)> {
 const ROUTING_SECTIONS: &[&str] = &["redirects", "rewrites", "headers"];
 
 fn collect_config_redirects(
+    prefix: &str,
     root: &Map<String, Value>,
     order: &BTreeMap<String, Vec<String>>,
     locations: &BTreeMap<String, Location>,
     issues: &mut Vec<Issue>,
 ) -> Vec<ConfigRedirect> {
     let mut collected = Vec::new();
-    let Some(entries) = section_entries(root, "redirects", locations, issues) else {
+    let Some(entries) = section_entries(prefix, root, "redirects", locations, issues) else {
         return collected;
     };
     for (index, entry) in entries.iter().enumerate() {
-        let path = format!("$.redirects[{index}]");
+        let path = format!("{prefix}.redirects[{index}]");
         let Some(object) = entry_object(entry, &path, "redirects", locations, issues) else {
             continue;
         };
@@ -1057,17 +1207,18 @@ fn optional_query(
 }
 
 fn collect_config_rewrites(
+    prefix: &str,
     root: &Map<String, Value>,
     order: &BTreeMap<String, Vec<String>>,
     locations: &BTreeMap<String, Location>,
     issues: &mut Vec<Issue>,
 ) -> Vec<ConfigRewrite> {
     let mut collected = Vec::new();
-    let Some(entries) = section_entries(root, "rewrites", locations, issues) else {
+    let Some(entries) = section_entries(prefix, root, "rewrites", locations, issues) else {
         return collected;
     };
     for (index, entry) in entries.iter().enumerate() {
-        let path = format!("$.rewrites[{index}]");
+        let path = format!("{prefix}.rewrites[{index}]");
         let Some(object) = entry_object(entry, &path, "rewrites", locations, issues) else {
             continue;
         };
@@ -1121,17 +1272,18 @@ fn collect_config_rewrites(
 }
 
 fn collect_config_headers(
+    prefix: &str,
     root: &Map<String, Value>,
     order: &BTreeMap<String, Vec<String>>,
     locations: &BTreeMap<String, Location>,
     issues: &mut Vec<Issue>,
 ) -> Vec<ConfigHeaderRule> {
     let mut collected = Vec::new();
-    let Some(entries) = section_entries(root, "headers", locations, issues) else {
+    let Some(entries) = section_entries(prefix, root, "headers", locations, issues) else {
         return collected;
     };
     for (index, entry) in entries.iter().enumerate() {
-        let path = format!("$.headers[{index}]");
+        let path = format!("{prefix}.headers[{index}]");
         let Some(object) = entry_object(entry, &path, "headers", locations, issues) else {
             continue;
         };
@@ -1224,6 +1376,7 @@ fn collect_config_headers(
 }
 
 fn section_entries<'a>(
+    prefix: &str,
     root: &'a Map<String, Value>,
     section: &str,
     locations: &BTreeMap<String, Location>,
@@ -1237,7 +1390,7 @@ fn section_entries<'a>(
                 issues,
                 locations,
                 "config_invalid",
-                &format!("$.{section}"),
+                &format!("{prefix}.{section}"),
                 &format!("{section} must be an array."),
                 None,
             );
@@ -1368,6 +1521,26 @@ fn validate_crons(
     }
 }
 
+/// Requests to block, challenge, or serve past the cache. The grammar is
+/// shared with the current config lane, so a rule that compiles here compiles
+/// at publish and vice versa.
+fn validate_traffic_rules(
+    root: &Map<String, Value>,
+    locations: &BTreeMap<String, Location>,
+    issues: &mut Vec<Issue>,
+) {
+    for issue in traffic_rules::validate(root) {
+        push_issue(
+            issues,
+            locations,
+            issue.code,
+            &issue.json_path(),
+            &issue.message,
+            issue.suggestion.as_deref(),
+        );
+    }
+}
+
 fn validate_templates(
     root: &Map<String, Value>,
     templates: &[TemplateSource],
@@ -1487,10 +1660,15 @@ fn project(root: &Map<String, Value>) -> Value {
             out.insert(section.into(), Value::Object(projected));
         }
     }
-    for section in ["redirects", "rewrites", "headers", "crons"] {
+    for section in ["redirects", "rewrites", "headers", "crons", "firewall"] {
         if let Some(entries) = root.get(section).and_then(Value::as_array) {
             out.insert(section.into(), json!(entries));
         }
+    }
+    // Validated above, then carried verbatim: the compiler that turns traffic
+    // rules into provider edge rules reads what the author wrote.
+    if let Some(cache) = root.get("cache") {
+        out.insert("cache".into(), cache.clone());
     }
     if let Some(access) = root.get("access") {
         if let Ok(patterns) = normalized_public_patterns(access) {
@@ -1535,7 +1713,15 @@ fn effective(config: &Value, index: Value) -> Value {
             .collect::<Vec<_>>();
         out.insert("redirects".into(), Value::Array(redirects));
     }
-    for key in ["rewrites", "headers", "metadata", "substitute", "crons"] {
+    for key in [
+        "rewrites",
+        "headers",
+        "metadata",
+        "substitute",
+        "crons",
+        "firewall",
+        "cache",
+    ] {
         if let Some(v) = config.get(key) {
             out.insert(key.into(), v.clone());
         }
@@ -1623,28 +1809,6 @@ fn retired_template_pattern() -> &'static regex::Regex {
 fn image_path(v: &str) -> bool {
     v.starts_with('/') && !v.starts_with("//") && !v.split(['/', '\\']).any(|p| p == "..")
 }
-fn nearest(candidate: &str, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .map(|k| (*k, edit(candidate, k)))
-        .filter(|(_, d)| *d <= 2)
-        .min_by_key(|(_, d)| *d)
-        .map(|(k, _)| k.into())
-}
-fn edit(a: &str, b: &str) -> usize {
-    let mut prev = (0..=b.len()).collect::<Vec<_>>();
-    for (i, ca) in a.chars().enumerate() {
-        let mut cur = vec![i + 1];
-        for (j, cb) in b.chars().enumerate() {
-            cur.push(
-                (cur[j] + 1)
-                    .min(prev[j + 1] + 1)
-                    .min(prev[j] + usize::from(ca != cb)),
-            );
-        }
-        prev = cur;
-    }
-    *prev.last().unwrap_or(&b.len())
-}
 fn newline_offsets(source: &str) -> Vec<usize> {
     source
         .bytes()
@@ -1669,8 +1833,14 @@ fn make_issue(
     message: &str,
     suggestion: Option<&str>,
 ) -> Issue {
+    // A key the document never wrote has no offset of its own — a defaulted
+    // status, a missing destination, an overlay rule whose rows are positions
+    // rather than bytes. The entry that owns it always has one, and pointing at
+    // the rule beats pointing at line 1. Same walk-up the merge does
+    // (routing::ConfigAddress::diagnostic).
     let l = loc
         .get(path)
+        .or_else(|| loc.get(entry_path(path)))
         .cloned()
         .unwrap_or(Location { line: 1, column: 1 });
     Issue {
@@ -1786,6 +1956,64 @@ mod tests {
         );
     }
 
+    /// The rule grammar and its messages are proven in `config::traffic_rules`.
+    /// What the strict seam adds is that `firewall` and `cache` are v1 keys at
+    /// all, that a rule issue addresses the field that carried it, and that both
+    /// projections keep the declaration verbatim.
+    #[test]
+    fn carries_traffic_rules_through_both_projections_and_addresses_their_issues() {
+        let firewall = json!([{
+            "name": "login-guard",
+            "action": "block",
+            "status": 429,
+            "match": { "path": "/wp-login.php*", "country": { "op": "in", "values": ["RU"] } }
+        }]);
+        let cache = json!({
+            "bypass": [{ "match": { "query": { "preview": { "op": "exists" } } }, "any": true }]
+        });
+        let output = compile_source(
+            r#"{
+              "version": 1,
+              "firewall": [
+                {
+                  "name": "login-guard",
+                  "action": "block",
+                  "status": 429,
+                  "match": { "path": "/wp-login.php*", "country": { "op": "in", "values": ["RU"] } }
+                }
+              ],
+              "cache": {
+                "bypass": [
+                  { "match": { "query": { "preview": { "op": "exists" } } }, "any": true }
+                ]
+              }
+            }"#,
+        );
+        assert!(output.success, "{:?}", output.issues);
+        let config = output.config.expect("a compiled config");
+        assert_eq!(config.get("firewall"), Some(&firewall));
+        assert_eq!(config.get("cache"), Some(&cache));
+        let effective = output.effective.expect("an effective config");
+        assert_eq!(effective.get("firewall"), Some(&firewall));
+        assert_eq!(effective.get("cache"), Some(&cache));
+
+        let output = compile_source(
+            r#"{
+              "version": 1,
+              "firewall": [{ "action": "challenge", "status": 403, "match": { "path": "/x" } }]
+            }"#,
+        );
+        assert!(!output.success);
+        assert_eq!(
+            output
+                .issues
+                .iter()
+                .map(|issue| (issue.code.as_str(), issue.path.as_str()))
+                .collect::<Vec<_>>(),
+            [("config_invalid", "$.firewall[0].status")]
+        );
+    }
+
     #[test]
     fn compiles_public_paths_into_one_live_config_grant() {
         let output = compile_source(
@@ -1894,9 +2122,14 @@ mod tests {
             schema.pointer("/properties/redirects/items/properties/status/enum"),
             Some(&json!([301, 302, 303, 307, 308]))
         );
+        // What an omitted status resolves to is prose, never a JSON Schema
+        // `default`. The zod twin of this block generates the OpenAPI document,
+        // where a generated client reads a defaulted property as one the caller
+        // has to send — so neither side may carry one, and the two are compared
+        // key for key by packages/routing/src/traffic-rules-contract.test.ts.
         assert_eq!(
             schema.pointer("/properties/redirects/items/properties/status/default"),
-            Some(&json!(302))
+            None
         );
         assert_eq!(
             schema.pointer("/properties/redirects/items/required"),
@@ -1948,13 +2181,16 @@ mod tests {
             Some(&json!(["source", "destination"]))
         );
         // A header entry is a set or a remove, and the required keys are what
-        // tell the two shapes apart.
+        // tell the two shapes apart. `anyOf` rather than `oneOf`: the two are
+        // mutually exclusive by construction (both closed, disjoint required
+        // sets), and the zod twin this block is compared against generates
+        // `anyOf` for a union.
         assert_eq!(
-            schema.pointer("/properties/headers/items/properties/headers/items/oneOf/0/required"),
+            schema.pointer("/properties/headers/items/properties/headers/items/anyOf/0/required"),
             Some(&json!(["key", "value"]))
         );
         assert_eq!(
-            schema.pointer("/properties/headers/items/properties/headers/items/oneOf/1/required"),
+            schema.pointer("/properties/headers/items/properties/headers/items/anyOf/1/required"),
             Some(&json!(["key", "remove"]))
         );
     }

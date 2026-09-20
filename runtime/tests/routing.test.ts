@@ -456,6 +456,117 @@ test("exact redirects answer from their compiled key", async () => {
   expect(directory.headers.get("location")).toBe("/docs/");
 });
 
+// The Space's own rules are a third authoring lane, and the only one the
+// finalizer cannot read off the staged tree — it rides the finalize body. This
+// version stages NO routing at all: no `_redirects`, no `_headers`, no
+// `sf.jsonc`. A Space whose only rules are dashboard rules still serves them,
+// which is the whole point of the tab that writes them. (Which lane wins when
+// they collide is settled in the compiler, not over HTTP: see
+// routing::tests::overlay_rules_run_ahead_of_both_file_lanes_and_stay_named_overlay.)
+test("a Space whose only routing is its overlay serves it", async () => {
+  const OVERLAY_HOST = "overlay.test";
+  const OVERLAY_VERSION_HOST = "overlay--v1.test";
+  await deploy(rt, {
+    spaceId: "spc_overlay",
+    versionId: "ver_overlay_1",
+    metadata: { title: "Overlay" },
+    files: {
+      "index.html": "<h1>overlay</h1>\n",
+      "dashboard.html": "<h1>dashboard</h1>\n",
+    },
+    finalize: {
+      routing_overlay: {
+        redirects: [{ source: "/old", destination: "/dashboard.html", status: 302 }],
+      },
+    },
+    activate: {
+      route_name: "production",
+      // The version host has to be public too: this case is about which rule
+      // answers, and an access gate would answer first.
+      config: publicAccessConfig({}, "live_and_all_versions"),
+      production_hostnames: [OVERLAY_HOST],
+      version_hostnames: [{ hostname: OVERLAY_VERSION_HOST, version_id: "ver_overlay_1" }],
+    },
+  });
+
+  const served = await get(rt, OVERLAY_VERSION_HOST, "/old");
+  expect(served.status).toBe(302);
+  expect(served.headers.get("location")).toBe("/dashboard.html");
+});
+
+// The origin gives a rule up only where the edge demonstrably holds it: the
+// live production surface, on a host that was in the edge scope at finalize.
+// Each host below fails exactly one of those two conditions, or neither.
+test("an edge-placed rule is the edge's only on the hosts the edge was told about", async () => {
+  const PLACED_HOST = "placed.test";
+  // In the edge scope, but attached to the Space's live route only AFTER this
+  // version was finalized — so the edge holds nothing for it.
+  const ATTACHED_LATER_HOST = "attached-later.test";
+  // In the edge scope too, but it follows a branch route, which serves its own
+  // content and never gets the Space's production rules.
+  const BRANCH_HOST = "branch.test";
+  const PLACED_VERSION_HOST = "placed--v1.test";
+  const LEGACY = "<h1>legacy</h1>\n";
+  await deploy(rt, {
+    spaceId: "spc_placed",
+    versionId: "ver_placed_1",
+    metadata: { title: "Placed" },
+    files: {
+      "index.html": "<h1>placed</h1>\n",
+      // Forced, so the rule outranks the committed bytes and placement does
+      // not refuse it as shadowed. That is what makes the hosts visibly
+      // disagree: whoever evaluates the rule redirects, and whoever skips it
+      // finds a published file underneath.
+      "legacy.html": LEGACY,
+      "new.html": "<h1>new</h1>\n",
+      _redirects: "/legacy.html /new.html 301!",
+    },
+    finalize: {
+      placement_enabled: true,
+      routing_production_hostnames: [PLACED_HOST, BRANCH_HOST],
+    },
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig(),
+      production_hostnames: [PLACED_HOST, ATTACHED_LATER_HOST],
+      version_hostnames: [{ hostname: PLACED_VERSION_HOST, version_id: "ver_placed_1" }],
+    },
+  });
+
+  // Production, and in the frozen edge scope: the edge holds this rule, so the
+  // origin steps over it and answers with the file the rule sits on top of.
+  const production = await get(rt, PLACED_HOST, "/legacy.html");
+  expect(production.status).toBe(200);
+  expect(await production.text()).toBe(LEGACY);
+  expect(production.headers.get("location")).toBeNull();
+
+  // A domain attached after the publish serves the same live route, but the
+  // version's edge scope froze without it. Giving the rule up here would
+  // delete it: nobody would answer.
+  const attachedLater = await get(rt, ATTACHED_LATER_HOST, "/legacy.html");
+  expect(attachedLater.status).toBe(301);
+  expect(attachedLater.headers.get("location")).toBe("/new.html");
+
+  // The version host is a preview surface with no edge rules of its own, so it
+  // still runs the whole table.
+  const preview = await get(rt, PLACED_VERSION_HOST, "/legacy.html");
+  expect(preview.status).toBe(301);
+  expect(preview.headers.get("location")).toBe("/new.html");
+
+  // Repointing the Space's hostnames at a branch route: BRANCH_HOST is in the
+  // edge scope, so only its route name keeps the rule at the origin.
+  await putRoute(rt, "spc_placed", "beta", {
+    version_id: "ver_placed_1",
+    config: publicAccessConfig(),
+    production_hostnames: [BRANCH_HOST],
+    noindex_production_hostnames: [],
+    version_hostnames: [],
+  });
+  const branch = await get(rt, BRANCH_HOST, "/legacy.html");
+  expect(branch.status).toBe(301);
+  expect(branch.headers.get("location")).toBe("/new.html");
+});
+
 test("ordered redirects preserve the request query and RFC method semantics", async () => {
   // The ordered lane is a pure function of host+path+query, so the query it did
   // not consume travels to the destination.

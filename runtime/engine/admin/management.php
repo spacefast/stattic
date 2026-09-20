@@ -574,12 +574,24 @@ function _stattic_runtime_finalize_routing(?array $metadata): array
         }
         $proxyRules[] = ['source' => $rule['source'], 'destination' => $rule['destination']];
     }
-    return [
+    $response = [
         'redirect_rule_count' => (int) ($routing['redirectRuleCount'] ?? 0),
         'header_rule_count' => (int) ($routing['headerRuleCount'] ?? 0),
         'proxy_rule_count' => (int) ($routing['proxyRuleCount'] ?? 0),
         'proxy_rules' => $proxyRules,
     ];
+    // Placement's own output, carried through untouched: the provider rules the
+    // control plane reconciles onto the edge, and every rule's verdict. The
+    // finalizer decides both and this engine reads neither, so re-deriving a
+    // shape for them here would only be a second opinion nobody asked for. Both
+    // keys are absent from the artifact whenever placement is off.
+    foreach (['edgeRules' => 'edge_rules', 'placement' => 'placement'] as $key => $field) {
+        $value = _stattic_runtime_metadata_list($routing, $key);
+        if ($value !== []) {
+            $response[$field] = $value;
+        }
+    }
+    return $response;
 }
 
 function _stattic_runtime_finalize_idempotent_ready_response(string $privateRoot, string $spaceId, string $versionId, array $body = [], array $claims = []): void

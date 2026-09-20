@@ -8,4 +8,6 @@ pub mod current;
 pub mod diagnostics;
 pub mod jsonc;
 pub mod strict;
+mod suggest;
 pub mod system;
+pub mod traffic_rules;

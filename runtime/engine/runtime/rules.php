@@ -5,6 +5,23 @@ declare(strict_types=1);
 // compiler could not decide, which rides the response table under "\0rules"
 // (contracts §5).
 
+require_once __DIR__ . '/../shared/finalizer-protocol.generated.php';
+
+// A rule the placement pass handed to the WP Cloud edge. The edge holds it
+// scoped to the Space's production hostnames and answers it before the origin
+// is ever asked, so on a production host the origin must leave it alone — two
+// answers to one request is the bug, and the edge's is the one the visitor
+// gets. Every other host (version, branch, preview) keeps evaluating it: the
+// edge holds nothing for them.
+//
+// Phase 1 accepts one divergence: both runtimes trim ALL trailing slashes off
+// a request path, while the placed edge form spells out only `/old` and
+// `/old/`, so a production request for `/old///` is answered by neither side.
+function _stattic_rule_placed_at_edge(array $rule): bool
+{
+    return ($rule[STATTIC_RUNTIME_RESPONSE_ENTRY_PLACEMENT] ?? null) === STATTIC_RUNTIME_RESPONSE_PLACEMENT_EDGE;
+}
+
 function _stattic_for_each_ordered_rule(array $rules, string $requestPath, callable $visit, bool $normalizeTrailingSlash = false): mixed
 {
     $exactPath = $normalizeTrailingSlash ? _stattic_redirect_match_path($requestPath) : $requestPath;

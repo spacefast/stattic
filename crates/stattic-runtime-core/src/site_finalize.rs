@@ -13,8 +13,8 @@ use std::time::Instant;
 use url::Url;
 
 use crate::access::{
-    compile_conventions, retain_response_header_operations, rule_is_request_dependent,
-    ConventionCompileInput,
+    compile_conventions, retain_response_header_operations, rule_is_placed_at_edge,
+    rule_is_request_dependent, ConventionCompileInput, ConventionRoutingSummary,
 };
 use crate::artifacts::{
     build_lookup_map, compile_listings, public_files, resolve_serving_config, static_lookup_action,
@@ -55,6 +55,7 @@ use crate::responses::{
     compile_response_table, publish_response_tables, ResponseCompileInput, DENY_ALL_ROBOTS,
 };
 use crate::route_inventory::{compile_route_inventory, RouteInventoryInput, ZERO_CONTROL_ROUTES};
+use crate::routing::{EdgeRuleSpec, OverlayRouting, PlacementReportEntry};
 use crate::storage::{
     apply_templates, blob_path, blob_root, commit_session_files, install_blob_from, put_blob,
 };
@@ -382,6 +383,14 @@ fn readiness_statuses(
         .filter(|action| action.get("action").and_then(Value::as_str) == Some("redirect"))
     {
         statuses.insert(action.get("status").and_then(Value::as_u64).unwrap_or(302));
+        // A compiled redirect is normally the ONE answer this path has, which
+        // is why the shortcut returns here. An edge-placed rule is not: the
+        // origin skips it on a production host and readiness can reach the box
+        // through a transport that never passes the edge, so both the edge's
+        // redirect and the origin's own answer are legitimate observations.
+        if rules.iter().any(|rule| rule_is_placed_at_edge(rule)) {
+            statuses.insert(if public.is_some() { 200 } else { 404 });
+        }
         statuses.extend(MUTABLE_ACCESS);
         return Ok(statuses.into_iter().collect());
     }
@@ -444,7 +453,13 @@ fn readiness_statuses(
             }
             _ => continue,
         }
-        if !request_dependent {
+        // An edge-placed rule is not the origin's to answer on a production
+        // host (spec §5), and readiness can reach the box through a provider
+        // transport that never passes the edge. So the terminal status stays
+        // reachable: the probe legitimately sees the edge's redirect OR the
+        // origin's own answer, and a target that only accepted the redirect
+        // would fail a healthy version on the path that bypasses the edge.
+        if !request_dependent && !rule_is_placed_at_edge(rule) {
             terminal_reachable = false;
         }
     }
@@ -758,18 +773,7 @@ fn run_finalize_pipeline(
         }
     }
     let convention_files = Value::Object(convention_map);
-    let assigned_hostnames: Vec<String> = input
-        .body
-        .get("routing_assigned_hostnames")
-        .and_then(Value::as_array)
-        .map(|hostnames| {
-            hostnames
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let assigned_hostnames = hostname_list(&input.body, "routing_assigned_hostnames");
     let conventions_started = Instant::now();
     let compiled_conventions = compile_conventions(
         &convention_files,
@@ -784,6 +788,27 @@ fn run_finalize_pipeline(
         &ConventionCompileInput {
             assigned_hostnames: assigned_hostnames.clone(),
             platform_csp_sources: platform_csp_sources(&serving)?,
+            placement_enabled: input
+                .body
+                .get("placement_enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            production_hostnames: hostname_list(&input.body, "routing_production_hostnames"),
+            // PUBLIC paths only: a private file answers no request, so it
+            // cannot be the published file an unforced rule yields to.
+            manifest_paths: public_set.clone(),
+            // The Space's own routing rules. They are not staged content, so
+            // they arrive on the body. Each SECTION is a raw `Value` the
+            // compiler reads and reports rule by rule, so a bad rule keeps its
+            // diagnostic; only a `routing_overlay` that is not an object at all
+            // fails here, and it compiles as absent with nothing said about it.
+            // The control plane sends this key through a zod schema that
+            // refuses that shape, so the silent branch is unreachable.
+            overlay_routing: input
+                .body
+                .get("routing_overlay")
+                .cloned()
+                .and_then(|overlay| serde_json::from_value::<OverlayRouting>(overlay).ok()),
         },
         &mut diagnostics,
     )?;
@@ -810,7 +835,14 @@ fn run_finalize_pipeline(
             }
         }
     }
-    let routing_summary = compiled_conventions.routing;
+    // The counts, plus what placement decided. Both extra keys are omitted
+    // when placement is off, so a placement-free build writes the metadata it
+    // always wrote.
+    let routing_summary = routing_metadata(
+        &compiled_conventions.routing,
+        &compiled_conventions.edge_rules,
+        &compiled_conventions.routing_placement,
+    );
     let redirects_exact = compiled_conventions.redirects_exact.unwrap_or_default();
     let redirects_pattern = compiled_conventions.redirects_pattern.unwrap_or_default();
     let mut headers_exact = compiled_conventions.headers_exact.unwrap_or_default();
@@ -1103,6 +1135,32 @@ fn run_finalize_pipeline(
         delta,
         telemetry,
     })
+}
+
+/// The version's `routing` metadata block: the compiled counts, and — only
+/// when placement ran — the provider rules the edge-placed half compiles to
+/// plus every rule's verdict.
+///
+/// The control plane reads both off the finalize response: it reconciles
+/// `edgeRules` onto the edge and reports `placement` back to the author, whose
+/// splat redirect would otherwise just be missing with no explanation. Serving
+/// reads neither — the compiled rule already carries its own `placement`
+/// marker (`access::serving_rule_value`).
+fn routing_metadata(
+    summary: &ConventionRoutingSummary,
+    edge_rules: &[EdgeRuleSpec],
+    placement: &[PlacementReportEntry],
+) -> Value {
+    let Value::Object(mut block) = json!(summary) else {
+        return json!(summary);
+    };
+    if !edge_rules.is_empty() {
+        block.insert("edgeRules".into(), json!(edge_rules));
+    }
+    if !placement.is_empty() {
+        block.insert("placement".into(), json!(placement));
+    }
+    Value::Object(block)
 }
 
 /// Folds everything outside the file set that decides what a URL answers.
@@ -1475,6 +1533,22 @@ fn resolve_template_substitution(
         variable_digests: prepared.dependencies,
         system_variable_dependencies: prepared.system_dependencies,
     })
+}
+
+/// A hostname list off the finalize body. Absent, not an array, or carrying
+/// non-strings all read the same: no hostnames. Only the control plane knows
+/// which hostnames a version answers on, so an unstated list states nothing.
+fn hostname_list(body: &Value, field: &str) -> Vec<String> {
+    body.get(field)
+        .and_then(Value::as_array)
+        .map(|hostnames| {
+            hostnames
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The platform origins the control plane resolved for this publish, keyed by
@@ -2724,6 +2798,45 @@ mod tests {
                 json!({"path":"/probe.txt","expected_statuses":[302,401,403,404]})
             );
         }
+    }
+
+    #[test]
+    fn public_readiness_keeps_the_origin_answer_reachable_for_an_edge_placed_rule() {
+        // Forced, because an unforced rule whose source is a published file
+        // never leaves the origin — and the published file underneath is
+        // exactly what makes the two answers differ.
+        let fixture = |placement_enabled: bool| {
+            let (_temp, private, output) = finalize_fixture(
+                &[
+                    ("probe.txt", b"probe"),
+                    ("_redirects", b"/probe.txt /new 301!"),
+                ],
+                json!({"mode":"website"}),
+                json!({
+                    "serving": {"config": {}},
+                    "placement_enabled": placement_enabled,
+                    "routing_production_hostnames": ["space.example.com"],
+                }),
+            );
+            output.unwrap();
+            finalized_readiness_target(&private)
+        };
+
+        // Placed: the origin's production rule table omits the rule, and the
+        // health probe can reach the box through a transport that never passes
+        // the edge, so BOTH answers are legitimate — the edge's 301 and the
+        // origin's own 200. A target that accepted only the 301 would fail a
+        // perfectly healthy version on that path.
+        assert_eq!(
+            fixture(true),
+            json!({"path":"/probe.txt","expected_statuses":[200,301,302,401,403]})
+        );
+        // Unplaced: the origin answers the redirect itself and nothing else,
+        // so 200 is not reachable and must not be accepted.
+        assert_eq!(
+            fixture(false),
+            json!({"path":"/probe.txt","expected_statuses":[301,302,401,403]})
+        );
     }
 
     #[test]

@@ -3,14 +3,22 @@
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::sync::OnceLock;
 use unicode_normalization::UnicodeNormalization;
 
 mod headers;
+pub mod placement;
+#[cfg(test)]
+mod placement_tests;
 mod redirects;
 
 use headers::compile_headers;
+pub use placement::{
+    place, placement_report, EdgeRuleSpec, Placement, PlacementInput, PlacementReportEntry,
+};
 use redirects::compile_redirects;
 
 const REDIRECT_STATUSES: &[u16] = &[200, 301, 302, 303, 307, 308, 404];
@@ -49,6 +57,27 @@ pub struct RoutingInput {
     /// file the publisher actually has. Absent means the canonical `sf.jsonc`.
     #[serde(default)]
     pub config_path: Option<String>,
+    /// The Space overlay's own routing sections — what the dashboard wrote,
+    /// never the file's rules and never the two already merged. They compile
+    /// ahead of every file rule, which is what makes a dashboard rule an
+    /// override rather than a suggestion.
+    #[serde(default)]
+    pub overlay_routing: Option<OverlayRouting>,
+    /// The placement feature flag, off unless the finalize asks for it. False
+    /// places nothing, so the compiled artifact is what it was before
+    /// placement existed. See [`PlacementInput::enabled`].
+    #[serde(default)]
+    pub placement_enabled: bool,
+    /// **Production hostnames only**, for [`PlacementInput::hostnames`]. Never
+    /// `assigned_hostnames`: that list also carries version, immutable and
+    /// branch hostnames, which serve other content and keep the full runtime
+    /// ruleset. Empty places nothing.
+    #[serde(default)]
+    pub production_hostnames: Vec<String>,
+    /// The version's published file paths, for [`PlacementInput::manifest_paths`]:
+    /// manifest-relative, no leading slash.
+    #[serde(default)]
+    pub manifest_paths: BTreeSet<String>,
 }
 
 /// Where a `sf.jsonc` key is written. Merge diagnostics carry the line the
@@ -75,6 +104,49 @@ pub struct ConfigRouting {
     /// `sf.jsonc` points at the rule instead of at the top of the file.
     #[serde(default)]
     pub locations: BTreeMap<String, RuleLocation>,
+}
+
+/// The Space overlay's three routing sections, exactly as the overlay states
+/// them.
+///
+/// Entries stay `Value` rather than being typed here: the strict grammar is
+/// what judges a rule, so a malformed overlay entry earns the same diagnostic
+/// a malformed `sf.jsonc` entry does instead of being silently dropped by
+/// serde before anyone can report it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OverlayRouting {
+    #[serde(default)]
+    pub redirects: Option<Value>,
+    #[serde(default)]
+    pub rewrites: Option<Value>,
+    #[serde(default)]
+    pub headers: Option<Value>,
+}
+
+impl OverlayRouting {
+    /// Whether the overlay states any routing at all. An overlay that declares
+    /// none is the common case and costs the compile nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.redirects.is_none() && self.rewrites.is_none() && self.headers.is_none()
+    }
+
+    /// The sections as the section collectors read them: one object carrying
+    /// only the keys the overlay actually declared.
+    #[must_use]
+    pub fn sections(&self) -> Map<String, Value> {
+        let mut root = Map::new();
+        for (key, value) in [
+            ("redirects", self.redirects.as_ref()),
+            ("rewrites", self.rewrites.as_ref()),
+            ("headers", self.headers.as_ref()),
+        ] {
+            if let Some(value) = value {
+                root.insert(key.into(), value.clone());
+            }
+        }
+        root
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +229,16 @@ pub struct RoutingCompilation {
     pub diagnostics: Vec<RoutingDiagnostic>,
     pub stats: RoutingStats,
     pub sanitized_headers: Option<String>,
+    /// The provider rules the edge-placed rules compile to. Empty — and
+    /// omitted from the artifact — whenever placement is off, which is every
+    /// compile that does not ask for it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_rules: Vec<EdgeRuleSpec>,
+    /// Every judged rule's verdict — where it runs and, at the origin, why it
+    /// could not move. Empty, and omitted, whenever placement is off: an
+    /// unjudged rule has no verdict to report.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub placement: Vec<PlacementReportEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,6 +294,11 @@ pub struct RedirectRule {
     /// republish; the compiled artifact never bakes a plan verdict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_gated: Option<&'static str>,
+    /// Where this rule runs, once the placement pass has judged it, and the
+    /// reason code when the edge could not carry it. Absent means placement
+    /// never ran for this artifact, which is the origin serving everything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<Placement>,
     /// Which authoring lane declared this rule. This is finalizer provenance,
     /// not part of the serving artifact: both lanes compile to the same
     /// canonical redirect shape and the runtime must not branch on authorship.
@@ -238,6 +325,9 @@ pub struct HeaderRule {
     /// one request, the file's value is the one that ships.
     #[serde(skip_serializing_if = "is_file_origin")]
     pub origin: &'static str,
+    /// Where this rule runs; see [`RedirectRule::placement`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<Placement>,
 }
 
 fn is_file_origin(origin: &&'static str) -> bool {
@@ -601,6 +691,7 @@ pub fn compile_config_header(
             .collect(),
         operations,
         origin: "config",
+        placement: None,
     };
     // A rejected key costs that key, not the rule.
     ConfigRuleCompilation {
@@ -609,36 +700,75 @@ pub fn compile_config_header(
     }
 }
 
-/// The merge: `_redirects` / `_headers` rules first, `sf.jsonc` rules appended.
+/// The merge: overlay rules first, then `_redirects` / `_headers`, then
+/// `sf.jsonc`.
 ///
-/// The merged redirect list is every `_redirects` rule in file order, then every
-/// `sf.jsonc` `redirects` entry, then every `sf.jsonc` `rewrites` entry.
-/// Redirects are first-match-wins, so a file rule is always asked first and
-/// `sf.jsonc` can only add behavior where the files are silent.
+/// The merged redirect list is every Space-overlay rule, then every
+/// `_redirects` rule in file order, then every `sf.jsonc` `redirects` entry,
+/// then every `sf.jsonc` `rewrites` entry. Redirects are first-match-wins, so
+/// the order IS the precedence: the dashboard's rule answers ahead of anything
+/// the version committed — that is what makes it an override — while the two
+/// committed lanes keep the order they have always had, `_redirects` asked
+/// first and `sf.jsonc` adding behavior where the files are silent.
 ///
-/// Headers accumulate — every matching rule applies — so config rules carry
-/// `origin: "config"`, and both consumers
+/// Headers accumulate — every matching rule applies — so each rule carries the
+/// lane that wrote it, and both consumers
 /// (`_stattic_apply_header_operations` in runtime/engine/runtime/headers.php,
-/// `headersForRequest` in packages/routing/src/match.ts) skip a config `set` for
-/// a name a file rule already set. Repeats within a lane still accumulate, which
-/// is what keeps repeated `Set-Cookie` entries working.
+/// `headersForRequest` in packages/routing/src/match.ts) resolve a clash on one
+/// header name by lane precedence: overlay beats file beats config. Repeats
+/// within a lane still accumulate, which is what keeps repeated `Set-Cookie`
+/// entries working.
 pub fn merge_config_routing(
     file_redirects: Vec<RedirectRule>,
     file_headers: Vec<HeaderRule>,
+    overlay: &ConfigRouting,
     config: &ConfigRouting,
     config_file: &str,
     assigned_hostnames: &[String],
 ) -> MergedRouting {
-    let mut merged = MergedRouting {
-        redirects: file_redirects,
-        headers: file_headers,
-        diagnostics: Vec::new(),
-    };
-    let file_redirect_count = merged.redirects.len();
-    let address = ConfigAddress {
-        file: config_file,
-        locations: &config.locations,
-    };
+    let mut merged = MergedRouting::default();
+    // The overlay lane compiles into an empty list: nothing precedes it, so it
+    // is never shadowed and its rules are asked first.
+    push_config_lane(
+        &mut merged,
+        overlay,
+        ConfigAddress {
+            file: crate::config::strict::OVERLAY_ROUTING_FILE,
+            locations: &overlay.locations,
+        },
+        "overlay",
+        assigned_hostnames,
+        0..0,
+    );
+    let file_redirects_from = merged.redirects.len();
+    merged.redirects.extend(file_redirects);
+    let file_redirect_range = file_redirects_from..merged.redirects.len();
+    merged.headers.extend(file_headers);
+    push_config_lane(
+        &mut merged,
+        config,
+        ConfigAddress {
+            file: config_file,
+            locations: &config.locations,
+        },
+        "config",
+        assigned_hostnames,
+        file_redirect_range,
+    );
+    merged
+}
+
+/// One authoring lane's rules, compiled and appended in the order they were
+/// written. `file_redirects` is where the `_redirects` rules already sit in the
+/// merged list, which is the only slice a shadowing warning may look at.
+fn push_config_lane(
+    merged: &mut MergedRouting,
+    lane: &ConfigRouting,
+    address: ConfigAddress<'_>,
+    origin: &'static str,
+    assigned_hostnames: &[String],
+    file_redirects: Range<usize>,
+) {
     let push_redirect = |merged: &mut MergedRouting,
                          entry_path: &str,
                          deferred: bool,
@@ -653,13 +783,14 @@ pub fn merge_config_routing(
                 deferred,
             );
         }
-        let Some(rule) = compiled.rule else {
+        let Some(mut rule) = compiled.rule else {
             return;
         };
+        rule.origin = origin;
         // Shadowing is exact-equality only: same compiled source matcher, no
         // glob-overlap guessing, and a conditional file rule is not a shadow —
         // warning about a rule that does run is worse than not warning.
-        let shadowed = merged.redirects[..file_redirect_count]
+        let shadowed = merged.redirects[file_redirects.clone()]
             .iter()
             .any(|file_rule| {
                 file_rule.source == rule.source
@@ -683,17 +814,21 @@ pub fn merge_config_routing(
         }
         merged.redirects.push(rule);
     };
-    for entry in &config.redirects {
-        let deferred = has_pending_variable_destination(&entry.destination);
+    // Nothing substitutes an overlay rule: it is stored JSON, not staged file
+    // text, so a `{{ vars.NAME }}` in it is a literal the publisher can see and
+    // fix now rather than a value the server still owes them.
+    let substituted = origin != "overlay";
+    for entry in &lane.redirects {
+        let deferred = substituted && has_pending_variable_destination(&entry.destination);
         let compiled = compile_config_redirect(entry, assigned_hostnames);
-        push_redirect(&mut merged, &entry.path, deferred, compiled);
+        push_redirect(merged, &entry.path, deferred, compiled);
     }
-    for entry in &config.rewrites {
-        let deferred = has_pending_variable_destination(&entry.destination);
+    for entry in &lane.rewrites {
+        let deferred = substituted && has_pending_variable_destination(&entry.destination);
         let compiled = compile_config_rewrite(entry, assigned_hostnames);
-        push_redirect(&mut merged, &entry.path, deferred, compiled);
+        push_redirect(merged, &entry.path, deferred, compiled);
     }
-    for entry in &config.headers {
+    for entry in &lane.headers {
         let compiled = compile_config_header(&entry.source, &entry.headers);
         for issue in &compiled.issues {
             address.diagnostic(
@@ -705,11 +840,11 @@ pub fn merge_config_routing(
                 false,
             );
         }
-        if let Some(rule) = compiled.rule {
+        if let Some(mut rule) = compiled.rule {
+            rule.origin = origin;
             merged.headers.push(rule);
         }
     }
-    merged
 }
 
 /// Whether a matching file rule ends the request, or merely gets first refusal.
@@ -771,7 +906,7 @@ impl ConfigAddress<'_> {
 /// `$.redirects[2].status` -> `$.redirects[2]`: the entry a key belongs to,
 /// which the document always has a location for even when the key itself is
 /// absent (a defaulted status, a missing destination).
-fn entry_path(path: &str) -> &str {
+pub(crate) fn entry_path(path: &str) -> &str {
     path.rfind(']')
         .map(|end| &path[..=end])
         .filter(|entry| entry.len() < path.len())
@@ -826,6 +961,14 @@ pub fn compile_routing_files(input: &RoutingInput) -> RoutingCompilation {
         None => (ConfigRouting::default(), Vec::new()),
         Some(source) => crate::config::strict::routing_sections(source),
     };
+    let (overlay, overlay_issues) = match input
+        .overlay_routing
+        .as_ref()
+        .filter(|overlay| !overlay.is_empty())
+    {
+        None => (ConfigRouting::default(), Vec::new()),
+        Some(overlay) => crate::config::strict::overlay_routing_sections(overlay),
+    };
     let file_redirects = compile_redirects(input, &mut diagnostics);
     let file_headers = compile_headers(&input.headers, &mut diagnostics);
     // The sanitized `_headers` file is the file lane written back. A config
@@ -838,32 +981,54 @@ pub fn compile_routing_files(input: &RoutingInput) -> RoutingCompilation {
         .as_deref()
         .filter(|path| !path.is_empty())
         .unwrap_or(crate::protocol::CONFIG_CANONICAL_FILE);
-    for issue in config_issues {
-        diagnostic(
-            &mut diagnostics,
-            config_file,
-            issue.line,
-            issue.severity,
-            config_issue_code(&issue.code),
-            &issue.message,
-            &issue.path,
-        );
+    for (file, issues) in [
+        (crate::config::strict::OVERLAY_ROUTING_FILE, overlay_issues),
+        (config_file, config_issues),
+    ] {
+        for issue in issues {
+            diagnostic(
+                &mut diagnostics,
+                file,
+                issue.line,
+                issue.severity,
+                config_issue_code(&issue.code),
+                &issue.message,
+                &issue.path,
+            );
+        }
     }
-    let merged = merge_config_routing(
+    let mut merged = merge_config_routing(
         file_redirects,
         file_headers,
+        &overlay,
         &config,
         config_file,
         &input.assigned_hostnames,
     );
-    let (mut redirects, headers) = (merged.redirects, merged.headers);
     // Plan gating is an artifact-level fact, not a per-publish verdict: the
     // origin resolves the team's live entitlement at request time.
-    for rule in &mut redirects {
+    for rule in &mut merged.redirects {
         if rule.action == "proxy" {
             rule.plan_gated = Some("external_proxy");
         }
     }
+    // Placement runs after the merge, on the first-match-ordered list it
+    // produced. All three facts come from the caller, and every one of them can
+    // turn placement off by itself: the flag, the version's manifest, and the
+    // PRODUCTION hostname set. That last one is never `assigned_hostnames` —
+    // that list is what a rule source may legally name, version, immutable and
+    // branch hostnames included, and those serve other content, so scoping edge
+    // rules onto them would take rules away from preview hosts (spec §4).
+    let edge_rules = place(
+        &mut merged,
+        &PlacementInput {
+            manifest_paths: &input.manifest_paths,
+            hostnames: &input.production_hostnames,
+            enabled: input.placement_enabled,
+        },
+    );
+    let placement = placement_report(&merged, &edge_rules);
+    let (redirects, headers) = (merged.redirects, merged.headers);
     diagnostics.extend(merged.diagnostics);
     // Limits count what the version actually serves, so they run after the merge.
     add_limit_diagnostics(
@@ -892,6 +1057,8 @@ pub fn compile_routing_files(input: &RoutingInput) -> RoutingCompilation {
         headers,
         sanitized_headers,
         diagnostics,
+        edge_rules,
+        placement,
     }
 }
 
@@ -1320,6 +1487,8 @@ fn cdn_headers() -> &'static BTreeSet<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -1504,6 +1673,135 @@ mod tests {
                 "redirect_shadowed_by_file",
                 "$.redirects[0].source"
             )]
+        );
+    }
+
+    /// The Space's own rules answer first. Redirects are first-match-wins, so
+    /// the order IS the override: a dashboard rule at a source the version also
+    /// claims has to be asked before either file lane, or saving it in the
+    /// dashboard would change nothing. It is never shadowed for the same
+    /// reason, and it carries its lane all the way through placement — which is
+    /// how the API tells the row apart from the ones the version shipped.
+    #[test]
+    fn overlay_rules_run_ahead_of_both_file_lanes_and_stay_named_overlay() {
+        let result = compile_routing_files(&RoutingInput {
+            redirects: "/old /file 301\n".into(),
+            config_source: Some(
+                r#"{ "redirects": [{ "source": "/old", "destination": "/config" }] }"#.into(),
+            ),
+            overlay_routing: Some(OverlayRouting {
+                redirects: Some(
+                    json!([{ "source": "/old", "destination": "/dashboard", "status": 307 }]),
+                ),
+                ..OverlayRouting::default()
+            }),
+            placement_enabled: true,
+            production_hostnames: vec!["example.com".into()],
+            ..RoutingInput::default()
+        });
+
+        assert_eq!(
+            result
+                .redirects
+                .iter()
+                .map(|rule| (rule.destination.as_str(), rule.status, rule.origin))
+                .collect::<Vec<_>>(),
+            vec![
+                ("/dashboard", 307, "overlay"),
+                ("/file", 301, "file"),
+                ("/config", 302, "config"),
+            ]
+        );
+        // Placement judges the merged list in that same order, and the edge
+        // rows it produces carry the lane the control plane reports.
+        assert_eq!(
+            result
+                .placement
+                .iter()
+                .map(|entry| entry.origin.as_str())
+                .collect::<Vec<_>>(),
+            vec!["overlay", "file", "config"]
+        );
+        assert_eq!(
+            result.edge_rules.first().map(|spec| spec.source.as_str()),
+            Some("overlay")
+        );
+        // Only the `sf.jsonc` rule is shadowed. The overlay rule is the one
+        // doing the shadowing, so warning about it would be backwards.
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .map(|item| (item.file.as_str(), item.code))
+                .collect::<Vec<_>>(),
+            vec![("sf.jsonc", "redirect_shadowed_by_file")]
+        );
+    }
+
+    /// An overlay rule has no file and no byte offset, so it is addressed by
+    /// the row it is: `sf.overlay`, the 1-based position in its own list, and
+    /// the same JSON path the file lane uses under an `overlay.` root. The
+    /// codes are the file lane's — a rule refused in `sf.jsonc` is refused in
+    /// the dashboard, with the same words — and one bad rule costs that rule,
+    /// not the list.
+    ///
+    /// Every class of problem lands on the ROW, including the two that are
+    /// reported about a key rather than a rule: a key the grammar does not
+    /// know, and a key with the wrong type. Neither has a position of its own,
+    /// and "line 1" would send the dashboard to the wrong row.
+    #[test]
+    fn an_invalid_overlay_rule_is_addressed_at_the_row_the_dashboard_owns() {
+        let result = compile_routing_files(&RoutingInput {
+            overlay_routing: Some(OverlayRouting {
+                redirects: Some(json!([
+                    { "source": "/keep", "destination": "/kept" },
+                    { "source": "/moved", "destination": "/elsewhere.html", "status": 200 },
+                    { "source": "/typo", "destination": "/fine", "stat": 301, "force": "yes" },
+                ])),
+                ..OverlayRouting::default()
+            }),
+            ..RoutingInput::default()
+        });
+
+        assert_eq!(
+            result
+                .redirects
+                .iter()
+                .map(|rule| rule.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/keep"]
+        );
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .map(|item| (
+                    item.file.as_str(),
+                    item.line,
+                    item.code,
+                    item.source.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "sf.overlay",
+                    3,
+                    "config_unknown_key",
+                    "overlay.redirects[2].stat"
+                ),
+                (
+                    "sf.overlay",
+                    3,
+                    "config_invalid",
+                    "overlay.redirects[2].force"
+                ),
+                (
+                    "sf.overlay",
+                    2,
+                    "redirect_status_use_rewrites",
+                    "overlay.redirects[1].status"
+                ),
+            ]
         );
     }
 

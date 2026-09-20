@@ -2,8 +2,6 @@
   "files": [
     "bin/stattic-runtime",
     "engine-manifest.json",
-    "engine/wordpress/space-users.php",
-    "engine/runtime/space-users.php",
     "engine/admin/api.php",
     "engine/admin/auth.php",
     "engine/admin/build-source.php",
@@ -20,7 +18,6 @@
     "engine/admin/upload.php",
     "engine/admin/zero-db.php",
     "engine/admin/storage.php",
-    "engine/entrypoints/space-users-session.php",
     "engine/entrypoints/blob.php",
     "engine/entrypoints/cron.php",
     "engine/entrypoints/content.php",
@@ -114,10 +111,6 @@
   ],
   "executables": ["bin/stattic-runtime"],
   "trees": [
-    {
-      "source": "wordpress/spacefast-identity",
-      "path": "wp-content/mu-plugins/spacefast-identity"
-    },
     {
       "source": "wordpress/zero-dashboard",
       "path": "wp-content/mu-plugins/zero-dashboard"

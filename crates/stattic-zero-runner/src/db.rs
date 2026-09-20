@@ -304,13 +304,10 @@ pub(crate) fn tenant_db_metadata(metadata: &EndpointDbMetadata) -> Result<Value,
                     } else {
                         "string"
                     });
-            let mut exposed = json!({ "name": logical_column, "type": column_type });
-            for key in ["nullable", "optional", "userReference", "defaultValue"] {
-                if let Some(value) = column.get(key) {
-                    exposed[key] = value.clone();
-                }
-            }
-            columns.insert(logical_column.clone(), exposed);
+            columns.insert(
+                logical_column.clone(),
+                json!({ "name": logical_column, "type": column_type }),
+            );
         }
         let indexes = table.indexes.cloned().unwrap_or_default();
         tables.insert(
@@ -541,24 +538,7 @@ fn capability_filters(
     let mut params = Vec::with_capacity(filters.len());
     for filter in filters {
         let column = quote_mysql_identifier(table.column(&filter.field)?);
-        let optional = table
-            .columns
-            .get(&filter.field)
-            .and_then(|column| column.get("optional"))
-            .and_then(Value::as_bool)
-            == Some(true);
         if filter.value.is_null() {
-            if optional {
-                clauses.push(match filter.op {
-                    DbCapabilityComparison::Eq | DbCapabilityComparison::Lte => {
-                        format!("{column} IS NULL")
-                    }
-                    DbCapabilityComparison::Gt => format!("{column} IS NOT NULL"),
-                    DbCapabilityComparison::Gte => "1 = 1".to_string(),
-                    DbCapabilityComparison::Lt => "0 = 1".to_string(),
-                });
-                continue;
-            }
             if matches!(filter.op, DbCapabilityComparison::Eq) {
                 clauses.push(format!("{column} IS NULL"));
                 continue;
@@ -574,18 +554,7 @@ fn capability_filters(
             DbCapabilityComparison::Lt => "<",
             DbCapabilityComparison::Lte => "<=",
         };
-        clauses.push(
-            if optional
-                && matches!(
-                    filter.op,
-                    DbCapabilityComparison::Lt | DbCapabilityComparison::Lte
-                )
-            {
-                format!("({column} {operator} ? OR {column} IS NULL)")
-            } else {
-                format!("{column} {operator} ?")
-            },
-        );
+        clauses.push(format!("{column} {operator} ?"));
         params.push(filter.value);
     }
     Ok((

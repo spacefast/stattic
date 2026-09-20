@@ -682,10 +682,6 @@ test("host classes: canonical redirects, and a version-pinned host serves its ve
   );
   // No version was selected, so the response names none.
   expect(canonical.headers.get("x-spacefast-version")).toBeNull();
-  // A 308 keeps the method, so a POST is redirected too, never answered 405.
-  const posted = await get(rt, WWW, "/blog/post.html?from=www", { method: "POST" });
-  expect(posted.status).toBe(308);
-  expect(posted.headers.get("location")).toBe("https://site.test/blog/post.html?from=www");
 
   const renamed = await get(rt, "renamed.test", "/blog/post.html?from=old&view=full");
   expect(renamed.status).toBe(307);

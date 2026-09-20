@@ -637,18 +637,15 @@ fn zero_endpoint_db_metadata(input: Option<&Value>, schema_hash: Option<&String>
                             .and_then(|object| object.get("type"))
                             .and_then(Value::as_str)
                             .unwrap_or(if column_name == "id" { "id" } else { "string" });
-                        let mut metadata = json!({
-                            "name": column_name,
-                            "physicalName": physical_column,
-                            "quotedName": quote_mysql_identifier(physical_column),
-                            "type": column_type,
-                        });
-                        for key in ["nullable", "optional", "userReference", "defaultValue"] {
-                            if let Some(value) = raw_column.get(key) {
-                                metadata[key] = value.clone();
-                            }
-                        }
-                        columns.insert(column_name.clone(), metadata);
+                        columns.insert(
+                            column_name.clone(),
+                            json!({
+                                "name": column_name,
+                                "physicalName": physical_column,
+                                "quotedName": quote_mysql_identifier(physical_column),
+                                "type": column_type,
+                            }),
+                        );
                     }
                 }
                 let mut indexes = serde_json::Map::new();
@@ -691,13 +688,6 @@ fn zero_endpoint_db_metadata(input: Option<&Value>, schema_hash: Option<&String>
     })
 }
 
-fn zero_db_column_sql_type(column: &Value) -> &'static str {
-    match column.get("type").and_then(Value::as_str) {
-        Some("number") => "DOUBLE",
-        _ => "TEXT",
-    }
-}
-
 fn zero_db_migration_statements(db: &Value) -> Vec<String> {
     let Some(tables) = db.get("tables").and_then(Value::as_object) else {
         return Vec::new();
@@ -725,11 +715,7 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
                         quote_mysql_identifier(column_physical)
                     )
                 } else {
-                    format!(
-                        "{} {} NULL",
-                        quote_mysql_identifier(column_physical),
-                        zero_db_column_sql_type(column)
-                    )
+                    format!("{} TEXT NULL", quote_mysql_identifier(column_physical))
                 };
                 column_definitions.push(definition);
             }
@@ -754,31 +740,6 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
             quote_mysql_identifier(physical_name),
             column_definitions.join(", ")
         ));
-        if let Some(columns) = columns {
-            for column in columns.values() {
-                let Some(physical) = column.get("physicalName").and_then(Value::as_str) else {
-                    continue;
-                };
-                let literal = match column.get("defaultValue") {
-                    Some(Value::String(value)) => {
-                        let bytes = value
-                            .as_bytes()
-                            .iter()
-                            .map(|byte| format!("{byte:02x}"))
-                            .collect::<String>();
-                        format!("CONVERT(X'{bytes}' USING utf8mb4)")
-                    }
-                    Some(Value::Bool(value)) => if *value { "1" } else { "0" }.to_string(),
-                    Some(Value::Number(value)) => value.to_string(),
-                    _ => continue,
-                };
-                let name = quote_mysql_identifier(physical);
-                statements.push(format!(
-                    "UPDATE {} SET {name} = {literal} WHERE {name} IS NULL",
-                    quote_mysql_identifier(physical_name)
-                ));
-            }
-        }
     }
     if let Some(operations) = db.get("migrationOperations").and_then(Value::as_array) {
         for operation in operations {
@@ -818,13 +779,9 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
                     continue;
                 }
                 statements.push(format!(
-                    "ALTER TABLE {} ADD COLUMN {} {} NULL",
+                    "ALTER TABLE {} ADD COLUMN {} TEXT NULL",
                     quote_mysql_identifier(physical_name),
-                    quote_mysql_identifier(column_physical),
-                    columns
-                        .and_then(|columns| columns.get(column_name))
-                        .map(zero_db_column_sql_type)
-                        .unwrap_or("TEXT")
+                    quote_mysql_identifier(column_physical)
                 ));
                 continue;
             }
@@ -846,16 +803,13 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
                 continue;
             };
             let columns = table.get("columns").and_then(Value::as_object);
-            let unique = operation.get("unique").and_then(Value::as_bool) == Some(true);
             let mut traversal_names: Vec<&str> =
                 column_names.iter().filter_map(Value::as_str).collect();
-            if !unique {
-                for managed in ["createdAt", "id"] {
-                    if columns.is_some_and(|columns| columns.contains_key(managed))
-                        && !traversal_names.contains(&managed)
-                    {
-                        traversal_names.push(managed);
-                    }
+            for managed in ["createdAt", "id"] {
+                if columns.is_some_and(|columns| columns.contains_key(managed))
+                    && !traversal_names.contains(&managed)
+                {
+                    traversal_names.push(managed);
                 }
             }
             let physical_columns: Vec<String> = traversal_names
@@ -865,10 +819,7 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
                         .and_then(|columns| columns.get(*name))
                         .and_then(|column| column.get("physicalName"))
                         .and_then(Value::as_str)?;
-                    let column_type = columns
-                        .and_then(|columns| columns.get(*name))
-                        .map(zero_db_column_sql_type);
-                    Some(if *name == "id" || matches!(column_type, Some("DOUBLE")) {
+                    Some(if *name == "id" {
                         quote_mysql_identifier(physical)
                     } else {
                         format!("{}(191)", quote_mysql_identifier(physical))
@@ -879,8 +830,7 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
                 continue;
             }
             statements.push(format!(
-                "CREATE {}INDEX {} ON {} ({})",
-                if unique { "UNIQUE " } else { "" },
+                "CREATE INDEX {} ON {} ({})",
                 quote_mysql_identifier(index_name),
                 quote_mysql_identifier(physical_name),
                 physical_columns.join(", ")
@@ -898,9 +848,7 @@ fn zero_migration_statement_sort_key(statement: &str) -> String {
         1
     } else if statement.starts_with("DROP INDEX ") {
         2
-    } else if statement.starts_with("CREATE INDEX ")
-        || statement.starts_with("CREATE UNIQUE INDEX ")
-    {
+    } else if statement.starts_with("CREATE INDEX ") {
         3
     } else {
         4

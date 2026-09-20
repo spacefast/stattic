@@ -31,7 +31,6 @@ const manifest = JSON.parse(
 // Every entry carries its reason: adding a path here is the one way to silence
 // this guard, and it leaves a visible diff a reviewer reads.
 const NOT_SHIPPED = {
-  "identity/": "pinned plugin distribution and build inputs, installed through its extracted tree",
   "bootstrap-plugin/":
     "signed box bootstrap plugin source, packaged only in the paired bootstrap zip",
   "browser-specs/": "real-browser runtime tests, never installed on a site",
@@ -59,8 +58,6 @@ const BUILD_ARTIFACTS = new Set([
 // file by installer.php from the payload it extracts. Pin the shipped set here
 // so a new tree is a reviewed diff, with the script that produces each.
 const EXPECTED_TREES = {
-  // runtime/identity/build.ts verifies and extracts the pinned Identity distribution.
-  "wordpress/spacefast-identity": "wp-content/mu-plugins/spacefast-identity",
   // zero/scripts/build.ts (the vendored Zero dashboard plugin)
   "wordpress/zero-dashboard": "wp-content/mu-plugins/zero-dashboard",
 } as const;
@@ -68,13 +65,7 @@ const EXPECTED_TREES = {
 // Generated roots: present after a build, absent in a fresh checkout, so the
 // walk has to skip them either way — trees reconcile their manifest entries
 // instead. Turbo task metadata is build output the same way.
-const GENERATED_ROOTS = [
-  ".turbo",
-  "bin",
-  "engine/vendor",
-  "wordpress/spacefast-identity",
-  "wordpress/zero-dashboard",
-];
+const GENERATED_ROOTS = [".turbo", "bin", "engine/vendor", "wordpress/zero-dashboard"];
 
 // Walk the working tree, not Git's index, because the dev engine builder
 // packages the working tree too. An untracked PHP module must be covered before

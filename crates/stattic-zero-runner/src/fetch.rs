@@ -215,26 +215,7 @@ pub(crate) fn handle_fetch_frame(raw: &str) -> String {
     }
 }
 
-pub(crate) fn handle_fetch_frame_with_timeout(raw: &str, timeout: Duration) -> String {
-    match execute_fetch_frame_with_timeout(raw, timeout.min(fetch_timeout())) {
-        Ok(result) => json!({ "ok": true, "result": result }).to_string(),
-        Err(error) => error.refusal_json(),
-    }
-}
-
 fn execute_fetch_frame(raw: &str) -> Result<Value, FetchRefusal> {
-    execute_fetch_frame_with_timeout(raw, fetch_timeout())
-}
-
-fn execute_fetch_frame_with_timeout(raw: &str, timeout: Duration) -> Result<Value, FetchRefusal> {
-    if timeout.is_zero() {
-        return Err(FetchRefusal::new(
-            "zero_fetch_upstream_unavailable",
-            504,
-            "Zero action exceeded its request budget.",
-        ));
-    }
-
     if raw.len() > FETCH_FRAME_MAX_BYTES {
         return Err(FetchRefusal::payload_invalid(
             "The fetch request is too large.",
@@ -285,7 +266,7 @@ fn execute_fetch_frame_with_timeout(raw: &str, timeout: Duration) -> Result<Valu
     let agent = fetch_agent();
     let request = agent
         .configure_request(request)
-        .timeout_global(Some(timeout))
+        .timeout_global(Some(fetch_timeout()))
         .build();
     let mut response = agent.run(request).map_err(|_| {
         FetchRefusal::new(

@@ -381,7 +381,6 @@ function _stattic_spacefast_sdk_bootstrap(
     $loader = '(function(){' .
         'var root=window.Spacefast=window.Spacefast||{};' .
         $reviewReload .
-        (($serving['users']['enabled'] ?? false) === true ? _stattic_space_users_browser_script() : '') .
         $tagLoader .
         $collab .
         '})();';
@@ -884,40 +883,4 @@ function _stattic_send_spacefast_sdk_cors_headers(): void
     header('Access-Control-Allow-Headers: If-None-Match', false);
     header('Cross-Origin-Resource-Policy: cross-origin', false);
     header('Timing-Allow-Origin: *', false);
-}
-
-/** Tiny same-origin integration for pages without a bundler. */
-function _stattic_space_users_browser_script(): string
-{
-    return <<<'JS'
-root.users={
-  getCurrentUser:async function(){
-    var r=await fetch('/__zero/auth/user',{credentials:'same-origin',cache:'no-store',redirect:'error'});
-    if(!r.ok)throw new Error('Account verification failed ('+r.status+').');
-    var a=(await r.json()).data;
-    if(a===null)return null;
-    if(!a||a.provider!=='space-users'||!a.isAuthenticated||!/^usr_[a-f0-9]{64}$/.test(a.userId)||typeof a.displayName!=='string')throw new Error('Invalid account response.');
-    return {id:a.userId,displayName:a.displayName};
-  },
-  signInWithGoogle:function(options){return this.signIn('google',options);},
-  signInWithGravatar:function(options){return this.signIn('gravatar',options);},
-  signInWithSpacefast:function(options){return this.signIn('spacefast',options);},
-  signIn:function(provider,options){
-    if(!['google','gravatar','spacefast'].includes(provider))throw new Error('Choose a supported sign-in method.');
-    var back=new URL(options&&options.returnTo||location.href,location.href);
-    if(back.origin!==location.origin)throw new Error('Return to a page on this app.');
-    var url=new URL('/__zero/auth/start',location.origin);
-    url.searchParams.set('provider',provider);url.searchParams.set('returnTo',back.href);location.assign(url.href);
-  },
-  signOut:async function(){
-    var r=await fetch('/__zero/auth/sign-out',{method:'POST',credentials:'same-origin',redirect:'error'});
-    if(!r.ok)throw new Error('Sign-out failed. Try again.');
-  },
-  fetch:function(input,options){
-    var url=new URL(input,location.href);
-    if(url.origin!==location.origin)throw new Error('Authenticated requests must use this app origin.');
-    return fetch(url,Object.assign({},options,{credentials:'same-origin',redirect:'error'}));
-  }
-};
-JS;
 }

@@ -43,25 +43,6 @@ pub(crate) fn execute_endpoint_module(
     artifact: &EndpointArtifact,
     bytecode: &[u8],
 ) -> Result<RunnerResponse, RunnerResponse> {
-    let is_action = artifact.execution_mode == crate::artifacts::ExecutionMode::Action;
-    let action_deadline = is_action.then(|| Instant::now() + Duration::from_secs(5));
-    if is_action {
-        let body = base64::engine::general_purpose::STANDARD
-            .decode(&envelope.request.body_base64)
-            .unwrap_or_default();
-        let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        let args = payload
-            .get("args")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!([]));
-        if serde_json::to_vec(&args).unwrap_or_default().len() > 16 * 1024 {
-            return Err(error_response(
-                413,
-                "zero_request_body_too_large",
-                "Zero action arguments exceed 16 KiB.",
-            ));
-        }
-    }
     crate::db::rollback_open_transaction();
     let _execution_mode = ExecutionModeGuard::enter(artifact.execution_mode);
     // An action holds no invocation transaction: it reads the database between
@@ -82,11 +63,8 @@ pub(crate) fn execute_endpoint_module(
     let execution_interrupted = Arc::new(AtomicBool::new(false));
     let interrupt_state = Arc::clone(&execution_interrupted);
     runtime.set_interrupt_handler(Some(Box::new(move || {
-        let interrupted = if let Some(deadline) = action_deadline {
-            Instant::now() >= deadline
-        } else {
-            execution_clock.elapsed() > Duration::from_millis(JS_EXECUTION_TIMEOUT_MS)
-        };
+        let interrupted =
+            execution_clock.elapsed() > Duration::from_millis(JS_EXECUTION_TIMEOUT_MS);
         if interrupted {
             interrupt_state.store(true, Ordering::SeqCst);
         }
@@ -101,15 +79,11 @@ pub(crate) fn execute_endpoint_module(
         let js_error = |error: rquickjs::Error| {
             js_execution_error_response(
                 &error.to_string(),
-                if is_action {
-                    Duration::ZERO
-                } else {
-                    execution_clock.elapsed()
-                },
+                execution_clock.elapsed(),
                 &execution_interrupted,
             )
         };
-        install_globals(&ctx, envelope, artifact, action_deadline)?;
+        install_globals(&ctx, envelope, artifact)?;
         let module_load_started = Instant::now();
         let module = unsafe { Module::load(ctx.clone(), bytecode) }
             .map_err(|error| error_response(422, "zero_bytecode_invalid", &error.to_string()))?;
@@ -133,20 +107,6 @@ pub(crate) fn execute_endpoint_module(
         let mut headers = validate_response_headers(result.headers.unwrap_or_default(), status)
             .map_err(|error| error_response(502, error.code, error.message))?;
         let mut body = result.body.unwrap_or_default();
-        if is_action && body.len() > 48 * 1024 {
-            return Err(error_response(
-                502,
-                "zero_response_too_large",
-                "Zero action result exceeds 48 KiB.",
-            ));
-        }
-        if action_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(error_response(
-                504,
-                "zero_js_execution_timeout",
-                "Zero action exceeded 5 seconds.",
-            ));
-        }
         let mut body_base64 = result.body_base64;
         if let Some(image) = result.image {
             body_base64 = Some(render_response_image(
@@ -257,7 +217,6 @@ fn install_globals(
     ctx: &Ctx<'_>,
     envelope: &InvokeEnvelope,
     artifact: &EndpointArtifact,
-    action_deadline: Option<Instant>,
 ) -> Result<(), RunnerResponse> {
     let tenant_db = crate::db::tenant_db_metadata(&artifact.db)
         .map_err(crate::db::BrokerRefusal::runner_response)?;
@@ -302,15 +261,7 @@ fn install_globals(
         globals
             .set(
                 "__statticFetchHost",
-                Func::from(move |frame: String| -> String {
-                    match action_deadline {
-                        Some(deadline) => crate::fetch::handle_fetch_frame_with_timeout(
-                            &frame,
-                            deadline.saturating_duration_since(Instant::now()),
-                        ),
-                        None => crate::fetch::handle_fetch_frame(&frame),
-                    }
-                }),
+                Func::from(|frame: String| -> String { crate::fetch::handle_fetch_frame(&frame) }),
             )
             .map_err(|error| {
                 error_response(500, "zero_fetch_host_install_failed", &error.to_string())

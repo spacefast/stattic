@@ -75,7 +75,6 @@ function _stattic_storage_object_create(string $privateRoot, string $spaceId, ar
     if (!is_dir(_stattic_space_root($privateRoot, $spaceId))) {
         _stattic_problem_response(404, 'storage_unavailable', 'Storage is unavailable for this space.');
     }
-    $public = _stattic_uploads_request_public();
     $staged = _stattic_storage_stage_upload($privateRoot);
     if (($staged['ok'] ?? false) !== true) {
         if (($staged['reason'] ?? null) === 'too_large') {
@@ -108,7 +107,6 @@ function _stattic_storage_object_create(string $privateRoot, string $spaceId, ar
     }
     $id = bin2hex(random_bytes(16));
     $record = [
-        'public' => $public,
         'contentType' => $contentType,
         'createdAt' => gmdate('c'),
         'filename' => _stattic_uploads_request_filename(),
@@ -232,7 +230,6 @@ function _stattic_uploads_owner_object(string $id, array $record, string $readKe
 {
     return [
         'id' => $id,
-        'public' => $record['public'],
         'contentType' => $record['contentType'],
         'createdAt' => gmdate('Y-m-d\TH:i:s\Z', (int) strtotime($record['createdAt'])),
         // Omitted, never null: an object stored before names existed, or
@@ -243,20 +240,6 @@ function _stattic_uploads_owner_object(string $id, array $record, string $readKe
         'sha256' => $record['sha256'],
         // Path-relative and fresh at response time; the caller absolutizes
         // against whichever of the space's hostnames it is presenting.
-        'url' => $record['public']
-            ? STATTIC_UPLOADS_PUBLIC_URL_PREFIX . $id . '?k=' . $readKey
-            : '/storage/' . $id,
+        'url' => STATTIC_UPLOADS_PUBLIC_URL_PREFIX . $id . '?k=' . $readKey,
     ];
-}
-
-function _stattic_storage_object_read(string $privateRoot, string $spaceId, string $objectId): never
-{
-    $record = _stattic_uploads_get($privateRoot, $spaceId, $objectId);
-    if ($record === null) {
-        _stattic_problem_response(404, 'storage_object_not_found', 'Storage object not found.');
-    }
-    if ($record['filename'] !== null) {
-        header("Content-Disposition: attachment; filename*=UTF-8''" . rawurlencode($record['filename']));
-    }
-    _stattic_uploads_send($privateRoot, $spaceId, $record, 'GET', false);
 }

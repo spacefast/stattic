@@ -55,14 +55,7 @@ afterAll(() => {
   strict?.stop();
 });
 
-type Uploaded = {
-  id: string;
-  public: boolean;
-  contentType: string;
-  filename?: string;
-  size: number;
-  url: string;
-};
+type Uploaded = { id: string; contentType: string; filename?: string; size: number; url: string };
 
 // The owner projection: what the list answers with, and what the management
 // upload lane answers with, so one shape crosses that boundary.
@@ -81,11 +74,10 @@ async function upload(
   body: string,
   contentType = "text/plain",
   disposition?: string,
-  isPublic = true,
 ): Promise<Uploaded> {
   const headers = new Headers({ "content-type": contentType });
   if (disposition !== undefined) headers.set("content-disposition", disposition);
-  const response = await get(rt, HOST, `/storage?public=${isPublic}`, {
+  const response = await get(rt, HOST, "/storage", {
     method: "POST",
     headers: Object.fromEntries(headers),
     body,
@@ -161,14 +153,12 @@ test("the keyed visitor URL is the only public read, and a wrong key answers exa
 });
 
 test("/storage/<id> is the authenticated lane: read without a key, uploader-only delete, idempotent", async () => {
-  const object = await upload("authed bytes", "text/plain", undefined, false);
-  expect(object.public).toBe(false);
-  expect((await get(rt, HOST, `/__stattic/u/${object.id}?k=${keyOnDisk(rt)}`)).status).toBe(404);
+  const object = await upload("authed bytes");
   const read = await get(rt, HOST, `/storage/${object.id}`);
   expect(read.status).toBe(200);
   // The keyless URL is authenticated per request, so no shared cache may
-  // answer for it, including a browser cache after sign-out.
-  expect(read.headers.get("cache-control")).toBe("private, no-store");
+  // answer for it. The browser may keep its own copy of the immutable bytes.
+  expect(read.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
   expect(read.headers.get("a8c-edge-cache")).toBe("no-cache");
   expect(await read.text()).toBe("authed bytes");
 
@@ -284,16 +274,9 @@ test("the management upload lane stores an object for the space owner", async ()
   );
   expect(listed.objects.find((row) => row.id === object.id)).toEqual(object);
 
-  // Owner uploads default private; another visitor cannot read them.
-  expect((await get(rt, HOST, `/__stattic/u/${object.id}?k=${keyOnDisk(rt)}`)).status).toBe(404);
-  const read = await fetch(
-    `${rt.baseUrl}${runtimeHttpPath(`${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/storage/${object.id}`)}`,
-    {
-      headers: {
-        authorization: `Bearer ${managementToken("storage_read", { space_id: SPACE, storage_object_id: object.id })}`,
-      },
-    },
-  );
+  // Readable through the keyed public URL like any other object.
+  const url = new URL(object.url, `https://${HOST}`);
+  const read = await get(rt, HOST, `${url.pathname}${url.search}`);
   expect(read.status).toBe(200);
   expect(await read.text()).toBe("owner bytes");
 
@@ -419,19 +402,6 @@ test("an anonymous commenter session is the upload grant — budgeted, and only 
   });
   expect(uploaded.status).toBe(201);
   const object = (await uploaded.json()) as Uploaded;
-  expect(object.public).toBe(false);
-  expect(
-    (await get(strict, ANON_HOST, `/storage/${object.id}`, { headers: { cookie } })).status,
-  ).toBe(404);
-  expect(
-    (
-      await get(
-        strict,
-        ANON_HOST,
-        `/__stattic/u/${object.id}?k=${(await apiJson<{ key: string }>(strict, "GET", `${RUNTIME_HTTP_API_BASE}/storage/read-key`, "storage_read_key")).key}`,
-      )
-    ).status,
-  ).toBe(404);
   const record = JSON.parse(
     readFileSync(
       path.join(

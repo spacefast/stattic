@@ -49,15 +49,6 @@ declare(strict_types=1);
     ) {
         return;
     }
-    // One guard, not two: the hook installer ships with the content kernel
-    // (wordpress/space-users.php), so an identity tree without a loaded kernel
-    // must load neither. Two independent checks fataled mu-plugin loading on
-    // `spacefast_space_users_install_hooks()` for that release shape.
-    $identity = $releaseReal . '/wordpress/spacefast-identity/spacefast-identity.php';
-    if (is_file($identity) && function_exists('spacefast_space_users_install_hooks')) {
-        spacefast_space_users_install_hooks();
-        require_once $identity;
-    }
     $contentModelRoot = $installRoot . '/storage/spaces/' . $spaceId . '/content-model';
     $pinnedRevision = $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] ?? null;
     $contentModelPointer = is_string($pinnedRevision)

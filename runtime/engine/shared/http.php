@@ -75,7 +75,8 @@ function _stattic_http_failure(string $error): array
 
 // $request: url, method, headers, body|body_stream+body_size, connect_timeout,
 // timeout, connect_timeout_ms, timeout_ms, redirects (0 = never follow), schemes, resolve (CURLOPT_RESOLVE
-// pins), max_body_bytes, sink ('buffer'|'output'|callable) and on_headers.
+// pins), proxy (false = refuse the ambient one), max_body_bytes, sink
+// ('buffer'|'output'|callable) and on_headers.
 // on_headers(int $status, array $headerPairs) fires once per non-1xx header
 // block, before any body byte; returning false aborts the transfer, as does a
 // sink callable returning false.
@@ -134,6 +135,19 @@ function _stattic_http_configure(\CurlHandle $handle, array $request, object $st
     $resolve = is_array($request['resolve'] ?? null) ? array_values(array_map('strval', $request['resolve'])) : [];
     if ($resolve !== []) {
         $options[CURLOPT_RESOLVE] = $resolve;
+    }
+
+    // A caller that pinned its connect addresses must also refuse the ambient
+    // proxy, or the pin decides nothing: with `HTTPS_PROXY` set, libcurl sends
+    // `CONNECT host:port` and the PROXY resolves the name for itself, so the
+    // peer is whatever it picks. Opt-in rather than default, because the
+    // platform's own callers (provider APIs, callbacks, object storage) legitimately
+    // reach their upstreams through a configured proxy on some deployments.
+    // Emptying CURLOPT_PROXY is what clears an ambient one; NOPROXY covers the
+    // per-host env forms libcurl also reads.
+    if (($request['proxy'] ?? null) === false) {
+        $options[CURLOPT_PROXY] = '';
+        $options[CURLOPT_NOPROXY] = '*';
     }
 
     $onHeaders = is_callable($request['on_headers'] ?? null) ? $request['on_headers'] : null;

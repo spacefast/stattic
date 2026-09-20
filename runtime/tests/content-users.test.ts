@@ -331,12 +331,6 @@ echo json_encode([
       "zero/wp-users-get",
       "zero/wp-users-create",
       "zero/wp-users-update",
-      "zero/wp-users-deletion-complete",
-      "zero/wp-users-account-list",
-      "zero/wp-users-account-get",
-      "zero/wp-users-sessions-list",
-      "zero/wp-users-sessions-revoke",
-      "zero/wp-users-suspend",
     ],
     refused: [],
   });

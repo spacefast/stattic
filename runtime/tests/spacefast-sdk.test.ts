@@ -210,23 +210,6 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   };
   // ONE SDK projection: the loader's config and the production tag module in
   // the same section. Nothing here names a second artifact.
-  accessConfig.users = {
-    enabled: true,
-    providers: {
-      google: { mode: "managed" },
-      gravatar: { enabled: true },
-      spacefast: { enabled: true },
-    },
-  };
-  accessConfig.usersProviderConfig = {
-    issuer: "https://api.spacefast.com/v1/auth",
-    clientId: "space-test",
-    googleStartUrl: "https://api.spacefast.com/v1/auth/space-users/spc_sdk/google/start",
-    gravatarStartUrl: "https://api.spacefast.com/v1/auth/space-users/spc_sdk/gravatar/start",
-    directGoogle: { clientId: "direct-test", clientSecret: "test-private-client-secret" },
-    availability: { google: { managed: true, direct: true }, gravatar: true, spacefast: true },
-    revision: "test-private-config",
-  };
   accessConfig.sdk = {
     revision: "sdk-public-1",
     config: { cast_api_base: "https://cast.example.test" },
@@ -279,29 +262,6 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
     },
   };
   Function("window", "document", body)(fakeWindow, fakeDocument);
-  const authConfig = await get(runtime, SITE, "/__zero/config");
-  expect(authConfig.status).toBe(200);
-  expect((await authConfig.json()).auth.signOutMethod).toBe("POST");
-  const assigned: string[] = [];
-  const browser = {
-    href: "https://sdk.site.test/app",
-    origin: "https://sdk.site.test",
-    assign: (url: string) => assigned.push(url),
-  };
-  Function(
-    "window",
-    "document",
-    "location",
-    body +
-      ";window.Spacefast.users.signInWithGoogle();window.Spacefast.users.signInWithGravatar();window.Spacefast.users.signInWithSpacefast();",
-  )(fakeWindow, fakeDocument, browser);
-  expect(assigned.map((url) => new URL(url).searchParams.get("provider"))).toEqual([
-    "google",
-    "gravatar",
-    "spacefast",
-  ]);
-  expect(assigned.every((url) => new URL(url).origin === browser.origin)).toBe(true);
-  expect(JSON.stringify(fakeWindow.Spacefast)).not.toContain("test-private-client-secret");
   expect(appended).toHaveLength(0);
   expect(fakeWindow.__embeddedTagLoaded).toBe(true);
   expect(response.headers.get("content-type")).toContain("application/javascript");

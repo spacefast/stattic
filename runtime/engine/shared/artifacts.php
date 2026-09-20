@@ -759,7 +759,6 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
         'version_id' => $versionId,
         'space_id' => $spaceId,
         'authorization' => _stattic_v4_authorization_projection($overlay),
-        'users' => is_array($overlay['users'] ?? null) ? $overlay['users'] : [],
         // Read straight off the overlay, not through the authorization
         // projection: that projection is null for a Space with no grants, which
         // is most of them, and egress scope must answer for those too.

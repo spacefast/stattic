@@ -145,17 +145,6 @@ test("a tombstoned space answers with the engine's page, never its own documents
   const perPrincipal = await get(rt, host, "/", { headers: { Accept: "text/html" } });
   expect(perPrincipal.status).toBe(402);
   expect(await perPrincipal.text()).toContain("This space is paused");
-
-  const archived = await tombstone("spc_pages_fault", { hostnames: [host], reason: "archived" });
-  expect(archived.status).toBe(200);
-  const archivedPage = await get(rt, host, "/");
-  expect(archivedPage.status).toBe(404);
-  expect(await archivedPage.text()).not.toContain("Acme home");
-  const restored = await tombstone("spc_pages_fault", { hostnames: [host], mode: "remove" });
-  expect(restored.status).toBe(200);
-  const restoredPage = await get(rt, host, "/");
-  expect(restoredPage.status).toBe(200);
-  expect(await restoredPage.text()).toContain("Acme home");
 });
 
 test("a partner tombstone uses its compiled de-branded platform page", async () => {

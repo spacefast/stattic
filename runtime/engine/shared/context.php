@@ -161,7 +161,7 @@ const STATTIC_ZERO_CONTROL_ROUTES = [
     '__zero/config' => ['operation' => 'config', 'methods' => ['GET', 'HEAD']],
     '__zero/run' => ['operation' => 'run', 'methods' => ['POST']],
     '__zero/auth/start' => ['operation' => 'auth_start', 'methods' => ['GET', 'HEAD']],
-    '__zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD', 'POST']],
+    '__zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD']],
     '__zero/realtime/events' => ['operation' => 'realtime_events', 'methods' => ['GET', 'HEAD']],
     '__spacefast/zero/config' => ['operation' => 'config', 'methods' => ['GET', 'HEAD']],
     '__spacefast/zero/run' => ['operation' => 'run', 'methods' => ['POST']],
@@ -202,11 +202,6 @@ function _stattic_path_is_internal_artifact(string $path): bool
 // tenant path and `/__span/x` is ours). `fold` compares case-insensitively.
 // `admit` narrows a row to the exact set its handler can answer.
 const SPACEFAST_CONTROL_PATHS = [
-    ['path' => '/identity', 'match' => 'namespace', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => '/__zero/auth/user', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => '/__zero/auth/complete', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => '/__zero/auth/native', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => '/__zero/auth/api/', 'match' => 'prefix', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/__stattic_probe', 'match' => 'exact', 'visitor' => true, 'tenant' => true, 'stage' => 'probe', 'handler' => 'probe'],
     ['path' => STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH . '/redeem', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_callback'],
     ['path' => STATTIC_ACCESS_CLIENT_SCRIPT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_client_script'],

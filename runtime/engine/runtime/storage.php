@@ -3,9 +3,9 @@ declare(strict_types=1);
 
 // Per-space storage: a record store at spaces/<s>/uploads/objects/<id>.json,
 // bodies in the shared CAS. The record is the authority. Deleting it stops
-// access even when an edge copy names the same bytes. Public objects require
-// the runtime-wide read key (`?k=`), whose rotation revokes their shared URLs.
-// Private objects require an identified session and never enter the public lane.
+// access even when an edge copy names the same bytes. A public URL works only
+// with the runtime-wide read key (`?k=`), whose rotation invalidates every
+// handed-out URL at once.
 require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/../shared/pointers.php';
@@ -93,12 +93,10 @@ function _stattic_uploads_record(mixed $record): ?array
         || !is_int($size) || $size < 0
         || !is_string($sha256) || !_stattic_is_sha256_hex(strtolower($sha256))
         || !is_string($uploaderId) || $uploaderId === '' || strlen($uploaderId) > 255
-        || (array_key_exists('public', $record) && !is_bool($record['public']))
     ) {
         return null;
     }
     return [
-        'public' => ($record['public'] ?? true) === true,
         'contentType' => $contentType,
         'createdAt' => $createdAt,
         'email' => is_string($record['email'] ?? null) ? $record['email'] : null,
@@ -194,11 +192,13 @@ function _stattic_uploads_headers(array $record, bool $publicCache): array
         'Last-Modified' => gmdate('D, d M Y H:i:s \G\M\T', _stattic_content_mtime($record['sha256'])),
         'X-Content-Type-Options' => 'nosniff',
         'Content-Security-Policy' => "sandbox; default-src 'none'",
-        // Public URLs cache immutable bytes until a delete purges the edge.
-        // Authenticated reads must reach the session gate on every request.
+        // The object id is a 128-bit random name for immutable bytes, so the
+        // URL caches forever; a delete purges the edge instead of relying on
+        // revalidation. A protected space, or a share-token fetch whose URL is
+        // itself the secret, keeps the private cache class.
         'Cache-Control' => $publicCache
             ? 'public, max-age=31536000, immutable'
-            : 'private, no-store',
+            : 'private, max-age=31536000, immutable',
     ];
     if (_stattic_uploads_active_content($record['contentType'])) {
         $headers['Content-Disposition'] = 'attachment';
@@ -229,7 +229,7 @@ function _stattic_uploads_serve(string $privateRoot, string $spaceId, string $re
     $id = rawurldecode(substr($requestPath, strlen(STATTIC_UPLOADS_PUBLIC_URL_PREFIX)));
     $record = _stattic_uploads_get($privateRoot, $spaceId, $id);
     // The record is the gate: deleted record, deleted object.
-    if ($record === null || !$record['public']) {
+    if ($record === null) {
         _stattic_render_not_found();
         exit;
     }
@@ -378,10 +378,13 @@ function _stattic_storage_handle(
     if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
         _stattic_method_not_allowed('GET, HEAD, DELETE');
     }
-    if (!$record['public'] && !$authenticated && !$developmentGuest) {
-        _stattic_problem_refused(404, 'storage_object_not_found', 'Storage object not found.');
-    }
-    _stattic_uploads_send($privateRoot, $spaceId, $record, $requestMethod, false);
+    _stattic_uploads_send(
+        $privateRoot,
+        $spaceId,
+        $record,
+        $requestMethod,
+        false
+    );
 }
 
 // Whether Comments is on for THIS surface (live vs preview). The
@@ -390,15 +393,6 @@ function _stattic_storage_comments_enabled(array $serving): bool
 {
     require_once __DIR__ . '/spacefast-sdk.php';
     return _stattic_comments_enabled_for_surface($serving);
-}
-
-function _stattic_uploads_request_public(): bool
-{
-    $value = $_GET['public'] ?? 'false';
-    if ($value !== 'true' && $value !== 'false') {
-        _stattic_problem_refused(422, 'validation_error', 'The public option must be true or false.');
-    }
-    return $value === 'true';
 }
 
 function _stattic_uploads_upload(
@@ -410,7 +404,6 @@ function _stattic_uploads_upload(
     array $auth
 ): never
 {
-    $public = _stattic_uploads_request_public();
     $staged = _stattic_storage_stage_upload($privateRoot);
     if (($staged['ok'] ?? false) !== true) {
         if (($staged['reason'] ?? null) === 'too_large') {
@@ -453,7 +446,6 @@ function _stattic_uploads_upload(
             $sha256,
             $contentType,
             $filename,
-            $public,
             $uploaderId,
             $anonymousUploader,
             $auth
@@ -469,7 +461,6 @@ function _stattic_uploads_upload(
             }
             $id = bin2hex(random_bytes(16));
             _stattic_storage_commit_record($privateRoot, $spaceId, $id, $tmpPath, [
-                'public' => $public,
                 'contentType' => $contentType,
                 'createdAt' => gmdate('c'),
                 'email' => is_string($auth['email'] ?? null) ? $auth['email'] : null,
@@ -500,7 +491,6 @@ function _stattic_uploads_upload(
 
     _stattic_json_response(201, [
         'id' => $id,
-        'public' => $public,
         'contentType' => $contentType,
         // Omitted, never null: the field is absent on an object that was
         // uploaded without a name.
@@ -508,9 +498,11 @@ function _stattic_uploads_upload(
         'size' => $size,
         // Composed from the current read key at response time, stable until it
         // rotates, whatever route the upload arrived on.
-        'url' => $public
-            ? _stattic_uploads_public_url($privateRoot, 'https://' . $requestHost, $id)
-            : 'https://' . $requestHost . '/storage/' . $id,
+        'url' => _stattic_uploads_public_url(
+            $privateRoot,
+            'https://' . $requestHost,
+            $id
+        ),
     ]);
 }
 

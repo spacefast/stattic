@@ -237,40 +237,130 @@ function _stattic_space_users_admit_origin(string $method, string $host): void
     }
 }
 
-/** Live database verification stays outside the process that will execute tenant PHP. */
+/**
+ * In-process verification against the site's own WordPress database.
+ *
+ * A request cannot delegate this to a WP-CLI child: the wp.cloud FPM pool runs
+ * in a mount namespace with no `php` or `wp` on PATH and no loopback listener
+ * (measured 2026-09-20 on the retained contract site: every proc_open of the
+ * CLI fails, and curl to 127.0.0.1:80/443 is refused). It cannot boot WordPress
+ * either, because the engine serves from the provider's auto_prepend pass,
+ * before /scripts/env.php defines the database constants (custom-redirects.php).
+ * What the pass does have is the DB_* tuple and wp-config.php, which is all the
+ * identity plugin's session lookup needs.
+ *
+ * Same verdict as spacefast_space_users_auth(): a live, unrevoked session on an
+ * active account whose WordPress user is this Space's app user, answering the
+ * Space-scoped opaque subject. wordpress/space-users.php owns the WordPress
+ * side; a change to either side changes both.
+ */
 function _stattic_space_users_verify_session(string $privateRoot, string $spaceId, string $host, array $settings, string $cookie): ?array
 {
-    if (strlen($cookie) > 512) return null;
-    require_once __DIR__ . '/../shared/native-process.php';
-    $input = json_encode([
-        'privateRoot' => $privateRoot, 'spaceId' => $spaceId, 'host' => (string) parse_url(_stattic_space_users_origin($host), PHP_URL_HOST) . (($port = parse_url(_stattic_space_users_origin($host), PHP_URL_PORT)) === null ? '' : ':' . $port),
-        'scheme' => _stattic_request_scheme(), 'settings' => $settings, 'cookie' => $cookie,
-    ], JSON_THROW_ON_ERROR);
-    $result = _stattic_runtime_run_subprocess([
-        _stattic_config_value('SPACEFAST_RUNTIME_WP_CLI_BIN') ?: 'wp',
-        '--path=' . dirname(dirname($privateRoot)),
-        '--require=' . __DIR__ . '/../entrypoints/space-users-session.php',
-        'eval', 'spacefast_space_users_session_reply();',
-    ], null, $input, null, 10000, 8192, 1024);
-    if (!$result['spawned'] || $result['timedOut'] || $result['exitCode'] !== 0) {
+    if ($cookie === '' || strlen($cookie) > 512 || $spaceId === '') return null;
+    require_once __DIR__ . '/../shared/artifacts.php';
+    require_once __DIR__ . '/../shared/db-broker.php';
+    $site = _stattic_space_users_site_config(dirname(dirname($privateRoot)));
+    $url = _stattic_zero_runner_base_env()['SPACEFAST_ZERO_DATABASE_URL'] ?? '';
+    if ($site === null || !is_string($url) || $url === '') {
         _stattic_problem_refused(503, 'space_users_verifier_unavailable', 'Account verification is temporarily unavailable.');
     }
-    $reply = json_decode($result['stdout'], true);
-    if (!is_array($reply) || !array_key_exists('data', $reply)) {
+    // The broker is the engine's one mysqli owner. Its binding is request state
+    // another lane may already hold (sf_db() binds the application database
+    // after this verify), so the identity lookup borrows it and hands it back.
+    $state = &_stattic_db_broker_state();
+    [$previousUrl, $previousSource] = [$state['url'], $state['source']];
+    _stattic_db_broker_bind($url, 'provider');
+    $link = _stattic_db_broker_connection();
+    if (!$link instanceof mysqli) {
+        _stattic_problem_refused(503, 'space_users_verifier_unavailable', 'Account verification is temporarily unavailable.');
+    }
+    $auth = _stattic_space_users_lookup_session($link, $site, $spaceId, $cookie);
+    _stattic_db_broker_bind($previousUrl, $previousSource);
+    if ($auth === false) {
         _stattic_problem_refused(503, 'space_users_verifier_invalid', 'Account verification is temporarily unavailable.');
     }
-    if ($reply['data'] === null) return null;
-    $auth = $reply['data'];
-    if (!is_array($auth) || !is_string($auth['userId'] ?? null)
-        || preg_match('/\Ausr_[a-f0-9]{64}\z/', $auth['userId']) !== 1
-        || !is_string($auth['displayName'] ?? null) || strlen($auth['displayName']) > 2048
-        || ($auth['provider'] ?? null) !== 'space-users'
-        || ($auth['isAuthenticated'] ?? null) !== true || ($auth['isGuest'] ?? null) !== false) {
-        _stattic_problem_refused(503, 'space_users_verifier_invalid', 'Account verification is temporarily unavailable.');
+    return $auth;
+}
+
+/**
+ * The table prefix and the `auth` salt halves from the site's wp-config.php,
+ * read without executing it (it ends by booting WordPress). Null when the file
+ * is unreadable; empty salt halves fall back to the options table, the way
+ * wp_salt() does. The prefix is a SQL identifier fragment, so it is allowlisted.
+ *
+ * @return array{prefix:string,key:string,salt:string}|null
+ */
+function _stattic_space_users_site_config(string $publicRoot): ?array
+{
+    $source = is_file($publicRoot . '/wp-config.php') ? file_get_contents($publicRoot . '/wp-config.php') : false;
+    if (!is_string($source)) return null;
+    $define = static function (string $name) use ($source): string {
+        if (preg_match('/define\s*\(\s*([\'"])' . $name . '\1\s*,\s*([\'"])((?:\\\\.|(?!\2).)*)\2\s*\)/s', $source, $match) !== 1) return '';
+        return stripslashes($match[3]);
+    };
+    $prefix = preg_match('/\$table_prefix\s*=\s*([\'"])([A-Za-z0-9_]+)\1\s*;/', $source, $match) === 1 ? $match[2] : 'wp_';
+    return ['prefix' => $prefix, 'key' => $define('AUTH_KEY'), 'salt' => $define('AUTH_SALT')];
+}
+
+/**
+ * @param array{prefix:string,key:string,salt:string} $site
+ * @return array|null|false null = no live session for this Space; false = the lookup itself failed
+ */
+function _stattic_space_users_lookup_session(mysqli $link, array $site, string $spaceId, string $secret): array|null|false
+{
+    $p = $site['prefix'];
+    $one = static function (string $sql, string $types, array $params) use ($link): array|null|false {
+        $statement = $link->prepare($sql);
+        if (!$statement instanceof mysqli_stmt) {
+            // 1146: the identity tables do not exist yet, so no account can either.
+            return $link->errno === 1146 ? null : false;
+        }
+        if ($params !== [] && !$statement->bind_param($types, ...$params)) return false;
+        if (!$statement->execute()) return false;
+        $result = $statement->get_result();
+        $row = $result instanceof mysqli_result ? $result->fetch_assoc() : false;
+        $statement->close();
+        return is_array($row) ? $row : ($row === false ? false : null);
+    };
+    $key = $site['key'];
+    $salt = $site['salt'];
+    if ($key === '' || $salt === '') {
+        $names = ['auth_key', 'auth_salt'];
+        $rows = $one(
+            "SELECT MAX(CASE WHEN option_name = 'auth_key' THEN option_value END) AS k, MAX(CASE WHEN option_name = 'auth_salt' THEN option_value END) AS s FROM {$p}options WHERE option_name IN (?, ?)",
+            'ss', $names
+        );
+        if ($rows === false) return false;
+        $key = $key !== '' ? $key : (string) ($rows['k'] ?? '');
+        $salt = $salt !== '' ? $salt : (string) ($rows['s'] ?? '');
+        if ($key === '' || $salt === '') return null;
     }
+    $sessionParams = [hash_hmac('sha256', $secret, $key . $salt), time()];
+    $session = $one(
+        "SELECT s.wp_user_id FROM {$p}sfi_sessions s JOIN {$p}sfi_accounts a ON a.wp_user_id = s.wp_user_id"
+        . " WHERE s.secret_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND a.status = 'active' LIMIT 1",
+        'si', $sessionParams
+    );
+    if ($session === false) return false;
+    if ($session === null) return null;
+    $userId = (int) $session['wp_user_id'];
+    $userParams = [$spaceId, 'spacefast_app_subject_' . $userId . '_' . $spaceId, $userId];
+    $user = $one(
+        "SELECT u.display_name,"
+        . " (SELECT m.meta_value FROM {$p}usermeta m WHERE m.user_id = u.ID AND m.meta_key = '_spacefast_app_user' ORDER BY m.umeta_id LIMIT 1) AS app_space,"
+        . " EXISTS(SELECT 1 FROM {$p}usermeta n WHERE n.user_id = u.ID AND n.meta_key = '_spacefast_space_id' AND n.meta_value = ?) AS is_member,"
+        . " (SELECT o.option_value FROM {$p}options o WHERE o.option_name = ? LIMIT 1) AS subject"
+        . " FROM {$p}users u WHERE u.ID = ? LIMIT 1",
+        'ssi', $userParams
+    );
+    if ($user === false) return false;
+    if ($user === null || (string) ($user['app_space'] ?? '') !== $spaceId || (int) ($user['is_member'] ?? 0) !== 1) return null;
+    $subject = (string) ($user['subject'] ?? '');
+    if (preg_match('/\Ausr_[a-f0-9]{64}\z/', $subject) !== 1) return null;
+    $displayName = (string) ($user['display_name'] ?? '');
     return [
-        'user' => ['id' => $auth['userId'], 'displayName' => $auth['displayName']],
-        'userId' => $auth['userId'], 'displayName' => $auth['displayName'],
+        'user' => ['id' => $subject, 'displayName' => $displayName],
+        'userId' => $subject, 'displayName' => $displayName,
         'provider' => 'space-users', 'isAuthenticated' => true, 'isGuest' => false,
     ];
 }

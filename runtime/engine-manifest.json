@@ -20,7 +20,6 @@
     "engine/admin/upload.php",
     "engine/admin/zero-db.php",
     "engine/admin/storage.php",
-    "engine/entrypoints/space-users-session.php",
     "engine/entrypoints/blob.php",
     "engine/entrypoints/cron.php",
     "engine/entrypoints/content.php",

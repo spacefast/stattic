@@ -60,9 +60,13 @@ try {
     spacefast_space_users_identity_lock($raceIssuer, $raceSubject, static function () use ($raceIssuer, $raceSubject, $login, $space, &$process, &$pipes): void {
         $identity = ['kind' => 'user', 'issuer' => $raceIssuer, 'subject' => $raceSubject, 'principal_id' => spacefast_content_principal_authority($raceIssuer, $raceSubject)];
         $code = 'while (ob_get_level()) ob_end_clean(); fwrite(STDOUT, $GLOBALS["wpdb"]->get_var("SELECT CONNECTION_ID()") . "\\n"); echo json_encode(spacefast_content_principal_ensure_user(' . var_export($identity, true) . '));';
-        $process = proc_open(['wp', '--path=' . ABSPATH, '--require=' . dirname(__DIR__) . '/engine/entrypoints/space-users-session.php', 'eval', $code], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        $scope = tempnam(sys_get_temp_dir(), 'sf-users-race-');
+        file_put_contents($scope, '<?php ' . implode(' ', array_map(
+            static fn (string $name): string => '$GLOBALS[' . var_export($name, true) . '] = ' . var_export($GLOBALS[$name], true) . ';',
+            ['SPACEFAST_CONTENT_SPACE_ID', 'SPACEFAST_CONTENT_PRIVATE_ROOT', 'SPACEFAST_CONTENT_PUBLIC_ORIGIN', 'SPACEFAST_PAGE_SERVING']
+        )));
+        $process = proc_open(['wp', '--path=' . ABSPATH, '--require=' . $scope, 'eval', $code], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
         if (!is_resource($process)) throw new RuntimeException('race_child_failed');
-        fwrite($pipes[0], wp_json_encode(['privateRoot' => $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'], 'spaceId' => $space, 'host' => 'localhost:18280', 'scheme' => 'http', 'settings' => $GLOBALS['SPACEFAST_PAGE_SERVING']['users'], 'cookie' => '']));
         fclose($pipes[0]);
         stream_set_timeout($pipes[1], 5);
         $connection = (int) fgets($pipes[1]);

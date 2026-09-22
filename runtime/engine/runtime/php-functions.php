@@ -353,6 +353,9 @@ function _stattic_php_functions_send(int $status, array $headers, string $body):
             header($name . ': ' . $value, true);
         }
         header('content-length: ' . strlen($body), true);
+        // wp.cloud FPM does not run the registered header callback on this
+        // terminal path. Emit the policy before sending any response bytes.
+        _stattic_php_functions_enforce_platform_headers();
     }
     if ($state['method'] !== 'HEAD') {
         echo $body;

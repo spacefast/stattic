@@ -396,10 +396,6 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     if ($functionsFinalize !== null) {
         _stattic_runtime_write_functions_config_artifact($versionRoot, $functionsFinalize);
     }
-    $phpFinalize = is_array($body['php'] ?? null) ? $body['php'] : null;
-    if ($phpFinalize !== null) {
-        _stattic_runtime_write_php_config_artifact($versionRoot, $phpFinalize);
-    }
     _stattic_runtime_apply_zero_migrations($versionRoot);
     $finalizedEvent = [
         'event' => 'version_finalized',
@@ -981,24 +977,6 @@ function _stattic_runtime_version_has_zero_pack(string $versionRoot): bool
     return is_file($versionRoot . '/zero/routes.php')
         || is_file($versionRoot . '/zero/endpoints-index.json')
         || is_file($versionRoot . '/zero/runs-index.json');
-}
-
-/**
- * The PHP execution lane's private values, for a version whose only code is
- * committed `functions/*.php`. Same placement and the same reason as the two
- * runtime configs: BESIDE the version's file tree, where a publish cannot
- * reach, because these are the Space's secrets. Only `variableValues` is
- * copied, so an unrecognised key cannot land here either.
- */
-function _stattic_runtime_write_php_config_artifact(string $versionRoot, array $php): void
-{
-    _stattic_runtime_mkdir($versionRoot . '/php');
-    _stattic_runtime_write_json_atomic($versionRoot . '/php/config.json', [
-        'runtimeKind' => 'php',
-        'variableValues' => is_array($php['variableValues'] ?? null)
-            ? _stattic_zero_string_map($php['variableValues'])
-            : [],
-    ]);
 }
 
 function _stattic_runtime_write_zero_config_artifact(string $versionRoot, array $zero): void
@@ -1754,6 +1732,39 @@ function _stattic_runtime_route_config(mixed $raw): array
         return [];
     }
     $config = [];
+    if (array_key_exists('users', $raw)) {
+        $users = $raw['users'];
+        $providers = is_array($users) ? ($users['providers'] ?? null) : null;
+        $google = is_array($providers) ? ($providers['google'] ?? null) : null;
+        if (!is_array($users) || !is_bool($users['enabled'] ?? null) || !is_array($providers)
+            || !is_array($google) || !in_array($google['mode'] ?? null, ['disabled', 'managed', 'direct'], true)
+            || (($google['mode'] ?? null) === 'direct' && (!is_string($google['clientId'] ?? null) || $google['clientId'] === ''))
+            || !is_bool($providers['gravatar']['enabled'] ?? null) || !is_bool($providers['spacefast']['enabled'] ?? null)) {
+            _stattic_problem_response(422, 'space_users_config_invalid', 'Users settings are invalid.');
+        }
+        $config['users'] = [
+            'enabled' => $users['enabled'],
+            'providers' => [
+                'google' => $google['mode'] === 'direct' ? ['mode' => 'direct', 'clientId' => $google['clientId']] : ['mode' => $google['mode']],
+                'gravatar' => ['enabled' => $providers['gravatar']['enabled']],
+                'spacefast' => ['enabled' => $providers['spacefast']['enabled']],
+            ],
+        ];
+    }
+    if (array_key_exists('usersProviderConfig', $raw)) {
+        $private = $raw['usersProviderConfig'];
+        if ($private !== null && (!is_array($private)
+            || !is_string($private['issuer'] ?? null) || !is_string($private['clientId'] ?? null)
+            || !is_string($private['googleStartUrl'] ?? null) || !is_string($private['gravatarStartUrl'] ?? null)
+            || !is_string($private['revision'] ?? null) || !is_array($private['availability'] ?? null)
+            || !array_key_exists('directGoogle', $private)
+            || ($private['directGoogle'] !== null && (!is_array($private['directGoogle'])
+                || !is_string($private['directGoogle']['clientId'] ?? null) || !is_string($private['directGoogle']['clientSecret'] ?? null))))) {
+            _stattic_problem_response(422, 'space_users_provider_config_invalid', 'Users provider configuration is invalid.');
+        }
+        $config['usersProviderConfig'] = $private;
+    }
+
     if (array_key_exists('public_exposure_digest', $raw)) {
         $config['public_exposure_digest'] = _stattic_runtime_public_exposure_digest($raw);
     }

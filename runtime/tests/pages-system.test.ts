@@ -121,18 +121,14 @@ test("a tombstoned space answers with the engine's page, never its own documents
   const html = await response.text();
   expect(html).toContain("This space is paused");
   expect(html).toContain("Need help?");
-  // Platform-owned page: the Spacefast wordmark and its fonts, not the tenant's
-  // brand, and not the site-page footer line either.
-  expect(html).toContain('@font-face{font-family:"Recoleta"');
-  // Recoleta is the only downloaded face — body and mono are system stacks.
-  expect(html).not.toContain("spacefast.com/assets/fonts");
-  // It loads from the shared origin (one warm cache across every space
-  // hostname), with the rendered weight preloaded ahead of the stylesheet.
-  expect(html).toContain(
-    '<link rel="preload" href="https://wordpress.com/i/fonts/recoleta/400.woff2" as="font" type="font/woff2" crossorigin>',
-  );
+  // Platform-owned page: the one colophon every page wears, with the Spacefast
+  // wordmark and not the tenant's brand. Every tier is set in the system stack,
+  // so the page downloads no font: no @font-face, no preload.
+  expect(html).toContain('<svg class="sf-wordmark"');
+  expect(html).toContain("Best way to share what your agent made");
+  expect(html).not.toContain("@font-face");
+  expect(html).not.toContain('rel="preload"');
   expect(html).not.toContain("__spacefast/pages/fonts");
-  expect(html).not.toContain("Best way to share what your agent made");
   expect(html).not.toContain("Acme");
 
   // A per-principal suspension (`site_suspended`) serves the SAME 402 suspended
@@ -145,6 +141,17 @@ test("a tombstoned space answers with the engine's page, never its own documents
   const perPrincipal = await get(rt, host, "/", { headers: { Accept: "text/html" } });
   expect(perPrincipal.status).toBe(402);
   expect(await perPrincipal.text()).toContain("This space is paused");
+
+  const archived = await tombstone("spc_pages_fault", { hostnames: [host], reason: "archived" });
+  expect(archived.status).toBe(200);
+  const archivedPage = await get(rt, host, "/");
+  expect(archivedPage.status).toBe(404);
+  expect(await archivedPage.text()).not.toContain("Acme home");
+  const restored = await tombstone("spc_pages_fault", { hostnames: [host], mode: "remove" });
+  expect(restored.status).toBe(200);
+  const restoredPage = await get(rt, host, "/");
+  expect(restoredPage.status).toBe(200);
+  expect(await restoredPage.text()).toContain("Acme home");
 });
 
 test("a partner tombstone uses its compiled de-branded platform page", async () => {

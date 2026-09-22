@@ -101,14 +101,14 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   expect((await clientScriptResponse).status()).toBe(200);
 
   const popupPromise = passwordContext.waitForEvent("page");
-  await passwordPage.getByRole("link", { name: "Continue with Spacefast" }).click();
+  await passwordPage.getByRole("link", { name: "Sign in", exact: true }).click();
   const popup = await popupPromise;
   await popup.goto(fixture.pageUrl);
   await popup.locator('input[name="password"]').fill(PASSWORD);
   const passwordResponsePromise = popup.waitForResponse(
     (response) => new URL(response.url()).pathname === "/__spacefast/access/password",
   );
-  await popup.getByRole("button", { name: "Open" }).click();
+  await popup.getByRole("button", { name: "Continue", exact: true }).click();
   const passwordResponse = await passwordResponsePromise;
   expect(passwordResponse.status()).toBe(303);
   const passwordHeaders = await passwordResponse.request().allHeaders();
@@ -128,7 +128,7 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   const verifiedPasswordResponsePromise = verifiedEmailPage.waitForResponse(
     (response) => new URL(response.url()).pathname === "/__spacefast/access/password",
   );
-  await verifiedEmailPage.getByRole("button", { name: "Open" }).click();
+  await verifiedEmailPage.getByRole("button", { name: "Continue", exact: true }).click();
   const verifiedPasswordResponse = await verifiedPasswordResponsePromise;
   expect(verifiedPasswordResponse.status()).toBe(403);
   const verifiedPasswordHeaders = await verifiedPasswordResponse.request().allHeaders();
@@ -153,7 +153,7 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   const inviteContext = await browser.newContext();
   const invitePage = await inviteContext.newPage();
   expect((await invitePage.goto(fixture.pageUrl))?.status()).toBe(403);
-  await invitePage.getByText("Need access? Request an invite").click();
+  await invitePage.getByText("Request access").click();
   const inviteForm = invitePage.locator(".sf-access-request > form");
   expect(await inviteForm.locator(":scope > .sf-input").count()).toBe(2);
   await invitePage.locator('input[name="email"]').fill("visitor@example.com");
@@ -196,11 +196,11 @@ test("production transitions render every locally reachable state with independe
 
     await page.goto(fixture.defaultPageUrl);
     await page.locator('input[name="password"]').fill("definitely wrong");
-    await page.getByRole("button", { name: "Open" }).click();
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
     await expectStatus(page, "invalid-password");
 
     await page.goto(fixture.defaultPageUrl);
-    await page.getByText("Need access? Request an invite").click();
+    await page.getByText("Request access").click();
     await page.locator('input[name="email"]').fill("visitor@example.com");
     await page.getByRole("button", { name: "Request an invite" }).click();
     await expectStatus(page, "request-pending");
@@ -222,7 +222,7 @@ test("production transitions render every locally reachable state with independe
     await context.clearCookies();
     await page.goto(fixture.defaultPageUrl);
     await page.locator('input[name="password"]').fill(VERIFIED_EMAIL_PASSWORD);
-    await page.getByRole("button", { name: "Open" }).click();
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
     const emailFailedNavigation = page.waitForURL(/sf_access=email-failed/);
     await page.locator("form.sf-access-verify-email").evaluate((form) => {
       const email = form.querySelector('input[name="email"]');
@@ -241,7 +241,7 @@ test("production transitions render every locally reachable state with independe
       (response) => new URL(response.url()).pathname === "/__spacefast/access/password",
     );
     await page.locator('input[name="password"]').fill(PASSWORD);
-    await page.getByRole("button", { name: "Open" }).click();
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
     expect((await sessionResponsePromise).status()).toBe(303);
     expect(
       (await context.cookies(fixture.defaultPageUrl)).filter((cookie) =>
@@ -260,7 +260,7 @@ test("production transitions render every locally reachable state with independe
     for (let attempt = 0; attempt < 12; attempt += 1) {
       await page.goto(fixture.defaultPageUrl);
       await page.locator('input[name="password"]').fill("still wrong");
-      await page.getByRole("button", { name: "Open" }).click();
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
       if (new URL(page.url()).searchParams.get("sf_access") === "rate-limited") {
         rateLimited = true;
         break;
@@ -273,7 +273,7 @@ test("production transitions render every locally reachable state with independe
     try {
       await page.goto(fixture.defaultPageUrl);
       await page.locator('input[name="password"]').fill(PASSWORD);
-      await page.getByRole("button", { name: "Open" }).click();
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
       await expectStatus(page, "exchange-unavailable");
     } finally {
       await fetch(`${fixture.exchangeControlUrl}/exchange-available`, { method: "POST" });

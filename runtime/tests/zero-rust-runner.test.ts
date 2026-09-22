@@ -419,7 +419,7 @@ const capsule = {
     atomicMail: {
       ...route,
       async handler(ctx) {
-        await ctx.db.todos.insert({ id: "99003", title: "committed-mail" });
+        const row = await ctx.db.todos.insert({ title: "committed-mail" });
         const committed = await ctx.email.send({
           from: "hello@example.com",
           to: "reader@example.com",
@@ -427,7 +427,7 @@ const capsule = {
           text: "commits with the row",
         });
         return {
-          committedRow: await ctx.db.todos.get("99003"),
+          committedRow: await ctx.db.todos.get(row.id),
           committed,
         };
       },
@@ -454,7 +454,7 @@ const capsule = {
     atomicMailRollback: {
       ...route,
       async handler(ctx) {
-        await ctx.db.todos.insert({ id: "99002", title: "rolled-back-mail" });
+        await ctx.db.todos.insert({ title: "rolled-back-mail" });
         await ctx.email.send({
           from: "hello@example.com",
           to: "reader@example.com",
@@ -485,8 +485,30 @@ const capsule = {
     lakebedDb: {
       ...route,
       async handler(ctx) {
-        const first = await ctx.db.messages.insert({ pinned: true, title: "first" });
-        const second = await ctx.db.messages.insert({ pinned: false, title: "second" });
+        const first = await ctx.db.messages.insert({ pinned: true, title: "first", rank: 2.5, note: "clear me" });
+        const second = await ctx.db.messages.insert({ pinned: false, title: "second", rank: 10, note: "present" });
+        const numericOrder = (await ctx.db.messages.withIndex("by_rank").collect()).map(row => row.rank);
+        const numericCount = await ctx.db.messages.withIndex("by_rank", q => q.lt("rank", 10)).count();
+        const cleared = await ctx.db.messages.update(first.id, { note: null });
+        const optionalCleared = !Object.hasOwn(cleared, "note");
+        const absentCount = await ctx.db.messages.withIndex("by_note", q => q.eq("note", undefined)).count();
+        const presentCount = await ctx.db.messages.withIndex("by_note", q => q.gt("note", undefined)).count();
+        const optionalBoundCount = await ctx.db.messages.withIndex("by_note", q => q.lt("note", "z")).count();
+        const defaultOwner = first.owner;
+        let invalidPredicates = 0;
+        for (const run of [
+          () => ctx.db.messages.where("rank", NaN).collect(),
+          () => ctx.db.messages.withIndex("by_rank", q => q.eq("rank", Infinity)).count(),
+          () => ctx.db.messages.withIndex("by_rank", q => q.gt("rank", -Infinity)).collect(),
+        ]) { try { await run(); } catch { invalidPredicates += 1; } }
+        await ctx.db.claims.insert({ guest: "guest_one" });
+        let duplicateGuestRejected = false;
+        try { await ctx.db.claims.insert({ guest: "guest_one" }); }
+        catch { duplicateGuestRejected = true; }
+        const guestClaims = await ctx.db.claims.withIndex("by_guest", q => q.eq("guest", "guest_one")).count();
+        let invalidNumberRejected = false;
+        try { await ctx.db.messages.insert({ pinned: false, title: "bad", rank: Infinity }); }
+        catch { invalidNumberRejected = true; }
         const custom = await ctx.db.messages
           .withIndex("by_title", (q) => q.eq("title", "first"))
           .collect();
@@ -542,6 +564,7 @@ const capsule = {
         const updated = await ctx.db.messages.update(second.id, { title: "updated" });
         const deleted = await ctx.db.messages.delete(second.id);
         return {
+          numericOrder, numericCount, optionalCleared, defaultOwner, invalidNumberRejected, absentCount, presentCount, optionalBoundCount, invalidPredicates, duplicateGuestRejected, guestClaims,
           collected: collected.map((row) => row.title),
           crossQueryRejected,
           custom: custom.map((row) => row.title),
@@ -581,8 +604,40 @@ await globalThis.__statticRunZeroEndpoint(capsule, route);`,
                 columns: ["pinned"],
                 unique: false,
               },
+              {
+                op: "add_index",
+                table: "messages",
+                name: "by_rank",
+                columns: ["rank"],
+                unique: false,
+              },
+              {
+                op: "add_index",
+                table: "messages",
+                name: "by_note",
+                columns: ["note"],
+                unique: false,
+              },
+              {
+                op: "add_index",
+                table: "claims",
+                name: "by_guest",
+                columns: ["guest"],
+                unique: true,
+              },
             ],
             tables: {
+              claims: {
+                physicalName: "zero_guest_claims",
+                primaryKey: "id",
+                columns: {
+                  id: "id",
+                  createdAt: "created_at",
+                  updatedAt: "updated_at",
+                  guest: { physicalName: "guest", type: "string" },
+                },
+                indexes: { by_guest: { fields: ["guest"] } },
+              },
               messages: {
                 physicalName: "lakebed_items",
                 primaryKey: "id",
@@ -592,10 +647,20 @@ await globalThis.__statticRunZeroEndpoint(capsule, route);`,
                   updatedAt: "updated_at",
                   title: "item_title",
                   pinned: { physicalName: "item_pinned", type: "boolean" },
+                  rank: { physicalName: "rank", type: "number", defaultValue: -1.5 },
+                  note: { physicalName: "note", type: "string", nullable: true, optional: true },
+                  owner: {
+                    physicalName: "owner",
+                    type: "string",
+                    userReference: true,
+                    defaultValue: "guest_one",
+                  },
                 },
                 indexes: {
                   by_title: { fields: ["title"] },
                   by_pinned: { fields: ["pinned"] },
+                  by_rank: { fields: ["rank"] },
+                  by_note: { fields: ["note"] },
                 },
               },
             },
@@ -924,7 +989,13 @@ test("precomputes compact DB metadata for generated DB endpoints", () => {
 async function publishRepublishSpace(versionId: string, withNote: boolean) {
   const noteColumns = withNote
     ? {
-        note: { physicalName: "todo_note" },
+        note: {
+          physicalName: "todo_note",
+          type: "string",
+          optional: true,
+          nullable: true,
+          defaultValue: "guest's draft",
+        },
       }
     : {};
   await deploy(rt, {
@@ -1028,6 +1099,7 @@ function republishColumns(): string {
 test("republishing with an added schema field adds the column and lets writes use it", async () => {
   await publishRepublishSpace("ver_zero_republish_rust_1", false);
   expect(republishColumns()).not.toContain("todo_note");
+  mysql.exec(`INSERT INTO ${REPUBLISH_TABLE} (todo_title) VALUES ('before-default')`);
 
   // `CREATE TABLE IF NOT EXISTS` is a no-op by now, so only the ALTER can add
   // the column, and it has to land before the index that reads it.
@@ -1049,6 +1121,9 @@ test("republishing with an added schema field adds the column and lets writes us
     ),
   );
   expect(republishColumns()).toContain("todo_note");
+  expect(
+    mysql.exec(`SELECT todo_note FROM ${REPUBLISH_TABLE} WHERE todo_title = 'before-default'`),
+  ).toBe("guest's draft");
 
   const response = await get(rt, REPUBLISH_HOST, "/api/republish/db", { method: "POST" });
   const text = await response.text();
@@ -1341,6 +1416,17 @@ test("executes the Lakebed database v1 API through the real Rust runner", async 
   const body = JSON.parse(text);
   expect(body.longCursorLength).toBeLessThan(4_096);
   expect(body).toMatchObject({
+    invalidPredicates: 3,
+    duplicateGuestRejected: true,
+    guestClaims: 1,
+    absentCount: 1,
+    presentCount: 1,
+    optionalBoundCount: 2,
+    numericOrder: [2.5, 10],
+    numericCount: 1,
+    optionalCleared: true,
+    defaultOwner: "guest_one",
+    invalidNumberRejected: true,
     collected: ["second", "first"],
     crossQueryRejected: true,
     custom: ["first"],
@@ -1379,10 +1465,9 @@ test("serves space storage from the PHP runtime without invoking tenant code", a
     size: number;
     url: string;
   };
-  expect(object).toMatchObject({ contentType: "text/plain", size: 14 });
+  expect(object).toMatchObject({ contentType: "text/plain", size: 14, public: false });
   expect(object.id).toMatch(/^[a-f0-9]{32}$/);
-  // Fresh at response time: the public URL carries the runtime read key.
-  expect(object.url).toMatch(new RegExp(`/__stattic/u/${object.id}\\?k=[a-f0-9]{32}$`));
+  expect(object.url).toBe(`https://${GENERATED_HOST}/storage/${object.id}`);
   const objectSha = sha256("runtime object");
   const recordPath = path.join(
     spaceRoot(rt, GENERATED_SPACE),
@@ -1585,7 +1670,9 @@ test("mail intent lives and dies with the invocation transaction", async () => {
   expect(result.committedRow?.title).toBe("committed-mail");
 
   // The thrown invocation's row is gone with its intent.
-  expect(mysql.exec("SELECT todo_title FROM zero_items WHERE todo_id = '99002';")).toBe("");
+  expect(
+    mysql.exec("SELECT todo_title FROM zero_items WHERE todo_title = 'rolled-back-mail';"),
+  ).toBe("");
 
   // One outbox row, and it is the committed one.
   const outbox = mysql.exec(

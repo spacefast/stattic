@@ -79,19 +79,12 @@ const STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH = STATTIC_ZERO_CANONICAL_NAMES
 const STATTIC_COMMENTS_VERSION_URLS_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/version-urls';
 // Mirrors COLLAB_VERSION_URLS_MAX_IDS in packages/common.
 const STATTIC_COMMENTS_VERSION_URLS_MAX_IDS = 50;
-// Recoleta is the only downloaded platform page face; body and mono are system
-// stacks. It is commercial, never shipped in the engine, and loads from
-// wordpress.com's font CDN, so every space hostname reuses one warm
-// browser-cache entry. Mirrors packages/common/src/utils/page-fonts.ts.
 // url => [family, weight, preload]; emission order is CSS order, and preload
-// marks the face the pages render (Recoleta 400 headings).
-const STATTIC_PLATFORM_PAGE_FONTS = [
-    'https://wordpress.com/i/fonts/recoleta/300.woff2' => ['Recoleta', '300', false],
-    'https://wordpress.com/i/fonts/recoleta/400.woff2' => ['Recoleta', '400', true],
-    'https://wordpress.com/i/fonts/recoleta/500.woff2' => ['Recoleta', '500', false],
-    'https://wordpress.com/i/fonts/recoleta/600.woff2' => ['Recoleta', '600', false],
-    'https://wordpress.com/i/fonts/recoleta/700.woff2' => ['Recoleta', '700', false],
-];
+// marks a face the pages render.
+// The built-in pages set every tier in the SF Pro system stack, so a bare
+// Spacefast site downloads no font at all. A white-label host that wants its own
+// faces still declares them on the brand document; this is only the default.
+const STATTIC_PLATFORM_PAGE_FONTS = [];
 const STATTIC_TAG_PREVIEW_QUERY_NAME = 'spacefast_tag_preview';
 // Mirrors PAGE_PREVIEW_QUERY in packages/common.
 const STATTIC_PAGE_PREVIEW_QUERY_NAME = 'spacefast_view';
@@ -161,7 +154,7 @@ const STATTIC_ZERO_CONTROL_ROUTES = [
     '__zero/config' => ['operation' => 'config', 'methods' => ['GET', 'HEAD']],
     '__zero/run' => ['operation' => 'run', 'methods' => ['POST']],
     '__zero/auth/start' => ['operation' => 'auth_start', 'methods' => ['GET', 'HEAD']],
-    '__zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD']],
+    '__zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD', 'POST']],
     '__zero/realtime/events' => ['operation' => 'realtime_events', 'methods' => ['GET', 'HEAD']],
     '__spacefast/zero/config' => ['operation' => 'config', 'methods' => ['GET', 'HEAD']],
     '__spacefast/zero/run' => ['operation' => 'run', 'methods' => ['POST']],
@@ -202,6 +195,11 @@ function _stattic_path_is_internal_artifact(string $path): bool
 // tenant path and `/__span/x` is ours). `fold` compares case-insensitively.
 // `admit` narrows a row to the exact set its handler can answer.
 const SPACEFAST_CONTROL_PATHS = [
+    ['path' => '/identity', 'match' => 'namespace', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
+    ['path' => '/__zero/auth/user', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
+    ['path' => '/__zero/auth/complete', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
+    ['path' => '/__zero/auth/native', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
+    ['path' => '/__zero/auth/api/', 'match' => 'prefix', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/__stattic_probe', 'match' => 'exact', 'visitor' => true, 'tenant' => true, 'stage' => 'probe', 'handler' => 'probe'],
     ['path' => STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH . '/redeem', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_callback'],
     ['path' => STATTIC_ACCESS_CLIENT_SCRIPT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_client_script'],

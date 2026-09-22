@@ -349,6 +349,7 @@ test("a run invocation runs the lane its operation allows and refuses any other"
           {
             execution_mode: "action",
             run_id: "action_notify",
+            run_kind: "action",
             source: "globalThis.__statticZeroResult = '{}';",
             capabilities: { db: false },
           },
@@ -490,80 +491,85 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
         version_hostnames: [],
       },
     });
+    const identityConfig = {
+      projection_generation: 1,
+      visitor_issuer: "spacefast-api",
+      visitor_jwks: {
+        keys: [
+          {
+            kty: "OKP",
+            crv: "Ed25519",
+            kid: issuer.kid,
+            alg: "EdDSA",
+            use: "sig",
+            x: jwk.x ?? "",
+          },
+        ],
+      },
+      session_version: 0,
+      authorization: {
+        generation: 1,
+        sessionVersion: 0,
+        fence: "none",
+        acquireUrl: "https://access.spacefast.test/acquire/zero",
+        accessPage: {
+          displayName: "Zero Identity",
+          accountUrl: "https://api.spacefast.test/v1/access/acquire/opaque-zero",
+          connections: [],
+          exchange: ACCESS_EXCHANGE,
+        },
+        spaceClaimed: true,
+        grants: [
+          {
+            id: "grt_zero_identity_public",
+            generation: 1,
+            audience: { kind: "public" },
+            resources: { include: ["/**"], exclude: [] },
+            capabilities: ["page.view"],
+            constraints: {},
+            target: { kind: "live" },
+            source: { kind: "managed", reference: "test:zero-identity-public" },
+          },
+          {
+            id: "grt_zero_identity_member",
+            generation: 1,
+            audience: {
+              kind: "external",
+              issuer: "spacefast-membership",
+              subject: "mem_zero",
+            },
+            resources: { include: ["/**"], exclude: [] },
+            capabilities: ["page.view"],
+            constraints: {},
+            target: { kind: "live" },
+            source: { kind: "system", reference: "test:zero-identity-member" },
+          },
+          {
+            id: "grt_zero_identity_person",
+            generation: 1,
+            audience: { kind: "person", personId: "per_zero" },
+            resources: { include: ["/**"], exclude: [] },
+            capabilities: ["page.view"],
+            constraints: {},
+            target: { kind: "live" },
+            source: { kind: "managed", reference: "test:zero-identity-person" },
+          },
+        ],
+      },
+    };
     await putRoute(idRuntime, "spc_zero_identity", "production", {
       version_id: "ver_zero_identity_1",
-      config: {
-        projection_generation: 1,
-        visitor_issuer: "spacefast-api",
-        visitor_jwks: {
-          keys: [
-            {
-              kty: "OKP",
-              crv: "Ed25519",
-              kid: issuer.kid,
-              alg: "EdDSA",
-              use: "sig",
-              x: jwk.x ?? "",
-            },
-          ],
-        },
-        session_version: 0,
-        authorization: {
-          generation: 1,
-          sessionVersion: 0,
-          fence: "none",
-          acquireUrl: "https://access.spacefast.test/acquire/zero",
-          accessPage: {
-            displayName: "Zero Identity",
-            accountUrl: "https://api.spacefast.test/v1/access/acquire/opaque-zero",
-            connections: [],
-            exchange: ACCESS_EXCHANGE,
-          },
-          spaceClaimed: true,
-          grants: [
-            {
-              id: "grt_zero_identity_public",
-              generation: 1,
-              audience: { kind: "public" },
-              resources: { include: ["/**"], exclude: [] },
-              capabilities: ["page.view"],
-              constraints: {},
-              target: { kind: "live" },
-              source: { kind: "managed", reference: "test:zero-identity-public" },
-            },
-            {
-              id: "grt_zero_identity_member",
-              generation: 1,
-              audience: {
-                kind: "external",
-                issuer: "spacefast-membership",
-                subject: "mem_zero",
-              },
-              resources: { include: ["/**"], exclude: [] },
-              capabilities: ["page.view"],
-              constraints: {},
-              target: { kind: "live" },
-              source: { kind: "system", reference: "test:zero-identity-member" },
-            },
-            {
-              id: "grt_zero_identity_person",
-              generation: 1,
-              audience: { kind: "person", personId: "per_zero" },
-              resources: { include: ["/**"], exclude: [] },
-              capabilities: ["page.view"],
-              constraints: {},
-              target: { kind: "live" },
-              source: { kind: "managed", reference: "test:zero-identity-person" },
-            },
-          ],
-        },
-      },
+      config: identityConfig,
     });
 
     // The canonical spelling and the frozen-client alias reach the same
-    // auth_start operation with byte-identical results.
+    // auth_start operation with byte-identical results. A capsule built
+    // against the SDK always names its provider here; a Space that never
+    // enabled Users still has to serve those buttons through the hosted
+    // account flow rather than refusing them.
     for (const startPath of [
-      "/__zero/auth/start?returnTo=%2Faccount%3Ftab%3Dprofile",
+      "/__zero/auth/start?returnTo=%2Faccount%3Ftab%3Dprofile&provider=google",
+      "/__zero/auth/start?returnTo=%2Faccount%3Ftab%3Dprofile&provider=gravatar",
       "/__spacefast/zero/auth/gravatar/start?returnTo=%2Faccount%3Ftab%3Dprofile",
     ]) {
       const signIn = await get(idRuntime, host, startPath);
@@ -574,6 +580,9 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       const signInUrl = new URL(signIn.headers.get("location") ?? "");
       expect(signInUrl.origin + signInUrl.pathname).toBe(
         "https://api.spacefast.test/v1/access/acquire/opaque-zero",
+      );
+      expect(signInUrl.searchParams.get("provider")).toBe(
+        startPath.includes("provider=google") ? "google" : null,
       );
       expect(signInUrl.searchParams.get("host")).toBe(host);
       expect(signInUrl.searchParams.get("return")).toBe("/account?tab=profile");
@@ -671,6 +680,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       sv: 0,
       generation: 1,
       spaceId: "spc_zero_identity",
+      authProvider: "google",
       // WHO the session is. Zero reads this and nothing else — a member
       // authority alone never makes a visitor a signed-in user.
       principal: "account:usr_zero",
@@ -702,7 +712,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
     envelope = JSON.parse(readFileSync(capturePath, "utf8"));
     expect(envelope.auth).toMatchObject({
       userId: "account:usr_zero",
-      provider: "gravatar",
+      provider: "google",
       displayName: multibyteName,
       picture: "https://gravatar.com/avatar/abc123abc123abc123abc123abc123ab?s=160",
       profileUrl: "https://gravatar.com/abc123abc123abc123abc123abc123ab",
@@ -746,7 +756,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       });
       const envelope = JSON.parse(readFileSync(capturePath, "utf8"));
       expect(envelope.auth.userId).toBe(principal);
-      expect(envelope.auth.provider).toBe(cookie ? "gravatar" : "service");
+      expect(envelope.auth.provider).toBe(cookie ? "google" : "service");
       expect(envelope.context.versionId).toBe("ver_zero_identity_1");
       expect(envelope.request.path).toBe("/__spacefast/zero/run");
       expect(envelope.request.headers.authorization).toBeUndefined();
@@ -801,6 +811,24 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       body: JSON.stringify({ id: "mutation-text", op: "mutation.run", name: "updateProfile" }),
     });
     expect(wrongContentType.status).toBe(403);
+    expect(existsSync(capturePath)).toBe(false);
+
+    const forgedUpgrade = await get(idRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: {
+        cookie: sessionCookie,
+        "content-type": "application/json",
+        origin: `http://${host}`,
+        "sec-fetch-site": "same-origin",
+      },
+      body: JSON.stringify({
+        op: "mutation.run",
+        name: "zeroGuestUpgrade",
+        args: [{ guestUserId: "guest:someone-else", userId: "account:usr_zero" }],
+      }),
+    });
+    expect(forgedUpgrade.status).toBe(403);
+    expect(await forgedUpgrade.json()).toMatchObject({ code: "zero_auth_upgrade_internal" });
     expect(existsSync(capturePath)).toBe(false);
 
     const browserMutation = await get(idRuntime, host, "/__zero/run", {
@@ -1056,6 +1084,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
     envelope = JSON.parse(readFileSync(capturePath, "utf8"));
     expect(envelope.auth).toMatchObject({
       userId: "person:per_zero",
+      provider: "account",
       displayName: "Invited Reviewer",
       isGuest: false,
       isAuthenticated: true,
@@ -1070,6 +1099,41 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
     expect(signOut.headers.get("location")).toBe(
       "https://zero-identity.test/__spacefast/access/logout?return=%2Fgoodbye%3Ffrom%3Dzero",
     );
+
+    await putRoute(idRuntime, "spc_zero_identity", "production", {
+      version_id: "ver_zero_identity_1",
+      config: {
+        ...identityConfig,
+        projection_generation: 2,
+        users: {
+          enabled: true,
+          providers: {
+            google: { mode: "disabled" },
+            gravatar: { enabled: false },
+            spacefast: { enabled: true },
+          },
+        },
+      },
+    });
+    // The hosted fall-back above is for Spaces that never enabled Users. Once
+    // Users is on, the same request belongs to the Space's own identity
+    // installation and is refused until that installation answers, never
+    // redirected into the platform account flow, which would sign the visitor
+    // in as a platform account instead of an app user.
+    const usersOnProvider = await get(
+      idRuntime,
+      host,
+      "/__zero/auth/start?returnTo=%2Faccount&provider=gravatar",
+    );
+    expect(usersOnProvider.status).toBe(503);
+    expect(usersOnProvider.headers.get("location")).toBe(null);
+    expect(await usersOnProvider.json()).toMatchObject({ code: "space_users_unavailable" });
+
+    const appGuest = await get(idRuntime, host, "/api/whoami", {
+      headers: { cookie: sessionCookie },
+    });
+    expect(appGuest.status).toBe(201);
+    expect((await appGuest.json()).auth).toMatchObject({ isAuthenticated: false, isGuest: true });
   } finally {
     idRuntime.stop();
   }

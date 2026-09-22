@@ -424,6 +424,7 @@ function _stattic_runtime_stage_components(string $privateRoot, array $claims): 
     _stattic_component_check_embedded($lock, 'runtime-engine', dirname($engineRoot) . '/bin/stattic-runtime', $problems);
     _stattic_component_check_embedded($lock, 'immutable-loader', $publicRoot . '/wp-content/mu-plugins/spacefast-content.php', $problems);
     _stattic_component_check_embedded($lock, 'content-kernel', $engineRoot . '/wordpress/content-kernel.php', $problems);
+    _stattic_component_check_embedded($lock, 'spacefast-identity', $publicRoot . '/wp-content/mu-plugins/spacefast-identity', $problems, true);
     _stattic_component_check_embedded($lock, 'php-toolkit', $engineRoot . '/vendor/php-toolkit.phar', $problems);
     _stattic_component_check_embedded($lock, 'zero-dashboard', $publicRoot . '/wp-content/mu-plugins/zero-dashboard', $problems, true);
     _stattic_component_check_loader_alias(

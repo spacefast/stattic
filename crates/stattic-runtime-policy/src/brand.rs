@@ -76,19 +76,10 @@ impl Default for Brand {
             problem_docs_base_url: "https://spacefast.com/docs/errors".into(),
             mail_domain: "mail.spacefast.com".into(),
             wordmark_url: String::new(),
-            // Recoleta is the only downloaded face — body and mono are system
-            // stacks. It is commercial, never shipped in the engine, and loads
-            // from wordpress.com's font CDN so every space hostname reuses one
-            // warm browser-cache entry.
-            fonts: ["300", "400", "500", "600", "700"]
-                .into_iter()
-                .map(|weight| BrandFont {
-                    url: format!("https://wordpress.com/i/fonts/recoleta/{weight}.woff2"),
-                    family: "Recoleta".into(),
-                    weight: weight.into(),
-                    preload: weight == "400",
-                })
-                .collect(),
+            // The built-in pages set every tier in the SF Pro system stack, so
+            // a bare Spacefast site downloads nothing. A white-label host that
+            // wants its own faces declares them on the document instead.
+            fonts: Vec::new(),
         }
     }
 }
@@ -195,15 +186,8 @@ mod tests {
         );
         assert_eq!(brand.mail_domain, "mail.spacefast.com");
         assert_eq!(brand.wordmark_url, "");
-        assert_eq!(
-            brand
-                .fonts
-                .iter()
-                .filter(|font| font.preload)
-                .map(|font| font.url.as_str())
-                .collect::<Vec<_>>(),
-            ["https://wordpress.com/i/fonts/recoleta/400.woff2"]
-        );
+        // A bare Spacefast page downloads no font.
+        assert!(brand.fonts.is_empty());
     }
 
     #[test]
@@ -216,7 +200,6 @@ mod tests {
             brand.problem_type_url("space_not_found"),
             "https://partner.example/errors/space_not_found"
         );
-        assert!(brand.fonts.is_empty());
         // Untouched members stay compiled-in.
         assert_eq!(brand.help_url, Brand::default().help_url);
         assert_eq!(brand.mail_domain, "mail.spacefast.com");

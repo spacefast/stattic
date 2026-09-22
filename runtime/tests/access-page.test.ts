@@ -758,7 +758,7 @@ test("the deny surface renders the access page with every configured lane", asyn
   expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   const html = await response.text();
   expect(html).toContain("Design Handbook is private");
-  expect(html).toContain("Continue with Spacefast");
+  expect(html).toContain(">Sign in</a>");
   expect(html).toContain('href="/__spacefast/access/account?return=%2Fdocs%2F"');
   expect(html).toContain("Continue with Okta");
   expect(html).toContain('action="/__spacefast/access/password"');
@@ -826,7 +826,7 @@ test("an unclaimed space points the visitor at the link it cannot render", async
   expect(html).toContain("Ask your agent or check your logs for the link you need to unlock");
   // Still lane-less: no form, no account lane, nothing to submit.
   expect(html).not.toContain('name="password"');
-  expect(html).not.toContain("Continue with Spacefast");
+  expect(html).not.toContain("sf-access-account");
 
   // The hidden Link lane still opens the destination though this Space renders
   // no password, account, request, or identity lane.
@@ -1047,13 +1047,13 @@ test("the request-invite lane relays centrally and remembers only the requested 
   const html = await rendered.text();
   expect(html).toContain("Invite requested for /docs.");
   expect(html).toContain("Request again</summary>");
-  expect(html).not.toContain("Need access? Request an invite</summary>");
+  expect(html).not.toContain("Request access</summary>");
 
   const unrelated = await get(runtime, LANES_HOST, "/admin/", {
     headers: { cookie: requested },
   });
   const unrelatedHtml = await unrelated.text();
-  expect(unrelatedHtml).toContain("Need access? Request an invite</summary>");
+  expect(unrelatedHtml).toContain("Request access</summary>");
   expect(unrelatedHtml).not.toContain("Invite requested for /docs.");
 
   const call = exchangeRequests.findLast(
@@ -1100,7 +1100,7 @@ test("identity-bound spaces probe the account session silently, once per browser
     headers: { cookie: guard },
   });
   expect(rendered.status).toBe(403);
-  expect(await rendered.text()).toContain("Continue with Spacefast");
+  expect(await rendered.text()).toContain(">Sign in</a>");
 
   // The memory is host-bound: the same value replayed on a sibling host proves
   // nothing there and is dropped instead of suppressing that host's probe.
@@ -1151,7 +1151,7 @@ test("a bounced silent probe renders the page instead of looping", async () => {
   const checked = await get(runtime, SILENT_HOST, "/docs/?sf_access=checked");
   expect(checked.status).toBe(403);
   const html = await checked.text();
-  expect(html).toContain("Continue with Spacefast");
+  expect(html).toContain(">Sign in</a>");
 
   const noGrant = await get(runtime, SILENT_HOST, "/docs/?sf_access=no-grant");
   expect(await noGrant.text()).toContain("hasn&#039;t let you in yet");

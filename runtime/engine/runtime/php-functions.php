@@ -46,11 +46,6 @@ require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/admission.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
 require_once __DIR__ . '/../shared/problem.php';
-// sf_fetch()'s policy and transport: the same SSRF tables, scope derivation and
-// connect-IP pin every other egress surface spends, and the same bounded curl
-// the proxy lane runs on.
-require_once __DIR__ . '/../shared/egress.php';
-require_once __DIR__ . '/../shared/http.php';
 // sf_spam()'s submission vocabulary, generated from the same TypeScript
 // contract the Zero and Functions service clients are built from.
 require_once __DIR__ . '/../shared/safety.php';
@@ -98,56 +93,6 @@ const STATTIC_PHP_FUNCTIONS_SERVICE_TIMEOUT_MS = 15000;
 const STATTIC_PHP_FUNCTIONS_SERVICE_STDOUT_MAX_BYTES = 1048576;
 const STATTIC_PHP_FUNCTIONS_SERVICE_STDERR_MAX_BYTES = 65536;
 
-/**
- * sf_fetch()'s budget, matching the Zero tier's fetch bridge
- * (crates/stattic-zero-runner/src/fetch.rs `FETCH_BODY_MAX_BYTES`,
- * `FETCH_TIMEOUT`, `EGRESS_MAX_REDIRECT_HOPS`) so a handler that moves between
- * tiers meets the same ceiling. A visitor holds an admission slot for the whole
- * call, so the timeout is a ceiling a caller may lower and never raise.
- */
-const STATTIC_PHP_FUNCTIONS_FETCH_BODY_MAX_BYTES = 1048576;
-const STATTIC_PHP_FUNCTIONS_FETCH_TIMEOUT_MS = 10000;
-
-/**
- * Hop-by-hop and transport-owned names. A handler that sets these describes the
- * connection this file owns, not the request it is making, so they are dropped
- * rather than refused. Identical to the Zero bridge's
- * `is_forbidden_request_header` / `is_forbidden_response_header`.
- */
-const STATTIC_PHP_FUNCTIONS_FETCH_DENIED_REQUEST_HEADERS = [
-    'connection', 'content-length', 'host', 'keep-alive', 'proxy-authorization',
-    'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade',
-];
-const STATTIC_PHP_FUNCTIONS_FETCH_DENIED_RESPONSE_HEADERS = [
-    'connection', 'keep-alive', 'proxy-authenticate', 'set-cookie', 'set-cookie2',
-    'te', 'trailer', 'transfer-encoding', 'upgrade',
-];
-
-/**
- * Names sf_env() never answers, whatever the version configuration carries.
- *
- * Two groups, the same two the Functions selection withholds
- * (apps/control-plane/src/functions/variables.ts): the platform's own
- * namespaces, which a worker could otherwise use to spoof a value the broker
- * trusts, and connection strings, because sf_db() hands this lane operation
- * frames and never a credential. A Zero-attached Space's private configuration
- * legitimately carries its DATABASE_URL for the broker to bind — that is the
- * one place the two selections differ, and it must not arrive at a handler
- * through the back door.
- *
- * The control plane already filters both groups, so this is the engine refusing
- * to be the one surface that hands one back — the same posture as the prelude's
- * credential scrub. Mirrors `EXECUTION_ENV_RESERVED_PREFIXES`
- * (packages/common/src/contracts/execution.ts) and
- * `FUNCTIONS_WITHHELD_VARIABLE_NAMES`, the way
- * STATTIC_PHP_FUNCTIONS_SERVICE_GRANT mirrors the broker's wire vocabulary.
- */
-const STATTIC_PHP_FUNCTIONS_RESERVED_VARIABLE_PREFIXES = ['SPACEFAST_', 'ZERO_'];
-const STATTIC_PHP_FUNCTIONS_WITHHELD_VARIABLE_NAMES = [
-    'DATABASE_URL', 'DATABASE_URI', 'MYSQL_URL', 'MYSQL_URI', 'MYSQL_DSN',
-    'POSTGRES_URL', 'POSTGRES_URI', 'POSTGRESQL_URL', 'POSTGRESQL_URI',
-];
-
 /** Per-request bridge state, shared with the sf_* helpers. */
 function &_stattic_php_functions_state(): array
 {
@@ -161,10 +106,6 @@ function &_stattic_php_functions_state(): array
         'api_base_url' => null,
         'database' => false,
         'services' => null,
-        'variables' => [],
-        // Fail closed, like every other reading of the scope: a dispatch that
-        // never bound one reaches the trusted list, not the internet.
-        'egress_scope' => STATTIC_EGRESS_SCOPE_TRUSTED,
     ];
 
     return $state;
@@ -253,6 +194,8 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
         _stattic_render_admission_shed(STATTIC_ADMISSION_RETRY_AFTER_SECONDS);
     }
 
+    $GLOBALS['SPACEFAST_PHP_FUNCTIONS_ADMISSION_ACQUIRED'] = true;
+
     // ---- everything the handler may ask for, resolved BEFORE the jail -----
     $state['method'] = $method;
     $state['private'] = (bool) $context['private_cache'];
@@ -261,6 +204,7 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     // Same verify, same shape as a Zero endpoint's auth context. Runs now
     // because verification reads `.stattic/**` key material the jail denies.
     $state['auth'] = _stattic_zero_auth_context($serving, (string) $context['host']);
+    $state['private'] = $state['private'] || _stattic_access_private_cache_flag();
 
     // Same reason, same moment: the database credential comes from platform
     // configuration the jail is about to deny, and is bound into the broker's
@@ -271,20 +215,9 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     //
     // One resolution feeds both bindings: the service broker writes an accepted
     // email into this space's own outbox, so it needs the same database URL.
-    $runtimeConfig = _stattic_php_functions_runtime_config((string) $context['version_root']);
-    $runnerEnv = _stattic_zero_runner_base_env($runtimeConfig);
+    $runnerEnv = _stattic_php_functions_runner_env((string) $context['version_root']);
     $state['database'] = _stattic_php_functions_bind_database($runnerEnv);
     $state['services'] = _stattic_php_functions_bind_services($context, $runnerEnv);
-    // The author's own selected variables, from the same configuration the
-    // relay hands a dispatched worker. Read now for the same reason as the rest
-    // of this block: it lives beside the version tree, which the jail denies.
-    $state['variables'] = _stattic_php_functions_variable_values($runtimeConfig);
-    // THE derivation, shared with the Zero envelope and the `sf-fx-egress`
-    // dispatch header, so claiming a Space widens sf_fetch on the next config
-    // push with no republish. `_stattic_php_functions_api_base_url()` above also
-    // warms `_stattic_config_value`'s memo, which sf_fetch's internal-host check
-    // reads after the jail has denied the file it comes from.
-    $state['egress_scope'] = _stattic_egress_scope($serving);
 
     $raw = in_array($method, ['GET', 'HEAD'], true)
         ? ''
@@ -484,97 +417,21 @@ function sf_json(mixed $data, int $status = 200): never
 }
 
 /**
- * This version's private runtime configuration: the Zero artifact when the
- * Space runs Zero, the Functions one when it declares a worker, and otherwise
- * this lane's own. All three carry the same `variableValues` projection, and
- * the relay resolves a dispatched worker's configuration through the same
- * fallback (functions-relay.php `_stattic_functions_relay_serve`), so a handler
- * reads the same values whichever runtime the Space also happens to run.
+ * The labeled database environment for this version, resolved as the capsule
+ * runner resolves it: a space that declares `DATABASE_URL` reaches the same
+ * database from PHP and from a capsule, one that declares none reaches the
+ * provider database the site already owns. Read once, because it costs a
+ * version-config read and both brokered capabilities need the answer.
  *
- * The third one exists because this lane is declared by the file tree alone: a
- * Space can publish `index.html` and `functions/source.php` and run code with no
- * worker metadata and no capsule, and then neither of the other two artifacts is
- * written and there is nothing for sf_env() to read. Finalize sends it only in
- * that case (`php` on runtimeVersionFinalizeRequestSchema), so the order below
- * is a fallback and never a conflict.
- *
- * `$versionRoot` is the version FILES root, as every serve-lane caller carries
- * it; all three artifacts live one level up, beside the file tree, where no
- * publish can reach them.
- *
- * Read once: it costs a version-config read and the database binding, the
- * service binding and sf_env() all need the answer.
- *
- * @return array<string,mixed>
- */
-function _stattic_php_functions_runtime_config(string $versionRoot): array
-{
-    if ($versionRoot === '') {
-        return [];
-    }
-    $zero = _stattic_runtime_read_json(dirname($versionRoot) . '/' . STATTIC_ZERO_CONFIG_PATH);
-    if (is_array($zero) && $zero !== []) {
-        return $zero;
-    }
-    $functions = _stattic_functions_config_read($versionRoot);
-    if ($functions['kind'] === 'present') {
-        return $functions['value'];
-    }
-    $php = _stattic_runtime_read_json(dirname($versionRoot) . '/php/config.json');
-
-    return is_array($php) ? $php : [];
-}
-
-/**
- * The selected variable values this version's worker receives, filtered to what
- * a handler may be handed. Withheld names are dropped rather than blanked, so
- * sf_env() answers `null` — "not configured" — instead of an empty string an
- * application would take for a configured value.
- *
- * @param array<string,mixed> $config
  * @return array<string,string>
  */
-function _stattic_php_functions_variable_values(array $config): array
+function _stattic_php_functions_runner_env(string $versionRoot): array
 {
-    $values = [];
-    foreach (is_array($config['variableValues'] ?? null) ? $config['variableValues'] : [] as $name => $value) {
-        if (is_string($name) && $name !== '' && is_string($value) && !_stattic_php_functions_variable_reserved($name)) {
-            $values[$name] = $value;
-        }
-    }
+    $config = $versionRoot === ''
+        ? []
+        : _stattic_runtime_read_json(dirname($versionRoot) . '/' . STATTIC_ZERO_CONFIG_PATH);
 
-    return $values;
-}
-
-function _stattic_php_functions_variable_reserved(string $name): bool
-{
-    $upper = strtoupper($name);
-
-    return in_array($upper, STATTIC_PHP_FUNCTIONS_WITHHELD_VARIABLE_NAMES, true)
-        || array_any(
-            STATTIC_PHP_FUNCTIONS_RESERVED_VARIABLE_PREFIXES,
-            static fn (string $prefix): bool => str_starts_with($upper, $prefix)
-        );
-}
-
-/**
- * One of the Space's own configured variables, or null when it is not
- * configured for this version.
- *
- *   $token = sf_env('GITHUB_TOKEN');
- *
- * The selection is the platform's, not the handler's: a Space variable reaches
- * a worker because it is scoped to this Space, and the database credential and
- * the reserved `SPACEFAST_` / `ZERO_` namespaces never do. Nothing here reads
- * the process environment — the prelude emptied it before the handler ran, and
- * `getenv()` in a handler is the platform's configuration, never the author's.
- */
-function sf_env(string $name): ?string
-{
-    $state = &_stattic_php_functions_state();
-    $values = is_array($state['variables']) ? $state['variables'] : [];
-
-    return is_string($values[$name] ?? null) ? $values[$name] : null;
+    return _stattic_zero_runner_base_env(is_array($config) ? $config : []);
 }
 
 /**
@@ -682,292 +539,6 @@ function sf_api_url(string $path = ''): string
         _stattic_php_functions_problem(503, 'php_function_api_unavailable', 'The Spacefast API URL is not available.');
     }
     return $apiBaseUrl . $path;
-}
-
-// ---- guarded egress --------------------------------------------------------
-
-/**
- * sf_fetch() refused the call, or could not reach the target. `$errorCode` is
- * the platform's own fetch vocabulary (`zero_fetch_host_untrusted`,
- * `zero_fetch_target_denied`, `zero_fetch_upstream_unavailable`, …), the same
- * codes a capsule's `fetch()` surfaces for the same refusal, so a handler that
- * branches on one branches the same way from either tier.
- *
- * A non-2xx answer is NOT one of these: an upstream that replied did its job,
- * and the handler reads `status`.
- */
-final class SpacefastFetchError extends RuntimeException
-{
-    public function __construct(
-        // Not `$code`: Exception already owns that name as a protected int.
-        public readonly string $errorCode,
-        string $message,
-    ) {
-        parent::__construct($message);
-    }
-}
-
-/**
- * An outbound HTTPS request, under the Space's own egress scope.
- *
- *   $response = sf_fetch('https://api.github.com/rate_limit', [
- *       'headers' => ['Authorization' => 'Bearer ' . sf_env('GITHUB_TOKEN')],
- *   ]);
- *   // ['status' => 200, 'headers' => ['content-type' => ...], 'body' => '...']
- *
- * Options are `method` (default GET), `headers`, `body`, and `timeoutMs`, which
- * may lower the 10s ceiling and never raise it. The budget is the call's, not
- * each hop's: a redirect chain spends what the first hop left.
- *
- * ---------------------------------------------------------------------------
- * What this is, and what it is not
- * ---------------------------------------------------------------------------
- * It is the platform's egress POLICY, applied for the author: the same scope
- * derivation the Zero envelope and the `sf-fx-egress` dispatch header carry
- * (claimed Space → the public internet the denylist permits, anonymous Space →
- * the trusted list, and the refusal is the upsell), the same generated SSRF
- * tables, and a connect-IP pin that closes the DNS-rebinding window between the
- * verdict and the socket — on every redirect hop, not just the first.
- *
- * It is NOT a containment boundary, and must not be described as one. This lane
- * runs tenant code in the engine's own php-fpm worker, where `disable_functions`
- * is a provider capability we do not have (tenant-prelude.php CANNOT.A): a
- * handler can call `curl_*` or `exec` directly. Routing this through a
- * subprocess would buy nothing here — unlike sf_db()/sf_email(), no platform
- * credential is involved, so there is no secret a child process would keep out
- * of tenant-visible memory.
- *
- * @param array<string,mixed> $options
- * @return array{status:int,headers:array<string,string>,body:string}
- */
-function sf_fetch(string $url, array $options = []): array
-{
-    $state = &_stattic_php_functions_state();
-    $scope = is_string($state['egress_scope'] ?? null)
-        ? $state['egress_scope']
-        : STATTIC_EGRESS_SCOPE_TRUSTED;
-
-    // Every option is refused when it is the wrong type rather than ignored: a
-    // handler that passes its headers as a JSON string should be told, not
-    // quietly sent a header-less request that fails somewhere far from here.
-    if (($options['method'] ?? null) !== null && !is_string($options['method'])) {
-        throw new SpacefastFetchError('zero_fetch_payload_invalid', 'The fetch method must be a string.');
-    }
-    $method = strtoupper(trim((string) ($options['method'] ?? 'GET')));
-    if (preg_match('/^[A-Z]+$/', $method) !== 1) {
-        throw new SpacefastFetchError('zero_fetch_payload_invalid', 'The fetch method is not valid.');
-    }
-    if ($method === 'CONNECT' || $method === 'TRACE') {
-        throw new SpacefastFetchError('zero_fetch_method_denied', 'The fetch method is not permitted.');
-    }
-    $body = $options['body'] ?? null;
-    if ($body !== null && !is_string($body)) {
-        throw new SpacefastFetchError('zero_fetch_payload_invalid', 'The fetch body must be a string.');
-    }
-    if (is_string($body) && strlen($body) > STATTIC_PHP_FUNCTIONS_FETCH_BODY_MAX_BYTES) {
-        throw new SpacefastFetchError('zero_fetch_payload_invalid', 'The fetch body is too large.');
-    }
-    if (($options['headers'] ?? null) !== null && !is_array($options['headers'])) {
-        throw new SpacefastFetchError('zero_fetch_payload_invalid', 'The fetch headers must be an array.');
-    }
-    $headers = _stattic_php_functions_fetch_request_headers($options['headers'] ?? []);
-    if (($options['timeoutMs'] ?? null) !== null && !is_int($options['timeoutMs'])) {
-        throw new SpacefastFetchError('zero_fetch_payload_invalid', 'The fetch timeout must be an integer.');
-    }
-    $budgetMs = is_int($options['timeoutMs'] ?? null)
-        ? max(1, min($options['timeoutMs'], STATTIC_PHP_FUNCTIONS_FETCH_TIMEOUT_MS))
-        : STATTIC_PHP_FUNCTIONS_FETCH_TIMEOUT_MS;
-
-    // Redirects are followed here rather than by libcurl, because each hop is a
-    // new target that has to face the whole policy again — the scope included —
-    // and a followed hop would otherwise escape the pinned connect set. The
-    // Authorization and Cookie a handler set belong to the host it named, so a
-    // cross-host hop drops them rather than replaying the credential, and the
-    // budget is the call's rather than each hop's, so a chain cannot hold a
-    // visitor's admission slot for four times the ceiling.
-    $target = $url;
-    $previousOrigin = null;
-    $deadline = microtime(true) + $budgetMs / 1000;
-    for ($hop = 0; $hop <= STATTIC_RUNTIME_EGRESS_MAX_REDIRECT_HOPS; $hop++) {
-        // Before resolution, not after: name resolution is the one step of a hop
-        // this process cannot cancel, so the least it must do is refuse to start
-        // another one with nothing left to spend.
-        _stattic_php_functions_fetch_remaining_ms($deadline);
-        $parts = _stattic_php_functions_fetch_target($target, $scope);
-        // An ORIGIN, not a host: the port is part of who a credential was meant
-        // for, and a different port is a different service, often a different
-        // operator. Comparing hostnames alone replays the handler's bearer to
-        // whoever answers on :8443.
-        if ($previousOrigin !== null && $parts['origin'] !== $previousOrigin) {
-            unset($headers['authorization'], $headers['cookie']);
-        }
-        $previousOrigin = $parts['origin'];
-        $result = _stattic_http_request([
-            'url' => $target,
-            'method' => $method,
-            'headers' => $headers,
-            'schemes' => STATTIC_RUNTIME_EGRESS_TENANT_FETCH_ALLOWED_SCHEMES,
-            'resolve' => $parts['resolve'],
-            // The pin above decides the peer only if nothing else may. An
-            // ambient proxy would re-resolve the name and connect wherever it
-            // liked, with the approved address never consulted.
-            'proxy' => false,
-            'timeout_ms' => _stattic_php_functions_fetch_remaining_ms($deadline),
-            'max_body_bytes' => STATTIC_PHP_FUNCTIONS_FETCH_BODY_MAX_BYTES,
-            ...(is_string($body) ? ['body' => $body] : []),
-        ]);
-        $responseHeaders = _stattic_http_header_map($result['headers']);
-        if ($result['error'] !== null) {
-            throw $result['error'] === 'http_response_rejected'
-                ? new SpacefastFetchError('zero_fetch_response_too_large', 'The fetch response is too large.')
-                : new SpacefastFetchError('zero_fetch_upstream_unavailable', 'The fetch target could not be reached.');
-        }
-        $location = $responseHeaders['location'] ?? null;
-        if ($result['status'] < 300 || $result['status'] > 399 || !is_string($location) || $location === '') {
-            return [
-                'status' => $result['status'],
-                'headers' => array_diff_key(
-                    $responseHeaders,
-                    array_flip(STATTIC_PHP_FUNCTIONS_FETCH_DENIED_RESPONSE_HEADERS)
-                ),
-                'body' => $result['body'],
-            ];
-        }
-        // 301/302/303 name a resource to GET, not the request to replay. Only
-        // 307/308 promise the method and body survive, so only they keep them —
-        // re-POSTing a body to a host the author did not name is the failure
-        // mode this avoids.
-        if ($result['status'] !== 307 && $result['status'] !== 308) {
-            $method = $method === 'HEAD' ? 'HEAD' : 'GET';
-            $body = null;
-            unset($headers['content-type']);
-        }
-        $target = _stattic_php_functions_fetch_redirect_target($target, $location);
-    }
-
-    throw new SpacefastFetchError('zero_fetch_target_denied', 'The fetch followed too many redirects.');
-}
-
-/**
- * What is left of the call's budget, or a refusal.
- *
- * The budget belongs to the call rather than to each hop, and a visitor holds
- * an admission slot on this Space's fpm pool until it is spent.
- *
- * KNOWN RESIDUAL: this bounds everything the engine drives, which is every
- * connect, TLS handshake and body read. It does NOT bound name resolution.
- * `dns_get_record()` takes no timeout and cannot be cancelled from PHP, so a
- * stalled resolver can still overrun the ceiling by whatever the system
- * resolver's own `timeout`/`attempts` allow. Checking here, before each hop's
- * resolution, is what keeps a spent call from starting another lookup;
- * genuinely bounding the first one needs a resolver the engine owns.
- */
-function _stattic_php_functions_fetch_remaining_ms(float $deadline): int
-{
-    $remainingMs = (int) round(($deadline - microtime(true)) * 1000);
-    if ($remainingMs < 1) {
-        throw new SpacefastFetchError('zero_fetch_upstream_unavailable', 'The fetch target could not be reached.');
-    }
-
-    return $remainingMs;
-}
-
-/**
- * The full egress verdict for one hop: scheme, credentials, scope and the
- * denylist lexically, then the resolve-and-pin that is the binding check
- * (shared/egress.php is explicit that the predicate alone is not the verdict).
- *
- * Only a trusted-scope miss gets the upsell, matching the proxy lane: nobody is
- * told to claim a Space to reach a metadata address.
- *
- * @return array{origin:string,resolve:list<string>}
- */
-function _stattic_php_functions_fetch_target(string $url, string $scope): array
-{
-    $parts = parse_url($url);
-    $host = is_array($parts) ? strtolower((string) ($parts['host'] ?? '')) : '';
-    $scheme = is_array($parts) ? strtolower((string) ($parts['scheme'] ?? '')) : '';
-    if ($host === '' || !in_array($scheme, STATTIC_RUNTIME_EGRESS_TENANT_FETCH_ALLOWED_SCHEMES, true)) {
-        throw new SpacefastFetchError('zero_fetch_payload_invalid', 'The fetch target must be an absolute HTTPS URL.');
-    }
-    if (isset($parts['user']) || isset($parts['pass'])) {
-        throw new SpacefastFetchError('zero_fetch_payload_invalid', 'The fetch target must not include credentials.');
-    }
-    $port = (int) ($parts['port'] ?? 443);
-    if (!_stattic_egress_host_allowed($host, $port, $scope)) {
-        throw $scope === STATTIC_EGRESS_SCOPE_TRUSTED
-            && _stattic_egress_host_allowed($host, $port, STATTIC_EGRESS_SCOPE_OPEN)
-                ? new SpacefastFetchError(
-                    'zero_fetch_host_untrusted',
-                    "This host isn't reachable from an unclaimed space. Claim the space to reach any public host."
-                )
-                : new SpacefastFetchError('zero_fetch_target_denied', 'The fetch target is not permitted.');
-    }
-    $ips = _stattic_egress_resolve_public_ips($host, $port);
-    if ($ips === null) {
-        throw new SpacefastFetchError('zero_fetch_target_denied', 'The fetch target is not permitted.');
-    }
-
-    return [
-        'origin' => $scheme . '://' . trim($host, '[]') . ':' . $port,
-        'resolve' => _stattic_egress_curl_resolve_entries($host, $port, $ips),
-    ];
-}
-
-/**
- * A `Location` resolved against the hop it came from, so a relative redirect
- * stays on a host that already passed the policy and an absolute one faces it
- * again on the next pass.
- *
- * RFC 3986 reference resolution, through the engine's existing URI parser
- * (`\Uri\Rfc3986\Uri`, the same one shared/context.php parses request targets
- * with) rather than string surgery on the path. The rules a hand-rolled version
- * gets wrong are the ones redirects actually use: `?page=2` keeps the current
- * path rather than replacing the last segment, `#section` keeps the query too,
- * and dot segments have to collapse. Fetching `/dir/?page=2` when the upstream
- * said `/dir/item?page=2` is a silently different resource, not an error.
- */
-function _stattic_php_functions_fetch_redirect_target(string $base, string $location): string
-{
-    try {
-        $resolved = (new \Uri\Rfc3986\Uri($base))->resolve($location);
-    } catch (Throwable) {
-        // The URL can carry a credential the author put there, so the message
-        // names the failure and never the value.
-        throw new SpacefastFetchError('zero_fetch_payload_invalid', 'The fetch redirect is not valid.');
-    }
-
-    // A fragment is the client's alone and is never sent; dropping it here
-    // keeps the next hop's policy check and the request identical.
-    return $resolved->withFragment(null)->toRawString();
-}
-
-/**
- * A handler's headers, normalized to lower-case names with the transport's own
- * names dropped. A malformed name or a value carrying a line break is refused
- * rather than dropped: that is a handler bug, and silently sending a different
- * request than the one it wrote is worse than saying so.
- *
- * @param array<mixed,mixed> $headers
- * @return array<string,string>
- */
-function _stattic_php_functions_fetch_request_headers(array $headers): array
-{
-    $normalized = [];
-    foreach ($headers as $name => $value) {
-        if (!is_string($name) || preg_match('/^[A-Za-z0-9!#$%&\'*+.^_`|~-]+$/', $name) !== 1) {
-            throw new SpacefastFetchError('zero_fetch_payload_invalid', 'A fetch header name is not valid.');
-        }
-        if (!is_string($value) || preg_match('/[\r\n\x00]/', $value) === 1) {
-            throw new SpacefastFetchError('zero_fetch_payload_invalid', 'A fetch header value is not valid.');
-        }
-        $lower = strtolower($name);
-        if (!in_array($lower, STATTIC_PHP_FUNCTIONS_FETCH_DENIED_REQUEST_HEADERS, true)) {
-            $normalized[$lower] = $value;
-        }
-    }
-
-    return $normalized;
 }
 
 // ---- brokered capabilities -------------------------------------------------

@@ -215,7 +215,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // a stronger state, is a denial, never an open space. A failed READ of an
     // existing overlay took the unavailable exit above.
     if ($overlay === null || ($overlay['fence'] ?? null) === 'exposure') {
-        _stattic_v4_render_forbidden('denied', 'access_denied', 'Forbidden');
+        _stattic_v4_render_forbidden('denied', 'access_denied', 'This page is private.');
     }
     $open = ($overlay['open'] ?? null) === true;
 
@@ -469,6 +469,17 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             $accessPath === $requestPath ? $originalRequestPath : $accessPath
         );
     }
+    require_once __DIR__ . '/space-users.php';
+    if (_stattic_space_users_prepare($privateRoot, $serving, $requestHost, $requestPath, $requestUri, $requestMethod, $overlay['usersProviderConfig'] ?? null)) {
+        return;
+    }
+    $authControl = STATTIC_ZERO_CONTROL_ROUTES[trim($requestPath, '/')] ?? null;
+    if (is_array($authControl) && in_array($authControl['operation'], ['config', 'auth_start', 'auth_sign_out', 'run'], true)) {
+        if (!in_array($requestMethod, $authControl['methods'], true)) _stattic_method_not_allowed(implode(', ', $authControl['methods']));
+        require_once __DIR__ . '/zero.php';
+        _stattic_invoke_zero($authControl, $versionRoot, $serving, $requestHost, $requestPath, $requestUri, $requestMethod);
+    }
+
     // The enforcement verdict, not the overlay flag: a Space that HAS grants but
     // admits this URL anonymously and unconditionally is still URL-stable and
     // keeps its shared-cache policy. Token presence, valid or not, pins the
@@ -1502,12 +1513,19 @@ function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath
 function _stattic_v4_render_forbidden(string $pageId, string $code, string $message): never
 {
     require_once __DIR__ . '/../shared/errors.php';
-    _stattic_serve_page($pageId, [
+    $context = [
         'status' => 403,
         'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE],
         'message' => $message,
         'code' => $code,
-    ]);
+    ];
+    // The denied page leads with "Access denied" and carries its copy in the
+    // denial slot, so a fence reads exactly like the lane-less deny in
+    // access-rules.php: same words, nothing about the Space disclosed.
+    if ($pageId === 'denied') {
+        $context['fragment'] = '<p class="sf-copy">' . _stattic_html_escape($message) . '</p>';
+    }
+    _stattic_serve_page($pageId, $context);
     exit;
 }
 

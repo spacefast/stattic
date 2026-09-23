@@ -291,7 +291,11 @@ function _stattic_db_broker_close(): void
 function _stattic_db_broker_operation(string $raw): array
 {
     if (strlen($raw) > STATTIC_DB_OPERATION_MAX_BYTES) {
-        return _stattic_db_broker_error('zero_db_operation_too_large', 'Zero DB operation exceeded the request size limit.');
+        return _stattic_db_broker_error('zero_db_operation_too_large', sprintf(
+            'Database operation is %d bytes; the limit is %d. Send fewer or smaller statements per call.',
+            strlen($raw),
+            STATTIC_DB_OPERATION_MAX_BYTES
+        ));
     }
 
     // Decoded to objects rather than associative arrays: PHP renders both `{}`
@@ -381,8 +385,15 @@ function _stattic_db_broker_transaction(stdClass $operation): array
     if (!is_array($statements) || !array_is_list($statements)) {
         return _stattic_db_broker_error('zero_db_operation_invalid', 'Zero DB operation could not be parsed.');
     }
-    if ($statements === [] || count($statements) > STATTIC_DB_TRANSACTION_MAX_STATEMENTS) {
+    if ($statements === []) {
         return _stattic_db_broker_error('zero_db_transaction_invalid', 'Zero DB transaction statements are invalid.');
+    }
+    if (count($statements) > STATTIC_DB_TRANSACTION_MAX_STATEMENTS) {
+        return _stattic_db_broker_error('zero_db_transaction_invalid', sprintf(
+            'Database batch has %d statements; the limit is %d. Split it into smaller batches.',
+            count($statements),
+            STATTIC_DB_TRANSACTION_MAX_STATEMENTS
+        ));
     }
 
     $shapes = [];
@@ -588,7 +599,11 @@ function _stattic_db_broker_run_statement(array $statement): array
         return _stattic_db_broker_error('zero_db_sql_invalid', 'Zero DB operation SQL is invalid.');
     }
     if (count($statement['params']) > STATTIC_DB_PARAM_MAX_COUNT) {
-        return _stattic_db_broker_error('zero_db_too_many_params', 'Zero DB operation has too many parameters.');
+        return _stattic_db_broker_error('zero_db_too_many_params', sprintf(
+            'Database statement has %d bound parameters; the limit is %d. Split it into smaller statements.',
+            count($statement['params']),
+            STATTIC_DB_PARAM_MAX_COUNT
+        ));
     }
 
     $bindings = _stattic_db_broker_bindings($statement['params']);
@@ -688,9 +703,12 @@ function _stattic_db_broker_rows(mysqli $connection, mysqli_stmt $prepared, stri
             _stattic_db_broker_evict($cacheKey);
             return $failure;
         }
-        // No result set at all (a DDL or DML statement run in query mode):
-        // db.rs reports the same empty row list.
-        return ['ok' => true, 'json' => '{"ok":true,"rows":[]}'];
+        // No result set at all: a DDL or DML statement run in query mode, as a
+        // D1 client's all() or first() sends it. The write still happened, so
+        // report what it changed next to the empty row list, the way D1 does.
+        $affected = _stattic_db_broker_unsigned_literal($prepared->affected_rows);
+        $insertId = _stattic_db_broker_unsigned_literal($prepared->insert_id);
+        return ['ok' => true, 'json' => '{"affectedRows":' . $affected . ',"lastInsertId":' . $insertId . ',"ok":true,"rows":[]}'];
     }
 
     $fields = $result->fetch_fields();

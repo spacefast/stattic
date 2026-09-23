@@ -1,7 +1,7 @@
 {
-  "revision": "cbeedac4a88bba588ac069b6593ba32f1ec565f8",
-  "sourceHash": "d1b6658bc88bb4692f41be4f3aa38cc572265168df329f0f4fbfbcf98d3eb510",
-  "manifestSha256": "7191f0340cf566de797957e008df881100ebe7b4e69f7e7a4dc27259f914d6bb",
+  "revision": "1cd0b0877f3bc361334c2b9a01213053b03f8618",
+  "sourceHash": "666c0978ac7588e8b8feafa38f7eaa2e160a293733dce9b0468846d777761c09",
+  "manifestSha256": "69b7c40054849da0c994766af5f9df9deb5a052ed05ea72cd2f88aeec6a9dbbc",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "1ffd6a730e5e6a6ab70a96bf472fa3bea8d3c031dd6185d01f8810743aa529e2"
+      "sha256": "df37a5f235a0e42589e8d1527b9e20cbac3acfb32675f89286372af4628b7079"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "9315bd64937a5b373a6fb6142a716aee21d1ec291245825013af1e8d9a3cb9e5"
+      "sha256": "fe996119eabaa30383d1be835e25be2390a461d528d32590c50e1c57a82e75a5"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -293,7 +293,7 @@
     },
     {
       "path": "crates/stattic-zero-runner/src/db.rs",
-      "sha256": "34f440774a920db425e481d5104b017d7f387a78e41dd459be0c9063dbc847a2"
+      "sha256": "78732f5660343ab55a5d4a56ce737f745f61157ec30b92751fc1aced30cdf8cf"
     },
     {
       "path": "crates/stattic-zero-runner/src/db/legacy.rs",
@@ -525,7 +525,7 @@
     },
     {
       "path": "runtime/engine/runtime/functions-dispatch.php",
-      "sha256": "e08eaa0a317d1957a25477d236b3046b45d58ba3f3dbe3803356b0305a3a9b91"
+      "sha256": "70da9672cccefe7b5b428f6e3148ea525c1eac33b6d539bbcd39158ac51fcb15"
     },
     {
       "path": "runtime/engine/runtime/functions-purge.php",
@@ -645,7 +645,7 @@
     },
     {
       "path": "runtime/engine/shared/db-broker.php",
-      "sha256": "d22c1aeaeba00a87cce7e41c2e27c77ce60cc615180522667c80cb524361b10b"
+      "sha256": "26def320a57cc7515b7574d7b38e3053b6c9bce7e44b9a1fb7e7a9603e9fdeeb"
     },
     {
       "path": "runtime/engine/shared/egress.php",
@@ -957,7 +957,7 @@
     },
     {
       "path": "runtime/tests/db-broker.test.ts",
-      "sha256": "3defe10a4955490d9b53344a3d01f15da3b3417f79494c374100eeeeb4f3601e"
+      "sha256": "8cd3b8005084dc78907a5e18e984b201e0a202b1ca42d3c20e1a35dc354de6d3"
     },
     {
       "path": "runtime/tests/dispatch.test.ts",
@@ -1141,7 +1141,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "06d17ffe610cbd3a354b59c74d6c43831d20d5195bd645912398af556b820ba8"
+      "sha256": "c73220c96399798d87ee78068bb0c9a0563ee3c50655ea70e325eb53f4019efe"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

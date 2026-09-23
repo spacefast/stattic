@@ -2272,6 +2272,34 @@ foreach ([
 check(in_array(['content-type', 'text/html'], $fxRelayed, true), 'dispatch: keeps the worker Content-Type');
 check(in_array(['x-custom', 'value'], $fxRelayed, true), 'dispatch: keeps an ordinary worker header');
 check(in_array(['cache-control', 'public, s-maxage=30'], $fxRelayed, true), 'dispatch: a public space keeps worker-declared caching');
+check(
+    _stattic_functions_edge_cache_directive($fxPublicPolicy, _stattic_cache_policy_apply_lines($fxPublicPolicy, $fxRelayed)) === SPACEFAST_EDGE_CACHE_OPT_IN,
+    'dispatch cache: worker-declared public caching opts into the edge'
+);
+
+// A worker that declares no Cache-Control asked for nothing to be stored: the
+// response leaves as no-store and the edge is told not to cache it, instead of
+// replaying a database read to every later visitor.
+$fxUndeclaredHeaders = [['content-type', 'application/json']];
+$fxUndeclaredPolicy = _stattic_functions_response_cache_policy(false, $fxUndeclaredHeaders);
+$fxUndeclaredLines = _stattic_cache_policy_apply_lines(
+    $fxUndeclaredPolicy,
+    _stattic_relay_response_header_lines($fxUndeclaredHeaders, $fxUndeclaredPolicy, _stattic_functions_relay_response_lane())
+);
+check($fxUndeclaredPolicy['cache_control'] === STATTIC_CACHE_CONTROL_NO_STORE, 'dispatch cache: a worker response without Cache-Control is no-store');
+check(in_array(['Cache-Control', STATTIC_CACHE_CONTROL_NO_STORE], $fxUndeclaredLines, true), 'dispatch cache: the no-store default reaches the visitor');
+check(
+    _stattic_functions_edge_cache_directive($fxUndeclaredPolicy, $fxUndeclaredLines) === SPACEFAST_EDGE_CACHE_OPT_OUT,
+    'dispatch cache: a worker response without Cache-Control opts out of the edge'
+);
+
+// The edge channel is the platform's: a worker cannot opt itself in or forge a verdict.
+$fxSteering = _stattic_relay_response_header_lines(
+    [['a8c-edge-cache', 'cache'], ['x-ac', 'HIT'], ['content-type', 'text/html']],
+    $fxUndeclaredPolicy,
+    _stattic_functions_relay_response_lane()
+);
+check($fxSteering === [['content-type', 'text/html']], 'dispatch: strips worker A8C-* and x-ac response headers');
 
 // A Cloudflare-shaped value is what disqualifies these two, not the name.
 $fxTenantReporting = _stattic_relay_response_header_lines([
@@ -2332,6 +2360,10 @@ $fxPrivateNames = array_map(
     )
 );
 check($fxPrivateNames === ['content-type'], 'dispatch: a private space drops worker cache metadata');
+check(
+    _stattic_functions_edge_cache_directive($fxPrivatePolicy, [['cache-control', 'public, s-maxage=30']]) === SPACEFAST_EDGE_CACHE_OPT_OUT,
+    'dispatch cache: a private space never opts a worker response into the edge'
+);
 
 // Inbound: the platform's own dispatch headers can never be forged by a
 // visitor, while Authorization belongs to the customer's application.
@@ -3012,7 +3044,8 @@ check(
 );
 check(
     _stattic_db_broker_execute(str_repeat('x', STATTIC_DB_OPERATION_MAX_BYTES + 1))
-        === '{"code":"zero_db_operation_too_large","message":"Zero DB operation exceeded the request size limit.","ok":false}',
+        === '{"code":"zero_db_operation_too_large","message":"Database operation is ' . (STATTIC_DB_OPERATION_MAX_BYTES + 1)
+            . ' bytes; the limit is ' . STATTIC_DB_OPERATION_MAX_BYTES . '. Send fewer or smaller statements per call.","ok":false}',
     'db broker envelope: the size limit is checked before parsing'
 );
 

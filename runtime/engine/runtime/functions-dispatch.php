@@ -349,7 +349,9 @@ function _stattic_functions_relay_response_lane(): array
         'deny_prefixes' => [SPACEFAST_FUNCTIONS_DISPATCH_HEADER_PREFIX, 'cf-'],
         'deny_value' => static function (string $name, string $value): bool {
             $lowerValue = strtolower($value);
-            return ($name === 'server' && trim($lowerValue) === 'cloudflare')
+            // §16: a worker never steers the edge (A8C-*) or forges its verdict (x-ac).
+            return _stattic_platform_owns_header($name)
+                || ($name === 'server' && trim($lowerValue) === 'cloudflare')
                 || (
                     in_array($name, ['nel', 'report-to'], true)
                     && (str_contains($lowerValue, 'cf-nel') || str_contains($lowerValue, 'cloudflare.com'))
@@ -367,15 +369,40 @@ function _stattic_functions_relay_response_lane(): array
 // would be stored once by URL and replayed to every variant. The signals that
 // revoke a proxy origin's shared-cache grant (any Vary beyond Accept-Encoding,
 // a Set-Cookie, a private/no-cache directive) revoke the worker's the same way,
-// down to the same no-store.
+// down to the same no-store. A worker that declares no Cache-Control at all
+// asked for nothing to be stored: its answer is usually computed per request
+// (a database read), so it leaves as no-store rather than falling to whatever
+// the edge does with an undeclared response.
 function _stattic_functions_response_cache_policy(bool $privateCache, array $workerHeaders): array
 {
     return _stattic_cache_policy([
         'private' => $privateCache,
         'public' => _stattic_cache_policy_upstream_revokes_shared_store($workerHeaders)
+            || _stattic_functions_worker_cache_control($workerHeaders) === null
             ? STATTIC_CACHE_CONTROL_NO_STORE
             : null,
     ]);
+}
+
+function _stattic_functions_worker_cache_control(array $workerHeaders): ?string
+{
+    foreach ($workerHeaders as $header) {
+        if (is_array($header) && strtolower(trim((string) ($header[0] ?? ''))) === 'cache-control') {
+            return (string) ($header[1] ?? '');
+        }
+    }
+    return null;
+}
+
+// The edge opt-in for a relayed worker response, derived from the Cache-Control
+// that actually leaves (the decided policy, else the worker's own), the same
+// way every PHP lane derives it, so the worker's caching and the edge's can
+// never disagree.
+function _stattic_functions_edge_cache_directive(array $cachePolicy, array $sentLines): string
+{
+    return _stattic_edge_cache_directive(
+        $cachePolicy['cache_control'] ?? _stattic_functions_worker_cache_control($sentLines)
+    );
 }
 
 // Never returns when it dispatches; returns normally only when this request is
@@ -463,13 +490,13 @@ function _stattic_functions_dispatch(
             // headers are the lane input that can revoke shared caching, and
             // they exist only once the host has answered.
             $cachePolicy = _stattic_functions_response_cache_policy($privateCache, $headerPairs);
-            _stattic_relay_send_response_headers(
-                _stattic_cache_policy_apply_lines(
-                    $cachePolicy,
-                    _stattic_relay_response_header_lines($headerPairs, $cachePolicy, _stattic_functions_relay_response_lane())
-                ),
-                $cachePolicy
+            $responseLines = _stattic_cache_policy_apply_lines(
+                $cachePolicy,
+                _stattic_relay_response_header_lines($headerPairs, $cachePolicy, _stattic_functions_relay_response_lane())
             );
+            _stattic_relay_send_response_headers($responseLines, $cachePolicy);
+            _stattic_clear_platform_owned_response_headers();
+            header(STATTIC_EDGE_CACHE_HEADER . ': ' . _stattic_functions_edge_cache_directive($cachePolicy, $responseLines), true);
             // After the response headers, before the first body byte: the
             // filter reads the declared content type and never sees a platform
             // page (a failure past this point truncates instead, by design).

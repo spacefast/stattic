@@ -142,13 +142,17 @@ test("transaction control state edges answer the broker's own codes", async () =
       }),
     ],
   });
-  const codes = (responses ?? []).map((body) => JSON.parse(String(body)).code);
-  expect(codes).toEqual([
+  const refusals = (responses ?? []).map((body) => JSON.parse(String(body)));
+  expect(refusals.map((refusal) => refusal.code)).toEqual([
     "zero_db_transaction_missing",
     "zero_db_transaction_missing",
     "zero_db_transaction_invalid",
     "zero_db_transaction_invalid",
   ]);
+  // An oversized batch says how big it was and what the limit is.
+  expect(refusals[3].message).toBe(
+    "Database batch has 65 statements; the limit is 64. Split it into smaller batches.",
+  );
 });
 
 test("a batch transaction rolls back entirely when one statement fails", async () => {
@@ -190,6 +194,13 @@ test("a batch transaction returns one result per statement", async () => {
     { affectedRows: 1, lastInsertId: 0, ok: true },
     { ok: true, rows: [{ n: 2 }] },
   ]);
+
+  // A write sent in query mode, as a D1 client's all() sends it, still reports
+  // what it changed next to its empty row list.
+  const { responses: written } = await php({
+    operations: [op({ sql: "DELETE FROM lifecycle WHERE id = ?", params: [4] })],
+  });
+  expect(written?.[0]).toBe('{"affectedRows":1,"lastInsertId":0,"ok":true,"rows":[]}');
 });
 
 test("a transaction abandoned by a dying request leaves no rows and no locks", async () => {
@@ -327,7 +338,16 @@ test("a cached statement is not reused across different parameter types", async 
 
 // --- bounded output ---------------------------------------------------------------------
 
-test("the row cap and the byte cap each refuse with their own code", async () => {
+test("each size cap refuses with its own code", async () => {
+  const paramsRefused = await php({
+    operations: [op({ sql: "SELECT 1", params: Array.from({ length: 257 }, () => 1) })],
+  });
+  expect(JSON.parse(String(paramsRefused.responses?.[0]))).toMatchObject({
+    code: "zero_db_too_many_params",
+    message:
+      "Database statement has 257 bound parameters; the limit is 256. Split it into smaller statements.",
+  });
+
   const rowsCapped = await php({
     operations: [op({ sql: "SELECT id FROM wide" })],
   });

@@ -336,7 +336,11 @@ fn execute_db_capability_operation(
     if raw.len() > DB_OPERATION_MAX_BYTES {
         return Err(BrokerRefusal::new(
             "zero_db_operation_too_large",
-            "Zero DB operation exceeded the request size limit.",
+            format!(
+                "Database operation is {} bytes; the limit is {}. Send fewer or smaller statements per call.",
+                raw.len(),
+                DB_OPERATION_MAX_BYTES
+            ),
         ));
     }
     let operation: DbCapabilityOperation = serde_json::from_str(raw).map_err(|_| {
@@ -899,7 +903,11 @@ fn ready_statement(statement: &DbStatement) -> Result<ReadyStatement<'_>, Broker
     if statement.params.len() > DB_PARAM_MAX_COUNT {
         return Err(BrokerRefusal::new(
             "zero_db_too_many_params",
-            "Zero DB operation has too many parameters.",
+            format!(
+                "Database statement has {} bound parameters; the limit is {}. Split it into smaller statements.",
+                statement.params.len(),
+                DB_PARAM_MAX_COUNT
+            ),
         ));
     }
     let params = Params::Positional(

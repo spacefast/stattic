@@ -453,7 +453,19 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // The ONE protected-space enforcement call on the serve path; an open Space
     // loads no access code at all. BOTH paths are passed: a rewrite must not
     // launder a URL whose own Grants are narrower than the effective path's.
-    if (!$open) {
+    //
+    // The one entry a protected Space answers without it is the version's
+    // declared share-preview image (see _stattic_v4_public_preview_image), and
+    // never while a platform fence holds the Space.
+    $publicPreviewImage = false;
+    if (
+        !$open
+        && _stattic_v4_public_preview_image($serving, $entry, $requestMethod, $requestPath, $originalRequestPath)
+    ) {
+        require_once __DIR__ . '/access-rules.php';
+        $publicPreviewImage = _stattic_access_unfenced($serving, $requestHost, $requestPath);
+    }
+    if (!$open && !$publicPreviewImage) {
         require_once __DIR__ . '/access-rules.php';
         // The SDK, the collaboration manifest and its theme are subresources of
         // the page that embedded them and own no scope, so no page Grant lists
@@ -550,6 +562,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         'edge_owns_placed_rules' => $edgeOwnsPlacedRules,
         'route_status' => $routeStatus,
         'private_file_alias' => $privateFileAlias,
+        'public_preview_image' => $publicPreviewImage,
         'request_uri' => $requestUri,
         // The URL the VISITOR asked for, never the rewritten one: the provider's
         // asset rewrite (C21/D146) keys on it, and a mount or a residue rewrite
@@ -1003,6 +1016,11 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
     }
     $headers = _stattic_v4_platform_response_headers($context, $headers, $privateCache);
+    // Public so a link previewer can fetch it, never indexed: the Space it
+    // belongs to is still private.
+    if (!empty($context['public_preview_image'])) {
+        $headers['x-robots-tag'] = 'noindex, nofollow';
+    }
 
     // The validator is EMITTED, never answered against: the edge holds the copy
     // and answers If-None-Match off its own HIT.
@@ -1028,6 +1046,11 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     }
     $length = is_int($rawLength) ? $rawLength : 0;
     $lane = (int) ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_LANE] ?? STATTIC_RUNTIME_RESPONSE_LANE_PHP);
+    // nginx drops X-Robots-Tag on the accel lane, and the noindex above is the
+    // reason this image may be public at all.
+    if (!empty($context['public_preview_image'])) {
+        $lane = STATTIC_RUNTIME_RESPONSE_LANE_PHP;
+    }
     // Only an access verdict can authorize the reserved alias. A token merely
     // appearing on an otherwise-public URL still makes that response private,
     // but it does not create an alias another request may reuse.
@@ -1109,6 +1132,48 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     _stattic_stream_file($stream, $length);
     fclose($stream);
     exit;
+}
+
+// A protected Space's declared share-preview image (`meta.image`, flagged `pi`
+// at compile time) is the one thing it serves without a session. WhatsApp,
+// Signal and Slack build a link preview by fetching the page and then its
+// og:image in a separate request that carries no cookie, so behind the gate a
+// shared link shows no picture. Whoever holds the link already sees the page;
+// the owner chose this image to be what the link looks like.
+//
+// Narrow on purpose: a GET or HEAD for that entry at its own URL (no rewrite or
+// alias reaches it), a 200 with a body, and a raster image type. The compiler
+// decides the same things; this re-checks them so the exemption can never
+// widen past an image.
+//
+// Never on an immutable per-version hostname. The response there is shared-
+// cacheable for a year, and a fence's route write purges only the route's own
+// hostnames, so a later hold could not take the image back. Shared links use
+// the Space's live hostname, where a purge reaches.
+function _stattic_v4_public_preview_image(
+    array $serving,
+    ?array $entry,
+    string $requestMethod,
+    string $requestPath,
+    string $originalRequestPath
+): bool {
+    if (
+        !empty($serving['immutable'])
+        || $entry === null
+        || empty($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_PREVIEW_IMAGE])
+        || !in_array($requestMethod, ['GET', 'HEAD'], true)
+        || $requestPath !== $originalRequestPath
+        || (int) ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS] ?? 0) !== 200
+        || !is_string($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_BLOB] ?? null)
+        || isset($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION])
+    ) {
+        return false;
+    }
+    $headers = is_array($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_HEADERS] ?? null)
+        ? $entry[STATTIC_RUNTIME_RESPONSE_ENTRY_HEADERS]
+        : [];
+    $contentType = strtolower(trim(explode(';', (string) ($headers['content-type'] ?? ''), 2)[0]));
+    return in_array($contentType, ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], true);
 }
 
 // The platform's own header ownership over one table response: the

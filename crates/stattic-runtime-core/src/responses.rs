@@ -27,11 +27,11 @@ use crate::protocol::{
     RESPONSE_ACTION_PHP, RESPONSE_ENTRY_ACTION, RESPONSE_ENTRY_ALLOWLISTED_EXT,
     RESPONSE_ENTRY_BLOB, RESPONSE_ENTRY_CACHE_CLASS, RESPONSE_ENTRY_ETAG, RESPONSE_ENTRY_HEADERS,
     RESPONSE_ENTRY_LANE, RESPONSE_ENTRY_LENGTH, RESPONSE_ENTRY_PLACED_HOSTNAMES,
-    RESPONSE_ENTRY_RULES_FIRST, RESPONSE_ENTRY_STATUS, RESPONSE_KEY_NOT_FOUND,
-    RESPONSE_KEY_NOT_FOUND_PREFIX, RESPONSE_KEY_ROBOTS, RESPONSE_KEY_RULES, RESPONSE_KEY_SPA,
-    RESPONSE_LANE_ACCEL, RESPONSE_LANE_PHP, RESPONSE_TABLE_BASENAME, RESPONSE_TABLE_MAX_BYTES,
-    RESPONSE_TABLE_SINGLE_KEY, RESPONSE_TABLE_SPLIT_BYTES, THEME_STYLESHEET_URL,
-    VERSION_ROOT_BASENAME, VERSION_ROOT_POINTER_FILE,
+    RESPONSE_ENTRY_PREVIEW_IMAGE, RESPONSE_ENTRY_RULES_FIRST, RESPONSE_ENTRY_STATUS,
+    RESPONSE_KEY_NOT_FOUND, RESPONSE_KEY_NOT_FOUND_PREFIX, RESPONSE_KEY_ROBOTS, RESPONSE_KEY_RULES,
+    RESPONSE_KEY_SPA, RESPONSE_LANE_ACCEL, RESPONSE_LANE_PHP, RESPONSE_TABLE_BASENAME,
+    RESPONSE_TABLE_MAX_BYTES, RESPONSE_TABLE_SINGLE_KEY, RESPONSE_TABLE_SPLIT_BYTES,
+    THEME_STYLESHEET_URL, VERSION_ROOT_BASENAME, VERSION_ROOT_POINTER_FILE,
 };
 use crate::serving_paths::is_private_serving_path;
 
@@ -65,6 +65,9 @@ pub(crate) struct ResponseEntry {
     pub rules_first: bool,
     /// An HTML body, which is always the PHP lane.
     pub html: bool,
+    /// The version's declared share-preview image. See
+    /// [`RESPONSE_ENTRY_PREVIEW_IMAGE`].
+    pub preview_image: bool,
 }
 
 impl ResponseEntry {
@@ -79,6 +82,7 @@ impl ResponseEntry {
             action: None,
             rules_first: false,
             html: false,
+            preview_image: false,
         }
     }
 
@@ -99,6 +103,7 @@ impl ResponseEntry {
             action: None,
             rules_first: false,
             html: false,
+            preview_image: false,
         }
     }
 
@@ -214,6 +219,9 @@ impl ResponseEntry {
         }
         if self.blob.is_some() && allowlisted_extension(key) {
             entry.insert(RESPONSE_ENTRY_ALLOWLISTED_EXT.into(), json!(1));
+        }
+        if self.blob.is_some() && self.preview_image {
+            entry.insert(RESPONSE_ENTRY_PREVIEW_IMAGE.into(), json!(1));
         }
         if let Some(action) = &self.action {
             entry.insert(RESPONSE_ENTRY_ACTION.into(), action.clone());
@@ -360,6 +368,10 @@ pub(crate) struct ResponseCompileInput<'a> {
     /// version property — but a preview host only ever serves its own version,
     /// so compiling the noindex in is honest and costs no request-time work.
     pub noindex_host: bool,
+    /// The files (no leading slash) the version advertises as its link-preview
+    /// image. An entry is flagged only when it is a raster image; see
+    /// [`RESPONSE_ENTRY_PREVIEW_IMAGE`].
+    pub preview_images: &'a BTreeSet<String>,
 }
 
 /// Compiles every request key a published version can answer.
@@ -401,10 +413,12 @@ pub(crate) fn compile_response_table(
             continue;
         }
         let key = request_key(path);
-        table.insert(
-            key.clone(),
-            file_entry(&key, path, meta, input, &rules, 200),
-        );
+        let mut entry = file_entry(&key, path, meta, input, &rules, 200);
+        // Only the file's own URL: an alias or a rewrite that reaches the same
+        // bytes stays gated like everything else.
+        entry.preview_image =
+            input.preview_images.contains(path) && is_raster_image(&entry.headers);
+        table.insert(key.clone(), entry);
         for alias in clean_url_keys(path, &index_name, directory_index, clean_urls) {
             match alias {
                 CleanUrl::Serve(key) => {
@@ -740,7 +754,19 @@ fn file_entry(
         action: None,
         rules_first: false,
         html: is_html,
+        preview_image: false,
     }
+}
+
+/// The image types every link-preview client renders. SVG is left out on
+/// purpose: it can carry script, and no preview client draws it anyway.
+fn is_raster_image(headers: &BTreeMap<String, String>) -> bool {
+    headers.get("content-type").is_some_and(|value| {
+        let media = value.split(';').next().unwrap_or_default().trim();
+        ["image/png", "image/jpeg", "image/webp", "image/gif"]
+            .iter()
+            .any(|kind| media.eq_ignore_ascii_case(kind))
+    })
 }
 
 /// The redirect and `_headers` rules, indexed for compile-time evaluation.
@@ -1431,6 +1457,7 @@ mod tests {
             headers_pattern,
             false,
             None,
+            None,
         )
     }
 
@@ -1444,6 +1471,7 @@ mod tests {
         headers_pattern: Value,
         noindex_host: bool,
         pages: Option<&[Value]>,
+        preview_image: Option<&str>,
     ) -> BTreeMap<String, ResponseEntry> {
         let files: BTreeMap<String, FileMeta> = entries
             .iter()
@@ -1452,6 +1480,8 @@ mod tests {
         let private = BTreeSet::new();
         let listings = Vec::new();
         let zero = Map::new();
+        let preview_images: BTreeSet<String> =
+            preview_image.into_iter().map(String::from).collect();
         compile_response_table(&ResponseCompileInput {
             files: &files,
             private: &private,
@@ -1468,6 +1498,7 @@ mod tests {
                 DENY_ALL_ROBOTS.len() as u64,
             )),
             noindex_host,
+            preview_images: &preview_images,
         })
     }
 
@@ -1515,6 +1546,7 @@ mod tests {
             json!([]),
             false,
             Some(&pages),
+            None,
         );
         assert!(!table.contains_key("/"));
         assert!(!table.contains_key(RESPONSE_KEY_SPA));
@@ -1740,6 +1772,7 @@ mod tests {
             json!([]),
             true,
             None,
+            None,
         );
         let page = &table["/index.html"];
         assert_eq!(
@@ -1749,6 +1782,55 @@ mod tests {
         assert_eq!(page.lane("/index.html"), RESPONSE_LANE_PHP);
         // A large binary has no signal to carry; it is not silently tagged.
         assert!(!table["/logo.png"].headers.contains_key("x-robots-tag"));
+    }
+
+    /// A protected Space serves its share-preview image to cookieless link
+    /// previewers, so the flag has to mark that one raster file and nothing it
+    /// could be confused with.
+    #[test]
+    fn only_the_declared_raster_preview_image_is_flagged() {
+        let files: &[(&str, &[u8])] = &[
+            ("index.html", b"<h1>home</h1>"),
+            ("assets/og-image.jpg", b"jpeg"),
+            ("assets/other.jpg", b"jpeg"),
+            ("assets/og.svg", b"<svg/>"),
+        ];
+        let config = json!({"index": "index.html", "clean_urls": false});
+        let flagged = |table: &BTreeMap<String, ResponseEntry>, key: &str| {
+            table[key]
+                .to_value(key)
+                .get(RESPONSE_ENTRY_PREVIEW_IMAGE)
+                .cloned()
+        };
+
+        let table = compile_for_host(
+            files,
+            config.clone(),
+            json!({}),
+            json!([]),
+            json!({}),
+            json!([]),
+            false,
+            None,
+            Some("assets/og-image.jpg"),
+        );
+        assert_eq!(flagged(&table, "/assets/og-image.jpg"), Some(json!(1)));
+        assert_eq!(flagged(&table, "/assets/other.jpg"), None);
+        assert_eq!(flagged(&table, "/index.html"), None);
+
+        // An SVG can carry script, so declaring one earns it nothing.
+        let svg = compile_for_host(
+            files,
+            config,
+            json!({}),
+            json!([]),
+            json!({}),
+            json!([]),
+            false,
+            None,
+            Some("assets/og.svg"),
+        );
+        assert_eq!(flagged(&svg, "/assets/og.svg"), None);
     }
 
     /// A `_headers` rule ships WHOLE in the residue and nothing of it lands in

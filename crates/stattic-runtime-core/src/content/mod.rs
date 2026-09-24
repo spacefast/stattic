@@ -65,6 +65,10 @@ pub struct HtmlPipelineOutcome {
     /// source-unchanged under a matching context digest, so no byte of theirs
     /// was read, rendered, decorated or installed this run.
     pub adopted: BTreeSet<String>,
+    /// The file paths the served HTML advertises as its link-preview image
+    /// (`og:image`, `twitter:image` and their variants), resolved but not yet
+    /// checked against the files this version ships.
+    pub preview_images: BTreeSet<String>,
 }
 
 /// Runs the content pipeline over the committed files, writing generated
@@ -318,6 +322,7 @@ pub fn materialize_html_pipeline(
         .filter_map(|reference| reference.strip_prefix('/'))
         .all(|path| !generated.contains(path));
     let mut adopted = BTreeSet::new();
+    let mut preview_images = BTreeSet::new();
     for path in targets {
         // A rendered page's decoration also reads frontmatter that never
         // reaches the rendered bytes (description, image), so byte equality
@@ -338,6 +343,12 @@ pub fn materialize_html_pipeline(
                             Some(&prior.served_content_type),
                         ),
                     );
+                    // The served bytes are last version's, decorated from this
+                    // same source under the same context digest, so the tags
+                    // the author wrote are in the source head. The platform
+                    // tag is the site-level image, which the finalizer adds.
+                    let head = source_head(&files_root.join(&path));
+                    preview_images.extend(advertised_image_files(&head, &path));
                     adopted.insert(path);
                     continue;
                 }
@@ -359,6 +370,7 @@ pub fn materialize_html_pipeline(
             },
             diagnostics,
         )?;
+        preview_images.extend(advertised_image_files(&document, &path));
         if document != source {
             write_generated(
                 files_root,
@@ -376,7 +388,97 @@ pub fn materialize_html_pipeline(
         generated,
         decorated,
         adopted,
+        preview_images,
     })
+}
+
+/// The meta tags a link-preview client reads its image from. Open Graph uses
+/// `property`, Twitter uses `name`, and pages mix the two, so both are read.
+const PREVIEW_IMAGE_META: [&str; 5] = [
+    "og:image",
+    "og:image:url",
+    "og:image:secure_url",
+    "twitter:image",
+    "twitter:image:src",
+];
+
+/// How much of an adopted page is read to find its preview tags. They live in
+/// `<head>`, and this keeps adoption from paying for whole documents.
+const PREVIEW_SCAN_BYTES: u64 = 64 * 1024;
+
+fn source_head(path: &Path) -> String {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(PREVIEW_SCAN_BYTES).read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The files one served HTML document at `page_path` advertises as its link
+/// preview image.
+fn advertised_image_files(html: &str, page_path: &str) -> Vec<String> {
+    let found = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&found);
+    let settings = RewriteStrSettings::new().append_element_content_handler(element!(
+        "head meta[content]",
+        move |element| {
+            let mut advertised = false;
+            for attribute in ["property", "name"] {
+                if let Some(key) = element.get_attribute(attribute) {
+                    let key = key.trim().to_ascii_lowercase();
+                    advertised |= PREVIEW_IMAGE_META.contains(&key.as_str());
+                }
+            }
+            if advertised {
+                if let Some(content) = element.get_attribute("content") {
+                    sink.borrow_mut().push(content);
+                }
+            }
+            Ok(())
+        }
+    ));
+    // A document lol_html cannot finish still yields the tags it reached.
+    let _ = rewrite_str(html, settings);
+    let references = found.take();
+    references
+        .iter()
+        .filter_map(|reference| advertised_image_file(reference, page_path))
+        .collect()
+}
+
+/// The file path an image reference names, from the page at `page_path`.
+///
+/// A root-relative path and a page-relative path resolve as a browser would.
+/// An absolute `http(s)` URL keeps only its path, whatever the host: the
+/// finalizer does not know every hostname a Space answers on (custom domains
+/// attach after publish), and the caller only ever flags a path that names a
+/// file this version ships, which the author already advertised.
+pub(crate) fn advertised_image_file(reference: &str, page_path: &str) -> Option<String> {
+    let reference = reference.trim();
+    let reference = reference.split(['#', '?']).next().unwrap_or_default();
+    let lower = reference.to_ascii_lowercase();
+    let scheme = ["https://", "http://", "//"]
+        .into_iter()
+        .find(|scheme| lower.starts_with(scheme));
+    let path = if let Some(scheme) = scheme {
+        reference[scheme.len()..].split_once('/')?.1.to_string()
+    } else if let Some(rooted) = reference.strip_prefix('/') {
+        rooted.to_string()
+    } else if reference.contains(':') {
+        return None;
+    } else {
+        let dir = path_dir(page_path);
+        if dir.is_empty() {
+            reference.to_string()
+        } else {
+            format!("{dir}/{reference}")
+        }
+    };
+    let clean = path
+        .split('/')
+        .all(|segment| !segment.is_empty() && segment != "." && segment != "..");
+    clean.then_some(path)
 }
 
 fn apply_layouts(
@@ -1022,6 +1124,25 @@ mod tests {
         assert!(html.contains("href=\"data:image/svg+xml,"));
         assert!(html.contains("%3E%52%3C%2F%74%65%78%74%3E"));
         assert!(!html.contains("/__spacefast_generated/theme.css"));
+        // The pipeline reports the image the served page advertises as its
+        // link preview, as the file it names.
+        assert_eq!(
+            run.result.as_ref().unwrap().preview_images,
+            BTreeSet::from(["cover.png".to_string()])
+        );
+
+        // Hand-written tags count the same: host and query drop, a
+        // page-relative reference resolves from the page, other meta is ignored.
+        let hand_written = br#"<html><head><meta property="og:image" content="https://site.view.fast/assets/og.jpg?v=c778f02a"><meta name="twitter:image" content="share.png"><meta property="og:title" content="/title.png"></head><body></body></html>"#;
+        let run = run_pipeline(
+            &[("trip/index.html", hand_written)],
+            json!({"mode":"website"}),
+            json!({"config":{}}),
+        );
+        assert_eq!(
+            run.result.as_ref().unwrap().preview_images,
+            BTreeSet::from(["assets/og.jpg".to_string(), "trip/share.png".to_string()])
+        );
 
         let favicon = b"author icon";
         let run = run_pipeline(

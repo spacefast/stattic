@@ -27,7 +27,10 @@ use crate::catalog::{
 use crate::config::crons;
 use crate::config::diagnostics::DiagnosticSeverity;
 use crate::config::jsonc::parse as parse_jsonc;
-use crate::content::{materialize_html_pipeline, IMPLICIT_FAVICON_PATH, PIPELINE_SOURCE_MAX_BYTES};
+use crate::content::{
+    advertised_image_file, materialize_html_pipeline, IMPLICIT_FAVICON_PATH,
+    PIPELINE_SOURCE_MAX_BYTES,
+};
 use crate::csp::PlatformCspSources;
 use crate::finalize::{
     artifact_metadata, create_dir_all, file_meta, invalid, invalid_error, invalid_with_details,
@@ -957,6 +960,25 @@ fn run_finalize_pipeline(
     // Base map and every channel variant compile through the SAME inputs; only
     // the file map differs, so a routing decision cannot drift between them.
     let noindex_host = noindex_host(&serving)?;
+    // Every image the served HTML advertises as its link preview, plus the
+    // site-level one decoration writes into it (the version's `meta.image`,
+    // else the dashboard's): an adopted page was not re-read for the tag the
+    // platform wrote. Only files this version ships can be flagged.
+    let site_images = [
+        config
+            .get("meta")
+            .and_then(Value::as_object)
+            .and_then(|meta| meta.get("image")),
+        viewer.get("og_image_path"),
+    ];
+    let preview_images: BTreeSet<String> = site_images
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|reference| advertised_image_file(reference, ""))
+        .chain(pipeline.preview_images.iter().cloned())
+        .filter(|path| files.contains_key(path))
+        .collect();
     let compile_for = |files: &BTreeMap<String, FileMeta>| {
         compile_response_table(&ResponseCompileInput {
             files,
@@ -971,6 +993,7 @@ fn run_finalize_pipeline(
             zero_actions: &zero_actions,
             robots_blob: Some((robots.clone(), DENY_ALL_ROBOTS.len() as u64)),
             noindex_host,
+            preview_images: &preview_images,
         })
     };
     let (table, route_tables) = timed(&mut telemetry.response_tables_ms, || {
@@ -2410,6 +2433,7 @@ mod tests {
     use super::*;
     use crate::finalize::mime_for_path;
     use crate::model::{RuntimeZeroEndpoint, RuntimeZeroRun, SITE_FINALIZE_INPUT_FORMAT};
+    use crate::protocol::{RESPONSE_ENTRY_PREVIEW_IMAGE, RESPONSE_TABLE_BASENAME};
     use std::path::PathBuf;
     use tempfile::{tempdir, TempDir};
 
@@ -4425,6 +4449,28 @@ mod tests {
         fs::read(private.join(format!("spaces/s/blobs/{}/{sha}", &sha[..2]))).unwrap()
     }
 
+    /// How many entries a version's compiled response tables flag as a
+    /// link-preview image.
+    fn preview_flags(private: &Path, version: &str) -> usize {
+        let root = private.join(format!("spaces/s/versions/{version}"));
+        let mut pending = vec![root];
+        let mut flags = 0;
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if name.starts_with(RESPONSE_TABLE_BASENAME) && name.ends_with(".php") {
+                    let table = fs::read_to_string(&path).unwrap();
+                    let key = format!("'{RESPONSE_ENTRY_PREVIEW_IMAGE}' =>");
+                    flags += table.matches(&key).count();
+                }
+            }
+        }
+        flags
+    }
+
     /// The headline of the incremental path: a republish that changes one file
     /// adopts every other page's served identity verbatim — same catalog entry,
     /// same CAS object, no decoration work — while the changed file takes the
@@ -4434,6 +4480,9 @@ mod tests {
         let temp = tempdir().unwrap();
         let private = temp.path().join(".stattic/storage");
         let stable = b"<html><head></head><body><p>stable</p></body></html>" as &[u8];
+        // A rendered page whose link-preview image comes from frontmatter,
+        // unchanged across both publishes.
+        let post = b"---\nimage: /cover.png\n---\n# Post\n" as &[u8];
         let metadata = json!({"mode":"website","title":"Adopt"});
         finalize_site(
             fixture_input(
@@ -4447,6 +4496,8 @@ mod tests {
                             b"<html><head></head><body><p>one</p></body></html>",
                         ),
                         ("style.css", b"body{}"),
+                        ("post.md", post),
+                        ("cover.png", b"cover"),
                     ],
                 ),
                 metadata.clone(),
@@ -4467,6 +4518,8 @@ mod tests {
                         b"<html><head></head><body><p>two</p></body></html>",
                     ),
                     ("style.css", b"body{}"),
+                    ("post.md", post),
+                    ("cover.png", b"cover"),
                 ],
             ),
             metadata,
@@ -4479,8 +4532,14 @@ mod tests {
         let telemetry = output.telemetry.as_ref().expect("a finalize that ran");
         assert_eq!(
             telemetry.skipped_files, 1,
-            "index.html adopts; about.html changed; style.css is no decoration target: {telemetry:?}"
+            "index.html adopts; about.html changed; the post is rendered, so never adopted; \
+             style.css is no decoration target: {telemetry:?}"
         );
+        // The frontmatter image stays the post's link preview on the republish,
+        // and it is the one file both versions serve past the access gate.
+        for version in ["v", "v2"] {
+            assert_eq!(preview_flags(&private, version), 1, "{version}");
+        }
         assert_eq!(
             catalog_at(&private, "v").paths["index.html"],
             catalog_at(&private, "v2").paths["index.html"],

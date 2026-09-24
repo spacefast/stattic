@@ -2192,6 +2192,17 @@ function _stattic_enforce_scoped_admission(
     _stattic_render_access_gate($serving, $requestHost);
 }
 
+// Whether no platform fence holds this Space and its projection is readable.
+// The share-preview image exemption on the serve path
+// (_stattic_v4_public_preview_image) skips enforcement, so it asks this first:
+// an ownership or exposure hold keeps even the preview image behind the gate.
+function _stattic_access_unfenced(array $serving, string $requestHost, string $requestPath): bool
+{
+    $admission = _stattic_scoped_admission_context($serving, $requestHost, $requestPath);
+    return ($admission['error'] ?? null) === null
+        && ($admission['projection']['fence'] ?? 'none') === 'none';
+}
+
 // THE protected-space enforcement call on the serve path (contracts §7): exits
 // on deny, returns on admit.
 //

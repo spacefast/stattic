@@ -59,6 +59,10 @@ const PRIVATE_VERSION_HOST = "private-version.access.test";
 const OTHER_PRIVATE_HOST = "other-private.access.test";
 const PRIVATE_SPACE = "spc_access_private";
 const PRIVATE_VERSION = "ver_access_private";
+const PREVIEW_HOST = "preview-image.access.test";
+const PREVIEW_VERSION_HOST = "preview-image-version.access.test";
+const PREVIEW_SPACE = "spc_access_preview_image";
+const PREVIEW_VERSION = "ver_access_preview_image";
 const PUBLIC_HOST = "public.access.test";
 const PUBLIC_SPACE = "spc_access_public";
 const PUBLIC_VERSION = "ver_access_public";
@@ -863,6 +867,27 @@ beforeAll(async () => {
       },
     });
   }
+  // A private Space that declared a share-preview image.
+  await deploy(runtime, {
+    spaceId: PREVIEW_SPACE,
+    versionId: PREVIEW_VERSION,
+    files: {
+      ...FIXTURE_FILES,
+      "og.png": "png bytes",
+      "other.png": "png bytes",
+      "og.svg": "<svg/>",
+      // Most agent-built pages write their own tag, as an absolute URL.
+      "trip/index.html": `<html><head><meta property="og:image" content="https://${PREVIEW_HOST}/trip/cover.jpg?v=c778f02a"></head><body><h1>trip</h1></body></html>\n`,
+      "trip/cover.jpg": "jpeg bytes",
+    },
+    serving: { config: { meta: { image: "/og.png" } } },
+    activate: {
+      route_name: "production",
+      config: projection({ memberRefs: ["member:mem_owner"] }),
+      production_hostnames: [PREVIEW_HOST],
+      version_hostnames: [{ hostname: PREVIEW_VERSION_HOST, version_id: PREVIEW_VERSION }],
+    },
+  });
 });
 
 afterAll(() => {
@@ -934,6 +959,47 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   expect((await get(runtime, PRIVATE_HOST, "/", { headers: { cookie: external } })).status).toBe(
     200,
   );
+
+  // The one exception: the image the Space declared as its share preview.
+  // A link previewer fetches it in its own cookieless request, so it serves
+  // with no session, and stays out of search indexes.
+  const preview = await get(runtime, PREVIEW_HOST, "/og.png");
+  expect(preview.status).toBe(200);
+  expect(preview.headers.get("content-type")).toStartWith("image/png");
+  expect(preview.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+  expect(preview.headers.get("cache-control")).not.toContain("private");
+  expect(await preview.text()).toBe("png bytes");
+  expect((await get(runtime, PREVIEW_HOST, "/og.png", { method: "HEAD" })).status).toBe(200);
+  const handWritten = await get(runtime, PREVIEW_HOST, "/trip/cover.jpg?v=c778f02a");
+  expect(handWritten.status).toBe(200);
+  expect(handWritten.headers.get("content-type")).toStartWith("image/jpeg");
+  expect(handWritten.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+  // Nothing else on that Space follows it out: not the page, not another
+  // image, and not the same file reached under a different name.
+  // An immutable version host caches for a year where no fence purge reaches,
+  // so the exemption stays on the live host that shared links use.
+  const pinned = await get(runtime, PREVIEW_VERSION_HOST, "/og.png");
+  expect(pinned.status).toBe(403);
+  expect(pinned.headers.get("cache-control")).toBe("private, no-store");
+  for (const path of ["/", "/docs/", "/trip/", "/other.png", "/og.svg"]) {
+    const gated = await get(runtime, PREVIEW_HOST, path);
+    expect(gated.status).toBe(403);
+    expect(gated.headers.get("cache-control")).toBe("private, no-store");
+  }
+  // A platform hold outranks the owner's choice: a fenced Space keeps even its
+  // preview image behind the gate.
+  try {
+    await putRoute(runtime, PREVIEW_SPACE, "production", {
+      version_id: PREVIEW_VERSION,
+      config: projection({ memberRefs: ["member:mem_owner"], accessFence: "ownership" }),
+    });
+    expect((await get(runtime, PREVIEW_HOST, "/og.png")).status).toBe(403);
+  } finally {
+    await putRoute(runtime, PREVIEW_SPACE, "production", {
+      version_id: PREVIEW_VERSION,
+      config: projection({ memberRefs: ["member:mem_owner"] }),
+    });
+  }
 });
 
 test("a Space with no visitor lanes denies uniformly and discloses nothing", async () => {

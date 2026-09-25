@@ -3214,7 +3214,9 @@ function _stattic_access_status_fragment(string $status): string
 
 function _stattic_access_request_form(string $returnPath, string $summary, bool $open = false): string
 {
-    $lock = '<svg viewBox="' . STATTIC_PAGE_ICON_VIEW_BOX . '" aria-hidden="true" focusable="false"><path d="'
+    // Custom and older published access templates carry no icon CSS; without
+    // intrinsic dimensions the SVG renders at the 300x150 replaced-element default.
+    $lock = '<svg width="16" height="16" viewBox="' . STATTIC_PAGE_ICON_VIEW_BOX . '" aria-hidden="true" focusable="false"><path d="'
         . STATTIC_PAGE_ICON_LOCK_CLOSED . '"></path></svg>';
     return '<details class="sf-access-request"' . ($open ? ' open' : '') . '>'
         . '<summary>' . $lock . _stattic_html_escape($summary) . '</summary>'
@@ -3284,7 +3286,8 @@ function _stattic_access_lanes_fragment(
             . '<label class="sf-label" for="sf-access-password-input">Password</label>'
             . '<div class="sf-access-password-row">'
             . '<div class="sf-field">'
-            . '<svg class="sf-field-icon" viewBox="' . STATTIC_PAGE_ICON_VIEW_BOX . '" aria-hidden="true" focusable="false"><path d="'
+            // Intrinsic size for templates without the icon CSS (see the request form).
+            . '<svg class="sf-field-icon" width="14" height="14" viewBox="' . STATTIC_PAGE_ICON_VIEW_BOX . '" aria-hidden="true" focusable="false"><path d="'
             . STATTIC_PAGE_ICON_KEY . '"></path></svg>'
             . '<input id="sf-access-password-input" class="sf-input" type="password" name="password"'
             . ' autocomplete="current-password" required maxlength="1024" placeholder="Enter password"'

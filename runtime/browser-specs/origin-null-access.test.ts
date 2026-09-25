@@ -99,6 +99,16 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   expect(rendered?.status()).toBe(403);
   expect(await passwordPage.getByRole("heading", { name: "Private studio" }).count()).toBe(1);
   expect((await clientScriptResponse).status()).toBe(200);
+  // This template carries no icon CSS, so the runtime-injected SVGs must size
+  // themselves instead of falling back to the 300x150 replaced-element default.
+  expect(await passwordPage.locator(".sf-field-icon").boundingBox()).toMatchObject({
+    width: 14,
+    height: 14,
+  });
+  expect(await passwordPage.locator(".sf-access-request summary svg").boundingBox()).toMatchObject({
+    width: 16,
+    height: 16,
+  });
 
   const popupPromise = passwordContext.waitForEvent("page");
   await passwordPage.getByRole("link", { name: "Sign in", exact: true }).click();

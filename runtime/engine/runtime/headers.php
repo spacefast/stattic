@@ -86,6 +86,10 @@ function _stattic_apply_header_operations(array &$applied, array $operations, ar
         if (_stattic_platform_managed_header($lower)) {
             continue;
         }
+        $owner = $applied[$lower]['origin'] ?? $removed[$lower]['origin'] ?? null;
+        if ($owner !== null && _stattic_header_lane_precedence($origin) < _stattic_header_lane_precedence($owner)) {
+            continue;
+        }
         if (($operation['kind'] ?? 'set') === 'remove') {
             unset($applied[$lower]);
             if ($removed !== null) {
@@ -95,19 +99,10 @@ function _stattic_apply_header_operations(array &$applied, array $operations, ar
         }
 
         if ($removed !== null) {
-            $removed_by = $removed[$lower]['origin'] ?? null;
-            if ($removed_by !== null
-                && _stattic_header_lane_precedence($origin) < _stattic_header_lane_precedence($removed_by)) {
-                continue;
-            }
             unset($removed[$lower]);
         }
         $value = _stattic_expand_template((string) ($operation['value'] ?? ''), $captures);
         if (isset($applied[$lower])) {
-            if (_stattic_header_lane_precedence($origin)
-                < _stattic_header_lane_precedence((string) ($applied[$lower]['origin'] ?? 'file'))) {
-                continue;
-            }
             $applied[$lower]['value'] .= ',' . $value;
         } else {
             $applied[$lower] = [

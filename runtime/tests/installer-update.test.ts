@@ -58,7 +58,7 @@ async function startUpdateFixture(options?: {
   treeFiles?: Readonly<Record<string, string>>;
   treeAliases?: boolean;
 }): Promise<UpdateFixture> {
-  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-update-installer-"));
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "spacefast-update-installer-")));
   roots.push(root);
   const publicRoot = options?.publicRoot ?? path.join(root, "public");
   const installerRoot = path.join(publicRoot, "__spacefast");

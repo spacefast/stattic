@@ -180,6 +180,8 @@ beforeAll(async () => {
         // replaces rather than folds with.
         "/framed.html",
         "  X-Frame-Options: DENY",
+        "  ! X-Content-Policy",
+        "  X-Removed-Policy: file",
         "/owned.html",
         "  A8C-Edge-Cache: no-cache",
         "  X-AC: hit",
@@ -197,7 +199,14 @@ beforeAll(async () => {
       // not staged content, so they ride the finalize body.
       routing_overlay: {
         headers: [
-          { source: "/framed.html", headers: [{ key: "X-Frame-Options", value: "SAMEORIGIN" }] },
+          {
+            source: "/framed.html",
+            headers: [
+              { key: "X-Frame-Options", value: "SAMEORIGIN" },
+              { key: "X-Content-Policy", value: "dashboard" },
+              { key: "X-Removed-Policy", remove: true },
+            ],
+          },
         ],
       },
     },
@@ -305,6 +314,8 @@ test("the Space's own header rule replaces the file's on the wire", async () => 
   const framed = await get(rt, HOST, "/framed.html");
   expect(framed.status).toBe(200);
   expect(framed.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+  expect(framed.headers.get("x-content-policy")).toBe("dashboard");
+  expect(framed.headers.get("x-removed-policy")).toBeNull();
 });
 
 test("browser paths keep one identity across compiled rules, access, and lookup", async () => {

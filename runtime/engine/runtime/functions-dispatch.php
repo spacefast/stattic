@@ -340,17 +340,43 @@ function _stattic_functions_relay_request_lane(): array
     ];
 }
 
+function _stattic_functions_cookie_domain_escapes_host(string $value, string $requestHost): bool
+{
+    $host = strtolower(rtrim(trim($requestHost), '.'));
+    foreach (array_slice(explode(';', $value), 1) as $attribute) {
+        $parts = explode('=', trim($attribute), 2);
+        if (strtolower(trim((string) ($parts[0] ?? ''))) !== 'domain') {
+            continue;
+        }
+        if (!isset($parts[1])) {
+            return true;
+        }
+        $domain = strtolower(trim((string) $parts[1]));
+        $domain = str_starts_with($domain, '.') ? substr($domain, 1) : $domain;
+        if ($domain === '' || $domain !== $host) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Cloudflare terminates the internal Functions hop; its response metadata
-// describes that hop, and the outer CDN would cache stale Ray IDs.
-function _stattic_functions_relay_response_lane(): array
+// describes that hop, and the outer CDN would cache stale Ray IDs. Application
+// cookies relay only host-only or scoped to the exact request host: a Space's
+// hostname shares its parent with sibling Spaces (view.fast, a partner apex),
+// and the runtime cannot prove a custom domain's parent belongs to this Space.
+function _stattic_functions_relay_response_lane(string $requestHost = ''): array
 {
     return [
         'deny' => ['content-encoding', 'strict-transport-security'],
         'deny_prefixes' => [SPACEFAST_FUNCTIONS_DISPATCH_HEADER_PREFIX, 'cf-'],
-        'deny_value' => static function (string $name, string $value): bool {
+        'allow_cookies' => true,
+        'deny_value' => static function (string $name, string $value) use ($requestHost): bool {
             $lowerValue = strtolower($value);
             // §16: a worker never steers the edge (A8C-*) or forges its verdict (x-ac).
             return _stattic_platform_owns_header($name)
+                || (in_array($name, ['set-cookie', 'set-cookie2'], true)
+                    && _stattic_functions_cookie_domain_escapes_host($value, $requestHost))
                 || ($name === 'server' && trim($lowerValue) === 'cloudflare')
                 || (
                     in_array($name, ['nel', 'report-to'], true)
@@ -482,7 +508,7 @@ function _stattic_functions_dispatch(
         'connect_timeout' => STATTIC_FUNCTIONS_DISPATCH_CONNECT_TIMEOUT_SECONDS,
         'timeout' => STATTIC_FUNCTIONS_DISPATCH_TIMEOUT_SECONDS,
         'sink' => 'output',
-        'on_headers' => static function (int $responseStatus, array $headerPairs) use (&$status, &$headersSent, $privateCache, $insertSnippets): void {
+        'on_headers' => static function (int $responseStatus, array $headerPairs) use (&$status, &$headersSent, $privateCache, $insertSnippets, $requestHost): void {
             $status = $responseStatus;
             http_response_code($responseStatus);
             $headersSent = true;
@@ -492,7 +518,11 @@ function _stattic_functions_dispatch(
             $cachePolicy = _stattic_functions_response_cache_policy($privateCache, $headerPairs);
             $responseLines = _stattic_cache_policy_apply_lines(
                 $cachePolicy,
-                _stattic_relay_response_header_lines($headerPairs, $cachePolicy, _stattic_functions_relay_response_lane())
+                _stattic_relay_response_header_lines(
+                    $headerPairs,
+                    $cachePolicy,
+                    _stattic_functions_relay_response_lane($requestHost)
+                )
             );
             _stattic_relay_send_response_headers($responseLines, $cachePolicy);
             _stattic_clear_platform_owned_response_headers();

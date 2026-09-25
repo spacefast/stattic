@@ -206,6 +206,17 @@ test("sealed Markdown activation retains editor-only edits and refuses conflicti
   expect(prepared[7]?.ok).toBe(true);
 });
 
+test("fractional UTC source dates canonicalize to WordPress precision", async () => {
+  const source =
+    '<!-- spacefast:document {"version":1,"title":"Schedule","slug":"schedule","status":"future","dateGmt":"2099-02-01T12:30:00.123Z"} -->\nBody.';
+  expect(parseContentSourceDocument(source).metadata?.dateGmt).toBe("2099-02-01T12:30:00Z");
+
+  const [bound] = await runScenario("md", [{ op: "reconcile", state: "initial", text: source }]);
+  const created = receipt(bound);
+  expect(created.ledger.baseText).toContain('"dateGmt":"2099-02-01T12:30:00Z"');
+  expect(created.ledger.baseText).not.toContain(".123Z");
+});
+
 test("a repo Markdown file binds, survives a WordPress edit, and round-trips back byte-stable", async () => {
   const source = "# Launch\n\nThe first paragraph.\n\n- alpha\n- beta\n";
   expect(() =>

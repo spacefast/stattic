@@ -75,7 +75,7 @@ function _stattic_storage_object_create(string $privateRoot, string $spaceId, ar
     if (!is_dir(_stattic_space_root($privateRoot, $spaceId))) {
         _stattic_problem_response(404, 'storage_unavailable', 'Storage is unavailable for this space.');
     }
-    $public = _stattic_uploads_request_public();
+    $public = ($claims['action'] ?? null) === 'storage_upload_private' ? false : _stattic_uploads_request_public();
     $staged = _stattic_storage_stage_upload($privateRoot);
     if (($staged['ok'] ?? false) !== true) {
         if (($staged['reason'] ?? null) === 'too_large') {

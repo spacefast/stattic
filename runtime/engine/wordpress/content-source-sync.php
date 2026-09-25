@@ -69,24 +69,35 @@ function spacefast_content_sync_document(string $text): array
     }
     $end = strpos($text, ' -->');
     $metadata = $end === false ? null : json_decode(substr($text, 24, $end - 24), true);
+    $dateGmtPresent = is_array($metadata) && array_key_exists('dateGmt', $metadata);
+    $dateGmt = $dateGmtPresent ? spacefast_content_sync_date_normalize($metadata['dateGmt']) : null;
     if (!is_array($metadata) || array_diff(array_keys($metadata), ['version', 'title', 'slug', 'status', 'componentSource', 'dateGmt']) !== []
         || ($metadata['version'] ?? null) !== 1
         || !is_string($metadata['title'] ?? null) || strlen($metadata['title']) > 2000
         || !is_string($metadata['slug'] ?? null) || strlen($metadata['slug']) > 200
         || !in_array($metadata['status'] ?? null, ['draft', 'pending', 'publish', 'private', 'future', 'trash'], true)
         || (isset($metadata['componentSource']) && !spacefast_content_sync_source_valid($metadata['componentSource']))
-        || (array_key_exists('dateGmt', $metadata) && !spacefast_content_sync_date_valid($metadata['dateGmt']))
-        || (($metadata['status'] ?? null) === 'future' && !isset($metadata['dateGmt']))) {
+        || ($dateGmtPresent && $dateGmt === null)
+        || (($metadata['status'] ?? null) === 'future' && !$dateGmtPresent)) {
         throw new Spacefast_Content_Error(422, 'content_document_metadata_invalid', 'The source document metadata is invalid.');
     }
+    if ($dateGmt !== null) $metadata['dateGmt'] = $dateGmt;
     return ['metadata' => $metadata, 'body' => ltrim(substr($text, $end + 4), "\r\n")];
+}
+
+function spacefast_content_sync_date_normalize(mixed $date): ?string
+{
+    if (!is_string($date) || preg_match('/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z$/D', $date, $matches) !== 1) {
+        return null;
+    }
+    $canonical = $matches[1] . 'Z';
+    $parsed = DateTimeImmutable::createFromFormat('!Y-m-d\TH:i:s\Z', $canonical, new DateTimeZone('UTC'));
+    return $parsed !== false && $parsed->format('Y-m-d\TH:i:s\Z') === $canonical ? $canonical : null;
 }
 
 function spacefast_content_sync_date_valid(mixed $date): bool
 {
-    if (!is_string($date)) return false;
-    $parsed = DateTimeImmutable::createFromFormat('!Y-m-d\TH:i:s\Z', $date, new DateTimeZone('UTC'));
-    return $parsed !== false && $parsed->format('Y-m-d\TH:i:s\Z') === $date;
+    return spacefast_content_sync_date_normalize($date) !== null;
 }
 
 function spacefast_content_sync_envelope(?array $metadata, string $body): string

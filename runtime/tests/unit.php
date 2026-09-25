@@ -2218,9 +2218,9 @@ foreach (['/', '/api/orders', '/posts/1', '/__spacefastish/ok'] as $ordinary) {
 }
 check(!_stattic_functions_dispatchable('/', 'TRACE'), 'dispatch: refuses TRACE');
 
-// A tenant's worker is as untrusted as a proxy origin and crosses the same
-// relay: headers describing the hop we terminate, reaching outside the response
-// (x-accel-redirect), or planting state on the apex (Set-Cookie) do not survive.
+// A tenant's worker crosses the untrusted response relay, but it is still the
+// application serving this hostname. Headers describing the internal hop,
+// reaching outside the response, or steering the platform edge do not survive.
 // A public space's worker keeps its own caching while nothing in its response
 // revokes the grant, so the lane decides no policy and Cache-Control relays.
 $fxPublicPolicy = _stattic_functions_response_cache_policy(false, [
@@ -2241,7 +2241,6 @@ $fxRelayed = _stattic_relay_response_header_lines([
     ['server', 'cloudflare'],
     ['nel', '{"report_to":"cf-nel","max_age":604800}'],
     ['report-to', '{"group":"cf-nel","endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4"}]}'],
-    ['set-cookie', 'tenant=value'],
     ['x-accel-redirect', '/.stattic/storage/spaces/spc_other/versions/ver_1/files/index.html'],
     ['x-sendfile', '/etc/passwd'],
     ['surrogate-control', 'max-age=86400'],
@@ -2262,7 +2261,6 @@ foreach ([
     'server',
     'nel',
     'report-to',
-    'set-cookie',
     'x-accel-redirect',
     'x-sendfile',
     'surrogate-control',
@@ -2329,6 +2327,40 @@ foreach ([
         'dispatch cache: worker response ' . json_encode($fxRevokingResponse) . ' revokes shared caching'
     );
 }
+
+// Cookies are application state, not internal host metadata. Host-scoped cookie
+// lines reach the browser, while their presence replaces an otherwise public
+// cache grant with no-store. No hostname can widen one to a parent domain: a
+// managed parent is shared with sibling Spaces.
+$fxCookieHeaders = [
+    ['set-cookie', 'session=tenant; Path=/; HttpOnly'],
+    ['set-cookie', 'preference=dark; Domain=.site.view.fast; Path=/; SameSite=Lax'],
+    ['set-cookie', 'poison=sibling; Domain=view.fast; Path=/'],
+    ['cache-control', 'public, s-maxage=600'],
+];
+$fxCookiePolicy = _stattic_functions_response_cache_policy(false, $fxCookieHeaders);
+$fxCookieLines = _stattic_cache_policy_apply_lines(
+    $fxCookiePolicy,
+    _stattic_relay_response_header_lines(
+        $fxCookieHeaders,
+        $fxCookiePolicy,
+        _stattic_functions_relay_response_lane('site.view.fast')
+    )
+);
+check($fxCookiePolicy['cache_control'] === STATTIC_CACHE_CONTROL_NO_STORE, 'dispatch cache: application cookies force no-store');
+check(
+    array_values(array_filter($fxCookieLines, static fn (array $line): bool => strtolower($line[0]) === 'set-cookie')) === [
+        ['set-cookie', 'session=tenant; Path=/; HttpOnly'],
+        ['set-cookie', 'preference=dark; Domain=.site.view.fast; Path=/; SameSite=Lax'],
+    ],
+    'dispatch: preserves every host-scoped application Set-Cookie response header in order'
+);
+check(
+    !in_array(['set-cookie', 'poison=sibling; Domain=view.fast; Path=/'], $fxCookieLines, true),
+    'dispatch: an application cannot set a cookie on its parent domain'
+);
+check(!in_array(['cache-control', 'public, s-maxage=600'], $fxCookieLines, true), 'dispatch cache: cookie response drops worker public caching');
+check(in_array(['Cache-Control', STATTIC_CACHE_CONTROL_NO_STORE], $fxCookieLines, true), 'dispatch cache: cookie response reaches the visitor as no-store');
 
 // The full pipeline for the poisoned shape. Vary itself still relays: the
 // visitor's browser cache honors it even though the edge cannot.

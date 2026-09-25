@@ -68,6 +68,7 @@ type Uploaded = {
 // upload lane answers with, so one shape crosses that boundary.
 type OwnerObject = {
   id: string;
+  public: boolean;
   contentType: string;
   createdAt: string;
   filename?: string;
@@ -85,11 +86,16 @@ async function upload(
 ): Promise<Uploaded> {
   const headers = new Headers({ "content-type": contentType });
   if (disposition !== undefined) headers.set("content-disposition", disposition);
-  const response = await get(rt, HOST, `/storage?public=${isPublic}`, {
-    method: "POST",
-    headers: Object.fromEntries(headers),
-    body,
-  });
+  const response = await get(
+    rt,
+    HOST,
+    isPublic ? "/storage?public=true" : "/storage/private?public=true",
+    {
+      method: "POST",
+      headers: Object.fromEntries(headers),
+      body,
+    },
+  );
   const text = await response.text();
   if (response.status !== 201) throw new Error(`upload -> ${response.status}: ${text}`);
   // SAFETY: the 201 above is the upload lane's success, whose body is one object.
@@ -104,7 +110,7 @@ async function managementUpload(
 ): Promise<Response> {
   const headers = new Headers({
     "content-type": options.contentType,
-    authorization: `Bearer ${managementToken("storage_upload", {
+    authorization: `Bearer ${managementToken("storage_upload_private", {
       space_id: SPACE,
       storage_uploader_id: options.uploaderId,
     })}`,
@@ -115,7 +121,9 @@ async function managementUpload(
       `attachment; filename*=UTF-8''${encodeURIComponent(options.filename)}`,
     );
   }
-  const apiPath = runtimeHttpPath(`${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/storage`);
+  const apiPath = runtimeHttpPath(
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/storage/private?public=true`,
+  );
   return fetch(`${rt.baseUrl}${apiPath}`, {
     method: "POST",
     headers,
@@ -270,6 +278,7 @@ test("the management upload lane stores an object for the space owner", async ()
   // SAFETY: the 201 asserted above is the management lane's success, whose body
   // is one owner object.
   const object = (await created.json()) as OwnerObject;
+  expect(object.public).toBe(false);
   expect(object.filename).toBe("brief.txt");
   expect(object.uploaderId).toBe("usr_owner_1");
   expect(object.size).toBe("owner bytes".length);

@@ -231,6 +231,7 @@ function _stattic_runtime_admin_management_routes(): array
         ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/export$#', 'zero_db_export', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_zero_db_export'],
         ['GET', '#^/spaces/([^/]+)/storage$#', 'storage_list', ['space_id' => 1], 'none', false, '_stattic_storage_list'],
         ['POST', '#^/spaces/([^/]+)/storage$#', 'storage_upload', ['space_id' => 1], 'space', true, '_stattic_storage_object_create'],
+        ['POST', '#^/spaces/([^/]+)/storage/private$#', 'storage_upload_private', ['space_id' => 1], 'space', true, '_stattic_storage_object_create'],
         ['GET', '#^/spaces/([^/]+)/storage/([a-f0-9]{32})$#', 'storage_read', ['space_id' => 1, 'storage_object_id' => 2], 'none', false, '_stattic_storage_object_read'],
         ['DELETE', '#^/spaces/([^/]+)/storage/([a-f0-9]{32})$#', 'storage_delete', ['space_id' => 1, 'storage_object_id' => 2], 'space', false, '_stattic_storage_object_delete'],
         ['GET', '#^/storage/read-key$#', 'storage_read_key', [], 'none', false, '_stattic_storage_read_key_get'],

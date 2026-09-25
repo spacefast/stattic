@@ -60,6 +60,7 @@ function _stattic_proxy_response_header_lines(array $originHeaders, array $platf
         $lowerName = strtolower($name);
         if (
             in_array($lowerName, STATTIC_RELAY_STRIPPED_RESPONSE_HEADERS, true)
+            || in_array($lowerName, STATTIC_RELAY_STRIPPED_PROXY_STATE_HEADERS, true)
             || in_array($lowerName, STATTIC_PRIVATE_STRIPPED_CACHE_HEADERS, true)
         ) {
             continue;

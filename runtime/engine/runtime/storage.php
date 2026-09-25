@@ -337,7 +337,7 @@ function _stattic_storage_handle(
     };
     $admitted = $authenticated || $anonymousCommenter || $developmentGuest;
 
-    if ($requestPath === '/storage') {
+    if ($requestPath === '/storage' || $requestPath === '/storage/private') {
         if ($requestMethod !== 'POST') {
             _stattic_method_not_allowed('POST');
         }
@@ -350,7 +350,8 @@ function _stattic_storage_handle(
             $requestHost,
             $uploaderId,
             $anonymousCommenter,
-            $auth
+            $auth,
+            $requestPath === '/storage/private' ? false : _stattic_uploads_request_public()
         );
     }
 
@@ -407,10 +408,10 @@ function _stattic_uploads_upload(
     string $requestHost,
     string $uploaderId,
     bool $anonymousUploader,
-    array $auth
+    array $auth,
+    bool $public
 ): never
 {
-    $public = _stattic_uploads_request_public();
     $staged = _stattic_storage_stage_upload($privateRoot);
     if (($staged['ok'] ?? false) !== true) {
         if (($staged['reason'] ?? null) === 'too_large') {

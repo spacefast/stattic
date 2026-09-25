@@ -18,10 +18,13 @@ require_once __DIR__ . '/context.php';
 // Content-Length is dropped because this server re-frames the relayed body.
 const STATTIC_RELAY_HOP_BY_HOP_RESPONSE_HEADERS = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade', 'content-length'];
 
-// Never relayed regardless of the cache verdict: Set-Cookie must not cross onto
-// the space hostname, and upstream cache metadata must not replace the platform
-// policy the lane decided.
-const STATTIC_RELAY_STRIPPED_RESPONSE_HEADERS = ['set-cookie', 'set-cookie2', 'pragma', 'surrogate-control', 'cdn-cache-control'];
+// Upstream cache metadata must not replace the platform policy the lane decided.
+const STATTIC_RELAY_STRIPPED_RESPONSE_HEADERS = ['pragma', 'surrogate-control', 'cdn-cache-control'];
+
+// A proxy origin must not plant state on the space hostname. The Functions host
+// is different: it executes the space's own application, so its cookies are the
+// application's response state and must reach the browser.
+const STATTIC_RELAY_STRIPPED_PROXY_STATE_HEADERS = ['set-cookie', 'set-cookie2'];
 
 // Inbound framing that describes the hop we terminate, not the one we open.
 const STATTIC_RELAY_DENIED_REQUEST_HEADERS = ['host', 'content-length', 'connection', 'keep-alive', 'transfer-encoding', 'te', 'trailers', 'upgrade', 'expect'];
@@ -119,6 +122,7 @@ function _stattic_relay_request_headers(array $lane = []): array
  *   suppress       array<string, true>  platform names that win over the upstream
  *   deny           list<string>         lane-specific extra names
  *   deny_prefixes  list<string>         lane-specific extra prefixes
+ *   allow_cookies   bool                 relay response cookies from the app
  *   deny_value     ?callable            lane rules that read the value too
  *
  * @return list<array{0: string, 1: string}>
@@ -132,6 +136,7 @@ function _stattic_relay_response_header_lines(array $upstreamHeaders, array $cac
     $deny = [
         ...STATTIC_RELAY_HOP_BY_HOP_RESPONSE_HEADERS,
         ...STATTIC_RELAY_STRIPPED_RESPONSE_HEADERS,
+        ...(!empty($lane['allow_cookies']) ? [] : STATTIC_RELAY_STRIPPED_PROXY_STATE_HEADERS),
         ...(is_array($lane['deny'] ?? null) ? $lane['deny'] : []),
         // A decided policy replaces the upstream's cache metadata outright; a
         // lane that declared none (a public space's worker) keeps it.

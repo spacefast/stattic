@@ -1000,7 +1000,6 @@ function _stattic_runtime_compile_route(string $privateRoot, string $spaceId, ar
     }
     $resolved = _stattic_runtime_resolve_route_target($privateRoot, $spaceId, $target, $pointerCache);
     $versionId = is_array($resolved) && is_string($resolved['version_id'] ?? null) ? $resolved['version_id'] : null;
-    $config = is_array($resolved['config'] ?? null) ? $resolved['config'] : [];
     if ($versionId === null) {
         return null;
     }
@@ -1069,15 +1068,11 @@ function _stattic_runtime_resolve_route_target(string $privateRoot, string $spac
             $pointerCache[$cacheKey] = null;
             return null;
         }
-        // Immutable hosts pin content bytes, not access: they deliberately reuse
-        // the Space's current production authorization projection. Missing
-        // production state stays fail-closed. [] is not a valid projection.
-        $production = _stattic_runtime_read_json_strict(_stattic_route_pointer_path($privateRoot, $spaceId, 'production'));
+        // Immutable hosts pin content bytes, not access. Access follows the
+        // Space's current production projection through the overlay, so route
+        // compilation only has to prove that this version can serve.
         $pointerCache[$cacheKey] = [
             'version_id' => $versionId,
-            'config' => is_array($production) && is_array($production['config'] ?? null)
-                ? $production['config']
-                : [],
         ];
         return $pointerCache[$cacheKey];
     }
@@ -1102,7 +1097,6 @@ function _stattic_runtime_resolve_route_target(string $privateRoot, string $spac
         $pointerCache[$cacheKey] = [
             'version_id' => $versionId,
             'route_name' => $routeName,
-            'config' => is_array($pointer['config'] ?? null) ? $pointer['config'] : [],
         ];
         return $pointerCache[$cacheKey];
     }

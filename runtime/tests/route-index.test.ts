@@ -7,7 +7,15 @@ import { expect, test } from "bun:test";
 // gen monotonicity, which shards a mutation rewrites, previous.json as the
 // grace anchor, shard GC by (unreferenced AND aged), and the cross-space
 // correctness the incremental update's owners map preserves.
-import { chmodSync, existsSync, rmSync, unlinkSync, utimesSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 
 import { publicRuntimeRouteConfig } from "../../apps/control-plane/src/runtime/runtime-route-config.fixture";
@@ -528,6 +536,60 @@ test("intent-only hostname update rebuilds the route index", async () => {
     const served = await get(rt, host, "/");
     expect(served.status).toBe(200);
     expect(await served.text()).toBe("intent index");
+  } finally {
+    rt.stop();
+  }
+});
+
+test("hostname-intent compilation keeps production config memory constant across version hosts", async () => {
+  const rt = await startRuntime({ phpIni: { memory_limit: "32M" } });
+  const spaceId = "spc_idx_many_versions";
+  const liveVersionId = "ver_idx_many_versions_live";
+  try {
+    await deploy(rt, {
+      spaceId,
+      versionId: liveVersionId,
+      files: { "index.html": "live" },
+      activate: productionActivation("many-versions.test"),
+    });
+
+    writeFileSync(
+      storagePath(rt, "spaces", spaceId, "routes", "production.json"),
+      JSON.stringify({
+        route_name: "production",
+        version_id: liveVersionId,
+        config: { sdk: { body: "x".repeat(128 * 1024) } },
+      }),
+    );
+
+    const versionHostnames = Array.from({ length: 300 }, (_, index) => {
+      const versionId = `ver_idx_many_versions_${index}`;
+      const versionRoot = storagePath(rt, "spaces", spaceId, "versions", versionId);
+      mkdirSync(versionRoot, { recursive: true });
+      writeFileSync(path.join(versionRoot, "root.json"), "{}");
+      return {
+        hostname: `many-versions--v${index}.test`,
+        version_id: versionId,
+      };
+    });
+
+    const response = await api(
+      rt,
+      "PUT",
+      `/__spacefast/api.php/spaces/${spaceId}/hostname-intent`,
+      "update_hostname_intent",
+      { space_id: spaceId },
+      {
+        production_hostnames: ["many-versions.test"],
+        version_hostnames: versionHostnames,
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ route_count: 301 });
+    expect(hostEntry(rt, versionHostnames.at(-1)?.hostname ?? "")).toMatchObject({
+      version_id: versionHostnames.at(-1)?.version_id,
+      immutable: true,
+    });
   } finally {
     rt.stop();
   }

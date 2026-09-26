@@ -623,7 +623,7 @@ function _stattic_request_body_stream()
 
 // Hand-mirrored by the control-plane generator (admin/generate.php) onto baked
 // artifacts. Keep the two byte-identical when tuning it.
-const STATTIC_DEFAULT_EDGE_CACHE_CONTROL = 'public, max-age=0, s-maxage=600, stale-while-revalidate=60';
+const STATTIC_DEFAULT_EDGE_CACHE_CONTROL = 'public, max-age=0, s-maxage=600, must-revalidate';
 const STATTIC_CACHE_CONTROL_NO_STORE = 'no-store';
 // Protected and request-bound bytes are never retained by the browser, edge or
 // WordPress page cache. Authorization and revocation therefore run every time.
@@ -990,6 +990,13 @@ function _stattic_strip_platform_owned_headers(array $headers): array
 // does not say what the method did. The verdict lives here, beside the seams
 // that compose platform response headers, so every lane inherits it
 // structurally instead of re-deciding it.
+function _stattic_cache_policy_request_varying(bool $mark = false): bool
+{
+    static $varying = false;
+    $varying = $varying || $mark;
+    return $varying;
+}
+
 function _stattic_request_method_forbids_shared_store(): bool
 {
     return !in_array(_stattic_runtime_request_method(), ['GET', 'HEAD'], true);
@@ -1067,6 +1074,15 @@ function _stattic_apply_platform_header_policy(array $headers, string $cacheCont
         if (is_string($name) && is_scalar($value) && strtolower($name) === $cacheControlKey) {
             $cacheControl = (string) $value;
         }
+    }
+    if (_stattic_cache_policy_request_varying() && ($cacheControl === null || _stattic_cache_control_allows_shared_store($cacheControl))) {
+        foreach (array_keys($headers) as $name) {
+            if (is_string($name) && strtolower($name) === $cacheControlKey) {
+                unset($headers[$name]);
+            }
+        }
+        $headers[$cacheControlKey] = STATTIC_CACHE_CONTROL_NO_STORE;
+        $cacheControl = STATTIC_CACHE_CONTROL_NO_STORE;
     }
     // Method-blind edge (see _stattic_request_method_forbids_shared_store):
     // every response to a non-GET/HEAD request is pinned private no-store here,

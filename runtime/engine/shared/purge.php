@@ -5,25 +5,13 @@ require_once __DIR__ . '/context.php';
 require_once __DIR__ . '/storage.php';
 require_once __DIR__ . '/http.php';
 
-// A mutation that changed served bytes purges the provider edge by calling the
-// wp.cloud site's LOCAL edge-cache API directly, the same
-// `http://127.0.0.1:47002/api/v1.0/edge-cache/<site>/purge/<domain>` endpoint
-// the platform's own Edge_Cache mu-plugin calls, reached over loopback with the
-// site's `ATOMIC_SITE_API_KEY`. No WordPress bootstrap, no durable queue: a
-// loopback POST to a same-box nginx gateway needs neither. A bounded in-request
-// retry covers the rare transient, and the visitor never waits because the call
-// is deferred past `fastcgi_finish_request`.
-
-// Every purge is a whole-host purge. The edge keys a stored response on
-// host+path+QUERY while a URI purge is queryless, so an enumerated purge can
-// never name every variant an entry may live under. Eviction is structural: a
-// mutation drops every edge entry for every host it names, and the copies
-// re-warm on the next visit. The bounded shared TTL in serve-fast.php is the
-// correctness backstop when this best-effort purge cannot sync. Do not add
-// a urls-scoped lane without solving query-variant coverage first.
-
-// The local gateway is on loopback; a failure is a transient, not a network
-// partition. One retry covers it without pinning the worker.
+// Each affected hostname has one durable pending record. Post-response work
+// delivers it promptly; provider cron and maintenance recover after request or provider
+// failure. A later mutation replaces the generation, so an older delivery
+// cannot acknowledge newer work. Records survive Space/version deletion.
+//
+// Purges are whole-host: the provider keys on host+path+query, while its URI
+// purge cannot address every query variant.
 const STATTIC_RUNTIME_PURGE_ATTEMPTS = 2;
 
 // The site's local edge-cache API base and auth, from the platform env the FPM
@@ -54,13 +42,24 @@ function _stattic_runtime_edge_purge_endpoint(): ?array
     ];
 }
 
+function _stattic_runtime_require_edge_purge_endpoint(string $sapi = PHP_SAPI): ?array
+{
+    $endpoint = _stattic_runtime_edge_purge_endpoint();
+    // The CLI and local PHP server have no provider edge. Web requests on the
+    // deployed runtime must refuse serving mutations when credentials vanish.
+    if ($endpoint === null && !in_array($sapi, ['cli', 'cli-server'], true)) {
+        throw new RuntimeException('edge_purge_endpoint_unavailable');
+    }
+    return $endpoint;
+}
+
 /**
  * One whole-host purge POST to the local gateway for one hostname. Mirrors the
  * body the platform's Edge_Cache adapter sends (class-edge-cache-atomic.php).
  * Success is the gateway's `{"message":"OK"}`; a bounded retry covers a
  * loopback blip.
  */
-function _stattic_runtime_edge_purge_host(array $endpoint, string $hostname, string $reason): bool
+function _stattic_runtime_edge_purge_host(array $endpoint, string $hostname, string $reason, float $deadline): bool
 {
     $body = [
         'purge_count' => 1,
@@ -79,8 +78,15 @@ function _stattic_runtime_edge_purge_host(array $endpoint, string $hostname, str
         'timeout' => 5,
     ];
     for ($attempt = 0; $attempt < STATTIC_RUNTIME_PURGE_ATTEMPTS; $attempt++) {
+        $remainingMs = (int) (($deadline - microtime(true)) * 1000);
+        if ($remainingMs <= 0) {
+            return false;
+        }
+        $request['timeout_ms'] = min(5000, $remainingMs);
+        $request['connect_timeout_ms'] = min(2000, $remainingMs);
         $result = _stattic_http_request($request);
-        if ($result['ok'] && str_contains((string) $result['body'], '"message":"OK"')) {
+        if ($result['ok'] && $result['status'] >= 200 && $result['status'] < 300
+            && (json_decode((string) $result['body'], true)['message'] ?? null) === 'OK') {
             return true;
         }
     }
@@ -123,16 +129,15 @@ function _stattic_runtime_purge_path_list(mixed $raw): array
     return array_keys($paths);
 }
 
-// The public→private edge is the ONE access transition that owes the edge a
-// full sweep: every alias may hold formerly-public responses, including
-// year-TTL immutable assets. The reverse owes nothing, since denied responses
-// are `private, no-store` by construction. A missing or malformed NEW
-// descriptor reads as not-public, so the ambiguous side still sweeps.
-function _stattic_runtime_exposure_became_private(?array $previous, ?array $next): bool
+// Any anonymous-access change may narrow a path or version target even while
+// another public grant remains. Sweep all aliases unless exposure is unchanged
+// or the previous configuration admitted no public responses.
+function _stattic_runtime_exposure_needs_sweep(?array $previous, ?array $next): bool
 {
-    return is_array($previous)
-        && ($previous['public'] ?? null) === true
-        && !(is_array($next) && ($next['public'] ?? null) === true);
+    if (is_array($previous) && ($previous['public'] ?? null) === false) {
+        return false;
+    }
+    return $previous === null || $next === null || $previous != $next;
 }
 
 /**
@@ -218,90 +223,192 @@ function _stattic_runtime_access_sweep_hostnames(?array $intent, ?array $tombsto
  */
 function _stattic_runtime_space_sweep_hostnames(string $spaceRoot): array
 {
-    return _stattic_runtime_access_sweep_hostnames(
-        _stattic_runtime_read_json($spaceRoot . '/hostname-intent.json'),
-        _stattic_runtime_read_json($spaceRoot . '/tombstones.json'),
-    );
+    $intent = _stattic_runtime_read_json($spaceRoot . '/hostname-intent.json');
+    $tombstones = _stattic_runtime_read_json($spaceRoot . '/tombstones.json');
+    if (($intent !== null && (!is_array($intent) || !is_array($intent['routes'] ?? null)))
+        || ($tombstones !== null && (!is_array($tombstones) || !is_array($tombstones['hostnames'] ?? null)))) {
+        throw new RuntimeException('edge_purge_hostnames_unavailable');
+    }
+    return _stattic_runtime_access_sweep_hostnames($intent, $tombstones);
+}
+
+function _stattic_runtime_purge_store(string $privateRoot): array
+{
+    return _stattic_record_store($privateRoot . '/runtime/edge-purges');
+}
+
+function _stattic_runtime_purge_read(array $store, string $hostname): ?array
+{
+    $read = _stattic_record_store_read($store, $hostname);
+    if ($read['state'] === 'unavailable') {
+        throw new RuntimeException('edge_purge_record_unavailable');
+    }
+    return $read['record'];
+}
+
+/** Persist before returning a receipt or starting any provider request. */
+function _stattic_runtime_purge_enqueue(string $privateRoot, array $hostnames, string $reason, array $mutationLocks = []): void
+{
+    $store = _stattic_runtime_purge_store($privateRoot);
+    _stattic_record_store_ensure($store);
+    foreach ($hostnames as $hostname) {
+        _stattic_lock_with(
+            _stattic_lock_stripe_path($store['root'], $hostname),
+            STATTIC_LOCK_WAIT,
+            static fn () => throw new RuntimeException('edge_purge_queue_busy'),
+            static function () use ($store, $hostname, $reason, $mutationLocks): void {
+                $previous = _stattic_runtime_purge_read($store, $hostname);
+                _stattic_record_store_put($store, $hostname, [
+                    'generation' => bin2hex(random_bytes(16)),
+                    'mutation_locks' => array_values(array_unique([
+                        ...($previous['mutation_locks'] ?? []),
+                        ...$mutationLocks,
+                    ])),
+                    'reason' => $reason,
+                    'created_at' => is_array($previous) ? ($previous['created_at'] ?? time()) : time(),
+                    'attempts' => 0,
+                    'next_attempt_at' => 0,
+                ]);
+            },
+        );
+    }
+}
+
+// Call while holding the Space write lock, before the first serving mutation.
+// Recovery retains the hostname set even if the mutation deletes its metadata.
+function _stattic_runtime_prepare_purge(string $privateRoot, string $spaceId, array $hostnames, string $reason): void
+{
+    if (_stattic_runtime_require_edge_purge_endpoint() !== null) {
+        _stattic_runtime_purge_enqueue($privateRoot, _stattic_runtime_purge_hostname_list($hostnames), $reason, [_stattic_space_write_lock_path($privateRoot, $spaceId)]);
+    }
 }
 
 /**
- * Purge the edge for one mutation and return a receipt.
- *
- * `$input`: hostnames (required, a purge with no hostname is unaddressable)
- * and reason. Every named host is purged in full; see the header for why no
- * narrower scope exists.
- *
- * On FPM the provider round-trip is deferred past `fastcgi_finish_request`, so
- * the caller's response returns immediately and the receipt is `queued`.
- * Without it (CLI dispatch, the php -S harness) the call is synchronous and the
- * receipt carries the real outcome: `ok` the edge accepted every host, `failed`
- * at least one host refused (journaled for operators; the loopback retry
- * already tried twice). A space no hostname addresses, or a box with no edge
- * API (dev/CI), is `ok`/`none`.
- *
- * @return array{status: string, mode: string}
+ * Returns true only when every selected hostname has no pending generation.
+ * The network call holds a delivery lock, not the writer lock. New mutations
+ * can enqueue while it runs; completion compares generations under the writer
+ * lock. A killed process releases its locks and leaves its record for retry.
  */
+function _stattic_runtime_purge_drain(string $privateRoot, float $deadline, ?int $now = null, ?array $hostnames = null): bool
+{
+    $store = _stattic_runtime_purge_store($privateRoot);
+    if (!file_exists($store['root'])) {
+        return true;
+    }
+    if (!is_dir($store['root']) || !is_readable($store['root'])) {
+        throw new RuntimeException('edge_purge_queue_unavailable');
+    }
+    $endpoint = _stattic_runtime_edge_purge_endpoint();
+    $now ??= time();
+    $complete = true;
+    if ($hostnames === null) {
+        // Retry the least recently attempted work first. A failing hostname
+        // must not consume every cron budget ahead of untouched hosts.
+        $due = [];
+        foreach (_stattic_record_store_ids($store) as $hostname) {
+            $record = _stattic_runtime_purge_read($store, $hostname);
+            if ($record !== null) {
+                $due[$hostname] = (int) ($record['next_attempt_at'] ?? 0);
+            }
+        }
+        asort($due, SORT_NUMERIC);
+        $hostnames = array_keys($due);
+    }
+    foreach ($hostnames as $hostname) {
+        if (microtime(true) >= $deadline) {
+            return false;
+        }
+        $settled = _stattic_lock_with(
+            _stattic_lock_stripe_path($store['root'], $hostname, 'delivery-'),
+            STATTIC_LOCK_TRY,
+            static fn (): bool => false,
+            static function () use ($store, $hostname, $endpoint, $privateRoot, $deadline, $now): bool {
+                $record = _stattic_runtime_purge_read($store, $hostname);
+                if ($record === null) {
+                    return true;
+                }
+                if (!is_array($record) || !is_string($record['generation'] ?? null) || !is_string($record['reason'] ?? null)) {
+                    throw new RuntimeException('edge_purge_record_invalid');
+                }
+                if (($record['next_attempt_at'] ?? 0) > $now || $endpoint === null) {
+                    return false;
+                }
+                // An obligation may be persisted before its serving mutation.
+                // Wait for that writer to finish (or die) before sending it.
+                foreach ($record['mutation_locks'] ?? [] as $mutationLock) {
+                    if (!_stattic_lock_with($mutationLock, STATTIC_LOCK_TRY,
+                        static fn (): bool => false, static fn (): bool => true)) {
+                        return false;
+                    }
+                }
+                $accepted = _stattic_runtime_edge_purge_host($endpoint, $hostname, $record['reason'], $deadline);
+                return _stattic_lock_with(
+                    _stattic_lock_stripe_path($store['root'], $hostname),
+                    STATTIC_LOCK_WAIT,
+                    static fn () => throw new RuntimeException('edge_purge_queue_busy'),
+                    static function () use ($store, $hostname, $privateRoot, $record, $accepted, $now): bool {
+                        $current = _stattic_runtime_purge_read($store, $hostname);
+                        if (!is_array($current) || ($current['generation'] ?? null) !== $record['generation']) {
+                            return false;
+                        }
+                        if ($accepted) {
+                            _stattic_record_store_delete($store, $hostname);
+                            return true;
+                        }
+                        $attempts = ((int) ($record['attempts'] ?? 0)) + 1;
+                        _stattic_record_store_put($store, $hostname, [
+                            ...$record,
+                            'attempts' => $attempts,
+                            'next_attempt_at' => $now + min(300, 5 * (2 ** min(6, $attempts - 1))),
+                        ]);
+                        _stattic_runtime_append_journal($privateRoot, [
+                            'event' => 'edge_purge_failed',
+                            'mode' => 'domain',
+                            'reason' => $record['reason'],
+                            'hostnames' => [$hostname],
+                            'attempts' => $attempts,
+                        ]);
+                        return false;
+                    },
+                );
+            },
+        );
+        $complete = $settled && $complete;
+    }
+    return $complete;
+}
+
+/** @return array{status:string, mode:string, urls?:int} */
 function _stattic_runtime_purge_now(string $privateRoot, array $input): array
 {
     $hostnames = _stattic_runtime_purge_hostname_list($input['hostnames'] ?? null);
     $reason = is_string($input['reason'] ?? null) ? $input['reason'] : 'runtime_mutation';
-
-    if ($hostnames === []) {
-        return ['status' => 'ok', 'mode' => 'none'];
+    if ($hostnames === [] || _stattic_runtime_require_edge_purge_endpoint() === null) {
+        // A zero-URL receipt retains the old control-plane wire enum while
+        // saying exactly how much provider work was needed.
+        return ['status' => 'ok', 'mode' => 'urls', 'urls' => 0];
     }
-
-    $run = static function () use ($privateRoot, $hostnames, $reason): bool {
-        return _stattic_runtime_purge_dispatch($privateRoot, $hostnames, $reason);
-    };
-
+    _stattic_runtime_purge_enqueue($privateRoot, $hostnames, $reason);
+    $run = static fn (): bool => _stattic_runtime_purge_drain($privateRoot, microtime(true) + 20, null, $hostnames);
     if (function_exists('fastcgi_finish_request')) {
         _stattic_flush_response_before_deferred(true);
-        _stattic_defer(static function () use ($run): void {
-            $run();
-        });
+        _stattic_defer($run);
         $status = 'queued';
     } else {
-        $status = $run() ? 'ok' : 'failed';
+        $status = $run() ? 'ok' : 'queued';
     }
-
     return ['status' => $status, 'mode' => 'domain'];
 }
 
-/**
- * The actual provider calls: one whole-host POST per hostname. Off wp.cloud
- * (no edge API) it is a successful no-op. A refused host is journaled so a
- * stale edge is visible to operators.
- *
- * @param list<string> $hostnames
- */
-function _stattic_runtime_purge_dispatch(
-    string $privateRoot,
-    array $hostnames,
-    string $reason
-): bool {
-    $endpoint = _stattic_runtime_edge_purge_endpoint();
-    if ($endpoint === null) {
+/** Synchronous callers share the same persisted retry ownership. */
+function _stattic_runtime_purge_dispatch(string $privateRoot, array $hostnames, string $reason): bool
+{
+    if (_stattic_runtime_require_edge_purge_endpoint() === null) {
         return true;
     }
-
-    $allAccepted = true;
-    $failedHosts = [];
-    foreach ($hostnames as $hostname) {
-        if (!_stattic_runtime_edge_purge_host($endpoint, $hostname, $reason)) {
-            $allAccepted = false;
-            $failedHosts[] = $hostname;
-        }
-    }
-
-    if ($failedHosts !== []) {
-        _stattic_runtime_append_journal($privateRoot, [
-            'event' => 'edge_purge_failed',
-            'mode' => 'domain',
-            'reason' => $reason,
-            'hostnames' => $failedHosts,
-        ]);
-    }
-    return $allAccepted;
+    $hostnames = _stattic_runtime_purge_hostname_list($hostnames);
+    _stattic_runtime_purge_enqueue($privateRoot, $hostnames, $reason);
+    return _stattic_runtime_purge_drain($privateRoot, microtime(true) + 20, null, $hostnames);
 }
 
 /**
@@ -309,9 +416,9 @@ function _stattic_runtime_purge_dispatch(
  * bytes could live under: route intent plus tombstones, read off the space root
  * so the visitor lane can call it without the management readers. A space no
  * hostname has ever served is unaddressable at the provider, so there is no
- * edge entry to drop and 'none' says so.
+ * edge entry to drop; the zero-URL receipt says so.
  *
- * @return array{status: string, mode: string}
+ * @return array{status: string, mode: string, urls?: int}
  */
 function _stattic_runtime_purge_space_hosts_now(
     string $privateRoot,
@@ -320,7 +427,7 @@ function _stattic_runtime_purge_space_hosts_now(
 ): array {
     $hostnames = _stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId));
     if ($hostnames === []) {
-        return ['status' => 'ok', 'mode' => 'none'];
+        return ['status' => 'ok', 'mode' => 'urls', 'urls' => 0];
     }
     return _stattic_runtime_purge_now($privateRoot, [
         'hostnames' => $hostnames,

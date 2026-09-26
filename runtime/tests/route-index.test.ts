@@ -23,6 +23,7 @@ import {
   api,
   apiJson,
   deploy,
+  edgePurgeCalls,
   get,
   hostEntry,
   previousRoutePointer,
@@ -507,8 +508,8 @@ test("a takedown removes only its space's live claim regardless of space-id orde
   }
 });
 
-test("intent-only hostname update rebuilds the route index", async () => {
-  const rt = await startRuntime();
+test("intent-only hostname update rebuilds the route index without purging unchanged reconciles", async () => {
+  const rt = await startRuntime({ captureEdgePurges: true });
   const host = "intent-only-index.test";
   try {
     await deploy(rt, {
@@ -517,6 +518,7 @@ test("intent-only hostname update rebuilds the route index", async () => {
       files: { "index.html": "intent index" },
     });
     await putRoute(rt, "spc_idx_intent", "production", productionRoute([], "ver_idx_intent_1"));
+    const beforeIntent = readPointer(rt);
 
     const response = await api(
       rt,
@@ -536,6 +538,92 @@ test("intent-only hostname update rebuilds the route index", async () => {
     const served = await get(rt, host, "/");
     expect(served.status).toBe(200);
     expect(await served.text()).toBe("intent index");
+    const purgesBefore = edgePurgeCalls(rt).length;
+    expect(purgesBefore).toBeGreaterThan(0);
+    const unchanged = await api(
+      rt,
+      "PUT",
+      "/__spacefast/api.php/spaces/spc_idx_intent/hostname-intent",
+      "update_hostname_intent",
+      { space_id: "spc_idx_intent" },
+      { production_hostnames: [host], version_hostnames: [] },
+    );
+    expect(unchanged.status).toBe(200);
+    expect(await unchanged.json()).toEqual({ space_id: "spc_idx_intent", route_count: 1 });
+    expect(edgePurgeCalls(rt).length).toBe(purgesBefore);
+
+    // Reproduce a process death after hostname-intent.json was persisted but
+    // before the index pointer was published. The replay must repair and purge.
+    writeFileSync(storagePath(rt, "routes", "current.json"), JSON.stringify(beforeIntent));
+    expect(hostEntry(rt, host)).toBeNull();
+    const replay = await api(
+      rt,
+      "PUT",
+      "/__spacefast/api.php/spaces/spc_idx_intent/hostname-intent",
+      "update_hostname_intent",
+      { space_id: "spc_idx_intent" },
+      { production_hostnames: [host], version_hostnames: [] },
+    );
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ purge: { mode: "domain" } });
+    expect(hostEntry(rt, host)).toMatchObject({ space_id: "spc_idx_intent" });
+    expect(edgePurgeCalls(rt).length).toBeGreaterThan(purgesBefore);
+  } finally {
+    rt.stop();
+  }
+});
+
+test("site repair persists invalidation for every Space before replacing the shared index", async () => {
+  const rt = await startRuntime({ captureEdgePurges: true });
+  const hostA = "repair-a.test";
+  const movedHostA = "repair-a-new.test";
+  const hostB = "repair-b.test";
+  try {
+    await deploy(rt, {
+      spaceId: "spc_repair_a",
+      versionId: "ver_repair_a",
+      files: { "index.html": "a" },
+      activate: productionActivation(hostA),
+    });
+    await deploy(rt, {
+      spaceId: "spc_repair_b",
+      versionId: "ver_repair_b",
+      files: { "index.html": "b" },
+      activate: productionActivation(hostB),
+    });
+    const beforeMove = readPointer(rt);
+    const moved = await api(
+      rt,
+      "PUT",
+      "/__spacefast/api.php/spaces/spc_repair_a/hostname-intent",
+      "update_hostname_intent",
+      { space_id: "spc_repair_a" },
+      { production_hostnames: [movedHostA], version_hostnames: [] },
+    );
+    expect(moved.status).toBe(200);
+    // The old index still names hostA, which no Space currently declares.
+    writeFileSync(storagePath(rt, "routes", "current.json"), JSON.stringify(beforeMove));
+    const stale = readPointer(rt);
+    const queueRoot = storagePath(rt, "runtime", "edge-purges");
+    rmSync(queueRoot, { recursive: true, force: true });
+    writeFileSync(queueRoot, "blocked");
+    const repair = () =>
+      api(rt, "POST", "/__spacefast/api.php/spaces/spc_repair_a/repair", "repair_space", {
+        space_id: "spc_repair_a",
+      });
+    expect((await repair()).status).toBe(500);
+    expect(readPointer(rt)).toEqual(stale);
+
+    unlinkSync(queueRoot);
+    const purgesBefore = edgePurgeCalls(rt).length;
+    expect((await repair()).status).toBe(200);
+    expect(hostEntry(rt, hostB)).toMatchObject({ space_id: "spc_repair_b" });
+    expect(
+      edgePurgeCalls(rt)
+        .slice(purgesBefore)
+        .map((call) => call.hostname)
+        .sort(),
+    ).toEqual([hostA, hostB, movedHostA].sort());
   } finally {
     rt.stop();
   }

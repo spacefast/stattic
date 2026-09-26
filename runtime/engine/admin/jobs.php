@@ -777,10 +777,17 @@ function _stattic_runtime_job_run_claimed(string $privateRoot, array $job, float
  * steps walk, blob GC collects bytes no remaining declaration names, and the
  * disk report runs last so it measures what the pass left.
  */
+function _stattic_runtime_job_housekeeping_edge_purge(string $privateRoot, array $_claims, float $deadline): bool
+{
+    require_once __DIR__ . '/../shared/purge.php';
+    return _stattic_runtime_purge_drain($privateRoot, $deadline);
+}
+
 function _stattic_runtime_job_maintenance_steps(): array
 {
     return [
         'job_reap' => '_stattic_runtime_job_housekeeping_reap',
+        'edge_purge' => '_stattic_runtime_job_housekeeping_edge_purge',
         'retention' => '_stattic_runtime_job_housekeeping_retention',
         'blob_gc' => '_stattic_runtime_job_housekeeping_local_blob_gc',
         'route_shard_gc' => '_stattic_runtime_job_housekeeping_route_shard_gc',

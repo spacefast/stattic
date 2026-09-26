@@ -11,11 +11,8 @@ function _sf_cache_control(string $cacheClass, bool $open): string
     }
     return match ($cacheClass) {
         STATTIC_RUNTIME_CACHE_CLASS_IMMUTABLE => 'public, max-age=31536000, immutable',
-        // Everything else a version serves is version-pinned until activation.
-        // A whole-host purge accelerates sync, but it is a deferred
-        // best-effort side effect: correctness cannot depend on every purge
-        // succeeding. Keep a bounded shared lifetime while browsers revalidate
-        // every load (max-age=0 + ETag).
+        // Durable purges retire shared copies promptly. A bounded lifetime
+        // retires a stale response that filled after the purge completed.
         default => 'public, s-maxage=600, max-age=0, must-revalidate',
     };
 }
@@ -102,6 +99,9 @@ function _stattic_cache_policy(array $lane = []): array
     }
     if ($private) {
         $cacheControl = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+    } elseif (_stattic_cache_policy_request_varying()) {
+        $cacheControl = STATTIC_CACHE_CONTROL_NO_STORE;
+        $noStore = true;
     } elseif (_stattic_request_method_forbids_shared_store()) {
         // The provider edge is method-blind (_stattic_edge_cache_directive): it
         // keys a stored response on host+path+query alone, so a stored answer

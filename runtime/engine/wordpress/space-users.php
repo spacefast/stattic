@@ -17,11 +17,11 @@ function spacefast_space_users_install_hooks(): void
 {
     add_filter('wp_redirect', static function (string $location): string {
         $portal = home_url('/identity');
-        if (isset($_COOKIE['sfi_app_return']) && str_starts_with($location, $portal . '?factor=')) {
+        if (isset($_COOKIE[SpacefastIdentitySessions::cookieName('sfi_app_return')]) && str_starts_with($location, $portal . '?factor=')) {
             return $location . '&return_to=' . rawurlencode('/__zero/auth/complete');
         }
         if (!in_array($location, [$portal, home_url('/identity/account')], true) || !isset($GLOBALS['SPACEFAST_SPACE_USERS_AUTHENTICATED_USER_ID'])) return $location;
-        $cookie = $_COOKIE['sfi_app_return'] ?? null;
+        $cookie = $_COOKIE[SpacefastIdentitySessions::cookieName('sfi_app_return')] ?? null;
         if (!is_string($cookie)) return $location;
         [$id, $binding] = array_pad(explode('.', $cookie, 2), 2, '');
         try {
@@ -29,7 +29,7 @@ function spacefast_space_users_install_hooks(): void
         } catch (\Spacefast\Identity\Failure $error) {
             return $location;
         }
-        setcookie('sfi_app_return', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => is_ssl(), 'httponly' => true, 'samesite' => 'Lax']);
+        setcookie(SpacefastIdentitySessions::cookieName('sfi_app_return'), '', ['expires' => time() - 3600, 'path' => '/', 'secure' => is_ssl(), 'httponly' => true, 'samesite' => 'Lax']);
         $path = $challenge['payload']['path'] ?? '';
         return is_string($path) && preg_match('~\A/(?!/)[^\x00-\x20\\\\]*\z~', $path) === 1 ? home_url($path) : $location;
     });
@@ -149,7 +149,7 @@ function spacefast_space_users_providers(array $providers): array
 function spacefast_space_users_live_session(): ?array
 {
     if (!spacefast_space_users_available() || spacefast_space_users_settings()['enabled'] !== true) return null;
-    $cookie = $_COOKIE[SpacefastIdentitySessions::COOKIE] ?? null;
+    $cookie = $_COOKIE[SpacefastIdentitySessions::cookieName(SpacefastIdentitySessions::COOKIE)] ?? null;
     if (!is_string($cookie)) return null;
     $session = SpacefastIdentity::$sessions->find($cookie);
     return $session !== null && get_user_meta((int) $session['wp_user_id'], '_spacefast_app_user', true) === spacefast_content_space_id() && spacefast_content_users_in_space((int) $session['wp_user_id']) ? $session : null;

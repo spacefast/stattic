@@ -25,7 +25,7 @@ use crate::storage::put_blob;
 use crate::transforms::{resolve_effective_config, ResolveEffectiveInput};
 
 pub(crate) const DEFAULT_EDGE_CACHE_CONTROL: &str =
-    "public, max-age=0, s-maxage=600, stale-while-revalidate=60";
+    "public, max-age=0, s-maxage=600, must-revalidate";
 
 /// The committed paths that are publicly served: not convention/config files,
 /// not dotfiles. Explicit compressed files keep their own public URLs.

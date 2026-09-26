@@ -1,6 +1,32 @@
 <?php
 declare(strict_types=1);
 
+// Read before WordPress loads, so it cannot ask the identity plugin for the name.
+// In production the plugin only runs over HTTPS and always sets the __Host- name;
+// the bare name is plain-HTTP local development only.
+function _stattic_space_users_session_cookie(): ?string
+{
+    $cookie = $_COOKIE['__Host-sfi_session']
+        ?? (_stattic_cookies_secure() ? null : ($_COOKIE['sfi_session'] ?? null));
+    return is_string($cookie) ? $cookie : null;
+}
+
+// Named by the identity plugin's rule so every sfi_* cookie shares one prefix.
+function _stattic_space_users_set_cookie(string $name, string $value, int $expires): void
+{
+    $cookieName = \Spacefast\Identity\Sessions::cookieName($name);
+    setcookie($cookieName, $value, [
+        'expires' => $expires, 'path' => '/',
+        'secure' => _stattic_cookies_secure() || str_starts_with($cookieName, '__Host-'),
+        'httponly' => true, 'samesite' => 'Lax',
+    ]);
+}
+
+function _stattic_space_users_cookie(string $name): string
+{
+    return (string) ($_COOKIE[\Spacefast\Identity\Sessions::cookieName($name)] ?? '');
+}
+
 function _stattic_space_users_route(string $path): bool
 {
     return $path === '/identity' || str_starts_with($path, '/identity/')
@@ -14,7 +40,7 @@ function _stattic_space_users_prepare(
     $route = _stattic_space_users_route($path);
     $control = STATTIC_ZERO_CONTROL_ROUTES[trim($path, '/')] ?? null;
     $start = is_array($control) && in_array($control['operation'], ['auth_start', 'auth_sign_out'], true);
-    $hasSession = isset($_COOKIE['sfi_session']);
+    $hasSession = _stattic_space_users_session_cookie() !== null;
     $enabled = ($serving['users']['enabled'] ?? false) === true;
     if (!$route && !$start) return false;
     if (!$enabled) {
@@ -61,13 +87,13 @@ function _stattic_space_users_dispatch(string $path, string $method, string $hos
     if ($path === '/__zero/auth/complete') {
         if ($method !== 'GET') _stattic_method_not_allowed('GET');
         if (spacefast_space_users_auth() === null) _stattic_problem_refused(401, 'space_users_sign_in_required', 'Finish signing in to continue.');
-        [$id, $binding] = array_pad(explode('.', (string) ($_COOKIE['sfi_app_return'] ?? ''), 2), 2, '');
+        [$id, $binding] = array_pad(explode('.', _stattic_space_users_cookie('sfi_app_return'), 2), 2, '');
         try {
             $challenge = \Spacefast\Identity\Plugin::$security->consume($id, 'space_app_return', $binding);
         } catch (\Spacefast\Identity\Failure $error) {
             _stattic_problem_refused($error->status, $error->kind, $error->getMessage());
         }
-        setcookie('sfi_app_return', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => _stattic_cookies_secure(), 'httponly' => true, 'samesite' => 'Lax']);
+        _stattic_space_users_set_cookie('sfi_app_return', '', time() - 3600);
         header('Location: ' . (_stattic_safe_return_path((string) ($challenge['payload']['path'] ?? '/')) ?? '/'), true, 303);
         exit;
     }
@@ -136,10 +162,7 @@ function _stattic_space_users_native_begin(string $returnPath): string
     }
     $binding = \Spacefast\Identity\Security::token();
     $id = \Spacefast\Identity\Plugin::$security->challenge('space_native', 0, '', $payload, $binding, 300);
-    setcookie('sfi_native_start', $id . '.' . $binding, [
-        'expires' => time() + 300, 'path' => '/__zero/auth/native', 'secure' => _stattic_cookies_secure(),
-        'httponly' => true, 'samesite' => 'Lax',
-    ]);
+    _stattic_space_users_set_cookie('sfi_native_start', $id . '.' . $binding, time() + 300);
     return '/__zero/auth/native';
 }
 
@@ -153,7 +176,7 @@ function _stattic_space_users_native_complete(string $host, string $method): nev
     $verified = _stattic_current_session_identity($serving, $host);
     $account = _stattic_access_account_identity(_stattic_access_identity_record($verified) ?? []);
     if ($account === null) _stattic_problem_refused(401, 'space_users_native_identity_missing', 'Start Spacefast sign-in again.');
-    [$id, $binding] = array_pad(explode('.', (string) ($_COOKIE['sfi_native_start'] ?? ''), 2), 2, '');
+    [$id, $binding] = array_pad(explode('.', _stattic_space_users_cookie('sfi_native_start'), 2), 2, '');
     try {
         $challenge = \Spacefast\Identity\Plugin::$security->consume($id, 'space_native', $binding);
         $name = (string) ($verified['profile']['name'] ?? 'Spacefast user');
@@ -181,7 +204,7 @@ function _stattic_space_users_native_complete(string $host, string $method): nev
     } catch (\Spacefast\Identity\Failure $error) {
         _stattic_problem_refused($error->status, $error->kind, $error->getMessage());
     }
-    setcookie('sfi_native_start', '', ['expires' => time() - 3600, 'path' => '/__zero/auth/native', 'secure' => _stattic_cookies_secure(), 'httponly' => true, 'samesite' => 'Lax']);
+    _stattic_space_users_set_cookie('sfi_native_start', '', time() - 3600);
     $returnPath = _stattic_safe_return_path((string) ($challenge['payload']['path'] ?? '/')) ?? '/';
     if ($result['kind'] === 'mfa_required') _stattic_space_users_return_begin($returnPath);
     $destination = $result['kind'] === 'mfa_required'
@@ -369,10 +392,7 @@ function _stattic_space_users_return_begin(string $returnPath): void
 {
     $binding = \Spacefast\Identity\Security::token();
     $challenge = \Spacefast\Identity\Plugin::$security->challenge('space_app_return', 0, '', ['path' => $returnPath], $binding, 300);
-    setcookie('sfi_app_return', $challenge . '.' . $binding, [
-        'expires' => time() + 300, 'path' => '/', 'secure' => _stattic_cookies_secure(),
-        'httponly' => true, 'samesite' => 'Lax',
-    ]);
+    _stattic_space_users_set_cookie('sfi_app_return', $challenge . '.' . $binding, time() + 300);
 }
 
 function _stattic_space_users_origin(string $host): string
@@ -388,8 +408,8 @@ function _stattic_space_users_origin(string $host): string
 function _stattic_space_users_request_auth(array $serving, string $host): ?array
 {
     if (array_key_exists('SPACEFAST_SPACE_USERS_AUTH', $GLOBALS)) return $GLOBALS['SPACEFAST_SPACE_USERS_AUTH'];
-    $cookie = $_COOKIE['sfi_session'] ?? null;
-    if (!is_string($cookie) || strlen($cookie) > 512) return null;
+    $cookie = _stattic_space_users_session_cookie();
+    if ($cookie === null || strlen($cookie) > 512) return null;
     $privateRoot = _stattic_access_private_root();
     require_once __DIR__ . '/../shared/admission.php';
     _stattic_space_users_admit_origin(_stattic_runtime_request_method(), $host);

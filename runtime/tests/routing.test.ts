@@ -45,6 +45,7 @@ import {
   blobGateToken,
   createDeclaredSession,
   deploy,
+  edgePurgeCalls,
   errorCode,
   finalize,
   finalizeRaw,
@@ -1536,97 +1537,92 @@ test("finalize activation atomically releases immutable version tombstones", asy
   expect((await get(rt, versionHost, "/")).status).toBe(404);
 });
 
-test("finalize persists and replays the released-tombstone purge", async () => {
-  const spaceId = "spc_release_purge_replay";
-  const liveHost = "release-purge.test";
-  const versionHost = "v2.release-purge.test";
+test("finalize purges released tombstones once and leaves unchanged replays cached", async () => {
+  const rt = await startRuntime({ captureEdgePurges: true });
+  try {
+    const spaceId = "spc_release_purge_replay";
+    const liveHost = "release-purge.test";
+    const versionHost = "v2.release-purge.test";
 
-  await deploy(rt, {
-    spaceId,
-    versionId: "ver_release_purge_1",
-    files: { "index.html": "<h1>first</h1>\n" },
-    activate: {
-      route_name: "production",
-      config: publicAccessConfig({ mode: "website" }, "live_and_all_versions"),
-      production_hostnames: [liveHost],
-    },
-  });
-  await apiJson(
-    rt,
-    "PUT",
-    `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/tombstones`,
-    "update_tombstones",
-    { space_id: spaceId },
-    { hostnames: [versionHost], mode: "replace" },
-  );
-  expect((await get(rt, versionHost, "/")).status).toBe(404);
+    await deploy(rt, {
+      spaceId,
+      versionId: "ver_release_purge_1",
+      files: { "index.html": "<h1>first</h1>\n" },
+      activate: {
+        route_name: "production",
+        config: publicAccessConfig({ mode: "website" }, "live_and_all_versions"),
+        production_hostnames: [liveHost],
+      },
+    });
+    await apiJson(
+      rt,
+      "PUT",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/tombstones`,
+      "update_tombstones",
+      { space_id: spaceId },
+      { hostnames: [versionHost], mode: "replace" },
+    );
+    expect((await get(rt, versionHost, "/")).status).toBe(404);
 
-  const secondVersionId = "ver_release_purge_2";
-  const secondFiles = { "index.html": "<h1>second</h1>\n" };
-  const secondSession = await createDeclaredSession(rt, spaceId, secondVersionId, secondFiles);
-  await uploadSessionBlobs(rt, secondSession, secondFiles);
-  const secondFinalizeBody = {
-    upload_id: secondSession.uploadId,
-    activate: {
-      route_name: "production",
-      config: publicAccessConfig({ mode: "website" }, "live_and_all_versions"),
-      config_digest: sha256("release-purge-config"),
-      production_hostnames: [liveHost],
-      version_hostnames: [{ hostname: versionHost, version_id: secondVersionId }],
-    },
-  };
+    const secondVersionId = "ver_release_purge_2";
+    const secondFiles = { "index.html": "<h1>second</h1>\n" };
+    const secondSession = await createDeclaredSession(rt, spaceId, secondVersionId, secondFiles);
+    await uploadSessionBlobs(rt, secondSession, secondFiles);
+    const secondFinalizeBody = {
+      upload_id: secondSession.uploadId,
+      activate: {
+        route_name: "production",
+        config: publicAccessConfig({ mode: "website" }, "live_and_all_versions"),
+        config_digest: sha256("release-purge-config"),
+        production_hostnames: [liveHost],
+        version_hostnames: [{ hostname: versionHost, version_id: secondVersionId }],
+      },
+    };
 
-  // The activating commit releases the tombstone and purges the edge for it.
-  const activation = await finalize(rt, spaceId, secondVersionId, secondFinalizeBody);
-  expect(activation.status).toBe(200);
-  const activationBody = z
-    .looseObject({ purge: z.looseObject({ mode: z.string().optional() }).optional() })
-    .parse(await activation.json());
-  expect(activationBody.purge?.mode).toBe("domain");
-  expect((await get(rt, versionHost, "/")).status).toBe(200);
+    // The activating commit releases the tombstone and purges the edge for it.
+    const activation = await finalize(rt, spaceId, secondVersionId, secondFinalizeBody);
+    expect(activation.status).toBe(200);
+    const activationBody = z
+      .looseObject({ purge: z.looseObject({ mode: z.string().optional() }).optional() })
+      .parse(await activation.json());
+    expect(activationBody.purge?.mode).toBe("domain");
+    expect((await get(rt, versionHost, "/")).status).toBe(200);
 
-  // The released hostname is persisted on the receipt so a lost/failed deferred
-  // purge can still converge on replay.
-  const routePointerPath = storagePath(rt, "spaces", spaceId, "routes", "production.json");
-  const pointer = z
-    .looseObject({ activation_release_purge: z.array(z.string()).optional() })
-    .parse(JSON.parse(readFileSync(routePointerPath, "utf8")));
-  expect(pointer.activation_release_purge).toEqual([versionHost]);
+    const purgesBefore = edgePurgeCalls(rt).length;
+    expect(edgePurgeCalls(rt).some((purge) => purge.hostname === versionHost)).toBe(true);
+    const replay = await finalize(rt, spaceId, secondVersionId, secondFinalizeBody);
+    expect(replay.status).toBe(200);
+    expect((await get(rt, versionHost, "/")).status).toBe(200);
+    expect(edgePurgeCalls(rt).length).toBe(purgesBefore);
 
-  // An exact replay (idempotent no-op) re-issues that purge rather than
-  // returning before purging.
-  const replay = await finalize(rt, spaceId, secondVersionId, secondFinalizeBody);
-  expect(replay.status).toBe(200);
-  const replayBody = z
-    .looseObject({ purge: z.looseObject({ mode: z.string().optional() }).optional() })
-    .parse(await replay.json());
-  expect(replayBody.purge?.mode).toBe("domain");
-  expect((await get(rt, versionHost, "/")).status).toBe(200);
-
-  // The next commit that releases nothing clears the marker, so ordinary
-  // reconciles never re-purge an immutable version host whose bytes never change.
-  const thirdVersionId = "ver_release_purge_3";
-  const thirdFiles = { "index.html": "<h1>third</h1>\n" };
-  const thirdSession = await createDeclaredSession(rt, spaceId, thirdVersionId, thirdFiles);
-  await uploadSessionBlobs(rt, thirdSession, thirdFiles);
-  expect(
-    (
-      await finalize(rt, spaceId, thirdVersionId, {
-        upload_id: thirdSession.uploadId,
-        activate: {
-          route_name: "production",
-          config: publicAccessConfig({ mode: "website" }, "live_and_all_versions"),
-          config_digest: sha256("release-purge-config-3"),
-          production_hostnames: [liveHost],
-          version_hostnames: [{ hostname: versionHost, version_id: secondVersionId }],
-        },
-      })
-    ).status,
-  ).toBe(200);
-  const clearedPointer = z
-    .looseObject({ activation_release_purge: z.array(z.string()).optional() })
-    .parse(JSON.parse(readFileSync(routePointerPath, "utf8")));
-  expect(clearedPointer.activation_release_purge).toBeUndefined();
+    // A later content activation leaves the retained version hostname cached.
+    const versionPurges = edgePurgeCalls(rt).filter(
+      (purge) => purge.hostname === versionHost,
+    ).length;
+    const thirdVersionId = "ver_release_purge_3";
+    const thirdFiles = { "index.html": "<h1>third</h1>\n" };
+    const thirdSession = await createDeclaredSession(rt, spaceId, thirdVersionId, thirdFiles);
+    await uploadSessionBlobs(rt, thirdSession, thirdFiles);
+    expect(
+      (
+        await finalize(rt, spaceId, thirdVersionId, {
+          upload_id: thirdSession.uploadId,
+          activate: {
+            route_name: "production",
+            config: publicAccessConfig({ mode: "website" }, "live_and_all_versions"),
+            config_digest: sha256("release-purge-config-3"),
+            production_hostnames: [liveHost],
+            version_hostnames: [{ hostname: versionHost, version_id: secondVersionId }],
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect(edgePurgeCalls(rt).filter((purge) => purge.hostname === versionHost).length).toBe(
+      versionPurges,
+    );
+  } finally {
+    rt.stop();
+  }
 });
 
 test("finalize rejects proxy rules targeting internal or non-public upstreams", async () => {

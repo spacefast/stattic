@@ -327,6 +327,24 @@ function _stattic_engine_update_invalidate_aliases(string $privateRoot): void
     }
 }
 
+// Unversioned SDK and platform responses change with the engine, independently
+// of a content publish. Persist their purge before acknowledging a new release.
+function _stattic_engine_update_purge(string $privateRoot, string $revision): void
+{
+    require_once __DIR__ . '/../shared/purge.php';
+    $marker = $privateRoot . '/runtime/edge-purge-revision.json';
+    $previous = _stattic_runtime_read_json($marker);
+    if (is_array($previous) && ($previous['revision'] ?? null) === $revision) {
+        return;
+    }
+    $hostnames = [];
+    foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
+        $hostnames = [...$hostnames, ..._stattic_runtime_space_sweep_hostnames($spaceRoot)];
+    }
+    _stattic_runtime_purge_now($privateRoot, ['hostnames' => $hostnames, 'reason' => 'engine_updated']);
+    _stattic_runtime_write_json_atomic($marker, ['revision' => $revision]);
+}
+
 function _stattic_engine_update_route(string $privateRoot, array $_claims): void
 {
     $body = _stattic_json_body();
@@ -357,6 +375,7 @@ function _stattic_engine_update_route(string $privateRoot, array $_claims): void
     _stattic_engine_update_invalidate_aliases($privateRoot);
 
     if (_stattic_engine_installation_proven($privateRoot, $revision, $nativeSha256)) {
+        _stattic_engine_update_purge($privateRoot, $revision);
         _stattic_json_response(200, [
             'status' => 'current',
             'engine_revision' => SPACEFAST_RUNTIME_ENGINE_REVISION,

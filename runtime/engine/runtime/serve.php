@@ -800,7 +800,7 @@ function _stattic_v4_entry(string $versionDir, array $root, string $key): ?array
     $table = _stattic_v4_include_artifact($versionDir . '/' . $file);
     if ($table === false) {
         // Terminal: a null return means "no entry", which the ladder resolves to
-        // a platform 404 with s-maxage=600, ten edge-cached minutes of 404 on a
+        // a platform 404 with a long shared lifetime on a
         // live page off one failed include.
         _stattic_render_runtime_unavailable_lazy('response_table_unreadable');
     }

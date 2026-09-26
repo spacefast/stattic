@@ -1160,6 +1160,33 @@ function _stattic_runtime_put_hostname_intent(string $privateRoot, string $space
 {
     $body = _stattic_json_body();
     $routes = _stattic_runtime_routes_from_hostname_intent('production', $body);
+    $previous = _stattic_runtime_read_json_strict(_stattic_space_root($privateRoot, $spaceId) . '/hostname-intent.json');
+    if (is_array($previous) && !_stattic_runtime_hostname_intent_changed($previous, $routes)) {
+        $repairHostnames = null;
+        _stattic_runtime_update_route_index($privateRoot, $spaceId, static function () use ($privateRoot, &$repairHostnames): void {
+            if ($repairHostnames !== null) {
+                return;
+            }
+            $repairHostnames = _stattic_runtime_repair_hostnames($privateRoot);
+            if (_stattic_runtime_require_edge_purge_endpoint() !== null) {
+                _stattic_runtime_purge_enqueue($privateRoot, $repairHostnames, 'hostname_intent_repaired', [
+                    $privateRoot . '/routes/index.lock',
+                ]);
+            }
+        });
+        _stattic_json_response(200, [
+            'space_id' => $spaceId,
+            'route_count' => count($routes),
+            ...($repairHostnames !== null && $repairHostnames !== [] && _stattic_runtime_edge_purge_endpoint() !== null
+                ? ['purge' => _stattic_runtime_purge_now($privateRoot, ['hostnames' => $repairHostnames, 'reason' => 'hostname_intent_repaired'])]
+                : []),
+        ]);
+    }
+    $hostnames = array_values(array_unique([
+        ..._stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId)),
+        ..._stattic_runtime_route_intent_hostnames('', ['routes' => $routes]),
+    ]));
+    _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'hostname_intent_updated');
     _stattic_runtime_store_hostname_intent($privateRoot, $spaceId, $routes, $claims);
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
     // Whole-domain: an intent change re-points hostnames, so which paths changed
@@ -1167,7 +1194,7 @@ function _stattic_runtime_put_hostname_intent(string $privateRoot, string $space
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'route_count' => count($routes),
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'hostname_intent_updated'),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'hostname_intent_updated', $hostnames),
     ]);
 }
 
@@ -1243,12 +1270,10 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
         // Repair a receipt persisted before the route-index generation was
         // published, before claiming the activation is already complete.
         _stattic_runtime_update_route_index($privateRoot, $spaceId);
-        $replayPurge = _stattic_runtime_replay_release_purge($privateRoot, $previousRoute);
         return [
             'changed_paths' => [],
             'unchanged' => true,
             'activation_event_id' => $storedActivationEventId,
-            ...($replayPurge !== null ? ['purge' => $replayPurge] : []),
         ];
     }
     // Matching config bytes do not prove the route-index publish completed.
@@ -1261,16 +1286,53 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
         && !$intentChanged
     ) {
         // The guard above proves the receipt is present, so the event id is the
-        // stored one; the release purge, however, may still be owed to the edge.
-        $replayPurge = _stattic_runtime_replay_release_purge($privateRoot, $previousRoute);
+        // stored one. The durable queue independently owns any pending purge.
         return [
             'changed_paths' => [],
             'unchanged' => true,
             'activation_event_id' => $storedActivationEventId,
-            ...($replayPurge !== null ? ['purge' => $replayPurge] : []),
         ];
     }
     $config = _stattic_runtime_route_config($body['config'] ?? null);
+    $releasedTombstoneHostnames = [];
+    if ($storeIntent) {
+        $tombstoned = [];
+        foreach ($tombstones['hostnames'] ?? [] as $hostname) {
+            if (is_string($hostname)) {
+                $normalized = _stattic_runtime_normalize_route_hostname($hostname);
+                if ($normalized !== '') {
+                    $tombstoned[$normalized] = true;
+                }
+            }
+        }
+        // Only the activated version's own immutable hostnames are released.
+        // Older retained version hostnames stay tombstoned: a tombstone added
+        // after their publication must outrank a later route reconcile.
+        foreach (_stattic_runtime_affected_intent_hostnames_from_routes($intentRoutes, null, $versionId) as $hostname) {
+            if (isset($tombstoned[$hostname])) {
+                $releasedTombstoneHostnames[] = $hostname;
+            }
+        }
+    }
+    $effectiveIntentRoutes = $storeIntent
+        ? $intentRoutes
+        : (is_array($previousIntent['routes'] ?? null) ? $previousIntent['routes'] : []);
+    $hostnames = array_values(array_unique(array_merge(
+        _stattic_runtime_affected_intent_hostnames_from_routes($effectiveIntentRoutes, $routeName),
+        _stattic_runtime_affected_intent_hostnames_from_routes($previousIntent['routes'] ?? [], $routeName),
+        $releasedTombstoneHostnames,
+    )));
+    $previousExposure = is_array($previousRoute)
+        ? _stattic_runtime_public_exposure_descriptor(is_array($previousRoute['config'] ?? null) ? $previousRoute['config'] : [])
+        : null;
+    $needsSweep = _stattic_runtime_exposure_needs_sweep($previousExposure, _stattic_runtime_public_exposure_descriptor($config));
+    $purgeHosts = $needsSweep
+        ? array_values(array_unique([
+            ..._stattic_runtime_access_sweep_hostnames($previousIntent, $tombstones),
+            ..._stattic_runtime_access_sweep_hostnames($storeIntent ? ['routes' => $intentRoutes] : $previousIntent, $tombstones),
+        ]))
+        : $hostnames;
+    _stattic_runtime_prepare_purge($privateRoot, $spaceId, $purgeHosts, $needsSweep ? 'space_access_privatized' : 'route_updated');
     _stattic_runtime_write_route(
         $privateRoot,
         $spaceId,
@@ -1293,45 +1355,18 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
     // per-space lock. Write both documents before publishing the shared route
     // index, so a crash exposes either the old state or the complete new state.
     // Exact replays returned above never erase a tombstone added after commit.
-    $releasedTombstoneHostnames = [];
-    if ($storeIntent) {
-        $tombstoned = [];
-        foreach ($tombstones['hostnames'] ?? [] as $hostname) {
-            if (is_string($hostname)) {
-                $normalized = _stattic_runtime_normalize_route_hostname($hostname);
-                if ($normalized !== '') {
-                    $tombstoned[$normalized] = true;
-                }
-            }
-        }
-        // Only the activated version's own immutable hostnames are released.
-        // Older retained version hostnames stay tombstoned: a tombstone added
-        // after their publication must outrank a later route reconcile.
-        foreach (_stattic_runtime_affected_intent_hostnames_from_routes($intentRoutes, null, $versionId) as $hostname) {
-            if (isset($tombstoned[$hostname])) {
-                $releasedTombstoneHostnames[] = $hostname;
-            }
-        }
-        if ($releasedTombstoneHostnames !== []) {
-            _stattic_runtime_store_space_tombstones(
-                $privateRoot,
-                $spaceId,
-                $releasedTombstoneHostnames,
-                'remove'
-            );
-        }
+    if ($storeIntent && $releasedTombstoneHostnames !== []) {
+        _stattic_runtime_store_space_tombstones(
+            $privateRoot,
+            $spaceId,
+            $releasedTombstoneHostnames,
+            'remove'
+        );
     }
     $changedPathsKnown = false;
     $changedPaths = _stattic_runtime_changed_path_list($body['changed_paths'] ?? null, $changedPathsKnown);
     // The same hostname set feeds the journal event and the purge: a path purge
     // that missed a hostname the event named would leave that host stale.
-    $effectiveIntentRoutes = $storeIntent
-        ? $intentRoutes
-        : (is_array($previousIntent['routes'] ?? null) ? $previousIntent['routes'] : []);
-    $hostnames = array_values(array_unique(array_merge(
-        _stattic_runtime_affected_intent_hostnames_from_routes($effectiveIntentRoutes, $routeName),
-        $releasedTombstoneHostnames,
-    )));
     $routeEvent = _stattic_runtime_route_updated_event(
         $spaceId,
         $routeName,
@@ -1345,12 +1380,10 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
     // cannot say whether cached anonymous bytes just became private. The
     // before/after exposure digests answer that. Presence of the previous field
     // means a route existed; null means treat it conservatively.
-    $previousExposure = null;
     if (is_array($previousRoute)) {
         $previousConfig = is_array($previousRoute['config'] ?? null)
             ? $previousRoute['config']
             : [];
-        $previousExposure = _stattic_runtime_public_exposure_descriptor($previousConfig);
         $routeEvent['previous_public_exposure_digest'] =
             _stattic_runtime_public_exposure_digest($previousConfig);
         $routeEvent['public_exposure_digest'] =
@@ -1373,34 +1406,18 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
         $versionId,
         $activationEventId,
         $operationId,
-        $requestDigest,
-        $releasedTombstoneHostnames
+        $requestDigest
     );
-    // Access flipping public→private owes EVERY hostname the space has ever
+    // Narrowing anonymous access owes EVERY hostname the space has ever
     // answered on (route intent + tombstones) a full sweep: the edge holds
-    // year-TTL copies of the formerly-public HTML on every alias, including
+    // cached copies of formerly-public content on every alias, including
     // the immutable version hosts a content activation deliberately skips
     // (their bytes never change, so a publish must NOT purge them). Every
     // other write purges only the route's own serving hostnames.
-    $sweepIntent = $storeIntent ? ['routes' => $intentRoutes] : $previousIntent;
-    $purge = _stattic_runtime_purge_now(
-        $privateRoot,
-        _stattic_runtime_exposure_became_private(
-            $previousExposure,
-            _stattic_runtime_public_exposure_descriptor($config),
-        )
-            ? [
-                'hostnames' => _stattic_runtime_access_sweep_hostnames(
-                    $sweepIntent,
-                    $tombstones,
-                ),
-                'reason' => 'space_access_privatized',
-            ]
-            : [
-                'hostnames' => $hostnames,
-                'reason' => 'route_updated',
-            ],
-    );
+    $purge = _stattic_runtime_purge_now($privateRoot, [
+        'hostnames' => $purgeHosts,
+        'reason' => $needsSweep ? 'space_access_privatized' : 'route_updated',
+    ]);
     return [
         'changed_paths' => $changedPaths,
         'unchanged' => false,
@@ -1409,7 +1426,7 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
     ];
 }
 
-function _stattic_runtime_store_route_activation_event_id(string $routePath, string $spaceId, string $routeName, string $versionId, string $activationEventId, string $operationId, string $requestDigest, array $releasedTombstoneHostnames = []): void
+function _stattic_runtime_store_route_activation_event_id(string $routePath, string $spaceId, string $routeName, string $versionId, string $activationEventId, string $operationId, string $requestDigest): void
 {
     $stored = _stattic_runtime_read_json($routePath);
     if (
@@ -1427,54 +1444,7 @@ function _stattic_runtime_store_route_activation_event_id(string $routePath, str
     $stored['activation_event_id'] = $activationEventId;
     $stored['activation_operation_id'] = $operationId;
     $stored['activation_request_digest'] = $requestDigest;
-    // The immutable-host purge that a tombstone release owes the edge is
-    // deferred (fastcgi_finish_request) and best-effort, so it can be lost when
-    // the worker exits before it dispatches. Persist the released hostnames on
-    // the receipt so an idempotent replay re-issues the purge until the space's
-    // next commit rewrites this set; otherwise the edge could keep serving the
-    // cached tombstone under the canonical cache key and stall version-hostname
-    // readiness. An empty release clears the marker so ordinary reconciles never
-    // re-purge immutable hosts whose bytes never change.
-    if ($releasedTombstoneHostnames !== []) {
-        $stored['activation_release_purge'] = array_values($releasedTombstoneHostnames);
-    } else {
-        unset($stored['activation_release_purge']);
-    }
     _stattic_runtime_write_json_atomic($routePath, $stored);
-}
-
-// The hostnames a completed activation released from tombstoning but whose edge
-// purge may not have landed yet, read back off the persisted route pointer.
-function _stattic_runtime_route_pending_release_purge(mixed $previousRoute): array
-{
-    $pending = is_array($previousRoute) && is_array($previousRoute['activation_release_purge'] ?? null)
-        ? $previousRoute['activation_release_purge']
-        : [];
-    $hostnames = [];
-    foreach ($pending as $hostname) {
-        if (!is_string($hostname)) {
-            continue;
-        }
-        $normalized = _stattic_runtime_normalize_route_hostname($hostname);
-        if ($normalized !== '') {
-            $hostnames[$normalized] = true;
-        }
-    }
-    return array_keys($hostnames);
-}
-
-// Re-issue the deferred release purge on an idempotent replay so a lost or
-// failed first attempt still converges the edge onto the served version.
-function _stattic_runtime_replay_release_purge(string $privateRoot, mixed $previousRoute): ?array
-{
-    $hostnames = _stattic_runtime_route_pending_release_purge($previousRoute);
-    if ($hostnames === []) {
-        return null;
-    }
-    return _stattic_runtime_purge_now($privateRoot, [
-        'hostnames' => $hostnames,
-        'reason' => 'tombstone_release_replay',
-    ]);
 }
 
 function _stattic_runtime_canonical_request_digest(array $body): string
@@ -1618,6 +1588,8 @@ function _stattic_runtime_put_tombstones(string $privateRoot, string $spaceId, a
     // preserves the generic tombstone.
     $reason = isset($body['reason']) && is_string($body['reason']) ? $body['reason'] : null;
     $category = isset($body['category']) && is_string($body['category']) ? $body['category'] : null;
+    $purgeHostnames = array_values(array_unique([...$hostnames, ..._stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId))]));
+    _stattic_runtime_prepare_purge($privateRoot, $spaceId, $purgeHostnames, 'space_tombstones_updated');
     $tombstoneCount = _stattic_runtime_store_space_tombstones($privateRoot, $spaceId, $hostnames, $mode, $reason, $category);
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
     _stattic_runtime_record_management_event($privateRoot, $claims, [
@@ -1629,7 +1601,7 @@ function _stattic_runtime_put_tombstones(string $privateRoot, string $spaceId, a
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'tombstone_count' => $tombstoneCount,
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_tombstones_updated', $hostnames),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_tombstones_updated', $purgeHostnames),
     ]);
 }
 
@@ -1650,6 +1622,7 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
     }
     $tombstones = is_array($tombstonesDoc) ? $tombstonesDoc : [];
     $hostnames = _stattic_runtime_access_sweep_hostnames($intent, $tombstones);
+    _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'space_deleted');
     _stattic_runtime_rm_recursive($spaceRoot);
     // Tombstones must survive the rm: retired hostnames keep serving the
     // tombstone page rather than degrading to the generic undeployed 503.
@@ -1688,6 +1661,7 @@ function _stattic_runtime_delete_version(string $privateRoot, string $spaceId, s
     // sidecars live inside it, and their readers stat before including, so a
     // link minted a moment ago stops resolving on its next request even though
     // the bytes stay in the space's shared CAS until the collector runs.
+    _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'version_deleted');
     _stattic_runtime_rm_recursive($versionRoot);
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
     _stattic_runtime_record_management_event($privateRoot, $claims, [
@@ -1707,10 +1681,49 @@ function _stattic_runtime_delete_version(string $privateRoot, string $spaceId, s
     ]);
 }
 
+/** @return list<string> */
+function _stattic_runtime_repair_hostnames(string $privateRoot): array
+{
+    $hostnames = [];
+    foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
+        foreach (_stattic_runtime_space_sweep_hostnames($spaceRoot) as $hostname) {
+            $hostnames[$hostname] = true;
+        }
+    }
+    $pointer = _stattic_runtime_read_route_pointer($privateRoot);
+    if ($pointer === false) {
+        throw new RuntimeException('route index read failed: ' . $privateRoot . '/routes/current.json');
+    }
+    if (is_array($pointer)) {
+        foreach ([...array_values(is_array($pointer['shards'] ?? null) ? $pointer['shards'] : []), $pointer['wildcards'] ?? null] as $name) {
+            if (!is_string($name)) {
+                continue;
+            }
+            $shard = _stattic_runtime_read_route_shard($privateRoot . '/routes/' . $name);
+            if ($shard === null) {
+                continue;
+            }
+            foreach (array_keys($shard['hostnames'] + $shard['host_routes']) as $hostname) {
+                $hostnames[(string) $hostname] = true;
+            }
+        }
+    }
+    return _stattic_runtime_purge_hostname_list(array_keys($hostnames));
+}
+
 function _stattic_runtime_repair_space(string $privateRoot, string $spaceId, array $claims): void
 {
     if (!is_dir(_stattic_space_root($privateRoot, $spaceId))) {
         _stattic_problem_response(404, 'space_not_found', 'Space not found.');
+    }
+    // The rebuild repairs every Space's projection, so include every Space's
+    // hostname as well as names from the old index before changing any pointer.
+    $hostnames = _stattic_runtime_repair_hostnames($privateRoot);
+    if (_stattic_runtime_require_edge_purge_endpoint() !== null) {
+        _stattic_runtime_purge_enqueue($privateRoot, $hostnames, 'space_repaired', [
+            $privateRoot . '/runtime/write.lock',
+            $privateRoot . '/routes/index.lock',
+        ]);
     }
     _stattic_runtime_rebuild_route_index($privateRoot);
     _stattic_runtime_record_management_event($privateRoot, $claims, [
@@ -1722,7 +1735,7 @@ function _stattic_runtime_repair_space(string $privateRoot, string $spaceId, arr
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'status' => 'repaired',
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_repaired'),
+        'purge' => _stattic_runtime_purge_now($privateRoot, ['hostnames' => $hostnames, 'reason' => 'space_repaired']),
     ]);
 }
 

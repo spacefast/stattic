@@ -608,6 +608,13 @@ function _stattic_uploads_delete_record(
     $delete = static function () use ($privateRoot, $spaceId, $id): bool {
         $store = _stattic_uploads_store($privateRoot, $spaceId);
         $existing = _stattic_uploads_record(_stattic_record_store_get($store, $id));
+        if ($existing === null) {
+            return false;
+        }
+        require_once __DIR__ . '/../shared/purge.php';
+        _stattic_runtime_prepare_purge($privateRoot, $spaceId,
+            _stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId)),
+            'storage_object_deleted');
         _stattic_record_store_delete($store, $id);
         return $existing !== null;
     };

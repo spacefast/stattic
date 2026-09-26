@@ -19,7 +19,7 @@ import {
   visitorIssuer,
 } from "./harness.ts";
 
-const SHARED = "public, max-age=0, s-maxage=600, stale-while-revalidate=60";
+const SHARED = "public, max-age=0, s-maxage=600, must-revalidate";
 const PROTECTED = "private, no-store";
 const PUBLIC_HOST = "proxy-upstream.test";
 const PUBLIC_HOST_ROUTE = "proxy-route-public.test";

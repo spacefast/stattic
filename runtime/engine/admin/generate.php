@@ -476,12 +476,12 @@ function _stattic_runtime_rebuild_route_index(string $privateRoot): void
     });
 }
 
-function _stattic_runtime_rebuild_route_index_unlocked(string $privateRoot): void
+function _stattic_runtime_rebuild_route_index_unlocked(string $privateRoot, ?callable $beforePublish = null): void
 {
     $contributions = [];
     foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
         $spaceId = basename((string) $spaceRoot);
-        _stattic_runtime_sync_space_overlay($privateRoot, $spaceId);
+        _stattic_runtime_sync_space_overlay($privateRoot, $spaceId, $beforePublish);
         $contribution = _stattic_runtime_space_index_contribution($privateRoot, $spaceId);
         if (_stattic_runtime_contribution_hostnames($contribution) !== []) {
             $contributions[] = $contribution;
@@ -494,24 +494,25 @@ function _stattic_runtime_rebuild_route_index_unlocked(string $privateRoot): voi
         $split['shards'],
         [],
         ['fresh' => $split['wildcards']],
-        _stattic_runtime_contribution_owners($contributions)
+        _stattic_runtime_contribution_owners($contributions),
+        $beforePublish
     );
 }
 
 // Any unexpected on-disk state falls back to a full rebuild.
-function _stattic_runtime_update_route_index(string $privateRoot, string $spaceId): void
+function _stattic_runtime_update_route_index(string $privateRoot, string $spaceId, ?callable $beforePublish = null): void
 {
-    _stattic_runtime_with_route_index_lock($privateRoot, static function () use ($privateRoot, $spaceId): void {
-        _stattic_runtime_update_route_index_unlocked($privateRoot, $spaceId);
+    _stattic_runtime_with_route_index_lock($privateRoot, static function () use ($privateRoot, $spaceId, $beforePublish): void {
+        _stattic_runtime_update_route_index_unlocked($privateRoot, $spaceId, $beforePublish);
     });
 }
 
-function _stattic_runtime_update_route_index_unlocked(string $privateRoot, string $spaceId): void
+function _stattic_runtime_update_route_index_unlocked(string $privateRoot, string $spaceId, ?callable $beforePublish = null): void
 {
     // The overlay carries this Space's access state and route->version map, and
     // is what the serve path reads for both; it swaps before the route pointer
     // so a host that becomes reachable already has its access answer on disk.
-    _stattic_runtime_sync_space_overlay($privateRoot, $spaceId);
+    _stattic_runtime_sync_space_overlay($privateRoot, $spaceId, $beforePublish);
 
     $current = _stattic_runtime_read_route_pointer($privateRoot);
     if ($current === false) {
@@ -521,7 +522,7 @@ function _stattic_runtime_update_route_index_unlocked(string $privateRoot, strin
     $wildcardsName = is_string($current['wildcards'] ?? null) ? $current['wildcards'] : null;
     $owners = _stattic_runtime_read_route_owners($privateRoot, $current);
     if ($current === null || $shardManifest === null || $wildcardsName === null || $owners === null) {
-        _stattic_runtime_rebuild_route_index_unlocked($privateRoot);
+        _stattic_runtime_rebuild_route_index_unlocked($privateRoot, $beforePublish);
         return;
     }
 
@@ -583,7 +584,7 @@ function _stattic_runtime_update_route_index_unlocked(string $privateRoot, strin
             || !is_string($shardFile)
             || !is_file($privateRoot . '/routes/' . $shardFile)
         ) {
-            _stattic_runtime_rebuild_route_index_unlocked($privateRoot);
+            _stattic_runtime_rebuild_route_index_unlocked($privateRoot, $beforePublish);
             return;
         }
         if (!isset($affectedShards[$shard])) {
@@ -596,7 +597,7 @@ function _stattic_runtime_update_route_index_unlocked(string $privateRoot, strin
         if (isset($shardManifest[$shard])) {
             $existing = _stattic_runtime_read_route_shard($privateRoot . '/routes/' . $shardManifest[$shard]);
             if ($existing === null) {
-                _stattic_runtime_rebuild_route_index_unlocked($privateRoot);
+                _stattic_runtime_rebuild_route_index_unlocked($privateRoot, $beforePublish);
                 return;
             }
             $contents = $existing;
@@ -607,7 +608,7 @@ function _stattic_runtime_update_route_index_unlocked(string $privateRoot, strin
     if ($wildcardAffected) {
         $contents = _stattic_runtime_read_route_shard($privateRoot . '/routes/' . $wildcardsName);
         if ($contents === null) {
-            _stattic_runtime_rebuild_route_index_unlocked($privateRoot);
+            _stattic_runtime_rebuild_route_index_unlocked($privateRoot, $beforePublish);
             return;
         }
         $wildcards = ['fresh' => _stattic_runtime_apply_host_updates($contents, null, $affected, $updatedHostnames, $updatedHostRoutes)];
@@ -632,7 +633,7 @@ function _stattic_runtime_update_route_index_unlocked(string $privateRoot, strin
     }
     ksort($newOwners);
 
-    _stattic_runtime_write_route_index($privateRoot, $freshShards, $reusedShards, $wildcards, $newOwners);
+    _stattic_runtime_write_route_index($privateRoot, $freshShards, $reusedShards, $wildcards, $newOwners, $beforePublish);
 }
 
 // ENOENT is a normal "no document" answer; a read FAILURE of an existing
@@ -1197,7 +1198,7 @@ function _stattic_runtime_split_route_index(array $hostnames, array $hostRoutes)
 // or pruned by age. `gen` is a monotonically increasing int that counts REAL
 // index changes: an identical index skips the write below, so gen does not
 // move for no-op regenerations (overlay-only activations included).
-function _stattic_runtime_write_route_index(string $privateRoot, array $freshShards, array $reusedShards, array $wildcards, array $owners): void
+function _stattic_runtime_write_route_index(string $privateRoot, array $freshShards, array $reusedShards, array $wildcards, array $owners, ?callable $beforePublish = null): void
 {
     $routesRoot = $privateRoot . '/routes';
     $shardsRoot = $routesRoot . '/shards';
@@ -1268,6 +1269,12 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
     // because the shards it names, and nothing else, are the ones whose grace
     // period starts with THIS write.
     $retired = _stattic_runtime_read_json($routesRoot . '/previous.json');
+
+    // Replays can repair a stale projection. Persist their invalidation before
+    // either pointer changes; an identical index leaves warm caches alone.
+    if ($beforePublish !== null) {
+        $beforePublish();
+    }
 
     // previous.json is written BEFORE the swap, not after: it is what keeps the
     // superseded shards alive for requests already mid-flight, and a GC racing
@@ -1583,7 +1590,7 @@ function _stattic_runtime_overlay_sdk_section(string $privateRoot, string $space
 // includes after the host shard. Rebuilt from the Space's own state, so every
 // mutation that already calls _stattic_runtime_update_route_index refreshes it
 // without the management lane having to know it exists.
-function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceId): void
+function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceId, ?callable $beforePublish = null): void
 {
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
     if (!is_dir($spaceRoot)) {
@@ -1697,7 +1704,7 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
         // Read at serve time so a `planGated` proxy rule follows the current
         // plan, not what publish baked.
         'entitlements' => _stattic_runtime_stored_entitlements($privateRoot, $spaceId),
-    ]);
+    ], $beforePublish);
 }
 
 // The §4 swap protocol: write the content-addressed overlay -> include it back
@@ -1705,7 +1712,7 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
 // pointer read is the visibility protocol).
 // An overlay whose content is unchanged keeps its name, and the pointer is left
 // alone so `gen` only moves when something actually changed.
-function _stattic_runtime_write_space_overlay(string $privateRoot, string $spaceId, array $overlay): void
+function _stattic_runtime_write_space_overlay(string $privateRoot, string $spaceId, array $overlay, ?callable $beforePublish = null): void
 {
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
     $pointerPath = $spaceRoot . '/space.json';
@@ -1732,6 +1739,9 @@ function _stattic_runtime_write_space_overlay(string $privateRoot, string $space
         _stattic_runtime_route_index_validation_failed('overlay');
     }
 
+    if ($beforePublish !== null) {
+        $beforePublish();
+    }
     _sf_json_write($pointerPath, [
         'schema' => STATTIC_RUNTIME_ARTIFACT_SCHEMA,
         'gen' => is_int($current['gen'] ?? null) ? $current['gen'] + 1 : 1,

@@ -28,6 +28,7 @@
     "engine/entrypoints/health.php",
     "engine/entrypoints/invoke.php",
     "engine/entrypoints/mail-outbox.php",
+    "engine/entrypoints/edge-purge.php",
     "engine/entrypoints/management.php",
     "engine/entrypoints/upload.php",
     "engine/init.php",

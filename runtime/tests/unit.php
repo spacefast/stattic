@@ -22,6 +22,7 @@ require_once __DIR__ . '/../engine/runtime/functions-artifacts.php'; // signed b
 require_once __DIR__ . '/../engine/runtime/functions-dispatch.php'; // origin -> host dispatch contract
 require_once __DIR__ . '/../engine/shared/runtime-log.php'; // the one runtime log writer
 require_once __DIR__ . '/../engine/shared/db-broker.php'; // MySQL broker value encoding (pure helpers only here)
+require_once __DIR__ . '/../engine/runtime/space-users.php'; // app-session cookie read before WordPress loads
 
 $assertions = 0;
 $failures = [];
@@ -1647,13 +1648,13 @@ check(
 );
 
 $pathBucket = [
-    'id' => 'b1', 'endpoint' => 'https://minio.internal:9000', 'region' => 'us-east-1',
+    'id' => 'b1', 'endpoint' => 'https://rustfs.internal:9000', 'region' => 'us-east-1',
     'bucket' => 'stattic-cold', 'urlStyle' => 'path',
 ];
 $pathLocator = _stattic_s3_locator($pathBucket, 'spaces/spc_1/blobs/9f/9f3a');
-check($pathLocator['host'] === 'minio.internal:9000', 's3 locator (path style): host is the bare endpoint host');
+check($pathLocator['host'] === 'rustfs.internal:9000', 's3 locator (path style): host is the bare endpoint host');
 check($pathLocator['path'] === '/stattic-cold/spaces/spc_1/blobs/9f/9f3a', 's3 locator (path style): bucket name prefixes the object path');
-check($pathLocator['url'] === 'https://minio.internal:9000/stattic-cold/spaces/spc_1/blobs/9f/9f3a', 's3 locator (path style): full URL assembled correctly');
+check($pathLocator['url'] === 'https://rustfs.internal:9000/stattic-cold/spaces/spc_1/blobs/9f/9f3a', 's3 locator (path style): full URL assembled correctly');
 
 $vhostBucket = ['id' => 'b1', 'endpoint' => 'https://s3.example.com', 'region' => 'us-east-1', 'bucket' => 'stattic-cold', 'urlStyle' => 'vhost'];
 $vhostLocator = _stattic_s3_locator($vhostBucket, 'spaces/spc_1/blobs/9f/9f3a');
@@ -1705,7 +1706,7 @@ check(
 
 // Bucket manifest reading (persist-data seam: SPACEFAST_STORAGE_BUCKETS_JSON).
 putenv('SPACEFAST_STORAGE_BUCKETS_JSON=' . json_encode([
-    ['id' => 'primary', 'endpoint' => 'https://minio.internal:9000', 'region' => 'us-east-1', 'bucket' => 'cold', 'urlStyle' => 'path'],
+    ['id' => 'primary', 'endpoint' => 'https://rustfs.internal:9000', 'region' => 'us-east-1', 'bucket' => 'cold', 'urlStyle' => 'path'],
 ]));
 $manifestRow = _stattic_s3_bucket_row('primary', true);
 check($manifestRow !== null && $manifestRow['bucket'] === 'cold', 's3 bucket manifest: reads a row by id from the env-delivered JSON');
@@ -3148,15 +3149,15 @@ check(
 $scopePublic = ['v' => 4, 'public' => true, 'authorizationDigest' => str_repeat('a', 64)];
 $scopePrivate = ['public' => false] + $scopePublic;
 check(
-    _stattic_runtime_exposure_became_private($scopePublic, $scopePrivate)
-        && _stattic_runtime_exposure_became_private($scopePublic, null),
+    _stattic_runtime_exposure_needs_sweep($scopePublic, $scopePrivate)
+        && _stattic_runtime_exposure_needs_sweep($scopePublic, null),
     'public→private (and public→unknown, fail-closed) triggers the access sweep'
 );
 check(
-    !_stattic_runtime_exposure_became_private($scopePrivate, $scopePublic)
-        && !_stattic_runtime_exposure_became_private($scopePublic, $scopePublic)
-        && !_stattic_runtime_exposure_became_private($scopePrivate, $scopePrivate)
-        && !_stattic_runtime_exposure_became_private(null, $scopePrivate),
+    !_stattic_runtime_exposure_needs_sweep($scopePrivate, $scopePublic)
+        && !_stattic_runtime_exposure_needs_sweep($scopePublic, $scopePublic)
+        && !_stattic_runtime_exposure_needs_sweep($scopePrivate, $scopePrivate)
+        && _stattic_runtime_exposure_needs_sweep(null, $scopePrivate),
     'no other exposure transition triggers the access sweep'
 );
 
@@ -3360,12 +3361,12 @@ $offBoxReceipt = _stattic_runtime_purge_now($offBoxRoot, [
     'reason' => 'route_updated',
 ]);
 check(
-    $offBoxReceipt === ['status' => 'ok', 'mode' => 'domain'],
-    'edge purge: a mutation off-box reports an ok whole-host purge'
+    $offBoxReceipt === ['status' => 'ok', 'mode' => 'urls', 'urls' => 0],
+    'edge purge: a mutation off-box reports no provider work'
 );
 check(
     _stattic_runtime_purge_now($offBoxRoot, ['hostnames' => []])
-        === ['status' => 'ok', 'mode' => 'none'],
+        === ['status' => 'ok', 'mode' => 'urls', 'urls' => 0],
     'edge purge: an unaddressable purge (no hostname) is ok/none'
 );
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($offBoxRoot)));
@@ -3639,6 +3640,24 @@ check(
     'content loader: an identity tree without the content kernel loads neither instead of fataling'
 );
 _stattic_job_runner_unit_rm_recursive($loaderRoot);
+
+
+// --- Space Users session cookie ------------------------------------------------------
+// A sibling host under the same parent domain can plant a Domain-scoped bare
+// `sfi_session`; only the __Host- name may identify an app user over HTTPS.
+
+$savedCookies = $_COOKIE;
+$_COOKIE = ['sfi_session' => 'planted'];
+check(_stattic_space_users_session_cookie() === null, 'space users: a bare sfi_session is ignored when cookies are secure');
+$_COOKIE = ['sfi_session' => 'planted', '__Host-sfi_session' => 'own'];
+check(_stattic_space_users_session_cookie() === 'own', 'space users: the __Host- session wins over a planted bare cookie');
+$_COOKIE = ['__Host-sfi_session' => ['array']];
+check(_stattic_space_users_session_cookie() === null, 'space users: a non-string session cookie is nobody');
+putenv('SPACEFAST_INSECURE_COOKIES=1');
+$_COOKIE = ['sfi_session' => 'dev'];
+check(_stattic_space_users_session_cookie() === 'dev', 'space users: plain-HTTP development reads the bare session name');
+putenv('SPACEFAST_INSECURE_COOKIES');
+$_COOKIE = $savedCookies;
 
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");

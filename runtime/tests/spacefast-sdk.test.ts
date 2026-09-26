@@ -310,7 +310,7 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   expect(response.headers.get("timing-allow-origin")).toBe("*");
   expect(response.headers.get("etag")).toContain("runtime:");
   expect(response.headers.get("cache-control")).toBe(
-    "public, max-age=0, s-maxage=600, stale-while-revalidate=60",
+    "public, max-age=0, s-maxage=600, must-revalidate",
   );
   expect(response.headers.get("x-spacefast-sdk-revision")).toContain("runtime:");
   expect(response.headers.get("vary")).toBeNull();
@@ -336,7 +336,7 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   );
   expect(versionedPreview.status).toBe(200);
   expect(versionedPreview.headers.get("cache-control")).toBe(
-    "public, max-age=0, s-maxage=600, stale-while-revalidate=60",
+    "public, max-age=0, s-maxage=600, must-revalidate",
   );
 
   const otherOrigin = await get(runtime, SITE, "/__spacefast/sdk.js", {
@@ -357,7 +357,7 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   });
   expect(preview.status).toBe(200);
   expect(preview.headers.get("cache-control")).toBe(
-    "public, max-age=0, s-maxage=600, stale-while-revalidate=60",
+    "public, max-age=0, s-maxage=600, must-revalidate",
   );
   // A `?preview=` token names a tag release, never a surface. The live host is
   // the live surface whatever the URL is decorated with — otherwise the preview
@@ -388,7 +388,7 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   const previewPage = await get(runtime, SITE, "/?spacefast_tag_preview=preview-token");
   expect(previewPage.status).toBe(200);
   expect(previewPage.headers.get("cache-control")).toBe(
-    "public, max-age=0, s-maxage=600, stale-while-revalidate=60",
+    "public, max-age=0, s-maxage=600, must-revalidate",
   );
   expect(previewPage.headers.get("cdn-cache-control")).toBeNull();
   expect(previewPage.headers.get("surrogate-control")).toBeNull();

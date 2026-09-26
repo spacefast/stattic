@@ -169,17 +169,17 @@ test("a malformed or empty purge names its refusal instead of purging nothing", 
   expect(junk.status).toBe(422);
 });
 
-test("identical sets coalesce; distinct sets spend the per-space quota", async () => {
+test("each mutation purges even the same paths, within the per-space quota", async () => {
   writePurgeToken(PURGE_TOKEN);
   const before = edgePurgeCalls(rt).filter((r) => r.reason === "functions_purge").length;
 
-  // The same set twice inside the coalesce window: both accepted, ONE purge.
+  // The same path can change twice. Both mutations must invalidate it.
   const first = await purge({ paths: ["/coalesce/a.css"], tags: [] });
   const repeat = await purge({ paths: ["/coalesce/a.css"], tags: [] });
   expect(first.status).toBe(202);
   expect(repeat.status).toBe(202);
   const afterCoalesce = edgePurgeCalls(rt).filter((r) => r.reason === "functions_purge").length;
-  expect(afterCoalesce).toBe(before + 1);
+  expect(afterCoalesce).toBe(before + 2);
 
   // Distinct sets each spend quota. Past the window ceiling the refusal is a
   // 429 that names when to come back, never a silent drop.

@@ -1628,9 +1628,19 @@ test("a Public path becoming Private announces both exposure digests and denies 
   };
   // Still public: a content-shaped route write purges only the live serving
   // hostname, since the version-pinned alias never changes bytes on activation.
+  await putRoute(runtime, CACHE_SPACE, "production", {
+    version_id: CACHE_VERSION,
+    config: {
+      ...projection({ mode: "public" }),
+      public_exposure: publicExposure,
+      public_exposure_digest: publicConfigDigest,
+    },
+    config_digest: publicConfigDigest,
+  });
   const activationPurge = await edgePurgeCallsBy(runtime, () =>
     putRoute(runtime, CACHE_SPACE, "production", {
       version_id: CACHE_VERSION,
+      changed_paths: ["/docs/"],
       config: {
         ...projection({ mode: "public" }),
         public_exposure: publicExposure,
@@ -1641,6 +1651,22 @@ test("a Public path becoming Private announces both exposure digests and denies 
   );
   expect(activationPurge.map((call) => call.hostname)).toEqual([CACHE_HOST]);
   expect(activationPurge[0]?.reason).toBe("route_updated");
+  const partialExposure = { ...publicExposure, authorizationDigest: "e".repeat(64) };
+  const partialPurge = await edgePurgeCallsBy(runtime, () =>
+    putRoute(runtime, CACHE_SPACE, "production", {
+      version_id: CACHE_VERSION,
+      config: {
+        ...projection({ mode: "public", overrides: [{ scope: "/docs", mode: "limited" }] }),
+        public_exposure: partialExposure,
+        public_exposure_digest: "f".repeat(64),
+      },
+      config_digest: "f".repeat(64),
+    }),
+  );
+  expect(partialPurge.map((call) => call.hostname)).toEqual([CACHE_HOST, CACHE_VERSION_HOST]);
+  expect((await get(runtime, CACHE_HOST, "/docs/")).status).toBe(403);
+  expect((await get(runtime, CACHE_HOST, "/")).status).toBe(200);
+
   // Public→private is the one transition that owes every alias a sweep: the
   // edge holds long-TTL copies of the formerly-public HTML on all of them, live
   // host first, version-pinned aliases behind it.
@@ -1670,9 +1696,9 @@ test("a Public path becoming Private announces both exposure digests and denies 
       event.space_id === CACHE_SPACE &&
       event.version_id === CACHE_VERSION,
   );
-  expect(routeEvent?.previous_public_exposure_digest).toBe(publicConfigDigest);
+  expect(routeEvent?.previous_public_exposure_digest).toBe("f".repeat(64));
   expect(routeEvent?.public_exposure_digest).toBe(privateConfigDigest);
-  expect(routeEvent?.previous_public_exposure).toEqual(publicExposure);
+  expect(routeEvent?.previous_public_exposure).toEqual(partialExposure);
   expect(routeEvent?.public_exposure).toEqual(privateExposure);
 
   // Authorization runs before anything a stale browser copy could present, so a

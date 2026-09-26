@@ -145,35 +145,34 @@ function _stattic_storage_read_key_get(string $privateRoot): void
 // re-reading served config.
 function _stattic_storage_read_key_rotate(string $privateRoot): void
 {
-    $key = bin2hex(random_bytes(16));
-    $rotatedAt = gmdate('c');
-    _sf_json_write($privateRoot . '/runtime/storage-read-key.json', [
-        'key' => $key,
-        'rotated_at' => $rotatedAt,
-    ]);
-
-    // An unenumerable space tree must fail the rotation loudly: completing it
-    // while purging nothing would leave every old-key URL live in the edge with
-    // the rotated key already active.
-    $spaceRoots = _stattic_runtime_space_roots($privateRoot);
-    if ($spaceRoots === null) {
-        _stattic_problem_response(503, 'storage_rotation_purge_unavailable', 'Space enumeration failed; the rotation purge could not be planned.');
-    }
     require_once __DIR__ . '/../shared/purge.php';
-    $hostnames = [];
-    foreach ($spaceRoots as $spaceRoot) {
-        foreach (_stattic_runtime_space_sweep_hostnames($spaceRoot) as $hostname) {
-            $hostnames[$hostname] = true;
-        }
-    }
-    $purge = ['status' => 'ok', 'mode' => 'none'];
-    if ($hostnames !== []) {
-        $purge = _stattic_runtime_purge_now($privateRoot, [
-            'hostnames' => array_keys($hostnames),
-            'reason' => 'storage_read_key_rotated',
-        ]);
-    }
-    _stattic_json_response(200, ['key' => $key, 'rotatedAt' => $rotatedAt, 'purge' => $purge]);
+    _stattic_runtime_mkdir($privateRoot . '/runtime');
+    $lockPath = $privateRoot . '/runtime/storage-read-key.lock';
+    _stattic_lock_with($lockPath, STATTIC_LOCK_WAIT,
+        static fn () => throw new RuntimeException('storage_rotation_busy'),
+        static function () use ($privateRoot, $lockPath): void {
+            $hostnames = [];
+            foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
+                $hostnames = [...$hostnames, ..._stattic_runtime_space_sweep_hostnames($spaceRoot)];
+            }
+            $hostnames = _stattic_runtime_purge_hostname_list($hostnames);
+            // Refuse before rotating when a deployed runtime has lost its purge credentials.
+            if (_stattic_runtime_require_edge_purge_endpoint() !== null) {
+                _stattic_runtime_purge_enqueue($privateRoot, $hostnames, 'storage_read_key_rotated', [$lockPath]);
+            }
+            $key = bin2hex(random_bytes(16));
+            $rotatedAt = gmdate('c');
+            _sf_json_write($privateRoot . '/runtime/storage-read-key.json', [
+                'key' => $key,
+                'rotated_at' => $rotatedAt,
+            ]);
+            $purge = _stattic_runtime_purge_now($privateRoot, [
+                'hostnames' => $hostnames,
+                'reason' => 'storage_read_key_rotated',
+            ]);
+            _stattic_json_response(200, ['key' => $key, 'rotatedAt' => $rotatedAt, 'purge' => $purge]);
+        },
+    );
 }
 
 function _stattic_storage_object_delete(string $privateRoot, string $spaceId, string $objectId): void

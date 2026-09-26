@@ -321,7 +321,8 @@ function spacefast_content_redirect_publish(array $records): array|WP_Error
     if (!is_string($privateRoot) || $privateRoot === '') {
         return new WP_Error('content_redirect_unavailable', 'Redirect serving is unavailable.', ['status' => 503]);
     }
-    $root = $privateRoot . '/spaces/' . spacefast_content_require_space_id();
+    $spaceId = spacefast_content_require_space_id();
+    $root = $privateRoot . '/spaces/' . $spaceId;
     $rules = ['exact' => [], 'pattern' => []];
     foreach ($records as $record) {
         if (!$record['enabled'] || !$record['supported']) {
@@ -330,17 +331,41 @@ function spacefast_content_redirect_publish(array $records): array|WP_Error
         $rules['exact'][$record['source']] = [['destination' => $record['destination'], 'status' => $record['status'], 'action' => 'redirect', 'order' => 0, 'requiresPublishedDestination' => $record['requiresPublishedDestination']]];
     }
     $json = json_encode($rules, JSON_THROW_ON_ERROR);
-    $temporary = tempnam($root, '.redirects-');
-    if ($temporary === false || file_put_contents($temporary, $json, LOCK_EX) !== strlen($json)) {
-        return new WP_Error('content_redirect_unavailable', 'Redirects could not be applied.', ['status' => 503]);
-    }
-    // Redirection owns records; the artifact is its scoped serving projection.
-    if (!rename($temporary, $root . '/content-redirects.json')) {
-        unlink($temporary);
-        return new WP_Error('content_redirect_unavailable', 'Redirects were saved but could not be applied.', ['status' => 503]);
-    }
     require_once __DIR__ . '/../shared/purge.php';
-    $hosts = _stattic_runtime_space_sweep_hostnames($root);
+    $hosts = [];
+    // Keep the hostname snapshot, durable purge, and serving projection in
+    // one writer boundary. A killed worker leaves the purge for cron.
+    $applied = _stattic_space_write_lock_with(
+        $privateRoot,
+        $spaceId,
+        STATTIC_LOCK_WAIT,
+        static fn () => new WP_Error('content_redirect_unavailable', 'Redirect serving is busy.', ['status' => 503]),
+        static function () use ($privateRoot, $spaceId, $root, $json, &$hosts): bool|WP_Error {
+            $hosts = _stattic_runtime_space_sweep_hostnames($root);
+            _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hosts, 'content_redirects');
+            $temporary = tempnam($root, '.redirects-');
+            if ($temporary === false) {
+                return new WP_Error('content_redirect_unavailable', 'Redirects could not be applied.', ['status' => 503]);
+            }
+            try {
+                if (file_put_contents($temporary, $json, LOCK_EX) !== strlen($json)) {
+                    return new WP_Error('content_redirect_unavailable', 'Redirects could not be applied.', ['status' => 503]);
+                }
+                // Redirection owns records; the artifact is its scoped serving projection.
+                if (!rename($temporary, $root . '/content-redirects.json')) {
+                    return new WP_Error('content_redirect_unavailable', 'Redirects were saved but could not be applied.', ['status' => 503]);
+                }
+                return true;
+            } finally {
+                if (is_file($temporary)) {
+                    unlink($temporary);
+                }
+            }
+        },
+    );
+    if ($applied instanceof WP_Error) {
+        return $applied;
+    }
     $purged = _stattic_runtime_purge_dispatch($privateRoot, $hosts, 'content_redirects');
     $conflicts = [];
     $host = parse_url(spacefast_content_public_origin(), PHP_URL_HOST);

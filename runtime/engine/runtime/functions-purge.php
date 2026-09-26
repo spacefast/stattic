@@ -10,13 +10,12 @@
  * carries `{paths: string[]}`, and gets a 202: accepted, never edge-confirmed.
  * It goes through the same provider bridge every management mutation uses
  * (shared/purge.php), which defers the loopback call past
- * fastcgi_finish_request. There is no queue behind that 202 — shared/purge.php
- * says why a same-box loopback POST does not need one.
+ * fastcgi_finish_request. A durable queue owns retries until the gateway accepts.
  *
  * Paths only, no tags: a tag names a group only the worker's own cache object
  * understands, and OpenNext resolves tags to concrete routes BEFORE minting
  * the purge frame, so a tag could never reach this route with meaning. The
- * paths validate and coalesce the request; the eviction itself is whole-host
+ * paths validate the request; the eviction itself is whole-host
  * (shared/purge.php header explains why no narrower scope exists).
  *
  * Like the relay and log intake beside it, this route holds no per-tenant
@@ -26,8 +25,7 @@
 require_once __DIR__ . '/../shared/artifacts.php';
 require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/response.php';
-// Config reads answer empty until this has run, which for the purge kick means
-// silently failing to find the CLI binary it spawns.
+// Load provider-backed runtime configuration before admitting a purge.
 require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/../shared/record-store.php';
@@ -43,9 +41,6 @@ const STATTIC_FUNCTIONS_PURGE_MAX_BODY_BYTES = 65536;
 // not the provider's.
 const STATTIC_FUNCTIONS_PURGE_QUOTA_PER_WINDOW = 10;
 const STATTIC_FUNCTIONS_PURGE_QUOTA_WINDOW_SECONDS = 60;
-// An identical set accepted this recently is already owed to the edge by a
-// durable record, so a repeat is acknowledged without minting a second one.
-const STATTIC_FUNCTIONS_PURGE_COALESCE_SECONDS = 10;
 
 /**
  * The purge credential, read from the version-adjacent functions/config.json
@@ -82,8 +77,8 @@ function _stattic_functions_purge_bearer(): string
 }
 
 // The per-space admission ledger: one record per space, quota window plus the
-// last accepted signature for coalescing. A record is debris once its window
-// and coalesce horizon have passed; retention reclaims it on the store's own
+// accepted count. A record is debris once its window has passed;
+// retention reclaims it on the store's own
 // sweep cadence.
 function _stattic_functions_purge_admission_store(string $privateRoot): array
 {
@@ -98,18 +93,17 @@ function _stattic_functions_purge_admission_store(string $privateRoot): array
 }
 
 /**
- * Quota + coalescing in one critical section under the space's stripe lock, so
- * two concurrent purges cannot both pass a nearly-full window or double-mint a
- * coalesced set.
+ * Quota admission runs under the space's stripe lock, so two concurrent
+ * requests cannot both pass a nearly-full window.
  *
  * @return array{verdict: string, retry_after?: int}
  */
-function _stattic_functions_purge_admit(array $store, string $spaceId, string $signature, int $now): array
+function _stattic_functions_purge_admit(array $store, string $spaceId, int $now): array
 {
     $decision = _stattic_record_store_mutate(
         $store,
         $spaceId,
-        static function (?array $record) use ($store, $spaceId, $signature, $now): array {
+        static function (?array $record) use ($store, $spaceId, $now): array {
             $windowStartedAt = is_array($record) && is_int($record['window_started_at'] ?? null)
                 ? $record['window_started_at']
                 : 0;
@@ -118,21 +112,6 @@ function _stattic_functions_purge_admit(array $store, string $spaceId, string $s
                 $windowStartedAt = $now;
                 $count = 0;
                 $record = null;
-            }
-            $lastSignature = is_array($record) && is_string($record['last_signature'] ?? null)
-                ? $record['last_signature']
-                : '';
-            $lastAcceptedAt = is_array($record) && is_int($record['last_accepted_at'] ?? null)
-                ? $record['last_accepted_at']
-                : 0;
-            if (
-                $lastSignature !== ''
-                && hash_equals($lastSignature, $signature)
-                && $now - $lastAcceptedAt < STATTIC_FUNCTIONS_PURGE_COALESCE_SECONDS
-            ) {
-                // Coalesced repeats spend no quota: the earlier record already
-                // owes the identical set to the edge.
-                return ['verdict' => 'coalesced'];
             }
             if ($count >= STATTIC_FUNCTIONS_PURGE_QUOTA_PER_WINDOW) {
                 return [
@@ -143,8 +122,6 @@ function _stattic_functions_purge_admit(array $store, string $spaceId, string $s
             _stattic_record_store_put($store, $spaceId, [
                 'window_started_at' => $windowStartedAt,
                 'count' => $count + 1,
-                'last_signature' => $signature,
-                'last_accepted_at' => $now,
             ]);
             return ['verdict' => 'accepted'];
         },
@@ -178,9 +155,8 @@ function _stattic_functions_purge_serve(string $privateRoot, string $spaceId, st
     }
 
     $hostnames = _stattic_runtime_route_intent_hostnames(_stattic_space_root($privateRoot, $spaceId));
-    $signature = hash('sha256', (string) json_encode([$hostnames, $paths], JSON_UNESCAPED_SLASHES));
     $store = _stattic_functions_purge_admission_store($privateRoot);
-    $decision = _stattic_functions_purge_admit($store, $spaceId, $signature, time());
+    $decision = _stattic_functions_purge_admit($store, $spaceId, time());
     if (($decision['verdict'] ?? null) === 'over_quota') {
         _stattic_problem_response(429, 'purge_rate_limited', 'Purge quota for this space is exhausted; retry shortly.', [], [
             'Retry-After' => (string) (int) ($decision['retry_after'] ?? 1),

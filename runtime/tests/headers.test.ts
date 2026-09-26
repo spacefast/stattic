@@ -40,9 +40,9 @@ const NOINDEX_ROBOTS = "User-agent: WordPress.com mShots\nAllow: /\n\nUser-agent
 const HTML_OPEN = "public, s-maxage=600, max-age=0, must-revalidate";
 const IMMUTABLE = "public, max-age=31536000, immutable";
 const REVALIDATE = "public, s-maxage=600, max-age=0, must-revalidate";
-// Synthetic/unpurgeable URLs (404s, pattern-rule redirects) keep the bounded
+// Synthetic URLs (404s, pattern-rule redirects) share the host-purged
 // shared window instead of a cache class.
-const EDGE_DEFAULT = "public, max-age=0, s-maxage=600, stale-while-revalidate=60";
+const EDGE_DEFAULT = "public, max-age=0, s-maxage=600, must-revalidate";
 // A tokened URL is the secret itself, so cache-policy.php's sticky no-store
 // flag replaces whatever class or publisher policy the entry carried.
 const TOKENED = "private, no-store";
@@ -191,6 +191,8 @@ beforeAll(async () => {
         "/old /new 301",
         "/r/* /target/:splat 302",
         "/beta /target.html 302 Cookie=beta",
+        "/choice /target.html 302 Cookie=beta",
+        "/choice /ordinary 302",
         "/doc-rewrite /doc.md 200! Cookie=beta",
       ].join("\n"),
     },
@@ -501,6 +503,11 @@ test("redirects carry an explicit edge cache policy on both lanes", async () => 
 // reaching the origin at all. Publisher policy cannot make those URLs storable,
 // because none of the request inputs is part of the cache key.
 test("condition-matched responses never enter a shared cache", async () => {
+  const ordinary = await get(rt, HOST, "/choice");
+  expect(ordinary.status).toBe(302);
+  expect(ordinary.headers.get("location")).toBe("/ordinary");
+  expect(cachePolicy(ordinary)).toEqual(["no-store", "no-cache"]);
+
   const matched = await get(rt, HOST, "/doc-rewrite", { headers: { cookie: "beta=1" } });
   expect(matched.status).toBe(200);
   expect(await matched.text()).toBe(DOC_MD);
@@ -521,9 +528,9 @@ test("condition-matched responses never enter a shared cache", async () => {
 });
 
 // Synthetic URLs no purge can enumerate: the SPA shell keeps the HTML policy
-// (its bytes are a published page), a 404 falls back to the bounded shared
+// (its bytes are a published page), a 404 falls back to the default shared
 // window.
-test("fallback and not-found responses state a bounded policy", async () => {
+test("fallback and not-found responses state the shared default policy", async () => {
   const fallback = await get(rt, CONTRACT_HOST, "/spa/route");
   expect(fallback.status).toBe(200);
   expect(await fallback.text()).toBe("<h1>spa fallback</h1>\n");

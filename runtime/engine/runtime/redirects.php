@@ -68,6 +68,7 @@ function _stattic_apply_redirects(array $redirects, array $serving, callable $pa
 
         if (!empty($rule['conditions'])) {
             $conditionalCandidate = true;
+            _stattic_cache_policy_request_varying(true);
             $conditionalVary = array_values(array_unique([
                 ...$conditionalVary,
                 ..._stattic_redirect_condition_vary_headers($rule['conditions']),

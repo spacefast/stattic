@@ -208,8 +208,8 @@ pub const RESPONSE_LANE_PHP: u64 = 1;
 /// - `html` and `no` — open: `public, s-maxage=600, max-age=0,
 ///   must-revalidate`, paired with the `A8C-Edge-Cache: cache` opt-in the
 ///   engine adds at send time. Both classes are version-pinned content. A
-///   whole-host purge accelerates activation, while the bounded shared TTL
-///   keeps correctness independent from a deferred purge succeeding. Browsers
+///   durable whole-host purge retires the shared copy on mutation; the bounded
+///   shared TTL covers an in-flight fill that lands after the purge. Browsers
 ///   revalidate every load (`max-age=0` + ETag). The edge stores only on a
 ///   positive shared TTL beside the opt-in (measured live,
 ///   e2e-tests/direct/wpcloud-behavior.test.ts). Protected:

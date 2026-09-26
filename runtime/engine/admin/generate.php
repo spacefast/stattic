@@ -1457,6 +1457,8 @@ const STATTIC_RUNTIME_ZERO_CAPABILITIES = [
     'email' => false,
     'content' => false,
     'storage' => false,
+    'connectors' => false,
+    'crypto' => false,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1908,7 +1910,10 @@ function _stattic_runtime_zero_compiler_entries(array $input, string $snakeIdKey
                 : _stattic_zero_derived_run_execution_mode((string) ($entry[$camelIdKey] ?? ''));
         }
         $entry['capabilities'] = _stattic_runtime_zero_endpoint_capabilities($entry['capabilities'] ?? []);
-        unset($entry[$snakeIdKey], $entry['schema_hash'], $entry['execution_mode']);
+        if (is_array($entry['crypto_keys'] ?? null) && !array_key_exists('cryptoKeys', $entry)) {
+            $entry['cryptoKeys'] = array_values(array_filter($entry['crypto_keys'], 'is_string'));
+        }
+        unset($entry[$snakeIdKey], $entry['schema_hash'], $entry['execution_mode'], $entry['crypto_keys']);
         $entries[] = $entry;
     }
 

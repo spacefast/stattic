@@ -5,6 +5,7 @@
 
 mod artifacts;
 mod constants;
+mod crypto;
 mod db;
 mod fetch;
 mod image;

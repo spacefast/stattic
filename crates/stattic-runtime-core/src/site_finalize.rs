@@ -2792,6 +2792,7 @@ mod tests {
             endpoint_id: None,
             schema_hash: None,
             capabilities: Default::default(),
+            crypto_keys: Vec::new(),
             db: None,
         }];
 
@@ -3002,6 +3003,7 @@ mod tests {
             endpoint_id: None,
             schema_hash: None,
             capabilities: Default::default(),
+            crypto_keys: Vec::new(),
             db: None,
         }];
 
@@ -3477,6 +3479,7 @@ mod tests {
             endpoint_id: None,
             schema_hash: None,
             capabilities: serde_json::from_value(json!({"db":false,"fetch":false,"auth":false,"env":false,"realtime":false,"logging":false})).unwrap(),
+            crypto_keys: Vec::new(),
             db: None,
         }];
         input.zero_runs = vec![RuntimeZeroRun {
@@ -3487,6 +3490,7 @@ mod tests {
                     .into(),
             schema_hash: None,
             capabilities: serde_json::from_value(json!({"db":false,"fetch":false,"auth":false,"env":false,"realtime":false,"logging":false})).unwrap(),
+            crypto_keys: Vec::new(),
             db: None,
         }];
         let output = finalize_site(input, false).unwrap();
@@ -3733,6 +3737,7 @@ mod tests {
             endpoint_id: None,
             schema_hash: None,
             capabilities: Default::default(),
+            crypto_keys: Vec::new(),
             db: None,
         };
         for endpoints in [
@@ -3817,6 +3822,7 @@ mod tests {
             endpoint_id: None,
             schema_hash: None,
             capabilities: Default::default(),
+            crypto_keys: Vec::new(),
             db: None,
         }];
         assert!(matches!(

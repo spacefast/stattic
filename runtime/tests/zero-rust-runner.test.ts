@@ -5,9 +5,11 @@
 // that the compiler writes those answers, the Zero endpoints and the Zero pack
 // into the artifacts the serve path reads.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import { verifyPartnerToken } from "../../apps/control-plane/src/auth/partner-token.ts";
 import { ZERO_RUNTIME_HOST_SOURCE } from "../../packages/zero-compile/src/runtime-host.ts";
 import {
   blobPath,
@@ -42,6 +44,11 @@ const GENERATED_HOST = "zero-generated-rust-runner.test";
 const GENERATED_SPACE = "spc_zero_generated_rust";
 const GENERATED_VERSION = "ver_zero_generated_rust_1";
 const REPUBLISH_HOST = "zero-republish-rust-runner.test";
+// A partner's key pair, made the way the Zero README says to: the JWK `d` is
+// the seed that sits in a secret variable, `x` the public key it registers.
+const PARTNER_SIGNING_KEY = generateKeyPairSync("ed25519");
+const PARTNER_SIGNING_SEED = String(PARTNER_SIGNING_KEY.privateKey.export({ format: "jwk" }).d);
+const PARTNER_PUBLIC_KEY = String(PARTNER_SIGNING_KEY.publicKey.export({ format: "jwk" }).x);
 const REPUBLISH_SPACE = "spc_zero_republish_rust";
 const REPUBLISH_TABLE = "sf_spc_zero_republish_todos";
 const REPO_ROOT = path.resolve(import.meta.dir, "../..");
@@ -669,6 +676,39 @@ await globalThis.__statticRunZeroEndpoint(capsule, route);`,
         {
           execution_mode: "read",
           method: "GET",
+          path: "/api/generated/partner-token",
+          source: `${ZERO_RUNTIME_HOST_SOURCE}
+const route = { mode: "read", method: "GET", path: "/api/generated/partner-token" };
+const capsule = {
+  endpoints: {
+    partnerToken: {
+      ...route,
+      async handler(ctx) {
+        return {
+          env: ctx.env,
+          token: await ctx.jwt.sign({
+            key: "PARTNER_SIGNING_KEY",
+            kid: "webhosting-1",
+            claims: {
+              iss: "https://webhosting.example",
+              aud: "partner_audience",
+              sub: "customer-42",
+              client_id: "webhosting",
+            },
+            ttlSeconds: 600,
+          }),
+        };
+      },
+    },
+  },
+};
+await globalThis.__statticRunZeroEndpoint(capsule, route);`,
+          capabilities: { db: false, env: true, crypto: true },
+          crypto_keys: ["PARTNER_SIGNING_KEY"],
+        },
+        {
+          execution_mode: "read",
+          method: "GET",
           path: "/api/generated/response-headers",
           source: `
 const query = globalThis.__statticZeroRequest.query;
@@ -690,6 +730,12 @@ globalThis.__statticZeroResult = JSON.stringify({ status: query === "mode=redire
         },
       ],
       zero_runs: SHARED_ZERO_RUNS,
+    },
+    zero: {
+      variableValues: {
+        APP_NAME: "webhosting",
+        PARTNER_SIGNING_KEY: PARTNER_SIGNING_SEED,
+      },
     },
     activate: {
       route_name: "production",
@@ -1566,6 +1612,26 @@ test("applies the native response-header policy to every endpoint response", asy
   expect(duplicate.status).toBe(502);
   expect(await duplicate.json()).toMatchObject({
     code: "zero_response_header_invalid",
+  });
+});
+
+test("a token ctx.jwt.sign mints passes the Partner API verifier, and its key never reaches ctx.env", async () => {
+  const response = await get(rt, GENERATED_HOST, "/api/generated/partner-token");
+  const text = await response.text();
+  if (response.status !== 200) throw new Error(`expected 200, got ${response.status}: ${text}`);
+  // SAFETY: the 200 above is this fixture endpoint's own JSON.
+  const body = JSON.parse(text) as { env: Record<string, string>; token: string };
+
+  expect(body.env).toEqual({ APP_NAME: "webhosting" });
+  expect(
+    await verifyPartnerToken(body.token, {
+      issuer: "https://webhosting.example",
+      audience: "partner_audience",
+      publicKeys: [{ kid: "webhosting-1", publicKey: PARTNER_PUBLIC_KEY }],
+    }),
+  ).toMatchObject({
+    ok: true,
+    claims: { sub: "customer-42", clientId: "webhosting" },
   });
 });
 

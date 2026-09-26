@@ -278,6 +278,7 @@ pub(crate) fn compile_zero_endpoints(
             quickjs_abi: QUICKJS_ABI.to_string(),
             db_capability_abi: DB_CAPABILITY_ABI.to_string(),
             capabilities: endpoint.capabilities.clone(),
+            crypto_keys: endpoint.crypto_keys.clone(),
             db,
         };
         let schema_hash = artifact
@@ -376,6 +377,7 @@ pub(crate) fn compile_zero_endpoints(
             quickjs_abi: QUICKJS_ABI.to_string(),
             db_capability_abi: DB_CAPABILITY_ABI.to_string(),
             capabilities: run.capabilities.clone(),
+            crypto_keys: run.crypto_keys.clone(),
             db,
         };
         compiled.run_artifacts.push(artifact);
@@ -606,6 +608,7 @@ fn runner_capabilities(capabilities: &ZeroCapabilities) -> ZeroEndpointCapabilit
         content: capabilities.content,
         storage: capabilities.storage,
         connectors: capabilities.connectors,
+        crypto: capabilities.crypto,
     }
 }
 
@@ -973,6 +976,7 @@ mod tests {
                     endpoint_id: None,
                     schema_hash: None,
                     capabilities: ZeroCapabilities::default(),
+                    crypto_keys: Vec::new(),
                     db: None,
                 })
                 .collect::<Vec<_>>();

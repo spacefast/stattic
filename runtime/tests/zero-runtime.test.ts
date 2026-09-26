@@ -1220,6 +1220,7 @@ test("native compiler defaults omitted Zero capabilities with fetch open", () =>
     email: false,
     content: false,
     connectors: false,
+    crypto: false,
     storage: false,
   });
 
@@ -1238,6 +1239,7 @@ test("native compiler defaults omitted Zero capabilities with fetch open", () =>
     email: false,
     content: false,
     connectors: false,
+    crypto: false,
     storage: false,
   });
 });

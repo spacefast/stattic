@@ -261,11 +261,17 @@ fn install_globals(
 ) -> Result<(), RunnerResponse> {
     let tenant_db = crate::db::tenant_db_metadata(&artifact.db)
         .map_err(crate::db::BrokerRefusal::runner_response)?;
+    // Key variables leave the bootstrap before any tenant code can read it, and
+    // the keyring is reset even when there are none, so an earlier invocation's
+    // keys cannot outlive it on this thread.
+    let (variables, keys) =
+        crate::crypto::partition_variables(&envelope.variables, &artifact.crypto_keys);
+    crate::crypto::set_keyring(keys);
     let bootstrap_json = serde_json::to_string(&serde_json::json!({
         "request": envelope.request,
         "context": envelope.context,
         "auth": envelope.auth,
-        "variables": envelope.variables,
+        "variables": variables,
         "capabilities": artifact.capabilities,
         "endpoint": {
             "endpointId": if artifact.kind == "run" { &artifact.run_id } else { &artifact.endpoint_id },
@@ -314,6 +320,18 @@ fn install_globals(
             )
             .map_err(|error| {
                 error_response(500, "zero_fetch_host_install_failed", &error.to_string())
+            })?;
+    }
+    if artifact.capabilities.crypto {
+        ctx.globals()
+            .set(
+                "__statticCryptoHost",
+                Func::from(|frame: String| -> String {
+                    crate::crypto::handle_crypto_frame(&frame)
+                }),
+            )
+            .map_err(|error| {
+                error_response(500, "zero_crypto_host_install_failed", &error.to_string())
             })?;
     }
     // The grant is set even when nothing is installed: it is what the broker

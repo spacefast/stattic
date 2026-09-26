@@ -55,6 +55,28 @@ if (typeof globalThis.__statticServiceHost === "function") {
 }
 // @stattic-endif
 
+// @stattic-if crypto
+// ctx.jwt and ctx.crypto: synchronous, like the service bridge. Key values stay
+// in Rust; a frame names a key, never carries one.
+// oxlint-disable-next-line anti-slop/no-runtime-typeof -- QuickJS injects this native host function only when the finalized artifact grants the crypto capability.
+if (typeof globalThis.__statticCryptoHost === "function") {
+  const __statticCryptoHost = globalThis.__statticCryptoHost;
+  delete globalThis.__statticCryptoHost;
+  globalThis.__statticCrypto = function __statticCrypto(operation, payload) {
+    const answer = JSON.parse(
+      __statticCryptoHost(JSON.stringify({ operation: operation, payload: payload || {} })),
+    );
+    if (answer.ok !== true) {
+      const error = new Error(answer.message || "The crypto call was refused.");
+      error.name = "SpacefastCryptoError";
+      error.code = answer.code || "crypto_payload_invalid";
+      throw error;
+    }
+    return answer.result;
+  };
+}
+// @stattic-endif
+
 // @stattic-if fetch
 globalThis.__statticFetch = async function __statticFetch(input, init = {}) {
   if (typeof globalThis.__statticFetchHost !== "function") {

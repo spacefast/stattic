@@ -63,6 +63,7 @@ fn capability_enabled(name: &str, capabilities: &EndpointCapabilities) -> Option
         "auth" => Some(capabilities.auth),
         "env" => Some(capabilities.env),
         "realtime" => Some(capabilities.realtime),
+        "crypto" => Some(capabilities.crypto),
         "logging" => Some(capabilities.logging),
         // One block covers all three services: the prelude only installs the
         // bridge, and which services a handler may actually reach is decided by

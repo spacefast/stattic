@@ -130,6 +130,9 @@ pub struct RuntimeZeroEndpoint {
     pub schema_hash: Option<String>,
     #[serde(default)]
     pub capabilities: ZeroCapabilities,
+    /// Variables the handler names as `ctx.jwt` / `ctx.crypto` keys.
+    #[serde(default)]
+    pub crypto_keys: Vec<String>,
     #[serde(default)]
     pub db: Option<Value>,
 }
@@ -144,6 +147,9 @@ pub struct RuntimeZeroRun {
     pub schema_hash: Option<String>,
     #[serde(default)]
     pub capabilities: ZeroCapabilities,
+    /// Variables the handler names as `ctx.jwt` / `ctx.crypto` keys.
+    #[serde(default)]
+    pub crypto_keys: Vec<String>,
     #[serde(default)]
     pub db: Option<Value>,
 }
@@ -213,6 +219,8 @@ pub struct ZeroCapabilities {
     pub storage: bool,
     #[serde(default)]
     pub connectors: bool,
+    #[serde(default)]
+    pub crypto: bool,
 }
 
 impl Default for ZeroCapabilities {
@@ -230,6 +238,7 @@ impl Default for ZeroCapabilities {
             content: false,
             storage: false,
             connectors: false,
+            crypto: false,
         }
     }
 }
@@ -255,6 +264,8 @@ pub struct ZeroEndpointArtifact {
     pub quickjs_abi: String,
     pub db_capability_abi: String,
     pub capabilities: ZeroCapabilities,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crypto_keys: Vec<String>,
     pub db: Value,
 }
 
@@ -273,6 +284,8 @@ pub struct ZeroRunArtifact {
     pub quickjs_abi: String,
     pub db_capability_abi: String,
     pub capabilities: ZeroCapabilities,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crypto_keys: Vec<String>,
     pub db: Value,
 }
 

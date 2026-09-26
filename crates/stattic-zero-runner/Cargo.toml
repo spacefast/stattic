@@ -9,11 +9,15 @@ base64 = "0.22"
 libc = "0.2"
 mysql = "26"
 rquickjs = "0.12.2"
+# Ed25519, HMAC and randomness for ctx.jwt / ctx.crypto. Already compiled in
+# through rustls, so the runner gains no new crate.
+ring = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 stattic-runtime-egress = { path = "../stattic-runtime-egress" }
 stattic-runtime-policy = { path = "../stattic-runtime-policy" }
+subtle = "2.6"
 takumi = { workspace = true }
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 

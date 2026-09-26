@@ -68,6 +68,8 @@ struct RawEndpointArtifact {
     #[serde(default)]
     capabilities: DeclaredCapabilities,
     #[serde(default)]
+    crypto_keys: Vec<String>,
+    #[serde(default)]
     db: EndpointDbMetadata,
 }
 
@@ -89,6 +91,9 @@ pub(crate) struct EndpointArtifact {
     pub quickjs_abi: String,
     pub db_capability_abi: Option<String>,
     pub capabilities: EndpointCapabilities,
+    /// Variables the handler names as `ctx.jwt` / `ctx.crypto` keys. They are
+    /// withheld from `ctx.env` and read only by the crypto host.
+    pub crypto_keys: Vec<String>,
     pub db: EndpointDbMetadata,
     /// True when the artifact declared no execution mode, which only a capsule
     /// finalized before the execution law does. Its bytes are frozen — the
@@ -129,6 +134,7 @@ impl RawEndpointArtifact {
             } else {
                 EndpointCapabilities::declared_defaults()
             }),
+            crypto_keys: self.crypto_keys,
             db: self.db,
             frozen_shape,
         }
@@ -176,6 +182,8 @@ pub struct EndpointCapabilities {
     pub storage: bool,
     #[serde(default)]
     pub connectors: bool,
+    #[serde(default)]
+    pub crypto: bool,
 }
 
 impl Default for EndpointCapabilities {
@@ -199,6 +207,7 @@ impl EndpointCapabilities {
             content: false,
             storage: false,
             connectors: false,
+            crypto: false,
         }
     }
 
@@ -219,6 +228,7 @@ impl EndpointCapabilities {
             content: false,
             storage: false,
             connectors: false,
+            crypto: false,
         }
     }
 
@@ -252,6 +262,7 @@ struct DeclaredCapabilities {
     content: Option<bool>,
     storage: Option<bool>,
     connectors: Option<bool>,
+    crypto: Option<bool>,
 }
 
 impl DeclaredCapabilities {
@@ -271,6 +282,7 @@ impl DeclaredCapabilities {
             content: self.content.unwrap_or(absent.content),
             storage: self.storage.unwrap_or(absent.storage),
             connectors: self.connectors.unwrap_or(absent.connectors),
+            crypto: self.crypto.unwrap_or(absent.crypto),
         }
     }
 }

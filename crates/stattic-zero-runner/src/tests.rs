@@ -30,7 +30,8 @@ globalThis.__statticZeroResult = JSON.stringify({
     envInstalled: typeof globalThis.__statticEnv === "object",
     realtimeInstalled: typeof globalThis.__statticRealtime === "object",
     loggingInstalled: typeof globalThis.__statticLog === "function",
-    serviceInstalled: typeof globalThis.__statticService === "function"
+    serviceInstalled: typeof globalThis.__statticService === "function",
+    cryptoInstalled: typeof globalThis.__statticCrypto === "function"
   })
 });
 "#
@@ -74,6 +75,7 @@ fn no_capabilities() -> EndpointCapabilities {
         content: false,
         storage: false,
         connectors: false,
+        crypto: false,
     }
 }
 
@@ -142,7 +144,8 @@ impl Fixture {
                     "gravatar": capabilities.gravatar,
                     "spam": capabilities.spam,
                     "email": capabilities.email,
-                    "content": capabilities.content
+                    "content": capabilities.content,
+                    "crypto": capabilities.crypto
                 },
                 "db": {
                     "schemaHash": null,
@@ -276,7 +279,8 @@ fn invokes_bytecode_endpoint_artifact() {
             "envInstalled": false,
             "realtimeInstalled": false,
             "loggingInstalled": false,
-            "serviceInstalled": false
+            "serviceInstalled": false,
+            "cryptoInstalled": false
         })
     );
 }
@@ -324,6 +328,7 @@ fn renders_capability_templates_only_when_declared() {
         content: true,
         storage: true,
         connectors: false,
+        crypto: false,
     });
 
     let response = handle_invoke(&fixture.envelope()).expect("response");
@@ -372,6 +377,62 @@ fn capability_shims_read_bootstrap_and_emit_events() {
     assert_eq!(response.events.len(), 1);
     assert_eq!(response.events[0]["event"], "zero.log");
     assert_eq!(response.events[0]["level"], "info");
+}
+
+/// A key the artifact records leaves `ctx.env` before tenant code runs and is
+/// reachable only through the crypto bridge, which signs with it. A recorded
+/// key with no variable is unavailable. A name the artifact did not record
+/// reaches nothing, even when a variable holds it.
+#[test]
+fn crypto_keys_leave_env_and_reach_only_the_crypto_bridge() {
+    let fixture = Fixture::with_source_and_capabilities(
+        r#"
+const sign = (key) => {
+  try {
+    return globalThis.__statticCrypto("jwt_sign", { key, kid: "k1", claims: { sub: "s" } });
+  } catch (error) {
+    return error.code;
+  }
+};
+globalThis.__statticZeroResult = JSON.stringify({
+  status: 200,
+  headers: { "content-type": "application/json; charset=utf-8" },
+  body: JSON.stringify({
+    env: globalThis.__statticEnv,
+    bootstrapVariables: globalThis.__statticZeroBootstrap.variables,
+    signed: sign("SIGNING_KEY").split(".").length,
+    unset: sign("UNSET_KEY"),
+    undeclared: sign("FEATURE_FLAG")
+  })
+});
+"#,
+        EndpointCapabilities {
+            env: true,
+            crypto: true,
+            ..no_capabilities()
+        },
+    );
+    fixture.edit_artifact(|artifact| {
+        artifact.insert(
+            "cryptoKeys".to_string(),
+            json!(["SIGNING_KEY", "UNSET_KEY"]),
+        );
+    });
+    let mut envelope: Value = serde_json::from_str(&fixture.envelope()).expect("envelope");
+    envelope["variables"]["SIGNING_KEY"] =
+        json!(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 32]));
+
+    let response = handle_invoke(&envelope.to_string()).expect("response");
+    let body = response_body(&response);
+
+    assert_eq!(body["env"], json!({ "FEATURE_FLAG": "enabled" }));
+    assert_eq!(
+        body["bootstrapVariables"],
+        json!({ "FEATURE_FLAG": "enabled" })
+    );
+    assert_eq!(body["signed"], 3);
+    assert_eq!(body["unset"], "crypto_key_unavailable");
+    assert_eq!(body["undeclared"], "crypto_key_unknown");
 }
 
 #[test]

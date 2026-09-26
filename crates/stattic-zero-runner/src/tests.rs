@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -7,7 +7,31 @@ use tempfile::TempDir;
 
 use crate::artifacts::{sha256_prefixed, EndpointCapabilities};
 use crate::constants::{DB_CAPABILITY_ABI, ENDPOINT_FORMAT, QUICKJS_ABI, RUNNER_ABI};
-use crate::{compile_file_with_capabilities, handle_invoke};
+use crate::{compile_endpoint_program, handle_invoke};
+
+fn compile_file_with_capabilities(
+    source_path: &Path,
+    bytecode_path: &Path,
+    generated_source_path: Option<&Path>,
+    capabilities: &EndpointCapabilities,
+) -> Result<(), String> {
+    let source = fs::read_to_string(source_path).map_err(|error| error.to_string())?;
+    let compile_name = generated_source_path
+        .unwrap_or(source_path)
+        .to_string_lossy();
+    let compiled = compile_endpoint_program(&source, compile_name.as_ref(), capabilities)?;
+    if let Some(generated_source_path) = generated_source_path {
+        if let Some(parent) = generated_source_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::write(generated_source_path, compiled.generated_source)
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(parent) = bytecode_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(bytecode_path, compiled.bytecode).map_err(|error| error.to_string())
+}
 
 fn endpoint_source() -> &'static str {
     r#"
@@ -155,18 +179,6 @@ impl Fixture {
             .to_string(),
         )
         .expect("artifact");
-        fs::write(
-            root.join("zero/endpoints-index.json"),
-            json!({
-                "format": "stattic.zero.endpoints-index.v1",
-                "artifact_kind": "zero_endpoints_index",
-                "endpoints": {
-                    "GET /api/status": "zero/endpoints/test.json"
-                }
-            })
-            .to_string(),
-        )
-        .expect("endpoint index");
         Self { site, root }
     }
 
@@ -181,17 +193,6 @@ impl Fixture {
         let mut artifact: Value = serde_json::from_str(&raw).expect("artifact json");
         edit(artifact.as_object_mut().expect("artifact object"));
         fs::write(self.artifact_path(), artifact.to_string()).expect("artifact");
-    }
-
-    /// The envelope an engine from before the execution law sent: no mode at
-    /// all, because the field did not exist when that engine was built.
-    fn envelope_without_execution_mode(&self) -> String {
-        let mut envelope: Value = serde_json::from_str(&self.envelope()).expect("envelope json");
-        envelope
-            .as_object_mut()
-            .expect("envelope object")
-            .remove("executionMode");
-        envelope.to_string()
     }
 
     /// The image render cache, a sibling of the version root.
@@ -219,6 +220,7 @@ impl Fixture {
             "versionRoot": self.root.to_string_lossy(),
             "endpointId": "GET /api/status",
             "executionMode": "read",
+            "artifactPath": "zero/endpoints/test.json",
             "request": {
                 "method": "GET",
                 "path": "/api/status",
@@ -232,9 +234,7 @@ impl Fixture {
             "context": {
                 "spaceId": "spc_test",
                 "versionId": "ver_test",
-                "schemaHash": null,
-                "authRef": "current",
-                "variablesRef": "finalized"
+                "schemaHash": null
             },
             "auth": {
                 "userId": "usr_test",
@@ -286,9 +286,8 @@ fn invokes_bytecode_endpoint_artifact() {
 }
 
 /// A capsule finalized before the execution law declares no `executionMode`,
-/// and its version is immutable. The runner derives the mode the publish path
-/// would have stamped and serves it, whether the engine on the box declares a
-/// mode for the request or predates the law as well.
+/// and its version is immutable. The runner serves it under the mode the
+/// engine asserts for the request.
 #[test]
 fn serves_a_frozen_artifact_that_declares_no_execution_mode() {
     let fixture = Fixture::new(false);
@@ -297,20 +296,10 @@ fn serves_a_frozen_artifact_that_declares_no_execution_mode() {
         artifact.remove("dbCapabilityAbi");
     });
 
-    let from_new_engine = handle_invoke(&fixture.envelope()).expect("response");
-    let from_old_engine =
-        handle_invoke(&fixture.envelope_without_execution_mode()).expect("response");
+    let response = handle_invoke(&fixture.envelope()).expect("response");
 
-    assert_eq!(from_new_engine.status, 202);
-    assert_eq!(
-        response_body(&from_new_engine)["endpointId"],
-        "GET /api/status"
-    );
-    assert_eq!(from_old_engine.status, 202);
-    assert_eq!(
-        response_body(&from_old_engine)["endpointId"],
-        "GET /api/status"
-    );
+    assert_eq!(response.status, 202);
+    assert_eq!(response_body(&response)["endpointId"], "GET /api/status");
 }
 
 #[test]
@@ -598,7 +587,6 @@ fn rejects_wrong_endpoint_id() {
     let fixture = Fixture::new(false);
     let mut envelope: Value = serde_json::from_str(&fixture.envelope()).expect("envelope");
     envelope["endpointId"] = json!("GET /api/other");
-    envelope["artifactPath"] = json!("zero/endpoints/test.json");
 
     let response = handle_invoke(&envelope.to_string()).unwrap_err();
 
@@ -619,18 +607,6 @@ fn rejects_artifact_mode_that_does_not_match_the_invocation() {
         response_body(&response)["code"],
         "zero_artifact_mode_invalid"
     );
-}
-
-#[test]
-fn accepts_legacy_artifact_path_when_endpoint_index_is_absent() {
-    let fixture = Fixture::new(false);
-    fs::remove_file(fixture.root.join("zero/endpoints-index.json")).expect("remove index");
-    let mut envelope: Value = serde_json::from_str(&fixture.envelope()).expect("envelope");
-    envelope["artifactPath"] = json!("zero/endpoints/test.json");
-
-    let response = handle_invoke(&envelope.to_string()).expect("response");
-
-    assert_eq!(response.status, 202);
 }
 
 fn image_result(width: u32, height: u32) -> Value {
@@ -817,7 +793,6 @@ fn run_fixture_envelope(fixture: &Fixture, mode: &str) -> String {
     let mut envelope: Value = serde_json::from_str(&fixture.envelope()).expect("envelope json");
     envelope["endpointId"] = json!(format!("{mode}_lookup"));
     envelope["executionMode"] = json!(mode);
-    envelope["artifactPath"] = json!("zero/endpoints/test.json");
     envelope["request"]["method"] = json!("POST");
     envelope.to_string()
 }

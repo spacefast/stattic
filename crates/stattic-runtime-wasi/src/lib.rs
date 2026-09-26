@@ -7,11 +7,9 @@
 //! (wrapped by `scripts/build-runtime-wasi.mjs`); the artifact ships to
 //! JavaScript consumers as `stattic-runtime-core.wasm`.
 //!
-//! Memory ceiling: the native finalizer binary applies a 384 MiB additional
-//! address-space rlimit via `stattic_zero_runner::apply_process_address_space_limit`.
-//! That ceiling is native-only — a wasm32 module is capped at 4 GiB by the
-//! architecture and, in practice, by whatever limit the embedding host places
-//! on the instance's linear memory — so no in-module ceiling is enforced here.
+//! Memory ceiling: none is enforced in-module. A wasm32 module is capped at
+//! 4 GiB by the architecture and, in practice, by whatever limit the embedding
+//! host places on the instance's linear memory.
 
 use serde_json::json;
 use stattic_runtime_core::prepare_abi::dispatch_json;

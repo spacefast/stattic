@@ -93,7 +93,7 @@ beforeAll(async () => {
     path.join(runtime.root, "wp-load.php"),
     [
       "<?php",
-      "function spacefast_content_handle_request(array $request, bool $managed): array {",
+      "function spacefast_content_handle_request(array $request): array {",
       "  return ['results' => ['posts' => ['items' => [], 'total' => 0]]];",
       "}",
       "",

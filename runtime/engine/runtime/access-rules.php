@@ -43,9 +43,11 @@ function _stattic_access_context(
     ];
 }
 
+// An alias of THE hostname normalizer (shared/context.php) for this file's
+// callers; code outside it calls _stattic_normalize_hostname directly.
 function _stattic_canonicalize_host(string $host): string
 {
-    return rtrim(strtolower(trim($host)), '.');
+    return _stattic_normalize_hostname($host);
 }
 
 function _stattic_runtime_request_origin(string $requestHost): string
@@ -53,7 +55,7 @@ function _stattic_runtime_request_origin(string $requestHost): string
     $authority = strtolower(trim((string) ($_SERVER['HTTP_HOST'] ?? '')));
     if (
         preg_match('/\A[a-z0-9.-]+(?::[0-9]{1,5})?\z/D', $authority) !== 1
-        || _stattic_normalize_hostname($authority) !== _stattic_normalize_hostname($requestHost)
+        || _stattic_normalize_host_authority($authority) !== _stattic_normalize_hostname($requestHost)
     ) {
         $authority = _stattic_canonicalize_host($requestHost);
     }
@@ -755,7 +757,7 @@ function _stattic_access_session_create(
         'sessionVersion' => $sessionVersion,
         'accessGeneration' => _stattic_projection_generation($serving),
         'spaceId' => $spaceId,
-        'host' => strtolower(_stattic_canonicalize_host($host)),
+        'host' => _stattic_canonicalize_host($host),
         'iat' => $now,
         'exp' => $now + STATTIC_ACCESS_SESSION_CLAIM_TTL_SECONDS,
         ...($profile !== null ? ['profile' => $profile] : []),
@@ -5003,9 +5005,7 @@ function _stattic_access_presented_session_id(): ?string
     }
     $claims = _stattic_access_session_decode(
         _stattic_page_serving(),
-        _stattic_canonicalize_host(
-            _stattic_normalize_hostname((string) ($_SERVER['HTTP_HOST'] ?? ''))
-        ),
+        _stattic_normalize_host_authority((string) ($_SERVER['HTTP_HOST'] ?? '')),
         $credential
     );
     return is_array($claims) ? (string) $claims['sid'] : null;

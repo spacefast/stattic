@@ -30,6 +30,7 @@ require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/../shared/record-store.php';
 require_once __DIR__ . '/../shared/purge.php';
+require_once __DIR__ . '/../shared/functions-wire.generated.php';
 
 // A purge body is a list of paths, never content; anything above this is a
 // broken caller, not a big purge.
@@ -43,7 +44,7 @@ const STATTIC_FUNCTIONS_PURGE_QUOTA_PER_WINDOW = 10;
 const STATTIC_FUNCTIONS_PURGE_QUOTA_WINDOW_SECONDS = 60;
 
 /**
- * The purge credential, read from the version-adjacent functions/config.json
+ * The purge credential, read from the version's functions/config.json
  * the control plane wrote at finalize under `purge.token` (the mint is
  * control-plane-side; this origin only compares). Version fencing is inherent:
  * the document is version-scoped, so the pointer flip that activates a
@@ -61,18 +62,9 @@ function _stattic_functions_purge_expected_token(string $versionRoot): ?string
     return is_string($token) && $token !== '' ? $token : null;
 }
 
-// Deliberately the same 404 for every refusal: no purge block, a non-Functions
-// version, a wrong token. Same as the functions host treats its signed bundle
-// route, because distinguishing them would confirm which spaces carry a purge
-// credential.
-function _stattic_functions_purge_refused(): never
-{
-    _stattic_response_send(404, "Not found.\n", 'text/plain; charset=utf-8', ['Cache-Control' => 'no-store']);
-}
-
 function _stattic_functions_purge_bearer(): string
 {
-    $token = $_SERVER['HTTP_SF_PURGE_TOKEN'] ?? '';
+    $token = $_SERVER[SPACEFAST_FUNCTIONS_PURGE_TOKEN_SERVER_VAR] ?? '';
     return is_string($token) ? trim($token) : '';
 }
 
@@ -111,7 +103,6 @@ function _stattic_functions_purge_admit(array $store, string $spaceId, int $now)
             if ($now - $windowStartedAt >= STATTIC_FUNCTIONS_PURGE_QUOTA_WINDOW_SECONDS) {
                 $windowStartedAt = $now;
                 $count = 0;
-                $record = null;
             }
             if ($count >= STATTIC_FUNCTIONS_PURGE_QUOTA_PER_WINDOW) {
                 return [
@@ -137,8 +128,11 @@ function _stattic_functions_purge_serve(string $privateRoot, string $spaceId, st
     }
     $expected = _stattic_functions_purge_expected_token($versionRoot);
     $presented = _stattic_functions_purge_bearer();
+    // Deliberately the same 404 for every refusal: no purge block, a
+    // non-Functions version, a wrong token. Distinguishing them would confirm
+    // which spaces carry a purge credential.
     if ($expected === null || $presented === '' || !hash_equals($expected, $presented)) {
-        _stattic_functions_purge_refused();
+        _stattic_opaque_not_found();
     }
 
     $body = _stattic_bounded_request_body(STATTIC_FUNCTIONS_PURGE_MAX_BODY_BYTES);

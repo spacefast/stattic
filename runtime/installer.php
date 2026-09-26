@@ -773,33 +773,10 @@ function active_release_pointer_states_match(array $left, array $right): bool
         && ($left['root'] ?? null) === ($right['root'] ?? null);
 }
 
-/** @param array{state:string,target?:string,root?:string} $expected */
-function normalize_active_release_pointer(string $installRoot, array $expected): bool
-{
-    if (($expected['state'] ?? null) !== 'missing') {
-        return false;
-    }
-    if (!active_release_pointer_states_match(active_release_pointer_state($installRoot), $expected)) {
-        return false;
-    }
-    $pointer = $installRoot . '/active-release';
-    return !is_link($pointer)
-        && !is_dir($pointer)
-        && is_file($pointer)
-        && unlink_if_present($pointer)
-        && (active_release_pointer_state($installRoot)['state'] ?? null) === 'absent';
-}
-
 function active_release_pointer_target(string $installRoot): ?string
 {
     $state = active_release_pointer_state($installRoot);
     return in_array($state['state'], ['valid', 'legacy'], true) ? ($state['target'] ?? null) : null;
-}
-
-function active_release_root(string $installRoot): ?string
-{
-    $state = active_release_pointer_state($installRoot);
-    return in_array($state['state'], ['valid', 'legacy'], true) ? ($state['root'] ?? null) : null;
 }
 
 function publish_active_release(string $installRoot, string $target): bool
@@ -2064,14 +2041,6 @@ function write_rollback_failure_journal(string $reason, array $result): void
     }
 }
 
-function clear_rollback_failure_journal(string $installRoot): void
-{
-    $journal = $installRoot . '/rollback-failure.json';
-    if (file_exists($journal) && !is_link($journal)) {
-        unlink_if_present($journal);
-    }
-}
-
 function install_transaction_release_root(string $installRoot, array $record): ?string
 {
     $target = $record['release'] ?? null;
@@ -2962,9 +2931,10 @@ $installedReleaseTarget = in_array($installedPointer['state'], ['valid', 'legacy
     ? ($installedPointer['target'] ?? null)
     : null;
 $installedManifest = is_string($installedReleaseRoot) ? installed_engine_manifest($installedReleaseRoot) : null;
+// `valid` already proved the payload identity; rehashing the tree here would
+// only repeat that proof.
 $installedReleasePayloadMatches = ($installedPointer['state'] ?? null) === 'valid'
-    && is_string($installedReleaseRoot)
-    && installed_release_payload_matches($installedReleaseRoot);
+    && is_string($installedReleaseRoot);
 $installedReleaseLoaderIdentity = $installedReleasePayloadMatches && is_string($installedReleaseRoot)
     ? installed_release_loader_identity($installedReleaseRoot)
     : null;
@@ -3214,6 +3184,8 @@ if ($injectedPointerFailure || !publish_active_release($installRoot, $newRelease
 
 remove_retired_public_paths($publicRoot, $manifest, $historicalOwners, $suffix);
 
+// Only a `valid` pointer yields a root, and `valid` already proved the
+// published payload identity.
 $publishedPointer = active_release_pointer_state($installRoot);
 $publishedReleaseRoot = ($publishedPointer['state'] ?? null) === 'valid' ? ($publishedPointer['root'] ?? null) : null;
 $publishedManifest = is_string($publishedReleaseRoot) ? installed_engine_manifest($publishedReleaseRoot) : null;
@@ -3229,7 +3201,6 @@ if (
     $injectedPostcheckFailure
     || $publishedReleaseRoot !== realpath($releaseRoot)
     || ($publishedPointer['target'] ?? null) !== $newReleaseTarget
-    || !installed_release_payload_matches($publishedReleaseRoot ?? '')
     || $publishedLoaderIdentity !== $loaderIdentity
     || installed_loader_identity($installRoot) !== $loaderIdentity
     || !is_array($publishedManifest)

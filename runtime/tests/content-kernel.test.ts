@@ -23,9 +23,11 @@ test("the MU loader follows the engine pointer and selects one Space's immutable
   for (const release of ["release-a", "release-b"]) {
     const releaseRoot = path.join(publicRoot, ".stattic/releases", release);
     mkdirSync(path.join(releaseRoot, "engine/wordpress"), { recursive: true });
+    // The real kernel owns the Space-scope check the loader defers to; the
+    // marker records which release's copy was loaded.
     writeFileSync(
       path.join(releaseRoot, "engine/wordpress/content-kernel.php"),
-      `<?php $GLOBALS['loaded_kernel'] = ${JSON.stringify(release)};`,
+      `<?php require ${JSON.stringify(kernel)}; $GLOBALS['loaded_kernel'] = ${JSON.stringify(release)};`,
     );
   }
   // Two Spaces on one box, each with its own immutable ContentModelRelease pointer.
@@ -652,11 +654,7 @@ function verdict(mixed $result): mixed {
 }
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
 // WordPress REST is available with a tenant scope, without an editor session.
-$noGate = verdict(spacefast_content_require_rest_scope(null));
-// The gate admitted an anonymous request: no editor user, no role, marker set.
-$GLOBALS['SPACEFAST_CONTENT_REST_ADMITTED'] = true;
-$anonymousAdmitted = verdict(spacefast_content_require_rest_scope(null));
-echo json_encode(['no_gate' => $noGate, 'anonymous_admitted' => $anonymousAdmitted]);
+echo json_encode(['no_gate' => verdict(spacefast_content_require_rest_scope(null))]);
 `;
   const process = Bun.spawn(["php", "-r", script, kernel], {
     cwd: repoRoot,
@@ -670,8 +668,5 @@ echo json_encode(['no_gate' => $noGate, 'anonymous_admitted' => $anonymousAdmitt
   ]);
 
   expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-  expect(JSON.parse(stdout)).toEqual({
-    no_gate: null,
-    anonymous_admitted: null,
-  });
+  expect(JSON.parse(stdout)).toEqual({ no_gate: null });
 });

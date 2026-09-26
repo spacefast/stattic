@@ -298,10 +298,6 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         _stattic_render_platform_action(_stattic_version_pending_action());
     }
     $versionDir = _stattic_version_root($privateRoot, $spaceId, $versionId);
-    // zero.php / functions-*.php address the version through `<version>/files`
-    // and reach their sidecars with dirname(). The v4 compiler writes no file
-    // tree, so this is a naming convention, not a directory.
-    $versionRoot = _stattic_version_files_root($privateRoot, $spaceId, $versionId);
     // The first point at which a version is the answer, so the first at which the
     // response may name one: naming it above leaks which version a host points at.
     _stattic_emit_runtime_identity($versionId);
@@ -340,7 +336,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // before token redemption, access and content resolution.
     if ($requestPath === '/' . STATTIC_FUNCTIONS_PURGE_PATH) {
         require_once __DIR__ . '/functions-purge.php';
-        _stattic_functions_purge_serve($privateRoot, $spaceId, $versionRoot, $requestMethod);
+        _stattic_functions_purge_serve($privateRoot, $spaceId, $versionDir, $requestMethod);
     }
 
     // `?__=` is redeemed HERE, before the response table is read, and the request
@@ -489,7 +485,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     if (is_array($authControl) && in_array($authControl['operation'], ['config', 'auth_start', 'auth_sign_out', 'run'], true)) {
         if (!in_array($requestMethod, $authControl['methods'], true)) _stattic_method_not_allowed(implode(', ', $authControl['methods']));
         require_once __DIR__ . '/zero.php';
-        _stattic_invoke_zero($authControl, $versionRoot, $serving, $requestHost, $requestPath, $requestUri, $requestMethod);
+        _stattic_invoke_zero($authControl, $versionDir, $serving, $requestHost, $requestPath, $requestUri, $requestMethod);
     }
 
     // The enforcement verdict, not the overlay flag: a Space that HAS grants but
@@ -546,7 +542,6 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         'space_id' => $spaceId,
         'version_id' => $versionId,
         'version_dir' => $versionDir,
-        'version_root' => $versionRoot,
         'root' => $root,
         'host' => $requestHost,
         'host_entry' => $hostEntry,
@@ -612,20 +607,16 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         // whole-site middleware claim would cost every hashed chunk.
         $immutableEntry = ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_CACHE_CLASS] ?? null)
             === STATTIC_RUNTIME_CACHE_CLASS_IMMUTABLE;
-        $bypassCapable = !$immutableEntry && _stattic_v4_functions_static_bypass_capable(
-            $versionRoot,
+        $bypassCookies = $immutableEntry ? null : _stattic_v4_functions_static_bypass_cookies(
+            $versionDir,
             $requestPath,
             $requestMethod,
         );
-        $cookieHeader = $_SERVER['HTTP_COOKIE'] ?? '';
-        $bypass = false;
-        if ($bypassCapable && is_string($cookieHeader) && $cookieHeader !== '') {
-            require_once __DIR__ . '/functions-dispatch.php';
-            $bypass = _stattic_functions_bypass_requested($versionRoot, $requestPath, $requestMethod);
-        }
-        if (!$bypass) {
+        // A non-empty list means the probe above already required
+        // functions-dispatch.php.
+        if ($bypassCookies === null || $bypassCookies === [] || !_stattic_functions_bypass_requested($bypassCookies)) {
             $entryContext = $sendContext;
-            if ($bypassCapable) {
+            if ($bypassCookies !== null) {
                 // The URL varies by a cookie the provider cannot put in its
                 // cache key. Reuse the response boundary's existing no-store
                 // disposition rather than relying on a response-time Vary.
@@ -647,14 +638,18 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         if (is_file($contentRedirectFile)) {
             $contentRedirects = json_decode((string) file_get_contents($contentRedirectFile), true);
             if (is_array($contentRedirects)) {
-                foreach ($contentRedirects['exact'] ?? [] as $source => $rules) {
-                    $contentRedirects['exact'][$source] = array_values(array_filter($rules, static fn (array $rule): bool =>
+                // Only this path's exact rules can match, so only they need the
+                // published-destination probe. Probe the key the redirect walk
+                // reads: it trims trailing slashes, so `/old/` matches `/old`.
+                require_once __DIR__ . '/redirects.php';
+                $redirectKey = _stattic_redirect_match_path($requestPath);
+                if (is_array($contentRedirects['exact'][$redirectKey] ?? null)) {
+                    $contentRedirects['exact'][$redirectKey] = array_values(array_filter($contentRedirects['exact'][$redirectKey], static fn (array $rule): bool =>
                         empty($rule['requiresPublishedDestination'])
                         || _stattic_v4_entry($versionDir, $root, $rule['destination']) !== null
                         || ($hasPages && _stattic_page_resolve($versionDir, $rule['destination']) !== null)
                     ));
                 }
-                require_once __DIR__ . '/redirects.php';
                 _stattic_apply_redirects($contentRedirects, $serving, static fn (): bool => false, $requestHost, $requestPath, $requestMethod);
             }
         }
@@ -834,51 +829,59 @@ function _stattic_v4_nearest_not_found(string $versionDir, array $root, string $
 // of the version's declared bypass cookies is present. This answers the
 // cacheability question WITHOUT a cookie on this request: the normal response
 // must never warm a shared edge cache that would hide a later cookie from PHP.
-function _stattic_v4_functions_static_bypass_capable(string $versionRoot, string $requestPath, string $requestMethod): bool
+// Null means the response is invariant; a list means it may vary, and names the
+// cookies that turn this request into a dispatch (none when the policy itself
+// could not be read).
+/** @return list<string>|null */
+function _stattic_v4_functions_static_bypass_cookies(string $versionDir, string $requestPath, string $requestMethod): ?array
 {
     if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
-        return false;
+        return null;
     }
-    $configRead = _stattic_functions_config_read($versionRoot);
+    $configRead = _stattic_functions_config_read($versionDir);
     if ($configRead['kind'] === 'absent') {
         // Verified absence is the only state that proves this version has no
         // Functions cookie-bypass policy.
-        return false;
+        return null;
     }
     if ($configRead['kind'] !== 'present') {
         // Unavailable/malformed configuration is NOT proof of no bypass. Keep
         // the ordinary response out of shared cache so a later healthy request
         // can recover the exact route/cookie answer without a stale edge HIT.
-        return true;
+        return [];
     }
     // `present` already proved `artifact` is an array with its required fields.
     $artifact = $configRead['value']['artifact'];
     if (!array_key_exists('bypassCookies', $artifact) || !is_array($artifact['bypassCookies'])) {
         // Stricter than the dispatch lane on purpose: a config that does not
         // state its bypass policy cannot prove the response is invariant.
-        return true;
+        return [];
     }
     if ($artifact['bypassCookies'] === []) {
-        return false;
+        return null;
     }
+    $cookies = array_values(array_filter(
+        $artifact['bypassCookies'],
+        static fn (mixed $cookie): bool => is_string($cookie) && $cookie !== ''
+    ));
     require_once __DIR__ . '/functions-dispatch.php';
-    $routesRead = _stattic_try_load_functions_routes_artifact($versionRoot);
+    $routesRead = _stattic_try_load_functions_routes_artifact($versionDir);
     if ($routesRead['kind'] === 'unavailable') {
         // The path table decides whether this static URL can vary. Failure is
         // not proof of no bypass, but the committed asset still owns this lane:
         // serve it no-store rather than replacing it with an invariant response
         // from the later Functions route lane.
-        return true;
+        return $cookies;
     }
     if ($routesRead['kind'] === 'absent') {
-        return false;
+        return null;
     }
     $route = _stattic_resolve_functions_route_action(
-        $versionRoot,
+        $versionDir,
         ltrim($requestPath, '/'),
         $requestMethod,
     );
-    return is_array($route) && ($route['action'] ?? null) === 'dispatch_functions';
+    return is_array($route) && ($route['action'] ?? null) === 'dispatch_functions' ? $cookies : null;
 }
 
 // One stat, cached per version: a Zero page's document response settles the
@@ -886,10 +889,10 @@ function _stattic_v4_functions_static_bypass_capable(string $versionRoot, string
 // question without paying for a read. `zero/config.json` is the artifact the
 // Zero lane itself reads, so its presence is the same "this version HAS Zero"
 // the runtime already trusts.
-function _stattic_v4_version_has_zero_runtime(string $versionRoot): bool
+function _stattic_v4_version_has_zero_runtime(string $versionDir): bool
 {
     static $cache = [];
-    $path = dirname($versionRoot) . '/zero/config.json';
+    $path = $versionDir . '/zero/config.json';
     return $cache[$path] ??= is_file($path);
 }
 
@@ -919,7 +922,7 @@ function _stattic_zero_prime_anonymous_document_session(
         $status !== 200
         || !in_array($method, ['GET', 'HEAD'], true)
         || !str_starts_with(strtolower((string) ($headers['content-type'] ?? '')), 'text/html')
-        || !_stattic_v4_version_has_zero_runtime((string) $context['version_root'])
+        || !_stattic_v4_version_has_zero_runtime((string) $context['version_dir'])
     ) {
         return;
     }
@@ -1287,13 +1290,13 @@ function _stattic_v4_dispatch_action(array $context, array $action, array $entry
             _stattic_render_method_not_allowed_lazy($allow === [] ? ['GET', 'HEAD'] : $allow);
         }
     }
-    if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_ZERO || $type === STATTIC_RUNTIME_RESPONSE_ACTION_FUNCTION) {
+    if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_ZERO) {
         require_once __DIR__ . '/../shared/admission.php';
         _stattic_admission_acquire_once((string) $context['private_root'], $serving, 'zero');
         require_once __DIR__ . '/zero.php';
         _stattic_invoke_zero(
             $action,
-            (string) $context['version_root'],
+            (string) $context['version_dir'],
             $serving,
             (string) $context['host'],
             $requestPath,
@@ -1307,11 +1310,6 @@ function _stattic_v4_dispatch_action(array $context, array $action, array $entry
         // (admission, identity, jail, include, send) and never returns.
         require_once __DIR__ . '/php-functions.php';
         _stattic_php_functions_serve($context, $action, $requestPath);
-    }
-    if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_PROXY) {
-        _stattic_enforce_access_for_proxy($serving, (string) $context['host'], $requestPath, (string) $context['request_uri']);
-        require_once __DIR__ . '/proxy.php';
-        _stattic_proxy_request(['action' => 'proxy'] + $action, '/', $serving);
     }
     if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_LISTING) {
         _stattic_v4_serve_listing($context, $action, $entry, $requestPath);
@@ -1502,13 +1500,12 @@ function _stattic_v4_rule_headers(array $context): array
 function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath, string $requestMethod, string $requestUri): void
 {
     $versionDir = (string) $context['version_dir'];
-    $versionRoot = (string) $context['version_root'];
     $lookup = ltrim($requestPath, '/');
     $connectorRoute = _stattic_zero_connector_route($requestPath);
-    if ($connectorRoute !== null && is_file(dirname($versionRoot) . '/zero/config.json')) {
+    if ($connectorRoute !== null && _stattic_v4_version_has_zero_runtime($versionDir)) {
         require_once __DIR__ . '/zero.php';
         _stattic_zero_send_connector_response(
-            _stattic_zero_runtime_config(dirname($versionRoot)), $context['serving'],
+            _stattic_zero_runtime_config($versionDir), $context['serving'],
             (string) $context['host'], $requestPath, $requestMethod, $connectorRoute
         );
     }
@@ -1517,7 +1514,7 @@ function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath
     // exists when the finalize body also carried a `zero` block.
     if (is_file($versionDir . '/zero/routes.php')) {
         require_once __DIR__ . '/zero-routes.php';
-        $result = _stattic_resolve_zero_route_action($versionRoot, $lookup, $requestMethod);
+        $result = _stattic_resolve_zero_route_action($versionDir, $lookup, $requestMethod);
         if (!empty($result['method_not_allowed'])) {
             // Zero's resolver reports no per-route Allow, so the recorded set is
             // the default its terminal 405 always advertised. Recording instead
@@ -1531,7 +1528,7 @@ function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath
             require_once __DIR__ . '/zero.php';
             _stattic_invoke_zero(
                 $result['action'],
-                $versionRoot,
+                $versionDir,
                 $context['serving'],
                 (string) $context['host'],
                 $requestPath,
@@ -1541,9 +1538,9 @@ function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath
         }
     }
 
-    if (_stattic_version_has_functions($versionRoot)) {
+    if (_stattic_version_has_functions($versionDir)) {
         require_once __DIR__ . '/functions-dispatch.php';
-        $functionsRoute = _stattic_resolve_functions_route_action($versionRoot, $lookup, $requestMethod);
+        $functionsRoute = _stattic_resolve_functions_route_action($versionDir, $lookup, $requestMethod);
         // A path the table claims at other methods ends at a 405, never a fall
         // through to the SPA index or a 404: the route exists, the verb does
         // not. The router's Allow joins the union, which the caller renders once
@@ -1553,14 +1550,13 @@ function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath
             _stattic_method_decline($allow === [] ? ['GET', 'HEAD'] : $allow);
         }
         if (is_array($functionsRoute) && ($functionsRoute['action'] ?? null) === 'dispatch_functions') {
-            // The same slot the exact-route Functions action takes in
-            // _stattic_v4_dispatch_action: a dispatch holds this PHP-FPM worker
-            // for up to 30s and its relay calls re-enter the same pool, so this
-            // lane pays the same uncacheable-concurrency admission the Zero
-            // branch above does.
+            // A dispatch holds this PHP-FPM worker for up to 30s and its relay
+            // calls re-enter the same pool, so this lane pays the same
+            // uncacheable-concurrency admission the Zero branch above does.
+            require_once __DIR__ . '/../shared/admission.php';
             _stattic_admission_acquire_once((string) $context['private_root'], $context['serving'], 'zero');
             _stattic_functions_dispatch(
-                $versionRoot,
+                $versionDir,
                 (string) $context['space_id'],
                 (string) $context['version_id'],
                 $requestPath,
@@ -1697,11 +1693,6 @@ function _stattic_render_platform_action(array $action, bool $privateCache = fal
     _stattic_render_runtime_invariant_error_lazy('route-action-metadata-missing', 'Runtime platform action metadata is malformed.');
 }
 
-function _stattic_runtime_api_not_found_action(): array
-{
-    return _stattic_platform_error_action('runtime-api-not-found', 404, "Not found.\n");
-}
-
 function _stattic_undeployed_action(): array
 {
     return _stattic_platform_error_action('undeployed', 503, "This space hasn't been published yet.\n");
@@ -1829,44 +1820,17 @@ function _stattic_lookup_not_found_is_terminal(string $lookup): bool
     ) {
         return true;
     }
-    if (isset(STATTIC_PRIVATE_COMPILE_FILES[$path]) || isset(STATTIC_PRIVATE_CONFIG_FILES[$path])) {
+    if (in_array($path, STATTIC_RUNTIME_PRIVATE_COMPILE_FILES, true) || in_array($path, STATTIC_RUNTIME_PRIVATE_CONFIG_FILES, true)) {
         return true;
     }
     return _stattic_path_has_hidden_segment($path);
 }
 
-// Deliberately a denylist, not "any extension present", so dotted client-side
-// routes (`/users/jane.doe`, `/v1.2.3`) stay SPA-eligible.
-const STATTIC_LOOKUP_ASSET_EXTENSIONS = [
-    'avif' => true, 'bmp' => true, 'br' => true, 'css' => true, 'eot' => true,
-    'gif' => true, 'gz' => true, 'ico' => true, 'jpeg' => true, 'jpg' => true,
-    'js' => true, 'json' => true, 'map' => true, 'mjs' => true, 'mp3' => true,
-    'mp4' => true, 'ogg' => true, 'otf' => true, 'png' => true, 'svg' => true,
-    'ttf' => true, 'wasm' => true, 'webm' => true, 'webmanifest' => true,
-    'webp' => true, 'woff' => true, 'woff2' => true, 'xml' => true,
-    'pdf' => true, 'csv' => true, 'rtf' => true, 'txt' => true,
-    'doc' => true, 'docx' => true, 'xls' => true, 'xlsx' => true,
-    'ppt' => true, 'pptx' => true, 'odt' => true, 'ods' => true,
-    'odp' => true, 'epub' => true,
-    'zip' => true, 'tar' => true, 'tgz' => true, 'rar' => true,
-    '7z' => true, 'bz2' => true, 'xz' => true, 'zst' => true,
-    'wav' => true, 'flac' => true, 'aac' => true, 'm4a' => true,
-    'm4v' => true, 'mov' => true, 'avi' => true, 'mkv' => true,
-    'weba' => true, 'oga' => true, 'ogv' => true, 'opus' => true,
-    'wmv' => true, 'flv' => true, 'mpg' => true, 'mpeg' => true,
-    'm3u8' => true, 'tif' => true, 'tiff' => true, 'heic' => true,
-    'heif' => true, 'jxl' => true,
-    'yaml' => true, 'yml' => true, 'toml' => true, 'sql' => true,
-    'ndjson' => true, 'jsonl' => true, 'geojson' => true,
-    'ics' => true, 'vcf' => true,
-    'exe' => true, 'dmg' => true, 'pkg' => true, 'deb' => true,
-    'rpm' => true, 'apk' => true, 'msi' => true, 'iso' => true,
-    'bin' => true, 'appimage' => true,
-];
-
+// A denylist, not "any extension present", so dotted client-side routes stay
+// SPA-eligible; finalize's readiness probe decides by the same generated list.
 function _stattic_lookup_is_known_asset_extension(string $path): bool
 {
-    return isset(STATTIC_LOOKUP_ASSET_EXTENSIONS[strtolower((string) pathinfo($path, PATHINFO_EXTENSION))]);
+    return in_array(strtolower((string) pathinfo($path, PATHINFO_EXTENSION)), STATTIC_RUNTIME_LOOKUP_ASSET_EXTENSIONS, true);
 }
 
 function _stattic_render_platform_page_lazy(string $pageId, int $status, array $headers = [], string $fallback = '', bool $private = false): void
@@ -1954,7 +1918,7 @@ function _stattic_spacefast_sdk_access_path(array $serving, string $requestHost,
         !is_string($refererHost)
         || !is_string($refererPath)
         || $refererPath === ''
-        || _stattic_canonicalize_host($refererHost) !== _stattic_canonicalize_host($requestHost)
+        || _stattic_normalize_hostname($refererHost) !== _stattic_normalize_hostname($requestHost)
     ) {
         return $requestPath;
     }

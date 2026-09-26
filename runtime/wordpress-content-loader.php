@@ -9,24 +9,28 @@ declare(strict_types=1);
 (static function (): void {
     $publicRoot = dirname(__DIR__, 2);
     $installRoot = $publicRoot . '/.stattic';
-    $pointer = is_file($installRoot . '/active-release')
-        ? file_get_contents($installRoot . '/active-release', false, null, 0, 256)
-        : false;
-    $target = is_string($pointer) ? trim($pointer) : '';
-    if (preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) !== 1) {
-        return;
+    // A served request arrives with the release the prepend already resolved
+    // and verified; a CLI or cron load resolves it here the same way.
+    $releaseReal = $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] ?? null;
+    if (!is_string($releaseReal)) {
+        $pointer = is_file($installRoot . '/active-release')
+            ? file_get_contents($installRoot . '/active-release', false, null, 0, 256)
+            : false;
+        $target = is_string($pointer) ? trim($pointer) : '';
+        if (preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) !== 1) {
+            return;
+        }
+        $installReal = realpath($installRoot);
+        $releaseReal = realpath($installRoot . '/' . $target);
+        if (
+            !is_string($installReal)
+            || !is_string($releaseReal)
+            || !str_starts_with($releaseReal, $installReal . '/releases/')
+        ) {
+            return;
+        }
+        $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseReal;
     }
-
-    $installReal = realpath($installRoot);
-    $releaseReal = realpath($installRoot . '/' . $target);
-    if (
-        !is_string($installReal)
-        || !is_string($releaseReal)
-        || !str_starts_with($releaseReal, $installReal . '/releases/')
-    ) {
-        return;
-    }
-    $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseReal;
 
     $nativeProcess = $releaseReal . '/engine/shared/native-process.php';
     if (is_file($nativeProcess)) {
@@ -40,13 +44,10 @@ declare(strict_types=1);
     // ContentModelReleases are per Space. One wp.cloud site hosts many Spaces, so a
     // request without an exact Space scope (wp-cron and similar) loads no
     // content model at all. The release is data: the kernel projects it into native
-    // WordPress. No generated plugin is executed here.
-    $spaceId = $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? null;
-    if (
-        !is_string($spaceId)
-        || strlen($spaceId) > 128
-        || preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*$/', $spaceId) !== 1
-    ) {
+    // WordPress. No generated plugin is executed here. The kernel owns the scope
+    // check, and without a kernel nothing below has a reader.
+    $spaceId = function_exists('spacefast_content_space_id') ? spacefast_content_space_id() : '';
+    if ($spaceId === '') {
         return;
     }
     // One guard, not two: the hook installer ships with the content kernel

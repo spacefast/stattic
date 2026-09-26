@@ -180,11 +180,11 @@ function spacefast_content_admin_resolve($request): array|WP_Error
     ];
 }
 
-function spacefast_content_rest_dispatch(array $request, bool $managed): array
+function spacefast_content_rest_dispatch(array $request): array
 {
     $method = $request['method'] ?? null;
     $path = $request['path'] ?? null;
-    if (!$managed || spacefast_content_principal_role() === null) {
+    if (spacefast_content_principal_role() === null) {
         throw new Spacefast_Content_Error(403, 'content_rest_forbidden', 'A content principal is required.');
     }
     if (!in_array($method, ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'], true)
@@ -380,16 +380,8 @@ function spacefast_content_redirect_publish(array $records): array|WP_Error
     return ['items' => array_values($records), 'state' => $purged ? 'applied' : 'pending', 'revision' => hash('sha256', $json), 'conflicts' => $conflicts];
 }
 
-function spacefast_content_public_routes_refresh_locked(): void
+function spacefast_content_public_routes_refresh_locked(string $root): void
 {
-    $privateRoot = $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? '';
-    if (!is_string($privateRoot) || $privateRoot === '' || spacefast_content_space_id() === '') {
-        return;
-    }
-    $root = $privateRoot . '/spaces/' . spacefast_content_require_space_id();
-    if (!is_dir($root)) {
-        return;
-    }
     $posts = get_posts([
         'post_type' => 'any', 'post_status' => 'publish', 'numberposts' => -1,
         'meta_query' => [['key' => SPACEFAST_CONTENT_SPACE_META, 'value' => spacefast_content_require_space_id()]],
@@ -492,7 +484,6 @@ function spacefast_content_collection_permalink(string $url, mixed $post, bool $
         $path = $binding['publicPath'];
         return home_url($leaveName ? spacefast_content_permalink_template($path, '%postname%') : $path);
     }
-    $release = spacefast_content_model_active_release();
     foreach (spacefast_content_model_resources() as $resource) {
         if (($resource['kind'] ?? '') !== 'collection') {
             continue;
@@ -510,7 +501,6 @@ function spacefast_content_collection_for_post(int $postId): ?array
     if (!spacefast_content_post_belongs_to_space($postId)) {
         return null;
     }
-    $release = spacefast_content_model_active_release();
     foreach (spacefast_content_model_resources() as $resource) {
         if (($resource['kind'] ?? '') === 'collection'
             && has_term(spacefast_content_model_collection_term_slug(spacefast_content_require_space_id(), $resource['id']), SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY, $postId)) {
@@ -521,11 +511,11 @@ function spacefast_content_collection_for_post(int $postId): ?array
     return is_object($post) ? spacefast_content_collection_for_post_type($post->post_type) : null;
 }
 
-function spacefast_content_admin_media_read(array $request, bool $managed): array
+function spacefast_content_admin_media_read(array $request): array
 {
     spacefast_content_principal_establish_user();
     $postId = $request['attachmentId'] ?? null;
-    if (!$managed || !is_int($postId) || $postId < 1 || !spacefast_content_post_belongs_to_space($postId)
+    if (!is_int($postId) || $postId < 1 || !spacefast_content_post_belongs_to_space($postId)
         || get_post_type($postId) !== 'attachment' || !current_user_can('read_post', $postId)) {
         throw new Spacefast_Content_Error(404, 'content_media_not_found', 'Media not found.');
     }
@@ -676,7 +666,7 @@ function spacefast_content_public_routes_refresh(): void
         throw new Spacefast_Content_Error(503, 'content_routes_unavailable', 'Content routes could not be locked.');
     }
     try {
-        spacefast_content_public_routes_refresh_locked();
+        spacefast_content_public_routes_refresh_locked($directory);
     } finally {
         flock($lock, LOCK_UN);
         fclose($lock);

@@ -12,6 +12,7 @@ require_once __DIR__ . '/../shared/pointers.php';
 require_once __DIR__ . '/../shared/response.php';
 require_once __DIR__ . '/../shared/record-store.php';
 require_once __DIR__ . '/../shared/storage-policy.generated.php';
+require_once __DIR__ . '/../shared/functions-wire.generated.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
 require_once __DIR__ . '/../shared/errors.php';
 
@@ -264,17 +265,13 @@ function _stattic_uploads_send(
     // policy applies inside _stattic_send_response_headers.
     $headers = _stattic_uploads_headers($record, $publicCache);
     $size = $record['size'];
-    $blobPath = _stattic_runtime_blob_path($privateRoot, $spaceId, $record['sha256']);
-    if (!is_file($blobPath)) {
-        // Promote-on-read: the bytes land in the CAS first, then serve locally.
-        // There is no S3-to-visitor stream.
-        require_once __DIR__ . '/tier.php';
-        $promoted = _stattic_tier_promote_blob($privateRoot, $spaceId, $record['sha256']);
-        if ($promoted === null) {
-            _stattic_render_tier_fetch_unavailable(STATTIC_UPLOADS_PROMOTE_RETRY_AFTER_SECONDS);
-            exit;
-        }
-        $blobPath = $promoted;
+    // Promote-on-read: the bytes land in the CAS first, then serve locally.
+    // There is no S3-to-visitor stream.
+    require_once __DIR__ . '/tier.php';
+    $blobPath = _stattic_runtime_local_blob($privateRoot, $spaceId, $record['sha256']);
+    if ($blobPath === null) {
+        _stattic_render_tier_fetch_unavailable(STATTIC_UPLOADS_PROMOTE_RETRY_AFTER_SECONDS);
+        exit;
     }
 
     // HEAD advertises what the matching GET would send, without opening the file.
@@ -588,35 +585,45 @@ function _stattic_uploads_delete(string $privateRoot, string $spaceId, string $i
     // The keyed public URL opts into the edge, so removing the record must also
     // revoke the shared copy: the whole-host purge stops the edge serving it to
     // NEW viewers. Browsers that already fetched it keep their year. A repeat
-    // delete finds no record and spends no purge.
-    if (_stattic_uploads_delete_record($privateRoot, $spaceId, $id, true)) {
-        require_once __DIR__ . '/../shared/purge.php';
-        _stattic_runtime_purge_space_hosts_now($privateRoot, $spaceId, 'storage_object_deleted');
+    // delete finds no record and spends no purge. The delete persisted the
+    // obligation under the write lock, so this only delivers those hostnames:
+    // after the response on FPM, inline elsewhere.
+    if (_stattic_uploads_delete_record($privateRoot, $spaceId, $id, true, $purgeHostnames) && $purgeHostnames !== []) {
+        $drain = static fn (): bool => _stattic_runtime_purge_drain($privateRoot, microtime(true) + 20, null, $purgeHostnames);
+        if (function_exists('fastcgi_finish_request')) {
+            _stattic_flush_response_before_deferred(true);
+            _stattic_defer($drain);
+        } else {
+            $drain();
+        }
     }
     _stattic_uploads_deleted_response();
 }
 
-// Returns whether a record was there to delete. The CAS body is NOT unlinked:
-// the blob may back another record or a version, and the GC's live set, which
-// reads these records, is what releases it.
+// Returns whether a record was there to delete, and hands back the hostnames
+// whose purge it prepared so the caller sends exactly those. The CAS body is
+// NOT unlinked: the blob may back another record or a version, and the GC's
+// live set, which reads these records, is what releases it.
 function _stattic_uploads_delete_record(
     string $privateRoot,
     string $spaceId,
     string $id,
-    bool $lock
+    bool $lock,
+    ?array &$purgeHostnames = null
 ): bool {
-    $delete = static function () use ($privateRoot, $spaceId, $id): bool {
+    $purgeHostnames = [];
+    $delete = static function () use ($privateRoot, $spaceId, $id, &$purgeHostnames): bool {
         $store = _stattic_uploads_store($privateRoot, $spaceId);
-        $existing = _stattic_uploads_record(_stattic_record_store_get($store, $id));
-        if ($existing === null) {
+        if (_stattic_uploads_record(_stattic_record_store_get($store, $id)) === null) {
             return false;
         }
         require_once __DIR__ . '/../shared/purge.php';
-        _stattic_runtime_prepare_purge($privateRoot, $spaceId,
-            _stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId)),
-            'storage_object_deleted');
+        $purgeHostnames = _stattic_runtime_purge_hostname_list(
+            _stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId))
+        );
+        _stattic_runtime_prepare_purge($privateRoot, $spaceId, $purgeHostnames, 'storage_object_deleted');
         _stattic_record_store_delete($store, $id);
-        return $existing !== null;
+        return true;
     };
     if (!$lock) {
         return $delete();
@@ -701,12 +708,12 @@ function _stattic_storage_function_auth(
     if ($claims === null) {
         return null;
     }
-    $required = in_array($requestMethod, ['GET', 'HEAD'], true)
-        ? 'storage.read'
-        : 'storage.write';
+    // The storage lane lists its read capability first, then its write one.
+    [$read, $write] = SPACEFAST_FUNCTIONS_BROKERS['storage'];
+    $required = in_array($requestMethod, ['GET', 'HEAD'], true) ? $read : $write;
     if (!in_array($required, _stattic_functions_relay_grant(
         $claims,
-        ['storage.read', 'storage.write']
+        SPACEFAST_FUNCTIONS_BROKERS['storage']
     ), true)) {
         return null;
     }

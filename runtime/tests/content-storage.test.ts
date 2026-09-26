@@ -332,9 +332,7 @@ try {
 }
 $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = 'editor';
 $dispatched = spacefast_content_handle_request(
-  ['operation' => 'storage.get', 'id' => $nested['id']],
-  true
-);
+  ['operation' => 'storage.get', 'id' => $nested['id']]);
 
 echo json_encode([
   'ability_names' => $abilityNames,

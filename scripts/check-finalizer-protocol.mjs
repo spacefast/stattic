@@ -226,6 +226,10 @@ try {
       read: (p) => p.responses.providerAssetExtensions,
     },
     {
+      name: "STATTIC_RUNTIME_PRIVATE_CONFIG_FILES",
+      read: (p) => p.config.current.acceptedFiles,
+    },
+    {
       name: "STATTIC_RUNTIME_PLATFORM_OWNED_HEADER_PREFIXES",
       read: (p) => p.responses.platformOwnedHeaderPrefixes,
     },

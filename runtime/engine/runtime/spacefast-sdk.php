@@ -99,7 +99,7 @@ function _stattic_serve_spacefast_sdk(
 
 function _stattic_comments_request_origin(string $requestHost): ?string
 {
-    $host = _stattic_canonicalize_host($requestHost);
+    $host = _stattic_normalize_hostname($requestHost);
     if ($host === '' || preg_match('/[\\x00-\\x20\\x7f\\/\\\\]/', $host) === 1) {
         return null;
     }
@@ -477,8 +477,8 @@ function _stattic_spacefast_sdk_placeholder_orb(array $overlay): string
 // stays headless instead of talking to a host nobody configured.
 function _stattic_spacefast_sdk_api_base_url(): ?string
 {
-    $base = rtrim(_stattic_config_value('SPACEFAST_API_BASE_URL'), '/');
-    return $base !== '' && filter_var($base, FILTER_VALIDATE_URL) ? $base : null;
+    require_once __DIR__ . '/../shared/jwt.php';
+    return _stattic_runtime_api_base_url() ?: null;
 }
 
 function _stattic_spacefast_sdk_host_is_local(mixed $host): bool
@@ -486,7 +486,7 @@ function _stattic_spacefast_sdk_host_is_local(mixed $host): bool
     if (!is_string($host)) {
         return false;
     }
-    $host = strtolower(trim($host));
+    $host = _stattic_normalize_hostname($host);
     return $host === 'localhost'
         || str_ends_with($host, '.localhost')
         || $host === '127.0.0.1'
@@ -563,15 +563,6 @@ function _stattic_comments_enabled_for_surface(array $serving): bool
     $comments = is_array($sdkConfig['comments'] ?? null) ? $sdkConfig['comments'] : [];
     $lane = _stattic_spacefast_preview_surface($serving) ? 'preview' : 'live';
     return ($comments[$lane] ?? null) === true;
-}
-
-function _stattic_comments_overlay_theme(array $comments): array
-{
-    $theme = _stattic_spacefast_collab_theme($comments);
-    return [
-        'accent' => $theme['accent'],
-        'hide_branding' => $theme['hideBranding'],
-    ];
 }
 
 /**
@@ -769,47 +760,32 @@ function _stattic_spacefast_collab_manifest(
 }
 
 /**
- * The Comments configuration for THIS host, assembled entirely on this host.
- *
- * Everything space-level (Cast endpoints, the published/preview toggles, the
- * theme, the feature set, the screenshot endpoint) rides the overlay. The
- * runtime adds only what it alone knows: which version host the visitor is on,
- * and its own same-origin ticket endpoint. Nothing here is per-page, so it can
- * be embedded verbatim in the cacheable SDK bootstrap. The SDK derives the one
- * per-page value, the room key, from location.pathname.
+ * The Comments facts THIS host resolves for the SDK bootstrap, the collab
+ * manifest and the ticket exchange: whether this surface collaborates, the Cast
+ * endpoint and resource, the same-origin ticket and upload endpoints, the
+ * notices flag and the orb accent. Everything space-level rides the overlay;
+ * nothing here is per-page.
  */
 function _stattic_comments_local_config(string $privateRoot, array $serving, string $requestHost): array
 {
     $sdkConfig = _stattic_spacefast_sdk_config($serving);
     $comments = is_array($sdkConfig['comments'] ?? null) ? $sdkConfig['comments'] : [];
     $origin = _stattic_comments_request_origin($requestHost);
-    $theme = _stattic_comments_overlay_theme($comments);
-    $endpoints = [
-        'ticket' => ($origin ?? '') . STATTIC_COMMENTS_TICKET_PATH,
-        'storage' => ($origin ?? '') . '/storage',
-    ];
+    $theme = ['accent' => _stattic_spacefast_collab_theme($comments)['accent']];
+    $endpoints = ['ticket' => ($origin ?? '') . STATTIC_COMMENTS_TICKET_PATH];
     $disabled = [
         'enabled' => false,
         'resource_key' => null,
-        'version' => ['id' => null, 'current' => null, 'url' => null],
-        'space' => ['live_url' => null],
         'theme' => $theme,
         'ws_url' => null,
         'endpoints' => $endpoints,
         'uploads' => null,
-        'features' => [
-            'picker' => true,
-            'drawing' => false,
-            'capture' => false,
-            'attachments' => false,
-            'notices' => false,
-        ],
+        'features' => ['notices' => false],
     ];
 
     $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : '';
     $resourceKey = _stattic_spacefast_sdk_config_string($sdkConfig, 'cast_resource_key');
     $wsUrl = _stattic_spacefast_sdk_config_string($sdkConfig, 'cast_ws_url');
-    $previewHost = _stattic_spacefast_preview_surface($serving);
     if (
         $spaceId === ''
         || $origin === null
@@ -820,9 +796,6 @@ function _stattic_comments_local_config(string $privateRoot, array $serving, str
         return $disabled;
     }
 
-    $versionId = is_string($serving['version_id'] ?? null) ? $serving['version_id'] : null;
-    $liveVersionId = is_string($serving['live_version_id'] ?? null) ? $serving['live_version_id'] : null;
-    $liveUrl = is_string($comments['live_url'] ?? null) ? $comments['live_url'] : null;
     $features = is_array($comments['features'] ?? null) ? $comments['features'] : [];
     // The read key rides the served config. That is the whole "fresh URLs"
     // mechanism: clients compose attachment URLs from {base, key} + id, nothing
@@ -832,13 +805,6 @@ function _stattic_comments_local_config(string $privateRoot, array $serving, str
     return [
         'enabled' => true,
         'resource_key' => $resourceKey,
-        'version' => [
-            // Comments-on-live IS the live context: no version URL to point at.
-            'id' => $previewHost ? $versionId : null,
-            'current' => $liveVersionId,
-            'url' => $previewHost ? $origin . '/' : null,
-        ],
-        'space' => ['live_url' => $previewHost ? $liveUrl : null],
         'theme' => $theme,
         'ws_url' => $wsUrl,
         'endpoints' => $endpoints,
@@ -846,13 +812,7 @@ function _stattic_comments_local_config(string $privateRoot, array $serving, str
             'base' => $origin . STATTIC_UPLOADS_PUBLIC_URL_PREFIX,
             'key' => _stattic_storage_read_key($privateRoot),
         ],
-        'features' => [
-            'picker' => ($features['picker'] ?? null) !== false,
-            'drawing' => ($features['drawing'] ?? null) === true,
-            'capture' => ($features['capture'] ?? null) === true,
-            'attachments' => ($features['attachments'] ?? null) === true,
-            'notices' => ($features['notices'] ?? null) === true,
-        ],
+        'features' => ['notices' => ($features['notices'] ?? null) === true],
     ];
 }
 

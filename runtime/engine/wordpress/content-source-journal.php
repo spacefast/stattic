@@ -247,10 +247,7 @@ function spacefast_content_source_journal_materialize_entry(int $postId, object 
     // A Page the content model projected from the capsule's own client source
     // belongs to the compiler: activation rewrites it on every publish, and
     // materializing it would hand the drain a file the capsule never asked for.
-    if (
-        function_exists('get_post_meta')
-        && (string) get_post_meta($postId, SPACEFAST_CONTENT_MODEL_PAGE_SOURCE_META, true) !== ''
-    ) {
+    if ((string) get_post_meta($postId, SPACEFAST_CONTENT_MODEL_PAGE_SOURCE_META, true) !== '') {
         return null;
     }
     return [
@@ -280,7 +277,6 @@ function spacefast_content_source_journal_entry(int $postId, object $post): ?arr
     if (!is_array($binding) || isset(SPACEFAST_CONTENT_SYNC_TAKEOVER_FORMATS[(string) $binding['format']])) {
         return null;
     }
-    $blocks = spacefast_content_sync_read_blocks($post, $binding);
     $ledger = spacefast_content_sync_ledger($postId);
     if (!is_array($ledger) || ($ledger['bindingId'] ?? null) !== $bindingId) {
         return null;
@@ -340,11 +336,8 @@ function spacefast_content_source_journal_write(array $entry, string $operationI
 }
 
 /** Conversion is a requested operation, never a side effect of saving blocks. */
-function spacefast_content_request_conversion(array $request, bool $managed): array
+function spacefast_content_request_conversion(array $request): array
 {
-    if (!$managed) {
-        throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content conversion requires Spacefast authorization.');
-    }
     $operationId = $request['operationId'] ?? null;
     $bindingId = $request['bindingId'] ?? null;
     if (!is_string($operationId) || preg_match('/^op_[A-Za-z0-9]+$/', $operationId) !== 1

@@ -45,6 +45,10 @@ import os from "node:os";
 import path from "node:path";
 
 import { errorDocsUrl, errorTitle } from "../../packages/common/src/contracts/error-codes.ts";
+import type {
+  RuntimeDrainedEvent,
+  RuntimeEventsDrainResponse,
+} from "../../packages/common/src/contracts/runtime-api.ts";
 import { FINALIZER_PROTOCOL } from "../../packages/routing/src/protocol.generated.ts";
 import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
 import { writeActiveReleasePointer } from "./active-release.ts";
@@ -625,6 +629,85 @@ function writeGeneratedConfig(root: string): void {
   );
 }
 
+export type PhpServer = { baseUrl: string; processId: number; stop: () => void };
+
+/**
+ * Serves `router` from `cwd` with `php -S` on a port PHP binds itself, and
+ * resolves once the server answers the engine health endpoint. PHP owns the
+ * ephemeral port from bind onward, so no probed port can be taken in between.
+ */
+export async function startPhpServer(input: {
+  binary?: string | undefined;
+  args: readonly string[];
+  router: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}): Promise<PhpServer> {
+  const server = spawn(
+    input.binary ?? PHP_BINARY,
+    [...input.args, "-S", "127.0.0.1:0", input.router],
+    {
+      cwd: input.cwd,
+      stdio: ["ignore", "ignore", "pipe"],
+      // PHP_CLI_SERVER_WORKERS forks children. Give the fixture its own process
+      // group so stop() can reap the whole server instead of leaking listeners
+      // after killing only the parent process.
+      detached: process.platform !== "win32",
+      env: input.env,
+    },
+  );
+  const listening = Promise.withResolvers<string>();
+  let diagnostics = "";
+  // Drain for the fixture's whole lifetime: PHP logs every request to stderr.
+  server.stderr.on("data", (chunk: Buffer) => {
+    diagnostics = (diagnostics + chunk.toString()).slice(-8192);
+    const match = diagnostics.match(
+      /Development Server \(http:\/\/127\.0\.0\.1:([1-9]\d*)\) started/,
+    );
+    if (match?.[1]) listening.resolve(`http://127.0.0.1:${match[1]}`);
+  });
+  server.once("error", listening.reject);
+  server.once("exit", (code, signal) => {
+    listening.reject(new Error(`php_exited:${code ?? signal}`));
+  });
+  const stop = () => {
+    if (process.platform !== "win32" && server.pid !== undefined) {
+      try {
+        process.kill(-server.pid, "SIGKILL");
+        return;
+      } catch {
+        // The parent may have exited before cleanup; fall back to the handle.
+      }
+    }
+    server.kill("SIGKILL");
+  };
+
+  const readiness = AbortSignal.timeout(10_000);
+  const abortStartup = () => listening.reject(new Error("php_server_start_timeout"));
+  readiness.addEventListener("abort", abortStartup, { once: true });
+  let baseUrl: string;
+  let processId: number;
+  try {
+    baseUrl = await listening.promise;
+    if (server.exitCode !== null || server.signalCode !== null) {
+      throw new Error(`php_exited:${server.exitCode ?? server.signalCode}`);
+    }
+    const response = await fetch(`${baseUrl}/__spacefast/health.php`, { signal: readiness });
+    if (server.exitCode !== null || server.signalCode !== null) {
+      throw new Error(`php_exited:${server.exitCode ?? server.signalCode}`);
+    }
+    if (!response.ok) throw new Error(`php_health_failed:${response.status}`);
+    if (server.pid === undefined) throw new Error("php_server_pid_missing");
+    processId = server.pid;
+  } catch (cause) {
+    stop();
+    throw new Error(`PHP fixture startup failed.\n${diagnostics}`, { cause });
+  } finally {
+    readiness.removeEventListener("abort", abortStartup);
+  }
+  return { baseUrl, processId, stop };
+}
+
 export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtime> {
   // realpathSync: macOS tmpdirs live behind the /var -> /private/var symlink.
   // The engine compares textually-normalized candidate paths against
@@ -674,82 +757,36 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
       }
     : {};
 
-  // PHP owns the ephemeral port from bind onward, including across Bun shards.
-  phpArgs.push("-S", "127.0.0.1:0", RUNTIME_TEST_ROUTER);
-  const server = spawn(options.phpBinary ?? PHP_BINARY, phpArgs, {
-    cwd: root,
-    stdio: ["ignore", "ignore", "pipe"],
-    // PHP_CLI_SERVER_WORKERS forks children. Give the fixture its own process
-    // group so stop() can reap the whole server instead of leaking listeners
-    // after killing only the parent process.
-    detached: process.platform !== "win32",
-    env: {
-      ...process.env,
-      ...DEFAULT_ENV,
-      SPACEFAST_RUNTIME_BIN: options.env?.SPACEFAST_RUNTIME_BIN ?? runtimeBinaryPath(),
-      ...edgeCaptureEnv,
-      ...options.env,
-    },
-  });
-  const listening = Promise.withResolvers<string>();
-  let diagnostics = "";
-  // Drain for the fixture's whole lifetime: PHP logs every request to stderr.
-  server.stderr.on("data", (chunk: Buffer) => {
-    diagnostics = (diagnostics + chunk.toString()).slice(-8192);
-    const match = diagnostics.match(
-      /Development Server \(http:\/\/127\.0\.0\.1:([1-9]\d*)\) started/,
-    );
-    if (match?.[1]) listening.resolve(`http://127.0.0.1:${match[1]}`);
-  });
-  server.once("error", listening.reject);
-  server.once("exit", (code, signal) => {
-    listening.reject(new Error(`php_exited:${code ?? signal}`));
-  });
-  const stopServer = () => {
-    if (process.platform !== "win32" && server.pid !== undefined) {
-      try {
-        process.kill(-server.pid, "SIGKILL");
-        return;
-      } catch {
-        // The parent may have exited before cleanup; fall back to the handle.
-      }
-    }
-    server.kill("SIGKILL");
-  };
-
-  const readiness = AbortSignal.timeout(10_000);
-  const abortStartup = () => listening.reject(new Error("php_server_start_timeout"));
-  readiness.addEventListener("abort", abortStartup, { once: true });
-  let baseUrl: string;
+  let server: PhpServer;
   try {
-    baseUrl = await listening.promise;
-    if (server.exitCode !== null || server.signalCode !== null) {
-      throw new Error(`php_exited:${server.exitCode ?? server.signalCode}`);
-    }
-    const response = await fetch(`${baseUrl}/__spacefast/health.php`, { signal: readiness });
-    if (server.exitCode !== null || server.signalCode !== null) {
-      throw new Error(`php_exited:${server.exitCode ?? server.signalCode}`);
-    }
-    if (!response.ok) throw new Error(`php_health_failed:${response.status}`);
+    server = await startPhpServer({
+      binary: options.phpBinary,
+      args: phpArgs,
+      router: RUNTIME_TEST_ROUTER,
+      cwd: root,
+      env: {
+        ...process.env,
+        ...DEFAULT_ENV,
+        SPACEFAST_RUNTIME_BIN: options.env?.SPACEFAST_RUNTIME_BIN ?? runtimeBinaryPath(),
+        ...edgeCaptureEnv,
+        ...options.env,
+      },
+    });
   } catch (cause) {
-    stopServer();
     edgeCapture?.stop();
     rmSync(root, { recursive: true, force: true });
-    throw new Error(`PHP fixture startup failed.\n${diagnostics}`, { cause });
-  } finally {
-    readiness.removeEventListener("abort", abortStartup);
+    throw cause;
   }
 
-  if (server.pid === undefined) throw new Error("php_server_pid_missing");
   return {
-    baseUrl,
+    baseUrl: server.baseUrl,
     root,
     engineRoot: path.join(root, ".stattic/releases/test/engine"),
     storageRoot: path.join(root, ".stattic", "storage"),
-    processId: server.pid,
+    processId: server.processId,
     edgePurges: edgeCapture ? edgePurges : undefined,
     stop: () => {
-      stopServer();
+      server.stop();
       edgeCapture?.stop();
       rmSync(root, { recursive: true, force: true });
     },
@@ -1313,24 +1350,12 @@ export async function putRoute(
 // Journal pull lane (contracts §10, D53)
 // ---------------------------------------------------------------------------
 
-export type JournalCursor = { file: string; offset: number; inode: number };
+// The contract keeps these optional for older bundles; the engine under test
+// always sends them.
+export type DrainedEvent = RuntimeDrainedEvent &
+  Required<Pick<RuntimeDrainedEvent, "cursor" | "event_id">>;
 
-export type DrainedEvent = {
-  delivery_id: string;
-  /** The position to ack through this event; the page cursor is the last one. */
-  cursor: JournalCursor;
-  event_id: string;
-  operation_id?: string;
-  event: Record<string, unknown>;
-};
-
-export type DrainResponse = {
-  delivered_count: number;
-  failed_count: number;
-  expired_count: number;
-  returned_count: number;
-  pending_count: number;
-  cursor: JournalCursor;
+export type DrainResponse = Required<Omit<RuntimeEventsDrainResponse, "events">> & {
   events: DrainedEvent[];
 };
 

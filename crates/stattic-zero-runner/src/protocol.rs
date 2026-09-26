@@ -12,13 +12,8 @@ pub(crate) struct InvokeEnvelope {
     pub protocol: String,
     pub version_root: String,
     pub endpoint_id: String,
-    /// Absent from an engine that predates the execution law. Read it through
-    /// `execution_mode()`, which derives the same mode the publish path would
-    /// have stamped, rather than refusing the whole envelope.
-    #[serde(default, rename = "executionMode")]
-    pub declared_execution_mode: Option<ExecutionMode>,
-    #[serde(default)]
-    pub artifact_path: Option<String>,
+    pub execution_mode: ExecutionMode,
+    pub artifact_path: String,
     pub request: InvokeRequest,
     pub context: InvokeContext,
     #[serde(default)]
@@ -43,17 +38,6 @@ pub(crate) struct InvokeRequest {
     pub body_base64: String,
 }
 
-impl InvokeEnvelope {
-    /// The mode the engine asserted for this request, or the derivation the
-    /// publish path applies when the engine on the box still predates the
-    /// execution law.
-    pub(crate) fn execution_mode(&self) -> ExecutionMode {
-        self.declared_execution_mode.unwrap_or_else(|| {
-            crate::artifacts::derived_execution_mode("endpoint", &self.request.method)
-        })
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InvokeContext {
@@ -72,8 +56,6 @@ pub(crate) struct InvokeContext {
     /// not be the way out of the trusted list.
     #[serde(default)]
     pub egress_scope: EgressScope,
-    pub auth_ref: String,
-    pub variables_ref: String,
 }
 
 #[cfg(test)]
@@ -85,6 +67,8 @@ mod tests {
             "protocol": "stattic.zero.invoke.v1",
             "versionRoot": "/versions/ver_1",
             "endpointId": "GET /api/thing",
+            "executionMode": "read",
+            "artifactPath": "zero/endpoints/thing.json",
             "request": {
                 "method": "GET",
                 "path": "/api/thing",
@@ -104,8 +88,6 @@ mod tests {
         let base = serde_json::json!({
             "spaceId": "spc_1",
             "versionId": "ver_1",
-            "authRef": "current",
-            "variablesRef": "finalized",
         });
         // An engine that predates the scope sends none, and a frozen capsule is
         // not a way out of the trusted list.

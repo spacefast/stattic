@@ -27,6 +27,14 @@ function _stattic_platform_error_action(string $pageId, int $status, string $mes
     return $action;
 }
 
+// The one refusal a signed machine route gives for every failure (bad path,
+// bad token, missing bytes, no credential): distinguishing them would confirm
+// which spaces carry what. Callers load shared/response.php.
+function _stattic_opaque_not_found(): never
+{
+    _stattic_response_send(404, "Not found.\n", 'text/plain; charset=utf-8', ['Cache-Control' => 'no-store']);
+}
+
 function _stattic_version_pending_action(): array
 {
     return _stattic_platform_error_action('version-pending', 503, "This version is not active yet.\n", 'public, max-age=0, s-maxage=30, must-revalidate');
@@ -42,13 +50,8 @@ function _stattic_runtime_artifact_metadata_valid_lazy(mixed $artifact): bool
         && $artifact['generated_at'] !== '';
 }
 
-function _stattic_version_files_root(string $privateRoot, string $spaceId, string $versionId): string
-{
-    return _stattic_version_root($privateRoot, $spaceId, $versionId) . '/files';
-}
-
-// The config lives beside the version's files (`../functions/`), not inside
-// them, so a publish can never write it. Only verified absence proves "no
+// The config lives in the version directory's `functions/`, outside the
+// published file tree, so a publish can never write it. Only verified absence proves "no
 // worker"; an unreadable or malformed config keeps the Functions lanes engaged
 // so a transient failure never collapses into 404.
 function _stattic_version_has_functions(string $versionRoot): bool
@@ -56,7 +59,7 @@ function _stattic_version_has_functions(string $versionRoot): bool
     return _stattic_functions_config_read($versionRoot)['kind'] !== 'absent';
 }
 
-// The ONE reader of the version-adjacent functions/config.json: the static
+// The ONE reader of the version's functions/config.json: the static
 // bypass probe (serve.php), the dispatch lane (functions-dispatch.php) and the
 // purge credential (functions-purge.php) all answer from this memo. Settled
 // outcomes (present, verified absent, malformed) are memoized; `unavailable` is
@@ -65,7 +68,7 @@ function _stattic_version_has_functions(string $versionRoot): bool
 function _stattic_functions_config_read(string $versionRoot): array
 {
     static $cache = [];
-    $path = dirname($versionRoot) . '/functions/config.json';
+    $path = $versionRoot . '/functions/config.json';
     if (array_key_exists($path, $cache)) {
         return $cache[$path];
     }
@@ -648,21 +651,13 @@ function _stattic_edge_owns_placed_rules(array $serving, array $placedHostnames,
     if ($placedHostnames === [] || !_stattic_serving_is_production_host($serving)) {
         return false;
     }
-    $host = _stattic_edge_scope_hostname($requestHost);
+    $host = _stattic_normalize_hostname($requestHost);
     foreach ($placedHostnames as $hostname) {
-        if (is_string($hostname) && _stattic_edge_scope_hostname($hostname) === $host) {
+        if (is_string($hostname) && _stattic_normalize_hostname($hostname) === $host) {
             return true;
         }
     }
     return false;
-}
-
-// Host comparison for the edge scope: case, port and the root dot are spellings
-// of one name, and the finalizer's list and the request line need not agree on
-// them.
-function _stattic_edge_scope_hostname(string $hostname): string
-{
-    return rtrim(_stattic_normalize_hostname(trim($hostname)), '.');
 }
 
 function _stattic_v4_version_for_host(array $hostEntry, array $overlay): ?string

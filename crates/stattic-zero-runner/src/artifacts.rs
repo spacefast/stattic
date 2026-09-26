@@ -5,10 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::constants::{
-    DB_CAPABILITY_ABI, ENDPOINTS_INDEX_FORMAT, ENDPOINTS_INDEX_KIND, ENDPOINT_FORMAT, QUICKJS_ABI,
-    RUNNER_ABI, RUN_FORMAT,
-};
+use crate::constants::{DB_CAPABILITY_ABI, ENDPOINT_FORMAT, QUICKJS_ABI, RUNNER_ABI, RUN_FORMAT};
 use crate::protocol::InvokeEnvelope;
 use crate::response::{error_response, RunnerResponse};
 
@@ -21,21 +18,6 @@ pub(crate) enum ExecutionMode {
     /// connection, and only reads are allowed. A handler that calls out to the
     /// network gets to do so without a write transaction open behind it.
     Action,
-}
-
-/// The execution mode a capsule published before the execution law never
-/// declared. `runtime/engine/admin/generate.php` stamps exactly this
-/// derivation onto an endpoint entry that arrives without one, and a run keeps
-/// `write` — everything a run could do before the split. The serve path must
-/// agree with the publish path, because both read the same frozen capsule.
-pub(crate) fn derived_execution_mode(kind: &str, method: &str) -> ExecutionMode {
-    if kind == "run" {
-        return ExecutionMode::Write;
-    }
-    match method.to_ascii_uppercase().as_str() {
-        "GET" | "HEAD" | "OPTIONS" => ExecutionMode::Read,
-        _ => ExecutionMode::Write,
-    }
 }
 
 /// The artifact exactly as it sits on disk. Every field a capsule published
@@ -105,15 +87,11 @@ pub(crate) struct EndpointArtifact {
 impl RawEndpointArtifact {
     fn resolve(self, envelope: &InvokeEnvelope) -> EndpointArtifact {
         let frozen_shape = self.execution_mode.is_none();
-        // The engine's mode is the better signal when the artifact has none:
-        // it comes from the compiled route entry, or from the run operation,
-        // which distinguishes a query run from a mutation run where the
-        // artifact's own `POST` cannot. Fall back to the method derivation
-        // only when the engine predates the law too.
-        let execution_mode = self
-            .execution_mode
-            .or(envelope.declared_execution_mode)
-            .unwrap_or_else(|| derived_execution_mode(&self.kind, &self.method));
+        // The engine's mode stands in when the artifact has none: it comes
+        // from the compiled route entry, or from the run operation, which
+        // distinguishes a query run from a mutation run where the artifact's
+        // own `POST` cannot.
+        let execution_mode = self.execution_mode.unwrap_or(envelope.execution_mode);
         EndpointArtifact {
             format: self.format,
             endpoint_id: self.endpoint_id,
@@ -139,15 +117,6 @@ impl RawEndpointArtifact {
             frozen_shape,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EndpointIndexArtifact {
-    format: String,
-    #[serde(rename = "artifact_kind")]
-    artifact_kind: String,
-    endpoints: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -314,44 +283,13 @@ pub(crate) fn read_endpoint_artifact(
 pub(crate) fn resolve_endpoint_artifact_path(
     envelope: &InvokeEnvelope,
 ) -> Result<PathBuf, RunnerResponse> {
-    if let Some(artifact_path) = envelope
-        .artifact_path
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        return resolve_version_path(&envelope.version_root, artifact_path)
-            .map_err(|message| error_response(422, "zero_artifact_path_invalid", &message));
-    }
-
-    let index_path = resolve_version_path(&envelope.version_root, "zero/endpoints-index.json")
-        .map_err(|message| error_response(422, "zero_endpoint_index_path_invalid", &message))?;
-    let raw = fs::read_to_string(&index_path).map_err(|error| {
-        error_response(503, "zero_endpoint_index_unreadable", &error.to_string())
-    })?;
-    let index: EndpointIndexArtifact = serde_json::from_str(&raw).map_err(|error| {
-        error_response(422, "zero_endpoint_index_malformed", &error.to_string())
-    })?;
-    if index.format != ENDPOINTS_INDEX_FORMAT || index.artifact_kind != ENDPOINTS_INDEX_KIND {
-        return Err(error_response(
-            422,
-            "zero_endpoint_index_invalid",
-            "Zero endpoint index format is unsupported.",
-        ));
-    }
-    let artifact_path = index.endpoints.get(&envelope.endpoint_id).ok_or_else(|| {
-        error_response(
-            404,
-            "zero_endpoint_not_found",
-            "Zero endpoint id is not present in the compiled endpoint index.",
-        )
-    })?;
-    resolve_version_path(&envelope.version_root, artifact_path)
+    resolve_version_path(&envelope.version_root, &envelope.artifact_path)
         .map_err(|message| error_response(422, "zero_artifact_path_invalid", &message))
 }
 
 impl EndpointArtifact {
     pub(crate) fn validate_for(&self, envelope: &InvokeEnvelope) -> Result<(), RunnerResponse> {
-        if self.execution_mode != envelope.execution_mode() {
+        if self.execution_mode != envelope.execution_mode {
             return Err(error_response(
                 422,
                 "zero_artifact_mode_invalid",

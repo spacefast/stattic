@@ -143,8 +143,7 @@ function _stattic_content_deployment_claims_path(string $privateRoot, string $ho
     if ($target['kind'] !== 'present') {
         return false;
     }
-    $versionRoot = _stattic_version_files_root($privateRoot, $target['space_id'], $target['version_id']);
-    $versionDir = dirname($versionRoot);
+    $versionDir = _stattic_version_root($privateRoot, $target['space_id'], $target['version_id']);
     $root = _stattic_v4_version_root_artifact($versionDir, $target['serving']['route_name'] ?? null);
     if ($root === null) {
         return false;
@@ -152,15 +151,15 @@ function _stattic_content_deployment_claims_path(string $privateRoot, string $ho
     if (_stattic_v4_entry($versionDir, $root, $path) !== null) {
         return true;
     }
-    if (_stattic_version_has_functions($versionRoot)) {
+    if (_stattic_version_has_functions($versionDir)) {
         require_once __DIR__ . '/../runtime/functions-dispatch.php';
-        if (_stattic_resolve_functions_route_action($versionRoot, ltrim($path, '/'), $method) !== null) {
+        if (_stattic_resolve_functions_route_action($versionDir, ltrim($path, '/'), $method) !== null) {
             return true;
         }
     }
     if (is_file($versionDir . '/zero/routes.php')) {
         require_once __DIR__ . '/../runtime/zero-routes.php';
-        $route = _stattic_resolve_zero_route_action($versionRoot, ltrim($path, '/'), $method);
+        $route = _stattic_resolve_zero_route_action($versionDir, ltrim($path, '/'), $method);
         if (is_array($route['action'] ?? null) || !empty($route['method_not_allowed'])) {
             return true;
         }

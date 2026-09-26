@@ -170,16 +170,13 @@ function _stattic_runtime_admin_run_route(string $privateRoot, array $route, arr
                 ? $required['space_id']
                 : null;
         }
+        $run = static fn () => $handler(...$args);
         if ($spaceLockId !== null) {
-            _stattic_runtime_with_space_write_lock($privateRoot, $spaceLockId, static function () use ($handler, $args): void {
-                $handler(...$args);
-            });
+            _stattic_runtime_with_space_write_lock($privateRoot, $spaceLockId, $run);
         } elseif ($route['lock'] !== 'none') {
-            _stattic_runtime_with_write_lock($privateRoot, static function () use ($handler, $args): void {
-                $handler(...$args);
-            });
+            _stattic_runtime_with_write_lock($privateRoot, $run);
         } else {
-            $handler(...$args);
+            $run();
         }
         return;
     }

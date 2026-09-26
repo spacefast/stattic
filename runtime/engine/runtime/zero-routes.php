@@ -67,7 +67,7 @@ function _stattic_load_zero_routes_artifact(string $versionRoot): array
 {
     // The error paths render and exit, so only validated arrays are ever cached.
     static $cache = [];
-    $path = dirname($versionRoot) . '/zero/routes.php';
+    $path = $versionRoot . '/zero/routes.php';
     if (array_key_exists($path, $cache)) {
         return $cache[$path];
     }

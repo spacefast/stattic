@@ -426,25 +426,6 @@ function _stattic_mail_outbox_tally(array &$summary, string $bucket, bool $commi
  *
  * @return array{claimed:int,delivered:int,retried:int,dead:int,lost:int,unavailable:bool}
  */
-/**
- * Bind the box's own database for a drain that no request configured.
- *
- * `_stattic_zero_runner_base_env()` is the engine's single provider-credential
- * resolver: the reserved labelled name, then `DATABASE_URL`, then the provider's
- * `DB_HOST`/`DB_NAME`/`DB_USER`/`DB_PASSWORD` tuple. Passing no application
- * configuration is deliberate — the outbox belongs to the box, never to whichever
- * Space happens to be live, so a Space's own declared database must not be
- * selected here. This is the same binding the retired management mail route did.
- */
-function _stattic_mail_outbox_bind_provider_database(): void
-{
-    $env = _stattic_zero_runner_base_env();
-    _stattic_db_broker_bind(
-        is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : null,
-        is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
-    );
-}
-
 function _stattic_mail_outbox_deliver_due(
     string $publicRoot,
     int $limit = STATTIC_MAIL_OUTBOX_MAX_PAGE,
@@ -460,7 +441,7 @@ function _stattic_mail_outbox_deliver_due(
     // unbound broker reads only the reserved `SPACEFAST_ZERO_DATABASE_URL`, so on
     // a provider box that exposes the ordinary `DB_*` tuple this returned
     // `unavailable` before claiming anything and queued mail never left.
-    _stattic_mail_outbox_bind_provider_database();
+    _stattic_db_broker_bind_provider();
     $connection = _stattic_db_broker_connection();
     if (!$connection instanceof mysqli) {
         $summary['unavailable'] = true;

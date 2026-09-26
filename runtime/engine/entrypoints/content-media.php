@@ -103,7 +103,7 @@ if (!is_dir($privateRoot)) {
     _stattic_content_media_refuse(503);
 }
 
-$requestHost = _stattic_normalize_hostname((string) ($_SERVER['HTTP_HOST'] ?? ''));
+$requestHost = _stattic_normalize_host_authority((string) ($_SERVER['HTTP_HOST'] ?? ''));
 $adminSession = _stattic_content_media_admin_session($privateRoot, $requestHost);
 $target = null;
 if (is_array($adminSession)) {

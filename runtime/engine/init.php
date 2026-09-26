@@ -44,7 +44,7 @@ if ($requestPath === null) {
         "Access path is invalid.\n"
     );
 }
-$requestHost = _stattic_normalize_hostname((string) ($_SERVER['HTTP_HOST'] ?? ''));
+$requestHost = _stattic_normalize_host_authority((string) ($_SERVER['HTTP_HOST'] ?? ''));
 
 _stattic_dispatch_public_alias_entrypoint($engineRoot, $requestPath, $requestUri);
 

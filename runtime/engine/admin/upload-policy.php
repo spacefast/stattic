@@ -8,7 +8,12 @@ declare(strict_types=1);
 // apps/control-plane/src/runtime/php-policy-parity.test.ts runs through this
 // file AND through staticUploadPathViolation, asserting one verdict per path.
 
+// Manifest scale ceilings: the runtime's last-resort boundary. No plan lowers
+// them; only the anonymous tier does, in the control plane. A skipped or
+// compromised control plane is why the boundary exists.
+const SPACEFAST_UPLOAD_MAX_FILES = 100000;
 const SPACEFAST_UPLOAD_MAX_PATH_BYTES = 1024;
+const SPACEFAST_UPLOAD_MAX_FILE_BYTES = 1073741824;
 const SPACEFAST_UPLOAD_EXECUTION_CONTROL_FILES = ['.htaccess', '.user.ini'];
 // Root-level docroot files this engine installs (from its own engine-manifest.json).
 const SPACEFAST_UPLOAD_RESERVED_ROOT_CONTROL_FILES = ['custom-redirects.php', 'engine-manifest.json', 'installer.php', 'wordpress-content-loader.php'];

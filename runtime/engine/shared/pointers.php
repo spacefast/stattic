@@ -121,9 +121,26 @@ function _sf_pointer_read(string $name, string $path): array
     return ['kind' => 'unavailable', 'value' => null];
 }
 
-// THE pointer write: tmp + rename, so a reader sees the whole old document or
-// the whole new one, never a torn one. Nothing to invalidate: the next read IS
-// the visibility protocol.
+// THE tmp + rename idiom, so a reader sees the whole old file or the whole new
+// one, never a torn one. The directory must exist; the caller owns what a
+// failure means. $mode, when given, is applied to the tmp file before it
+// becomes visible.
+function _sf_atomic_put(string $path, string $bytes, bool $lock, ?int $mode = null): bool
+{
+    $tmp = $path . '.tmp-' . bin2hex(random_bytes(6));
+    if (
+        file_put_contents($tmp, $bytes, $lock ? LOCK_EX : 0) !== strlen($bytes)
+        || ($mode !== null && !chmod($tmp, $mode))
+        || !rename($tmp, $path)
+    ) {
+        unlink($tmp);
+        return false;
+    }
+    return true;
+}
+
+// THE pointer write. Nothing to invalidate: the next read IS the visibility
+// protocol.
 function _sf_json_write(string $path, array $value): void
 {
     $encoded = json_encode($value, JSON_UNESCAPED_SLASHES);
@@ -131,10 +148,7 @@ function _sf_json_write(string $path, array $value): void
         throw new RuntimeException('pointer payload is not encodable: ' . $path);
     }
     _sf_artifact_mkdir(dirname($path));
-    $tmp = $path . '.tmp-' . bin2hex(random_bytes(6));
-    $body = $encoded . "\n";
-    if (file_put_contents($tmp, $body) !== strlen($body) || !rename($tmp, $path)) {
-        unlink($tmp);
+    if (!_sf_atomic_put($path, $encoded . "\n", false)) {
         throw new RuntimeException('pointer write failed: ' . $path);
     }
 }
@@ -158,10 +172,7 @@ function _sf_php_artifact_write(string $dir, string $base, string $code): string
         touch($path);
         return $name;
     }
-    $tmp = $path . '.tmp-' . bin2hex(random_bytes(6));
-    $written = file_put_contents($tmp, $code, LOCK_EX);
-    if ($written === false || $written !== strlen($code) || !rename($tmp, $path)) {
-        unlink($tmp);
+    if (!_sf_atomic_put($path, $code, true)) {
         throw new RuntimeException('artifact write failed: ' . $path);
     }
     if (function_exists('opcache_invalidate')) {
@@ -240,9 +251,7 @@ function _sf_php_cache_write(string $path, array $value): bool
     }
     try {
         _sf_artifact_mkdir(dirname($path));
-        $tmp = $path . '.tmp-' . bin2hex(random_bytes(6));
-        if (file_put_contents($tmp, $code) !== strlen($code) || !rename($tmp, $path)) {
-            unlink($tmp);
+        if (!_sf_atomic_put($path, $code, false)) {
             return false;
         }
     } catch (Throwable) {

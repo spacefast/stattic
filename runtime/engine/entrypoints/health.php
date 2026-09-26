@@ -17,5 +17,5 @@ _stattic_json_response(200, [
     'engine_version' => SPACEFAST_RUNTIME_ENGINE_VERSION,
     'engine_revision' => SPACEFAST_RUNTIME_ENGINE_REVISION,
     'site_state' => is_dir($storageRoot) ? 'configured' : 'unconfigured',
-    'request_hostname' => _stattic_normalize_hostname((string) ($_SERVER['HTTP_HOST'] ?? '')),
+    'request_hostname' => _stattic_normalize_host_authority((string) ($_SERVER['HTTP_HOST'] ?? '')),
 ], 'application/json', ['Cache-Control' => 'no-store']);

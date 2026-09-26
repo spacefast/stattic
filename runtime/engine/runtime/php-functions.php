@@ -52,6 +52,7 @@ require_once __DIR__ . '/../shared/safety.php';
 // The database credential and the socket live here and only here: sf_db() hands
 // tenant code operation frames, never a connection.
 require_once __DIR__ . '/../shared/db-broker.php';
+require_once __DIR__ . '/../shared/functions-wire.generated.php';
 // sf_spam()/sf_email() run the native `service-broker` executor, the same
 // one-shot child the Functions relay spawns for a dispatched worker.
 require_once __DIR__ . '/../shared/native-process.php';
@@ -82,7 +83,6 @@ const STATTIC_PHP_FUNCTIONS_DENIED_HEADER_PREFIXES = ['x-accel-'];
  * nothing can spend is only reach.
  */
 const STATTIC_PHP_FUNCTIONS_SERVICE_GRANT = ['spam.check', 'email.send'];
-const STATTIC_PHP_FUNCTIONS_SERVICE_GRANT_ENV = 'SPACEFAST_SERVICE_BROKER_GRANT';
 
 // A visitor holds an admission slot on this space's fpm pool for the whole
 // call, and the broker's own upstream timeout is 5s. This bounds a child that
@@ -194,7 +194,8 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
         _stattic_render_admission_shed(STATTIC_ADMISSION_RETRY_AFTER_SECONDS);
     }
 
-    $GLOBALS['SPACEFAST_PHP_FUNCTIONS_ADMISSION_ACQUIRED'] = true;
+    // The request's one admission slot: `_stattic_admission_acquire_once` takes no second.
+    $GLOBALS['SPACEFAST_ADMISSION_ACQUIRED'] = true;
 
     // ---- everything the handler may ask for, resolved BEFORE the jail -----
     $state['method'] = $method;
@@ -215,7 +216,7 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     //
     // One resolution feeds both bindings: the service broker writes an accepted
     // email into this space's own outbox, so it needs the same database URL.
-    $runnerEnv = _stattic_php_functions_runner_env((string) $context['version_root']);
+    $runnerEnv = _stattic_php_functions_runner_env((string) $context['version_dir']);
     $state['database'] = _stattic_php_functions_bind_database($runnerEnv);
     $state['services'] = _stattic_php_functions_bind_services($context, $runnerEnv);
 
@@ -428,13 +429,9 @@ function sf_json(mixed $data, int $status = 200): never
  *
  * @return array<string,string>
  */
-function _stattic_php_functions_runner_env(string $versionRoot): array
+function _stattic_php_functions_runner_env(string $versionDir): array
 {
-    $config = $versionRoot === ''
-        ? []
-        : _stattic_runtime_read_json(dirname($versionRoot) . '/' . STATTIC_ZERO_CONFIG_PATH);
-
-    return _stattic_zero_runner_base_env(is_array($config) ? $config : []);
+    return _stattic_zero_runner_base_env(_stattic_zero_runtime_config($versionDir));
 }
 
 /**
@@ -446,19 +443,14 @@ function _stattic_php_functions_runner_env(string $versionRoot): array
  */
 function _stattic_php_functions_bind_database(array $env): bool
 {
-    $url = is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : '';
-    $source = is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null)
-        ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE']
-        : null;
-    if ($url === '') {
+    _stattic_db_broker_bind_env($env);
+    if (($env['SPACEFAST_ZERO_DATABASE_URL'] ?? '') === '') {
         // An empty grant, not an absent one: `null` means every capability, so
         // an unattached space must be told what it may do.
-        _stattic_db_broker_bind(null, null);
         _stattic_db_broker_grant([]);
 
         return false;
     }
-    _stattic_db_broker_bind($url, $source);
     // The broker's own capability names (db-broker.php `_stattic_db_broker_capability_granted`).
     _stattic_db_broker_grant(['db.read', 'db.write']);
 
@@ -504,7 +496,7 @@ function _stattic_php_functions_bind_services(array $context, array $runnerEnv):
             // Set per call, not per request, at the call site.
             'invocationId' => '',
         ]) + [
-            STATTIC_PHP_FUNCTIONS_SERVICE_GRANT_ENV => implode(',', STATTIC_PHP_FUNCTIONS_SERVICE_GRANT),
+            SPACEFAST_FUNCTIONS_SERVICE_BROKER_GRANT_ENV => implode(',', STATTIC_PHP_FUNCTIONS_SERVICE_GRANT),
         ],
         'invocation' => 'phpfx_' . bin2hex(random_bytes(12)),
         'calls' => 0,

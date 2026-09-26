@@ -54,7 +54,7 @@ function _stattic_cron_target(string $privateRoot, string $requestHost): array
     $host = _stattic_v4_host_lookup(
         $privateRoot,
         $routesRead['value'],
-        _stattic_normalize_hostname($requestHost)
+        _stattic_normalize_host_authority($requestHost)
     );
     if ($host === false) {
         return ['kind' => 'unavailable'];
@@ -105,14 +105,11 @@ function _stattic_cron_manifest(string $privateRoot, string $spaceId, string $ve
         return null;
     }
 
-    $absolute = _stattic_runtime_blob_path($privateRoot, $spaceId, $sha);
-    if (!is_file($absolute)) {
-        // The bytes may have aged out to the cold tier; same promotion every
-        // other blob read takes.
-        require_once __DIR__ . '/tier.php';
-        $absolute = _stattic_tier_promote_blob($privateRoot, $spaceId, $sha) ?? '';
-    }
-    $raw = is_file($absolute)
+    // The bytes may have aged out to the cold tier; same promotion every other
+    // blob read takes.
+    require_once __DIR__ . '/tier.php';
+    $absolute = _stattic_runtime_local_blob($privateRoot, $spaceId, $sha);
+    $raw = $absolute !== null
         ? file_get_contents($absolute, false, null, 0, STATTIC_CRONS_MANIFEST_MAX_BYTES + 1)
         : false;
     if (!is_string($raw) || strlen($raw) > STATTIC_CRONS_MANIFEST_MAX_BYTES) {

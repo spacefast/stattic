@@ -29,9 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use crate::finalize::{
-    invalid, invalid_error, rewrite_json_compact, FileMeta, FinalizeError, Result,
-};
+use crate::finalize::{invalid, invalid_error, FileMeta, FinalizeError, Result};
 use crate::hash::stable_json_sha256;
 use crate::protocol::CACHE_CLASS_IMMUTABLE;
 use crate::responses::compiled_cache_class;
@@ -583,10 +581,19 @@ pub fn read_version_catalog(version_root: &Path) -> Result<Option<FileCatalog>> 
         path: path.clone(),
         source,
     })?;
+    embedded_version_catalog(&metadata, &path)
+}
+
+/// The catalog embedded in an already-parsed `metadata.json`, with the same
+/// verdicts as [`read_version_catalog`]; `path` only names the document in errors.
+pub(crate) fn embedded_version_catalog(
+    metadata: &Value,
+    path: &Path,
+) -> Result<Option<FileCatalog>> {
     let Some(embedded) = metadata.get(VERSION_CATALOG_METADATA_KEY) else {
         return Ok(None);
     };
-    let catalog: FileCatalog = serde_json::from_value(embedded.clone()).map_err(|_| {
+    let catalog = FileCatalog::deserialize(embedded).map_err(|_| {
         invalid_error(
             "runtime_file_catalog_invalid",
             format!("{} does not embed a readable catalog.", path.display()),
@@ -601,51 +608,18 @@ pub fn read_version_catalog(version_root: &Path) -> Result<Option<FileCatalog>> 
     Ok(Some(catalog))
 }
 
-/// Publishes the catalog into the version's `metadata.json` — the one document
-/// the blob collector sweeps, which is why it must never live anywhere else.
-///
-/// The rewrite is compact and never creates the version directory: this document
-/// is read back before it is written, so a missing parent means the version was
-/// deleted underneath the caller.
-pub fn write_version_catalog(version_root: &Path, catalog: &FileCatalog) -> Result<()> {
-    let path = version_root.join("metadata.json");
-    let bytes = fs::read(&path).map_err(|source| FinalizeError::Io {
-        path: path.clone(),
-        source,
-    })?;
-    let mut metadata: Value =
-        serde_json::from_slice(&bytes).map_err(|source| FinalizeError::Json {
-            path: path.clone(),
-            source,
-        })?;
-    let Some(fields) = metadata.as_object_mut() else {
-        return invalid(
-            "runtime_file_catalog_invalid",
-            format!("{} is not a metadata object.", path.display()),
-        );
-    };
-    fields.insert(
-        VERSION_CATALOG_METADATA_KEY.to_string(),
-        serde_json::to_value(catalog).map_err(|source| FinalizeError::Json {
-            path: path.clone(),
-            source,
-        })?,
-    );
-    rewrite_json_compact(&path, &metadata)
-}
-
 /// The digest two versions must share before a purge may be scoped to files.
 pub fn serving_digest(
     redirects: &Value,
     headers: &Value,
-    serving_config: &Value,
+    serving_config: &Map<String, Value>,
     control_plane_state: Option<&Value>,
 ) -> String {
     stable_json_sha256(&serde_json::json!({
         "redirects": redirects,
         "headers": headers,
         "serving": serving_config,
-        "state": control_plane_state.cloned().unwrap_or(Value::Null),
+        "state": control_plane_state,
     }))
 }
 

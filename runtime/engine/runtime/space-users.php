@@ -40,10 +40,9 @@ function _stattic_space_users_prepare(
     $route = _stattic_space_users_route($path);
     $control = STATTIC_ZERO_CONTROL_ROUTES[trim($path, '/')] ?? null;
     $start = is_array($control) && in_array($control['operation'], ['auth_start', 'auth_sign_out'], true);
-    $hasSession = _stattic_space_users_session_cookie() !== null;
-    $enabled = ($serving['users']['enabled'] ?? false) === true;
     if (!$route && !$start) return false;
-    if (!$enabled) {
+    $hasSession = _stattic_space_users_session_cookie() !== null;
+    if (($serving['users']['enabled'] ?? false) !== true) {
         if ($route) _stattic_problem_refused(404, 'space_users_disabled', 'Users is not enabled for this Space.');
         return false;
     }
@@ -59,7 +58,7 @@ function _stattic_space_users_prepare(
     $GLOBALS['SPACEFAST_SPACE_USERS_PROVIDER_CONFIGURATION'] = $providerConfiguration;
     $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
     $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
-    $GLOBALS['SPACEFAST_CONTENT_PUBLIC_ORIGIN'] = _stattic_space_users_origin($host);
+    $GLOBALS['SPACEFAST_CONTENT_PUBLIC_ORIGIN'] = _stattic_runtime_request_origin($host);
     if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
         $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] = [
             'private_root' => $privateRoot, 'method' => $method,
@@ -252,7 +251,7 @@ function _stattic_space_users_start(string $selected, string $returnPath): never
 function _stattic_space_users_admit_origin(string $method, string $host): void
 {
     $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-    $expected = _stattic_space_users_origin($host);
+    $expected = _stattic_runtime_request_origin($host);
     if (($origin !== '' && $origin !== $expected)
         || (!in_array($method, ['GET', 'HEAD', 'OPTIONS'], true) && $origin !== $expected)
         || ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '') === 'cross-site') {
@@ -395,16 +394,6 @@ function _stattic_space_users_return_begin(string $returnPath): void
     _stattic_space_users_set_cookie('sfi_app_return', $challenge . '.' . $binding, time() + 300);
 }
 
-function _stattic_space_users_origin(string $host): string
-{
-    $authority = (string) ($_SERVER['HTTP_HOST'] ?? $host);
-    if (preg_match('/\A[a-zA-Z0-9.-]+(?::[1-9][0-9]{0,4})?\z/', $authority) !== 1
-        || _stattic_normalize_hostname($authority) !== _stattic_normalize_hostname($host)) {
-        $authority = $host;
-    }
-    return _stattic_request_scheme() . '://' . strtolower($authority);
-}
-
 function _stattic_space_users_request_auth(array $serving, string $host): ?array
 {
     if (array_key_exists('SPACEFAST_SPACE_USERS_AUTH', $GLOBALS)) return $GLOBALS['SPACEFAST_SPACE_USERS_AUTH'];
@@ -413,7 +402,7 @@ function _stattic_space_users_request_auth(array $serving, string $host): ?array
     $privateRoot = _stattic_access_private_root();
     require_once __DIR__ . '/../shared/admission.php';
     _stattic_space_users_admit_origin(_stattic_runtime_request_method(), $host);
-    if (empty($GLOBALS['SPACEFAST_PHP_FUNCTIONS_ADMISSION_ACQUIRED'])) _stattic_admission_acquire_once($privateRoot, $serving, 'space_users_verify');
+    _stattic_admission_acquire_once($privateRoot, $serving, 'space_users_verify');
     _stattic_access_private_cache_flag(true);
     return $GLOBALS['SPACEFAST_SPACE_USERS_AUTH'] = _stattic_space_users_verify_session(
         $privateRoot, (string) $serving['space_id'], $host, $serving['users'], $cookie

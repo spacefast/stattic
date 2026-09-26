@@ -16,16 +16,13 @@ use crate::access::rule_value_is_set;
 use crate::content::{escape_attr, escape_html};
 #[cfg(not(target_family = "wasm"))]
 use crate::finalize::read_bounded;
-use crate::finalize::{invalid, php_like, sha256, FileMeta, Result};
+use crate::finalize::{invalid, FileMeta, Result};
 #[cfg(not(target_family = "wasm"))]
 use crate::protocol::{LISTING_ROWS_MARKER, PAGE_MAX_BYTES};
 use crate::serving_paths::is_private_serving_path as is_private;
 #[cfg(not(target_family = "wasm"))]
 use crate::storage::put_blob;
 use crate::transforms::{resolve_effective_config, ResolveEffectiveInput};
-
-pub(crate) const DEFAULT_EDGE_CACHE_CONTROL: &str =
-    "public, max-age=0, s-maxage=600, must-revalidate";
 
 /// The committed paths that are publicly served: not convention/config files,
 /// not dotfiles. Explicit compressed files keep their own public URLs.
@@ -468,7 +465,7 @@ pub fn build_lookup_map<'a>(
             lookup.insert(path.clone(), not_found_action());
             continue;
         }
-        let action = static_lookup_action("file", path, 200);
+        let action = static_lookup_action(path);
         lookup.insert(path.clone(), action.clone());
         if path == "index.html" {
             lookup.insert(String::new(), action.clone());
@@ -484,7 +481,7 @@ pub fn build_lookup_map<'a>(
     // every exact key would otherwise recompile the whole pattern list: 100
     // dynamic rules against 2,000 static ones is 200,000 compilations for one
     // version. Compile the pattern lane once and match it 2,000 times.
-    let compiled_patterns = compile_pattern_matchers(pattern_redirects);
+    let compiled_patterns = compile_redirect_matchers(pattern_redirects);
     for (request_path, rules) in exact_redirects {
         let Some((action, order)) = rules
             .as_array()
@@ -513,7 +510,7 @@ pub fn build_lookup_map<'a>(
 /// The pattern lane's matchers, compiled once, each paired with the rule's
 /// position in the ordered redirect list. Rules without a usable regex drop out
 /// here: they can never claim a request path, so they can never shadow one.
-fn compile_pattern_matchers(pattern_redirects: &[Value]) -> Vec<(i64, Regex)> {
+pub(crate) fn compile_redirect_matchers(pattern_redirects: &[Value]) -> Vec<(i64, Regex)> {
     pattern_redirects
         .iter()
         .filter_map(|rule| {
@@ -570,9 +567,7 @@ fn first_exact_redirect_action(rules: &[Value]) -> Option<(Value, i64)> {
     Some((
         json!({
             "action": "redirect",
-            "destination": destination,
             "status": status,
-            "cache_control": DEFAULT_EDGE_CACHE_CONTROL,
             "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         }),
         rule.get("order")
@@ -581,22 +576,19 @@ fn first_exact_redirect_action(rules: &[Value]) -> Option<(Value, i64)> {
     ))
 }
 
-pub(crate) fn static_lookup_action(action: &str, path: &str, status: u64) -> Value {
+fn static_lookup_action(path: &str) -> Value {
     json!({
-        "action": action,
+        "action": "file",
         "path": path,
-        "file_shard": &sha256(path.as_bytes())[..2],
-        "status": status,
+        "status": 200,
         "methods": ["GET", "HEAD"],
-        "forced_download_or_text": php_like(path),
     })
 }
 
-pub(crate) fn not_found_action() -> Value {
+fn not_found_action() -> Value {
     json!({
         "action": "not_found",
         "status": 404,
-        "cache_control": DEFAULT_EDGE_CACHE_CONTROL,
         "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     })
 }
@@ -970,12 +962,6 @@ mod tests {
             Some(&json!("not_found"))
         );
         assert_eq!(
-            lookup
-                .get("_headers")
-                .and_then(|action| action.get("cache_control")),
-            Some(&json!(DEFAULT_EDGE_CACHE_CONTROL))
-        );
-        assert_eq!(
             lookup.get("docs").and_then(|action| action.get("path")),
             Some(&json!("docs/index.html"))
         );
@@ -1001,10 +987,6 @@ mod tests {
             &json!("index.html"),
         );
         assert_eq!(lookup["old.html"]["action"], json!("redirect"));
-        assert_eq!(
-            lookup["old.html"]["cache_control"],
-            json!(DEFAULT_EDGE_CACHE_CONTROL)
-        );
         assert_eq!(
             lookup["old.html"]["methods"],
             json!(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
@@ -1045,6 +1027,6 @@ mod tests {
 
         assert!(!lookup.contains_key("docs/intro"));
         // A path no earlier pattern claims still gets the fast path.
-        assert_eq!(lookup["other"]["destination"], json!("/elsewhere"));
+        assert_eq!(lookup["other"]["action"], json!("redirect"));
     }
 }

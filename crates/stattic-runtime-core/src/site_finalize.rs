@@ -16,13 +16,12 @@ use crate::access::{
     compile_conventions, retain_response_header_operations, rule_is_placed_at_edge,
     rule_is_request_dependent, ConventionCompileInput, ConventionRoutingSummary,
 };
-use crate::artifacts::{
-    build_lookup_map, compile_listings, public_files, resolve_serving_config, static_lookup_action,
-};
+use crate::artifacts::{build_lookup_map, compile_listings, public_files, resolve_serving_config};
 use crate::catalog::{
-    build_catalog, catalog_delta, preview_image_path, read_version_catalog, serving_digest,
-    write_version_catalog, CatalogDelta, CatalogDigests, CatalogInput, DeltaServing, FileCatalog,
-    ImmutablePaths, ObjectIdentity, CATALOG_DELTA_METADATA_KEY, CATALOG_DIGESTS_METADATA_KEY,
+    build_catalog, catalog_delta, embedded_version_catalog, preview_image_path,
+    read_version_catalog, serving_digest, CatalogDelta, CatalogDigests, CatalogInput, DeltaServing,
+    FileCatalog, ImmutablePaths, ObjectIdentity, CATALOG_DELTA_METADATA_KEY,
+    CATALOG_DIGESTS_METADATA_KEY, VERSION_CATALOG_METADATA_KEY,
 };
 use crate::config::crons;
 use crate::config::diagnostics::DiagnosticSeverity;
@@ -35,13 +34,13 @@ use crate::csp::PlatformCspSources;
 use crate::finalize::{
     artifact_metadata, create_dir_all, file_meta, invalid, invalid_error, invalid_with_details,
     mime_for_path, read_bounded, remove_any, sha256, validate_id, validate_relative_path,
-    write_bytes, write_generated, write_json, write_php, AdoptablePath, FileMeta, FinalizeError,
-    Result,
+    write_bytes, write_generated, write_json, write_json_compact, write_php, AdoptablePath,
+    FileMeta, FinalizeError, Result,
 };
 use crate::hash::stable_json_sha256;
 use crate::model::{
-    FinalizeTelemetry, RuntimeDiagnostic, RuntimeDiagnosticSeverity, SiteFinalizeInput,
-    SiteFinalizeOutput, SITE_FINALIZE_OUTPUT_FORMAT,
+    FinalizeTelemetry, PhpActionRecord, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
+    SiteFinalizeInput, SiteFinalizeOutput, SITE_FINALIZE_OUTPUT_FORMAT,
 };
 use crate::policy::{validate_finalize_policy, FinalizePolicyContext};
 use crate::prepare::{
@@ -51,14 +50,15 @@ use crate::prepare::{
 };
 use crate::protocol::{
     ARTIFACT_SCHEMA_VERSION, CONFIG_ACCEPTED_FILES, CONFIG_FILE_MAX_BYTES, CRONS_ARTIFACT_PATH,
-    TEMPLATE_MAX_BYTES, TEMPLATE_VARIANT_FILE_LIMIT, TEMPLATE_VARIANT_ROUTE_LIMIT,
-    TEMPLATE_VARIANT_ROUTE_NAME_MAX_CHARS, THEME_STYLESHEET_PATH, VERSION_ROOT_POINTER_FILE,
+    LOOKUP_ASSET_EXTENSIONS, TEMPLATE_MAX_BYTES, TEMPLATE_VARIANT_FILE_LIMIT,
+    TEMPLATE_VARIANT_ROUTE_LIMIT, TEMPLATE_VARIANT_ROUTE_NAME_MAX_CHARS, THEME_STYLESHEET_PATH,
+    VERSION_ROOT_POINTER_FILE,
 };
 use crate::responses::{
     compile_response_table, publish_response_tables, ResponseCompileInput, DENY_ALL_ROBOTS,
 };
 use crate::route_inventory::{compile_route_inventory, RouteInventoryInput, ZERO_CONTROL_ROUTES};
-use crate::routing::{EdgeRuleSpec, OverlayRouting, PlacementReportEntry};
+use crate::routing::{strip_trailing_slash, EdgeRuleSpec, OverlayRouting, PlacementReportEntry};
 use crate::storage::{
     apply_templates, blob_path, blob_root, commit_session_files, install_blob_from, put_blob,
 };
@@ -79,13 +79,8 @@ fn readiness_rules_for_path<'a>(
     redirects_exact: &'a Map<String, Value>,
     redirects_pattern: &'a [Value],
 ) -> Result<Vec<&'a Value>> {
-    let exact_path = if request_path == "/" {
-        request_path
-    } else {
-        request_path.trim_end_matches('/')
-    };
     let mut rules = redirects_exact
-        .get(exact_path)
+        .get(&strip_trailing_slash(request_path))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -189,10 +184,10 @@ impl<'a> ReadinessLookup<'a> {
     }
 }
 
-fn zero_route_can_own_root(compiled_zero_routes: &[Value]) -> bool {
-    compiled_zero_routes
+fn zero_route_can_own_root(zero_routes: &[PhpActionRecord]) -> bool {
+    zero_routes
         .iter()
-        .any(|route| route.get("pattern").and_then(Value::as_str) == Some("/:splat"))
+        .any(|PhpActionRecord::InvokeZero { pattern, .. }| pattern == "/:splat")
 }
 
 fn readiness_clean_urls_enabled(serving_config: &Map<String, Value>, fallback: &Value) -> bool {
@@ -216,103 +211,14 @@ fn readiness_rewrite_target_path(destination: &str, request_path: &str) -> Strin
 }
 
 fn readiness_lookup_has_known_asset_extension(path: &str) -> bool {
-    let Some(extension) = Path::new(path).extension().and_then(|value| value.to_str()) else {
-        return false;
-    };
-    matches!(
-        extension.to_ascii_lowercase().as_str(),
-        "avif"
-            | "bmp"
-            | "br"
-            | "css"
-            | "eot"
-            | "gif"
-            | "gz"
-            | "ico"
-            | "jpeg"
-            | "jpg"
-            | "js"
-            | "json"
-            | "map"
-            | "mjs"
-            | "mp3"
-            | "mp4"
-            | "ogg"
-            | "otf"
-            | "png"
-            | "svg"
-            | "ttf"
-            | "wasm"
-            | "webm"
-            | "webmanifest"
-            | "webp"
-            | "woff"
-            | "woff2"
-            | "xml"
-            | "pdf"
-            | "csv"
-            | "rtf"
-            | "txt"
-            | "doc"
-            | "docx"
-            | "xls"
-            | "xlsx"
-            | "ppt"
-            | "pptx"
-            | "odt"
-            | "ods"
-            | "odp"
-            | "epub"
-            | "zip"
-            | "tar"
-            | "tgz"
-            | "rar"
-            | "7z"
-            | "bz2"
-            | "xz"
-            | "zst"
-            | "wav"
-            | "flac"
-            | "aac"
-            | "m4a"
-            | "m4v"
-            | "mov"
-            | "avi"
-            | "mkv"
-            | "weba"
-            | "oga"
-            | "ogv"
-            | "opus"
-            | "wmv"
-            | "flv"
-            | "mpg"
-            | "mpeg"
-            | "m3u8"
-            | "tif"
-            | "tiff"
-            | "heic"
-            | "heif"
-            | "jxl"
-            | "yaml"
-            | "yml"
-            | "toml"
-            | "sql"
-            | "ndjson"
-            | "jsonl"
-            | "geojson"
-            | "ics"
-            | "vcf"
-            | "exe"
-            | "dmg"
-            | "pkg"
-            | "deb"
-            | "rpm"
-            | "apk"
-            | "msi"
-            | "iso"
-            | "bin"
-            | "appimage"
-    )
+    Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            LOOKUP_ASSET_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
 }
 
 fn readiness_rewrite_status(
@@ -479,7 +385,7 @@ struct RuntimeReadinessRouting<'a> {
     lookup: &'a Map<String, Value>,
     serving_config: &'a Map<String, Value>,
     fallback: &'a Value,
-    compiled_zero_routes: &'a [Value],
+    zero_routes: &'a [PhpActionRecord],
 }
 
 fn runtime_readiness_target(
@@ -493,11 +399,11 @@ fn runtime_readiness_target(
         lookup,
         serving_config,
         fallback,
-        compiled_zero_routes,
+        zero_routes,
     } = routing;
     let lookup = &ReadinessLookup::new(lookup);
     if public_files.is_empty() {
-        if lookup.action("/").is_none() && zero_route_can_own_root(compiled_zero_routes) {
+        if lookup.action("/").is_none() && zero_route_can_own_root(zero_routes) {
             return invalid(
                 "runtime_readiness_public_target_unavailable",
                 "A dynamic runtime route owns the readiness root and no stable public object exists.",
@@ -670,24 +576,22 @@ fn run_finalize_pipeline(
     })?;
     write_crons_artifact(stage_root, files, substitution.routing_config.as_ref())?;
 
+    let absent = Map::new();
     let serving = input
         .body
         .get("serving")
         .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+        .unwrap_or(&absent);
     let config = serving
         .get("config")
         .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+        .unwrap_or(&absent);
     let metadata = input
         .session
         .get("metadata")
         .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let viewer = resolved_viewer(&metadata, &config);
+        .unwrap_or(&absent);
+    let viewer = resolved_viewer(metadata, config);
     // Everything the pipeline produces lands in the CAS: the tables address
     // blobs, and a blob is the only place a byte lives.
     let blobs = blob_root(private_root, &input.space_id);
@@ -695,14 +599,14 @@ fn run_finalize_pipeline(
     // The previous version's catalog, read ONCE: it gates per-file adoption
     // here and feeds the publish delta at the end of the pipeline.
     let previous_catalog = previous_version_catalog(input, private_root)?;
-    let context_digest = pipeline_context_digest(&config, &serving, &viewer, &metadata, files);
+    let context_digest = pipeline_context_digest(config, serving, &viewer, metadata, files);
     let adoptable = adoptable_paths(previous_catalog.as_ref(), &context_digest, files, &blobs);
     let pipeline = timed(&mut telemetry.html_pipeline_ms, || {
         materialize_html_pipeline(
             &stage_root.join("files"),
             files,
-            &serving,
-            &metadata,
+            serving,
+            metadata,
             &viewer,
             &adoptable,
             &mut diagnostics,
@@ -749,8 +653,7 @@ fn run_finalize_pipeline(
     // dispatch configuration rides in: the control plane sends `functions` only
     // for a version whose compiled metadata carries a worker.
     let has_worker = input.body.get("functions").is_some_and(Value::is_object);
-    let mut serving_config =
-        resolve_serving_config(&config, files, &private, &metadata, has_worker)?;
+    let mut serving_config = resolve_serving_config(config, files, &private, metadata, has_worker)?;
     if let Some(pages) = pages {
         serving_config.remove("fallback");
         write_php(&stage_root.join("pages.php"), &json!(pages))?;
@@ -790,7 +693,7 @@ fn run_finalize_pipeline(
             .map(|(path, _)| path.clone()),
         &ConventionCompileInput {
             assigned_hostnames: assigned_hostnames.clone(),
-            platform_csp_sources: platform_csp_sources(&serving)?,
+            platform_csp_sources: platform_csp_sources(serving)?,
             placement_enabled: input
                 .body
                 .get("placement_enabled")
@@ -859,7 +762,7 @@ fn run_finalize_pipeline(
     let compiled_zero = compile_trunk_zero(input, &artifact_meta, &mut diagnostics)?;
     telemetry.zero_compile_ms = elapsed_ms(zero_started);
     validate_finalize_policy(FinalizePolicyContext {
-        config: &config,
+        config,
         files,
         redirects_exact: &redirects_exact,
         redirects_pattern: &redirects_pattern,
@@ -879,17 +782,11 @@ fn run_finalize_pipeline(
             .get("directory_index")
             .unwrap_or(&Value::String("index.html".into())),
     );
-    let compiled_zero_routes: Vec<Value> = compiled_zero
-        .php_routes
-        .iter()
-        .filter_map(|record| serde_json::to_value(record).ok())
-        .collect();
-    lookup.extend(zero_control_lookup_actions(&input.body));
-    for record in &compiled_zero_routes {
-        let Some((path, action)) = exact_zero_lookup_action(record) else {
-            continue;
-        };
-        lookup.insert(path, action);
+    // Zero owns its exact paths ahead of any file. Readiness only needs to
+    // know an invocation answers there, never which one.
+    let zero_actions = zero_response_actions(&input.body, &compiled_zero.php_routes);
+    for path in zero_actions.keys() {
+        lookup.insert(path.clone(), json!({"action": "invoke_zero"}));
     }
     let fallback = build_fallback(&serving_config, files, &private);
     let readiness_target = runtime_readiness_target(
@@ -901,7 +798,7 @@ fn run_finalize_pipeline(
             lookup: &lookup,
             serving_config: &serving_config,
             fallback: &fallback,
-            compiled_zero_routes: &compiled_zero_routes,
+            zero_routes: &compiled_zero.php_routes,
         },
     )?;
     let zero_endpoint_count = compiled_zero.endpoint_artifacts.len();
@@ -945,9 +842,9 @@ fn run_finalize_pipeline(
             &stage_root.join("pages"),
             files,
             &serving_config,
-            &metadata,
+            metadata,
             &viewer,
-            &serving,
+            serving,
             &private,
         )
     })?;
@@ -956,10 +853,9 @@ fn run_finalize_pipeline(
     // `X-Robots-Tag` compiled into every HTML entry.
     let robots = put_blob(&blobs, DENY_ALL_ROBOTS.as_bytes())?;
 
-    let zero_actions = zero_response_actions(&input.body, &compiled_zero_routes);
     // Base map and every channel variant compile through the SAME inputs; only
     // the file map differs, so a routing decision cannot drift between them.
-    let noindex_host = noindex_host(&serving)?;
+    let noindex_host = noindex_host(serving)?;
     // Every image the served HTML advertises as its link preview, plus the
     // site-level one decoration writes into it (the version's `meta.image`,
     // else the dashboard's): an adopted page was not re-read for the tag the
@@ -1053,7 +949,7 @@ fn run_finalize_pipeline(
             &redirect_rules,
             &header_rules,
             &serving_config,
-            &serving,
+            serving,
         ),
         template_paths: substitution.substituted_paths.clone(),
         generated_at: &input.generated_at,
@@ -1079,7 +975,9 @@ fn run_finalize_pipeline(
         "diagnostics": diagnostics,
     });
     let artifacts_started = Instant::now();
-    write_json(
+    // Compact: the runtime is the only reader, and the embedded catalog can
+    // name six figures of paths (see `write_json_compact`).
+    write_json_compact(
         &stage_root.join("metadata.json"),
         &json!({
             "schema": ARTIFACT_SCHEMA_VERSION,
@@ -1095,7 +993,7 @@ fn run_finalize_pipeline(
                 "ogImagePath": viewer.get("og_image_path").cloned().unwrap_or(Value::Null),
             },
             "conventionFiles": metadata_convention_files,
-            "routes": compiled_zero_routes,
+            "routes": compiled_zero.php_routes,
             "zeroEndpointCount": zero_endpoint_count,
             "zeroRunCount": zero_run_count,
             "zeroPackSha256": zero_pack_sha256(&compiled_zero),
@@ -1112,6 +1010,10 @@ fn run_finalize_pipeline(
             // idempotent answer, which never re-runs the finalizer) has to give
             // back exactly what the first call did.
             CATALOG_DIGESTS_METADATA_KEY: catalog_digests,
+            // The canonical catalog itself. It lives in this document because
+            // it is the one the blob collector sweeps, and must never live
+            // anywhere else.
+            VERSION_CATALOG_METADATA_KEY: catalog,
             "variableDigests": substitution.variable_digests,
             "systemVariableDependencies": substitution.system_variable_dependencies,
             "routing": routing_summary,
@@ -1134,7 +1036,6 @@ fn run_finalize_pipeline(
             "generatedAt": input.generated_at,
         }),
     )?;
-    write_version_catalog(stage_root, &catalog)?;
     write_json(&stage_root.join("debug.json"), &debug_json)?;
     write_zero_artifacts(stage_root, &compiled_zero)?;
     validate_zero_artifacts(stage_root, zero_endpoint_count, zero_run_count)?;
@@ -1198,7 +1099,7 @@ fn catalog_serving_digest(
     serving_digest(
         redirect_rules,
         header_rules,
-        &Value::Object(serving_config.clone()),
+        serving_config,
         serving.get("state_digest"),
     )
 }
@@ -1258,10 +1159,10 @@ fn pipeline_context_digest(
     };
     stable_json_sha256(&json!({
         "engine": env!("CARGO_PKG_VERSION"),
-        "config": Value::Object(config.clone()),
-        "siteThemeCss": serving.get("theme_css").cloned().unwrap_or(Value::Null),
-        "viewer": Value::Object(viewer.clone()),
-        "siteTitle": metadata.get("title").cloned().unwrap_or(Value::Null),
+        "config": config,
+        "siteThemeCss": serving.get("theme_css"),
+        "viewer": viewer,
+        "siteTitle": metadata.get("title"),
         "faviconIco": files.contains_key(IMPLICIT_FAVICON_PATH),
         "themeJson": staged_sha("theme.json"),
         "themeStylesheet": staged_sha(THEME_STYLESHEET_PATH),
@@ -1699,7 +1600,7 @@ fn original_objects(
 
 /// The Zero control and exact-endpoint routes, as response-table actions.
 /// A pattern route stays in `zero/routes.php`, which the miss lane consults.
-fn zero_response_actions(body: &Value, compiled_zero_routes: &[Value]) -> Map<String, Value> {
+fn zero_response_actions(body: &Value, zero_routes: &[PhpActionRecord]) -> Map<String, Value> {
     let mut actions = Map::new();
     if body.get("zero").is_some_and(Value::is_object) {
         for (path, method, operation) in ZERO_CONTROL_ROUTES {
@@ -1713,26 +1614,29 @@ fn zero_response_actions(body: &Value, compiled_zero_routes: &[Value]) -> Map<St
             );
         }
     }
-    for record in compiled_zero_routes {
-        let Some(pattern) = record.get("pattern").and_then(Value::as_str) else {
-            continue;
-        };
+    for PhpActionRecord::InvokeZero {
+        pattern,
+        method,
+        execution_mode,
+        endpoint_id,
+        zero_artifact,
+        schema_hash,
+        capabilities,
+    } in zero_routes
+    {
         if pattern.contains(':') {
             continue;
         }
-        let Some(method) = record.get("method").and_then(Value::as_str) else {
-            continue;
-        };
         let mut action = json!({
             "t": "zero",
-            "endpoint": record.get("endpointId").cloned().unwrap_or(Value::Null),
-            "artifact": record.get("zeroArtifact").cloned().unwrap_or(Value::Null),
-            "execution_mode": record.get("executionMode").cloned().unwrap_or(Value::Null),
+            "endpoint": endpoint_id,
+            "artifact": zero_artifact,
+            "execution_mode": execution_mode,
             "methods": zero_methods(method),
-            "capabilities": record.get("capabilities").cloned().unwrap_or_else(|| json!({})),
+            "capabilities": capabilities,
         });
-        if let Some(schema_hash) = record.get("schemaHash") {
-            action["schema_hash"] = schema_hash.clone();
+        if let Some(schema_hash) = schema_hash {
+            action["schema_hash"] = json!(schema_hash);
         }
         actions.insert(pattern.trim_matches('/').to_string(), action);
     }
@@ -1840,47 +1744,6 @@ fn compile_trunk_zero(
     Ok(compiled)
 }
 
-/// The generated Zero control actions merged into the exact lookup map when a
-/// version declares a Zero runtime.
-fn zero_control_lookup_actions(body: &Value) -> Map<String, Value> {
-    if !body.get("zero").is_some_and(Value::is_object) {
-        return Map::new();
-    }
-    ZERO_CONTROL_ROUTES
-        .iter()
-        .map(|(path, method, operation)| {
-            (
-                path.trim_start_matches('/').to_string(),
-                json!({
-                    "action": "invoke_zero",
-                    "operation": operation,
-                    "methods": zero_methods(method),
-                }),
-            )
-        })
-        .collect()
-}
-
-fn exact_zero_lookup_action(record: &Value) -> Option<(String, Value)> {
-    let pattern = record.get("pattern")?.as_str()?;
-    if pattern.contains(':') {
-        return None;
-    }
-    let method = record.get("method")?.as_str()?;
-    let mut action = json!({
-        "action": "invoke_zero",
-        "endpoint_id": record.get("endpointId")?.clone(),
-        "zero_artifact": record.get("zeroArtifact")?.clone(),
-        "execution_mode": record.get("executionMode")?.clone(),
-        "methods": zero_methods(method),
-        "capabilities": record.get("capabilities").cloned().unwrap_or_else(|| json!({})),
-    });
-    if let Some(schema_hash) = record.get("schemaHash") {
-        action["schema_hash"] = schema_hash.clone();
-    }
-    Some((pattern.trim_matches('/').to_string(), action))
-}
-
 /// A compiled Zero artifact as JSON. These types are finalizer-owned and always
 /// serialize; a failure here is a bug in this crate, not bad publisher input.
 fn serialized<T: serde::Serialize>(value: &T) -> Value {
@@ -1955,13 +1818,13 @@ fn existing_finalize_output(
             "The existing immutable version metadata is unavailable.",
         )
     })?;
-    let metadata: Value = serde_json::from_slice(&bytes).map_err(|_| {
+    let document: Value = serde_json::from_slice(&bytes).map_err(|_| {
         invalid_error(
             "version_existing_invalid",
             "The existing immutable version metadata is invalid.",
         )
     })?;
-    let Some(metadata) = metadata.as_object() else {
+    let Some(metadata) = document.as_object() else {
         return invalid(
             "version_existing_invalid",
             "The existing immutable version metadata is invalid.",
@@ -1979,7 +1842,7 @@ fn existing_finalize_output(
     // The catalog is what a version IS: its file count, its digests, and the
     // proof it was published at all. A committed version without a readable one
     // answers nothing, so a replay refuses it rather than reporting ready.
-    let Some(catalog) = read_version_catalog(version_root)? else {
+    let Some(catalog) = embedded_version_catalog(&document, &metadata_path)? else {
         return invalid(
             "version_existing_invalid",
             "The existing immutable version embeds no file catalog.",
@@ -2404,6 +2267,8 @@ fn flatten_rules(exact: &Map<String, Value>, pattern: &[Value]) -> Value {
     Value::Array(out)
 }
 
+/// The configured fallback's status, for readiness, when it names a servable
+/// file; `Null` otherwise.
 fn build_fallback(
     config: &Map<String, Value>,
     files: &BTreeMap<String, FileMeta>,
@@ -2421,11 +2286,7 @@ fn build_fallback(
     {
         return Value::Null;
     }
-    static_lookup_action(
-        "fallback",
-        path,
-        f.get("status").and_then(Value::as_u64).unwrap_or(200),
-    )
+    json!({"status": f.get("status").and_then(Value::as_u64).unwrap_or(200)})
 }
 
 #[cfg(test)]
@@ -3570,7 +3431,7 @@ mod tests {
         execution_mode: &str,
         method: &str,
         path: &str,
-        artifact_path: Option<&str>,
+        artifact_path: &str,
     ) -> (u16, Value, Vec<Value>) {
         let envelope = json!({
             "protocol": "stattic.zero.invoke.v1",
@@ -3591,9 +3452,7 @@ mod tests {
             "context": {
                 "spaceId": "spc_zero_all_features",
                 "versionId": "ver_zero_all_features",
-                "schemaHash": null,
-                "authRef": "current",
-                "variablesRef": "finalized"
+                "schemaHash": null
             },
             "auth": {
                 "userId": "usr_zero_fixture",
@@ -3697,7 +3556,9 @@ mod tests {
             "read",
             "GET",
             "/api/health",
-            None,
+            endpoint_index["endpoints"]["GET /api/health"]
+                .as_str()
+                .unwrap(),
         );
         assert_eq!(status, 200);
         assert_eq!(body["installed"], no_capabilities);
@@ -3717,7 +3578,9 @@ mod tests {
             "read",
             "GET",
             "/api/capabilities",
-            None,
+            endpoint_index["endpoints"]["GET /api/capabilities"]
+                .as_str()
+                .unwrap(),
         );
         assert_eq!(status, 200);
         assert_eq!(body["installed"], auth_env_logging);

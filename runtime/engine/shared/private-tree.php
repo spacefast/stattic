@@ -9,13 +9,15 @@ declare(strict_types=1);
 // runs inside WordPress and answers failures by throwing Spacefast_Content_Error
 // for the entrypoint to turn into a problem document. shared/storage.php's
 // spellings answer with _stattic_problem_response(), which emits an HTTP
-// response and exits — fatal inside a WordPress request. So this file has no
-// requires at all, and every function here REPORTS (bool/null) instead of
-// deciding what a failure means. shared/storage.php keeps its loud engine-lane
+// response and exits — fatal inside a WordPress request. So this file requires
+// only the dependency-free shared/pointers.php, and every function here REPORTS
+// (bool/null) instead of deciding what a failure means. shared/storage.php keeps its loud engine-lane
 // wrappers on top; the kernel throws its own error.
 //
 // Nothing here is a substitute for the engine's asserts on the ENGINE lane:
 // _stattic_runtime_assert_private_path() still runs there first.
+
+require_once __DIR__ . '/pointers.php';
 
 // Every private tree on a site lives under this suffix of the install root, so
 // containment is decidable from the path text alone — no config, no globals.
@@ -129,14 +131,7 @@ function _stattic_private_tree_write_pointer(string $path, string $value): bool
         return false;
     }
     $contents = $value . "\n";
-    $temporary = $path . '.tmp.' . bin2hex(random_bytes(8));
-    $written = @file_put_contents($temporary, $contents, LOCK_EX);
-    if ($written !== strlen($contents) || !@chmod($temporary, 0640)) {
-        @unlink($temporary);
-        return false;
-    }
-    if (!@rename($temporary, $path)) {
-        @unlink($temporary);
+    if (!@_sf_atomic_put($path, $contents, true, 0640)) {
         return false;
     }
     if (_stattic_private_tree_read_pointer($path, strlen($contents)) === $value) {

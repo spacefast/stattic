@@ -48,7 +48,6 @@ pub struct RunnerMetrics {
 #[serde(rename_all = "camelCase")]
 pub struct RunnerStageMetrics {
     pub envelope_parse_ms: f64,
-    pub endpoint_index_ms: f64,
     pub artifact_read_ms: f64,
     pub bytecode_read_ms: f64,
     pub js_runtime_init_ms: f64,
@@ -59,7 +58,6 @@ pub struct RunnerStageMetrics {
 impl RunnerStageMetrics {
     fn has_samples(&self) -> bool {
         self.envelope_parse_ms > 0.0
-            || self.endpoint_index_ms > 0.0
             || self.artifact_read_ms > 0.0
             || self.bytecode_read_ms > 0.0
             || self.js_runtime_init_ms > 0.0
@@ -104,12 +102,6 @@ fn take_stage_metrics() -> Option<RunnerStageMetrics> {
 pub(crate) fn record_envelope_parse(started: Instant) {
     record_stage(started, |metrics, elapsed| {
         metrics.envelope_parse_ms += elapsed;
-    });
-}
-
-pub(crate) fn record_endpoint_index(started: Instant) {
-    record_stage(started, |metrics, elapsed| {
-        metrics.endpoint_index_ms += elapsed;
     });
 }
 

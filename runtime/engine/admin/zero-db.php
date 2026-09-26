@@ -240,10 +240,7 @@ function _stattic_zero_db_read_operation(array $config, string $operation): stri
 {
     $env = _stattic_zero_runner_base_env($config);
     _stattic_db_broker_set_read_deadline_ms(_stattic_zero_db_read_deadline_ms());
-    _stattic_db_broker_bind(
-        is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : null,
-        is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
-    );
+    _stattic_db_broker_bind_env($env);
     _stattic_db_broker_grant(['db.read']);
     $answer = _stattic_db_broker_execute($operation);
     // A dump reads many tables on one link, so the rollback lands per operation,

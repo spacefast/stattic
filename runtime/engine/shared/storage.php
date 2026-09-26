@@ -270,6 +270,54 @@ function _stattic_runtime_read_json(string $path): mixed
     return $decoded;
 }
 
+// ENOENT is a normal "no document" answer; a read FAILURE of an existing
+// document must abort the operation that needed it. Publishing a route index,
+// purge set, or tombstone state derived from a failed read deletes live state
+// (the management route answers 5xx and the control plane retries; the
+// maintenance tick journals maintenance_step_failed). Falling back to a full
+// rebuild is NOT a safe disposition either: the rebuild does the same reads.
+function _stattic_runtime_read_json_strict(string $path): mixed
+{
+    $decoded = _stattic_runtime_read_json($path);
+    if ($decoded === false) {
+        throw new RuntimeException('runtime document read failed: ' . $path);
+    }
+    return $decoded;
+}
+
+/**
+ * @return list<string> absolute child paths
+ */
+function _stattic_runtime_directory_entries_strict(string $root): array
+{
+    $paths = _stattic_runtime_directory_entries($root);
+    if ($paths === null) {
+        throw new RuntimeException('runtime document enumeration failed: ' . $root);
+    }
+    return $paths;
+}
+
+
+// The two per-space routing documents, strictly read and shape-checked. null =
+// verifiably absent; a read failure or a wrong shape throws, because a purge
+// set or route index derived from either would drop live hostnames. $spaceId,
+// when given, must match the document's own.
+function _stattic_runtime_space_routing_doc(string $spaceRoot, string $kind, ?string $spaceId = null): ?array
+{
+    [$file, $key, $label] = match ($kind) {
+        'intent' => ['hostname-intent.json', 'routes', 'hostname intent'],
+        'tombstones' => ['tombstones.json', 'hostnames', 'tombstones'],
+    };
+    $document = _stattic_runtime_read_json_strict($spaceRoot . '/' . $file);
+    if (
+        $document !== null
+        && (!is_array($document) || !is_array($document[$key] ?? null) || ($spaceId !== null && ($document['space_id'] ?? null) !== $spaceId))
+    ) {
+        throw new RuntimeException('runtime ' . $label . ' is invalid: ' . $spaceRoot);
+    }
+    return $document;
+}
+
 // A marker in the future (wall-clock rollback) reads as due: it must never
 // suppress a sweep permanently.
 function _stattic_marker_due(string $markerPath, int $intervalSeconds, int $now): bool
@@ -386,14 +434,7 @@ function _stattic_runtime_write_private_string(string $path, string $content): v
 {
     _stattic_runtime_mkdir(dirname($path));
     _stattic_runtime_assert_private_path($path);
-    $tmp = $path . '.tmp-' . bin2hex(random_bytes(6));
-    $written = file_put_contents($tmp, $content, LOCK_EX);
-    if ($written === false || $written !== strlen($content)) {
-        unlink($tmp);
-        _stattic_problem_response(500, 'runtime_write_failed', 'Runtime private write failed.');
-    }
-    if (!rename($tmp, $path)) {
-        unlink($tmp);
+    if (!_sf_atomic_put($path, $content, true)) {
         _stattic_problem_response(500, 'runtime_write_failed', 'Runtime private write failed.');
     }
 }
@@ -494,34 +535,34 @@ function _stattic_runtime_journal_files(string $privateRoot): array
     return $names;
 }
 
-// Complete lines from $offset, appending decoded records to $entries until it
-// holds $max. The returned resume offset is always a line start.
-function _stattic_runtime_journal_read_file(string $path, int $offset, int $max, array &$entries): int
+// Complete lines from $offset, appending [record, offset of its line end] to
+// $records until it holds $max. A line end is always a line start, so each
+// offset is where reading resumes after its record.
+function _stattic_runtime_journal_read_file(string $path, int $offset, int $max, array &$records): void
 {
     $handle = fopen($path, 'rb');
     if ($handle === false) {
-        return $offset;
+        return;
     }
     clearstatcache(true, $path);
     $size = (int) filesize($path);
     if ($offset > $size) {
         // Resuming past EOF would wedge the cursor forever; re-read instead.
-        fclose($handle);
-        return 0;
+        $offset = 0;
     }
     if (fseek($handle, $offset) !== 0) {
         fclose($handle);
-        return $offset;
+        return;
     }
     $position = $offset;
     $buffer = '';
-    while (count($entries) < $max) {
+    while (count($records) < $max) {
         $chunk = fread($handle, STATTIC_RUNTIME_JOURNAL_READ_CHUNK_BYTES);
         if (!is_string($chunk) || $chunk === '') {
             break;
         }
         $buffer .= $chunk;
-        while (count($entries) < $max) {
+        while (count($records) < $max) {
             $newline = strpos($buffer, "\n");
             if ($newline === false) {
                 break;
@@ -531,12 +572,11 @@ function _stattic_runtime_journal_read_file(string $path, int $offset, int $max,
             $position += $newline + 1;
             $decoded = json_decode($line, true);
             if (is_array($decoded)) {
-                $entries[] = $decoded;
+                $records[] = [$decoded, $position];
             }
         }
     }
     fclose($handle);
-    return $position;
 }
 
 // The inode a journal generation currently occupies, or 0 when it cannot be
@@ -578,12 +618,13 @@ function _stattic_runtime_journal_cursor_position(
 }
 
 /**
- * Journal records from $cursor forward, across rotation generations, never the
- * same record twice.
+ * Up to $max journal records from $cursor forward, across rotation generations,
+ * never the same record twice. Each record carries the cursor that resumes
+ * AFTER it: the coordinate a partial acknowledgement commits.
  *
  * @param  array{file?: string, offset?: int, inode?: int} $cursor  {} starts at
  *         the oldest surviving generation.
- * @return array{entries: list<array>, cursor: array{file: string, offset: int, inode: int}}
+ * @return list<array{entry: array, cursor: array{file: string, offset: int, inode: int}}>
  */
 function _stattic_runtime_journal_read(string $privateRoot, array $cursor, int $max): array
 {
@@ -601,30 +642,26 @@ function _stattic_runtime_journal_read(string $privateRoot, array $cursor, int $
         $inode
     );
 
-    $entries = [];
-    $file = $files[$index] ?? 'journal.jsonl';
-    $inode = 0;
-    for ($position = $index; $position < count($files); $position += 1) {
+    $records = [];
+    for ($position = $index; $position < count($files) && count($records) < $max; $position += 1) {
         // Identity BEFORE the read: if this generation is rotated out under the
         // reader, the inode still names the bytes that were just consumed.
         $positionInode = _stattic_runtime_journal_inode($privateRoot, $files[$position]);
-        $offset = _stattic_runtime_journal_read_file(
+        $read = [];
+        _stattic_runtime_journal_read_file(
             $privateRoot . '/runtime/' . $files[$position],
             $position === $index ? $offset : 0,
-            $max,
-            $entries
+            $max - count($records),
+            $read
         );
-        $file = $files[$position];
-        $inode = $positionInode;
-        if (count($entries) >= $max) {
-            break;
+        foreach ($read as [$entry, $end]) {
+            $records[] = [
+                'entry' => $entry,
+                'cursor' => ['file' => $files[$position], 'offset' => $end, 'inode' => $positionInode],
+            ];
         }
     }
-
-    return [
-        'entries' => $entries,
-        'cursor' => ['file' => $file, 'offset' => $offset, 'inode' => $inode],
-    ];
+    return $records;
 }
 
 // The event id hashes these exact bytes, so the hashed entry and the persisted
@@ -685,6 +722,21 @@ function _stattic_runtime_copy_private_file(string $source, string $target): voi
     if (!copy($source, $target)) {
         _stattic_problem_response(500, 'runtime_copy_failed', 'Private file copy failed.');
     }
+}
+
+// Moves a staged file to a unique pending sibling of $target and returns that
+// path; the caller commits it with its own rename. A cross-device staging
+// root falls back to copy + unlink.
+function _stattic_runtime_move_private(string $source, string $target): string
+{
+    _stattic_runtime_mkdir(dirname($target));
+    _stattic_runtime_assert_private_path($target);
+    $pending = $target . '.tmp-' . bin2hex(random_bytes(6));
+    if (!rename($source, $pending)) {
+        _stattic_runtime_copy_private_file($source, $pending);
+        unlink($source);
+    }
+    return $pending;
 }
 
 function _stattic_runtime_blob_path(string $privateRoot, string $spaceId, string $sha): string
@@ -819,6 +871,22 @@ const STATTIC_RUNTIME_VERSION_FILE_VIEWS = ['source', 'served'];
 // A publish session's life when its record carries no explicit expiry.
 const STATTIC_RUNTIME_UPLOAD_SESSION_DEFAULT_TTL_SECONDS = 86400;
 
+// A requested session expiry, normalized to ISO 8601; null when absent or
+// unparseable, so the caller picks its own default.
+function _stattic_runtime_publish_session_expiry(mixed $raw): ?string
+{
+    $parsed = is_string($raw) ? strtotime($raw) : false;
+    return $parsed === false ? null : gmdate('c', $parsed);
+}
+
+// An unparseable expiry never expires a session here; the store's retention
+// fallback reclaims it instead.
+function _stattic_runtime_publish_session_expired(array $session): bool
+{
+    $expiresAt = strtotime((string) ($session['expires_at'] ?? ''));
+    return $expiresAt !== false && $expiresAt < time();
+}
+
 /**
  * The open-publish-session record store. Here rather than on the upload surface
  * because it has two readers: the upload lane that writes it, and the blob gate,
@@ -871,8 +939,7 @@ function _stattic_runtime_publish_session_blob(
     if (!is_array($session) || ($session['space_id'] ?? null) !== $spaceId) {
         return null;
     }
-    $expiresAt = strtotime((string) ($session['expires_at'] ?? ''));
-    if ($expiresAt !== false && $expiresAt < time()) {
+    if (_stattic_runtime_publish_session_expired($session)) {
         return null;
     }
     $accepted = is_array($session['accepted'] ?? null) ? $session['accepted'] : [];
@@ -1299,13 +1366,7 @@ function _stattic_runtime_blob_commit_verified(string $privateRoot, string $spac
         unlink($tmpPath);
         return;
     }
-    _stattic_runtime_mkdir(dirname($target));
-    _stattic_runtime_assert_private_path($target);
-    $pending = $target . '.tmp-' . bin2hex(random_bytes(6));
-    if (!rename($tmpPath, $pending)) {
-        _stattic_runtime_copy_private_file($tmpPath, $pending);
-        unlink($tmpPath);
-    }
+    $pending = _stattic_runtime_move_private($tmpPath, $target);
     // Before the commit rename, so the blob is never visible at $target
     // carrying the download's clock reading.
     _stattic_stamp_content_mtime($pending, $expected);

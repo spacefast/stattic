@@ -95,8 +95,8 @@ function _stattic_runtime_static_zip_caps(array $claims): array
 {
     $caps = is_array($claims['static_zip_caps'] ?? null) ? $claims['static_zip_caps'] : null;
     $limits = [
-        'max_files' => STATTIC_RUNTIME_MANIFEST_MAX_FILES,
-        'max_file_bytes' => STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES,
+        'max_files' => SPACEFAST_UPLOAD_MAX_FILES,
+        'max_file_bytes' => SPACEFAST_UPLOAD_MAX_FILE_BYTES,
         // An archive expands into exactly one version, so its expansion ceiling
         // IS the per-version ceiling. Generated from the protocol rather than
         // restated, so ingest and the finalizer cannot disagree about it.
@@ -119,11 +119,11 @@ function _stattic_runtime_static_zip_caps(array $claims): array
 /** @return array{entries: list<array{index: int, path: string, size: int}>, expanded_bytes: int} */
 function _stattic_runtime_static_zip_preflight(ZipArchive $archive, array $caps): array
 {
-    if ($archive->numFiles > STATTIC_RUNTIME_MANIFEST_MAX_FILES) {
+    if ($archive->numFiles > SPACEFAST_UPLOAD_MAX_FILES) {
         _stattic_runtime_static_zip_problem(
             'publish_archive_file_count_exceeded',
-            'Inline publish archives support up to ' . STATTIC_RUNTIME_MANIFEST_MAX_FILES . ' entries.',
-            ['file_count' => $archive->numFiles, 'limit' => STATTIC_RUNTIME_MANIFEST_MAX_FILES],
+            'Inline publish archives support up to ' . SPACEFAST_UPLOAD_MAX_FILES . ' entries.',
+            ['file_count' => $archive->numFiles, 'limit' => SPACEFAST_UPLOAD_MAX_FILES],
         );
     }
 
@@ -176,13 +176,6 @@ function _stattic_runtime_static_zip_preflight(ZipArchive $archive, array $caps)
             );
         }
         _stattic_runtime_assert_static_upload_path($path);
-        if (strlen($path) > STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES) {
-            _stattic_runtime_static_zip_problem(
-                'manifest_path_too_long',
-                'Publish archive path exceeds the runtime manifest limit.',
-                ['path' => $path, 'bytes' => strlen($path), 'limit' => STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES],
-            );
-        }
         if (isset($allPaths[$path])) {
             _stattic_runtime_static_zip_problem(
                 'manifest_duplicate_path',

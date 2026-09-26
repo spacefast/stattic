@@ -337,11 +337,7 @@ function _stattic_engine_update_purge(string $privateRoot, string $revision): vo
     if (is_array($previous) && ($previous['revision'] ?? null) === $revision) {
         return;
     }
-    $hostnames = [];
-    foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
-        $hostnames = [...$hostnames, ..._stattic_runtime_space_sweep_hostnames($spaceRoot)];
-    }
-    _stattic_runtime_purge_now($privateRoot, ['hostnames' => $hostnames, 'reason' => 'engine_updated']);
+    _stattic_runtime_purge_now($privateRoot, ['hostnames' => _stattic_runtime_all_space_sweep_hostnames($privateRoot), 'reason' => 'engine_updated']);
     _stattic_runtime_write_json_atomic($marker, ['revision' => $revision]);
 }
 

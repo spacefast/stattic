@@ -1,11 +1,9 @@
 //! Which committed paths are privately held configuration versus publicly
 //! served content. Shared by the transform resolvers and finalize policy.
 
+use crate::protocol::{COMPILE_SIDECAR_FILES, CONFIG_ACCEPTED_FILES};
+
 const EXACT_PRIVATE_PATHS: &[&str] = &[
-    "_redirects",
-    "_headers",
-    "_config.json",
-    "_routes.json",
     ".well-known/spacefast-runtime",
     ".well-known/stattic-runtime",
     "zero",
@@ -19,23 +17,19 @@ const EXACT_PRIVATE_PATHS: &[&str] = &[
     "__spacefast/crons.json",
 ];
 
+/// Beyond [`CONFIG_ACCEPTED_FILES`], which are matched the same way.
 const CASE_INSENSITIVE_CONFIG_PATHS: &[&str] = &[
-    "sf.jsonc",
-    "spacefast.jsonc",
-    "spacefast.json",
-    "sf.json",
-    ".sf/sf.json",
-    ".sf/config.jsonc",
-    ".sf/config.json",
     ".stattic/routes.json",
     // A compile input for the generated theme stylesheet, not content.
     "theme.json",
 ];
 
 pub(crate) fn is_private_serving_path(path: &str) -> bool {
-    if EXACT_PRIVATE_PATHS.contains(&path)
-        || CASE_INSENSITIVE_CONFIG_PATHS
+    if COMPILE_SIDECAR_FILES.contains(&path)
+        || EXACT_PRIVATE_PATHS.contains(&path)
+        || CONFIG_ACCEPTED_FILES
             .iter()
+            .chain(CASE_INSENSITIVE_CONFIG_PATHS)
             .any(|config| config.eq_ignore_ascii_case(path))
         || path.starts_with("zero/")
         || path.starts_with("__spacefast/functions/bundles/")

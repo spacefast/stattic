@@ -1273,15 +1273,25 @@ fn normalize_path(value: &str) -> String {
     value.nfc().collect()
 }
 
-fn strip_trailing_slash(value: &str) -> String {
+/// A route path without its trailing slashes; root stays `/`.
+pub(crate) fn strip_trailing_slash(value: &str) -> String {
     if value == "/" {
         "/".into()
     } else {
         value.trim_end_matches('/').to_string()
     }
 }
-fn normalize_hostname(value: &str) -> String {
-    routing_trim(value).trim_end_matches('.').to_lowercase()
+/// THE hostname normalizer, the same rule as `normalizeHostname` in
+/// @spacefast/common and `_stattic_normalize_hostname` in the PHP engine, held
+/// together by packages/common/src/utils/hostname.fixtures.json. Trim WHATWG
+/// ASCII whitespace, drop a run of root dots, fold ASCII case: DNS
+/// case-insensitivity is ASCII-only (RFC 4343), and a Unicode fold would turn
+/// U+212A (Kelvin sign) into an ASCII `k`.
+pub(crate) fn normalize_hostname(value: &str) -> String {
+    value
+        .trim_matches(|ch| matches!(ch, '\t' | '\n' | '\u{C}' | '\r' | ' '))
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
 }
 fn push_escaped_regex_literal(output: &mut String, ch: char) {
     if matches!(
@@ -1490,6 +1500,26 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn hostname_normalization_matches_the_shared_corpus() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/common/src/utils/hostname.fixtures.json"
+        )))
+        .expect("the shared hostname corpus must be valid JSON");
+        for case in corpus["cases"].as_array().expect("cases must be an array") {
+            let input = case["input"].as_str().expect("input must be a string");
+            assert_eq!(
+                normalize_hostname(input),
+                case["hostname"]
+                    .as_str()
+                    .expect("hostname must be a string"),
+                "{input:?} ({})",
+                case["why"]
+            );
+        }
+    }
 
     #[test]
     fn compiles_full_redirect_and_header_shapes() {

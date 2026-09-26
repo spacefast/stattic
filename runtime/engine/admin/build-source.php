@@ -41,12 +41,7 @@ function _stattic_build_source_put(
         unlink($tmpPath);
         _stattic_problem_response(400, 'build_source_empty', 'Build source cannot be empty.');
     }
-    _stattic_runtime_mkdir(dirname($target));
-    $pending = $target . '.tmp-' . bin2hex(random_bytes(6));
-    if (!rename($tmpPath, $pending)) {
-        _stattic_runtime_copy_private_file($tmpPath, $pending);
-        unlink($tmpPath);
-    }
+    $pending = _stattic_runtime_move_private($tmpPath, $target);
     if (!rename($pending, $target)) {
         unlink($pending);
         _stattic_problem_response(500, 'build_source_commit_failed', 'Build source could not be committed.');

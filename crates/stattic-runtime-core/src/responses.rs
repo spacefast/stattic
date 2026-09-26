@@ -15,7 +15,7 @@ use regex::Regex;
 use crate::access::{
     bucket_pattern_rules, rule_is_placed_at_edge, rule_is_request_dependent, rule_value_is_set,
 };
-use crate::artifacts::CompiledListing;
+use crate::artifacts::{compile_redirect_matchers, CompiledListing};
 use crate::finalize::{
     content_mtime, create_dir_all, immutable_path, invalid_with_details, mime_for_path, php_like,
     sha256, write_bytes, write_json, FileMeta, Result,
@@ -829,21 +829,7 @@ impl<'a> RuleIndex<'a> {
     ) -> Self {
         // Compiling a regex costs orders of magnitude more than matching one,
         // and every compiled key would otherwise recompile the whole list.
-        let redirect_matchers = redirects_pattern
-            .iter()
-            .filter_map(|rule| {
-                let regex = rule
-                    .get("regex")
-                    .and_then(Value::as_str)
-                    .filter(|regex| !regex.is_empty())
-                    .and_then(|regex| Regex::new(regex).ok())?;
-                let order = rule
-                    .get("order")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(i64::MAX);
-                Some((order, regex))
-            })
-            .collect();
+        let redirect_matchers = compile_redirect_matchers(redirects_pattern);
 
         let mut ordered: Vec<&Value> = headers_exact
             .values()

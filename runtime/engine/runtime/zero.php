@@ -11,6 +11,7 @@ require_once __DIR__ . '/../shared/native-process.php';
 require_once __DIR__ . '/../shared/safety.php';
 require_once __DIR__ . '/../shared/html-insert.php';
 require_once __DIR__ . '/../shared/runtime-log.php';
+require_once __DIR__ . '/../shared/functions-wire.generated.php';
 require_once __DIR__ . '/access-rules.php';
 
 const STATTIC_ZERO_REQUEST_BODY_MAX_BYTES = 1048576;
@@ -50,8 +51,7 @@ function _stattic_invoke_zero(
 ): void {
     require_once __DIR__ . '/../shared/bootstrap-config.php';
     $operation = is_string($action['operation'] ?? null) ? $action['operation'] : 'endpoint';
-    $parentRoot = dirname($versionRoot);
-    $config = _stattic_zero_runtime_config($parentRoot);
+    $config = _stattic_zero_runtime_config($versionRoot);
     if ($operation === 'config') {
         _stattic_zero_send_config_response($config, $serving);
     }
@@ -62,7 +62,7 @@ function _stattic_invoke_zero(
         _stattic_zero_send_realtime_events($config, $requestMethod);
     }
     if ($operation === 'run') {
-        _stattic_zero_send_run_response($config, $parentRoot, $serving, $requestMethod, $requestHost);
+        _stattic_zero_send_run_response($config, $versionRoot, $serving, $requestMethod, $requestHost);
     }
 
     $executionMode = is_string($action['execution_mode'] ?? null) && $action['execution_mode'] !== ''
@@ -81,7 +81,7 @@ function _stattic_invoke_zero(
     // against the envelope after reading it, which is the check that matters.
     $artifactPath = (string) $action['artifact'];
     $envelope = _stattic_zero_envelope(
-        $parentRoot,
+        $versionRoot,
         $serving,
         (string) $action['endpoint'],
         $executionMode,
@@ -454,7 +454,7 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
     if ($relayAuth !== null) {
         $headers = (array) $envelope['request']['headers'];
         foreach (array_keys($headers) as $name) {
-            if ($name === 'authorization' || str_starts_with($name, 'sf-fx-')) unset($headers[$name]);
+            if ($name === 'authorization' || str_starts_with($name, SPACEFAST_FUNCTIONS_DISPATCH_HEADER_PREFIX)) unset($headers[$name]);
         }
         $envelope['request']['headers'] = _stattic_runtime_json_object($headers);
     }
@@ -635,14 +635,15 @@ function _stattic_zero_envelope(
     array $request,
     string $body,
     array $config,
-    ?string $artifactPath,
+    string $artifactPath,
     ?array $auth = null
 ): array {
-    $envelope = [
+    return [
         'protocol' => 'stattic.zero.invoke.v1',
         'versionRoot' => $versionRoot,
         'endpointId' => $endpointId,
         'executionMode' => $executionMode,
+        'artifactPath' => $artifactPath,
         'request' => [
             'method' => (string) ($request['method'] ?? ''),
             'path' => (string) ($request['path'] ?? ''),
@@ -660,17 +661,10 @@ function _stattic_zero_envelope(
             'schemaHash' => $schemaHash,
             'visitorIp' => _stattic_zero_trusted_visitor_ip(),
             'egressScope' => _stattic_egress_scope($serving),
-            'authRef' => 'current',
-            'variablesRef' => 'finalized',
         ],
         'auth' => $auth ?? _stattic_zero_auth_context($serving, (string) ($request['host'] ?? '')),
         'variables' => _stattic_runtime_json_object(_stattic_zero_string_map(is_array($config['variableValues'] ?? null) ? $config['variableValues'] : [])),
     ];
-    if ($artifactPath !== null) {
-        $envelope['artifactPath'] = $artifactPath;
-    }
-
-    return $envelope;
 }
 
 function _stattic_zero_send_run_frame(string $op, string $name, array $request, array $runnerResponse, string $runnerBody): never

@@ -456,7 +456,7 @@ function _stattic_visitor_verify(string $token, array $options): ?array
     // claim, rename and custom domains. The mint also records the serving host
     // in its own claim, which must equal the host this request arrived on, so a
     // token lifted from one origin is refused on every other.
-    $host = strtolower((string) ($options['host'] ?? ''));
+    $host = _stattic_normalize_hostname((string) ($options['host'] ?? ''));
     $expectedSpaceId = is_string($options['spaceId'] ?? null) ? $options['spaceId'] : '';
     $audience = is_string($claims['aud'] ?? null) ? $claims['aud'] : '';
     if ($host === '' || $audience === '' || $expectedSpaceId === '') {
@@ -465,7 +465,7 @@ function _stattic_visitor_verify(string $token, array $options): ?array
     if (!hash_equals($expectedSpaceId, $audience)) {
         return null;
     }
-    $hostClaim = is_string($claims['host'] ?? null) ? strtolower($claims['host']) : '';
+    $hostClaim = is_string($claims['host'] ?? null) ? _stattic_normalize_hostname($claims['host']) : '';
     if ($hostClaim === '' || !hash_equals($host, $hostClaim)) {
         return null;
     }

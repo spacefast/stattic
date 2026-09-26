@@ -60,6 +60,10 @@ const CONFIG_FILES: [&str; 7] = [
 pub const CONFIG_CANONICAL_FILE: &str = CONFIG_FILES[0];
 pub const CONFIG_ALIAS_FILES: &[&str] = CONFIG_FILES.split_at(1).1;
 pub const CONFIG_ACCEPTED_FILES: &[&str] = &CONFIG_FILES;
+/// Compile-input sidecars at the version root. Like the config files above
+/// they are read at compile time and never served.
+pub const COMPILE_SIDECAR_FILES: &[&str] =
+    &["_redirects", "_headers", "_config.json", "_routes.json"];
 
 /// The bytes one version may materialize, summed over its unique path set
 /// after retained/fresh replacement. THE ceiling: the finalizer enforces it
@@ -119,7 +123,6 @@ pub const EXECUTION_DB_OPERATIONS_DEFAULT: usize = 64;
 /// single execution to four such batches.
 pub const EXECUTION_DB_OPERATIONS_MAX: usize = 256;
 
-pub const PAGE_PROTOCOL_FORMAT: &str = "spacefast.page-protocol.v1";
 pub const BROKER_PROTOCOL: &str = "spacefast.broker.v1";
 
 /// The artifact schema the compiler emits. The engine accepts a *range*
@@ -230,13 +233,11 @@ pub const RESPONSE_KEY_ROBOTS: &str = "\0robots";
 
 /// Action discriminators carried in `a.t`.
 pub const RESPONSE_ACTION_ZERO: &str = "zero";
-pub const RESPONSE_ACTION_FUNCTION: &str = "fx";
 /// A committed `functions/<route>.php` executed in the hardened engine worker
 /// (runtime/engine/runtime/php-functions.php). Only a functions-route `.php`
 /// compiles to this action; every other `.php` stays inert (forced
 /// `text/plain` + `content-disposition: attachment`).
 pub const RESPONSE_ACTION_PHP: &str = "php";
-pub const RESPONSE_ACTION_PROXY: &str = "proxy";
 pub const RESPONSE_ACTION_LISTING: &str = "listing";
 pub const RESPONSE_ACTION_NOT_FOUND: &str = "404";
 
@@ -279,6 +280,105 @@ pub const PLATFORM_OWNED_HEADERS: &[&str] = &["x-ac", "x-nc", "x-sc"];
 pub const PROVIDER_ASSET_EXTENSIONS: &[&str] = &[
     "avif", "css", "eot", "gif", "jpeg", "jpg", "js", "mp3", "mp4", "otf", "pdf", "png", "svg",
     "ttf", "webm", "webp", "woff", "woff2",
+];
+
+/// Extensions that mark a missed request path as an asset rather than a
+/// client-side route, so a 200 SPA fallback never answers it. Deliberately a
+/// denylist, not "any extension present", so dotted client-side routes
+/// (`/users/jane.doe`, `/v1.2.3`) stay SPA-eligible. The serving engine and
+/// finalize's readiness probe both decide by this list.
+pub const LOOKUP_ASSET_EXTENSIONS: &[&str] = &[
+    "avif",
+    "bmp",
+    "br",
+    "css",
+    "eot",
+    "gif",
+    "gz",
+    "ico",
+    "jpeg",
+    "jpg",
+    "js",
+    "json",
+    "map",
+    "mjs",
+    "mp3",
+    "mp4",
+    "ogg",
+    "otf",
+    "png",
+    "svg",
+    "ttf",
+    "wasm",
+    "webm",
+    "webmanifest",
+    "webp",
+    "woff",
+    "woff2",
+    "xml",
+    "pdf",
+    "csv",
+    "rtf",
+    "txt",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    "odt",
+    "ods",
+    "odp",
+    "epub",
+    "zip",
+    "tar",
+    "tgz",
+    "rar",
+    "7z",
+    "bz2",
+    "xz",
+    "zst",
+    "wav",
+    "flac",
+    "aac",
+    "m4a",
+    "m4v",
+    "mov",
+    "avi",
+    "mkv",
+    "weba",
+    "oga",
+    "ogv",
+    "opus",
+    "wmv",
+    "flv",
+    "mpg",
+    "mpeg",
+    "m3u8",
+    "tif",
+    "tiff",
+    "heic",
+    "heif",
+    "jxl",
+    "yaml",
+    "yml",
+    "toml",
+    "sql",
+    "ndjson",
+    "jsonl",
+    "geojson",
+    "ics",
+    "vcf",
+    "exe",
+    "dmg",
+    "pkg",
+    "deb",
+    "rpm",
+    "apk",
+    "msi",
+    "iso",
+    "bin",
+    "appimage",
 ];
 
 /// The largest body finalize will commit to the PHP lane.
@@ -394,9 +494,7 @@ pub struct ResponseSpecialKeyMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct ResponseActionTypeMetadata {
     pub zero: &'static str,
-    pub function: &'static str,
     pub php: &'static str,
-    pub proxy: &'static str,
     pub listing: &'static str,
     pub not_found: &'static str,
 }
@@ -443,9 +541,7 @@ fn response_metadata() -> ResponseProtocolMetadata {
         },
         action_types: ResponseActionTypeMetadata {
             zero: RESPONSE_ACTION_ZERO,
-            function: RESPONSE_ACTION_FUNCTION,
             php: RESPONSE_ACTION_PHP,
-            proxy: RESPONSE_ACTION_PROXY,
             listing: RESPONSE_ACTION_LISTING,
             not_found: RESPONSE_ACTION_NOT_FOUND,
         },
@@ -785,6 +881,9 @@ pub fn php_source() -> String {
     let tenant_fetch_schemes = php_string_array(EgressProfile::TenantFetch.allowed_schemes());
     let proxy_route_schemes = php_string_array(EgressProfile::ProxyRoute.allowed_schemes());
     let provider_asset_extensions = php_string_array(PROVIDER_ASSET_EXTENSIONS);
+    let lookup_asset_extensions = php_string_array(LOOKUP_ASSET_EXTENSIONS);
+    let private_config_files = php_string_array(CONFIG_ACCEPTED_FILES);
+    let private_compile_files = php_string_array(COMPILE_SIDECAR_FILES);
     // The MySQL broker's operation shape, sourced from the Rust engine
     // `shared/db-broker.php` is specified against. Emitted under the engine's
     // own spelling so the PHP file consumes them where it used to restate them.
@@ -799,7 +898,7 @@ pub fn php_source() -> String {
     let platform_owned_prefixes = php_string_array(PLATFORM_OWNED_HEADER_PREFIXES);
     let platform_owned_headers = php_string_array(PLATFORM_OWNED_HEADERS);
     let responses = format!(
-        "\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA = {ARTIFACT_SCHEMA_VERSION};\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA_MIN = {ARTIFACT_SCHEMA_MIN};\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA_MAX = {ARTIFACT_SCHEMA_MAX};\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA_NAME = '{ARTIFACT_SCHEMA_NAME}';\nconst STATTIC_RUNTIME_ARTIFACT_HASH_PREFIX_LEN = {ARTIFACT_HASH_PREFIX_LEN};\nconst STATTIC_RUNTIME_VERSION_ROOT_POINTER_FILE = '{VERSION_ROOT_POINTER_FILE}';\nconst STATTIC_RUNTIME_VERSION_ROOT_BASENAME = '{VERSION_ROOT_BASENAME}';\nconst STATTIC_RUNTIME_RESPONSE_TABLE_BASENAME = '{RESPONSE_TABLE_BASENAME}';\nconst STATTIC_RUNTIME_RESPONSE_TABLE_SINGLE_KEY = '{RESPONSE_TABLE_SINGLE_KEY}';\nconst STATTIC_RUNTIME_RESPONSE_TABLE_SPLIT_BYTES = {RESPONSE_TABLE_SPLIT_BYTES};\nconst STATTIC_RUNTIME_RESPONSE_TABLE_MAX_BYTES = {RESPONSE_TABLE_MAX_BYTES};\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS = '{RESPONSE_ENTRY_STATUS}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_HEADERS = '{RESPONSE_ENTRY_HEADERS}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_BLOB = '{RESPONSE_ENTRY_BLOB}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_ETAG = '{RESPONSE_ENTRY_ETAG}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_LENGTH = '{RESPONSE_ENTRY_LENGTH}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_LANE = '{RESPONSE_ENTRY_LANE}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION = '{RESPONSE_ENTRY_ACTION}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_CACHE_CLASS = '{RESPONSE_ENTRY_CACHE_CLASS}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_RULES_FIRST = '{RESPONSE_ENTRY_RULES_FIRST}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_PLACEMENT = '{RESPONSE_ENTRY_PLACEMENT}';\nconst STATTIC_RUNTIME_RESPONSE_PLACEMENT_EDGE = '{RESPONSE_PLACEMENT_EDGE}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_PLACED_HOSTNAMES = '{RESPONSE_ENTRY_PLACED_HOSTNAMES}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_ALLOWLISTED_EXT = '{RESPONSE_ENTRY_ALLOWLISTED_EXT}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_PREVIEW_IMAGE = '{RESPONSE_ENTRY_PREVIEW_IMAGE}';\nconst STATTIC_RUNTIME_RESPONSE_LANE_ACCEL = {RESPONSE_LANE_ACCEL};\nconst STATTIC_RUNTIME_RESPONSE_LANE_PHP = {RESPONSE_LANE_PHP};\nconst STATTIC_RUNTIME_CACHE_CLASS_IMMUTABLE = '{CACHE_CLASS_IMMUTABLE}';\nconst STATTIC_RUNTIME_CACHE_CLASS_HTML = '{CACHE_CLASS_HTML}';\nconst STATTIC_RUNTIME_CACHE_CLASS_REVALIDATE = '{CACHE_CLASS_REVALIDATE}';\nconst STATTIC_RUNTIME_RESPONSE_KEY_SPA = \"\\0spa\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_NOT_FOUND = \"\\x00404\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_NOT_FOUND_PREFIX = \"\\x00404:\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_RULES = \"\\0rules\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_ROBOTS = \"\\0robots\";\nconst STATTIC_RUNTIME_RESPONSE_ACTION_ZERO = '{RESPONSE_ACTION_ZERO}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_FUNCTION = '{RESPONSE_ACTION_FUNCTION}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_PHP = '{RESPONSE_ACTION_PHP}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_PROXY = '{RESPONSE_ACTION_PROXY}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_LISTING = '{RESPONSE_ACTION_LISTING}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_NOT_FOUND = '{RESPONSE_ACTION_NOT_FOUND}';\nconst STATTIC_RUNTIME_PLATFORM_OWNED_HEADER_PREFIXES = {platform_owned_prefixes};\nconst STATTIC_RUNTIME_PLATFORM_OWNED_HEADERS = {platform_owned_headers};\nconst STATTIC_RUNTIME_PROVIDER_ASSET_EXTENSIONS = {provider_asset_extensions};\nconst STATTIC_RUNTIME_PHP_LANE_BODY_MAX_BYTES = {PHP_LANE_BODY_MAX_BYTES};\nconst STATTIC_RUNTIME_THEME_STYLESHEET_PATH = '{THEME_STYLESHEET_PATH}';\nconst STATTIC_RUNTIME_THEME_STYLESHEET_URL = '{THEME_STYLESHEET_URL}';\nconst STATTIC_RUNTIME_LISTING_ROWS_MARKER = '{LISTING_ROWS_MARKER}';\n"
+        "\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA = {ARTIFACT_SCHEMA_VERSION};\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA_MIN = {ARTIFACT_SCHEMA_MIN};\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA_MAX = {ARTIFACT_SCHEMA_MAX};\nconst STATTIC_RUNTIME_ARTIFACT_SCHEMA_NAME = '{ARTIFACT_SCHEMA_NAME}';\nconst STATTIC_RUNTIME_ARTIFACT_HASH_PREFIX_LEN = {ARTIFACT_HASH_PREFIX_LEN};\nconst STATTIC_RUNTIME_VERSION_ROOT_POINTER_FILE = '{VERSION_ROOT_POINTER_FILE}';\nconst STATTIC_RUNTIME_VERSION_ROOT_BASENAME = '{VERSION_ROOT_BASENAME}';\nconst STATTIC_RUNTIME_RESPONSE_TABLE_BASENAME = '{RESPONSE_TABLE_BASENAME}';\nconst STATTIC_RUNTIME_RESPONSE_TABLE_SINGLE_KEY = '{RESPONSE_TABLE_SINGLE_KEY}';\nconst STATTIC_RUNTIME_RESPONSE_TABLE_SPLIT_BYTES = {RESPONSE_TABLE_SPLIT_BYTES};\nconst STATTIC_RUNTIME_RESPONSE_TABLE_MAX_BYTES = {RESPONSE_TABLE_MAX_BYTES};\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS = '{RESPONSE_ENTRY_STATUS}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_HEADERS = '{RESPONSE_ENTRY_HEADERS}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_BLOB = '{RESPONSE_ENTRY_BLOB}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_ETAG = '{RESPONSE_ENTRY_ETAG}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_LENGTH = '{RESPONSE_ENTRY_LENGTH}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_LANE = '{RESPONSE_ENTRY_LANE}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION = '{RESPONSE_ENTRY_ACTION}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_CACHE_CLASS = '{RESPONSE_ENTRY_CACHE_CLASS}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_RULES_FIRST = '{RESPONSE_ENTRY_RULES_FIRST}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_PLACEMENT = '{RESPONSE_ENTRY_PLACEMENT}';\nconst STATTIC_RUNTIME_RESPONSE_PLACEMENT_EDGE = '{RESPONSE_PLACEMENT_EDGE}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_PLACED_HOSTNAMES = '{RESPONSE_ENTRY_PLACED_HOSTNAMES}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_ALLOWLISTED_EXT = '{RESPONSE_ENTRY_ALLOWLISTED_EXT}';\nconst STATTIC_RUNTIME_RESPONSE_ENTRY_PREVIEW_IMAGE = '{RESPONSE_ENTRY_PREVIEW_IMAGE}';\nconst STATTIC_RUNTIME_RESPONSE_LANE_ACCEL = {RESPONSE_LANE_ACCEL};\nconst STATTIC_RUNTIME_RESPONSE_LANE_PHP = {RESPONSE_LANE_PHP};\nconst STATTIC_RUNTIME_CACHE_CLASS_IMMUTABLE = '{CACHE_CLASS_IMMUTABLE}';\nconst STATTIC_RUNTIME_CACHE_CLASS_HTML = '{CACHE_CLASS_HTML}';\nconst STATTIC_RUNTIME_CACHE_CLASS_REVALIDATE = '{CACHE_CLASS_REVALIDATE}';\nconst STATTIC_RUNTIME_RESPONSE_KEY_SPA = \"\\0spa\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_NOT_FOUND = \"\\x00404\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_NOT_FOUND_PREFIX = \"\\x00404:\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_RULES = \"\\0rules\";\nconst STATTIC_RUNTIME_RESPONSE_KEY_ROBOTS = \"\\0robots\";\nconst STATTIC_RUNTIME_RESPONSE_ACTION_ZERO = '{RESPONSE_ACTION_ZERO}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_PHP = '{RESPONSE_ACTION_PHP}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_LISTING = '{RESPONSE_ACTION_LISTING}';\nconst STATTIC_RUNTIME_RESPONSE_ACTION_NOT_FOUND = '{RESPONSE_ACTION_NOT_FOUND}';\nconst STATTIC_RUNTIME_PLATFORM_OWNED_HEADER_PREFIXES = {platform_owned_prefixes};\nconst STATTIC_RUNTIME_PLATFORM_OWNED_HEADERS = {platform_owned_headers};\nconst STATTIC_RUNTIME_PROVIDER_ASSET_EXTENSIONS = {provider_asset_extensions};\nconst STATTIC_RUNTIME_LOOKUP_ASSET_EXTENSIONS = {lookup_asset_extensions};\nconst STATTIC_RUNTIME_PRIVATE_CONFIG_FILES = {private_config_files};\nconst STATTIC_RUNTIME_PRIVATE_COMPILE_FILES = {private_compile_files};\nconst STATTIC_RUNTIME_PHP_LANE_BODY_MAX_BYTES = {PHP_LANE_BODY_MAX_BYTES};\nconst STATTIC_RUNTIME_THEME_STYLESHEET_PATH = '{THEME_STYLESHEET_PATH}';\nconst STATTIC_RUNTIME_THEME_STYLESHEET_URL = '{THEME_STYLESHEET_URL}';\nconst STATTIC_RUNTIME_LISTING_ROWS_MARKER = '{LISTING_ROWS_MARKER}';\n"
     );
     format!(
         "<?php\ndeclare(strict_types=1);\n\n// @generated by `cargo run -p stattic-runtime-compiler --bin protocol-codegen -- --php`.\n// Rust protocol and Zero runner constants are the only editable authorities.\n\nconst STATTIC_RUNTIME_ZERO_RUNNER_ABI = '{}';\nconst STATTIC_RUNTIME_ZERO_QUICKJS_ABI = '{}';\nconst STATTIC_RUNTIME_ZERO_MIGRATIONS_FORMAT = '{}';\nconst STATTIC_RUNTIME_ZERO_BUNDLE_MAX_BYTES = {};\nconst STATTIC_RUNTIME_ZERO_BUNDLE_LIMIT = {};\nconst STATTIC_RUNTIME_EGRESS_MAX_REDIRECT_HOPS = {};\nconst STATTIC_RUNTIME_EGRESS_TENANT_FETCH_ALLOWED_SCHEMES = {};\nconst STATTIC_RUNTIME_EGRESS_PROXY_ROUTE_ALLOWED_SCHEMES = {};\nconst STATTIC_RUNTIME_EGRESS_DENIED_IPV4 = {};\nconst STATTIC_RUNTIME_EGRESS_DENIED_IPV6 = {};\nconst STATTIC_RUNTIME_EGRESS_INTERNAL_HOSTS = {};\nconst STATTIC_RUNTIME_EGRESS_TRUSTED_HOSTS = {};\nconst STATTIC_RUNTIME_BROKER_PROTOCOL = '{}';\nconst STATTIC_RUNTIME_EXECUTION_TIMEOUT_MS_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_TIMEOUT_MS_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_MEMORY_BYTES_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_MEMORY_BYTES_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_BODY_BYTES_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_BODY_BYTES_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_OUTPUT_BYTES_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_OUTPUT_BYTES_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_SUBREQUESTS_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_SUBREQUESTS_MAX = {};\nconst STATTIC_RUNTIME_EXECUTION_DB_OPERATIONS_DEFAULT = {};\nconst STATTIC_RUNTIME_EXECUTION_DB_OPERATIONS_MAX = {};\nconst STATTIC_RUNTIME_CONFIG_INJECT_SNIPPET_LIMIT = {};\nconst STATTIC_RUNTIME_CONFIG_INJECT_SNIPPET_MAX_BYTES = {};\nconst STATTIC_RUNTIME_VERSION_MAX_TOTAL_BYTES = {};\n{}{}",

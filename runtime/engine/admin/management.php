@@ -27,19 +27,7 @@ require_once __DIR__ . '/components.php';
 
 function _stattic_runtime_with_write_lock(string $privateRoot, callable $callback): void
 {
-    $lockDir = $privateRoot . '/runtime';
-    _stattic_runtime_mkdir($lockDir);
-    _stattic_runtime_acquire_write_lock($lockDir . '/write.lock', $callback);
-}
-
-/** Bind provider-backed journal management without the current application configuration. */
-function _stattic_runtime_application_journal_bind_db(): void
-{
-    $env = _stattic_zero_runner_base_env();
-    _stattic_db_broker_bind(
-        is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : null,
-        is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
-    );
+    _stattic_runtime_acquire_write_lock($privateRoot . '/runtime/write.lock', $callback);
 }
 
 function _stattic_runtime_application_journal_drain(string $privateRoot, array $claims): void
@@ -56,7 +44,7 @@ function _stattic_runtime_application_journal_drain(string $privateRoot, array $
     ) {
         _stattic_problem_response(422, 'application_journal_drain_invalid', 'Application journal drain request is invalid.');
     }
-    _stattic_runtime_application_journal_bind_db();
+    _stattic_db_broker_bind_provider();
     $connection = _stattic_db_broker_connection();
     if (!$connection instanceof mysqli) {
         _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.', [
@@ -82,7 +70,7 @@ function _stattic_runtime_application_journal_complete(string $privateRoot, arra
     if (!is_array($receipts) || !array_is_list($receipts) || count($receipts) > STATTIC_APPLICATION_JOURNAL_MAX_PAGE) {
         _stattic_problem_response(422, 'application_journal_receipts_invalid', 'Application journal receipts are invalid.');
     }
-    _stattic_runtime_application_journal_bind_db();
+    _stattic_db_broker_bind_provider();
     $connection = _stattic_db_broker_connection();
     if (!$connection instanceof mysqli) {
         _stattic_problem_response(503, 'application_journal_unavailable', 'Application journal storage is unavailable.', [
@@ -116,9 +104,7 @@ function _stattic_runtime_with_space_write_lock(string $privateRoot, string $spa
         $spaceId,
         STATTIC_LOCK_WAIT,
         _stattic_runtime_write_lock_unavailable(...),
-        static function () use ($callback): void {
-            $callback();
-        },
+        $callback,
     );
 }
 
@@ -128,9 +114,7 @@ function _stattic_runtime_with_space_write_lock(string $privateRoot, string $spa
 // strictly site -> space -> index; every acquire path must follow it.
 function _stattic_runtime_with_route_index_lock(string $privateRoot, callable $callback): void
 {
-    $lockDir = $privateRoot . '/routes';
-    _stattic_runtime_mkdir($lockDir);
-    _stattic_runtime_acquire_write_lock($lockDir . '/index.lock', $callback);
+    _stattic_runtime_acquire_write_lock($privateRoot . '/routes/index.lock', $callback);
 }
 
 // apps/control-plane treats the 503 runtime_write_lock_unavailable code as
@@ -147,25 +131,18 @@ function _stattic_runtime_write_lock_unavailable(): never
 
 function _stattic_runtime_acquire_write_lock(string $lockPath, callable $callback): void
 {
-    _stattic_lock_with(
-        $lockPath,
-        STATTIC_LOCK_WAIT,
-        _stattic_runtime_write_lock_unavailable(...),
-        static function () use ($callback): void {
-            $callback();
-        },
-    );
+    _stattic_runtime_mkdir(dirname($lockPath));
+    _stattic_lock_with($lockPath, STATTIC_LOCK_WAIT, _stattic_runtime_write_lock_unavailable(...), $callback);
 }
 
 function _stattic_runtime_upload_session_for_version(string $privateRoot, string $spaceId, string $versionId): ?array
 {
-    $now = time();
     foreach (_stattic_record_store_records(_stattic_runtime_publish_sessions_store($privateRoot, $spaceId)) as $candidateId => $candidate) {
-        if (($candidate['space_id'] ?? null) !== $spaceId || ($candidate['version_id'] ?? null) !== $versionId) {
-            continue;
-        }
-        $expiresAt = strtotime((string) ($candidate['expires_at'] ?? ''));
-        if ($expiresAt !== false && $expiresAt < $now) {
+        if (
+            ($candidate['space_id'] ?? null) !== $spaceId
+            || ($candidate['version_id'] ?? null) !== $versionId
+            || _stattic_runtime_publish_session_expired($candidate)
+        ) {
             continue;
         }
         return ['upload_id' => $candidateId, 'session' => $candidate];
@@ -193,13 +170,9 @@ function _stattic_runtime_create_version(string $privateRoot, string $spaceId, a
     $retention = _stattic_runtime_retention_mode($body['retention'] ?? null, $reusableVersionId, $retainedFiles);
     $uploadId = _stattic_runtime_new_id('upl');
     $createdAt = gmdate('c');
-    $expiresAt = isset($body['expires_at']) && is_string($body['expires_at']) && strtotime($body['expires_at']) !== false
-        ? gmdate('c', (int) strtotime($body['expires_at']))
-        : gmdate('c', time() + STATTIC_RUNTIME_UPLOAD_SESSION_DEFAULT_TTL_SECONDS);
+    $requestedExpiresAt = _stattic_runtime_publish_session_expiry($body['expires_at'] ?? null);
+    $expiresAt = $requestedExpiresAt ?? gmdate('c', time() + STATTIC_RUNTIME_UPLOAD_SESSION_DEFAULT_TTL_SECONDS);
     $manifestHash = isset($body['manifest_hash']) && is_string($body['manifest_hash']) ? $body['manifest_hash'] : null;
-    $requestedExpiresAt = isset($body['expires_at']) && is_string($body['expires_at']) && strtotime($body['expires_at']) !== false
-        ? gmdate('c', (int) strtotime($body['expires_at']))
-        : null;
     $metadata = is_array($body['metadata'] ?? null) ? $body['metadata'] : [];
     $requestDigest = _stattic_runtime_canonical_request_digest([
         'version_id' => $versionId,
@@ -664,22 +637,12 @@ function _stattic_runtime_state_summary(string $privateRoot): array
             }
             $routes[$pointer['route_name']] = $pointer['version_id'];
         }
-        $intentDoc = _stattic_runtime_read_json_strict($spaceRoot . '/hostname-intent.json');
-        if ($intentDoc !== null && (!is_array($intentDoc) || !is_array($intentDoc['routes'] ?? null))) {
-            throw new RuntimeException('runtime state hostname intent invalid: ' . $spaceRoot);
-        }
-        $intent = is_array($intentDoc) ? $intentDoc : [];
-        $tombstonesDoc = _stattic_runtime_read_json_strict($spaceRoot . '/tombstones.json');
-        if ($tombstonesDoc !== null && (!is_array($tombstonesDoc) || !is_array($tombstonesDoc['hostnames'] ?? null))) {
-            throw new RuntimeException('runtime state tombstones invalid: ' . $spaceRoot);
-        }
-        $tombstones = is_array($tombstonesDoc) ? $tombstonesDoc : [];
+        $intent = _stattic_runtime_space_routing_doc($spaceRoot, 'intent') ?? [];
+        $tombstones = _stattic_runtime_space_routing_doc($spaceRoot, 'tombstones') ?? [];
         $spaces[] = [
             'space_id' => basename($spaceRoot),
             'routes' => (object) $routes,
-            'tombstone_count' => is_array($tombstones['hostnames'] ?? null)
-                ? count($tombstones['hostnames'])
-                : 0,
+            'tombstone_count' => count($tombstones['hostnames'] ?? []),
             'intent_hostnames' => _stattic_runtime_route_intent_hostnames($spaceRoot, $intent),
             'hostnames' => _stattic_runtime_access_sweep_hostnames($intent, $tombstones),
         ];
@@ -741,7 +704,6 @@ function _stattic_runtime_journal_cursor_read(string $privateRoot): array
 
 function _stattic_runtime_journal_cursor_write(string $privateRoot, array $cursor): void
 {
-    _stattic_runtime_mkdir($privateRoot . '/runtime');
     _stattic_runtime_write_json_atomic(
         _stattic_runtime_journal_cursor_path($privateRoot),
         _stattic_runtime_journal_cursor_normalize($cursor) + ['updated_at' => gmdate('c')]
@@ -793,23 +755,22 @@ function _stattic_runtime_journal_cursor_advances(string $privateRoot, array $fr
 
 /**
  * One page of journal records, each paired with the cursor that resumes AFTER it.
- * Read one record at a time: the per-record coordinate is what a partial
- * acknowledgement needs, and the batch reader only reports the page end.
+ * The page cursor is the last record's; one record past the page answers
+ * whether there is more without a second read.
  *
- * @return array{records: list<array{entry: array, cursor: array}>, cursor: array}
+ * @return array{records: list<array{entry: array, cursor: array}>, cursor: array, more: bool}
  */
 function _stattic_runtime_journal_page(string $privateRoot, array $cursor, int $max): array
 {
-    $records = [];
-    for ($read = 0; $read < $max; $read += 1) {
-        $next = _stattic_runtime_journal_read($privateRoot, $cursor, 1);
-        if (($next['entries'] ?? []) === []) {
-            break;
-        }
-        $cursor = _stattic_runtime_journal_cursor_normalize($next['cursor']);
-        $records[] = ['entry' => $next['entries'][0], 'cursor' => $cursor];
-    }
-    return ['records' => $records, 'cursor' => $cursor];
+    $records = _stattic_runtime_journal_read($privateRoot, $cursor, $max + 1);
+    $more = count($records) > $max;
+    $records = array_slice($records, 0, $max);
+    $last = end($records);
+    return [
+        'records' => $records,
+        'cursor' => $last === false ? $cursor : $last['cursor'],
+        'more' => $more,
+    ];
 }
 
 function _stattic_runtime_drained_event(array $entry, array $cursor): array
@@ -875,15 +836,9 @@ function _stattic_runtime_drain_callback_events(string $privateRoot, array $clai
         $events[] = _stattic_runtime_drained_event($entry, $record['cursor']);
     }
 
-    // The control plane only compares pending_count against zero, so probe for
+    // The control plane only compares pending_count against zero, so report
     // "is there more" rather than counting.
-    $more = _stattic_runtime_journal_read($privateRoot, $page['cursor'], 1);
-    _stattic_runtime_drain_response(
-        $privateRoot,
-        $page['cursor'],
-        $events,
-        ($more['entries'] ?? []) === [] ? 0 : 1
-    );
+    _stattic_runtime_drain_response($privateRoot, $page['cursor'], $events, $page['more'] ? 1 : 0);
 }
 
 function _stattic_runtime_drain_response(string $privateRoot, array $cursor, array $events, int $pending): never
@@ -981,7 +936,6 @@ function _stattic_runtime_version_has_zero_pack(string $versionRoot): bool
 
 function _stattic_runtime_write_zero_config_artifact(string $versionRoot, array $zero): void
 {
-    _stattic_runtime_mkdir($versionRoot . '/zero');
     _stattic_runtime_write_json_atomic($versionRoot . '/zero/config.json', _stattic_runtime_zero_config_artifact($zero));
 }
 
@@ -991,7 +945,6 @@ function _stattic_runtime_write_zero_config_artifact(string $versionRoot, array 
 // are copied one by one so an unrecognised key cannot land in it either.
 function _stattic_runtime_write_functions_config_artifact(string $versionRoot, array $functions): void
 {
-    _stattic_runtime_mkdir($versionRoot . '/functions');
     _stattic_runtime_write_json_atomic(
         $versionRoot . '/functions/config.json',
         _stattic_runtime_functions_config_artifact($functions)
@@ -1160,8 +1113,9 @@ function _stattic_runtime_put_hostname_intent(string $privateRoot, string $space
 {
     $body = _stattic_json_body();
     $routes = _stattic_runtime_routes_from_hostname_intent('production', $body);
-    $previous = _stattic_runtime_read_json_strict(_stattic_space_root($privateRoot, $spaceId) . '/hostname-intent.json');
-    if (is_array($previous) && !_stattic_runtime_hostname_intent_changed($previous, $routes)) {
+    $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
+    $previous = _stattic_runtime_space_routing_doc($spaceRoot, 'intent');
+    if ($previous !== null && !_stattic_runtime_hostname_intent_changed($previous, $routes)) {
         $repairHostnames = null;
         _stattic_runtime_update_route_index($privateRoot, $spaceId, static function () use ($privateRoot, &$repairHostnames): void {
             if ($repairHostnames !== null) {
@@ -1183,11 +1137,11 @@ function _stattic_runtime_put_hostname_intent(string $privateRoot, string $space
         ]);
     }
     $hostnames = array_values(array_unique([
-        ..._stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId)),
+        ..._stattic_runtime_space_sweep_hostnames($spaceRoot),
         ..._stattic_runtime_route_intent_hostnames('', ['routes' => $routes]),
     ]));
     _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'hostname_intent_updated');
-    _stattic_runtime_store_hostname_intent($privateRoot, $spaceId, $routes, $claims);
+    _stattic_runtime_store_hostname_intent_from_snapshot($privateRoot, $spaceId, $routes, $previous, $claims);
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
     // Whole-domain: an intent change re-points hostnames, so which paths changed
     // is not a question this mutation can answer.
@@ -1232,16 +1186,9 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
         throw new RuntimeException('runtime route pointer is invalid: ' . $routePath);
     }
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
-    $previousIntentDoc = _stattic_runtime_read_json_strict($spaceRoot . '/hostname-intent.json');
-    if ($previousIntentDoc !== null && (!is_array($previousIntentDoc) || !is_array($previousIntentDoc['routes'] ?? null))) {
-        throw new RuntimeException('runtime hostname intent is invalid: ' . $spaceRoot);
-    }
-    $previousIntent = is_array($previousIntentDoc) ? $previousIntentDoc : [];
-    $tombstonesDoc = _stattic_runtime_read_json_strict($spaceRoot . '/tombstones.json');
-    if ($tombstonesDoc !== null && (!is_array($tombstonesDoc) || !is_array($tombstonesDoc['hostnames'] ?? null))) {
-        throw new RuntimeException('runtime tombstones are invalid: ' . $spaceRoot);
-    }
-    $tombstones = is_array($tombstonesDoc) ? $tombstonesDoc : [];
+    $previousIntentDoc = _stattic_runtime_space_routing_doc($spaceRoot, 'intent');
+    $previousIntent = $previousIntentDoc ?? [];
+    $tombstones = _stattic_runtime_space_routing_doc($spaceRoot, 'tombstones') ?? [];
     // Guarded on $storeIntent because compiling also validates the intent body,
     // and a route write carrying no intent must not start rejecting bodies it
     // never inspected.
@@ -1322,10 +1269,10 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
         _stattic_runtime_affected_intent_hostnames_from_routes($previousIntent['routes'] ?? [], $routeName),
         $releasedTombstoneHostnames,
     )));
-    $previousExposure = is_array($previousRoute)
-        ? _stattic_runtime_public_exposure_descriptor(is_array($previousRoute['config'] ?? null) ? $previousRoute['config'] : [])
-        : null;
-    $needsSweep = _stattic_runtime_exposure_needs_sweep($previousExposure, _stattic_runtime_public_exposure_descriptor($config));
+    $previousConfig = is_array($previousRoute['config'] ?? null) ? $previousRoute['config'] : [];
+    $previousExposure = is_array($previousRoute) ? _stattic_runtime_public_exposure_descriptor($previousConfig) : null;
+    $nextExposure = _stattic_runtime_public_exposure_descriptor($config);
+    $needsSweep = _stattic_runtime_exposure_needs_sweep($previousExposure, $nextExposure);
     $purgeHosts = $needsSweep
         ? array_values(array_unique([
             ..._stattic_runtime_access_sweep_hostnames($previousIntent, $tombstones),
@@ -1381,16 +1328,12 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
     // before/after exposure digests answer that. Presence of the previous field
     // means a route existed; null means treat it conservatively.
     if (is_array($previousRoute)) {
-        $previousConfig = is_array($previousRoute['config'] ?? null)
-            ? $previousRoute['config']
-            : [];
         $routeEvent['previous_public_exposure_digest'] =
             _stattic_runtime_public_exposure_digest($previousConfig);
         $routeEvent['public_exposure_digest'] =
             _stattic_runtime_public_exposure_digest($config);
         $routeEvent['previous_public_exposure'] = $previousExposure;
-        $routeEvent['public_exposure'] =
-            _stattic_runtime_public_exposure_descriptor($config);
+        $routeEvent['public_exposure'] = $nextExposure;
     }
     // The index/pointer publish happens BEFORE the journal record that announces
     // it: that record is a promise the activation is already SERVING. The
@@ -1545,7 +1488,6 @@ function _stattic_runtime_hostname_intent_changed(array $stored, array $incoming
 
 function _stattic_runtime_write_route(string $privateRoot, string $spaceId, string $routeName, string $versionId, array $config, ?string $configDigest = null): void
 {
-    _stattic_runtime_mkdir(_stattic_space_routes_root($privateRoot, $spaceId));
     _stattic_runtime_write_json_atomic(_stattic_route_pointer_path($privateRoot, $spaceId, $routeName), [
         'space_id' => $spaceId,
         'route_name' => $routeName,
@@ -1611,23 +1553,14 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
     // Snapshot every purge/tombstone input before removing any bytes. An
     // unavailable input aborts the delete instead of producing an incomplete
     // purge set or silently dropping retired-host state.
-    $intentDoc = _stattic_runtime_read_json_strict($spaceRoot . '/hostname-intent.json');
-    if ($intentDoc !== null && (!is_array($intentDoc) || !is_array($intentDoc['routes'] ?? null))) {
-        throw new RuntimeException('runtime hostname intent is invalid: ' . $spaceRoot);
-    }
-    $intent = is_array($intentDoc) ? $intentDoc : [];
-    $tombstonesDoc = _stattic_runtime_read_json_strict($spaceRoot . '/tombstones.json');
-    if ($tombstonesDoc !== null && (!is_array($tombstonesDoc) || !is_array($tombstonesDoc['hostnames'] ?? null))) {
-        throw new RuntimeException('runtime tombstones are invalid: ' . $spaceRoot);
-    }
-    $tombstones = is_array($tombstonesDoc) ? $tombstonesDoc : [];
+    $intent = _stattic_runtime_space_routing_doc($spaceRoot, 'intent') ?? [];
+    $tombstones = _stattic_runtime_space_routing_doc($spaceRoot, 'tombstones') ?? [];
     $hostnames = _stattic_runtime_access_sweep_hostnames($intent, $tombstones);
     _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'space_deleted');
     _stattic_runtime_rm_recursive($spaceRoot);
     // Tombstones must survive the rm: retired hostnames keep serving the
     // tombstone page rather than degrading to the generic undeployed 503.
-    if (is_array($tombstones) && is_array($tombstones['hostnames'] ?? null) && $tombstones['hostnames'] !== []) {
-        _stattic_runtime_mkdir($spaceRoot);
+    if (($tombstones['hostnames'] ?? []) !== []) {
         _stattic_runtime_write_json_atomic($spaceRoot . '/tombstones.json', $tombstones);
     }
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
@@ -1669,9 +1602,6 @@ function _stattic_runtime_delete_version(string $privateRoot, string $spaceId, s
         'space_id' => $spaceId,
         'version_id' => $versionId,
         'hostnames' => $hostnames,
-        // Kept in the event because the control plane still reads it, and
-        // honestly empty: remote-blob refcounts are the demote lane's to report.
-        'remote_shas' => [],
     ]);
     _stattic_json_response(200, [
         'space_id' => $spaceId,
@@ -1684,12 +1614,7 @@ function _stattic_runtime_delete_version(string $privateRoot, string $spaceId, s
 /** @return list<string> */
 function _stattic_runtime_repair_hostnames(string $privateRoot): array
 {
-    $hostnames = [];
-    foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
-        foreach (_stattic_runtime_space_sweep_hostnames($spaceRoot) as $hostname) {
-            $hostnames[$hostname] = true;
-        }
-    }
+    $hostnames = array_fill_keys(_stattic_runtime_all_space_sweep_hostnames($privateRoot), true);
     $pointer = _stattic_runtime_read_route_pointer($privateRoot);
     if ($pointer === false) {
         throw new RuntimeException('route index read failed: ' . $privateRoot . '/routes/current.json');
@@ -1994,7 +1919,7 @@ function _stattic_runtime_read_version_source_route(
     if (
         $rawMaxBytes === null
         || preg_match('/\A[1-9][0-9]{0,7}\z/', $rawMaxBytes) !== 1
-        || (int) $rawMaxBytes > STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES
+        || (int) $rawMaxBytes > SPACEFAST_UPLOAD_MAX_FILE_BYTES
     ) {
         _stattic_problem_response(
             422,

@@ -5,8 +5,9 @@
  * Version: 1
  */
 declare(strict_types=1);
-// The kernel's one dependency on the engine tree. shared/private-tree.php has
-// no requires of its own and decides nothing on the kernel's behalf: it holds
+// The kernel's one dependency on the engine tree. shared/private-tree.php
+// loads only the dependency-free pointers.php and decides nothing on the
+// kernel's behalf: it holds
 // the containment-guarded delete and the verified pointer publish that the
 // kernel would otherwise open-code (and once did, unguarded and @-suppressed).
 // Relative to this file, so it resolves inside whichever immutable release
@@ -710,9 +711,8 @@ function spacefast_content_may_read_private_resources(): bool
  */
 function spacefast_content_private_resource_ids(): array
 {
-    $contentModel = spacefast_content_model_active_release();
     $ids = [];
-    foreach (is_array($contentModel['postTypes'] ?? null) ? $contentModel['postTypes'] : [] as $resource) {
+    foreach (spacefast_content_model_resources() as $resource) {
         if (
             is_array($resource)
             && ($resource['kind'] ?? '') === 'collection'
@@ -983,7 +983,7 @@ function spacefast_content_collection_for_post_type(string $postType): ?array
     };
 }
 
-function spacefast_content_handle_request(array $request, bool $managed): array
+function spacefast_content_handle_request(array $request): array
 {
     if (in_array($request['operation'] ?? '', ['source.convert', 'source.inspect', 'source.resolve'], true)) {
         spacefast_content_principal_establish_user();
@@ -992,19 +992,18 @@ function spacefast_content_handle_request(array $request, bool $managed): array
         'model.stage' => spacefast_content_model_stage_release(
             $request['revision'] ?? null,
             $request['contentModelPhp'] ?? null,
-            $request['artifactDigest'] ?? null,
-            $managed
+            $request['artifactDigest'] ?? null
         ),
-        'model.activate' => spacefast_content_model_activate_release($request['revision'] ?? null, $managed),
-        'model.commit' => spacefast_content_model_commit_release($request, $managed),
-        'source.reconcile' => spacefast_content_reconcile_source($request, $managed),
-        'source.acknowledge' => spacefast_content_acknowledge_source($request, $managed),
-        'source.materialize' => spacefast_content_materialize_source($request, $managed),
-        'source.convert' => spacefast_content_request_conversion($request, $managed),
-        'source.inspect' => spacefast_content_inspect_source($request, $managed),
-        'source.resolve' => spacefast_content_resolve_source($request, $managed),
-        'rest.request' => spacefast_content_rest_dispatch($request, $managed),
-        'media.read' => spacefast_content_admin_media_read($request, $managed),
+        'model.activate' => spacefast_content_model_activate_release($request['revision'] ?? null),
+        'model.commit' => spacefast_content_model_commit_release($request),
+        'source.reconcile' => spacefast_content_reconcile_source($request),
+        'source.acknowledge' => spacefast_content_acknowledge_source($request),
+        'source.materialize' => spacefast_content_materialize_source($request),
+        'source.convert' => spacefast_content_request_conversion($request),
+        'source.inspect' => spacefast_content_inspect_source($request),
+        'source.resolve' => spacefast_content_resolve_source($request),
+        'rest.request' => spacefast_content_rest_dispatch($request),
+        'media.read' => spacefast_content_admin_media_read($request),
         // Storage answers over this endpoint for a caller that can reach it.
         // No Zero handler can today -- ctx.storage is withdrawn until the
         // service transport lands -- but the dispatcher runs the ability's own

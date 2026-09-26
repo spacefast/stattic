@@ -183,7 +183,7 @@ function _stattic_cli_invoke(
         $requestMethod,
         $requestTarget,
         $path,
-        _stattic_normalize_hostname($requestHost)
+        _stattic_normalize_host_authority($requestHost)
     );
 }
 

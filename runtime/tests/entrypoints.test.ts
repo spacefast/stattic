@@ -115,6 +115,10 @@ function _stattic_dashboard_origin(): string {
   return defined('SPACEFAST_DASHBOARD_ORIGIN') ? SPACEFAST_DASHBOARD_ORIGIN : '';
 }
 function _stattic_normalize_hostname(string $host): string { return strtolower($host); }
+function _stattic_normalize_host_authority(string $host): string { return strtolower($host); }
+function _stattic_base64url_encode(string $value): string {
+  return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
+}
 function _stattic_problem_response(int $status, string $code, string $message): never {
   echo json_encode(['refused' => [$status, $code]]);
   exit(0);

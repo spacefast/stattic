@@ -217,7 +217,7 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             require_once $releaseRoot . '/engine/shared/content-access.php';
             $isContentAdminRequest = true;
             $privateRoot = $installRoot . '/storage';
-            $host = _stattic_normalize_hostname((string) ($_SERVER['HTTP_HOST'] ?? ''));
+            $host = _stattic_normalize_host_authority((string) ($_SERVER['HTTP_HOST'] ?? ''));
             // The platform's answer outranks the session. A tombstoned or
             // held host gets the platform's page from every visitor; leaving
             // it editable for the rest of a session TTL would let an editor
@@ -339,24 +339,6 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     $_REQUEST['page'] = 'zero';
                     $_SERVER['PHP_SELF'] = '/wp-admin/admin.php';
                 }
-                // Editor sessions follow their active model. Public REST follows
-                // the served version, so an unpublished candidate cannot change
-                // its collection privacy policy.
-                $restSpaceId = (string) ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? '');
-                $contentModelRevision = $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] ?? null;
-                if ($session !== null && $restSpaceId !== '') {
-                    $contentModelRevision = _stattic_private_tree_read_pointer(
-                        $privateRoot . '/spaces/' . $restSpaceId . '/content-model/active-release',
-                        128
-                    );
-                }
-                // The gate admitted this request; whether WordPress answers REST
-                // at all is the gate's decision, not the resolved role's. The
-                // kernel's rest_authentication_errors filter reads this marker so
-                // an anonymous request the gate already admitted (a public Space)
-                // gets WordPress's own unauthenticated answer instead of a 404
-                // the gate never intended. The role still projects capabilities.
-                $GLOBALS['SPACEFAST_CONTENT_REST_ADMITTED'] = true;
                 // REST renders no theme, and WordPress answers on parse_request
                 // long before one would load.
                 if (!defined('WP_USE_THEMES')) {
@@ -368,9 +350,9 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 // returns; WordPress booted here reaches wpdb with an empty
                 // database tuple and dies in dead_db(). The document root's
                 // front controller runs next with the environment complete, and
-                // everything this gate decided — the Space scope, the resolved
-                // principal, the admission marker — is in $GLOBALS, which that
-                // pass shares. Declining here is how the request gets there.
+                // everything this gate decided — the Space scope and the
+                // resolved principal — is in $GLOBALS, which that pass shares.
+                // Declining here is how the request gets there.
                 if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
                     $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER'] = $restFrontController;
                     return;

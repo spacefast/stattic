@@ -4,10 +4,10 @@
  * The callback surface a dispatched worker uses for brokered database access.
  * Authority travels inside the presented token; this endpoint never looks a
  * grant up. Database frames are answered in-process by the engine's own MySQL
- * broker (shared/db-broker.php), the native executor's byte-for-byte twin,
- * pinned by the db-broker.test.ts corpus. An operation costs neither a process
- * spawn nor a fresh MySQL handshake: the `p:` link outlives the request in
- * PHP's own persistent pool, the only lifetime this host allows. Service frames
+ * broker (shared/db-broker.php), which encodes results the way the native
+ * executor does. An operation costs neither a process spawn nor a fresh MySQL
+ * handshake: the `p:` link outlives the request in PHP's own persistent pool,
+ * the only lifetime this host allows. Service frames
  * still run the one-shot `service-broker` executor, whose cost is its outbound
  * HTTPS call and whose identity is per invocation. Every call re-enters this
  * space's PHP-FPM pool while the proxied request still occupies a worker in it,
@@ -24,24 +24,24 @@ require_once __DIR__ . '/../shared/runtime-log.php';
 require_once __DIR__ . '/../shared/artifacts.php';
 require_once __DIR__ . '/../shared/db-broker.php';
 require_once __DIR__ . '/../shared/native-process.php';
+require_once __DIR__ . '/../shared/functions-wire.generated.php';
 
-const STATTIC_FUNCTIONS_RELAY_AUD = 'spacefast-functions-relay';
-
-// What a frame may be granted, keyed by the broker the outbound gateway named.
-// The gateway sets that header outside the isolate, so tenant code cannot
-// choose its own lane by forging one. A lane that runs a native subprocess also
-// names its `executor`, the env var its grant travels in, and whether it is
-// handed the caller's service identity; the database lane names none of the
-// three, because the engine answers its frames itself.
+// The lanes this relay route serves, keyed by the broker the outbound gateway
+// named. The gateway sets that header outside the isolate, so tenant code
+// cannot choose its own lane by forging one. Each lane's capabilities are the
+// shared broker table's. A lane that runs a native subprocess also names its
+// `executor`, the env var its grant travels in, and whether it is handed the
+// caller's service identity; the database lane names none of the three,
+// because the engine answers its frames itself.
 const SPACEFAST_FUNCTIONS_RELAY_BROKERS = [
     'database' => [
-        'capabilities' => ['db.read', 'db.write'],
+        'capabilities' => SPACEFAST_FUNCTIONS_BROKERS['database'],
     ],
-    'zero' => ['capabilities' => ['zero.call']],
+    'zero' => ['capabilities' => SPACEFAST_FUNCTIONS_BROKERS['zero']],
     'services' => [
         'executor' => 'service-broker',
-        'capabilities' => ['gravatar.profile', 'spam.check', 'email.send', 'connectors.call'],
-        'grant_env' => 'SPACEFAST_SERVICE_BROKER_GRANT',
+        'capabilities' => SPACEFAST_FUNCTIONS_BROKERS['services'],
+        'grant_env' => SPACEFAST_FUNCTIONS_SERVICE_BROKER_GRANT_ENV,
         'identity' => true,
     ],
 ];
@@ -67,7 +67,7 @@ function _stattic_functions_relay_claims(
     string $spaceId,
     string $token
 ): ?array {
-    return _stattic_runtime_token_claims($privateRoot, $token, STATTIC_FUNCTIONS_RELAY_AUD, [
+    return _stattic_runtime_token_claims($privateRoot, $token, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['relay'], [
         'scope_valid' => static function (array $claims) use ($spaceId): bool {
             if (!is_string($claims['space_id'] ?? null) || !hash_equals($spaceId, (string) $claims['space_id'])) {
                 return false;
@@ -144,7 +144,7 @@ function _stattic_functions_relay_executor_env(array $claims, string $broker, ar
  */
 function _stattic_functions_relay_invocation_id(): string
 {
-    return _stattic_service_invocation_id($_SERVER['HTTP_SF_FX_INVOCATION'] ?? '');
+    return _stattic_service_invocation_id($_SERVER[SPACEFAST_FUNCTIONS_RELAY_SERVER_VARS['invocation']] ?? '');
 }
 
 /**
@@ -153,7 +153,7 @@ function _stattic_functions_relay_invocation_id(): string
  */
 function _stattic_functions_relay_broker(): ?string
 {
-    $raw = $_SERVER['HTTP_SF_FX_BROKER'] ?? '';
+    $raw = $_SERVER[SPACEFAST_FUNCTIONS_RELAY_SERVER_VARS['broker']] ?? '';
     if (!is_string($raw) || $raw === '') {
         return 'database';
     }
@@ -191,18 +191,12 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
         // The broker is bound to the same URL resolution every other database
         // lane uses, and to exactly the grant this credential carries; the
         // result limits it enforces read the same configuration names directly.
-        // A worker cannot tell this lane from a spawned executor, since the
-        // corpus pins the answer bytes against the native engine. The database
-        // can: the persistent link makes a handler's Kth query cost a round
-        // trip, not a spawn and a handshake.
-        $env = _stattic_zero_runner_base_env();
-        _stattic_db_broker_bind(
-            is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : '',
-            is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
-        );
+        // The persistent link makes a handler's Kth query cost a round trip,
+        // not a spawn and a handshake.
+        _stattic_db_broker_bind_provider();
         _stattic_db_broker_grant($grant);
         $versionRoot = _stattic_version_root($privateRoot, $spaceId, $claims['version_id']);
-        $functions = _stattic_functions_config_read($versionRoot . '/files');
+        $functions = _stattic_functions_config_read($versionRoot);
         $databases = $functions['kind'] === 'present' ? ($functions['value']['artifact']['d1'] ?? []) : [];
         $frame = json_decode($body, true);
         if ($databases !== [] || (is_array($frame) && array_key_exists('d1', $frame))) {
@@ -223,17 +217,17 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     $versionRoot = _stattic_version_root($privateRoot, $spaceId, $claims['version_id']);
     $config = _stattic_zero_runtime_config($versionRoot);
     if ($config === []) {
-        $functions = _stattic_functions_config_read($versionRoot . '/files');
+        $functions = _stattic_functions_config_read($versionRoot);
         $config = $functions['kind'] === 'present' ? $functions['value'] : [];
     }
     $serving['space_id'] = $spaceId;
     $serving['version_id'] = $claims['version_id'];
-    $host = is_string($_SERVER['HTTP_SF_FX_VISITOR_HOST'] ?? null)
-        ? $_SERVER['HTTP_SF_FX_VISITOR_HOST'] : (string) ($_SERVER['HTTP_HOST'] ?? '');
+    $visitorHost = $_SERVER[SPACEFAST_FUNCTIONS_RELAY_SERVER_VARS['visitorHost']] ?? null;
+    $host = is_string($visitorHost) ? $visitorHost : (string) ($_SERVER['HTTP_HOST'] ?? '');
     // Read only the signed cookie. The Authorization header is the relay grant,
     // not a visitor credential, and must not shadow the cookie.
     $identity = _stattic_zero_identity_from_principal(_stattic_current_session_identity_uncached(
-        $serving, _stattic_canonicalize_host($host), null, _stattic_visitor_cookie_from_request()
+        $serving, _stattic_normalize_hostname($host), null, _stattic_visitor_cookie_from_request()
     ));
     $visitor = $identity['isAuthenticated'] ? ['subject' => $identity['userId']] : null;
     if ($broker === 'zero') {

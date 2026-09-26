@@ -134,6 +134,20 @@ function spacefast_content_sync_document_metadata(object $post): array
     return $metadata;
 }
 
+/** The WordPress post columns a document envelope's metadata sets. */
+function spacefast_content_sync_metadata_post_fields(?array $metadata): array
+{
+    if ($metadata === null) {
+        return [];
+    }
+    $fields = ['post_title' => $metadata['title'], 'post_name' => $metadata['slug'], 'post_status' => $metadata['status']];
+    if (isset($metadata['dateGmt'])) {
+        $fields['post_date_gmt'] = str_replace('T', ' ', substr($metadata['dateGmt'], 0, -1));
+        $fields['post_date'] = get_date_from_gmt($fields['post_date_gmt']);
+    }
+    return $fields;
+}
+
 function spacefast_content_sync_metadata_digest(object $post): string
 {
     return spacefast_content_sync_digest_text(spacefast_content_sync_canonical_json(spacefast_content_sync_document_metadata($post)));
@@ -299,10 +313,9 @@ function spacefast_content_sync_make_ledger(
 ): array {
     $metadataPost = clone $post;
     $metadata = $input['format'] === 'tsx' ? null : spacefast_content_sync_document($text)['metadata'];
-    foreach (['title' => 'post_title', 'slug' => 'post_name', 'status' => 'post_status'] as $key => $column) {
-        if (isset($metadata[$key])) $metadataPost->{$column} = $metadata[$key];
+    foreach (spacefast_content_sync_metadata_post_fields($metadata) as $column => $value) {
+        $metadataPost->{$column} = $value;
     }
-    if (isset($metadata['dateGmt'])) $metadataPost->post_date_gmt = str_replace('T', ' ', substr($metadata['dateGmt'], 0, -1));
     $ledger = [
         'version' => 1,
         'bindingId' => $input['bindingId'],
@@ -437,8 +450,7 @@ function spacefast_content_sync_find_post(string $bindingId, array $binding, boo
     }
     $post = $posts[0] ?? null;
     if ($post === null && $adoptUnbound) {
-        $canonicalPage = ($binding['post_type'] ?? null) === 'page'
-            && preg_match('/\Async\.pages\.[a-f0-9]{32}\z/D', $bindingId) === 1;
+        $canonicalPage = spacefast_content_model_is_canonical_page($binding);
         $query = [
             'post_type' => $binding['post_type'],
             'post_status' => ['publish', 'future', 'draft', 'pending', 'private', 'trash'],
@@ -672,9 +684,8 @@ function spacefast_content_sync_save_document(array $input, string $blocks): int
         throw new Spacefast_Content_Error(409, 'content_sync_binding_conflict', 'The binding post type changed.');
     }
     $slug = $binding['slug'];
-    $canonicalPage = $binding['post_type'] === 'page'
-        && preg_match('/\Async\.pages\.[a-f0-9]{32}\z/D', $input['bindingId']) === 1;
-    if ($canonicalPage && is_string($binding['publicPath'] ?? null)) {
+    $canonicalPage = spacefast_content_model_is_canonical_page($binding);
+    if ($canonicalPage) {
         $slug = trim($binding['publicPath'], '/') === '' ? 'home' : basename($binding['publicPath']);
     }
     $titleSource = $canonicalPage ? pathinfo(basename($input['source']), PATHINFO_FILENAME) : $slug;
@@ -692,15 +703,7 @@ function spacefast_content_sync_save_document(array $input, string $blocks): int
             : ucwords(str_replace(['-', '_'], ' ', $titleSource)),
     ];
     $metadata = $input['format'] === 'tsx' ? null : spacefast_content_sync_document($input['text'])['metadata'];
-    if ($metadata !== null) {
-        $post['post_title'] = $metadata['title'];
-        $post['post_name'] = $metadata['slug'];
-        $post['post_status'] = $metadata['status'];
-        if (isset($metadata['dateGmt'])) {
-            $post['post_date_gmt'] = str_replace('T', ' ', substr($metadata['dateGmt'], 0, -1));
-            $post['post_date'] = get_date_from_gmt($post['post_date_gmt']);
-        }
-    }
+    $post = array_replace($post, spacefast_content_sync_metadata_post_fields($metadata));
     if (is_object($existing)) {
         $post['ID'] = (int) $existing->ID;
         spacefast_content_sync_track_post((int) $existing->ID);
@@ -926,11 +929,8 @@ function spacefast_content_sync_without_journal(callable $operation): array
     }
 }
 
-function spacefast_content_reconcile_source(array $request, bool $managed): array
+function spacefast_content_reconcile_source(array $request): array
 {
-    if (!$managed) {
-        throw new Spacefast_Content_Error(401, 'content_auth_required', 'Source sync requires Spacefast authorization.');
-    }
     $input = spacefast_content_sync_parse_reconcile($request);
     return spacefast_content_sync_without_journal(
         static fn (): array => spacefast_content_sync_locked(
@@ -1197,11 +1197,8 @@ function spacefast_content_sync_materialize_invalid(): never
  * it. Later saves keep their WordPress bytes; activation binds that exact source
  * and journals any difference for the next normal reconciliation.
  */
-function spacefast_content_materialize_source(array $request, bool $managed): array
+function spacefast_content_materialize_source(array $request): array
 {
-    if (!$managed) {
-        throw new Spacefast_Content_Error(401, 'content_auth_required', 'Source materialization requires Spacefast authorization.');
-    }
     $input = spacefast_content_sync_parse_materialize($request);
     return spacefast_content_sync_without_journal(
         static fn (): array => spacefast_content_sync_locked(
@@ -1327,9 +1324,7 @@ function spacefast_content_sync_materialize_locked(array $input): array
         $document['metadata']['componentSource'] = $input['componentSource'];
         $text = spacefast_content_sync_envelope($document['metadata'], $document['body']);
     }
-    $prepared = function_exists('get_post_meta')
-        ? get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META, true)
-        : '';
+    $prepared = get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META, true);
     // Idempotence, layer one: a document that already has a path keeps it, so a
     // second materialization mints nothing and moves nothing.
     $already = is_string($prepared) && $prepared !== '';
@@ -1348,7 +1343,7 @@ function spacefast_content_sync_materialize_locked(array $input): array
             'textDigest' => spacefast_content_sync_digest_text($text),
         ],
     ];
-    if (!$already && function_exists('update_post_meta')) {
+    if (!$already) {
         update_post_meta($postId, SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META, $input['source']);
     }
     update_post_meta($postId, SPACEFAST_CONTENT_SOURCE_PREPARED_META, [
@@ -1370,11 +1365,8 @@ function spacefast_content_sync_materialize_locked(array $input): array
  * ledger cannot claim a source revision that may never have been written. This
  * is the acknowledgement half of that exchange.
  */
-function spacefast_content_acknowledge_source(array $request, bool $managed): array
+function spacefast_content_acknowledge_source(array $request): array
 {
-    if (!$managed) {
-        throw new Spacefast_Content_Error(401, 'content_auth_required', 'Source sync requires Spacefast authorization.');
-    }
     $bindingId = $request['bindingId'] ?? null;
     $operationId = $request['operationId'] ?? null;
     $baseRevision = $request['baseRevision'] ?? null;
@@ -1494,15 +1486,7 @@ function spacefast_content_sync_resolve_pending(array $request): array
             }
             $text = spacefast_content_sync_canonical_text($prepared['format'], spacefast_content_sync_envelope($document['metadata'], $document['body']));
             $blocks = spacefast_content_sync_to_blocks($prepared['format'], $text);
-            $update = ['ID' => $postId];
-            $metadata = spacefast_content_sync_document($text)['metadata'];
-            if ($metadata !== null) {
-                $update += ['post_title' => $metadata['title'], 'post_name' => $metadata['slug'], 'post_status' => $metadata['status']];
-                if (isset($metadata['dateGmt'])) {
-                    $update['post_date_gmt'] = str_replace('T', ' ', substr($metadata['dateGmt'], 0, -1));
-                    $update['post_date'] = get_date_from_gmt($update['post_date_gmt']);
-                }
-            }
+            $update = ['ID' => $postId] + spacefast_content_sync_metadata_post_fields(spacefast_content_sync_document($text)['metadata']);
             if ($pending['field_storage'] === 'post_content') $update['post_content'] = $blocks;
             $saved = wp_update_post($update, true);
             if (is_wp_error($saved)) throw new Spacefast_Content_Error(500, 'content_write_failed', 'The resolved document could not be saved.');
@@ -1532,9 +1516,8 @@ function spacefast_content_sync_resolve_pending(array $request): array
     ));
 }
 
-function spacefast_content_inspect_source(array $request, bool $managed): array
+function spacefast_content_inspect_source(array $request): array
 {
-    if (!$managed) throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content synchronization requires Spacefast authorization.');
     $bindingId = $request['bindingId'] ?? null;
     $pending = is_string($bindingId) ? spacefast_content_sync_pending_source($bindingId) : null;
     if ($pending !== null) return spacefast_content_sync_pending_inspection($bindingId, $pending);
@@ -1558,9 +1541,8 @@ function spacefast_content_inspect_source(array $request, bool $managed): array
 }
 
 /** The selected merge becomes a prepared source write in the existing durable lane. */
-function spacefast_content_resolve_source(array $request, bool $managed): array
+function spacefast_content_resolve_source(array $request): array
 {
-    if (!$managed) throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content resolution requires Spacefast authorization.');
     if (is_string($request['bindingId'] ?? null) && spacefast_content_sync_pending_source($request['bindingId']) !== null) {
         return spacefast_content_sync_resolve_pending($request);
     }
@@ -1582,7 +1564,7 @@ function spacefast_content_resolve_source(array $request, bool $managed): array
             if (is_array($replay) && ($replay['status'] ?? null) === 'pulled') {
                 return ['operationId' => $input['operationId'], 'bindingId' => $input['bindingId'], 'postId' => $postId, 'status' => 'queued'];
             }
-            $observed = spacefast_content_inspect_source(['bindingId' => $input['bindingId']], true);
+            $observed = spacefast_content_inspect_source(['bindingId' => $input['bindingId']]);
             if (!hash_equals($input['baseRevision'], $observed['baseRevision'])
                 || !hash_equals($expectedWordpressDigest, $observed['wordpressDigest'])) {
                 throw new Spacefast_Content_Error(409, 'content_sync_resolution_stale', 'The document changed while this conflict was being resolved. Refresh the comparison.');

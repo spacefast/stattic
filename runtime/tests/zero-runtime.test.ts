@@ -74,7 +74,7 @@ beforeAll(async () => {
 <?php
 // One binary serves the finalize and Zero lanes, so delegate non-Zero commands.
 $real = ${JSON.stringify(REAL_RUNTIME_PATH)};
-if (!in_array($argv[1] ?? '', ['prepare', 'invoke'], true)) {
+if (($argv[1] ?? '') !== 'invoke') {
     $process = proc_open(
         array_merge([$real], array_slice($argv, 1)),
         [0 => STDIN, 1 => STDOUT, 2 => STDERR],
@@ -82,19 +82,6 @@ if (!in_array($argv[1] ?? '', ['prepare', 'invoke'], true)) {
     );
     exit(is_resource($process) ? proc_close($process) : 1);
 }
-if (($argv[1] ?? '') === 'prepare') {
-    $source = $argv[2] ?? '';
-    $bytecode = $argv[3] ?? '';
-    $generated = $argv[5] ?? $source;
-    if ($source === '' || $bytecode === '' || !is_file($source)) {
-        fwrite(STDERR, "prepare args invalid");
-        exit(2);
-    }
-    file_put_contents($generated, file_get_contents($source));
-    file_put_contents($bytecode, "fake-bytecode");
-    exit(0);
-}
-if (($argv[1] ?? '') !== 'invoke') exit(2);
 $input = stream_get_contents(STDIN);
 $capture = ${JSON.stringify(capturePath)};
 file_put_contents($capture, $input);
@@ -291,8 +278,6 @@ test("invokes a finalized Zero lookup action through a fresh runner process", as
     versionId: "ver_zero_runtime_1",
     schemaHash: "sha256:test",
     visitorIp: "203.0.113.44",
-    authRef: "current",
-    variablesRef: "finalized",
   });
 });
 

@@ -16,9 +16,7 @@ mod response_headers;
 mod services;
 mod templates;
 
-use std::fs;
 use std::io::{self, Read};
-use std::path::Path;
 use std::time::Instant;
 
 use artifacts::{
@@ -30,8 +28,7 @@ use js::{compile_endpoint_source, execute_endpoint_module};
 use protocol::InvokeEnvelope;
 use response::{
     attach_runner_metrics, error_response, record_artifact_read, record_bytecode_read,
-    record_endpoint_index, record_envelope_parse, reset_stage_metrics, write_response,
-    RunnerResponse,
+    record_envelope_parse, reset_stage_metrics, write_response, RunnerResponse,
 };
 
 pub use artifacts::EndpointCapabilities as ZeroEndpointCapabilities;
@@ -92,7 +89,7 @@ pub fn self_test() -> Result<(), String> {
 /// leave row locks behind for the lifetime of the connection pool.
 pub fn run_service_broker_stdio() {
     services::set_grant(services::ServiceGrant::from_wire(
-        &std::env::var("SPACEFAST_SERVICE_BROKER_GRANT").unwrap_or_default(),
+        &std::env::var(services::SERVICE_BROKER_GRANT_ENV).unwrap_or_default(),
     ));
     let mut input = String::new();
     let outcome = io::stdin()
@@ -142,30 +139,6 @@ pub fn handle_invoke(input: &str) -> Result<RunnerResponse, RunnerResponse> {
         })
 }
 
-pub(crate) fn compile_file_with_capabilities(
-    source_path: &Path,
-    bytecode_path: &Path,
-    generated_source_path: Option<&Path>,
-    capabilities: &EndpointCapabilities,
-) -> Result<(), String> {
-    let source = fs::read_to_string(source_path).map_err(|error| error.to_string())?;
-    let compile_name = generated_source_path
-        .unwrap_or(source_path)
-        .to_string_lossy();
-    let compiled = compile_endpoint_program(&source, compile_name.as_ref(), capabilities)?;
-    if let Some(generated_source_path) = generated_source_path {
-        if let Some(parent) = generated_source_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        fs::write(generated_source_path, compiled.generated_source)
-            .map_err(|error| error.to_string())?;
-    }
-    if let Some(parent) = bytecode_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    fs::write(bytecode_path, compiled.bytecode).map_err(|error| error.to_string())
-}
-
 pub fn compile_endpoint_program(
     source: &str,
     name: &str,
@@ -178,38 +151,6 @@ pub fn compile_endpoint_program(
         generated_source,
         bytecode,
     })
-}
-
-/// Compiles one endpoint source to bytecode ahead of serving. The argument
-/// grammar belongs to the CLI that spells it; this takes the resolved values.
-pub fn prepare(
-    source: &str,
-    bytecode: &str,
-    capabilities_json: Option<&str>,
-    generated_source: Option<&str>,
-) -> i32 {
-    let capabilities = match capabilities_json {
-        Some(raw) => match serde_json::from_str::<EndpointCapabilities>(raw) {
-            Ok(capabilities) => capabilities,
-            Err(error) => {
-                eprintln!("zero capability metadata invalid: {error}");
-                return 2;
-            }
-        },
-        None => EndpointCapabilities::conservative(),
-    };
-    match compile_file_with_capabilities(
-        Path::new(source),
-        Path::new(bytecode),
-        generated_source.map(Path::new),
-        &capabilities,
-    ) {
-        Ok(()) => 0,
-        Err(error) => {
-            eprintln!("zero bytecode compile failed: {error}");
-            1
-        }
-    }
 }
 
 fn read_invoke_stdin(mut reader: impl Read) -> Result<String, RunnerResponse> {
@@ -243,11 +184,7 @@ fn handle_invoke_inner(input: &str) -> Result<RunnerResponse, RunnerResponse> {
         ));
     }
 
-    let index_started = Instant::now();
     let artifact_path = resolve_endpoint_artifact_path(&envelope)?;
-    if envelope.artifact_path.as_deref().unwrap_or("").is_empty() {
-        record_endpoint_index(index_started);
-    }
     let artifact_started = Instant::now();
     let artifact = read_endpoint_artifact(&artifact_path, &envelope)?;
     record_artifact_read(artifact_started);

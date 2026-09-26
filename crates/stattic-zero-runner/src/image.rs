@@ -82,8 +82,7 @@ pub(crate) fn etag_for(png: &[u8]) -> String {
 }
 
 fn render_fresh(node: &Value, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let node: Node = serde_json::from_value(node.clone())
-        .map_err(|error| format!("Invalid image node: {error}"))?;
+    let node = Node::deserialize(node).map_err(|error| format!("Invalid image node: {error}"))?;
     let options = RenderOptions::builder()
         .viewport(Viewport::new((width, height)))
         .node(node)
@@ -154,7 +153,9 @@ fn cache_path_for(
 }
 
 /// The content address of a render: the renderer version, the viewport, and a
-/// key-order-independent serialization of the node tree.
+/// key-order-independent serialization of the node tree. `serde_json::Map` is a
+/// `BTreeMap` here (no `preserve_order` feature), so serializing the parsed tree
+/// already writes every object's keys sorted.
 fn cache_key(node: &Value, width: u32, height: u32) -> String {
     let mut hasher = Sha256::new();
     hasher.update(RENDERER_ABI.as_bytes());
@@ -162,27 +163,8 @@ fn cache_key(node: &Value, width: u32, height: u32) -> String {
     hasher.update(width.to_be_bytes());
     hasher.update(height.to_be_bytes());
     hasher.update([0]);
-    hasher.update(serde_json::to_vec(&canonicalize(node)).unwrap_or_default());
+    hasher.update(serde_json::to_vec(node).unwrap_or_default());
     format!("{:x}", hasher.finalize())
-}
-
-/// Rebuilds `value` with every object's keys in sorted order, so two trees that
-/// differ only in JSON key order hash the same.
-fn canonicalize(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort_unstable();
-            let mut sorted = serde_json::Map::with_capacity(keys.len());
-            for key in keys {
-                let Some(child) = map.get(key) else { continue };
-                sorted.insert(key.clone(), canonicalize(child));
-            }
-            Value::Object(sorted)
-        }
-        Value::Array(items) => Value::Array(items.iter().map(canonicalize).collect()),
-        other => other.clone(),
-    }
 }
 
 const PNG_MAGIC: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -304,6 +286,17 @@ mod tests {
         // Same string at the same size in two families: identical bytes would
         // mean one generic fell through to the other's face.
         assert_ne!(default_face, mono, "each generic must reach its own face");
+    }
+
+    /// Two node trees that differ only in JSON key order are one render.
+    #[test]
+    fn cache_key_ignores_object_key_order() {
+        let parse = |raw: &str| serde_json::from_str::<Value>(raw).expect("node json");
+        let forward = parse(r#"{"type":"text","text":"hi","style":{"color":"red","fontSize":24}}"#);
+        let reversed =
+            parse(r#"{"style":{"fontSize":24,"color":"red"},"text":"hi","type":"text"}"#);
+
+        assert_eq!(cache_key(&forward, 64, 32), cache_key(&reversed, 64, 32));
     }
 
     /// The cache key carries [`RENDERER_ABI`], so a takumi upgrade that leaves

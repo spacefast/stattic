@@ -223,13 +223,24 @@ function _stattic_runtime_access_sweep_hostnames(?array $intent, ?array $tombsto
  */
 function _stattic_runtime_space_sweep_hostnames(string $spaceRoot): array
 {
-    $intent = _stattic_runtime_read_json($spaceRoot . '/hostname-intent.json');
-    $tombstones = _stattic_runtime_read_json($spaceRoot . '/tombstones.json');
-    if (($intent !== null && (!is_array($intent) || !is_array($intent['routes'] ?? null)))
-        || ($tombstones !== null && (!is_array($tombstones) || !is_array($tombstones['hostnames'] ?? null)))) {
-        throw new RuntimeException('edge_purge_hostnames_unavailable');
+    try {
+        return _stattic_runtime_access_sweep_hostnames(
+            _stattic_runtime_space_routing_doc($spaceRoot, 'intent'),
+            _stattic_runtime_space_routing_doc($spaceRoot, 'tombstones'),
+        );
+    } catch (RuntimeException $error) {
+        throw new RuntimeException('edge_purge_hostnames_unavailable', 0, $error);
     }
-    return _stattic_runtime_access_sweep_hostnames($intent, $tombstones);
+}
+
+/** @return list<string> Every Space's sweep hostnames, normalized. */
+function _stattic_runtime_all_space_sweep_hostnames(string $privateRoot): array
+{
+    $hostnames = [];
+    foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
+        $hostnames = [...$hostnames, ..._stattic_runtime_space_sweep_hostnames($spaceRoot)];
+    }
+    return _stattic_runtime_purge_hostname_list($hostnames);
 }
 
 function _stattic_runtime_purge_store(string $privateRoot): array
@@ -409,28 +420,4 @@ function _stattic_runtime_purge_dispatch(string $privateRoot, array $hostnames, 
     $hostnames = _stattic_runtime_purge_hostname_list($hostnames);
     _stattic_runtime_purge_enqueue($privateRoot, $hostnames, $reason);
     return _stattic_runtime_purge_drain($privateRoot, microtime(true) + 20, null, $hostnames);
-}
-
-/**
- * `_stattic_runtime_purge_now` addressed at every hostname one space's cached
- * bytes could live under: route intent plus tombstones, read off the space root
- * so the visitor lane can call it without the management readers. A space no
- * hostname has ever served is unaddressable at the provider, so there is no
- * edge entry to drop; the zero-URL receipt says so.
- *
- * @return array{status: string, mode: string, urls?: int}
- */
-function _stattic_runtime_purge_space_hosts_now(
-    string $privateRoot,
-    string $spaceId,
-    string $reason
-): array {
-    $hostnames = _stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId));
-    if ($hostnames === []) {
-        return ['status' => 'ok', 'mode' => 'urls', 'urls' => 0];
-    }
-    return _stattic_runtime_purge_now($privateRoot, [
-        'hostnames' => $hostnames,
-        'reason' => $reason,
-    ]);
 }

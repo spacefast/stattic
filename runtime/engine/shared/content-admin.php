@@ -12,11 +12,8 @@ function _stattic_content_admin_cookie_name(): string
         : SPACEFAST_CONTENT_ADMIN_COOKIE;
 }
 
-function _stattic_content_admin_base64url_encode(string $value): string
-{
-    return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
-}
-
+// Strict where context.php's _stattic_base64url_decode is lenient: a token
+// segment outside the url-safe alphabet is a forgery, never a decode to ''.
 function _stattic_content_admin_base64url_decode(string $value): ?string
 {
     if ($value === '' || preg_match('/^[A-Za-z0-9_-]+$/', $value) !== 1) {
@@ -241,7 +238,6 @@ function _stattic_content_admin_mint_ticket(
     $frameOrigin = _stattic_content_admin_frame_origin($frameOrigin);
     $publicOrigin = _stattic_content_admin_frame_origin($publicOrigin);
     $access = _stattic_content_admin_access($access);
-    $host = strtolower(trim($host));
     if (
         !is_array($principal)
         || $authorization === null
@@ -258,7 +254,7 @@ function _stattic_content_admin_mint_ticket(
     _stattic_record_store_ensure($store);
     _stattic_record_store_sweep($store, $now);
     for ($attempt = 0; $attempt < 3; $attempt += 1) {
-        $token = _stattic_content_admin_base64url_encode(random_bytes(32));
+        $token = _stattic_base64url_encode(random_bytes(32));
         $id = hash('sha256', $token);
         $expiresAt = $now + SPACEFAST_CONTENT_ADMIN_TICKET_TTL;
         if (_stattic_record_store_claim($store, $id, [
@@ -299,7 +295,7 @@ function _stattic_content_admin_consume_ticket(
                 $record === null
                 || !is_int($record['expires_at'] ?? null)
                 || $record['expires_at'] <= $now
-                || !hash_equals((string) ($record['host'] ?? ''), strtolower(trim($host)))
+                || !hash_equals((string) ($record['host'] ?? ''), $host)
             ) {
                 return null;
             }
@@ -369,8 +365,8 @@ function _stattic_content_admin_mint_session(
     }
     $now ??= time();
     $expiresAt = $now + SPACEFAST_CONTENT_ADMIN_SESSION_TTL;
-    $payload = _stattic_content_admin_base64url_encode((string) json_encode([
-        'host' => strtolower(trim($host)),
+    $payload = _stattic_base64url_encode((string) json_encode([
+        'host' => $host,
         'user_id' => $userId,
         'principal' => $principal,
         'space_id' => $authorization['space_id'],
@@ -382,7 +378,7 @@ function _stattic_content_admin_mint_session(
         'expires_at' => $expiresAt,
     ], JSON_UNESCAPED_SLASHES));
     return [
-        'token' => $payload . '.' . _stattic_content_admin_base64url_encode(hash_hmac('sha256', $payload, $secret, true)),
+        'token' => $payload . '.' . _stattic_base64url_encode(hash_hmac('sha256', $payload, $secret, true)),
         'expires_at' => $expiresAt,
     ];
 }
@@ -416,7 +412,7 @@ function _stattic_content_admin_verify_session(
         || $claims['user_id'] < 1
         || !is_int($claims['expires_at'] ?? null)
         || $claims['expires_at'] <= $now
-        || !hash_equals((string) ($claims['host'] ?? ''), strtolower(trim($host)))
+        || !hash_equals((string) ($claims['host'] ?? ''), $host)
     ) {
         return null;
     }

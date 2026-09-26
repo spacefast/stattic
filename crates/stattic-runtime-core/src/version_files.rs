@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use crate::catalog::read_version_catalog;
 use crate::finalize::{invalid, invalid_error, remove_any, write_bytes, FinalizeError, Result};
 use crate::protocol::{PAGE_MAX_BYTES, VERSION_ROOT_POINTER_FILE};
 use crate::transforms::html::{
@@ -164,15 +163,6 @@ pub fn validate_artifacts(root: &Path, published: &PublishedArtifacts<'_>) -> Re
                 format!("Missing {name}."),
             );
         }
-    }
-    // The catalog is load-bearing, not a projection: the resolver, the list
-    // route and the finalize receipt all read it and none of them has a
-    // fallback. A version published without one answers nothing.
-    if read_version_catalog(root)?.is_none() {
-        return invalid(
-            "runtime_artifact_validation_failed",
-            "metadata.json embeds no file catalog.",
-        );
     }
     if !root.join(published.root_file).is_file() {
         return invalid(

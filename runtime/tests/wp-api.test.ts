@@ -336,7 +336,6 @@ beforeAll(async () => {
       "  'principal_kind' => is_array($principal) ? ($principal['kind'] ?? null) : null,",
       "  'actor_id' => is_array($principal) ? ($principal['actor_id'] ?? null) : null,",
       "  'themes' => defined('WP_USE_THEMES') ? WP_USE_THEMES : null,",
-      "  'rest_admitted' => (bool) ($GLOBALS['SPACEFAST_CONTENT_REST_ADMITTED'] ?? false),",
       "  'model_revision' => $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] ?? null,",
       "]);",
       "",
@@ -444,8 +443,9 @@ beforeAll(async () => {
       "    ['id' => 'projects', 'kind' => 'collection', 'postType' => 'post', 'label' => 'Projects'],",
       "  ]];",
       "}",
+      "function spacefast_content_model_resources() { return spacefast_content_model_active_release()['postTypes']; }",
       "function spacefast_content_model_resource($resourceId) {",
-      "  foreach (spacefast_content_model_active_release()['postTypes'] as $resource) {",
+      "  foreach (spacefast_content_model_resources() as $resource) {",
       "    if ($resource['id'] === $resourceId) return $resource;",
       "  }",
       "  return null;",
@@ -509,8 +509,6 @@ test("a Space credential reaches WordPress REST as the principal its Grants earn
     principal_kind: "service",
     actor_id: MACHINE,
     themes: false,
-    // The gate admitted this request, so the kernel filter serves REST.
-    rest_admitted: true,
     model_revision: SERVED_MODEL_REVISION,
   });
 
@@ -535,10 +533,6 @@ test("REST without a Spacefast credential is WordPress's own unauthenticated ans
     principal_kind: null,
     actor_id: null,
     themes: false,
-    // Still marked admitted with no role: the gate admitted an anonymous
-    // request, and the kernel filter serves WordPress's unauthenticated answer
-    // rather than 404-ing a request the gate never refused.
-    rest_admitted: true,
     model_revision: SERVED_MODEL_REVISION,
   });
 });

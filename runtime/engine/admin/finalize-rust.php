@@ -183,7 +183,6 @@ function _stattic_runtime_finalize_with_rust(
     }
 
     $incomingRoot = $canonicalPrivateRoot . '/runtime/finalizer-inputs';
-    _stattic_runtime_mkdir($incomingRoot);
     $inputPath = $incomingRoot . '/' . ($uploadId !== '' ? $uploadId : 'refinalize') . '-' . bin2hex(random_bytes(6)) . '.json';
     $outputPath = $inputPath . '.output.json';
     _stattic_runtime_write_json_atomic($inputPath, $input);

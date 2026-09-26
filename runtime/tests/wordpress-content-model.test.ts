@@ -302,11 +302,11 @@ $GLOBALS['themeDir'] = $argv[6];
 add_action('template_redirect', 'redirect_canonical');
 require $argv[1];
 
-$staged = spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5], true);
-$activation = spacefast_content_model_activate_release($argv[3], true);
+$staged = spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5]);
+$activation = spacefast_content_model_activate_release($argv[3]);
 // Publish, promote and rollback all activate again. Nothing may break, and the
 // migration ledger must not gain a second row for the same revision.
-$reactivation = spacefast_content_model_activate_release($argv[3], true);
+$reactivation = spacefast_content_model_activate_release($argv[3]);
 $releaseRoot = $argv[2] . '/spaces/spc_alpha/content-model/releases/' . substr($argv[3], 7);
 $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $releaseRoot;
 $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $argv[3];
@@ -662,23 +662,21 @@ $catch = static function (callable $run): string {
   try { $run(); return 'no_error'; }
   catch (Spacefast_Content_Error $error) { return $error->codeName; }
 };
-spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5], true);
-spacefast_content_model_stage_release($argv[6], $argv[7], $argv[8], true);
+spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5]);
+spacefast_content_model_stage_release($argv[6], $argv[7], $argv[8]);
 _stattic_private_tree_write_pointer($pointer, $argv[6]);
-spacefast_content_model_activate_release($argv[3], true);
+spacefast_content_model_activate_release($argv[3]);
 $afterActivate = $read();
-spacefast_content_model_activate_release($argv[6], true);
+spacefast_content_model_activate_release($argv[6]);
 $afterRollback = $read();
-$cleared = spacefast_content_model_activate_release(null, true);
+$cleared = spacefast_content_model_activate_release(null);
 echo json_encode([
   'after_activate' => $afterActivate,
   'after_rollback' => $afterRollback,
   'cleared' => $cleared,
   'after_clear' => $read(),
-  'unknown_release' => $catch(static fn () => spacefast_content_model_activate_release('sha256:' . str_repeat('c', 64), true)),
-  'malformed_revision' => $catch(static fn () => spacefast_content_model_activate_release('not-a-revision', true)),
-  'unmanaged' => $catch(static fn () => spacefast_content_model_activate_release($argv[3], false)),
-  'unmanaged_stage' => $catch(static fn () => spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5], false)),
+  'unknown_release' => $catch(static fn () => spacefast_content_model_activate_release('sha256:' . str_repeat('c', 64))),
+  'malformed_revision' => $catch(static fn () => spacefast_content_model_activate_release('not-a-revision')),
 ]);
 `;
   try {
@@ -707,8 +705,6 @@ echo json_encode([
       after_clear: olderRevision,
       unknown_release: "content_model_not_found",
       malformed_revision: "content_model_revision_invalid",
-      unmanaged: "content_auth_required",
-      unmanaged_stage: "content_auth_required",
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -735,7 +731,7 @@ test("activation refuses a generated PHP ContentModelRelease whose immutable byt
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
 $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $argv[2];
 require $argv[1];
-try { spacefast_content_model_activate_release($argv[3], true); }
+try { spacefast_content_model_activate_release($argv[3]); }
 catch (Spacefast_Content_Error $error) { echo $error->codeName; }
 `;
   try {
@@ -770,7 +766,7 @@ test("activation refuses a Payload-shaped release with a republish instruction",
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
 $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $argv[2];
 require $argv[1];
-try { spacefast_content_model_activate_release($argv[3], true); }
+try { spacefast_content_model_activate_release($argv[3]); }
 catch (Spacefast_Content_Error $error) {
   echo json_encode([$error->status, $error->codeName, $error->getMessage()]);
 }
@@ -834,8 +830,8 @@ $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
 $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $argv[2];
 require $argv[1];
 
-$staged = spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5], true);
-$activation = spacefast_content_model_activate_release($argv[3], true);
+$staged = spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5]);
+$activation = spacefast_content_model_activate_release($argv[3]);
 $releaseRoot = $argv[2] . '/spaces/spc_alpha/content-model/releases/' . substr($argv[3], 7);
 $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $releaseRoot;
 $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $argv[3];
@@ -1028,8 +1024,8 @@ $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $argv[2];
 define('REST_REQUEST', true);
 require $argv[1];
 
-spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5], true);
-spacefast_content_model_activate_release($argv[3], true);
+spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5]);
+spacefast_content_model_activate_release($argv[3]);
 $releaseRoot = $argv[2] . '/spaces/spc_alpha/content-model/releases/' . substr($argv[3], 7);
 $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $releaseRoot;
 $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $argv[3];

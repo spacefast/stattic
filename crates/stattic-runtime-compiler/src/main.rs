@@ -11,12 +11,6 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 enum Command {
     Finalize(FinalizeArgs),
-    Prepare {
-        source: String,
-        bytecode: String,
-        capabilities: Option<String>,
-        generated_source: Option<String>,
-    },
     Invoke,
     ServiceBroker,
     MarkdownToHtml,
@@ -83,17 +77,6 @@ fn run() -> Result<(), CliError> {
     let command = parse_args(env::args().skip(1))?;
     match command {
         Command::Finalize(args) => finalize_site_command(args)?,
-        Command::Prepare {
-            source,
-            bytecode,
-            capabilities,
-            generated_source,
-        } => exit_with_status(stattic_zero_runner::prepare(
-            &source,
-            &bytecode,
-            capabilities.as_deref(),
-            generated_source.as_deref(),
-        )),
         Command::Invoke => stattic_zero_runner::run_stdio(),
         Command::ServiceBroker => stattic_zero_runner::run_service_broker_stdio(),
         Command::MarkdownToHtml => markdown_to_html()?,
@@ -116,12 +99,6 @@ fn markdown_to_html() -> Result<(), CliError> {
         stattic_runtime_core::content::markdown_fragment(&source)
     );
     Ok(())
-}
-
-fn exit_with_status(status: i32) {
-    if status != 0 {
-        std::process::exit(status);
-    }
 }
 
 /// Runs the filesystem-rooted site finalize. `--dry-run` executes the
@@ -244,18 +221,6 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliErro
     }
     match command.as_str() {
         "finalize" => Ok(Command::Finalize(parse_finalize_args(args)?)),
-        "prepare" => {
-            let values = args.collect::<Vec<_>>();
-            match values.as_slice() {
-                [source, bytecode, optional @ ..] if optional.len() <= 2 => Ok(Command::Prepare {
-                    source: source.clone(),
-                    bytecode: bytecode.clone(),
-                    capabilities: optional.first().cloned(),
-                    generated_source: optional.get(1).cloned(),
-                }),
-                _ => Err(CliError::Usage(usage())),
-            }
-        }
         "invoke" => no_operands(args, Command::Invoke),
         "service-broker" => no_operands(args, Command::ServiceBroker),
         "markdown-to-html" => no_operands(args, Command::MarkdownToHtml),
@@ -315,7 +280,6 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
 fn usage() -> String {
     "usage:
   stattic-runtime finalize --input <input.json> [--version-root <dir>] [--output <file>] [--dry-run]
-  stattic-runtime prepare <source.js> <bytecode> [capabilities-json] [generated-source.js]
   stattic-runtime invoke
   stattic-runtime service-broker
   stattic-runtime markdown-to-html

@@ -983,13 +983,7 @@ function _stattic_strip_platform_owned_headers(array $headers): array
     return $headers;
 }
 
-// The provider edge is METHOD-BLIND: it keys a stored response on
-// host+path+query alone, so a stored answer to a POST/PUT/DELETE would be
-// replayed to every later GET of the same URL. No response to a non-GET/HEAD
-// request may therefore be storable by any cache, edge included: the URL alone
-// does not say what the method did. The verdict lives here, beside the seams
-// that compose platform response headers, so every lane inherits it
-// structurally instead of re-deciding it.
+// Sticky for the request: once a rule marks this URL request-varying, it stays marked.
 function _stattic_cache_policy_request_varying(bool $mark = false): bool
 {
     static $varying = false;
@@ -997,6 +991,13 @@ function _stattic_cache_policy_request_varying(bool $mark = false): bool
     return $varying;
 }
 
+// The provider edge is METHOD-BLIND: it keys a stored response on
+// host+path+query alone, so a stored answer to a POST/PUT/DELETE would be
+// replayed to every later GET of the same URL. No response to a non-GET/HEAD
+// request may therefore be storable by any cache, edge included: the URL alone
+// does not say what the method did. The verdict lives here, beside the seams
+// that compose platform response headers, so every lane inherits it
+// structurally instead of re-deciding it.
 function _stattic_request_method_forbids_shared_store(): bool
 {
     return !in_array(_stattic_runtime_request_method(), ['GET', 'HEAD'], true);
@@ -1247,26 +1248,6 @@ function _stattic_blob_relative_key(string $spaceId, string $sha256): ?string
     return 'spaces/' . $spaceId . '/blobs/' . substr($sha256, 0, 2) . '/' . $sha256;
 }
 
-// Spec "Space Configuration Files": private after compile, never served. Shared
-// by the compile-side exclusion (admin/generate.php) and the serve-side
-// terminal-404 gate (runtime/serve.php); keys are canonical lowercase paths.
-const STATTIC_PRIVATE_CONFIG_FILES = [
-    'sf.jsonc' => true,
-    'spacefast.jsonc' => true,
-    'spacefast.json' => true,
-    'sf.json' => true,
-    '.sf/sf.json' => true,
-    '.sf/config.jsonc' => true,
-    '.sf/config.json' => true,
-];
-// Compile-input sidecars, same posture.
-const STATTIC_PRIVATE_COMPILE_FILES = [
-    '_redirects' => true,
-    '_headers' => true,
-    '_config.json' => true,
-    '_routes.json' => true,
-];
-
 // Spec "Hidden Files": a dot-prefixed segment is private, except a root-level
 // `.well-known`. Files inside it are public; dot-prefixed entries deeper are
 // not. Callers pass the path pre-lowercased and slash-trimmed.
@@ -1476,11 +1457,34 @@ function _stattic_path_has_residual_dot_segment(string $path): bool
     return true;
 }
 
-// Deliberately no trim(): callers feed bytes that must compare as-is (the
-// same-host Referer check relies on both sides staying untrimmed).
+/**
+ * THE hostname normalizer: `normalizeHostname` in @spacefast/common and
+ * `routing::normalize_hostname` in stattic-runtime-core, one rule in three
+ * languages, held together by packages/common/src/utils/hostname.fixtures.json.
+ * Trim WHATWG ASCII whitespace, drop a run of root dots, fold ASCII case
+ * (strtolower is ASCII-only since PHP 8.2, as DNS case-insensitivity is).
+ * A hostname has no port; a Host header does, see below.
+ */
 function _stattic_normalize_hostname(string $hostname): string
 {
-    return preg_replace('/:\d+$/', '', strtolower($hostname)) ?: '';
+    return strtolower(rtrim(trim($hostname, " \t\n\f\r"), '.'));
+}
+
+/**
+ * A `Host` header value (or `--host` flag) to its hostname:
+ * `normalizeHostAuthority` in @spacefast/routing. Only a bracketed IPv6
+ * literal may give up a trailing `:digits`, because `::1` has no port.
+ */
+function _stattic_normalize_host_authority(string $authority): string
+{
+    $authority = trim($authority, " \t\n\f\r");
+    if (
+        preg_match('/\A(.*):\d+\z/s', $authority, $match) === 1
+        && (!str_contains($match[1], ':') || str_ends_with($match[1], ']'))
+    ) {
+        $authority = $match[1];
+    }
+    return _stattic_normalize_hostname($authority);
 }
 
 /**

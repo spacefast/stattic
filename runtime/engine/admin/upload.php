@@ -18,15 +18,6 @@ const STATTIC_RUNTIME_BULK_CAS_MAX_COMPRESSED_BYTES = 134217728; // 128 MiB
 const STATTIC_RUNTIME_BULK_CAS_MAX_EXPANDED_BYTES = 134217728; // 128 MiB
 const STATTIC_RUNTIME_BULK_CAS_MAX_BLOBS = 2000;
 
-// Manifest scale ceilings: the runtime's last-resort boundary. No plan lowers
-// them; only the anonymous tier does, in the control plane. Keep these in parity
-// with MANIFEST_MAX_FILES_CEILING, MANIFEST_MAX_PATH_BYTES and
-// MAX_VERSION_FILE_SIZE_BYTES in packages/common/src/utils/publish-policy.ts;
-// a skipped or compromised control plane is why the boundary exists.
-const STATTIC_RUNTIME_MANIFEST_MAX_FILES = 100000;
-const STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES = 1024;
-const STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES = 1073741824; // 1 GiB
-
 function _stattic_runtime_publish_pins_store(string $privateRoot, string $spaceId): array
 {
     $spaceId = _stattic_runtime_id($spaceId, 'space_id');
@@ -127,8 +118,7 @@ function _stattic_runtime_publish_session_load(string $privateRoot, string $spac
     if ($session === null) {
         return null;
     }
-    $expiresAt = strtotime((string) ($session['expires_at'] ?? ''));
-    if ($expiresAt !== false && $expiresAt < time()) {
+    if (_stattic_runtime_publish_session_expired($session)) {
         _stattic_runtime_publish_session_release($privateRoot, $spaceId, $uploadId);
         return null;
     }
@@ -382,9 +372,8 @@ function _stattic_runtime_materialize_lazy_upload_session(string $privateRoot, s
         'manifest' => $manifest,
         'accepted' => (object) [],
         'created_at' => gmdate('c'),
-        'expires_at' => is_string($descriptor['expires_at'] ?? null) && strtotime($descriptor['expires_at']) !== false
-            ? gmdate('c', (int) strtotime($descriptor['expires_at']))
-            : gmdate('c', time() + STATTIC_RUNTIME_UPLOAD_SESSION_DEFAULT_TTL_SECONDS),
+        'expires_at' => _stattic_runtime_publish_session_expiry($descriptor['expires_at'] ?? null)
+            ?? gmdate('c', time() + STATTIC_RUNTIME_UPLOAD_SESSION_DEFAULT_TTL_SECONDS),
         'runtime_instance_id' => is_string($expected['runtime_instance_id'] ?? null) ? $expected['runtime_instance_id'] : null,
         'manifest_hash' => is_string($descriptor['manifest_hash'] ?? null) ? $descriptor['manifest_hash'] : null,
         'retained_files' => $retained,
@@ -455,8 +444,8 @@ function _stattic_runtime_manifest_files(mixed $files, bool $allowInternalArtifa
     }
     // Nothing downstream re-checks file count or path length, so refuse an
     // unpublishable manifest here, before a session reserves a pin.
-    if (count($files) > STATTIC_RUNTIME_MANIFEST_MAX_FILES) {
-        _stattic_problem_response(413, 'manifest_too_many_files', 'Version manifest declares more than ' . STATTIC_RUNTIME_MANIFEST_MAX_FILES . ' files.', ['details' => ['file_count' => count($files), 'limit' => STATTIC_RUNTIME_MANIFEST_MAX_FILES]]);
+    if (count($files) > SPACEFAST_UPLOAD_MAX_FILES) {
+        _stattic_problem_response(413, 'manifest_too_many_files', 'Version manifest declares more than ' . SPACEFAST_UPLOAD_MAX_FILES . ' files.', ['details' => ['file_count' => count($files), 'limit' => SPACEFAST_UPLOAD_MAX_FILES]]);
     }
     $normalized = [];
     $seenPaths = [];
@@ -477,11 +466,11 @@ function _stattic_runtime_manifest_files(mixed $files, bool $allowInternalArtifa
         if (!$allowInternalArtifacts || !_stattic_path_is_internal_artifact($entry['path'])) {
             _stattic_runtime_assert_static_upload_path($entry['path']);
         }
-        if (strlen($entry['path']) > STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES) {
-            _stattic_problem_response(422, 'manifest_path_too_long', 'File paths support up to ' . STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES . ' bytes in canonical form.', ['details' => ['path' => $entry['path'], 'bytes' => strlen($entry['path']), 'limit' => STATTIC_RUNTIME_MANIFEST_MAX_PATH_BYTES]]);
+        if (strlen($entry['path']) > SPACEFAST_UPLOAD_MAX_PATH_BYTES) {
+            _stattic_problem_response(422, 'manifest_path_too_long', 'File paths support up to ' . SPACEFAST_UPLOAD_MAX_PATH_BYTES . ' bytes in canonical form.', ['details' => ['path' => $entry['path'], 'bytes' => strlen($entry['path']), 'limit' => SPACEFAST_UPLOAD_MAX_PATH_BYTES]]);
         }
-        if ($entry['size'] > STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES) {
-            _stattic_problem_response(413, 'manifest_file_too_large', 'File ' . $entry['path'] . ' exceeds the ' . STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES . ' byte per-file limit.', ['details' => ['path' => $entry['path'], 'size' => $entry['size'], 'limit' => STATTIC_RUNTIME_MANIFEST_MAX_FILE_BYTES]]);
+        if ($entry['size'] > SPACEFAST_UPLOAD_MAX_FILE_BYTES) {
+            _stattic_problem_response(413, 'manifest_file_too_large', 'File ' . $entry['path'] . ' exceeds the ' . SPACEFAST_UPLOAD_MAX_FILE_BYTES . ' byte per-file limit.', ['details' => ['path' => $entry['path'], 'size' => $entry['size'], 'limit' => SPACEFAST_UPLOAD_MAX_FILE_BYTES]]);
         }
         if (isset($seenPaths[$entry['path']])) {
             _stattic_problem_response(422, 'manifest_duplicate_path', 'Version manifest declares the same canonical path twice.', ['details' => ['path' => $entry['path']]]);

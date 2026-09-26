@@ -102,18 +102,27 @@ impl ServiceGrant {
     };
 
     /// Parses the comma-separated wire grant the relay passes to the executor.
-    /// Fails closed: an absent or unreadable grant reaches nothing.
+    /// Fails closed: an absent or unreadable grant reaches nothing, and so does
+    /// a name outside [`WIRE_GRANTS`].
     pub(crate) fn from_wire(raw: &str) -> Self {
-        let granted = |name: &str| raw.split(',').any(|token| token.trim() == name);
-        Self {
-            gravatar: granted("gravatar.profile"),
-            spam: granted("spam.check"),
-            email: granted("email.send"),
-            // The Functions tier already spells the storage grant this way;
-            // one vocabulary across tiers rather than a second spelling here.
-            storage: granted("storage.read"),
-            content: granted("content.query"),
-            connectors: granted("connectors.call"),
+        let mut grant = Self::NONE;
+        for token in raw.split(',').map(str::trim) {
+            if let Some((_, service)) = WIRE_GRANTS.iter().find(|(name, _)| *name == token) {
+                grant.permit(service);
+            }
+        }
+        grant
+    }
+
+    fn permit(&mut self, service: &str) {
+        match service {
+            "gravatar" => self.gravatar = true,
+            "spam" => self.spam = true,
+            "email" => self.email = true,
+            "content" => self.content = true,
+            "storage" => self.storage = true,
+            "connectors" => self.connectors = true,
+            _ => {}
         }
     }
 
@@ -129,6 +138,23 @@ impl ServiceGrant {
         }
     }
 }
+
+/// The environment variable the relay hands this executor its grant in.
+pub(crate) const SERVICE_BROKER_GRANT_ENV: &str = "SPACEFAST_SERVICE_BROKER_GRANT";
+
+/// Each capability name the wire grant may carry, and the service it admits.
+/// The names are the Functions capability vocabulary in
+/// packages/common/src/contracts/functions.ts; the storage grant reuses that
+/// tier's `storage.read` spelling rather than inventing a second one.
+/// `wire_grants_match_the_shared_functions_contract` pins this table to the
+/// generated functions-wire.generated.json in both directions.
+const WIRE_GRANTS: &[(&str, &str)] = &[
+    ("gravatar.profile", "gravatar"),
+    ("spam.check", "spam"),
+    ("email.send", "email"),
+    ("connectors.call", "connectors"),
+    ("storage.read", "storage"),
+];
 
 pub(crate) fn set_grant(grant: ServiceGrant) {
     SERVICE_GRANT.with(|state| *state.borrow_mut() = grant);
@@ -337,14 +363,7 @@ fn connectors_call(
         ));
     };
     // Both URL and credential are supplied by PHP; tenant frames cannot choose an upstream.
-    let agent = ureq::Agent::new_with_config(
-        ureq::config::Config::builder()
-            .timeout_global(Some(Duration::from_secs(27)))
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .build(),
-    );
-    let response = agent
+    let response = connector_agent()
         .post(url)
         .header("content-type", "application/json")
         .header("authorization", &format!("Bearer {token}"))
@@ -820,6 +839,22 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
+/// The connector call's own agent, shared the same way: a longer budget than
+/// the platform services, no redirects (the credential must not follow one),
+/// and error statuses returned as responses so their `code` can be read.
+fn connector_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(27)))
+                .http_status_as_error(false)
+                .max_redirects(0)
+                .build(),
+        )
+    })
+}
+
 fn required_str<'a>(
     payload: &'a Map<String, Value>,
     field: &str,
@@ -1141,6 +1176,52 @@ mod tests {
             body,
             json!({"role":"tracker", "tool":"issues.create", "args":{"title":"New"}, "visitor":{"subject":"visitor:alice"}, "requestId":"request_test", "handler":{"name":"issues", "mode":"read", "callIndex":0}})
         );
+    }
+
+    #[test]
+    fn wire_grants_match_the_shared_functions_contract() {
+        let contract: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/common/src/contracts/functions-wire.generated.json"
+        )))
+        .expect("the generated Functions wire contract must be valid JSON");
+        assert_eq!(
+            contract["serviceBrokerGrantEnv"].as_str(),
+            Some(SERVICE_BROKER_GRANT_ENV)
+        );
+        let lane = |name: &str| -> Vec<String> {
+            contract["brokers"][name]
+                .as_array()
+                .unwrap_or_else(|| panic!("the {name} broker lane must be listed"))
+                .iter()
+                .map(|capability| capability.as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Every capability the relay's services lane can forward admits the
+        // service before its dot, and nothing else.
+        for capability in lane("services") {
+            let service = capability.split('.').next().unwrap();
+            let grant = ServiceGrant::from_wire(&capability);
+            assert!(grant.permits(service), "{capability} must admit {service}");
+            let mut only = ServiceGrant::NONE;
+            only.permit(service);
+            assert_eq!(grant, only, "{capability} must admit only {service}");
+        }
+
+        // And every spelling this broker reads is one the contract names.
+        let vocabulary: Vec<String> = contract["brokers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .flat_map(|name| lane(name))
+            .collect();
+        for (name, _) in WIRE_GRANTS {
+            assert!(
+                vocabulary.iter().any(|capability| capability == name),
+                "{name} is not a Functions capability"
+            );
+        }
     }
 
     #[test]

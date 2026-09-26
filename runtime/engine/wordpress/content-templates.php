@@ -120,14 +120,13 @@ function spacefast_content_templates_for_release(): array
 /** @return list<object> */
 function spacefast_content_templates_project(): array
 {
-    $contentModel = spacefast_content_model_active_release();
-    if ($contentModel === null) {
+    if (spacefast_content_model_active_release() === null) {
         return [];
     }
     $markup = spacefast_content_templates_default_markup();
     $theme = spacefast_content_templates_theme();
     $templates = [];
-    foreach (is_array($contentModel['postTypes'] ?? null) ? $contentModel['postTypes'] : [] as $resource) {
+    foreach (spacefast_content_model_resources() as $resource) {
         $slug = is_array($resource) ? spacefast_content_templates_slug_for_resource($resource) : null;
         if ($slug === null || isset($templates[$slug])) {
             continue;
@@ -278,10 +277,9 @@ function spacefast_content_templates_collection_resource(int $postId): ?array
     if ($postId < 1 || !function_exists('wp_get_object_terms')) {
         return null;
     }
-    $contentModel = spacefast_content_model_active_release();
     $spaceId = spacefast_content_require_space_id();
     $byTerm = [];
-    foreach (is_array($contentModel['postTypes'] ?? null) ? $contentModel['postTypes'] : [] as $resource) {
+    foreach (spacefast_content_model_resources() as $resource) {
         if (is_array($resource) && ($resource['kind'] ?? '') === 'collection' && is_string($resource['id'] ?? null)) {
             $byTerm[spacefast_content_model_collection_term_slug($spaceId, $resource['id'])] = $resource;
         }

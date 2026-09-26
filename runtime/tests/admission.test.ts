@@ -322,7 +322,7 @@ beforeAll(async () => {
 <?php
 // One binary serves the finalize and Zero lanes, so delegate non-Zero commands.
 $real = ${JSON.stringify(REAL_RUNTIME_PATH)};
-if (!in_array($argv[1] ?? '', ['prepare', 'invoke'], true)) {
+if (($argv[1] ?? '') !== 'invoke') {
   $process = proc_open(
     array_merge([$real], array_slice($argv, 1)),
     [0 => STDIN, 1 => STDOUT, 2 => STDERR],
@@ -330,12 +330,6 @@ if (!in_array($argv[1] ?? '', ['prepare', 'invoke'], true)) {
   );
   exit(is_resource($process) ? proc_close($process) : 1);
 }
-if (($argv[1] ?? '') === 'prepare') {
-  copy($argv[2], $argv[5] ?? $argv[2]);
-  file_put_contents($argv[3], "bytecode");
-  exit(0);
-}
-if (($argv[1] ?? '') !== 'invoke') exit(2);
 $input = json_decode(stream_get_contents(STDIN), true);
 echo json_encode([
   'status' => 200,

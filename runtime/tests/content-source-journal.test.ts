@@ -355,7 +355,7 @@ $receipt = spacefast_content_handle_request([
   'text' => "# Launch\n\nThe first paragraph.\n",
   'observedSourceRevision' => 'blob-1',
   'operationId' => 'op_000001',
-], true);
+]);
 $probes[] = ['step' => 'bound', 'rows' => journal_rows($link)];
 $postId = null;
 global $posts;
@@ -426,8 +426,8 @@ update_post_meta($createdId, SPACEFAST_CONTENT_SPACE_META, ${JSON.stringify(SPAC
 probe('after-editor-create', $link);
 editor_save($createdId, "<!-- wp:paragraph -->\n<p>Second draft.</p>\n<!-- /wp:paragraph -->");
 probe('after-editor-second-save', $link);
-$firstMaterialized = spacefast_content_materialize_source(['operationId' => 'op_firstmaterialize', 'postId' => $createdId], true);
-$pendingInspection = spacefast_content_inspect_source(['bindingId' => 'materialize.' . $createdId], true);
+$firstMaterialized = spacefast_content_materialize_source(['operationId' => 'op_firstmaterialize', 'postId' => $createdId]);
+$pendingInspection = spacefast_content_inspect_source(['bindingId' => 'materialize.' . $createdId]);
 $pendingResolution = [
   'operationId' => 'op_pendingresolution', 'bindingId' => 'materialize.' . $createdId,
   'source' => $pendingInspection['source'], 'observedSourceRevision' => 'blob-occupied',
@@ -437,12 +437,12 @@ $pendingResolution = [
 $pendingStale = [];
 foreach (['expectedBaseRevision', 'expectedWordpressDigest'] as $field) {
   try {
-    spacefast_content_resolve_source([...$pendingResolution, $field => 'sha256:' . str_repeat('0', 64)], true);
+    spacefast_content_resolve_source([...$pendingResolution, $field => 'sha256:' . str_repeat('0', 64)]);
     $pendingStale[$field] = 'unexpected_success';
   } catch (Spacefast_Content_Error $error) { $pendingStale[$field] = $error->codeName; }
 }
-$pendingResolved = spacefast_content_resolve_source($pendingResolution, true);
-$pendingReplay = spacefast_content_resolve_source($pendingResolution, true);
+$pendingResolved = spacefast_content_resolve_source($pendingResolution);
+$pendingReplay = spacefast_content_resolve_source($pendingResolution);
 $resolvedMaterialized = spacefast_content_sync_receipt($createdId, 'op_pendingresolution');
 $probes[] = ['step' => 'pending-resolution', 'rows' => [
   'inspection' => $pendingInspection, 'stale' => $pendingStale, 'resolved' => $pendingResolved,
@@ -453,7 +453,7 @@ $posts[$createdId]['post_title'] = 'Updated during build';
 $posts[$createdId]['post_name'] = 'renamed-during-build';
 editor_save($createdId, "<!-- wp:paragraph -->\n<p>Third draft during build.</p>\n<!-- /wp:paragraph -->");
 probe('after-materialization-pending-save', $link);
-$repeatMaterialized = spacefast_content_materialize_source(['operationId' => 'op_repeatmaterialize', 'postId' => $createdId], true);
+$repeatMaterialized = spacefast_content_materialize_source(['operationId' => 'op_repeatmaterialize', 'postId' => $createdId]);
 $adopted = spacefast_content_sync_without_journal(static fn () => spacefast_content_sync_publish_document([
   'bindingId' => 'sync.posts-created', 'source' => 'content/posts/hello-world.md', 'format' => 'md',
   'text' => $resolvedMaterialized['sourceWrite']['text'], 'observedSourceRevision' => 'blob-resolved-materialized',
@@ -481,22 +481,22 @@ update_post_meta($pageId, SPACEFAST_CONTENT_SPACE_META, ${JSON.stringify(SPACE_I
 update_post_meta($pageId, SPACEFAST_CONTENT_EXTERNAL_ID_META, SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX . ${JSON.stringify(TSX_BINDING)});
 probe('after-compile-class-save', $link);
 $conversion = ['operation' => 'source.convert', 'operationId' => 'op_explicitconversion', 'postId' => $pageId, 'bindingId' => '${TSX_BINDING}'];
-spacefast_content_request_conversion($conversion, true);
-spacefast_content_request_conversion($conversion, true);
+spacefast_content_request_conversion($conversion);
+spacefast_content_request_conversion($conversion);
 probe('after-explicit-conversion', $link);
-spacefast_content_materialize_source(['operationId' => 'op_prepareconversion', 'bindingId' => '${TSX_BINDING}'], true);
-$conversionInspection = spacefast_content_inspect_source(['bindingId' => '${TSX_BINDING}'], true);
+spacefast_content_materialize_source(['operationId' => 'op_prepareconversion', 'bindingId' => '${TSX_BINDING}']);
+$conversionInspection = spacefast_content_inspect_source(['bindingId' => '${TSX_BINDING}']);
 spacefast_content_resolve_source([
   'operationId' => 'op_resolveconversion', 'bindingId' => '${TSX_BINDING}',
   'source' => $conversionInspection['source'], 'observedSourceRevision' => 'blob-existing-html',
   'expectedBaseRevision' => $conversionInspection['baseRevision'], 'expectedWordpressDigest' => $conversionInspection['wordpressDigest'],
   'text' => '<p>Resolved component page.</p>',
-], true);
+]);
 $probes[] = ['step' => 'conversion-resolution', 'rows' => [
   'inspection' => $conversionInspection, 'receipt' => spacefast_content_sync_receipt($pageId, 'op_resolveconversion'),
 ]];
 probe('after-conversion-resolution', $link);
-$inspection = spacefast_content_inspect_source(['bindingId' => ${JSON.stringify(BINDING)}], true);
+$inspection = spacefast_content_inspect_source(['bindingId' => ${JSON.stringify(BINDING)}]);
 $resolution = [
   'operationId' => 'op_explicitresolution', 'bindingId' => ${JSON.stringify(BINDING)},
   'source' => ${JSON.stringify(SOURCE)}, 'observedSourceRevision' => 'blob-current',
@@ -504,13 +504,13 @@ $resolution = [
   'text' => "# Resolved\n\nThe selected result.\n",
 ];
 try {
-  spacefast_content_resolve_source([...$resolution, 'expectedWordpressDigest' => 'sha256:' . str_repeat('0', 64)], true);
+  spacefast_content_resolve_source([...$resolution, 'expectedWordpressDigest' => 'sha256:' . str_repeat('0', 64)]);
   $probes[] = ['step' => 'stale-resolution', 'rows' => ['code' => 'unexpected_success']];
 } catch (Spacefast_Content_Error $error) {
   $probes[] = ['step' => 'stale-resolution', 'rows' => ['code' => $error->codeName]];
 }
-spacefast_content_resolve_source($resolution, true);
-spacefast_content_resolve_source($resolution, true);
+spacefast_content_resolve_source($resolution);
+spacefast_content_resolve_source($resolution);
 probe('after-resolution', $link);
 $probes[] = ['step' => 'resolved-receipt', 'rows' => spacefast_content_sync_receipt($postId, 'op_explicitresolution')];
 $probes[] = ['step' => 'sync-status', 'rows' => spacefast_content_source_journal_status()];
@@ -535,7 +535,7 @@ spacefast_content_handle_request([
   'bindingId' => 'sync.projects-meta', 'source' => 'content/projects/details.md',
   'text' => "# Details\n\nOriginal field.\n", 'observedSourceRevision' => 'blob-meta',
   'operationId' => 'op_initialmeta',
-], true);
+]);
 $metaPost = spacefast_content_sync_find_post('sync.projects-meta', spacefast_content_model_sync_binding('sync.projects-meta'));
 update_post_meta((int) $metaPost->ID, 'unrelated_field', 'Keep this in WordPress.');
 probe('after-unrelated-meta', $link);
@@ -547,7 +547,7 @@ spacefast_content_handle_request([
   'source' => 'content/posts/scheduled.md',
   'text' => '<!-- spacefast:document {"version":1,"title":"Scheduled","slug":"scheduled","status":"future","dateGmt":"2099-01-01T12:00:00Z"} -->' . "\nScheduled body.\n",
   'observedSourceRevision' => 'blob-scheduled', 'operationId' => 'op_initialscheduled',
-], true);
+]);
 $scheduledPost = spacefast_content_sync_find_post('sync.posts-scheduled', spacefast_content_model_sync_binding('sync.posts-scheduled'));
 $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = ${JSON.stringify(path.join(path.dirname(storage), "releases/test-engine"))};
 unset($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'], $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'], $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION']);

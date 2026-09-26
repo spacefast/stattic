@@ -15,12 +15,6 @@ fn map<const N: usize>(values: [(&str, &str); N]) -> BTreeMap<String, String> {
 }
 
 #[test]
-fn page_protocol_format_is_explicitly_versioned() {
-    assert!(stattic_runtime_core::protocol::PAGE_PROTOCOL_FORMAT
-        .starts_with("spacefast.page-protocol.v"));
-}
-
-#[test]
 fn config_selection_and_jsonc_parsing_are_canonical() {
     let output = analyze(AnalyzeInput {
         format: ANALYZE_INPUT_FORMAT.into(),

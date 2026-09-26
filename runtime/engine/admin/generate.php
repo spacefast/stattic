@@ -157,34 +157,9 @@ function _stattic_runtime_hostname_list(mixed $raw): array
     return array_keys($hostnames);
 }
 
-function _stattic_runtime_store_hostname_intent(string $privateRoot, string $spaceId, array $rawRoutes, array $claims = []): void
-{
-    $previousIntent = _stattic_runtime_read_json_strict(_stattic_space_root($privateRoot, $spaceId) . '/hostname-intent.json');
-    $routes = _stattic_runtime_normalize_hostname_intent_routes($rawRoutes);
-    _stattic_runtime_store_hostname_intent_from_snapshot(
-        $privateRoot,
-        $spaceId,
-        $routes,
-        $previousIntent,
-        $claims,
-    );
-}
-
-function _stattic_runtime_normalize_hostname_intent_routes(array $rawRoutes): array
-{
-    $routes = [];
-    foreach ($rawRoutes as $route) {
-        if (!is_array($route)) {
-            _stattic_problem_response(422, 'invalid_route', 'Each route must be an object.');
-        }
-        $routes[] = _stattic_runtime_normalize_route($route);
-    }
-    return $routes;
-}
-
-// Activation already owns a strict preflight snapshot. Reusing it here keeps
-// every potentially failing read before the route/access mutation, while the
-// public wrapper above preserves the same preflight for standalone callers.
+// Every caller already holds a strict preflight snapshot of the stored intent.
+// Reusing it here keeps every potentially failing read before the route/access
+// mutation.
 function _stattic_runtime_store_hostname_intent_from_snapshot(
     string $privateRoot,
     string $spaceId,
@@ -256,14 +231,8 @@ function _stattic_runtime_hostname_intent_targets(array $routes): array
 // (spec "Cache Management").
 function _stattic_runtime_affected_intent_hostnames(string $privateRoot, string $spaceId, ?string $routeName, ?string $versionId = null): array
 {
-    $intent = _stattic_runtime_read_json_strict(_stattic_space_root($privateRoot, $spaceId) . '/hostname-intent.json');
-    if ($intent === null) {
-        return [];
-    }
-    if (!is_array($intent) || !is_array($intent['routes'] ?? null)) {
-        throw new RuntimeException('runtime hostname intent is invalid');
-    }
-    return _stattic_runtime_affected_intent_hostnames_from_routes($intent['routes'], $routeName, $versionId);
+    $intent = _stattic_runtime_space_routing_doc(_stattic_space_root($privateRoot, $spaceId), 'intent');
+    return $intent === null ? [] : _stattic_runtime_affected_intent_hostnames_from_routes($intent['routes'], $routeName, $versionId);
 }
 
 function _stattic_runtime_affected_intent_hostnames_from_routes(array $routes, ?string $routeName, ?string $versionId = null): array
@@ -441,7 +410,7 @@ function _stattic_runtime_normalize_route(array $route): array
 
 function _stattic_runtime_normalize_route_hostname(string $hostname): string
 {
-    $hostname = _stattic_normalize_hostname(trim($hostname));
+    $hostname = _stattic_normalize_hostname($hostname);
     return preg_match('/^(\\*\\.)?[a-z0-9.-]{1,253}$/', $hostname) === 1 ? $hostname : '';
 }
 
@@ -636,33 +605,6 @@ function _stattic_runtime_update_route_index_unlocked(string $privateRoot, strin
     _stattic_runtime_write_route_index($privateRoot, $freshShards, $reusedShards, $wildcards, $newOwners, $beforePublish);
 }
 
-// ENOENT is a normal "no document" answer; a read FAILURE of an existing
-// document must abort the operation that needed it. Publishing a route index,
-// purge set, or tombstone state derived from a failed read deletes live state
-// (the management route answers 5xx and the control plane retries; the
-// maintenance tick journals maintenance_step_failed). Falling back to a full
-// rebuild is NOT a safe disposition either: the rebuild does the same reads.
-function _stattic_runtime_read_json_strict(string $path): mixed
-{
-    $decoded = _stattic_runtime_read_json($path);
-    if ($decoded === false) {
-        throw new RuntimeException('runtime document read failed: ' . $path);
-    }
-    return $decoded;
-}
-
-/**
- * @return list<string> absolute child paths
- */
-function _stattic_runtime_directory_entries_strict(string $root): array
-{
-    $paths = _stattic_runtime_directory_entries($root);
-    if ($paths === null) {
-        throw new RuntimeException('runtime document enumeration failed: ' . $root);
-    }
-    return $paths;
-}
-
 // Read under the index lock: this is the read half of a read-modify-write.
 // false = current.json exists but could not be read. The caller must abort,
 // never treat it as gen 0.
@@ -738,11 +680,8 @@ function _stattic_runtime_space_index_contribution(string $privateRoot, string $
 {
     $contribution = ['space_id' => $spaceId, 'hostnames' => [], 'routes' => [], 'canonical' => [], 'tombstones' => [], 'tombstone_reason' => null, 'tombstone_category' => null];
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
-    $routesConfig = _stattic_runtime_read_json_strict($spaceRoot . '/hostname-intent.json');
-    if ($routesConfig !== null && (!is_array($routesConfig) || ($routesConfig['space_id'] ?? null) !== $spaceId || !is_array($routesConfig['routes'] ?? null))) {
-        throw new RuntimeException('runtime hostname intent is invalid: ' . $spaceRoot);
-    }
-    if (is_array($routesConfig) && ($routesConfig['space_id'] ?? null) === $spaceId && is_array($routesConfig['routes'] ?? null)) {
+    $routesConfig = _stattic_runtime_space_routing_doc($spaceRoot, 'intent', $spaceId);
+    if ($routesConfig !== null) {
         // Safe to memoize: nothing writes pointers while a contribution is built.
         $pointerCache = [];
         foreach ($routesConfig['routes'] as $route) {
@@ -764,11 +703,8 @@ function _stattic_runtime_space_index_contribution(string $privateRoot, string $
             }
         }
     }
-    $tombstoneConfig = _stattic_runtime_read_json_strict($spaceRoot . '/tombstones.json');
-    if ($tombstoneConfig !== null && (!is_array($tombstoneConfig) || ($tombstoneConfig['space_id'] ?? null) !== $spaceId || !is_array($tombstoneConfig['hostnames'] ?? null))) {
-        throw new RuntimeException('runtime tombstones are invalid: ' . $spaceRoot);
-    }
-    if (is_array($tombstoneConfig) && ($tombstoneConfig['space_id'] ?? null) === $spaceId && is_array($tombstoneConfig['hostnames'] ?? null)) {
+    $tombstoneConfig = _stattic_runtime_space_routing_doc($spaceRoot, 'tombstones', $spaceId);
+    if ($tombstoneConfig !== null) {
         foreach ($tombstoneConfig['hostnames'] as $hostname) {
             if (is_string($hostname) && $hostname !== '') {
                 $contribution['tombstones'][] = $hostname;
@@ -1579,8 +1515,7 @@ function _stattic_runtime_overlay_sdk_section(string $privateRoot, string $space
         $staging = $privateRoot . '/runtime/blob-staging';
         _stattic_runtime_mkdir($staging);
         $tmp = $staging . '/sdk-' . bin2hex(random_bytes(12)) . '.tmp';
-        if (file_put_contents($tmp, $body) !== strlen($body)) {
-            unlink($tmp);
+        if (!_sf_atomic_put($tmp, $body, false)) {
             _stattic_runtime_route_index_validation_failed('overlay');
         }
         _stattic_runtime_blob_put($privateRoot, $spaceId, $tmp, $sha);
@@ -1933,10 +1868,7 @@ function _stattic_runtime_apply_zero_migrations(string $versionRoot): void
     }
     $zeroConfig = _stattic_runtime_read_json($versionRoot . '/zero/config.json');
     $env = _stattic_zero_runner_base_env(is_array($zeroConfig) ? $zeroConfig : []);
-    _stattic_db_broker_bind(
-        is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : null,
-        is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
-    );
+    _stattic_db_broker_bind_env($env);
     $result = _stattic_db_broker_apply_migrations($path);
     // Publishing is the only thing this request does with a database, and the
     // link is worth nothing to the rest of it.
@@ -2031,8 +1963,7 @@ function _stattic_runtime_apply_d1_migrations(array $functions, string $spaceId)
     $databases = $functions['artifact']['d1'] ?? [];
     if ($databases === []) return;
     require_once __DIR__ . '/../shared/d1-broker.php';
-    $env = _stattic_zero_runner_base_env();
-    _stattic_db_broker_bind($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null, $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null);
+    _stattic_db_broker_bind_provider();
     _stattic_db_broker_grant(['db.read', 'db.write']);
     try {
         _sf_d1_migrate($spaceId, $databases);

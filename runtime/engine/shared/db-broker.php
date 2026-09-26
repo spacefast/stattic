@@ -21,13 +21,14 @@ require_once __DIR__ . '/finalizer-protocol.generated.php';
 // lifetime this host allows, so a handler's Kth operation costs a round trip
 // rather than a connect.
 //
-// The observable contract is `crates/stattic-zero-runner/src/db.rs`, the
-// in-process executor behind the Zero runner's QuickJS host function, down to
-// the bytes: same operation shape, same JSON encoding of every MySQL type, same
-// error codes, same limits, same transaction semantics, pinned by the
-// db-broker.test.ts corpus. Two engines that disagree about how a DECIMAL or an
-// unsigned BIGINT becomes JSON diverge silently in production, so the encoder
-// here follows the Rust driver's wire behaviour rather than PHP's conveniences.
+// The result encoding follows `crates/stattic-zero-runner/src/db.rs`, the
+// in-process executor behind the Zero runner's QuickJS host function: same JSON
+// encoding of every MySQL type, same error codes, same limits. Nothing compares
+// the two engines' bytes (db-broker.test.ts covers this one alone), so a change
+// to either encoder is ported to the other by hand. Two engines that disagree
+// about how a DECIMAL or an unsigned BIGINT becomes JSON diverge silently in
+// production, so the encoder here follows the Rust driver's wire behaviour
+// rather than PHP's conveniences.
 //
 // STATTIC_DB_OPERATION_MAX_BYTES, _PARAM_MAX_COUNT, _TRANSACTION_MAX_STATEMENTS,
 // _RESULT_ROWS_MAX and _SESSION_PIN are the shared half of that contract and
@@ -94,6 +95,35 @@ function _stattic_db_broker_bind(?string $url, ?string $source = null): void
     }
     $state['url'] = $bound;
     $state['source'] = $source;
+}
+
+/**
+ * Bind the box's own database for work that no request configured.
+ *
+ * `_stattic_zero_runner_base_env()` is the engine's single provider-credential
+ * resolver: the reserved labelled name, then `DATABASE_URL`, then the provider's
+ * `DB_HOST`/`DB_NAME`/`DB_USER`/`DB_PASSWORD` tuple. Passing no application
+ * configuration is deliberate — box-owned work (mail outbox, application
+ * journal, D1 migrations) never binds whichever Space happens to be live.
+ */
+function _stattic_db_broker_bind_provider(): void
+{
+    _stattic_db_broker_bind_env(_stattic_zero_runner_base_env());
+}
+
+/**
+ * Bind the labelled database URL out of a `_stattic_zero_runner_base_env()`
+ * result. An empty URL binds nothing: `_stattic_db_broker_dsn()` treats it as
+ * unbound, exactly like null.
+ *
+ * @param array<string,string> $env
+ */
+function _stattic_db_broker_bind_env(array $env): void
+{
+    _stattic_db_broker_bind(
+        is_string($env['SPACEFAST_ZERO_DATABASE_URL'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL'] : null,
+        is_string($env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] ?? null) ? $env['SPACEFAST_ZERO_DATABASE_URL_SOURCE'] : null
+    );
 }
 
 /**
@@ -492,8 +522,10 @@ function _stattic_db_broker_finish_transaction(string $command): array
 
 /**
  * Authorization follows the SQL, never the caller-supplied result-shape hint.
- * Ported clause for clause from db.rs `statement_is_mutation`. Anything not
- * positively recognized as a read fails closed as a mutation. The local tier
+ * This is the only classifier that sees tenant-authored SQL: the native runner
+ * builds every statement itself from a declared operation, so it knows which
+ * ones write without reading them. Anything not positively recognized as a
+ * read fails closed as a mutation. The local tier
  * never notices (its grant is all-or-nothing); this classifier exists for the
  * relay's narrowed read-only credential.
  */
@@ -1404,7 +1436,9 @@ function _stattic_db_broker_rows_max(): int
 {
     $configured = (int) _stattic_config_value('SPACEFAST_ZERO_DB_ROWS_MAX');
 
-    return $configured > 0 ? $configured : STATTIC_DB_RESULT_ROWS_MAX;
+    return $configured > 0
+        ? min($configured, STATTIC_DB_RESULT_ROWS_MAX)
+        : STATTIC_DB_RESULT_ROWS_MAX;
 }
 
 function _stattic_db_broker_bytes_max(): int

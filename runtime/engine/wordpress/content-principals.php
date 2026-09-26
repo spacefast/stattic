@@ -155,7 +155,7 @@ function spacefast_content_principal_find_user(string $principalId, string $issu
  */
 function spacefast_content_principal_ensure_user(array $identity, bool $syncProfile = true): int
 {
-    if (function_exists('spacefast_space_users_available') && spacefast_space_users_available()) {
+    if (spacefast_space_users_available()) {
         return spacefast_space_users_identity_lock((string) $identity['issuer'], (string) $identity['subject'],
             static fn (): int => spacefast_content_principal_ensure_user_unlocked($identity, $syncProfile));
     }

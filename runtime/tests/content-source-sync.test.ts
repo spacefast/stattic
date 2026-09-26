@@ -474,11 +474,10 @@ function digest(text: string) {
 }
 
 test("an editor-created page materializes once under canonical pages", async () => {
-  const [, first, second, unmanaged] = await runScenario("md", [
+  const [, first, second] = await runScenario("md", [
     { op: "createInWordPress", slug: "hello-world", blocks: MARKDOWN_BLOCKS, postType: "page" },
     { op: "materialize", target: "post" },
     { op: "materialize", target: "post" },
-    { op: "materialize", target: "post", managed: false },
   ]);
 
   const prepared = materialized(first);
@@ -496,8 +495,6 @@ test("an editor-created page materializes once under canonical pages", async () 
   const repeated = materialized(second);
   expect(repeated.status).toBe("skipped");
   expect(repeated.sourceWrite.source).toBe(prepared.sourceWrite.source);
-
-  expect(problem(unmanaged).code).toBe("content_auth_required");
 });
 
 test("a document richer than its materialization format is refused, not flattened", async () => {

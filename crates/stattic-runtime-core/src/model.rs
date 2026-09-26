@@ -161,20 +161,6 @@ pub struct RuntimeZeroRun {
     rename_all_fields = "camelCase"
 )]
 pub enum PhpActionRecord {
-    ServeStatic {
-        pattern: String,
-        file: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        content_type: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        etag: Option<String>,
-    },
-    Redirect {
-        pattern: String,
-        destination: String,
-        status: u16,
-        cache_control: String,
-    },
     InvokeZero {
         pattern: String,
         method: String,

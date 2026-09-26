@@ -21,7 +21,6 @@
 // edge answers conditionals off its own HIT. The ETag is still EMITTED per entry
 // and asserted below; nothing in PHP compares it.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import {
   chmodSync,
   cpSync,
@@ -32,7 +31,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { brotliCompressSync, gzipSync } from "node:zlib";
@@ -58,9 +56,11 @@ import {
   RUNTIME_HTTP_API_BASE,
   RUNTIME_TEST_ATOMIC_PREPEND,
   RUNTIME_TEST_ROUTER,
+  type PhpServer,
   sha256,
   storagePath,
   type Runtime,
+  startPhpServer,
   startRuntime,
   uploadSessionBlobs,
   versionRootArtifact,
@@ -106,41 +106,6 @@ const BROWSER_HEADERS = {
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 };
 const AGENT_HEADERS = { accept: "*/*", "user-agent": "curl/8.5.0" };
-
-async function freePort(): Promise<number> {
-  const server = net.createServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (address === null || typeof address === "string") {
-    server.close();
-    throw new Error("runtime_test_listener_missing_port");
-  }
-  await new Promise<void>((resolve, reject) =>
-    server.close((error) => (error ? reject(error) : resolve())),
-  );
-  return address.port;
-}
-
-function waitForPhpServer(server: ChildProcessWithoutNullStreams): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let stderr = "";
-    const timeout = setTimeout(() => finish(new Error("php_server_start_timeout")), 10_000);
-    const onData = (chunk: Buffer) => {
-      stderr += chunk.toString();
-      if (stderr.includes(" Development Server (") && stderr.includes(") started")) finish();
-    };
-    const onExit = (code: number | null) => finish(new Error(`php_exited:${code}`));
-    const finish = (error?: Error) => {
-      clearTimeout(timeout);
-      server.stderr.off("data", onData);
-      server.off("exit", onExit);
-      if (error) reject(error);
-      else resolve();
-    };
-    server.stderr.on("data", onData);
-    server.once("exit", onExit);
-  });
-}
 
 beforeAll(async () => {
   redirectReceiver = Bun.serve({
@@ -802,9 +767,13 @@ test("SPA mode serves the shell for app routes, never for asset-looking paths", 
       pattern: [],
     }),
   );
-  const unpublished = await get(rt, "spa.test", "/unpublished-rename");
-  expect(unpublished.status).toBe(200);
-  expect(await unpublished.text()).toBe("<h1>spa</h1>\n");
+  // The redirect walk trims trailing slashes, so `/unpublished-rename/` reads
+  // the same rules and must get the same published-destination filter.
+  for (const requestPath of ["/unpublished-rename", "/unpublished-rename/"]) {
+    const unpublished = await get(rt, "spa.test", requestPath);
+    expect(unpublished.status, requestPath).toBe(200);
+    expect(await unpublished.text(), requestPath).toBe("<h1>spa</h1>\n");
+  }
   const published = await get(rt, "spa.test", "/published-rename");
   expect(published.status).toBe(301);
   expect(published.headers.get("location")).toBe("/main.js");
@@ -1083,7 +1052,12 @@ test("a Functions version dispatches its compiled routes; everything else routes
     },
     activate: {
       route_name: "production",
-      config: publicAccessConfig({ mode: "website", site_title: "Functions routes" }),
+      // Open (public on every target), so the serve path loads no access code:
+      // the Functions lane must bring its own admission dependency.
+      config: publicAccessConfig(
+        { mode: "website", site_title: "Functions routes" },
+        "live_and_all_versions",
+      ),
       production_hostnames: [host],
       noindex_production_hostnames: [],
       version_hostnames: [],
@@ -1695,7 +1669,7 @@ test("public requests load only the modules their request class needs", async ()
   const moduleRuntime = await startRuntime();
   const host = "lazy-modules.test";
   let instrumentedRoot: string | undefined;
-  let instrumentedServer: ChildProcessWithoutNullStreams | undefined;
+  let instrumentedServer: PhpServer | undefined;
   try {
     await deploy(moduleRuntime, {
       spaceId: "spc_lazy_modules",
@@ -1744,28 +1718,19 @@ test("public requests load only the modules their request class needs", async ()
       ].join("\n"),
     );
 
-    const port = await freePort();
-    const instrumentedBaseUrl = `http://127.0.0.1:${port}`;
-    instrumentedServer = spawn(
-      "php",
-      [
-        "-d",
-        "opcache.enable_cli=0",
-        "-d",
-        `auto_prepend_file=${testPrepend}`,
-        "-S",
-        `127.0.0.1:${port}`,
-        instrumentedRouter,
-      ],
-      { cwd: instrumentedRoot, stdio: "pipe", env: process.env },
-    );
-    await waitForPhpServer(instrumentedServer);
+    instrumentedServer = await startPhpServer({
+      args: ["-d", "opcache.enable_cli=0", "-d", `auto_prepend_file=${testPrepend}`],
+      router: instrumentedRouter,
+      cwd: instrumentedRoot,
+      env: process.env,
+    });
+    const instrumentedBaseUrl = instrumentedServer.baseUrl;
     const instrumentedRuntime: Runtime = {
       baseUrl: instrumentedBaseUrl,
       root: instrumentedRoot,
       engineRoot: path.join(instrumentedRoot, ".stattic/releases/test/engine"),
       storageRoot: path.join(instrumentedRoot, ".stattic/storage"),
-      processId: instrumentedServer.pid ?? 0,
+      processId: instrumentedServer.processId,
       stop: () => undefined,
     };
 
@@ -1853,7 +1818,7 @@ test("public requests load only the modules their request class needs", async ()
       expect(staticModules, forbidden).not.toContain(forbidden);
     }
   } finally {
-    instrumentedServer?.kill();
+    instrumentedServer?.stop();
     if (instrumentedRoot) rmSync(instrumentedRoot, { recursive: true, force: true });
     moduleRuntime.stop();
   }

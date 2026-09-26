@@ -4,15 +4,13 @@ declare(strict_types=1);
 // Promote-on-read (contracts §8): a stat miss on a CAS blob resolves here, and
 // either the bytes are local when this returns or the caller renders 503.
 //
-// Loaded LAZILY from serve.php's promote seam: nothing here may be reachable
-// from the local hot path. That laziness is what makes bootstrap-config safe to
-// require: bucket credentials live in Atomic_Persistent_Data, so the miss branch
-// pays a decrypt the hot path must never pay (§6, §11).
-require_once __DIR__ . '/../shared/bootstrap-config.php';
+// Loaded lazily from serve.php's promote seam, and cheap to load everywhere
+// else: the bucket client, the admission counter and bootstrap-config load only
+// once a promote actually runs. Bucket credentials live in
+// Atomic_Persistent_Data, so the miss branch pays a decrypt a local hit must
+// never pay (§6, §11).
 require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/storage.php';
-require_once __DIR__ . '/../shared/s3.php';
-require_once __DIR__ . '/../shared/admission.php';
 
 // Small on purpose: a cold space under a traffic spike sheds most of the spike
 // instead of holding every worker on the same bucket.
@@ -23,6 +21,17 @@ const STATTIC_TIER_PROMOTE_CONCURRENCY = 2;
 // corrupt or hostile object cannot fill the disk before the digest check gets
 // to reject it.
 const STATTIC_TIER_PROMOTE_MAX_BYTES = 1073741824; // 1 GiB
+
+/**
+ * A blob's local CAS path, promoted from the cold tier when it is not on disk.
+ * Null means the bytes are unreachable right now; the caller picks its own
+ * refusal (503, 404, or "no manifest").
+ */
+function _stattic_runtime_local_blob(string $privateRoot, string $spaceId, string $sha256): ?string
+{
+    $path = _stattic_runtime_blob_path($privateRoot, $spaceId, $sha256);
+    return is_file($path) ? $path : _stattic_tier_promote_blob($privateRoot, $spaceId, $sha256);
+}
 
 function _stattic_tier_promote_admit(string $privateRoot, string $spaceId): callable|false
 {
@@ -70,6 +79,9 @@ function _stattic_tier_fetch_failed(string $privateRoot, array $entry): void
  */
 function _stattic_tier_promote_blob(string $privateRoot, string $spaceId, string $sha256): ?string
 {
+    require_once __DIR__ . '/../shared/bootstrap-config.php';
+    require_once __DIR__ . '/../shared/s3.php';
+    require_once __DIR__ . '/../shared/admission.php';
     $sha256 = strtolower(trim($sha256));
     // Checked before _stattic_runtime_blob_path(), which renders a 422 problem
     // document, the wrong emitter entirely for a visitor request.

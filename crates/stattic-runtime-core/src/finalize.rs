@@ -336,26 +336,21 @@ pub fn write_json(path: &Path, value: &Value) -> Result<()> {
     write_bytes(path, &bytes)
 }
 
-/// Rewrites an existing JSON document, compact and atomically, without creating
-/// the directories leading to it.
+/// Writes compact JSON through the same atomic path as [`write_json`].
 ///
-/// **Compact** because the runtime is the only reader and a version may commit
-/// 100,000 paths: indentation roughly doubles a worst-case document that the PHP
-/// reader refuses outright above a byte ceiling
-/// (`STATTIC_RUNTIME_VERSION_CATALOG_MAX_BYTES`), which would let a version
-/// commit and then 500 on every read. Artifacts a human opens — `debug.json`,
-/// the zero documents — keep their indentation.
-///
-/// **In place** because the caller reads the document before rewriting it: if
-/// the parent has gone by the time we write, the version was deleted underneath
-/// us and the rename must fail rather than resurrect the tree.
-pub fn rewrite_json_compact(path: &Path, value: &Value) -> Result<()> {
+/// For a version's `metadata.json`: the runtime is its only reader and a
+/// version may commit 100,000 paths, so indentation roughly doubles a
+/// worst-case document that the PHP reader refuses outright above a byte
+/// ceiling (`STATTIC_RUNTIME_VERSION_CATALOG_MAX_BYTES`), which would let a
+/// version commit and then 500 on every read. Artifacts a human opens —
+/// `debug.json`, the zero documents — keep their indentation.
+pub fn write_json_compact(path: &Path, value: &Value) -> Result<()> {
     let mut bytes = serde_json::to_vec(value).map_err(|source| FinalizeError::Json {
         path: path.into(),
         source,
     })?;
     bytes.push(b'\n');
-    write_bytes_in_place(path, &bytes)
+    write_bytes(path, &bytes)
 }
 
 /// Writes a `<?php return ...;` artifact the PHP serving layer can `include`.
@@ -518,6 +513,7 @@ pub(crate) fn mime_for_path(path: &str, declared: Option<&str>) -> String {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn php_like(path: &str) -> bool {
     matches!(
         path.rsplit('.')
@@ -576,27 +572,21 @@ pub(crate) fn civil_from_days(days: i64) -> (i64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_meta_from_parts, immutable_path, rewrite_json_compact};
+    use super::{file_meta_from_parts, immutable_path, write_json_compact};
 
     /// The document a version's `metadata.json` carries can reach six figures of
-    /// paths, and the runtime is its only reader: it goes out compact, and it
-    /// never rebuilds the directory it lives in — a missing parent means the
-    /// version was deleted while we held its contents.
+    /// paths, and the runtime is its only reader: it goes out compact.
     #[test]
-    fn the_in_place_json_writer_stays_compact_and_never_creates_its_directory() {
+    fn the_metadata_json_writer_stays_compact() {
         let temp = tempfile::tempdir().unwrap();
         let document = serde_json::json!({"catalog": {"paths": ["a", "b"]}});
 
         let path = temp.path().join("metadata.json");
-        rewrite_json_compact(&path, &document).unwrap();
+        write_json_compact(&path, &document).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "{\"catalog\":{\"paths\":[\"a\",\"b\"]}}\n"
         );
-
-        let deleted = temp.path().join("gone/metadata.json");
-        rewrite_json_compact(&deleted, &document).unwrap_err();
-        assert!(!deleted.parent().unwrap().exists());
     }
 
     #[test]

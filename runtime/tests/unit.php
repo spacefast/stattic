@@ -1789,7 +1789,7 @@ $validClaims = [
 ];
 
 check(
-    _stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken($validClaims), 'spc_1', 'ver_1', $digest, STATTIC_FUNCTIONS_BUNDLE_AUD),
+    _stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken($validClaims), 'spc_1', 'ver_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
     'bundle token: a correctly scoped, correctly signed token verifies'
 );
 
@@ -1803,22 +1803,22 @@ foreach ([
     'audience' => ['aud' => 'stattic-runtime-file-fetch'],
     // The sibling artifact kind is a foreign audience: a seed token must not
     // open the bundle it was minted beside.
-    'artifact kind' => ['aud' => STATTIC_FUNCTIONS_SEED_AUD],
+    'artifact kind' => ['aud' => SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['seed']],
 ] as $label => $override) {
     check(
-        !_stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken(array_merge($validClaims, $override)), 'spc_1', 'ver_1', $digest, STATTIC_FUNCTIONS_BUNDLE_AUD),
+        !_stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken(array_merge($validClaims, $override)), 'spc_1', 'ver_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
         'bundle token: refuses a token whose ' . $label . ' does not match'
     );
 }
 
 check(
-    !_stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken(array_merge($validClaims, ['exp' => time() - 1])), 'spc_1', 'ver_1', $digest, STATTIC_FUNCTIONS_BUNDLE_AUD),
+    !_stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken(array_merge($validClaims, ['exp' => time() - 1])), 'spc_1', 'ver_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
     'bundle token: refuses an expired token'
 );
 $noExp = $validClaims;
 unset($noExp['exp']);
 check(
-    !_stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken($noExp), 'spc_1', 'ver_1', $digest, STATTIC_FUNCTIONS_BUNDLE_AUD),
+    !_stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken($noExp), 'spc_1', 'ver_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
     'bundle token: refuses a token with no expiry, so one cannot be unbounded by omission'
 );
 
@@ -1832,7 +1832,7 @@ $forgedToken = $forgedInput . '.' . _stattic_base64url_encode(
     sodium_crypto_sign_detached($forgedInput, sodium_crypto_sign_secretkey($forgedKeypair))
 );
 check(
-    !_stattic_artifact_bundle_token_valid('/tmp', $forgedToken, 'spc_1', 'ver_1', $digest, STATTIC_FUNCTIONS_BUNDLE_AUD),
+    !_stattic_artifact_bundle_token_valid('/tmp', $forgedToken, 'spc_1', 'ver_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
     'bundle token: refuses a token signed by a key that is not the runtime key'
 );
 
@@ -1935,7 +1935,7 @@ $signed = $mintBundleToken($validClaims);
 $parsed = _stattic_artifact_parse_bundle_path('/__spacefast/functions/b/' . $digest . '/' . $signed . '/bundle.json');
 check(
     is_array($parsed) && $parsed['digest'] === $digest && $parsed['token'] === $signed
-        && $parsed['aud'] === STATTIC_FUNCTIONS_BUNDLE_AUD,
+        && $parsed['aud'] === SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle'],
     'bundle path: a well-formed signed URL parses into digest, token and the bundle audience'
 );
 
@@ -1945,11 +1945,11 @@ check(
 $parsedSeed = _stattic_artifact_parse_bundle_path('/__spacefast/functions/b/' . $digest . '/' . $signed . '/seed.json');
 check(
     is_array($parsedSeed) && $parsedSeed['digest'] === $digest && $parsedSeed['token'] === $signed
-        && $parsedSeed['aud'] === STATTIC_FUNCTIONS_SEED_AUD,
+        && $parsedSeed['aud'] === SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['seed'],
     'bundle path: a seed URL parses under the seed audience'
 );
 check(
-    STATTIC_FUNCTIONS_BUNDLE_AUD !== STATTIC_FUNCTIONS_SEED_AUD,
+    SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle'] !== SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['seed'],
     'bundle path: the two artifact kinds never share an audience'
 );
 
@@ -1989,7 +1989,7 @@ require_once __DIR__ . '/../engine/admin/management.php';
 // symlink and the confinement check resolves ancestors.
 $configBase = realpath(sys_get_temp_dir()) . '/sf-fx-config-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
 $configRoot = $configBase . '/spaces/spc_fx/versions/ver_fx';
-mkdir($configRoot . '/files', 0o777, true);
+mkdir($configRoot, 0o777, true);
 
 _stattic_runtime_write_functions_config_artifact($configRoot, [
     'runtimeKind' => 'functions',
@@ -2068,8 +2068,8 @@ _stattic_runtime_write_functions_config_artifact($configRoot, [
         ['method' => 'PUT', 'path' => '/hello'],
     ]],
 ]);
-check(is_file($configRoot . '/functions/routes.php'), 'functions routes: written beside the config, outside files/');
-$fxRoutesVersionRoot = $configRoot . '/files';
+check(is_file($configRoot . '/functions/routes.php'), 'functions routes: written beside the config');
+$fxRoutesVersionRoot = $configRoot;
 check(
     _stattic_resolve_functions_route_action($fxRoutesVersionRoot, 'api/users/1', 'GET') === ['action' => 'dispatch_functions'],
     'functions routes: a subtree descendant dispatches'
@@ -2099,7 +2099,6 @@ check(
 
 array_map('unlink', glob($configRoot . '/functions/*') ?: []);
 @rmdir($configRoot . '/functions');
-@rmdir($configRoot . '/files');
 @rmdir($configRoot);
 @rmdir($configBase . '/spaces/spc_fx/versions');
 @rmdir($configBase . '/spaces/spc_fx');
@@ -2433,7 +2432,6 @@ $fxCfgRoots = [];
 $fxCfgStage = static function (?array $document) use (&$fxCfgRoots): string {
     $root = realpath(sys_get_temp_dir()) . '/sf-fx-cfg-' . bin2hex(random_bytes(6));
     mkdir($root . '/functions', 0o777, true);
-    mkdir($root . '/files', 0o777, true);
     if ($document !== null) {
         file_put_contents($root . '/functions/config.json', (string) json_encode($document));
     }
@@ -2441,8 +2439,8 @@ $fxCfgStage = static function (?array $document) use (&$fxCfgRoots): string {
     return $root;
 };
 $fxRoot = $fxCfgStage(null);
-check(_stattic_functions_config($fxRoot . '/files') === null, 'dispatch config: absent when no config file exists');
-check(!_stattic_version_has_functions($fxRoot . '/files'), 'dispatch config: a static version reports no worker');
+check(_stattic_functions_config($fxRoot) === null, 'dispatch config: absent when no config file exists');
+check(!_stattic_version_has_functions($fxRoot), 'dispatch config: a static version reports no worker');
 foreach ([
     ['runtimeKind' => 'zero'],
     ['runtimeKind' => 'functions'],
@@ -2450,15 +2448,14 @@ foreach ([
     ['runtimeKind' => 'functions', 'host' => ['hostname' => 'fx.example', 'bundleUrl' => 'https://x/b'], 'artifact' => ['compatibilityDate' => '2026-07-01']],
 ] as $index => $incomplete) {
     $incompleteRoot = $fxCfgStage($incomplete);
-    check(_stattic_functions_config($incompleteRoot . '/files') === null, 'dispatch config: incomplete config ' . $index . ' does not dispatch');
+    check(_stattic_functions_config($incompleteRoot) === null, 'dispatch config: incomplete config ' . $index . ' does not dispatch');
 }
 $fxRoot = $fxCfgStage($fxConfig);
-check(_stattic_functions_config($fxRoot . '/files') !== null, 'dispatch config: a complete config dispatches');
-check(_stattic_version_has_functions($fxRoot . '/files'), 'dispatch config: a Functions version reports a worker');
+check(_stattic_functions_config($fxRoot) !== null, 'dispatch config: a complete config dispatches');
+check(_stattic_version_has_functions($fxRoot), 'dispatch config: a Functions version reports a worker');
 foreach ($fxCfgRoots as $fxCfgRoot) {
     array_map('unlink', glob($fxCfgRoot . '/functions/*') ?: []);
     @rmdir($fxCfgRoot . '/functions');
-    @rmdir($fxCfgRoot . '/files');
     @rmdir($fxCfgRoot);
 }
 
@@ -3505,7 +3502,7 @@ check(
     'an unbound broker cannot see the provider DB_* tuple'
 );
 
-_stattic_mail_outbox_bind_provider_database();
+_stattic_db_broker_bind_provider();
 $boundDsn = _stattic_db_broker_dsn();
 check(
     ($boundDsn['db'] ?? '') === 'outbox_unit_db' && ($boundDsn['user'] ?? '') === 'outbox_unit_user',

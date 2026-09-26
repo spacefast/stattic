@@ -288,7 +288,7 @@ export type Step =
   | { op: "lookupPage"; adopt?: boolean }
   // `post` materializes the editor-created document; `binding` is the
   // compile-class takeover, which names the binding instead.
-  | { op: "materialize"; target: "post" | "binding"; managed?: boolean };
+  | { op: "materialize"; target: "post" | "binding" };
 
 export type SyncLedger = {
   version: 1;
@@ -389,7 +389,7 @@ function select_and_commit_test_model(string $revision, bool $stale = false): ar
       'paths' => ['_spacefast/pages/documents/model.json' => ['source' => ['sha256' => $sha, 'size' => strlen($reference), 'contentType' => 'application/json']]], 'variants' => []],
   ]);
   _stattic_runtime_write_json_atomic(_stattic_route_pointer_path($storage, $space, 'production'), ['version_id' => $version]);
-  return spacefast_content_handle_request(['operation' => 'model.commit', 'revision' => $revision, 'versionId' => $stale ? 'ver_wrong' : $version], true);
+  return spacefast_content_handle_request(['operation' => 'model.commit', 'revision' => $revision, 'versionId' => $stale ? 'ver_wrong' : $version]);
 }
 
 $steps = json_decode(${JSON.stringify(JSON.stringify(steps))}, true);
@@ -443,8 +443,8 @@ foreach ($steps as $step) {
       $model['syncBindings'] = [$binding];
       $model['revision'] = 'sha256:' . hash('sha256', json_encode($step));
       $php = '<?php return ' . var_export($model, true) . ';';
-      spacefast_content_model_stage_release($model['revision'], $php, 'sha256:' . hash('sha256', $php), true);
-      spacefast_content_handle_request(['operation' => 'model.activate', 'revision' => $model['revision']], true);
+      spacefast_content_model_stage_release($model['revision'], $php, 'sha256:' . hash('sha256', $php));
+      spacefast_content_handle_request(['operation' => 'model.activate', 'revision' => $model['revision']]);
       select_and_commit_test_model($model['revision']);
       $GLOBALS['firstPublishedRevision'] ??= $model['revision'];
       $GLOBALS['publishedPageSnapshot'] = [...$binding['documentSeed'], 'bindingId' => $binding['id'], 'format' => $binding['format'], 'modelRevision' => $model['revision']];
@@ -456,8 +456,8 @@ foreach ($steps as $step) {
       $model['syncBindings'] = [];
       $model['revision'] = 'sha256:' . hash('sha256', json_encode($model));
       $php = '<?php return ' . var_export($model, true) . ';';
-      spacefast_content_model_stage_release($model['revision'], $php, 'sha256:' . hash('sha256', $php), true);
-      spacefast_content_handle_request(['operation' => 'model.activate', 'revision' => $model['revision']], true);
+      spacefast_content_model_stage_release($model['revision'], $php, 'sha256:' . hash('sha256', $php));
+      spacefast_content_handle_request(['operation' => 'model.activate', 'revision' => $model['revision']]);
       $GLOBALS['preparedRemovalRevision'] = $model['revision'];
       if (empty($step['prepareOnly'])) select_and_commit_test_model($model['revision']);
       $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'removed']];
@@ -536,7 +536,7 @@ foreach ($steps as $step) {
       }
       $results[] = [
         'ok' => true,
-        'receipt' => spacefast_content_handle_request($request, $step['managed'] ?? true),
+        'receipt' => spacefast_content_handle_request($request),
       ];
       continue;
     }
@@ -564,7 +564,7 @@ foreach ($steps as $step) {
       ];
       if (isset($step['baseRevision'])) { $request['baseRevision'] = $step['baseRevision']; }
     }
-    $receipt = spacefast_content_handle_request($request, true);
+    $receipt = spacefast_content_handle_request($request);
     if (isset($receipt['ledger']['revision'])) {
       $lastLedgerRevision = $receipt['ledger']['revision'];
     }

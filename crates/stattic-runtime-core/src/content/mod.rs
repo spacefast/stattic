@@ -83,11 +83,11 @@ pub fn materialize_html_pipeline(
     adoptable: &BTreeMap<String, AdoptablePath>,
     diagnostics: &mut Vec<Value>,
 ) -> Result<HtmlPipelineOutcome> {
+    let absent = Map::new();
     let config = serving
         .get("config")
         .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+        .unwrap_or(&absent);
     let platform_meta = config
         .get("platform_meta")
         .and_then(Value::as_bool)
@@ -361,7 +361,7 @@ pub fn materialize_html_pipeline(
             &source,
             HtmlDecorationContext {
                 page: page_by_output.get(&path).copied(),
-                config: &config,
+                config,
                 viewer,
                 files,
                 meta_tags: page_by_output.contains_key(&path) || platform_meta,

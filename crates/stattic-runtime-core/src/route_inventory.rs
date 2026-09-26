@@ -12,7 +12,7 @@ use crate::finalize::{invalid_with_details, FileMeta, Result};
 use crate::hash::stable_json_sha256;
 use crate::model::{PhpActionRecord, ZeroExecutionMode};
 use crate::responses::php_function_route;
-use crate::routing::RedirectRule;
+use crate::routing::{normalize_hostname, strip_trailing_slash, RedirectRule};
 use crate::serving_paths::is_private_serving_path;
 
 pub(crate) const ROUTE_INVENTORY_FORMAT: &str = "stattic.route-inventory.v1";
@@ -312,10 +312,7 @@ pub(crate) fn compile_route_inventory(input: RouteInventoryInput<'_>) -> Result<
             execution_mode,
             endpoint_id,
             ..
-        } = route
-        else {
-            continue;
-        };
+        } = route;
         routes.push(RouteRecord::from_input(RouteRecordInput {
             kind: RouteKind::ZeroEndpoint,
             source: endpoint_id.clone(),
@@ -488,17 +485,21 @@ fn validate_redirect_cycles(
     exact_response_paths: &BTreeSet<String>,
 ) -> Result<()> {
     let host_universe = redirect_host_universe(redirects, assigned_hostnames);
+    let compiled: Vec<CompiledRedirectRule<'_>> =
+        redirects.iter().map(CompiledRedirectRule::new).collect();
     let mut candidates = BTreeSet::<RouteNode>::new();
-    for rule in redirects.iter().filter(|rule| {
+    for compiled_rule in compiled.iter().filter(|compiled_rule| {
+        let rule = compiled_rule.rule;
         rule.action == "redirect"
             && rule.match_kind == "exact"
             && rule.conditions.is_empty()
             && rule.query.is_none()
     }) {
-        for host in concrete_rule_hosts(rule, &host_universe) {
+        let rule = compiled_rule.rule;
+        for host in concrete_rule_hosts(compiled_rule, &host_universe) {
             candidates.insert(RouteNode {
                 host,
-                path: normalize_route_path(&rule.source),
+                path: strip_trailing_slash(&rule.source),
             });
         }
     }
@@ -506,7 +507,7 @@ fn validate_redirect_cycles(
     let mut edges = BTreeMap::<RouteNode, RedirectEdge>::new();
     for source in candidates {
         if let Some(edge) =
-            effective_redirect_edge(&source, redirects, redirect_route_ids, exact_response_paths)
+            effective_redirect_edge(&source, &compiled, redirect_route_ids, exact_response_paths)
         {
             edges.insert(source, edge);
         }
@@ -562,19 +563,22 @@ fn redirect_host_universe(
 ) -> BTreeSet<String> {
     assigned_hostnames
         .iter()
-        .map(|host| normalize_route_host(host))
+        .map(|host| normalize_hostname(host))
         .chain(redirects.iter().filter_map(|rule| {
             rule.host
                 .as_deref()
                 .filter(|host| !host.contains('*') && !host.contains(':'))
-                .map(normalize_route_host)
+                .map(normalize_hostname)
         }))
         .filter(|host| !host.is_empty())
         .collect()
 }
 
-fn concrete_rule_hosts(rule: &RedirectRule, universe: &BTreeSet<String>) -> Vec<String> {
-    if rule.host.is_none() {
+fn concrete_rule_hosts(
+    rule: &CompiledRedirectRule<'_>,
+    universe: &BTreeSet<String>,
+) -> Vec<String> {
+    if rule.rule.host.is_none() {
         return if universe.is_empty() {
             vec!["*".to_string()]
         } else {
@@ -583,22 +587,23 @@ fn concrete_rule_hosts(rule: &RedirectRule, universe: &BTreeSet<String>) -> Vec<
     }
     universe
         .iter()
-        .filter(|host| redirect_rule_matches_host(rule, host))
+        .filter(|host| rule.matches_host(host))
         .cloned()
         .collect()
 }
 
 fn effective_redirect_edge(
     source: &RouteNode,
-    redirects: &[RedirectRule],
+    redirects: &[CompiledRedirectRule<'_>],
     redirect_route_ids: &[Option<String>],
     exact_response_paths: &BTreeSet<String>,
 ) -> Option<RedirectEdge> {
-    for (index, rule) in redirects.iter().enumerate() {
+    for (index, compiled) in redirects.iter().enumerate() {
+        let rule = compiled.rule;
         if !rule.conditions.is_empty() || rule.query.is_some() {
             continue;
         }
-        let Some(captures) = redirect_rule_captures(rule, source) else {
+        let Some(captures) = compiled.captures(source) else {
             continue;
         };
         match rule.action {
@@ -622,36 +627,54 @@ fn effective_redirect_edge(
     None
 }
 
-fn redirect_rule_captures(
-    rule: &RedirectRule,
-    source: &RouteNode,
-) -> Option<BTreeMap<String, String>> {
-    if !redirect_rule_matches_host(rule, &source.host) {
-        return None;
-    }
-    let Some(regex) = rule.regex.as_deref() else {
-        return (normalize_route_path(&rule.source) == source.path).then(BTreeMap::new);
-    };
-    let regex = regex::Regex::new(regex).ok()?;
-    let captures = regex.captures(&source.path)?;
-    Some(
-        regex
-            .capture_names()
-            .flatten()
-            .filter_map(|name| {
-                captures
-                    .name(name)
-                    .map(|value| (name.to_string(), value.as_str().to_string()))
-            })
-            .collect(),
-    )
+/// A redirect rule with its regexes compiled once: cycle validation matches
+/// every rule against every candidate node, and compiling costs far more than
+/// matching. The outer `Option` is "the rule has a regex"; the inner one is
+/// "it compiled" — a rule whose regex does not compile matches nothing.
+struct CompiledRedirectRule<'a> {
+    rule: &'a RedirectRule,
+    regex: Option<Option<regex::Regex>>,
+    host_regex: Option<Option<regex::Regex>>,
 }
 
-fn redirect_rule_matches_host(rule: &RedirectRule, host: &str) -> bool {
-    let Some(regex) = rule.host_regex.as_deref() else {
-        return rule.host.is_none();
-    };
-    host != "*" && regex::Regex::new(regex).is_ok_and(|regex| regex.is_match(host))
+impl<'a> CompiledRedirectRule<'a> {
+    fn new(rule: &'a RedirectRule) -> Self {
+        let compile = |pattern: &str| regex::Regex::new(pattern).ok();
+        Self {
+            rule,
+            regex: rule.regex.as_deref().map(compile),
+            host_regex: rule.host_regex.as_deref().map(compile),
+        }
+    }
+
+    fn captures(&self, source: &RouteNode) -> Option<BTreeMap<String, String>> {
+        if !self.matches_host(&source.host) {
+            return None;
+        }
+        let Some(regex) = &self.regex else {
+            return (strip_trailing_slash(&self.rule.source) == source.path).then(BTreeMap::new);
+        };
+        let regex = regex.as_ref()?;
+        let captures = regex.captures(&source.path)?;
+        Some(
+            regex
+                .capture_names()
+                .flatten()
+                .filter_map(|name| {
+                    captures
+                        .name(name)
+                        .map(|value| (name.to_string(), value.as_str().to_string()))
+                })
+                .collect(),
+        )
+    }
+
+    fn matches_host(&self, host: &str) -> bool {
+        let Some(regex) = &self.host_regex else {
+            return self.rule.host.is_none();
+        };
+        host != "*" && regex.as_ref().is_some_and(|regex| regex.is_match(host))
+    }
 }
 
 fn expand_redirect_destination(destination: &str, captures: &BTreeMap<String, String>) -> String {
@@ -672,26 +695,14 @@ fn redirect_target(source: &RouteNode, destination: &str) -> Option<RouteNode> {
             .filter(|path| !path.is_empty())?;
         return Some(RouteNode {
             host: source.host.clone(),
-            path: normalize_route_path(path),
+            path: strip_trailing_slash(path),
         });
     }
     let parsed = url::Url::parse(destination).ok()?;
     Some(RouteNode {
-        host: normalize_route_host(parsed.host_str()?),
-        path: normalize_route_path(parsed.path()),
+        host: normalize_hostname(parsed.host_str()?),
+        path: strip_trailing_slash(parsed.path()),
     })
-}
-
-fn normalize_route_host(host: &str) -> String {
-    host.trim().trim_end_matches('.').to_ascii_lowercase()
-}
-
-fn normalize_route_path(path: &str) -> String {
-    if path == "/" {
-        "/".to_string()
-    } else {
-        path.trim_end_matches('/').to_string()
-    }
 }
 
 #[cfg(test)]

@@ -71,29 +71,10 @@ if (isset($request['publicOrigin'])) {
     }
     $GLOBALS['SPACEFAST_CONTENT_PUBLIC_ORIGIN'] = $publicOrigin;
 }
-$host = _stattic_normalize_hostname((string) ($_SERVER['HTTP_HOST'] ?? ''));
+$host = _stattic_normalize_host_authority((string) ($_SERVER['HTTP_HOST'] ?? ''));
 // The principal assertion carries the acting identity for operations performed
-// on behalf of a person. The content-model/document lanes act on management-JWT
-// authority alone (the control plane is the actor), so only the person-scoped
-// operations below require it.
-$principalGated = in_array(
-    $operation,
-    [
-        'content.authorization.apply',
-        'content.admin.launch',
-        'content.rest.request',
-        'content.media.read',
-        'content.source.convert',
-        'content.source.inspect',
-        'content.source.resolve',
-        // Storage authorizes against the caller's projected WordPress role,
-        // so it acts for a person and needs the assertion that names one.
-        'content.storage.list',
-        'content.storage.get',
-        'content.storage.delete',
-    ],
-    true
-);
+// on behalf of a person; the operation table says which those are.
+$principalGated = STATTIC_CONTENT_OPERATIONS[$request['operation']];
 $GLOBALS['SPACEFAST_CONTENT_SYSTEM_OPERATION'] = !$principalGated;
 $principal = _stattic_content_principal_assertion(
     $request['principal'] ?? null,
@@ -191,7 +172,7 @@ if (!function_exists('spacefast_content_handle_request')) {
 }
 
 try {
-    $result = spacefast_content_handle_request($request, true);
+    $result = spacefast_content_handle_request($request);
 } catch (Spacefast_Content_Error $error) {
     _stattic_problem_response($error->status, $error->codeName, $error->getMessage());
 } catch (Spacefast_Content_Conflict $conflict) {

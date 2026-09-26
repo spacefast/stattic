@@ -19,18 +19,17 @@ require_once __DIR__ . '/../shared/http.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
 require_once __DIR__ . '/../shared/upstream-relay.php';
 require_once __DIR__ . '/../shared/html-insert.php';
-
-const SPACEFAST_FUNCTIONS_DISPATCH_HEADER_PREFIX = 'sf-fx-';
+require_once __DIR__ . '/../shared/errors.php';
+require_once __DIR__ . '/../shared/functions-wire.generated.php';
 
 // A hung dispatch holds a PHP-FPM slot against every other request to this
 // space, while its relay calls demand more from the same pool.
 const STATTIC_FUNCTIONS_DISPATCH_TIMEOUT_SECONDS = 30;
 const STATTIC_FUNCTIONS_DISPATCH_CONNECT_TIMEOUT_SECONDS = 5;
 
-// Storage, database and platform services transit the relay. The Next cache
-// lives with the worker, and log delivery degrades on its own. Tenant fetch is
-// not a capability at all: every worker has it, bounded by `sf-fx-egress`.
-const STATTIC_FUNCTIONS_RELAY_FREE_CAPABILITIES = ['log', 'next.cache'];
+// Storage, database and platform services transit the relay; the generated
+// SPACEFAST_FUNCTIONS_RELAY_FREE_CAPABILITIES do not. Tenant fetch is not a
+// capability at all: every worker has it, bounded by `sf-fx-egress`.
 
 // Compiled beside the version's file tree, never inside it, like the config.
 // The non-terminal reader lets the static lane tell verified absence from a
@@ -43,7 +42,7 @@ function _stattic_try_load_functions_routes_artifact(string $versionRoot): array
     // Present and verified-absent outcomes are memoized per request; the
     // transient `unavailable` outcome never is, so a later call retries.
     static $cache = [];
-    $path = dirname($versionRoot) . '/functions/routes.php';
+    $path = $versionRoot . '/functions/routes.php';
     if (array_key_exists($path, $cache)) {
         return $cache[$path];
     }
@@ -157,40 +156,28 @@ function _stattic_functions_config(string $versionRoot): ?array
 /**
  * Whether this request must skip the static fast path and dispatch instead: a
  * draft/preview session, meaning a request carrying one of the version's
- * declared bypass cookies, asking for a path the worker claims. A prerendered
- * page serves from disk for everyone else, but a draft request needs the worker
- * to render draft content. The caller has already established the cheap facts
- * (GET/HEAD, a non-empty Cookie header, a functions version), so this only
- * reads the config and consults the cached route table.
+ * declared bypass cookies. A prerendered page serves from disk for everyone
+ * else, but a draft request needs the worker to render draft content. The
+ * caller (serve.php `_stattic_v4_functions_static_bypass_cookies`) has already
+ * established that the worker claims this path and handed over the cookie
+ * names, so this is only the Cookie header match.
+ *
+ * @param list<string> $bypassCookies
  */
-function _stattic_functions_bypass_requested(string $versionRoot, string $requestPath, string $requestMethod): bool
+function _stattic_functions_bypass_requested(array $bypassCookies): bool
 {
     $cookieHeader = $_SERVER['HTTP_COOKIE'] ?? '';
     if (!is_string($cookieHeader) || $cookieHeader === '') {
         return false;
     }
-    $config = _stattic_functions_config($versionRoot);
-    if ($config === null) {
-        return false;
-    }
-    $artifact = is_array($config['artifact'] ?? null) ? $config['artifact'] : [];
-    $present = false;
-    foreach (is_array($artifact['bypassCookies'] ?? null) ? $artifact['bypassCookies'] : [] as $cookie) {
-        if (
-            is_string($cookie) && $cookie !== ''
-            // Anchored to a cookie boundary: `foo__prerender_bypass` is a
-            // different cookie and must not trip the platform's rule.
-            && preg_match('/(?:^|;\s*)' . preg_quote($cookie, '/') . '=/', $cookieHeader) === 1
-        ) {
-            $present = true;
-            break;
+    foreach ($bypassCookies as $cookie) {
+        // Anchored to a cookie boundary: `foo__prerender_bypass` is a
+        // different cookie and must not trip the platform's rule.
+        if (preg_match('/(?:^|;\s*)' . preg_quote($cookie, '/') . '=/', $cookieHeader) === 1) {
+            return true;
         }
     }
-    if (!$present) {
-        return false;
-    }
-    $route = _stattic_resolve_functions_route_action($versionRoot, ltrim($requestPath, '/'), $requestMethod);
-    return is_array($route) && ($route['action'] ?? null) === 'dispatch_functions';
+    return false;
 }
 
 // Control paths stay terminal: a tenant worker must never answer
@@ -244,7 +231,7 @@ function _stattic_functions_dispatch_headers(
     if (!$relayUsable) {
         $capabilities = array_values(array_filter(
             $capabilities,
-            static fn($c) => in_array($c, STATTIC_FUNCTIONS_RELAY_FREE_CAPABILITIES, true)
+            static fn($c) => in_array($c, SPACEFAST_FUNCTIONS_RELAY_FREE_CAPABILITIES, true)
         ));
     }
 
@@ -262,42 +249,42 @@ function _stattic_functions_dispatch_headers(
         : (string) json_encode($variableValues, JSON_UNESCAPED_SLASHES);
 
     $headers = [
-        'sf-fx-bundle' => (string) $host['bundleUrl'],
-        'sf-fx-main' => (string) $artifact['mainModule'],
-        'sf-fx-compat-date' => (string) $artifact['compatibilityDate'],
-        'sf-fx-compat-flags' => implode(',', $flags),
-        'sf-fx-visitor' => base64_encode((string) json_encode((object) _stattic_functions_visitor_context(), JSON_INVALID_UTF8_SUBSTITUTE)),
-        'sf-fx-d1' => implode(',', array_column($artifact['d1'] ?? [], 'binding')),
-        'sf-fx-caps' => implode(',', $capabilities),
-        'sf-fx-space' => $spaceId,
-        'sf-fx-version' => $versionId,
-        'sf-fx-request' => $requestId,
-        'sf-fx-dispatch-token' => $dispatchToken,
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['bundleUrl'] => (string) $host['bundleUrl'],
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['mainModule'] => (string) $artifact['mainModule'],
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['compatibilityDate'] => (string) $artifact['compatibilityDate'],
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['compatibilityFlags'] => implode(',', $flags),
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['visitor'] => base64_encode((string) json_encode((object) _stattic_functions_visitor_context(), JSON_INVALID_UTF8_SUBSTITUTE)),
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['d1'] => implode(',', array_column($artifact['d1'] ?? [], 'binding')),
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['capabilities'] => implode(',', $capabilities),
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['spaceId'] => $spaceId,
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['versionId'] => $versionId,
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['requestId'] => $requestId,
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['dispatchToken'] => $dispatchToken,
         // How far the worker's outbound fetch may reach. Origin-decided, like
         // the grant: the host reads it and never infers it. Stripped inbound by
         // the `sf-fx-` prefix rule below, so a visitor cannot send their own.
-        'sf-fx-egress' => $egressScope,
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['egress'] => $egressScope,
         // Base64 so a value containing a newline cannot inject a header.
-        'sf-fx-env' => base64_encode($encodedVariableValues),
+        SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['env'] => base64_encode($encodedVariableValues),
     ];
     // The cache seed's signed read URL, minted at finalize beside the bundle
     // URL. Optional: a version without one starts its cache cold.
     if (is_string($host['seedUrl'] ?? null) && $host['seedUrl'] !== '') {
-        $headers['sf-fx-seed'] = (string) $host['seedUrl'];
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['seedUrl']] = (string) $host['seedUrl'];
     }
     // A needed relay is a usable one: when it is not, the filter above leaves
     // only relay-free capabilities behind.
     $relayNeeded = array_filter(
         $capabilities,
-        static fn($c) => !in_array($c, STATTIC_FUNCTIONS_RELAY_FREE_CAPABILITIES, true)
+        static fn($c) => !in_array($c, SPACEFAST_FUNCTIONS_RELAY_FREE_CAPABILITIES, true)
     ) !== [];
     if ($relayNeeded) {
-        $headers['sf-fx-relay'] = (string) $relay['url'];
-        $headers['sf-fx-relay-token'] = (string) $relay['token'];
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['relayUrl']] = (string) $relay['url'];
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['relayToken']] = (string) $relay['token'];
     }
     if ($relayUsable) {
-        $headers['sf-fx-log'] = $originBaseUrl . '/' . STATTIC_FUNCTIONS_LOGS_PATH;
-        $headers['sf-fx-log-token'] = (string) $relay['token'];
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['logUrl']] = $originBaseUrl . '/' . STATTIC_FUNCTIONS_LOGS_PATH;
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['logToken']] = (string) $relay['token'];
     }
     // The purge channel is independent of the relay: its credential is its own,
     // minted at finalize beside the relay token and verified by this origin's
@@ -307,8 +294,8 @@ function _stattic_functions_dispatch_headers(
     // visitor hit.
     $purge = is_array($config['purge'] ?? null) ? $config['purge'] : null;
     if ($purge !== null && is_string($purge['token'] ?? null) && $purge['token'] !== '') {
-        $headers['sf-fx-purge'] = $originBaseUrl . '/' . STATTIC_FUNCTIONS_PURGE_PATH;
-        $headers['sf-fx-purge-token'] = (string) $purge['token'];
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['purgeUrl']] = $originBaseUrl . '/' . STATTIC_FUNCTIONS_PURGE_PATH;
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['purgeToken']] = (string) $purge['token'];
     }
     // Usage reporting is independent of the relay: the credential and the
     // destination are both the control plane's, and this origin only forwards
@@ -320,8 +307,8 @@ function _stattic_functions_dispatch_headers(
         && is_string($usage['url'] ?? null) && $usage['url'] !== ''
         && is_string($usage['token'] ?? null) && $usage['token'] !== ''
     ) {
-        $headers['sf-fx-usage'] = (string) $usage['url'];
-        $headers['sf-fx-usage-token'] = (string) $usage['token'];
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['usageUrl']] = (string) $usage['url'];
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['usageToken']] = (string) $usage['token'];
     }
     return $headers;
 }
@@ -342,7 +329,7 @@ function _stattic_functions_relay_request_lane(): array
 
 function _stattic_functions_cookie_domain_escapes_host(string $value, string $requestHost): bool
 {
-    $host = strtolower(rtrim(trim($requestHost), '.'));
+    $host = _stattic_normalize_hostname($requestHost);
     foreach (array_slice(explode(';', $value), 1) as $attribute) {
         $parts = explode('=', trim($attribute), 2);
         if (strtolower(trim((string) ($parts[0] ?? ''))) !== 'domain') {

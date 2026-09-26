@@ -17,17 +17,16 @@ require_once __DIR__ . '/../shared/jwt.php';
 require_once __DIR__ . '/../shared/response.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/../shared/server-file.php';
+require_once __DIR__ . '/../shared/functions-wire.generated.php';
 
 const STATTIC_FUNCTIONS_BUNDLE_ROUTE_PREFIX = '/' . STATTIC_FUNCTIONS_BUNDLE_PREFIX;
-const STATTIC_FUNCTIONS_BUNDLE_AUD = 'spacefast-functions-bundle';
-const STATTIC_FUNCTIONS_SEED_AUD = 'spacefast-functions-seed';
 
 // One signed route serves both artifact kinds; the terminal filename names the
 // kind and selects the token audience, so a bundle token can never read a seed
 // or vice versa.
 const STATTIC_FUNCTIONS_ARTIFACT_KINDS = [
-    'bundle.json' => STATTIC_FUNCTIONS_BUNDLE_AUD,
-    'seed.json' => STATTIC_FUNCTIONS_SEED_AUD,
+    'bundle.json' => SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle'],
+    'seed.json' => SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['seed'],
 ];
 
 // The digest is pinned to lowercase hex here rather than downstream because it
@@ -79,29 +78,26 @@ function _stattic_artifact_serve(
     string $requestMethod
 ): void {
     if ($requestMethod !== 'GET' && $requestMethod !== 'HEAD') {
-        _stattic_artifact_not_found();
+        _stattic_opaque_not_found();
     }
 
     $parsed = _stattic_artifact_parse_bundle_path($requestPath);
     if ($parsed === null) {
-        _stattic_artifact_not_found();
+        _stattic_opaque_not_found();
     }
 
     if (!_stattic_artifact_bundle_token_valid($privateRoot, $parsed['token'], $spaceId, $versionId, $parsed['digest'], $parsed['aud'])) {
-        _stattic_artifact_not_found();
+        _stattic_opaque_not_found();
     }
 
     // Finalize removes its per-version `files/` workspace after compiling the
     // immutable response tables. The CAS is the only place published bytes
     // live, so the signed route resolves the digest there directly. The token
     // already binds this digest to this Space and version.
-    $absolute = _stattic_runtime_blob_path($privateRoot, $spaceId, $parsed['digest']);
-    if (!is_file($absolute)) {
-        require_once __DIR__ . '/tier.php';
-        $absolute = _stattic_tier_promote_blob($privateRoot, $spaceId, $parsed['digest']) ?? '';
-    }
-    if (!is_file($absolute)) {
-        _stattic_artifact_not_found();
+    require_once __DIR__ . '/tier.php';
+    $absolute = _stattic_runtime_local_blob($privateRoot, $spaceId, $parsed['digest']);
+    if ($absolute === null) {
+        _stattic_opaque_not_found();
     }
 
     // Immutable is safe because the URL is content-addressed, and the edge may
@@ -126,7 +122,7 @@ function _stattic_artifact_serve(
     $length = filesize($absolute);
     $contents = $requestMethod === 'GET' ? file_get_contents($absolute) : '';
     if ($length === false || $contents === false) {
-        _stattic_artifact_not_found();
+        _stattic_opaque_not_found();
     }
     _stattic_response_send(
         200,
@@ -136,9 +132,4 @@ function _stattic_artifact_serve(
         // runs the platform policy itself.
         _stattic_apply_platform_header_policy($headers + ['Content-Length' => (string) $length])
     );
-}
-
-function _stattic_artifact_not_found(): never
-{
-    _stattic_response_send(404, "Not found.\n", 'text/plain; charset=utf-8', ['Cache-Control' => 'no-store']);
 }

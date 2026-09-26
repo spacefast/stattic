@@ -71,6 +71,7 @@
     "engine/shared/errors.php",
     "engine/shared/page-css.generated.php",
     "engine/shared/finalizer-protocol.generated.php",
+    "engine/shared/functions-wire.generated.php",
     "engine/shared/html-insert.php",
     "engine/shared/http.php",
     "engine/shared/jwt.php",

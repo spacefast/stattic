@@ -99,11 +99,6 @@ function _stattic_runtime_job_path(string $privateRoot, string $jobId): string
     return _stattic_record_store_path(_stattic_runtime_jobs_queue_store($privateRoot), $jobId);
 }
 
-function _stattic_runtime_job_dead_path(string $privateRoot, string $jobId): string
-{
-    return _stattic_record_store_path(_stattic_runtime_jobs_dead_store($privateRoot), $jobId);
-}
-
 function _stattic_runtime_job_lane_lock_path(string $privateRoot, string $lane): string
 {
     return _stattic_runtime_jobs_root($privateRoot) . '/lane-' . $lane . '.lock';
@@ -374,6 +369,13 @@ function _stattic_runtime_job_create(string $privateRoot, array $scope, float $d
     $operationId = _stattic_runtime_job_scope_string($scope['operation_id'] ?? null);
     $payload = is_array($scope['payload'] ?? null) ? $scope['payload'] : [];
     $jobId = _stattic_runtime_job_identity($type, $spaceId, $idempotencyKey);
+    $admissionScope = _stattic_runtime_job_admission_scope([
+        'type' => $type,
+        'space_id' => $spaceId,
+        'operation_id' => $operationId,
+        'idempotency_key' => $idempotencyKey,
+        'payload' => $payload,
+    ]);
 
     $conflict = false;
     $now = gmdate('c');
@@ -392,6 +394,7 @@ function _stattic_runtime_job_create(string $privateRoot, array $scope, float $d
             $operationId,
             $idempotencyKey,
             $payload,
+            $admissionScope,
             $now
         ): ?array {
             if ($read['state'] === 'present') {
@@ -400,13 +403,7 @@ function _stattic_runtime_job_create(string $privateRoot, array $scope, float $d
                 // WHOLE immutable scope is compared — a shared idempotency key
                 // under a different operation is a different request, and
                 // returning this job would hand it work it never signed.
-                $conflict = _stattic_runtime_job_admission_scope($read['record'] ?? []) !== [
-                    'type' => $type,
-                    'space_id' => $spaceId,
-                    'operation_id' => $operationId,
-                    'idempotency_key' => $idempotencyKey,
-                    'payload' => json_encode($payload, JSON_UNESCAPED_SLASHES),
-                ];
+                $conflict = _stattic_runtime_job_admission_scope($read['record'] ?? []) !== $admissionScope;
                 return null;
             }
             $record = [
@@ -609,6 +606,12 @@ function _stattic_runtime_job_persist(string $privateRoot, array $job, float $de
     );
 }
 
+function _stattic_runtime_job_heartbeat_stale(array $job, int $now): bool
+{
+    $heartbeat = is_numeric($job['heartbeat'] ?? null) ? (int) $job['heartbeat'] : 0;
+    return ($now - $heartbeat) > STATTIC_RUNTIME_JOB_HEARTBEAT_TIMEOUT_SECONDS;
+}
+
 /**
  * Recover THIS job's abandoned run, and only this one. Box-wide reaping is the
  * maintenance pass's work (_stattic_runtime_job_housekeeping_reap): a tick
@@ -622,8 +625,7 @@ function _stattic_runtime_job_reap_one(string $privateRoot, string $jobId, int $
     if ($read['state'] !== 'present' || ($read['record']['status'] ?? null) !== 'running') {
         return null;
     }
-    $heartbeat = is_numeric($read['record']['heartbeat'] ?? null) ? (int) $read['record']['heartbeat'] : 0;
-    if (($now - $heartbeat) <= STATTIC_RUNTIME_JOB_HEARTBEAT_TIMEOUT_SECONDS) {
+    if (!_stattic_runtime_job_heartbeat_stale($read['record'], $now)) {
         return 'running_elsewhere';
     }
     return _stattic_runtime_job_record_failure(
@@ -904,8 +906,7 @@ function _stattic_runtime_job_housekeeping_reap(string $privateRoot, array $clai
         if (($job['status'] ?? null) !== 'running') {
             continue;
         }
-        $heartbeat = is_numeric($job['heartbeat'] ?? null) ? (int) $job['heartbeat'] : 0;
-        if (($now - $heartbeat) <= STATTIC_RUNTIME_JOB_HEARTBEAT_TIMEOUT_SECONDS) {
+        if (!_stattic_runtime_job_heartbeat_stale($job, $now)) {
             continue;
         }
         $recovered = _stattic_runtime_job_record_failure(

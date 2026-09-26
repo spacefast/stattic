@@ -26,6 +26,9 @@ function _stattic_lazy_minted_secret(string $root, string $name, int $bytes): ?s
   return str_repeat('ab', $bytes);
 }
 function _stattic_runtime_instance_id(): string { return 'rti_content'; }
+function _stattic_base64url_encode(string $value): string {
+  return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
+}
 function _stattic_cookies_secure(): bool { return true; }
 function _stattic_id_valid(string $value): bool {
   return preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/', $value) === 1;
@@ -124,7 +127,7 @@ $valid = _stattic_content_admin_verify_session('/private', $session['token'], 's
 [$payload, $signature] = explode('.', $session['token']);
 $tamperedClaims = json_decode(_stattic_content_admin_base64url_decode($payload), true);
 $tamperedClaims['public_origin'] = 'https://another-space.example';
-$tampered = _stattic_content_admin_base64url_encode(json_encode($tamperedClaims)) . '.' . $signature;
+$tampered = _stattic_base64url_encode(json_encode($tamperedClaims)) . '.' . $signature;
 $nextAuthorization = _stattic_content_admin_apply_authorization('/private', [
   'spaceId' => 'spc_123',
   'accessGeneration' => 8,

@@ -151,11 +151,7 @@ function _stattic_storage_read_key_rotate(string $privateRoot): void
     _stattic_lock_with($lockPath, STATTIC_LOCK_WAIT,
         static fn () => throw new RuntimeException('storage_rotation_busy'),
         static function () use ($privateRoot, $lockPath): void {
-            $hostnames = [];
-            foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
-                $hostnames = [...$hostnames, ..._stattic_runtime_space_sweep_hostnames($spaceRoot)];
-            }
-            $hostnames = _stattic_runtime_purge_hostname_list($hostnames);
+            $hostnames = _stattic_runtime_all_space_sweep_hostnames($privateRoot);
             // Refuse before rotating when a deployed runtime has lost its purge credentials.
             if (_stattic_runtime_require_edge_purge_endpoint() !== null) {
                 _stattic_runtime_purge_enqueue($privateRoot, $hostnames, 'storage_read_key_rotated', [$lockPath]);
@@ -185,13 +181,19 @@ function _stattic_storage_object_delete(string $privateRoot, string $spaceId, st
     }
     // The route already holds the per-space write lock, so the delete must not
     // take it a second time.
-    $deleted = _stattic_uploads_delete_record($privateRoot, $spaceId, $objectId, false);
-    if ($deleted) {
+    $deleted = _stattic_uploads_delete_record($privateRoot, $spaceId, $objectId, false, $purgeHostnames);
+    if ($deleted && $purgeHostnames !== []) {
         // Same revocation as the visitor lane's delete: the keyed public URL
         // opts into the edge, so the record's removal must drop the shared
-        // copy too. Deferred past the response on FPM (purge_now).
-        require_once __DIR__ . '/../shared/purge.php';
-        _stattic_runtime_purge_space_hosts_now($privateRoot, $spaceId, 'storage_object_deleted');
+        // copy too. The delete already persisted the obligation; this only
+        // delivers those hostnames, after the response on FPM.
+        $drain = static fn (): bool => _stattic_runtime_purge_drain($privateRoot, microtime(true) + 20, null, $purgeHostnames);
+        if (function_exists('fastcgi_finish_request')) {
+            _stattic_flush_response_before_deferred(true);
+            _stattic_defer($drain);
+        } else {
+            $drain();
+        }
     }
     _stattic_json_response(200, ['id' => $objectId, 'deleted' => $deleted]);
 }

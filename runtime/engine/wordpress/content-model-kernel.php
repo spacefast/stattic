@@ -24,9 +24,7 @@ const SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY = 'zero_collection';
 const SPACEFAST_CONTENT_MODEL_PERMALINK_STRUCTURE = '/%postname%/';
 // The theme the engine installs, and the only one a managed site renders through.
 const SPACEFAST_CONTENT_MODEL_MANAGED_THEME = 'spacefast-managed';
-const SPACEFAST_CONTENT_MODEL_SPACE_META = '_spacefast_space_id';
 const SPACEFAST_CONTENT_MODEL_PAGE_SOURCE_META = '_zero_page_source_key';
-const SPACEFAST_CONTENT_MODEL_PAGE_PATH_META = '_zero_page_path';
 // Ability category slugs admit `^[a-z0-9]+(?:-[a-z0-9]+)*$`, and every
 // WordPress-visible identifier this kernel mints is Zero-branded.
 const SPACEFAST_CONTENT_MODEL_ABILITY_CATEGORY = 'zero-content';
@@ -158,32 +156,16 @@ function spacefast_content_model_resources(): array
     ];
 }
 
+/** @return array{name:string,post_type:string,collection_term:?string}|null */
 function spacefast_content_model_collection_projection(string $resourceId): ?array
 {
     $resource = spacefast_content_model_resource($resourceId);
     if ($resource === null) {
         return null;
     }
-    $fields = [];
-    $nativeProperties = ['title' => 'post_title', 'content' => 'post_content', 'excerpt' => 'post_excerpt'];
-    foreach ($resource['fields'] as $field) {
-        $definition = $field['definition'];
-        if (isset($nativeProperties[$field['name']])) {
-            $definition['storageProperty'] = $nativeProperties[$field['name']];
-            unset($definition['storageName']);
-        }
-        $fields[$field['name']] = $definition;
-    }
     return [
         'name' => $resourceId,
         'post_type' => $resource['postType'],
-        'public' => $resource['publicRead'],
-        'fields' => $fields,
-        'builtin' => $resource['kind'] !== 'collection',
-        'media' => $resource['kind'] === 'media',
-        'compiled' => false,
-        'scoped' => true,
-        'contentModel' => true,
         'collection_term' => $resource['kind'] === 'collection'
             ? spacefast_content_model_collection_term_slug(spacefast_content_require_space_id(), $resourceId)
             : null,
@@ -329,7 +311,7 @@ function spacefast_content_model_register_rest_meta(array $contentModel): void
                     'sanitize_callback' => static fn (mixed $value): string => rest_sanitize_boolean($value) ? '1' : '0',
                 ] : []),
                 'auth_callback' => static fn (bool $allowed, string $key, int $postId): bool =>
-                    spacefast_content_model_authorize_post($postId) && current_user_can('edit_post', $postId)
+                    spacefast_content_post_belongs_to_space($postId) && current_user_can('edit_post', $postId)
                     && (spacefast_content_collection_for_post($postId)['name'] ?? null) === $resource['id'],
             ]);
         }
@@ -388,17 +370,6 @@ function spacefast_content_model_preserve_absent_meta(mixed $post, mixed $reques
     return $post;
 }
 
-function spacefast_content_model_authorize_post(int $postId): bool
-{
-    if ($postId < 1 || !function_exists('get_post_meta')) {
-        return false;
-    }
-    return hash_equals(
-        spacefast_content_require_space_id(),
-        (string) get_post_meta($postId, SPACEFAST_CONTENT_MODEL_SPACE_META, true)
-    );
-}
-
 function spacefast_content_model_validate_reference_value(array $definition, mixed $value): bool
 {
     if (!function_exists('get_post')) {
@@ -409,7 +380,7 @@ function spacefast_content_model_validate_reference_value(array $definition, mix
     $ids = is_array($value) ? $value : [$value];
     foreach ($ids as $id) {
         if ((int) $id < 1) continue;
-        if (!spacefast_content_model_authorize_post((int) $id)
+        if (!spacefast_content_post_belongs_to_space((int) $id)
             || !in_array(spacefast_content_collection_for_post((int) $id)['name'] ?? null, $resourceIds, true)) {
             return false;
         }
@@ -438,7 +409,7 @@ function spacefast_content_model_ensure_collection_terms(array $contentModel): v
         $termId = is_array($term) ? (int) ($term['term_id'] ?? 0) : (int) $term;
         if ($termId > 0 && function_exists('update_term_meta')) {
             update_term_meta($termId, '_zero_resource_id', $resource['id']);
-            update_term_meta($termId, SPACEFAST_CONTENT_MODEL_SPACE_META, $spaceId);
+            update_term_meta($termId, SPACEFAST_CONTENT_SPACE_META, $spaceId);
         }
     }
 }
@@ -531,6 +502,11 @@ function spacefast_content_model_column_sql(array $column): string
 
 function spacefast_content_model_apply_tables(array $contentModel): void
 {
+    // A release that declares no Tables has nothing to migrate, so it never
+    // needs the ledger either.
+    if ($contentModel['tables'] === []) {
+        return;
+    }
     global $wpdb;
     if (!is_object($wpdb) || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'query') || !method_exists($wpdb, 'get_var')) {
         throw new Spacefast_Content_Error(503, 'content_tables_unavailable', 'WordPress Tables are unavailable.');
@@ -754,13 +730,9 @@ function spacefast_content_model_register_abilities(array $contentModel): void
 function spacefast_content_model_stage_release(
     mixed $revision,
     mixed $contentModelPhp,
-    mixed $artifactDigest,
-    bool $managed
+    mixed $artifactDigest
 ): array
 {
-    if (!$managed) {
-        throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content model staging requires Spacefast authorization.');
-    }
     if (!is_string($revision) || preg_match(SPACEFAST_CONTENT_MODEL_REVISION_PATTERN, $revision) !== 1) {
         throw new Spacefast_Content_Error(400, 'content_model_revision_invalid', 'The ContentModelRelease revision is invalid.');
     }
@@ -819,11 +791,11 @@ function spacefast_content_model_page_link(string $link, int $postId, bool $samp
         || !spacefast_content_post_belongs_to_space($postId)) {
         return $link;
     }
-    $externalId = get_post_meta($postId, SPACEFAST_CONTENT_EXTERNAL_ID_META, true);
-    if (!is_string($externalId) || !str_starts_with($externalId, SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX)) {
+    $bindingId = spacefast_content_source_journal_binding_id($postId);
+    if ($bindingId === null) {
         return $link;
     }
-    $binding = spacefast_content_model_sync_binding(substr($externalId, strlen(SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX)));
+    $binding = spacefast_content_model_sync_binding($bindingId);
     $path = $binding['publicPath'] ?? null;
     return ($binding['post_type'] ?? null) === 'page' && is_string($path)
         ? home_url($sample ? spacefast_content_permalink_template($path, '%pagename%') : $path)
@@ -904,13 +876,22 @@ function spacefast_content_model_ensure_managed_theme(): void
     switch_theme(SPACEFAST_CONTENT_MODEL_MANAGED_THEME);
 }
 
+/**
+ * A page the compiler owns one-to-one with a source route, not a collection
+ * entry. The compiler gives exactly those bindings a public path, and the key
+ * reads the same on a raw release binding and a resolved one.
+ */
+function spacefast_content_model_is_canonical_page(array $binding): bool
+{
+    return is_string($binding['publicPath'] ?? null);
+}
+
 /** The verified release carries seed bytes, so activation never guesses a live version root. */
 function spacefast_content_model_reconcile_documents(array $contentModel): array
 {
     $documents = [];
     foreach ($contentModel['syncBindings'] as $binding) {
-        $canonicalPage = ($binding['postType'] ?? null) === 'page'
-            && preg_match('/\Async\.pages\.[a-f0-9]{32}\z/D', (string) ($binding['id'] ?? '')) === 1;
+        $canonicalPage = spacefast_content_model_is_canonical_page($binding);
         $collectionPost = isset($binding['documentSeed']);
         if (!$canonicalPage && !$collectionPost) {
             continue;
@@ -992,9 +973,8 @@ function spacefast_content_model_prepare_retirement(string $root, ?array $previo
 }
 
 /** Cleanup follows the proven serving switch, never candidate preparation. */
-function spacefast_content_model_commit_release(array $request, bool $managed): array
+function spacefast_content_model_commit_release(array $request): array
 {
-    if (!$managed) throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content model commit requires Spacefast authorization.');
     $revision = $request['revision'] ?? null;
     $versionId = $request['versionId'] ?? null;
     if (($revision !== null && (!is_string($revision) || preg_match(SPACEFAST_CONTENT_MODEL_REVISION_PATTERN, $revision) !== 1))
@@ -1044,11 +1024,8 @@ function spacefast_content_model_commit_release(array $request, bool $managed): 
     );
 }
 
-function spacefast_content_model_activate_release(mixed $revision, bool $managed): array
+function spacefast_content_model_activate_release(mixed $revision): array
 {
-    if (!$managed) {
-        throw new Spacefast_Content_Error(401, 'content_auth_required', 'Content model activation requires Spacefast authorization.');
-    }
     if ($revision !== null && (!is_string($revision) || preg_match(SPACEFAST_CONTENT_MODEL_REVISION_PATTERN, $revision) !== 1)) {
         throw new Spacefast_Content_Error(400, 'content_model_revision_invalid', 'The ContentModelRelease revision is invalid.');
     }

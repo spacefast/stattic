@@ -1,7 +1,7 @@
 {
-  "revision": "085c0d60ae5e6479d1c897a23039b6c4a948ffc6",
+  "revision": "c3d5e171a342e24f0dcaac9c069213b563c1413a",
   "sourceHash": "ab82da3e165984358ba7caf810e59cf92e463fbad5d278e356f12aa716206480",
-  "manifestSha256": "6db211711d6cd9627a38797297ef0b51a6ddaee11bd94b49993563f5f003559f",
+  "manifestSha256": "78879761d77e008f4c94fc2f9a018cff1e1e5eede5643b200d5ca609445f0675",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "e3bbac333c7c482f1485175c0448852b9acf66859899dca5ea263c919bf41c30"
+      "sha256": "2c8443223dcbccf6188fef82f1a6986cb5408699c2ca216616e55fefe4d14d5f"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "15a62bc5463c888d44ab24c97313ce2b63106179dbcb245699be18ddf3c77262"
+      "sha256": "bc0b1af5e2763db3dbbbd367dfaa83f0f694a788523ad10ea306345c4d09f821"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -1105,11 +1105,11 @@
     },
     {
       "path": "runtime/tests/space-users-http-fixture.php",
-      "sha256": "dd2a4f857e9be8fb0bdaaa266dbc2ab62f8e3efc3fb076fa698cd16429fe8ea5"
+      "sha256": "38a5f72adf9e3671375fd0489d497f694ed41cc2a38e7ccb1760720de0d23485"
     },
     {
       "path": "runtime/tests/space-users-http.ts",
-      "sha256": "007f425b7f474cdf3f6d3e8a28510bf26bf7e56c0a40abc66fa9c3506725f3f7"
+      "sha256": "5ecb27313a6b35896aa8e4843e11dc3c2dfa886815691624beba485adb681e64"
     },
     {
       "path": "runtime/tests/space-users-verify.test.ts",

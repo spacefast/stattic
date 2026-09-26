@@ -19,7 +19,7 @@ export const usersHttpFixtureSchema = z
     z.object({
       id: z.number().int().positive(),
       subject: z.string().regex(/^usr_[a-f0-9]{64}$/),
-      cookie: z.string().startsWith("sfi_session="),
+      cookie: z.string().startsWith("__Host-sfi_session="),
       csrf: z.string().min(1),
     }),
   )
@@ -31,7 +31,7 @@ if (!$auth['isAuthenticated']) sf_json(['error' => 'sign_in_required'], 401);
 sf_json(['userId' => $auth['userId'], 'wordpressLoaded' => class_exists('Spacefast\\Identity\\Plugin', false)]);
 `;
 
-/** The same installed HTTP boundary runs locally and on the retained provider site. */
+/** The installed HTTPS boundary on the retained provider site, driven with production cookie names. */
 export async function acceptSpaceUsersHttp(input: {
   origin: string;
   protectedPath: string;
@@ -122,6 +122,6 @@ export async function acceptSpaceUsersHttp(input: {
   await protectedUser(carol.cookie, null);
   const signout = await call("/__zero/auth/sign-out", dave.cookie, { method: "POST" });
   assert.equal(signout.status, 200);
-  assert.match(signout.headers.get("set-cookie") ?? "", /sfi_session=/);
+  assert.match(signout.headers.get("set-cookie") ?? "", /__Host-sfi_session=/);
   await protectedUser(dave.cookie, null);
 }

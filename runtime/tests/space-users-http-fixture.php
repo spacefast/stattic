@@ -26,9 +26,11 @@ function spacefast_users_http_fixture(string $marker, bool $cleanup): array
         $id = Identity::$accounts->emailLogin($name . '-' . $marker . '@example.test');
         update_user_meta($id, '_spacefast_users_contract', $marker);
         $session = Identity::$sessions->create($id);
+        // WP-CLI has no HTTPS, so Sessions::cookieName() would return the bare
+        // dev name; the contract runs over HTTPS, where only __Host- is read.
         $accounts[] = [
             'id' => $id, 'subject' => spacefast_space_users_subject($id),
-            'cookie' => 'sfi_session=' . $session['secret'], 'csrf' => $session['session']['csrf'],
+            'cookie' => '__Host-' . \Spacefast\Identity\Sessions::COOKIE . '=' . $session['secret'], 'csrf' => $session['session']['csrf'],
         ];
     }
     return $accounts;

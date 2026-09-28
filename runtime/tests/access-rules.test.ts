@@ -87,6 +87,7 @@ const SCOPED_HOST = "scoped.access.test";
 const SCOPED_SPACE = "spc_access_scoped";
 const SCOPED_VERSION = "ver_access_scoped";
 const SESSION_HOST = "session.access.test";
+const SESSION_VERSION_HOST = "session-version.access.test";
 const SESSION_SPACE = "spc_access_session";
 const SESSION_VERSION = "ver_access_session";
 const AUTHORITY_LRU_HOST = "authority-lru.access.test";
@@ -138,7 +139,7 @@ function spaceForHost(host: string): string {
     [PATH_SPACE, [PATH_HOST]],
     [CACHE_SPACE, [CACHE_HOST]],
     [SCOPED_SPACE, [SCOPED_HOST]],
-    [SESSION_SPACE, [SESSION_HOST]],
+    [SESSION_SPACE, [SESSION_HOST, SESSION_VERSION_HOST]],
     [AUTHORITY_LRU_SPACE, [AUTHORITY_LRU_HOST]],
     [BOUNDARY_SPACE, [BOUNDARY_HOST]],
     ["spc_access_allowed_fallback", [ALLOWED_FALLBACK_HOST]],
@@ -787,6 +788,7 @@ beforeAll(async () => {
       spaceId: SESSION_SPACE,
       versionId: SESSION_VERSION,
       hosts: [SESSION_HOST],
+      versionHosts: [SESSION_VERSION_HOST],
       config: projection({
         memberRefs: ["member:mem_session"],
         people: [{ personId: "per_session", grants: [{ id: "pgr_session", scope: "/" }] }],
@@ -1247,6 +1249,15 @@ test("a team-shaped Grant admits any member authority and an epoch bump retires 
     // signed this member's authority, so the engine admits it.
     const cookie = await openAuthorities(SESSION_HOST, ["member:mem_never_projected"]);
     expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie } })).status).toBe(200);
+    // The immutable Version host reads the same production projection, so a
+    // member added after it was installed opens a pinned Version too.
+    const versionCookie = await openAuthorities(SESSION_VERSION_HOST, [
+      "member:mem_joined_after_projection",
+    ]);
+    expect(
+      (await get(runtime, SESSION_VERSION_HOST, "/", { headers: { cookie: versionCookie } }))
+        .status,
+    ).toBe(200);
 
     // Another team's Grant admits nobody, even with a valid member authority:
     // the handoff mints no session and the direct header lane is refused.
@@ -1275,6 +1286,11 @@ test("a team-shaped Grant admits any member authority and an epoch bump retires 
     const revoked = await get(runtime, SESSION_HOST, "/", { headers: { cookie } });
     expect(revoked.status).toBe(403);
     expect(existsSync(sessionRecordPath(SESSION_SPACE, cookie))).toBe(false);
+    const revokedVersion = await get(runtime, SESSION_VERSION_HOST, "/", {
+      headers: { cookie: versionCookie },
+    });
+    expect(revokedVersion.status).toBe(403);
+    expect(existsSync(sessionRecordPath(SESSION_SPACE, versionCookie))).toBe(false);
 
     // A fresh handoff at the new generation admits again: revocation is per
     // epoch, not per member, and the control plane decides who gets a new

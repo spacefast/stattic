@@ -1554,14 +1554,8 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
             // A team Grant is matched by member authorities the control plane
             // signs; its digest carries the membership epoch so a reduction
             // retires every member session without naming any member here.
-            // The control plane does not emit team Grants yet: today
-            // grantGenerationDigest in
-            // apps/control-plane/src/access/authority-generation.ts digests
-            // the per-member derived Grant id without an epoch. When the
-            // control plane switches to team Grants it must digest
-            // `<grantId>:<generation>:<membershipEpoch>` to match this.
-            // A rolled-back engine refuses v5 overlays until every route is
-            // re-PUT, the same way the v3 to v4 upgrade behaved.
+            // Keep the digest byte-for-byte aligned with grantGenerationDigest
+            // in apps/control-plane/src/access/authority-generation.ts.
             $generationSources[$reference][] = [
                 'source' => $kind === 'team'
                     ? (string) $grant['id'] . ':' . (string) $grant['generation'] . ':' . $membershipEpoch

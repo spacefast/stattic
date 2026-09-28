@@ -5,14 +5,13 @@ import path from "node:path";
 import { z } from "zod";
 
 import type { SpaceGrant } from "@spacefast/common/contracts/grants";
-import { RUNTIME_AUTHORIZATION_GRANT_LIMIT } from "@spacefast/common/contracts/runtime-api";
 
 import {
   authorityGrantGeneration,
   authorityGrantGenerationMatches,
+  runtimeMembershipGrantId,
   type TeamGrantScope,
 } from "../../apps/control-plane/src/access/authority-generation.ts";
-import { projectRuntimeMembershipGrants } from "../../apps/control-plane/src/runtime/access-projection.ts";
 import { PHP_BINARY } from "./harness.ts";
 
 type ParityGrant = {
@@ -71,6 +70,26 @@ function controlPlaneGrants(): SpaceGrant[] {
   }));
 }
 
+function legacyRuntimeMembershipGrants(
+  grants: ReturnType<typeof controlPlaneGrants>,
+  team: TeamGrantScope,
+) {
+  return grants.flatMap(({ grant, generation }) => {
+    if (grant.audience.kind !== "team") return [{ ...grant, generation }];
+    if (grant.audience.teamId !== team.teamId) return [];
+    return team.memberIds.map((memberId) => ({
+      ...grant,
+      id: runtimeMembershipGrantId(grant.id, memberId),
+      generation,
+      audience: {
+        kind: "external" as const,
+        issuer: "spacefast-membership",
+        subject: memberId,
+      },
+    }));
+  });
+}
+
 /** The engine answers with a sha-256 digest, or null when nothing admits. */
 const engineGenerationSchema = z.union([z.string().regex(/^[a-f0-9]{64}$/), z.null()]);
 
@@ -80,7 +99,8 @@ function engineGeneration(
   authority: string,
   format: "members" | "team",
 ): string | null {
-  const runtimeGrants = controlPlaneGrants().map(({ grant, generation }) => ({
+  const active = controlPlaneGrants();
+  const runtimeGrants = active.map(({ grant, generation }) => ({
     ...grant,
     generation,
   }));
@@ -93,10 +113,7 @@ function engineGeneration(
     spaceClaimed: true,
     teamId: TEAM_ID,
     membershipEpoch: team.membershipEpoch,
-    grants:
-      format === "members"
-        ? projectRuntimeMembershipGrants(runtimeGrants, team.teamId, team.memberIds)
-        : runtimeGrants,
+    grants: format === "members" ? legacyRuntimeMembershipGrants(active, team) : runtimeGrants,
   };
   const accessRulesPath = path.resolve(import.meta.dir, "../engine/runtime/access-rules.php");
   const probe = spawnSync(
@@ -175,33 +192,5 @@ test("installed member and team projections validate only live identities and cu
       MEMBER_AUTHORITY,
       epochDigest,
     ),
-  ).toBe(false);
-
-  const runtimeGrants = active.map(({ grant, generation }) => ({ ...grant, generation }));
-  const memberIds = Array.from(
-    { length: Math.floor((RUNTIME_AUTHORIZATION_GRANT_LIMIT - 1) / 2) },
-    (_, index) => `mbr_large_${index}`,
-  );
-  const underLimit = projectRuntimeMembershipGrants(runtimeGrants, TEAM_ID, memberIds);
-  expect(underLimit.length).toBe(memberIds.length * 2 + 1);
-  expect(underLimit.some((grant) => grant.audience.kind === "team")).toBe(false);
-  const largeTeam = { ...team, memberIds: [...memberIds, memberId, "mbr_extra"] };
-  expect(projectRuntimeMembershipGrants(runtimeGrants, TEAM_ID, largeTeam.memberIds)).toEqual(
-    runtimeGrants,
-  );
-  const largeDigest = engineGeneration(largeTeam, MEMBER_AUTHORITY, "members");
-  expect(largeDigest).toBe(epochDigest);
-  if (!largeDigest) throw new Error("large-team generation missing");
-  const reducedLargeTeam = {
-    ...largeTeam,
-    membershipEpoch: largeTeam.membershipEpoch + 1,
-    memberIds: largeTeam.memberIds.filter((id) => id !== memberId),
-  };
-  expect(engineGeneration(reducedLargeTeam, MEMBER_AUTHORITY, "members")).not.toBe(largeDigest);
-  expect(authorityGrantGenerationMatches(active, largeTeam, MEMBER_AUTHORITY, largeDigest)).toBe(
-    true,
-  );
-  expect(
-    authorityGrantGenerationMatches(active, reducedLargeTeam, MEMBER_AUTHORITY, largeDigest),
   ).toBe(false);
 });

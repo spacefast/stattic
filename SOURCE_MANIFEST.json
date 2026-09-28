@@ -1,7 +1,7 @@
 {
-  "revision": "90cddec3e94f93f2fbcd76a715e664c43e011f1b",
-  "sourceHash": "43a3670aa6b1d507ac7b2c0f943261d1452b8fb3a70a93ade8a618a597bae5e9",
-  "manifestSha256": "9303e685e4479d3ba5761fb6178b2d80e71093bb7223c8c931d9835cab2000e4",
+  "revision": "2ad4ea71394f4462f2719dbcb925ea1a7e9491b1",
+  "sourceHash": "060bd95a40ba7af6357e47b5101e720306fdb68c9a40a1b16ed70dcf20b0b9d2",
+  "manifestSha256": "2d5694f1e94b1f150c705fdfd7db9b2086bd0115125810ff6825c91463c074c4",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "3a80703a8ecf00e09e3257c2f04a61edf37979abb48142a4db708fcb1843e23a"
+      "sha256": "1594b51c0f788bf1a89c38eef9befbf8b0875b1de3c554efcd9187efe7b9abab"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "2101154c50fd06c618a3fdf8d3cc6b25171e5c2317705a1991b53e73d54a344b"
+      "sha256": "fac38bd5b8837d2df307922f3c4ad5f62984a0c6ffdf2c7acdcc838219bce069"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -129,7 +129,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/hash.rs",
-      "sha256": "e03e962730d42f78f73d1c6d0dd9c2718242348929c1e7a7da40faea6cf3433e"
+      "sha256": "6367250890865c6cc4b1866a05cc1c895723cf06eeadf3fc29284ecdc03bb108"
     },
     {
       "path": "crates/stattic-runtime-core/src/io.rs",
@@ -389,11 +389,11 @@
     },
     {
       "path": "runtime/custom-redirects.php",
-      "sha256": "057cfa65f23595ae4c3fc64c073fda6fb273986a8e6a2d16e14f404c16ab810a"
+      "sha256": "d66e0e3c0c14b85109b72e821d934334aa65bbc9a29d11b3989f72adfae4199c"
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "e5a3298c39db0a786257d2e78a9a8c9a823b97d7c544943229ca109052571de4"
+      "sha256": "d232a7ededde41eba98767d52c59fe8f9fe08e00746eefdf6ba6b7ae8c83b499"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -409,7 +409,7 @@
     },
     {
       "path": "runtime/engine/admin/components.php",
-      "sha256": "9b91f151ea1cbb27064244e1a359ed10d688ba818d765f84c36794c08ef2a612"
+      "sha256": "1c75951b1c2590d24c753c20ab59805c56d50d4ef5cad4bb219e4cf309a3b829"
     },
     {
       "path": "runtime/engine/admin/dispatch.php",
@@ -433,7 +433,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "7973f3cb345508998c8b0c99ecf70e96cc68175baddf4d7277507867e613f476"
+      "sha256": "c2141cd5a116f27dd258522157c82557580b9787d33f1ae11a78a683ac8ccef2"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -601,7 +601,7 @@
     },
     {
       "path": "runtime/engine/shared/application-journal.php",
-      "sha256": "615e785a5ae93954ed8dd3aa1379c7c4e6efef278b70aedabde8ef8926ba4579"
+      "sha256": "0bd573b6fcb4f52f8cd3e786fe9f89532a7130fe976a1d9d7e4543dd2065d52d"
     },
     {
       "path": "runtime/engine/shared/artifacts.php",
@@ -618,6 +618,10 @@
     {
       "path": "runtime/engine/shared/cache-policy.php",
       "sha256": "fbfba5101519bca8609b3fb33cea8977e56545919e46dc2b5a312101c176735d"
+    },
+    {
+      "path": "runtime/engine/shared/canonical-json.php",
+      "sha256": "c7e5462c08e4959c5f69cfaea3f765c75d8b3483b505587832b2e3754799e505"
     },
     {
       "path": "runtime/engine/shared/content-access.php",
@@ -765,7 +769,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-html.php",
-      "sha256": "0f6ab6a584ffcae858afc4c2e7ce1e5ccdfe1559d12a01b16760e24e145cc9b0"
+      "sha256": "ddc6610c9c5cf9c081c80e6da8ceddf7c5b0968c10e202804aa5da7fb338f4f9"
     },
     {
       "path": "runtime/engine/wordpress/content-kernel.php",
@@ -793,7 +797,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-source-sync.php",
-      "sha256": "198ece96135783a1ed89680d1bc3d255ffdd45a9274b06bdbe12ccc4f8cc1cb2"
+      "sha256": "b23db1f443ce551b696c2bae6dfe5086686eb4bb1d83c4f0d1d31690984510ca"
     },
     {
       "path": "runtime/engine/wordpress/content-storage.php",
@@ -929,7 +933,7 @@
     },
     {
       "path": "runtime/tests/content-source-sync.test.ts",
-      "sha256": "53b2d1f53d8723a880b677d57052d1d40045cff90e01f5362cac020b1849b399"
+      "sha256": "eeb57cb37a5e839486ac28063330e1254c70d60b141749a3e697ae3c9bbf4724"
     },
     {
       "path": "runtime/tests/content-storage.test.ts",

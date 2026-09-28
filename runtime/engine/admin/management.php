@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../shared/context.php';
+require_once __DIR__ . '/../shared/canonical-json.php';
 require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/pointers.php';
 require_once __DIR__ . '/../shared/purge.php';
@@ -1392,23 +1393,7 @@ function _stattic_runtime_store_route_activation_event_id(string $routePath, str
 
 function _stattic_runtime_canonical_request_digest(array $body): string
 {
-    $canonicalize = static function (mixed $value) use (&$canonicalize): mixed {
-        if (!is_array($value)) {
-            return $value;
-        }
-        if (array_is_list($value)) {
-            return array_map($canonicalize, $value);
-        }
-        ksort($value, SORT_STRING);
-        foreach ($value as $key => $entry) {
-            $value[$key] = $canonicalize($entry);
-        }
-        return $value;
-    };
-    return hash(
-        'sha256',
-        (string) json_encode($canonicalize($body), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
-    );
+    return hash('sha256', _stattic_canonical_json($body));
 }
 
 function _stattic_runtime_public_exposure_digest(array $config): ?string

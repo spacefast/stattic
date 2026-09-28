@@ -31,6 +31,8 @@
  */
 declare(strict_types=1);
 
+require_once __DIR__ . '/../shared/canonical-json.php';
+
 const SPACEFAST_CONTENT_SYNC_LEDGER_META = '_spacefast_source_sync_ledger_v1';
 const SPACEFAST_CONTENT_SYNC_RECEIPT_META = '_spacefast_source_sync_receipts_v1';
 /**
@@ -105,7 +107,7 @@ function spacefast_content_sync_envelope(?array $metadata, string $body): string
     if ($metadata === null) {
         return $body;
     }
-    $json = str_replace(['<', '>'], ['\\u003c', '\\u003e'], spacefast_content_sync_canonical_json($metadata));
+    $json = str_replace(['<', '>'], ['\\u003c', '\\u003e'], _stattic_canonical_json($metadata));
     return '<!-- spacefast:document ' . $json . " -->\n" . $body;
 }
 
@@ -150,7 +152,7 @@ function spacefast_content_sync_metadata_post_fields(?array $metadata): array
 
 function spacefast_content_sync_metadata_digest(object $post): string
 {
-    return spacefast_content_sync_digest_text(spacefast_content_sync_canonical_json(spacefast_content_sync_document_metadata($post)));
+    return spacefast_content_sync_digest_text(_stattic_canonical_json(spacefast_content_sync_document_metadata($post)));
 }
 
 function spacefast_content_sync_document_changed(array $ledger, object $post, array $binding): bool
@@ -273,35 +275,10 @@ function spacefast_content_sync_digest_text(string $value): string
     return 'sha256:' . hash('sha256', $value);
 }
 
-/**
- * The digest spelling packages/common/src/utils/canonical-json.ts produces, so
- * a ledger revision computed here verifies against `verifySyncLedgerV1` there.
- */
-function spacefast_content_sync_canonical_json(mixed $value): string
-{
-    if (is_array($value)) {
-        if (array_is_list($value)) {
-            return '[' . implode(',', array_map('spacefast_content_sync_canonical_json', $value)) . ']';
-        }
-        ksort($value, SORT_STRING);
-        $members = [];
-        foreach ($value as $key => $member) {
-            $members[] = json_encode((string) $key, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
-                . ':' . spacefast_content_sync_canonical_json($member);
-        }
-        return '{' . implode(',', $members) . '}';
-    }
-    $encoded = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    if (!is_string($encoded)) {
-        throw new Spacefast_Content_Error(500, 'content_sync_ledger_invalid', 'The sync ledger could not be encoded.');
-    }
-    return $encoded;
-}
-
 function spacefast_content_sync_revision(array $ledger): string
 {
     unset($ledger['revision']);
-    return spacefast_content_sync_digest_text(spacefast_content_sync_canonical_json($ledger));
+    return spacefast_content_sync_digest_text(_stattic_canonical_json($ledger));
 }
 
 function spacefast_content_sync_make_ledger(
@@ -1440,7 +1417,7 @@ function spacefast_content_sync_pending_inspection(string $bindingId, array $pen
     $text = spacefast_content_sync_pullable_text($prepared['format'], spacefast_content_sync_read_blocks($post, $pending), $post, $prepared['text']);
     return [
         'bindingId' => $bindingId, 'postId' => (int) $post->ID, 'source' => $prepared['source'],
-        'baseRevision' => spacefast_content_sync_digest_text(spacefast_content_sync_canonical_json($prepared)),
+        'baseRevision' => spacefast_content_sync_digest_text(_stattic_canonical_json($prepared)),
         'baseText' => $prepared['text'], 'wordpressText' => $text,
         'wordpressDigest' => spacefast_content_sync_digest_text($text),
         'wordpressRevisionId' => spacefast_content_sync_current_revision_id((int) $post->ID),

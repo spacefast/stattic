@@ -340,8 +340,10 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     $_SERVER['PHP_SELF'] = '/wp-admin/admin.php';
                 }
                 // REST renders no theme, and WordPress answers on parse_request
-                // long before one would load.
-                if (!defined('WP_USE_THEMES')) {
+                // long before one would load. /zero-admin is the exception: the
+                // dashboard renders on template_redirect, which core fires only
+                // when themes are on.
+                if (!defined('WP_USE_THEMES') && !($path === '/zero-admin' || str_starts_with($path, '/zero-admin/'))) {
                     define('WP_USE_THEMES', false);
                 }
                 // The page lane's reason, on the API door. This pass is the

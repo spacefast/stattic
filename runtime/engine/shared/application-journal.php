@@ -18,6 +18,7 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/context.php';
+require_once __DIR__ . '/canonical-json.php';
 require_once __DIR__ . '/db-broker.php';
 require_once __DIR__ . '/content-source-journal.php';
 
@@ -69,27 +70,6 @@ function _stattic_application_journal_iso(string $mysqlTimestamp): string
         $parsed = DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $mysqlTimestamp, new DateTimeZone('UTC'));
     }
     return $parsed instanceof DateTimeImmutable ? $parsed->format('Y-m-d\TH:i:s.u\Z') : '';
-}
-
-function _stattic_application_journal_canonical_json(mixed $value): string
-{
-    $canonicalize = static function (mixed $entry) use (&$canonicalize): mixed {
-        if (!is_array($entry)) {
-            return $entry;
-        }
-        if (array_is_list($entry)) {
-            return array_map($canonicalize, $entry);
-        }
-        ksort($entry, SORT_STRING);
-        foreach ($entry as $key => $child) {
-            $entry[$key] = $canonicalize($child);
-        }
-        return $entry;
-    };
-    return (string) json_encode(
-        $canonicalize($value),
-        JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
-    );
 }
 
 /**
@@ -218,7 +198,7 @@ function _stattic_content_source_journal_claim(mysqli $connection, string $sink,
                     'kind' => isset($payload['bindingId'])
                         ? 'content-source-changed'
                         : 'content-source-materialized',
-                    'payloadDigest' => 'sha256:' . hash('sha256', _stattic_application_journal_canonical_json($payload)),
+                    'payloadDigest' => 'sha256:' . hash('sha256', _stattic_canonical_json($payload)),
                     'payload' => $payload,
                     'createdAt' => _stattic_application_journal_iso((string) ($row['created_at'] ?? '')),
                 ],

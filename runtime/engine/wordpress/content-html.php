@@ -303,6 +303,6 @@ function spacefast_content_html_canonical_block(array $block): string
     $attributes = is_array($block['attrs'] ?? null) ? $block['attrs'] : [];
     $encoded = $attributes === []
         ? ''
-        : ' ' . spacefast_content_sync_canonical_json($attributes);
+        : ' ' . _stattic_canonical_json($attributes);
     return '<!-- wp:' . $name . $encoded . ' -->' . $inner . '<!-- /wp:' . $name . ' -->';
 }

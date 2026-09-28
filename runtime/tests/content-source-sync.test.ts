@@ -7,6 +7,7 @@ import { expect, test } from "bun:test";
 
 import { verifySyncLedgerV1 } from "../../packages/common/src/contracts/content-contract-verification.ts";
 import {
+  canonicalizeContentSourceDocument,
   parseContentSourceDocument,
   syncMaterializeReceiptV1Schema,
 } from "../../packages/common/src/contracts/content-sync.ts";
@@ -215,6 +216,39 @@ test("fractional UTC source dates canonicalize to WordPress precision", async ()
   const created = receipt(bound);
   expect(created.ledger.baseText).toContain('"dateGmt":"2099-02-01T12:30:00Z"');
   expect(created.ledger.baseText).not.toContain(".123Z");
+});
+
+test("the document envelope is one spelling and one byte limit on both sides", async () => {
+  // A title holding a line separator and multibyte letters: PHP must leave
+  // U+2028 unescaped and count the limit in UTF-8 bytes, as the zod side does.
+  // Key order is pinned by the shared canonical-JSON corpus, not here.
+  const title = "Café line \u{1F600}";
+  const source = `<!-- spacefast:document ${JSON.stringify({ version: 1, title, slug: "cafe", status: "draft" })} -->\nBody.\n`;
+  const [bound] = await runScenario("md", [{ op: "reconcile", state: "initial", text: source }]);
+  const created = receipt(bound);
+  // The runtime's envelope is byte-identical to the control plane's canonical one.
+  expect(created.ledger.baseText.split(" -->")[0]).toBe(
+    canonicalizeContentSourceDocument(source).split(" -->")[0],
+  );
+  expect(created.ledger.baseText).toContain(`"title":"${title}"`);
+  // SAFETY: the ledger's branded digest types are the contract's.
+  await verifySyncLedgerV1(created.ledger as never);
+
+  // 667 three-byte letters: 667 UTF-16 units, 2001 bytes. Both sides refuse it.
+  const oversized = source.replace(JSON.stringify(title), JSON.stringify("€".repeat(667)));
+  expect(() => parseContentSourceDocument(oversized)).toThrow();
+  const [refused] = await runScenario("md", [
+    { op: "reconcile", state: "initial", text: oversized },
+  ]);
+  expect(problem(refused).code).toBe("content_document_metadata_invalid");
+
+  // A lone surrogate has no UTF-8 form: PHP's json_decode and zod both refuse it.
+  const malformed = source.replace(JSON.stringify(title), JSON.stringify("\uD800"));
+  expect(() => parseContentSourceDocument(malformed)).toThrow();
+  const [rejected] = await runScenario("md", [
+    { op: "reconcile", state: "initial", text: malformed },
+  ]);
+  expect(problem(rejected).code).toBe("content_document_metadata_invalid");
 });
 
 test("a repo Markdown file binds, survives a WordPress edit, and round-trips back byte-stable", async () => {

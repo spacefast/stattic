@@ -450,7 +450,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // loads no access code at all. BOTH paths are passed: a rewrite must not
     // launder a URL whose own Grants are narrower than the effective path's.
     //
-    // The one entry a protected Space answers without it is the version's
+    // The one entry a claimed protected Space answers without it is the version's
     // declared share-preview image (see _stattic_v4_public_preview_image), and
     // never while a platform fence holds the Space.
     $publicPreviewImage = false;
@@ -1137,8 +1137,8 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     exit;
 }
 
-// A protected Space's declared share-preview image (`meta.image`, flagged `pi`
-// at compile time) is the one thing it serves without a session. WhatsApp,
+// A claimed protected Space's declared share-preview image (`meta.image`, flagged
+// `pi` at compile time) is the one thing it serves without a session. WhatsApp,
 // Signal and Slack build a link preview by fetching the page and then its
 // og:image in a separate request that carries no cookie, so behind the gate a
 // shared link shows no picture. Whoever holds the link already sees the page;
@@ -1148,6 +1148,9 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
 // alias reaches it), a 200 with a body, and a raster image type. The compiler
 // decides the same things; this re-checks them so the exemption can never
 // widen past an image.
+//
+// An unclaimed Space has no owner to consent to sharing the image. It uses the
+// same credential checks as every other artifact until the Space is claimed.
 //
 // Never on an immutable per-version hostname. The response there is shared-
 // cacheable for a year, and a fence's route write purges only the route's own
@@ -1162,6 +1165,7 @@ function _stattic_v4_public_preview_image(
 ): bool {
     if (
         !empty($serving['immutable'])
+        || ($serving['authorization']['spaceClaimed'] ?? false) !== true
         || $entry === null
         || empty($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_PREVIEW_IMAGE])
         || !in_array($requestMethod, ['GET', 'HEAD'], true)

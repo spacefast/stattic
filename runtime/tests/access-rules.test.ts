@@ -133,6 +133,7 @@ const issuer = visitorIssuer(keyPair.publicKey);
 function spaceForHost(host: string): string {
   const groups: Array<[string, string[]]> = [
     [PRIVATE_SPACE, [PRIVATE_HOST, PRIVATE_VERSION_HOST, OTHER_PRIVATE_HOST]],
+    [PREVIEW_SPACE, [PREVIEW_HOST, PREVIEW_VERSION_HOST]],
     [PUBLIC_SPACE, [PUBLIC_HOST]],
     [LANELESS_SPACE, [LANELESS_HOST]],
     [BRANCH_SPACE, [BRANCH_LIVE_HOST, BRANCH_HOST]],
@@ -156,6 +157,7 @@ function spaceForHost(host: string): string {
 
 type ProjectionInput = {
   mode?: "private" | "public";
+  spaceClaimed?: boolean;
   accessFence?: "none" | "ownership" | "exposure";
   accessGeneration?: number;
   grantGenerations?: Record<string, number>;
@@ -355,7 +357,7 @@ function projection(input: ProjectionInput = {}) {
               },
             },
           }),
-      spaceClaimed: true,
+      spaceClaimed: input.spaceClaimed ?? true,
       ...teamEnvelope,
       grants,
     },
@@ -962,7 +964,37 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
     200,
   );
 
-  // The one exception: the image the Space declared as its share preview.
+  // Before ownership, even the declared share-preview image needs the Open
+  // Link's authority. A public hostname alone never grants these bytes.
+  const previewLinkId = "lnk_preclaim_preview";
+  await putRoute(runtime, PREVIEW_SPACE, "production", {
+    version_id: PREVIEW_VERSION,
+    config: projection({
+      spaceClaimed: false,
+      links: [{ linkId: previewLinkId, scopes: ["/"], expiresAt: null }],
+    }),
+  });
+  try {
+    const unclaimedPreview = await get(runtime, PREVIEW_HOST, "/og.png");
+    expect(unclaimedPreview.status).toBe(403);
+    expect(unclaimedPreview.headers.get("cache-control")).toBe("private, no-store");
+    expect(await unclaimedPreview.text()).not.toContain("png bytes");
+
+    const previewCookie = await openAuthorities(PREVIEW_HOST, [`link:${previewLinkId}`]);
+    const authorizedPreview = await get(runtime, PREVIEW_HOST, "/og.png", {
+      headers: { cookie: previewCookie },
+    });
+    expect(authorizedPreview.status).toBe(200);
+    expect(authorizedPreview.headers.get("cache-control")).toBe("private, no-store");
+    expect(await authorizedPreview.text()).toBe("png bytes");
+  } finally {
+    await putRoute(runtime, PREVIEW_SPACE, "production", {
+      version_id: PREVIEW_VERSION,
+      config: projection({ memberRefs: ["member:mem_owner"] }),
+    });
+  }
+
+  // After ownership, the image the Space declared as its share preview is an exception.
   // A link previewer fetches it in its own cookieless request, so it serves
   // with no session, and stays out of search indexes.
   const preview = await get(runtime, PREVIEW_HOST, "/og.png");

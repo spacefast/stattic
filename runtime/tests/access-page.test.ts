@@ -752,7 +752,7 @@ afterAll(async () => {
 });
 
 test("the deny surface renders the access page with every configured lane", async () => {
-  const response = await get(runtime, LANES_HOST, "/docs/?sf_access=no-grant");
+  const response = await get(runtime, LANES_HOST, "/docs/");
   expect(response.status).toBe(403);
   expect(response.headers.get("cache-control")).toBe("private, no-store");
   expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
@@ -768,7 +768,7 @@ test("the deny surface renders the access page with every configured lane", asyn
     /<details\b[^>]*class="[^"]*\bsf-access-request\b[^"]*"[^>]*>/,
   )?.[0];
   expect(requestDetails).toBeDefined();
-  expect(requestDetails).toMatch(/\sopen(?:\s|>)/);
+  expect(requestDetails).not.toMatch(/\sopen(?:\s|>)/);
   expect(html).toContain('name="return" value="/docs/"');
   expect(html).toContain('<script src="/__spacefast/access/client.js" defer></script>');
   const clientScript = await get(runtime, LANES_HOST, "/__spacefast/access/client.js");
@@ -1154,7 +1154,26 @@ test("a bounced silent probe renders the page instead of looping", async () => {
   expect(html).toContain(">Sign in</a>");
 
   const noGrant = await get(runtime, SILENT_HOST, "/docs/?sf_access=no-grant");
-  expect(await noGrant.text()).toContain("hasn&#039;t let you in yet");
+  const noGrantHtml = await noGrant.text();
+  expect(noGrantHtml).toContain("hasn&#039;t let you in yet");
+  // The refused account is already signed in, so the lane is offered as what it
+  // is, a same-tab re-check for after the owner grants access, next to the invite.
+  expect(noGrantHtml).not.toContain(">Sign in</a>");
+  expect(noGrantHtml).toContain(
+    'href="/__spacefast/access/account?return=%2Fdocs%2F">Check again</a>',
+  );
+  expect(noGrantHtml).not.toContain("data-sf-access-popup");
+  expect(noGrantHtml).not.toContain("/__spacefast/access/client.js");
+  expect(noGrantHtml).toContain("Request an invite");
+
+  const lanesNoGrant = await get(runtime, LANES_HOST, "/docs/?sf_access=no-grant");
+  const lanesHtml = await lanesNoGrant.text();
+  expect(lanesHtml).not.toContain(">Sign in</a>");
+  expect(lanesHtml).toContain(">Check again</a>");
+  expect(lanesHtml).toContain("Continue with Okta");
+  expect(
+    lanesHtml.match(/<details\b[^>]*class="[^"]*\bsf-access-request\b[^"]*"[^>]*>/)?.[0],
+  ).toMatch(/\sopen(?:\s|>)/);
 });
 
 test("a sole SSO lane skips the chooser entirely", async () => {

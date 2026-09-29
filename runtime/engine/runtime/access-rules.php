@@ -3237,12 +3237,22 @@ function _stattic_access_lanes_fragment(
     $buttons = '';
     $hasPopup = false;
     if (is_string($lanes['account'])) {
-        $hasPopup = true;
         $accountHref = _stattic_access_url_with_params(STATTIC_ACCESS_ACCOUNT_START_PATH, [
             'return' => $returnPath,
         ]);
-        $buttons .= '<a class="sf-button sf-access-account" data-sf-access-popup href="'
-            . _stattic_html_escape($accountHref) . '">Sign in</a>';
+        if ($status === 'no-grant') {
+            // The visitor is already signed in with an account this space refused,
+            // so "Sign in" only re-ran the same check and looked dead. The check is
+            // still worth offering by its real name, same tab, for when the owner
+            // grants access later: sf_access stays in the address bar, so a reload
+            // alone would keep showing this page.
+            $buttons .= '<a class="sf-button sf-access-account" href="'
+                . _stattic_html_escape($accountHref) . '">Check again</a>';
+        } else {
+            $hasPopup = true;
+            $buttons .= '<a class="sf-button sf-access-account" data-sf-access-popup href="'
+                . _stattic_html_escape($accountHref) . '">Sign in</a>';
+        }
     }
     foreach ($lanes['connections'] as $connection) {
         $ssoHref = _stattic_access_url_with_params($connection['startUrl'], [

@@ -23,6 +23,35 @@ function _stattic_wordpress_page_resume_deferred_request(): void
 }
 
 /**
+ * Keep this response out of the provider's page cache.
+ *
+ * For every visitor lane that boots WordPress: the document and fallback lanes
+ * here, and Users (space-users.php). Booting WordPress loads the provider's
+ * advanced-cache.php, which is Batcache. Once a URL gets a second request
+ * within two minutes, Batcache stores what the request printed and answers
+ * later requests from that copy inside core's boot, before the lane runs. A
+ * post saved in WordPress then stays invisible on its page for the copy's whole
+ * lifetime. `Cache-Control: private, no-store` does not stop it: Batcache reads
+ * max-age and nothing else from that header.
+ *
+ * batcache_cancel() is Batcache's own opt-out: the request's output passes
+ * through unstored. Call it as soon as core is loaded, before the lane closes
+ * any buffer or can decline: a declined request still ends in an engine answer
+ * (the SPA shell or the 404) that must not be stored either.
+ *
+ * Immutable version URLs opt out too, so each of their requests renders in
+ * full. That is what their `private, no-store` header already says; give them a
+ * public cache policy in that header if they should be cached, not a Batcache
+ * copy the header denies.
+ */
+function _stattic_wordpress_lane_refuse_page_cache(): void
+{
+    if (function_exists('batcache_cancel')) {
+        batcache_cancel();
+    }
+}
+
+/**
  * Render only the canonical document route selected by the runtime inventory.
  *
  * Returns true when the request was handed to the document root's front
@@ -104,6 +133,9 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
     // the Spacefast SPA/404 tail.
     ob_start();
     require_once $wpLoad;
+    // Before the discard: when the page cache's buffer is the one on top, closing
+    // it hands the page cache whatever core printed while booting.
+    _stattic_wordpress_lane_refuse_page_cache();
     ob_end_clean();
     if (!function_exists('spacefast_content_model_sync_binding') || !function_exists('spacefast_content_sync_find_post')) {
         return false;
@@ -402,6 +434,7 @@ function _stattic_wordpress_fallback_try_serve(array $context, string $requestPa
         define('WP_USE_THEMES', true);
     }
     require_once $wpLoad;
+    _stattic_wordpress_lane_refuse_page_cache();
     if (!function_exists('wp') || !function_exists('is_404')) {
         return false;
     }

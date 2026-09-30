@@ -1,7 +1,7 @@
 {
-  "revision": "ff72f271e625e6c85c2d9e3cbfd334172b931f79",
-  "sourceHash": "2603f7813e75e4690ae31070a8119a0920a0643cf35ef6452673a28b076f8026",
-  "manifestSha256": "cf891f15950cf4ba495fd0c9c3bf7b8f0d6cf6b791ae8fdc04106c04373d61c5",
+  "revision": "45fab612aca79f2e1720a72719698f44969e21ce",
+  "sourceHash": "fc212c22ba9091aa4ffe0054760ae8c946a95573084d88edc44c513a26a9dabe",
+  "manifestSha256": "64aff29bde4ad755f039fdd27e851e46f86946bdf14a79efbe35ec74cdf37822",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "a0c4fd44b0515f8314bc7e4734403afccaaf6d24422cb41fb990563e189cfa55"
+      "sha256": "3bd5a2b9c7a7e77c06765c64dea6993fe6c784677c0cf436135a55f93b6116d2"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "793c98b83149467890b59969a8ddb30dcdd1481788a2346974b356ec68c7ffcf"
+      "sha256": "062801365f9342653686ba6cdf3dc94329e064dd8e0e26ed2a9d8d56aaa31c70"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -509,7 +509,7 @@
     },
     {
       "path": "runtime/engine/init.php",
-      "sha256": "1138d49af88479bbfa4ab50b744689ad061aafbb7c6628d376fce5d02d20a899"
+      "sha256": "d27fc57f402c7a9da80603716a977b5c321e4712867a5af6e08cc607297891cf"
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
@@ -521,7 +521,7 @@
     },
     {
       "path": "runtime/engine/runtime/content-page.php",
-      "sha256": "132408715f82358638412fd9cbcb80e33af998c507e532e9cb27a11d15494e9b"
+      "sha256": "7b4093463f45763b93fb5db9636a8c71b8f9a9ff1b0d40ab1ae737667cd52e4e"
     },
     {
       "path": "runtime/engine/runtime/crons.php",
@@ -569,7 +569,7 @@
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
-      "sha256": "3b3d1f21fa0545f087d45cc34563a4eda7b7264cebaf3f595f323a024c74b8e3"
+      "sha256": "5306dede0f81a491ed20bb948fdb94fe1333ca3f31ec431488213d1e1ebb3b56"
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
@@ -933,7 +933,7 @@
     },
     {
       "path": "runtime/tests/content-source-sync.test.ts",
-      "sha256": "eeb57cb37a5e839486ac28063330e1254c70d60b141749a3e697ae3c9bbf4724"
+      "sha256": "f459d8160e3177cc9c53fb020740f72f97a1a6a8b4f54571c3f53110abb334f2"
     },
     {
       "path": "runtime/tests/content-storage.test.ts",
@@ -941,7 +941,7 @@
     },
     {
       "path": "runtime/tests/content-sync.test-helper.ts",
-      "sha256": "218993cbdcf03550a5cc15d3ec56ec9b340ada43c44b715975afc75e6edb82fb"
+      "sha256": "62099f777b97d00045b4937adaf839e7f12f31e6076149f002179b346a7493c4"
     },
     {
       "path": "runtime/tests/content-type-policy.test.ts",

@@ -3,10 +3,11 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/shared/context.php';
 
-// No batcache handling here: this lane serves and exits before WordPress core
-// (and therefore advanced-cache.php) ever loads, so batcache can never observe
-// a runtime response to cache. Edge purges call the platform site API directly
-// (shared/purge.php).
+// No batcache handling here: the static lanes serve and exit before WordPress
+// core (and therefore advanced-cache.php) ever loads, so batcache never sees
+// their responses. The lanes that do boot core opt out of batcache themselves
+// (_stattic_wordpress_lane_refuse_page_cache). Edge purges call the platform site
+// API directly (shared/purge.php).
 
 // Must run before anything can exit: every early return below is a response that
 // has to be attributable to this runtime, including access denials that would

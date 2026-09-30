@@ -33,7 +33,10 @@ test("release activation seeds canonical documents and preserves editor takeover
   const edited = "<!-- wp:paragraph -->\n<p>Editor owns this.</p>\n<!-- /wp:paragraph -->";
   const outcomes = await runScenario("html", [
     { op: "activatePage", format: "tsx", text },
-    { op: "renderPage" },
+    // Behind the provider's page cache, like a live box: an edit saved in
+    // WordPress has to reach the next render of the page, not a stored copy of
+    // this one or of what core printed while booting.
+    { op: "renderPage", bootOutput: "Notice: printed while core boots." },
     { op: "inspectPage" },
     { op: "editInWordPress", blocks: edited },
     { op: "activatePage", format: "tsx", text },
@@ -48,7 +51,7 @@ test("release activation seeds canonical documents and preserves editor takeover
     { op: "inspectPage" },
     // A failed replacement may clear the editor's active model while this
     // version still serves. Its sealed model must keep live editor bytes visible.
-    { op: "renderPage", clearActiveRelease: true },
+    { op: "renderPage", clearActiveRelease: true, wordpressFrontController: true },
     { op: "renderPage", snapshot: { text, format: "tsx" } },
   ]);
   const renders = outcomes.filter(

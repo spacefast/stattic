@@ -69,7 +69,15 @@ function releaseRoot(format: SyncFormat) {
   const loader = path.join(root, "wp-content/mu-plugins/spacefast-content.php");
   mkdirSync(path.dirname(loader), { recursive: true });
   copyFileSync(path.join(repoRoot, "runtime/wordpress-content-loader.php"), loader);
-  writeFileSync(path.join(root, "wp-load.php"), `<?php require ${JSON.stringify(loader)};`);
+  // Core loads the page cache drop-in before any plugin, as wp-settings.php does,
+  // and anything printed while booting (a notice, a plugin's stray echo) lands in
+  // its buffer.
+  const pageCache = path.join(root, "wp-content/advanced-cache.php");
+  writeFileSync(pageCache, PAGE_CACHE);
+  writeFileSync(
+    path.join(root, "wp-load.php"),
+    `<?php require ${JSON.stringify(pageCache)}; echo $GLOBALS['bootOutput'] ?? ''; require ${JSON.stringify(loader)};`,
+  );
   // The content model's own digest is over the generated PHP, and the kernel checks
   // it, so this writes the real one rather than a placeholder.
   const php = contentModelPhp(revision, format);
@@ -80,6 +88,37 @@ function releaseRoot(format: SyncFormat) {
   );
   return { storage, revision, releaseDir: dir };
 }
+
+/**
+ * The provider's page cache, as a wp.cloud box runs it: Batcache, whose
+ * `x-nananana: Batcache-Hit` a stale document carried live. Upstream
+ * Automattic/batcache's contract, reduced to what a document render meets: it
+ * runs inside core's boot, so a stored copy is answered there, before any
+ * plugin or engine lane runs; and whatever the request prints is stored unless
+ * batcache_cancel() ran. Upstream admits a URL on its second request within two
+ * minutes. This one admits on the first, which only makes a stale copy easier
+ * to catch. Every render in a scenario is the same URL, so there is one copy.
+ */
+const PAGE_CACHE = String.raw`<?php
+global $batcache;
+$batcache = (object) ['cancel' => false];
+function batcache_cancel(): void
+{
+    global $batcache;
+    $batcache->cancel = true;
+}
+$batcacheCopy = __DIR__ . '/batcache-copy.html';
+if (is_file($batcacheCopy)) {
+    die(file_get_contents($batcacheCopy));
+}
+ob_start(static function (string $output) use ($batcacheCopy): string {
+    global $batcache;
+    if ($batcache->cancel === false && trim($output) !== '') {
+        file_put_contents($batcacheCopy, $output);
+    }
+    return $output;
+});
+`;
 
 /** One built-in resource, in the release's own PHP spelling. */
 function resource(id: string, postType: string) {
@@ -261,6 +300,16 @@ export type Step =
       clearActiveRelease?: boolean;
       assets?: string[];
       islandsBootUrl?: string;
+      /**
+       * Serve it through WordPress's own front controller: the auto_prepend
+       * pass hands the request on, core boots with the page cache's buffer
+       * around everything printed after it, and the content loader resumes the
+       * lane at wp_loaded. Without it the lane boots core itself inside a buffer
+       * of its own, which it discards along with the page cache's.
+       */
+      wordpressFrontController?: boolean;
+      /** What core prints while it boots, such as a PHP notice. */
+      bootOutput?: string;
     }
   | { op: "reconcile"; state: "initial" | "bound"; text: string; baseRevision?: string }
   | {
@@ -504,9 +553,17 @@ foreach ($steps as $step) {
       $renderScript .= '$versionRoot = _stattic_version_root($context["private_root"], $context["space_id"], $context["version_id"]); if (!is_dir($versionRoot)) mkdir($versionRoot, 0775, true);';
       $renderScript .= 'file_put_contents($versionRoot . "/metadata.json", json_encode(["catalog" => ["format" => STATTIC_RUNTIME_VERSION_CATALOG_FORMAT, "spaceId" => $context["space_id"], "versionId" => $context["version_id"], "paths" => ["_spacefast/pages/documents/" . $route["id"] . ".json" => ["source" => ["sha256" => hash("sha256", $snapshotBytes), "size" => strlen($snapshotBytes), "contentType" => "application/json"]]], "variants" => []]]));';
       $renderScript .= '$assets = ' . var_export($step['assets'] ?? [], true) . ';';
+      $renderScript .= '$bootOutput = ' . var_export($step['bootOutput'] ?? '', true) . ';';
       $renderScript .= 'function _stattic_v4_entry($dir, $root, $key) { return in_array($key, $GLOBALS["assets"], true) ? [] : null; }';
       $renderScript .= 'function _stattic_v4_blob_contents($context, $sha) { return $GLOBALS["snapshotBytes"]; }';
-      $renderScript .= '_stattic_wordpress_page_try_serve(' . var_export($context, true) . ', "/docs/about", "GET", ' . var_export($route, true) . ');';
+      $serve = '_stattic_wordpress_page_try_serve(' . var_export($context, true) . ', "/docs/about", "GET", ' . var_export($route, true) . ')';
+      if (!empty($step['wordpressFrontController'])) {
+        $renderScript .= '$GLOBALS["SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY"] = true;';
+        $renderScript .= 'if (!' . $serve . ') exit("The lane did not hand the request on.");';
+        $renderScript .= 'require_once ' . var_export(dirname(${JSON.stringify(storage)}, 2) . '/wp-load.php', true) . ';';
+        $renderScript .= '$GLOBALS["SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY"] = false;';
+      }
+      $renderScript .= $serve . ';';
       $renderPath = tempnam(sys_get_temp_dir(), 'sf-page-render-');
       file_put_contents($renderPath, $renderScript);
       $html = shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($renderPath));

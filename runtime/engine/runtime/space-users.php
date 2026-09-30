@@ -70,6 +70,7 @@ function _stattic_space_users_prepare(
     (static function (string $bootstrap): void {
         require_once $bootstrap;
     })($wpLoad);
+    _stattic_wordpress_lane_refuse_page_cache();
     if (!function_exists('spacefast_space_users_available') || !spacefast_space_users_available()) {
         _stattic_problem_refused(503, 'space_users_unavailable', 'Users is not installed on this Space yet.');
     }

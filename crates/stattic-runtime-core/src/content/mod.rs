@@ -291,6 +291,7 @@ pub fn materialize_html_pipeline(
 
     let page_by_output: BTreeMap<String, &Page> = pages
         .iter()
+        .filter(|page| page.layout_rendered)
         .map(|page| (page.output_path.clone(), page))
         .collect();
     let targets: Vec<String> = files
@@ -1560,6 +1561,59 @@ mod tests {
         }
         assert!(run.files.contains_key("page/index.html"));
         assert!(!run.files.contains_key("draft/index.html"));
+    }
+
+    #[test]
+    fn index_markdown_renders_to_its_directory_index() {
+        let run = run_pipeline(
+            &[
+                ("index.md", b"Hi!"),
+                ("docs/index.markdown", b"# Docs"),
+                ("guide/INDEX.md", b"# Guide"),
+            ],
+            json!({"mode":"website"}),
+            json!({"config":{"listing":true,"viewer":false}}),
+        );
+        run.result.as_ref().unwrap();
+        for output in ["index.html", "docs/index.html", "guide/index.html"] {
+            assert!(run.files.contains_key(output), "{output} was not generated");
+        }
+        assert!(
+            !run.files
+                .keys()
+                .any(|path| path.rsplit('/').next() == Some(".html")),
+            "an index page was written as a `.html` dotfile"
+        );
+    }
+
+    #[test]
+    fn skipped_markdown_page_does_not_decorate_the_file_it_yielded_to() {
+        let run = run_pipeline(
+            &[
+                (
+                    "index.html",
+                    b"<html><head></head><body><h1>Authored</h1></body></html>",
+                ),
+                ("index.md", b"---\ntitle: From Markdown\n---\nHi!"),
+                ("docs.md", b"---\ntitle: Docs Flat\n---\nalpha"),
+                ("docs/index.md", b"---\ntitle: Docs Nested\n---\nbeta"),
+            ],
+            json!({"mode":"website"}),
+            json!({"config":{"listing":true,"viewer":false}}),
+        );
+        run.result.as_ref().unwrap();
+        assert!(has_diagnostic(&run, "page_output_conflict"));
+        let home = read(&run, "index.html");
+        assert!(home.contains("<h1>Authored</h1>"));
+        assert!(!home.contains("From Markdown"), "{home}");
+        let docs = read(&run, "docs/index.html");
+        let (rendered, skipped) = if docs.contains("<p>alpha</p>") {
+            ("Docs Flat", "Docs Nested")
+        } else {
+            ("Docs Nested", "Docs Flat")
+        };
+        assert!(docs.contains(rendered), "{docs}");
+        assert!(!docs.contains(skipped), "{docs}");
     }
 
     #[test]

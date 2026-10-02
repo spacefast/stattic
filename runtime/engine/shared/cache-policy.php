@@ -33,6 +33,18 @@ function _stattic_cache_policy_no_store_flags(): bool
         || _stattic_invalid_access_cookie_cleared();
 }
 
+// The no-store reasons that also make the response private content (see
+// _stattic_private_content_response_header_lines). A guest-pseudonym mint is
+// the one no-store reason left out: it discloses nothing, so it keeps the
+// response out of every cache without pinning noindex, CORP or CSP onto a
+// public page (_stattic_identity_cookie_principal_mutated).
+function _stattic_cache_policy_private_flags(): bool
+{
+    return _stattic_access_query_token_present()
+        || _stattic_identity_cookie_principal_mutated()
+        || _stattic_invalid_access_cookie_cleared();
+}
+
 // An upstream's headers are as untrusted as a visitor's: any personalization or
 // restriction signal revokes the shared-cache grant the route opted into.
 function _stattic_cache_policy_upstream_revokes_shared_store(array $headerLines): bool
@@ -89,7 +101,9 @@ function _stattic_cache_policy(array $lane = []): array
 {
     $flags = _stattic_cache_policy_no_store_flags();
     $noStore = $flags || !empty($lane['no_store']);
-    $private = $flags || !empty($lane['private']) || _stattic_access_private_cache_flag();
+    $private = _stattic_cache_policy_private_flags()
+        || !empty($lane['private'])
+        || _stattic_access_private_cache_flag();
 
     $cacheControl = array_key_exists('public', $lane) ? $lane['public'] : STATTIC_CACHE_CONTROL_NO_STORE;
     if (!$private && is_string($cacheControl) && !empty($lane['upstream'])) {
@@ -98,6 +112,9 @@ function _stattic_cache_policy(array $lane = []): array
         }
     }
     if ($private) {
+        $cacheControl = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+    } elseif ($flags) {
+        // Stateful but not private content: a guest-pseudonym Set-Cookie.
         $cacheControl = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
     } elseif (_stattic_cache_policy_request_varying()) {
         $cacheControl = STATTIC_CACHE_CONTROL_NO_STORE;

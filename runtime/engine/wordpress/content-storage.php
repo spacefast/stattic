@@ -375,6 +375,31 @@ function spacefast_content_storage_get(mixed $input): mixed
 }
 
 /**
+ * wp_handle_sideload and wp_tempnam live in wp-admin/includes/file.php, and
+ * wp_generate_attachment_metadata in image.php. Core loads them for its own
+ * media controller, never for an ability run, so without them the upload
+ * ability answered every call with `zero_storage_unavailable`. media.php is
+ * loaded only while wp_read_audio_metadata is still undeclared: the Markdown
+ * toolkit PHAR polyfills that function, and core declares it unguarded.
+ */
+function spacefast_content_storage_load_media_admin(): void
+{
+    if (!defined('ABSPATH')) {
+        return;
+    }
+    $includes = ['file.php', 'image.php'];
+    if (!function_exists('wp_read_audio_metadata')) {
+        $includes[] = 'media.php';
+    }
+    foreach ($includes as $include) {
+        $path = ABSPATH . 'wp-admin/includes/' . $include;
+        if (is_file($path)) {
+            require_once $path;
+        }
+    }
+}
+
+/**
  * Uploads one file into this Space.
  *
  * Every step is WP core's: wp_handle_sideload applies WordPress's own filename
@@ -386,6 +411,7 @@ function spacefast_content_storage_upload(mixed $input): mixed
 {
     $input = spacefast_content_storage_input($input);
     $spaceId = spacefast_content_space_id();
+    spacefast_content_storage_load_media_admin();
     if (
         $spaceId === ''
         || !function_exists('wp_handle_sideload')
@@ -417,6 +443,13 @@ function spacefast_content_storage_upload(mixed $input): mixed
     $title = trim((string) ($input['title'] ?? ''));
     if (strlen($title) > SPACEFAST_CONTENT_STORAGE_TITLE_MAX_BYTES) {
         return spacefast_content_storage_error(400, 'zero_storage_title_invalid', 'The file title is too long.');
+    }
+    // Before the folder term: a refused upload must not leave a folder behind.
+    if (function_exists('wp_upload_dir')) {
+        $uploads = wp_upload_dir();
+        if (($uploads['error'] ?? false) !== false) {
+            return spacefast_content_storage_error(503, 'zero_storage_unavailable', 'Space storage is unavailable: its upload directory could not be created.');
+        }
     }
     $termId = spacefast_content_storage_folder_term($spaceId, $input['folder'] ?? null, true);
     if ($termId === null) {

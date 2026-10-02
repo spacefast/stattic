@@ -232,6 +232,24 @@ function spacefast_content_url_origin(mixed $url, string $origin): mixed
         . (is_string($parts['fragment'] ?? null) ? '#' . $parts['fragment'] : '');
 }
 
+/**
+ * The private storage root media bytes are written under: the same
+ * `<installRoot>/storage` the content-media lane serves them from. It is never
+ * derived from ABSPATH. On a managed box WordPress core lives under the
+ * provider's read-only `__wp__/` and only wp-load.php is linked into the site
+ * root, so ABSPATH names core's directory, not the one the engine installs
+ * into: a root built from it is unwritable and is not where the media lane
+ * reads.
+ */
+function spacefast_content_upload_private_root(): string
+{
+    $root = $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? null;
+    if ((!is_string($root) || $root === '') && function_exists('_stattic_access_private_root')) {
+        $root = _stattic_access_private_root();
+    }
+    return is_string($root) && str_starts_with($root, '/') ? rtrim($root, '/') : '';
+}
+
 function spacefast_content_scope_upload_dir(array $uploads): array
 {
     $spaceId = spacefast_content_space_id();
@@ -242,12 +260,12 @@ function spacefast_content_scope_upload_dir(array $uploads): array
     }
     $subdir = is_string($uploads['subdir'] ?? null) ? $uploads['subdir'] : '';
     $origin = spacefast_content_request_origin();
-    if ($origin === '' || !defined('ABSPATH')) {
+    $privateRoot = spacefast_content_upload_private_root();
+    if ($origin === '' || $privateRoot === '') {
         return $uploads;
     }
     $spaceHash = substr(hash('sha256', $spaceId), 0, 32);
-    $uploads['basedir'] = rtrim((string) ABSPATH, '/')
-        . '/.stattic/storage/spaces/' . $spaceId . '/content-media';
+    $uploads['basedir'] = $privateRoot . '/spaces/' . $spaceId . '/content-media';
     $uploads['baseurl'] = $origin . '/__spacefast/content-media/' . $spaceHash;
     $uploads['path'] = $uploads['basedir'] . $subdir;
     $uploads['url'] = $uploads['baseurl'] . $subdir;

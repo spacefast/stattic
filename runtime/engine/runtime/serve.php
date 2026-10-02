@@ -459,7 +459,8 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         && _stattic_v4_public_preview_image($serving, $entry, $requestMethod, $requestPath, $originalRequestPath)
     ) {
         require_once __DIR__ . '/access-rules.php';
-        $publicPreviewImage = _stattic_access_unfenced($serving, $requestHost, $requestPath);
+        $publicPreviewImage = _stattic_access_unfenced($serving, $requestHost, $requestPath)
+            && !_stattic_access_anonymous_admits($serving, $requestHost, $requestPath);
     }
     if (!$open && !$publicPreviewImage) {
         require_once __DIR__ . '/access-rules.php';
@@ -910,7 +911,9 @@ function _stattic_v4_version_has_zero_runtime(string $versionDir): bool
  *
  * Writing the cookie also marks the response no-store
  * (_stattic_identity_cookie_mutated), so this document never warms a shared
- * cache with one visitor's Set-Cookie.
+ * cache with one visitor's Set-Cookie. It does NOT make the document private
+ * content: the pseudonym carries no authority and the bytes are the public
+ * page, so it keeps the publisher's X-Robots-Tag and gains no platform noindex.
  */
 function _stattic_zero_prime_anonymous_document_session(
     array $context,
@@ -982,7 +985,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     _stattic_zero_prime_anonymous_document_session($context, $headers, $status, $method);
 
     $noStore = _stattic_cache_policy_no_store_flags();
-    $privateCache = (bool) $context['private_cache'] || $noStore;
+    $privateCache = (bool) $context['private_cache'] || _stattic_cache_policy_private_flags();
     $requestVarying = (bool) $context['request_varying'];
     $tagPreviewToken = $context['tag_preview'];
 
@@ -1019,8 +1022,8 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
     }
     $headers = _stattic_v4_platform_response_headers($context, $headers, $privateCache);
-    // Public so a link previewer can fetch it, never indexed: the Space it
-    // belongs to is still private.
+    // Public so a link previewer can fetch it, never indexed: the path is still
+    // private to everyone else (an image a Public Grant admits is not flagged).
     if (!empty($context['public_preview_image'])) {
         $headers['x-robots-tag'] = 'noindex, nofollow';
     }
@@ -1098,7 +1101,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         $body = _stattic_v4_read_blob($context, $absolutePath, $blobRelativePath, $length);
         $body = _stattic_apply_spacefast_sdk_preview_to_html($body, $tagPreviewToken);
         unset($headers['etag']);
-        $headers['cache-control'] = $privateCache
+        $headers['cache-control'] = $privateCache || $noStore
             ? STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE
             : STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
         $headers['content-length'] = (string) strlen($body);

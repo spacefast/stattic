@@ -973,9 +973,14 @@ function _stattic_anonymous_session_ensure_anonymous_id(
     if ($existing !== null) {
         return $existing;
     }
-    $payload = _stattic_anonymous_session_write($serving, $requestHost, [
-        'anonymousId' => _stattic_collab_mint_anonymous_id(),
-    ]);
+    _stattic_guest_session_mint_active(true);
+    try {
+        $payload = _stattic_anonymous_session_write($serving, $requestHost, [
+            'anonymousId' => _stattic_collab_mint_anonymous_id(),
+        ]);
+    } finally {
+        _stattic_guest_session_mint_active(false);
+    }
     return is_array($payload) ? _stattic_collab_anonymous_id($payload) : null;
 }
 
@@ -2197,6 +2202,26 @@ function _stattic_access_unfenced(array $serving, string $requestHost, string $r
     $admission = _stattic_scoped_admission_context($serving, $requestHost, $requestPath);
     return ($admission['error'] ?? null) === null
         && ($admission['projection']['fence'] ?? 'none') === 'none';
+}
+
+// Whether an unconstrained Public Grant already reaches this path, e.g. on a
+// Space that keeps other paths private. The share-preview exemption, and the
+// noindex that comes with it, exist for an image the gate would otherwise hold
+// back; one an unconstrained Public Grant admits is an ordinary public asset
+// and takes the ordinary enforcement lane. A constrained one (expiry, country,
+// user agent, frame origin) admits identity-dependently, so the enforcement
+// lane would pin the image private and refuse a hot-linking previewer; it
+// keeps the exemption.
+function _stattic_access_anonymous_admits(array $serving, string $requestHost, string $requestPath): bool
+{
+    $admission = _stattic_scoped_admission_context($serving, $requestHost, $requestPath);
+    if (($admission['error'] ?? null) !== null || ($admission['projection']['fence'] ?? 'none') !== 'none') {
+        return false;
+    }
+    $capabilities = $admission['anonymous']['capabilities'] ?? [];
+    return is_array($capabilities)
+        && in_array('page.view', $capabilities, true)
+        && !empty($admission['anonymous']['sharedCacheable']);
 }
 
 // THE protected-space enforcement call on the serve path (contracts §7): exits

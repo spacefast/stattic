@@ -73,12 +73,15 @@ pub(super) fn markdown_output_path(path: &str) -> String {
     } else {
         &path[..path.len() - 3]
     };
-    if stem
-        .rsplit('/')
-        .next()
-        .is_some_and(|v| v.eq_ignore_ascii_case("index"))
-    {
-        format!("{}.html", stem.strip_suffix("index").unwrap_or(stem))
+    let (directory, name) = match stem.rsplit_once('/') {
+        Some((directory, name)) => (Some(directory), name),
+        None => (None, stem),
+    };
+    if name.eq_ignore_ascii_case("index") {
+        match directory {
+            Some(directory) => format!("{directory}/index.html"),
+            None => "index.html".into(),
+        }
     } else {
         format!("{stem}/index.html")
     }

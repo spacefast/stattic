@@ -613,6 +613,11 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
     // Stateful, so no shared cache may hand one visitor's session to the next.
     expect(document.headers.get("cache-control")).toBe("private, no-store");
     expect(document.headers.get("a8c-edge-cache")).toBe("no-cache");
+    // But not private content: the pseudonym carries no authority and these
+    // are the public page's bytes, so a crawler's cold, cookie-less fetch of a
+    // public Zero page is not told to drop it from the index.
+    expect(document.headers.get("x-robots-tag")).toBeNull();
+    expect(document.headers.get("cross-origin-resource-policy")).toBeNull();
 
     // The first XHRs now all present that cookie: none of them mints, and every
     // one of them reports the same guest.
@@ -645,6 +650,8 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
     rmSync(capturePath, { force: true });
     const otherGuest = await get(idRuntime, host, "/api/whoami");
     expect(otherGuest.status).toBe(201);
+    expect(otherGuest.headers.get("cache-control")).toBe("private, no-store");
+    expect(otherGuest.headers.get("x-robots-tag")).toBeNull();
     expect((otherGuest.headers.get("set-cookie") ?? "").split(";", 1)[0]).toMatch(
       /^spacefast_session(?:_dev)?=sfa1_[A-Za-z0-9_-]+\.[a-f0-9]{64}$/,
     );

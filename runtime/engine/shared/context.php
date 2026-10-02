@@ -350,6 +350,9 @@ function _stattic_set_cookie(
 ): void {
     if ($name === _stattic_session_cookie_name()) {
         _stattic_identity_cookie_mutated(true);
+        if (!_stattic_guest_session_mint_active()) {
+            _stattic_identity_cookie_principal_mutated(true);
+        }
     }
     $secure = _stattic_cookies_secure();
     $usePartitioned = $partitioned && $secure;
@@ -885,6 +888,33 @@ function _stattic_identity_cookie_mutated(?bool $set = null): bool
         $mutated = true;
     }
     return $mutated;
+}
+
+// The subset of identity-cookie writes that make the response itself private
+// content. Handing a cookie-less visitor its authority-less guest pseudonym
+// (`sfa1_`, _stattic_anonymous_session_ensure_anonymous_id) is stateful, so no
+// cache may store that response, but its bytes are what every anonymous visitor
+// receives. Only this marker, not the Set-Cookie alone, selects the
+// private-content boundary, whose noindex would otherwise land on every cold
+// load of a public Zero page.
+function _stattic_identity_cookie_principal_mutated(?bool $set = null): bool
+{
+    static $mutated = false;
+    if ($set === true) {
+        $mutated = true;
+    }
+    return $mutated;
+}
+
+// True only while the guest pseudonym is being minted, so the cookie write it
+// performs is recorded as stateful but not principal-shaped.
+function _stattic_guest_session_mint_active(?bool $set = null): bool
+{
+    static $active = false;
+    if ($set !== null) {
+        $active = $set;
+    }
+    return $active;
 }
 
 // Set when a presented access cookie failed session verification and was cleared.

@@ -1034,6 +1034,42 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
       config: projection({ memberRefs: ["member:mem_owner"] }),
     });
   }
+  // The exemption is for images the gate would otherwise hold back. Once a
+  // Public Grant reaches the image, it is an ordinary public asset, and a
+  // search engine may index it like the page that advertises it.
+  try {
+    await putRoute(runtime, PREVIEW_SPACE, "production", {
+      version_id: PREVIEW_VERSION,
+      config: projection({ memberRefs: ["member:mem_owner"], mode: "public" }),
+    });
+    for (const publicPath of ["/og.png", "/trip/cover.jpg?v=c778f02a", "/"]) {
+      const publicAsset = await get(runtime, PREVIEW_HOST, publicPath);
+      expect(publicAsset.status).toBe(200);
+      expect(publicAsset.headers.get("x-robots-tag")).toBeNull();
+      expect(publicAsset.headers.get("cache-control")).not.toContain("private");
+    }
+    // A constrained Public Grant admits identity-dependently, which would pin
+    // the image private; the exemption keeps it public for link previewers.
+    await putRoute(runtime, PREVIEW_SPACE, "production", {
+      version_id: PREVIEW_VERSION,
+      config: projection({
+        memberRefs: ["member:mem_owner"],
+        mode: "public",
+        publicConstraints: { expiresAt: "2999-01-01T00:00:00.000Z" },
+      }),
+    });
+    const constrained = await get(runtime, PREVIEW_HOST, "/og.png", {
+      headers: { referer: "https://social.example/" },
+    });
+    expect(constrained.status).toBe(200);
+    expect(constrained.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(constrained.headers.get("cache-control")).not.toContain("private");
+  } finally {
+    await putRoute(runtime, PREVIEW_SPACE, "production", {
+      version_id: PREVIEW_VERSION,
+      config: projection({ memberRefs: ["member:mem_owner"] }),
+    });
+  }
 });
 
 test("a Space with no visitor lanes denies uniformly and discloses nothing", async () => {

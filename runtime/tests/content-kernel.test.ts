@@ -100,8 +100,11 @@ test("the MU loader follows the engine pointer and selects one Space's immutable
 // clause forced into every query, and the capability that goes away without it.
 test("the WordPress content kernel keeps one Space's native content out of another's", async () => {
   const script = String.raw`
-define('ABSPATH', '/srv/wordpress/');
+// A managed box keeps core under the provider's __wp__/ and links only
+// wp-load.php into the site root, so ABSPATH is not the install root.
+define('ABSPATH', '/srv/htdocs/__wp__/');
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+$GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = '/srv/htdocs/.stattic/storage';
 $_SERVER['HTTP_HOST'] = 'alpha.spacefast.test';
 $savedMeta = [];
 
@@ -217,9 +220,10 @@ echo json_encode([
     // The same row seen from the other Space on the same box.
     ownership: [true, false, ["do_not_allow"]],
     upload_scope: [
-      "/srv/wordpress/.stattic/storage/spaces/spc_alpha/content-media",
+      // The directory the content-media lane serves from, never ABSPATH's.
+      "/srv/htdocs/.stattic/storage/spaces/spc_alpha/content-media",
       `https://alpha.spacefast.test/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}`,
-      "/srv/wordpress/.stattic/storage/spaces/spc_alpha/content-media/2026/08",
+      "/srv/htdocs/.stattic/storage/spaces/spc_alpha/content-media/2026/08",
       `https://alpha.spacefast.test/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}/2026/08`,
     ],
     // WordPress must never hand the provider's own hostname to the browser.

@@ -68,6 +68,7 @@ if (function_exists('add_action')) {
     add_action('post_updated', 'spacefast_content_slug_redirect', 30, 3);
     add_action('pre_get_posts', 'spacefast_content_scope_post_query');
     add_filter('the_posts', 'spacefast_content_scope_posts', 10, 2);
+    add_filter('render_block_core/heading', 'spacefast_content_markdown_render_heading', 10, 3);
     // Retirement moves a source-owned document to Trash and rollback brings it
     // back with the same id, fields and comments. WordPress's own sweep would
     // destroy that identity after EMPTY_TRASH_DAYS, so this Space's Trash is

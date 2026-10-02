@@ -493,8 +493,9 @@ test("the receipt book is bounded, so the oldest operation stops replaying", asy
 // a NEW path plus the canonical text of what WordPress holds — never a merge.
 
 // One document per serializer, each spelled the way that serializer's own suite
-// pins as representable: Markdown carries the heading anchor, the blocks-engine
-// HTML transformer does not.
+// pins as representable: Markdown derives a heading id from its text, so the
+// importer's id is one Markdown carries. The blocks-engine HTML transformer
+// drops it.
 const MARKDOWN_BLOCKS =
   '<!-- wp:heading {"level":1} -->\n' +
   '<h1 class="wp-block-heading" id="hello-world">Hello world</h1>\n' +

@@ -1,7 +1,7 @@
 {
-  "revision": "8c1d3158853d24a963ed4aa2ab50e12b457062f0",
-  "sourceHash": "a751e834d943d67f6b3919ae365b25004ed8acb444d76b54647c9715da1f950f",
-  "manifestSha256": "e69d225162cf85c6d5edfbf8af8e38f50343ba7894ddefa25671a6987949f6f2",
+  "revision": "ac2e872fb7aa21d8beae60ce90dcdaa01e7aef9f",
+  "sourceHash": "19a55d0592167f98a9f60599804d6f360ebfd7993a3efa3f43b21a9116342ba6",
+  "manifestSha256": "63a2b91de51163745e9c6b9898b22ed8623c106be10f2100002f99efb87439a0",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "829f327713c299f65a773a938b26e63c15d8fe9534042489e05561a8d5643ecb"
+      "sha256": "22514639dd14ebfebaa7c97ae676e3889d9cd82bd6a18793c6420ec87075daf5"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "2b807e1caae895c2121f2d5938390a693b090f208fe45a07afb2c5aab853b4e8"
+      "sha256": "f3f1b6a3af7f5cf8f19983d1ebaaeea2740c9986327a9cc159c44b227662e214"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -521,7 +521,7 @@
     },
     {
       "path": "runtime/engine/runtime/content-page.php",
-      "sha256": "7b4093463f45763b93fb5db9636a8c71b8f9a9ff1b0d40ab1ae737667cd52e4e"
+      "sha256": "df407ee4917c38a35b809b15f57d9422a2089ad8c04339cd94dcc93f86a945ba"
     },
     {
       "path": "runtime/engine/runtime/crons.php",
@@ -761,7 +761,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "ed6b4241e7dc84ff0f5f57874262ce9c748de4d140113af1a4af9a74c7faac6a"
+      "sha256": "70bb8b819bc2a86be04570cf7605712e981bf2fc3e6ed0844ccf8502af84d608"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -773,11 +773,11 @@
     },
     {
       "path": "runtime/engine/wordpress/content-kernel.php",
-      "sha256": "486f756454e380d484e14763067b7268b54aedec590bb7abff24599b50ee0360"
+      "sha256": "5a378258d9b6d1bac3d2ea14a902701e10ada83a1c66a775b1b949dfec3f023f"
     },
     {
       "path": "runtime/engine/wordpress/content-markdown.php",
-      "sha256": "5efa2a1f6522b712dabb97b3b9c77b1ecfac594250c0663e630140ec82ba91ce"
+      "sha256": "74ce2b2f3a527020f59549a4b0cee2b25c17f73e5e8cc74795d92121069ba85e"
     },
     {
       "path": "runtime/engine/wordpress/content-model-kernel.php",
@@ -916,6 +916,10 @@
       "sha256": "583cfde42990ccba31606682bc7851d376176874ea84fc19637a38d273768562"
     },
     {
+      "path": "runtime/tests/content-markdown-editor.test.ts",
+      "sha256": "1df1a100c1043051d9aa40307eb3963bcc57a66ed112673af0bd78901caa4ea2"
+    },
+    {
       "path": "runtime/tests/content-markdown-toolkit.test.ts",
       "sha256": "97f6c25abb30800b34d2fac61d344de0325863045622c0c6c6543fb3eacc56cb"
     },
@@ -933,7 +937,7 @@
     },
     {
       "path": "runtime/tests/content-source-sync.test.ts",
-      "sha256": "f459d8160e3177cc9c53fb020740f72f97a1a6a8b4f54571c3f53110abb334f2"
+      "sha256": "30075caacf451f5f6d98731c2adb762a76330fbe7090f99272b138ff33d6b34d"
     },
     {
       "path": "runtime/tests/content-storage-upload.test.ts",
@@ -1010,6 +1014,50 @@
     {
       "path": "runtime/tests/fixtures/admission-counter-generation.php",
       "sha256": "caf907191d70eb7d28645195604fc1ee03df65cab87384fd6450203a4878d60c"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/anchored.html",
+      "sha256": "4cfa0036f0e49f2d68149cc2c4914660e481b49a6cd57a5e56bde55e44aacc67"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/bolded.html",
+      "sha256": "933cbd40bbba6853fbe5e7387b9028088b5fbb225fc269a6dd81ceb392b201e7"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/coded.html",
+      "sha256": "8064ac119dcf637a300f05e68ba6a3d422da0ce6add2a5b4ed9cb82afbd494a5"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/document.md",
+      "sha256": "7e5808b7a603149e2b377db564b08cd775dac04cc4583321356b99edbe558000"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/generate.ts",
+      "sha256": "73d055529bfe7d5ad5e28d8965cff8fe0087243ad9259a6e1abebe9e7126a4d7"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/inserted.html",
+      "sha256": "cd8fd332cd6ac438a1047711dae28bb0dbedef574b6b2aee15be7180a224d045"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/legacy-renamed.html",
+      "sha256": "9a7b8cec096d7bfd856e9daed6c7e36bf1ba33385f60e2b2559e709f6341456d"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/legacy-reordered.html",
+      "sha256": "af56e68ba6e4fb6a16ed5c73074bcd145276e98126f894e4d0f99a17d75e4ca4"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/renamed.html",
+      "sha256": "0d1cbe464be1728587fb5bcbae8a0684b7eef398aa6d448c33a8876369f7d04a"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/reordered.html",
+      "sha256": "cf135e469f86327e757ad67715db804330c2f7f580b6a93159395b7cef93930c"
+    },
+    {
+      "path": "runtime/tests/fixtures/content-markdown-editor/saved.html",
+      "sha256": "c59be9ddca6d1c646bd8eee2c5999abebdb574d12511671992e3164cc7aca277"
     },
     {
       "path": "runtime/tests/fixtures/database-egress-addresses.json",

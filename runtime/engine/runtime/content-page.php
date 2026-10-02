@@ -182,6 +182,9 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
         $GLOBALS['post'] = $page;
         setup_postdata($page);
     }
+    // A sealed snapshot is not a stored post, so the heading-id filter cannot
+    // look its format up. See spacefast_content_markdown_renders_document.
+    $GLOBALS['SPACEFAST_CONTENT_RENDER_FORMAT'] = $immutable ? $snapshot['format'] : null;
     if (function_exists('apply_filters')) {
         // `the_content` is where do_blocks lives, so this one call is what runs
         // the real render_block over a dynamic block like core/query. The lane
@@ -189,6 +192,7 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
         // builds its own, and pre_get_posts scopes it to this Space.
         $content = (string) apply_filters('the_content', $content);
     }
+    unset($GLOBALS['SPACEFAST_CONTENT_RENDER_FORMAT']);
     if (function_exists('wp_reset_postdata')) {
         wp_reset_postdata();
     }

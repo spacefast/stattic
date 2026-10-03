@@ -261,10 +261,10 @@ check(
 
 // --- Runtime source URL upload policy -----------------------------------------------
 
-$sourceUrl = _stattic_runtime_assert_fetch_url('https://1.1.1.1/assets/index.html');
+$sourceUrl = _stattic_runtime_resolve_fetch_url(_stattic_runtime_assert_fetch_url('https://1.1.1.1/assets/index.html'));
 check($sourceUrl['url'] === 'https://1.1.1.1/assets/index.html', 'source URL policy preserves public HTTPS URL');
 check($sourceUrl['resolve'] === ['1.1.1.1:443:1.1.1.1'], 'source URL policy pins the validated address');
-$ipv6SourceUrl = _stattic_runtime_assert_fetch_url('https://[2606:4700:4700::1111]/assets/index.html');
+$ipv6SourceUrl = _stattic_runtime_resolve_fetch_url(_stattic_runtime_assert_fetch_url('https://[2606:4700:4700::1111]/assets/index.html'));
 check($ipv6SourceUrl['resolve'] === [], 'source URL policy accepts public IPv6 literals without DNS rebinding risk');
 
 // --- Header operations: denylist, merge, placeholder expansion ----------------------

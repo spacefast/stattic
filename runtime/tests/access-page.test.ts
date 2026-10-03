@@ -1,11 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import {
-  createHash,
-  createPublicKey,
-  generateKeyPairSync,
-  randomBytes,
-  randomUUID,
-} from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 
@@ -1550,9 +1544,7 @@ test("X-SF-Authorization admits access, owner API, and centrally exchanged machi
     await import("../../apps/control-plane/src/access/runtime-exchange.js");
   const { ensureSpaceDefaultHostname } =
     await import("../../apps/control-plane/src/runtime/hostname-identity.js");
-  const { runtimeJwtPrivateKeyFromEnv } =
-    await import("../../apps/control-plane/src/runtime/jwt-key-material.js");
-  const { ACCESS_TOKEN_KID } = await import("@spacefast/common/contracts/access");
+  const { runtimeJwks } = await import("../../apps/control-plane/src/runtime/auth.js");
   const app = createApp();
   await app.modules;
   const centralExchange = Bun.serve({
@@ -1596,20 +1588,9 @@ test("X-SF-Authorization admits access, owner API, and centrally exchanged machi
       },
     },
   });
-  const publicJwk = createPublicKey(runtimeJwtPrivateKeyFromEnv()).export({ format: "jwk" });
-  config.visitor_jwks = {
-    keys: [
-      {
-        ...publicJwk,
-        kid: ACCESS_TOKEN_KID,
-        alg: "EdDSA",
-        use: "sig",
-        kty: "OKP",
-        crv: "Ed25519",
-        x: publicJwk.x ?? "",
-      },
-    ],
-  };
+  // Project the key this API process signs with, even if another runtime suite
+  // initialized its keyring before test-env changed the environment.
+  config.visitor_jwks = runtimeJwks();
   await deploy(runtime, {
     spaceId: seed.spaceId,
     versionId: `ver_${randomBytes(12).toString("hex")}`,

@@ -29,6 +29,7 @@ import {
   getBlob,
   journalRecords,
   managementToken,
+  PHP_BINARY,
   RUNTIME_HOST,
   manifestFor,
   putBlob,
@@ -1199,6 +1200,136 @@ test("URL uploads reject egress-unsafe fetch targets before streaming", async ()
   const internalHost = await postSource("https://site.view.fast/index.html");
   expect(internalHost.status).toBe(422);
   expect(await errorCode(internalHost)).toBe("upload_source_url_forbidden");
+});
+
+test("URL fetch allowance survives workers and resident bytes recover the receipt", async () => {
+  const content = "url allowance recovery\n";
+  const session = await createDeclaredSession(rt, SPACE, "ver_url_allowance", {
+    "index.html": content,
+  });
+  const claim = async () => {
+    const process = Bun.spawn([
+      PHP_BINARY,
+      "-r",
+      "require $argv[1]; echo json_encode(_stattic_runtime_publish_session_claim_url_fetch($argv[2], $argv[3], $argv[4], $argv[5]));",
+      path.join(rt.engineRoot, "admin/upload.php"),
+      rt.storageRoot,
+      SPACE,
+      session.uploadId,
+      "index.html",
+    ]);
+    const output = await new Response(process.stdout).text();
+    expect(await process.exited).toBe(0);
+    return JSON.parse(output).status;
+  };
+  expect((await Promise.all([claim(), claim()])).sort()).toEqual(["already_attempted", "claimed"]);
+  expect(await claim()).toBe("already_attempted");
+  const record = JSON.parse(
+    readFileSync(
+      path.join(rt.storageRoot, "spaces", SPACE, "publish-sessions", `${session.uploadId}.json`),
+      "utf8",
+    ),
+  );
+  expect(record.accepted).toEqual({});
+  const refused = await fetch(uploadUrl(`/${session.uploadId}/fetch/files/index.html`), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${session.token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ url: "https://source-never-resolves.invalid/index.html" }),
+  });
+  expect(refused.status).toBe(409);
+  expect(await errorCode(refused)).toBe("upload_source_url_fetch_failed");
+
+  const digest = sha256(content);
+  expect((await putBlob(rt, SPACE, session.token, digest, content)).status).toBe(200);
+  expect(await claim()).toBe("resident");
+  const recovered = await fetch(uploadUrl(`/${session.uploadId}/fetch/files/index.html`), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${session.token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ url: "https://127.0.0.1/unreachable" }),
+  });
+  expect(recovered.status).toBe(200);
+  expect(recovered.headers.get("etag")).toBe(`"${digest}"`);
+  expect(readBlob(rt, SPACE, digest)?.toString()).toBe(content);
+  expect(
+    (await finalize(rt, SPACE, session.versionId, { upload_id: session.uploadId })).status,
+  ).toBe(200);
+});
+
+test("URL transport cancels error bodies and removes the staged file", async () => {
+  const certificate = path.join(rt.root, "url-transport-cert.pem");
+  const key = path.join(rt.root, "url-transport-key.pem");
+  const generate = Bun.spawn(
+    [
+      "openssl",
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-days",
+      "1",
+      "-subj",
+      "/CN=127.0.0.1",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1",
+      "-keyout",
+      key,
+      "-out",
+      certificate,
+    ],
+    { stdout: "ignore", stderr: "pipe" },
+  );
+  const generationError = await new Response(generate.stderr).text();
+  if ((await generate.exited) !== 0) throw new Error(generationError);
+  const cancelled = Promise.withResolvers<void>();
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    tls: { cert: Bun.file(certificate), key: Bun.file(key) },
+    fetch() {
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]));
+          },
+          cancel() {
+            cancelled.resolve();
+          },
+        }),
+        { status: 503 },
+      );
+    },
+  });
+  const temporary = path.join(rt.root, "url-error-body.tmp");
+  const process = Bun.spawn([
+    PHP_BINARY,
+    "-d",
+    `curl.cainfo=${certificate}`,
+    "-r",
+    "require $argv[1]; _stattic_runtime_stream_url_to_tmp(['url' => $argv[2], 'resolve' => []], $argv[3], 10);",
+    path.join(rt.engineRoot, "admin/upload.php"),
+    server.url.toString(),
+    temporary,
+  ]);
+  try {
+    const output = await new Response(process.stdout).text();
+    expect(await process.exited).toBe(0);
+    expect(JSON.parse(output)).toMatchObject({
+      status: 422,
+      code: "upload_source_url_fetch_failed",
+    });
+    await cancelled.promise;
+    expect(existsSync(temporary)).toBe(false);
+  } finally {
+    process.kill();
+    server.stop(true);
+  }
 });
 
 test("the upload surface rejects unsupported operations, and refusals stay readable to a browser", async () => {

@@ -153,6 +153,17 @@ function _stattic_runtime_publish_session_release(string $privateRoot, string $s
     ]);
 }
 
+function _stattic_runtime_publish_session_store_record(array $store, string $uploadId, array $session): array
+{
+    // Associative decoding loses the distinction between {} and []; the
+    // finalizer's accepted-digest map must remain an object when empty.
+    $session['accepted'] = _stattic_runtime_json_object(
+        is_array($session['accepted'] ?? null) ? $session['accepted'] : []
+    );
+    _stattic_record_store_put($store, $uploadId, $session);
+    return $session;
+}
+
 function _stattic_runtime_publish_session_replace(string $privateRoot, string $spaceId, string $uploadId, callable $change): array
 {
     $store = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
@@ -164,17 +175,10 @@ function _stattic_runtime_publish_session_replace(string $privateRoot, string $s
         if (!is_array($next)) {
             _stattic_problem_response(500, 'upload_session_update_failed', 'Publish session update returned an invalid record.');
         }
-        // json_decode(..., true) cannot tell an empty object from an empty
-        // list, so a session with no accepted uploads would persist
-        // `accepted: []`, which the Rust finalizer rejects.
-        $next['accepted'] = _stattic_runtime_json_object(
-            is_array($next['accepted'] ?? null) ? $next['accepted'] : []
-        );
         // Pin first: a digest established by a path upload or URL fetch must be
         // protected before it becomes an accepted CAS object.
         _stattic_runtime_publish_session_write_pin($privateRoot, $spaceId, $uploadId, $next);
-        _stattic_record_store_put($store, $uploadId, $next);
-        return $next;
+        return _stattic_runtime_publish_session_store_record($store, $uploadId, $next);
     });
     if (!is_array($updated)) {
         _stattic_problem_response(503, 'upload_session_lock_unavailable', 'Publish session is busy.');
@@ -208,6 +212,39 @@ function _stattic_runtime_publish_session_bind_sha(string $privateRoot, string $
         $session['manifest'] = $manifest;
         return $session;
     });
+}
+
+// One outbound transfer per declared path. Persist before the request starts so
+// retries and other FPM workers cannot spend the same manifest allowance again.
+// Resident declared bytes remain recoverable after a lost response or crash.
+function _stattic_runtime_publish_session_claim_url_fetch(string $privateRoot, string $spaceId, string $uploadId, string $filePath): array
+{
+    $store = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
+    $decision = _stattic_record_store_mutate($store, $uploadId, static function (?array $session) use ($store, $uploadId, $privateRoot, $spaceId, $filePath): array {
+        if ($session === null) {
+            _stattic_problem_response(404, 'upload_not_found', 'Publish session not found.');
+        }
+        $entry = _stattic_runtime_declared_upload_file($session, $filePath);
+        if ($entry === null) {
+            _stattic_problem_response(422, 'upload_path_not_declared', 'Path was not declared in the publish manifest.');
+        }
+        $sha = is_string($entry['sha256'] ?? null) ? strtolower($entry['sha256']) : '';
+        if (_stattic_is_sha256_hex($sha) && _stattic_runtime_blob_size($privateRoot, $spaceId, $sha) === (int) $entry['size']) {
+            return ['status' => 'resident', 'entry' => $entry];
+        }
+        $attempts = is_array($session['url_fetch_attempts'] ?? null) ? $session['url_fetch_attempts'] : [];
+        if (isset($attempts[$filePath])) {
+            return ['status' => 'already_attempted', 'entry' => $entry];
+        }
+        $attempts[$filePath] = true;
+        $session['url_fetch_attempts'] = $attempts;
+        _stattic_runtime_publish_session_store_record($store, $uploadId, $session);
+        return ['status' => 'claimed', 'entry' => $entry];
+    });
+    if (!is_array($decision)) {
+        _stattic_problem_response(503, 'upload_session_lock_unavailable', 'Publish session is busy.');
+    }
+    return $decision;
 }
 
 function _stattic_runtime_publish_session_accept(string $privateRoot, string $spaceId, string $uploadId, string $sha, int $size): array
@@ -635,6 +672,11 @@ function _stattic_runtime_upload_accepted(string $privateRoot, string $spaceId, 
 {
     _stattic_runtime_blob_commit_verified($privateRoot, $spaceId, $tmpPath, $sha);
     _stattic_runtime_publish_session_accept($privateRoot, $spaceId, $uploadId, $sha, $size);
+    _stattic_runtime_upload_receipt($sha, $size);
+}
+
+function _stattic_runtime_upload_receipt(string $sha, int $size): never
+{
     header('ETag: "' . $sha . '"', false);
     _stattic_json_response(200, ['ok' => true, 'sha256' => $sha, 'size' => $size]);
 }
@@ -894,11 +936,18 @@ function _stattic_runtime_assert_fetch_url(string $url): array
     if ($port < 1 || $port > 65535 || !_stattic_egress_host_allowed($host, $port, STATTIC_EGRESS_SCOPE_OPEN)) {
         _stattic_problem_response(422, 'upload_source_url_forbidden', 'URL upload host is not allowed.');
     }
+    return ['url' => $url, 'host' => $host, 'port' => $port];
+}
+
+function _stattic_runtime_resolve_fetch_url(array $source): array
+{
+    $host = $source['host'];
+    $port = $source['port'];
     $ips = _stattic_egress_resolve_public_ips($host, $port);
     if ($ips === null) {
         _stattic_problem_response(422, 'upload_source_url_unresolvable', 'URL upload host could not be resolved.');
     }
-    return ['url' => $url, 'resolve' => _stattic_egress_curl_resolve_entries($host, $port, $ips)];
+    return ['url' => $source['url'], 'resolve' => _stattic_egress_curl_resolve_entries($host, $port, $ips)];
 }
 
 function _stattic_runtime_stream_url_to_tmp(array $source, string $tmpPath, int $limit): array
@@ -917,6 +966,9 @@ function _stattic_runtime_stream_url_to_tmp(array $source, string $tmpPath, int 
         'resolve' => is_array($source['resolve'] ?? null) ? $source['resolve'] : [],
         'on_headers' => static function (int $responseStatus, array $headerPairs) use (&$status, &$tooLarge, $limit): bool {
             $status = $responseStatus;
+            if ($status < 200 || $status >= 300) {
+                return false;
+            }
             foreach ($headerPairs as [$name, $value]) {
                 if (strtolower($name) === 'content-length' && preg_match('/^[0-9]+$/', trim($value)) === 1 && (int) $value > $limit) {
                     $tooLarge = true;
@@ -927,7 +979,7 @@ function _stattic_runtime_stream_url_to_tmp(array $source, string $tmpPath, int 
         },
         'sink' => static function (string $chunk) use ($sink, &$status, &$tooLarge): bool {
             if ($status < 200 || $status >= 300) {
-                return true;
+                return false;
             }
             if (_stattic_runtime_stream_sink_write($sink, $chunk) === false) {
                 $tooLarge = $sink->reason === 'too_large';
@@ -953,7 +1005,23 @@ function _stattic_runtime_stream_url_to_tmp(array $source, string $tmpPath, int 
 function _stattic_runtime_upload_file_from_url(string $privateRoot, string $uploadId, string $encodedPath, array $claims): void
 {
     [$uploadId, $spaceId, $filePath, $entry] = _stattic_runtime_upload_file_target($privateRoot, $uploadId, $encodedPath, $claims);
+    $declaredSha = is_string($entry['sha256'] ?? null) ? strtolower($entry['sha256']) : '';
+    if (_stattic_is_sha256_hex($declaredSha) && _stattic_runtime_blob_size($privateRoot, $spaceId, $declaredSha) === (int) $entry['size']) {
+        _stattic_runtime_publish_session_accept($privateRoot, $spaceId, $uploadId, $declaredSha, (int) $entry['size']);
+        _stattic_runtime_upload_receipt($declaredSha, (int) $entry['size']);
+    }
     $source = _stattic_runtime_fetch_url_from_body();
+    $decision = _stattic_runtime_publish_session_claim_url_fetch($privateRoot, $spaceId, $uploadId, $filePath);
+    $entry = $decision['entry'];
+    if ($decision['status'] === 'resident') {
+        $sha = strtolower((string) $entry['sha256']);
+        _stattic_runtime_publish_session_accept($privateRoot, $spaceId, $uploadId, $sha, (int) $entry['size']);
+        _stattic_runtime_upload_receipt($sha, (int) $entry['size']);
+    }
+    if ($decision['status'] === 'already_attempted') {
+        _stattic_problem_response(409, 'upload_source_url_fetch_failed', 'This path has already used its source URL fetch. Upload its bytes directly or start a new publish session.');
+    }
+    $source = _stattic_runtime_resolve_fetch_url($source);
     $stagingRoot = $privateRoot . '/runtime/blob-staging';
     _stattic_runtime_mkdir($stagingRoot);
     $tmpPath = $stagingRoot . '/url-' . bin2hex(random_bytes(12)) . '.tmp';

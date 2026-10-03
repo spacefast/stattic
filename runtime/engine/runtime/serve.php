@@ -4,12 +4,10 @@ declare(strict_types=1);
 // The visitor serve path (contracts §6, §15, §16): pointer -> host shard ->
 // overlay -> access -> version root -> response table -> entry -> send.
 //
-// PHP never answers a conditional request and never serves a range: the platform
-// delivers neither If-None-Match/If-Modified-Since nor Range to the origin, and
-// the edge answers conditionals off its own HIT (§16, C19). ETag is still
-// EMITTED per entry as the edge's validator. This lane sends no Last-Modified;
-// on the accel lane nginx derives its own from the content-derived mtime
-// stamped on the placed file.
+// Nginx owns validators and ranges after an X-Accel handoff. When no server
+// consumes that handoff, PHP answers single byte ranges and ETag conditionals.
+// This lane has no Last-Modified validator; date-based If-Range falls back to
+// the complete representation.
 
 require_once __DIR__ . '/../shared/artifacts.php';
 require_once __DIR__ . '/../shared/server-file.php';
@@ -1028,8 +1026,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         $headers['x-robots-tag'] = 'noindex, nofollow';
     }
 
-    // The validator is EMITTED, never answered against: the edge holds the copy
-    // and answers If-None-Match off its own HIT.
+    // The same validator identifies full and partial PHP representations.
     //
     // `et` is compiled UNQUOTED for both validator kinds (sha256 on the PHP lane,
     // nginx's `<hexmtime>-<hexsize>` on the accel lane) and quoted exactly once,
@@ -1123,6 +1120,55 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         );
     }
 
+    $offset = 0;
+    if ($status === 200) {
+        $headers['accept-ranges'] = 'bytes';
+        $validator = $headers['etag'] ?? '';
+        $ifMatch = $_SERVER['HTTP_IF_MATCH'] ?? null;
+        $ifNoneMatch = $_SERVER['HTTP_IF_NONE_MATCH'] ?? null;
+        if (is_string($ifMatch) && !_stattic_v4_etag_matches($ifMatch, $validator, false)) {
+            $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+            $headers['a8c-edge-cache'] = 'no-cache';
+            $headers['content-length'] = '0';
+            _stattic_send_response_headers($headers);
+            http_response_code(412);
+            exit;
+        }
+        if (is_string($ifNoneMatch) && _stattic_v4_etag_matches($ifNoneMatch, $validator, true)) {
+            $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+            $headers['a8c-edge-cache'] = 'no-cache';
+            unset($headers['content-length']);
+            _stattic_send_response_headers($headers);
+            http_response_code(304);
+            exit;
+        }
+        // Range is defined for GET only. Unsupported/malformed range sets are
+        // ignored; serving the whole representation is allowed for multipart.
+        $ifRange = $_SERVER['HTTP_IF_RANGE'] ?? null;
+        if ($method === 'GET' && ($ifRange === null || ($validator !== '' && $ifRange === $validator))) {
+            $range = _stattic_v4_byte_range((string) ($_SERVER['HTTP_RANGE'] ?? ''), $length);
+            if ($range === false) {
+                $headers['content-range'] = 'bytes */' . $length;
+                $headers['content-length'] = '0';
+                $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+                $headers['a8c-edge-cache'] = 'no-cache';
+                _stattic_send_response_headers($headers);
+                http_response_code(416);
+                exit;
+            }
+            if (is_array($range)) {
+                [$offset, $end] = $range;
+                $headers['content-range'] = 'bytes ' . $offset . '-' . $end . '/' . $length;
+                $length = $end - $offset + 1;
+                $status = 206;
+                // A provider cache that ignores Range must not store a slice
+                // under the full representation's URL.
+                $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+                $headers['a8c-edge-cache'] = 'no-cache';
+            }
+        }
+    }
+
     if ($method === 'HEAD') {
         $headers['content-length'] = (string) $length;
         _stattic_send_response_headers($headers);
@@ -1132,6 +1178,10 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
 
     _stattic_acquire_static_stream_admission($context, $length);
     $stream = _stattic_v4_open_blob($context, $absolutePath, $blobRelativePath);
+    if ($offset > 0 && fseek($stream, $offset) !== 0) {
+        fclose($stream);
+        _stattic_render_runtime_invariant_error_lazy('response-range-seek-failed', 'Runtime could not seek the response body.');
+    }
     $headers['content-length'] = (string) $length;
     _stattic_send_response_headers($headers);
     http_response_code($status);
@@ -2046,4 +2096,45 @@ function _stattic_acquire_static_stream_admission(array $context, int $bytes): v
         is_array($context['serving']) ? $context['serving'] : [],
         'static_stream'
     );
+}
+
+// null means ignore Range; false means a valid range has no satisfiable bytes.
+function _stattic_v4_byte_range(string $value, int $length): array|false|null
+{
+    if (!preg_match('/^bytes=([0-9]*)-([0-9]*)$/iD', trim($value), $parts)
+        || ($parts[1] === '' && $parts[2] === '')) {
+        return null;
+    }
+    // PHP saturates decimal casts at PHP_INT_MAX, so oversized bounds cannot
+    // wrap negative. End and suffix bounds are clipped to the representation.
+    if ($parts[1] === '') {
+        $suffix = (int) $parts[2];
+        return $suffix === 0 || $length === 0 ? false : [max(0, $length - $suffix), $length - 1];
+    }
+    $start = (int) $parts[1];
+    $end = $parts[2] === '' ? $length - 1 : (int) $parts[2];
+    if ($parts[2] !== '' && $end < $start) {
+        return null;
+    }
+    return $start >= $length ? false : [$start, min($end, $length - 1)];
+}
+
+function _stattic_v4_etag_matches(string $condition, string $etag, bool $weak): bool
+{
+    if (trim($condition) === '*') {
+        return true;
+    }
+    if ($etag === '') {
+        return false;
+    }
+    if (!preg_match('/^\s*(?:W\/)?"[^"\r\n]*"(?:\s*,\s*(?:W\/)?"[^"\r\n]*")*\s*$/D', $condition)) {
+        return false;
+    }
+    preg_match_all('/(?:W\/)?"[^"\r\n]*"/', $condition, $tags);
+    foreach ($tags[0] as $tag) {
+        if (($weak ? preg_replace('/^W\//', '', $tag) : $tag) === $etag) {
+            return true;
+        }
+    }
+    return false;
 }

@@ -1,7 +1,7 @@
 {
-  "revision": "634b19f2333a7914fc91ff9f70e74ee8408742b6",
-  "sourceHash": "cb2d11a970f87c591468d267209a2a00f1075fd61e3154102b791d4d2ea43417",
-  "manifestSha256": "5227a44cac2f0c335d28480beb4a87101b1be223de83c93f11e0d01ee9f6a4fe",
+  "revision": "87aebf1b962a6adf921f4c43c9b4075a2abc21cc",
+  "sourceHash": "b936bf15cc10494dda092b6788b02ff429dcf71f99a5547a708709b158059453",
+  "manifestSha256": "94109219037c4dd80be40361c421c565821807d0d95d9176697aa0e58db28c0a",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "eff036ae8329f37ef218e1c11345702ada01c4c8a2973a94f1fb2fdb7db91e94"
+      "sha256": "8ccd03205ddc3f759984b8579cff9f7b528a4b48c3b713f01e004d74b5856538"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "950c1924296bfdd5c64b1d421c28854f98953df31e4805ca23cc446529f27a7c"
+      "sha256": "167bf15b8d1d6f14340178bc44a99d92c24a34dd5d726803e8d833ada929e4c8"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -353,7 +353,7 @@
     },
     {
       "path": "runtime/README.md",
-      "sha256": "edd51e58c008f20e2935d6b402cd4b2717a8bdccb9c016ba61294d1c29eff09c"
+      "sha256": "54f20f36461d24028a7b45504268b23fd8e886c4d279989cf450efc3ec495779"
     },
     {
       "path": "runtime/SKILL.md",
@@ -429,15 +429,15 @@
     },
     {
       "path": "runtime/engine/admin/jobs.php",
-      "sha256": "577aa84c31d2e3374961617473ea51d6ebed9365e45b5a0b33063cd5a9437142"
+      "sha256": "64025c9d4e37ae033e62ccc4383ccef6acfa65684434a2b0d9062be421590e62"
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "c2141cd5a116f27dd258522157c82557580b9787d33f1ae11a78a683ac8ccef2"
+      "sha256": "cb1713a2c0f92376ac426a6288764e53de812e711e140d173e79b50ac6a50a30"
     },
     {
       "path": "runtime/engine/admin/retention.php",
-      "sha256": "bc3ecbc21e89b606c68f475f1c71448b6f86c222175782991ae9db9652192ce0"
+      "sha256": "c7f290bd3310c9931c8a68a89c0fa56ecf5e8c048db39e6eb5a90f675c6a13a0"
     },
     {
       "path": "runtime/engine/admin/static-zip.php",
@@ -449,7 +449,7 @@
     },
     {
       "path": "runtime/engine/admin/tier.php",
-      "sha256": "6609101f18873aeb14a930e4ac9d844ded59eb815cd5324bfd359603e9179425"
+      "sha256": "806afe40a20c023cb158ca8d40c829b37bc7778a5726fa1bfec38503aa2da1b0"
     },
     {
       "path": "runtime/engine/admin/upload-policy.php",
@@ -561,7 +561,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "a89d42a28610a5b594e79fea75edbadfa49deecf88036033ec84a00ba0c6a7ee"
+      "sha256": "6628b0615b9e1487ca1954a497adbbf7952502e5f49af4c97bf96e2c13a6fa74"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -701,7 +701,7 @@
     },
     {
       "path": "runtime/engine/shared/pointers.php",
-      "sha256": "ce2513f9ecd8b9d69be31c0432dd88f5537a29d4c447ac1904c78e9a0e91f520"
+      "sha256": "dbbc0835dadc4da983ba0b858197fb92f3b0f743681d310e5302f198d8c5a6ae"
     },
     {
       "path": "runtime/engine/shared/private-tree.php",
@@ -729,7 +729,7 @@
     },
     {
       "path": "runtime/engine/shared/s3.php",
-      "sha256": "a04ff61356364adc2866c2c41e07e8c68434196e9ab1369841851eed2156d736"
+      "sha256": "e64c61308127d5a8f97fcaae9f933ae25372bdf8d530c53b31b6865a4e056a17"
     },
     {
       "path": "runtime/engine/shared/safety.php",
@@ -745,7 +745,7 @@
     },
     {
       "path": "runtime/engine/shared/storage.php",
-      "sha256": "e4611cb681e0bf5fec5a47af313d79ded43100bb429cb7d8348021bc0548ea91"
+      "sha256": "957cc7656e2ab5e59220020940e55a67e10df4816f697e4ab965a4bc148f87f1"
     },
     {
       "path": "runtime/engine/shared/streaming.php",
@@ -1153,7 +1153,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "ced6c01be80ce283bdd658fa9843f9e08f796c0a85326be439906292cb7e3747"
+      "sha256": "47768728138a972b04e75a74c268377b78bd36df48b21068f52eab4a9ad28981"
     },
     {
       "path": "runtime/tests/run-ci.sh",
@@ -1165,7 +1165,7 @@
     },
     {
       "path": "runtime/tests/s3-cli.php",
-      "sha256": "c44f11b35de09a6e4ca99d1d1469dc72b3f98dea0ab3bdaafa676093954a60e4"
+      "sha256": "ef8adbc37a8b1ddf07073906af22b35314e4a178fb7da03c97af5fa373abd0f9"
     },
     {
       "path": "runtime/tests/s3-fake.ts",
@@ -1173,7 +1173,7 @@
     },
     {
       "path": "runtime/tests/s3.test.ts",
-      "sha256": "2745f20aa54066ae9210c50c52d0981a3fe4593c0dc75abd9be6d7713ba0cea0"
+      "sha256": "d2bc18423741989bd3fec7d4037c0817ea4a435ea02a3f4d40c4103bbbb16dc7"
     },
     {
       "path": "runtime/tests/space-users-http-fixture.php",
@@ -1221,7 +1221,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "4a1cd549a283f8913d24cca57012940ab1a9307717f6a7e579ab1b3b09635e26"
+      "sha256": "9583eb1ec155cbee4f2961c795d5468c043ef718b250046375be2bc2d3f4e342"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

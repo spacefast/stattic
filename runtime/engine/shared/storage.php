@@ -736,7 +736,11 @@ function _stattic_runtime_move_private(string $source, string $target): string
 {
     _stattic_runtime_mkdir(dirname($target));
     _stattic_runtime_assert_private_path($target);
-    $pending = $target . '.tmp-' . bin2hex(random_bytes(6));
+    try {
+        $pending = _sf_atomic_temp_path($target);
+    } catch (RuntimeException) {
+        _stattic_problem_response(500, 'runtime_mkdir_failed', 'Runtime storage directory could not be created.');
+    }
     if (!rename($source, $pending)) {
         _stattic_runtime_copy_private_file($source, $pending);
         unlink($source);

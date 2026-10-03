@@ -108,6 +108,25 @@ switch ($op) {
         echo json_encode(['ok' => $result['ok'], 'status' => $result['status']]) . "\n";
         break;
 
+    case 'reclaim_tick':
+        require_once __DIR__ . '/../engine/admin/tier.php';
+        $started = microtime(true);
+        $deadline = $started + ($request['budget_ms'] ?? 1000) / 1000;
+        $complete = _stattic_runtime_job_housekeeping_bucket_reclaim((string) $request['private_root'], [], $deadline);
+        echo json_encode(['complete' => $complete, 'elapsed_ms' => (microtime(true) - $started) * 1000, 'remaining_ms' => ($deadline - microtime(true)) * 1000]) . "\n";
+        break;
+
+    case 'reclaim_start':
+    case 'reclaim_drain':
+        require_once __DIR__ . '/../engine/admin/tier.php';
+        $privateRoot = (string) $request['private_root'];
+        $spaceId = (string) $request['space_id'];
+        if ($op === 'reclaim_start') _stattic_tier_schedule_space_bucket_reclaim($privateRoot, $spaceId);
+        $started = microtime(true);
+        $complete = _stattic_tier_reclaim_space_bucket_objects($privateRoot, $spaceId, isset($request['budget_ms']) ? microtime(true) + $request['budget_ms'] / 1000 : null, $options);
+        echo json_encode(['elapsed_ms' => (microtime(true) - $started) * 1000, 'complete' => $complete, 'pending' => is_file($privateRoot . '/runtime/bucket-reclaim/' . $spaceId . '.json')]) . "\n";
+        break;
+
     case 'multi_put':
         $items = is_array($request['items'] ?? null) ? $request['items'] : [];
         echo json_encode(_stattic_s3_multi_put($items, (int) ($request['streams'] ?? 4))) . "\n";

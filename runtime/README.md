@@ -195,6 +195,24 @@ htdocs/.stattic/storage
   routes/shards/<name>.php                  host lookup shards the pointers name
 ```
 
+## Static byte ranges
+
+The PHP serving fallback supports one `bytes` range per GET, including suffix
+and open-ended ranges. It returns 206 with `Content-Range` and the selected
+`Content-Length`, or 416 with `Content-Range: bytes */<length>` when no bytes
+satisfy the range. HEAD ignores Range and reports the full representation length.
+Malformed or multipart ranges receive the complete representation.
+
+ETag preconditions run before range selection. If-Range requires the current
+strong ETag; a weak, stale, or date validator receives the full representation
+because this lane does not emit Last-Modified. PHP emits `private, no-store` for
+partial responses. On recognized-extension public URLs, wp.cloud can replace the
+wire cache policy and handle ranges itself. The direct provider contract checks
+the partial bytes, a complete GET at the same URL, and a later range after the
+cache warms. Private accelerated assets use the `;sf-private` alias to preserve
+authorization and `private, no-store`. On the X-Accel lane, Nginx continues to own
+validators, ranges, and HEAD.
+
 ## Native finalization
 
 The Rust finalizer owns upload materialisation, configuration, routing,

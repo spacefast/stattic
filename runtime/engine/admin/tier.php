@@ -968,32 +968,78 @@ function _stattic_runtime_job_step_tier_demote(string $privateRoot, array $job, 
     ];
 }
 
-/**
- * Deleting a space deletes its bucket bytes too. Without this the blobs prefix
- * outlives the space forever: the keys derive from (space, sha) and nothing
- * else records them, so once the space tree is gone nothing can list them.
- *
- * Best-effort and post-response by contract: a space delete must not fail, or
- * even wait, on a bucket. The journal record is the operator's evidence, and an
- * incomplete pass names how much it left behind.
- */
-function _stattic_tier_reclaim_space_bucket_objects(string $privateRoot, string $spaceId): void
+/** Queue deleted-Space bucket cleanup outside the removed Space tree. */
+function _stattic_tier_schedule_space_bucket_reclaim(string $privateRoot, string $spaceId): void
 {
+    if (!_stattic_runtime_id_valid($spaceId)) return;
+    $path = $privateRoot . '/runtime/bucket-reclaim/' . $spaceId . '.json';
+    // Repeated deletes must retain the bucket that owns the orphaned bytes.
+    if (file_exists($path)) return;
     $bucketId = _stattic_s3_default_bucket_id();
-    if ($bucketId === null || !_stattic_runtime_id_valid($spaceId)) {
+    if ($bucketId === null) {
         return;
     }
-    $reclaimed = _stattic_s3_delete_prefix($bucketId, 'spaces/' . $spaceId . '/blobs/');
-    if ($reclaimed['deleted'] === 0 && $reclaimed['complete']) {
-        return;
-    }
-    _stattic_runtime_append_journal($privateRoot, [
-        'event' => 'space_bucket_objects_reclaimed',
+    _stattic_runtime_write_json_atomic($privateRoot . '/runtime/bucket-reclaim/' . $spaceId . '.json', [
         'space_id' => $spaceId,
         'bucket' => $bucketId,
-        'deleted' => $reclaimed['deleted'],
-        'complete' => $reclaimed['complete'],
     ]);
+}
+
+/** One bounded pass; the durable record survives failure and the object cap. */
+function _stattic_tier_reclaim_space_bucket_objects(
+    string $privateRoot,
+    string $spaceId,
+    ?float $deadline = null,
+    array $options = []
+): bool {
+    $path = $privateRoot . '/runtime/bucket-reclaim/' . $spaceId . '.json';
+    $record = _stattic_runtime_read_json($path);
+    if ($record === null) return true;
+    if (!is_array($record) || !is_string($record['bucket'] ?? null)
+        || ($record['space_id'] ?? null) !== $spaceId || !_stattic_runtime_id_valid($spaceId)) {
+        _stattic_runtime_append_journal($privateRoot, ['event' => 'space_bucket_reclaim_deferred', 'space_id' => $spaceId, 'reason' => 'invalid_record'], $deadline === null);
+        return false;
+    }
+    if ($deadline !== null) $options['deadline'] = $deadline;
+    $reclaimed = _stattic_s3_delete_prefix($record['bucket'], 'spaces/' . $spaceId . '/blobs/', STATTIC_TIER_GC_DELETE_BATCH, $options);
+    if ($reclaimed['deleted'] > 0 || !$reclaimed['complete']) {
+        _stattic_runtime_append_journal($privateRoot, [
+            'event' => 'space_bucket_objects_reclaimed',
+            'space_id' => $spaceId,
+            'bucket' => $record['bucket'],
+            'deleted' => $reclaimed['deleted'],
+            'complete' => $reclaimed['complete'],
+        ], $deadline === null);
+    }
+    if ($reclaimed['complete']) {
+        return @unlink($path) || !file_exists($path);
+    }
+    return $reclaimed['complete'];
+}
+
+function _stattic_runtime_job_housekeeping_bucket_reclaim(string $privateRoot, array $_claims, float $deadline): bool
+{
+    $now = microtime(true);
+    if ($now >= $deadline) return false;
+    // Best-effort remote cleanup gets at most a quarter of the remaining tick
+    // (and at most one second), leaving time for later local housekeeping.
+    $reclaimDeadline = $now + min(1.0, ($deadline - $now) / 4);
+    $entries = _stattic_runtime_directory_entries($privateRoot . '/runtime/bucket-reclaim');
+    if ($entries === null) return false;
+    $cursorPath = $privateRoot . '/runtime/bucket-reclaim-cursor.json';
+    $entries = _stattic_tier_resume_order($entries, _stattic_tier_read_cursor($cursorPath));
+    foreach ($entries as $index => $path) {
+        if (!str_ends_with($path, '.json')) continue;
+        if (microtime(true) >= $reclaimDeadline) return true;
+        $spaceId = substr(basename($path), 0, -5);
+        _stattic_tier_reclaim_space_bucket_objects($privateRoot, $spaceId, $reclaimDeadline);
+        _stattic_tier_write_cursor($cursorPath, $entries[($index + 1) % count($entries)]);
+    }
+    if (microtime(true) >= $reclaimDeadline) return true;
+    // Pending records belong to future periodic ticks, not this job. Preserve
+    // them even when a bucket is unavailable so recovery can reclaim its bytes.
+    _stattic_tier_write_cursor($cursorPath, null);
+    return true;
 }
 
 /**

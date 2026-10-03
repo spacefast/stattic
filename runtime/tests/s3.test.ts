@@ -3,7 +3,7 @@
 // booting the full HTTP runtime. The endpoint is the in-process fake S3
 // fixture (s3-fake.ts), so every case is a real HTTP round trip.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -44,6 +44,10 @@ function resolveEntry(fake: FakeS3, host: string): string {
 }
 
 type S3CliResult = {
+  elapsed_ms: number;
+  remaining_ms: number;
+  complete: boolean;
+  pending: boolean;
   a: { ok: boolean };
   b: { ok: boolean };
   body_base64: string;
@@ -97,6 +101,108 @@ describe("shared/s3.php SigV4 signer + client", () => {
   afterAll(() => {
     fake.stop();
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("deleted-Space bucket cleanup persists across capped passes and process restarts", async () => {
+    const privateRoot = path.join(tmpDir, ".stattic/storage");
+    mkdirSync(privateRoot, { recursive: true });
+    const spaceId = "spc_reclaim";
+    const prefix = `spaces/${spaceId}/blobs/`;
+    const manifest = [bucketRow(fake, "path", "s3.fake.test")];
+    for (let index = 0; index < 201; index++)
+      fake.putObject(`${prefix}${index}`, Buffer.from("garbage"));
+    fake.putObject("spaces/spc_other/blobs/retained", Buffer.from("live"));
+    const request = {
+      private_root: privateRoot,
+      space_id: spaceId,
+      options: { resolve: [resolveEntry(fake, "s3.fake.test")] },
+    };
+    const first = await runS3Cli({ ...request, op: "reclaim_start" }, manifest);
+    expect(first.complete).toBe(false);
+    expect(first.pending).toBe(true);
+    expect([...fake.objects.keys()].filter((key) => key.startsWith(prefix))).toHaveLength(1);
+    // Each call starts a new PHP process, so only the durable record carries ownership.
+    // A repeated delete under a changed default must retain the original owner.
+    const marker = path.join(privateRoot, "runtime/bucket-reclaim", `${spaceId}.json`);
+    await runS3Cli({ ...request, op: "reclaim_start", budget_ms: 0 }, [
+      { ...manifest[0], id: "replacement-bucket" },
+    ]);
+    expect(JSON.parse(readFileSync(marker, "utf8")).bucket).toBe("test-bucket");
+    const resumed = await runS3Cli({ ...request, op: "reclaim_drain" }, manifest);
+    expect(resumed.complete).toBe(true);
+    expect(resumed.pending).toBe(false);
+    expect([...fake.objects.keys()].filter((key) => key.startsWith(prefix))).toHaveLength(0);
+    expect(fake.getObject("spaces/spc_other/blobs/retained")?.body.toString()).toBe("live");
+  });
+
+  test("unservable cleanup records survive without blocking a completed maintenance scan", async () => {
+    const privateRoot = path.join(tmpDir, "stuck-reclaim", ".stattic/storage");
+    const directory = path.join(privateRoot, "runtime/bucket-reclaim");
+    mkdirSync(directory, { recursive: true });
+    const records = {
+      "spc_corrupt.json": "{",
+      "spc_unknown.json": JSON.stringify({ space_id: "spc_unknown", bucket: "removed" }),
+    };
+    for (const [name, body] of Object.entries(records))
+      writeFileSync(path.join(directory, name), body);
+    for (let pass = 0; pass < 2; pass++) {
+      expect((await runS3Cli({ op: "reclaim_tick", private_root: privateRoot }, [])).complete).toBe(
+        true,
+      );
+    }
+    for (const [name, body] of Object.entries(records))
+      expect(readFileSync(path.join(directory, name), "utf8")).toBe(body);
+  });
+
+  test("reclaim deadline bounds stalled listings and queued delete waves", async () => {
+    let stallListing = true;
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        if (req.method === "GET" && !stallListing)
+          return new Response(
+            "<ListBucketResult>" +
+              Array.from(
+                { length: 64 },
+                (_, i) => `<Contents><Key>spaces/spc_deadline/blobs/${i}</Key></Contents>`,
+              ).join("") +
+              "</ListBucketResult>",
+          );
+        return new Promise<Response>(() => {});
+      },
+    });
+    try {
+      const manifest = [
+        {
+          ...bucketRow(fake, "path", "s3.fake.test"),
+          endpoint: `http://s3.fake.test:${server.port}`,
+        },
+      ];
+      const request = {
+        private_root: path.join(tmpDir, "deadline-reclaim", ".stattic/storage"),
+        space_id: "spc_deadline",
+        budget_ms: 80,
+        options: { resolve: [`s3.fake.test:${server.port}:127.0.0.1`] },
+      };
+      mkdirSync(request.private_root, { recursive: true });
+      for (const op of ["reclaim_start", "reclaim_drain"]) {
+        const result = await runS3Cli({ ...request, op }, manifest);
+        expect(result.complete).toBe(false);
+        expect(result.pending).toBe(true);
+        expect(result.elapsed_ms).toBeLessThan(500);
+        stallListing = false;
+      }
+      // Housekeeping has its own slice: a stalled bucket must leave the tick
+      // complete and leave time for the following local maintenance steps.
+      stallListing = true;
+      const tickManifest = [{ ...manifest[0], endpoint: `http://127.0.0.1:${server.port}` }];
+      const tick = await runS3Cli({ ...request, op: "reclaim_tick", budget_ms: 800 }, tickManifest);
+      expect(tick.complete).toBe(true);
+      expect(tick.remaining_ms).toBeGreaterThan(200);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("signed GET round-trip: path-style addressing", async () => {

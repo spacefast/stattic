@@ -105,6 +105,29 @@ function _stattic_runtime_retention_roots(string $privateRoot): array
     ];
 }
 
+// Private atomic-write remnants share one staging root. Use ctime:
+// pending blobs already carry their content-derived mtime before commit.
+function _stattic_runtime_reclaim_atomic_temps(string $privateRoot, ?int $now = null, ?float $deadline = null): int
+{
+    $now ??= time();
+    $staleBefore = $now - STATTIC_RUNTIME_STAGING_RETENTION_SECONDS;
+    $reclaimed = 0;
+    foreach (glob($privateRoot . '/runtime/atomic-staging/.tmp-*') ?: [] as $path) {
+        if ($deadline !== null && microtime(true) >= $deadline) {
+            break;
+        }
+        if (is_link($path) || !is_file($path)
+            || preg_match('/\.tmp-[a-f0-9]{12}$/D', basename($path)) !== 1
+            || filectime($path) > $staleBefore) {
+            continue;
+        }
+        if (unlink($path)) {
+            $reclaimed++;
+        }
+    }
+    return $reclaimed;
+}
+
 /**
  * Compiled content releases, which age out by COUNT before they age out by
  * clock: every schema.compile writes a new revision tree and repoints
@@ -215,6 +238,13 @@ function _stattic_runtime_job_housekeeping_retention(string $privateRoot, array 
                     $complete = false;
                     break;
                 }
+            }
+            if ($complete) {
+                $temps = _stattic_runtime_reclaim_atomic_temps($privateRoot, null, $deadline);
+                if ($temps > 0) {
+                    $reclaimed['*.tmp-*'] = $temps;
+                }
+                $complete = microtime(true) < $deadline;
             }
             if ($complete) {
                 $releases = _stattic_runtime_reclaim_content_releases($privateRoot, null, $deadline);

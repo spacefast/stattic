@@ -792,6 +792,7 @@ function _stattic_runtime_job_maintenance_steps(): array
         'edge_purge' => '_stattic_runtime_job_housekeeping_edge_purge',
         'retention' => '_stattic_runtime_job_housekeeping_retention',
         'blob_gc' => '_stattic_runtime_job_housekeeping_local_blob_gc',
+        'bucket_reclaim' => '_stattic_runtime_job_housekeeping_bucket_reclaim',
         'route_shard_gc' => '_stattic_runtime_job_housekeeping_route_shard_gc',
         'disk_report' => '_stattic_runtime_job_housekeeping_disk_report',
     ];

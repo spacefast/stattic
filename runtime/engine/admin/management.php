@@ -1542,6 +1542,7 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
     $tombstones = _stattic_runtime_space_routing_doc($spaceRoot, 'tombstones') ?? [];
     $hostnames = _stattic_runtime_access_sweep_hostnames($intent, $tombstones);
     _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'space_deleted');
+    _stattic_tier_schedule_space_bucket_reclaim($privateRoot, $spaceId);
     _stattic_runtime_rm_recursive($spaceRoot);
     // Tombstones must survive the rm: retired hostnames keep serving the
     // tombstone page rather than degrading to the generic undeployed 503.

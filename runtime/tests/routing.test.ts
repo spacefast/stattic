@@ -14,12 +14,8 @@
 //   * access decisions and protected-space policy -> access-rules.test.ts;
 //   * Zero and Functions execution -> zero-runtime.test.ts, functions-*.test.ts.
 //
-// Gone with the mechanisms they described (§15/§16): compression negotiation and
-// sidecar selection (nginx compresses both lanes on the fly; PHP never sends
-// Content-Encoding), Range/206/416, and conditional 304 handling — the platform
-// never delivers If-None-Match/If-Modified-Since/Range to the origin, and the
-// edge answers conditionals off its own HIT. The ETag is still EMITTED per entry
-// and asserted below; nothing in PHP compares it.
+// Compression remains server-owned. Byte ranges and ETag conditionals on the
+// PHP fallback are exercised through the canonical serving route below.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   chmodSync,
@@ -127,6 +123,8 @@ beforeAll(async () => {
       "blog/404.html": BLOG_404,
       "blog/post.html": POST,
       "assets/app.js": APP_JS,
+      "movie.mp4": "0123456789".repeat(100200),
+      "empty.txt": "",
       // A published `.gz` is an ordinary file at its own URL: v4 compiles no
       // sidecar relationship and never negotiates an encoding.
       "assets/app.js.gz": APP_JS_GZIP,
@@ -278,8 +276,9 @@ test("the nearest custom 404 answers, walking up from the requested directory", 
   expect(nested.status).toBe(404);
   expect(await nested.text()).toBe(BLOG_404);
 
-  const root = await get(rt, SITE, "/missing");
+  const root = await get(rt, SITE, "/missing", { headers: { range: "bytes=0-1" } });
   expect(root.status).toBe(404);
+  expect(root.headers.get("content-range")).toBeNull();
   expect(await root.text()).toBe(ROOT_404);
 
   // A `404!` rule names its own document and keeps the rewritten status.
@@ -633,10 +632,74 @@ test("static entries answer GET and HEAD only", async () => {
   expect(rejected.status).toBe(405);
   expect(rejected.headers.get("allow")).toBe("GET, HEAD");
 
-  const head = await get(rt, SITE, "/blog/post.html", { method: "HEAD" });
+  const head = await get(rt, SITE, "/blog/post.html", {
+    method: "HEAD",
+    headers: { range: "bytes=0-1" },
+  });
   expect(head.status).toBe(200);
   expect(head.headers.get("content-length")).toBe(String(Buffer.byteLength(POST)));
   expect(await head.text()).toBe("");
+});
+
+test("PHP fallback serves single byte ranges and checks validators before slicing", async () => {
+  const body = "0123456789".repeat(100200);
+  const full = await get(rt, SITE, "/movie.mp4");
+  expect(full.status).toBe(200);
+  expect(full.headers.get("accept-ranges")).toBe("bytes");
+  expect(await full.text()).toBe(body);
+  const etag = full.headers.get("etag");
+  if (etag === null) throw new Error("missing media validator");
+  const cases = [
+    ["bytes=1000000-1000999", 1000000, 1000999],
+    ["bytes=-3", body.length - 3, body.length - 1],
+    [`bytes=${body.length - 2}-`, body.length - 2, body.length - 1],
+    [`bytes=${body.length - 2}-999999999999999999999`, body.length - 2, body.length - 1],
+  ] as const;
+  for (const [range, start, end] of cases) {
+    const response = await get(rt, SITE, "/movie.mp4", { headers: { range, "if-range": etag } });
+    expect(response.status, range).toBe(206);
+    expect(response.headers.get("content-range")).toBe(`bytes ${start}-${end}/${body.length}`);
+    expect(response.headers.get("content-length")).toBe(String(end - start + 1));
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.text()).toBe(body.slice(start, end + 1));
+  }
+  for (const [requestPath, range, length] of [
+    ["/movie.mp4", `bytes=${body.length}-`, body.length],
+    ["/movie.mp4", "bytes=-0", body.length],
+    ["/empty.txt", "bytes=0-0", 0],
+  ] as const) {
+    const response = await get(rt, SITE, requestPath, { headers: { range } });
+    expect(response.status).toBe(416);
+    expect(response.headers.get("content-range")).toBe(`bytes */${length}`);
+    expect(await response.text()).toBe("");
+  }
+  for (const headers of [
+    { range: "bytes=4-2" },
+    { range: "bytes=0-1,4-5" },
+    { range: "items=0-1" },
+    { range: "bytes=0-1", "if-range": `W/${etag}` },
+    { range: "bytes=0-1", "if-range": '"stale"' },
+    { range: "bytes=0-1", "if-range": "Wed, 21 Oct 2015 07:28:00 GMT" },
+  ]) {
+    const response = await get(rt, SITE, "/movie.mp4", { headers });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-range")).toBeNull();
+    expect(await response.text()).toBe(body);
+  }
+  const unchanged = await get(rt, SITE, "/movie.mp4", {
+    headers: { range: "bytes=0-1", "if-none-match": `"other", W/${etag}` },
+  });
+  expect(unchanged.status).toBe(304);
+  expect(unchanged.headers.get("cache-control")).toBe("private, no-store");
+  expect(unchanged.headers.get("a8c-edge-cache")).toBe("no-cache");
+  expect(unchanged.headers.get("content-range")).toBeNull();
+  expect(await unchanged.text()).toBe("");
+  const stale = await get(rt, SITE, "/movie.mp4", {
+    headers: { range: "bytes=0-1", "if-match": '"stale"' },
+  });
+  expect(stale.status).toBe(412);
+  expect(stale.headers.get("cache-control")).toBe("private, no-store");
+  expect(await stale.text()).toBe("");
 });
 
 test("host classes: canonical redirects, and a version-pinned host serves its version", async () => {

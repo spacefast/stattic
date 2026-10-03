@@ -316,7 +316,7 @@ function _stattic_s3_transport_request(
         'timeout' => STATTIC_S3_TOTAL_TIMEOUT_SECONDS,
         'schemes' => [$locator['scheme']],
     ];
-    foreach (['resolve', 'sink', 'on_headers', 'body', 'body_stream', 'body_size'] as $field) {
+    foreach (['resolve', 'sink', 'on_headers', 'body', 'body_stream', 'body_size', 'timeout_ms', 'connect_timeout_ms'] as $field) {
         if (isset($options[$field])) {
             $request[$field] = $options[$field];
         }
@@ -346,6 +346,12 @@ function _stattic_s3_signed_headers(string $method, string $body, array $options
 // range, if_none_match, resolve.
 function _stattic_s3_request(array $bucketRow, string $mode, string $method, string $key, array $options = []): array
 {
+    if (isset($options['deadline'])) {
+        $remainingMs = (int) floor(($options['deadline'] - microtime(true)) * 1000);
+        if ($remainingMs <= 0) return ['ok' => false, 'status' => 0, 'headers' => [], 'body' => '', 'error' => 's3_deadline_exceeded'];
+        $options['timeout_ms'] = $remainingMs;
+        $options['connect_timeout_ms'] = $remainingMs;
+    }
     $prepared = _stattic_s3_prepare($bucketRow, $mode, $key);
     if (isset($prepared['error'])) {
         return ['ok' => false, 'status' => 0, 'headers' => [], 'body' => '', 'error' => $prepared['error']];
@@ -362,6 +368,9 @@ function _stattic_s3_request(array $bucketRow, string $mode, string $method, str
         'resolve' => $options['resolve'] ?? [],
         'query' => $options['query'] ?? [],
     ];
+    foreach (['timeout_ms', 'connect_timeout_ms'] as $field) {
+        if (isset($options[$field])) $transportOptions[$field] = $options[$field];
+    }
     if ($method === 'PUT') {
         $transportOptions['body'] = $body;
     }
@@ -446,6 +455,12 @@ function _stattic_s3_delete_prefix(
 ): array {
     $deleted = 0;
     while ($deleted < $maxObjects) {
+        if (isset($options['deadline'])) {
+            $remainingMs = (int) floor(($options['deadline'] - microtime(true)) * 1000);
+            if ($remainingMs <= 0) return ['deleted' => $deleted, 'complete' => false];
+            $options['timeout_ms'] = $remainingMs;
+            $options['connect_timeout_ms'] = $remainingMs;
+        }
         $keys = _stattic_s3_list_prefix($bucketId, $prefix, $options);
         if ($keys === null) {
             return ['deleted' => $deleted, 'complete' => false];
@@ -454,7 +469,16 @@ function _stattic_s3_delete_prefix(
             return ['deleted' => $deleted, 'complete' => true];
         }
         $keys = array_slice($keys, 0, $maxObjects - $deleted);
-        $results = _stattic_s3_multi_delete($bucketId, $keys, $options);
+        $results = [];
+        foreach (array_chunk($keys, STATTIC_S3_DELETE_PARALLEL_STREAMS) as $wave) {
+            if (isset($options['deadline'])) {
+                $remainingMs = (int) floor(($options['deadline'] - microtime(true)) * 1000);
+                if ($remainingMs <= 0) break;
+                $options['timeout_ms'] = $remainingMs;
+                $options['connect_timeout_ms'] = $remainingMs;
+            }
+            $results += _stattic_s3_multi_delete($bucketId, $wave, $options);
+        }
         foreach ($keys as $key) {
             if (($results[$key] ?? false) !== true) {
                 return ['deleted' => $deleted, 'complete' => false];
@@ -500,7 +524,7 @@ function _stattic_s3_multi_delete(string $bucketId, array $keys, array $options 
             [
                 'resolve' => $options['resolve'] ?? [],
                 'sink' => static fn (string $chunk): bool => true,
-            ]
+            ] + $options
         ));
         if ($job === false) {
             $results[$key] = false;

@@ -121,13 +121,31 @@ function _sf_pointer_read(string $name, string $path): array
     return ['kind' => 'unavailable', 'value' => null];
 }
 
+// Private writes share a staging root so retention can enumerate interrupted
+// writes without walking every version and content-addressed blob directory.
+function _sf_atomic_temp_path(string $path): string
+{
+    $marker = '/.stattic/storage/';
+    $offset = strpos($path, $marker);
+    if ($offset === false) {
+        return $path . '.tmp-' . bin2hex(random_bytes(6));
+    }
+    $root = substr($path, 0, $offset + strlen($marker)) . 'runtime/atomic-staging';
+    _sf_artifact_mkdir($root);
+    return $root . '/.tmp-' . bin2hex(random_bytes(6));
+}
+
 // THE tmp + rename idiom, so a reader sees the whole old file or the whole new
 // one, never a torn one. The directory must exist; the caller owns what a
 // failure means. $mode, when given, is applied to the tmp file before it
 // becomes visible.
 function _sf_atomic_put(string $path, string $bytes, bool $lock, ?int $mode = null): bool
 {
-    $tmp = $path . '.tmp-' . bin2hex(random_bytes(6));
+    try {
+        $tmp = _sf_atomic_temp_path($path);
+    } catch (RuntimeException) {
+        return false;
+    }
     if (
         file_put_contents($tmp, $bytes, $lock ? LOCK_EX : 0) !== strlen($bytes)
         || ($mode !== null && !chmod($tmp, $mode))

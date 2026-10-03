@@ -1771,11 +1771,7 @@ check(
     _stattic_runtime_jwks($configuredJwksRoot, false) === $configuredJwks,
     'runtime JWKS: the blob gate can read the persisted configured keys without provider bootstrap'
 );
-unlink($configuredJwksRoot . '/runtime/jwks.json');
-rmdir($configuredJwksRoot . '/runtime');
-rmdir($configuredJwksRoot);
-rmdir(dirname($configuredJwksRoot));
-rmdir(dirname($configuredJwksRoot, 2));
+_stattic_job_runner_unit_rm_recursive(dirname($configuredJwksRoot, 2));
 putenv('SPACEFAST_RUNTIME_JWKS_B64=' . base64_encode(json_encode([
     'keys' => [[
         'kty' => 'OKP',
@@ -3463,6 +3459,56 @@ check(
         true
     ),
     'a crashed compile stage root is a registered retention root'
+);
+$blockedAtomicRoot = sys_get_temp_dir() . '/sf-atomic-blocked-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
+mkdir($blockedAtomicRoot, 0777, true);
+file_put_contents($blockedAtomicRoot . '/runtime', 'not a directory');
+check(
+    @_sf_atomic_put($blockedAtomicRoot . '/pointer.json', 'pending', false) === false
+        && !file_exists($blockedAtomicRoot . '/pointer.json'),
+    'atomic writes preserve their false failure contract when staging cannot be created'
+);
+$blockedAtomicSource = $blockedAtomicRoot . '/upload.tmp';
+file_put_contents($blockedAtomicSource, 'upload bytes');
+$moveProbe = <<<'PHP'
+define('STATTIC_RUNTIME_DISPATCH_CLI', true);
+require $argv[1];
+require_once $argv[2];
+@_stattic_runtime_move_private($argv[3], $argv[4]);
+PHP;
+$moveOutput = [];
+$moveStatus = 1;
+exec(
+    escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($moveProbe) . ' '
+        . escapeshellarg(__DIR__ . '/../engine/shared/storage.php') . ' '
+        . escapeshellarg(__DIR__ . '/../engine/shared/response.php') . ' '
+        . escapeshellarg($blockedAtomicSource) . ' '
+        . escapeshellarg($blockedAtomicRoot . '/blob') . ' 2>&1',
+    $moveOutput,
+    $moveStatus
+);
+$moveResponse = json_decode(implode("\n", $moveOutput), true);
+check(
+    $moveStatus === 0 && ($moveResponse['status'] ?? null) === 500
+        && ($moveResponse['body']['code'] ?? null) === 'runtime_mkdir_failed'
+        && file_get_contents($blockedAtomicSource) === 'upload bytes'
+        && !file_exists($blockedAtomicRoot . '/blob'),
+    'private moves preserve the problem response and staged upload when atomic staging cannot be created'
+);
+_stattic_job_runner_unit_rm_recursive(dirname($blockedAtomicRoot, 2));
+$tempPath = _sf_atomic_temp_path($contentSpaceRoot . '/pointer.json');
+file_put_contents($tempPath, 'interrupted write');
+touch($tempPath, 1);
+$finalPath = $contentSpaceRoot . '/pointer.json';
+file_put_contents($finalPath, 'committed write');
+check(
+    _stattic_runtime_reclaim_atomic_temps($contentRetentionRoot) === 0 && is_file($tempPath),
+    'atomic temp retention ignores a live pending blob with content-derived mtime'
+);
+check(
+    _stattic_runtime_reclaim_atomic_temps($contentRetentionRoot, time() + STATTIC_RUNTIME_STAGING_RETENTION_SECONDS + 1) === 1
+        && !file_exists($tempPath) && file_get_contents($finalPath) === 'committed write',
+    'atomic temp retention reclaims an interrupted write while preserving committed files'
 );
 // The guard the kernel gained: nothing outside private storage is removable,
 // and the private root itself is not inside itself.

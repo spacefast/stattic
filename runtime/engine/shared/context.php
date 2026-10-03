@@ -195,6 +195,7 @@ function _stattic_path_is_internal_artifact(string $path): bool
 // tenant path and `/__span/x` is ours). `fold` compares case-insensitively.
 // `admit` narrows a row to the exact set its handler can answer.
 const SPACEFAST_CONTROL_PATHS = [
+    ['path' => '/storage', 'match' => 'namespace', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/identity', 'match' => 'namespace', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/__zero/auth/user', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/__zero/auth/complete', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
@@ -266,13 +267,7 @@ function _stattic_zero_legacy_control_path(string $path): ?string
 
 function _stattic_control_path_row(string $path): ?array
 {
-    // Fold before the fast-exit (a raw '/__' prefix survives folding, so the
-    // folded check covers both): '//__' spellings must reach the fold-enabled
-    // rows exactly like their canonical spelling.
     $folded = '/' . trim(strtolower($path), '/');
-    if (!str_starts_with($folded, '/__')) {
-        return null;
-    }
     foreach (SPACEFAST_CONTROL_PATHS as $row) {
         $subject = empty($row['fold']) ? $path : $folded;
         $target = $row['path'];
@@ -978,12 +973,6 @@ function _stattic_cache_control_allows_shared_store(string $cacheControl): bool
 // publisher header map naming any of them is stripped at send time, on every
 // lane: a tenant must never steer the edge that fronts every Space.
 //
-// The generated protocol owns the list the compiler also enforces; these two are
-// the spellings it does not carry yet, kept separate so a regeneration cannot
-// silently drop them.
-const STATTIC_PLATFORM_OWNED_HEADER_PREFIXES_EXTRA = ['x-nananana', 'x-hacker', 'host-header'];
-const STATTIC_PLATFORM_OWNED_HEADERS_EXTRA = ['strict-transport-security'];
-
 const STATTIC_EDGE_CACHE_HEADER = 'a8c-edge-cache';
 const SPACEFAST_EDGE_CACHE_OPT_IN = 'cache';
 const SPACEFAST_EDGE_CACHE_OPT_OUT = 'no-cache';
@@ -992,9 +981,8 @@ function _stattic_platform_owns_header(string $name): bool
 {
     $lower = strtolower(trim($name));
     return in_array($lower, STATTIC_RUNTIME_PLATFORM_OWNED_HEADERS, true)
-        || in_array($lower, STATTIC_PLATFORM_OWNED_HEADERS_EXTRA, true)
         || array_any(
-            [...STATTIC_RUNTIME_PLATFORM_OWNED_HEADER_PREFIXES, ...STATTIC_PLATFORM_OWNED_HEADER_PREFIXES_EXTRA],
+            STATTIC_RUNTIME_PLATFORM_OWNED_HEADER_PREFIXES,
             static fn (string $prefix): bool => str_starts_with($lower, $prefix)
         );
 }

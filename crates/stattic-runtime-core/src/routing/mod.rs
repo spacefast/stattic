@@ -1563,6 +1563,30 @@ mod tests {
     }
 
     #[test]
+    fn provider_owned_headers_fail_with_the_authored_location() {
+        let result = compile_routing_files(&RoutingInput {
+            headers:
+                "/feed\n  A8C-Edge-Cache: cache\n  !X-Ac\n  X-Hacker-Test: yes\n  X-App-Result: ok"
+                    .into(),
+            ..RoutingInput::default()
+        });
+        assert_eq!(result.headers[0].operations.len(), 1);
+        assert_eq!(result.headers[0].operations[0].name, "X-App-Result");
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .map(|item| (item.severity, item.code, item.line))
+                .collect::<Vec<_>>(),
+            vec![
+                ("error", "header_name_unsupported", 2),
+                ("error", "header_name_unsupported", 3),
+                ("error", "header_name_unsupported", 4)
+            ]
+        );
+    }
+
+    #[test]
     fn unicode_matchers_use_the_same_nfc_identity_as_browser_requests() {
         let result = compile_routing_files(&RoutingInput {
             redirects: "/cafe\u{301}-agent /target 302\n".into(),

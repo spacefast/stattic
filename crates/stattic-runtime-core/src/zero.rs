@@ -478,15 +478,17 @@ fn zero_route_path_valid(path: &str) -> bool {
         return false;
     }
 
-    !matches!(
-        path,
-        "/" | "/index.html"
-            | "/client.js"
-            | "/auth/callback"
-            | "/__spacefast"
-            | "/__span"
-            | "/__zero"
-    ) && !path.starts_with("/auth/")
+    !matches!(segments.first(), Some(&"identity" | &"storage"))
+        && !matches!(
+            path,
+            "/" | "/index.html"
+                | "/client.js"
+                | "/auth/callback"
+                | "/__spacefast"
+                | "/__span"
+                | "/__zero"
+        )
+        && !path.starts_with("/auth/")
         && !path.starts_with("/__spacefast/")
         && !path.starts_with("/__span/")
         && !path.starts_with("/__zero/")
@@ -1012,6 +1014,8 @@ mod tests {
             "/api//empty",
             "/api/:",
             "/api/:splat/tail",
+            "/identity",
+            "/storage/123",
             long_segment.as_str(),
         ] {
             let diagnostics = compile([path].as_slice());
@@ -1026,7 +1030,16 @@ mod tests {
             "zero_endpoint_conflict"
         ));
 
-        let valid = compile(["/api/users/:id", "/api/:bad-name", "/files/:splat"].as_slice());
+        let valid = compile(
+            [
+                "/api/users/:id",
+                "/api/:bad-name",
+                "/files/:splat",
+                "/identity-kit",
+                "/storagebox/file",
+            ]
+            .as_slice(),
+        );
         assert!(
             !valid
                 .iter()

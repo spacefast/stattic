@@ -40,7 +40,6 @@ const SPACEFAST_PLATFORM_MANAGED_HEADERS = [
     'proxy-authorization' => true,
     'server' => true,
     'set-cookie' => true,
-    'strict-transport-security' => true,
     'surrogate-control' => true,
     'te' => true,
     'trailer' => true,
@@ -57,8 +56,12 @@ const SPACEFAST_PLATFORM_MANAGED_HEADERS = [
     'x-lighttpd-sendfile2' => true,
     'x-reproxy-url' => true,
     'x-sendfile' => true,
+    'x-ac' => true,
+    'x-nc' => true,
+    'x-sc' => true,
+    'strict-transport-security' => true,
 ];
-const SPACEFAST_PLATFORM_MANAGED_HEADER_PREFIXES = ['x-spacefast-', 'x-stattic-'];
+const SPACEFAST_PLATFORM_MANAGED_HEADER_PREFIXES = ['x-spacefast-', 'x-stattic-', 'a8c-', 'x-nananana', 'x-hacker', 'host-header'];
 
 // The internal-redirect/sendfile subset of the map above: headers that make the web
 // server produce a different response instead of describing this one. The proxy relay

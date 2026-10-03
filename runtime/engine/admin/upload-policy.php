@@ -96,7 +96,8 @@ function _stattic_static_upload_path_violation(string $path): ?array
     if ($lowerPath === $lowerName && in_array($lowerName, SPACEFAST_UPLOAD_RESERVED_ROOT_CONTROL_FILES, true)) {
         return $reserved($path);
     }
-    if (in_array($lowerSegments[0], SPACEFAST_UPLOAD_RESERVED_ROOT_SEGMENTS, true)) {
+    if (in_array($lowerSegments[0], SPACEFAST_UPLOAD_RESERVED_ROOT_SEGMENTS, true)
+        || in_array(explode('/', $path)[0], ['identity', 'storage'], true)) {
         return $reserved($path);
     }
     $publishableBuildArtifact =

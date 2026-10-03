@@ -135,6 +135,10 @@ foreach ([
 ] as $host) {
     check(!_stattic_egress_host_allowed($host), "egress denies host: {$host}");
 }
+foreach (['/storage/v1/x', '/identity/session'] as $path) {
+    $parts = _stattic_assert_proxy_target_allowed('https://api.github.com' . $path, STATTIC_EGRESS_SCOPE_TRUSTED);
+    check($parts['path'] === $path, 'proxy: upstream ordinary namespaces stay usable ' . $path);
+}
 foreach (['example.com', 'api.github.com', 'my-static.example.net'] as $host) {
     check(_stattic_egress_host_allowed($host, null, STATTIC_EGRESS_SCOPE_OPEN), "egress allows host: {$host}");
 }
@@ -2222,10 +2226,10 @@ check(!isset($fxHeadersNoUsage['sf-fx-usage']), 'dispatch: no usage intake witho
 check($fxHeadersNoUsage['sf-fx-bundle'] === 'https://shop.example/b/x/t/bundle.json', 'dispatch: a config without usage still dispatches');
 
 // The platform's own surfaces are never the worker's to answer.
-foreach (['/__spacefast/functions/relay', '/__spacefast/zero/run', '/__zero/run', '/__zero', '/__stattic/x', '/__span/y', '/__spacefast'] as $reserved) {
+foreach (['/identity', '/identity/session', '/storage', '/storage/123', '/__spacefast/functions/relay', '/__spacefast/zero/run', '/__zero/run', '/__zero', '/__stattic/x', '/__span/y', '/__spacefast'] as $reserved) {
     check(!_stattic_functions_dispatchable($reserved, 'GET'), 'dispatch: refuses reserved path ' . $reserved);
 }
-foreach (['/', '/api/orders', '/posts/1', '/__spacefastish/ok'] as $ordinary) {
+foreach (['/', '/api/orders', '/posts/1', '/identity-kit', '/storagebox/file', '/Storage/report.pdf', '/Identity/logo.svg', '/__spacefastish/ok'] as $ordinary) {
     check(_stattic_functions_dispatchable($ordinary, 'GET'), 'dispatch: allows ' . $ordinary);
 }
 check(!_stattic_functions_dispatchable('/', 'TRACE'), 'dispatch: refuses TRACE');
@@ -2253,6 +2257,8 @@ $fxRelayed = _stattic_relay_response_header_lines([
     ['server', 'cloudflare'],
     ['nel', '{"report_to":"cf-nel","max_age":604800}'],
     ['report-to', '{"group":"cf-nel","endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4"}]}'],
+    ['report-to', '{"group":"cf-nel","endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4"}]}, {"group":"cf-nel","endpoints":[{"url":"https://nel.cloudflare.com/report/v4"}]}'],
+    ['report-to', '{"group":"cf-nel","endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4"}]}, {"group":"tenant-errors","max_age":1e400,"endpoints":[{"url":"https://tenant.example/report"}]}'],
     ['x-accel-redirect', '/.stattic/storage/spaces/spc_other/versions/ver_1/files/index.html'],
     ['x-sendfile', '/etc/passwd'],
     ['surrogate-control', 'max-age=86400'],
@@ -2314,10 +2320,18 @@ check($fxSteering === [['content-type', 'text/html']], 'dispatch: strips worker 
 // A Cloudflare-shaped value is what disqualifies these two, not the name.
 $fxTenantReporting = _stattic_relay_response_header_lines([
     ['server', 'tenant-origin'],
-    ['nel', '{"report_to":"tenant-errors","max_age":3600}'],
-    ['report-to', '{"group":"tenant-errors","endpoints":[{"url":"https://errors.example/report"}]}'],
+    ['nel', '{"report_to":"tenant-cf-nel-errors","max_age":3600}'],
+    ['report-to', '{"group":"tenant-cf-nel-errors","endpoints":[{"url":"https://cloudflare.com/tenant/report"}]}'],
+    ['report-to', '{"group":"cf-nel","endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4"}]}, {"group":"tenant-errors","endpoints":[{"url":"https://tenant.example/report,a"}]}'],
 ], $fxPublicPolicy, _stattic_functions_relay_response_lane());
-check(count($fxTenantReporting) === 3, 'dispatch: a worker keeps its own Server and reporting endpoints');
+check(count($fxTenantReporting) === 4, 'dispatch: a worker keeps its own Server and reporting endpoints');
+check(
+    json_decode($fxTenantReporting[3][1] ?? '', true) === [
+        'group' => 'tenant-errors',
+        'endpoints' => [['url' => 'https://tenant.example/report,a']],
+    ],
+    'dispatch: a combined Report-To drops internal hop groups and retains tenant endpoints including commas'
+);
 
 // The wp.cloud edge keys a stored response on host+path+query and ignores Vary,
 // so worker-declared caching survives only while a URL-keyed store can honor it.

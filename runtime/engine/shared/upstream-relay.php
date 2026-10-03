@@ -123,7 +123,7 @@ function _stattic_relay_request_headers(array $lane = []): array
  *   deny           list<string>         lane-specific extra names
  *   deny_prefixes  list<string>         lane-specific extra prefixes
  *   allow_cookies   bool                 relay response cookies from the app
- *   deny_value     ?callable            lane rules that read the value too
+ *   filter_value   ?callable            map a value, or return null to omit it
  *
  * @return list<array{0: string, 1: string}>
  */
@@ -143,7 +143,7 @@ function _stattic_relay_response_header_lines(array $upstreamHeaders, array $cac
         ...(($cachePolicy['cache_control'] ?? null) !== null ? STATTIC_PRIVATE_STRIPPED_CACHE_HEADERS : []),
     ];
     $denyPrefixes = is_array($lane['deny_prefixes'] ?? null) ? $lane['deny_prefixes'] : [];
-    $denyValue = is_callable($lane['deny_value'] ?? null) ? $lane['deny_value'] : null;
+    $filterValue = is_callable($lane['filter_value'] ?? null) ? $lane['filter_value'] : null;
     $suppress = is_array($lane['suppress'] ?? null) ? $lane['suppress'] : [];
 
     $lines = [];
@@ -156,9 +156,14 @@ function _stattic_relay_response_header_lines(array $upstreamHeaders, array $cac
             || isset(SPACEFAST_INTERNAL_REDIRECT_HEADERS[$lowerName])
             || isset($suppress[$lowerName])
             || _stattic_relay_header_prefixed($lowerName, $denyPrefixes)
-            || ($denyValue !== null && $denyValue($lowerName, $value) === true)
         ) {
             continue;
+        }
+        if ($filterValue !== null) {
+            $value = $filterValue($lowerName, $value);
+            if ($value === null) {
+                continue;
+            }
         }
         $lines[] = [$name, $value];
     }

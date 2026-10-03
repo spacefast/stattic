@@ -348,6 +348,59 @@ function _stattic_functions_cookie_domain_escapes_host(string $value, string $re
     return false;
 }
 
+function _stattic_functions_reporting_header_value(string $name, string $value): ?string
+{
+    if (!in_array($name, ['nel', 'report-to'], true)) {
+        return $value;
+    }
+    if ($name === 'nel') {
+        $report = json_decode($value, true);
+        return is_array($report) && ($report['report_to'] ?? null) === 'cf-nel' ? null : $value;
+    }
+    // Report-To is an HTTP list of JSON objects. Decode the list as a whole so
+    // commas inside endpoint URLs never become group boundaries.
+    $groups = json_decode('[' . $value . ']');
+    if (!is_array($groups)) {
+        return $value;
+    }
+    $retained = array_values(array_filter(
+        $groups,
+        static fn ($group): bool => !($group instanceof stdClass) || !_stattic_functions_cloudflare_reporting_group($group)
+    ));
+    if (count($retained) === count($groups)) {
+        return $value;
+    }
+    if ($retained === []) {
+        return null;
+    }
+    // A numeric value outside PHP's finite range must not abort the response
+    // while filtering an unrelated group. Omit only groups we cannot encode.
+    $encoded = array_filter(array_map(static fn ($group): string|false => json_encode($group), $retained), 'is_string');
+    return $encoded === [] ? null : implode(', ', $encoded);
+}
+
+function _stattic_functions_cloudflare_reporting_group(stdClass $report): bool
+{
+    if (($report->group ?? null) !== 'cf-nel') {
+        return false;
+    }
+    $endpoints = $report->endpoints ?? [];
+    if (!is_array($endpoints)) {
+        return false;
+    }
+    foreach ($endpoints as $endpoint) {
+        if (!($endpoint instanceof stdClass) || !is_string($endpoint->url ?? null)) {
+            continue;
+        }
+        $host = parse_url($endpoint->url, PHP_URL_HOST);
+        if (is_string($host) && (strtolower($host) === 'nel.cloudflare.com'
+            || str_ends_with(strtolower($host), '.nel.cloudflare.com'))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Cloudflare terminates the internal Functions hop; its response metadata
 // describes that hop, and the outer CDN would cache stale Ray IDs. Application
 // cookies relay only host-only or scoped to the exact request host: a Space's
@@ -359,17 +412,16 @@ function _stattic_functions_relay_response_lane(string $requestHost = ''): array
         'deny' => ['content-encoding', 'strict-transport-security'],
         'deny_prefixes' => [SPACEFAST_FUNCTIONS_DISPATCH_HEADER_PREFIX, 'cf-'],
         'allow_cookies' => true,
-        'deny_value' => static function (string $name, string $value) use ($requestHost): bool {
+        'filter_value' => static function (string $name, string $value) use ($requestHost): ?string {
             $lowerValue = strtolower($value);
             // §16: a worker never steers the edge (A8C-*) or forges its verdict (x-ac).
-            return _stattic_platform_owns_header($name)
+            if (_stattic_platform_owns_header($name)
                 || (in_array($name, ['set-cookie', 'set-cookie2'], true)
                     && _stattic_functions_cookie_domain_escapes_host($value, $requestHost))
-                || ($name === 'server' && trim($lowerValue) === 'cloudflare')
-                || (
-                    in_array($name, ['nel', 'report-to'], true)
-                    && (str_contains($lowerValue, 'cf-nel') || str_contains($lowerValue, 'cloudflare.com'))
-                );
+                || ($name === 'server' && trim($lowerValue) === 'cloudflare')) {
+                return null;
+            }
+            return _stattic_functions_reporting_header_value($name, $value);
         },
     ];
 }

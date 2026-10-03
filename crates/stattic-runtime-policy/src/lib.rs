@@ -30,9 +30,13 @@
 
 pub mod brand;
 
-/// Reserved response-header namespaces owned by the platform's own serving
-/// signature (`X-Spacefast-Runtime`, `X-Spacefast-Version`,
-/// `X-Spacefast-Reason`, …). User rules can never forge or clobber them.
+/// The provider edge owns these cache controls and response diagnostics.
+pub const PROVIDER_OWNED_RESPONSE_HEADER_PREFIXES: &[&str] =
+    &["a8c-", "x-nananana", "x-hacker", "host-header"];
+pub const PROVIDER_OWNED_RESPONSE_HEADERS: &[&str] =
+    &["x-ac", "x-nc", "x-sc", "strict-transport-security"];
+
+/// Reserved namespaces carrying the platform's own serving signature.
 pub const PLATFORM_MANAGED_RESPONSE_HEADER_PREFIXES: &[&str] = &["x-spacefast-", "x-stattic-"];
 
 /// The connection and transport surface: hop-by-hop names (Connection,
@@ -60,7 +64,6 @@ pub const TRANSPORT_MANAGED_RESPONSE_HEADERS: &[&str] = &[
     "proxy-authorization",
     "server",
     "set-cookie",
-    "strict-transport-security",
     "surrogate-control",
     "te",
     "trailer",
@@ -106,6 +109,10 @@ pub fn platform_managed_response_header(name: &str) -> bool {
         .any(|prefix| name.starts_with(prefix))
         || TRANSPORT_MANAGED_RESPONSE_HEADERS.contains(&name.as_str())
         || INTERNAL_REDIRECT_RESPONSE_HEADERS.contains(&name.as_str())
+        || PROVIDER_OWNED_RESPONSE_HEADERS.contains(&name.as_str())
+        || PROVIDER_OWNED_RESPONSE_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 fn typescript_string_array(values: &[&str]) -> String {
@@ -121,13 +128,14 @@ fn typescript_string_array(values: &[&str]) -> String {
 /// and the PHP policy codegen all read.
 ///
 /// `PLATFORM_MANAGED_RESPONSE_HEADERS` is emitted as the concatenation of the
-/// two disjoint Rust sets, transport first, so every header name is written
+/// disjoint Rust sets, transport first, so every header name is written
 /// down exactly once in this crate and nowhere else in the repository.
 #[must_use]
 pub fn typescript_source() -> String {
     let managed = TRANSPORT_MANAGED_RESPONSE_HEADERS
         .iter()
         .chain(INTERNAL_REDIRECT_RESPONSE_HEADERS.iter())
+        .chain(PROVIDER_OWNED_RESPONSE_HEADERS.iter())
         .copied()
         .collect::<Vec<_>>();
     format!(
@@ -152,7 +160,8 @@ pub fn typescript_source() -> String {
          \x20* not this list alone: the reserved prefixes are the other half of the policy.\n\
          \x20*/\n\
          export const PLATFORM_MANAGED_RESPONSE_HEADERS: readonly string[] = {managed};\n",
-        prefixes = typescript_string_array(PLATFORM_MANAGED_RESPONSE_HEADER_PREFIXES),
+        prefixes = typescript_string_array(&PLATFORM_MANAGED_RESPONSE_HEADER_PREFIXES.iter()
+            .chain(PROVIDER_OWNED_RESPONSE_HEADER_PREFIXES.iter()).copied().collect::<Vec<_>>()),
         internal_redirect = typescript_string_array(INTERNAL_REDIRECT_RESPONSE_HEADERS),
         managed = typescript_string_array(&managed),
     )
@@ -170,6 +179,10 @@ mod tests {
             "SET-COOKIE",
             "x-spacefast-runtime",
             "X-Stattic-Anything",
+            "A8C-Edge-Cache",
+            "X-Ac",
+            "X-Nananana-Test",
+            "Host-Header",
         ] {
             assert!(platform_managed_response_header(name), "{name}");
         }
@@ -184,7 +197,11 @@ mod tests {
     }
 
     #[test]
-    fn the_two_literal_sets_are_disjoint_so_generated_lists_carry_no_duplicates() {
+    fn literal_sets_are_disjoint_so_generated_lists_carry_no_duplicates() {
+        for name in PROVIDER_OWNED_RESPONSE_HEADERS {
+            assert!(!TRANSPORT_MANAGED_RESPONSE_HEADERS.contains(name));
+            assert!(!INTERNAL_REDIRECT_RESPONSE_HEADERS.contains(name));
+        }
         for name in INTERNAL_REDIRECT_RESPONSE_HEADERS {
             assert!(
                 !TRANSPORT_MANAGED_RESPONSE_HEADERS.contains(name),

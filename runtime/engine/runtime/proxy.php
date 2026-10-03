@@ -330,7 +330,8 @@ function _stattic_assert_proxy_target_allowed(string $target, string $egressScop
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy target must not include credentials.\n");
     }
     $path = (string) ($parts['path'] ?? '/');
-    if (_stattic_path_is_reserved($path)) {
+    // Ordinary control namespaces belong to this Space, not the upstream host.
+    if (str_starts_with('/' . trim(strtolower($path), '/'), '/__') && _stattic_path_is_reserved($path)) {
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy route cannot target runtime control paths.\n");
     }
     return $parts;

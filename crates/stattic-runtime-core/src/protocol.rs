@@ -268,9 +268,11 @@ pub const ACCEL_SURVIVING_HEADERS: &[&str] = &[
 /// where correctness demands one. `x-ac`/`x-sc`/`x-nc` are the edge's own cache
 /// telemetry. A publisher `_headers` rule that set any of them would either
 /// publish private bytes to the shared edge or forge a cache verdict, so
-/// finalize drops those operations and the engine refuses them at send time.
-pub const PLATFORM_OWNED_HEADER_PREFIXES: &[&str] = &["a8c-"];
-pub const PLATFORM_OWNED_HEADERS: &[&str] = &["x-ac", "x-nc", "x-sc"];
+/// the compiler rejects those operations and the engine refuses them at send time.
+pub use stattic_runtime_policy::{
+    PROVIDER_OWNED_RESPONSE_HEADERS as PLATFORM_OWNED_HEADERS,
+    PROVIDER_OWNED_RESPONSE_HEADER_PREFIXES as PLATFORM_OWNED_HEADER_PREFIXES,
+};
 
 /// The extensions the provider rewrites on an nginx-served response (measured
 /// live, 2026-08-07): it replaces the cache policy with

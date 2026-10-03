@@ -1,7 +1,7 @@
 {
-  "revision": "605041bc15d745f7d6147ada0acd810973e4f4c5",
-  "sourceHash": "c94853acdbd86cd238ce5760a08117d0ae6b540c8b420304578ef9cfce62304a",
-  "manifestSha256": "97490e97f225a96f997bd686d8111959eefea4a6d3af9f638302281f3b805b75",
+  "revision": "2acf920b2e4781f907a2033dbc114870bac0f977",
+  "sourceHash": "823a7bb704dbdb99a16bf4e90463059d2a08bcd653e2ebbc80448ec428193f91",
+  "manifestSha256": "3c6500a88f207e3f1aac9caa476f847585d89ff16b32960830006e8b03f8b493",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "357e732a9dc5dc509ea05e14f4da56fa1e74e0bb0d1bdd263a01729d5fc287d6"
+      "sha256": "a6ef8d819265f4d972f5690b00e5a5bb1529fcd1403f6e3aeb6f062ac229091f"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "662e8a57fffcb70d8ba2c368af05f2f50066302e331e4b6b41ef54149f5af920"
+      "sha256": "b9ad7504e5c77e6374c3f5487cd80a1d3fb94028d242445271adbb2686c00295"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -393,7 +393,7 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "d232a7ededde41eba98767d52c59fe8f9fe08e00746eefdf6ba6b7ae8c83b499"
+      "sha256": "116c2302d51f43c07cde51da1d2812acacb62588cc8cbf258be0402788f8883c"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -482,10 +482,6 @@
     {
       "path": "runtime/engine/entrypoints/cron.php",
       "sha256": "7da1b3ee00433f31edf6e910b62543e9f0a8ea4ff57ff97f111814c2c45117c0"
-    },
-    {
-      "path": "runtime/engine/entrypoints/edge-purge.php",
-      "sha256": "b37c8071ef132d464eb58cc15fe9eca443efd8e6959c02cce94df4c1b2031871"
     },
     {
       "path": "runtime/engine/entrypoints/health.php",
@@ -717,7 +713,7 @@
     },
     {
       "path": "runtime/engine/shared/purge.php",
-      "sha256": "f0b26bfa72c47c8de40751ddfa9aeb74d550ad7dc4d801e07476dc2a278e4492"
+      "sha256": "7ffebab8c413fe1db14029c57ad8b21e88b1bed593685f1f8ab42fb4dafb0ab9"
     },
     {
       "path": "runtime/engine/shared/record-store.php",
@@ -997,7 +993,7 @@
     },
     {
       "path": "runtime/tests/edge-purge.test.ts",
-      "sha256": "45bcb99f69cb364366752a9bce92f6ea4abf0cb615d05ab84c26f6f9a6e90b82"
+      "sha256": "0a62e63aef9a831f2db7240150d37ec78f99359a6300a7a2760ecbec303f0cb2"
     },
     {
       "path": "runtime/tests/engine-manifest-drift.test.ts",

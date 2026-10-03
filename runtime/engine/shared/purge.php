@@ -6,7 +6,7 @@ require_once __DIR__ . '/storage.php';
 require_once __DIR__ . '/http.php';
 
 // Each affected hostname has one durable pending record. Post-response work
-// delivers it promptly; provider cron and maintenance recover after request or provider
+// delivers it promptly; engine housekeeping recovers after request or provider
 // failure. A later mutation replaces the generation, so an older delivery
 // cannot acknowledge newer work. Records survive Space/version deletion.
 //

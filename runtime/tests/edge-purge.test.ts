@@ -111,7 +111,7 @@ test("accepted purges survive request death and provider failure without acknowl
   expect(f.delivered).toHaveLength(3);
 });
 
-test("purge delivery waits for the serving mutation and the provider tick recovers a deleted Space", async () => {
+test("purge delivery waits for the serving mutation and housekeeping recovers a deleted Space", async () => {
   await using f = await fixture();
   f.enableGateway();
   const writer = f.spawn(`
@@ -143,11 +143,11 @@ test("purge delivery waits for the serving mutation and the provider tick recove
     writer.stdin.end();
     expect(await writer.exited).not.toBe(0);
     const recovered = await f.run(`
-      $argv = ['edge-purge.php', '--private-root=' . $root];
-      require '${engine}/entrypoints/edge-purge.php';
+      $pass = _stattic_runtime_job_maintenance_tick($root, [], microtime(true) + 20);
+      echo json_encode(in_array('edge_purge', $pass['steps'], true));
     `);
     expect(recovered.exitCode, recovered.stderr).toBe(0);
-    expect(JSON.parse(recovered.stdout)).toEqual({ complete: true });
+    expect(recovered.stdout).toBe("true");
     expect(f.delivered).toEqual(["/api/v1.0/edge-cache/123/purge/deleted.test"]);
   } finally {
     writer.kill();

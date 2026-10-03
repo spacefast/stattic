@@ -9,9 +9,14 @@ require_once __DIR__ . '/lock.php';
 require_once __DIR__ . '/record-store.php';
 require_once __DIR__ . '/pointers.php';
 
-function _stattic_json_body(): array
+function _stattic_json_body(int $limit = STATTIC_RUNTIME_PHP_LANE_BODY_MAX_BYTES): array
 {
-    $raw = _stattic_request_body_contents();
+    $raw = _stattic_bounded_request_body($limit);
+    if ($raw === null) {
+        _stattic_problem_response(413, 'runtime_request_body_too_large', 'Runtime management request body exceeds its byte limit.', [
+            'details' => ['limit' => $limit],
+        ]);
+    }
     if (!is_string($raw) || trim($raw) === '') {
         return [];
     }

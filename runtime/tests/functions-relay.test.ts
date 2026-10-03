@@ -900,6 +900,7 @@ test("a reachable edge receives the dispatch: the origin forwards to exactly the
 
   const edgeRt = await startRuntime({
     env: { SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "fx-dispatch-secret" },
+    phpIni: { log_errors: "1", error_log: runtimeLogPath },
   });
   try {
     const host = "fx-edge.test";
@@ -918,12 +919,37 @@ test("a reachable edge receives the dispatch: the origin forwards to exactly the
       },
     });
 
-    const dispatched = await get(edgeRt, host, "/api/hello");
+    const dispatched = await get(edgeRt, host, "/api/hello", {
+      headers: { accept: "application/json" },
+    });
     // The edge refused mid-handshake, so dispatch reports 502 — but 502 is only
     // reachable by having forwarded. A local execution or a static fallthrough
     // would never have opened a connection to the edge host at all.
     expect(dispatched.status).toBe(502);
     expect(connections.length).toBeGreaterThan(0);
+    expect(dispatched.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
+    expect(dispatched.headers.get("cache-control")).toContain("no-store");
+    expect(dispatched.headers.get("retry-after")).toBeNull();
+    const requestId = dispatched.headers.get("x-spacefast-request-id");
+    expect(requestId).toMatch(/^fxr_[a-f0-9]{24}$/);
+    expect(await dispatched.json()).toEqual({
+      type: "https://spacefast.com/docs/errors/functions_transport_failed",
+      title: "Functions transport failed",
+      status: 502,
+      code: "functions_transport_failed",
+      detail: "The function did not respond.",
+      page: "proxy-error",
+      requestId,
+    });
+    const records = runtimeLogRecords().filter((record) => record.requestId === requestId);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      level: "error",
+      versionId: "ver_fx_edge_1",
+      metadata: { code: "functions_transport_failed", headersSent: false },
+    });
+    expect(records[0]?.metadata.cause).toEqual(expect.any(String));
+    expect(records[0]?.metadata.cause).not.toBe("");
 
     // Static content on the same version still serves: dispatch owns only the
     // paths that resolve to no file.

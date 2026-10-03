@@ -260,9 +260,13 @@ function _stattic_serve_page(string $pageId, array $context = []): void
     if ($representation === 'json') {
         // `page` is an RFC 9457 extension member: the platform page an HTML
         // request would have been shown.
+        $extra = ['page' => $pageId];
+        if (is_string($context['requestId'] ?? null) && $context['requestId'] !== '') {
+            $extra['requestId'] = $context['requestId'];
+        }
         _stattic_response_send(
             $status,
-            json_encode(_stattic_problem_document($status, $code, trim($message), ['page' => $pageId]), JSON_UNESCAPED_SLASHES) . "\n",
+            json_encode(_stattic_problem_document($status, $code, trim($message), $extra), JSON_UNESCAPED_SLASHES) . "\n",
             STATTIC_PROBLEM_MEDIA_TYPE . '; charset=utf-8',
         );
     }

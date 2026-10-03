@@ -3282,7 +3282,7 @@ function _stattic_access_lanes_fragment(
     foreach ($lanes['connections'] as $connection) {
         $ssoHref = _stattic_access_url_with_params($connection['startUrl'], [
             'host' => $host,
-            'return' => $returnPath,
+            'return' => parse_url($returnPath, PHP_URL_PATH) ?: '/',
             'browserState' => _stattic_access_browser_state_begin(),
         ]);
         $buttons .= '<a class="sf-button sf-access-sso" href="' . _stattic_html_escape($ssoHref)

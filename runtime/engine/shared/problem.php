@@ -4,8 +4,7 @@ declare(strict_types=1);
 // RFC 9457 problem documents. The `type` and `title` derivations below duplicate
 // errorDocsUrl() / errorTitle() in packages/common/src/contracts/error-codes.ts,
 // which PHP cannot import: change one, change the other.
-// `requestId` is deliberately absent: the runtime mints no request ids, and a
-// reflected caller-supplied header would correlate with nothing.
+// Callers add `requestId` only when it correlates with a runtime log or dispatch.
 
 require_once __DIR__ . '/brand.php';
 

@@ -440,6 +440,18 @@ check(
 // (X-Real-IP, CF-Connecting-IP, X-Forwarded-Host) are attacker-controlled, so
 // there is no address to match. What survives: country (a server-set
 // fastcgi_param), user-agent selectors, and fail-closed for a stored ipCidrs grant.
+$ssoFragment = _stattic_access_lanes_fragment(
+    ['account' => null, 'connections' => [['startUrl' => 'https://access.example.test/identity/acn_example/start?spaceId=spc_example', 'label' => 'Example']], 'exchange' => null, 'password' => false, 'link' => false, 'request' => false],
+    'page.example.test',
+    '/docs/?mode=present',
+    '',
+    null,
+    null
+);
+preg_match('/href="([^"]+)"/', $ssoFragment, $ssoMatch);
+parse_str(parse_url(html_entity_decode($ssoMatch[1] ?? ''), PHP_URL_QUERY) ?? '', $ssoQuery);
+check(($ssoQuery['return'] ?? null) === '/docs/', 'SSO start receives a query-free access scope');
+
 $networkGrant = [
     'id' => 'grt_network',
     'generation' => 1,

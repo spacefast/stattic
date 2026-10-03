@@ -228,7 +228,10 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
     header('Cache-Control: private, no-store', true);
     header('X-Content-Type-Options: nosniff', true);
     if ($requestMethod !== 'HEAD') {
+        require_once __DIR__ . '/../shared/html-insert.php';
+        _stattic_html_insert_stream_begin(_stattic_html_insert_snippets($serving));
         echo $document;
+        _stattic_html_insert_stream_end();
     }
     exit;
 }

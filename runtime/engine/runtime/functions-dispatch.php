@@ -20,6 +20,7 @@ require_once __DIR__ . '/../shared/cache-policy.php';
 require_once __DIR__ . '/../shared/upstream-relay.php';
 require_once __DIR__ . '/../shared/html-insert.php';
 require_once __DIR__ . '/../shared/errors.php';
+require_once __DIR__ . '/../shared/runtime-log.php';
 require_once __DIR__ . '/../shared/functions-wire.generated.php';
 
 // A hung dispatch holds a PHP-FPM slot against every other request to this
@@ -537,8 +538,18 @@ function _stattic_functions_dispatch(
     }
 
     if ($result['error'] !== null) {
+        _stattic_runtime_log_write([
+            'level' => 'error',
+            'requestId' => $requestId,
+            'message' => 'Function dispatch transport failed.',
+            'metadata' => [
+                'code' => 'functions_transport_failed',
+                'cause' => $result['error'],
+                'headersSent' => $headersSent,
+            ],
+        ], $versionId);
         _stattic_relay_abort_after_headers($headersSent);
-        _stattic_functions_bad_gateway();
+        _stattic_functions_bad_gateway($requestId);
     }
     if (!$headersSent) {
         http_response_code($status > 0 ? $status : 502);
@@ -558,9 +569,16 @@ function _stattic_functions_request_id(): string
     return 'fxr_' . bin2hex(random_bytes(12));
 }
 
-function _stattic_functions_bad_gateway(): void
+function _stattic_functions_bad_gateway(string $requestId): void
 {
-    _stattic_render_platform_page('proxy-error', 502, [], "The function did not respond.\n");
+    _stattic_serve_page('proxy-error', [
+        'status' => 502,
+        'code' => 'functions_transport_failed',
+        'message' => 'The function did not respond.',
+        'headers' => ['X-Spacefast-Request-Id' => $requestId],
+        'requestId' => $requestId,
+        'customizable' => true,
+    ]);
 }
 
 // A function path whose execution edge is unreachable answers 503, never a

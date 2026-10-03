@@ -1547,6 +1547,10 @@ test("X-SF-Authorization admits access, owner API, and centrally exchanged machi
   const { runtimeJwks } = await import("../../apps/control-plane/src/runtime/auth.js");
   const app = createApp();
   await app.modules;
+  // Compile the lazy in-process router before PHP's bounded exchange request.
+  // Production serves an initialized API; fixture startup is not auth latency.
+  const readiness = await app.request("http://localhost/live");
+  expect(readiness.status).toBe(200);
   const centralExchange = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { readActiveReleaseTarget } from "./active-release.ts";
+import { startPhpServer } from "./harness.ts";
 
 const roots: string[] = [];
 
@@ -150,3 +151,31 @@ test("installer rejects a hung native self-test within its deadline", async () =
   expect(String(failure?.stderr)).toContain("runtime_native_self_test_failed:bin/stattic-runtime");
   expect(Date.now() - started).toBeLessThan(9_000);
 }, 12_000);
+
+test("installer refuses direct execution over HTTP", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-installer-http-"));
+  roots.push(root);
+  const installer = path.join(root, "installer.php");
+  copyFileSync(path.resolve(import.meta.dirname, "../installer.php"), installer);
+  const router = path.join(root, "router.php");
+  writeFileSync(
+    router,
+    `<?php
+if (parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/__spacefast/health.php') { echo 'ready'; return; }
+require __DIR__ . '/installer.php';
+`,
+  );
+  const server = await startPhpServer({
+    args: ["-d", "auto_prepend_file="],
+    router,
+    cwd: root,
+    env: process.env,
+  });
+  try {
+    const response = await fetch(`${server.baseUrl}/installer.php`);
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+  } finally {
+    server.stop();
+  }
+});

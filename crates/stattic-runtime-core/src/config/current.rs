@@ -467,8 +467,11 @@ fn validate_runtime_config(
 
     if kind == "zero" {
         retain_runtime_keys(runtime, &["kind", "server", "client"], diagnostics);
-        // Zero is never inferred, so a declaration that names neither entry has
-        // nothing to compile.
+        // Zero is never inferred: the server remains explicit. Server-only
+        // capsules use the compiler's platform client when the default is absent.
+        if !runtime.contains_key("client") {
+            runtime.insert("client".into(), Value::String("client/index.tsx".into()));
+        }
         for key in ["server", "client"] {
             let trimmed = runtime
                 .get(key)
@@ -1153,11 +1156,11 @@ pub fn public_json_schema() -> Value {
         "oneOf": [
             {
                 "type": "object",
-                "required": ["kind", "server", "client"],
+                "required": ["kind", "server"],
                 "properties": {
                     "kind": { "const": "zero" },
                     "server": { "type": "string", "minLength": 1 },
-                    "client": { "type": "string", "minLength": 1 }
+                    "client": { "type": "string", "minLength": 1, "default": "client/index.tsx" }
                 },
                 "additionalProperties": false
             },
@@ -1454,7 +1457,7 @@ mod tests {
         );
         assert_eq!(
             schema.pointer("/properties/runtime/oneOf/0/required"),
-            Some(&json!(["kind", "server", "client"]))
+            Some(&json!(["kind", "server"]))
         );
         assert_eq!(
             schema.pointer("/properties/runtime/oneOf/1/properties/kind/const"),
@@ -1472,7 +1475,7 @@ mod tests {
         let config = parse_config(
             r#"{
                 "name": "  guestbook  ",
-                "runtime": { "kind": "zero", "server": " server/index.ts ", "client": "client/index.tsx" },
+                "runtime": { "kind": "zero", "server": " server/index.ts " },
                 "meta": { "title": "Guestbook", "favicon": "/favicon.svg" },
                 "listing": true
             }"#,

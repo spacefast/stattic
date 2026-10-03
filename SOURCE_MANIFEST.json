@@ -1,7 +1,7 @@
 {
-  "revision": "ac2e872fb7aa21d8beae60ce90dcdaa01e7aef9f",
-  "sourceHash": "19a55d0592167f98a9f60599804d6f360ebfd7993a3efa3f43b21a9116342ba6",
-  "manifestSha256": "63a2b91de51163745e9c6b9898b22ed8623c106be10f2100002f99efb87439a0",
+  "revision": "81ad7d717a2ae64c49ae5a7beb8b0332ca12122a",
+  "sourceHash": "efb969ebf63b61cd23e8c88a12d188439855a234496cd306deccc0beedebabf5",
+  "manifestSha256": "bbc3e31b05548a86ba0e9fa88ccca2f4b06b3f5e7bb120ced85444a6512c9d10",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "22514639dd14ebfebaa7c97ae676e3889d9cd82bd6a18793c6420ec87075daf5"
+      "sha256": "977e169f61f06a4771dcadec8d78fe6eba5bbca6b8034fb963e8d77373d03127"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "f3f1b6a3af7f5cf8f19983d1ebaaeea2740c9986327a9cc159c44b227662e214"
+      "sha256": "cd6eac7cc8b11e63924bb7ea9088bf0e22b17762c1883ebf47df2811d3f4200f"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -61,7 +61,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/config/current.rs",
-      "sha256": "f9ea4506c7038493aae1a3dc1737bcdddaa37a3de72a263362e6b06c30be397a"
+      "sha256": "ef0aeeccd0a01685d4c01ed7c4df3215da1f99d0f4761e903680d7271a1f52f0"
     },
     {
       "path": "crates/stattic-runtime-core/src/config/diagnostics.rs",
@@ -833,7 +833,7 @@
     },
     {
       "path": "runtime/installer.php",
-      "sha256": "0ab2b4b2ecb9b385b44ad184e30966b4837e88f13724666e2198c4262ea9ea14"
+      "sha256": "8129c85168e3fd344b1e2a3b429d871df09024833e661653bcc48744112a910d"
     },
     {
       "path": "runtime/package.json",
@@ -1101,7 +1101,7 @@
     },
     {
       "path": "runtime/tests/installer-native.test.ts",
-      "sha256": "86b1533daa7da9d42f970bc7af55b6c32a679c147c67b14e3ba082ceddbde101"
+      "sha256": "d33292aa8bfb53338ee10ae23e5925767005b0b5706ce9495ce51f121c95a67a"
     },
     {
       "path": "runtime/tests/installer-real-manifest.test.ts",

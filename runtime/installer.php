@@ -7,19 +7,21 @@ error_reporting(E_ALL);
 ini_set('log_errors', '1');
 ini_set('display_errors', '0');
 
+// CLI only, run by the SSH bootstrap and the /engine/update route. Refuse
+// providers that direct-execute arbitrary PHP files before inspecting input.
+if (PHP_SAPI !== 'cli') {
+    http_response_code(404);
+    exit(1);
+}
+
 if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
     fwrite(STDERR, 'Spacefast runtime installer requires PHP 8.5; running PHP ' . PHP_VERSION . "\n");
     exit(1);
 }
 
-// CLI only, run by the SSH bootstrap and the /engine/update route. This guard
-// fails closed under a provider that direct-executes arbitrary PHP files. The
-// zip source rides argv[1] (https URL or local path); SPACEFAST_RUNTIME_ENGINE_MD5,
+// The zip source rides argv[1] (https URL or local path); SPACEFAST_RUNTIME_ENGINE_MD5,
 // _REVISION and optional _NATIVE_SHA256 ride the environment. The JSON receipt
 // on stdout is the whole report. There is no callback.
-if (PHP_SAPI !== 'cli') {
-    exit(1);
-}
 
 function fail(string $message, int $exitCode = 1): never
 {

@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import {
+  createHash,
+  createPublicKey,
+  generateKeyPairSync,
+  randomBytes,
+  randomUUID,
+} from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 
@@ -17,8 +23,9 @@ import {
 
 // The runtime-rendered visitor access page: lanes from the projected grants,
 // presentation from the accessPage descriptor, credentials verified centrally
-// through the server-to-server exchange. That exchange is a local fake here,
-// minting real handoff tokens with the suite's visitor key.
+// through the server-to-server exchange. Browser lanes use a local exchange
+// fixture with signed handoffs. The opaque machine header case uses the
+// canonical API and isolated Postgres.
 
 let runtime: Runtime;
 let exchange: ReturnType<typeof Bun.serve>;
@@ -1479,7 +1486,7 @@ test("a link arrival chains one silent account probe before the clean URL", asyn
   expect(again.headers.get("location")).toBe("/docs/");
 });
 
-test("X-SF-Authorization admits access and owner API tokens", async () => {
+test("X-SF-Authorization admits access, owner API, and centrally exchanged machine tokens", async () => {
   const before = exchangeRequests.length;
   const linked = await get(runtime, LANES_HOST, "/docs/", {
     headers: {
@@ -1501,6 +1508,130 @@ test("X-SF-Authorization admits access and owner API tokens", async () => {
   });
   expect(owner.status).toBe(200);
   expect(owner.headers.get("set-cookie")).toBeNull();
+
+  // This lane crosses real PHP HTTP, the canonical API, and isolated Postgres.
+  // The other lanes above use the captured-shape exchange fixture.
+  await using cleanup = new AsyncDisposableStack();
+  if (process.env.SPACEFAST_TEST_DATABASE_URL === undefined) {
+    const { provisionTestDatabases, dropTestDatabases } =
+      await import("../../apps/control-plane/src/test/test-database-provisioning.js");
+    const { databaseUrlWithName, testWorkerDatabaseName } =
+      await import("../../apps/control-plane/src/test/test-database-names.js");
+    const adminUrl =
+      process.env.SPACEFAST_TEST_DATABASE_ADMIN_URL ??
+      "postgres://stattic:stattic@127.0.0.1:25432/stattic";
+    const runId = randomBytes(6).toString("hex");
+    await provisionTestDatabases({
+      adminUrl,
+      migrationsFolder: path.resolve(import.meta.dir, "../../apps/control-plane/drizzle"),
+      runId,
+      workerCount: 1,
+    });
+    process.env.SPACEFAST_TEST_DATABASE_URL = databaseUrlWithName(
+      adminUrl,
+      testWorkerDatabaseName(runId, 1),
+    );
+    process.env.SPACEFAST_TEST_REDIS_URL =
+      process.env.SPACEFAST_TEST_REDIS_ADMIN_URL ?? "redis://127.0.0.1:26379";
+    cleanup.defer(() => dropTestDatabases({ adminUrl, runId, workerCount: 1 }));
+  }
+  const runtimeBinary = process.env.SPACEFAST_RUNTIME_BIN;
+  await import("../../apps/control-plane/src/test-env.js");
+  if (runtimeBinary !== undefined) process.env.SPACEFAST_RUNTIME_BIN = runtimeBinary;
+  const { createApp } = await import("../../apps/control-plane/src/app.js");
+  const { db } = await import("../../apps/control-plane/src/db/client.js");
+  const { seedSpaceWithKey, cleanupSpaceWithKey } =
+    await import("../../apps/control-plane/src/test/seed.js");
+  const { createMachineCredential, revokeMachineCredential } =
+    await import("../../apps/control-plane/src/access/credentials.js");
+  const { loadAccessBrokerTargetCredential } =
+    await import("../../apps/control-plane/src/access/broker-target.js");
+  const { runtimeExchangeCredential } =
+    await import("../../apps/control-plane/src/access/runtime-exchange.js");
+  const { ensureSpaceDefaultHostname } =
+    await import("../../apps/control-plane/src/runtime/hostname-identity.js");
+  const { runtimeJwtPrivateKeyFromEnv } =
+    await import("../../apps/control-plane/src/runtime/jwt-key-material.js");
+  const { ACCESS_TOKEN_KID } = await import("@spacefast/common/contracts/access");
+  const app = createApp();
+  await app.modules;
+  const centralExchange = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request) => app.request(request),
+  });
+  cleanup.defer(() => centralExchange.stop(true));
+  const seed = await seedSpaceWithKey("runtime-machine-header");
+  cleanup.defer(() => cleanupSpaceWithKey(seed));
+  const { hostname } = await ensureSpaceDefaultHostname(seed.spaceId);
+  const brokerTarget = await loadAccessBrokerTargetCredential(db, seed.spaceId);
+  const machine = await createMachineCredential({
+    spaceId: seed.spaceId,
+    credential: {
+      name: "Private docs agent",
+      resources: { include: ["/docs/**"], exclude: [] },
+      capabilities: ["page.view"],
+      target: { kind: "live" },
+      constraints: {},
+    },
+  });
+  const space = await db.query.spaces.findFirst({
+    where: (spaces, { eq }) => eq(spaces.id, seed.spaceId),
+  });
+  if (!space) throw new Error("machine header fixture Space is missing");
+  const config = accessConfig({
+    spaceId: seed.spaceId,
+    generation: space.accessGeneration,
+    grants: [
+      { ...machine.credential.grant.grant, generation: machine.credential.grant.generation },
+    ],
+    accessPage: {
+      accountUrl: null,
+      connections: [],
+      exchange: {
+        passwordUrl: `${centralExchange.url}acquire/${encodeURIComponent(brokerTarget)}/password`,
+        tokenUrl: `${centralExchange.url}acquire/${encodeURIComponent(brokerTarget)}/token`,
+        requestUrl: `${centralExchange.url}acquire/${encodeURIComponent(brokerTarget)}/request`,
+        credential: runtimeExchangeCredential(seed.spaceId),
+      },
+    },
+  });
+  const publicJwk = createPublicKey(runtimeJwtPrivateKeyFromEnv()).export({ format: "jwk" });
+  config.visitor_jwks = {
+    keys: [
+      {
+        ...publicJwk,
+        kid: ACCESS_TOKEN_KID,
+        alg: "EdDSA",
+        use: "sig",
+        kty: "OKP",
+        crv: "Ed25519",
+        x: publicJwk.x ?? "",
+      },
+    ],
+  };
+  await deploy(runtime, {
+    spaceId: seed.spaceId,
+    versionId: `ver_${randomBytes(12).toString("hex")}`,
+    files: { "docs/index.html": "private machine docs", "admin/index.html": "private admin" },
+    activate: {
+      route_name: "production",
+      production_hostnames: [hostname],
+      config,
+    },
+  });
+  const machineHeaders = { "x-sf-authorization": `Bearer ${machine.token}` };
+  const opened = await get(runtime, hostname, "/docs/", { headers: machineHeaders });
+  expect(opened.status, await opened.clone().text()).toBe(200);
+  expect(await opened.text()).toBe("private machine docs");
+  expect(opened.headers.get("set-cookie")).toBeNull();
+  const outside = await get(runtime, hostname, "/admin/", { headers: machineHeaders });
+  expect(outside.status).toBe(403);
+  expect(await outside.text()).not.toContain("private admin");
+  await revokeMachineCredential({ spaceId: seed.spaceId, credentialId: machine.credential.id });
+  const revoked = await get(runtime, hostname, "/docs/", { headers: machineHeaders });
+  expect(revoked.status).toBe(403);
+  expect(await revoked.text()).not.toContain("private machine docs");
 });
 
 test("revoking the Grant behind a link closes the sessions it opened", async () => {

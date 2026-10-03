@@ -1730,6 +1730,13 @@ fn compile_trunk_zero(
         .iter()
         .find(|diagnostic| diagnostic.severity == RuntimeDiagnosticSeverity::Error)
     {
+        if error.code == "zero_migrations_too_many" {
+            return Err(FinalizeError::Invalid {
+                code: "zero_migrations_too_many",
+                message: error.message.clone(),
+                details: error.details.clone().map(Value::Object),
+            });
+        }
         let code = match error.code.as_str() {
             "zero_endpoint_duplicate" => "zero_endpoint_duplicate",
             _ => "zero_endpoint_compile_failed",
@@ -3354,9 +3361,66 @@ mod tests {
             crypto_keys: Vec::new(),
             db: None,
         }];
+        // CREATE carries the current schema; ALTER also updates an existing table.
+        // Repeated endpoint/run metadata must count once across the whole artifact.
+        let mut tables = Map::new();
+        let mut operations = Vec::new();
+        for index in 0..64 {
+            let name = format!("items{index}");
+            tables.insert(
+                name.clone(),
+                json!({
+                    "physicalName": format!("synthetic_{name}"),
+                    "primaryKey": "id",
+                    "columns": {
+                        "id": {"physicalName": "id", "type": "number"},
+                        "createdAt": {"physicalName": "created_at", "type": "string"},
+                        "updatedAt": {"physicalName": "updated_at", "type": "string"},
+                        "title": {"physicalName": "title", "type": "string"}
+                    }
+                }),
+            );
+            for column in ["createdAt", "updatedAt", "title"] {
+                operations.push(json!({
+                    "op": "add_column", "table": name,
+                    "column": {"name": column, "type": "string"}
+                }));
+            }
+        }
+        let db = json!({"tables": tables, "migrationOperations": operations});
+        input.zero_endpoints[0].db = Some(db.clone());
+        input.zero_runs[0].db = Some(db);
+
+        let mut oversized = input.clone();
+        oversized.zero_runs[0].db.as_mut().unwrap()["tables"]["extra"] = json!({
+            "physicalName": "synthetic_extra", "columns": {"id": "id"}
+        });
+        let error = finalize_site(oversized, false).unwrap_err();
+        match error {
+            FinalizeError::Invalid {
+                code,
+                message,
+                details,
+            } => {
+                assert_eq!(code, "zero_migrations_too_many");
+                assert_eq!(message, "Zero migrations require 257 unique SQL statements; the limit is 256. Reduce the schema or migration changes before publishing.");
+                assert_eq!(
+                    details,
+                    Some(json!({"statementCount": 257, "statementLimit": 256}))
+                );
+            }
+            other => panic!("expected migration capacity error, got {other:?}"),
+        }
+        assert!(!private.join("spaces/s/versions/v").exists());
+
         let output = finalize_site(input, false).unwrap();
         assert_eq!(output.zero_endpoint_count, 1);
         let version = private.join("spaces/s/versions/v");
+
+        let migrations: Value =
+            serde_json::from_slice(&fs::read(version.join("zero/migrations.json")).unwrap())
+                .unwrap();
+        assert_eq!(migrations["statements"].as_array().unwrap().len(), 256);
 
         let endpoint_index: Value =
             serde_json::from_slice(&fs::read(version.join("zero/endpoints-index.json")).unwrap())

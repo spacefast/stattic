@@ -163,6 +163,13 @@ curl -H "X-SF-Authorization: Bearer $SPACEFAST_TOKEN" \
   https://your-space.spacefast.app/wp-json/wp/v2/posts
 ```
 
+The `sfm_` token returned by `sf share token create` works directly in this
+header for private pages and Zero requests. No separate exchange call is needed.
+Its Grant must cover the requested path and serving target. Zero writes also
+require the corresponding write capability. The runtime exchanges the token for
+a short-lived host-bound proof and checks the current Grants for each request.
+Keep the token out of URLs.
+
 Discovery is WordPress's own: `/wp-json/` is a self-describing index, and every collection
 publishes its schema at `OPTIONS /wp-json/wp/v2/<collection>`.
 

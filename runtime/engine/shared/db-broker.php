@@ -33,7 +33,8 @@ require_once __DIR__ . '/finalizer-protocol.generated.php';
 // STATTIC_DB_OPERATION_MAX_BYTES, _PARAM_MAX_COUNT, _TRANSACTION_MAX_STATEMENTS,
 // _RESULT_ROWS_MAX and _SESSION_PIN are the shared half of that contract and
 // arrive generated from db.rs (finalizer-protocol.generated.php). The rest of
-// the tuning below is this engine's alone.
+// the tuning below is this engine's alone. The migration statement cap is also
+// generated, from the native compiler's artifact admission bound.
 
 // Server-side prepared statements are a finite server resource
 // (`max_prepared_stmt_count` is global, not per-connection), so the
@@ -41,11 +42,6 @@ require_once __DIR__ . '/finalizer-protocol.generated.php';
 // closing them. A capsule store issues a small, repetitive statement set, so a
 // modest cache runs at a high hit rate.
 const STATTIC_DB_STMT_CACHE_MAX = 32;
-
-// A capsule's whole schema in one artifact. Well past what the compiler emits
-// for any real store, and low enough that a malformed artifact stops here
-// rather than after a few thousand DDL round trips.
-const STATTIC_DB_MIGRATION_STATEMENTS_MAX = 256;
 
 /**
  * Process-wide broker state, returned by reference so callers mutate the one

@@ -93,6 +93,9 @@ pub const ZERO_BUNDLE_MAX_BYTES: usize = 786_432;
 pub const ZERO_BUNDLE_LIMIT: usize = 8;
 pub const ZERO_STATIC_FILE_LIMIT: usize = 16;
 pub const ZERO_ENTRY_LIMIT: usize = 128;
+/// Unique SQL statements in one compiled migrations artifact. The PHP broker
+/// applies them synchronously, so compile admission must hold its migration work bound.
+pub const ZERO_MIGRATION_STATEMENTS_MAX: usize = 256;
 pub const ZERO_SOURCE_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const ZERO_ID_MAX_CHARS: usize = 256;
 pub const ZERO_ROUTE_PATH_MAX_CHARS: usize = 2_048;
@@ -640,6 +643,7 @@ pub struct FinalizerLimitMetadata {
     pub zero_bundle_limit: usize,
     pub zero_static_file_limit: usize,
     pub zero_entry_limit: usize,
+    pub zero_migration_statements_max: usize,
     pub zero_source_max_bytes: usize,
     pub zero_id_max_chars: usize,
     pub zero_route_path_max_chars: usize,
@@ -815,6 +819,7 @@ pub fn metadata() -> FinalizerProtocolMetadata {
             zero_bundle_limit: ZERO_BUNDLE_LIMIT,
             zero_static_file_limit: ZERO_STATIC_FILE_LIMIT,
             zero_entry_limit: ZERO_ENTRY_LIMIT,
+            zero_migration_statements_max: ZERO_MIGRATION_STATEMENTS_MAX,
             zero_source_max_bytes: ZERO_SOURCE_MAX_BYTES,
             zero_id_max_chars: ZERO_ID_MAX_CHARS,
             zero_route_path_max_chars: ZERO_ROUTE_PATH_MAX_CHARS,
@@ -888,11 +893,12 @@ pub fn php_source() -> String {
     // `shared/db-broker.php` is specified against. Emitted under the engine's
     // own spelling so the PHP file consumes them where it used to restate them.
     let db_broker = format!(
-        "\nconst STATTIC_DB_OPERATION_MAX_BYTES = {};\nconst STATTIC_DB_PARAM_MAX_COUNT = {};\nconst STATTIC_DB_TRANSACTION_MAX_STATEMENTS = {};\nconst STATTIC_DB_RESULT_ROWS_MAX = {};\nconst STATTIC_DB_SESSION_PIN = {};\n",
+        "\nconst STATTIC_DB_OPERATION_MAX_BYTES = {};\nconst STATTIC_DB_PARAM_MAX_COUNT = {};\nconst STATTIC_DB_TRANSACTION_MAX_STATEMENTS = {};\nconst STATTIC_DB_RESULT_ROWS_MAX = {};\nconst STATTIC_DB_MIGRATION_STATEMENTS_MAX = {};\nconst STATTIC_DB_SESSION_PIN = {};\n",
         stattic_zero_runner::DB_OPERATION_MAX_BYTES,
         stattic_zero_runner::DB_PARAM_MAX_COUNT,
         stattic_zero_runner::DB_TRANSACTION_MAX_STATEMENTS,
         stattic_zero_runner::DB_RESULT_ROWS_MAX,
+        ZERO_MIGRATION_STATEMENTS_MAX,
         php_single_quoted(stattic_zero_runner::DB_SESSION_PIN),
     );
     let platform_owned_prefixes = php_string_array(PLATFORM_OWNED_HEADER_PREFIXES);

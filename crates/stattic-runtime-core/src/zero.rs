@@ -11,6 +11,7 @@ use crate::finalize::sha256;
 use crate::hash::{sha256_prefixed, stable_json_sha256};
 use crate::metadata::artifact_metadata_fields;
 use crate::model::*;
+use crate::protocol::ZERO_MIGRATION_STATEMENTS_MAX;
 use crate::route_inventory::is_zero_control_path;
 
 pub(crate) struct CompiledZeroEndpoints {
@@ -396,7 +397,21 @@ pub(crate) fn compile_zero_endpoints(
             fallback,
         });
     }
-    if !migration_statements.is_empty() {
+    if migration_statements.len() > ZERO_MIGRATION_STATEMENTS_MAX {
+        let count = migration_statements.len();
+        diagnostics.push(RuntimeDiagnostic {
+            severity: RuntimeDiagnosticSeverity::Error,
+            code: "zero_migrations_too_many".to_string(),
+            message: format!(
+                "Zero migrations require {count} unique SQL statements; the limit is {ZERO_MIGRATION_STATEMENTS_MAX}. Reduce the schema or migration changes before publishing."
+            ),
+            path: None,
+            details: Some(serde_json::Map::from_iter([
+                ("statementCount".to_string(), json!(count)),
+                ("statementLimit".to_string(), json!(ZERO_MIGRATION_STATEMENTS_MAX)),
+            ])),
+        });
+    } else if !migration_statements.is_empty() {
         let metadata = artifact_metadata_fields(artifact_metadata);
         compiled.zero_migrations = Some(ZeroMigrationsArtifact {
             runtime_schema: metadata.runtime_schema,

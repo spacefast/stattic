@@ -1,7 +1,7 @@
 {
-  "revision": "87bafb69c4d040beb177f5e715714d147bee86c3",
-  "sourceHash": "0c87024ee542f012cfdc1a347b5569eda21e37acfcd20b6ffb5ab2224960093a",
-  "manifestSha256": "e32ca8d04548fa155425cd7b2ce2cbf6faf69bcb69eecd13ae03c9d6f0ca198d",
+  "revision": "fb2e4b490301dcb18bdd25ee609f1b7698a96ebf",
+  "sourceHash": "c94853acdbd86cd238ce5760a08117d0ae6b540c8b420304578ef9cfce62304a",
+  "manifestSha256": "973cdc569217bdacdad3c7eba45bec46f1270c0eea375f0eb43d5740b87e0f9b",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "2192fe9863f1a2831cadd467037290e6d0033755812247e286dd97e46a0d735b"
+      "sha256": "1627299fb528e06affaf01487c256f809456e44dad46b2b2641f2f6cb8d79bce"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "e6404a6a2adb63a9f29029835f5e325e70b50342953e7bd3619e02b149592a7d"
+      "sha256": "6cc965bf6fceb8a4f5e7bf7e37a1459e3c53dfe173a53b018eb74d9ea181c475"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -161,7 +161,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/protocol.rs",
-      "sha256": "cfeb7f04f4c162ad48998f403c8c97872602c28f3cf4567b3a6a30469d4a7d9f"
+      "sha256": "40773220bac8cdb0fb5c75221c3d411ff7301b91acc0a710aee058945654f487"
     },
     {
       "path": "crates/stattic-runtime-core/src/responses.rs",
@@ -197,7 +197,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "b0d3824ce25796609b9e0f98a289f0009d5dbf4987116b3c0f40e003e3b54c3d"
+      "sha256": "8cf2f951a38d9e2c703433bc53057191866ade4941324cb626aa1058c0868da1"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -229,7 +229,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/zero.rs",
-      "sha256": "f58c5762931b328429a98ca60253ae4ed98bab9c6c1cb314783b445d61afbd84"
+      "sha256": "10979e2fa4c8a161f5074e3249885eb0b46c0eb638809f5f012aa9da886d742f"
     },
     {
       "path": "crates/stattic-runtime-core/tests/prepare_fixtures.rs",
@@ -353,7 +353,7 @@
     },
     {
       "path": "runtime/README.md",
-      "sha256": "c9bf1e97db2751249cf6cc8a4836578b633a85779597f0585378bd4ced284303"
+      "sha256": "edd51e58c008f20e2935d6b402cd4b2717a8bdccb9c016ba61294d1c29eff09c"
     },
     {
       "path": "runtime/SKILL.md",
@@ -657,7 +657,7 @@
     },
     {
       "path": "runtime/engine/shared/db-broker.php",
-      "sha256": "f0985e59dc6f7bff6df794fa1af3873a6675d208b1dff425f0e4397e6936251e"
+      "sha256": "11effbad8a4182d5ba45fb188325a40def337e7103ceecce3f27e3f2eee5d40c"
     },
     {
       "path": "runtime/engine/shared/egress.php",
@@ -669,7 +669,7 @@
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
-      "sha256": "59baf3fe62881ef651718cb798b9307b68732a9300a2850f313f0755cf30e9e5"
+      "sha256": "e68b0b630463984739e0b5230b2e797844c2343b858e04a871ceec7c9c67e918"
     },
     {
       "path": "runtime/engine/shared/functions-wire.generated.php",
@@ -849,7 +849,7 @@
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "cddb19d6f383c02a57d7c6561d58f1bd5e33c69a415c628af6e5e8330c59a8aa"
+      "sha256": "5ac4541c085be808847cd59bfa839d1165a8eedaac14a0993a1fefbda4bf5975"
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
@@ -968,6 +968,10 @@
       "sha256": "9e9b6764c580198b1b3e2359db6bb479925fb1112d6ca4e38a0bc2a644e348d5"
     },
     {
+      "path": "runtime/tests/db-broker-admission.test.ts",
+      "sha256": "735e29ab39ad705ac7ef374fb7b1b74b7ef30f9571929fc0c7b81e9fc45c63aa"
+    },
+    {
       "path": "runtime/tests/db-broker-bench.php",
       "sha256": "c8d3a9900945eaad0ed4ff8fe79f1f59af8adf5736e7b58f9490edbcacb88a23"
     },
@@ -985,7 +989,7 @@
     },
     {
       "path": "runtime/tests/db-broker.test.ts",
-      "sha256": "8cd3b8005084dc78907a5e18e984b201e0a202b1ca42d3c20e1a35dc354de6d3"
+      "sha256": "b30cc1dcaca243e8ae25631b85e0b785af394d88ec1765959bbbf978d0853dd6"
     },
     {
       "path": "runtime/tests/dispatch.test.ts",
@@ -1293,7 +1297,7 @@
     },
     {
       "path": "scripts/check-finalizer-protocol.mjs",
-      "sha256": "75816c82e1a05bc8b59082a765aeaafc2ce96475797309d7ee773bf42ed25265"
+      "sha256": "0e18731f4cc214da90fbef59de8ed0220191f7198146cf9b9b4595768de61376"
     }
   ]
 }

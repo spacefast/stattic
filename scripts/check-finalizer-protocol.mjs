@@ -107,6 +107,10 @@ try {
   const constants = phpConstants(phpFile.source);
 
   const sharedContracts = [
+    {
+      name: "STATTIC_DB_MIGRATION_STATEMENTS_MAX",
+      read: (p) => p.limits.zeroMigrationStatementsMax,
+    },
     { name: "STATTIC_RUNTIME_EGRESS_MAX_REDIRECT_HOPS", read: (p) => p.egress.maxRedirectHops },
     {
       name: "STATTIC_RUNTIME_EGRESS_TENANT_FETCH_ALLOWED_SCHEMES",

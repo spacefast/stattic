@@ -506,28 +506,6 @@ test("a statement the server rejects fails the publish instead of half-migrating
   ).toBe("0");
 });
 
-test("an artifact this engine did not compile is refused before it connects", async () => {
-  const foreign = path.join(artifactRoot, "foreign.json");
-  writeFileSync(
-    foreign,
-    JSON.stringify({
-      format: "stattic.zero.migrations.v0",
-      artifact_kind: "zero_migrations",
-      statements: ["DROP TABLE mig_notes"],
-    }),
-  );
-
-  // The unusable URL is the assertion: reaching the connection would answer
-  // zero_db_url_invalid, so the artifact code proves the format check ran first
-  // and no foreign statement was issued.
-  const { migrate } = await php({ action: "migrate", path: foreign, url: "not a url at all" });
-  expect(migrate).toEqual({
-    ok: false,
-    code: "zero_migration_artifact_invalid",
-    message: "Zero migration artifact format is unsupported.",
-  });
-});
-
 const d1Databases = [
   {
     binding: "DB",

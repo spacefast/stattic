@@ -193,7 +193,11 @@ $wpdb = new class {
   private array $snapshot = [];
   public function prepare(string $query, mixed ...$values): string { return $query; }
   public function get_var(string $query): mixed { return null; }
-  public function query(string $query): int {
+  public function query(string $query): int|false {
+    if ($query === 'COMMIT' && !empty($GLOBALS['failNextCommit'])) {
+      $GLOBALS['failNextCommit'] = false;
+      return false;
+    }
     if ($query === 'START TRANSACTION') $this->snapshot = [$GLOBALS['posts'], $GLOBALS['meta']];
     if ($query === 'ROLLBACK' && $this->snapshot !== []) [$GLOBALS['posts'], $GLOBALS['meta']] = $this->snapshot;
     return 1;
@@ -292,6 +296,7 @@ export type Step =
       invalidDigest?: boolean;
     }
   | { op: "inspectPage" }
+  | { op: "inspectReceipts" }
   | { op: "removePage"; prepareOnly?: boolean }
   | { op: "commitPage"; stale?: boolean }
   | {
@@ -337,7 +342,7 @@ export type Step =
   | { op: "lookupPage"; adopt?: boolean }
   // `post` materializes the editor-created document; `binding` is the
   // compile-class takeover, which names the binding instead.
-  | { op: "materialize"; target: "post" | "binding" };
+  | { op: "materialize"; target: "post" | "binding"; failCommit?: boolean };
 
 export type SyncLedger = {
   version: 1;
@@ -397,6 +402,8 @@ type DriverReceipt = {
   ledger?: SyncLedger;
   activeRevision?: string;
   html?: string;
+  receiptCount?: number;
+  receiptBytes?: number;
 };
 
 type SyncRepresentation = { text: string; digest: string; revision: string };
@@ -445,9 +452,13 @@ $steps = json_decode(${JSON.stringify(JSON.stringify(steps))}, true);
 $results = [];
 $op = 0;
 $lastLedgerRevision = null;
+$lastLedgerText = null;
 foreach ($steps as $step) {
   // "@previous" chains a step onto the ledger the step before it produced,
   // which is what a real caller does with the revision from its last receipt.
+  if (($step['text'] ?? null) === '@previous') {
+    $step['text'] = $lastLedgerText ?? '';
+  }
   if (($step['baseRevision'] ?? null) === '@previous') {
     $step['baseRevision'] = $lastLedgerRevision ?? 'unset';
   }
@@ -517,6 +528,15 @@ foreach ($steps as $step) {
       $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'committed']];
       continue;
     }
+    if ($step['op'] === 'inspectReceipts') {
+      $binding = spacefast_content_model_sync_binding(${JSON.stringify(BINDING)});
+      $post = spacefast_content_sync_find_post(${JSON.stringify(BINDING)}, $binding, false);
+      $book = get_post_meta((int) $post->ID, SPACEFAST_CONTENT_SYNC_RECEIPT_META, true);
+      $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'inspected',
+        'receiptCount' => count($book), 'receiptBytes' => strlen(serialize($book)),
+      ]];
+      continue;
+    }
     if ($step['op'] === 'inspectPage') {
       $originalModel = require ${JSON.stringify(path.join(releaseDir, "content-model.php"))};
       $binding = spacefast_content_model_sync_binding(${JSON.stringify(TSX_BINDING)}) ?? $originalModel['syncBindings'][1];
@@ -577,6 +597,7 @@ foreach ($steps as $step) {
       continue;
     }
     if ($step['op'] === 'materialize') {
+      $GLOBALS['failNextCommit'] = $step['failCommit'] ?? false;
       $op++;
       // Verbatim the body \`materializeRuntimeContentSource\` sends: the
       // operation, the post, the operation id, and \`bindingId\` only on the
@@ -624,6 +645,7 @@ foreach ($steps as $step) {
     $receipt = spacefast_content_handle_request($request);
     if (isset($receipt['ledger']['revision'])) {
       $lastLedgerRevision = $receipt['ledger']['revision'];
+      $lastLedgerText = $receipt['ledger']['baseText'];
     }
     $results[] = ['ok' => true, 'receipt' => $receipt];
   } catch (Spacefast_Content_Conflict $conflict) {

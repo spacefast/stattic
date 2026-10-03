@@ -1,7 +1,7 @@
 {
-  "revision": "b2fd62b9136472a675d40c80ccaedc87c77c8899",
-  "sourceHash": "deb1f0fcb7ced97f4d204580160e13a396fecbf80a50995638511ef3b59444f5",
-  "manifestSha256": "7d9612eab875da7f374afa85013e0a8e49e6baf1e83e9c8ff6a90aeee6a5f78e",
+  "revision": "634b19f2333a7914fc91ff9f70e74ee8408742b6",
+  "sourceHash": "cb2d11a970f87c591468d267209a2a00f1075fd61e3154102b791d4d2ea43417",
+  "manifestSha256": "5227a44cac2f0c335d28480beb4a87101b1be223de83c93f11e0d01ee9f6a4fe",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "ed6e369f6656c2fdb3d66a9252e4d750546ffd9c9c8262127ab5f9895bff1b6a"
+      "sha256": "eff036ae8329f37ef218e1c11345702ada01c4c8a2973a94f1fb2fdb7db91e94"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "2b350c7df149a29507dd9b32ed663556aada387aaeb3c5a92a18bb5fc9833a7c"
+      "sha256": "950c1924296bfdd5c64b1d421c28854f98953df31e4805ca23cc446529f27a7c"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -197,7 +197,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "8cf2f951a38d9e2c703433bc53057191866ade4941324cb626aa1058c0868da1"
+      "sha256": "fd98f64f0282c0062afb2de2d78d6e20a0e4f1a4efb1a4978c367e37349a1dce"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -793,7 +793,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-source-sync.php",
-      "sha256": "b23db1f443ce551b696c2bae6dfe5086686eb4bb1d83c4f0d1d31690984510ca"
+      "sha256": "5e2fe6e57efd84551699aaaa6c316ec62470c440fdcd3aa72f340d6bbe9edd61"
     },
     {
       "path": "runtime/engine/wordpress/content-storage.php",
@@ -937,7 +937,7 @@
     },
     {
       "path": "runtime/tests/content-source-sync.test.ts",
-      "sha256": "30075caacf451f5f6d98731c2adb762a76330fbe7090f99272b138ff33d6b34d"
+      "sha256": "ac6ee7910246e41d68b0f804babfa55f62306c0ccf0532f7e5e8d90c89bb248b"
     },
     {
       "path": "runtime/tests/content-storage-upload.test.ts",
@@ -949,7 +949,7 @@
     },
     {
       "path": "runtime/tests/content-sync.test-helper.ts",
-      "sha256": "62099f777b97d00045b4937adaf839e7f12f31e6076149f002179b346a7493c4"
+      "sha256": "9129c946677e56675d2dd0b3087795a3711cf6181da7881dedbe48382dc86ef5"
     },
     {
       "path": "runtime/tests/content-type-policy.test.ts",
@@ -1137,7 +1137,7 @@
     },
     {
       "path": "runtime/tests/provenance-serving.test.ts",
-      "sha256": "347e19749f065b78892764a92f661ff744a2485f263811862f933b67c32e8577"
+      "sha256": "61d50f3b600011ca310fec8dc9012cf040a0daa851643baf78a8655c5b1cbd17"
     },
     {
       "path": "runtime/tests/proxy-cache-upstream.test.ts",

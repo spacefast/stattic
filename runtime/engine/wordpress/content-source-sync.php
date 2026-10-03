@@ -36,14 +36,15 @@ require_once __DIR__ . '/../shared/canonical-json.php';
 const SPACEFAST_CONTENT_SYNC_LEDGER_META = '_spacefast_source_sync_ledger_v1';
 const SPACEFAST_CONTENT_SYNC_RECEIPT_META = '_spacefast_source_sync_receipts_v1';
 /**
- * How many operation receipts one binding keeps. Receipts exist so a retried
+ * Limits for the operation receipt book one binding keeps. A retried
  * operationId replays its answer instead of re-running the write, and a retry
- * ladder lives seconds — never dozens of operations. Keeping them in one
- * bounded row rather than a row per operationId matters because WordPress
- * primes a post's entire meta cache on first access, so an unbounded pile
- * would tax every content operation on that post, not just the sync.
+ * ladder lives seconds — never dozens of operations. Bound both the count and
+ * serialized bytes: WordPress primes a post's entire meta cache on first
+ * access, so an unbounded pile would tax every content operation on that post,
+ * not just the sync.
  */
 const SPACEFAST_CONTENT_SYNC_RECEIPT_LIMIT = 20;
+const SPACEFAST_CONTENT_SYNC_RECEIPT_MAX_BYTES = 4 * 1024 * 1024;
 const SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX = 'source:';
 const SPACEFAST_CONTENT_SYNC_SERIALIZER_VERSION = 1;
 const SPACEFAST_CONTENT_SYNC_MAX_TEXT_BYTES = 1000000;
@@ -773,8 +774,29 @@ function spacefast_content_sync_store_receipt(int $postId, string $operationId, 
     // eviction order rather than letting a still-live operation age out.
     unset($receipts[$key]);
     $receipts[$key] = $receipt;
-    if (count($receipts) > SPACEFAST_CONTENT_SYNC_RECEIPT_LIMIT) {
-        $receipts = array_slice($receipts, -SPACEFAST_CONTENT_SYNC_RECEIPT_LIMIT, null, true);
+    $ledger = spacefast_content_sync_ledger($postId);
+    while (count($receipts) > SPACEFAST_CONTENT_SYNC_RECEIPT_LIMIT
+        || strlen(serialize($receipts)) > SPACEFAST_CONTENT_SYNC_RECEIPT_MAX_BYTES) {
+        $evicted = false;
+        foreach ($receipts as $candidateKey => $candidate) {
+            // The current pull is the acknowledgement's durable prerequisite.
+            // Later no-op reconciles must not evict it while its base is live.
+            $pending = ($candidate['status'] ?? null) === 'pulled'
+                && is_array($ledger)
+                && ($candidate['ledger']['revision'] ?? null) === $ledger['revision'];
+            if ($candidateKey === $key || $pending) continue;
+            unset($receipts[$candidateKey]);
+            $evicted = true;
+            break;
+        }
+        if (!$evicted && count($receipts) <= SPACEFAST_CONTENT_SYNC_RECEIPT_LIMIT) {
+            // WordPress-generated text is not bounded by the caller input limit.
+            // Keep exact active payloads; the byte budget bounds their history.
+            break;
+        }
+        if (!$evicted) {
+            throw new Spacefast_Content_Error(500, 'content_write_failed', 'The pending source receipts exceed the receipt storage limit.');
+        }
     }
     update_post_meta($postId, SPACEFAST_CONTENT_SYNC_RECEIPT_META, $receipts);
 }
@@ -1179,7 +1201,9 @@ function spacefast_content_materialize_source(array $request): array
     $input = spacefast_content_sync_parse_materialize($request);
     return spacefast_content_sync_without_journal(
         static fn (): array => spacefast_content_sync_locked(
-            static fn (): array => spacefast_content_sync_materialize_locked($input)
+            static fn (): array => spacefast_content_sync_with_transaction(
+                static fn (): array => spacefast_content_sync_materialize_locked($input)
+            )
         )
     );
 }
@@ -1271,6 +1295,7 @@ function spacefast_content_sync_materialize_locked(array $input): array
 {
     $post = $input['post'];
     $postId = (int) $post->ID;
+    spacefast_content_sync_lock_post($postId);
     // Idempotence, layer two: a retried operationId replays its first answer
     // rather than deriving a second one against content that has since moved.
     $replayed = spacefast_content_sync_receipt($postId, $input['operationId']);

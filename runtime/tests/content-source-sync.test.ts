@@ -455,20 +455,21 @@ test("a prepared source write is acknowledged, and only against the ledger it ca
   expect(problem(stale).code).toBe("content_sync_stale_acknowledgement");
 });
 
-test("the receipt book is bounded, so the oldest operation stops replaying", async () => {
-  const source = "# Launch\n\nThe first paragraph.\n";
+test("the receipt book bounds storage while retaining a pending source acknowledgement", async () => {
+  const source = "# Launch\n\n" + "Long paragraph. ".repeat(40_000) + "\n";
   const edit = {
     op: "editInWordPress",
-    blocks: "<!-- wp:paragraph -->\n<p>Edited in WordPress.</p>\n<!-- /wp:paragraph -->\n",
+    blocks:
+      '<!-- wp:heading {"level":1} -->\n<h1 class="wp-block-heading" id="launch">Launch</h1>\n<!-- /wp:heading -->\n\n<!-- wp:paragraph -->\n<p>' +
+      "Long paragraph. ".repeat(40_000) +
+      "</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>Edited in WordPress.</p>\n<!-- /wp:paragraph -->\n",
   } as const;
-  // One more reconcile than the book holds, each with its own operationId, so
-  // the pull's receipt is the entry pushed out. Nothing else about the binding
-  // changes across them: same source, same WordPress content, so the ledger
-  // revision holds still and only the receipt book moves.
+  // Distinct no-op reconciles exceed the byte cap without moving the ledger.
+  // The prepared source acknowledgement must survive that storage pressure.
   const fill = Array.from({ length: 20 }, () => ({
     op: "reconcile" as const,
     state: "bound" as const,
-    text: source,
+    text: "@previous",
     baseRevision: "@previous",
   }));
 
@@ -479,13 +480,61 @@ test("the receipt book is bounded, so the oldest operation stops replaying", asy
     // Acknowledging op 2 while it is still held proves the eviction below is
     // the book filling up, not the acknowledgement being wrong to begin with.
     { op: "acknowledge", baseRevision: "@previous", ackOp: 2 },
-    ...fill,
+    ...fill.slice(0, 5),
+    { op: "inspectReceipts" },
+    { op: "acknowledge", baseRevision: "@previous", ackOp: 2 },
+    ...fill.slice(5),
+    { op: "inspectReceipts" },
+    { op: "acknowledge", baseRevision: "@previous", ackOp: 2 },
+    {
+      op: "reconcile",
+      state: "bound",
+      text: source + "New source line.\n",
+      baseRevision: "@previous",
+    },
+    { op: "inspectReceipts" },
     { op: "acknowledge", baseRevision: "@previous", ackOp: 2 },
   ]);
 
   expect(receipt(results[2]).status).toBe("pulled");
   expect(receipt(results[3]).status).toBe("acknowledged");
+  expect(receipt(results[4]).status).toBe("unchanged");
+  expect(receipt(results[8]).ledger.revision).toBe(receipt(results[2]).ledger.revision);
+  expect(receipt(results[10]).status).toBe("acknowledged");
+  expect(inspected(results[9]).receiptBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+  const book = inspected(results[results.length - 5]);
+  expect(book.receiptBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+  expect(book.receiptCount).toBeGreaterThan(1);
+  expect(book.receiptCount).toBeLessThan(20);
+  expect(receipt(results[results.length - 4]).status).toBe("acknowledged");
+  expect(receipt(results[results.length - 3]).status).toBe("pushed");
+  expect(inspected(results[results.length - 2]).receiptBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
   expect(problem(results[results.length - 1]).code).toBe("content_sync_not_prepared");
+
+  const small = "# Small\n";
+  const countResults = await runScenario("md", [
+    { op: "reconcile", state: "initial", text: small },
+    ...fill.map((step) => ({ ...step, text: small })),
+    { op: "inspectReceipts" },
+  ]);
+  expect(inspected(countResults[countResults.length - 1]).receiptCount).toBe(20);
+
+  const largeBody = "Large WordPress paragraph. ".repeat(90_000);
+  const largePull = await runScenario("md", [
+    { op: "reconcile", state: "initial", text: "Small source.\n" },
+    {
+      op: "editInWordPress",
+      blocks: "<!-- wp:paragraph -->\n<p>" + largeBody + "</p>\n<!-- /wp:paragraph -->\n",
+    },
+    { op: "reconcile", state: "bound", text: "Small source.\n", baseRevision: "@previous" },
+    { op: "inspectReceipts" },
+    { op: "acknowledge", baseRevision: "@previous", ackOp: 2 },
+  ]);
+  expect(receipt(largePull[2]).status).toBe("pulled");
+  expect(receipt(largePull[2]).sourceWrite?.text).toContain(largeBody);
+  expect(inspected(largePull[3]).receiptCount).toBe(1);
+  expect(inspected(largePull[3]).receiptBytes).toBeGreaterThan(4 * 1024 * 1024);
+  expect(receipt(largePull[4]).status).toBe("acknowledged");
 });
 
 // Materialization is the other direction of the same lane: a document WordPress
@@ -512,11 +561,16 @@ function digest(text: string) {
 }
 
 test("an editor-created page materializes once under canonical pages", async () => {
-  const [, first, second] = await runScenario("md", [
-    { op: "createInWordPress", slug: "hello-world", blocks: MARKDOWN_BLOCKS, postType: "page" },
+  const largeBody = "Large WordPress paragraph. ".repeat(180_000);
+  const blocks =
+    MARKDOWN_BLOCKS + "\n<!-- wp:paragraph -->\n<p>" + largeBody + "</p>\n<!-- /wp:paragraph -->\n";
+  const [, failed, first, second] = await runScenario("md", [
+    { op: "createInWordPress", slug: "hello-world", blocks, postType: "page" },
+    { op: "materialize", target: "post", failCommit: true },
     { op: "materialize", target: "post" },
     { op: "materialize", target: "post" },
   ]);
+  expect(problem(failed).code).toBe("content_transaction_failed");
 
   const prepared = materialized(first);
   expect(prepared.status).toBe("materialized");
@@ -527,6 +581,8 @@ test("an editor-created page materializes once under canonical pages", async () 
   expect(prepared.sourceWrite.state).toBe("prepared");
   expect(prepared.sourceWrite.text).toContain("# Hello world");
   expect(prepared.sourceWrite.text).toContain("Written in the editor.");
+  expect(prepared.sourceWrite.text).toContain(largeBody);
+  expect(prepared.sourceWrite.text.length).toBeGreaterThan(4 * 1024 * 1024);
   expect(prepared.sourceWrite.textDigest).toBe(digest(prepared.sourceWrite.text));
 
   // A post that already has a path keeps it: the second call mints nothing.

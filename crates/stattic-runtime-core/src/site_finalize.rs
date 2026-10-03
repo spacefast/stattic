@@ -50,9 +50,9 @@ use crate::prepare::{
 };
 use crate::protocol::{
     ARTIFACT_SCHEMA_VERSION, CONFIG_ACCEPTED_FILES, CONFIG_FILE_MAX_BYTES, CRONS_ARTIFACT_PATH,
-    LOOKUP_ASSET_EXTENSIONS, TEMPLATE_MAX_BYTES, TEMPLATE_VARIANT_FILE_LIMIT,
-    TEMPLATE_VARIANT_ROUTE_LIMIT, TEMPLATE_VARIANT_ROUTE_NAME_MAX_CHARS, THEME_STYLESHEET_PATH,
-    VERSION_ROOT_POINTER_FILE,
+    LOOKUP_ASSET_EXTENSIONS, RESPONSE_ACTION_LISTING, TEMPLATE_MAX_BYTES,
+    TEMPLATE_VARIANT_FILE_LIMIT, TEMPLATE_VARIANT_ROUTE_LIMIT,
+    TEMPLATE_VARIANT_ROUTE_NAME_MAX_CHARS, THEME_STYLESHEET_PATH, VERSION_ROOT_POINTER_FILE,
 };
 use crate::responses::{
     compile_response_table, publish_response_tables, ResponseCompileInput, DENY_ALL_ROBOTS,
@@ -271,9 +271,8 @@ fn readiness_rewrite_status(
 /// Every status the readiness probe may legitimately observe at `request_path`.
 ///
 /// `public` carries the serving context when a public object owns the target.
-/// `None` means the version publishes no public object, so the root IS the
-/// target: an internal rewrite cannot resolve bytes there, and the terminal
-/// answer is 404 rather than 200.
+/// Generated root listings also provide a stable public response. `None` means
+/// the root has no public response; its terminal answer is 404 rather than 200.
 fn readiness_statuses(
     request_path: &str,
     redirects_exact: &Map<String, Value>,
@@ -386,6 +385,7 @@ struct RuntimeReadinessRouting<'a> {
     serving_config: &'a Map<String, Value>,
     fallback: &'a Value,
     zero_routes: &'a [PhpActionRecord],
+    root_listing: bool,
 }
 
 fn runtime_readiness_target(
@@ -400,10 +400,11 @@ fn runtime_readiness_target(
         serving_config,
         fallback,
         zero_routes,
+        root_listing,
     } = routing;
     let lookup = &ReadinessLookup::new(lookup);
-    if public_files.is_empty() {
-        if lookup.action("/").is_none() && zero_route_can_own_root(zero_routes) {
+    if public_files.iter().all(|path| path == "robots.txt") {
+        if !root_listing && lookup.action("/").is_none() && zero_route_can_own_root(zero_routes) {
             return invalid(
                 "runtime_readiness_public_target_unavailable",
                 "A dynamic runtime route owns the readiness root and no stable public object exists.",
@@ -411,7 +412,7 @@ fn runtime_readiness_target(
         }
         return Ok(json!({
             "path":"/",
-            "expected_statuses":readiness_statuses("/", redirects_exact, redirects_pattern, lookup, None)?
+            "expected_statuses":readiness_statuses("/", redirects_exact, redirects_pattern, lookup, root_listing.then_some((serving_config, fallback)))?
         }));
     }
     let selected = public_files
@@ -789,18 +790,6 @@ fn run_finalize_pipeline(
         lookup.insert(path.clone(), json!({"action": "invoke_zero"}));
     }
     let fallback = build_fallback(&serving_config, files, &private);
-    let readiness_target = runtime_readiness_target(
-        files,
-        &public_files,
-        RuntimeReadinessRouting {
-            redirects_exact: &redirects_exact,
-            redirects_pattern: &redirects_pattern,
-            lookup: &lookup,
-            serving_config: &serving_config,
-            fallback: &fallback,
-            zero_routes: &compiled_zero.php_routes,
-        },
-    )?;
     let zero_endpoint_count = compiled_zero.endpoint_artifacts.len();
     let zero_run_count = compiled_zero.run_artifacts.len();
 
@@ -900,6 +889,26 @@ fn run_finalize_pipeline(
             .collect();
         (table, route_tables)
     });
+    let readiness_target = runtime_readiness_target(
+        files,
+        &public_files,
+        RuntimeReadinessRouting {
+            redirects_exact: &redirects_exact,
+            redirects_pattern: &redirects_pattern,
+            lookup: &lookup,
+            serving_config: &serving_config,
+            fallback: &fallback,
+            zero_routes: &compiled_zero.php_routes,
+            root_listing: table.get("/").is_some_and(|entry| {
+                entry
+                    .action
+                    .as_ref()
+                    .and_then(|action| action.get("t"))
+                    .and_then(Value::as_str)
+                    == Some(RESPONSE_ACTION_LISTING)
+            }),
+        },
+    )?;
     // This is the exact predicate serving passes to an unforced rewrite: the
     // finished response table, including generated aliases, listings, PHP
     // functions, and Zero actions. Readiness lookup is intentionally narrower
@@ -2485,6 +2494,21 @@ mod tests {
             finalized_readiness_target(&private),
             json!({"path":"/assets/public%20proof.txt","expected_statuses":[200,302,401,403]})
         );
+        for (listing, expected_statuses) in [
+            (false, json!([302, 401, 403, 404])),
+            (true, json!([200, 302, 401, 403])),
+        ] {
+            let (_temp, private, output) = finalize_fixture(
+                &[("robots.txt", b"User-agent: *\nDisallow: /\n")],
+                json!({"mode":"website"}),
+                json!({"serving":{"config":{"listing":listing}}}),
+            );
+            output.unwrap();
+            assert_eq!(
+                finalized_readiness_target(&private),
+                json!({"path":"/","expected_statuses":expected_statuses})
+            );
+        }
     }
 
     #[test]

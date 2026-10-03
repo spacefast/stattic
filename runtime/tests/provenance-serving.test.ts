@@ -177,6 +177,16 @@ test("every finalized readiness target names a status the serving lane answers",
       location: null,
     },
     {
+      // A robots-only version can still publish a generated root listing.
+      suffix: "robots-listing",
+      files: { "robots.txt": "User-agent: *\nDisallow: /\n" },
+      open: true,
+      serving: { config: { listing: true } },
+      target: { path: "/", expected_statuses: [200, 302, 401, 403] },
+      status: 200,
+      location: null,
+    },
+    {
       // No public object at all: readiness falls back to root, which the
       // nearest-404 chain answers.
       suffix: "no-object",
@@ -193,6 +203,7 @@ test("every finalized readiness target names a status the serving lane answers",
     const versionId = `ver_readiness_${row.suffix.replace(/-/g, "_")}`;
     const hostname = `${row.suffix}-readiness.test`;
     const finalized = await finalizeRaw(rt, spaceId, versionId, row.files, {
+      serving: "serving" in row ? row.serving : undefined,
       activate: {
         route_name: "production",
         config: row.open

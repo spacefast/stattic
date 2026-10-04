@@ -1348,6 +1348,17 @@ function _stattic_v4_dispatch_action(array $context, array $action, array $entry
         }
     }
     if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_ZERO) {
+        // Control routes carry an operation; exact endpoints carry one handler
+        // per method. HEAD uses GET, as in the compiled Zero route index.
+        if (array_key_exists('endpoints', $action)) {
+            $method = (string) $context['method'];
+            $endpoint = $action['endpoints'][$method]
+                ?? ($method === 'HEAD' ? ($action['endpoints']['GET'] ?? null) : null);
+            if (!is_array($endpoint)) {
+                _stattic_render_runtime_invariant_error_lazy('zero-route-metadata-missing', 'Runtime Zero endpoint metadata is missing.');
+            }
+            $action = $endpoint;
+        }
         require_once __DIR__ . '/../shared/admission.php';
         _stattic_admission_acquire_once((string) $context['private_root'], $serving, 'zero');
         require_once __DIR__ . '/zero.php';
@@ -1682,6 +1693,7 @@ function _stattic_runtime_tombstone_page_variant(string $pageId): ?array
         'page_id' => $variant['template_id'],
         'status' => $variant['status'],
         'body' => $variant['body'],
+        'robots' => $variant['robots'],
         'cache_control' => $variant['cache_control'],
     ];
 }
@@ -1705,10 +1717,14 @@ function _stattic_render_platform_action(array $action, bool $privateCache = fal
             'private' => $privateCache,
             'public' => (string) ($action['cache_control'] ?? $variant['cache_control']),
         ]);
+        $headers = ['Cache-Control' => $policy['cache_control']];
+        if ($variant['robots']) {
+            $headers['X-Robots-Tag'] = 'noindex, nofollow';
+        }
         _stattic_render_platform_page_lazy(
             $variant['page_id'],
             $variant['status'],
-            ['Cache-Control' => $policy['cache_control']],
+            $headers,
             $variant['body'],
             $policy['private']
         );

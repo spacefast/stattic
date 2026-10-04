@@ -1062,6 +1062,39 @@ test("the request-invite lane relays centrally and remembers only the requested 
   );
   expect(call?.form.get("email")).toBe("visitor@example.com");
   expect(call?.form.get("message")).toBe("It's me");
+  expect(call?.form.has("accountHint")).toBe(false);
+});
+
+test("the request-invite lane forwards only this browser's hint for the posted address", async () => {
+  const start = await get(runtime, LANES_HOST, "/__spacefast/access/account?return=%2Fdocs%2F");
+  const stateCookie = browserStateCookie(start);
+  const browserState = stateCookie.slice(stateCookie.indexOf("=") + 1);
+  const hint = accountHintToken(browserState);
+  const forwarded = async (body: Record<string, string>, cookie = stateCookie) => {
+    const submitted = await get(runtime, LANES_HOST, "/__spacefast/access/request", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: `https://${LANES_HOST}`,
+        cookie,
+      },
+      body: new URLSearchParams({ return: "/docs/", ...body }),
+    });
+    expect(submitted.status).toBe(303);
+    expect(submitted.headers.get("location")).toBe("/docs/?sf_access=request-pending");
+    const call = exchangeRequests.findLast(
+      (request) => request.pathname === "/acquire/runtime-page/request",
+    );
+    expect(call?.form.get("email")).toBe(body.email);
+    return call?.form.get("accountHint") ?? null;
+  };
+
+  expect(await forwarded({ email: "anne@example.com", account_hint: hint })).toBe(hint);
+  // The platform skips confirming the address on a verified hint, so a copied
+  // hint or another address is dropped and the email flow runs. What makes a
+  // hint verify at all is held by the no-grant page test below.
+  expect(await forwarded({ email: "anne@example.com", account_hint: hint }, "")).toBeNull();
+  expect(await forwarded({ email: "mallory@example.com", account_hint: hint })).toBeNull();
 });
 
 test("an invalid email never leaves this host", async () => {
@@ -1175,6 +1208,102 @@ test("a bounced silent probe renders the page instead of looping", async () => {
   expect(
     lanesHtml.match(/<details\b[^>]*class="[^"]*\bsf-access-request\b[^"]*"[^>]*>/)?.[0],
   ).toMatch(/\sopen(?:\s|>)/);
+});
+
+type AccountHintClaims = {
+  purpose: string;
+  generation: number;
+  email: string;
+};
+
+// Host, audience, and expiry are the shared visitor verifier's checks, held
+// with the redeem handoff; these overrides are what the hint adds on top.
+function accountHintToken(
+  browserState: string,
+  overrides: Partial<AccountHintClaims> = {},
+): string {
+  const now = Math.floor(Date.now() / 1000);
+  return signEd25519Jwt(keyPair.privateKey, issuer.kid, {
+    purpose: "account-hint",
+    iss: "spacefast-api",
+    aud: LANES_SPACE,
+    host: LANES_HOST,
+    spaceId: LANES_SPACE,
+    generation: 0,
+    browserState,
+    email: "anne@example.com",
+    iat: now,
+    nbf: now,
+    exp: now + 600,
+    ...overrides,
+  });
+}
+
+// A refused account gets no session here, so the control plane's no-grant
+// bounce names it with a hint: shown on the page and sent with the invite
+// request, never redeemable for a session.
+test("a no-grant bounce names the signed-in account and asks for no email", async () => {
+  const start = await get(runtime, LANES_HOST, "/__spacefast/access/account?return=%2Fdocs%2F");
+  const stateCookie = browserStateCookie(start);
+  const browserState = stateCookie.slice(stateCookie.indexOf("=") + 1);
+  const page = (token: string, cookie = stateCookie) =>
+    get(
+      runtime,
+      LANES_HOST,
+      `/docs/?sf_access=no-grant&sf_access_as=${encodeURIComponent(token)}`,
+      {
+        headers: { cookie },
+      },
+    );
+
+  const hinted = await page(accountHintToken(browserState));
+  expect(hinted.status).toBe(403);
+  const html = await hinted.text();
+  expect(html).toContain("You&#039;re signed in as <strong>anne@example.com</strong>");
+  // The status line names the account, so the form asks for no address.
+  expect(html).not.toContain('type="email"');
+  expect(html).toContain('<input type="hidden" name="email" value="anne@example.com">');
+  expect(html).toContain('<input type="hidden" name="account_hint" value="');
+  // The hint never rides into the forms' return path or the re-check link.
+  expect(html).toContain('name="return" value="/docs/"');
+  expect(html).not.toContain("sf_access_as");
+  // The invite request re-checks the state cookie, so the page renews it for
+  // as long as the hint lives.
+  expect(browserStateCookie(hinted)).toBe(stateCookie);
+  // Another address drops the hint and brings the email field back.
+  const different = html.match(/<a href="([^"]+)">Use a different email<\/a>/)?.[1];
+  expect(different).toBe("/docs/?sf_access=no-grant");
+  const plain = await (
+    await get(runtime, LANES_HOST, different ?? "", { headers: { cookie: stateCookie } })
+  ).text();
+  expect(plain).toContain('type="email" name="email" required');
+  expect(plain).not.toContain('name="account_hint"');
+  // It opens nothing and mints no session.
+  expect(sessionCookie(hinted)).toBe("");
+  const redeemed = await get(
+    runtime,
+    LANES_HOST,
+    `/__sf/redeem?sf_token=${encodeURIComponent(accountHintToken(browserState))}&return=%2Fdocs%2F`,
+    { headers: { cookie: stateCookie } },
+  );
+  expect(redeemed.status).not.toBe(303);
+  expect(sessionCookie(redeemed)).toBe("");
+
+  const ignored = [
+    ["another browser", accountHintToken(browserState), ""],
+    ["a different browser binding", accountHintToken("b".repeat(64)), stateCookie],
+    ["a redeem handoff", accountHintToken(browserState, { purpose: "handoff" }), stateCookie],
+    ["a stale generation", accountHintToken(browserState, { generation: 1 }), stateCookie],
+    ["a non-email", accountHintToken(browserState, { email: "<b>x</b>" }), stateCookie],
+  ] as const;
+  for (const [, token, cookie] of ignored) {
+    const rendered = await (await page(token, cookie)).text();
+    expect(rendered).toContain("You&#039;re signed in, but this space hasn&#039;t let you in yet.");
+    expect(rendered).not.toContain("anne@example.com");
+    expect(rendered).not.toContain(' value="<');
+    expect(rendered).toContain('type="email" name="email" required');
+    expect(rendered).not.toContain('name="account_hint"');
+  }
 });
 
 test("a sole SSO lane skips the chooser entirely", async () => {

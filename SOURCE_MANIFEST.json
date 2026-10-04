@@ -1,7 +1,7 @@
 {
-  "revision": "4923971af0e737b3f2d2aa6d74683e2fc0ccb632",
-  "sourceHash": "b936bf15cc10494dda092b6788b02ff429dcf71f99a5547a708709b158059453",
-  "manifestSha256": "21beecd1a4333bc8855565e612852c752cc5ea70a74d23688fd90e32b105ad4c",
+  "revision": "29d44bb5a302c93e29253524b32b0bea0077a9ae",
+  "sourceHash": "e295e8e615f10c34dd47e67f956e3b18d35fcca05d7c2643fb38c40bc6bbd425",
+  "manifestSha256": "2e4609cb7141013d4ea084c1815c57d856bc126b4ea08cca8783962f7b1002b8",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "53a6053065408360aa74098106dfacf67bb87ac508c10d47b774b8bdfe304584"
+      "sha256": "11b526b008088f6d7e41ab46c7051b718f3ae8de1ecfcc4a9dbc64a879558109"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "c2519eabd039e1cfb791832129bf0c45fb4096eb04f1b0e8f9c756cca2dccfa9"
+      "sha256": "4d1792e08b747523718ad210be3f8bc7ccb4757916b6d95ce9ce6d6ad295874b"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -197,7 +197,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "fd98f64f0282c0062afb2de2d78d6e20a0e4f1a4efb1a4978c367e37349a1dce"
+      "sha256": "a084b4eebdedde368a3b4f8fb0a7abad172489147f2f14b461532b2821681806"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -353,7 +353,7 @@
     },
     {
       "path": "runtime/README.md",
-      "sha256": "54f20f36461d24028a7b45504268b23fd8e886c4d279989cf450efc3ec495779"
+      "sha256": "fd80edafd27e2022a19b9fa40f0076de53e3cb4864372c65ac5a44d1ae607a04"
     },
     {
       "path": "runtime/SKILL.md",
@@ -425,7 +425,7 @@
     },
     {
       "path": "runtime/engine/admin/generate.php",
-      "sha256": "956c6d83ab61e87889e759167f6a37ccaf5e9df13ae66959802a4ecf5f3cf07f"
+      "sha256": "27d398c2be5f8ac2fa825c0b3f0dd7c2040ab8eed706454a3e662f5c134903a3"
     },
     {
       "path": "runtime/engine/admin/jobs.php",
@@ -509,7 +509,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "891788d9b46079c6810fd738c48e63e9cce62736e7f4f65b5c8588a46354dfda"
+      "sha256": "77277e4661ab6291fd489eda44504a68e42a50cbe1836134e1950ab05620aa31"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -561,7 +561,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "6628b0615b9e1487ca1954a497adbbf7952502e5f49af4c97bf96e2c13a6fa74"
+      "sha256": "c327ce8ed24ebd244c5ced71375b23265ff904092c9e1cf18ff5615634d88920"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -601,7 +601,7 @@
     },
     {
       "path": "runtime/engine/shared/artifacts.php",
-      "sha256": "f2c3fe998852e257d295a78f2dbca56eef3d65c5b804af858505019ff1bb19a0"
+      "sha256": "993c3ffe92630513f4701b78a26137da4225123f1a32776f61d1071820978821"
     },
     {
       "path": "runtime/engine/shared/bootstrap-config.php",
@@ -661,7 +661,7 @@
     },
     {
       "path": "runtime/engine/shared/errors.php",
-      "sha256": "5fb49121a31b3fd7abf3650a3e5901ab82fef1f4cbf4e5da6da271a776ceb90b"
+      "sha256": "dcfc0e7ad54b9ebec6d9448e401d61cb18a43962302683af9d840ec8a58e2681"
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
@@ -757,7 +757,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "70bb8b819bc2a86be04570cf7605712e981bf2fc3e6ed0844ccf8502af84d608"
+      "sha256": "bd01b47890344ea1eaad28ee48f7d553d89896f978f8c9d61767424b86dc2fa7"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -845,7 +845,7 @@
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "17c0a0c174389142e3a90cb87d0291e01395afb92a52f8279789e53c804aea28"
+      "sha256": "fc2483048c31d8e0db37e2791ff108101528c4024ad735e1f7424575a2b9ae7c"
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
@@ -1125,7 +1125,7 @@
     },
     {
       "path": "runtime/tests/pages-system.test.ts",
-      "sha256": "4e117c4dd49cc91e32b2237c5b04195f937227d9c1b21d50d1a7a4d46f1ee85c"
+      "sha256": "108ba4c2c4c84aad916d2db48e344bdaa76853095645ac69c736b3ddbf7ce96d"
     },
     {
       "path": "runtime/tests/php-functions.test.ts",
@@ -1257,11 +1257,11 @@
     },
     {
       "path": "runtime/tests/zero-runtime.test.ts",
-      "sha256": "1ccd84572013e86ec73298c90f6451e98302773dd5b0db8c4ddb7364c5113f85"
+      "sha256": "94cfb32ca60e72c5a7af231b9f80949bd107ad87c19d20dcc18c9ef3734d2c84"
     },
     {
       "path": "runtime/tests/zero-rust-runner.test.ts",
-      "sha256": "946e2f680325a1fb220d41416823c25b9ccb1a9d74d98c0614f0f3625c8d9530"
+      "sha256": "50c3aaf557a0f60d81e7b6d366d1f9798852f7a21d9102ce0434765cb2d40446"
     },
     {
       "path": "runtime/wordpress-content-loader.php",

@@ -1637,17 +1637,40 @@ fn zero_response_actions(body: &Value, zero_routes: &[PhpActionRecord]) -> Map<S
             continue;
         }
         let mut action = json!({
-            "t": "zero",
             "endpoint": endpoint_id,
             "artifact": zero_artifact,
             "execution_mode": execution_mode,
-            "methods": zero_methods(method),
             "capabilities": capabilities,
         });
         if let Some(schema_hash) = schema_hash {
             action["schema_hash"] = json!(schema_hash);
         }
-        actions.insert(pattern.trim_matches('/').to_string(), action);
+        let route = actions
+            .entry(pattern.trim_matches('/').to_string())
+            .or_insert_with(|| json!({"t": "zero", "methods": [], "endpoints": {}}));
+        // Stored versions survive engine rollback. Older dispatchers read one
+        // handler at the top level; prefer GET regardless of compiler order.
+        if method == "GET" || route.get("endpoint").is_none() {
+            for (key, value) in action.as_object().expect("Zero handler metadata") {
+                route[key] = value.clone();
+            }
+            if schema_hash.is_none() {
+                route
+                    .as_object_mut()
+                    .expect("Zero route metadata")
+                    .remove("schema_hash");
+            }
+        }
+        route["endpoints"][method] = action;
+        let methods = route["methods"].as_array_mut().expect("Zero route methods");
+        for allowed in zero_methods(method)
+            .as_array()
+            .expect("Zero endpoint methods")
+        {
+            if !methods.contains(allowed) {
+                methods.push(allowed.clone());
+            }
+        }
     }
     actions
 }
@@ -3374,6 +3397,43 @@ mod tests {
             crypto_keys: Vec::new(),
             db: None,
         }];
+        // Both handlers return bytes without owning a database transaction.
+        for (method, mode, body) in [
+            (
+                "POST",
+                crate::model::ZeroExecutionMode::Read,
+                "post handler",
+            ),
+            ("GET", crate::model::ZeroExecutionMode::Read, "get handler"),
+        ] {
+            let mut endpoint = input.zero_endpoints[0].clone();
+            endpoint.method = method.into();
+            endpoint.execution_mode = mode;
+            endpoint.path = "/api/exact".into();
+            endpoint.schema_hash = (method == "POST").then(|| "sha256:post".into());
+            endpoint.source = format!(
+                "globalThis.__statticZeroResult = JSON.stringify({{ status: 200, body: JSON.stringify('{}') }});",
+                body
+            );
+            input.zero_endpoints.push(endpoint);
+        }
+        let expected_actions = zero_response_actions(
+            &input.body,
+            &compile_zero_endpoints(None, &input.zero_endpoints, &[], &mut Vec::new()).php_routes,
+        );
+        let exact = &expected_actions["api/exact"];
+        assert_eq!(exact["methods"], json!(["POST", "GET", "HEAD"]));
+        assert!(exact.get("schema_hash").is_none());
+        assert_eq!(exact["endpoint"], exact["endpoints"]["GET"]["endpoint"]);
+        assert_eq!(exact["artifact"], exact["endpoints"]["GET"]["artifact"]);
+        assert_eq!(
+            exact["execution_mode"],
+            exact["endpoints"]["GET"]["execution_mode"]
+        );
+        assert_eq!(
+            exact["capabilities"],
+            exact["endpoints"]["GET"]["capabilities"]
+        );
         input.zero_runs = vec![RuntimeZeroRun {
             execution_mode: crate::model::ZeroExecutionMode::Read,
             run_id: "query_items".into(),
@@ -3438,7 +3498,7 @@ mod tests {
         assert!(!private.join("spaces/s/versions/v").exists());
 
         let output = finalize_site(input, false).unwrap();
-        assert_eq!(output.zero_endpoint_count, 1);
+        assert_eq!(output.zero_endpoint_count, 3);
         let version = private.join("spaces/s/versions/v");
 
         let migrations: Value =
@@ -3470,6 +3530,22 @@ mod tests {
         assert!(!fs::read(version.join(bytecode_path)).unwrap().is_empty());
         assert!(version.join("zero/routes.php").is_file());
         assert!(version.join("zero/runs-index.json").is_file());
+
+        for (method, mode, expected_body) in [
+            ("GET", "read", "get handler"),
+            ("POST", "read", "post handler"),
+        ] {
+            let action = &exact["endpoints"][method];
+            let endpoint_id = format!("{method} /api/exact");
+            assert_eq!(action["endpoint"], endpoint_id);
+            assert_eq!(action["execution_mode"], mode);
+            let artifact = action["artifact"].as_str().unwrap();
+            assert_eq!(endpoint_index["endpoints"][&endpoint_id], artifact);
+            let (status, body, _) =
+                invoke_compiled_zero(&version, &endpoint_id, mode, method, "/api/exact", artifact);
+            assert_eq!(status, 200);
+            assert_eq!(body, expected_body);
+        }
 
         let metadata = finalized_metadata(&private);
         let inventory = metadata["routeInventory"]["routes"]

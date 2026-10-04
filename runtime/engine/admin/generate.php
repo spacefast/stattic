@@ -287,6 +287,7 @@ function _stattic_runtime_store_space_tombstones(string $privateRoot, string $sp
     $tombstonePath = _stattic_space_root($privateRoot, $spaceId) . '/tombstones.json';
     $tombstones = [];
     $existing = _stattic_runtime_read_json_strict($tombstonePath);
+    $metadata = [];
     if ($mode !== 'replace') {
         if (is_array($existing) && is_array($existing['hostnames'] ?? null)) {
             foreach ($existing['hostnames'] as $hostname) {
@@ -296,6 +297,10 @@ function _stattic_runtime_store_space_tombstones(string $privateRoot, string $sp
                 $normalized = _stattic_runtime_normalize_route_hostname($hostname);
                 if ($normalized !== '') {
                     $tombstones[$normalized] = true;
+                    $metadata[$normalized] = $existing['hostname_metadata'][$normalized] ?? [
+                        'reason' => $existing['reason'] ?? null,
+                        'category' => $existing['category'] ?? null,
+                    ];
                 }
             }
         }
@@ -309,9 +314,17 @@ function _stattic_runtime_store_space_tombstones(string $privateRoot, string $sp
             _stattic_problem_response(422, 'invalid_hostname', 'Hostname is invalid.');
         }
         if ($mode === 'remove') {
-            unset($tombstones[$normalized]);
+            unset($tombstones[$normalized], $metadata[$normalized]);
         } else {
             $tombstones[$normalized] = true;
+            $prior = $metadata[$normalized] ?? $existing['hostname_metadata'][$normalized] ?? [];
+            if ($prior === [] && in_array($normalized, $existing['hostnames'] ?? [], true)) {
+                $prior = ['reason' => $existing['reason'] ?? null, 'category' => $existing['category'] ?? null];
+            }
+            $metadata[$normalized] = [
+                'reason' => $reason ?? $prior['reason'] ?? null,
+                'category' => $category ?? $prior['category'] ?? null,
+            ];
         }
     }
     // Absence preserves existing metadata so a follow-up host edit never silently
@@ -325,6 +338,7 @@ function _stattic_runtime_store_space_tombstones(string $privateRoot, string $sp
     $record = [
         'space_id' => $spaceId,
         'hostnames' => array_keys($tombstones),
+        'hostname_metadata' => $metadata,
         'updated_at' => gmdate('c'),
     ];
     if ($reason !== null && $reason !== '') {
@@ -710,6 +724,7 @@ function _stattic_runtime_space_index_contribution(string $privateRoot, string $
                 $contribution['tombstones'][] = $hostname;
             }
         }
+        $contribution['tombstone_metadata'] = $tombstoneConfig['hostname_metadata'] ?? [];
         $contribution['tombstone_reason'] = is_string($tombstoneConfig['reason'] ?? null) ? $tombstoneConfig['reason'] : null;
         $contribution['tombstone_category'] = is_string($tombstoneConfig['category'] ?? null) ? $tombstoneConfig['category'] : null;
     }
@@ -760,6 +775,7 @@ function _stattic_runtime_filter_contribution_to_hostname(array $contribution, s
         'routes' => [],
         'canonical' => [],
         'tombstones' => [],
+        'tombstone_metadata' => $contribution['tombstone_metadata'] ?? [],
         'tombstone_reason' => $contribution['tombstone_reason'] ?? null,
         'tombstone_category' => $contribution['tombstone_category'] ?? null,
     ];
@@ -808,8 +824,8 @@ function _stattic_runtime_merge_host_contributions(array $contributions): array
                 $hostnames,
                 (string) $hostname,
                 (string) $contribution['space_id'],
-                is_string($contribution['tombstone_reason'] ?? null) ? $contribution['tombstone_reason'] : null,
-                is_string($contribution['tombstone_category'] ?? null) ? $contribution['tombstone_category'] : null
+                isset($contribution['tombstone_metadata'][$hostname]) ? ($contribution['tombstone_metadata'][$hostname]['reason'] ?? null) : ($contribution['tombstone_reason'] ?? null),
+                isset($contribution['tombstone_metadata'][$hostname]) ? ($contribution['tombstone_metadata'][$hostname]['category'] ?? null) : ($contribution['tombstone_category'] ?? null)
             );
         }
     }
@@ -1090,6 +1106,7 @@ function _stattic_runtime_tombstone_variant(?string $reason, ?string $category):
     $key = is_string($category) && $category !== '' ? strtolower($category) : (is_string($reason) ? strtolower($reason) : '');
     $pageId = match ($key) {
         'csam' => 'tombstone-csam',
+        'version_deleted' => 'tombstone-version-deleted',
         'copyright', 'dmca' => 'tombstone-dmca',
         'tenant_suspended', 'account_suspended', 'site_suspended' => 'tombstone-suspended',
         default => 'tombstone-generic',

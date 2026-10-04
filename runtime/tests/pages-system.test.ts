@@ -14,6 +14,10 @@
 // why they are tested against a Space that shipped documents of its own.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 
+import type { RuntimePages } from "../../packages/common/src/contracts/pages.js";
+
+type PartnerPlatformPages = Partial<NonNullable<RuntimePages["platform"]>>;
+
 import {
   api,
   deploy,
@@ -42,6 +46,10 @@ const PAGE_ARTIFACTS = {
     "<!doctype html><html><body><h1>Acme lost it</h1><p><!--sf-runtime:request-path:start-->fallback<!--sf-runtime:request-path:end--></p></body></html>",
   "platform-partner-suspended":
     '<!doctype html><html><body><header>Partner Cloud</header><h1>This space is paused</h1><a href="https://partner.example/help">Need help?</a></body></html>',
+  "platform-partner-gone":
+    "<!doctype html><html><body><header>Partner Cloud</header><h1>Nothing here</h1></body></html>",
+  "platform-partner-version-deleted":
+    "<!doctype html><html><body><header>Partner Cloud</header><h1>Version deleted</h1></body></html>",
   "platform-partner-undeployed":
     "<!doctype html><html><body><header>Partner Cloud</header><h1>Waiting for launch</h1></body></html>",
 };
@@ -65,7 +73,18 @@ async function deploySite(spaceId: string, versionId: string, host: string): Pro
   });
 }
 
-async function deployPartnerSite(spaceId: string, versionId: string, host: string): Promise<void> {
+async function deployPartnerSite(
+  spaceId: string,
+  versionId: string,
+  host: string,
+  versionDeletedPage = true,
+): Promise<void> {
+  const platform: PartnerPlatformPages = {
+    suspended: "platform-partner-suspended",
+    gone: "platform-partner-gone",
+    undeployed: "platform-partner-undeployed",
+  };
+  if (versionDeletedPage) platform["version-deleted"] = "platform-partner-version-deleted";
   await deploy(rt, {
     spaceId,
     versionId,
@@ -76,10 +95,7 @@ async function deployPartnerSite(spaceId: string, versionId: string, host: strin
         pages: {
           routes: {},
           previews: {},
-          platform: {
-            suspended: "platform-partner-suspended",
-            undeployed: "platform-partner-undeployed",
-          },
+          platform,
         },
       },
     },
@@ -147,6 +163,37 @@ test("a tombstoned space answers with the engine's page, never its own documents
   const archivedPage = await get(rt, host, "/");
   expect(archivedPage.status).toBe(404);
   expect(await archivedPage.text()).not.toContain("Acme home");
+  const deleted = await tombstone("spc_pages_fault", {
+    hostnames: [host],
+    reason: "version_deleted",
+  });
+  expect(deleted.status).toBe(200);
+  const deletedPage = await get(rt, host, "/", { headers: { Accept: "text/html" } });
+  expect(deletedPage.status).toBe(404);
+  expect(deletedPage.headers.get("X-Robots-Tag")).toBe("noindex, nofollow");
+  const deletedHtml = await deletedPage.text();
+  expect(deletedHtml).toContain("Version deleted");
+  expect(deletedHtml).toContain("This version has been deleted.");
+  expect(deletedHtml).not.toContain("This space is no longer available.");
+  expect(deletedHtml).not.toContain("Acme home");
+  const detachedHost = "pages-detached-fault.test";
+  expect(
+    (await tombstone("spc_pages_fault", { hostnames: [detachedHost], mode: "add" })).status,
+  ).toBe(200);
+  const detachedPage = await get(rt, detachedHost, "/", { headers: { Accept: "text/html" } });
+  expect(await detachedPage.text()).toContain("This space is no longer available.");
+  const originalPage = await get(rt, host, "/", { headers: { Accept: "text/html" } });
+  expect(await originalPage.text()).toContain("Version deleted");
+  const legal = await tombstone("spc_pages_fault", {
+    hostnames: [host],
+    reason: "version_deleted",
+    category: "dmca",
+  });
+  expect(legal.status).toBe(200);
+  const legalPage = await get(rt, host, "/");
+  expect(legalPage.status).toBe(451);
+  expect(legalPage.headers.get("X-Robots-Tag")).toBe("noindex, nofollow");
+  expect(await legalPage.text()).toContain("Unavailable for legal reasons");
   const restored = await tombstone("spc_pages_fault", { hostnames: [host], mode: "remove" });
   expect(restored.status).toBe(200);
   const restoredPage = await get(rt, host, "/");
@@ -172,6 +219,26 @@ test("a partner tombstone uses its compiled de-branded platform page", async () 
   expect(html).not.toContain("spacefast.com");
   expect(html).not.toContain("Recoleta");
   expect(html).not.toContain("wordpress.com");
+  await tombstone("spc_pages_partner_fault", { hostnames: [host], reason: "version_deleted" });
+  const deletedHtml = await (await get(rt, host, "/", { headers: { Accept: "text/html" } })).text();
+  expect(deletedHtml).toContain("Partner Cloud");
+  expect(deletedHtml).toContain("Version deleted");
+  expect(deletedHtml).not.toContain("Spacefast");
+  const oldHost = "pages-partner-old-fault.test";
+  await deployPartnerSite(
+    "spc_pages_partner_old_fault",
+    "ver_pages_partner_old_fault_1",
+    oldHost,
+    false,
+  );
+  await tombstone("spc_pages_partner_old_fault", {
+    hostnames: [oldHost],
+    reason: "version_deleted",
+  });
+  const oldHtml = await (await get(rt, oldHost, "/", { headers: { Accept: "text/html" } })).text();
+  expect(oldHtml).toContain("Partner Cloud");
+  expect(oldHtml).toContain("Nothing here");
+  expect(oldHtml).not.toContain("Spacefast");
 });
 
 test("the retired per-space font path takes the uniform private-namespace denial", async () => {
@@ -210,7 +277,11 @@ test("CSAM stays byte-identical to undeployed for every negotiated representatio
   // Even a partner version carrying an undeployed artifact takes the neutral
   // built-in path for CSAM, so the response cannot reveal that the host existed.
   await deployPartnerSite("spc_pages_csam", "ver_pages_csam_1", host);
-  const takedown = await tombstone("spc_pages_csam", { hostnames: [host], category: "csam" });
+  const takedown = await tombstone("spc_pages_csam", {
+    hostnames: [host],
+    reason: "version_deleted",
+    category: "csam",
+  });
   expect(takedown.status).toBe(200);
 
   // The CSAM page declares no-store, so it negotiates — which is exactly where a

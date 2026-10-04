@@ -221,6 +221,18 @@ template artifacts, and Zero compilation. PHP authenticates the management
 request, invokes the installed native binary, commits activation state, and
 serves the generated artifacts. There is no PHP compiler or fallback lane.
 
+Exact Zero endpoints compile into a response-table action keyed by path. Its
+`endpoints` map keeps each HTTP method's handler identity, artifact, execution
+mode, and schema hash together. Its `methods` list controls the 405 `Allow`
+response. Dispatch selects the request method, with HEAD falling back to GET.
+Pattern endpoints keep using the compiled Zero route buckets.
+
+The native compiler and PHP dispatcher ship in the same engine release. Install
+that release before finalizing versions with method-indexed actions. Top-level
+handler fields preserve rollback reads (GET when present, otherwise the first
+handler). Existing stored actions remain readable; republish affected versions
+to regenerate the handlers that an older finalizer overwrote.
+
 ## Testing
 
 The runtime has a self-contained test suite in `tests/`. One way to run it:

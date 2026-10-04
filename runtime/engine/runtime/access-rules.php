@@ -3189,7 +3189,12 @@ function _stattic_access_clean_return_path(): string
         : null;
     // A share-link token that did not open the page is spent: never carry it
     // into the gate's forms or the redirect they bounce through.
-    unset($params['sf_access'], $params['sf_access_return'], $params[STATTIC_ACCESS_QUERY_TOKEN_PARAM]);
+    unset(
+        $params['sf_access'],
+        $params['sf_access_return'],
+        $params[STATTIC_ACCESS_ACCOUNT_HINT_PARAM],
+        $params[STATTIC_ACCESS_QUERY_TOKEN_PARAM]
+    );
     if ($explicitReturn !== null) {
         return $explicitReturn;
     }
@@ -3210,8 +3215,60 @@ function _stattic_request_is_document_navigation(): bool
     return $destination === 'document';
 }
 
-function _stattic_access_status_fragment(string $status): string
+// The control plane's no-grant bounce names the account it found: a visitor
+// without authority gets no runtime session, so this host cannot know who it is.
+// The hint has its own purpose, is never redeemable, and opens nothing. Its one
+// power beyond display: a verified one lets this browser's invite request for
+// that exact address skip the "confirm your address" email.
+const STATTIC_ACCESS_ACCOUNT_HINT_PARAM = 'sf_access_as';
+const STATTIC_ACCESS_ACCOUNT_HINT_PURPOSE = 'account-hint';
+
+// The token's browserState claim when this browser holds the matching state
+// cookie, else ''.
+function _stattic_access_claims_browser_state(array $claims): string
 {
+    $tokenState = $claims['browserState'] ?? null;
+    if (!is_string($tokenState) || preg_match('/\A[a-f0-9]{64}\z/D', $tokenState) !== 1) {
+        return '';
+    }
+    return _stattic_access_browser_state_from_request($tokenState);
+}
+
+// ['email' => ..., 'token' => ..., 'browserState' => ...] for a hint that
+// verifies here, else null.
+function _stattic_access_account_hint(array $serving, string $host, mixed $token): ?array
+{
+    if (!is_string($token) || $token === '' || strlen($token) > 4096) {
+        return null;
+    }
+    $verified = _stattic_visitor_verify(
+        $token,
+        _stattic_visitor_verify_options($serving, $host, null, ['requireJti' => false])
+    );
+    $claims = is_array($verified) && is_array($verified['claims'] ?? null) ? $verified['claims'] : [];
+    if (($claims['purpose'] ?? null) !== STATTIC_ACCESS_ACCOUNT_HINT_PURPOSE) {
+        return null;
+    }
+    // Bound to the browser that started the sign-in, so a forwarded URL never
+    // shows one person's address in someone else's browser.
+    $browserState = _stattic_access_claims_browser_state($claims);
+    if ($browserState === '') {
+        return null;
+    }
+    $email = is_string($claims['email'] ?? null) ? trim($claims['email']) : '';
+    if ($email === '' || strlen($email) > 320 || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
+        return null;
+    }
+    return ['email' => $email, 'token' => $token, 'browserState' => $browserState];
+}
+
+function _stattic_access_status_fragment(string $status, ?string $accountEmail = null): string
+{
+    if ($status === 'no-grant' && $accountEmail !== null) {
+        return '<p class="sf-copy sf-access-status" role="status">You&#039;re signed in as <strong>'
+            . _stattic_html_escape($accountEmail)
+            . '</strong>, but this space hasn&#039;t let you in yet. Ask for an invite below.</p>';
+    }
     $messages = [
         'no-grant' => "You're signed in, but this space hasn't let you in yet. Ask for an invite below.",
         'email-sent' => 'Check your email. Use the confirmation link we sent to finish opening this page.',
@@ -3233,8 +3290,12 @@ function _stattic_access_status_fragment(string $status): string
     return '<p class="sf-copy sf-access-status" role="status">' . _stattic_html_escape($message) . '</p>';
 }
 
-function _stattic_access_request_form(string $returnPath, string $summary, bool $open = false): string
-{
+function _stattic_access_request_form(
+    string $returnPath,
+    string $summary,
+    bool $open = false,
+    ?array $accountHint = null
+): string {
     // Custom and older published access templates carry no icon CSS; without
     // intrinsic dimensions the SVG renders at the 300x150 replaced-element default.
     $lock = '<svg width="16" height="16" viewBox="' . STATTIC_PAGE_ICON_VIEW_BOX . '" aria-hidden="true" focusable="false"><path d="'
@@ -3243,10 +3304,22 @@ function _stattic_access_request_form(string $returnPath, string $summary, bool 
         . '<summary>' . $lock . _stattic_html_escape($summary) . '</summary>'
         . '<form method="post" action="' . _stattic_html_escape(STATTIC_ACCESS_REQUEST_PATH) . '">'
         . '<input type="hidden" name="return" value="' . _stattic_html_escape($returnPath) . '">'
-        . '<input class="sf-input" type="email" name="email" required autocomplete="email" placeholder="you@example.com">'
+        // A signed-in account is named in the status line; its address and
+        // the signed hint ride along so the platform can skip confirming it.
+        . ($accountHint !== null
+            ? '<input type="hidden" name="email" value="' . _stattic_html_escape($accountHint['email']) . '">'
+                . '<input type="hidden" name="account_hint" value="' . _stattic_html_escape($accountHint['token']) . '">'
+            : '<input class="sf-input" type="email" name="email" required autocomplete="email" placeholder="you@example.com">')
         . '<textarea class="sf-input" name="message" maxlength="280" placeholder="Anything the owner should know (optional)"></textarea>'
         . '<button class="sf-button" type="submit">Request an invite</button>'
-        . '</form></details>';
+        . '</form>'
+        // Another address (a work one, say) drops the hint and gets confirmed by email.
+        . ($accountHint !== null
+            ? '<p class="sf-sub"><a href="'
+                . _stattic_html_escape(_stattic_access_url_with_params($returnPath, ['sf_access' => 'no-grant']))
+                . '">Use a different email</a></p>'
+            : '')
+        . '</details>';
 }
 
 function _stattic_access_lanes_fragment(
@@ -3255,7 +3328,8 @@ function _stattic_access_lanes_fragment(
     string $returnPath,
     string $status,
     ?string $emailContinuation,
-    ?string $requestedScope
+    ?string $requestedScope,
+    ?array $accountHint = null
 ): string
 {
     $html = '<div class="sf-access-lanes">';
@@ -3360,7 +3434,8 @@ function _stattic_access_lanes_fragment(
             $html .= _stattic_access_request_form(
                 $returnPath,
                 'Request access',
-                $status === 'no-grant'
+                $status === 'no-grant',
+                $accountHint
             );
         }
     }
@@ -3507,14 +3582,27 @@ function _stattic_render_access_gate(array $serving, string $requestHost, array 
         $status = 'session-expired';
     }
     $descriptor = $lanes['descriptor'];
-    $statusFragment = _stattic_access_status_fragment($status);
+    $accountHint = $status === 'no-grant'
+        ? _stattic_access_account_hint($serving, $host, $_GET[STATTIC_ACCESS_ACCOUNT_HINT_PARAM] ?? null)
+        : null;
+    if ($accountHint !== null) {
+        // The state cookie may date from an earlier gate render; the invite
+        // request re-checks it, so keep it alive as long as the page can be sent.
+        _stattic_set_cookie(
+            _stattic_access_browser_state_cookie_name($accountHint['browserState']),
+            $accountHint['browserState'],
+            STATTIC_ACCESS_BROWSER_STATE_SECONDS
+        );
+    }
+    $statusFragment = _stattic_access_status_fragment($status, $accountHint['email'] ?? null);
     $lanesFragment = _stattic_access_lanes_fragment(
         $lanes,
         $host,
         $returnPath,
         $status,
         $emailContinuation,
-        _stattic_access_identity_requested_path($identity)
+        _stattic_access_identity_requested_path($identity),
+        $accountHint
     );
     $title = is_string($descriptor['displayName'])
         ? $descriptor['displayName'] . ' is private'
@@ -3937,7 +4025,11 @@ function _stattic_access_handle_request_invite(array $serving, string $requestHo
     if ($email === '' || strlen($email) > 320 || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
         _stattic_access_gate_after_post($serving, $requestHost, $returnPath, 'request-failed');
     }
+    // The platform skips confirming the address on a verified hint, so only
+    // forward one this browser was handed, for exactly the posted address.
     $host = _stattic_canonicalize_host($requestHost);
+    $postedHint = _stattic_access_account_hint($serving, $host, $_POST['account_hint'] ?? null);
+    $accountHint = $postedHint !== null && $postedHint['email'] === $email ? $postedHint['token'] : '';
     $context = _stattic_access_context($serving, $requestHost, '/');
     $landingPath = parse_url($returnPath, PHP_URL_PATH);
     $result = _stattic_access_exchange_post(
@@ -3949,7 +4041,8 @@ function _stattic_access_handle_request_invite(array $serving, string $requestHo
                 'email' => $email,
                 'requestedRole' => 'viewer',
             ],
-            $message !== '' ? ['message' => $message] : []
+            $message !== '' ? ['message' => $message] : [],
+            $accountHint !== '' ? ['accountHint' => $accountHint] : []
         ),
         _stattic_access_exchange_headers($lanes['exchange'], $context, 'application/json')
     );
@@ -4068,15 +4161,8 @@ function _stattic_access_consume_handoff_token(
         return null;
     }
     if (array_key_exists('identity', $claims) && _stattic_access_account_identity($claims) === null) return null;
-    if (array_key_exists('browserState', $claims)) {
-        $tokenState = is_string($claims['browserState'] ?? null)
-            && preg_match('/\A[a-f0-9]{64}\z/D', $claims['browserState']) === 1
-            ? $claims['browserState']
-            : '';
-        $browserState = _stattic_access_browser_state_from_request($tokenState);
-        if ($tokenState === '' || $browserState === '' || !hash_equals($tokenState, $browserState)) {
-            return null;
-        }
+    if (array_key_exists('browserState', $claims) && _stattic_access_claims_browser_state($claims) === '') {
+        return null;
     }
     $current = _stattic_current_session_identity($serving, $host);
     $currentSid = is_array($current) && is_string($current['sessionId'] ?? null)

@@ -1280,9 +1280,16 @@ test("exact Zero requests dispatch from the compiled response table with their d
     endpoint: "POST /api/manifest",
     artifact: artifactPath,
     execution_mode: "write",
-    // A PHP list decodes to an index-keyed map (harness `phpArtifact`).
-    methods: { 0: "POST" },
     schema_hash: "sha256:manifest",
+    methods: { 0: "POST" },
+    endpoints: {
+      POST: {
+        endpoint: "POST /api/manifest",
+        artifact: artifactPath,
+        execution_mode: "write",
+        schema_hash: "sha256:manifest",
+      },
+    },
   });
 
   const response = await get(rt, host, "/api/manifest", { method: "POST" });
@@ -1304,7 +1311,7 @@ test("exact Zero requests dispatch from the compiled response table with their d
   expect(envelope.context.schemaHash).toBe("sha256:manifest");
 });
 
-test("exact Zero routes beat colliding static files", async () => {
+test("exact Zero routes dispatch distinct methods and beat colliding static files", async () => {
   const activeHost = "zero-exact-fallback-active.test";
   await deploy(rt, {
     spaceId: "spc_zero_exact_fallback_active",
@@ -1322,6 +1329,14 @@ test("exact Zero routes beat colliding static files", async () => {
           path: "/api/exact",
           source: "globalThis.__statticZeroResult = '{}';",
           endpoint_id: "GET /api/exact active",
+          capabilities: { db: false, fetch: false, auth: false, env: false },
+        },
+        {
+          execution_mode: "write",
+          method: "POST",
+          path: "/api/exact",
+          source: "globalThis.__statticZeroResult = '{}';",
+          endpoint_id: "POST /api/exact active",
           capabilities: { db: false, fetch: false, auth: false, env: false },
         },
       ],
@@ -1347,7 +1362,12 @@ test("exact Zero routes beat colliding static files", async () => {
     "ver_zero_exact_fallback_active_1",
     "/api/exact",
   );
-  expect(zeroAction(collidingKey)).toMatchObject({ endpoint: "GET /api/exact active" });
+  expect(zeroAction(collidingKey)).toMatchObject({
+    endpoints: {
+      GET: { endpoint: "GET /api/exact active" },
+      POST: { endpoint: "POST /api/exact active" },
+    },
+  });
   expect(collidingKey?.[RESPONSES.entryKeys.blob]).toBeNull();
 
   const activeResponse = await get(rt, activeHost, "/api/exact");
@@ -1357,6 +1377,28 @@ test("exact Zero routes beat colliding static files", async () => {
     method: "GET",
     path: "/api/exact",
   });
+
+  const postResponse = await get(rt, activeHost, "/api/exact", { method: "POST" });
+  expect(postResponse.status).toBe(201);
+  expect(await postResponse.json()).toMatchObject({
+    endpointId: "POST /api/exact active",
+    method: "POST",
+    path: "/api/exact",
+  });
+  expect(JSON.parse(readFileSync(capturePath, "utf8"))).toMatchObject({
+    executionMode: "write",
+  });
+  const headResponse = await get(rt, activeHost, "/api/exact", { method: "HEAD" });
+  expect(headResponse.status).toBe(201);
+  expect(await headResponse.text()).toBe("");
+  expect(JSON.parse(readFileSync(capturePath, "utf8"))).toMatchObject({
+    endpointId: "GET /api/exact active",
+    executionMode: "read",
+    request: { method: "HEAD" },
+  });
+  const refused = await get(rt, activeHost, "/api/exact", { method: "DELETE" });
+  expect(refused.status).toBe(405);
+  expect(refused.headers.get("allow")?.split(", ").sort()).toEqual(["GET", "HEAD", "POST"]);
 });
 
 test("a Zero action cannot borrow another endpoint id's indexed artifact", async () => {
@@ -1377,11 +1419,12 @@ test("a Zero action cannot borrow another endpoint id's indexed artifact", async
   )}.json`;
   try {
     // Point the POST /api/status entry at another endpoint's id while keeping
-    // its own artifact: the runner must dispatch the artifact the entry names,
+    // its own artifact in both projections (legacy and method-indexed): the
+    // runner must dispatch the artifact the entry names,
     // never the artifact the borrowed id indexes.
     const tampered = originalTable
       .toString("utf8")
-      .replace("'endpoint' => 'POST /api/status'", "'endpoint' => 'GET /api/items/:id'");
+      .replaceAll("'endpoint' => 'POST /api/status'", "'endpoint' => 'GET /api/items/:id'");
     expect(tampered).not.toBe(originalTable.toString("utf8"));
     writeFileSync(tablePath ?? "", tampered);
 
@@ -1652,7 +1695,7 @@ test("does not spawn the Zero runner for static or not-found requests", async ()
   expect(entries["/"]?.[RESPONSES.entryKeys.blob]).toBe(sha256("<h1>zero runtime</h1>\n"));
   expect(entries["/missing"]).toBeUndefined();
   expect(zeroAction(entries["/api/status"] ?? null)).toMatchObject({
-    endpoint: "POST /api/status",
+    endpoints: { POST: { endpoint: "POST /api/status" } },
   });
 
   rmSync(capturePath, { force: true });
@@ -1711,7 +1754,9 @@ test("does not spawn the Zero runner for redirects, headers, or canonical client
   });
   // Only the endpoint invokes the runner; client pages use their declared shell.
   const entries = responseEntries(rt, "spc_zero_nonzero", "ver_zero_nonzero_1");
-  expect(zeroAction(entries["/api/zero"] ?? null)).toMatchObject({ endpoint: "GET /api/zero" });
+  expect(zeroAction(entries["/api/zero"] ?? null)).toMatchObject({
+    endpoints: { GET: { endpoint: "GET /api/zero" } },
+  });
   for (const key of ["/old", "/", "/_spacefast/pages/client.html"]) {
     expect({ key, zero: zeroAction(entries[key] ?? null) }).toEqual({ key, zero: null });
   }

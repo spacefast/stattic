@@ -151,6 +151,7 @@ const STATTIC_PLATFORM_PAGE_COPY = [
     'undeployed' => ['Waiting for launch', 'This space hasn’t been published yet. Check back soon.'],
     'suspended' => ['This space is paused', 'Serving is on hold until billing is sorted out.'],
     'legal' => ['Unavailable for legal reasons', 'This space is blocked in response to a legal demand.'],
+    'version-deleted' => ['Version deleted', 'This version has been deleted.'],
     'gone' => ['Nothing here', 'This space is no longer available.'],
     'rate-limited' => ['Slow down a second', 'Too many requests hit this space at once. Give it a moment and try again.'],
     'tier-unavailable' => ['Back in a bit', 'This space is temporarily unavailable.'],
@@ -282,6 +283,9 @@ function _stattic_serve_page(string $pageId, array $context = []): void
     $html = '';
     if ($requestMethod !== 'HEAD') {
         $artifact = $customizable ? _stattic_page_artifact($context, $pageId) : null;
+        if ($artifact === null && $customizable && $pageId === 'version-deleted') {
+            $artifact = _stattic_page_artifact($context, 'gone');
+        }
         $html = $artifact !== null
             ? _stattic_compose_page_artifact($artifact, $pageId, $context)
             : _stattic_platform_page_html(
@@ -300,6 +304,7 @@ function _stattic_render_platform_page(string $pageId, int $status, array $heade
         'not-found' => 'gone', 'runtime-invariant-error' => 'runtime-error',
         'request-too-large' => 'content-too-large',
         'tombstone-dmca' => 'legal', 'tombstone-suspended' => 'suspended',
+        'tombstone-version-deleted' => 'version-deleted',
         'tombstone-generic' => 'gone',
     ];
     $resolvedPageId = $map[$pageId] ?? $pageId;

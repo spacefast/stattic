@@ -49,8 +49,7 @@ function _stattic_runtime_static_zip_path(string $input): ?string
 
 function _stattic_runtime_static_zip_visible_path(string $path): bool
 {
-    $first = explode('/', $path, 2)[0] ?? '';
-    return $first !== '__MACOSX' && $first !== '.DS_Store';
+    return preg_match('~' . SPACEFAST_UPLOAD_OS_METADATA_PATH_PATTERN . '~', $path) !== 1;
 }
 
 /** @param list<array{index: int, path: string, size: int}> $entries */

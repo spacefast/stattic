@@ -55,6 +55,10 @@ test("static zip ingest normalizes paths, commits CAS blobs, and pins the result
       "site/assets/app.js": script,
       "site/assets/pixel.data": image,
       "site/.DS_Store": strToU8("finder"),
+      "._site": strToU8("wrapper resource fork"),
+      "site/assets/._app.js": strToU8("resource fork"),
+      "site/assets/.DS_Store": strToU8("nested finder"),
+      "site/assets/__MACOSX/ignored": strToU8("nested metadata"),
       "__MACOSX/site/._index.html": strToU8("fork"),
     }),
   );

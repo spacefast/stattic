@@ -1,7 +1,7 @@
 //! Which committed paths are privately held configuration versus publicly
 //! served content. Shared by the transform resolvers and finalize policy.
 
-use crate::protocol::{COMPILE_SIDECAR_FILES, CONFIG_ACCEPTED_FILES};
+use crate::protocol::{COMPILE_SIDECAR_FILES, CONFIG_ACCEPTED_FILES, CONFIG_TYPESCRIPT_FILE};
 
 const EXACT_PRIVATE_PATHS: &[&str] = &[
     ".well-known/spacefast-runtime",
@@ -19,6 +19,7 @@ const EXACT_PRIVATE_PATHS: &[&str] = &[
 
 /// Beyond [`CONFIG_ACCEPTED_FILES`], which are matched the same way.
 const CASE_INSENSITIVE_CONFIG_PATHS: &[&str] = &[
+    CONFIG_TYPESCRIPT_FILE,
     ".stattic/routes.json",
     // A compile input for the generated theme stylesheet, not content.
     "theme.json",
@@ -101,6 +102,8 @@ mod tests {
     #[test]
     fn serving_visibility_matches_control_zero_and_sidecar_policy() {
         assert!(is_private_serving_path("SF.JSONC"));
+        assert!(is_private_serving_path("SPACEFAST.CONFIG.TS"));
+        assert!(is_private_serving_path("spacefast.config.ts.gz"));
         assert!(is_private_serving_path("zero/endpoints-index.json"));
         assert!(is_private_serving_path(
             "__spacefast/functions/bundles/worker/bundle.json"

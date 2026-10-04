@@ -1,7 +1,7 @@
 {
-  "revision": "eab8e7faf0915fc351209974ecf7cdc69b844498",
-  "sourceHash": "e74d701ca8bad931681a309b718e96535d24bfed1742f6faee1ba78cef7e5188",
-  "manifestSha256": "cf179687d5c2ce14751836b29005306dfc5132486de0b160f8013f19874b766c",
+  "revision": "33794ff1a695be904c4e26f597dd294c39e9d6a4",
+  "sourceHash": "1eeddcb1fd4dfcb337c1ab70baacd3a36e1acc42037124469806390399b50023",
+  "manifestSha256": "b79481f5196fae027beb461583067a4c483d5e6f3a6d10cd1b24d04b115d390c",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "4eaf36968e9a20c3b360ab48fc760f8667b4ed777158fde2f66ed469b0a32a56"
+      "sha256": "e5cafa4b68cd5cd4d3d48646031dc2aa93d1c73ed5888bfafad91988a4851ceb"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "d8959d3b16626d675126b47a60195bab9ecf1040d823c9de4cc75dab3aa53f8d"
+      "sha256": "537e36394c339afcf679e753f01b0bd1fc48ba3ea484b71e0c6b6f0c7429957a"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -161,7 +161,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/protocol.rs",
-      "sha256": "a659e5e51d4529196cbe90883ded9c9fbcefa36ef084aad9a622b2061bcac5dd"
+      "sha256": "e91c466b2c6d08d69d48e38f5a5eaaaab8cf5725f3ee553576b9764636ad3d37"
     },
     {
       "path": "crates/stattic-runtime-core/src/responses.rs",
@@ -193,7 +193,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/serving_paths.rs",
-      "sha256": "179a2ce1f87949770cfbacfda23e2d8463efd2da786d94e0f6c5a1ef5abba779"
+      "sha256": "9e931c8e1089e8a6c18661902736ec66d67a206f44d9e57c4de6893b8b612e70"
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
@@ -665,7 +665,7 @@
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
-      "sha256": "145e5eb0ba0d7f266363291c0df3650c8998adc37e8b3516fe5f6c4c6e8d36c7"
+      "sha256": "a7935952f53cf9440eb0021edb725649dbf99bdf5aaa711392806816289699bb"
     },
     {
       "path": "runtime/engine/shared/functions-wire.generated.php",
@@ -1297,7 +1297,7 @@
     },
     {
       "path": "scripts/check-finalizer-protocol.mjs",
-      "sha256": "0e18731f4cc214da90fbef59de8ed0220191f7198146cf9b9b4595768de61376"
+      "sha256": "c71e4b70729c8f2cc40b3b718cb13d70b7c4332895e29effcaa61ecf093a8d35"
     }
   ]
 }

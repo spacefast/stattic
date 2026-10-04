@@ -231,7 +231,7 @@ try {
     },
     {
       name: "STATTIC_RUNTIME_PRIVATE_CONFIG_FILES",
-      read: (p) => p.config.current.acceptedFiles,
+      read: (p) => p.config.current.privateFiles,
     },
     {
       name: "STATTIC_RUNTIME_PLATFORM_OWNED_HEADER_PREFIXES",

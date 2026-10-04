@@ -60,6 +60,9 @@ const CONFIG_FILES: [&str; 7] = [
 pub const CONFIG_CANONICAL_FILE: &str = CONFIG_FILES[0];
 pub const CONFIG_ALIAS_FILES: &[&str] = CONFIG_FILES.split_at(1).1;
 pub const CONFIG_ACCEPTED_FILES: &[&str] = &CONFIG_FILES;
+/// The author's executable config. The CLI evaluates it into `sf.jsonc`; the
+/// source itself is private like the accepted files.
+pub const CONFIG_TYPESCRIPT_FILE: &str = "spacefast.config.ts";
 /// Compile-input sidecars at the version root. Like the config files above
 /// they are read at compile time and never served.
 pub const COMPILE_SIDECAR_FILES: &[&str] =
@@ -602,6 +605,7 @@ pub struct ConfigFilePolicyMetadata {
     pub canonical_file: &'static str,
     pub alias_files: &'static [&'static str],
     pub accepted_files: &'static [&'static str],
+    pub private_files: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -752,6 +756,11 @@ pub fn metadata() -> FinalizerProtocolMetadata {
         canonical_file: CONFIG_CANONICAL_FILE,
         alias_files: CONFIG_ALIAS_FILES,
         accepted_files: CONFIG_ACCEPTED_FILES,
+        private_files: CONFIG_ACCEPTED_FILES
+            .iter()
+            .copied()
+            .chain([CONFIG_TYPESCRIPT_FILE])
+            .collect(),
     };
     FinalizerProtocolMetadata {
         config: ConfigProtocolMetadata {
@@ -895,7 +904,7 @@ pub fn php_source() -> String {
     let proxy_route_schemes = php_string_array(EgressProfile::ProxyRoute.allowed_schemes());
     let provider_asset_extensions = php_string_array(PROVIDER_ASSET_EXTENSIONS);
     let lookup_asset_extensions = php_string_array(LOOKUP_ASSET_EXTENSIONS);
-    let private_config_files = php_string_array(CONFIG_ACCEPTED_FILES);
+    let private_config_files = php_string_array(&metadata().config.current.private_files);
     let private_compile_files = php_string_array(COMPILE_SIDECAR_FILES);
     // The MySQL broker's operation shape, sourced from the Rust engine
     // `shared/db-broker.php` is specified against. Emitted under the engine's

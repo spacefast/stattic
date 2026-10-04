@@ -1084,6 +1084,9 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   const pinned = await get(runtime, PREVIEW_VERSION_HOST, "/og.png");
   expect(pinned.status).toBe(403);
   expect(pinned.headers.get("cache-control")).toBe("private, no-store");
+  await pinned.arrayBuffer();
+  // Headers arrive before PHP shutdown releases admission. Complete each
+  // refusal before starting the next probe; this is not a concurrency test.
   for (const path of [
     "/",
     "/docs/",
@@ -1097,6 +1100,7 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
     const gated = await get(runtime, PREVIEW_HOST, path);
     expect(gated.status).toBe(403);
     expect(gated.headers.get("cache-control")).toBe("private, no-store");
+    await gated.arrayBuffer();
   }
   // A platform hold outranks the owner's choice: a fenced Space keeps even its
   // preview image behind the gate.

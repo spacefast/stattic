@@ -1,7 +1,7 @@
 {
-  "revision": "33794ff1a695be904c4e26f597dd294c39e9d6a4",
-  "sourceHash": "1eeddcb1fd4dfcb337c1ab70baacd3a36e1acc42037124469806390399b50023",
-  "manifestSha256": "b79481f5196fae027beb461583067a4c483d5e6f3a6d10cd1b24d04b115d390c",
+  "revision": "14ddc6a980f35754d5bd184e2d415866825b32a2",
+  "sourceHash": "faa2d25d1207807b2d627df1a880c053b7a7c53f9dd4e731fc5800724a4afbef",
+  "manifestSha256": "ebb1af17587d6121b9e2e7555f095d1f70f11a218867f4c2476b09ba345627c7",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "e5cafa4b68cd5cd4d3d48646031dc2aa93d1c73ed5888bfafad91988a4851ceb"
+      "sha256": "4e5d4072a4e4f9511dceb1c356b848288c428f6307d5789a186ea3391dae25db"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "537e36394c339afcf679e753f01b0bd1fc48ba3ea484b71e0c6b6f0c7429957a"
+      "sha256": "273d8c5f9f78887e61c36665ceb3e4ceb6cb5881785852475636f708b802dfc6"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -165,7 +165,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/responses.rs",
-      "sha256": "d02fa9f60bf9e51103f43f048810b89b62f647c439c24a8f50d177fa24ca8257"
+      "sha256": "85c997808ff065e861d8ae8cad80b5d91db4871944824532041d030f9f57198c"
     },
     {
       "path": "crates/stattic-runtime-core/src/route_inventory.rs",
@@ -1157,7 +1157,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "69a83d47b99fa8d83d214cb7601abf828ebd046ad348c99001ec025d06a1d734"
+      "sha256": "d4e449714701fd800a2ae571866d0763f147cdf407546044acd3617d5342eccd"
     },
     {
       "path": "runtime/tests/run-ci.sh",
@@ -1261,11 +1261,11 @@
     },
     {
       "path": "runtime/tests/zero-runtime.test.ts",
-      "sha256": "94cfb32ca60e72c5a7af231b9f80949bd107ad87c19d20dcc18c9ef3734d2c84"
+      "sha256": "0e15bdbcb37d45dd0a48e6264ded179c574105db8049c1d85b71032a0e15960b"
     },
     {
       "path": "runtime/tests/zero-rust-runner.test.ts",
-      "sha256": "50c3aaf557a0f60d81e7b6d366d1f9798852f7a21d9102ce0434765cb2d40446"
+      "sha256": "624323b7e3be6199b21c6a01f9c16743402173a0792fed4ab237e40e1d061bfa"
     },
     {
       "path": "runtime/wordpress-content-loader.php",

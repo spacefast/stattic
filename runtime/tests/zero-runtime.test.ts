@@ -1757,10 +1757,9 @@ test("does not spawn the Zero runner for redirects, headers, or canonical client
   expect(zeroAction(entries["/api/zero"] ?? null)).toMatchObject({
     endpoints: { GET: { endpoint: "GET /api/zero" } },
   });
-  for (const key of ["/old", "/", "/_spacefast/pages/client.html"]) {
+  for (const key of ["/", "/_spacefast/pages/client.html"]) {
     expect({ key, zero: zeroAction(entries[key] ?? null) }).toEqual({ key, zero: null });
   }
-  expect(entries["/old"]?.[RESPONSES.entryKeys.headers]).toMatchObject({ location: "/" });
 
   rmSync(capturePath, { force: true });
 

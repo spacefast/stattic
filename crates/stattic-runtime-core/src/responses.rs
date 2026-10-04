@@ -2,8 +2,8 @@
 //!
 //! One compiled array answers a request: status, the complete intended header
 //! set, the blob that carries the body, a precomputed validator, the lane that
-//! sends it, and an optional action. Nothing is resolved at request time — the
-//! serve path reads and sends.
+//! sends it, and an optional action. Ordered redirects and headers retain one
+//! canonical exact map and bucketed pattern list for the serve-time evaluator.
 
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,9 +12,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::access::{
-    bucket_pattern_rules, rule_is_placed_at_edge, rule_is_request_dependent, rule_value_is_set,
-};
+use crate::access::{bucket_pattern_rules, rule_value_is_set};
 use crate::artifacts::{compile_redirect_matchers, CompiledListing};
 use crate::finalize::{
     content_mtime, create_dir_all, immutable_path, invalid_with_details, mime_for_path, php_like,
@@ -514,11 +512,6 @@ pub(crate) fn compile_response_table(
         );
     }
 
-    // Exact redirects the compiler can answer without walking the ordered list.
-    for (request_path, compiled) in rules.compiled_exact_redirects() {
-        table.insert(request_path, compiled);
-    }
-
     for (path, action) in input.zero_actions {
         table.insert(
             request_key(path),
@@ -799,18 +792,18 @@ fn is_raster_image(headers: &BTreeMap<String, String>) -> bool {
 ///
 /// What the compiler resolves is the header NAMES a rule could set on a key
 /// ([`RuleIndex::settable_header_names`]) and the ordered redirect list, whose
-/// first-match-wins semantics a per-path answer would invert.
+/// first-match-wins semantics a per-path answer would invert. Exact redirects
+/// stay in this map: a finite set of compiled aliases cannot cover every
+/// trailing-slash spelling the matcher normalizes or preserve raw-pattern
+/// ordering.
 struct RuleIndex<'a> {
     redirects_exact: &'a Map<String, Value>,
     redirects_pattern: &'a [Value],
-    /// Every exact-redirect key still carried by the ordered residue under
+    /// Every exact-redirect key carried by the ordered residue under
     /// [`normalized_rule_key`], which is the string the serve-time walk looks
     /// them up by.
     redirect_exact_keys: BTreeSet<String>,
-    /// Singleton exact redirects removed from the residue because their
-    /// compiled table entry outranks every matching pattern.
-    compiled_exact_keys: BTreeSet<String>,
-    redirect_matchers: Vec<(i64, Regex)>,
+    redirect_matchers: Vec<Regex>,
     headers_exact: &'a Map<String, Value>,
     headers_pattern: &'a [Value],
     /// Every `_headers` rule as `(matcher, lowercase names it can SET)`.
@@ -848,7 +841,10 @@ impl<'a> RuleIndex<'a> {
     ) -> Self {
         // Compiling a regex costs orders of magnitude more than matching one,
         // and every compiled key would otherwise recompile the whole list.
-        let redirect_matchers = compile_redirect_matchers(redirects_pattern);
+        let redirect_matchers = compile_redirect_matchers(redirects_pattern)
+            .into_iter()
+            .map(|(_, regex)| regex)
+            .collect();
 
         let mut ordered: Vec<&Value> = headers_exact
             .values()
@@ -878,45 +874,18 @@ impl<'a> RuleIndex<'a> {
             header_setters.push((header_matcher(rule), names));
         }
 
-        let mut index = Self {
+        Self {
             redirects_exact,
             redirects_pattern,
             redirect_exact_keys: redirects_exact
                 .keys()
                 .map(|path| normalized_rule_key(path))
                 .collect(),
-            compiled_exact_keys: BTreeSet::new(),
             redirect_matchers,
             headers_exact,
             headers_pattern,
             header_setters,
-        };
-        // An unconditional single-rule exact redirect with no EARLIER matching
-        // pattern is fully represented by its ordinary response entry. Keeping
-        // it in the ordered residue as well only duplicates unreachable policy
-        // inside the single `\0rules` entry; a large generated redirect catalog
-        // can push that one entry past PHP/opcache's hard per-table ceiling.
-        //
-        // A later pattern may still match the same path. Record the compiled
-        // winner so `claims()` does not run that later rule ahead of it. Earlier
-        // patterns prevent compilation above and therefore keep the exact rule
-        // in the ordered residue as usual.
-        let singleton_exact_keys: BTreeSet<String> = redirects_exact
-            .iter()
-            .filter(|(_, rules)| rules.as_array().is_some_and(|rules| rules.len() == 1))
-            .map(|(path, _)| normalized_rule_key(path))
-            .collect();
-        let compiled_keys: BTreeSet<String> = index
-            .compiled_exact_redirects()
-            .into_iter()
-            .map(|(key, _)| key)
-            .filter(|key| singleton_exact_keys.contains(key))
-            .collect();
-        index.compiled_exact_keys = compiled_keys.clone();
-        index
-            .redirect_exact_keys
-            .retain(|key| !compiled_keys.contains(key));
-        index
+        }
     }
 
     /// Every header name a `_headers` rule could set on this key: the union over
@@ -949,67 +918,6 @@ impl<'a> RuleIndex<'a> {
         entry.rule_header_names = self.settable_header_names(key);
     }
 
-    /// The exact redirects that can answer without the ordered walk. A rule only
-    /// qualifies when nothing earlier could have claimed the path: redirects are
-    /// first-match-wins over ONE ordered list, and a precomputed answer that
-    /// jumps the queue silently inverts that.
-    fn compiled_exact_redirects(&self) -> Vec<(String, ResponseEntry)> {
-        let mut compiled = Vec::new();
-        for (request_path, bucket) in self.redirects_exact {
-            let Some(rules) = bucket.as_array() else {
-                continue;
-            };
-            let Some(rule) = rules.iter().min_by_key(|rule| {
-                rule.get("order")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(i64::MAX)
-            }) else {
-                continue;
-            };
-            if rule
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("redirect")
-                != "redirect"
-            {
-                continue;
-            }
-            let Some(destination) = rule
-                .get("destination")
-                .and_then(Value::as_str)
-                .filter(|destination| !destination.is_empty())
-            else {
-                continue;
-            };
-            if rule_is_request_dependent(rule) {
-                continue;
-            }
-            // An edge-placed rule is answered per HOST: the production host
-            // stands back and lets the edge have it, every other host runs it.
-            // A compiled entry cannot say that — it is one precomputed answer
-            // for every host — so a placed rule keeps its place in the ordered
-            // residue, where the serve path can skip it.
-            if rule_is_placed_at_edge(rule) {
-                continue;
-            }
-            let order = rule
-                .get("order")
-                .and_then(Value::as_i64)
-                .unwrap_or(i64::MAX);
-            if self.redirect_matchers.iter().any(|(pattern_order, regex)| {
-                *pattern_order < order && regex.is_match(request_path)
-            }) {
-                continue;
-            }
-            let status = rule.get("status").and_then(Value::as_u64).unwrap_or(302);
-            compiled.push((
-                normalized_rule_key(request_path),
-                redirect_entry(status, destination),
-            ));
-        }
-        compiled
-    }
-
     /// Whether an ordered REDIRECT can still claim this key, so the serve path
     /// has to walk `\0rules` before answering the compiled entry. Redirects
     /// only: they are the one thing that can move the request off this key,
@@ -1024,12 +932,9 @@ impl<'a> RuleIndex<'a> {
         if self.redirect_exact_keys.contains(&normalized) {
             return true;
         }
-        if self.compiled_exact_keys.contains(&normalized) {
-            return false;
-        }
         self.redirect_matchers
             .iter()
-            .any(|(_, regex)| regex.is_match(key))
+            .any(|regex| regex.is_match(key))
     }
 
     /// Whether any redirect rule can decline on a per-visitor condition. Fixed
@@ -1037,7 +942,7 @@ impl<'a> RuleIndex<'a> {
     /// walking every rule per request — the predicate is exactly the one
     /// `_stattic_redirect_has_conditional_candidate` applies to a rule
     /// (runtime/engine/runtime/redirects.php), not the wider
-    /// [`rule_is_request_dependent`].
+    /// request-dependence of methods, hosts, and query rules.
     fn has_conditional_redirect(&self) -> bool {
         self.redirects_exact
             .values()
@@ -1053,7 +958,7 @@ impl<'a> RuleIndex<'a> {
             })
     }
 
-    /// The rules the entries do not carry. Both lists go over whole, in the one
+    /// The canonical redirect and header rules. Both lists go over whole, in the one
     /// ordered-rule shape the serve path walks — an exact map keyed by path
     /// plus first-segment-bucketed patterns — so `order` still decides between
     /// them and redirects stay first-match-wins.
@@ -1062,10 +967,6 @@ impl<'a> RuleIndex<'a> {
         let redirects_exact: Map<String, Value> = self
             .redirects_exact
             .iter()
-            .filter(|(path, _)| {
-                self.redirect_exact_keys
-                    .contains(&normalized_rule_key(path))
-            })
             .map(|(path, rules)| (path.clone(), hoist_bucket(rules, &mut placed_hostnames)))
             .collect();
         let redirects_pattern = hoist_rules(self.redirects_pattern, &mut placed_hostnames);
@@ -1244,8 +1145,8 @@ fn write_response_table_set(
     // Every entry is serialized exactly once, whether or not the table splits.
     let rendered: Vec<(&str, String)> = entries
         .iter()
-        .map(|(key, entry)| (key.as_str(), render_entry(key, entry)))
-        .collect();
+        .map(|(key, entry)| Ok((key.as_str(), render_entry(stage_root, key, entry)?)))
+        .collect::<Result<_>>()?;
     let mut tables = BTreeMap::new();
     if table_length(rendered.iter().map(|(_, body)| body.as_str())) <= RESPONSE_TABLE_SPLIT_BYTES {
         let name = write_table(
@@ -1331,27 +1232,85 @@ const TABLE_PROLOGUE: &str = "<?php\nreturn [\n";
 const TABLE_EPILOGUE: &str = "];\n";
 
 /// One `key => entry,` line of a table file.
-fn render_entry(key: &str, entry: &ResponseEntry) -> String {
+fn render_entry(stage_root: &Path, key: &str, entry: &ResponseEntry) -> Result<String> {
     let value = entry.to_value(key);
-    // The public routing config is capped as compact JSON, while a nested PHP
-    // array literal repeats indentation and `=>` for every field. A valid large
-    // redirect catalog can therefore cross wp.cloud's 1 MiB OPcache file
-    // ceiling only after compilation. Emit the reserved entry as a compact JSON
-    // expression: included tables still return the exact array every deployed
-    // schema-v4 runtime expects, so engine rollback remains safe.
-    if key == RESPONSE_KEY_RULES {
-        let encoded = serde_json::to_string(&value).expect("a JSON value always serializes");
-        return format!(
-            "    {} => json_decode({}, true, 512, JSON_THROW_ON_ERROR),\n",
-            crate::finalize::php_key_literal(key),
-            crate::finalize::php_export_value(&Value::String(encoded)),
-        );
-    }
-    format!(
-        "    {} => {},\n",
-        crate::finalize::php_key_literal(key),
+    let expression = if key == RESPONSE_KEY_RULES {
+        render_rule_value(stage_root, &value)?
+    } else {
         crate::finalize::php_export_value_at(&value, 4)
-    )
+    };
+    Ok(table_line(Some(key), &expression))
+}
+
+/// One `key => value,` (or keyless `value,`) line of a table body.
+fn table_line(key: Option<&str>, expression: &str) -> String {
+    match key {
+        Some(key) => format!(
+            "    {} => {expression},\n",
+            crate::finalize::php_key_literal(key)
+        ),
+        None => format!("    {expression},\n"),
+    }
+}
+
+/// Split only the PHP representation of large rule arrays. Every included
+/// fragment returns an immutable literal that OPcache can share across requests;
+/// merging allocates the outer map/list without decoding all nested rules.
+/// Existing schema-v4 readers still receive the same fully assembled array.
+fn render_rule_value(stage_root: &Path, value: &Value) -> Result<String> {
+    let literal = crate::finalize::php_export_value(value);
+    if literal.len() <= RESPONSE_TABLE_SPLIT_BYTES {
+        return Ok(literal);
+    }
+    let (merge, members): (&str, Vec<(Option<&str>, &Value)>) = match value {
+        Value::Array(items) => (
+            "array_merge",
+            items.iter().map(|item| (None, item)).collect(),
+        ),
+        Value::Object(map) => (
+            "array_replace",
+            map.iter()
+                .map(|(key, item)| (Some(key.as_str()), item))
+                .collect(),
+        ),
+        // A single scalar retains the existing hard-ceiling failure contract.
+        _ => return Ok(literal),
+    };
+    let lines = members
+        .into_iter()
+        .map(|(key, child)| Ok(table_line(key, &render_rule_value(stage_root, child)?)))
+        .collect::<Result<Vec<_>>>()?;
+    // An ancestor of the oversized value is small once that value is a merge
+    // expression: keep it inline instead of paying another include per request.
+    if table_length(lines.iter().map(String::as_str)) <= RESPONSE_TABLE_SPLIT_BYTES {
+        return Ok(format!("[\n{}]", lines.concat()));
+    }
+    let mut parts = Vec::new();
+    let mut body = String::new();
+    for line in lines {
+        if !body.is_empty()
+            && table_length([body.as_str(), line.as_str()].into_iter()) > RESPONSE_TABLE_SPLIT_BYTES
+        {
+            parts.push(write_rule_fragment(stage_root, &body)?);
+            body.clear();
+        }
+        body.push_str(&line);
+    }
+    if !body.is_empty() {
+        parts.push(write_rule_fragment(stage_root, &body)?);
+    }
+    Ok(format!("{merge}({})", parts.join(", ")))
+}
+
+fn write_rule_fragment(stage_root: &Path, body: &str) -> Result<String> {
+    // A `responses-rules-data-<hash>.php` name keeps fragments under the
+    // existing `responses-*.php` scanners and the shared per-file ceiling.
+    let bytes = render_table([body].into_iter());
+    let name = write_table(stage_root, Some("rules-data"), &bytes)?;
+    Ok(format!(
+        "(require __DIR__ . {})",
+        crate::finalize::php_export_value(&Value::String(format!("/{name}")))
+    ))
 }
 
 fn table_length<'a>(bodies: impl Iterator<Item = &'a str>) -> usize {
@@ -1933,82 +1892,9 @@ mod tests {
     }
 
     #[test]
-    fn compiled_exact_redirect_catalog_does_not_duplicate_into_the_rules_residue() {
+    fn a_large_exact_catalog_and_later_pattern_publish_once_in_the_ordered_rules() {
         let mut exact = Map::new();
-        for index in 0..4_000 {
-            exact.insert(
-                format!("/legacy-{index}"),
-                json!([{
-                    "action": "redirect",
-                    "destination": format!("/current-{index}"),
-                    "status": 301,
-                    "order": index,
-                }]),
-            );
-        }
-        let table = compile(
-            &[("index.html", b"home")],
-            json!({"index": "index.html", "clean_urls": false}),
-            Value::Object(exact),
-            json!([]),
-            json!({}),
-            json!([]),
-        );
-
-        assert_eq!(table["/legacy-3999"].status, 301);
-        assert_eq!(
-            table["/legacy-3999"]
-                .headers
-                .get("location")
-                .map(String::as_str),
-            Some("/current-3999")
-        );
-        assert!(!table.contains_key(RESPONSE_KEY_RULES));
-
-        let temp = tempfile::tempdir().unwrap();
-        publish_response_tables(temp.path(), &table, &BTreeMap::new(), "0.0.0-test").unwrap();
-    }
-
-    #[test]
-    fn a_later_pattern_rule_cannot_jump_a_compiled_earlier_exact() {
-        let table = compile(
-            &[("index.html", b"home")],
-            json!({"index": "index.html", "clean_urls": false}),
-            json!({"/promo": [{"action":"redirect","destination":"/summer-sale","status":301,"order":0}]}),
-            json!([{
-                "source": "/promo*",
-                "regex": "^/promo(?P<splat>.*)$",
-                "action": "redirect",
-                "destination": "/archived",
-                "status": 301,
-                "order": 1
-            }]),
-            json!({}),
-            json!([]),
-        );
-
-        let compiled = &table["/promo"];
-        assert_eq!(compiled.status, 301);
-        assert_eq!(
-            compiled.headers.get("location").map(String::as_str),
-            Some("/summer-sale")
-        );
-        assert!(
-            !compiled.rules_first,
-            "the compiled exact must answer before the later pattern"
-        );
-        let redirects = residue(&table, "redirects");
-        assert!(redirects["exact"]["/promo"].is_null());
-        assert_eq!(
-            redirects["pattern"]["fallback"][0]["destination"],
-            json!("/archived")
-        );
-    }
-
-    #[test]
-    fn a_large_exact_catalog_overlapped_by_a_later_pattern_stays_compiled() {
-        let mut exact = Map::new();
-        for index in 0..4_000 {
+        for index in 0..12_000 {
             exact.insert(
                 format!("/legacy-{index}"),
                 json!([{
@@ -2029,29 +1915,82 @@ mod tests {
                 "action": "redirect",
                 "destination": "/archive/:splat",
                 "status": 301,
-                "order": 5_000
+                "order": 15_000
             }]),
             json!({}),
             json!([]),
         );
 
-        assert!(!table["/legacy-3999"].rules_first);
-        assert!(residue(&table, "redirects")["exact"]
-            .as_object()
-            .is_some_and(Map::is_empty));
+        let redirects = residue(&table, "redirects");
+        assert_eq!(redirects["exact"].as_object().unwrap().len(), 12_000);
+        assert_eq!(
+            redirects["exact"]["/legacy-11999"][0]["destination"],
+            json!("/current-11999")
+        );
+        assert_eq!(redirects["pattern"]["fallback"][0]["order"], json!(15_000));
+        // The ordered exact map is the only redirect owner; response entries
+        // retain their published bytes and cannot duplicate a redirect catalog.
+        assert_eq!(table.len(), 4);
+
         let temp = tempfile::tempdir().unwrap();
         publish_response_tables(temp.path(), &table, &BTreeMap::new(), "0.0.0-test").unwrap();
+        // Only the exact map's data is split: every fragment is a plain literal
+        // OPcache can keep immutable, and its small ancestors stay inline
+        // instead of costing another include on every request.
+        let fragments: Vec<String> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("responses-rules-data-"))
+            .collect();
+        assert!(fragments.len() > 1);
+        for name in &fragments {
+            let bytes = std::fs::read_to_string(temp.path().join(name)).unwrap();
+            assert!(bytes.len() <= RESPONSE_TABLE_MAX_BYTES);
+            assert!(!bytes.contains("require"), "{name} nests another fragment");
+        }
     }
 
     #[test]
-    fn an_earlier_pattern_rule_keeps_an_exact_redirect_out_of_the_table() {
+    fn exact_redirects_run_before_a_file_and_merge_with_later_patterns() {
+        let table = compile(
+            &[("index.html", b"home"), ("promo/index.html", b"fallback")],
+            json!({"index": "index.html", "clean_urls": false}),
+            json!({"/promo": [{"action":"redirect","destination":"/summer-sale","status":301,"order":0}]}),
+            json!([{
+                "source": "/promo*",
+                "regex": "^/promo(?P<splat>.*)$",
+                "action": "redirect",
+                "destination": "/archived",
+                "status": 301,
+                "order": 1
+            }]),
+            json!({}),
+            json!([]),
+        );
+
+        let fallback = &table["/promo/"];
+        assert_eq!(fallback.blob.as_deref(), Some(sha256(b"fallback").as_str()));
+        assert!(
+            fallback.rules_first,
+            "the ordered rules must run before file bytes"
+        );
+        let redirects = residue(&table, "redirects");
+        assert_eq!(redirects["exact"]["/promo"][0]["order"], json!(0));
+        assert_eq!(
+            redirects["pattern"]["fallback"][0]["destination"],
+            json!("/archived")
+        );
+    }
+
+    #[test]
+    fn earlier_raw_patterns_and_normalized_exacts_share_the_ordered_rules() {
         let table = compile(
             &[("index.html", b"home")],
             json!({"index": "index.html", "clean_urls": false}),
             json!({"/docs/intro": [{"action":"redirect","destination":"/start","status":301,"order":1}]}),
             json!([{
                 "source": "/docs/:slug",
-                "regex": "^/docs/(?P<slug>[^/]+)/?$",
+                "regex": "^/docs/(?P<slug>[^/]+)//$",
                 "action": "redirect",
                 "destination": "/guides/:slug",
                 "status": 301,
@@ -2062,6 +2001,11 @@ mod tests {
         );
         // The ordered walk owns this path, so nothing precomputed may answer it.
         assert!(!table.contains_key("/docs/intro"));
+        assert!(!table.contains_key("/docs/intro/"));
+        assert_eq!(
+            residue(&table, "redirects")["exact"]["/docs/intro"][0]["destination"],
+            json!("/start")
+        );
         // ...and the complete ordered list is published for that walk.
         assert!(table.contains_key(RESPONSE_KEY_RULES));
     }
@@ -2134,9 +2078,8 @@ mod tests {
 
     /// A routing document can be valid under the public config-size contract
     /// yet expand beyond OPcache's per-file ceiling when represented as nested
-    /// PHP arrays. The reserved rule entry uses a compact JSON expression, so
-    /// catalog size does not become an unrelated response-table failure at
-    /// finalize.
+    /// PHP arrays. Large nested arrays are split into immutable PHP fragments,
+    /// so catalog size does not become an unrelated response-table failure.
     #[test]
     fn a_large_ordered_rule_catalog_stays_within_the_table_cap() {
         let temp = tempfile::tempdir().unwrap();

@@ -148,7 +148,7 @@ beforeAll(async () => {
       "SF.JSONC.gz": gzipSync(Buffer.from('{ "private": true }\n')),
       ".well-known/security.txt": "Contact: mailto:security@site.test\n",
       // The fixture's only redirect input: native finalize parses it and lowers
-      // it into compiled keys plus the ordered `\0rules` residue.
+      // it into the canonical ordered `\0rules` map.
       _redirects: [
         "/old /about.html 301",
         "/found /about.html 302",
@@ -407,10 +407,47 @@ test("php-like uploads are inert text, never executed", async () => {
   expect(await response.text()).toBe("<?php echo 'never executed';\n");
 });
 
-test("exact redirects answer from their compiled key", async () => {
-  const permanent = await get(rt, SITE, "/old");
-  expect(permanent.status).toBe(301);
-  expect(permanent.headers.get("location")).toBe("/about.html");
+test("large exact redirect catalogs preserve normalized ordered matching", async () => {
+  const host = "redirect-catalog.test";
+  await deploy(rt, {
+    spaceId: "spc_redirect_catalog",
+    versionId: "ver_redirect_catalog",
+    files: {
+      "index.html": INDEX,
+      "legacy-11999/index.html": "<h1>redirect fallback</h1>\n",
+      _redirects: [
+        "/ordered/:slug//* /pattern/:slug 301",
+        "/ordered/intro /exact 301",
+        ...Array.from({ length: 12_000 }, (_, index) => `/legacy-${index} /current-${index} 301`),
+        "/* /wrong-later-pattern 301",
+      ].join("\n"),
+    },
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig(),
+      production_hostnames: [host],
+      version_hostnames: [],
+    },
+  });
+  for (const pathname of [
+    "/legacy-11999",
+    "/legacy-11999/",
+    "/legacy-11999//",
+    "/legacy-%31%31%39%39%39//",
+  ]) {
+    const permanent = await get(rt, host, `${pathname}?campaign=summer&tag=a%2Bb&tag=c%20d`);
+    expect(permanent.status).toBe(301);
+    expect(permanent.headers.get("location")).toBe(
+      "/current-11999?campaign=summer&tag=a%2Bb&tag=c%20d",
+    );
+  }
+
+  const ordered = await get(rt, host, "/ordered/intro//");
+  expect(ordered.status).toBe(301);
+  expect(ordered.headers.get("location")).toBe("/pattern/intro");
+  const normalized = await get(rt, host, "/ordered/intro/");
+  expect(normalized.status).toBe(301);
+  expect(normalized.headers.get("location")).toBe("/exact");
 
   const temporary = await get(rt, SITE, "/found");
   expect(temporary.status).toBe(302);

@@ -559,9 +559,11 @@ function _stattic_tier_space_blob_gc(
         }
         $blobs = _stattic_tier_prefix_blobs($blobsRoot, $prefix);
         if ($blobs === null) {
-            // An unreadable prefix makes the space unreasonable-about, same as
-            // an unreadable declaration: touch nothing more, persist nothing.
-            return $skipped;
+            // Skip it unvisited, so the merge keeps its stored marks while the
+            // readable prefixes still collect. Incomplete, but not truncated:
+            // no cursor, or the next pass would start at the failure again.
+            $complete = false;
+            continue;
         }
         $deletions = [];
         foreach ($blobs as $sha => $blob) {
@@ -633,10 +635,11 @@ function _stattic_tier_space_blob_gc(
     foreach ($deleted as $sha) {
         unset($marks[$sha]);
     }
-    if ($resumeAt !== null) {
-        // The merge, and the whole reason a truncated pass may write at all: a
-        // sha whose prefix this pass never reached keeps exactly the mark it
-        // had. Nothing about it was observed, so nothing about it is replaced.
+    if (!$complete) {
+        // The merge, and the whole reason an incomplete pass may write at all: a
+        // sha whose prefix this pass did not walk (budget cut or unreadable)
+        // keeps exactly the mark it had. Nothing about it was observed, so
+        // nothing about it is replaced.
         foreach ($storedMarks as $sha => $seen) {
             if (!is_string($sha) || !is_int($seen) || isset($visited[substr($sha, 0, 2)])) {
                 continue;

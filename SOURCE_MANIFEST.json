@@ -1,7 +1,7 @@
 {
-  "revision": "f61a3a7fb266c426a8e3bced6dd8740ad171fe89",
-  "sourceHash": "9c0c72eb5244a5877169fa0267c673fad4b8920acf66fd16a441a1e88c900207",
-  "manifestSha256": "eff18c3568f4cc3636d4ab0472c076122a06ed302f7388b9a63efb5637557867",
+  "revision": "d4187bd017310bef2e0cbe6cf412592d1c4c2c89",
+  "sourceHash": "e74d701ca8bad931681a309b718e96535d24bfed1742f6faee1ba78cef7e5188",
+  "manifestSha256": "f072181fb8e1f4d15604022dbde765c3f29f5e8b7644cbe1b629cb8138856825",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "2cb8e0144a72501c849a393a047219127e568a993ef3af5be9c5f9eebc338932"
+      "sha256": "a3c636caf5b6038357098ce6ba385d68847b7d531c645ce9229a3a9356130883"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "a2b801c671f0209278d7f19a753a57c3ba7fa50db6245c724b5ba94016e350d5"
+      "sha256": "c383dec40e56792fbe2eb0d17f19593fd91e1aeb0ad63f6ba92dc6cff62d8f60"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -437,7 +437,7 @@
     },
     {
       "path": "runtime/engine/admin/retention.php",
-      "sha256": "c7f290bd3310c9931c8a68a89c0fa56ecf5e8c048db39e6eb5a90f675c6a13a0"
+      "sha256": "0f411aadb19b7617cd71c7c034e51a484150925ed431b82ec2c5b6ac879e150c"
     },
     {
       "path": "runtime/engine/admin/static-zip.php",
@@ -449,7 +449,7 @@
     },
     {
       "path": "runtime/engine/admin/tier.php",
-      "sha256": "806afe40a20c023cb158ca8d40c829b37bc7778a5726fa1bfec38503aa2da1b0"
+      "sha256": "c901d9ad136f220d387b1aa433dcb13d8da08ddce7cecf601ab9487c2df31fde"
     },
     {
       "path": "runtime/engine/admin/upload-policy.php",
@@ -1225,7 +1225,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "9583eb1ec155cbee4f2961c795d5468c043ef718b250046375be2bc2d3f4e342"
+      "sha256": "eb52ea7a413904aa1038505856095637160a89ce8e9c6c1439f245e7c057fe41"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

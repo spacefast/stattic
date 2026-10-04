@@ -172,7 +172,10 @@ function _stattic_runtime_reclaim_content_releases(
         arsort($releases);
         $kept = 0;
         foreach ($releases as $release => $mtime) {
-            if (basename($release) === $active || $kept < STATTIC_RUNTIME_CONTENT_RELEASES_KEPT) {
+            if (basename($release) === $active) {
+                continue;
+            }
+            if ($kept < STATTIC_RUNTIME_CONTENT_RELEASES_KEPT) {
                 $kept += 1;
                 continue;
             }

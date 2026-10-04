@@ -4,6 +4,16 @@ declare(strict_types=1);
 // Pure-function unit tests for runtime policy modules. Run with
 // `php runtime/tests/unit.php` (no server, no network, literal IPs only).
 
+// Permission failures must remain real in container runs as root. Create all
+// disposable fixtures as an unprivileged user so chmod has its normal effect.
+if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+    $fixtureUid = fileowner(__FILE__) ?: 65534;
+    $fixtureGid = filegroup(__FILE__) ?: 65534;
+    if (!posix_setgid($fixtureGid) || !posix_setuid($fixtureUid)) {
+        throw new RuntimeException('Cannot drop root privileges for permission fixtures');
+    }
+}
+
 require_once __DIR__ . '/../engine/shared/context.php'; // engine identity + config_value helpers
 require_once __DIR__ . '/../engine/shared/egress.php';
 require_once __DIR__ . '/../engine/shared/safety.php';
@@ -1325,6 +1335,57 @@ $gcSecondMarks = _stattic_runtime_read_json(_stattic_tier_gc_marks_path($gcPriva
 check(
     is_array($gcSecondMarks) && $gcSecondMarks !== [],
     'blob gc across ticks: the next pass at the same budget observes that Space rather than re-walking the first'
+);
+// A later unreadable prefix must preserve the work already completed.
+$gcFaultSpace = 'spc_gc_unreadable';
+$gcFaultRoot = _stattic_tier_space_blobs_root($gcPrivateRoot, $gcFaultSpace);
+$gcEarlySha = '00' . str_repeat('a', 62);
+$gcLateSha = 'ff' . str_repeat('b', 62);
+foreach ([$gcEarlySha, $gcLateSha] as $gcFaultSha) {
+    $gcFaultPath = _stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcFaultSha);
+    _stattic_runtime_mkdir(dirname($gcFaultPath));
+    file_put_contents($gcFaultPath, 'garbage');
+}
+$gcFaultMarksPath = _stattic_tier_gc_marks_path($gcPrivateRoot, $gcFaultSpace);
+_stattic_runtime_write_json_atomic($gcFaultMarksPath, [$gcEarlySha => $gcNow - 86400, $gcLateSha => $gcNow - 86400]);
+chmod($gcFaultRoot . '/ff', 0o000);
+set_error_handler(static fn (): bool => true, E_WARNING);
+try {
+    $gcFaultPass = _stattic_tier_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
+} finally {
+    restore_error_handler();
+}
+// A null cursor is what keeps a persistent failure from stalling the Space:
+// the next pass starts at the readable prefixes again.
+check(
+    $gcFaultPass === ['complete' => false, 'deleted' => 1, 'bytes' => 7]
+        && !is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcEarlySha))
+        && _stattic_runtime_read_json($gcFaultMarksPath) === [$gcLateSha => $gcNow - 86400]
+        && _stattic_tier_read_cursor(_stattic_tier_gc_cursor_path($gcPrivateRoot, $gcFaultSpace)) === null,
+    'blob gc: an unreadable prefix retains earlier deletion accounting and marks without pinning the cursor'
+);
+file_put_contents(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcEarlySha), 'garbage');
+_stattic_runtime_write_json_atomic($gcFaultMarksPath, [$gcEarlySha => $gcNow - 86400, $gcLateSha => $gcNow - 86400]);
+set_error_handler(static fn (): bool => true, E_WARNING);
+try {
+    $gcRepeatedPass = _stattic_tier_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
+} finally {
+    restore_error_handler();
+    chmod($gcFaultRoot . '/ff', 0o777);
+}
+check(
+    $gcRepeatedPass === ['complete' => false, 'deleted' => 1, 'bytes' => 7]
+        && !is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcEarlySha))
+        && is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcLateSha))
+        && _stattic_runtime_read_json($gcFaultMarksPath) === [$gcLateSha => $gcNow - 86400]
+        && _stattic_tier_read_cursor(_stattic_tier_gc_cursor_path($gcPrivateRoot, $gcFaultSpace)) === null,
+    'blob gc: a persistently unreadable prefix allows other prefixes to keep collecting'
+);
+$gcRecoveredPass = _stattic_tier_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
+check(
+    $gcRecoveredPass === ['complete' => true, 'deleted' => 1, 'bytes' => 7]
+        && !is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcLateSha)),
+    'blob gc: the recovered prefix resumes with its original grace and completes'
 );
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($gcPrivateRoot)));
 
@@ -3433,11 +3494,11 @@ foreach (range(0, 5) as $index) {
 // A crashed compile's stage root is registered too, and is not a release.
 mkdir($contentSpaceRoot . '/compile-' . str_repeat('c', 24), 0o777, true);
 check(
-    _stattic_private_tree_write_pointer($contentSpaceRoot . '/active-release', $contentRevisions[0]),
+    _stattic_private_tree_write_pointer($contentSpaceRoot . '/active-release', $contentRevisions[5]),
     'the compiled release pointer publishes through the shared verified write'
 );
 check(
-    _stattic_private_tree_read_pointer($contentSpaceRoot . '/active-release', 128) === $contentRevisions[0],
+    _stattic_private_tree_read_pointer($contentSpaceRoot . '/active-release', 128) === $contentRevisions[5],
     'the published pointer reads back as the revision that was written'
 );
 check(
@@ -3446,11 +3507,21 @@ check(
 );
 $survivors = array_map('basename', glob($contentSpaceRoot . '/releases/*') ?: []);
 sort($survivors);
-$expectedSurvivors = [$contentRevisions[0], $contentRevisions[3], $contentRevisions[4], $contentRevisions[5]];
+$expectedSurvivors = [$contentRevisions[2], $contentRevisions[3], $contentRevisions[4], $contentRevisions[5]];
 sort($expectedSurvivors);
 check(
     $survivors === $expectedSurvivors,
-    'content retention keeps the active release whatever its age, plus the newest three'
+    'content retention keeps a newest active release plus three predecessors'
+);
+// An old active release is exempt even when it sorts after every predecessor.
+mkdir($contentSpaceRoot . '/releases/' . $contentRevisions[0], 0o777, true);
+touch($contentSpaceRoot . '/releases/' . $contentRevisions[0], time() - (30 * 86400));
+_stattic_private_tree_write_pointer($contentSpaceRoot . '/active-release', $contentRevisions[0]);
+check(
+    _stattic_runtime_reclaim_content_releases($contentRetentionRoot) === 1
+        && is_dir($contentSpaceRoot . '/releases/' . $contentRevisions[0])
+        && !is_dir($contentSpaceRoot . '/releases/' . $contentRevisions[2]),
+    'content retention exempts an old active release while keeping only the three newest others'
 );
 check(
     in_array(

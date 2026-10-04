@@ -53,7 +53,11 @@ test("connector states and null results survive the PHP run envelopes", () => {
     ["mutation.run", "result"],
     ["action.run", "result"],
   ]) {
-    for (const value of [{ __connector: state }, null]) {
+    for (const value of [
+      { __connector: state },
+      { __connector: { ...state, code: "running" } },
+      null,
+    ]) {
       const probe = spawnSync(
         PHP_BINARY,
         [

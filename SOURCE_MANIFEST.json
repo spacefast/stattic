@@ -1,7 +1,7 @@
 {
-  "revision": "6e92820048763638d65e3389a830876e569f67e3",
+  "revision": "e8189bae8c6629cee3790ac51474f342131acc6f",
   "sourceHash": "9c0c72eb5244a5877169fa0267c673fad4b8920acf66fd16a441a1e88c900207",
-  "manifestSha256": "dac65194dcf1d9e63a13212cecf5d94be1930e37a27ebfd8a6b9b2d251ac72d3",
+  "manifestSha256": "3de3ff273813b33899ce2edc1b59f764426a186d5e29ce79beeea2aba9bbfe44",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "bec60765633f411bd3be5d63584f7733a3c97649d029a1926017c35ba9a585c8"
+      "sha256": "32dc35590d9c56e945fdfce93a954575a6d398ae3d7586605d9a7d3cedb16229"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "0bbda0adc253034aec7ea478295fa0f6748af9256ed7a346089d178a6b6b66a8"
+      "sha256": "5e07d48c506df10afd6c6012485d05552f42991fb827ac56480d383e3d1fa79f"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -1253,7 +1253,7 @@
     },
     {
       "path": "runtime/tests/zero-connectors.test.ts",
-      "sha256": "85fdf089587954534b60083628863b21407122be0173c89ae23309be357f865f"
+      "sha256": "56ef0242360fc5f003d60ef1af400c93c5cc46ce1100b3bcc1e89ea2346933fb"
     },
     {
       "path": "runtime/tests/zero-db-dump.test.ts",

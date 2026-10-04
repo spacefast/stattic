@@ -159,6 +159,26 @@ test("installed member and team projections validate only live identities and cu
   expect(authorityGrantGenerationMatches(active, team, MEMBER_AUTHORITY, legacy)).toBe(true);
   expect(authorityGrantGenerationMatches(active, team, MEMBER_AUTHORITY, epochDigest)).toBe(true);
 
+  const restricted = { ...team, restricted: true };
+  expect(authorityGrantGenerationMatches(active, restricted, MEMBER_AUTHORITY, legacy)).toBe(false);
+  expect(authorityGrantGenerationMatches(active, restricted, MEMBER_AUTHORITY, epochDigest)).toBe(
+    true,
+  );
+  const restrictedChanged = { ...restricted, membershipEpoch: restricted.membershipEpoch + 1 };
+  expect(
+    authorityGrantGenerationMatches(active, restrictedChanged, MEMBER_AUTHORITY, epochDigest),
+  ).toBe(false);
+  const currentRestrictedDigest = engineGeneration(restrictedChanged, MEMBER_AUTHORITY, "team");
+  if (!currentRestrictedDigest) throw new Error("restricted generation missing");
+  expect(
+    authorityGrantGenerationMatches(
+      active,
+      restrictedChanged,
+      MEMBER_AUTHORITY,
+      currentRestrictedDigest,
+    ),
+  ).toBe(true);
+
   const reduced = { ...team, membershipEpoch: team.membershipEpoch + 1 };
   expect(authorityGrantGenerationMatches(active, reduced, MEMBER_AUTHORITY, epochDigest)).toBe(
     false,

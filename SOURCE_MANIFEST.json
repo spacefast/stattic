@@ -1,7 +1,7 @@
 {
-  "revision": "9c6455e96757f24274dea151d1cc20b4faeacbd0",
+  "revision": "58793b1fefa2a2b116e24eeda9d9e71fed264f3b",
   "sourceHash": "47e2f2342bdec1cc181015f2eb50be30161ba2a7f322be948e88ed9eaf3b51db",
-  "manifestSha256": "93f918c93bbd249f8a9f16e6465e538f669301cadd96acc2e54d32fe7b032e5b",
+  "manifestSha256": "3e26b3a0274b33071298ee2521e87038466f15decb42ef474910b238545996ae",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "70aa879949961aa94891e8f9c8907b8c5fde6161603a6c79aeb313736e38e515"
+      "sha256": "22c157c745cf1c78de17c57297a61cf46ffb0b24dca9d370566382e895465036"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "a0e2260ed0882254ecdd0c3064053ddcd2de335a0aa7c3b13e73183e760fc18d"
+      "sha256": "a0d5acaf1701b14d93051bf553a079a4f513569b11cc09856d1083ce9d566053"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -853,7 +853,7 @@
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
-      "sha256": "bde10b7d5b8386a799547ec59f9e049573d58e84d5c8312b730f07bd80329050"
+      "sha256": "5584e9b74979f7230713c7e25f086aa08929dc9144374abdce82c2a594a173a0"
     },
     {
       "path": "runtime/tests/access-rules.test.ts",

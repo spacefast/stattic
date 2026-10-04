@@ -357,6 +357,7 @@ echo json_encode([
       "index.html": "<h1>x</h1>\n",
       "assets/app.js": "window.__spacefastStaticFixture = true;\n",
       "assets/large.bin": "x".repeat(262144),
+      "large.html": `<html><head><meta property="og:image" content="cover.png"></head><body>${"x".repeat(262144)}</body></html>`,
       "private/index.html": "<h1>private x</h1>\n",
     },
     serving: {
@@ -490,6 +491,26 @@ test(
     const shed = await get(rt, HOST_X, "/assets/large.bin");
     expect(shed.status).toBe(429);
     expect(shed.headers.get("retry-after")).toBe("2");
+
+    const preview = await get(rt, HOST_X, "/large.html?spacefast_tag_preview=fixture");
+    expect(preview.status).toBe(429);
+    expect(preview.headers.get("retry-after")).toBe("2");
+    expect(await preview.text()).toBe("Too Many Requests\n");
+
+    const head = await get(rt, HOST_X, "/large.html", { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(Number(head.headers.get("content-length"))).toBeGreaterThan(262144);
+    expect(await head.text()).toBe("");
+    const notModified = await get(rt, HOST_X, "/large.html", {
+      headers: { "if-none-match": "*" },
+    });
+    expect(notModified.status).toBe(304);
+    expect(await notModified.text()).toBe("");
+    const precondition = await get(rt, HOST_X, "/large.html", {
+      headers: { "if-match": '"stale"' },
+    });
+    expect(precondition.status).toBe(412);
+    expect(await precondition.text()).toBe("");
 
     const otherSpace = await get(rt, HOST_Y, "/assets/large.bin");
     expect(otherSpace.status).toBe(200);

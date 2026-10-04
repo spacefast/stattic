@@ -27,8 +27,8 @@ use crate::config::crons;
 use crate::config::diagnostics::DiagnosticSeverity;
 use crate::config::jsonc::parse as parse_jsonc;
 use crate::content::{
-    advertised_image_file, materialize_html_pipeline, IMPLICIT_FAVICON_PATH,
-    PIPELINE_SOURCE_MAX_BYTES,
+    advertised_image_file, advertised_image_host, materialize_html_pipeline, HtmlPipelineContext,
+    IMPLICIT_FAVICON_PATH, PIPELINE_SOURCE_MAX_BYTES,
 };
 use crate::csp::PlatformCspSources;
 use crate::finalize::{
@@ -593,6 +593,7 @@ fn run_finalize_pipeline(
         .and_then(Value::as_object)
         .unwrap_or(&absent);
     let viewer = resolved_viewer(metadata, config);
+    let assigned_hostnames = hostname_list(&input.body, "routing_assigned_hostnames");
     // Everything the pipeline produces lands in the CAS: the tables address
     // blobs, and a blob is the only place a byte lives.
     let blobs = blob_root(private_root, &input.space_id);
@@ -602,13 +603,16 @@ fn run_finalize_pipeline(
     let previous_catalog = previous_version_catalog(input, private_root)?;
     let context_digest = pipeline_context_digest(config, serving, &viewer, metadata, files);
     let adoptable = adoptable_paths(previous_catalog.as_ref(), &context_digest, files, &blobs);
-    let pipeline = timed(&mut telemetry.html_pipeline_ms, || {
+    let mut pipeline = timed(&mut telemetry.html_pipeline_ms, || {
         materialize_html_pipeline(
             &stage_root.join("files"),
             files,
-            serving,
-            metadata,
-            &viewer,
+            HtmlPipelineContext {
+                serving,
+                metadata,
+                viewer: &viewer,
+                assigned_hostnames: &assigned_hostnames,
+            },
             &adoptable,
             &mut diagnostics,
         )
@@ -680,7 +684,6 @@ fn run_finalize_pipeline(
         }
     }
     let convention_files = Value::Object(convention_map);
-    let assigned_hostnames = hostname_list(&input.body, "routing_assigned_hostnames");
     let conventions_started = Instant::now();
     let compiled_conventions = compile_conventions(
         &convention_files,
@@ -849,19 +852,43 @@ fn run_finalize_pipeline(
     // site-level one decoration writes into it (the version's `meta.image`,
     // else the dashboard's): an adopted page was not re-read for the tag the
     // platform wrote. Only files this version ships can be flagged.
-    let site_images = [
-        config
-            .get("meta")
-            .and_then(Value::as_object)
-            .and_then(|meta| meta.get("image")),
-        viewer.get("og_image_path"),
-    ];
-    let preview_images: BTreeSet<String> = site_images
+    let site_image = config
+        .get("meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("image"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|image| !image.is_empty())
+        .or_else(|| viewer.get("og_image_path").and_then(Value::as_str));
+    if let Some(reference) = site_image {
+        if advertised_image_file(reference, "", &assigned_hostnames).is_none() {
+            if let Some((path, host)) = advertised_image_host(reference, "", None) {
+                pipeline
+                    .preview_image_hosts
+                    .entry(path)
+                    .or_default()
+                    .insert(host);
+            }
+        }
+    }
+    let preview_images: BTreeSet<String> = site_image
         .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .filter_map(|reference| advertised_image_file(reference, ""))
+        .filter_map(|reference| advertised_image_file(reference, "", &assigned_hostnames))
         .chain(pipeline.preview_images.iter().cloned())
+        .collect();
+    for path in preview_images
+        .iter()
+        .filter(|path| !files.contains_key(*path))
+    {
+        diagnostics.push(json!({
+            "code": "preview_image_missing",
+            "severity": "warning",
+            "message": "A sharing preview image is missing from this version. Upload the image or update the image metadata.",
+            "path": path,
+        }));
+    }
+    let preview_images = preview_images
+        .into_iter()
         .filter(|path| files.contains_key(path))
         .collect();
     let compile_for = |files: &BTreeMap<String, FileMeta>| {
@@ -879,6 +906,7 @@ fn run_finalize_pipeline(
             robots_blob: Some((robots.clone(), DENY_ALL_ROBOTS.len() as u64)),
             noindex_host,
             preview_images: &preview_images,
+            preview_image_hosts: &pipeline.preview_image_hosts,
         })
     };
     let (table, route_tables) = timed(&mut telemetry.response_tables_ms, || {
@@ -1168,6 +1196,7 @@ fn pipeline_context_digest(
     };
     stable_json_sha256(&json!({
         "engine": env!("CARGO_PKG_VERSION"),
+        "previewMetadata": 1,
         "config": config,
         "siteThemeCss": serving.get("theme_css"),
         "viewer": viewer,
@@ -3794,7 +3823,7 @@ mod tests {
     fn repeated_finalize_is_rust_owned_validated_and_canonical() {
         let temp = tempdir().unwrap();
         let private = temp.path().join(".stattic/storage");
-        let manifest = accept_blobs(&private, &[("index.html", b"home")]);
+        let manifest = accept_blobs(&private, &[("index.html", b"<html><head><meta property=\"og:image\" content=\"/missing.png\"><meta name=\"twitter:image\" content=\"https://cdn.example.test/external.png\"></head><body>home</body></html>")]);
         let input = fixture_input(
             &private,
             manifest,
@@ -3803,6 +3832,13 @@ mod tests {
         );
 
         let first = finalize_site(input.clone(), false).unwrap();
+        assert_eq!(first.diagnostics.len(), 1);
+        assert_eq!(first.diagnostics[0].code, "preview_image_missing");
+        assert_eq!(
+            first.diagnostics[0].severity,
+            RuntimeDiagnosticSeverity::Warning
+        );
+        assert_eq!(first.diagnostics[0].path.as_deref(), Some("missing.png"));
         let mut retry = input.clone();
         retry.generated_at = "2026-07-12T00:05:00Z".into();
         let repeated = finalize_site(retry, false).unwrap();

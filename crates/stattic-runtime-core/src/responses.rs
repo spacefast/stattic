@@ -27,11 +27,12 @@ use crate::protocol::{
     RESPONSE_ACTION_PHP, RESPONSE_ENTRY_ACTION, RESPONSE_ENTRY_ALLOWLISTED_EXT,
     RESPONSE_ENTRY_BLOB, RESPONSE_ENTRY_CACHE_CLASS, RESPONSE_ENTRY_ETAG, RESPONSE_ENTRY_HEADERS,
     RESPONSE_ENTRY_LANE, RESPONSE_ENTRY_LENGTH, RESPONSE_ENTRY_PLACED_HOSTNAMES,
-    RESPONSE_ENTRY_PREVIEW_IMAGE, RESPONSE_ENTRY_RULES_FIRST, RESPONSE_ENTRY_STATUS,
-    RESPONSE_KEY_NOT_FOUND, RESPONSE_KEY_NOT_FOUND_PREFIX, RESPONSE_KEY_ROBOTS, RESPONSE_KEY_RULES,
-    RESPONSE_KEY_SPA, RESPONSE_LANE_ACCEL, RESPONSE_LANE_PHP, RESPONSE_TABLE_BASENAME,
-    RESPONSE_TABLE_MAX_BYTES, RESPONSE_TABLE_SINGLE_KEY, RESPONSE_TABLE_SPLIT_BYTES,
-    THEME_STYLESHEET_URL, VERSION_ROOT_BASENAME, VERSION_ROOT_POINTER_FILE,
+    RESPONSE_ENTRY_PREVIEW_IMAGE, RESPONSE_ENTRY_PREVIEW_IMAGE_HOSTS, RESPONSE_ENTRY_RULES_FIRST,
+    RESPONSE_ENTRY_STATUS, RESPONSE_KEY_NOT_FOUND, RESPONSE_KEY_NOT_FOUND_PREFIX,
+    RESPONSE_KEY_ROBOTS, RESPONSE_KEY_RULES, RESPONSE_KEY_SPA, RESPONSE_LANE_ACCEL,
+    RESPONSE_LANE_PHP, RESPONSE_TABLE_BASENAME, RESPONSE_TABLE_MAX_BYTES,
+    RESPONSE_TABLE_SINGLE_KEY, RESPONSE_TABLE_SPLIT_BYTES, THEME_STYLESHEET_URL,
+    VERSION_ROOT_BASENAME, VERSION_ROOT_POINTER_FILE,
 };
 use crate::serving_paths::is_private_serving_path;
 
@@ -68,6 +69,7 @@ pub(crate) struct ResponseEntry {
     /// The version's declared share-preview image. See
     /// [`RESPONSE_ENTRY_PREVIEW_IMAGE`].
     pub preview_image: bool,
+    pub preview_image_hosts: BTreeSet<String>,
 }
 
 impl ResponseEntry {
@@ -83,6 +85,7 @@ impl ResponseEntry {
             rules_first: false,
             html: false,
             preview_image: false,
+            preview_image_hosts: BTreeSet::new(),
         }
     }
 
@@ -104,6 +107,7 @@ impl ResponseEntry {
             rules_first: false,
             html: false,
             preview_image: false,
+            preview_image_hosts: BTreeSet::new(),
         }
     }
 
@@ -222,6 +226,12 @@ impl ResponseEntry {
         }
         if self.blob.is_some() && self.preview_image {
             entry.insert(RESPONSE_ENTRY_PREVIEW_IMAGE.into(), json!(1));
+        }
+        if self.blob.is_some() && !self.preview_image_hosts.is_empty() {
+            entry.insert(
+                RESPONSE_ENTRY_PREVIEW_IMAGE_HOSTS.into(),
+                json!(self.preview_image_hosts),
+            );
         }
         if let Some(action) = &self.action {
             entry.insert(RESPONSE_ENTRY_ACTION.into(), action.clone());
@@ -372,6 +382,7 @@ pub(crate) struct ResponseCompileInput<'a> {
     /// image. An entry is flagged only when it is a raster image; see
     /// [`RESPONSE_ENTRY_PREVIEW_IMAGE`].
     pub preview_images: &'a BTreeSet<String>,
+    pub preview_image_hosts: &'a BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Compiles every request key a published version can answer.
@@ -418,6 +429,13 @@ pub(crate) fn compile_response_table(
         // bytes stays gated like everything else.
         entry.preview_image =
             input.preview_images.contains(path) && is_raster_image(&entry.headers);
+        if is_raster_image(&entry.headers) {
+            entry.preview_image_hosts = input
+                .preview_image_hosts
+                .get(path)
+                .cloned()
+                .unwrap_or_default();
+        }
         table.insert(key.clone(), entry);
         for alias in clean_url_keys(path, &index_name, directory_index, clean_urls) {
             match alias {
@@ -755,6 +773,7 @@ fn file_entry(
         rules_first: false,
         html: is_html,
         preview_image: false,
+        preview_image_hosts: BTreeSet::new(),
     }
 }
 
@@ -1485,6 +1504,7 @@ mod tests {
             )),
             noindex_host,
             preview_images: &preview_images,
+            preview_image_hosts: &BTreeMap::new(),
         })
     }
 

@@ -454,7 +454,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $publicPreviewImage = false;
     if (
         !$open
-        && _stattic_v4_public_preview_image($serving, $entry, $requestMethod, $requestPath, $originalRequestPath)
+        && _stattic_v4_public_preview_image($serving, $entry, $requestMethod, $requestPath, $originalRequestPath, $requestHost, $privateRoot, $routes, $spaceId)
     ) {
         require_once __DIR__ . '/access-rules.php';
         $publicPreviewImage = _stattic_access_unfenced($serving, $requestHost, $requestPath)
@@ -1095,19 +1095,49 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         && str_starts_with(strtolower($headers['content-type'] ?? ''), 'text/html')
         && $length <= 2097152
     ) {
+        _stattic_acquire_static_stream_admission($context, $length);
         $body = _stattic_v4_read_blob($context, $absolutePath, $blobRelativePath, $length);
+        require_once __DIR__ . '/../shared/preview-images.php';
+        $body = _stattic_normalize_preview_images($body, $context);
         $body = _stattic_apply_spacefast_sdk_preview_to_html($body, $tagPreviewToken);
         unset($headers['etag']);
         $headers['cache-control'] = $privateCache || $noStore
             ? STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE
             : STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
         $headers['content-length'] = (string) strlen($body);
+        _stattic_v4_enforce_preconditions($headers);
         _stattic_send_response_headers($headers);
         http_response_code(200);
         if ($method === 'GET') {
             echo $body;
         }
         exit;
+    }
+
+    $normalizedHead = null;
+    $sourceHeadLength = 0;
+
+    // Preview metadata is host-dependent. Read only the same bounded head
+    // window the compiler scans, then keep the rest of the document streaming.
+    if (str_starts_with(strtolower($headers['content-type'] ?? ''), 'text/html')) {
+        require_once __DIR__ . '/../shared/preview-images.php';
+        $stream = _stattic_v4_open_blob($context, $absolutePath, $blobRelativePath);
+        $head = stream_get_contents($stream, min($length, 65536));
+        if (!is_string($head)) {
+            fclose($stream);
+            _stattic_render_runtime_invariant_error_lazy('file-missing', 'Runtime response blob could not be read.');
+        }
+        $normalized = _stattic_normalize_preview_images($head, $context);
+        fclose($stream);
+        if ($normalized !== $head) {
+            $normalizedHead = $normalized;
+            $sourceHeadLength = strlen($head);
+            $length += strlen($normalized) - $sourceHeadLength;
+            $lane = STATTIC_RUNTIME_RESPONSE_LANE_PHP;
+            if ($status === 200) {
+                $headers['etag'] = '"' . hash('sha256', $etag . "\0" . $normalized) . '"';
+            }
+        }
     }
 
     if ($lane === STATTIC_RUNTIME_RESPONSE_LANE_ACCEL && $status === 200) {
@@ -1124,24 +1154,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     if ($status === 200) {
         $headers['accept-ranges'] = 'bytes';
         $validator = $headers['etag'] ?? '';
-        $ifMatch = $_SERVER['HTTP_IF_MATCH'] ?? null;
-        $ifNoneMatch = $_SERVER['HTTP_IF_NONE_MATCH'] ?? null;
-        if (is_string($ifMatch) && !_stattic_v4_etag_matches($ifMatch, $validator, false)) {
-            $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
-            $headers['a8c-edge-cache'] = 'no-cache';
-            $headers['content-length'] = '0';
-            _stattic_send_response_headers($headers);
-            http_response_code(412);
-            exit;
-        }
-        if (is_string($ifNoneMatch) && _stattic_v4_etag_matches($ifNoneMatch, $validator, true)) {
-            $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
-            $headers['a8c-edge-cache'] = 'no-cache';
-            unset($headers['content-length']);
-            _stattic_send_response_headers($headers);
-            http_response_code(304);
-            exit;
-        }
+        _stattic_v4_enforce_preconditions($headers);
         // Range is defined for GET only. Unsupported/malformed range sets are
         // ignored; serving the whole representation is allowed for multipart.
         $ifRange = $_SERVER['HTTP_IF_RANGE'] ?? null;
@@ -1178,13 +1191,19 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
 
     _stattic_acquire_static_stream_admission($context, $length);
     $stream = _stattic_v4_open_blob($context, $absolutePath, $blobRelativePath);
-    if ($offset > 0 && fseek($stream, $offset) !== 0) {
+    $streamOffset = $normalizedHead === null ? $offset : $sourceHeadLength + max(0, $offset - strlen($normalizedHead));
+    if ($streamOffset > 0 && fseek($stream, $streamOffset) !== 0) {
         fclose($stream);
         _stattic_render_runtime_invariant_error_lazy('response-range-seek-failed', 'Runtime could not seek the response body.');
     }
     $headers['content-length'] = (string) $length;
     _stattic_send_response_headers($headers);
     http_response_code($status);
+    if ($normalizedHead !== null && $offset < strlen($normalizedHead)) {
+        $prefix = substr($normalizedHead, $offset, $length);
+        echo $prefix;
+        $length -= strlen($prefix);
+    }
     _stattic_stream_file($stream, $length);
     fclose($stream);
     exit;
@@ -1214,13 +1233,20 @@ function _stattic_v4_public_preview_image(
     ?array $entry,
     string $requestMethod,
     string $requestPath,
-    string $originalRequestPath
+    string $originalRequestPath,
+    string $requestHost,
+    string $privateRoot,
+    array $routes,
+    string $spaceId
 ): bool {
     if (
         !empty($serving['immutable'])
         || ($serving['authorization']['spaceClaimed'] ?? false) !== true
         || $entry === null
-        || empty($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_PREVIEW_IMAGE])
+        || (empty($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_PREVIEW_IMAGE])
+            && !_stattic_v4_preview_host_matches(
+                $entry[STATTIC_RUNTIME_RESPONSE_ENTRY_PREVIEW_IMAGE_HOSTS] ?? [],
+                $requestHost, $privateRoot, $routes, $spaceId, $requestPath, $requestMethod))
         || !in_array($requestMethod, ['GET', 'HEAD'], true)
         || $requestPath !== $originalRequestPath
         || (int) ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS] ?? 0) !== 200
@@ -1234,6 +1260,40 @@ function _stattic_v4_public_preview_image(
         : [];
     $contentType = strtolower(trim(explode(';', (string) ($headers['content-type'] ?? ''), 2)[0]));
     return in_array($contentType, ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], true);
+}
+
+function _stattic_v4_preview_host_matches(
+    array $advertisedHosts,
+    string $requestHost,
+    string $privateRoot,
+    array $routes,
+    string $spaceId,
+    string $requestPath,
+    string $requestMethod
+): bool {
+    if (in_array($requestHost, $advertisedHosts, true)) return true;
+    // Follow only the router's same-Space, path-preserving host redirect.
+    // Host spelling alone cannot establish ownership of an apex/www pair.
+    foreach ($advertisedHosts as $advertisedHost) {
+        if (!is_string($advertisedHost)) continue;
+        $advertised = _stattic_v4_host_lookup($privateRoot, $routes, $advertisedHost);
+        if (!is_array($advertised) || ($advertised['entry']['space_id'] ?? null) !== $spaceId) continue;
+        $route = _stattic_v4_match_host_route($advertised['routes'], $requestPath, $requestMethod);
+        if (!is_array($route) || ($route['space_id'] ?? null) !== $spaceId || ($route['location'] ?? null) !== '/') continue;
+        $action = $route['route_action'] ?? null;
+        if (!is_array($action) || ($action['action'] ?? null) !== 'redirect') continue;
+        $destination = parse_url((string) ($action['destination'] ?? ''));
+        if (is_array($destination)
+            && in_array($destination['scheme'] ?? null, ['http', 'https'], true)
+            && strtolower((string) ($destination['host'] ?? '')) === $requestHost
+            && in_array($destination['path'] ?? '', ['', '/'], true)
+            && !isset($destination['user'])
+            && !isset($destination['pass'])
+            && !isset($destination['port'])
+            && !isset($destination['query'])
+            && !isset($destination['fragment'])) return true;
+    }
+    return false;
 }
 
 // The platform's own header ownership over one table response: the
@@ -2133,6 +2193,31 @@ function _stattic_v4_byte_range(string $value, int $length): array|false|null
         return null;
     }
     return $start >= $length ? false : [$start, min($end, $length - 1)];
+}
+
+// Call for an existing successful GET/HEAD representation, after transformations
+// have cleared any validator that describes the original blob instead.
+function _stattic_v4_enforce_preconditions(array $headers): void
+{
+    $validator = $headers['etag'] ?? '';
+    $ifMatch = $_SERVER['HTTP_IF_MATCH'] ?? null;
+    $ifNoneMatch = $_SERVER['HTTP_IF_NONE_MATCH'] ?? null;
+    if (is_string($ifMatch) && !_stattic_v4_etag_matches($ifMatch, $validator, false)) {
+        $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+        $headers['a8c-edge-cache'] = 'no-cache';
+        $headers['content-length'] = '0';
+        _stattic_send_response_headers($headers);
+        http_response_code(412);
+        exit;
+    }
+    if (is_string($ifNoneMatch) && _stattic_v4_etag_matches($ifNoneMatch, $validator, true)) {
+        $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+        $headers['a8c-edge-cache'] = 'no-cache';
+        unset($headers['content-length']);
+        _stattic_send_response_headers($headers);
+        http_response_code(304);
+        exit;
+    }
 }
 
 function _stattic_v4_etag_matches(string $condition, string $etag, bool $weak): bool

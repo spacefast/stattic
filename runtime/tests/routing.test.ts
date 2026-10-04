@@ -642,6 +642,18 @@ test("static entries answer GET and HEAD only", async () => {
 });
 
 test("PHP fallback serves single byte ranges and checks validators before slicing", async () => {
+  const plainHtml = await get(rt, SITE, "/");
+  const htmlEtag = plainHtml.headers.get("etag");
+  if (htmlEtag === null) throw new Error("missing unchanged HTML validator");
+  expect(await plainHtml.text()).toBe(INDEX);
+  const unchangedHtml = await get(rt, SITE, "/", {
+    headers: { "if-none-match": htmlEtag },
+  });
+  expect(unchangedHtml.status).toBe(304);
+  expect(await unchangedHtml.text()).toBe("");
+  const staleHtml = await get(rt, SITE, "/", { headers: { "if-match": '"stale"' } });
+  expect(staleHtml.status).toBe(412);
+  expect(await staleHtml.text()).toBe("");
   const body = "0123456789".repeat(100200);
   const full = await get(rt, SITE, "/movie.mp4");
   expect(full.status).toBe(200);

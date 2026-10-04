@@ -1278,6 +1278,15 @@ function _stattic_path_has_hidden_segment(string $lowerPath): bool
     );
 }
 
+// https ALWAYS, exactly like _stattic_cookies_secure: X-Forwarded-Proto reaches
+// PHP attacker-controlled (contracts §16), and this scheme builds the Origin the
+// logout CSRF check compares against. A caller who could set it would be
+// choosing its own expected origin. The dev/test flag is the only escape.
+function _stattic_request_scheme(): string
+{
+    return _stattic_config_value('SPACEFAST_INSECURE_COOKIES') === '1' ? 'http' : 'https';
+}
+
 function _stattic_config_value(string $envName): string
 {
     if (defined($envName)) {

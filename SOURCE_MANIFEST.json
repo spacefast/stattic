@@ -1,7 +1,7 @@
 {
-  "revision": "a1b1aca0181a9e99df3f7530def98565df9fc23b",
-  "sourceHash": "e295e8e615f10c34dd47e67f956e3b18d35fcca05d7c2643fb38c40bc6bbd425",
-  "manifestSha256": "bd9c9269394378d7b628604c0aa61ed117731a03c3765d53561b4bc2f29d7e6a",
+  "revision": "9dc4c18b94a523a3e7afe9163b22d50b5bdf877d",
+  "sourceHash": "9c0c72eb5244a5877169fa0267c673fad4b8920acf66fd16a441a1e88c900207",
+  "manifestSha256": "98e9d44a5867657528c320cabb06bbde2d7eb6bd31f12989694996edc55dcac2",
   "files": [
     {
       "path": ".gitignore",
@@ -9,7 +9,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "e80bf76a812ae66247edc345e8a565258ec8b91f15b67c681d639acb2236595e"
+      "sha256": "ac3350f752835495e8481991ba48bc67bbd6a043b8715315ef9bea6eee093e56"
     },
     {
       "path": "Cargo.toml",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "fd30f4ac33aca9d04c4d30504dca4ea1df26d9b5a6d89aac817b63139b5cf472"
+      "sha256": "377a3e663156d9a1a3f39567bbb7224eb816c445d59a99ec81d55cc1bed04d15"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "7d856e58de8d71baca1777760f26e28c9959453043a49d0696535d1aec8449b1"
+      "sha256": "140f9a5eb0cf2eced46eae242c0f3819843b9b3bafa4d3aa6c7ddcf8c736cdfb"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -37,7 +37,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/Cargo.toml",
-      "sha256": "238d25dcc6050f54d980ebeeef30290cbd0a23b52101b497a29f6458a9a09baa"
+      "sha256": "370259efc556a8d424c3982da1874913dbcd37a37537d3d1382bb9c8a9fcd179"
     },
     {
       "path": "crates/stattic-runtime-core/src/access.rs",
@@ -105,7 +105,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/content/mod.rs",
-      "sha256": "d850662c0e4004729f78fd5a25d2bff3f19e38318a9940624c2fedb190da2776"
+      "sha256": "d8e6f4185fbc076fb981fc0f5dedb95d0062a9c73076336d13fbdaa4a0e57831"
     },
     {
       "path": "crates/stattic-runtime-core/src/content/support.rs",
@@ -161,11 +161,11 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/protocol.rs",
-      "sha256": "04eb2af059bdb6cde660b08bf2d1727e91a4b528713421be23b43bab8bc847ba"
+      "sha256": "a659e5e51d4529196cbe90883ded9c9fbcefa36ef084aad9a622b2061bcac5dd"
     },
     {
       "path": "crates/stattic-runtime-core/src/responses.rs",
-      "sha256": "24d651ce56b5a11d69b9133a5d526fe616682c536b6eae16a6497003bd7e2fd9"
+      "sha256": "d02fa9f60bf9e51103f43f048810b89b62f647c439c24a8f50d177fa24ca8257"
     },
     {
       "path": "crates/stattic-runtime-core/src/route_inventory.rs",
@@ -197,7 +197,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "a084b4eebdedde368a3b4f8fb0a7abad172489147f2f14b461532b2821681806"
+      "sha256": "897871b16cd981d2bff1db54d9f8194c9c3d6164bae6441b3f9bd83831b503e3"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -393,7 +393,7 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "116c2302d51f43c07cde51da1d2812acacb62588cc8cbf258be0402788f8883c"
+      "sha256": "b7ad76d5a984926bb96d6daa7137765cf3d823e98acf92098676d0fc9ffca2fb"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -509,7 +509,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "77277e4661ab6291fd489eda44504a68e42a50cbe1836134e1950ab05620aa31"
+      "sha256": "16977aa0658662b8da55dc96f351bacf0c7fd8426de22876fbb4f516919f34e7"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -561,7 +561,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "c327ce8ed24ebd244c5ced71375b23265ff904092c9e1cf18ff5615634d88920"
+      "sha256": "bc889341c071c22cd272d997d6f04321681a4a20751ce3a10d8352d7806f88ef"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -641,7 +641,7 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "ae46cc894e8057bc920135bc7d8dc3bf4bab186e96ce62c04a7e81e80a4ec5c9"
+      "sha256": "17235c763e1db857d6c77b16262a21c0a2bcf53762fd1f2425666d1b044dee06"
     },
     {
       "path": "runtime/engine/shared/d1-broker.php",
@@ -665,7 +665,7 @@
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
-      "sha256": "cc9c4d1b3c9d906a96dd7fa48136b41743af366665aca5c307ef818531d33679"
+      "sha256": "145e5eb0ba0d7f266363291c0df3650c8998adc37e8b3516fe5f6c4c6e8d36c7"
     },
     {
       "path": "runtime/engine/shared/functions-wire.generated.php",
@@ -702,6 +702,10 @@
     {
       "path": "runtime/engine/shared/pointers.php",
       "sha256": "dbbc0835dadc4da983ba0b858197fb92f3b0f743681d310e5302f198d8c5a6ae"
+    },
+    {
+      "path": "runtime/engine/shared/preview-images.php",
+      "sha256": "7016e87a65f6f3241e4d216bcd76abd1972aa2705a37269b19ce8ee4423f29e0"
     },
     {
       "path": "runtime/engine/shared/private-tree.php",
@@ -853,7 +857,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "edad389d8f37fb0b8a7a659c852519a0c37a897a8eafe57cd51777150692c0d1"
+      "sha256": "3cb0413f88cc83f42ba9516e15b1e84d7323c4459bf8cc6a7f1cd57b856a35ba"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",
@@ -865,7 +869,7 @@
     },
     {
       "path": "runtime/tests/admission.test.ts",
-      "sha256": "bdc3e38890a394a3cfbbe99187603896c0982010c364ed967380c7af1699e146"
+      "sha256": "1945f91a41a769e41efcfdd435dcfea83cd34fa08ce506ef48002929682718cd"
     },
     {
       "path": "runtime/tests/agent-detection.test.ts",
@@ -1101,7 +1105,7 @@
     },
     {
       "path": "runtime/tests/html-inject.test.ts",
-      "sha256": "dd536b55f363842a175720a94e9d6a882a9451ded1fd6062622d9a1a8d072ae1"
+      "sha256": "77cac4810b963f88b534282bb9c261c4db47667ce8ff38b47f76a601802faa28"
     },
     {
       "path": "runtime/tests/installer-native.test.ts",
@@ -1153,7 +1157,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "47768728138a972b04e75a74c268377b78bd36df48b21068f52eab4a9ad28981"
+      "sha256": "69a83d47b99fa8d83d214cb7601abf828ebd046ad348c99001ec025d06a1d734"
     },
     {
       "path": "runtime/tests/run-ci.sh",

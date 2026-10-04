@@ -1813,6 +1813,7 @@ dependencies = [
  "libc",
  "lol_html",
  "mime_guess",
+ "percent-encoding",
  "pulldown-cmark",
  "regex",
  "serde",

@@ -875,14 +875,22 @@ beforeAll(async () => {
   await deploy(runtime, {
     spaceId: PREVIEW_SPACE,
     versionId: PREVIEW_VERSION,
+    finalize: { routing_assigned_hostnames: [PREVIEW_HOST, PREVIEW_VERSION_HOST] },
     files: {
       ...FIXTURE_FILES,
       "og.png": "png bytes",
       "other.png": "png bytes",
       "og.svg": "<svg/>",
       // Most agent-built pages write their own tag, as an absolute URL.
-      "trip/index.html": `<html><head><meta property="og:image" content="https://${PREVIEW_HOST}/trip/cover.jpg?v=c778f02a"></head><body><h1>trip</h1></body></html>\n`,
+      "trip/index.html": `<html><head><meta property="og:image" content="https://${PREVIEW_HOST}/trip/cover.jpg?v=c778f02a"><meta name="twitter:image" content="https://cdn.example.test/other.png"></head><body><h1>trip</h1></body></html>\n`,
       "trip/cover.jpg": "jpeg bytes",
+      "trip/relative.html":
+        '<html><head><meta name="twitter:image" content="cover.jpg"></head><body>Relative preview</body></html>',
+      "late.html":
+        '<html><head><meta property="og:image" content="https://www.late-preview.test/late.jpg"></head><body>Late domain</body></html>',
+      "late.jpg": "late preview bytes",
+      "cover.jpg": "private root image",
+      _redirects: "/tour /trip/relative.html 200\n/preview-alias /trip/cover.jpg 200\n",
     },
     serving: { config: { meta: { image: "/og.png" } } },
     activate: {
@@ -1008,6 +1016,67 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   expect(handWritten.status).toBe(200);
   expect(handWritten.headers.get("content-type")).toStartWith("image/jpeg");
   expect(handWritten.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+  const previewMember = await openAuthorities(PREVIEW_HOST, ["member:mem_owner"]);
+  const rewrittenPage = await get(runtime, PREVIEW_HOST, "/tour", {
+    headers: { cookie: previewMember },
+  });
+  expect(rewrittenPage.status).toBe(200);
+  const rewrittenHtml = await rewrittenPage.text();
+  const advertised = rewrittenHtml.match(/name="twitter:image" content="([^"]+)"/);
+  expect(advertised?.[1]).toBe(`http://${PREVIEW_HOST}/trip/cover.jpg`);
+  const advertisedImage = await get(
+    runtime,
+    PREVIEW_HOST,
+    new URL(advertised?.[1] ?? "http://invalid.test/").pathname,
+  );
+  expect(advertisedImage.status).toBe(200);
+  expect(await advertisedImage.text()).toBe("jpeg bytes");
+  expect((await get(runtime, PREVIEW_HOST, "/late.jpg")).status).toBe(403);
+  // The domain was absent from finalization. Only a later authoritative route
+  // assignment to this Space admits the explicit absolute image reference.
+  await putRoute(runtime, PREVIEW_SPACE, "production", {
+    version_id: PREVIEW_VERSION,
+    config: projection({ memberRefs: ["member:mem_owner"] }),
+    production_hostnames: [PREVIEW_HOST, "www.late-preview.test"],
+    version_hostnames: [{ hostname: PREVIEW_VERSION_HOST, version_id: PREVIEW_VERSION }],
+  });
+  const latePreview = await get(runtime, "www.late-preview.test", "/late.jpg");
+  expect(latePreview.status).toBe(200);
+  expect(await latePreview.text()).toBe("late preview bytes");
+  expect((await get(runtime, "www.late-preview.test", "/other.png")).status).toBe(403);
+  expect((await get(runtime, PREVIEW_HOST, "/late.jpg")).status).toBe(403);
+  await putRoute(runtime, PREVIEW_SPACE, "production", {
+    version_id: PREVIEW_VERSION,
+    config: projection({ memberRefs: ["member:mem_owner"] }),
+    production_hostnames: [PREVIEW_HOST, "late-preview.test"],
+    host_canonical_redirects: [
+      { from: "www.late-preview.test", to: "https://late-preview.test", status: 308 },
+    ],
+    version_hostnames: [{ hostname: PREVIEW_VERSION_HOST, version_id: PREVIEW_VERSION }],
+  });
+  const canonicalRedirect = await get(runtime, "www.late-preview.test", "/late.jpg");
+  expect(canonicalRedirect.status).toBe(308);
+  expect(canonicalRedirect.headers.get("location")).toBe("https://late-preview.test/late.jpg");
+  const canonicalImage = await get(runtime, "late-preview.test", "/late.jpg");
+  expect(canonicalImage.status).toBe(200);
+  expect(await canonicalImage.text()).toBe("late preview bytes");
+  expect((await get(runtime, "late-preview.test", "/other.png")).status).toBe(403);
+  // A matching redirect owned by another Space cannot authorize these bytes.
+  await putRoute(runtime, PREVIEW_SPACE, "production", {
+    version_id: PREVIEW_VERSION,
+    config: projection({ memberRefs: ["member:mem_owner"] }),
+    production_hostnames: [PREVIEW_HOST, "late-preview.test"],
+    version_hostnames: [{ hostname: PREVIEW_VERSION_HOST, version_id: PREVIEW_VERSION }],
+  });
+  await putRoute(runtime, PUBLIC_SPACE, "production", {
+    version_id: PUBLIC_VERSION,
+    config: publicBaseConfig(),
+    production_hostnames: [PUBLIC_HOST],
+    host_canonical_redirects: [
+      { from: "www.late-preview.test", to: "https://late-preview.test", status: 308 },
+    ],
+  });
+  expect((await get(runtime, "late-preview.test", "/late.jpg")).status).toBe(403);
   // Nothing else on that Space follows it out: not the page, not another
   // image, and not the same file reached under a different name.
   // An immutable version host caches for a year where no fence purge reaches,
@@ -1015,7 +1084,16 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   const pinned = await get(runtime, PREVIEW_VERSION_HOST, "/og.png");
   expect(pinned.status).toBe(403);
   expect(pinned.headers.get("cache-control")).toBe("private, no-store");
-  for (const path of ["/", "/docs/", "/trip/", "/other.png", "/og.svg"]) {
+  for (const path of [
+    "/",
+    "/docs/",
+    "/trip/",
+    "/other.png",
+    "/og.svg",
+    "/cover.jpg",
+    "/preview-alias",
+    "/tour",
+  ]) {
     const gated = await get(runtime, PREVIEW_HOST, path);
     expect(gated.status).toBe(403);
     expect(gated.headers.get("cache-control")).toBe("private, no-store");

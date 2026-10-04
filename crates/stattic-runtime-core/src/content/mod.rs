@@ -69,6 +69,15 @@ pub struct HtmlPipelineOutcome {
     /// (`og:image`, `twitter:image` and their variants), resolved but not yet
     /// checked against the files this version ships.
     pub preview_images: BTreeSet<String>,
+    pub preview_image_hosts: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Site-wide configuration and origins used to render a version's HTML.
+pub struct HtmlPipelineContext<'a> {
+    pub serving: &'a Map<String, Value>,
+    pub metadata: &'a Map<String, Value>,
+    pub viewer: &'a Map<String, Value>,
+    pub assigned_hostnames: &'a [String],
 }
 
 /// Runs the content pipeline over the committed files, writing generated
@@ -77,12 +86,16 @@ pub struct HtmlPipelineOutcome {
 pub fn materialize_html_pipeline(
     files_root: &Path,
     files: &mut BTreeMap<String, FileMeta>,
-    serving: &Map<String, Value>,
-    metadata: &Map<String, Value>,
-    viewer: &Map<String, Value>,
+    context: HtmlPipelineContext<'_>,
     adoptable: &BTreeMap<String, AdoptablePath>,
     diagnostics: &mut Vec<Value>,
 ) -> Result<HtmlPipelineOutcome> {
+    let HtmlPipelineContext {
+        serving,
+        metadata,
+        viewer,
+        assigned_hostnames,
+    } = context;
     let absent = Map::new();
     let config = serving
         .get("config")
@@ -324,6 +337,7 @@ pub fn materialize_html_pipeline(
         .all(|path| !generated.contains(path));
     let mut adopted = BTreeSet::new();
     let mut preview_images = BTreeSet::new();
+    let mut preview_image_hosts = BTreeMap::new();
     for path in targets {
         // A rendered page's decoration also reads frontmatter that never
         // reaches the rendered bytes (description, image), so byte equality
@@ -349,7 +363,12 @@ pub fn materialize_html_pipeline(
                     // the author wrote are in the source head. The platform
                     // tag is the site-level image, which the finalizer adds.
                     let head = source_head(&files_root.join(&path));
-                    preview_images.extend(advertised_image_files(&head, &path));
+                    preview_images.extend(advertised_image_files(
+                        &head,
+                        &path,
+                        assigned_hostnames,
+                        &mut preview_image_hosts,
+                    ));
                     adopted.insert(path);
                     continue;
                 }
@@ -371,7 +390,13 @@ pub fn materialize_html_pipeline(
             },
             diagnostics,
         )?;
-        preview_images.extend(advertised_image_files(&document, &path));
+        let document = anchor_preview_image_urls(&document, &path);
+        preview_images.extend(advertised_image_files(
+            &document,
+            &path,
+            assigned_hostnames,
+            &mut preview_image_hosts,
+        ));
         if document != source {
             write_generated(
                 files_root,
@@ -390,6 +415,7 @@ pub fn materialize_html_pipeline(
         decorated,
         adopted,
         preview_images,
+        preview_image_hosts,
     })
 }
 
@@ -418,12 +444,24 @@ fn source_head(path: &Path) -> String {
 
 /// The files one served HTML document at `page_path` advertises as its link
 /// preview image.
-fn advertised_image_files(html: &str, page_path: &str) -> Vec<String> {
+fn advertised_image_files(
+    html: &str,
+    page_path: &str,
+    assigned_hostnames: &[String],
+    preview_image_hosts: &mut BTreeMap<String, BTreeSet<String>>,
+) -> Vec<String> {
     let found = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&found);
-    let settings = RewriteStrSettings::new().append_element_content_handler(element!(
-        "head meta[content]",
-        move |element| {
+    let base_href = Rc::new(RefCell::new(None));
+    let base_sink = Rc::clone(&base_href);
+    let settings = RewriteStrSettings::new()
+        .append_element_content_handler(element!("head base[href]", move |element| {
+            if base_sink.borrow().is_none() {
+                *base_sink.borrow_mut() = element.get_attribute("href");
+            }
+            Ok(())
+        }))
+        .append_element_content_handler(element!("head meta[content]", move |element| {
             let mut advertised = false;
             for attribute in ["property", "name"] {
                 if let Some(key) = element.get_attribute(attribute) {
@@ -437,49 +475,175 @@ fn advertised_image_files(html: &str, page_path: &str) -> Vec<String> {
                 }
             }
             Ok(())
-        }
-    ));
+        }));
     // A document lol_html cannot finish still yields the tags it reached.
     let _ = rewrite_str(html, settings);
     let references = found.take();
+    let base_href = base_href.take();
     references
         .iter()
-        .filter_map(|reference| advertised_image_file(reference, page_path))
+        .filter_map(|reference| {
+            let local = advertised_image_file_with_base(
+                reference,
+                page_path,
+                assigned_hostnames,
+                base_href.as_deref(),
+            );
+            if local.is_none() {
+                if let Some((path, host)) =
+                    advertised_image_host(reference, page_path, base_href.as_deref())
+                {
+                    preview_image_hosts.entry(path).or_default().insert(host);
+                }
+            }
+            local
+        })
         .collect()
+}
+
+/// Keep preview metadata tied to the published document. A rewrite or SPA
+/// fallback must not change which local image a cookieless scraper requests.
+fn anchor_preview_image_urls(html: &str, page_path: &str) -> String {
+    let Ok(document) = url::Url::parse(&format!("https://local.invalid/{page_path}")) else {
+        return html.to_string();
+    };
+    let base_href = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&base_href);
+    let _ = rewrite_str(
+        html,
+        RewriteStrSettings::new().append_element_content_handler(element!(
+            "head base[href]",
+            move |element| {
+                if sink.borrow().is_none() {
+                    *sink.borrow_mut() = element.get_attribute("href");
+                }
+                Ok(())
+            }
+        )),
+    );
+    let href = base_href.take();
+    let base = href
+        .as_deref()
+        .and_then(|href| document.join(href).ok())
+        .unwrap_or_else(|| document.clone());
+    let implicit_origin = !href.as_deref().is_some_and(image_reference_has_origin);
+    rewrite_str(
+        html,
+        RewriteStrSettings::new().append_element_content_handler(element!(
+            "head meta[content]",
+            move |element| {
+                let advertised = ["property", "name"].iter().any(|attribute| {
+                    element.get_attribute(attribute).is_some_and(|key| {
+                        PREVIEW_IMAGE_META.contains(&key.trim().to_ascii_lowercase().as_str())
+                    })
+                });
+                if advertised {
+                    if let Some(reference) = element.get_attribute("content") {
+                        if !reference.trim().is_empty() && !image_reference_has_origin(&reference) {
+                            if let Ok(resolved) = base.join(reference.trim()) {
+                                let anchored =
+                                    if implicit_origin && resolved.origin() == document.origin() {
+                                        resolved[url::Position::BeforePath..].to_string()
+                                    } else {
+                                        resolved.to_string()
+                                    };
+                                element.set_attribute("content", &anchored)?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+        )),
+    )
+    .unwrap_or_else(|_| html.to_string())
 }
 
 /// The file path an image reference names, from the page at `page_path`.
 ///
 /// A root-relative path and a page-relative path resolve as a browser would.
-/// An absolute `http(s)` URL keeps only its path, whatever the host: the
-/// finalizer does not know every hostname a Space answers on (custom domains
-/// attach after publish), and the caller only ever flags a path that names a
-/// file this version ships, which the author already advertised.
-pub(crate) fn advertised_image_file(reference: &str, page_path: &str) -> Option<String> {
+/// Absolute URLs are local only when their authority belongs to this space.
+/// External image metadata must never grant access to an unrelated local file.
+pub(crate) fn advertised_image_file(
+    reference: &str,
+    page_path: &str,
+    assigned_hostnames: &[String],
+) -> Option<String> {
+    advertised_image_file_with_base(reference, page_path, assigned_hostnames, None)
+}
+
+// WHATWG HTTP(S) URLs treat backslashes as separators and discard embedded
+// ASCII tabs/newlines. An explicit authority still needs hostname validation
+// when it happens to equal the synthetic origin used for local path lookup.
+fn image_reference_has_origin(reference: &str) -> bool {
+    let normalized = reference
+        .trim_matches(|character| character <= '\u{0020}')
+        .replace(['\t', '\n', '\r'], "")
+        .replace('\\', "/");
+    normalized.starts_with("//") || url::Url::parse(&normalized).is_ok()
+}
+
+/// Retain an absolute reference's origin until routing can prove ownership.
+/// The existing resolver owns scheme, credential, port and path validation.
+pub(crate) fn advertised_image_host(
+    reference: &str,
+    page_path: &str,
+    base_href: Option<&str>,
+) -> Option<(String, String)> {
+    let document = url::Url::parse(&format!("https://local.invalid/{page_path}")).ok()?;
+    let base = base_href
+        .and_then(|href| document.join(href).ok())
+        .unwrap_or(document);
+    let resolved = base.join(reference.trim()).ok()?;
+    let host = resolved.host_str()?.to_string();
+    let path = advertised_image_file_with_base(
+        reference,
+        page_path,
+        std::slice::from_ref(&host),
+        base_href,
+    )?;
+    Some((path, host))
+}
+
+fn advertised_image_file_with_base(
+    reference: &str,
+    page_path: &str,
+    assigned_hostnames: &[String],
+    base_href: Option<&str>,
+) -> Option<String> {
     let reference = reference.trim();
-    let reference = reference.split(['#', '?']).next().unwrap_or_default();
-    let lower = reference.to_ascii_lowercase();
-    let scheme = ["https://", "http://", "//"]
-        .into_iter()
-        .find(|scheme| lower.starts_with(scheme));
-    let path = if let Some(scheme) = scheme {
-        reference[scheme.len()..].split_once('/')?.1.to_string()
-    } else if let Some(rooted) = reference.strip_prefix('/') {
-        rooted.to_string()
-    } else if reference.contains(':') {
+    if reference.is_empty() {
         return None;
-    } else {
-        let dir = path_dir(page_path);
-        if dir.is_empty() {
-            reference.to_string()
-        } else {
-            format!("{dir}/{reference}")
-        }
-    };
-    let clean = path
-        .split('/')
-        .all(|segment| !segment.is_empty() && segment != "." && segment != "..");
-    clean.then_some(path)
+    }
+    let document = url::Url::parse(&format!("https://local.invalid/{page_path}")).ok()?;
+    let base = base_href
+        .and_then(|href| document.join(href).ok())
+        .unwrap_or_else(|| document.clone());
+    let resolved = base.join(reference).ok()?;
+    let explicit_origin =
+        image_reference_has_origin(reference) || base_href.is_some_and(image_reference_has_origin);
+    if (explicit_origin || resolved.origin() != document.origin())
+        && !(matches!(resolved.scheme(), "http" | "https")
+            && resolved.username().is_empty()
+            && resolved.password().is_none()
+            && resolved.port().is_none()
+            && resolved.host_str().is_some_and(|host| {
+                assigned_hostnames
+                    .iter()
+                    .any(|assigned| assigned.eq_ignore_ascii_case(host))
+            }))
+    {
+        return None;
+    }
+    let path = resolved.path().trim_start_matches('/');
+    let lower = path.to_ascii_lowercase();
+    if lower.contains("%2f") || lower.contains("%5c") {
+        return None;
+    }
+    let path = percent_encoding::percent_decode_str(path)
+        .decode_utf8()
+        .ok()?;
+    (!path.is_empty()).then(|| path.into_owned())
 }
 
 fn apply_layouts(
@@ -1069,9 +1233,12 @@ mod tests {
         let result = materialize_html_pipeline(
             &files_root,
             &mut map,
-            &serving,
-            &metadata,
-            &viewer,
+            HtmlPipelineContext {
+                serving: &serving,
+                metadata: &metadata,
+                viewer: &viewer,
+                assigned_hostnames: &["local.example.test".to_string()],
+            },
             &BTreeMap::new(),
             &mut diagnostics,
         );
@@ -1132,9 +1299,9 @@ mod tests {
             BTreeSet::from(["cover.png".to_string()])
         );
 
-        // Hand-written tags count the same: host and query drop, a
-        // page-relative reference resolves from the page, other meta is ignored.
-        let hand_written = br#"<html><head><meta property="og:image" content="https://site.view.fast/assets/og.jpg?v=c778f02a"><meta name="twitter:image" content="share.png"><meta property="og:title" content="/title.png"></head><body></body></html>"#;
+        // External URLs are not local declarations. Page-relative references
+        // resolve from the document, including parent segments and queries.
+        let hand_written = br#"<html><head><meta property="og:image" content="https://site.view.fast/assets/og.jpg?v=c778f02a"><meta name="twitter:image" content="../share%20image.png?v=1"><meta property="og:image:url" content="//cdn.example.test/remote.png"><meta property="og:image:secure_url" content="https://local.example.test/known.png"><meta property="og:title" content="/title.png"></head><body></body></html>"#;
         let run = run_pipeline(
             &[("trip/index.html", hand_written)],
             json!({"mode":"website"}),
@@ -1142,7 +1309,36 @@ mod tests {
         );
         assert_eq!(
             run.result.as_ref().unwrap().preview_images,
-            BTreeSet::from(["assets/og.jpg".to_string(), "trip/share.png".to_string()])
+            BTreeSet::from(["share image.png".to_string(), "known.png".to_string()])
+        );
+
+        assert_eq!(
+            run.result.as_ref().unwrap().preview_image_hosts,
+            BTreeMap::from([
+                (
+                    "assets/og.jpg".into(),
+                    BTreeSet::from(["site.view.fast".into()])
+                ),
+                (
+                    "remote.png".into(),
+                    BTreeSet::from(["cdn.example.test".into()])
+                ),
+            ])
+        );
+        assert!(read(&run, "trip/index.html").contains("content=\"/share%20image.png?v=1\""));
+
+        let external_base = run_pipeline(
+            &[
+                ("trip/index.html", br#"<html><head><meta property="og:image" content="cover.png"><base href="https://cdn.example.test/images/"></head><body></body></html>"#),
+                ("collision.html", br#"<html><head><base href="https://local.invalid/"><meta property="og:image" content="secret.png"></head><body></body></html>"#),
+                ("authority.html", br#"<html><head><meta property="og:image" content="\\local.invalid/secret.png"></head><body></body></html>"#),
+            ],
+            json!({"mode":"website"}),
+            json!({"config":{}}),
+        );
+        assert_eq!(
+            external_base.result.unwrap().preview_images,
+            BTreeSet::new()
         );
 
         let favicon = b"author icon";

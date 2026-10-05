@@ -1197,11 +1197,12 @@ fn pipeline_context_digest(
     stable_json_sha256(&json!({
         "engine": env!("CARGO_PKG_VERSION"),
         "previewMetadata": 1,
+        "providerIconAlias": 1,
         "config": config,
         "siteThemeCss": serving.get("theme_css"),
         "viewer": viewer,
         "siteTitle": metadata.get("title"),
-        "faviconIco": files.contains_key(IMPLICIT_FAVICON_PATH),
+        "faviconIco": staged_sha(IMPLICIT_FAVICON_PATH),
         "themeJson": staged_sha("theme.json"),
         "themeStylesheet": staged_sha(THEME_STYLESHEET_PATH),
         "metaImage": asset_ref(meta.and_then(|meta| meta.get("image"))),
@@ -4673,6 +4674,47 @@ mod tests {
         assert!(body.contains("stale-guard"), "{body}");
     }
 
+    /// A frozen pre-alias catalog carries the old decoration context and the
+    /// source-identical served HTML. Republishing must not adopt those old URLs.
+    #[test]
+    fn a_legacy_icon_catalog_redecorates_unchanged_html() {
+        let temp = tempdir().unwrap();
+        let private = temp.path().join(".stattic/storage");
+        let page = br#"<html><head><link rel="icon" href="/favicon.ico"></head><body><p>stable</p></body></html>"#;
+        let manifest = accept_blobs(
+            &private,
+            &[("index.html", page), ("favicon.ico", b"legacy icon")],
+        );
+        let catalog: FileCatalog = serde_json::from_str(include_str!(
+            "../tests/fixtures/provider-icon-legacy-catalog.json"
+        ))
+        .unwrap();
+        assert_eq!(catalog.paths["index.html"].source.sha256, sha256(page));
+        assert_eq!(
+            catalog.paths["index.html"].served,
+            Some(catalog.paths["index.html"].source.clone())
+        );
+        let previous_root = private.join("spaces/s/versions/v");
+        fs::create_dir_all(&previous_root).unwrap();
+        fs::write(
+            previous_root.join("metadata.json"),
+            serde_json::to_vec(&json!({VERSION_CATALOG_METADATA_KEY: catalog})).unwrap(),
+        )
+        .unwrap();
+        let mut next = fixture_input(
+            &private,
+            manifest,
+            json!({"mode":"website","title":"Adopt"}),
+            json!({"serving":{"config":{}},"previous_version_id":"v"}),
+        );
+        next.version_id = "v2".into();
+        next.upload_id = Some("u2".into());
+        let output = finalize_site(next, false).unwrap();
+        assert_eq!(output.telemetry.as_ref().unwrap().skipped_files, 0);
+        let body = String::from_utf8(served_body(&private, "v2", "index.html")).unwrap();
+        assert!(body.contains("href=\"/favicon.ico;sf-icon\""), "{body}");
+    }
+
     /// Every remaining context input the digest folds: flipping any one of them
     /// alone must drop adoption to zero. Each scenario pins one input — a
     /// digest that stopped reading it would ship a stale page.
@@ -4715,6 +4757,15 @@ mod tests {
                 next_meta: json!({"mode":"website","title":"Adopt"}),
                 first_body: json!({"serving":{"config":{"platform_meta":true,"meta":{"image":"/logo.png"}}}}),
                 next_body: json!({"serving":{"config":{"platform_meta":true,"meta":{"image":"/logo.png"}}}}),
+            },
+            ContextFlip {
+                name: "an implicit favicon's bytes ride the cache-busted URL",
+                first_files: vec![("index.html", page), ("favicon.ico", b"icon-a")],
+                next_files: vec![("index.html", page), ("favicon.ico", b"icon-b")],
+                first_meta: json!({"mode":"website","title":"Adopt"}),
+                next_meta: json!({"mode":"website","title":"Adopt"}),
+                first_body: json!({"serving":{"config":{}}}),
+                next_body: json!({"serving":{"config":{}}}),
             },
             ContextFlip {
                 name: "site-wide customization restyles unchanged HTML",
@@ -4766,6 +4817,29 @@ mod tests {
                 0,
                 "{name}"
             );
+            let first_icon = first_files
+                .iter()
+                .find(|(path, _)| *path == IMPLICIT_FAVICON_PATH);
+            let next_icon = next_files
+                .iter()
+                .find(|(path, _)| *path == IMPLICIT_FAVICON_PATH);
+            if let (Some((_, first_icon)), Some((_, next_icon))) = (first_icon, next_icon) {
+                if first_icon != next_icon {
+                    let body =
+                        String::from_utf8(served_body(&private, "v2", "index.html")).unwrap();
+                    assert!(
+                        body.contains(&format!(
+                            "/favicon.ico;sf-icon?v={}",
+                            &sha256(next_icon)[..12]
+                        )),
+                        "{name}: {body}"
+                    );
+                    assert!(
+                        !body.contains(&format!("?v={}", &sha256(first_icon)[..12])),
+                        "{name}: {body}"
+                    );
+                }
+            }
         }
     }
 

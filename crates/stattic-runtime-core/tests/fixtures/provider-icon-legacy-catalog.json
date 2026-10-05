@@ -1,0 +1,38 @@
+{
+  "format": "spacefast.runtime.file-catalog.v1",
+  "generatedAt": "2026-07-12T00:00:00Z",
+  "paths": {
+    "favicon.ico": {
+      "public": true,
+      "served": {
+        "contentType": "image/x-icon",
+        "sha256": "d6344452c8a4e465be141f715b445c8c1ac50a9ae623a58ed02a97c6c3796dfa",
+        "size": 11
+      },
+      "source": {
+        "contentType": "image/x-icon",
+        "sha256": "d6344452c8a4e465be141f715b445c8c1ac50a9ae623a58ed02a97c6c3796dfa",
+        "size": 11
+      }
+    },
+    "index.html": {
+      "public": true,
+      "served": {
+        "contentType": "text/html; charset=utf-8",
+        "sha256": "30e1aa7a848a7b7c5ce38bfb82f5f246949189e10ff00fbfd319399c8afebadf",
+        "size": 89
+      },
+      "source": {
+        "contentType": "text/html; charset=utf-8",
+        "sha256": "30e1aa7a848a7b7c5ce38bfb82f5f246949189e10ff00fbfd319399c8afebadf",
+        "size": 89
+      }
+    }
+  },
+  "pipelineContextDigest": "sha256:7e3c458fafc63a1bd210d2fda94d9ff468f8bea5f5a9625f996f909e2b4a8173",
+  "servingDigest": "sha256:daaf099644f5299adec42aa6a633f43ed5d3fe0bb6932d9ca0922e8d1dd37df4",
+  "spaceId": "s",
+  "templatePaths": [],
+  "variants": {},
+  "versionId": "v"
+}

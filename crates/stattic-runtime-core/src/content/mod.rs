@@ -391,6 +391,7 @@ pub fn materialize_html_pipeline(
             diagnostics,
         )?;
         let document = anchor_preview_image_urls(&document, &path);
+        let document = provider_safe_icon_urls(&document, &path);
         preview_images.extend(advertised_image_files(
             &document,
             &path,
@@ -825,6 +826,77 @@ fn cache_busted_local_asset(asset: &str, files: &BTreeMap<String, FileMeta>) -> 
     format!("{asset}?v={short}")
 }
 
+/// Only the provider's conventional root icon locations need an alias.
+fn provider_reserved_icon_path(path: &str) -> bool {
+    path == "/favicon.ico"
+        || path == "/apple-touch-icon.png"
+        || path
+            .strip_prefix("/apple-touch-icon-")
+            .is_some_and(|variant| {
+                variant.ends_with(".png") && !variant.contains('/') && !variant.contains(';')
+            })
+}
+
+fn provider_safe_icon_urls(html: &str, page_path: &str) -> String {
+    let Ok(document) = url::Url::parse(&format!("https://local.invalid/{page_path}")) else {
+        return html.to_string();
+    };
+    let base_href = Rc::new(RefCell::new(None));
+    let sink = Rc::clone(&base_href);
+    let _ = rewrite_str(
+        html,
+        RewriteStrSettings::new().append_element_content_handler(element!(
+            "head base[href]",
+            move |element| {
+                if sink.borrow().is_none() {
+                    *sink.borrow_mut() = element.get_attribute("href");
+                }
+                Ok(())
+            }
+        )),
+    );
+    let href = base_href.take();
+    // An explicit base authority is external even if it happens to match our
+    // synthetic origin. Do not change remote, protocol-relative or data URLs.
+    if href.as_deref().is_some_and(image_reference_has_origin) {
+        return html.to_string();
+    }
+    let base = href
+        .as_deref()
+        .and_then(|href| document.join(href).ok())
+        .unwrap_or_else(|| document.clone());
+    rewrite_str(
+        html,
+        RewriteStrSettings::new().append_element_content_handler(element!(
+            "head link[href]",
+            move |element| {
+                if element
+                    .get_attribute("rel")
+                    .is_some_and(|rel| rel.split_ascii_whitespace().any(is_icon_rel_token))
+                {
+                    if let Some(reference) = element.get_attribute("href") {
+                        if !reference.trim().is_empty() && !image_reference_has_origin(&reference) {
+                            if let Ok(mut resolved) = base.join(reference.trim()) {
+                                if resolved.origin() == document.origin()
+                                    && provider_reserved_icon_path(resolved.path())
+                                {
+                                    resolved.set_path(&format!("{};sf-icon", resolved.path()));
+                                    element.set_attribute(
+                                        "href",
+                                        &resolved[url::Position::BeforePath..],
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+        )),
+    )
+    .unwrap_or_else(|_| html.to_string())
+}
+
 /// Standard 32-bit FNV-1a offset keeps title-derived hues stable across Rust
 /// and platform versions instead of depending on a process-randomized hasher.
 const FAVICON_HASH_OFFSET: u32 = 2_166_136_261;
@@ -1020,14 +1092,15 @@ fn decorate_html(
     let favicon =
         string_in_opt(meta, "favicon").map(|favicon| cache_busted_local_asset(&favicon, files));
     let mut head = Vec::new();
-    // The author's icon always wins. A declared `<link rel="icon">` needs no
-    // help, a configured `meta.favicon` is compiled in, and a shipped
-    // `/favicon.ico` is left to the browser's own probe. Only a version that
-    // declares no icon at all gets the generated placeholder.
+    // The author's icon always wins. Declare shipped root icons explicitly so
+    // the provider-safe URL pass can keep them on the runtime serving ladder.
     if !has_favicon.get() {
         let href = match favicon {
             Some(favicon) => Some(favicon),
-            None if files.contains_key(IMPLICIT_FAVICON_PATH) => None,
+            None if files.contains_key(IMPLICIT_FAVICON_PATH) => Some(cache_busted_local_asset(
+                &format!("/{IMPLICIT_FAVICON_PATH}"),
+                files,
+            )),
             None => {
                 let fallback_title;
                 let favicon_title = if let Some(title) = title.as_deref() {
@@ -1383,8 +1456,8 @@ mod tests {
         assert_eq!(html.matches("rel=\"icon\"").count(), 0);
         assert!(!html.contains("data:image/svg+xml"));
 
-        // A shipped /favicon.ico is a declaration: inject nothing and let the
-        // browser's own probe find it, rather than overriding it with a tile.
+        // Declare a shipped icon on a URL that reaches the runtime, rather than
+        // relying on the provider-owned conventional browser probe.
         let undeclared = br#"<html><head><title>Mine</title></head><body></body></html>"#;
         let run = run_pipeline(
             &[("index.html", undeclared), ("favicon.ico", b"author icon")],
@@ -1393,8 +1466,33 @@ mod tests {
         );
         run.result.as_ref().unwrap();
         let html = read(&run, "index.html");
-        assert_eq!(html.matches("rel=\"icon\"").count(), 0);
+        assert!(html.contains(&format!(
+            "href=\"/favicon.ico;sf-icon?v={}\"",
+            &crate::finalize::sha256(b"author icon")[..12]
+        )));
         assert!(!html.contains("data:image/svg+xml"));
+
+        // Relative root-resolving references use the document/base URL. A
+        // remote base or icon authority must never be treated as a local file.
+        let run = run_pipeline(
+            &[
+                ("docs/index.html", br#"<html><head><base href="../"><link rel="ICON" href="./favicon.ico?x=1&amp;y=2#tab"><link rel="apple-touch-icon" href="apple-touch-icon-180x180.png"><link rel="icon" href="assets/favicon.ico"><link rel="icon" href="//cdn.test/favicon.ico"><link rel="icon" href="data:image/png;base64,AA=="></head><body></body></html>"#),
+                ("remote.html", br#"<html><head><base href="https://local.invalid/"><link rel="icon" href="/favicon.ico"></head><body></body></html>"#),
+                ("configured.html", undeclared),
+            ],
+            json!({"mode":"website"}),
+            json!({"config":{"meta":{"favicon":"/apple-touch-icon.png?brand=1#configured"}}}),
+        );
+        run.result.as_ref().unwrap();
+        let html = read(&run, "docs/index.html");
+        assert!(html.contains("href=\"/favicon.ico;sf-icon?x=1&amp;y=2#tab\""));
+        assert!(html.contains("href=\"/apple-touch-icon-180x180.png;sf-icon\""));
+        assert!(html.contains("href=\"assets/favicon.ico\""));
+        assert!(html.contains("href=\"//cdn.test/favicon.ico\""));
+        assert!(html.contains("href=\"data:image/png;base64,AA==\""));
+        assert!(read(&run, "remote.html").contains("href=\"/favicon.ico\""));
+        assert!(read(&run, "configured.html")
+            .contains("href=\"/apple-touch-icon.png;sf-icon?brand=1#configured\""));
 
         // No icon anywhere earns exactly one generated placeholder, and
         // re-finalizing that output must not accumulate a second.

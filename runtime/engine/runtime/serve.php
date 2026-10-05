@@ -58,6 +58,27 @@ function _sf_promote_blob(string $privateRoot, string $spaceId, string $blobRela
 
 const STATTIC_STATIC_STREAM_ADMISSION_BYTES = 262144;
 const STATTIC_PRIVATE_FILE_ALIAS_SUFFIX = ';sf-private';
+const STATTIC_ICON_FILE_ALIAS_SUFFIX = ';sf-icon';
+
+function _stattic_icon_file_alias_source(string $path): string|false|null
+{
+    // The provider owns only these root icon paths. Resolve their reserved
+    // suffix before the ordinary access/response lookup, never as a file read.
+    if (!str_contains($path, STATTIC_ICON_FILE_ALIAS_SUFFIX)) {
+        return null;
+    }
+    if (!str_ends_with($path, STATTIC_ICON_FILE_ALIAS_SUFFIX)) {
+        return false;
+    }
+    $source = substr($path, 0, -strlen(STATTIC_ICON_FILE_ALIAS_SUFFIX));
+    if (
+        _stattic_canonical_request_path($source) !== $source
+        || !preg_match('~\A/(?:favicon\.ico|apple-touch-icon(?:-[^/;]*)?\.png)\z~D', $source)
+    ) {
+        return false;
+    }
+    return $source;
+}
 
 function _stattic_private_file_alias_source(string $path): string|false|null
 {
@@ -225,9 +246,14 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         _stattic_private_file_alias_not_found();
     }
     $privateFileAlias = is_string($privateFileAliasSource);
-    if ($privateFileAlias) {
-        $requestPath = $privateFileAliasSource;
-        $originalRequestPath = $privateFileAliasSource;
+    $iconFileAliasSource = _stattic_icon_file_alias_source($requestPath);
+    if ($iconFileAliasSource === false) {
+        _stattic_private_file_alias_not_found();
+    }
+    $aliasSource = $privateFileAlias ? $privateFileAliasSource : $iconFileAliasSource;
+    if (is_string($aliasSource)) {
+        $requestPath = $aliasSource;
+        $originalRequestPath = $aliasSource;
         $query = (string) ($_SERVER['QUERY_STRING'] ?? '');
         $requestUri = $requestPath . ($query === '' ? '' : '?' . $query);
         $originalRequestUri = $requestUri;
@@ -556,6 +582,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         'edge_owns_placed_rules' => $edgeOwnsPlacedRules,
         'route_status' => $routeStatus,
         'private_file_alias' => $privateFileAlias,
+        'icon_file_alias' => is_string($iconFileAliasSource),
         'public_preview_image' => $publicPreviewImage,
         'request_uri' => $requestUri,
         // The URL the VISITOR asked for, never the rewritten one: the provider's
@@ -1073,6 +1100,10 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     // extension-safe alias; the target rechecks access and then keeps X-Accel.
     // Entries whose compiled headers require PHP remain on PHP on both URLs.
     if ($privateFileAlias) {
+        $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+    } elseif ($privateProviderAsset && !empty($context['icon_file_alias'])) {
+        // This client URL is already extension-safe. Keep the existing accel
+        // lane and private policy without redirecting to a second alias.
         $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
     } elseif ($privateProviderAsset && $lane === STATTIC_RUNTIME_RESPONSE_LANE_ACCEL) {
         _stattic_private_file_alias_redirect((string) ($context['client_path'] ?? ''));

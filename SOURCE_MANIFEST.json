@@ -1,7 +1,7 @@
 {
-  "revision": "58793b1fefa2a2b116e24eeda9d9e71fed264f3b",
-  "sourceHash": "47e2f2342bdec1cc181015f2eb50be30161ba2a7f322be948e88ed9eaf3b51db",
-  "manifestSha256": "3e26b3a0274b33071298ee2521e87038466f15decb42ef474910b238545996ae",
+  "revision": "a782a69ab815b74b60ccade5231de359762714e0",
+  "sourceHash": "812b2358ba534d6ccf0c45ae140717d45640accbf6f130d26ad3174bff767b6b",
+  "manifestSha256": "b996631afa2d0bba235c6fd771bb6758b9db2c91325e6f7ac8bee85df88d9787",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "22c157c745cf1c78de17c57297a61cf46ffb0b24dca9d370566382e895465036"
+      "sha256": "9f2d07b0f89b0607eb0a7d012fa090002c2bf914aecd002edf61c1e7f03556b5"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "a0d5acaf1701b14d93051bf553a079a4f513569b11cc09856d1083ce9d566053"
+      "sha256": "4dd5b3fe71b0e6bd62f3b9adc189427040a62d113f01d11950e612200489ecb5"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -105,7 +105,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/content/mod.rs",
-      "sha256": "d8e6f4185fbc076fb981fc0f5dedb95d0062a9c73076336d13fbdaa4a0e57831"
+      "sha256": "5799145b9e274be299d082bbbfa537ca72368c71717869e0e5dbf9ab7d23714a"
     },
     {
       "path": "crates/stattic-runtime-core/src/content/support.rs",
@@ -561,7 +561,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "bc889341c071c22cd272d997d6f04321681a4a20751ce3a10d8352d7806f88ef"
+      "sha256": "be0b05baf57ca36c4f175a0fea059ba6410692dfbf11e0f6fd02632010422e8b"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -849,7 +849,7 @@
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "fc2483048c31d8e0db37e2791ff108101528c4024ad735e1f7424575a2b9ae7c"
+      "sha256": "a0ca4acd58d026832c4c33e855fb9f2a44803f54fe673d4fccc6f200bdd482f2"
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
@@ -1105,7 +1105,7 @@
     },
     {
       "path": "runtime/tests/html-inject.test.ts",
-      "sha256": "77cac4810b963f88b534282bb9c261c4db47667ce8ff38b47f76a601802faa28"
+      "sha256": "0476fba7ff25eb8b0bc69513dc0af528ef10218c08fa73e9f7ccf27d34df7776"
     },
     {
       "path": "runtime/tests/installer-native.test.ts",

@@ -685,6 +685,7 @@ beforeAll(async () => {
         "index.html": `<html><body>home of ${fixture.spaceId}</body></html>`,
         "docs/index.html": `<html><head><link rel="stylesheet" href="site.css"></head><body>docs of ${fixture.spaceId}</body></html>`,
         "docs/site.css": "body { color: #123456; }",
+        "favicon.ico": { content: "private authored icon\n", contentType: "image/x-icon" },
         "docs/[section]/app-D2mDMWBM.js": "globalThis.spacefastProtectedAsset = true;\n",
         "docs/guide/index.html": `<html><body>guide of ${fixture.spaceId}</body></html>`,
         "admin/index.html": `<html><body>admin of ${fixture.spaceId}</body></html>`,
@@ -1897,6 +1898,23 @@ test("a system view token serves the page and its same-origin assets without a s
   const unauthenticatedAsset = await get(runtime, LANES_HOST, assetLocation);
   expect(unauthenticatedAsset.status).toBe(403);
   expect(await unauthenticatedAsset.text()).not.toContain("spacefastProtectedAsset");
+  const iconPath = "/favicon.ico;sf-icon?v=1";
+  const icon = await get(runtime, LANES_HOST, iconPath, { headers: { cookie: assetCookie } });
+  expect(icon.status).toBe(200);
+  expect(await icon.text()).toBe("private authored icon\n");
+  expect(icon.headers.get("cache-control")).toBe("private, no-store");
+  const iconHead = await get(runtime, LANES_HOST, iconPath, {
+    method: "HEAD",
+    headers: { cookie: assetCookie },
+  });
+  expect(iconHead.status).toBe(200);
+  expect(await iconHead.text()).toBe("");
+  expect(iconHead.headers.get("etag")).toBe(icon.headers.get("etag"));
+  expect(iconHead.headers.get("content-length")).toBe(icon.headers.get("content-length"));
+  const deniedIcon = await get(runtime, LANES_HOST, iconPath);
+  expect(deniedIcon.status).toBe(403);
+  expect(deniedIcon.headers.get("cache-control")).toBe("private, no-store");
+  expect(await deniedIcon.text()).not.toContain("private authored icon");
   // Verified locally against the runtime's own keys. The exchange never hears
   // about a system token.
   expect(exchangeRequests.length).toBe(before);
@@ -1907,6 +1925,9 @@ test("a system view token serves the page and its same-origin assets without a s
   const scoped = await get(runtime, LANES_HOST, `/docs/?__=${SYSTEM_VIEW_PREFIX}${scopedToken}`);
   expect(scoped.status).toBe(200);
   const scopedCookie = systemViewCookie(scoped);
+  expect(
+    (await get(runtime, LANES_HOST, iconPath, { headers: { cookie: scopedCookie } })).status,
+  ).toBe(403);
   expect(
     (await get(runtime, LANES_HOST, "/docs/guide/", { headers: { cookie: scopedCookie } })).status,
   ).toBe(200);

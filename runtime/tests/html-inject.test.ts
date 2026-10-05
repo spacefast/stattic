@@ -3,6 +3,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   deploy,
   get,
+  putRoute,
   publicAccessConfig,
   responseEntry,
   sha256,
@@ -20,6 +21,116 @@ beforeAll(async () => {
 }, 30000);
 
 afterAll(() => rt?.stop());
+
+test("declared icons select exact version bytes through runtime-safe URLs across promotion and rollback", async () => {
+  const spaceId = "spc_declared_icons";
+  const live = "icons.test";
+  const hosts = ["icons--a.test", "icons--b.test"];
+  const route = (version: string) => ({
+    version_id: version,
+    config: publicAccessConfig({ mode: "website" }, "live_and_all_versions"),
+    production_hostnames: [live],
+    noindex_production_hostnames: [],
+    version_hostnames: hosts.map((hostname, i) => ({
+      hostname,
+      version_id: `ver_icons_${i === 0 ? "a" : "b"}`,
+    })),
+  });
+  const paths = [
+    "favicon.ico",
+    "apple-touch-icon.png",
+    "apple-touch-icon-180x180.png",
+    "apple-touch-icon-precomposed.png",
+  ];
+  for (const version of ["a", "b"]) {
+    await deploy(rt, {
+      spaceId,
+      versionId: `ver_icons_${version}`,
+      files: {
+        "index.html": "<html><head></head><body>Implicit</body></html>",
+        "docs/index.html":
+          '<html><head><link rel="shortcut icon" href="../favicon.ico?x=1&amp;y=2#tab"><link rel="apple-touch-icon" href="../apple-touch-icon.png"><link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png"><link rel="apple-touch-icon-precomposed" href="/apple-touch-icon-precomposed.png"><link rel="icon" href="/other.png"><link rel="icon" href="https://cdn.example.test/favicon.ico"><link rel="icon" href="data:image/png;base64,AA=="></head><body>Explicit</body></html>',
+        "other.png": { content: `other-${version}`, contentType: "image/png" },
+        ...Object.fromEntries(
+          paths.map((icon) => [
+            icon,
+            {
+              content: `${icon}-${version}\n`,
+              contentType: icon.endsWith(".ico") ? "image/x-icon" : "image/png",
+            },
+          ]),
+        ),
+      },
+      activate: { route_name: "production", ...route(`ver_icons_${version}`) },
+    });
+  }
+  // B is live, A is immutable; promotion/rollback changes only the live answer.
+  for (const version of ["b", "a", "b"]) {
+    await putRoute(rt, spaceId, "production", route(`ver_icons_${version}`));
+    for (const [host, expected] of [
+      [live, version],
+      [hosts[0], "a"],
+      [hosts[1], "b"],
+    ]) {
+      const implicit = await (await get(rt, host, "/")).text();
+      const declared = implicit.match(/<link rel="icon" href="([^"]+)"/);
+      if (!declared) throw new Error("missing compiled implicit icon declaration");
+      expect(declared[1]).toBe(
+        `/favicon.ico;sf-icon?v=${sha256(`favicon.ico-${expected}\n`).slice(0, 12)}`,
+      );
+      const explicit = await (await get(rt, host, "/docs/")).text();
+      expect(explicit).toContain('href="/favicon.ico;sf-icon?x=1&amp;y=2#tab"');
+      expect(explicit).toContain('href="/other.png"');
+      expect(explicit).toContain('href="https://cdn.example.test/favicon.ico"');
+      expect(explicit).toContain('href="data:image/png;base64,AA=="');
+      for (const icon of paths) {
+        const url = icon === "favicon.ico" ? declared[1] : `/${icon};sf-icon`;
+        if (icon !== "favicon.ico") expect(explicit).toContain(`href="${url}"`);
+        const response = await get(rt, host, url);
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(`${icon}-${expected}\n`);
+        expect(response.headers.get("x-spacefast-version")).toBe(`ver_icons_${expected}`);
+        // The accel fallback owns its validator format; the alias retains it.
+        expect(response.headers.get("etag")).toMatch(/^"[a-f0-9-]+"$/);
+        expect(response.headers.get("content-type")).toBe(
+          icon.endsWith(".ico") ? "image/x-icon" : "image/png",
+        );
+        expect(response.headers.get("content-length")).toBe(
+          String(Buffer.byteLength(`${icon}-${expected}\n`)),
+        );
+        expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+        const repeated = await get(rt, host, url);
+        expect(await repeated.text()).toBe(`${icon}-${expected}\n`);
+        const head = await get(rt, host, url, { method: "HEAD" });
+        expect(head.status).toBe(200);
+        expect(await head.text()).toBe("");
+        for (const header of [
+          "etag",
+          "content-type",
+          "content-length",
+          "cache-control",
+          "x-content-type-options",
+        ]) {
+          expect(head.headers.get(header)).toBe(response.headers.get(header));
+          expect(repeated.headers.get(header)).toBe(response.headers.get(header));
+        }
+      }
+      expect(await (await get(rt, host, "/other.png")).text()).toBe(`other-${expected}`);
+    }
+  }
+  // Reserved suffix syntax must not become a general file alias.
+  for (const invalid of [
+    "/other.png;sf-icon",
+    "/docs/favicon.ico;sf-icon",
+    "/favicon.ico;sf-icon/extra",
+    "/favicon.ico;sf-icon;sf-icon",
+    "/apple-touch-icon-a;b.png;sf-icon",
+  ]) {
+    const response = await get(rt, live, invalid);
+    expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+  }
+});
 
 test("runtime splices static inject placements into served HTML", async () => {
   await deploy(rt, {

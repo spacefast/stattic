@@ -148,10 +148,6 @@ const STATTIC_ACCESS_EMAIL_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/emai
 const STATTIC_ACCESS_REQUEST_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/request';
 const STATTIC_ACCESS_CLIENT_SCRIPT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/client.js';
 const STATTIC_ACCESS_ACCOUNT_START_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/account';
-const STATTIC_SELL_CHECKOUT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sell/checkout';
-const STATTIC_SELL_STATUS_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sell/status';
-const STATTIC_SELL_PRODUCT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sell/product';
-const STATTIC_SELL_CLIENT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sell/client.js';
 // The namespace is private-by-default: a Zero control route missing from this
 // table silently 403s at the front door (init.php).
 const STATTIC_ZERO_CONTROL_ROUTES = [
@@ -213,10 +209,6 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_ACCESS_PASSWORD_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_password'],
     ['path' => STATTIC_ACCESS_EMAIL_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_email'],
     ['path' => STATTIC_ACCESS_REQUEST_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_request'],
-    ['path' => STATTIC_SELL_CHECKOUT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'sell_exchange'],
-    ['path' => STATTIC_SELL_PRODUCT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'sell_exchange'],
-    ['path' => STATTIC_SELL_STATUS_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'sell_status'],
-    ['path' => STATTIC_SELL_CLIENT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'sell_client'],
     ['path' => STATTIC_COMMENTS_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_COMMENTS_VERSION_URLS_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_ZERO_REALTIME_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
@@ -496,8 +488,6 @@ function _stattic_strip_access_query_token(string $query): string
 // token was presented.
 function _stattic_redact_access_secrets(string $uri): string
 {
-    $redacted = preg_replace('~([?&](?:purchaseToken|token)=)[^&#]*~', '$1[redacted]', $uri);
-    $uri = is_string($redacted) ? $redacted : $uri;
     $redacted = preg_replace(
         '~(^|[?&])' . preg_quote(STATTIC_ACCESS_QUERY_TOKEN_PARAM, '~') . '=[^&#]*~',
         '$1' . STATTIC_ACCESS_QUERY_TOKEN_PARAM . '=[redacted]',

@@ -3,7 +3,7 @@
 // booting the full HTTP runtime. The endpoint is the in-process fake S3
 // fixture (s3-fake.ts), so every case is a real HTTP round trip.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -95,7 +95,7 @@ describe("shared/s3.php SigV4 signer + client", () => {
 
   beforeAll(async () => {
     fake = await startFakeS3("placement-v2-test-bucket");
-    tmpDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "stattic-s3-test-")));
+    tmpDir = mkdtempSync(path.join(os.tmpdir(), "stattic-s3-test-"));
   });
 
   afterAll(() => {

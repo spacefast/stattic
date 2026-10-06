@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 use stattic_zero_runner::{ZERO_ENDPOINTS_INDEX_FORMAT, ZERO_ENDPOINTS_INDEX_KIND};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
 use url::Url;
@@ -27,8 +27,8 @@ use crate::config::crons;
 use crate::config::diagnostics::DiagnosticSeverity;
 use crate::config::jsonc::parse as parse_jsonc;
 use crate::content::{
-    advertised_image_file, advertised_image_host, materialize_html_pipeline, HtmlPipelineContext,
-    IMPLICIT_FAVICON_PATH, PIPELINE_SOURCE_MAX_BYTES,
+    advertised_image_file, advertised_image_host, is_pipeline_source, materialize_html_pipeline,
+    HtmlPipelineContext, HtmlPipelineOutcome, IMPLICIT_FAVICON_PATH, PIPELINE_SOURCE_MAX_BYTES,
 };
 use crate::csp::PlatformCspSources;
 use crate::finalize::{
@@ -603,6 +603,20 @@ fn run_finalize_pipeline(
     let previous_catalog = previous_version_catalog(input, private_root)?;
     let context_digest = pipeline_context_digest(config, serving, &viewer, metadata, files);
     let adoptable = adoptable_paths(previous_catalog.as_ref(), &context_digest, files, &blobs);
+    let html_context = HtmlPipelineContext {
+        serving,
+        metadata,
+        viewer: &viewer,
+        assigned_hostnames: &assigned_hostnames,
+    };
+    // Each channel starts from the same staged source, before the base pipeline
+    // rewrites it. Declared-template limits apply before derived outputs exist.
+    let variant_sources = prepare_template_variant_sources(
+        &substitution.template_variants,
+        files,
+        stage_root,
+        &html_context,
+    )?;
     let mut pipeline = timed(&mut telemetry.html_pipeline_ms, || {
         materialize_html_pipeline(
             &stage_root.join("files"),
@@ -617,7 +631,52 @@ fn run_finalize_pipeline(
             &mut diagnostics,
         )
     })?;
+    timed(&mut telemetry.blob_install_ms, || {
+        for (path, meta) in files
+            .iter()
+            .filter(|(path, _)| !pipeline.adopted.contains(*path))
+        {
+            install_blob_from(&blobs, &stage_root.join("files").join(path), &meta.sha256)?;
+        }
+        Ok::<_, FinalizeError>(())
+    })?;
+    let CompiledTemplateVariants {
+        files: variant_files,
+        pipelines: variant_pipelines,
+    } = timed(&mut telemetry.html_pipeline_ms, || {
+        compile_template_variant_files(
+            &substitution.template_variants,
+            TemplateVariantBase {
+                files,
+                pipeline: &pipeline,
+                sources: &variant_sources,
+            },
+            &blobs,
+            stage_root,
+            &html_context,
+            &mut diagnostics,
+        )
+    })?;
+    pipeline.private.extend(
+        variant_pipelines
+            .values()
+            .flat_map(|variant| variant.private.iter().cloned()),
+    );
     telemetry.generated_files = pipeline.generated.len();
+    // Derived channel pages are template outputs too, so the existing purge
+    // contract covers them even when only a channel variable changes.
+    let mut template_paths: BTreeSet<_> = substitution.substituted_paths.iter().cloned().collect();
+    template_paths.extend(
+        variant_files
+            .values()
+            .flat_map(|values| values.iter())
+            .filter(|(path, meta)| {
+                files
+                    .get(*path)
+                    .is_none_or(|base| base.sha256 != meta.sha256)
+            })
+            .map(|(path, _)| path.clone()),
+    );
     telemetry.decorated_files = pipeline.decorated;
     telemetry.skipped_files = pipeline.adopted.len();
     let pages = input
@@ -796,18 +855,7 @@ fn run_finalize_pipeline(
     let zero_endpoint_count = compiled_zero.endpoint_artifacts.len();
     let zero_run_count = compiled_zero.run_artifacts.len();
 
-    let files_root = stage_root.join("files");
-    let (originals, variant_files) = timed(&mut telemetry.blob_install_ms, || {
-        for (path, meta) in files.iter() {
-            // An adopted path's staged file still holds the SOURCE bytes while
-            // its meta names the previously served object — installing it here
-            // would file source bytes under the served hash. Both of its blobs
-            // were proven present when the path became adoptable.
-            if pipeline.adopted.contains(path) {
-                continue;
-            }
-            install_blob_from(&blobs, &files_root.join(path), &meta.sha256)?;
-        }
+    let originals = timed(&mut telemetry.blob_install_ms, || {
         let mut originals = original_objects(stage_root, &blobs, files)?;
         if let Some(previous) = previous_catalog.as_ref() {
             for path in &pipeline.adopted {
@@ -823,9 +871,7 @@ fn run_finalize_pipeline(
                 }
             }
         }
-        let variant_files =
-            compile_template_variant_files(&substitution.template_variants, files, &blobs)?;
-        Ok::<_, FinalizeError>((originals, variant_files))
+        Ok::<_, FinalizeError>(originals)
     })?;
 
     let listings = timed(&mut telemetry.listings_ms, || {
@@ -891,29 +937,47 @@ fn run_finalize_pipeline(
         .into_iter()
         .filter(|path| files.contains_key(path))
         .collect();
-    let compile_for = |files: &BTreeMap<String, FileMeta>| {
-        compile_response_table(&ResponseCompileInput {
-            files,
-            private: &private,
-            serving_config: &serving_config,
-            pages: pages.map(Vec::as_slice),
-            redirects_exact: &redirects_exact,
-            redirects_pattern: &redirects_pattern,
-            headers_exact: &headers_exact,
-            headers_pattern: &headers_pattern,
-            listings: &listings,
-            zero_actions: &zero_actions,
-            robots_blob: Some((robots.clone(), DENY_ALL_ROBOTS.len() as u64)),
-            noindex_host,
-            preview_images: &preview_images,
-            preview_image_hosts: &pipeline.preview_image_hosts,
-        })
-    };
+    let compile_for =
+        |files: &BTreeMap<String, FileMeta>,
+         preview_images: &BTreeSet<String>,
+         preview_image_hosts: &BTreeMap<String, BTreeSet<String>>| {
+            compile_response_table(&ResponseCompileInput {
+                files,
+                private: &private,
+                serving_config: &serving_config,
+                pages: pages.map(Vec::as_slice),
+                redirects_exact: &redirects_exact,
+                redirects_pattern: &redirects_pattern,
+                headers_exact: &headers_exact,
+                headers_pattern: &headers_pattern,
+                listings: &listings,
+                zero_actions: &zero_actions,
+                robots_blob: Some((robots.clone(), DENY_ALL_ROBOTS.len() as u64)),
+                noindex_host,
+                preview_images,
+                preview_image_hosts,
+            })
+        };
     let (table, route_tables) = timed(&mut telemetry.response_tables_ms, || {
-        let table = compile_for(files);
+        let table = compile_for(files, &preview_images, &pipeline.preview_image_hosts);
         let route_tables: BTreeMap<_, _> = variant_files
             .iter()
-            .map(|(route_name, variant_files)| (route_name.clone(), compile_for(variant_files)))
+            .map(|(route_name, variant_files)| {
+                let variant = &variant_pipelines[route_name];
+                let images = variant
+                    .preview_images
+                    .iter()
+                    .cloned()
+                    .chain(site_image.into_iter().filter_map(|reference| {
+                        advertised_image_file(reference, "", &assigned_hostnames)
+                    }))
+                    .filter(|path| variant_files.contains_key(path))
+                    .collect();
+                (
+                    route_name.clone(),
+                    compile_for(variant_files, &images, &variant.preview_image_hosts),
+                )
+            })
             .collect();
         (table, route_tables)
     });
@@ -988,7 +1052,7 @@ fn run_finalize_pipeline(
             &serving_config,
             serving,
         ),
-        template_paths: substitution.substituted_paths.clone(),
+        template_paths: template_paths.into_iter().collect(),
         generated_at: &input.generated_at,
         pipeline_context_digest: Some(context_digest),
     });
@@ -1291,16 +1355,112 @@ fn finalize_catalog_delta(
     Some(delta)
 }
 
-/// Materializes each channel's substituted bytes in the Space CAS and returns
-/// a complete file map for compiling that route's response table. The base map
+/// Channel file maps and results from the shared content pipeline.
+#[derive(Default)]
+struct CompiledTemplateVariants {
+    files: BTreeMap<String, BTreeMap<String, FileMeta>>,
+    pipelines: BTreeMap<String, HtmlPipelineOutcome>,
+}
+
+struct TemplateVariantSources {
+    root: PathBuf,
+    files: BTreeMap<String, FileMeta>,
+}
+
+struct TemplateVariantBase<'a> {
+    files: &'a BTreeMap<String, FileMeta>,
+    pipeline: &'a HtmlPipelineOutcome,
+    sources: &'a TemplateVariantSources,
+}
+
+fn variant_needs_pipeline(
+    values: &BTreeMap<String, String>,
+    files: &BTreeMap<String, FileMeta>,
+    context: &HtmlPipelineContext<'_>,
+) -> bool {
+    if values.keys().any(|path| is_pipeline_source(path)) {
+        return true;
+    }
+    let absent = Map::new();
+    let config = context
+        .serving
+        .get("config")
+        .and_then(Value::as_object)
+        .unwrap_or(&absent);
+    let mut changed = files.clone();
+    for (path, content) in values {
+        if let Some(meta) = files.get(path) {
+            changed.insert(
+                path.clone(),
+                file_meta(path, content.as_bytes(), Some(&meta.mime)),
+            );
+        }
+    }
+    pipeline_context_digest(
+        config,
+        context.serving,
+        context.viewer,
+        context.metadata,
+        files,
+    ) != pipeline_context_digest(
+        config,
+        context.serving,
+        context.viewer,
+        context.metadata,
+        &changed,
+    )
+}
+
+fn link_variant_source(source: &Path, target: &Path) -> Result<()> {
+    create_dir_all(target.parent().expect("staged relative path"))?;
+    if fs::hard_link(source, target).is_err() {
+        fs::copy(source, target).map_err(|source| FinalizeError::Io {
+            path: target.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn prepare_template_variant_sources(
+    routes: &BTreeMap<String, BTreeMap<String, String>>,
+    files: &BTreeMap<String, FileMeta>,
+    stage_root: &Path,
+    context: &HtmlPipelineContext<'_>,
+) -> Result<TemplateVariantSources> {
+    let root = stage_root.join("files-variants/source/files");
+    if routes
+        .values()
+        .any(|values| variant_needs_pipeline(values, files, context))
+    {
+        let templates: BTreeSet<_> = routes.values().flat_map(|values| values.keys()).collect();
+        // Capture only bytes the pipeline reads or a declared template changes.
+        // All rewrites are temp-file + rename, so linked inputs stay immutable.
+        for path in files
+            .keys()
+            .filter(|path| is_pipeline_source(path) || templates.contains(path))
+        {
+            link_variant_source(&stage_root.join("files").join(path), &root.join(path))?;
+        }
+    }
+    Ok(TemplateVariantSources {
+        root,
+        files: files.clone(),
+    })
+}
+
+/// Materializes each channel through the full content pipeline. The base map
 /// remains the version-host representation.
 fn compile_template_variant_files(
     routes: &BTreeMap<String, BTreeMap<String, String>>,
-    files: &BTreeMap<String, FileMeta>,
+    base: TemplateVariantBase<'_>,
     blobs: &Path,
-) -> Result<BTreeMap<String, BTreeMap<String, FileMeta>>> {
+    stage_root: &Path,
+    context: &HtmlPipelineContext<'_>,
+    diagnostics: &mut Vec<Value>,
+) -> Result<CompiledTemplateVariants> {
     if routes.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(CompiledTemplateVariants::default());
     }
     if routes.len() > TEMPLATE_VARIANT_ROUTE_LIMIT {
         return invalid(
@@ -1310,7 +1470,9 @@ fn compile_template_variant_files(
     }
 
     let mut compiled = BTreeMap::new();
-    for (route_name, values) in routes {
+    let mut pipelines = BTreeMap::new();
+    let base_diagnostics = diagnostics.clone();
+    for (index, (route_name, values)) in routes.iter().enumerate() {
         if route_name.is_empty()
             || route_name.len() > TEMPLATE_VARIANT_ROUTE_NAME_MAX_CHARS
             || !route_name
@@ -1331,28 +1493,152 @@ fn compile_template_variant_files(
             );
         }
 
-        let mut route_files = files.clone();
         for (path, content) in values {
             validate_relative_path(path)?;
-            let Some(base) = files.get(path) else {
+            if !base.sources.files.contains_key(path) {
                 return invalid(
                     "template_not_in_version",
                     format!("Template variant {path} is not a committed file in this version."),
                 );
-            };
+            }
             if content.len() > TEMPLATE_MAX_BYTES {
                 return invalid(
                     "invalid_template_variants",
                     format!("Template variant {path} exceeds {TEMPLATE_MAX_BYTES} bytes."),
                 );
             }
-            let bytes = content.as_bytes();
-            put_blob(blobs, bytes)?;
-            route_files.insert(path.clone(), file_meta(path, bytes, Some(&base.mime)));
         }
-        compiled.insert(route_name.clone(), route_files);
+        if !variant_needs_pipeline(values, &base.sources.files, context) {
+            let mut route_files = base.files.clone();
+            for (path, content) in values {
+                let bytes = content.as_bytes();
+                put_blob(blobs, bytes)?;
+                route_files.insert(
+                    path.clone(),
+                    file_meta(path, bytes, Some(&base.files[path].mime)),
+                );
+            }
+            let mut pipeline = base.pipeline.clone();
+            pipeline.generated.clear();
+            pipeline.decorated = 0;
+            pipeline.adopted = base
+                .files
+                .keys()
+                .filter(|path| is_pipeline_source(path) && !pipeline.private.contains(*path))
+                .cloned()
+                .collect();
+            compiled.insert(route_name.clone(), route_files);
+            pipelines.insert(route_name.clone(), pipeline);
+            continue;
+        }
+        // Numeric workspace names keep route labels out of filesystem paths.
+        let workspace = stage_root.join("files-variants").join(index.to_string());
+        let root = workspace.join("files");
+        for path in base
+            .sources
+            .files
+            .keys()
+            .filter(|path| is_pipeline_source(path) || values.contains_key(*path))
+        {
+            link_variant_source(&base.sources.root.join(path), &root.join(path))?;
+        }
+        let mut route_files = base.sources.files.clone();
+        apply_templates(values, &workspace, &mut route_files)?;
+        let absent = Map::new();
+        let config = context
+            .serving
+            .get("config")
+            .and_then(Value::as_object)
+            .unwrap_or(&absent);
+        let same_context = pipeline_context_digest(
+            config,
+            context.serving,
+            context.viewer,
+            context.metadata,
+            &route_files,
+        ) == pipeline_context_digest(
+            config,
+            context.serving,
+            context.viewer,
+            context.metadata,
+            &base.sources.files,
+        );
+        let adoption: BTreeMap<_, _> = base
+            .sources
+            .files
+            .iter()
+            .filter(|(path, meta)| {
+                same_context
+                    && is_pipeline_source(path)
+                    && !base.pipeline.private.contains(*path)
+                    && route_files
+                        .get(*path)
+                        .is_some_and(|candidate| candidate.sha256 == meta.sha256)
+            })
+            .filter_map(|(path, source)| {
+                base.files.get(path).map(|served| {
+                    (
+                        path.clone(),
+                        AdoptablePath {
+                            source_sha256: source.sha256.clone(),
+                            served_sha256: served.sha256.clone(),
+                            served_size: served.size,
+                            served_content_type: served.mime.clone(),
+                        },
+                    )
+                })
+            })
+            .collect();
+        let mut channel_diagnostics = Vec::new();
+        let pipeline = materialize_html_pipeline(
+            &root,
+            &mut route_files,
+            HtmlPipelineContext {
+                serving: context.serving,
+                metadata: context.metadata,
+                viewer: context.viewer,
+                assigned_hostnames: context.assigned_hostnames,
+            },
+            &adoption,
+            &mut channel_diagnostics,
+        )?;
+        for mut diagnostic in channel_diagnostics {
+            if !base_diagnostics.contains(&diagnostic) {
+                if let Some(object) = diagnostic.as_object_mut() {
+                    if let Some(details) = object
+                        .entry("details")
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                    {
+                        details.insert("route_name".into(), json!(route_name));
+                    }
+                }
+                diagnostics.push(diagnostic);
+            }
+        }
+        let mut served_files = base.files.clone();
+        for (path, meta) in &route_files {
+            if values.contains_key(path)
+                || base
+                    .sources
+                    .files
+                    .get(path)
+                    .is_none_or(|source| source.sha256 != meta.sha256)
+            {
+                if !pipeline.adopted.contains(path) {
+                    install_blob_from(blobs, &root.join(path), &meta.sha256)?;
+                }
+                served_files.insert(path.clone(), meta.clone());
+            }
+        }
+        remove_any(&workspace)?;
+        compiled.insert(route_name.clone(), served_files);
+        pipelines.insert(route_name.clone(), pipeline);
     }
-    Ok(compiled)
+    Ok(CompiledTemplateVariants {
+        files: compiled,
+        pipelines,
+    })
 }
 
 /// The substituted bytes this finalize publishes.
@@ -4091,30 +4377,51 @@ mod tests {
     /// it.
     #[test]
     fn finalize_substitutes_templates_conventions_and_variants_from_resolved_scopes() {
-        let (_temp, private, output) = finalize_fixture(
-            &[
-                ("index.html", b"<h1>{{ vars.GREETING }}</h1>"),
-                ("_redirects", b"/old /{{ vars.TARGET }} 301"),
-                ("sf.jsonc", br#"{"templates":["index.html"]}"#),
-            ],
-            json!({"mode":"website"}),
-            json!({
-                "serving": {"config": {}},
-                "variable_scopes": [{
-                    "kind": "space",
-                    "values": {
-                        "GREETING": {"value": "hello", "channelValues": {"production": "howdy"}},
-                        "TARGET": {"value": "resolved-target"}
-                    }
-                }],
-                "channels": [{"name": "production", "route_name": "prod"}],
-            }),
-        );
+        let sources: &[(&str, &[u8])] = &[
+            (
+                "index.html",
+                b"<!--#include virtual=\"/parts/header.html\" --><h1>{{ vars.GREETING }}</h1>",
+            ),
+            (
+                "about.html",
+                b"<!--#include virtual=\"/parts/header.html\" --><main>About</main>",
+            ),
+            ("simple.html", b"<h1>{{ vars.GREETING }}</h1>"),
+            (
+                "parts/header.html",
+                b"<header><!--#include virtual=\"/parts/brand.html\" --></header>",
+            ),
+            ("parts/brand.html", b"<p>{{ vars.BRAND }}</p>"),
+            ("_redirects", b"/old /{{ vars.TARGET }} 301"),
+            (
+                "sf.jsonc",
+                br#"{"templates":["index.html","simple.html","parts/brand.html"]}"#,
+            ),
+        ];
+        let mut body = json!({
+            "serving": {"config": {}},
+            "variable_scopes": [{
+                "kind": "space",
+                "values": {
+                    "GREETING": {"value": "hello", "channelValues": {"production": "howdy", "preview": "welcome"}},
+                    "BRAND": {"value": "base", "channelValues": {"production": "production brand", "preview": "preview brand"}},
+                    "TARGET": {"value": "resolved-target"}
+                }
+            }],
+            "channels": [{"name": "production", "route_name": "prod"}, {"name": "preview", "route_name": "preview"}],
+        });
+        let (_temp, private, output) =
+            finalize_fixture(sources, json!({"mode":"website"}), body.clone());
         output.unwrap();
         assert_eq!(
             String::from_utf8(finalized_body(&private, "index.html")).unwrap(),
-            "<h1>hello</h1>"
+            "<header><p>base</p></header><h1>hello</h1>"
         );
+        assert_eq!(
+            finalized_body(&private, "about.html"),
+            b"<header><p>base</p></header><main>About</main>"
+        );
+        assert_eq!(finalized_body(&private, "simple.html"), b"<h1>hello</h1>");
         // The compiled serving artifact — not just the recorded text — carries
         // the resolved value, so the rule the visitor hits is the resolved one.
         let table = finalized_table(&private);
@@ -4122,19 +4429,333 @@ mod tests {
         assert!(!table.contains("vars.TARGET"), "{table}");
 
         let catalog = finalized_catalog(&private);
-        assert_eq!(catalog.variants.keys().collect::<Vec<_>>(), vec!["prod"]);
-        let variant = &catalog.variants["prod"]["index.html"];
-        assert_eq!(variant.sha256, sha256(b"<h1>howdy</h1>"));
         assert_eq!(
-            fs::read(private.join(format!(
-                "spaces/s/blobs/{}/{}",
-                &variant.sha256[..2],
-                variant.sha256
-            )))
-            .unwrap(),
-            b"<h1>howdy</h1>"
+            catalog.variants.keys().collect::<Vec<_>>(),
+            vec!["preview", "prod"]
         );
-        assert_eq!(catalog.template_paths, vec!["index.html".to_string()]);
+        for (channel, brand, greeting) in [
+            ("prod", "production brand", "howdy"),
+            ("preview", "preview brand", "welcome"),
+        ] {
+            for (path, expected) in [
+                (
+                    "index.html",
+                    format!("<header><p>{brand}</p></header><h1>{greeting}</h1>"),
+                ),
+                (
+                    "about.html",
+                    format!("<header><p>{brand}</p></header><main>About</main>"),
+                ),
+                ("simple.html", format!("<h1>{greeting}</h1>")),
+            ] {
+                let variant = &catalog.variants[channel][path];
+                assert_eq!(
+                    variant.sha256,
+                    sha256(expected.as_bytes()),
+                    "{channel}/{path}"
+                );
+                assert_eq!(
+                    fs::read(private.join(format!(
+                        "spaces/s/blobs/{}/{}",
+                        &variant.sha256[..2],
+                        variant.sha256
+                    )))
+                    .unwrap(),
+                    expected.as_bytes()
+                );
+            }
+        }
+        assert_eq!(
+            catalog.template_paths,
+            vec![
+                "about.html",
+                "index.html",
+                "parts/brand.html",
+                "simple.html"
+            ]
+        );
+        // A channel-only variable update leaves base/source identities alone,
+        // but still republishes and purges the indirectly affected page.
+        body["variable_scopes"][0]["values"]["BRAND"]["channelValues"]["production"] =
+            json!("updated production brand");
+        body["previous_version_id"] = json!("v");
+        let mut next = fixture_input(
+            &private,
+            accept_blobs(&private, sources),
+            json!({"mode":"website"}),
+            body,
+        );
+        next.version_id = "v2".into();
+        next.upload_id = Some("u2".into());
+        let output = finalize_site(next, false).unwrap();
+        let next_catalog = catalog_at(&private, "v2");
+        assert_eq!(
+            catalog.paths["about.html"],
+            next_catalog.paths["about.html"]
+        );
+        assert_eq!(
+            next_catalog.variants["prod"]["about.html"].sha256,
+            sha256(b"<header><p>updated production brand</p></header><main>About</main>")
+        );
+        let delta = output.delta.unwrap();
+        assert_eq!((delta.added, delta.changed, delta.removed), (0, 0, 0));
+        let purges = delta.changed_paths.unwrap();
+        assert!(
+            purges.contains(&"/about.html".to_string()) && purges.contains(&"/about".to_string()),
+            "{purges:?}"
+        );
+    }
+
+    #[test]
+    fn channel_sources_exclude_media_and_reuse_unchanged_base_output() {
+        let temp = tempdir().unwrap();
+        let stage = temp.path().join("stage");
+        let root = stage.join("files");
+        let media = vec![0_u8; 2 * 1024 * 1024];
+        let inputs: &[(&str, &[u8])] = &[
+            ("index.html", b"<html><head></head><body><!--#include virtual=\"/parts/header.html\" --></body></html>"),
+            ("ordinary.html", b"<html><head></head><body>ordinary</body></html>"),
+            ("parts/header.html", b"<header>base</header>"),
+            ("config.js", b"base"),
+            ("theme.json", br#"{"version":3}"#),
+            ("movie.mp4", &media),
+        ];
+        let mut files = BTreeMap::new();
+        for (path, body) in inputs {
+            create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            fs::write(root.join(path), body).unwrap();
+            files.insert(path.to_string(), file_meta(path, body, None));
+        }
+        let serving =
+            json!({"config":{"inject":{"head":["<meta name=\"rendered\" content=\"yes\">"]}}})
+                .as_object()
+                .unwrap()
+                .clone();
+        let metadata = json!({"mode":"website"}).as_object().unwrap().clone();
+        let viewer = Map::new();
+        let context = HtmlPipelineContext {
+            serving: &serving,
+            metadata: &metadata,
+            viewer: &viewer,
+            assigned_hostnames: &[],
+        };
+        let js_routes = BTreeMap::from([(
+            "prod".to_string(),
+            BTreeMap::from([("config.js".to_string(), "prod".to_string())]),
+        )]);
+        let js_sources =
+            prepare_template_variant_sources(&js_routes, &files, &stage, &context).unwrap();
+        assert!(
+            !js_sources.root.exists(),
+            "file-only variants need no source workspace"
+        );
+        let html_routes = BTreeMap::from([(
+            "prod".to_string(),
+            BTreeMap::from([(
+                "parts/header.html".to_string(),
+                "<header>prod</header>".to_string(),
+            )]),
+        )]);
+        let sources =
+            prepare_template_variant_sources(&html_routes, &files, &stage, &context).unwrap();
+        let theme_routes = BTreeMap::from([(
+            "prod".to_string(),
+            BTreeMap::from([("theme.json".to_string(), "{bad json".to_string())]),
+        )]);
+        assert!(
+            !sources.root.join("movie.mp4").exists(),
+            "unread media stays in the CAS"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(root.join("index.html")).unwrap().ino(),
+                fs::metadata(sources.root.join("index.html")).unwrap().ino()
+            );
+        }
+        let mut diagnostics = Vec::new();
+        let pipeline = materialize_html_pipeline(
+            &root,
+            &mut files,
+            HtmlPipelineContext {
+                serving: &serving,
+                metadata: &metadata,
+                viewer: &viewer,
+                assigned_hostnames: &[],
+            },
+            &BTreeMap::new(),
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(sources.root.join("index.html")).unwrap(),
+            inputs[0].1,
+            "atomic base writes preserve linked source"
+        );
+        let blobs = temp.path().join("blobs");
+        for (path, meta) in &files {
+            install_blob_from(&blobs, &root.join(path), &meta.sha256).unwrap();
+        }
+        let js = compile_template_variant_files(
+            &js_routes,
+            TemplateVariantBase {
+                files: &files,
+                pipeline: &pipeline,
+                sources: &js_sources,
+            },
+            &blobs,
+            &stage,
+            &context,
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert!(js.pipelines["prod"].generated.is_empty());
+        assert!(js.pipelines["prod"].adopted.contains("index.html"));
+        assert_eq!(
+            js.files["prod"]["movie.mp4"].sha256,
+            files["movie.mp4"].sha256
+        );
+        let html = compile_template_variant_files(
+            &html_routes,
+            TemplateVariantBase {
+                files: &files,
+                pipeline: &pipeline,
+                sources: &sources,
+            },
+            &blobs,
+            &stage,
+            &context,
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert!(html.pipelines["prod"].adopted.contains("ordinary.html"));
+        assert!(!html.pipelines["prod"].generated.contains("ordinary.html"));
+        assert_eq!(
+            html.files["prod"]["ordinary.html"].sha256,
+            files["ordinary.html"].sha256
+        );
+        assert_eq!(
+            html.files["prod"]["movie.mp4"].sha256,
+            files["movie.mp4"].sha256
+        );
+        let mut channel_diagnostics = diagnostics.clone();
+        compile_template_variant_files(
+            &theme_routes,
+            TemplateVariantBase {
+                files: &files,
+                pipeline: &pipeline,
+                sources: &sources,
+            },
+            &blobs,
+            &stage,
+            &context,
+            &mut channel_diagnostics,
+        )
+        .unwrap();
+        let reported = runtime_diagnostics(channel_diagnostics);
+        assert!(
+            reported.iter().any(|diagnostic| diagnostic
+                .details
+                .as_ref()
+                .is_some_and(|details| details.get("route_name") == Some(&json!("prod")))),
+            "channel-specific warnings retain route identity in the receipt"
+        );
+    }
+
+    #[test]
+    fn channel_include_pages_render_and_decorate_without_consuming_template_slots() {
+        for page_count in [1, 101] {
+            let mut sources = vec![
+                (
+                    "draft.md".to_string(),
+                    "---\ndraft: true\n---\n# Draft".to_string(),
+                ),
+                (
+                    "parts/header.html".to_string(),
+                    "<!-- wp:paragraph --><p>{{ vars.BRAND }}</p><!-- /wp:paragraph -->"
+                        .to_string(),
+                ),
+                (
+                    "sf.jsonc".to_string(),
+                    r#"{"templates":["parts/header.html"]}"#.to_string(),
+                ),
+                (
+                    "theme.json".to_string(),
+                    r##"{"version":3,"styles":{"color":{"text":"#123456"}}}"##.to_string(),
+                ),
+            ];
+            for index in 0..page_count {
+                sources.push((
+                    if index == 0 { "index.html".to_string() } else { format!("page-{index}.html") },
+                    format!("<!--#include virtual=\"/parts/header.html\" --><!-- wp:heading {{\"level\":2}} --><h2>Page {index}</h2><!-- /wp:heading -->"),
+                ));
+            }
+            let inputs: Vec<_> = sources
+                .iter()
+                .map(|(path, body)| (path.as_str(), body.as_bytes()))
+                .collect();
+            let (_temp, private, output) = finalize_fixture(
+                &inputs,
+                json!({"mode":"files","content":{"format":"gutenberg-blocks"}}),
+                json!({
+                    "serving":{"config":{"platform_meta":true,"meta":{"description":"Channel description"}}},
+                    "variable_scopes":[{"kind":"space","values":{"BRAND":{"value":"base brand","channelValues":{"production":"production brand"}}}}],
+                    "channels":[{"name":"production","route_name":"prod"}],
+                }),
+            );
+            let output = output.unwrap_or_else(|error| {
+                panic!("{page_count} pages, one declared template: {error}")
+            });
+            assert_eq!(
+                output
+                    .diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic.code == "page_draft_skipped")
+                    .count(),
+                1,
+                "unchanged base warnings are emitted once"
+            );
+            let catalog = finalized_catalog(&private);
+            for index in 0..page_count {
+                let path = if index == 0 {
+                    "index.html".to_string()
+                } else {
+                    format!("page-{index}.html")
+                };
+                let variant = &catalog.variants["prod"][&path];
+                let body = String::from_utf8(
+                    fs::read(private.join(format!(
+                        "spaces/s/blobs/{}/{}",
+                        &variant.sha256[..2],
+                        variant.sha256
+                    )))
+                    .unwrap(),
+                )
+                .unwrap();
+                assert!(
+                    body.contains("<html")
+                        && body.contains("<p>production brand</p>")
+                        && body.contains(&format!("Page {index}")),
+                    "{page_count}/{path}: {body}"
+                );
+                assert!(
+                    !body.contains("<!-- wp:") && !body.contains("<!--#include"),
+                    "{body}"
+                );
+                assert!(
+                    body.contains(crate::protocol::THEME_STYLESHEET_URL)
+                        && body.contains("Channel description"),
+                    "{body}"
+                );
+                let base = String::from_utf8(finalized_body(&private, &path)).unwrap();
+                assert!(
+                    base.contains("<p>base brand</p>")
+                        && base.contains(crate::protocol::THEME_STYLESHEET_URL),
+                    "{base}"
+                );
+            }
+        }
     }
 
     /// A secret or unknown reference anywhere in the substitution set — a
@@ -4542,15 +5163,15 @@ mod tests {
         flags
     }
 
-    /// The headline of the incremental path: a republish that changes one file
-    /// adopts every other page's served identity verbatim — same catalog entry,
-    /// same CAS object, no decoration work — while the changed file takes the
-    /// full path and the delta scopes the purge to it.
+    /// Include-bearing pages compile from current fragments every publish;
+    /// ordinary pages retain adoption even beside them. Old versions and source
+    /// identities stay immutable, and purges follow expanded served bytes.
     #[test]
-    fn a_republish_adopts_unchanged_pages_and_reworks_only_the_changed_file() {
+    fn a_republish_reworks_shared_html_and_adopts_ordinary_pages() {
         let temp = tempdir().unwrap();
         let private = temp.path().join(".stattic/storage");
-        let stable = b"<html><head></head><body><p>stable</p></body></html>" as &[u8];
+        let stable = b"<html><head></head><body><!--#include virtual=\"/parts/header.html\" --><p>stable</p><!--#include virtual=\"/parts/footer.html\" --></body></html>" as &[u8];
+        let about = b"<html><head></head><body><!--#include virtual=\"/parts/header.html\" --><p>about only</p><!--#include virtual=\"/parts/footer.html\" --></body></html>" as &[u8];
         // A rendered page whose link-preview image comes from frontmatter,
         // unchanged across both publishes.
         let post = b"---\nimage: /cover.png\n---\n# Post\n" as &[u8];
@@ -4562,10 +5183,10 @@ mod tests {
                     &private,
                     &[
                         ("index.html", stable),
-                        (
-                            "about.html",
-                            b"<html><head></head><body><p>one</p></body></html>",
-                        ),
+                        ("about.html", about),
+                        ("parts/header.html", b"<header><h1>one</h1></header>"),
+                        ("parts/footer.html", b"<footer>kept</footer>"),
+                        ("parts/public.html", b"<main>Public ordinary page</main>"),
                         ("style.css", b"body{}"),
                         ("post.md", post),
                         ("cover.png", b"cover"),
@@ -4584,10 +5205,10 @@ mod tests {
                 &private,
                 &[
                     ("index.html", stable),
-                    (
-                        "about.html",
-                        b"<html><head></head><body><p>two</p></body></html>",
-                    ),
+                    ("about.html", about),
+                    ("parts/header.html", b"<header><h1>two</h1></header>"),
+                    ("parts/footer.html", b"<footer>kept</footer>"),
+                    ("parts/public.html", b"<main>Public ordinary page</main>"),
                     ("style.css", b"body{}"),
                     ("post.md", post),
                     ("cover.png", b"cover"),
@@ -4603,25 +5224,38 @@ mod tests {
         let telemetry = output.telemetry.as_ref().expect("a finalize that ran");
         assert_eq!(
             telemetry.skipped_files, 1,
-            "index.html adopts; about.html changed; the post is rendered, so never adopted; \
-             style.css is no decoration target: {telemetry:?}"
+            "include pages recompile while the ordinary parts/public.html page adopts: {telemetry:?}"
         );
         // The frontmatter image stays the post's link preview on the republish,
         // and it is the one file both versions serve past the access gate.
         for version in ["v", "v2"] {
             assert_eq!(preview_flags(&private, version), 1, "{version}");
         }
-        assert_eq!(
-            catalog_at(&private, "v").paths["index.html"],
-            catalog_at(&private, "v2").paths["index.html"],
-            "an adopted path carries the previous version's identities verbatim"
-        );
-        assert_eq!(
-            served_body(&private, "v", "index.html"),
-            served_body(&private, "v2", "index.html"),
-        );
-        let about = String::from_utf8(served_body(&private, "v2", "about.html")).unwrap();
-        assert!(about.contains("<p>two</p>"), "{about}");
+        for (path, own) in [("index.html", "stable"), ("about.html", "about only")] {
+            assert_eq!(
+                catalog_at(&private, "v").paths[path].source,
+                catalog_at(&private, "v2").paths[path].source
+            );
+            for (version, heading) in [("v", "one"), ("v2", "two")] {
+                let body = String::from_utf8(served_body(&private, version, path)).unwrap();
+                assert!(
+                    body.contains(&format!(
+                        "<header><h1>{heading}</h1></header><p>{own}</p><footer>kept</footer>"
+                    )),
+                    "{version}/{path}: {body}"
+                );
+                assert!(!body.contains("#include"));
+            }
+        }
+        assert!(catalog_at(&private, "v2").paths["parts/header.html"]
+            .served
+            .is_none());
+        for version in ["v", "v2"] {
+            assert_eq!(
+                served_body(&private, version, "parts/public.html"),
+                b"<main>Public ordinary page</main>"
+            );
+        }
         let changed = output
             .delta
             .expect("a named previous version")
@@ -4632,8 +5266,104 @@ mod tests {
             "{changed:?}"
         );
         assert!(
-            !changed.iter().any(|path| path == "/index.html"),
+            changed.iter().any(|path| path == "/index.html"),
             "{changed:?}"
+        );
+        assert!(
+            !changed.iter().any(|path| path == "/parts/public.html"),
+            "{changed:?}"
+        );
+        let mut identical = fixture_input(
+            &private,
+            accept_blobs(
+                &private,
+                &[
+                    ("index.html", stable),
+                    ("about.html", about),
+                    ("parts/header.html", b"<header><h1>two</h1></header>"),
+                    ("parts/footer.html", b"<footer>kept</footer>"),
+                    ("parts/public.html", b"<main>Public ordinary page</main>"),
+                    ("style.css", b"body{}"),
+                    ("post.md", post),
+                    ("cover.png", b"cover"),
+                ],
+            ),
+            json!({"mode":"website","title":"Adopt"}),
+            json!({"serving":{"config":{}},"previous_version_id":"v2"}),
+        );
+        identical.version_id = "v3".into();
+        identical.upload_id = Some("u3".into());
+        let output = finalize_site(identical, false).unwrap();
+        assert_eq!(output.telemetry.unwrap().skipped_files, 1);
+        for path in ["index.html", "about.html", "parts/public.html"] {
+            assert_eq!(
+                catalog_at(&private, "v2").paths[path],
+                catalog_at(&private, "v3").paths[path]
+            );
+            assert_eq!(
+                served_body(&private, "v2", path),
+                served_body(&private, "v3", path)
+            );
+        }
+    }
+
+    /// Ordinary HTML has no include ownership or shared invalidation. Changing
+    /// one route retains the previous served identity of every untouched page.
+    #[test]
+    fn a_republish_adopts_unchanged_pages_and_reworks_only_the_changed_file() {
+        let temp = tempdir().unwrap();
+        let private = temp.path().join(".stattic/storage");
+        let stable = b"<html><head></head><body><p>stable</p></body></html>" as &[u8];
+        let public_part = b"<main>Ordinary page under parts</main>" as &[u8];
+        let metadata = json!({"mode":"website","title":"Adopt"});
+        finalize_site(
+            fixture_input(
+                &private,
+                accept_blobs(
+                    &private,
+                    &[
+                        ("index.html", stable),
+                        ("about.html", b"<p>one</p>"),
+                        ("parts/public.html", public_part),
+                    ],
+                ),
+                metadata.clone(),
+                json!({"serving":{"config":{}}}),
+            ),
+            false,
+        )
+        .unwrap();
+        let mut next = fixture_input(
+            &private,
+            accept_blobs(
+                &private,
+                &[
+                    ("index.html", stable),
+                    ("about.html", b"<p>two</p>"),
+                    ("parts/public.html", public_part),
+                ],
+            ),
+            metadata,
+            json!({"serving":{"config":{}},"previous_version_id":"v"}),
+        );
+        next.version_id = "v2".into();
+        next.upload_id = Some("u2".into());
+        let output = finalize_site(next, false).unwrap();
+        assert_eq!(output.telemetry.unwrap().skipped_files, 2);
+        for path in ["index.html", "parts/public.html"] {
+            assert_eq!(
+                catalog_at(&private, "v").paths[path],
+                catalog_at(&private, "v2").paths[path]
+            );
+            assert_eq!(
+                served_body(&private, "v", path),
+                served_body(&private, "v2", path)
+            );
+        }
+        assert_eq!(served_body(&private, "v2", "about.html"), b"<p>two</p>");
+        assert_eq!(
+            output.delta.unwrap().changed_paths.unwrap(),
+            vec!["/about", "/about.html"]
         );
     }
 

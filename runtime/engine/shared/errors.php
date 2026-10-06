@@ -142,8 +142,6 @@ function _stattic_brand_wordmark(): string
 }
 
 const STATTIC_PLATFORM_PAGE_COPY = [
-    'checkout' => ['Confirming your payment', ''],
-    'checkout-cancel' => ['Checkout closed', 'Return to the shop when you’re ready.'],
     '404' => ['Page not found', ''],
     'login' => ['This space is for members', 'Sign in to continue — you’ll come right back here.'],
     'denied' => ['Access denied', ''],
@@ -169,11 +167,6 @@ function _stattic_platform_page_html(string $pageId, string $message, string $fr
         ?? [_stattic_brand_value('name') . ' could not serve this page', $message !== '' ? trim($message) : 'Try again in a moment.'];
     $title = _stattic_html_escape($titleOverride !== '' ? $titleOverride : $copy[0]);
     $description = $copy[1] === '' ? '' : '<p class="sf-copy">' . _stattic_html_escape($copy[1]) . '</p>';
-    if ($pageId === 'checkout') {
-        $description = '<sf-checkout-status></sf-checkout-status><script src="/__spacefast/sell/client.js" defer></script>';
-    } elseif ($pageId === 'checkout-cancel') {
-        $description .= '<a class="sf-button" href="/">Back to shop</a>';
-    }
     $sitePage = in_array($pageId, ['404', 'denied', 'access', 'index', 'preview'], true);
     // The listing and the viewer lead with their subject, so their title sits a
     // tier down; every other page leads with the message itself.
@@ -199,7 +192,7 @@ function _stattic_platform_page_html(string $pageId, string $message, string $fr
     $robots = (!$sitePage || $pageId === 'denied' || $pageId === 'access')
         ? '<meta name="robots" content="noindex">'
         : '';
-    return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' . $robots . '<title>' . $title . '</title>' . _stattic_page_font_preloads() . '<style>' . $css . '</style></head><body><div class="sf-page' . ($pageId === 'access' ? ' access' : '') . ' sf-page-' . $layout . '"><main class="sf-main">' . ($pageId === 'checkout' ? '' : '<h1>' . $title . '</h1>') . $description . '</main>' . $footer . '</div></body></html>';
+    return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' . $robots . '<title>' . $title . '</title>' . _stattic_page_font_preloads() . '<style>' . $css . '</style></head><body><div class="sf-page' . ($pageId === 'access' ? ' access' : '') . ' sf-page-' . $layout . '"><main class="sf-main"><h1>' . $title . '</h1>' . $description . '</main>' . $footer . '</div></body></html>';
 }
 
 function _stattic_replace_page_runtime_slot(string $html, string $name, string $replacement): string

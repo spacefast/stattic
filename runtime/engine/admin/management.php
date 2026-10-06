@@ -1607,10 +1607,6 @@ function _stattic_runtime_put_share_images(string $privateRoot, string $spaceId,
 
 function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, array $claims): void
 {
-    require_once __DIR__ . '/storage.php';
-    $retained = _stattic_storage_has_commerce_retention($privateRoot, $spaceId);
-    if ($retained === null) _stattic_problem_response(503, 'storage_unavailable', 'Paid asset retention could not be checked.');
-    if ($retained) _stattic_problem_response(409, 'storage_object_retained', 'This Space retains purchased files. Resolve paid-file retention before deleting it.');
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
     // Snapshot every purge/tombstone input before removing any bytes. An
     // unavailable input aborts the delete instead of producing an incomplete

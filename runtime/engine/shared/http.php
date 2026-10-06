@@ -112,12 +112,6 @@ function _stattic_http_configure(\CurlHandle $handle, array $request, object $st
         CURLOPT_HEADER => false,
         CURLOPT_SHARE => _stattic_http_share_handle(),
     ];
-    // Apply the configured trust store to reusable handles as well. libcurl's
-    // default CA bundle may differ from PHP's curl.cainfo setting.
-    $caInfo = ini_get('curl.cainfo');
-    if (is_string($caInfo) && $caInfo !== '') {
-        $options[CURLOPT_CAINFO] = $caInfo;
-    }
     if (array_key_exists('connect_timeout_ms', $request)) {
         $options[CURLOPT_CONNECTTIMEOUT_MS] = max(1, (int) $request['connect_timeout_ms']);
         unset($options[CURLOPT_CONNECTTIMEOUT]);

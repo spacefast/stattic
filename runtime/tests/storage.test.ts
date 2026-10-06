@@ -7,17 +7,6 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import "../../apps/control-plane/src/test-env.js";
-import { runtimeStorageObjectSchema } from "@spacefast/common/contracts/runtime-storage";
-
-import { runtimeJwks } from "../../apps/control-plane/src/runtime/auth.ts";
-import {
-  createRuntimeVersion,
-  uploadRuntimeSpaceStorageObject,
-  readRuntimeCommerceStorageObject,
-  retainRuntimeCommerceStorageObject,
-} from "../../apps/control-plane/src/runtime/runtime-api-client.ts";
-import { sellDownloadResponse } from "../../apps/control-plane/src/sell/download-response.ts";
 import {
   apiJson,
   deploy,
@@ -31,8 +20,6 @@ import {
   storagePath,
   type Runtime,
   RUNTIME_HTTP_API_BASE,
-  RUNTIME_INSTANCE_ID,
-  PHP_BINARY,
 } from "./harness.ts";
 
 const HOST = "storage-lane.site.test";
@@ -82,7 +69,6 @@ type Uploaded = {
 type OwnerObject = {
   id: string;
   public: boolean;
-  protection?: "commerce";
   contentType: string;
   createdAt: string;
   filename?: string;
@@ -120,17 +106,14 @@ async function upload(
 // `api()` (JSON in, JSON out) cannot express.
 async function managementUpload(
   body: string,
-  options: { contentType: string; filename?: string; uploaderId: string; commerce?: boolean },
+  options: { contentType: string; filename?: string; uploaderId: string },
 ): Promise<Response> {
   const headers = new Headers({
     "content-type": options.contentType,
-    authorization: `Bearer ${managementToken(
-      options.commerce ? "storage_upload_commerce" : "storage_upload_private",
-      {
-        space_id: SPACE,
-        storage_uploader_id: options.uploaderId,
-      },
-    )}`,
+    authorization: `Bearer ${managementToken("storage_upload_private", {
+      space_id: SPACE,
+      storage_uploader_id: options.uploaderId,
+    })}`,
   });
   if (options.filename !== undefined) {
     headers.set(
@@ -139,7 +122,7 @@ async function managementUpload(
     );
   }
   const apiPath = runtimeHttpPath(
-    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/storage/${options.commerce ? "commerce" : "private"}?public=true`,
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/storage/private?public=true`,
   );
   return fetch(`${rt.baseUrl}${apiPath}`, {
     method: "POST",
@@ -337,233 +320,6 @@ test("the management upload lane stores an object for the space owner", async ()
   });
   expect(empty.status).toBe(400);
   expect(await errorCode(empty)).toBe("storage_empty_file");
-});
-
-test("protected assets can arrive before the first published Version", async () => {
-  const spaceId = "spc_unpublished_shop";
-  const response = await fetch(
-    `${rt.baseUrl}${runtimeHttpPath(`${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/storage/commerce`)}`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${managementToken("storage_upload_commerce", { space_id: spaceId, storage_uploader_id: "first-shop-owner" })}`,
-        "content-type": "text/plain",
-      },
-      body: "First paid file",
-    },
-  );
-  expect(response.status).toBe(201);
-  const object = runtimeStorageObjectSchema.parse(await response.json());
-  expect(object.protection).toBe("commerce");
-  expect(object.public).toBe(false);
-  const read = await fetch(
-    `${rt.baseUrl}${runtimeHttpPath(`${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/storage/commerce/${object.id}`)}`,
-    {
-      headers: {
-        authorization: `Bearer ${managementToken("storage_read_commerce", { space_id: spaceId, storage_object_id: object.id })}`,
-      },
-    },
-  );
-  expect(read.status).toBe(200);
-  expect(await read.text()).toBe("First paid file");
-});
-
-test("commerce assets require an object-scoped commerce grant and cannot be deleted", async () => {
-  const created = await managementUpload("purchased bytes", {
-    contentType: "text/plain",
-    filename: "purchase.txt",
-    uploaderId: "dev-guest",
-    commerce: true,
-  });
-  expect(created.status).toBe(201);
-  const object = runtimeStorageObjectSchema.parse(await created.json());
-  expect(object.protection).toBe("commerce");
-  expect(object.public).toBe(false);
-  const repeated = await managementUpload("purchased bytes", {
-    contentType: "text/plain",
-    filename: "purchase.txt",
-    uploaderId: "another-owner",
-    commerce: true,
-  });
-  expect(runtimeStorageObjectSchema.parse(await repeated.json()).id).toBe(object.id);
-  const replacement = await managementUpload("next purchased edition", {
-    contentType: "text/plain",
-    filename: "purchase.txt",
-    uploaderId: "dev-guest",
-    commerce: true,
-  });
-  expect(runtimeStorageObjectSchema.parse(await replacement.json()).id).not.toBe(object.id);
-  expect((await get(rt, HOST, `/storage/${object.id}`)).status).toBe(404);
-  expect((await get(rt, HOST, `/__stattic/u/${object.id}?k=${keyOnDisk(rt)}`)).status).toBe(404);
-  expect((await get(rt, HOST, `/storage/${object.id}`, { method: "DELETE" })).status).toBe(403);
-
-  const endpoint = `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/storage`;
-  const request = (suffix: string, action: string, method = "GET", objectId = object.id) =>
-    fetch(`${rt.baseUrl}${runtimeHttpPath(`${endpoint}/${suffix}`)}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${managementToken(action, { space_id: SPACE, storage_object_id: objectId })}`,
-      },
-    });
-  expect((await request(object.id, "storage_read")).status).toBe(404);
-  expect((await request(object.id, "storage_delete", "DELETE")).status).toBe(409);
-  expect((await request(`commerce/${object.id}`, "storage_read")).status).toBe(403);
-  const ordinary = await upload("previously public bytes");
-  expect(
-    (await request(`commerce/${ordinary.id}`, "storage_read_commerce", "HEAD", ordinary.id)).status,
-  ).toBe(404);
-  expect(
-    (await request(`commerce/${object.id}`, "storage_read_commerce", "GET", "0".repeat(32))).status,
-  ).toBe(403);
-  const retain = (objectId = object.id, hash = object.sha256, action = "storage_retain_commerce") =>
-    fetch(`${rt.baseUrl}${runtimeHttpPath(`${endpoint}/commerce/${objectId}/retain`)}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${managementToken(action, { space_id: SPACE, storage_object_id: objectId })}`,
-      },
-      body: JSON.stringify({ sha256: hash }),
-    });
-  expect((await request("commerce-retention", "storage_read_commerce")).status).toBe(403);
-  expect(await (await request("commerce-retention", "storage_commerce_retention")).json()).toEqual({
-    retained: false,
-  });
-  expect((await retain(object.id, "0".repeat(64))).status).toBe(404);
-  expect((await retain(ordinary.id, "0".repeat(64))).status).toBe(404);
-  expect((await retain(object.id, object.sha256, "storage_read_commerce")).status).toBe(403);
-  expect(await (await retain()).json()).toEqual({
-    id: object.id,
-    sha256: object.sha256,
-    retained: true,
-  });
-  expect(await (await retain()).json()).toEqual({
-    id: object.id,
-    sha256: object.sha256,
-    retained: true,
-  });
-  expect(await (await request("commerce-retention", "storage_commerce_retention")).json()).toEqual({
-    retained: true,
-  });
-  const download = await request(`commerce/${object.id}`, "storage_read_commerce");
-  expect(download.status).toBe(200);
-  expect(await download.text()).toBe("purchased bytes");
-  expect(download.headers.get("cache-control")).toContain("no-store");
-  const head = await request(`commerce/${object.id}`, "storage_read_commerce", "HEAD");
-  expect(head.status).toBe(200);
-  expect(head.headers.get("content-length")).toBe(String("purchased bytes".length));
-  const buyerRequest = new Request("https://api.example/sell/download");
-  const proxy = sellDownloadResponse(
-    await request(`commerce/${object.id}`, "storage_read_commerce"),
-    buyerRequest,
-    object.sha256,
-  );
-  expect(proxy.headers.get("cache-control")).toBe("private, no-store");
-  expect(proxy.headers.get("referrer-policy")).toBe("no-referrer");
-  expect(proxy.headers.get("content-disposition")).toBe('attachment; filename="purchase.txt"');
-  expect(proxy.headers.get("x-spacefast-storage-sha256")).toBeNull();
-  expect(proxy.headers.get("content-security-policy")).toContain("sandbox");
-  expect(await proxy.text()).toBe("purchased bytes");
-  const proxyHead = sellDownloadResponse(
-    await request(`commerce/${object.id}`, "storage_read_commerce", "HEAD"),
-    new Request(buyerRequest.url, { method: "HEAD" }),
-    object.sha256,
-  );
-  expect(proxyHead.headers.get("content-length")).toBe(String("purchased bytes".length));
-  expect(await proxyHead.text()).toBe("");
-
-  expect(head.headers.get("x-spacefast-storage-protection")).toBe("commerce");
-  expect(head.headers.get("x-spacefast-storage-sha256")).toBe(object.sha256);
-  expect(head.headers.get("x-spacefast-storage-filename")).toBe("purchase.txt");
-  expect(await head.text()).toBe("");
-  const ranged = await fetch(
-    `${rt.baseUrl}${runtimeHttpPath(`${endpoint}/commerce/${object.id}`)}`,
-    {
-      headers: {
-        authorization: `Bearer ${managementToken("storage_read_commerce", { space_id: SPACE, storage_object_id: object.id })}`,
-        range: "bytes=0-8",
-      },
-    },
-  );
-  expect(ranged.status).toBe(206);
-  const proxyRange = sellDownloadResponse(ranged, buyerRequest, object.sha256);
-  expect(proxyRange.status).toBe(206);
-  expect(proxyRange.headers.get("content-range")).toBe("bytes 0-8/15");
-  expect(await proxyRange.text()).toBe("purchased");
-  expect(ranged.headers.get("cache-control")).toContain("no-store");
-  const unsatisfied = await fetch(
-    `${rt.baseUrl}${runtimeHttpPath(`${endpoint}/commerce/${object.id}`)}`,
-    {
-      headers: {
-        authorization: `Bearer ${managementToken("storage_read_commerce", { space_id: SPACE, storage_object_id: object.id })}`,
-        range: "bytes=99-",
-      },
-    },
-  );
-  const proxyUnsatisfied = sellDownloadResponse(unsatisfied, buyerRequest, object.sha256);
-  expect(proxyUnsatisfied.status).toBe(416);
-  expect(proxyUnsatisfied.headers.get("content-range")).toBe("bytes */15");
-  expect(await proxyUnsatisfied.text()).toBe("");
-  const mismatched = await request(`commerce/${object.id}`, "storage_read_commerce");
-  expect(() => sellDownloadResponse(mismatched, buyerRequest, "0".repeat(64))).toThrow(
-    "Your file is temporarily unavailable.",
-  );
-  const nativeClientRuntime = await startRuntime({
-    atomicData: {
-      SPACEFAST_RUNTIME_JWKS_B64: Buffer.from(JSON.stringify(runtimeJwks())).toString("base64"),
-    },
-  });
-  try {
-    const target = {
-      baseUrl: nativeClientRuntime.baseUrl,
-      runtimeInstanceId: RUNTIME_INSTANCE_ID,
-      operationId: "op_commerce_native_download",
-      spaceId: SPACE,
-    };
-    await createRuntimeVersion({
-      ...target,
-      body: { version_id: "ver_native_commerce", files: [], retention: "none", metadata: {} },
-    });
-    const payload = new Blob(["purchased bytes"]);
-    const uploaded = await uploadRuntimeSpaceStorageObject({
-      ...target,
-      body: payload,
-      contentLength: payload.size,
-      contentType: "text/plain",
-      filename: "purchase.txt",
-      protection: "commerce",
-      uploaderId: "native-control-plane",
-    });
-    expect(
-      await retainRuntimeCommerceStorageObject({
-        ...target,
-        objectId: uploaded.id,
-        sha256: uploaded.sha256,
-      }),
-    ).toEqual({ id: uploaded.id, sha256: uploaded.sha256, retained: true });
-    const nativeUnsatisfied = await readRuntimeCommerceStorageObject({
-      ...target,
-      objectId: uploaded.id,
-      range: "bytes=99-",
-    });
-    const nativeProxy = sellDownloadResponse(nativeUnsatisfied, buyerRequest, uploaded.sha256);
-    expect(nativeProxy.status).toBe(416);
-    expect(nativeProxy.headers.get("content-range")).toBe("bytes */15");
-  } finally {
-    nativeClientRuntime.stop();
-  }
-  const logPath =
-    "/sell/download?purchaseToken=locator-secret&sessionId=cs_test_fixture&token=download-secret";
-  const redacted = Bun.spawnSync([
-    PHP_BINARY,
-    "-r",
-    "require $argv[1]; echo _stattic_redact_access_secrets($argv[2]);",
-    path.join(rt.engineRoot, "shared/context.php"),
-    logPath,
-  ]);
-  expect(redacted.exitCode).toBe(0);
-  expect(redacted.stdout.toString()).toBe(
-    "/sell/download?purchaseToken=[redacted]&sessionId=cs_test_fixture&token=[redacted]",
-  );
 });
 
 test("rotation mints a new key, kills every old URL, and answers with a purge receipt", async () => {

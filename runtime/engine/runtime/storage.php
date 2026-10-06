@@ -95,14 +95,11 @@ function _stattic_uploads_record(mixed $record): ?array
         || !is_string($sha256) || !_stattic_is_sha256_hex(strtolower($sha256))
         || !is_string($uploaderId) || $uploaderId === '' || strlen($uploaderId) > 255
         || (array_key_exists('public', $record) && !is_bool($record['public']))
-        || (array_key_exists('protection', $record) && $record['protection'] !== 'commerce')
-        || (($record['protection'] ?? null) === 'commerce' && ($record['public'] ?? true) !== false)
     ) {
         return null;
     }
     return [
         'public' => ($record['public'] ?? true) === true,
-        'protection' => $record['protection'] ?? null,
         'contentType' => $contentType,
         'createdAt' => $createdAt,
         'email' => is_string($record['email'] ?? null) ? $record['email'] : null,
@@ -252,14 +249,14 @@ function _stattic_uploads_serve(string $privateRoot, string $spaceId, string $re
 }
 
 // The one byte-sending path for both lanes (visitor /__stattic/u/ and the
-// /storage surface). Commerce delivery permits ranges after authorization.
+// /storage surface). It answers no conditional and serves no range: the platform
+// delivers neither to this origin.
 function _stattic_uploads_send(
     string $privateRoot,
     string $spaceId,
     array $record,
     string $requestMethod,
-    bool $publicCache,
-    bool $allowRange = false
+    bool $publicCache
 ): never
 {
     // §16: the edge stores only on the explicit opt-in from the Cache-Control
@@ -275,32 +272,6 @@ function _stattic_uploads_send(
     if ($blobPath === null) {
         _stattic_render_tier_fetch_unavailable(STATTIC_UPLOADS_PROMOTE_RETRY_AFTER_SECONDS);
         exit;
-    }
-
-    $status = 200;
-    $offset = 0;
-    $length = $size;
-    if ($allowRange) {
-        require_once __DIR__ . '/../shared/byte-range.php';
-        $headers['Accept-Ranges'] = 'bytes';
-        // HEAD describes the full representation. Ignore Range on HEAD and
-        // ignore If-Range conservatively by sending the full representation.
-        $range = $requestMethod === 'GET' && !isset($_SERVER['HTTP_IF_RANGE'])
-            ? _stattic_v4_byte_range((string) ($_SERVER['HTTP_RANGE'] ?? ''), $size)
-            : null;
-        if ($range === false) {
-            $headers['Content-Range'] = 'bytes */' . $size;
-            _stattic_send_response_headers($headers);
-            header('Content-Length: 0');
-            http_response_code(416);
-            exit;
-        }
-        if (is_array($range)) {
-            [$offset, $end] = $range;
-            $length = $end - $offset + 1;
-            $headers['Content-Range'] = 'bytes ' . $offset . '-' . $end . '/' . $size;
-            $status = 206;
-        }
     }
 
     // HEAD advertises what the matching GET would send, without opening the file.
@@ -321,12 +292,11 @@ function _stattic_uploads_send(
         exit;
     }
     _stattic_send_response_headers($headers);
-    if ($offset > 0) fseek($stream, $offset);
-    header('Content-Length: ' . $length);
-    http_response_code($status);
+    header('Content-Length: ' . $size);
+    http_response_code(200);
     // Chunked, never fpassthru: a 128 MB object would otherwise buffer whole
     // into the worker before its first byte left.
-    _stattic_stream_file($stream, $length);
+    _stattic_stream_file($stream, $size);
     fclose($stream);
     exit;
 }
@@ -394,16 +364,13 @@ function _stattic_storage_handle(
         if ($record === null) {
             _stattic_uploads_deleted_response();
         }
-        if ($record['protection'] === 'commerce') {
-            _stattic_problem_refused(403, 'storage_object_retained', 'Purchased assets cannot be deleted.');
-        }
         if ($record['uploaderId'] !== $uploaderId) {
             _stattic_problem_refused(403, 'storage_delete_forbidden', 'Only the uploader can delete this object.');
         }
         _stattic_uploads_delete($privateRoot, $spaceId, $id);
     }
     $record = _stattic_uploads_get($privateRoot, $spaceId, $id);
-    if ($record === null || $record['protection'] === 'commerce') {
+    if ($record === null) {
         _stattic_problem_refused(404, 'storage_object_not_found', 'Storage object not found.');
     }
     if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {

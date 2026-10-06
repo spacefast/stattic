@@ -26,6 +26,49 @@ The runtime vocabulary is only **versions and routes**. A route pointer
 channels compile down to route pointers before they reach the runtime. The runtime never
 learns about users, teams, plans, billing, or domain ownership.
 
+## Shared HTML source
+
+HTML pages may reference shared fragments with exactly this comment syntax:
+
+```html
+<!--#include virtual="/parts/header.html" -->
+```
+
+The filename contains one or more ASCII letters, digits, `_` or `-`, followed by
+`.html`. Paths are relative to the uploaded site root. Quotes, spaces and keyword
+case are literal; nested directories and alternate directive forms are outside
+this contract. Fragments may use the same syntax to reference other fragments.
+
+Only comments beginning with the exact `<!--#include virtual="/parts/` prefix
+opt into expansion. Other forms, including legacy SSI comments, stay literal.
+Malformed references within that claimed prefix, missing fragments, cycles and
+exceeded expansion bounds fail publication visibly.
+
+Finalization expands actual HTML comment nodes once before normal rendering and
+decoration, preserving surrounding bytes. Strings in scripts, styles and
+attributes remain literal, as do unrelated comments. Referenced fragments are
+private compile inputs; unreferenced files under `parts/` remain ordinary pages.
+Include-bearing pages compile each publish, while ordinary pages retain their
+incremental output reuse. Reads, nesting, expansion and staged-path access are
+bounded. Visitors receive complete HTML through the existing serving path.
+
+Each channel's template overrides run through the same complete content pipeline
+as the base: include expansion, Markdown/block rendering, layouts, theme styles,
+HTML decoration and preview/icon URL handling. The declared-template limit applies
+before page generation; dependent pages consume the normal publication budgets,
+not extra template slots. Derived variants participate in the existing
+template-output purge contract.
+
+File-only channel overrides reuse compiled base output. Channels that change
+rendering inputs retain only the source bytes the pipeline reads, using immutable
+links where supported; unrelated media stays in the CAS. Unchanged ordinary pages
+reuse base served identities when the existing rendering-context digest matches.
+Common base warnings are emitted once, and channel-specific diagnostics identify
+their route in the receipt.
+
+This is a producer-neutral source contract, with no producer detection, extra
+manifest or client-side assembly.
+
 ## Install
 
 ### WP.Cloud (first-party)

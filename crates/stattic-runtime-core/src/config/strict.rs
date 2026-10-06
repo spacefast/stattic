@@ -211,7 +211,6 @@ pub fn public_json_schema() -> Value {
             },
             "crons": crons::json_schema(),
             "system": system::json_schema(),
-            "sell": super::current::sell_json_schema(),
             "access": {
                 "anyOf": [
                     {
@@ -349,18 +348,6 @@ pub fn compile(input: Input) -> Output {
     }
     validate_shape(root, &locations, &mut issues);
     validate_crons(root, &locations, &mut issues);
-    let mut sell_diagnostics = Vec::new();
-    super::current::validate_sell_config(root, &mut sell_diagnostics);
-    for diagnostic in sell_diagnostics {
-        push_issue(
-            &mut issues,
-            &locations,
-            &diagnostic.code,
-            &format!("$.{}", diagnostic.path.unwrap_or_else(|| "sell".into())),
-            &diagnostic.message,
-            None,
-        );
-    }
     validate_traffic_rules(root, &locations, &mut issues);
     validate_routing(root, &document.object_keys, &locations, &mut issues);
     validate_templates(root, &input.template_sources, &locations, &mut issues);
@@ -442,7 +429,6 @@ fn validate_keys(
         "firewall",
         "cache",
         "system",
-        "sell",
     ];
     let renamed = [
         ("index", "serve.index"),
@@ -1694,9 +1680,6 @@ fn project(root: &Map<String, Value>) -> Value {
     // enforces it.
     if let Some(system) = root.get("system") {
         out.insert("system".into(), system.clone());
-    }
-    if let Some(sell) = root.get("sell") {
-        out.insert("sell".into(), sell.clone());
     }
     Value::Object(out)
 }

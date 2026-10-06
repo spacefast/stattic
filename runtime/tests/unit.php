@@ -3531,7 +3531,7 @@ check(
     ),
     'a crashed compile stage root is a registered retention root'
 );
-$blockedAtomicRoot = realpath(sys_get_temp_dir()) . '/sf-atomic-blocked-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
+$blockedAtomicRoot = sys_get_temp_dir() . '/sf-atomic-blocked-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
 mkdir($blockedAtomicRoot, 0777, true);
 file_put_contents($blockedAtomicRoot . '/runtime', 'not a directory');
 check(

@@ -1261,7 +1261,7 @@ test("URL fetch allowance survives workers and resident bytes recover the receip
   ).toBe(200);
 });
 
-test("URL transport rejects error headers without consuming the body and removes the staged file", async () => {
+test("URL transport cancels error bodies and removes the staged file", async () => {
   const certificate = path.join(rt.root, "url-transport-cert.pem");
   const key = path.join(rt.root, "url-transport-key.pem");
   const generate = Bun.spawn(
@@ -1287,17 +1287,19 @@ test("URL transport rejects error headers without consuming the body and removes
   );
   const generationError = await new Response(generate.stderr).text();
   if ((await generate.exited) !== 0) throw new Error(generationError);
-  const received = Promise.withResolvers<void>();
+  const cancelled = Promise.withResolvers<void>();
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     tls: { cert: Bun.file(certificate), key: Bun.file(key) },
     fetch() {
-      received.resolve();
       return new Response(
         new ReadableStream({
           start(controller) {
             controller.enqueue(new Uint8Array([1]));
+          },
+          cancel() {
+            cancelled.resolve();
           },
         }),
         { status: 503 },
@@ -1322,9 +1324,7 @@ test("URL transport rejects error headers without consuming the body and removes
       status: 422,
       code: "upload_source_url_fetch_failed",
     });
-    // The provider received the request and its body never reaches EOF. The
-    // PHP process finishing proves it stopped at the rejected response headers.
-    await received.promise;
+    await cancelled.promise;
     expect(existsSync(temporary)).toBe(false);
   } finally {
     process.kill();

@@ -37,19 +37,14 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-import { runtimeStorageObjectSchema } from "@spacefast/common/contracts/runtime-storage";
-
 import {
   ackEvents,
-  managementToken,
-  runtimeHttpPath,
   apiJson,
   blobPath,
   createDeclaredSession,
   deploy,
   drainEvents,
   get,
-  errorCode,
   journalRecords,
   publicAccessConfig,
   putBlob,
@@ -598,33 +593,6 @@ test("targeted version deletion makes its exclusive blobs collectable and leaves
     "assets/live.txt": "still routed",
     ".hidden/notes.txt": privateBody,
   });
-  const paidBody = "purchased edition independent of deployments";
-  const uploaded = await fetch(
-    `${rt.baseUrl}${runtimeHttpPath(`/__spacefast/api.php/spaces/${spaceId}/storage/commerce`)}`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "text/plain",
-        authorization: `Bearer ${managementToken("storage_upload_commerce", { space_id: spaceId, storage_uploader_id: "fixture-owner" })}`,
-      },
-      body: paidBody,
-    },
-  );
-  expect(uploaded.status).toBe(201);
-  const paid = runtimeStorageObjectSchema.parse(await uploaded.json());
-  expect(
-    await apiJson(
-      rt,
-      "POST",
-      `/__spacefast/api.php/spaces/${spaceId}/storage/commerce/${paid.id}/retain`,
-      "storage_retain_commerce",
-      { space_id: spaceId, storage_object_id: paid.id },
-      { sha256: paid.sha256 },
-    ),
-  ).toEqual({ id: paid.id, sha256: paid.sha256, retained: true });
-  // Remove the original upload declaration: the paid snapshot must be the only
-  // remaining root for these bytes, and must also supply the download record.
-  rmSync(storagePath(rt, "spaces", spaceId, "uploads"), { recursive: true, force: true });
   const oldSha = entrySha(rt, spaceId, versionOld, "/assets/old.txt");
   const liveSha = entrySha(rt, spaceId, versionLive, "/assets/live.txt");
 
@@ -650,29 +618,6 @@ test("targeted version deletion makes its exclusive blobs collectable and leaves
   // maintenance pass collects them. The routed version and its private source
   // object remain declared and serving.
   expect(readBlob(rt, spaceId, oldSha)).toBeNull();
-  expect(readBlob(rt, spaceId, paid.sha256)?.toString("utf8")).toBe(paidBody);
-  const paidDownload = await fetch(
-    `${rt.baseUrl}${runtimeHttpPath(`/__spacefast/api.php/spaces/${spaceId}/storage/commerce/${paid.id}`)}`,
-    {
-      headers: {
-        authorization: `Bearer ${managementToken("storage_read_commerce", { space_id: spaceId, storage_object_id: paid.id })}`,
-      },
-    },
-  );
-  expect(paidDownload.status).toBe(200);
-  expect(await paidDownload.text()).toBe(paidBody);
-  const deletePaidSpace = await fetch(
-    `${rt.baseUrl}${runtimeHttpPath(`/__spacefast/api.php/spaces/${spaceId}/delete`)}`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${managementToken("delete_space", { space_id: spaceId })}`,
-      },
-    },
-  );
-  expect(deletePaidSpace.status).toBe(409);
-  expect(await errorCode(deletePaidSpace)).toBe("storage_object_retained");
-
   const collected = journalRecords(rt).find(
     (e) => e.event === "local_blob_gc" && (e.collected ?? []).includes(oldSha),
   );

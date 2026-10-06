@@ -72,10 +72,8 @@ function _stattic_storage_list(string $privateRoot, string $spaceId): void
  */
 function _stattic_storage_object_create(string $privateRoot, string $spaceId, array $claims): void
 {
-    if (!is_dir(_stattic_space_root($privateRoot, $spaceId))) {
-        _stattic_problem_response(404, 'storage_unavailable', 'Storage is unavailable for this space.');
-    }
-    $public = ($claims['action'] ?? null) === 'storage_upload_private' ? false : _stattic_uploads_request_public();
+    $commerce = ($claims['action'] ?? null) === 'storage_upload_commerce';
+    $public = $commerce || ($claims['action'] ?? null) === 'storage_upload_private' ? false : _stattic_uploads_request_public();
     $staged = _stattic_storage_stage_upload($privateRoot);
     if (($staged['ok'] ?? false) !== true) {
         if (($staged['reason'] ?? null) === 'too_large') {
@@ -109,6 +107,7 @@ function _stattic_storage_object_create(string $privateRoot, string $spaceId, ar
     $id = bin2hex(random_bytes(16));
     $record = [
         'public' => $public,
+        ...($commerce ? ['protection' => 'commerce'] : []),
         'contentType' => $contentType,
         'createdAt' => gmdate('c'),
         'filename' => _stattic_uploads_request_filename(),
@@ -123,15 +122,93 @@ function _stattic_storage_object_create(string $privateRoot, string $spaceId, ar
         unlink($tmpPath);
         _stattic_problem_response(503, 'storage_unavailable', 'Storage could not persist this object.');
     }
+    if ($commerce) {
+        // Reuse only an already-protected immutable record. Ordinary/public uploads keep their own identities.
+        $id = substr(hash('sha256', "spacefast-commerce-v1\0" . $spaceId . "\0" . $normalized['sha256'] . "\0" . $normalized['contentType'] . "\0" . ($normalized['filename'] ?? '')), 0, 32);
+        $existing = _stattic_uploads_get($privateRoot, $spaceId, $id);
+        if ($existing !== null) {
+            if ($existing['public'] || $existing['protection'] !== 'commerce'
+                || $existing['sha256'] !== $normalized['sha256'] || $existing['size'] !== $normalized['size']
+                || $existing['filename'] !== $normalized['filename'] || $existing['contentType'] !== $normalized['contentType']) {
+                unlink($tmpPath);
+                _stattic_problem_response(503, 'storage_unavailable', 'Protected storage identity does not match the uploaded object.');
+            }
+            // Keep original provenance. Committing the verified upload also heals a missing local CAS body.
+            $record = $existing;
+            $normalized = $existing;
+        }
+    }
     // The read key composes the URL in the response, and minting it can fail.
     // Resolve it BEFORE the commit so that failure refuses the upload instead
     // of storing an object the caller was told did not happen.
     $readKey = _stattic_storage_read_key($privateRoot);
+    // An authorized management upload can be the Space's first write: paid
+    // assets arrive before its first Version. The API's per-Space write lock
+    // serializes this initialization with other management mutations. Visitor
+    // uploads still require an existing, serving Space.
+    _stattic_runtime_mkdir(_stattic_space_root($privateRoot, $spaceId));
     _stattic_storage_commit_record($privateRoot, $spaceId, $id, $tmpPath, $record);
 
     // The same projection the list answers with, so one object shape crosses
     // this boundary whether it was just created or read back later.
     _stattic_json_response(201, _stattic_uploads_owner_object($id, $normalized, $readKey));
+}
+
+// Paid assets outlive upload records and deployment metadata. Recovery can issue a
+// new seven-day grant later, so these storage retention roots do not age out.
+function _stattic_storage_commerce_retention_path(string $privateRoot, string $spaceId, string $objectId): string
+{
+    return _stattic_space_root($privateRoot, $spaceId) . '/commerce-assets/' . $objectId . '.json';
+}
+
+function _stattic_storage_commerce_retained_record(string $privateRoot, string $spaceId, string $objectId): ?array
+{
+    $retained = _stattic_runtime_read_json(_stattic_storage_commerce_retention_path($privateRoot, $spaceId, $objectId));
+    if (!is_array($retained) || ($retained['schema_version'] ?? null) !== 1 || ($retained['object_id'] ?? null) !== $objectId) return null;
+    $record = _stattic_uploads_record($retained['object'] ?? null);
+    return $record !== null && !$record['public'] && $record['protection'] === 'commerce' ? $record : null;
+}
+
+function _stattic_storage_has_commerce_retention(string $privateRoot, string $spaceId): ?bool
+{
+    $entries = _stattic_runtime_directory_entries(_stattic_space_root($privateRoot, $spaceId) . '/commerce-assets');
+    if ($entries === null) return null;
+    foreach ($entries as $entry) {
+        if (str_ends_with($entry, '.json')) return true;
+    }
+    return false;
+}
+
+function _stattic_storage_commerce_retention_state(string $privateRoot, string $spaceId, array $claims): never
+{
+    $retained = _stattic_storage_has_commerce_retention($privateRoot, $spaceId);
+    if ($retained === null) {
+        _stattic_problem_response(503, 'storage_unavailable', 'Paid asset retention could not be read.');
+    }
+    _stattic_json_response(200, ['retained' => $retained]);
+}
+
+function _stattic_storage_retain_commerce(string $privateRoot, string $spaceId, string $objectId, array $claims): never
+{
+    $input = _stattic_json_body(1024);
+    if (!is_array($input) || count($input) !== 1 || !is_string($input['sha256'] ?? null) || !_stattic_is_sha256_hex($input['sha256'])) {
+        _stattic_problem_response(422, 'validation_error', 'An exact protected asset hash is required.');
+    }
+    $record = _stattic_storage_commerce_retained_record($privateRoot, $spaceId, $objectId)
+        ?? _stattic_uploads_get($privateRoot, $spaceId, $objectId);
+    if ($record === null || $record['public'] || $record['protection'] !== 'commerce' || $record['sha256'] !== $input['sha256']) {
+        _stattic_problem_response(404, 'storage_object_not_found', 'Protected storage object not found.');
+    }
+    $path = _stattic_storage_commerce_retention_path($privateRoot, $spaceId, $objectId);
+    if (file_exists($path)) {
+        $existing = _stattic_storage_commerce_retained_record($privateRoot, $spaceId, $objectId);
+        if ($existing === null || $existing !== $record) {
+            _stattic_problem_response(503, 'storage_unavailable', 'Paid asset retention needs repair.');
+        }
+    } else {
+        _stattic_runtime_write_json_atomic($path, ['schema_version' => 1, 'object_id' => $objectId, 'object' => $record, 'created_at' => gmdate('c')]);
+    }
+    _stattic_json_response(200, ['id' => $objectId, 'sha256' => $record['sha256'], 'retained' => true]);
 }
 
 function _stattic_storage_read_key_get(string $privateRoot): void
@@ -178,6 +255,10 @@ function _stattic_storage_object_delete(string $privateRoot, string $spaceId, st
     }
     if (!is_dir(_stattic_space_root($privateRoot, $spaceId))) {
         _stattic_problem_response(404, 'storage_unavailable', 'Storage is unavailable for this space.');
+    }
+    $record = _stattic_uploads_get($privateRoot, $spaceId, $objectId);
+    if ($record !== null && $record['protection'] === 'commerce') {
+        _stattic_problem_response(409, 'storage_object_retained', 'Purchased assets cannot be deleted.');
     }
     // The route already holds the per-space write lock, so the delete must not
     // take it a second time.
@@ -234,6 +315,7 @@ function _stattic_uploads_owner_object(string $id, array $record, string $readKe
     return [
         'id' => $id,
         'public' => $record['public'],
+        ...($record['protection'] === null ? [] : ['protection' => $record['protection']]),
         'contentType' => $record['contentType'],
         'createdAt' => gmdate('Y-m-d\TH:i:s\Z', (int) strtotime($record['createdAt'])),
         // Omitted, never null: an object stored before names existed, or
@@ -250,14 +332,27 @@ function _stattic_uploads_owner_object(string $id, array $record, string $readKe
     ];
 }
 
-function _stattic_storage_object_read(string $privateRoot, string $spaceId, string $objectId): never
+function _stattic_storage_object_read(string $privateRoot, string $spaceId, string $objectId, array $claims): never
 {
-    $record = _stattic_uploads_get($privateRoot, $spaceId, $objectId);
-    if ($record === null) {
+    $commerceRead = ($claims['action'] ?? null) === 'storage_read_commerce';
+    $record = $commerceRead
+        ? _stattic_storage_commerce_retained_record($privateRoot, $spaceId, $objectId) ?? _stattic_uploads_get($privateRoot, $spaceId, $objectId)
+        : _stattic_uploads_get($privateRoot, $spaceId, $objectId);
+    if ($record === null
+        || ($record['protection'] === 'commerce' && !$commerceRead)
+        || ($commerceRead && $record['protection'] !== 'commerce')) {
         _stattic_problem_response(404, 'storage_object_not_found', 'Storage object not found.');
+    }
+    if ($commerceRead) {
+        // Signed management only: the control plane verifies immutable receipts before catalog staging.
+        header('X-Spacefast-Storage-Protection: commerce');
+        header('X-Spacefast-Storage-SHA256: ' . $record['sha256']);
+        if ($record['filename'] !== null) {
+            header('X-Spacefast-Storage-Filename: ' . rawurlencode($record['filename']));
+        }
     }
     if ($record['filename'] !== null) {
         header("Content-Disposition: attachment; filename*=UTF-8''" . rawurlencode($record['filename']));
     }
-    _stattic_uploads_send($privateRoot, $spaceId, $record, 'GET', false);
+    _stattic_uploads_send($privateRoot, $spaceId, $record, $_SERVER['REQUEST_METHOD'] === 'HEAD' ? 'HEAD' : 'GET', false, ($claims['action'] ?? null) === 'storage_read_commerce');
 }

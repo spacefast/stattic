@@ -42,6 +42,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "redirects",
     "rewrites",
     "runtime",
+    "sell",
     "space",
     "superpowers",
     // Control-plane-only system-space manifest. Recognized here so it is not
@@ -269,16 +270,11 @@ fn validate_config_shape(
     diagnostics: &mut Vec<PrepareDiagnostic>,
 ) {
     let invalid = |diagnostics: &mut Vec<PrepareDiagnostic>, path: &str, expected: &str| {
-        diagnostics.push(diagnostic(
-            DiagnosticSeverity::Error,
-            "config_invalid",
-            format!("Expected {expected}"),
-            Some(if path.is_empty() {
-                config_path.to_string()
-            } else {
-                path.to_string()
-            }),
-        ));
+        config_invalid(
+            diagnostics,
+            if path.is_empty() { config_path } else { path },
+            expected,
+        );
     };
     if let Some(value) = object.get("index") {
         if !(value.as_str().is_some_and(|value| !value.is_empty()) || value == &Value::Bool(false))
@@ -355,6 +351,7 @@ fn validate_config_shape(
     validate_crons_config(object, diagnostics);
     validate_traffic_rules_config(object, diagnostics);
     validate_runtime_config(object, diagnostics);
+    validate_sell_config(object, diagnostics);
     validate_build_config(object, diagnostics);
     validate_access_config(object, diagnostics);
     validate_placement_config(object, diagnostics);
@@ -363,6 +360,57 @@ fn validate_config_shape(
     if let Some(inject) = object.get_mut("inject").and_then(Value::as_object_mut) {
         inject
             .retain(|key, _| matches!(key.as_str(), "head" | "bodyStart" | "bodyEnd" | "noscript"));
+    }
+}
+
+/// Sell is file-owned and control-plane-only. Reject an invalid declaration rather than stripping it.
+pub(super) fn validate_sell_config(
+    object: &Map<String, Value>,
+    diagnostics: &mut Vec<PrepareDiagnostic>,
+) {
+    let Some(sell) = object.get("sell") else {
+        return;
+    };
+    let Some(sell) = sell.as_object() else {
+        config_invalid(diagnostics, "sell", "an object");
+        return;
+    };
+    if sell
+        .keys()
+        .any(|key| !matches!(key.as_str(), "mode" | "products"))
+    {
+        config_invalid(
+            diagnostics,
+            "sell",
+            "an object containing only mode and products",
+        );
+    }
+    if let Some(mode) = sell.get("mode") {
+        if !matches!(mode.as_str(), Some("test" | "live")) {
+            config_invalid(diagnostics, "sell.mode", "test or live");
+        }
+    }
+    let valid_path = sell
+        .get("products")
+        .and_then(Value::as_str)
+        .is_some_and(|path| {
+            !path.is_empty()
+                && js_len(path) <= 1024
+                && !path.starts_with('/')
+                && !path.contains('\\')
+                && !path.contains('\0')
+                && path
+                    .strip_prefix("./")
+                    .unwrap_or(path)
+                    .split('/')
+                    .all(|segment| !matches!(segment, "" | "." | ".." | "public"))
+        });
+    if !valid_path {
+        config_invalid(
+            diagnostics,
+            "sell.products",
+            "a relative project path outside public directories, without traversal",
+        );
     }
 }
 
@@ -1255,6 +1303,7 @@ pub fn public_json_schema() -> Value {
             },
             "crons": crons,
             "system": super::system::json_schema(),
+            "sell": sell_json_schema(),
             "superpowers": superpowers,
             "theme": theme,
             "build": build,
@@ -1342,6 +1391,7 @@ export type SpaceConfigFile = SpaceConfig & {
   space?: string;
   name?: string;
   runtime?: SpaceRuntimeConfig;
+  sell?: { mode?: "test" | "live"; products: string };
   access?: { public: string[] };
 };
 "#;
@@ -1387,6 +1437,27 @@ fn push_shape_error(diagnostics: &mut Vec<PrepareDiagnostic>, path: &str, expect
         "config_invalid",
         format!("Expected {expected}"),
         Some(path.into()),
+    ));
+}
+
+pub(super) fn sell_json_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "mode": { "type": "string", "enum": ["test", "live"], "default": "test" },
+            "products": { "type": "string", "minLength": 1, "maxLength": 1024 }
+        },
+        "required": ["products"],
+        "additionalProperties": false
+    })
+}
+
+fn config_invalid(diagnostics: &mut Vec<PrepareDiagnostic>, path: &str, expected: &str) {
+    diagnostics.push(diagnostic(
+        DiagnosticSeverity::Error,
+        "config_invalid",
+        format!("Expected {expected}"),
+        Some(path.to_string()),
     ));
 }
 
@@ -1476,6 +1547,7 @@ mod tests {
             r#"{
                 "name": "  guestbook  ",
                 "runtime": { "kind": "zero", "server": " server/index.ts " },
+                "sell": { "mode": "test", "products": "./sell/products.json" },
                 "meta": { "title": "Guestbook", "favicon": "/favicon.svg" },
                 "listing": true
             }"#,
@@ -1488,6 +1560,7 @@ mod tests {
             config,
             Some(json!({
                 "name": "guestbook",
+                "sell": { "mode": "test", "products": "./sell/products.json" },
                 "runtime": {
                     "kind": "zero",
                     "server": "server/index.ts",
@@ -1659,6 +1732,11 @@ mod tests {
     #[test]
     fn invalid_runtime_and_name_declarations_block_the_publish() {
         let cases = [
+            (r#"{"sell":{"products":"../paid.json"}}"#, "config_invalid"),
+            (
+                r#"{"sell":{"products":"sell/products.json","mode":"preview"}}"#,
+                "config_invalid",
+            ),
             (
                 r#"{"runtime":{"kind":"zero"}}"#,
                 "config_runtime_entry_missing",

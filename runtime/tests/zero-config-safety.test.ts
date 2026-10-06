@@ -137,6 +137,9 @@ echo json_encode([
     // duplicated Spacefast persistent data. Omitting DB_HOST exercises the
     // local-MySQL default of the public runtime lane.
     env: {
+      // The API fixture also runs in this Bun process; its Postgres URL is
+      // not provider configuration for this independent PHP runtime.
+      DATABASE_URL: "",
       DB_NAME: "zero database",
       DB_USER: "zero:user",
       DB_PASSWORD: "p@ss/word?#",

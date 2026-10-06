@@ -186,7 +186,7 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
             return null;
         }
     }
-    foreach ([$spaceRoot . '/uploads', $spaceRoot . '/publish-sessions'] as $declarationsRoot) {
+    foreach ([$spaceRoot . '/uploads', $spaceRoot . '/publish-sessions', $spaceRoot . '/commerce-assets'] as $declarationsRoot) {
         $declarationEntries = _stattic_runtime_directory_entries($declarationsRoot);
         if ($declarationEntries === null) {
             return null;

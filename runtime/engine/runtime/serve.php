@@ -12,6 +12,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../shared/artifacts.php';
 require_once __DIR__ . '/../shared/server-file.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
+require_once __DIR__ . '/../shared/byte-range.php';
 
 // The visitor lane's entry, called by init.php and cli-invoke.php.
 function _sf_serve_fast(
@@ -266,6 +267,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // Must stay before route response headers are emitted: these exchange
     // responses own their headers.
     _stattic_dispatch_control_path($serving, $requestPath, $requestHost, $privateRoot);
+    if (in_array(rtrim($requestPath, '/'), ['/sell/return', '/sell/cancel'], true)) {
+        header('Referrer-Policy: no-referrer', true);
+        header('X-Robots-Tag: noindex, nofollow', true);
+        _stattic_access_private_cache_flag(true);
+    }
 
     if (!empty($hostEntry['noindex'])) {
         header('X-Robots-Tag: noindex, nofollow', false);
@@ -520,7 +526,8 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // ignores Vary, and looks up before PHP runs.
     $privateCache = _stattic_access_private_cache_flag()
         || $conditionalRewrite
-        || _stattic_access_query_token_present();
+        || _stattic_access_query_token_present()
+        || in_array(rtrim($requestPath, '/'), ['/sell/return', '/sell/cancel'], true);
     if ($privateFileAlias && (!$privateCache || !in_array($requestMethod, ['GET', 'HEAD'], true))) {
         _stattic_private_file_alias_not_found();
     }
@@ -662,6 +669,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             _stattic_v4_send_entry($entryContext, $entry, $requestPath);
         }
     }
+
+    // Exact authored checkout routes already won above. Generic application
+    // catch-alls and WordPress must not swallow the platform's defaults.
+    require_once __DIR__ . '/sell.php';
+    _stattic_sell_page_fallback($serving, $requestPath);
 
     // Pattern-matched Zero endpoints and Function routes cannot be table keys;
     // their exact forms already were, so a committed file still wins.
@@ -1783,6 +1795,9 @@ function _stattic_dispatch_control_path(array $serving, string $requestPath, str
     if ($handler === 'comments_exchange') {
         require_once __DIR__ . '/spacefast-sdk.php';
     }
+    if ($handler === 'sell_exchange' || $handler === 'sell_client' || $handler === 'sell_status') {
+        require_once __DIR__ . '/sell.php';
+    }
     match ($handler) {
         'access_callback' => _stattic_access_handle_callback($serving, $requestHost, $privateRoot),
         'access_client_script' => _stattic_access_handle_client_script(),
@@ -1792,6 +1807,9 @@ function _stattic_dispatch_control_path(array $serving, string $requestPath, str
         'access_email' => _stattic_access_handle_email_verification($serving, $requestHost, $privateRoot),
         'access_request' => _stattic_access_handle_request_invite($serving, $requestHost, $privateRoot),
         'comments_exchange' => _stattic_comments_handle_exchange($privateRoot, $serving, $requestHost, $requestPath),
+        'sell_exchange' => _stattic_sell_handle_exchange($privateRoot, $serving, $requestHost, $requestPath),
+        'sell_client' => _stattic_sell_handle_client(),
+        'sell_status' => _stattic_sell_handle_status($serving),
         'access_link_entry' => _stattic_access_handle_link_entry($serving, $requestPath, $requestHost),
     };
 }
@@ -2223,27 +2241,6 @@ function _stattic_acquire_static_stream_admission(array $context, int $bytes): v
         is_array($context['serving']) ? $context['serving'] : [],
         'static_stream'
     );
-}
-
-// null means ignore Range; false means a valid range has no satisfiable bytes.
-function _stattic_v4_byte_range(string $value, int $length): array|false|null
-{
-    if (!preg_match('/^bytes=([0-9]*)-([0-9]*)$/iD', trim($value), $parts)
-        || ($parts[1] === '' && $parts[2] === '')) {
-        return null;
-    }
-    // PHP saturates decimal casts at PHP_INT_MAX, so oversized bounds cannot
-    // wrap negative. End and suffix bounds are clipped to the representation.
-    if ($parts[1] === '') {
-        $suffix = (int) $parts[2];
-        return $suffix === 0 || $length === 0 ? false : [max(0, $length - $suffix), $length - 1];
-    }
-    $start = (int) $parts[1];
-    $end = $parts[2] === '' ? $length - 1 : (int) $parts[2];
-    if ($parts[2] !== '' && $end < $start) {
-        return null;
-    }
-    return $start >= $length ? false : [$start, min($end, $length - 1)];
 }
 
 // Call for an existing successful GET/HEAD representation, after transformations

@@ -389,7 +389,7 @@ function _stattic_runtime_purge_drain(string $privateRoot, float $deadline, ?int
     return $complete;
 }
 
-/** @return array{status:string, mode:string, urls?:int} */
+/** @return array{status:string, mode:string, urls?:int, hosts?:int} */
 function _stattic_runtime_purge_now(string $privateRoot, array $input): array
 {
     $hostnames = _stattic_runtime_purge_hostname_list($input['hostnames'] ?? null);
@@ -408,7 +408,8 @@ function _stattic_runtime_purge_now(string $privateRoot, array $input): array
     } else {
         $status = $run() ? 'ok' : 'queued';
     }
-    return ['status' => $status, 'mode' => 'domain'];
+    // The host count lets the control plane log what each mutation cost the edge.
+    return ['status' => $status, 'mode' => 'domain', 'hosts' => count($hostnames)];
 }
 
 /** Synchronous callers share the same persisted retry ownership. */

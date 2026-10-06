@@ -79,7 +79,7 @@ test("accepted purges survive request death and provider failure without acknowl
     echo json_encode($receipt); fflush(STDOUT);
     posix_kill(getmypid(), SIGKILL);
   `);
-  expect(accepted.stdout, accepted.stderr).toBe('{"status":"queued","mode":"domain"}');
+  expect(accepted.stdout, accepted.stderr).toBe('{"status":"queued","mode":"domain","hosts":1}');
   expect(accepted.exitCode).not.toBe(0);
   expect(f.delivered).toEqual([]);
 

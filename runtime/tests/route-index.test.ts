@@ -508,7 +508,7 @@ test("a takedown removes only its space's live claim regardless of space-id orde
   }
 });
 
-test("intent-only hostname update rebuilds the route index without purging unchanged reconciles", async () => {
+test("intent-only hostname update rebuilds the route index and purges only re-pointed hosts", async () => {
   const rt = await startRuntime({ captureEdgePurges: true });
   const host = "intent-only-index.test";
   try {
@@ -568,6 +568,51 @@ test("intent-only hostname update rebuilds the route index without purging uncha
     expect(await replay.json()).toMatchObject({ purge: { mode: "domain" } });
     expect(hostEntry(rt, host)).toMatchObject({ space_id: "spc_idx_intent" });
     expect(edgePurgeCalls(rt).length).toBeGreaterThan(purgesBefore);
+
+    // A git build moves its branch alias and adds the new version host. Retained
+    // version hosts and production keep their routes, so only the moved and
+    // added hosts are purged, not one purge per retained version.
+    await deploy(rt, {
+      spaceId: "spc_idx_intent",
+      versionId: "ver_idx_intent_2",
+      files: { "index.html": "intent index 2" },
+    });
+    const v1Host = "intent-only-index--v1.test";
+    const v2Host = "intent-only-index--v2.test";
+    const branchHost = "intent-only-index--br-main.test";
+    const putVersionHosts = (versionHostnames: Array<{ hostname: string; version_id: string }>) =>
+      api(
+        rt,
+        "PUT",
+        "/__spacefast/api.php/spaces/spc_idx_intent/hostname-intent",
+        "update_hostname_intent",
+        { space_id: "spc_idx_intent" },
+        { production_hostnames: [host], version_hostnames: versionHostnames },
+      );
+    expect(
+      (
+        await putVersionHosts([
+          { hostname: v1Host, version_id: "ver_idx_intent_1" },
+          { hostname: branchHost, version_id: "ver_idx_intent_1" },
+        ])
+      ).status,
+    ).toBe(200);
+    const purgesBeforeMove = edgePurgeCalls(rt).length;
+    expect(
+      (
+        await putVersionHosts([
+          { hostname: v1Host, version_id: "ver_idx_intent_1" },
+          { hostname: v2Host, version_id: "ver_idx_intent_2" },
+          { hostname: branchHost, version_id: "ver_idx_intent_2" },
+        ])
+      ).status,
+    ).toBe(200);
+    expect(
+      edgePurgeCalls(rt)
+        .slice(purgesBeforeMove)
+        .map((call) => call.hostname)
+        .sort(),
+    ).toEqual([branchHost, v2Host].sort());
   } finally {
     rt.stop();
   }

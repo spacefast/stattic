@@ -599,8 +599,8 @@ function _stattic_runtime_zero_endpoint_count(string $versionRoot): int
 }
 
 // The whole-domain purge every space mutation owes the edge. `$hostnames` is
-// supplied only when the caller already narrowed the set (a tombstone push);
-// otherwise it is the space's full event hostname set.
+// supplied when the caller already narrowed the set (a tombstone push, an
+// intent diff); otherwise it is the space's full event hostname set.
 function _stattic_runtime_purge_space_now(string $privateRoot, string $spaceId, string $reason, ?array $hostnames = null): array
 {
     return _stattic_runtime_purge_now($privateRoot, [
@@ -1137,15 +1137,14 @@ function _stattic_runtime_put_hostname_intent(string $privateRoot, string $space
                 : []),
         ]);
     }
-    $hostnames = array_values(array_unique([
-        ..._stattic_runtime_space_sweep_hostnames($spaceRoot),
-        ..._stattic_runtime_route_intent_hostnames('', ['routes' => $routes]),
-    ]));
+    // Only re-pointed hosts, each whole-host: which paths changed under them is
+    // not a question this mutation can answer. Retained version hosts are
+    // immutable, so sweeping them would cost one purge per version on every
+    // branch alias move.
+    $hostnames = _stattic_runtime_hostname_intent_purge_diff($previous['routes'] ?? [], $routes);
     _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'hostname_intent_updated');
     _stattic_runtime_store_hostname_intent_from_snapshot($privateRoot, $spaceId, $routes, $previous, $claims);
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
-    // Whole-domain: an intent change re-points hostnames, so which paths changed
-    // is not a question this mutation can answer.
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'route_count' => count($routes),

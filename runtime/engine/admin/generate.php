@@ -202,9 +202,26 @@ function _stattic_runtime_hostname_intent_repoint_diff(array $previousRoutes, ar
     return $changed;
 }
 
-// Both call sites pass already-normalized routes; re-running normalization here
-// would let a read of stored state 422.
-function _stattic_runtime_hostname_intent_targets(array $routes): array
+// The hostnames an intent change owes a purge: added, removed, or re-pointed,
+// noindex included because it rides cached headers. A host whose routes are
+// unchanged serves the same bytes, so a new version host or a moved branch
+// alias purges only itself, never every retained version host.
+function _stattic_runtime_hostname_intent_purge_diff(array $previousRoutes, array $routes): array
+{
+    $previousTargets = _stattic_runtime_hostname_intent_targets($previousRoutes, true);
+    $targets = _stattic_runtime_hostname_intent_targets($routes, true);
+    $changed = [];
+    foreach (array_keys($previousTargets + $targets) as $hostname) {
+        if (($previousTargets[$hostname] ?? null) !== ($targets[$hostname] ?? null)) {
+            $changed[] = (string) $hostname;
+        }
+    }
+    return $changed;
+}
+
+// Every call site passes already-normalized routes; re-running normalization
+// here would let a read of stored state 422.
+function _stattic_runtime_hostname_intent_targets(array $routes, bool $withNoindex = false): array
 {
     $targets = [];
     foreach ($routes as $route) {
@@ -215,6 +232,7 @@ function _stattic_runtime_hostname_intent_targets(array $routes): array
             'path_prefix' => is_string($route['path_prefix'] ?? null) ? $route['path_prefix'] : '/',
             'mount' => is_string($route['mount'] ?? null) ? $route['mount'] : 'strip_prefix',
             'target' => is_array($route['target'] ?? null) ? $route['target'] : [],
+            ...($withNoindex ? ['noindex' => !empty($route['options']['noindex'])] : []),
         ];
     }
     foreach ($targets as &$entries) {

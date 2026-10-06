@@ -221,12 +221,27 @@ function spacefast_content_rest_dispatch(array $request): array
         $restRequest->set_body_params($request['body'] ?? []);
     }
     spacefast_content_principal_establish_user();
-    $response = rest_do_request($restRequest);
+    return spacefast_content_rest_response($restRequest);
+}
+
+/** Serialize internal REST dispatch with the same hooks and links as WordPress HTTP. */
+function spacefast_content_rest_response(WP_REST_Request $request): array
+{
+    $server = rest_get_server();
+    $response = apply_filters('rest_post_dispatch', rest_do_request($request), $server, $request);
     $headers = [];
     foreach ($response->get_headers() as $name => $value) {
         $headers[$name] = is_array($value) ? implode(', ', $value) : (string) $value;
     }
-    return ['status' => $response->get_status(), 'headers' => (object) $headers, 'body' => $response->get_data()];
+    $status = $response->get_status();
+    $body = null;
+    if ($request->get_method() !== 'HEAD') {
+        $embed = $request->has_param('_embed') ? rest_parse_embed_param($request['_embed']) : false;
+        $body = $server->response_to_data($response, $embed);
+        $body = apply_filters('rest_pre_echo_response', $body, $server, $request);
+        if ($status === 204) $body = null;
+    }
+    return ['status' => $status, 'headers' => (object) $headers, 'body' => $body];
 }
 
 function spacefast_content_redirect_group(bool $create = false): int

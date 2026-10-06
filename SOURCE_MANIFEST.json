@@ -1,7 +1,7 @@
 {
-  "revision": "d5406ca97ee5c76d4bf8f5bba2eac00acc06b0b3",
-  "sourceHash": "5d79be8429d4fff0639933b82321ca3f1b226a4d598c64a4ff83751764d2550e",
-  "manifestSha256": "560dec4cdfc8300b76e2ed51632302f84811c1f557afa3c94808ae71139a2aa5",
+  "revision": "0548e224295d7c6142ee218c85461148745b177e",
+  "sourceHash": "bef70ef92ffc52f9cbc994a2be5c9aa3f8f1e2599085fe67ad6c6bcb2faf70ca",
+  "manifestSha256": "4024f7b86dc0a0b31b527a8c05ee7a9cf35a2623b4b75760f6fc0fca667e6037",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "6d76f34da23826e6c47ac941ac41f6069ba4491f9836b9d67ff40dc0cdf745d3"
+      "sha256": "f383aa452a61b1f5ae8b7db160df60cafb410b66970b72b797bf628f349f5d86"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "a02e9544848b66875ed38507be1504be218112bfcec71abfebd6acc7b58cc264"
+      "sha256": "0bbad0c4f4edd40eea9a1f8b1782179762bdf087792da96e1dc3e3ee835addb9"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -569,7 +569,7 @@
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
-      "sha256": "5306dede0f81a491ed20bb948fdb94fe1333ca3f31ec431488213d1e1ebb3b56"
+      "sha256": "8f3135c32c0517eab6a717c46e33d58f66ac43bd28dbe5b63668879eb86e655d"
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
@@ -769,7 +769,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
-      "sha256": "c9abd174cdce0e16e84d649890415038927f6687e338419bf8e553807e3b39d9"
+      "sha256": "1d47c6f8820ec6b25f09514914ebde71f6c1ecc99b7853d6b7ad454e5f79c102"
     },
     {
       "path": "runtime/engine/wordpress/content-html.php",
@@ -1189,7 +1189,7 @@
     },
     {
       "path": "runtime/tests/space-users-http.ts",
-      "sha256": "5ecb27313a6b35896aa8e4843e11dc3c2dfa886815691624beba485adb681e64"
+      "sha256": "076e10bf94c44264ced80a012a7f330430445de09c13eb689841209c2b0a2e59"
     },
     {
       "path": "runtime/tests/space-users-verify.test.ts",

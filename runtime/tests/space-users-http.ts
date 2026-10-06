@@ -78,6 +78,21 @@ export async function acceptSpaceUsersHttp(input: {
   };
   await protectedUser(alice.cookie, alice.subject);
   await protectedUser(bob.cookie, bob.subject);
+  const config = await call("/__zero/auth/api/config", "");
+  assert.equal(config.status, 200);
+  assert.equal(
+    z.object({ data: z.object({ issuer: z.string().url() }) }).parse(await config.json()).data
+      .issuer,
+    `${input.origin}/identity`,
+  );
+  const configHead = await call("/__zero/auth/api/config", "", { method: "HEAD" });
+  assert.equal(configHead.status, 200);
+  assert.equal(await configHead.text(), "");
+  for (const header of ["content-type", "cache-control", "allow"]) {
+    assert.equal(configHead.headers.get(header), config.headers.get(header));
+  }
+  assert.match(configHead.headers.get("allow") ?? "", /GET/);
+  assert.equal(configHead.headers.get("cache-control"), "no-store");
   const forged = await call(input.protectedPath, alice.cookie, {
     method: "POST",
     headers: { Origin: "https://other.example.test" },

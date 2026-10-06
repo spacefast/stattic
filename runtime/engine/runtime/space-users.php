@@ -108,7 +108,7 @@ function _stattic_space_users_dispatch(string $path, string $method, string $hos
         if (str_starts_with($operation, 'admin/')) {
             _stattic_problem_refused(403, 'space_users_management_forbidden', 'Manage Users from your Space dashboard.');
         }
-        $request = new WP_REST_Request($method, '/spacefast-identity/v1/' . $operation);
+        $request = new WP_REST_Request($method === 'HEAD' ? 'GET' : $method, '/spacefast-identity/v1/' . $operation);
         $request->set_query_params($_GET);
         $request->set_header('origin', (string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
         $request->set_header('x-identity-csrf', (string) ($_SERVER['HTTP_X_IDENTITY_CSRF'] ?? ''));
@@ -116,12 +116,14 @@ function _stattic_space_users_dispatch(string $path, string $method, string $hos
         $body = _stattic_bounded_request_body(1048576);
         if ($body === null) _stattic_problem_refused(413, 'space_users_request_too_large', 'The request is too large.');
         $request->set_body($body);
-        $response = rest_do_request($request);
-        $response = apply_filters('rest_post_dispatch', $response, rest_get_server(), $request);
-        foreach ($response->get_headers() as $name => $value) {
+        $response = spacefast_content_rest_response($request);
+        foreach ($response['headers'] as $name => $value) {
             if (strtolower($name) !== 'cache-control') header($name . ': ' . $value);
         }
-        _stattic_zero_json_response($response->get_status(), $response->get_data());
+        if ($response['body'] === null) {
+            _stattic_response_send($response['status'], '', 'application/json; charset=utf-8', ['Cache-Control' => 'no-store']);
+        }
+        _stattic_zero_json_response($response['status'], $response['body']);
     }
     if (str_starts_with($path, '/identity/assets/')) {
         $asset = substr($path, strlen('/identity/assets/'));

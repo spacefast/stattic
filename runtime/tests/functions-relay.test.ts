@@ -15,12 +15,12 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
+import { runtimeEngineMailOutboxCommand } from "../../apps/control-plane/src/runtime/engine-files.js";
 import {
   apiJson,
   deploy,
   finalizeRaw,
   get,
-  PHP_BINARY,
   publicAccessConfig,
   putRoute,
   type Runtime,
@@ -93,30 +93,21 @@ type MailOutboxSummary = {
 };
 
 /**
- * The scheduled delivery pass, run the way a box scheduler runs it: its own OS
- * process, no HTTP, no credential, nothing but this site's database and this
- * site's WordPress.
+ * The worker's scheduled delivery command follows this fixture's actual active
+ * release pointer and publication lock. Provider credentials stay on the box;
+ * stdout carries only settlement totals.
  */
 async function runMailOutboxCli(): Promise<{ exitCode: number; summary: MailOutboxSummary }> {
-  const child = spawn(
-    PHP_BINARY,
-    [
-      "-d",
-      "opcache.enable_cli=0",
-      path.join(rt.engineRoot, "entrypoints", "mail-outbox.php"),
-      `--private-root=${rt.storageRoot}`,
-    ],
-    {
-      cwd: rt.root,
-      env: {
-        PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        ...providerDatabaseEnv(),
-        SPACEFAST_TEST_WP_MAIL_CAPTURE: wpMailCapturePath,
-      },
-      stdio: "pipe",
+  const child = spawn("sh", ["-c", runtimeEngineMailOutboxCommand(rt.root)], {
+    cwd: rt.root,
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      ...providerDatabaseEnv(),
+      SPACEFAST_TEST_WP_MAIL_CAPTURE: wpMailCapturePath,
     },
-  );
+    stdio: "pipe",
+  });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk: Buffer) => {

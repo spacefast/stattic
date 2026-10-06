@@ -121,6 +121,9 @@ beforeAll(async () => {
   // environment the tenant prelude will scrub away.
   rt = await startRuntime({
     env: {
+      // The API seam in another suite can configure its Postgres URL in this
+      // Bun worker. This fixture has no attached provider database.
+      DATABASE_URL: "",
       SPACEFAST_SERVICE_EMAIL_SENDERS: SENDER,
       // The ingress-owned visitor identity, captured at dispatch into the spam
       // frame default, so sf_spam's default never depends on the handler
@@ -276,7 +279,7 @@ test("brokered capabilities reach the native broker from inside the jail", async
   // "No database attached" answered as its own problem document, not a driver
   // error: sf_db() hands back a handle and has no other moment to say so.
   const db = await get(rt, HOST, "/db");
-  expect(db.status).toBe(503);
+  expect(db.status, `${await db.clone().text()}\n${rt.diagnostics()}`).toBe(503);
   expect(db.headers.get("content-type")).toBe("application/problem+json");
   expect(((await db.json()) as { code?: string }).code).toBe("php_function_database_unavailable");
 });

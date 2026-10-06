@@ -1,7 +1,7 @@
 {
-  "revision": "c0fd3972b4139313a5e2f1c4361364ddeb702aab",
+  "revision": "ca882cc24c96d5a416d7b4a9e0f0a13cc2861991",
   "sourceHash": "357678c87a59898813a149795f4362e74390eff2cb35ffd51817f30800ffaa18",
-  "manifestSha256": "b6eb1caf6b916f765a4ea5cb1111c04fcec05ca2d5fd18354043337536f97cf2",
+  "manifestSha256": "c3633b89e7b6066bf56ca09f2f3236f77631bd1521df1feb4ef23e0e842e84d2",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "18586f5c42f5e02f2fd4497428513c7bdb679bc2c5bcef168e79d9a139184bac"
+      "sha256": "4104f9551f3b380303e984d1b6e817fce3dbcc1723b2e3eb7110a09c22c51dc7"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "406b4b1f9ba6b9c8db4d10779c0fb1c53c863a82c659c137ea1141af45ca08c3"
+      "sha256": "5b2da5f2eebea5c9f9bde056bd7188644bd9162631513344bd2db0a97f76ad2c"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -1093,7 +1093,7 @@
     },
     {
       "path": "runtime/tests/functions-relay.test.ts",
-      "sha256": "0cf63e5ecf6d74e29148f5820def9e2008944f0c144e40cdcdde6b0928b628db"
+      "sha256": "d9846626d82959ff5e0e9d8af32b1ae6c1f618868ac7eced408bbee1ad45a27d"
     },
     {
       "path": "runtime/tests/grant-conformance.php",
@@ -1105,7 +1105,7 @@
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "fd2a4eb2539ccf4c0747b4f40d738914b0c34b99bac7bcd9305ae5972a608214"
+      "sha256": "d64fa454cdcb9b22ec302d9fdd2b915e7aadaa7885dc94ca9a53a806cb965beb"
     },
     {
       "path": "runtime/tests/headers.test.ts",
@@ -1132,6 +1132,10 @@
       "sha256": "4fcc168745ca9e28d9916fd57ff9288fccb45d04ac477824cf7b2121215cdd20"
     },
     {
+      "path": "runtime/tests/mail-outbox-scheduler.test.ts",
+      "sha256": "8da6f5fdc0b7defa163a30f049ec00f5dafb410d3d7c8f7126905ed0161808f2"
+    },
+    {
       "path": "runtime/tests/mysql-container.ts",
       "sha256": "bf46d6a1d247277fcbf382467752974c451a197ffa1093fd774dc53d09dc87a8"
     },
@@ -1141,7 +1145,7 @@
     },
     {
       "path": "runtime/tests/php-functions.test.ts",
-      "sha256": "a9bf3e5659b8df795fefec0ef5ed6fdf4e96d64c22534cbeb90e51a2e8a6302a"
+      "sha256": "fbf871eab6e1bc944117ece40c1359d91217e30d52676e19ce8e5fc7e6ea1eec"
     },
     {
       "path": "runtime/tests/php-router.php",
@@ -1165,7 +1169,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "d4e449714701fd800a2ae571866d0763f147cdf407546044acd3617d5342eccd"
+      "sha256": "fcf8e80d3da1d866116cbd1275e63ca851c54e4d18c42ee606541f237f72f7c4"
     },
     {
       "path": "runtime/tests/run-ci.sh",

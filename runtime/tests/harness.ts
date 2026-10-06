@@ -405,6 +405,7 @@ export type Runtime = {
   engineRoot: string;
   storageRoot: string;
   processId: number;
+  diagnostics: () => string;
   /** Present only when startRuntime({ captureEdgePurges: true }): the purge POSTs the runtime made. */
   edgePurges?: EdgePurgeCall[];
   stop: () => void;
@@ -629,7 +630,12 @@ function writeGeneratedConfig(root: string): void {
   );
 }
 
-export type PhpServer = { baseUrl: string; processId: number; stop: () => void };
+export type PhpServer = {
+  baseUrl: string;
+  processId: number;
+  diagnostics: () => string;
+  stop: () => void;
+};
 
 /**
  * Serves `router` from `cwd` with `php -S` on a port PHP binds itself, and
@@ -705,7 +711,7 @@ export async function startPhpServer(input: {
   } finally {
     readiness.removeEventListener("abort", abortStartup);
   }
-  return { baseUrl, processId, stop };
+  return { baseUrl, processId, diagnostics: () => diagnostics, stop };
 }
 
 export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtime> {
@@ -784,6 +790,7 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
     engineRoot: path.join(root, ".stattic/releases/test/engine"),
     storageRoot: path.join(root, ".stattic", "storage"),
     processId: server.processId,
+    diagnostics: server.diagnostics,
     edgePurges: edgeCapture ? edgePurges : undefined,
     stop: () => {
       server.stop();

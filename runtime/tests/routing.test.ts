@@ -1843,6 +1843,7 @@ test("public requests load only the modules their request class needs", async ()
       engineRoot: path.join(instrumentedRoot, ".stattic/releases/test/engine"),
       storageRoot: path.join(instrumentedRoot, ".stattic/storage"),
       processId: instrumentedServer.processId,
+      diagnostics: instrumentedServer.diagnostics,
       stop: () => undefined,
     };
 

@@ -249,6 +249,7 @@ function _stattic_runtime_admin_management_routes(): array
         ['PUT', '#^/spaces/([^/]+)/routes/([^/]+)$#', 'update_route', ['space_id' => 1, 'route_name' => 2], 'space', false, '_stattic_runtime_put_route'],
         ['PUT', '#^/spaces/([^/]+)/hostname-intent$#', 'update_hostname_intent', ['space_id' => 1], 'space', false, '_stattic_runtime_put_hostname_intent'],
         ['PUT', '#^/spaces/([^/]+)/tombstones$#', 'update_tombstones', ['space_id' => 1], 'space', false, '_stattic_runtime_put_tombstones'],
+        ['PUT', '#^/spaces/([^/]+)/share-images$#', 'update_share_images', ['space_id' => 1], 'space', false, '_stattic_runtime_put_share_images'],
         ['POST', '#^/spaces/([^/]+)/delete$#', 'delete_space', ['space_id' => 1], 'space', false, '_stattic_runtime_delete_space'],
         ['POST', '#^/spaces/([^/]+)/repair$#', 'repair_space', ['space_id' => 1], 'site', false, '_stattic_runtime_repair_space'],
     ];

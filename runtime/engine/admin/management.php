@@ -1531,6 +1531,80 @@ function _stattic_runtime_put_tombstones(string $privateRoot, string $spaceId, a
     ]);
 }
 
+// Records which share-image screenshots the control plane has seen render for
+// the live version, replacing the previous record. Serving advertises only
+// these (_stattic_auto_share_image_ready). Only the live version's hosts can
+// match a record, so only they are purged for cached pages to pick up their
+// image; a record for a version that is no longer live is refused.
+function _stattic_runtime_put_share_images(string $privateRoot, string $spaceId, array $claims): void
+{
+    require_once __DIR__ . '/../shared/preview-images.php';
+    $body = _stattic_json_body();
+    $versionId = $body['version_id'] ?? null;
+    $urls = $body['urls'] ?? null;
+    if (
+        !is_string($versionId)
+        || preg_match('/\A[A-Za-z0-9_-]{1,128}\z/', $versionId) !== 1
+        || !is_array($urls)
+        || !array_is_list($urls)
+        || count($urls) > 64
+        || !array_all($urls, static fn (mixed $url): bool => is_string($url)
+            && strlen($url) <= 2048
+            && preg_match('~\Ahttps?://[^/?#\s]+/[^\s#]*\z~', $url) === 1)
+    ) {
+        _stattic_problem_response(422, 'share_images_invalid', 'Share images need a version_id and at most 64 page URLs.');
+    }
+    $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
+    if (!is_dir($spaceRoot)) {
+        _stattic_problem_response(404, 'space_not_found', 'The Space does not exist on this runtime.');
+    }
+    $live = _stattic_runtime_read_json_strict(_stattic_route_pointer_path($privateRoot, $spaceId, 'production'));
+    if (!is_array($live) || ($live['version_id'] ?? null) !== $versionId) {
+        _stattic_problem_response(409, 'share_images_version_not_live', 'Share images can only be recorded for the live version.');
+    }
+    $urls = array_values(array_unique($urls));
+    $liveHostnames = [];
+    foreach ((_stattic_runtime_space_routing_doc($spaceRoot, 'intent') ?? [])['routes'] ?? [] as $route) {
+        if (
+            is_array($route)
+            && is_string($route['hostname'] ?? null)
+            && ($route['target']['type'] ?? null) === 'route'
+            && ($route['target']['route_name'] ?? null) === 'production'
+        ) {
+            $liveHostnames[] = $route['hostname'];
+        }
+    }
+    // A repeat of the stored record (a preview publish re-warms the live
+    // version) changes no served page, so it purges nothing.
+    $readyPath = $spaceRoot . '/' . STATTIC_AUTO_SHARE_IMAGE_READY_FILE;
+    $previous = is_file($readyPath) ? json_decode((string) @file_get_contents($readyPath), true) : null;
+    $unchanged = is_array($previous)
+        && ($previous['version_id'] ?? null) === $versionId
+        && is_array($previous['urls'] ?? null)
+        && array_diff($urls, $previous['urls']) === []
+        && array_diff($previous['urls'], $urls) === [];
+    $purge = !$unchanged && $urls !== [] && $liveHostnames !== [];
+    if ($purge) {
+        _stattic_runtime_prepare_purge($privateRoot, $spaceId, $liveHostnames, 'space_share_images_updated');
+    }
+    _stattic_runtime_write_json_atomic($readyPath, [
+        'version_id' => $versionId,
+        'urls' => $urls,
+    ]);
+    _stattic_runtime_journal_management_diagnostic($privateRoot, $claims, [
+        'event' => 'space_share_images_updated',
+        'space_id' => $spaceId,
+        'version_id' => $versionId,
+        'url_count' => count($urls),
+    ]);
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'version_id' => $versionId,
+        'url_count' => count($urls),
+        ...($purge ? ['purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_share_images_updated', $liveHostnames)] : []),
+    ]);
+}
+
 function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, array $claims): void
 {
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);

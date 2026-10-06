@@ -1198,6 +1198,7 @@ fn pipeline_context_digest(
         "engine": env!("CARGO_PKG_VERSION"),
         "previewMetadata": 1,
         "providerIconAlias": 1,
+        "autoShareImage": 1,
         "config": config,
         "siteThemeCss": serving.get("theme_css"),
         "viewer": viewer,
@@ -4713,6 +4714,53 @@ mod tests {
         assert_eq!(output.telemetry.as_ref().unwrap().skipped_files, 0);
         let body = String::from_utf8(served_body(&private, "v2", "index.html")).unwrap();
         assert!(body.contains("href=\"/favicon.ico;sf-icon\""), "{body}");
+    }
+
+    /// A catalog finalized before share-image placeholders existed holds the
+    /// source-identical page decorated without them. Republishing must
+    /// redecorate it rather than adopt the old bytes.
+    #[test]
+    fn a_pre_share_image_catalog_redecorates_unchanged_html() {
+        let temp = tempdir().unwrap();
+        let private = temp.path().join(".stattic/storage");
+        let page = br#"<html><head><title>Share</title></head><body><p>stable</p></body></html>"#;
+        let manifest = accept_blobs(&private, &[("index.html", page)]);
+        // Captured from the finalizer as it was before share-image placeholders.
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/auto-share-image-legacy.json"
+        ))
+        .unwrap();
+        let legacy_served = fixture["servedIndexHtml"].as_str().unwrap().as_bytes();
+        let catalog: FileCatalog = serde_json::from_value(fixture["catalog"].clone()).unwrap();
+        assert_eq!(catalog.paths["index.html"].source.sha256, sha256(page));
+        assert_eq!(
+            catalog.paths["index.html"].served.as_ref().unwrap().sha256,
+            sha256(legacy_served)
+        );
+        // Both blobs are in the CAS, so only the digest can refuse adoption.
+        accept_blobs(&private, &[("legacy.html", legacy_served)]);
+        let previous_root = private.join("spaces/s/versions/v");
+        fs::create_dir_all(&previous_root).unwrap();
+        fs::write(
+            previous_root.join("metadata.json"),
+            serde_json::to_vec(&json!({VERSION_CATALOG_METADATA_KEY: catalog})).unwrap(),
+        )
+        .unwrap();
+        let mut next = fixture_input(
+            &private,
+            manifest,
+            json!({"mode":"website","title":"Adopt"}),
+            json!({"serving":{"config":{"platform_meta":true}},"previous_version_id":"v"}),
+        );
+        next.version_id = "v2".into();
+        next.upload_id = Some("u2".into());
+        let output = finalize_site(next, false).unwrap();
+        assert_eq!(output.telemetry.as_ref().unwrap().skipped_files, 0);
+        let body = String::from_utf8(served_body(&private, "v2", "index.html")).unwrap();
+        assert!(
+            body.contains("<meta data-spacefast-auto-image=\"og:image\">"),
+            "{body}"
+        );
     }
 
     /// Every remaining context input the digest folds: flipping any one of them

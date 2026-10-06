@@ -434,6 +434,10 @@ const PREVIEW_IMAGE_META: [&str; 5] = [
 /// `<head>`, and this keeps adoption from paying for whole documents.
 const PREVIEW_SCAN_BYTES: u64 = 64 * 1024;
 
+/// Marks the platform's share-image placeholders. The runtime's preview-image
+/// pass (`runtime/engine/shared/preview-images.php`) reads the same name.
+const AUTO_SHARE_IMAGE_ATTR: &str = "data-spacefast-auto-image";
+
 fn source_head(path: &Path) -> String {
     use std::io::Read as _;
     let mut bytes = Vec::new();
@@ -973,6 +977,8 @@ fn decorate_html(
     let title_text = Rc::new(RefCell::new(String::new()));
     let meta_names = Rc::new(RefCell::new(BTreeSet::<String>::new()));
     let meta_properties = Rc::new(RefCell::new(BTreeSet::<String>::new()));
+    let declares_preview_image = Rc::new(Cell::new(false));
+    let head_start = Rc::new(Cell::new(None::<usize>));
     let head_end = Rc::new(Cell::new(None::<usize>));
     let body_start_offset = Rc::new(Cell::new(None::<usize>));
     let body_end_offset = Rc::new(Cell::new(None::<usize>));
@@ -981,11 +987,13 @@ fn decorate_html(
         RewriteStrSettings::new()
             .append_element_content_handler(element!("head", {
                 let has_head = Rc::clone(&has_head);
+                let head_start = Rc::clone(&head_start);
                 let head_end = Rc::clone(&head_end);
                 move |element| {
                     if has_head.replace(true) {
                         return Ok(());
                     }
+                    head_start.set(Some(element.source_location().bytes().end));
                     let head_end = Rc::clone(&head_end);
                     element.on_end_tag(end_tag!(move |end| {
                         head_end.set(Some(end.source_location().bytes().start));
@@ -1048,7 +1056,22 @@ fn decorate_html(
                     if let Some(property) = element.get_attribute("property") {
                         meta_properties
                             .borrow_mut()
-                            .insert(property.to_ascii_lowercase());
+                            .insert(property.trim().to_ascii_lowercase());
+                    }
+                    Ok(())
+                }
+            }))
+            // Unfurlers read preview images from wherever the tag sits, so an
+            // authored one anywhere in the document stands the screenshot down.
+            .append_element_content_handler(element!("meta", {
+                let declares_preview_image = Rc::clone(&declares_preview_image);
+                move |element| {
+                    if ["property", "name"].iter().any(|attribute| {
+                        element.get_attribute(attribute).is_some_and(|key| {
+                            PREVIEW_IMAGE_META.contains(&key.trim().to_ascii_lowercase().as_str())
+                        })
+                    }) {
+                        declares_preview_image.set(true);
                     }
                     Ok(())
                 }
@@ -1092,6 +1115,7 @@ fn decorate_html(
     let favicon =
         string_in_opt(meta, "favicon").map(|favicon| cache_busted_local_asset(&favicon, files));
     let mut head = Vec::new();
+    let mut share_image = Vec::<String>::new();
     // The author's icon always wins. Declare shipped root icons explicitly so
     // the provider-safe URL pass can keep them on the runtime serving ladder.
     if !has_favicon.get() {
@@ -1170,15 +1194,26 @@ fn decorate_html(
                 ));
             }
         }
-        if !meta_names.borrow().contains("twitter:card") && (title.is_some() || image.is_some()) {
-            head.push(format!(
-                "<meta name=\"twitter:card\" content=\"{}\">",
-                if image.is_some() {
-                    "summary_large_image"
-                } else {
-                    "summary"
-                }
-            ));
+        // With no image anywhere, leave inert placeholders that the runtime
+        // fills with a screenshot once one is ready and only while the page is
+        // publicly readable. Both change without a republish. They open the
+        // head because the runtime rewrites only the document's first 64 KiB.
+        let auto_image = image.is_none() && !declares_preview_image.get();
+        if auto_image {
+            share_image.push(format!("<meta {AUTO_SHARE_IMAGE_ATTR}=\"og:image\">"));
+        }
+        if !meta_names.borrow().contains("twitter:card")
+            && (title.is_some() || image.is_some() || auto_image)
+        {
+            if image.is_some() {
+                head.push("<meta name=\"twitter:card\" content=\"summary_large_image\">".into());
+            } else if auto_image {
+                share_image.push(format!(
+                    "<meta name=\"twitter:card\" content=\"summary\" {AUTO_SHARE_IMAGE_ATTR}=\"twitter:card\">"
+                ));
+            } else {
+                head.push("<meta name=\"twitter:card\" content=\"summary\">".into());
+            }
         }
     }
     head.extend(inject_snippets(config, "head"));
@@ -1210,6 +1245,11 @@ fn decorate_html(
         diagnostics.push(json!({"code":"html_no_body","severity":"warning","message":"An HTML file has no body element; body decoration was skipped.","path":path}));
     }
     let mut insertions = Vec::<(usize, String)>::new();
+    if !share_image.is_empty() {
+        if let Some(offset) = head_start.get() {
+            insertions.push((offset, marked_block("share-image", &share_image)));
+        }
+    }
     if !head_block.is_empty() {
         if let Some(offset) = head_end.get() {
             insertions.push((offset, head_block));
@@ -1244,7 +1284,10 @@ fn strip_generated_html_blocks(source: &str) -> String {
             let marker = comment.text().trim().to_string();
             let location = comment.source_location().bytes();
             if let Some(name) = marker.strip_prefix("spacefast:") {
-                if matches!(name, "head" | "body-start" | "noscript" | "body-end") {
+                if matches!(
+                    name,
+                    "share-image" | "head" | "body-start" | "noscript" | "body-end"
+                ) {
                     open_for_handler
                         .borrow_mut()
                         .entry(name.to_string())
@@ -1357,6 +1400,7 @@ mod tests {
         assert!(html.contains("<!-- spacefast:body-end -->"));
         assert_eq!(html.matches("twitter:title").count(), 1);
         assert!(html.contains("name=\"twitter:card\" content=\"summary_large_image\""));
+        assert!(!html.contains(AUTO_SHARE_IMAGE_ATTR));
         assert!(html.contains(&format!(
             "property=\"og:image\" content=\"/cover.png?v={}\"",
             &crate::finalize::sha256(cover)[..12]
@@ -1514,6 +1558,63 @@ mod tests {
         let twice = read(&run, "index.html");
         assert_eq!(twice.matches("rel=\"icon\"").count(), 1);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn share_image_placeholders_appear_only_without_a_declared_image() {
+        let bare =
+            br#"<html><head><meta charset="utf-8"><title>Bare</title></head><body></body></html>"#;
+        let run = run_pipeline(
+            &[("index.html", bare)],
+            json!({"mode":"website"}),
+            json!({"config":{"platform_meta":true}}),
+        );
+        run.result.as_ref().unwrap();
+        let once = read(&run, "index.html");
+        // They open the head, ahead of a long author head the runtime would
+        // not read past.
+        assert!(once.starts_with(concat!(
+            "<html><head><!-- spacefast:share-image -->\n",
+            "<meta data-spacefast-auto-image=\"og:image\">\n",
+            "<meta name=\"twitter:card\" content=\"summary\" data-spacefast-auto-image=\"twitter:card\">\n",
+            "<!-- /spacefast:share-image -->\n<meta charset=\"utf-8\">",
+        )));
+        assert_eq!(once.matches("name=\"twitter:card\"").count(), 1);
+        assert!(!once.contains("property=\"og:image\""));
+        assert!(run.result.as_ref().unwrap().preview_images.is_empty());
+        let run = run_pipeline(
+            &[("index.html", once.as_bytes())],
+            json!({"mode":"website"}),
+            json!({"config":{"platform_meta":true}}),
+        );
+        assert_eq!(read(&run, "index.html"), once);
+
+        // Any authored preview image stands them down: either vocabulary, a
+        // padded property name, or a tag outside the head.
+        for authored in [
+            &br#"<html><head><title>Mine</title><meta name="twitter:image" content="/mine.png"></head><body></body></html>"#[..],
+            br#"<html><head><title>Mine</title><meta property=" og:image" content="/mine.png"></head><body></body></html>"#,
+            br#"<html><head><title>Mine</title></head><body><meta property="og:image" content="/mine.png"></body></html>"#,
+        ] {
+            let run = run_pipeline(
+                &[("index.html", authored)],
+                json!({"mode":"website"}),
+                json!({"config":{"platform_meta":true}}),
+            );
+            run.result.as_ref().unwrap();
+            let html = read(&run, "index.html");
+            assert!(!html.contains(AUTO_SHARE_IMAGE_ATTR), "{html}");
+            assert!(html.contains("<meta name=\"twitter:card\" content=\"summary\">"));
+        }
+
+        // Turning platform injection off injects no placeholder either.
+        let run = run_pipeline(
+            &[("index.html", bare)],
+            json!({"mode":"website"}),
+            json!({"config":{}}),
+        );
+        run.result.as_ref().unwrap();
+        assert!(!read(&run, "index.html").contains(AUTO_SHARE_IMAGE_ATTR));
     }
 
     #[test]

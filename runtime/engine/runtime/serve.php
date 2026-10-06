@@ -561,6 +561,16 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         );
     }
 
+    // Whether an anonymous visitor (a link unfurler) reads this exact URL,
+    // independent of who is asking: every requester then gets the same page,
+    // so the shared-cache copy agrees with what a scraper is served.
+    $sharePreviewPublic = $open || (
+        _stattic_access_unfenced($serving, $requestHost, $requestPath)
+        && _stattic_access_anonymous_admits($serving, $requestHost, $requestPath)
+        && ($originalRequestPath === $requestPath
+            || _stattic_access_anonymous_admits($serving, $requestHost, $originalRequestPath))
+    );
+
     // ---- entry resolution ------------------------------------------------
     $sendContext = [
         'private_root' => $privateRoot,
@@ -584,6 +594,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         'private_file_alias' => $privateFileAlias,
         'icon_file_alias' => is_string($iconFileAliasSource),
         'public_preview_image' => $publicPreviewImage,
+        'share_preview_public' => $sharePreviewPublic,
         'request_uri' => $requestUri,
         // The URL the VISITOR asked for, never the rewritten one: the provider's
         // asset rewrite (C21/D146) keys on it, and a mount or a residue rewrite
@@ -1008,6 +1019,15 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     }
 
     _stattic_zero_prime_anonymous_document_session($context, $headers, $status, $method);
+    $context['share_image'] = !empty($context['share_preview_public'])
+        && $status === 200
+        && str_starts_with(strtolower($headers['content-type'] ?? ''), 'text/html');
+    if ($context['share_image']) {
+        // The control plane sends a page to the screenshot service only on this
+        // statement: an anonymous fetch that happens to be admitted (a Grant
+        // constrained by country, network or expiry) is not public.
+        header('X-Spacefast-Share-Image: eligible', true);
+    }
 
     $noStore = _stattic_cache_policy_no_store_flags();
     $privateCache = (bool) $context['private_cache'] || _stattic_cache_policy_private_flags();

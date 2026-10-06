@@ -18,14 +18,19 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import path from "node:path";
 
 import {
+  api,
   deploy,
+  type DeploySpec,
   type EdgePurgeCall,
   edgePurgeCalls,
+  errorCode,
   get,
   journalRecords,
   PHP_BINARY,
   postAccessCallback,
   putRoute,
+  RUNTIME_HTTP_API_BASE,
+  sha256,
   signEd25519Jwt,
   spaceRoot,
   startRuntime,
@@ -94,6 +99,7 @@ const AUTHORITY_LRU_HOST = "authority-lru.access.test";
 const AUTHORITY_LRU_SPACE = "spc_access_authority_lru";
 const AUTHORITY_LRU_VERSION = "ver_access_authority_lru";
 const BOUNDARY_HOST = "boundary.access.test";
+const BOUNDARY_VERSION_HOST = "boundary-version.access.test";
 const BOUNDARY_SPACE = "spc_access_boundary";
 const BOUNDARY_VERSION = "ver_access_boundary";
 const ALLOWED_FALLBACK_HOST = "allowed-fallback.access.test";
@@ -142,7 +148,7 @@ function spaceForHost(host: string): string {
     [SCOPED_SPACE, [SCOPED_HOST]],
     [SESSION_SPACE, [SESSION_HOST, SESSION_VERSION_HOST]],
     [AUTHORITY_LRU_SPACE, [AUTHORITY_LRU_HOST]],
-    [BOUNDARY_SPACE, [BOUNDARY_HOST]],
+    [BOUNDARY_SPACE, [BOUNDARY_HOST, BOUNDARY_VERSION_HOST]],
     ["spc_access_allowed_fallback", [ALLOWED_FALLBACK_HOST]],
     ["spc_access_allowed_nearest", [ALLOWED_NEAREST_HOST]],
     [TEAM_ACTIVATION_SPACE, [TEAM_ACTIVATION_HOST]],
@@ -639,6 +645,18 @@ async function pollUntil<T>(probe: () => T | null, label: string): Promise<T> {
 
 // ---------------------------------------------------------------------------
 
+function boundaryProjection(publicConstraints: ProjectionInput["publicConstraints"] = {}) {
+  return projection({
+    mode: "public",
+    memberRefs: ["member:mem_boundary_owner"],
+    overrides: [
+      { scope: "/docs", mode: "limited" },
+      { scope: "/private", mode: "limited" },
+    ],
+    publicConstraints,
+  });
+}
+
 const FIXTURE_FILES = {
   "index.html": "<h1>home</h1>\n",
   "docs/index.html": "<h1>docs</h1>\n",
@@ -709,6 +727,7 @@ beforeAll(async () => {
     hosts: string[];
     versionHosts?: string[];
     files?: Record<string, string>;
+    serving?: DeploySpec["serving"];
     config: ReturnType<typeof projection> & { sdk?: Record<string, unknown> };
   }> = [
     {
@@ -843,15 +862,15 @@ beforeAll(async () => {
       spaceId: BOUNDARY_SPACE,
       versionId: BOUNDARY_VERSION,
       hosts: [BOUNDARY_HOST],
-      files: { _headers: PERMISSIVE_HEADERS },
-      config: projection({
-        mode: "public",
-        memberRefs: ["member:mem_boundary_owner"],
-        overrides: [
-          { scope: "/docs", mode: "limited" },
-          { scope: "/private", mode: "limited" },
-        ],
-      }),
+      versionHosts: [BOUNDARY_VERSION_HOST],
+      files: {
+        _headers: PERMISSIVE_HEADERS,
+        "index.html": "<html><head><title>Home</title></head><body><h1>home</h1></body></html>\n",
+        "docs/index.html":
+          "<html><head><title>Docs</title></head><body><h1>docs</h1></body></html>\n",
+      },
+      serving: { config: { platform_meta: true } },
+      config: boundaryProjection(),
     },
   ];
 
@@ -860,6 +879,7 @@ beforeAll(async () => {
       spaceId: fixture.spaceId,
       versionId: fixture.versionId,
       files: { ...FIXTURE_FILES, ...fixture.files },
+      serving: fixture.serving,
       activate: {
         route_name: "production",
         config: fixture.config,
@@ -2057,7 +2077,103 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
 });
 
 test("a scope exclusion cannot be widened by an alternate spelling of the same path", async () => {
-  expect((await get(runtime, BOUNDARY_HOST, "/")).status).toBe(200);
+  // A public page carries inert share-image placeholders until the control
+  // plane reports its screenshot rendered, so an unfurler never caches the
+  // screenshot service's "generating" placeholder.
+  const metaContents = (html: string, key: string) =>
+    html
+      .match(new RegExp(`<meta [^>]*(?:property|name)="${key}"[^>]*>`, "g"))
+      ?.map((tag) => tag.match(/content="([^"]*)"/)?.[1]);
+  const before = await get(runtime, BOUNDARY_HOST, "/");
+  expect(before.status).toBe(200);
+  const beforeHtml = await before.text();
+  expect(metaContents(beforeHtml, "og:image")).toBeUndefined();
+  expect(beforeHtml).toContain('<meta data-spacefast-auto-image="og:image">');
+
+  // The capture URL names the version, so each publish is its own screenshot,
+  // and that query leaves the page public and shared-cacheable.
+  const capture = (requestPath: string) =>
+    `http://${BOUNDARY_HOST}${requestPath}?v=${sha256(BOUNDARY_VERSION).slice(0, 12)}`;
+  const captured = await get(
+    runtime,
+    BOUNDARY_HOST,
+    `/?v=${sha256(BOUNDARY_VERSION).slice(0, 12)}`,
+  );
+  expect(captured.status).toBe(200);
+  expect(captured.headers.get("cache-control")).toStartWith("public");
+
+  const putShareImages = (versionId: string, urls: string[]) =>
+    api(
+      runtime,
+      "PUT",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${BOUNDARY_SPACE}/share-images`,
+      "update_share_images",
+      { space_id: BOUNDARY_SPACE },
+      { version_id: versionId, urls },
+    );
+  // Nothing rendered yet: nothing to purge.
+  expect(
+    await edgePurgeCallsBy(runtime, async () => {
+      expect((await putShareImages(BOUNDARY_VERSION, [])).status).toBe(200);
+    }),
+  ).toEqual([]);
+  // Only the live hosts can match a record, so the version host is not purged.
+  // /docs/ is listed too: a rendered screenshot never overrides the gate.
+  const purges = await edgePurgeCallsBy(runtime, async () => {
+    expect((await putShareImages(BOUNDARY_VERSION, [capture("/"), capture("/docs/")])).status).toBe(
+      200,
+    );
+  });
+  expect(purges.map(({ hostname, reason }) => [hostname, reason])).toEqual([
+    [BOUNDARY_HOST, "space_share_images_updated"],
+  ]);
+  // Re-recording the same list (a preview publish re-warms the live version)
+  // changes no served page and purges nothing.
+  expect(
+    await edgePurgeCallsBy(runtime, async () => {
+      expect(
+        (await putShareImages(BOUNDARY_VERSION, [capture("/docs/"), capture("/")])).status,
+      ).toBe(200);
+    }),
+  ).toEqual([]);
+  const home = await get(runtime, BOUNDARY_HOST, "/");
+  expect(home.status).toBe(200);
+  const homeHtml = await home.text();
+  expect(metaContents(homeHtml, "og:image")).toEqual([
+    `https://s0.wp.com/mshots/v1/${encodeURIComponent(capture("/"))}?w=1200&amp;h=630`,
+  ]);
+  expect(metaContents(homeHtml, "twitter:card")).toEqual(["summary_large_image"]);
+  expect(homeHtml).not.toContain("data-spacefast-auto-image");
+  // The control plane screenshots only pages the runtime states are public.
+  expect(home.headers.get("x-spacefast-share-image")).toBe("eligible");
+
+  expect((await putShareImages(BOUNDARY_VERSION, ["javascript:alert(1)"])).status).toBe(422);
+  // A pass for a version that is no longer live cannot replace the record.
+  const stale = await putShareImages("ver_access_boundary_previous", [capture("/")]);
+  expect(stale.status).toBe(409);
+  expect(await errorCode(stale)).toBe("share_images_version_not_live");
+  expect(
+    metaContents(await (await get(runtime, BOUNDARY_HOST, "/")).text(), "og:image"),
+  ).toHaveLength(1);
+
+  // A Public Grant constrained by expiry admits an anonymous fetch, but the
+  // page is not public: no eligibility statement, and placeholders stay inert
+  // even though / is on the ready list.
+  await putRoute(runtime, BOUNDARY_SPACE, "production", {
+    version_id: BOUNDARY_VERSION,
+    config: boundaryProjection({ expiresAt: new Date(Date.now() + 60 * 60_000).toISOString() }),
+  });
+  try {
+    const constrained = await get(runtime, BOUNDARY_HOST, "/");
+    expect(constrained.status).toBe(200);
+    expect(constrained.headers.get("x-spacefast-share-image")).toBeNull();
+    expect(await constrained.text()).toContain('<meta data-spacefast-auto-image="og:image">');
+  } finally {
+    await putRoute(runtime, BOUNDARY_SPACE, "production", {
+      version_id: BOUNDARY_VERSION,
+      config: boundaryProjection(),
+    });
+  }
 
   for (const requestPath of [
     "/docs/",
@@ -2084,7 +2200,13 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
   const cookie = await openAuthorities(BOUNDARY_HOST, ["member:mem_boundary_owner"]);
   const admitted = await get(runtime, BOUNDARY_HOST, "/docs/", { headers: { cookie } });
   expect(admitted.status).toBe(200);
-  expect(await admitted.text()).toContain("<h1>docs</h1>");
+  const docsHtml = await admitted.text();
+  expect(docsHtml).toContain("<h1>docs</h1>");
+  // The owner reads a page anonymous visitors cannot, so it advertises no
+  // share image and its placeholders stay inert.
+  expect(docsHtml).not.toContain("mshots");
+  expect(docsHtml).toContain('<meta data-spacefast-auto-image="og:image">');
+  expect(admitted.headers.get("x-spacefast-share-image")).toBeNull();
 });
 
 test("ambiguous path identities fail closed instead of being sanitized", async () => {

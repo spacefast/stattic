@@ -1,7 +1,7 @@
 {
-  "revision": "0362273d8a35dd25e075fa8e9b4af80882f38e4c",
-  "sourceHash": "c9a72f8cc6539a2a90503e61ce8ca09f96d37b624c310e08735ce93a407e9346",
-  "manifestSha256": "57206d7ae078cd10b4517bf562b585041f8e5af6bc5c24f95abfcef27a355774",
+  "revision": "c0fd3972b4139313a5e2f1c4361364ddeb702aab",
+  "sourceHash": "357678c87a59898813a149795f4362e74390eff2cb35ffd51817f30800ffaa18",
+  "manifestSha256": "b6eb1caf6b916f765a4ea5cb1111c04fcec05ca2d5fd18354043337536f97cf2",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "81016ead6601d75a451843a323d3069698f5f462c692cbcb42013df51b853de1"
+      "sha256": "18586f5c42f5e02f2fd4497428513c7bdb679bc2c5bcef168e79d9a139184bac"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "6209fba128be646e315943572e4f411a8f974233701ba6e1a92cb99892602521"
+      "sha256": "406b4b1f9ba6b9c8db4d10779c0fb1c53c863a82c659c137ea1141af45ca08c3"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -105,7 +105,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/content/mod.rs",
-      "sha256": "5799145b9e274be299d082bbbfa537ca72368c71717869e0e5dbf9ab7d23714a"
+      "sha256": "575ff9f43a3cf1aee75d82413f1a2a1f62cfaf6c7434da9a0a83de9d2fc828e8"
     },
     {
       "path": "crates/stattic-runtime-core/src/content/support.rs",
@@ -197,7 +197,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "9f923c9f27b75965153c9d6db06c3c9424d1f9d3dafc7a0550978437eb9e62df"
+      "sha256": "76035966f639758eb5d45f7eb5a440d30e0705cc95123b78f6164b01bf4c8033"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -230,6 +230,10 @@
     {
       "path": "crates/stattic-runtime-core/src/zero.rs",
       "sha256": "8710dc5d6448be5b39d6355f8689d2b0bd3e5b3459096514198870b9f08f0db5"
+    },
+    {
+      "path": "crates/stattic-runtime-core/tests/fixtures/auto-share-image-legacy.json",
+      "sha256": "4f25ef81005f9ccb14b9b71adb80491a7f60ee2711252bae2d9926f30fb74cc1"
     },
     {
       "path": "crates/stattic-runtime-core/tests/fixtures/provider-icon-legacy-catalog.json",
@@ -401,7 +405,7 @@
     },
     {
       "path": "runtime/engine/admin/api.php",
-      "sha256": "bc17892662b3cfce4da47c9e38725885220fbbc69face5d13a3ca96ec2031ad5"
+      "sha256": "9d31560ec0006aa38b714098b1650ccdd11fdc7c05cd218db227c264f062c7cf"
     },
     {
       "path": "runtime/engine/admin/auth.php",
@@ -437,7 +441,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "7c95591169cba8220dd5868249059b12ea234144ffbe93117f20359ff6c411bd"
+      "sha256": "efd92a7588c4fe84c31394dd8f1550471ec7e6057651ec7aa1b70fb683c003ac"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -565,7 +569,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "be0b05baf57ca36c4f175a0fea059ba6410692dfbf11e0f6fd02632010422e8b"
+      "sha256": "8028922092b3bd6e25ce51e3ea1bba9a2f73fba36e91ec16a8f99b7e61326ac2"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -709,7 +713,7 @@
     },
     {
       "path": "runtime/engine/shared/preview-images.php",
-      "sha256": "7016e87a65f6f3241e4d216bcd76abd1972aa2705a37269b19ce8ee4423f29e0"
+      "sha256": "48a3b589635156cd635d0ba4bc3a1ab3761873631f86d841801d659ee57057c3"
     },
     {
       "path": "runtime/engine/shared/private-tree.php",
@@ -821,7 +825,7 @@
     },
     {
       "path": "runtime/identity/NOTICE.md",
-      "sha256": "d761d78eafa173184c752c9a73ef30e90ea053d9a4d5d2ce3ac625066acb1bae"
+      "sha256": "4192a436a0768c6b680774789976ea062b363243dcb8e831b4d407c59ebd04b0"
     },
     {
       "path": "runtime/identity/build.ts",
@@ -829,11 +833,11 @@
     },
     {
       "path": "runtime/identity/lock.json",
-      "sha256": "fe2b5a4dc1e57169062b770bb34fc4eb2202b8cab390d176f82632f3712304ff"
+      "sha256": "5816c74968979167ceb768aae68a6e711ba06c40708e544de130ad19c52aab68"
     },
     {
       "path": "runtime/identity/spacefast-identity.zip",
-      "sha256": "0d204e6e031fead153cfcf4f74b55d098596dd864ad0307fe9638c5a15cc9186"
+      "sha256": "ffba0215c7710b1b7536aecdb4064b7ea4f033883c12308385f653c9648df6e1"
     },
     {
       "path": "runtime/installer.php",
@@ -861,7 +865,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "b4e5a5e64277149d442dc3fdf41ba54e0f6e90167013bbe74033df151e9f831a"
+      "sha256": "0d77d01dc1263ca2f3abf163b380e00170d3a6d33352a01c5f164fd475e8bec1"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",

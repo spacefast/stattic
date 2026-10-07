@@ -125,8 +125,9 @@ function _stattic_tier_collect_shas_from_artifact(string $path, array &$shas, in
  *
  * @return array{shas:array<string,int>,version_ids:list<string>}|null
  */
-function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?float $budgetDeadline = null): ?array
+function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?float $budgetDeadline = null, ?callable $budgetClock = null): ?array
 {
+    $budgetClock ??= static fn (): float => microtime(true);
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
     $shas = [];
     $versionIds = [];
@@ -135,7 +136,7 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
         return null;
     }
     foreach ($versionRoots as $versionRoot) {
-        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+        if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
             return null;
         }
         if (!is_dir($versionRoot)) {
@@ -192,7 +193,7 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
             return null;
         }
         foreach ($declarationEntries as $path) {
-            if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+            if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
                 return null;
             }
             if (is_file($path) && str_ends_with($path, '.json') && _stattic_tier_collect_shas_from_json($path, $shas) === null) {
@@ -217,9 +218,9 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
 }
 
 /** @return array<string,int>|null sha => publish timestamp */
-function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId, ?float $budgetDeadline = null): ?array
+function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId, ?float $budgetDeadline = null, ?callable $budgetClock = null): ?array
 {
-    $live = _stattic_tier_space_live_set($privateRoot, $spaceId, $budgetDeadline);
+    $live = _stattic_tier_space_live_set($privateRoot, $spaceId, $budgetDeadline, $budgetClock);
     return $live === null ? null : $live['shas'];
 }
 
@@ -234,8 +235,10 @@ function _stattic_tier_space_pinned_shas(
     string $privateRoot,
     string $spaceId,
     int $now,
-    ?float $budgetDeadline = null
+    ?float $budgetDeadline = null,
+    ?callable $budgetClock = null
 ): ?array {
+    $budgetClock ??= static fn (): float => microtime(true);
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
     $pinned = [];
     $pinEntries = _stattic_runtime_directory_entries($spaceRoot . '/pins');
@@ -245,7 +248,7 @@ function _stattic_tier_space_pinned_shas(
     foreach ($pinEntries as $path) {
         // Same whole-answer rule as the live set: a pin the budget cut off is
         // indistinguishable from no pin at all, and that difference is bytes.
-        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+        if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
             return null;
         }
         if (!is_file($path) || !str_ends_with($path, '.json')) {
@@ -428,8 +431,10 @@ function _stattic_tier_gc_apply_deletions(
     string $privateRoot,
     string $spaceId,
     array $deletions,
-    ?float $budgetDeadline = null
+    ?float $budgetDeadline = null,
+    ?callable $budgetClock = null
 ): array {
+    $budgetClock ??= static fn (): float => microtime(true);
     $collected = [];
     $evicted = [];
     $bytes = 0;
@@ -438,7 +443,7 @@ function _stattic_tier_gc_apply_deletions(
         // A batch is the bounded unit here: it is one short lock hold, and a
         // batch this pass never applied simply keeps its mark, so the next pass
         // re-decides it against a freshly read live set.
-        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+        if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
             $complete = false;
             break;
         }
@@ -511,18 +516,20 @@ function _stattic_tier_space_blob_gc(
     string $spaceId,
     int $now,
     int $grace,
-    ?float $budgetDeadline = null
+    ?float $budgetDeadline = null,
+    ?callable $budgetClock = null
 ): array {
+    $budgetClock ??= static fn (): float => microtime(true);
     $skipped = ['complete' => false, 'deleted' => 0, 'bytes' => 0];
     $prefixes = _stattic_tier_space_blob_prefixes($privateRoot, $spaceId);
     if ($prefixes === null) {
         return $skipped;
     }
-    $live = _stattic_tier_space_live_shas($privateRoot, $spaceId, $budgetDeadline);
+    $live = _stattic_tier_space_live_shas($privateRoot, $spaceId, $budgetDeadline, $budgetClock);
     if ($live === null) {
         return $skipped;
     }
-    $pinned = _stattic_tier_space_pinned_shas($privateRoot, $spaceId, $now, $budgetDeadline);
+    $pinned = _stattic_tier_space_pinned_shas($privateRoot, $spaceId, $now, $budgetDeadline, $budgetClock);
     if ($pinned === null) {
         return $skipped;
     }
@@ -552,7 +559,7 @@ function _stattic_tier_space_blob_gc(
     foreach ($order as $prefix) {
         // One CAS prefix is the bounded unit: it is enumerated whole, so the
         // marks for it are a whole answer about it.
-        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+        if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
             $resumeAt = $prefix;
             $complete = false;
             break;
@@ -612,7 +619,7 @@ function _stattic_tier_space_blob_gc(
         if ($deletions === []) {
             continue;
         }
-        $applied = _stattic_tier_gc_apply_deletions($privateRoot, $spaceId, $deletions, $budgetDeadline);
+        $applied = _stattic_tier_gc_apply_deletions($privateRoot, $spaceId, $deletions, $budgetDeadline, $budgetClock);
         $collected = [...$collected, ...$applied['collected']];
         $evicted = [...$evicted, ...$applied['evicted']];
         $bytes += $applied['bytes'];
@@ -722,7 +729,7 @@ function _stattic_tier_local_blob_gc_run(
                     break;
                 }
                 if (
-                    !_stattic_tier_space_blob_gc($privateRoot, $spaceId, $now, $grace, $budgetDeadline)['complete']
+                    !_stattic_tier_space_blob_gc($privateRoot, $spaceId, $now, $grace, $budgetDeadline, $budgetClock)['complete']
                 ) {
                     $complete = false;
                 }

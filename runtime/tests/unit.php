@@ -1240,17 +1240,36 @@ for ($p = 0; $p < 64; $p++) {
 putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS=0');
 $gcMarksPath = _stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_scale');
 $gcNow = time();
-// 5 ms against a pass measured in tens of ms: truncation is the direction a
-// loaded box makes MORE certain, never less.
+// Expire the 5 ms clock after a real deletion rather than racing filesystem
+// speed or coverage overhead. One pre-aged blob stops the first pass early;
+// a briefly pinned neighbor witnesses its newly persisted first-seen time.
 $gcBudgetSeconds = 0.005;
+$gcBoundarySha = array_key_first($gcBudgetShas);
+$gcWitnessSha = '00' . sprintf('%062x', 1);
+_stattic_runtime_write_json_atomic($gcMarksPath, [$gcBoundarySha => $gcNow - 2]);
+_stattic_runtime_write_json_atomic($gcPrivateRoot . '/spaces/spc_gc_scale/pins/budget-witness.json', [
+    'expires_at' => gmdate('c', $gcNow + 5),
+    'shas' => [$gcWitnessSha],
+]);
 $gcPasses = 0;
 $gcDeleted = 0;
 $gcFirstMarks = [];
 $gcMarksAfterSecond = [];
+$gcFirstPassComplete = null;
 $gcPeakBefore = memory_get_usage(false);
 memory_reset_peak_usage();
 while ($gcPasses < 200 && $gcBudgetShas !== []) {
     $gcPasses += 1;
+    $gcCandidates = array_keys($gcBudgetShas);
+    if ($gcPasses <= 2) {
+        $gcCandidates = array_values(array_diff($gcCandidates, [$gcWitnessSha]));
+    }
+    $gcBoundarySha = $gcCandidates[0];
+    $gcBoundaryPath = $gcBlobsRoot . '/' . substr($gcBoundarySha, 0, 2) . '/' . $gcBoundarySha;
+    $gcBudgetClock = static function () use ($gcBoundaryPath, $gcBudgetSeconds): float {
+        clearstatcache(true, $gcBoundaryPath);
+        return is_file($gcBoundaryPath) ? 0.0 : $gcBudgetSeconds;
+    };
     // Logical time advances two seconds a pass, so a mark this pass rewrote
     // rather than preserved would be visible as a later first-seen value.
     $gcPass = _stattic_tier_space_blob_gc(
@@ -1258,10 +1277,12 @@ while ($gcPasses < 200 && $gcBudgetShas !== []) {
         'spc_gc_scale',
         $gcNow + $gcPasses * 2,
         1,
-        microtime(true) + $gcBudgetSeconds
+        $gcBudgetSeconds,
+        $gcBudgetClock
     );
     $gcDeleted += $gcPass['deleted'];
     if ($gcPasses === 1) {
+        $gcFirstPassComplete = $gcPass['complete'];
         $gcFirstMarks = _stattic_runtime_read_json($gcMarksPath);
         $gcFirstMarks = is_array($gcFirstMarks) ? $gcFirstMarks : [];
     }
@@ -1278,7 +1299,7 @@ while ($gcPasses < 200 && $gcBudgetShas !== []) {
 $gcBudgetPeak = memory_get_peak_usage(false) - $gcPeakBefore;
 putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS');
 check(
-    $gcFirstMarks !== [],
+    $gcFirstPassComplete === false && $gcFirstMarks !== [],
     'blob gc across ticks: a pass the budget truncated still persists what it observed, so a grace clock starts'
 );
 $gcMarksPreserved = true;
@@ -1288,7 +1309,7 @@ foreach ($gcFirstMarks as $gcSha => $gcSeen) {
     }
 }
 check(
-    $gcMarksPreserved,
+    $gcMarksPreserved && isset($gcFirstMarks[$gcWitnessSha], $gcMarksAfterSecond[$gcWitnessSha]),
     'blob gc across ticks: the second pass never republishes a first-seen time the first pass recorded'
 );
 check(

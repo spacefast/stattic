@@ -63,9 +63,11 @@ export function registerSellPaymentElement() {
                 ? "Loading product…"
                 : state.phase === "starting"
                   ? "Preparing Checkout…"
-                  : state.product
-                    ? label
-                    : "Refresh product";
+                  : state.phase === "error" && state.product
+                    ? "Try Checkout again"
+                    : state.product
+                      ? label
+                      : "Refresh product";
             cover.hidden = !state.product?.coverImage;
             if (state.product?.coverImage) {
               cover.src = state.product.coverImage;

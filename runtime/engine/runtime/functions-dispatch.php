@@ -404,7 +404,7 @@ function _stattic_functions_cloudflare_reporting_group(stdClass $report): bool
 // Cloudflare terminates the internal Functions hop; its response metadata
 // describes that hop, and the outer CDN would cache stale Ray IDs. Application
 // cookies relay only host-only or scoped to the exact request host: a Space's
-// hostname shares its parent with sibling Spaces (view.fast, a partner apex),
+// hostname shares its parent with sibling Spaces (space.fast, view.fast, a partner apex),
 // and the runtime cannot prove a custom domain's parent belongs to this Space.
 function _stattic_functions_relay_response_lane(string $requestHost = ''): array
 {

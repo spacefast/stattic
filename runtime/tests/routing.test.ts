@@ -1391,16 +1391,9 @@ test("template variants select per-channel bytes; a version host serves the comm
     spaceId: "spc_variants",
     versionId: "ver_variants_1",
     files: {
-      "index.html":
-        '<!doctype html><html><head></head><body><!--#include virtual="/parts/header-shared.html" --><main>{{ vars.API }}</main></body></html>\n',
-      "docs/guide.html":
-        '<!doctype html><html><head></head><body><!--#include virtual="/parts/header-shared.html" --><main>guide</main></body></html>\n',
-      "parts/header-shared.html": "<header>{{ vars.API }}</header>",
+      "index.html": "<h1>variants</h1>\n",
       "config.js": template,
-      "sf.jsonc": '{ "templates": ["config.js", "index.html", "parts/header-shared.html"] }\n',
-    },
-    serving: {
-      config: { inject: { head: ['<meta name="channel-decoration" content="rendered">'] } },
+      "sf.jsonc": '{ "templates": ["config.js"] }\n',
     },
     finalize: {
       variable_scopes: [
@@ -1430,21 +1423,6 @@ test("template variants select per-channel bytes; a version host serves the comm
   const production = await get(rt, host, "/config.js");
   expect(production.status).toBe(200);
   expect(await production.text()).toBe(productionVariant);
-  for (const [pagePath, expected] of [
-    ["/", "<header>production</header><main>production</main>"],
-    ["/docs/guide.html", "<header>production</header><main>guide</main>"],
-  ]) {
-    const page = await get(rt, host, pagePath);
-    expect(page.status).toBe(200);
-    const body = await page.text();
-    expect(body).toContain(expected);
-    expect(body).toContain('name="channel-decoration"');
-    const pinnedPage = await get(rt, versionHost, pagePath);
-    expect(pinnedPage.status).toBe(200);
-    const pinnedBody = await pinnedPage.text();
-    expect(pinnedBody).toContain(expected.replaceAll("production", "base"));
-    expect(pinnedBody).toContain('name="channel-decoration"');
-  }
 
   // The version host is pinned to the artifact, not to the live channel.
   const pinned = await get(rt, versionHost, "/config.js");
@@ -1486,23 +1464,6 @@ test("template variants select per-channel bytes; a version host serves the comm
   );
   expect(variantBlob.status).toBe(200);
   expect(await variantBlob.text()).toBe(previewVariant);
-  const previewGuide = scan.files.find(
-    (file) => file.path === "docs/guide.html" && file.variant_route === "preview",
-  );
-  if (!previewGuide) throw new Error("Missing rendered preview-channel guide");
-  const previewPage = await getBlob(
-    rt,
-    host,
-    blobGateToken("spc_variants", previewGuide.sha256, {
-      versionId: "ver_variants_1",
-      variantRoute: "preview",
-    }),
-  );
-  expect(previewPage.status).toBe(200);
-  const previewBody = await previewPage.text();
-  expect(previewBody).toContain("<header>preview</header><main>guide</main>");
-  expect(previewBody).toContain('name="channel-decoration"');
-  expect(sha256(previewBody)).toBe(previewGuide.sha256);
 });
 
 test("tombstoned hostnames return the removed platform page", async () => {

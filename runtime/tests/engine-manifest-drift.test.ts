@@ -35,6 +35,8 @@ const NOT_SHIPPED = {
   "bootstrap-plugin/":
     "signed box bootstrap plugin source, packaged only in the paired bootstrap zip",
   "browser-specs/": "real-browser runtime tests, never installed on a site",
+  "browser/":
+    "payment browser source; scripts/build-sell-payment.mjs emits the shipped runtime bundle",
   "bunfig.toml": "Bun test coverage configuration, never installed on a site",
   "node_modules/": "workspace dependency links, never installed on a site",
   "package.json": "the Turbo workspace boundary and test dependency graph, never installed",

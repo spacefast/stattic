@@ -3024,6 +3024,8 @@ function _stattic_access_page_descriptor(array $serving): ?array
             'commentsTicketUrl',
             'commentsVersionUrlsUrl',
             'zeroRealtimeTicketUrl',
+            'sellCheckoutUrl',
+            'sellProductUrl',
         ] as $field) {
             $value = $rawExchange[$field] ?? null;
             $urls[$field] = is_string($value) && _stattic_platform_destination_allowed($value)
@@ -3618,7 +3620,7 @@ function _stattic_access_test_connect_origin(): string
     return trim((string) getenv('SPACEFAST_ACCESS_EXCHANGE_TEST_CONNECT_ORIGIN'));
 }
 
-function _stattic_access_exchange_post(string $url, array $fields, array $headers): ?array
+function _stattic_access_exchange_post(string $url, array $fields, array $headers, ?string $jsonBody = null): ?array
 {
     // Lazy: only the exchange lanes leave this host, and every other access
     // decision is answered from the projection on disk.
@@ -3668,10 +3670,13 @@ function _stattic_access_exchange_post(string $url, array $fields, array $header
         $headers[] = 'Host: ' . $logicalAuthority;
     }
     $responseCookies = [];
+    if ($jsonBody !== null) {
+        $headers[] = 'Content-Type: application/json';
+    }
     $result = _stattic_http_request([
         'url' => $requestUrl,
         'method' => 'POST',
-        'body' => http_build_query($fields),
+        'body' => $jsonBody ?? http_build_query($fields),
         'headers' => $headers,
         'connect_timeout' => 3,
         'timeout' => 5,

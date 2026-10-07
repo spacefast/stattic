@@ -4,7 +4,6 @@
 
 mod frontmatter;
 mod gutenberg;
-mod includes;
 mod markdown;
 mod support;
 mod theme_css;
@@ -37,15 +36,6 @@ use theme_css::compile_theme;
 
 pub(crate) const PIPELINE_SOURCE_MAX_BYTES: usize = 2 * 1024 * 1024;
 
-/// Staged bytes the renderer reads; other assets are addressed by metadata.
-pub(crate) fn is_pipeline_source(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    includes::is_html(path)
-        || lower.ends_with(".md")
-        || lower.ends_with(".markdown")
-        || path == "theme.json"
-}
-
 /// A pipeline-rendered page and the metadata its layout and decoration need.
 #[derive(Debug)]
 pub(crate) struct Page {
@@ -64,7 +54,6 @@ pub(crate) struct Page {
 }
 
 /// What one content-pipeline run produced.
-#[derive(Clone)]
 pub struct HtmlPipelineOutcome {
     /// The source paths that must stay private.
     pub private: BTreeSet<String>,
@@ -133,40 +122,6 @@ pub fn materialize_html_pipeline(
     let mut generated = BTreeSet::new();
     let mut decorated = 0usize;
     let mut pages = Vec::new();
-    let mut includes = includes::Includes::new(files_root, files.keys().cloned());
-    // Expand once from staged source, before any renderer rewrites an input.
-    // Only actual references claim private fragments. Include-bearing pages
-    // compile on every publish; ordinary pages keep their existing adoption.
-    let mut expanded = BTreeMap::new();
-    for path in files.keys().filter(|path| includes::is_html(path)) {
-        // The normal content lane owns oversized-source diagnostics.
-        if files[path].size > PIPELINE_SOURCE_MAX_BYTES as u64 {
-            continue;
-        }
-        if let Some(source) = pipeline_text(files_root, path, diagnostics)? {
-            if !source.contains(includes::PREFIX) {
-                continue;
-            }
-            let document = includes.resolve(path, &source)?;
-            if document != source {
-                expanded.insert(path.clone(), document);
-            }
-        }
-    }
-    private.extend(includes.referenced);
-    for (path, document) in expanded {
-        if private.contains(&path) {
-            continue;
-        }
-        write_generated(
-            files_root,
-            files,
-            &path,
-            document.as_bytes(),
-            Some("text/html; charset=utf-8"),
-        )?;
-        generated.insert(path);
-    }
     let site_title = config
         .get("meta")
         .and_then(Value::as_object)
@@ -180,7 +135,6 @@ pub fn materialize_html_pipeline(
             .filter(|path| {
                 let lower = path.to_ascii_lowercase();
                 !path.starts_with("__spacefast_generated/")
-                    && !private.contains(*path)
                     && (lower.ends_with(".html") || lower.ends_with(".htm"))
             })
             .cloned()
@@ -228,9 +182,6 @@ pub fn materialize_html_pipeline(
     // authored but never served.
     let paths: Vec<String> = files.keys().cloned().collect();
     for path in &paths {
-        if private.contains(path) {
-            continue;
-        }
         let lower = path.to_ascii_lowercase();
         let basename = path.rsplit('/').next().unwrap_or(path);
         // A leading `_` or `.` marks a partial, but only on a file this
@@ -391,7 +342,7 @@ pub fn materialize_html_pipeline(
         // A rendered page's decoration also reads frontmatter that never
         // reaches the rendered bytes (description, image), so byte equality
         // cannot prove its meta tags — pages always take the full path.
-        if adoption_enabled && !generated.contains(&path) && !page_by_output.contains_key(&path) {
+        if adoption_enabled && !page_by_output.contains_key(&path) {
             if let Some(prior) = adoptable.get(&path) {
                 if files
                     .get(&path)
@@ -1607,240 +1558,6 @@ mod tests {
         let twice = read(&run, "index.html");
         assert_eq!(twice.matches("rel=\"icon\"").count(), 1);
         assert_eq!(once, twice);
-    }
-
-    #[test]
-    fn html_includes_preserve_bytes_variants_and_raw_text() {
-        let source = br#"<!doctype html><html><head><link rel='icon' href='/icon.svg'><link href='/style.css' rel='stylesheet'></head><body class = 'kept'>
-<!--#include virtual="/parts/header-a.html" -->
-<main>Home &amp; only</main><!--#include virtual="/parts/footer.html" -->
-<script>const sample = '<!--#include virtual="/missing.html" -->';</script><style>/* <!--#include virtual="/missing.html" --> */</style>
-<!--#exec cmd="date" --><!--#ordinary comment -->
-<!--#include file="footer.html" --><!--#include virtual="/includes/nav.shtml" -->
-<!-- #include virtual="/parts/footer.html" --><!--#INCLUDE virtual="/parts/footer.html" -->
-<!--#include virtual='/parts/footer.html' --><!--#include  virtual="/parts/footer.html" -->
-<!--#include virtual ="/parts/footer.html" --><!--#include virtual="/fragments/footer.html" -->
-</body></html>"#;
-        let run = run_pipeline(
-            &[
-                ("index.html", source),
-                ("other.html", br#"<body><!--#include virtual="/parts/header-b.html" --><main>Other</main></body>"#),
-                ("parts/header-a.html", br#"<header data-variant='a'><!--#include virtual="/parts/Shared_Heading-1.html" --></header>"#),
-                ("parts/header-b.html", b"<header data-variant='b'>Variant B</header>"),
-                ("parts/Shared_Heading-1.html", b"<h1>Shared &amp; heading</h1>"),
-                ("parts/footer.html", b"<footer>Shared footer</footer>"),
-                ("parts/public.html", b"<main>Ordinary public page</main><!--#include file=\"footer.html\" -->"),
-                ("style.css", b"body{color:red}"),
-                ("app.js", b"const intact = true;"),
-            ], json!({"mode":"website"}), json!({"config":{}}),
-        );
-        let outcome = run.result.as_ref().unwrap();
-        let expected = String::from_utf8(source.to_vec())
-            .unwrap()
-            .replace(
-                "<!--#include virtual=\"/parts/header-a.html\" -->",
-                "<header data-variant='a'><h1>Shared &amp; heading</h1></header>",
-            )
-            .replace(
-                "<!--#include virtual=\"/parts/footer.html\" -->",
-                "<footer>Shared footer</footer>",
-            );
-        assert_eq!(read(&run, "index.html"), expected);
-        assert_eq!(
-            read(&run, "other.html"),
-            "<body><header data-variant='b'>Variant B</header><main>Other</main></body>"
-        );
-        assert_eq!(read(&run, "style.css"), "body{color:red}");
-        assert_eq!(read(&run, "app.js"), "const intact = true;");
-        assert_eq!(
-            read(&run, "parts/header-a.html"),
-            "<header data-variant='a'><!--#include virtual=\"/parts/Shared_Heading-1.html\" --></header>"
-        );
-        assert!(outcome.private.contains("parts/header-a.html"));
-        assert!(outcome.private.contains("parts/Shared_Heading-1.html"));
-        assert!(outcome.private.contains("parts/footer.html"));
-        assert!(!outcome.private.contains("parts/public.html"));
-        assert_eq!(
-            read(&run, "parts/public.html"),
-            "<main>Ordinary public page</main><!--#include file=\"footer.html\" -->"
-        );
-        assert!(!outcome.generated.contains("parts/header-a.html"));
-    }
-
-    #[test]
-    fn invalid_html_includes_fail_with_the_referring_path() {
-        for (source, code) in [
-            (
-                "<!--#include virtual=\"/parts/nested/a.html\" -->",
-                "html_include_invalid",
-            ),
-            (
-                "<!--#include virtual=\"/parts/a.htm\" -->",
-                "html_include_invalid",
-            ),
-            (
-                "<!--#include virtual=\"/parts/.html\" -->",
-                "html_include_invalid",
-            ),
-            (
-                "<!--#include virtual=\"/parts/a.html\"-->",
-                "html_include_invalid",
-            ),
-            (
-                "<!--#include virtual=\"/parts/a.html\" extra=\"x\" -->",
-                "html_include_invalid",
-            ),
-            (
-                "<!--#include virtual=\"/parts/a.html\"",
-                "html_include_invalid",
-            ),
-            (
-                "<!--#include virtual=\"/parts/missing.html\" -->",
-                "html_include_missing",
-            ),
-            (
-                "<!--#include virtual=\"/parts/../a.html\" -->",
-                "html_include_invalid",
-            ),
-            (
-                "<!--#include virtual=\"/parts/%2e%2e/a.html\" -->",
-                "html_include_invalid",
-            ),
-            (
-                "<!--#include virtual=\"/parts/a.html\" -->",
-                "html_include_cycle",
-            ),
-        ] {
-            let run = run_pipeline(
-                &[
-                    ("index.html", source.as_bytes()),
-                    (
-                        "parts/a.html",
-                        b"<!--#include virtual=\"/parts/a.html\" -->",
-                    ),
-                ],
-                json!({}),
-                json!({}),
-            );
-            match run.result.err().unwrap() {
-                FinalizeError::Invalid {
-                    code: actual,
-                    message,
-                    ..
-                } => {
-                    assert_eq!(actual, code, "{source}: {message}");
-                    assert!(message.contains("index.html"), "{message}");
-                }
-                error => panic!("{source}: {error}"),
-            }
-        }
-    }
-
-    #[test]
-    fn html_include_budgets_charge_reuse_depth_count_and_trailing_bytes() {
-        let include = "<!--#include virtual=\"/parts/a.html\" -->";
-        let fragment = "x".repeat(PIPELINE_SOURCE_MAX_BYTES / 2);
-        // The fragment fits twice; it is the trailing original byte that must
-        // reject this page. A warmed source cache must not make it free.
-        let source = format!("{include}{include}z");
-        let run = run_pipeline(
-            &[
-                ("index.html", source.as_bytes()),
-                ("parts/a.html", fragment.as_bytes()),
-            ],
-            json!({}),
-            json!({}),
-        );
-        assert!(matches!(
-            run.result,
-            Err(FinalizeError::Invalid {
-                code: "html_include_too_large",
-                ..
-            })
-        ));
-        let source = include.repeat(1025);
-        let run = run_pipeline(
-            &[("index.html", source.as_bytes()), ("parts/a.html", b"")],
-            json!({}),
-            json!({}),
-        );
-        assert!(matches!(
-            run.result,
-            Err(FinalizeError::Invalid {
-                code: "html_include_limit",
-                ..
-            })
-        ));
-
-        let mut sources = vec![(
-            "index.html".to_string(),
-            format!("{include}<!--#include virtual=\"/parts/0.html\" -->"),
-        )];
-        sources.push(("parts/a.html".into(), "<h1>warmed</h1>".into()));
-        for depth in 0..32 {
-            let target = if depth == 31 {
-                "a".to_string()
-            } else {
-                (depth + 1).to_string()
-            };
-            sources.push((
-                format!("parts/{depth}.html"),
-                format!("<!--#include virtual=\"/parts/{target}.html\" -->"),
-            ));
-        }
-        let files: Vec<_> = sources
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_bytes()))
-            .collect();
-        let run = run_pipeline(&files, json!({}), json!({}));
-        assert!(matches!(
-            run.result,
-            Err(FinalizeError::Invalid {
-                code: "html_include_limit",
-                ..
-            })
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn html_includes_reject_unstaged_files_and_symlink_escape() {
-        let temp = tempdir().unwrap();
-        let root = temp.path().join("files");
-        fs::create_dir_all(root.join("parts")).unwrap();
-        fs::write(root.join("parts/unlisted.html"), "not staged").unwrap();
-        fs::write(temp.path().join("outside.html"), "outside").unwrap();
-        std::os::unix::fs::symlink(
-            temp.path().join("outside.html"),
-            root.join("parts/link.html"),
-        )
-        .unwrap();
-        std::os::unix::fs::symlink(
-            root.join("parts/unlisted.html"),
-            root.join("parts/internal.html"),
-        )
-        .unwrap();
-        let mut includes = includes::Includes::new(
-            &root,
-            [
-                "parts/link.html".to_string(),
-                "parts/internal.html".to_string(),
-            ]
-            .into_iter(),
-        );
-        for (target, code) in [
-            ("unlisted", "html_include_missing"),
-            ("link", "html_include_escape"),
-            ("internal", "html_include_missing"),
-        ] {
-            let error = includes
-                .resolve(
-                    "index.html",
-                    &format!("<!--#include virtual=\"/parts/{target}.html\" -->"),
-                )
-                .unwrap_err();
-            assert!(matches!(error, FinalizeError::Invalid { code: actual, .. } if actual == code));
-        }
     }
 
     #[test]

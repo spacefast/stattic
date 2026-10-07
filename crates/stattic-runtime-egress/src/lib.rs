@@ -99,7 +99,9 @@ pub const DENIED_IPV6_NETWORKS: &[(Ipv6Addr, u8)] = &[
     (Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
 ];
 
-pub const SERVING_INTERNAL_HOSTS: &[&str] = &["view.fast", "atomicsites.net"];
+// Every managed space apex (current `space.fast`, legacy `view.fast`) plus the
+// provider fallback. A space must never reach a sibling space directly.
+pub const SERVING_INTERNAL_HOSTS: &[&str] = &["space.fast", "view.fast", "atomicsites.net"];
 
 /// The hosts an anonymous space may reach. Sorted, exact hostnames, no
 /// wildcards: a reviewer reads the whole policy in one column.

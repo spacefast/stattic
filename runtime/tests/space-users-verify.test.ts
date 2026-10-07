@@ -91,6 +91,9 @@ beforeAll(async () => {
   const url = new URL(mysql.url);
   rt = await startRuntime({
     env: {
+      // Ignore ambient API database configuration; this fixture owns its MySQL tuple.
+      DATABASE_URL: "",
+      SPACEFAST_ZERO_DATABASE_URL: "",
       // The provider's own DB_* tuple, as the box exposes it to the engine.
       DB_HOST: `${url.hostname}:${url.port}`,
       DB_NAME: DATABASE,
@@ -160,7 +163,7 @@ test("a PHP function sees the app user behind a live sfi_session cookie, and onl
     });
 
   const signedIn = await whoami(live);
-  expect(signedIn.status).toBe(200);
+  expect(signedIn.status, await signedIn.clone().text()).toBe(200);
   expect(signedIn.headers.get("cache-control")).toBe("private, no-store");
   expect(await signedIn.json()).toEqual({
     userId: SUBJECT,

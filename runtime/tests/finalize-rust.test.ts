@@ -140,22 +140,15 @@ afterAll(() => {
 });
 
 test("native finalize publishes and serves a site end to end", async () => {
-  const sourceFiles = {
-    "index.html":
-      '<!--#include virtual="/parts/header-shared.html" --><main>native home</main><!--#include virtual="/parts/footer.html" -->\n',
-    "docs/guide.html":
-      '<!--#include virtual="/parts/header-shared.html" --><main>guide</main><!--#include virtual="/parts/footer.html" -->\n',
-    "parts/header-shared.html": "<header><h1>shared one</h1></header>",
-    "parts/footer.html": "<footer>kept</footer>",
-    "parts/public.html": '<main>ordinary public page</main>\n<!--#include file="footer.html" -->\n',
-    "assets/site.css": "main{color:blue}\n",
-    _redirects: "/old /docs/guide.html 301\n",
-  };
   await deploy(rt, {
     spaceId: "spc_native",
     versionId: "ver_native_1",
     metadata: { mode: "website", title: "Native Finalize" },
-    files: sourceFiles,
+    files: {
+      "index.html": "<h1>native home</h1>\n",
+      "docs/guide.html": "<h1>guide</h1>\n",
+      _redirects: "/old /docs/guide.html 301\n",
+    },
     activate: {
       route_name: "production",
       config: publicAccessConfig({ mode: "website", site_title: "Native Finalize" }),
@@ -167,22 +160,11 @@ test("native finalize publishes and serves a site end to end", async () => {
 
   const home = await get(rt, HOST, "/");
   expect(home.status).toBe(200);
-  const firstHome =
-    "<header><h1>shared one</h1></header><main>native home</main><footer>kept</footer>\n";
-  expect(await home.text()).toBe(firstHome);
+  expect(await home.text()).toBe("<h1>native home</h1>\n");
 
   const guide = await get(rt, HOST, "/docs/guide.html");
   expect(guide.status).toBe(200);
-  const firstGuide =
-    "<header><h1>shared one</h1></header><main>guide</main><footer>kept</footer>\n";
-  expect(await guide.text()).toBe(firstGuide);
-  expect((await get(rt, HOST, "/parts/header-shared.html")).status).toBe(404);
-  const publicPart = await get(rt, HOST, "/parts/public.html");
-  expect(publicPart.status).toBe(200);
-  expect(await publicPart.text()).toBe(sourceFiles["parts/public.html"]);
-  const css = await get(rt, HOST, "/assets/site.css");
-  expect(css.status).toBe(200);
-  expect(await css.text()).toBe(sourceFiles["assets/site.css"]);
+  expect(await guide.text()).toBe("<h1>guide</h1>\n");
 
   // `_redirects` is compiled by the Rust finalizer and enforced when serving.
   const redirect = await get(rt, HOST, "/old");
@@ -202,8 +184,9 @@ test("native finalize publishes and serves a site end to end", async () => {
   });
 
   const nextFiles = {
-    ...sourceFiles,
-    "parts/header-shared.html": "<header><h1>shared two</h1></header>",
+    "index.html": "<h1>native home v2</h1>\n",
+    "docs/guide.html": "<h1>guide</h1>\n",
+    _redirects: "/old /docs/guide.html 301\n",
   };
   const next = await createDeclaredSession(rt, "spc_native", "ver_native_2", nextFiles);
   await uploadSessionBlobs(rt, next, nextFiles);
@@ -227,15 +210,7 @@ test("native finalize publishes and serves a site end to end", async () => {
 
   const updatedHome = await get(rt, HOST, "/");
   expect(updatedHome.status).toBe(200);
-  expect(await updatedHome.text()).toBe(firstHome.replace("shared one", "shared two"));
-  const updatedGuide = await get(rt, HOST, "/docs/guide.html");
-  expect(updatedGuide.status).toBe(200);
-  expect(await updatedGuide.text()).toBe(firstGuide.replace("shared one", "shared two"));
-  const unchangedPublicPart = await get(rt, HOST, "/parts/public.html");
-  expect(unchangedPublicPart.status).toBe(200);
-  expect(await unchangedPublicPart.text()).toBe(sourceFiles["parts/public.html"]);
-  expect(publishedBody("spc_native", "ver_native_1", "/")).toBe(firstHome);
-  expect(publishedBody("spc_native", "ver_native_1", "/docs/guide.html")).toBe(firstGuide);
+  expect(await updatedHome.text()).toBe("<h1>native home v2</h1>\n");
 });
 
 // The space card addresses this path on the version's own public URL, so it

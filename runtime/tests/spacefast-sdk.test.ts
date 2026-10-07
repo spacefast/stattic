@@ -6,12 +6,21 @@ import path from "node:path";
 import { canonicalPagePath, commentRoomKey } from "../../packages/collab-sdk/src/core.ts";
 import { ICON_PATHS } from "../../packages/collab-sdk/src/theme/icons.ts";
 import { collabManifestSchema } from "../../packages/common/src/contracts/collab-manifest.ts";
+import {
+  sellRuntimeCheckoutRequestSchema,
+  type SellRuntimeCheckoutRequest,
+  sellRuntimeProductRequestSchema,
+  sellPublicProductSchema,
+} from "../../packages/common/src/contracts/sell.ts";
 // Fetched through the shipped constants, not string literals: PHP and TypeScript
 // name these two URLs independently, and this suite is where a drift between
 // them surfaces.
 import {
   RUNTIME_COLLAB_MANIFEST_PATH,
   RUNTIME_COLLAB_THEME_PATH,
+  RUNTIME_SELL_CHECKOUT_PATH,
+  RUNTIME_SELL_PRODUCT_PATH,
+  RUNTIME_SELL_CLIENT_PATH,
 } from "../../packages/common/src/utils/runtime-paths.ts";
 import {
   deploy,
@@ -1012,10 +1021,38 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
 
 test("Comments configuration stays on-origin while the runtime authenticates upstream", async () => {
   const exchanges: Array<{ credential: string | null; payload: Record<string, unknown> }> = [];
+  const checkouts: Array<{ credential: string | null; payload: SellRuntimeCheckoutRequest }> = [];
   let ticketFailureCode: string | null = null;
   const central = Bun.serve({
     port: 0,
     async fetch(request) {
+      if (new URL(request.url).pathname === "/sell/runtime/spc_sdk_exchange/product") {
+        const input = sellRuntimeProductRequestSchema.parse(await request.json());
+        if (
+          input.deploymentId !== "ver_sdk_exchange_1" ||
+          request.headers.get("spacefast-runtime-exchange") !==
+            "runtime-comments-credential-0000000000000000000000000000"
+        )
+          return Response.json({ code: "access_denied" }, { status: 403 });
+        return Response.json({
+          data: sellPublicProductSchema.parse({
+            key: input.productKey,
+            name: "Guide",
+            kind: "digital",
+            price: { amountMinor: 1900, currency: "usd" },
+            testMode: true,
+          }),
+        });
+      }
+      if (new URL(request.url).pathname === "/sell/runtime/spc_sdk_exchange/checkout") {
+        checkouts.push({
+          credential: request.headers.get("spacefast-runtime-exchange"),
+          payload: sellRuntimeCheckoutRequestSchema.parse(await request.json()),
+        });
+        return Response.json({
+          data: { status: "processing", purchaseToken: "signed-locator", testMode: true },
+        });
+      }
       const fields = new URLSearchParams(await request.text());
       exchanges.push({
         credential: request.headers.get("spacefast-runtime-exchange"),
@@ -1077,6 +1114,8 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
           commentsTicketUrl: `${central.url}runtime/comments/runtime-comments/ticket`,
           commentsVersionUrlsUrl: `${central.url}runtime/comments/runtime-comments/version-urls`,
           zeroRealtimeTicketUrl: `${central.url}acquire/runtime-comments/zero/realtime-ticket`,
+          sellCheckoutUrl: `${central.url}sell/runtime/spc_sdk_exchange/checkout`,
+          sellProductUrl: `${central.url}sell/runtime/spc_sdk_exchange/product`,
           credential: "runtime-comments-credential-0000000000000000000000000000",
         },
       },
@@ -1331,6 +1370,86 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     expect(await errorCode(staleSession)).toBe("comments_reauth_required");
     expect(staleSession.headers.getSetCookie()).toHaveLength(0);
     ticketFailureCode = null;
+    const checkoutInput = {
+      pagePath: "/docs",
+      productKey: "guide",
+      attemptKey: randomUUID(),
+      attemptCreatedAt: new Date().toISOString(),
+    };
+    const checkout = (
+      input: typeof checkoutInput & { deploymentId?: string } = checkoutInput,
+      origin = "http://comments-exchange.site.test",
+    ) =>
+      get(runtime, "comments-exchange.site.test", RUNTIME_SELL_CHECKOUT_PATH, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin },
+        body: JSON.stringify(input),
+      });
+    const checkoutResponse = await checkout();
+    expect(checkoutResponse.status).toBe(200);
+    expect(await checkoutResponse.json()).toEqual({
+      data: { status: "processing", purchaseToken: "signed-locator", testMode: true },
+    });
+    expect(checkouts).toEqual([
+      {
+        credential: "runtime-comments-credential-0000000000000000000000000000",
+        payload: {
+          deploymentId: "ver_sdk_exchange_1",
+          productKey: checkoutInput.productKey,
+          attemptKey: checkoutInput.attemptKey,
+          attemptCreatedAt: checkoutInput.attemptCreatedAt,
+        },
+      },
+    ]);
+    expect(checkoutResponse.headers.get("cache-control")).toBe("no-store");
+    expect(checkoutResponse.headers.getSetCookie()).toHaveLength(0);
+    expect((await checkout({ ...checkoutInput, deploymentId: "ver_browser_chosen" })).status).toBe(
+      422,
+    );
+    expect((await checkout(checkoutInput, "https://attacker.example")).status).toBe(403);
+    expect(checkouts).toHaveLength(1);
+    const productResponse = await get(
+      runtime,
+      "comments-exchange.site.test",
+      RUNTIME_SELL_PRODUCT_PATH,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://comments-exchange.site.test",
+        },
+        body: JSON.stringify({ pagePath: "/docs", productKey: "guide" }),
+      },
+    );
+    expect(productResponse.status).toBe(200);
+    expect(await productResponse.json()).toEqual({
+      data: {
+        key: "guide",
+        name: "Guide",
+        kind: "digital",
+        price: { amountMinor: 1900, currency: "usd" },
+        testMode: true,
+      },
+    });
+    expect(productResponse.headers.get("cache-control")).toBe("no-store");
+    const paymentScript = await get(
+      runtime,
+      "comments-exchange.site.test",
+      RUNTIME_SELL_CLIENT_PATH,
+    );
+    expect(paymentScript.status).toBe(200);
+    expect(paymentScript.headers.get("content-type")).toBe("application/javascript; charset=utf-8");
+    expect(paymentScript.headers.get("cache-control")).toBe("no-store");
+    expect(paymentScript.headers.get("x-content-type-options")).toBe("nosniff");
+    expect((await paymentScript.arrayBuffer()).byteLength).toBeGreaterThan(0);
+    const paymentScriptHead = await get(
+      runtime,
+      "comments-exchange.site.test",
+      RUNTIME_SELL_CLIENT_PATH,
+      { method: "HEAD" },
+    );
+    expect(paymentScriptHead.status).toBe(200);
+    expect((await paymentScriptHead.arrayBuffer()).byteLength).toBe(0);
     const exchangesBeforeOutage = exchanges.length;
 
     // An unreachable control plane is a 502, distinguishable from denial.
@@ -1341,6 +1460,9 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     expect(outage.headers.get("content-type")).toContain("application/problem+json");
     expect(await errorCode(outage)).toBe("comments_exchange_unavailable");
     expect(exchanges.length).toBe(exchangesBeforeOutage);
+    const checkoutOutage = await checkout();
+    expect(checkoutOutage.status).toBe(503);
+    expect(await errorCode(checkoutOutage)).toBe("provider_error");
   } finally {
     central.stop(true);
   }

@@ -470,7 +470,7 @@ fn identity_of(meta: &FileMeta) -> ObjectIdentity {
 /// Diffs two local catalogs.
 ///
 /// Counts are over SOURCE identity — what the publisher changed, which is what
-/// a changelog reports. The scoped purge set is built from the same walk, plus
+/// a changelog reports. The scoped purge set also compares SERVED identity, plus
 /// the template paths of both sides: a publish that only changes a variable's
 /// value leaves every source hash alone while changing the bytes at those URLs.
 pub fn catalog_delta(
@@ -508,6 +508,8 @@ pub fn catalog_delta(
             Some(before) => {
                 if before.source.sha256 != entry.source.sha256 {
                     changed_count += 1;
+                }
+                if before.source.sha256 != entry.source.sha256 || before.served != entry.served {
                     // Same URL, different bytes. An immutable declaration is the
                     // publisher's promise that this cannot happen; since it did,
                     // honor the bytes and purge.

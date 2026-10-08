@@ -1,7 +1,7 @@
 {
-  "revision": "4f19629d2f3d64a0a33adb83c2801295f1700d14",
-  "sourceHash": "8ef5c87e5b1863e5fa11a3d828d24ff6816e942994176c2338120b9d0a71812e",
-  "manifestSha256": "4c7b3646484bbffca4e725c15a5d183ce51318b915ab1437090c35ccc05d051b",
+  "revision": "38207b066b3805470f7f05e703b2eb38a89f8ebf",
+  "sourceHash": "b9f5dd7771478c6bd3ba7cf865d981fe6dad45f5b782c6c90eb406ab77f1a7df",
+  "manifestSha256": "982f5741b4a19a008c5651ddb75b76e6365fd5ef0137e888ef0544400f991e91",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "ea69b45c53b777018891aaf31589eadbeaecee8df48c31ac45883c6373a8ce4f"
+      "sha256": "a105fb7303a26d21d274bc4afdee1d9216088077ae6412043d6bcb1d447bd4d9"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "443098f161906e1f320e1bf94e1781fe4995f6a2e6d46d9644744ec144aa9600"
+      "sha256": "f4e03a90c58789597f5003dff5edd73a6553a96f118a6cc86776f30b5e605dac"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -497,7 +497,7 @@
     },
     {
       "path": "runtime/engine/entrypoints/content.php",
-      "sha256": "a5a82185968623394dd8d36c49abd4d730367e7759d31185c75f5d5e145b7795"
+      "sha256": "d8a124ca455550696ab6ea904f9b7d05847e3e9c9ac2c0bc49d678d3257e366b"
     },
     {
       "path": "runtime/engine/entrypoints/cron.php",
@@ -689,7 +689,7 @@
     },
     {
       "path": "runtime/engine/shared/design-upload.generated.php",
-      "sha256": "b0e643119ae779b34b0f4c680c76d4e2fd284b59ec0b30be7afa8879c2020d2f"
+      "sha256": "dcbeccb1e66acb3f361368d1d4124090e192182a7d1f5dfb6e5c3e769be4e07c"
     },
     {
       "path": "runtime/engine/shared/egress.php",
@@ -861,7 +861,7 @@
     },
     {
       "path": "runtime/engine/wordpress/team-design-system.php",
-      "sha256": "636b340405f1d4e62c2eae4bffea1d6de29aefbbf130faf617cf3a3e38c9532f"
+      "sha256": "4ce7309b6f0a70c2e9501ed29dae41d8a87b0ba69f94a0c0b3f3fbd8e7b3f3bb"
     },
     {
       "path": "runtime/engine/wordpress/team-knowledge.php",
@@ -985,7 +985,7 @@
     },
     {
       "path": "runtime/tests/content-request.test.ts",
-      "sha256": "cbba99be7e89fc34fceae6278e75c334d4dc2711217193063bae77e47cd52bca"
+      "sha256": "94247ea4fa54591acf6a09f6fccaf1db7f3ddf5756326594fc584bd7448a82c3"
     },
     {
       "path": "runtime/tests/content-source-journal.test.ts",

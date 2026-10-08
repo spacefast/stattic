@@ -14,6 +14,7 @@ require_once $engineRoot . '/admin/auth.php';
 _stattic_emit_runtime_identity();
 
 const SPACEFAST_CONTENT_REQUEST_MAX_BYTES = 40 * 1024 * 1024;
+const SPACEFAST_DESIGN_UPLOAD_REQUEST_MAX_BYTES = 128 * 1024 * 1024;
 
 $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 if (!in_array($method, ['POST', 'PUT'], true)) {
@@ -23,9 +24,29 @@ if (!in_array($method, ['POST', 'PUT'], true)) {
     ]);
 }
 
-$rawBody = _stattic_bounded_request_body(SPACEFAST_CONTENT_REQUEST_MAX_BYTES);
+$privateRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
+// Bind the lazy private root before JWT verification: the verifier resolves
+// SPACEFAST_RUNTIME_INSTANCE_ID from `<privateRoot>/config.php` through this global.
+_stattic_access_private_root($privateRoot);
+if (!is_dir($privateRoot)) {
+    _stattic_problem_response(503, 'runtime_undeployed', 'Runtime storage is not provisioned on this site.');
+}
+
+$claims = null;
+// PUT is exclusively the asset-upload lane. Verify its action-scoped token
+// before granting its larger memory and body budgets, and consume its jti once.
+if ($method === 'PUT') {
+    $claims = _stattic_runtime_require_management_jwt($privateRoot, 'content.design-system.mutate');
+    // Asset transfers hold both the base64 envelope and decoded bytes in memory.
+    $memoryLimit = ini_parse_quantity((string) ini_get('memory_limit'));
+    if ($memoryLimit > 0 && $memoryLimit < 512 * 1024 * 1024) ini_set('memory_limit', '512M');
+}
+
+$rawBody = _stattic_bounded_request_body($method === 'PUT'
+    ? SPACEFAST_DESIGN_UPLOAD_REQUEST_MAX_BYTES
+    : SPACEFAST_CONTENT_REQUEST_MAX_BYTES);
 if ($rawBody === null) {
-    _stattic_problem_response(413, 'content_request_too_large', 'The content request exceeds 40 MiB.');
+    _stattic_problem_response(413, 'content_request_too_large', 'The content request exceeds its byte limit.');
 }
 $request = json_decode($rawBody, true);
 if (!is_array($request)) {
@@ -46,15 +67,6 @@ if ($operation === false) {
     _stattic_problem_response(400, 'content_operation_invalid', 'The content operation is not supported.');
 }
 
-$privateRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
-// Bind the lazy private root before the JWT verify below: the verifier
-// resolves SPACEFAST_RUNTIME_INSTANCE_ID through _stattic_config_value, which
-// reads `<privateRoot>/config.php` only through this global.
-_stattic_access_private_root($privateRoot);
-if (!is_dir($privateRoot)) {
-    _stattic_problem_response(503, 'runtime_undeployed', 'Runtime storage is not provisioned on this site.');
-}
-
 $needsAuthorization = in_array($operation, ['content.authorization.apply', 'content.admin.launch'], true);
 $requestedAuthorization = $needsAuthorization
     ? _stattic_content_admin_authorization($request['authorization'] ?? null)
@@ -62,7 +74,7 @@ $requestedAuthorization = $needsAuthorization
 if ($needsAuthorization && $requestedAuthorization === null) {
     _stattic_problem_response(422, 'content_authorization_invalid', 'The content authorization is invalid.');
 }
-$claims = _stattic_runtime_require_management_jwt(
+$claims ??= _stattic_runtime_require_management_jwt(
     $privateRoot,
     $operation,
     $requestedAuthorization === null ? [] : ['space_id' => $requestedAuthorization['space_id']]
@@ -105,6 +117,11 @@ if (
 }
 if ($principal !== null) {
     $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $principal;
+}
+// Raise only the authorized asset download, before WordPress builds its JSON response.
+if ($operation === 'content.design-system.read' && isset($request['attachmentId'])) {
+    $memoryLimit = ini_parse_quantity((string) ini_get('memory_limit'));
+    if ($memoryLimit > 0 && $memoryLimit < 512 * 1024 * 1024) ini_set('memory_limit', '512M');
 }
 // The role is the control plane's Grant decision, re-derived for this one
 // request and never read back from WordPress. The management JWT above

@@ -2,7 +2,16 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { api, deploy, publicAccessConfig, type Runtime, startRuntime } from "./harness.ts";
+import {
+  api,
+  deploy,
+  managementToken,
+  PHP_BINARY,
+  publicAccessConfig,
+  type Runtime,
+  RUNTIME_TEST_ATOMIC_PREPEND,
+  startRuntime,
+} from "./harness.ts";
 
 const repoRoot = path.resolve(import.meta.dir, "../..");
 const classifier = path.join(repoRoot, "runtime/engine/shared/content-request.php");
@@ -129,10 +138,56 @@ test("PUT file transfer does not widen other content operations", async () => {
     runtime,
     "PUT",
     "/__spacefast/content.php",
-    "content.model.activate",
+    "content.design-system.mutate",
     { space_id: CONTENT_SPACE },
     { operation: "model.activate", revision: null },
   );
   expect(response.status).toBe(405);
   expect(response.headers.get("allow")).toBe("POST");
+});
+
+test("PUT authenticates the upload lane before its body limit and memory increase", () => {
+  const uploadToken = managementToken("content.design-system.mutate", { space_id: CONTENT_SPACE });
+  const signatureIndex = uploadToken.lastIndexOf(".") + 1;
+  const invalidSignature =
+    uploadToken.slice(0, signatureIndex) +
+    (uploadToken[signatureIndex] === "A" ? "B" : "A") +
+    uploadToken.slice(signatureIndex + 1);
+  const script = String.raw`
+require $argv[1];
+$_SERVER['REQUEST_METHOD'] = 'PUT';
+$_SERVER['CONTENT_LENGTH'] = $argv[3];
+if ($argv[4] !== '') $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . $argv[4];
+register_shutdown_function(static function (): void {
+  fwrite(STDERR, (string) ini_get('memory_limit'));
+});
+require $argv[2] . '/entrypoints/content.php';
+`;
+  for (const [token, status, code] of [
+    ["", 401, "runtime_unauthorized"],
+    [invalidSignature, 401, "runtime_token_bad_signature"],
+    [
+      managementToken("content.model.activate", { space_id: CONTENT_SPACE }),
+      403,
+      "runtime_action_forbidden",
+    ],
+  ] as const) {
+    const result = Bun.spawnSync(
+      [
+        PHP_BINARY,
+        "-d",
+        "memory_limit=32M",
+        "-r",
+        script,
+        RUNTIME_TEST_ATOMIC_PREPEND,
+        runtime.engineRoot,
+        String(128 * 1024 * 1024 + 1),
+        token,
+      ],
+      { cwd: runtime.root },
+    );
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({ status, code });
+    expect(result.stderr.toString()).toBe("32M");
+  }
 });

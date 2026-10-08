@@ -5,7 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../shared/design-upload.generated.php';
 
 const SPACEFAST_DESIGN_TYPES = ['color', 'typography', 'layout', 'tone', 'rule', 'asset'];
-const SPACEFAST_DESIGN_ASSET_MAX_BYTES = 25000000;
+const SPACEFAST_DESIGN_ASSET_MAX_BYTES = 100000000;
 const SPACEFAST_DESIGN_METADATA_MAX_BYTES = 262144;
 
 if (function_exists('add_filter')) {
@@ -375,17 +375,21 @@ function spacefast_design_reference_valid(string $bytes, string $type, string $f
                 && str_contains($bytes, "P\0o\0w\0e\0r\0P\0o\0i\0n\0t\0 \0D\0o\0c\0u\0m\0e\0n\0t\0");
         case 'application/zip':
         case 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+        case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
             // Inspect the original container without extracting or executing its entries.
             $zip = new ZipArchive();
             if ($zip->open($file, ZipArchive::CHECKCONS) !== true) return false;
             try {
                 if ($type === 'application/zip') return true;
+                $word = $type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
                 $contentTypes = $zip->getFromName('[Content_Types].xml', 1_048_576);
-                return $zip->locateName('ppt/presentation.xml') !== false
+                return $zip->locateName($word ? 'word/document.xml' : 'ppt/presentation.xml') !== false
                     && is_string($contentTypes)
-                    && str_contains($contentTypes, 'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml')
+                    && str_contains($contentTypes, $word
+                        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'
+                        : 'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml')
                     && !str_contains($contentTypes, 'macroEnabled')
-                    && $zip->locateName('ppt/vbaProject.bin') === false;
+                    && $zip->locateName($word ? 'word/vbaProject.bin' : 'ppt/vbaProject.bin') === false;
             } finally {
                 $zip->close();
             }
@@ -413,7 +417,7 @@ function spacefast_design_upload(array $request): array
     $types = SPACEFAST_DESIGN_ASSET_MIMES;
     if (!is_string($bytes) || $bytes === '' || strlen($bytes) > SPACEFAST_DESIGN_ASSET_MAX_BYTES
         || !isset($types[$type]) || $filename === '' || preg_match('/[\/\\\\\x00-\x1f\x7f]/', $filename)) {
-        spacefast_design_error(400, 'team_design_system_upload_invalid', 'Upload one supported file of at most 25 MB.');
+        spacefast_design_error(400, 'team_design_system_upload_invalid', 'Upload one supported file of at most 100 MB.');
     }
     if ($type === 'image/svg+xml') $bytes = spacefast_design_svg($bytes);
     spacefast_content_storage_load_media_admin();

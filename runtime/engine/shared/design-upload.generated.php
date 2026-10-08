@@ -10,6 +10,7 @@ const SPACEFAST_DESIGN_ASSET_MIMES = [
     'image/webp' => 'webp',
     'image/svg+xml' => 'svg',
     'application/pdf' => 'pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
     'application/vnd.ms-powerpoint' => 'ppt',
     'application/vnd.openxmlformats-officedocument.presentationml.presentation' => 'pptx',
     'font/woff' => 'woff',

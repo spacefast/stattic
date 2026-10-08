@@ -46,6 +46,10 @@ final class Spacefast_Content_Error extends RuntimeException {
 require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/wordpress/content-markdown.php"))};
 require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/wordpress/content-source-sync.php"))};
 require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/wordpress/content-html.php"))};
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+function spacefast_content_space_id(): string { return $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? ''; }
+function serialize_source_blocks(string $blocks): string { return spacefast_content_sync_from_blocks('html', $blocks); }
+function normalize_source_media_urls(string $text): string { return spacefast_content_sync_source_media_urls($text); }
 
 $out = [];
 foreach (json_decode(${JSON.stringify(JSON.stringify(calls))}, true) as $call) {
@@ -89,6 +93,37 @@ function canonicalHtml(documents: readonly string[]): string[] {
     documents.map((argument) => ({ fn: "spacefast_content_html_canonical", argument })),
   );
 }
+
+test("source serialization makes this Space's media URLs host-relative", () => {
+  const hash = (space: string) =>
+    new Bun.CryptoHasher("sha256").update(space).digest("hex").slice(0, 32);
+  const own = hash("spc_alpha");
+  const other = hash("spc_beta");
+  const [serialized, normalized] = serializer([
+    {
+      fn: "serialize_source_blocks",
+      argument:
+        `<!-- wp:paragraph -->` +
+        `<p><img src=\"https://box.test/__spacefast/content-media/${own}/a.png\" ` +
+        `srcset=\"https://box.test/__spacefast/content-media/${own}/a.png 1x\" ` +
+        `href=\"http://box.test/__spacefast/content-media/${own}/link\"></p>` +
+        "<!-- /wp:paragraph -->",
+    },
+    {
+      fn: "normalize_source_media_urls",
+      argument:
+        `<!-- wp:image {\"url\":\"https://box.test/__spacefast/content-media/${own}/block.png\"} -->` +
+        ` <img srcset=\"https://other.test/__spacefast/content-media/${other}/b.png 2x\">`,
+    },
+  ]);
+
+  expect(serialized).toContain(`src="/__spacefast/content-media/${own}/a.png"`);
+  expect(serialized).toContain(`srcset="/__spacefast/content-media/${own}/a.png 1x"`);
+  expect(serialized).toContain(`href="/__spacefast/content-media/${own}/link"`);
+  expect(serialized).not.toContain("box.test");
+  expect(normalized).toContain(`"url":"/__spacefast/content-media/${own}/block.png"`);
+  expect(normalized).toContain(`https://other.test/__spacefast/content-media/${other}/b.png 2x`);
+});
 
 /**
  * The block markup WordPress actually saves, for the vocabulary a page is

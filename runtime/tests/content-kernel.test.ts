@@ -222,15 +222,15 @@ echo json_encode([
     upload_scope: [
       // The directory the content-media lane serves from, never ABSPATH's.
       "/srv/htdocs/.stattic/storage/spaces/spc_alpha/content-media",
-      `https://alpha.spacefast.test/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}`,
+      `/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}`,
       "/srv/htdocs/.stattic/storage/spaces/spc_alpha/content-media/2026/08",
-      `https://alpha.spacefast.test/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}/2026/08`,
+      `/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}/2026/08`,
     ],
     // WordPress must never hand the provider's own hostname to the browser.
     visitor_home: "https://alpha.spacefast.test/hey/",
     editor_home: "https://public.example/hey/?preview=1#content",
     editor_rest: "https://alpha.spacefast.test/wp-json/wp/v2/posts",
-    editor_media: `https://alpha.spacefast.test/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}/2026/08`,
+    editor_media: `/__spacefast/content-media/${new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32)}/2026/08`,
     request_url: "https://alpha.spacefast.test/wp-admin/edit.php?post_type=post",
   });
 });

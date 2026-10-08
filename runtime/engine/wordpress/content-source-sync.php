@@ -117,6 +117,8 @@ function spacefast_content_sync_envelope(?array $metadata, string $body): string
 /** Missing metadata leaves the database fields unchanged during source adoption. */
 function spacefast_content_sync_source_agrees(string $source, string $wordpress): bool
 {
+    $source = spacefast_content_sync_source_media_urls($source);
+    $wordpress = spacefast_content_sync_source_media_urls($wordpress);
     $left = spacefast_content_sync_document($source);
     $right = spacefast_content_sync_document($wordpress);
     if ($left['body'] !== $right['body']) return false;
@@ -168,11 +170,39 @@ function spacefast_content_sync_document_changed(array $ledger, object $post, ar
 /** The source text a document becomes, in the binding's format. */
 function spacefast_content_sync_from_blocks(string $format, string $blocks): string
 {
-    return match ($format) {
+    $text = match ($format) {
         'md' => spacefast_content_markdown_from_blocks($blocks),
         'html' => spacefast_content_html_from_blocks($blocks),
         'blocks' => $blocks,
     };
+    return spacefast_content_sync_source_media_urls($text);
+}
+
+function spacefast_content_sync_source_media_urls(string $text): string
+{
+    $spaceId = function_exists('spacefast_content_space_id') ? spacefast_content_space_id() : '';
+    if ($spaceId === '') return $text;
+    $spaceHash = substr(hash('sha256', $spaceId), 0, 32);
+    return preg_replace(
+        '~https?://[^/"\'<>\\s]+(?=/__spacefast/content-media/' . preg_quote($spaceHash, '~') . '(?:/|$))~i',
+        '',
+        $text
+    ) ?? $text;
+}
+
+/** Comparison-only view for a ledger written before media URLs were relative. */
+function spacefast_content_sync_normalize_ledger_media(array $ledger): array
+{
+    foreach ([['baseText', 'textDigest'], ['baseMarkdown', 'markdownDigest']] as [$textKey, $digestKey]) {
+        if (!is_string($ledger[$textKey] ?? null)) continue;
+        $document = spacefast_content_sync_document($ledger[$textKey]);
+        $document['body'] = spacefast_content_sync_source_media_urls($document['body']);
+        $ledger[$textKey] = spacefast_content_sync_envelope($document['metadata'], $document['body']);
+        if (is_string($ledger[$digestKey] ?? null)) {
+            $ledger[$digestKey] = spacefast_content_sync_digest_text($ledger[$textKey]);
+        }
+    }
+    return $ledger;
 }
 
 /** The blocks a source document becomes, in the binding's format. */
@@ -195,6 +225,7 @@ function spacefast_content_sync_to_blocks(string $format, string $text): string
 function spacefast_content_sync_canonical_text(string $format, string $text): string
 {
     $document = spacefast_content_sync_document($text);
+    $document['body'] = spacefast_content_sync_source_media_urls($document['body']);
     $body = match ($format) {
         'md' => spacefast_content_markdown_canonical($document['body']),
         'html' => spacefast_content_html_canonical($document['body']),
@@ -596,6 +627,7 @@ function spacefast_content_sync_publish_document(array $input): array
     }
     $ledger = $postId > 0 ? spacefast_content_sync_ledger($postId) : null;
     $blocks = is_object($post) ? spacefast_content_sync_read_blocks($post, $input['binding']) : '';
+    if (is_array($ledger)) $ledger = spacefast_content_sync_normalize_ledger_media($ledger);
     $materialized = $postId > 0 ? get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_MATERIALIZED_META, true) : '';
     if ($input['format'] === 'tsx') {
         if (is_string($materialized) && $materialized !== '') {
@@ -743,7 +775,9 @@ function spacefast_content_sync_ledger(int $postId): ?array
     if (is_string($ledger) && $ledger !== '') {
         $ledger = json_decode($ledger, true);
     }
-    return is_array($ledger) && $ledger !== [] ? $ledger : null;
+    if (!is_array($ledger) || $ledger === []) return null;
+
+    return $ledger;
 }
 
 function spacefast_content_sync_store_ledger(int $postId, array $ledger): void
@@ -1057,6 +1091,10 @@ function spacefast_content_sync_reconcile_bound(array $input, ?object $post): ar
             $wordpressRevisionId
         );
     }
+
+    // Keep the stored revision as the caller's CAS token, but compare against a
+    // host-independent view of bases produced by earlier runtime releases.
+    $ledger = spacefast_content_sync_normalize_ledger_media($ledger);
 
     $sourceChanged = !hash_equals(
         (string) $ledger['textDigest'],

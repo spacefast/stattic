@@ -266,14 +266,13 @@ function spacefast_content_scope_upload_dir(array $uploads): array
         return $uploads;
     }
     $subdir = is_string($uploads['subdir'] ?? null) ? $uploads['subdir'] : '';
-    $origin = spacefast_content_request_origin();
     $privateRoot = spacefast_content_upload_private_root();
-    if ($origin === '' || $privateRoot === '') {
+    if ($privateRoot === '') {
         return $uploads;
     }
     $spaceHash = substr(hash('sha256', $spaceId), 0, 32);
     $uploads['basedir'] = $privateRoot . '/spaces/' . $spaceId . '/content-media';
-    $uploads['baseurl'] = $origin . '/__spacefast/content-media/' . $spaceHash;
+    $uploads['baseurl'] = '/__spacefast/content-media/' . $spaceHash;
     $uploads['path'] = $uploads['basedir'] . $subdir;
     $uploads['url'] = $uploads['baseurl'] . $subdir;
     return $uploads;

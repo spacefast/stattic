@@ -325,6 +325,7 @@ export type Step =
       status?: string;
       dateGmt?: string;
     }
+  | { op: "legacyMediaLedger" }
   // `ackOp` closes an operation other than the most recent one, which is how a
   // test reaches back to a receipt the store may since have evicted.
   | { op: "acknowledge"; baseRevision: string; ackOp?: number }
@@ -472,6 +473,25 @@ foreach ($steps as $step) {
       }
     }
     $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'edited']];
+    continue;
+  }
+  if ($step['op'] === 'legacyMediaLedger') {
+    $binding = spacefast_content_model_sync_binding(${JSON.stringify(BINDING)});
+    $post = spacefast_content_sync_find_post(${JSON.stringify(BINDING)}, $binding, false);
+    $postId = (int) $post->ID;
+    $ledger = get_post_meta($postId, SPACEFAST_CONTENT_SYNC_LEDGER_META, true);
+    $spaceHash = substr(hash('sha256', ${JSON.stringify(SPACE_ID)}), 0, 32);
+    $relativePrefix = '/__spacefast/content-media/' . $spaceHash;
+    $absolutePrefix = 'https://box.test' . $relativePrefix;
+    $ledger['baseText'] = str_replace($relativePrefix, $absolutePrefix, $ledger['baseText']);
+    $ledger['textDigest'] = spacefast_content_sync_digest_text($ledger['baseText']);
+    $posts[$postId]['post_content'] = str_replace($relativePrefix, $absolutePrefix, $posts[$postId]['post_content']);
+    $ledger['blocksDigest'] = spacefast_content_sync_digest_text($posts[$postId]['post_content']);
+    $ledger['revision'] = spacefast_content_sync_revision($ledger);
+    spacefast_content_sync_store_ledger($postId, $ledger);
+    $lastLedgerRevision = $ledger['revision'];
+    $lastLedgerText = $ledger['baseText'];
+    $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'legacy-ledger', 'revision' => $ledger['revision']]];
     continue;
   }
   if ($step['op'] === 'createInWordPress') {

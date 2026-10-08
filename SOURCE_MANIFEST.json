@@ -1,7 +1,7 @@
 {
-  "revision": "22af2b65b94e8a096e3d1e8387cf1d254b792503",
-  "sourceHash": "dcb0ea745b751874d21e986b6afa57ca3eddd936965e2dc631879721d9a5c0cc",
-  "manifestSha256": "3e27ab2c946b87276446ca1950d5ae07c4add35950544065d1db89c87f5d2f42",
+  "revision": "203c517d5db1d130305ef147a627ac2b6ce58875",
+  "sourceHash": "4ac4cafa1565c849bec168479ef47ef474be0309948626902848545faa70358b",
+  "manifestSha256": "64c036ec1f0f59a73a59d786c8c5369e726e91eeea9f0e3e58ed77518a658d25",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "dbf484742039f403a397b8604a79f69fd12898202d8fa1ff9e71eb65eb050efb"
+      "sha256": "d5b636b0c912bf1ede2f9ae29d3e984a31419a1cf13934b8981ef2edc0bd8946"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "61ea569e01af4db8210f0e6c1a04bad3110093704b4208b13c9474f678ebd791"
+      "sha256": "3a281691e53df47c3b74703b974db22163c265ef68cd09bfcae5e464cb3c5202"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -813,7 +813,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-kernel.php",
-      "sha256": "b37d3cc315526f3a9ba9a1ad568e01e931badbe64aa4dc6ba9a303040acad7e5"
+      "sha256": "8acea1e54789f482b14cbc04c1cadbd92b11df5fa102c1320bebda9fe7d6688b"
     },
     {
       "path": "runtime/engine/wordpress/content-markdown.php",
@@ -837,7 +837,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-source-sync.php",
-      "sha256": "f8ce79f8915778a70e028559ff1a903382b318f9d5dbc2920190a829d15e0770"
+      "sha256": "8a3dccfae8c03ac8980cbe1a51367db2ed481807471a5851430a841b8132fdb3"
     },
     {
       "path": "runtime/engine/wordpress/content-storage.php",
@@ -969,11 +969,11 @@
     },
     {
       "path": "runtime/tests/content-html-sync.test.ts",
-      "sha256": "f455b4fe65149b8840eb7d92173347b8013fa330668927cb44a3f8fc1524ccad"
+      "sha256": "38dad197f95fd506d0de1695c8ee350a71bb7f346b3c531e9f1433a2e29e4e75"
     },
     {
       "path": "runtime/tests/content-kernel.test.ts",
-      "sha256": "583cfde42990ccba31606682bc7851d376176874ea84fc19637a38d273768562"
+      "sha256": "de8d33bca8a38f509c2e40fee2a607f0df557665a94c7b6cea1c9bacedc8db56"
     },
     {
       "path": "runtime/tests/content-markdown-editor.test.ts",
@@ -1001,7 +1001,7 @@
     },
     {
       "path": "runtime/tests/content-source-sync.test.ts",
-      "sha256": "ac6ee7910246e41d68b0f804babfa55f62306c0ccf0532f7e5e8d90c89bb248b"
+      "sha256": "b65672ea65660e3ede71d47e72c6bef32d97c9f27e4986b2a21c93a89ac61b1c"
     },
     {
       "path": "runtime/tests/content-storage-upload.test.ts",
@@ -1013,7 +1013,7 @@
     },
     {
       "path": "runtime/tests/content-sync.test-helper.ts",
-      "sha256": "9129c946677e56675d2dd0b3087795a3711cf6181da7881dedbe48382dc86ef5"
+      "sha256": "e98b72ec1eead503f4c1a3b6ee0df830fa402e3e96e3f13a5922f22c11734d4f"
     },
     {
       "path": "runtime/tests/content-type-policy.test.ts",

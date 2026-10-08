@@ -319,6 +319,56 @@ test("a repo Markdown file binds, survives a WordPress edit, and round-trips bac
   await verifySyncLedgerV1(pull.ledger as never);
 });
 
+test("binding accepts absolute media URLs already stored in the source and WordPress", async () => {
+  const mediaHash = new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32);
+  const absoluteMediaUrl = `https://box.test/__spacefast/content-media/${mediaHash}/launch.png`;
+  const source = `[Launch image](${absoluteMediaUrl})\n`;
+  const wordpress = `<!-- wp:paragraph --><p><a href="${absoluteMediaUrl}">Launch image</a></p><!-- /wp:paragraph -->`;
+  const [, created] = await runScenario("md", [
+    { op: "createInWordPress", slug: "launch", blocks: wordpress },
+    { op: "reconcile", state: "initial", text: source },
+  ]);
+
+  const ledger = receipt(created).ledger;
+  expect(ledger.baseText).toContain(`/__spacefast/content-media/${mediaHash}/launch.png`);
+  expect(ledger.baseText).not.toContain("box.test");
+  expect(ledger.textDigest).toBe(
+    `sha256:${new Bun.CryptoHasher("sha256").update(ledger.baseText).digest("hex")}`,
+  );
+});
+
+test("reconciling a pre-deploy ledger normalizes its media base before merging", async () => {
+  const mediaHash = new Bun.CryptoHasher("sha256").update("spc_alpha").digest("hex").slice(0, 32);
+  const absoluteMediaUrl = `https://box.test/__spacefast/content-media/${mediaHash}/launch.png`;
+  const base = `[Launch image](${absoluteMediaUrl})\n\nEditor paragraph.\n\nSource paragraph.\n`;
+  const [bound, , , merged] = await runScenario("md", [
+    { op: "reconcile", state: "initial", text: base },
+    { op: "legacyMediaLedger" },
+    {
+      op: "editInWordPress",
+      blocks:
+        `<!-- wp:paragraph --><p><a href="${absoluteMediaUrl}">Launch image</a></p><!-- /wp:paragraph -->` +
+        "<!-- wp:paragraph --><p>Editor changed this paragraph.</p><!-- /wp:paragraph -->" +
+        "<!-- wp:paragraph --><p>Source paragraph.</p><!-- /wp:paragraph -->",
+    },
+    {
+      op: "reconcile",
+      state: "bound",
+      text: base.replace("Source paragraph.", "Source changed this paragraph."),
+      baseRevision: "@previous",
+    },
+  ]);
+
+  expect(receipt(bound).ledger.baseText).toContain(
+    `/__spacefast/content-media/${mediaHash}/launch.png`,
+  );
+  const result = receipt(merged);
+  expect(result.status).toBe("pulled");
+  expect(result.sourceWrite?.text).toContain("Editor changed this paragraph.");
+  expect(result.sourceWrite?.text).toContain("Source changed this paragraph.");
+  expect(result.sourceWrite?.text).toContain(`/__spacefast/content-media/${mediaHash}/launch.png`);
+});
+
 test("re-reconciling the same source file reports no change", async () => {
   // The raw file, not the ledger's canonical spelling: a file nobody touched
   // must stay unchanged even though the serializer normalizes it. Digesting

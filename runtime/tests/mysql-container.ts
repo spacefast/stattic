@@ -43,6 +43,8 @@ export async function startMysqlContainer(input: {
   database: string;
   rootPassword: string;
   flavor?: "mysql" | "mariadb";
+  /** Suite setup may reserve a smaller readiness budget for its other work. */
+  setupTimeoutMs?: number;
 }): Promise<MysqlContainer> {
   const flavor = input.flavor ?? "mysql";
   const image = flavor === "mariadb" ? MARIADB_IMAGE : MYSQL_IMAGE;
@@ -73,8 +75,19 @@ export async function startMysqlContainer(input: {
   if (run.exitCode !== 0) {
     throw new Error(`mysql container failed to start:\n${run.stderr.toString()}`);
   }
-  await waitForMysql(name, input.rootPassword, flavor);
-  await waitForTcpPort(port);
+  try {
+    await waitForMysql(name, input.rootPassword, flavor, input.setupTimeoutMs);
+    await waitForTcpPort(port);
+  } catch (error) {
+    const logs = Bun.spawnSync({ cmd: ["docker", "logs", name], stdout: "pipe", stderr: "pipe" });
+    const index = started.indexOf(name);
+    if (index !== -1) started.splice(index, 1);
+    Bun.spawnSync({ cmd: ["docker", "rm", "-f", name] });
+    throw new Error(
+      `mysql container readiness failed: ${name}\n${logs.stdout.toString()}\n${logs.stderr.toString()}`,
+      { cause: error },
+    );
+  }
   return {
     name,
     url: `mysql://root:${input.rootPassword}@127.0.0.1:${port}/${input.database}`,
@@ -128,6 +141,7 @@ async function freeTcpPort(): Promise<number> {
   const server = net.createServer();
   server.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
+  // SAFETY: listening has completed on a TCP host/port, not a Unix socket.
   const port = (server.address() as net.AddressInfo).port;
   server.close();
   return port;
@@ -137,9 +151,10 @@ async function waitForMysql(
   container: string,
   rootPassword: string,
   flavor: "mysql" | "mariadb",
+  setupTimeoutMs = MYSQL_SETUP_TIMEOUT_MS,
 ): Promise<void> {
   const admin = flavor === "mariadb" ? "mariadb-admin" : "mysqladmin";
-  const deadline = Date.now() + MYSQL_SETUP_TIMEOUT_MS;
+  const deadline = Date.now() + setupTimeoutMs;
   for (;;) {
     const ping = Bun.spawnSync({
       cmd: [

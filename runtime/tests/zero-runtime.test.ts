@@ -85,6 +85,8 @@ if (($argv[1] ?? '') !== 'invoke') {
 $input = stream_get_contents(STDIN);
 $capture = ${JSON.stringify(capturePath)};
 file_put_contents($capture, $input);
+// The session the content broker forwards is runner environment, not envelope.
+file_put_contents($capture . '.content-cookie', (string) getenv('SPACEFAST_SERVICE_CONTENT_COOKIE'));
 $envelope = json_decode($input, true);
 $bodyPayload = [
     'ok' => true,
@@ -840,6 +842,16 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       ok: true,
     });
 
+    // No Origin and no fetch metadata is no browser, so no page could have
+    // steered it: the write runs, but the cookie lends it no identity.
+    const machineMutation = await get(idRuntime, host, "/__zero/run", {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({ id: "mutation-machine", op: "mutation.run", name: "updateProfile" }),
+    });
+    expect(machineMutation.status).toBe(200);
+    expect(JSON.parse(readFileSync(capturePath, "utf8")).auth).toMatchObject({ isGuest: true });
+
     rmSync(capturePath, { force: true });
     const directFormMutation = await get(idRuntime, host, "/api/update-profile", {
       method: "POST",
@@ -865,6 +877,30 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       body: "profile-update",
     });
     expect(directMutation.status).toBe(201);
+    expect(readFileSync(`${capturePath}.content-cookie`, "utf8")).toBe(sessionCookie);
+
+    // A webhook sender is that same non-browser caller. Its first delivery
+    // gets no cookie to keep, and a delivery that carries one anyway (an HTTP
+    // client with a cookie jar, here even a signed-in cookie) still runs as a
+    // guest instead of being refused. The cookie reaches neither the handler
+    // nor the content broker, which would otherwise read as its owner.
+    for (const headers of [
+      { "content-type": "application/json" },
+      { "content-type": "application/json", cookie: sessionCookie },
+    ]) {
+      rmSync(capturePath, { force: true });
+      const webhook = await get(idRuntime, host, "/api/update-profile", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ type: "order.paid" }),
+      });
+      expect(webhook.status).toBe(201);
+      expect(webhook.headers.get("set-cookie")).toBeNull();
+      const webhookEnvelope = JSON.parse(readFileSync(capturePath, "utf8"));
+      expect(webhookEnvelope.auth.userId).toMatch(/^guest:anon_[a-f0-9]{32}$/);
+      expect(webhookEnvelope.request.headers.cookie).toBeUndefined();
+      expect(readFileSync(`${capturePath}.content-cookie`, "utf8")).toBe("");
+    }
 
     // A consumed browser handoff is not platform bearer authority. Replaying
     // it in the explicit header must fail before tenant code runs, even when a

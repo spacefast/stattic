@@ -68,9 +68,9 @@ function _stattic_invoke_zero(
     $executionMode = is_string($action['execution_mode'] ?? null) && $action['execution_mode'] !== ''
         ? $action['execution_mode']
         : _stattic_zero_derived_endpoint_execution_mode($requestMethod);
-    if ($executionMode === 'write') {
-        _stattic_zero_enforce_cookie_mutation_request($serving, $requestHost, false);
-    }
+    $auth = $executionMode === 'write' && !_stattic_zero_admit_write_session($serving, $requestHost, false)
+        ? _stattic_zero_sessionless_guest()
+        : null;
 
     $body = _stattic_bounded_request_body(STATTIC_ZERO_REQUEST_BODY_MAX_BYTES);
     if ($body === null) {
@@ -98,7 +98,8 @@ function _stattic_invoke_zero(
         ],
         $body,
         $config,
-        $artifactPath
+        $artifactPath,
+        $auth
     );
 
     [$runnerResponse, $runnerBody] = _stattic_zero_execute_envelope($envelope, $config, 'Zero request envelope could not be encoded.');
@@ -399,9 +400,11 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
             'auth' => $identity,
         ]);
     }
-    if ($relayAuth === null && ($op === 'mutation.run' || $op === 'action.run')) {
-        _stattic_zero_enforce_cookie_mutation_request($serving, $requestHost, true);
-    }
+    $auth = $relayAuth === null
+        && ($op === 'mutation.run' || $op === 'action.run')
+        && !_stattic_zero_admit_write_session($serving, $requestHost, true)
+        ? _stattic_zero_sessionless_guest()
+        : $relayAuth;
     $name = is_array($decoded) && is_string($decoded['name'] ?? null) ? trim((string) $decoded['name']) : '';
     if ($name === 'zeroGuestUpgrade') _stattic_problem_refused(403, 'zero_auth_upgrade_internal', 'Guest upgrades are resolved by authentication.');
     $runId = _stattic_zero_run_id($op, $name);
@@ -449,7 +452,7 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
         is_string($body) ? $body : '',
         $config,
         $artifactPath,
-        $relayAuth
+        $auth
     );
     if ($relayAuth !== null) {
         $headers = (array) $envelope['request']['headers'];
@@ -462,11 +465,25 @@ function _stattic_zero_send_run_response(array $config, string $versionRoot, arr
     _stattic_zero_send_run_frame($op, $name, is_array($decoded) ? $decoded : [], $runnerResponse, $runnerBody);
 }
 
-function _stattic_zero_enforce_cookie_mutation_request(
+/**
+ * Whose identity a write runs under, decided before tenant code runs.
+ *
+ * True: the visitor session applies — an exchanged platform bearer, no
+ * cookie, or a cookie sent from the Space's exact origin. False: the write
+ * runs without its session (_stattic_zero_sessionless_guest), because it
+ * carries no browser provenance at all, neither Origin nor Sec-Fetch-Site.
+ * Every supported browser sends Origin on a write, so this is a
+ * server-to-server caller, typically a webhook sender whose HTTP client keeps
+ * a cookie jar. A cross-site page cannot steer it, but its cookie must not
+ * lend it a visitor's identity either, and refusing it would fail every
+ * delivery after the first one. Any other cookie-carrying write that does not
+ * prove the exact origin is refused.
+ */
+function _stattic_zero_admit_write_session(
     array $serving,
     string $requestHost,
     bool $requireJson
-): void {
+): bool {
     if (_stattic_platform_bearer_token_from_request() !== null) {
         $platformIdentity = _stattic_platform_identity_token(
             $serving,
@@ -484,22 +501,25 @@ function _stattic_zero_enforce_cookie_mutation_request(
             [STATTIC_HANDOFF_PURPOSE, STATTIC_RUNTIME_BEARER_PURPOSE],
             true
         )) {
-            return;
+            return true;
         }
         // Explicit machine authority never falls back to an ambient cookie or
         // a public Grant. A malformed, wrong-purpose, or failed exchange is a
         // hard denial before tenant code runs.
         _stattic_problem_refused(403, 'access_denied', 'Access denied.');
     }
+    $origin = strtolower(trim((string) ($_SERVER['HTTP_ORIGIN'] ?? '')));
+    $fetchSite = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));
+    if ($origin === '' && $fetchSite === '') {
+        return false;
+    }
     if (
         _stattic_visitor_cookie_from_request() === ''
         || _stattic_verify_cookie_identity($serving, $requestHost) === null
     ) {
-        return;
+        return true;
     }
-    $origin = strtolower(trim((string) ($_SERVER['HTTP_ORIGIN'] ?? '')));
     $expectedOrigin = strtolower(_stattic_runtime_request_origin($requestHost));
-    $fetchSite = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));
     $contentType = strtolower(trim((string) strstr(($_SERVER['CONTENT_TYPE'] ?? '') . ';', ';', true)));
     $contentTypeAllowed = $requireJson
         ? $contentType === 'application/json'
@@ -523,6 +543,7 @@ function _stattic_zero_enforce_cookie_mutation_request(
                 : 'Cookie-authenticated Zero writes require a same-origin request with a non-safelisted content type.'
         );
     }
+    return true;
 }
 
 function _stattic_zero_run_id(string $op, string $name): ?string
@@ -938,8 +959,7 @@ function _stattic_zero_upgrade_guest(array $config, string $versionRoot, array $
     if ($anonymousId === null) return;
     $runId = _stattic_zero_run_id('mutation.run', 'zeroGuestUpgrade');
     $artifactPath = _stattic_zero_run_artifact_path($versionRoot, $runId);
-    if ($artifactPath === null) return;
-    _stattic_zero_enforce_cookie_mutation_request($serving, $host, true);
+    if ($artifactPath === null || !_stattic_zero_admit_write_session($serving, $host, true)) return;
     $artifact = _stattic_zero_run_artifact($versionRoot, $artifactPath);
     $schemaHash = $artifact['db']['schemaHash'] ?? null;
     $envelope = _stattic_zero_envelope($versionRoot, $serving, $runId, 'write', $schemaHash,
@@ -966,6 +986,18 @@ function _stattic_zero_guest_auth_context(?string $anonymousId = null): array
         'isSignedIn' => false,
         'isAuthenticated' => false,
     ];
+}
+
+// A write served as if it had sent no Cookie header. Everything after this reads
+// the request without one: the tenant's request headers, the content broker's
+// forwarded session, the response's privacy boundary. Zero handlers cannot set
+// cookies, so none of the dropped ones was the handler's own. The guest is a
+// pseudonym for this one request and is never written back as a cookie.
+function _stattic_zero_sessionless_guest(): array
+{
+    unset($_SERVER['HTTP_COOKIE']);
+    $_COOKIE = [];
+    return _stattic_zero_guest_auth_context(_stattic_collab_mint_anonymous_id());
 }
 
 function _stattic_zero_identity_from_principal(?array $verified): array

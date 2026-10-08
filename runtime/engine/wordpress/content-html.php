@@ -3,9 +3,9 @@
  * The HTML serializer: the other format `content-source-sync.php` reconciles
  * through, and the one customers actually see.
  *
- * Block markup is an internal storage detail. A `<!-- wp: -->` comment never
- * reaches a repo file, an API response, or an agent — HTML does, in both
- * directions. This file is the whole of that conversion.
+ * HTML bindings exchange HTML rather than Gutenberg delimiter comments. This
+ * file owns that conversion. Lossless `.blocks` bindings use WordPress's stored
+ * markup directly through the same source-sync lane and need no HTML conversion.
  *
  * The two directions are deliberately asymmetric, because only one of them
  * needs to guess:

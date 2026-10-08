@@ -15,7 +15,7 @@
  * and content-html.php. Metadata and body merge independently against the same
  * common base.
  *
- * Both serializers share two properties, and both are measured rather than
+ * The Markdown and HTML serializers share two properties, and both are measured rather than
  * assumed (runtime/tests/content-source-sync.test.ts and
  * runtime/tests/content-html-sync.test.ts):
  *
@@ -28,6 +28,8 @@
  *    unchanged; if they do not, this refuses rather than silently dropping what
  *    the editor added. That is the fail-closed rule, and the refusal names the
  *    format that could not carry the document.
+ * Native `.blocks` sources retain Gutenberg markup and metadata without a
+ * conversion. They use this same ledger, conflict detection and writeback lane.
  */
 declare(strict_types=1);
 
@@ -48,7 +50,7 @@ const SPACEFAST_CONTENT_SYNC_RECEIPT_MAX_BYTES = 4 * 1024 * 1024;
 const SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX = 'source:';
 const SPACEFAST_CONTENT_SYNC_SERIALIZER_VERSION = 1;
 const SPACEFAST_CONTENT_SYNC_MAX_TEXT_BYTES = 1000000;
-const SPACEFAST_CONTENT_SYNC_FORMATS = ['md', 'html'];
+const SPACEFAST_CONTENT_SYNC_FORMATS = ['md', 'html', 'blocks'];
 /**
  * What a compile-class binding is handed back as when the editor takes its page
  * over. HTML is the interchange format with the widest block coverage: a page
@@ -169,6 +171,7 @@ function spacefast_content_sync_from_blocks(string $format, string $blocks): str
     return match ($format) {
         'md' => spacefast_content_markdown_from_blocks($blocks),
         'html' => spacefast_content_html_from_blocks($blocks),
+        'blocks' => $blocks,
     };
 }
 
@@ -179,6 +182,7 @@ function spacefast_content_sync_to_blocks(string $format, string $text): string
     return match ($format) {
         'md' => spacefast_content_markdown_to_blocks($text),
         'html' => spacefast_content_html_to_blocks($text),
+        'blocks' => $text,
     };
 }
 
@@ -194,6 +198,7 @@ function spacefast_content_sync_canonical_text(string $format, string $text): st
     $body = match ($format) {
         'md' => spacefast_content_markdown_canonical($document['body']),
         'html' => spacefast_content_html_canonical($document['body']),
+        'blocks' => $document['body'],
     };
     return spacefast_content_sync_envelope($document['metadata'], $body);
 }
@@ -204,6 +209,7 @@ function spacefast_content_sync_representable(string $format, string $blocks): b
     return match ($format) {
         'md' => spacefast_content_markdown_representable($blocks),
         'html' => spacefast_content_html_representable($blocks),
+        'blocks' => true,
     };
 }
 

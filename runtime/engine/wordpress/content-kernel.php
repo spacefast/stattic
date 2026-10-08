@@ -30,6 +30,7 @@ require_once __DIR__ . '/content-users.php';
 // taxonomy, registered meta, and the abilities that publish them.
 require_once __DIR__ . '/content-storage.php';
 require_once __DIR__ . '/content-admin-api.php';
+require_once __DIR__ . '/content-context.php';
 require_once __DIR__ . '/content-native-scope.php';
 require_once __DIR__ . '/knowledge.php';
 require_once __DIR__ . '/team-knowledge.php';
@@ -98,6 +99,8 @@ if (function_exists('add_action')) {
     add_filter('wp_is_application_passwords_available', '__return_false');
     add_filter('rest_authentication_errors', 'spacefast_content_require_rest_scope', 1);
     add_action('rest_api_init', 'spacefast_content_admin_register_rest_routes');
+    add_action('rest_api_init', 'spacefast_context_register_routes');
+    add_filter('rest_pre_insert_page', 'spacefast_context_guard_rest', 10, 2);
     add_filter('rest_pre_dispatch', 'spacefast_content_redirection_rest', 10, 3);
     add_filter('rest_pre_dispatch', 'spacefast_content_guard_global_theme_rest', 10, 3);
     add_filter('redirection_role', static fn (): string => 'spacefast_manage_content');
@@ -646,7 +649,13 @@ function spacefast_content_scope_post(int $postId, object $post): void
     ) {
         return;
     }
-    update_post_meta($postId, SPACEFAST_CONTENT_SPACE_META, spacefast_content_space_id());
+    if ($scopedRevision) {
+        // update_post_meta() redirects revision metadata to its parent. The
+        // query scope needs the stamp on the revision row itself.
+        update_metadata('post', $postId, SPACEFAST_CONTENT_SPACE_META, spacefast_content_space_id());
+    } else {
+        update_post_meta($postId, SPACEFAST_CONTENT_SPACE_META, spacefast_content_space_id());
+    }
     if ($scopedTemplate) {
         spacefast_content_templates_scope_theme($postId, $postType);
     }

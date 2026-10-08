@@ -110,6 +110,7 @@
     "engine/wordpress/team-design-system.php",
     "engine/shared/design-upload.generated.php",
     "engine/wordpress/content-admin-api.php",
+    "engine/wordpress/content-context.php",
     "engine/wordpress/content-native-scope.php",
     "engine/admin/components.php",
     "engine/wordpress/components.json",

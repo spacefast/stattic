@@ -902,7 +902,7 @@ function spacefast_content_model_reconcile_documents(array $contentModel): array
         $format = $binding['format'] ?? null;
         if (!is_string($text) || strlen($text) > SPACEFAST_CONTENT_SYNC_MAX_TEXT_BYTES
             || !is_string($digest) || !hash_equals(spacefast_content_sync_digest_text($text), $digest)
-            || !in_array($format, ['md', 'html', 'tsx'], true)
+            || !in_array($format, ['md', 'html', 'blocks', 'tsx'], true)
             || !is_string($binding['fieldStorage'] ?? null)
             || ($format === 'tsx' && ($binding['compiled']['sha256'] ?? null) !== $digest)) {
             throw new Spacefast_Content_Error(422, 'content_document_seed_invalid', 'A canonical document needs digest-verified seed bytes from its release.');

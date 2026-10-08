@@ -352,7 +352,7 @@ function _stattic_wordpress_page_snapshot(array $context, array $route): ?array
     }
     $seed = json_decode($bytes, true);
     if (!is_array($seed) || ($seed['bindingId'] ?? null) !== ($route['bindingId'] ?? null)
-        || !in_array($seed['format'] ?? null, ['md', 'html', 'tsx'], true)
+        || !in_array($seed['format'] ?? null, ['md', 'html', 'blocks', 'tsx'], true)
         || !is_string($seed['modelRevision'] ?? null)
         || preg_match('/\Asha256:[a-f0-9]{64}\z/D', $seed['modelRevision']) !== 1
         || !is_string($seed['text'] ?? null) || strlen($seed['text']) > 1000000

@@ -31,6 +31,9 @@ require_once __DIR__ . '/content-users.php';
 require_once __DIR__ . '/content-storage.php';
 require_once __DIR__ . '/content-admin-api.php';
 require_once __DIR__ . '/content-native-scope.php';
+require_once __DIR__ . '/knowledge.php';
+require_once __DIR__ . '/team-knowledge.php';
+require_once __DIR__ . '/team-design-system.php';
 const SPACEFAST_CONTENT_EXTERNAL_ID_META = '_spacefast_external_id';
 const SPACEFAST_CONTENT_SPACE_META = '_spacefast_space_id';
 final class Spacefast_Content_Error extends RuntimeException
@@ -637,6 +640,7 @@ function spacefast_content_scope_post(int $postId, object $post): void
         spacefast_content_space_id() === ''
         || (!$scopedRevision
             && !$scopedTemplate
+            && $postType !== 'wp_knowledge'
             && spacefast_content_collection_for_post_type($postType) === null)
         || !function_exists('update_post_meta')
     ) {
@@ -828,6 +832,17 @@ function spacefast_content_scope_post_query(mixed $query): void
         || !method_exists($query, 'get')
         || !method_exists($query, 'set')
     ) {
+        return;
+    }
+    // Revisions inherit the authorized parent's Space. WordPress redirects
+    // update_post_meta() on revision IDs to that parent, so revision rows do
+    // not carry the Space meta fence themselves.
+    $revisionParentId = $query->get('post_type') === 'revision'
+        ? (int) $query->get('post_parent')
+        : 0;
+    if ($revisionParentId > 0
+        && spacefast_content_may_read_private_resources()
+        && spacefast_content_post_belongs_to_space($revisionParentId)) {
         return;
     }
     $query->set('meta_query', spacefast_content_scope_meta_query($query->get('meta_query')));
@@ -1022,6 +1037,9 @@ function spacefast_content_handle_request(array $request): array
         'source.inspect' => spacefast_content_inspect_source($request),
         'source.resolve' => spacefast_content_resolve_source($request),
         'rest.request' => spacefast_content_rest_dispatch($request),
+        'knowledge.request' => spacefast_knowledge_dispatch($request),
+        'design-system.mutate' => spacefast_design_system_dispatch($request),
+        'design-system.read' => spacefast_design_system_dispatch(array_merge($request, ['action' => 'read'])),
         'media.read' => spacefast_content_admin_media_read($request),
         // Storage answers over this endpoint for a caller that can reach it.
         // No Zero handler can today -- ctx.storage is withdrawn until the

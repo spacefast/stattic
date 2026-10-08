@@ -41,6 +41,9 @@ test("every content request names a management action before WordPress boots", a
     await classify({
       admin: { operation: "admin.launch" },
       rest: { operation: "rest.request" },
+      knowledge: { operation: "knowledge.request" },
+      designSystem: { operation: "design-system.mutate" },
+      designRead: { operation: "design-system.read" },
       authorization: { operation: "authorization.apply" },
       stage: { operation: "model.stage" },
       activate: { operation: "model.activate" },
@@ -53,6 +56,9 @@ test("every content request names a management action before WordPress boots", a
   ).toEqual({
     admin: "content.admin.launch",
     rest: "content.rest.request",
+    knowledge: "content.knowledge.request",
+    designSystem: "content.design-system.mutate",
+    designRead: "content.design-system.read",
     authorization: "content.authorization.apply",
     stage: "content.model.stage",
     activate: "content.model.activate",
@@ -116,4 +122,17 @@ test("a managed content answer is never left publicly storable", async () => {
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ results: { posts: { items: [], total: 0 } } });
   expect(response.headers.get("cache-control")).toBe("private, no-store");
+});
+
+test("PUT file transfer does not widen other content operations", async () => {
+  const response = await api(
+    runtime,
+    "PUT",
+    "/__spacefast/content.php",
+    "content.model.activate",
+    { space_id: CONTENT_SPACE },
+    { operation: "model.activate", revision: null },
+  );
+  expect(response.status).toBe(405);
+  expect(response.headers.get("allow")).toBe("POST");
 });

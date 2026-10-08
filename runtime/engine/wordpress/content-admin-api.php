@@ -526,7 +526,7 @@ function spacefast_content_collection_for_post(int $postId): ?array
     return is_object($post) ? spacefast_content_collection_for_post_type($post->post_type) : null;
 }
 
-function spacefast_content_admin_media_read(array $request): array
+function spacefast_content_admin_media_read(array $request, int $maxBytes = 16777216): array
 {
     spacefast_content_principal_establish_user();
     $postId = $request['attachmentId'] ?? null;
@@ -544,7 +544,7 @@ function spacefast_content_admin_media_read(array $request): array
     $uploads = wp_upload_dir();
     $root = realpath($uploads['basedir']);
     if ($path === false || $root === false || !str_starts_with($path, $root . DIRECTORY_SEPARATOR)
-        || !is_file($path) || filesize($path) > 16777216) {
+        || !is_file($path) || filesize($path) > $maxBytes) {
         throw new Spacefast_Content_Error(404, 'content_media_not_found', 'Media not found.');
     }
     $bytes = file_get_contents($path);

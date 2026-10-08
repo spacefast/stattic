@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:688d7cd417fbac4ab8c08bab40e9d7208c35c62fc9e7b125d56c251f5d853553",
+  "digest": "sha256:e31f5818309b2c64854640f6472e7318a72fd3905abb173fa54f2665b09b1a0f",
   "components": [
     {
       "id": "spacefast-identity",
@@ -68,7 +68,7 @@
       "id": "content-kernel",
       "kind": "mu-plugin",
       "version": "source-tree",
-      "sha256": "sha256:5a378258d9b6d1bac3d2ea14a902701e10ada83a1c66a775b1b949dfec3f023f",
+      "sha256": "sha256:7e2c2ff4e27233a8d8233d73a120d6054d17f180ab280298d00d35ddb1572bc2",
       "source": {
         "kind": "embedded",
         "path": "engine/wordpress/content-kernel.php"

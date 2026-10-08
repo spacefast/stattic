@@ -206,6 +206,7 @@ function get_current_user_id(): int { return 1; }
 function current_user_can(string $capability, mixed ...$arguments): bool {
   $projected = spacefast_content_principal_capabilities([], [], [], (object) ['ID' => 1]);
   $primitive = match ($capability) {
+    'read_post' => 'read',
     'edit_post' => 'edit_others_posts',
     'delete_post' => 'delete_others_posts',
     default => $capability,

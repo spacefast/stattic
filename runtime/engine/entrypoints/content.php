@@ -13,23 +13,32 @@ require_once $engineRoot . '/admin/auth.php';
 
 _stattic_emit_runtime_identity();
 
-const SPACEFAST_CONTENT_REQUEST_MAX_BYTES = 25165824;
+const SPACEFAST_CONTENT_REQUEST_MAX_BYTES = 40 * 1024 * 1024;
 
 $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
-if ($method !== 'POST') {
-    _stattic_method_not_allowed('POST', [
+if (!in_array($method, ['POST', 'PUT'], true)) {
+    _stattic_method_not_allowed('POST, PUT', [
         'code' => 'content_method_not_allowed',
-        'message' => 'The content endpoint accepts POST requests.',
+        'message' => 'The content endpoint accepts POST requests or PUT for design asset uploads.',
     ]);
 }
 
 $rawBody = _stattic_bounded_request_body(SPACEFAST_CONTENT_REQUEST_MAX_BYTES);
 if ($rawBody === null) {
-    _stattic_problem_response(413, 'content_request_too_large', 'The content request exceeds 24 MiB.');
+    _stattic_problem_response(413, 'content_request_too_large', 'The content request exceeds 40 MiB.');
 }
 $request = json_decode($rawBody, true);
 if (!is_array($request)) {
     _stattic_problem_response(400, 'content_request_invalid', 'The content request must be a JSON object.');
+}
+// Only design uploads need the larger base64 envelope. Other lanes retain their limit.
+if (($request['operation'] ?? '') !== 'design-system.mutate' && strlen($rawBody) > 25165824) {
+    _stattic_problem_response(413, 'content_request_too_large', 'The content request exceeds 24 MiB.');
+}
+unset($rawBody);
+// A PUT file transfer avoids PHP's pre-handler post_max_size gate; only this upload lane accepts it.
+if ($method === 'PUT' && (($request['operation'] ?? '') !== 'design-system.mutate' || ($request['action'] ?? '') !== 'upload')) {
+    _stattic_method_not_allowed('POST', ['code' => 'content_method_not_allowed', 'message' => 'Use POST for this content operation.']);
 }
 
 $operation = _stattic_content_management_action($request);
@@ -79,7 +88,8 @@ $GLOBALS['SPACEFAST_CONTENT_SYSTEM_OPERATION'] = !$principalGated;
 $principal = _stattic_content_principal_assertion(
     $request['principal'] ?? null,
     $spaceId,
-    $host
+    // The principal audience is an origin, including a development port.
+    (string) ($_SERVER['HTTP_HOST'] ?? '')
 );
 if (
     $principalGated
@@ -102,6 +112,11 @@ if ($principal !== null) {
 // what WordPress lets it touch while it runs.
 $wordpressRole = $principal === null ? null : ($principal['wordpress_role'] ?? null);
 $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = $wordpressRole;
+// This authority arrives only on the dedicated management-JWT operation.
+// Browser REST and the generic content bridge cannot supply it.
+if (in_array($operation, ['content.knowledge.request', 'content.design-system.mutate', 'content.design-system.read'], true)) {
+    $GLOBALS['SPACEFAST_KNOWLEDGE_AUTHORITY'] = $request['knowledgeAuthority'] ?? null;
+}
 if ($operation === 'content.authorization.apply') {
     $authorization = _stattic_content_admin_apply_authorization($privateRoot, $requestedAuthorization);
     if ($authorization === null) {

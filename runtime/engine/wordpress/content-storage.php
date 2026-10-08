@@ -286,7 +286,7 @@ function spacefast_content_storage_projection(int $attachmentId): array
  * to nothing here exactly as it is absent from a listing — one definition of
  * "gone" for reading it, moving it, and trashing it again.
  */
-function spacefast_content_storage_resolve(mixed $input): int
+function spacefast_content_storage_resolve(mixed $input, string $capability = 'read_post'): int
 {
     $attachmentId = (int) (spacefast_content_storage_input($input)['id'] ?? 0);
     if ($attachmentId < 1 || !function_exists('get_post')) {
@@ -297,6 +297,7 @@ function spacefast_content_storage_resolve(mixed $input): int
         && (string) ($post->post_type ?? '') === 'attachment'
         && (string) ($post->post_status ?? '') === 'inherit'
         && spacefast_content_post_belongs_to_space($attachmentId)
+        && spacefast_content_storage_may($capability, $attachmentId)
         ? $attachmentId
         : 0;
 }
@@ -503,7 +504,7 @@ function spacefast_content_storage_apply_alt(int $attachmentId, array $input): v
 /** Moves one file to a folder. An empty path moves it back to the Space root. */
 function spacefast_content_storage_move(mixed $input): mixed
 {
-    $attachmentId = spacefast_content_storage_resolve($input);
+    $attachmentId = spacefast_content_storage_resolve($input, 'edit_post');
     if ($attachmentId === 0) {
         return spacefast_content_storage_error(404, 'zero_storage_not_found', 'No such file belongs to this Space.');
     }
@@ -537,7 +538,7 @@ function spacefast_content_storage_move(mixed $input): mixed
  */
 function spacefast_content_storage_delete(mixed $input): mixed
 {
-    $attachmentId = spacefast_content_storage_resolve($input);
+    $attachmentId = spacefast_content_storage_resolve($input, 'delete_post');
     if ($attachmentId === 0) {
         return spacefast_content_storage_error(404, 'zero_storage_not_found', 'No such file belongs to this Space.');
     }

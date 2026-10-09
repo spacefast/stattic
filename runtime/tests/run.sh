@@ -59,6 +59,11 @@ workers="${SPACEFAST_RUNTIME_TEST_WORKER_COUNT:-1}"
   echo "invalid SPACEFAST_RUNTIME_TEST_WORKER_COUNT: $workers" >&2
   exit 2
 }
+# The worker pool waits with `wait -n`; fail before any build on older bash.
+[[ "$workers" = 1 ]] || (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3) )) || {
+  echo "SPACEFAST_RUNTIME_TEST_WORKER_COUNT > 1 needs bash 4.3 or newer" >&2
+  exit 2
+}
 if [[ -n "${SPACEFAST_RUNTIME_TEST_SHARD:-}" ]]; then
   [[ "$workers" = 1 ]] || {
     echo "SPACEFAST_RUNTIME_TEST_SHARD requires one worker" >&2
@@ -70,32 +75,54 @@ if [[ -n "${SPACEFAST_RUNTIME_TEST_SHARD:-}" ]]; then
   }
   test_args+=("--shard=$SPACEFAST_RUNTIME_TEST_SHARD")
 fi
-test_args+=(tests --timeout 30000)
+test_args+=(--timeout 30000)
 if [[ "$workers" = 1 ]]; then
   if [[ -n "${SPACEFAST_BUN_COVERAGE_DIR:-}" ]]; then
     test_args+=("--coverage-dir=$SPACEFAST_BUN_COVERAGE_DIR")
   fi
-  exec bun "${test_args[@]}"
+  exec bun "${test_args[@]}" tests
 fi
 
 # Lint, PHP units and the instrumented compiler build run once. Independent
 # Bun processes divide the files and release their application state on exit.
-pids=()
+# A few files dominate the suite, and a fixed shard per worker left half the
+# workers idle while the slowest shards finished. Cut three shards per worker
+# and start the next one whenever a worker frees up.
+# Files that spend most of their time holding requests in flight on purpose.
+# Each starts first in its own process, so the suite's floor never waits
+# behind other shards, wherever Bun's file order puts the file.
+long_files=(tests/admission.test.ts)
 reports=()
-for ((worker = 1; worker <= workers; worker++)); do
-  worker_args=("${test_args[@]}" "--shard=$worker/$workers")
-  if [[ -n "${SPACEFAST_BUN_COVERAGE_DIR:-}" ]]; then
-    worker_coverage="$SPACEFAST_BUN_COVERAGE_DIR/shard-$worker"
-    mkdir -p "$worker_coverage"
-    worker_args+=("--coverage-dir=$worker_coverage")
-    reports+=("$worker_coverage/lcov.info")
-  fi
-  bun "${worker_args[@]}" &
-  pids+=("$!")
-done
+running=0
 status=0
-for pid in "${pids[@]}"; do
-  wait "$pid" || status=1
+launch() {
+  local name="$1"
+  shift
+  if [[ "$running" -ge "$workers" ]]; then
+    wait -n || status=1
+    running=$((running - 1))
+  fi
+  local args=("${test_args[@]}" "$@")
+  if [[ -n "${SPACEFAST_BUN_COVERAGE_DIR:-}" ]]; then
+    local coverage="$SPACEFAST_BUN_COVERAGE_DIR/$name"
+    mkdir -p "$coverage"
+    args+=("--coverage-dir=$coverage")
+    reports+=("$coverage/lcov.info")
+  fi
+  bun "${args[@]}" &
+  running=$((running + 1))
+}
+ignore_args=()
+for file in "${long_files[@]}"; do
+  launch "$(basename "$file" .test.ts)" "./$file"
+  ignore_args+=("--path-ignore-patterns=$file")
+done
+shard_count=$((workers * 3))
+for ((shard = 1; shard <= shard_count; shard++)); do
+  launch "shard-$shard" "${ignore_args[@]}" "--shard=$shard/$shard_count" tests
+done
+for ((; running > 0; running--)); do
+  wait -n || status=1
 done
 if [[ "${#reports[@]}" -gt 0 ]]; then
   for report in "${reports[@]}"; do test -s "$report" || status=1; done

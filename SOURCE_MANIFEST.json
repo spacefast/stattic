@@ -1,7 +1,7 @@
 {
-  "revision": "eeadc5ef41b187271cdfd2b9b64944d7bd58945a",
+  "revision": "1dd3e4878f250dbc21347bbab8bd80ab816069c9",
   "sourceHash": "56e10498a23b321885df44f8516cabdbbcf19d9e5616c568ca1e91352dff9a9a",
-  "manifestSha256": "6258ce5edb382d60b633e2832eebfa93c1b89c93d63cdf73de21bae8786bdbca",
+  "manifestSha256": "4401083e9c48b86118bb9b09099e01aa09b8c09ddd13cd3e35c4f9e447aba8c4",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "842640754d08be22829ef51232bef2613bc1db01e4858e167e5b976383e477ed"
+      "sha256": "17e7287de85ad6b2473f3cc26a51c944bbd923ebf9bb7acfb7f5bce466a882a2"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "10b9262f3ee66eb6c0afe3e4ef30b7fd0a2c9c410cfda1a632dc0aea3cd72455"
+      "sha256": "6fbf08827495041b69705c5544dfe89e555d709613b14064685f8b719b970494"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -1245,7 +1245,7 @@
     },
     {
       "path": "runtime/tests/run.sh",
-      "sha256": "2d45395de21e216e555df8c890880fd0f32d83950f0756ee37783ddc904c601a"
+      "sha256": "c95d643efcb1922388027b73ed90bf8109d363597fd011e75c35d200e9d54963"
     },
     {
       "path": "runtime/tests/s3-cli.php",

@@ -1,7 +1,7 @@
 {
-  "revision": "fedaffb90995c4abd5411e731156eed65b30e4fc",
-  "sourceHash": "d87977e9afee685466ec2ddbc5685e44b3b7761db73451657a13b65e3adb3d40",
-  "manifestSha256": "455ac541f6883bcae539f7531145732854d6870397d86dccf16295ddf167956f",
+  "revision": "eba3270dc8d492be0993d75c2c7944363d406ad3",
+  "sourceHash": "d5dcea2a3b193161989eb01c4db8339be470a63b1abe7322bb7ea7085415016b",
+  "manifestSha256": "6c788934bd171a7fb3058e4fec46bcf42784a041da3870738f5eda11cde8dc8c",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "f9275c4a75dce3bf72c26955a8c5d9834167f1c863375c024e57eb1452e81c68"
+      "sha256": "e8ebea8c6049f9f65ccf57ec16eda858694082519b9408d03fe55845f6c710ce"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "d3d8533b7d431d156f4297d959052b2998e0ed259fa10bdfc162aa663366636f"
+      "sha256": "70992fcdb3c091080fef6aadc14e5410fae14aeb5098675dc8d8c87f766eeac2"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -233,7 +233,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/zero.rs",
-      "sha256": "8710dc5d6448be5b39d6355f8689d2b0bd3e5b3459096514198870b9f08f0db5"
+      "sha256": "aa1e18f97dd523363b31943b7e5c0ac659ca45f359727697f98ce1827838657c"
     },
     {
       "path": "crates/stattic-runtime-core/tests/fixtures/auto-share-image-legacy.json",
@@ -589,7 +589,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "2d9d49d9fe68622684b5e1ba5cf1dc97ac6795b6fc960eda8413a2bce26fb28c"
+      "sha256": "d17e7eac124f6633e2475a432216703509a6a589798309a7cbb8ec3703fc751c"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -733,7 +733,7 @@
     },
     {
       "path": "runtime/engine/shared/page-css.generated.php",
-      "sha256": "81b14d308d468026f1acffd122f82de99cc4936bf84633ed2ab1b79e2d5cd723"
+      "sha256": "f593827ba3e9d0ba155536eff26a658b02ed54dbffa802b6d8a84d4297526952"
     },
     {
       "path": "runtime/engine/shared/pointers.php",
@@ -913,7 +913,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "0d77d01dc1263ca2f3abf163b380e00170d3a6d33352a01c5f164fd475e8bec1"
+      "sha256": "a56061fb9af3c85ddfbc9f2e5f77bce9ca7834714ad31958ff597d6e4dec6eba"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",

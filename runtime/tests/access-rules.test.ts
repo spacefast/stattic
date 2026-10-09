@@ -1690,6 +1690,47 @@ test("unconstrained Public access is anonymously cacheable and opts the edge in"
   expect(customerAuthorization.status).toBe(200);
 });
 
+test("a host canonical redirect follows the Space's anonymous verdict", async () => {
+  try {
+    await putRoute(runtime, PUBLIC_SPACE, "production", {
+      version_id: PUBLIC_VERSION,
+      config: publicBaseConfig(),
+      production_hostnames: [PUBLIC_HOST],
+      host_canonical_redirects: [
+        { from: `www.${PUBLIC_HOST}`, to: `https://${PUBLIC_HOST}`, status: 308 },
+      ],
+    });
+    const publicRedirect = await get(runtime, `www.${PUBLIC_HOST}`, "/about/");
+    expect(publicRedirect.status).toBe(308);
+    expect(publicRedirect.headers.get("location")).toBe(`https://${PUBLIC_HOST}/about/`);
+    expect(publicRedirect.headers.get("x-robots-tag")).toBeNull();
+    expect(publicRedirect.headers.get("cache-control") ?? "").not.toContain("private");
+
+    const tokened = await get(runtime, `www.${PUBLIC_HOST}`, "/about/?__=anything");
+    expect(tokened.status).toBe(308);
+    expect(tokened.headers.get("cache-control")).toBe("private, no-store");
+
+    await putRoute(runtime, PUBLIC_SPACE, "production", {
+      version_id: PUBLIC_VERSION,
+      config: projection({ memberRefs: ["member:mem_public_owner"] }),
+      production_hostnames: [PUBLIC_HOST],
+      host_canonical_redirects: [
+        { from: `www.${PUBLIC_HOST}`, to: `https://${PUBLIC_HOST}`, status: 308 },
+      ],
+    });
+    const privateRedirect = await get(runtime, `www.${PUBLIC_HOST}`, "/about/");
+    expect(privateRedirect.status).toBe(308);
+    expect(privateRedirect.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(privateRedirect.headers.get("cache-control")).toBe("private, no-store");
+  } finally {
+    await putRoute(runtime, PUBLIC_SPACE, "production", {
+      version_id: PUBLIC_VERSION,
+      config: publicBaseConfig(),
+      production_hostnames: [PUBLIC_HOST],
+    });
+  }
+});
+
 test("Grant constraints gate a Public Grant per request", async () => {
   try {
     // Any constraint at all makes the Grant conditional, so the response stops

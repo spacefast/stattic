@@ -775,6 +775,11 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
             column_definitions.join(", ")
         ));
         if let Some(columns) = columns {
+            // One backfill per table, not per column: every defaulted column
+            // otherwise costs a statement against ZERO_MIGRATION_STATEMENTS_MAX
+            // and a table scan on every publish.
+            let mut assignments = Vec::new();
+            let mut null_checks = Vec::new();
             for column in columns.values() {
                 let Some(physical) = column.get("physicalName").and_then(Value::as_str) else {
                     continue;
@@ -793,9 +798,15 @@ fn zero_db_migration_statements(db: &Value) -> Vec<String> {
                     _ => continue,
                 };
                 let name = quote_mysql_identifier(physical);
+                assignments.push(format!("{name} = COALESCE({name}, {literal})"));
+                null_checks.push(format!("{name} IS NULL"));
+            }
+            if !assignments.is_empty() {
                 statements.push(format!(
-                    "UPDATE {} SET {name} = {literal} WHERE {name} IS NULL",
-                    quote_mysql_identifier(physical_name)
+                    "UPDATE {} SET {} WHERE {}",
+                    quote_mysql_identifier(physical_name),
+                    assignments.join(", "),
+                    null_checks.join(" OR ")
                 ));
             }
         }
@@ -974,6 +985,46 @@ mod tests {
         let metadata =
             zero_endpoint_db_metadata(Some(&json!({"schemaHash":"sha256:db"})), Some(&fallback));
         assert_eq!(metadata["schemaHash"], json!("sha256:db"));
+    }
+
+    #[test]
+    fn default_backfills_cost_one_statement_per_table() {
+        let mut tables = serde_json::Map::new();
+        let mut operations = Vec::new();
+        for table in 0..17 {
+            let name = format!("t{table}");
+            let mut columns = serde_json::Map::new();
+            columns.insert("id".into(), json!({"physicalName": "id", "type": "id"}));
+            for column in 0..11 {
+                let column_name = format!("c{column}");
+                columns.insert(
+                    column_name.clone(),
+                    json!({"physicalName": column_name, "type": "string", "defaultValue": ""}),
+                );
+                operations.push(json!({
+                    "op": "add_column", "table": name,
+                    "column": {"name": column_name, "type": "string", "default": ""}
+                }));
+            }
+            tables.insert(
+                name.clone(),
+                json!({"physicalName": format!("sf_{name}"), "columns": columns}),
+            );
+        }
+        let db = zero_endpoint_db_metadata(
+            Some(&json!({"tables": tables, "migrationOperations": operations})),
+            None,
+        );
+        let statements = zero_db_migration_statements(&db);
+        let updates: Vec<_> = statements
+            .iter()
+            .filter(|statement| statement.starts_with("UPDATE "))
+            .collect();
+        assert_eq!(updates.len(), 17);
+        assert_eq!(statements.len(), 17 + 17 * 11 + 17);
+        assert!(updates.iter().all(|statement| statement
+            .contains("`c0` = COALESCE(`c0`, CONVERT(X'' USING utf8mb4))")
+            && statement.contains("WHERE `c0` IS NULL OR `c1` IS NULL OR")));
     }
 
     /// The route grammar is a boundary, not a preference: a path that escapes

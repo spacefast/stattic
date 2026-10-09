@@ -295,7 +295,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         }
         $kind = $action['action'] ?? null;
         if ($kind === 'redirect') {
-            _stattic_send_route_redirect($action, (string) ($matchedRoute['_remainder'] ?? '/'), !$open);
+            _stattic_send_route_redirect(
+                $action,
+                (string) ($matchedRoute['_remainder'] ?? '/'),
+                _stattic_v4_route_redirect_private($open, $serving, $requestHost, $requestPath)
+            );
         }
         if ($kind === 'robots_txt') {
             // Platform crawl policy contains no customer bytes or access state.
@@ -1950,6 +1954,22 @@ function _stattic_v4_match_path_prefix(string $prefix, string $requestPath): ?st
         return substr($requestPath, strlen($normalized));
     }
     return null;
+}
+
+// The enforcement verdict, not the overlay flag, as on the content path. `open`
+// is false for every Space that has Grants, including a Public one, and a
+// private redirect carries the private-content headers: a public custom
+// domain's www -> apex redirect would tell crawlers `noindex`.
+function _stattic_v4_route_redirect_private(bool $open, array $serving, string $requestHost, string $requestPath): bool
+{
+    if ($open) {
+        return false;
+    }
+    if (_stattic_access_query_token_present()) {
+        return true;
+    }
+    require_once __DIR__ . '/access-rules.php';
+    return !_stattic_access_anonymous_admits($serving, $requestHost, $requestPath);
 }
 
 function _stattic_send_route_redirect(array $action, string $remainder, bool $privateCache = false): never

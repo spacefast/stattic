@@ -168,9 +168,14 @@ async function waitForMysql(
         "-uroot",
         `-p${rootPassword}`,
         "--silent",
+        "--connect-timeout=2",
       ],
       stdout: "pipe",
       stderr: "pipe",
+      // A stalled handshake or Docker exec must not consume the suite's setup
+      // budget in one probe. The client deadline also stops it inside Docker.
+      timeout: Math.min(5_000, Math.max(1, deadline - Date.now())),
+      killSignal: "SIGKILL",
     });
     if (ping.exitCode === 0) {
       return;

@@ -1,7 +1,7 @@
 {
-  "revision": "55b42cc4f3da462249370654ca653aea022beb34",
+  "revision": "fedaffb90995c4abd5411e731156eed65b30e4fc",
   "sourceHash": "d87977e9afee685466ec2ddbc5685e44b3b7761db73451657a13b65e3adb3d40",
-  "manifestSha256": "9f3b432f613ad0d4273ab72bbb1b68c41b9e75fc7a300698ff7513692d4c80a9",
+  "manifestSha256": "455ac541f6883bcae539f7531145732854d6870397d86dccf16295ddf167956f",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "4f06b21f5079407996171b35f3691ec0b31c1787e558b6a6b881d6d53a247085"
+      "sha256": "f9275c4a75dce3bf72c26955a8c5d9834167f1c863375c024e57eb1452e81c68"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "d80eb49b9049f4107fe63ce3f5d6d7831804f5c1795be2e2d46b3ce6ebf19e8e"
+      "sha256": "d3d8533b7d431d156f4297d959052b2998e0ed259fa10bdfc162aa663366636f"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -1197,7 +1197,7 @@
     },
     {
       "path": "runtime/tests/mysql-container.ts",
-      "sha256": "219ded3bf7d78d6dedb15c03bab4be0b850e3147e6b204eb7272c9f4fb1b5615"
+      "sha256": "8bbd00241cdc0a83ec795222e1eafc792c0f9749f440c0007e10c02010aa0b08"
     },
     {
       "path": "runtime/tests/pages-system.test.ts",

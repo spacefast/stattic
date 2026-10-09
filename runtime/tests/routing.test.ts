@@ -249,6 +249,11 @@ test("compressed uploads are served as the bytes they are, never as an encoding"
 test("index and directory URLs resolve to their compiled keys", async () => {
   expect(await (await get(rt, SITE, "/")).text()).toBe(INDEX);
   expect(await (await get(rt, SITE, "/docs/")).text()).toBe("<h1>docs</h1>\n");
+  // Browsers send `[]|{}^` raw in the query (PHP form arrays among them);
+  // strict RFC 3986 refuses them, but they never make a path invalid.
+  const lenientQuery = await get(rt, SITE, "/?a[]=1&q={x|y}^");
+  expect(lenientQuery.status).toBe(200);
+  expect(await lenientQuery.text()).toBe(INDEX);
 
   // W7.2: `/docs` resolves to `docs/index.html`, so canonicalize to the
   // trailing-slash form — relative links in the document resolve against the
@@ -1870,7 +1875,7 @@ test("public requests load only the modules their request class needs", async ()
     );
 
     instrumentedServer = await startPhpServer({
-      args: ["-d", "opcache.enable_cli=0", "-d", `auto_prepend_file=${testPrepend}`],
+      args: ["-d", `auto_prepend_file=${testPrepend}`],
       router: instrumentedRouter,
       cwd: instrumentedRoot,
       env: process.env,

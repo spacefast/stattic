@@ -225,6 +225,7 @@ async function runInstaller(
   fixture: UpdateFixture,
   options?: {
     runtimeInstanceId?: string;
+    opcacheRestriction?: string;
     expectedNonce?: string;
     commandId?: string;
     zipUrl?: string;
@@ -243,6 +244,8 @@ async function runInstaller(
       "php",
       "-d",
       "auto_prepend_file=",
+      "-d",
+      `opcache.restrict_api=${options?.opcacheRestriction ?? ""}`,
       fixture.installerPath,
       options?.zipUrl ?? fixture.zipUrl,
     ],
@@ -274,8 +277,9 @@ async function runInstaller(
 test("installs the engine tree and prints the receipt", async () => {
   const fixture = await startUpdateFixture();
 
-  const result = await runInstaller(fixture);
+  const result = await runInstaller(fixture, { opcacheRestriction: "/provider-only/" });
 
+  expect(result.stderr).toBe("");
   expect(result.exitCode).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({
     status: "installed",

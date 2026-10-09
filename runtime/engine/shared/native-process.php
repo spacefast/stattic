@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/context.php';
+require_once __DIR__ . '/pointers.php';
 
 // An unavailable native binary is never a signal to run a PHP fallback: callers
 // fail closed.
@@ -150,10 +151,21 @@ function _stattic_runtime_run_subprocess(
     // reaps the child on some PHP/Linux builds, and proc_close() then loses the
     // real exit code.
     while ($stdinPipe !== null || $outputPipes !== []) {
+        if ($deadline !== null && microtime(true) >= $deadline) {
+            $timedOut = true;
+            break;
+        }
         $read = array_values($outputPipes);
         $write = $stdinPipe !== null ? [$stdinPipe] : [];
         $except = null;
-        if (stream_select($read, $write, $except, 0, 200000) === false) {
+        [$selected, $warning] = _sf_fs_attempt(static function () use (&$read, &$write, &$except): int|false {
+            return stream_select($read, $write, $except, 0, 200000);
+        });
+        if ($selected === false) {
+            if ($warning !== null && str_contains($warning, 'Interrupted system call')) {
+                continue;
+            }
+            _sf_fs_warn($warning);
             break;
         }
 

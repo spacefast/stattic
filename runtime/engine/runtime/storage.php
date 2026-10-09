@@ -551,7 +551,9 @@ function _stattic_uploads_anon_budget_admit(string $privateRoot, string $spaceId
 {
     $path = _stattic_uploads_root($privateRoot, $spaceId) . '/anon-usage.json';
     $day = gmdate('Y-m-d');
-    $raw = file_get_contents($path);
+    clearstatcache(true, $path);
+    $absent = !file_exists($path) && !is_link($path) && _sf_path_verifiably_absent($path);
+    $raw = $absent ? false : file_get_contents($path);
     $usage = is_string($raw) ? json_decode($raw, true) : null;
     $bytes = is_array($usage) && ($usage['day'] ?? null) === $day && is_int($usage['bytes'] ?? null)
         ? $usage['bytes']

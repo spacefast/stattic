@@ -29,6 +29,7 @@ const OVER_PIPE_BUFFER = 300_000;
 const LARGE_STDIN = 1_000_000;
 
 type SubprocessResult = {
+  diagnostics: string;
   spawned: boolean;
   exitCode: number;
   stdoutLength: number;
@@ -44,6 +45,7 @@ type SubprocessRequest = {
   missing_binary?: boolean;
   env?: Record<string, string>;
   detached?: boolean;
+  signal_ack?: string;
 };
 
 async function runSubprocessCli(request: SubprocessRequest): Promise<SubprocessResult> {
@@ -59,7 +61,8 @@ async function runSubprocessCli(request: SubprocessRequest): Promise<SubprocessR
   if (exitCode !== 0) {
     throw new Error(`subprocess-cli.php exited ${exitCode}: ${stderr}`);
   }
-  return JSON.parse(stdout.trim()) as SubprocessResult;
+  // SAFETY: subprocess-cli.php emits this fixed receipt after a successful fixture exit.
+  return { ...(JSON.parse(stdout.trim()) as SubprocessResult), diagnostics: stderr };
 }
 
 function sha256(value: string): string {
@@ -206,6 +209,36 @@ describe("shared/artifacts.php subprocess runner", () => {
     expect(result.spawned).toBe(true);
     expect(result.exitCode).toBe(7);
     expect(result.stdoutSha256).toBe(sha256("early"));
+  }, 20_000);
+
+  test("captures complete output when signals interrupt the pipe wait", async () => {
+    const ackPath = path.join(os.tmpdir(), `sf-subprocess-signal-${randomUUID()}`);
+    try {
+      const result = await runSubprocessCli({
+        signal_ack: ackPath,
+        child: `$ack = ${JSON.stringify(ackPath)};
+        $parent = posix_getppid();
+        for ($i = 0; $i < 20; $i++) {
+          if (is_file($ack)) unlink($ack);
+          posix_kill($parent, SIGUSR1);
+          $deadline = microtime(true) + 1;
+          do {
+            clearstatcache(true, $ack);
+            if (microtime(true) >= $deadline) exit(75);
+          } while (!is_file($ack));
+          fwrite(STDOUT, str_repeat('x', 100000));
+        }
+        fwrite(STDERR, 'complete');
+        exit(3);`,
+      });
+      expect(result.exitCode).toBe(3);
+      expect(result.stdoutLength).toBe(2_000_000);
+      expect(result.stdoutSha256).toBe(sha256("x".repeat(2_000_000)));
+      expect(result.stderrSha256).toBe(sha256("complete"));
+      expect(result.diagnostics).toBe("");
+    } finally {
+      rmSync(ackPath, { force: true });
+    }
   }, 20_000);
 
   test("propagates a non-zero child exit code", async () => {

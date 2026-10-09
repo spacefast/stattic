@@ -25,7 +25,7 @@ const UPDATE_BODY = {
   native_sha256: "b".repeat(64),
 };
 
-function update(body: unknown, runtime = rt): Promise<Response> {
+function update(body: typeof UPDATE_BODY, runtime = rt): Promise<Response> {
   return api(runtime, "POST", `${RUNTIME_HTTP_API_BASE}/engine/update`, "update_engine", {}, body);
 }
 
@@ -157,6 +157,34 @@ test("invalidates exactly the rewritten-in-place serving aliases", async () => {
     });
     expect(result.exitCode, result.stderr.toString()).toBe(0);
     const paths: unknown = JSON.parse(result.stdout.toString());
+    const restricted = Bun.spawnSync({
+      cmd: [
+        "php",
+        "-d",
+        "auto_prepend_file=",
+        "-d",
+        "opcache.enable_cli=1",
+        "-d",
+        "opcache.restrict_api=/provider-only/",
+        "-r",
+        `require ${JSON.stringify(path.resolve(import.meta.dirname, "../engine/admin/engine-update.php"))};
+         set_error_handler(static function ($severity, $message) { throw new ErrorException($message, 0, $severity); });
+         _stattic_engine_update_invalidate_aliases($argv[1]);
+         $name = _sf_php_artifact_write($argv[1], 'artifact', _sf_php_artifact_source(['value' => 1]));
+         _sf_php_cache_write($argv[1] . '/cache.php', ['value' => 2]);
+         _stattic_runtime_write_php_atomic($argv[1] . '/version.php', ['value' => 3]);
+         echo json_encode([include $argv[1] . '/' . $name, _sf_php_cache_read($argv[1] . '/cache.php'), include $argv[1] . '/version.php']);
+         restore_error_handler();`,
+        `${root}/.stattic/storage`,
+      ],
+      env: process.env,
+    });
+    expect(restricted.exitCode, restricted.stderr.toString()).toBe(0);
+    expect(JSON.parse(restricted.stdout.toString())).toEqual([
+      { value: 1 },
+      { value: 2 },
+      { value: 3 },
+    ]);
     expect(paths).toHaveLength(8);
     expect(paths).toEqual(
       expect.arrayContaining([

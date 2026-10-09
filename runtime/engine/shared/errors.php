@@ -84,6 +84,9 @@ function _stattic_page_artifact(array $context, string $pageId): ?string
         return null;
     }
     $path = _stattic_version_root($root, $spaceId, $versionId) . '/pages/' . $artifact . '.html';
+    if (!file_exists($path) && !is_link($path) && _sf_path_verifiably_absent($path)) {
+        return null;
+    }
     $size = filesize($path);
     if (!is_int($size) || $size < 1 || $size > 2 * 1024 * 1024) {
         return null;

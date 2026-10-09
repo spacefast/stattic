@@ -362,7 +362,7 @@ $references = [
 // Two saved rows under one theme on one box: 301 is this Space's edit of the
 // single template, 303 is a co-hosted Space's edit of the page template.
 $templatePosts = [
-  (object) ['ID' => 301, 'post_name' => 'single', 'post_content' => 'alpha-saved-single'],
+  (object) ['ID' => 301, 'post_name' => 'single', 'post_content' => 'alpha-saved-single', 'post_date' => '2026-10-01 12:00:00', 'post_modified' => '2026-10-05 12:00:00'],
   (object) ['ID' => 303, 'post_name' => 'page', 'post_content' => 'beta-saved-page'],
 ];
 $savedMeta[303]['_spacefast_space_id'] = 'spc_beta';
@@ -376,6 +376,9 @@ $filteredTemplates = array_map(
   static fn (object $template): array => [
     'slug' => $template->slug,
     'content' => $template->content,
+    'wp_id' => $template->wp_id,
+    'date' => $template->date,
+    'modified' => $template->modified,
   ],
   apply_filters('get_block_templates', [], ['slug__in' => ['single', 'page']], 'wp_template')
 );
@@ -385,6 +388,9 @@ $templates = array_map(
     'slug' => $template->slug,
     'type' => $template->type,
     'content' => $template->content,
+    'wp_id' => $template->wp_id,
+    'date' => $template->date,
+    'modified' => $template->modified,
   ],
   spacefast_content_templates_for_release()
 );
@@ -479,9 +485,23 @@ echo json_encode([
       "utf8",
     );
     expect(output.templates).toEqual([
-      { slug: "single", type: "wp_template", content: themeMarkup },
-      { slug: "page", type: "wp_template", content: themeMarkup },
-      { slug: "single-projects", type: "wp_template", content: themeMarkup },
+      {
+        slug: "single",
+        type: "wp_template",
+        content: themeMarkup,
+        wp_id: 0,
+        date: "",
+        modified: "",
+      },
+      { slug: "page", type: "wp_template", content: themeMarkup, wp_id: 0, date: "", modified: "" },
+      {
+        slug: "single-projects",
+        type: "wp_template",
+        content: themeMarkup,
+        wp_id: 0,
+        date: "",
+        modified: "",
+      },
     ]);
     expect(output.templates_without_release).toEqual([]);
 
@@ -505,8 +525,14 @@ echo json_encode([
     // this box — by a co-hosted Space — and answering with it would be a leak,
     // not a wrong screen.
     expect(output.filtered_templates).toEqual([
-      { slug: "single", content: "alpha-saved-single" },
-      { slug: "page", content: themeMarkup },
+      {
+        slug: "single",
+        content: "alpha-saved-single",
+        wp_id: 301,
+        date: "2026-10-01 12:00:00",
+        modified: "2026-10-05 12:00:00",
+      },
+      { slug: "page", content: themeMarkup, wp_id: 0, date: "", modified: "" },
     ]);
     expect(output.reactivation).toEqual(output.activation);
     expect(output.pointer).toBeNull();

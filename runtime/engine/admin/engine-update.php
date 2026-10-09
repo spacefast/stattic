@@ -319,7 +319,7 @@ function _stattic_engine_update_alias_paths(string $privateRoot): array
 // unchanged alias just recompiles ~one file.
 function _stattic_engine_update_invalidate_aliases(string $privateRoot): void
 {
-    if (!function_exists('opcache_invalidate')) {
+    if (!_sf_opcache_api_allowed()) {
         return;
     }
     foreach (_stattic_engine_update_alias_paths($privateRoot) as $path) {

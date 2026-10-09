@@ -1151,6 +1151,7 @@ function _stattic_apply_platform_header_policy(array $headers, string $cacheCont
 // Post-response work: runs in a shutdown handler, after fastcgi_finish_request()
 // on lanes that opt in. Deferred work must be self-contained (capture eagerly,
 // write lazily) and best-effort: failures are swallowed, never surfaced.
+/** @return list<array{work: callable, before_tenant: bool}> */
 function &_stattic_deferred_work(): array
 {
     static $queue = [];
@@ -1166,11 +1167,42 @@ function _stattic_flush_response_before_deferred(?bool $set = null): bool
     return $flush;
 }
 
-function _stattic_defer(callable $work): void
+// A PHP handler pins open_basedir for the rest of the request. Finish queued
+// platform file work before that handoff, without releasing its admission lock.
+function _stattic_run_deferred_work(bool $beforeTenant = false): void
+{
+    $queue = &_stattic_deferred_work();
+    // Only file maintenance opts into the pre-tenant window. Provider work
+    // stays after the response; callbacks may append more work in either lane.
+    while ($queue !== []) {
+        $index = null;
+        foreach ($queue as $key => $entry) {
+            if (!$beforeTenant || $entry['before_tenant']) {
+                $index = $key;
+                break;
+            }
+        }
+        if ($index === null) {
+            return;
+        }
+        $entry = array_splice($queue, $index, 1)[0];
+        try {
+            $entry['work']();
+        } catch (Throwable $error) {
+            error_log(sprintf(
+                'spacefast deferred work failed type=%s message=%s',
+                get_debug_type($error),
+                $error->getMessage(),
+            ));
+        }
+    }
+}
+
+function _stattic_defer(callable $work, bool $beforeTenant = false): void
 {
     static $registered = false;
     $queue = &_stattic_deferred_work();
-    $queue[] = $work;
+    $queue[] = ['work' => $work, 'before_tenant' => $beforeTenant];
     if ($registered) {
         return;
     }
@@ -1186,24 +1218,7 @@ function _stattic_defer(callable $work): void
         if (_stattic_flush_response_before_deferred() && function_exists('fastcgi_finish_request')) {
             fastcgi_finish_request();
         }
-        $queue = &_stattic_deferred_work();
-        // Drain by shifting, not a snapshot foreach: work a deferred callback
-        // itself defers (deferred-from-deferred) is appended to this same queue
-        // and must run in the same shutdown pass, not be dropped.
-        while ($queue !== []) {
-            $work = array_shift($queue);
-            try {
-                $work();
-            } catch (Throwable $error) {
-                // Post-response: the visitor already has their bytes, but the
-                // operator must still see why deferred work failed.
-                error_log(sprintf(
-                    'spacefast deferred work failed type=%s message=%s',
-                    get_debug_type($error),
-                    $error->getMessage(),
-                ));
-            }
-        }
+        _stattic_run_deferred_work();
     });
 }
 
@@ -1394,19 +1409,34 @@ function _stattic_nfc_no_intl_journal_once(): void
     ], false);
 }
 
-// RFC 3986 accepts ASCII URI bytes. HTTP request targets may carry authored
-// UTF-8 directly, so encode only those bytes before parsing; the canonical path
-// gate below performs the one validated percent-decode and NFC normalization.
+// RFC 3986 is stricter than the request targets clients actually send: authored
+// UTF-8, `[]|^{}` and friends arrive raw (the WHATWG URL spec's leniency), and
+// PHP's own `?a[]=1` form arrays need brackets. Percent-encode those bytes so
+// the parser accepts the target. In the path the encoded byte names the same
+// file: the canonical gate below does the one validated percent-decode and NFC
+// normalization. Controls, `\` and stray `%` stay raw in the path, so an
+// ambiguous path still fails closed at the parser. The query plays no part in
+// path identity, so every byte RFC 3986 refuses there is encoded, and
+// parse_str() decodes it back to what the client sent.
 function _stattic_uri_ascii(string $uri): ?string
 {
-    if (preg_match('//u', $uri) !== 1) {
+    $split = strcspn($uri, '?#');
+    $path = substr($uri, 0, $split);
+    if (preg_match('//u', $path) !== 1) {
         return null;
     }
-    return preg_replace_callback(
-        '/[^\x00-\x7f]+/u',
-        static fn (array $match): string => rawurlencode($match[0]),
-        $uri,
+    $encode = static fn (array $match): string => rawurlencode($match[0]);
+    // Origin-form only: an absolute-form target keeps `[]` for its IPv6 host.
+    $illegalPathBytes = str_starts_with($path, '/') ? '/[\x80-\xff "<>`{}|^\[\]]/' : '/[\x80-\xff]/';
+    $encodeQuery = static fn (string $part): string => preg_replace_callback(
+        '/%(?![0-9A-Fa-f]{2})|[^A-Za-z0-9\-._~!$&\'()*+,;=:@\/?%]/',
+        $encode,
+        $part,
     );
+    // The first `#` still ends the query, as it did before; any later one is data.
+    $rest = explode('#', substr($uri, $split), 2);
+    return preg_replace_callback($illegalPathBytes, $encode, $path)
+        . implode('#', array_map($encodeQuery, $rest));
 }
 
 // Preserve getRawPath(): getPath() removes dot segments before our security

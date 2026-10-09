@@ -68,8 +68,19 @@ check(_stattic_request_uri_path('/docs/page?draft=1') === '/docs/page', 'URI par
 check(_stattic_request_uri_path('/a/../private') === '/a/../private', 'URI parser preserves dot segments for rejection');
 check(_stattic_request_uri_path('/caf%C3%A9') === '/caf%C3%A9', 'URI parser preserves encoded Unicode');
 check(_stattic_request_uri_path('/café') === '/caf%C3%A9', 'URI parser encodes authored Unicode before validation');
-check(_stattic_request_uri_path(':malformed') === '', 'URI parser fails malformed targets closed');
+check(
+    _stattic_canonical_request_path(_stattic_request_uri_path('/a|b/{c}"d"')) === '/a|b/{c}"d"',
+    'URI parser accepts client-sent path bytes RFC 3986 refuses, under the same file identity'
+);
+foreach ([':malformed', '/a\\b', '/a%zz'] as $malformedTarget) {
+    check(_stattic_request_uri_path($malformedTarget) === '', 'URI parser fails malformed targets closed: ' . $malformedTarget);
+}
 check(_stattic_request_uri_query('/docs?draft=1%202') === 'draft=1%202', 'URI parser preserves the raw query');
+foreach (['/?a[]=1&b=x|y' => ['a' => ['1'], 'b' => 'x|y'], '/?q={a b}^%&r=50%25' => ['q' => '{a b}^%', 'r' => '50%']] as $lenientTarget => $lenientParams) {
+    check(_stattic_request_uri_path($lenientTarget) === '/', 'URI parser accepts a lenient query: ' . $lenientTarget);
+    parse_str((string) _stattic_request_uri_query($lenientTarget), $parsedLenientQuery);
+    check($parsedLenientQuery === $lenientParams, 'lenient query parses to what the client sent: ' . $lenientTarget);
+}
 
 // --- Request path joining ------------------------------------------------------------
 
@@ -110,6 +121,96 @@ check(
     !_sf_path_verifiably_absent($absenceRoot . '/wrong-type.json'),
     'verified absence: an existing non-file path is unavailable, not absent'
 );
+error_clear_last();
+check(
+    _sf_pointer_read('missing', $absenceRoot . '/missing.json') === ['kind' => 'absent', 'value' => null]
+        && error_get_last() === null,
+    'verified absent pointer reads without a PHP warning'
+);
+check(
+    _stattic_marker_due($absenceRoot . '/missing.marker', 60, time()) && error_get_last() === null,
+    'a missing sweep marker is due without a PHP warning'
+);
+check(
+    _sf_pointer_read('present', $absenceRoot . '/present.json') === ['kind' => 'present', 'value' => []],
+    'an existing pointer is still read from disk'
+);
+touch($absenceRoot . '/sweep.marker', 100);
+check(!_stattic_marker_due($absenceRoot . '/sweep.marker', 60, 120), 'a recent sweep marker is not due');
+check(_stattic_marker_due($absenceRoot . '/sweep.marker', 60, 160), 'a sweep marker is due at the interval boundary');
+unlink($absenceRoot . '/sweep.marker');
+$recordRoot = $absenceRoot . '/.stattic/storage/records';
+mkdir($recordRoot, 0775, true);
+$recordStore = _stattic_record_store($recordRoot);
+error_clear_last();
+check(_stattic_record_store_claim($recordStore, 'claim', ['owner' => 'first'], time() + 60), 'record claim creates its owner');
+check(
+    !_stattic_record_store_claim($recordStore, 'claim', ['owner' => 'second'], time() + 60)
+        && _stattic_record_store_get($recordStore, 'claim') === ['owner' => 'first']
+        && error_get_last() === null,
+    'a repeated claim preserves the original owner without a PHP warning'
+);
+check(
+    _sf_fopen_exclusive_racing(_stattic_record_store_path($recordStore, 'claim')) === false
+        && _stattic_record_store_get($recordStore, 'claim') === ['owner' => 'first']
+        && error_get_last() === null,
+    'exclusive creation after a competing claim preserves its owner without a PHP warning'
+);
+check(
+    @_sf_fopen_exclusive_racing($recordRoot . '/absent-parent/claim.json') === false
+        && str_contains(error_get_last()['message'] ?? '', 'No such file or directory'),
+    'exclusive creation without a competing record retains the storage failure diagnostic'
+);
+error_clear_last();
+_stattic_record_store_delete($recordStore, 'claim');
+_stattic_record_store_delete($recordStore, 'claim');
+check(
+    _stattic_record_store_read($recordStore, 'claim')['state'] === 'absent' && error_get_last() === null,
+    'record deletion is idempotent without a PHP warning'
+);
+// The racing helpers run the step a caller reaches after its existence probe
+// said "go", with a concurrent request having already flipped the answer. They
+// count the lost race as success and still report a real failure.
+error_clear_last();
+check(
+    _sf_mkdir_racing($absenceRoot . '/raced/dir', 0o775)
+        && _sf_mkdir_racing($absenceRoot . '/raced/dir', 0o775)
+        && is_dir($absenceRoot . '/raced/dir')
+        && error_get_last() === null,
+    'a directory create that loses the race to a concurrent create succeeds without a PHP warning'
+);
+check(
+    !@_sf_mkdir_racing($absenceRoot . '/present.json', 0o775)
+        && str_contains(error_get_last()['message'] ?? '', 'File exists'),
+    'a file in the way of a directory create still fails with its warning'
+);
+error_clear_last();
+check(
+    _sf_read_racing($absenceRoot . '/missing.json') === null
+        && _sf_unlink_racing($absenceRoot . '/missing.json')
+        && error_get_last() === null,
+    'a read or delete that loses the race to a concurrent delete answers absent without a PHP warning'
+);
+check(
+    @_sf_read_racing($absenceRoot . '/raced/dir') === false
+        && str_contains(error_get_last()['message'] ?? '', 'Is a directory')
+        && !@_sf_unlink_racing($absenceRoot . '/raced/dir')
+        && error_get_last() !== null,
+    'existing paths that cannot be read or deleted retain their failure diagnostic'
+);
+file_put_contents($absenceRoot . '/unreadable.json', "{}\n");
+chmod($absenceRoot . '/unreadable.json', 0o000);
+error_clear_last();
+check(
+    @_stattic_runtime_read_json($absenceRoot . '/unreadable.json') === false && error_get_last() !== null,
+    'an existing unreadable document is unavailable, never absent'
+);
+unlink($absenceRoot . '/unreadable.json');
+rmdir($absenceRoot . '/raced/dir');
+rmdir($absenceRoot . '/raced');
+rmdir($recordRoot);
+rmdir(dirname($recordRoot));
+rmdir(dirname(dirname($recordRoot)));
 $runtimeErrorLog = $absenceRoot . '/runtime-errors.log';
 $previousErrorLog = ini_set('error_log', $runtimeErrorLog);
 error_clear_last();
@@ -3553,6 +3654,30 @@ check(
     ),
     'a crashed compile stage root is a registered retention root'
 );
+// The unrestricted retention lane handles scratch entries PHP's jail cannot
+// inspect: outside and dangling links. Their targets must never be followed.
+$scratchRoot = $contentRetentionRoot . '/spaces/spc_scratch/tmp';
+mkdir($scratchRoot . '/php-fx-stale/nested', 0o777, true);
+mkdir($scratchRoot . '/php-fx-live', 0o777, true);
+$scratchOutside = dirname($contentRetentionRoot) . '/scratch-outside';
+file_put_contents($scratchOutside, 'keep');
+file_put_contents($scratchRoot . '/php-fx-stale/.hidden', 'scratch');
+file_put_contents($scratchRoot . '/php-fx-stale/nested/file', 'scratch');
+symlink($scratchOutside, $scratchRoot . '/php-fx-stale/outside');
+symlink($scratchOutside . '-absent', $scratchRoot . '/php-fx-stale/dangling');
+touch($scratchRoot . '/php-fx-stale', time() - STATTIC_RUNTIME_STAGING_RETENTION_SECONDS - 1);
+$scratchReclaimed = 0;
+foreach (_stattic_runtime_retention_roots($contentRetentionRoot) as [$pattern, $age]) {
+    $scratchReclaimed += _stattic_reclaim_stale_paths($pattern, $age);
+}
+check(
+    $scratchReclaimed === 1
+        && !is_dir($scratchRoot . '/php-fx-stale')
+        && is_dir($scratchRoot . '/php-fx-live')
+        && file_get_contents($scratchOutside) === 'keep',
+    'scratch retention removes outside and dangling links without touching targets or live requests'
+);
+unlink($scratchOutside);
 $blockedAtomicRoot = realpath(sys_get_temp_dir()) . '/sf-atomic-blocked-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
 mkdir($blockedAtomicRoot, 0777, true);
 file_put_contents($blockedAtomicRoot . '/runtime', 'not a directory');

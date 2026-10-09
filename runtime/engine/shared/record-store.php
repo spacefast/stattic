@@ -106,7 +106,7 @@ function _stattic_record_store_put(array $store, string $id, array $record): voi
 function _stattic_record_store_claim(array $store, string $id, array $record, int $expiresAt): bool
 {
     $path = _stattic_record_store_path($store, $id);
-    $handle = fopen($path, 'x');
+    $handle = _sf_fopen_exclusive_racing($path);
     if ($handle === false) {
         return false;
     }
@@ -132,7 +132,13 @@ function _stattic_record_store_delete(array $store, string $id): void
     if ($id === '') {
         return;
     }
-    unlink(_stattic_record_store_path($store, $id));
+    $path = _stattic_record_store_path($store, $id);
+    clearstatcache(true, $path);
+    if (!file_exists($path) && !is_link($path) && _sf_path_verifiably_absent($path)) {
+        return;
+    }
+    // A concurrent delete can land between the probe above and this unlink.
+    _sf_unlink_racing($path);
 }
 
 // Mutate-under-lock: the critical section receives the record as it stands

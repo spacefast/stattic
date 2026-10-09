@@ -651,7 +651,12 @@ export async function startPhpServer(input: {
 }): Promise<PhpServer> {
   const server = spawn(
     input.binary ?? PHP_BINARY,
-    [...input.args, "-S", "127.0.0.1:0", input.router],
+    // `php -S` is the cli-server SAPI, which opcache.enable_cli does not
+    // govern: OPcache stays on with timestamp revalidation every few seconds,
+    // so a fixture that rewrites a PHP file in place keeps executing the
+    // compiled copy. Fixtures serve the bytes on disk; a caller that is
+    // testing OPcache itself overrides this in its own args.
+    ["-d", "opcache.enable=0", ...input.args, "-S", "127.0.0.1:0", input.router],
     {
       cwd: input.cwd,
       stdio: ["ignore", "ignore", "pipe"],
@@ -738,14 +743,9 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
       ].join("\n"),
     );
   }
-  const phpArgs = [
-    "-d",
-    "opcache.enable_cli=0",
-    "-d",
-    `auto_prepend_file=${RUNTIME_TEST_ATOMIC_PREPEND}`,
-  ];
+  const phpArgs = ["-d", `auto_prepend_file=${RUNTIME_TEST_ATOMIC_PREPEND}`];
   if (options.autoPrependInit) {
-    phpArgs[3] = `auto_prepend_file=${path.join(root, ".stattic/test-prepend.php")}`;
+    phpArgs[1] = `auto_prepend_file=${path.join(root, ".stattic/test-prepend.php")}`;
   }
   for (const [name, value] of Object.entries(options.phpIni ?? {})) {
     phpArgs.push("-d", `${name}=${value}`);

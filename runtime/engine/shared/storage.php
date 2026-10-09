@@ -148,7 +148,7 @@ function _stattic_runtime_mkdir(string $path): void
 function _stattic_runtime_mkdir_soft(string $path): bool
 {
     _stattic_runtime_assert_private_path($path);
-    if (!is_dir($path) && !mkdir($path, 0775, true) && !is_dir($path)) {
+    if (!is_dir($path) && !_sf_mkdir_racing($path, 0775)) {
         return false;
     }
     chmod($path, 0775);
@@ -258,12 +258,12 @@ function _stattic_runtime_read_json(string $path): mixed
         return null;
     }
     error_clear_last();
-    $raw = file_get_contents($path);
-    if (!is_string($raw)) {
-        clearstatcache(true, $path);
-        if (_sf_path_verifiably_absent($path)) {
-            return null;
-        }
+    // A concurrent delete can land between the probe above and this read.
+    $raw = _sf_read_racing($path);
+    if ($raw === null) {
+        return null;
+    }
+    if ($raw === false) {
         _sf_runtime_log_read_failure('json_read_failed', $path);
         return false;
     }
@@ -327,6 +327,10 @@ function _stattic_runtime_space_routing_doc(string $spaceRoot, string $kind, ?st
 // suppress a sweep permanently.
 function _stattic_marker_due(string $markerPath, int $intervalSeconds, int $now): bool
 {
+    clearstatcache(true, $markerPath);
+    if (!file_exists($markerPath) && !is_link($markerPath) && _sf_path_verifiably_absent($markerPath)) {
+        return true;
+    }
     $last = filemtime($markerPath);
     return $last === false || $last > $now || $now - $last >= $intervalSeconds;
 }
@@ -456,14 +460,10 @@ function _stattic_runtime_json_object(array $value): object|array
 
 // Fixed-name but write-once: callers write version-directory artifacts at
 // finalize, before any reader has included the path, so opcache has never
-// compiled it and no invalidation protocol exists. The invalidate is parity
-// with `_sf_php_artifact_write`, result ignored.
+// compiled it and no invalidation protocol exists.
 function _stattic_runtime_write_php_atomic(string $path, array $value): void
 {
     _stattic_runtime_write_private_string($path, _sf_php_artifact_source($value));
-    if (function_exists('opcache_invalidate')) {
-        opcache_invalidate($path, true);
-    }
 }
 
 // THE operator journal: one append-only NDJSON file under the private root,

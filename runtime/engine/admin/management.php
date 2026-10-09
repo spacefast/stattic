@@ -2036,8 +2036,8 @@ function _stattic_runtime_read_version_source_route(
         _stattic_runtime_version_source_empty();
     }
     $blobPath = _stattic_runtime_blob_path($privateRoot, $spaceId, (string) $resolved['sha']);
-    $size = filesize($blobPath);
-    if (!is_file($blobPath) || !is_int($size)) {
+    $size = is_file($blobPath) ? filesize($blobPath) : false;
+    if (!is_int($size)) {
         _stattic_problem_response(
             503,
             'runtime_version_source_unavailable',

@@ -236,11 +236,18 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     $scratchTmp = _stattic_space_root($privateRoot, $spaceId) . '/tmp/php-fx-' . bin2hex(random_bytes(8));
     _stattic_runtime_mkdir($scratchTmp);
     register_shutdown_function(static function () use ($scratchTmp): void {
-        foreach (glob($scratchTmp . '/*') ?: [] as $entry) {
-            unlink($entry);
+        // The jail may refuse a symlink whose target is outside it. Leave that
+        // entry for the unrestricted retention pass, with one cleanup diagnostic.
+        [$removed, $warning] = _sf_fs_attempt(static fn (): bool => _stattic_private_tree_remove($scratchTmp));
+        if (!$removed) {
+            error_log('spacefast PHP function scratch cleanup deferred path=' . $scratchTmp
+                . ($warning !== null ? ' msg=' . $warning : ''));
         }
-        rmdir($scratchTmp);
     });
+
+    // File maintenance needs the platform storage root. Drain only that work
+    // before open_basedir is pinned; provider delivery stays after the response.
+    _stattic_run_deferred_work(beforeTenant: true);
 
     // At the first output byte, however produced, including a tenant flush(),
     // the platform re-takes the headers it owns.

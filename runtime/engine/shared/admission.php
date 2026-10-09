@@ -127,7 +127,9 @@ function _stattic_admission_counter_update(
                     unlink($stalePath);
                 }
             }
-            unlink($path);
+            if (is_file($path)) {
+                unlink($path);
+            }
         }
     }
     _stattic_lock_release($pointerHandle);
@@ -160,14 +162,71 @@ function _stattic_admission_counter_acquire(string $path, int $limit, int $stale
         return false;
     }
     $generation = $result['generation'];
-    return static function () use ($path, $staleSeconds, $generation): void {
+    // Bind the release before a PHP handler tightens open_basedir. The pointer
+    // lock fences rotation while these descriptors are opened; release later
+    // uses only them, never a path outside the handler's jail.
+    $release = _stattic_lock_with(
+        $path . '.generation',
+        STATTIC_LOCK_WAIT,
+        null,
+        static function ($pointerLock) use ($path, $generation): ?callable {
+            rewind($pointerLock);
+            if (_stattic_admission_counter_generation(stream_get_contents($pointerLock)) !== $generation) {
+                // Rotation already retired this request's charge.
+                return static function (): void {};
+            }
+            $pointer = fopen($path . '.generation', 'r+');
+            $counter = fopen($path . '.' . $generation, 'r+');
+            if (!is_resource($pointer) || !is_resource($counter)) {
+                if (is_resource($pointer)) fclose($pointer);
+                if (is_resource($counter)) fclose($counter);
+                return null;
+            }
+            $released = false;
+            return static function () use ($pointer, $counter, $generation, &$released): void {
+                if ($released) return;
+                $released = true;
+                try {
+                    if (!_stattic_lock_flock($pointer, LOCK_EX, true)) {
+                        error_log('spacefast admission release lock unavailable');
+                        return;
+                    }
+                    rewind($pointer);
+                    if (_stattic_admission_counter_generation(stream_get_contents($pointer)) !== $generation) {
+                        return;
+                    }
+                    rewind($counter);
+                    $value = json_decode((string) stream_get_contents($counter), true);
+                    if (!is_array($value) || !is_int($value['count'] ?? null)) {
+                        error_log('spacefast admission release counter unavailable');
+                        return;
+                    }
+                    $value['count'] = max(0, $value['count'] - 1);
+                    $value['updated_at'] = time();
+                    $payload = json_encode($value, JSON_UNESCAPED_SLASHES) . "\n";
+                    rewind($counter);
+                    if (!ftruncate($counter, 0) || fwrite($counter, $payload) !== strlen($payload) || !fflush($counter)) {
+                        error_log('spacefast admission release write failed');
+                    }
+                } finally {
+                    _stattic_lock_release($pointer);
+                    fclose($counter);
+                }
+            };
+        },
+    );
+    if (!is_callable($release)) {
+        // Descriptor binding failed before containment; undo the charge while
+        // its paths remain accessible, then refuse admission.
         _stattic_admission_counter_update(
             $path,
             $staleSeconds,
             static fn (int $count): int => -1,
             $generation,
         );
-    };
+        return false;
+    }
+    return $release;
 }
 
 function _stattic_admission_record_shed(string $privateRoot, string $spaceId, int $limit, string $reason): void

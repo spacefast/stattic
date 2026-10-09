@@ -32,6 +32,10 @@ function admission_fixture_generation_file_count(string $path): int
     ));
 }
 
+set_error_handler(static function (int $severity, string $message): never {
+    throw new ErrorException($message, 0, $severity);
+});
+
 $limit = 2;
 $fixtureRoot = sys_get_temp_dir() . '/spacefast-admission-generation-' . bin2hex(random_bytes(8));
 $privateRoot = $fixtureRoot . '/.stattic/storage';
@@ -118,6 +122,24 @@ try {
         $release();
     }
 
+    $jailedReleaseA = _stattic_admission_counter_acquire($path, $limit, 60);
+    $jailedReleaseB = _stattic_admission_counter_acquire($path, $limit, 60);
+    if (!is_callable($jailedReleaseA) || !is_callable($jailedReleaseB)) {
+        throw new RuntimeException('jailed release requests were not admitted');
+    }
+    $counterProbe = fopen(admission_fixture_file_counter_path($path), 'r');
+    $jail = $privateRoot . '/scratch';
+    mkdir($jail);
+    ini_set('open_basedir', $jail);
+    $jailedReleaseA();
+    $jailedReleaseA();
+    rewind($counterProbe);
+    $countAfterJailedRepeatRelease = json_decode(stream_get_contents($counterProbe), true)['count'];
+    $jailedReleaseB();
+    rewind($counterProbe);
+    $countAfterJailedReleases = json_decode(stream_get_contents($counterProbe), true)['count'];
+    fclose($counterProbe);
+
     echo json_encode([
         'request_b_admitted' => is_callable($releaseB),
         'generation_file_count_after_rotation' => $generationFileCountAfterRotation,
@@ -128,7 +150,11 @@ try {
         'admitted_after_slots_freed' => $admittedAfterSlotsFreed,
         'final_persisted_count' => $finalPersistedCount,
         'generation_file_counts_after_rotations' => $generationFileCountsAfterRotations,
+        'count_after_jailed_repeat_release' => $countAfterJailedRepeatRelease,
+        'count_after_jailed_releases' => $countAfterJailedReleases,
+        'jail_preserved' => ini_get('open_basedir') === $jail,
     ], JSON_THROW_ON_ERROR) . "\n";
 } finally {
+    restore_error_handler();
     exec('rm -rf ' . escapeshellarg($fixtureRoot));
 }

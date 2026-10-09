@@ -34,6 +34,14 @@ function subprocess_cli_payload(int $bytes): string
     return substr(str_repeat($unit, intdiv($bytes, 256) + 1), 0, $bytes);
 }
 
+if (is_string($request['signal_ack'] ?? null)) {
+    $signalAck = $request['signal_ack'];
+    pcntl_async_signals(true);
+    pcntl_signal(SIGUSR1, static function () use ($signalAck): void {
+        file_put_contents($signalAck, 'received');
+    }, false);
+}
+
 $stdinBytes = (int) ($request['stdin_bytes'] ?? 0);
 $stdin = $stdinBytes > 0 ? subprocess_cli_payload($stdinBytes) : null;
 

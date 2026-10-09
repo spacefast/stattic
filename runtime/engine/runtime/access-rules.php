@@ -674,7 +674,7 @@ function _stattic_access_session_record_write(string $privateRoot, string $sessi
     _stattic_record_store_put($store, $sessionId, $record);
     _stattic_defer(static function () use ($store): void {
         _stattic_record_store_sweep($store);
-    });
+    }, beforeTenant: true);
     return true;
 }
 
@@ -1838,7 +1838,7 @@ function _stattic_grant_network_ip_unsupported(array $grant): void
             'authority' => $reference,
             'reason' => 'ip_constraints_unenforceable',
         ], false);
-    });
+    }, beforeTenant: true);
 }
 
 // There is no `$ipAddress`: IP constraints are unenforceable on this platform
@@ -2728,7 +2728,7 @@ function _stattic_access_session_touch_record(
             ...$record,
             'lastSeenAt' => $now,
         ]);
-    });
+    }, beforeTenant: true);
 }
 
 // Use moves an authority forward so idle expiry measures real use, not the

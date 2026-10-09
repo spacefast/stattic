@@ -145,6 +145,9 @@ function spacefast_content_templates_project(): array
             'has_theme_file' => false,
             'is_custom' => false,
             'author' => null,
+            'wp_id' => 0,
+            'date' => '',
+            'modified' => '',
             'post_types' => [(string) ($resource['postType'] ?? '')],
         ];
     }
@@ -201,6 +204,8 @@ function spacefast_content_templates_filter(mixed $templates, mixed $query = [],
             $template->origin = null;
             $template->is_custom = true;
             $template->wp_id = (int) ($post->ID ?? 0);
+            $template->date = (string) ($post->post_date ?? '');
+            $template->modified = (string) ($post->post_modified ?? '');
         }
         $templates[] = $template;
     }

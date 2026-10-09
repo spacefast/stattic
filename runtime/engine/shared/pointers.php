@@ -50,6 +50,104 @@ function _sf_path_verifiably_absent(string $path): bool
     return false;
 }
 
+// A concurrent request can make a filesystem call warn even though it got the
+// outcome its caller wanted: mkdir loses a create race ("File exists"), or a
+// read or unlink loses a delete race ("No such file or directory"). PHP has no
+// errno for these, so the call runs here with its warning held back. The caller
+// checks the post-condition, and if that fails it passes the held warning to
+// _sf_fs_warn. A lost race is then silent, and a real failure still reaches the
+// error log and error_get_last().
+//
+// @return array{0: mixed, 1: ?string} the call's result and its held warning
+function _sf_fs_attempt(callable $call): array
+{
+    $warning = null;
+    set_error_handler(static function (int $severity, string $message) use (&$warning): bool {
+        $warning = $message;
+        return true;
+    }, E_WARNING | E_NOTICE);
+    try {
+        $result = $call();
+    } finally {
+        restore_error_handler();
+    }
+    return [$result, $warning];
+}
+
+function _sf_fs_warn(?string $warning): void
+{
+    if ($warning !== null) {
+        trigger_error($warning, E_USER_WARNING);
+    }
+}
+
+/** @return resource|false */
+function _sf_fopen_exclusive_racing(string $path): mixed
+{
+    [$handle, $warning] = _sf_fs_attempt(static fn () => fopen($path, 'x'));
+    if (is_resource($handle)) {
+        return $handle;
+    }
+    clearstatcache(true, $path);
+    if (!file_exists($path) && !is_link($path)) {
+        _sf_fs_warn($warning);
+    }
+    return false;
+}
+
+// The create step for a directory that another request may be creating at the
+// same moment. Callers check is_dir first; reaching here with the directory
+// already present IS the lost race, and that counts as success. Anything that
+// leaves no directory behind (permission denied, a file in the way, quota) still
+// returns false with mkdir's own warning raised unchanged: the replay guard
+// classifies that message by its operation and errno text.
+function _sf_mkdir_racing(string $dir, int $mode): bool
+{
+    [$created, $warning] = _sf_fs_attempt(static fn (): bool => mkdir($dir, $mode, true));
+    clearstatcache(true, $dir);
+    if ($created === true || is_dir($dir)) {
+        return true;
+    }
+    _sf_fs_warn($warning);
+    return false;
+}
+
+// Idempotent delete: a file that a concurrent request deleted first is gone,
+// which is what the caller asked for. Only a file that is still there (or whose
+// absence cannot be proven) returns false with unlink's warning raised.
+function _sf_unlink_racing(string $path): bool
+{
+    [$unlinked, $warning] = _sf_fs_attempt(static fn (): bool => unlink($path));
+    if ($unlinked === true) {
+        return true;
+    }
+    clearstatcache(true, $path);
+    if (_sf_path_verifiably_absent($path)) {
+        return true;
+    }
+    _sf_fs_warn($warning);
+    return false;
+}
+
+// A whole-file read that may lose a delete race. Returns the bytes, null when
+// the file verifiably does not exist (the read lost a race or it never
+// existed), or false when it exists but could not be read. A false return has
+// already raised the read's warning, so error_get_last() describes it.
+function _sf_read_racing(string $path): string|null|false
+{
+    [$raw, $warning] = _sf_fs_attempt(static fn (): string|false => file_get_contents($path));
+    if (is_string($raw)) {
+        _sf_fs_warn($warning);
+        return $warning === null ? $raw : false;
+    }
+    clearstatcache(true, $path);
+    if (_sf_path_verifiably_absent($path)) {
+        return null;
+    }
+    _sf_fs_warn($warning);
+    return false;
+}
+
 // Failure logging for the runtime read paths. Plain error_log on purpose: the
 // `sf-log/1 ` marker is the TENANT log lane and these are platform-internal.
 function _sf_runtime_log_read_failure(string $kind, string $path, ?string $identity = null): void
@@ -71,17 +169,19 @@ function _sf_runtime_log_read_failure(string $kind, string $path, ?string $ident
 function _sf_pointer_attempt(string $path): ?array
 {
     error_clear_last();
-    $raw = file_get_contents($path);
+    clearstatcache(true, $path);
+    if (!file_exists($path) && !is_link($path) && _sf_path_verifiably_absent($path)) {
+        return ['kind' => 'absent', 'value' => null];
+    }
+    $raw = _sf_read_racing($path);
+    if ($raw === null) {
+        return ['kind' => 'absent', 'value' => null];
+    }
     if (is_string($raw)) {
         $decoded = json_decode($raw, true);
         if (is_array($decoded)) {
             return ['kind' => 'present', 'value' => $decoded];
         }
-        return null;
-    }
-    clearstatcache(true, $path);
-    if (_sf_path_verifiably_absent($path)) {
-        return ['kind' => 'absent', 'value' => null];
     }
     return null;
 }
@@ -193,9 +293,6 @@ function _sf_php_artifact_write(string $dir, string $base, string $code): string
     if (!_sf_atomic_put($path, $code, true)) {
         throw new RuntimeException('artifact write failed: ' . $path);
     }
-    if (function_exists('opcache_invalidate')) {
-        opcache_invalidate($path, true);
-    }
     return $name;
 }
 
@@ -204,7 +301,7 @@ function _sf_artifact_mkdir(string $dir): void
     if (is_dir($dir)) {
         return;
     }
-    if (!mkdir($dir, 0775, true) && !is_dir($dir)) {
+    if (!_sf_mkdir_racing($dir, 0775)) {
         throw new RuntimeException('artifact directory could not be created: ' . $dir);
     }
 }
@@ -250,8 +347,7 @@ function _sf_php_cache_read(string $path, array $expect = []): ?array
  * means the next reader rebuilds from source, so callers ignore the result
  * except to decide sharding. tmp + rename; a given path's content never
  * changes (the source is immutable), so no invalidation exists anywhere. The
- * opcache_invalidate guards against a half-cached tmp path, same as
- * `_sf_php_artifact_write`.
+ * temporary paths are never included, so publication needs no invalidation.
  */
 function _sf_php_cache_write(string $path, array $value): bool
 {
@@ -275,8 +371,24 @@ function _sf_php_cache_write(string $path, array $value): bool
     } catch (Throwable) {
         return false;
     }
-    if (function_exists('opcache_invalidate')) {
-        opcache_invalidate($path, true);
-    }
     return true;
+}
+
+// OPcache restricts the calling script, not the artifact being invalidated.
+// Under FPM it prefix-matches SCRIPT_FILENAME as the web server passed it,
+// symlinks unresolved; the CLI compares the resolved script path instead.
+function _sf_opcache_api_allowed(): bool
+{
+    if (!function_exists('opcache_invalidate')) {
+        return false;
+    }
+    $restriction = (string) ini_get('opcache.restrict_api');
+    if ($restriction === '') {
+        return true;
+    }
+    $script = (string) ($_SERVER['SCRIPT_FILENAME'] ?? '');
+    if (PHP_SAPI === 'cli') {
+        $script = (string) realpath($script);
+    }
+    return $script !== '' && str_starts_with($script, $restriction);
 }

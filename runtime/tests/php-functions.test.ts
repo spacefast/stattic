@@ -14,10 +14,22 @@
 //   * what the service broker does with a frame (grant enforcement, Akismet's
 //     shape, the outbox row): services.rs and functions-relay.test.ts.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 
-import { deploy, get, publicAccessConfig, type Runtime, startRuntime } from "./harness.ts";
+import { runtimeAuthorizationProjectionSchema } from "../../packages/common/src/contracts/runtime-api.ts";
+import {
+  deploy,
+  get,
+  publicAccessConfig,
+  putRoute,
+  journalRecords,
+  type Runtime,
+  startRuntime,
+} from "./harness.ts";
 
 const HOST = "phpfx.test";
 const SPACE = "spc_phpfx";
@@ -27,7 +39,14 @@ const HELLO_PHP = "<?php sf_json(['hello' => sf_body()['name'] ?? 'world']);\n";
 
 // Reports, from inside the handler, the jail and the surfaces the scrub emptied.
 const PROBE_PHP = `<?php
+$scratch = (string) ini_get('session.save_path');
+file_put_contents($scratch . '/.hidden', 'scratch');
+mkdir($scratch . '/nested');
+file_put_contents($scratch . '/nested/file', 'scratch');
+symlink(dirname(__FILE__), $scratch . '/blob-link');
 sf_json([
+    'scratch_tmp' => $scratch,
+    'handler' => __FILE__,
     'open_basedir' => (string) ini_get('open_basedir'),
     // The fleet-wide dispatch credential MUST be gone from every surface (the
     // prelude scrubs it and the blob that embeds it); a same-team site-scoped
@@ -115,8 +134,11 @@ sf_json(['codes' => $codes]);
 `;
 
 let rt: Runtime;
+const diagnosticsRoot = mkdtempSync(path.join(os.tmpdir(), "sf-phpfx-diagnostics-"));
+const diagnosticsPath = path.join(diagnosticsRoot, "php.log");
 
 beforeAll(async () => {
+  await Bun.write(diagnosticsPath, "");
   // Platform service configuration as a wp.cloud site carries it: process
   // environment the tenant prelude will scrub away.
   rt = await startRuntime({
@@ -136,6 +158,7 @@ beforeAll(async () => {
     // open_basedir (`munmap_chunk(): invalid pointer` on the Ubuntu runner), so
     // this suite runs the real PHP binary. Other suites own PHP line coverage.
     phpBinary: process.env.SPACEFAST_REAL_PHP ?? "php",
+    phpIni: { error_log: diagnosticsPath, "pcov.enabled": "0" },
   });
   await deploy(rt, {
     spaceId: SPACE,
@@ -165,7 +188,10 @@ beforeAll(async () => {
   });
 });
 
-afterAll(() => rt?.stop());
+afterAll(() => {
+  rt?.stop();
+  rmSync(diagnosticsRoot, { recursive: true, force: true });
+});
 
 test("a functions route executes: parsed body in, JSON out, platform cache policy on", async () => {
   const post = await get(rt, HOST, "/hello", {
@@ -198,40 +224,82 @@ test("a functions route executes: parsed body in, JSON out, platform cache polic
 });
 
 test("the handler runs inside the prelude's jail, with platform secrets scrubbed", async () => {
-  const blobsRoot = path.join(rt.storageRoot, "spaces", SPACE, "blobs");
-
-  const response = await get(rt, HOST, "/probe");
-  expect(response.status).toBe(200);
-  // SAFETY: test-owned probe fixture; every field is pinned below, so a shape
-  // drift fails the test rather than hiding.
-  const report = (await response.json()) as {
-    open_basedir: string;
-    dispatch_token: string | false;
-    dispatch_token_server: string | null;
-    site_env_runtime_bin: string | false;
-    api_url: string;
-    auth: Record<string, unknown>;
+  const accessConfig = publicAccessConfig({ mode: "website", site_title: "PHP Functions" });
+  const authorization = runtimeAuthorizationProjectionSchema
+    .omit({ accessPage: true, teamId: true, membershipEpoch: true })
+    .parse(accessConfig.authorization);
+  const publicGrant = authorization.grants[0];
+  if (!publicGrant) throw new Error("Public fixture grant is missing");
+  accessConfig.authorization = {
+    ...authorization,
+    grants: [
+      ...authorization.grants,
+      {
+        ...publicGrant,
+        id: "grt_phpfx_deferred_diagnostic",
+        constraints: { network: { ipCidrs: ["127.0.0.0/8"] } },
+      },
+    ],
   };
+  await putRoute(rt, SPACE, "production", { version_id: VERSION, config: accessConfig });
+  try {
+    const blobsRoot = path.join(rt.storageRoot, "spaces", SPACE, "blobs");
 
-  // The jail is this space's content store plus its per-request scratch tmp,
-  // nothing else.
-  expect(report.open_basedir.startsWith(`${blobsRoot}:`)).toBe(true);
-  expect(report.open_basedir).toContain(
-    `${path.join(rt.storageRoot, "spaces", SPACE, "tmp")}/php-fx-`,
-  );
+    const response = await get(rt, HOST, "/probe");
+    expect(response.status).toBe(200);
+    // SAFETY: test-owned probe fixture; every field is pinned below, so a shape
+    // drift fails the test rather than hiding.
+    const report = (await response.json()) as {
+      scratch_tmp: string;
+      handler: string;
+      open_basedir: string;
+      dispatch_token: string | false;
+      dispatch_token_server: string | null;
+      site_env_runtime_bin: string | false;
+      api_url: string;
+      auth: { isGuest: boolean; isAuthenticated: boolean; provider: string };
+    };
 
-  // The fleet-wide dispatch credential is gone from every surface a handler or
-  // its subprocess reads. A site-scoped value is left: the team owns the box.
-  expect(report.dispatch_token).toBe(false);
-  expect(report.dispatch_token_server).toBeNull();
-  expect(report.site_env_runtime_bin).not.toBe(false);
-  expect(report.api_url).toBe("https://api.spacefast.com/health");
+    // The jail is this space's content store plus its per-request scratch tmp,
+    // nothing else.
+    expect(report.open_basedir.startsWith(`${blobsRoot}:`)).toBe(true);
+    expect(report.open_basedir).toContain(
+      `${path.join(rt.storageRoot, "spaces", SPACE, "tmp")}/php-fx-`,
+    );
 
-  // sf_auth() consumed the engine's verified visitor context: no cookie means
-  // the guest identity.
-  expect(report.auth["isGuest"]).toBe(true);
-  expect(report.auth["isAuthenticated"]).toBe(false);
-  expect(report.auth["provider"]).toBe("guest");
+    // The fleet-wide dispatch credential is gone from every surface a handler or
+    // its subprocess reads. A site-scoped value is left: the team owns the box.
+    expect(report.dispatch_token).toBe(false);
+    expect(report.dispatch_token_server).toBeNull();
+    expect(report.site_env_runtime_bin).not.toBe(false);
+    expect(report.api_url).toBe("https://api.spacefast.com/health");
+
+    // sf_auth() consumed the engine's verified visitor context: no cookie means
+    // the guest identity.
+    expect(report.auth["isGuest"]).toBe(true);
+    expect(report.auth["isAuthenticated"]).toBe(false);
+    expect(report.auth["provider"]).toBe("guest");
+
+    // The response can finish before PHP runs its shutdown callbacks. Observe
+    // deletion itself, including hidden and nested files, inside the real jail.
+    const deadline = AbortSignal.timeout(5_000);
+    while (existsSync(report.scratch_tmp) && !deadline.aborted) {
+      await setImmediate();
+    }
+    expect(existsSync(report.scratch_tmp)).toBe(false);
+    expect(existsSync(report.handler)).toBe(true);
+    // The next request on this server observes completed shutdown work.
+    await (await get(rt, HOST, "/")).text();
+    expect(journalRecords(rt).some((record) => record.event === "network_grant_ignored")).toBe(
+      true,
+    );
+    expect(readFileSync(diagnosticsPath, "utf8")).not.toContain("open_basedir restriction");
+  } finally {
+    await putRoute(rt, SPACE, "production", {
+      version_id: VERSION,
+      config: publicAccessConfig({ mode: "website", site_title: "PHP Functions" }),
+    });
+  }
 });
 
 test("a safe public PHP function response opts into the edge cache", async () => {

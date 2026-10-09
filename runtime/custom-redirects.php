@@ -127,14 +127,30 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             $path
         ) === 1;
         $isContentAdminRequest = false;
+        // nginx picks the script from the decoded, slash-merged, dot-resolved
+        // URI, so `/wp-admin//includes/file.php` or `%69ncludes` still runs
+        // the include. Classify that same spelling; an unresolvable `..` never
+        // reaches a script, so it cannot name one here either.
+        $scriptPath = [];
+        foreach (explode('/', rawurldecode($path)) as $segment) {
+            if ($segment === '' || $segment === '.') {
+                continue;
+            }
+            if ($segment === '..') {
+                array_pop($scriptPath);
+                continue;
+            }
+            $scriptPath[] = $segment;
+        }
+        $scriptPath = '/' . implode('/', $scriptPath);
         $isWordPressCorePhp = preg_match(
-            '#^/(?:wp-[^/]+\.php|wp-(?:includes|content)/.+\.php)(?:/|$)#',
-            $path
+            '#^/(?:wp-[^/]+\.php|wp-(?:includes|content)/.+\.php|wp-admin/includes/.+\.php)(?:/|$)#',
+            $scriptPath
         ) === 1;
-        $isWordPressCron = $path === '/wp-cron.php' || str_starts_with($path, '/wp-cron.php/');
-        $isBlockedWordPressEntrypoint = ($isWordPressCorePhp && !$isWordPressCron && $path !== '/wp-login.php')
-            || $path === '/xmlrpc.php'
-            || str_starts_with($path, '/xmlrpc.php/');
+        $isWordPressCron = $scriptPath === '/wp-cron.php' || str_starts_with($scriptPath, '/wp-cron.php/');
+        $isBlockedWordPressEntrypoint = ($isWordPressCorePhp && !$isWordPressCron && $scriptPath !== '/wp-login.php')
+            || $scriptPath === '/xmlrpc.php'
+            || str_starts_with($scriptPath, '/xmlrpc.php/');
         if ($isBlockedWordPressEntrypoint) {
             http_response_code(404);
             header('Cache-Control: private, no-store', true);
@@ -343,9 +359,6 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 // long before one would load. /zero-admin is the exception: the
                 // dashboard renders on template_redirect, which core fires only
                 // when themes are on.
-                if (!defined('WP_USE_THEMES') && !($path === '/zero-admin' || str_starts_with($path, '/zero-admin/'))) {
-                    define('WP_USE_THEMES', false);
-                }
                 // The page lane's reason, on the API door. This pass is the
                 // provider's auto_prepend, and /scripts/env.php defines
                 // DB_NAME/DB_USER/DB_HOST and WP_CONTENT_DIR only AFTER it
@@ -356,8 +369,14 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 // resolved principal — is in $GLOBALS, which that pass shares.
                 // Declining here is how the request gets there.
                 if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
-                    $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER'] = $restFrontController;
+                    $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER'] = [
+                        'path' => $restFrontController,
+                        'use_themes' => $path === '/zero-admin' || str_starts_with($path, '/zero-admin/'),
+                    ];
                     return;
+                }
+                if (!defined('WP_USE_THEMES') && !($path === '/zero-admin' || str_starts_with($path, '/zero-admin/'))) {
+                    define('WP_USE_THEMES', false);
                 }
                 require $restFrontController;
                 exit;
@@ -382,9 +401,12 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
     // ran to completion in the auto_prepend pass and left its verdict in
     // $GLOBALS, so all that remains is the WordPress boot it declined to make.
     $deferredRest = $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER'] ?? null;
-    if (is_string($deferredRest)) {
+    if (is_array($deferredRest)) {
         unset($GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER']);
-        require $deferredRest;
+        if (!defined('WP_USE_THEMES')) {
+            define('WP_USE_THEMES', $deferredRest['use_themes']);
+        }
+        require $deferredRest['path'];
         exit;
     }
 

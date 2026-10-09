@@ -47,7 +47,7 @@ function _stattic_tier_journal(string $privateRoot, array $entry): void
 {
     _stattic_defer(static function () use ($privateRoot, $entry): void {
         _stattic_runtime_append_journal($privateRoot, $entry, false);
-    });
+    }, beforeTenant: true);
 }
 
 /**

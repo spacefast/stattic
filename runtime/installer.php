@@ -2694,7 +2694,15 @@ function assert_engine_publication_instance(string $publicRoot, string $expected
     $configPath = $installRoot . '/storage/config.php';
     if (is_link($installRoot) || is_link($configPath)) fail('runtime_engine_proof_root_invalid');
     clearstatcache(true, $configPath);
-    if (function_exists('opcache_invalidate')) opcache_invalidate($configPath, true);
+    $opcacheRestriction = (string) ini_get('opcache.restrict_api');
+    // Same caller rule as _sf_opcache_api_allowed(): FPM matches the unresolved
+    // SCRIPT_FILENAME, the CLI its resolved path.
+    $callingScript = (string) ($_SERVER['SCRIPT_FILENAME'] ?? '');
+    if (PHP_SAPI === 'cli') $callingScript = (string) realpath($callingScript);
+    if (function_exists('opcache_invalidate')
+        && ($opcacheRestriction === '' || ($callingScript !== '' && str_starts_with($callingScript, $opcacheRestriction)))) {
+        opcache_invalidate($configPath, true);
+    }
     $config = is_file($configPath) ? require $configPath : [];
     $persistent = class_exists('Atomic_Persistent_Data') ? new Atomic_Persistent_Data() : null;
     $identities = [

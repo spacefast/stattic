@@ -77,6 +77,10 @@ function _stattic_runtime_retention_stores(string $privateRoot): array
 function _stattic_runtime_retention_roots(string $privateRoot): array
 {
     return [
+        // PHP's tightened open_basedir cannot unlink an outside or dangling
+        // symlink. Reclaim leftover scratch on the unrestricted maintenance
+        // lane, after a full day beyond the lifetime of a handler request.
+        [$privateRoot . '/spaces/*/tmp/php-fx-*', STATTIC_RUNTIME_STAGING_RETENTION_SECONDS],
         [$privateRoot . '/runtime/blob-staging/*', STATTIC_RUNTIME_STAGING_RETENTION_SECONDS],
         [$privateRoot . '/runtime/finalizer-inputs/*', STATTIC_RUNTIME_STAGING_RETENTION_SECONDS],
         // D140 probe blobs: content-addressed, rewritten on demand, worthless once cold.

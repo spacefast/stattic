@@ -604,7 +604,7 @@ function _stattic_jwt_consume_jti(string $privateRoot, string $namespace, string
     $store = _stattic_jwt_replay_store($privateRoot);
     _stattic_defer(static function () use ($store, $now): void {
         _stattic_record_store_sweep($store, $now);
-    });
+    }, beforeTenant: true);
 
     $id = hash('sha256', $namespace . ':' . $jti);
     $record = ['ns' => $namespace, 'jti' => $jti, 'exp' => $exp];

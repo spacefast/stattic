@@ -754,7 +754,7 @@ function spacefast_content_model_stage_release(
     }
     $contentModelRoot = spacefast_content_model_root($privateRoot, spacefast_content_require_space_id());
     $releasesRoot = $contentModelRoot . '/releases';
-    if ((!is_dir($releasesRoot) && !mkdir($releasesRoot, 0750, true)) || !is_dir($releasesRoot)) {
+    if (!is_dir($releasesRoot) && !_sf_mkdir_racing($releasesRoot, 0750)) {
         throw new Spacefast_Content_Error(503, 'content_model_storage_unavailable', 'ContentModelRelease storage is unavailable.');
     }
     $releaseRoot = $releasesRoot . '/' . spacefast_content_model_revision_directory($revision);

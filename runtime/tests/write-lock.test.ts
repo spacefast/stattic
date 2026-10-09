@@ -229,6 +229,33 @@ function updateTombstonesDispatch(spaceId: string) {
   );
 }
 
+test("pre-handler maintenance preserves response-only work and the application database binding", () => {
+  const request = `
+    require $argv[1];
+    _stattic_db_broker_bind('mysql://application.test/app', 'application');
+    _stattic_defer(static function (): void {
+      _stattic_db_broker_bind('mysql://provider.test/platform', 'provider');
+      echo "post-response\\n";
+      _stattic_defer(static fn () => print("nested-post-response\\n"));
+    });
+    _stattic_defer(static function (): void {
+      echo "maintenance\\n";
+      _stattic_defer(static fn () => print("nested-maintenance\\n"), true);
+    }, true);
+    _stattic_run_deferred_work(true);
+    echo _stattic_db_broker_state()['url'] . "\\n";
+  `;
+  const result = spawnSync(
+    PHP_BINARY,
+    ["-r", request, path.join(rt.engineRoot, "shared", "db-broker.php")],
+    { encoding: "utf8" },
+  );
+  expect(result.status).toBe(0);
+  expect(result.stdout).toBe(
+    "maintenance\nnested-maintenance\nmysql://application.test/app\npost-response\nnested-post-response\n",
+  );
+});
+
 test("deferred shutdown work runs after the request mutation releases its lock", () => {
   const lockPath = spaceLockPath("spc_deferred_shutdown");
   const contender = [

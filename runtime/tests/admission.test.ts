@@ -765,5 +765,8 @@ test("admission releases stay within their acquire generation", () => {
     admitted_after_slots_freed: true,
     final_persisted_count: 0,
     generation_file_counts_after_rotations: [1, 1, 1, 1, 1],
+    count_after_jailed_repeat_release: 1,
+    count_after_jailed_releases: 0,
+    jail_preserved: true,
   });
 });

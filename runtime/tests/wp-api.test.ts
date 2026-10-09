@@ -535,6 +535,29 @@ test("REST without a Spacefast credential is WordPress's own unauthenticated ans
     themes: false,
     model_revision: SERVED_MODEL_REVISION,
   });
+
+  const indexPath = path.join(runtime.root, "index.php");
+  const installedIndex = readFileSync(indexPath);
+  writeFileSync(
+    indexPath,
+    [
+      "<?php",
+      "set_error_handler(static function ($severity, $message) { throw new ErrorException($message, 0, $severity); });",
+      "define('WP_USE_THEMES', true);",
+      `require ${JSON.stringify(path.join(wordpressCoreRoot, "wp-blog-header.php"))};`,
+    ].join("\n"),
+  );
+  try {
+    const providerController = await wpContext(OPEN_HOST, "/wp-json/wp/v2/posts");
+    expect(providerController.status).toBe(200);
+    expect(providerController.context).toMatchObject({
+      served_by: "wordpress",
+      space_id: OPEN_SPACE,
+      themes: true,
+    });
+  } finally {
+    writeFileSync(indexPath, installedIndex);
+  }
 });
 
 test("an unusable credential is refused rather than downgraded", async () => {
@@ -613,6 +636,23 @@ test("classic WordPress admin receives the same authenticated Space scope", asyn
   });
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ space: OPEN_SPACE, role: "editor" });
+
+  const includesRoot = path.join(runtime.root, "wp-admin/includes");
+  mkdirSync(includesRoot, { recursive: true });
+  writeFileSync(path.join(includesRoot, "file.php"), "<?php echo 'internal include executed';");
+  // nginx resolves merged slashes and percent-escapes to the same script, so
+  // those spellings must not slip past the rule.
+  for (const spelling of [
+    "/wp-admin/includes/file.php",
+    "/wp-admin//includes/file.php",
+    "/wp-admin/%69ncludes/file.php",
+  ]) {
+    const internalInclude = await get(runtime, OPEN_HOST, spelling, {
+      headers: { "x-sf-authorization": `Bearer ${token}` },
+    });
+    expect(internalInclude.status, spelling).toBe(404);
+    expect(await internalInclude.text()).toBe("Not Found");
+  }
 });
 
 test("both REST spellings honour a Grant that scopes /wp-json", async () => {

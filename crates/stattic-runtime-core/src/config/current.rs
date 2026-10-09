@@ -22,6 +22,11 @@ use std::sync::OnceLock;
 const KNOWN_CONFIG_KEYS: &[&str] = &[
     "$schema",
     "access",
+    // Control-plane-only analytics settings, starting with the author's
+    // analytics profile. Passed through verbatim like `system`: the control
+    // plane validates it in TypeScript at finalize, and the serving engine
+    // never reads it.
+    "analytics",
     "build",
     "cache",
     "cleanUrls",
@@ -1691,12 +1696,12 @@ mod tests {
         );
     }
 
-    /// The `system` manifest is control-plane-only: the crate recognizes the
-    /// key so it is not stripped as unknown, then passes it through verbatim for
-    /// the control plane to parse and validate. This lane must not strip it, not
-    /// warn `config_invalid`, and not mutate its contents.
+    /// The `system` manifest and `analytics` are control-plane-only: the crate
+    /// recognizes the keys so they are not stripped as unknown, then passes them
+    /// through verbatim for the control plane to parse and validate. This lane
+    /// must not strip them, not warn `config_invalid`, and not mutate them.
     #[test]
-    fn system_manifest_survives_the_current_lane_verbatim() {
+    fn control_plane_keys_survive_the_current_lane_verbatim() {
         let mut diagnostics = Vec::new();
         let system = json!({
             "presentation": {
@@ -1716,16 +1721,25 @@ mod tests {
                 { "url": "https://acme.example/hooks", "events": ["version.published"] }
             ]
         });
+        let analytics = json!({
+            "profile": { "subject": { "name": "Acme", "form": "site" }, "goals": [] }
+        });
         let config = parse_config(
-            &format!(r#"{{ "name": "acme", "system": {system} }}"#),
+            &format!(r#"{{ "name": "acme", "system": {system}, "analytics": {analytics} }}"#),
             "sf.jsonc",
             &mut diagnostics,
         );
 
         assert_eq!(diagnostics, Vec::new());
         assert_eq!(
-            config.and_then(|value| value.pointer("/system").cloned()),
+            config
+                .as_ref()
+                .and_then(|value| value.pointer("/system").cloned()),
             Some(system)
+        );
+        assert_eq!(
+            config.and_then(|value| value.pointer("/analytics").cloned()),
+            Some(analytics)
         );
     }
 

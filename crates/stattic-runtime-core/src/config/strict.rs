@@ -443,6 +443,7 @@ fn validate_keys(
         "cache",
         "system",
         "sell",
+        "analytics",
     ];
     let renamed = [
         ("index", "serve.index"),
@@ -1698,6 +1699,11 @@ fn project(root: &Map<String, Value>) -> Value {
     if let Some(sell) = root.get("sell") {
         out.insert("sell".into(), sell.clone());
     }
+    // The author's analytics profile, for finalize to parse. It stays out of
+    // this lane's published schema while the analytics HUD is internal.
+    if let Some(analytics) = root.get("analytics") {
+        out.insert("analytics".into(), analytics.clone());
+    }
     Value::Object(out)
 }
 fn effective(config: &Value, index: Value) -> Value {
@@ -1970,6 +1976,25 @@ mod tests {
                 .map(|issue| (issue.code.as_str(), issue.path.as_str()))
                 .collect::<Vec<_>>(),
             [("config_cron_invalid_schedule", "$.crons[0].schedule")]
+        );
+    }
+
+    /// `analytics` is control-plane-only, like `system` and `sell`: a v1 file may
+    /// carry it, and the compiler hands it on verbatim for the control plane to
+    /// parse, so the CLI and finalize agree on the same file.
+    #[test]
+    fn carries_analytics_through_verbatim_for_the_control_plane() {
+        let analytics = json!({
+            "profile": { "subject": { "name": "Acme", "form": "site" }, "goals": [] }
+        });
+        let output = compile_source(&format!(r#"{{ "version": 1, "analytics": {analytics} }}"#));
+        assert!(output.issues.is_empty(), "{:?}", output.issues);
+        assert!(output.success);
+        assert_eq!(
+            output
+                .config
+                .and_then(|config| config.get("analytics").cloned()),
+            Some(analytics)
         );
     }
 

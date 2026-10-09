@@ -141,6 +141,7 @@ function spacefast_context_editor_assets(): array
     $context = new WP_Block_Editor_Context(['name' => 'spacefast-context', 'post' => $post]);
     wp_add_inline_script('wp-block-library', 'wp.blocks.setCategories(' . wp_json_encode(get_block_categories($context)) . ');wp.blocks.unstable__bootstrapServerSideBlockDefinitions(' . wp_json_encode(get_block_editor_server_block_settings()) . ');', 'before');
     $scripts->all_deps(['wp-block-editor', 'wp-block-library', 'wp-components', 'wp-format-library']);
+    $preload = array_reduce(['/wp/v2/types?context=view', '/wp/v2/pages/' . $post->ID . '?context=edit'], 'rest_preload_api_request', []);
     $result = []; $moduleIds = [];
     foreach ($scripts->to_do as $handle) {
         $asset = $scripts->registered[$handle] ?? null;
@@ -149,7 +150,12 @@ function spacefast_context_editor_assets(): array
         if ($path === null) continue;
         $before = $scripts->get_data($handle, 'before'); $data = $scripts->get_data($handle, 'data'); $after = $scripts->get_data($handle, 'after');
         // No administrative nonce or user-meta persistence in the app editor.
-        if ($handle === 'wp-api-fetch') $after = ['wp.apiFetch.use(wp.apiFetch.createRootURLMiddleware(location.origin + "/wp-json/"));'];
+        // The responses core-data asks for first ship with the editor, as wp-admin
+        // preloads them: the page and its post types need no further round trip.
+        if ($handle === 'wp-api-fetch') $after = [
+            'wp.apiFetch.use(wp.apiFetch.createRootURLMiddleware(location.origin + "/wp-json/"));',
+            'wp.apiFetch.use(wp.apiFetch.createPreloadingMiddleware(' . wp_json_encode($preload) . '));',
+        ];
         if ($handle === 'wp-preferences') $after = ['wp.data.dispatch(wp.preferences.store).setPersistenceLayer({get:async()=>{try{return JSON.parse(localStorage.getItem("context:gutenberg:preferences")||"{}")}catch{return {}}},set:(data)=>{try{localStorage.setItem("context:gutenberg:preferences",JSON.stringify(data))}catch{}}});'];
         foreach (($scripts->get_data($handle, 'module_dependencies') ?: []) as $dependency) $moduleIds[] = is_string($dependency) ? $dependency : $dependency['id'];
         $result[] = ['handle' => $handle, 'src' => $path . '?ver=' . rawurlencode((string) $asset->ver),

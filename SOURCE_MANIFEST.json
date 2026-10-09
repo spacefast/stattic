@@ -1,7 +1,7 @@
 {
-  "revision": "28c929ad90777cb1e71ad8f0314b4f6467158bf9",
-  "sourceHash": "faca09cb3e289e93e411c971e06bad0b0a006a3d69cd7e8de31549fa86d64ac1",
-  "manifestSha256": "406550ac1a07df64bfb464a5bc7bea2fca276af264a8504d9b784ca835717473",
+  "revision": "3e94b877747c5f2e5ad61b89e89ffdafa295aa77",
+  "sourceHash": "0cf8c862b9a2ed622a00a44188b3cdfbc13dac3f12be9ebd72f6594edcecd9a6",
+  "manifestSha256": "1f895c6d9143dd01c51847ffd6e9f9c77c5d6336d3ac667dcb17d7bb6e1a6a3e",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "5e7b5fdad0a923d5cc4c0c63032ba2b22c3e4c5b2f7a866e0b57715b27a99d9c"
+      "sha256": "0b326771b3779d0fbdc5f1f800bc804bc7f5b2a7c0424c0bc89971e359b61ece"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "b05f9d4dd5a8b26fe1d18af3afc8cf9426aa49b13217b53645be2f7ad598cb07"
+      "sha256": "1fd98f453af2a9f70f2de3154116e8f9aea5710e4acbb85cfa2dd2bf72466d1b"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -373,11 +373,11 @@
     },
     {
       "path": "runtime/bootstrap-plugin/restore-config.php",
-      "sha256": "cd5a5264d92a5b68917e1bf412eca6803076de09aed126a62644c9aa7efa1790"
+      "sha256": "49099e1e8635d5a337d082b973d694c950da5d530b4c2c112c0e1c24f4870705"
     },
     {
       "path": "runtime/bootstrap-plugin/spacefast-bootstrap.php",
-      "sha256": "9f3acece15b79693037ca450fb880942a369355e8a38b71237204a32399dd689"
+      "sha256": "e1e763dc158b2601983f1e8a351aa7a4f4a547f19c6fbc147a17e593e1544519"
     },
     {
       "path": "runtime/bootstrap-plugin/stage-installer.php",
@@ -945,7 +945,7 @@
     },
     {
       "path": "runtime/tests/bootstrap-plugin.test.ts",
-      "sha256": "2e955e70a7ce1ccf1a89e4c6b7053aa1a3ebac320f6b0df347f0f8c8fd5c793e"
+      "sha256": "6e52975033db13ec20014876ae621124dab90bf20eb1d82c686a3d58b7644413"
     },
     {
       "path": "runtime/tests/build-context-space.ts",

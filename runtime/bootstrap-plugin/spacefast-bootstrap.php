@@ -176,9 +176,94 @@ function spacefast_bootstrap_verify_jwt(string $token): ?array
     return $payload;
 }
 
-/** Write the engine's config file where the engine reads it: `<docroot>/.stattic/storage/config.php`. */
+function spacefast_bootstrap_is_shared_storage_key(string $key): bool
+{
+    return str_starts_with($key, 'SPACEFAST_STORAGE_BUCKET') || str_starts_with($key, 'SPACEFAST_BUCKET_');
+}
+
+function spacefast_bootstrap_site_config(array $config): array
+{
+    return array_filter(
+        $config,
+        static fn (mixed $key): bool => !is_string($key) || !spacefast_bootstrap_is_shared_storage_key($key),
+        ARRAY_FILTER_USE_KEY,
+    );
+}
+
+/** Keep cold-storage readers and cleanup usable until their data is retired. */
+function spacefast_bootstrap_with_storage_retirement_lock(callable $callback): mixed
+{
+    $root = spacefast_bootstrap_docroot() . '/.stattic/storage';
+    $path = $root . '/config.php';
+    $existing = is_file($path) ? require $path : [];
+    $retiring = is_array($existing) && spacefast_bootstrap_site_config($existing) !== $existing;
+    if (class_exists('Atomic_Persistent_Data')) {
+        foreach (new Atomic_Persistent_Data() as $key => $value) {
+            if (is_string($key) && spacefast_bootstrap_is_shared_storage_key($key)) {
+                $retiring = true;
+                break;
+            }
+        }
+    }
+    // Config restores and ordinary updates do not retire any bucket authority.
+    // Old cold-storage records must not prevent repairing an already-clean box.
+    if (!$retiring) {
+        return $callback();
+    }
+    $jobs = $root . '/runtime/jobs';
+    if (!is_dir($jobs) && !mkdir($jobs, 0755, true) && !is_dir($jobs)) {
+        throw new SpacefastBootstrapConfigError('bootstrap_storage_retirement_lock_failed');
+    }
+    // This is the engine's bulk-lane lock, shared by demotion and bucket reclaim.
+    $handle = fopen($jobs . '/lane-bulk.lock', 'c');
+    if ($handle === false) {
+        throw new SpacefastBootstrapConfigError('bootstrap_storage_retirement_lock_failed');
+    }
+    try {
+        $deadline = microtime(true) + 20.0;
+        while (!flock($handle, LOCK_EX | LOCK_NB)) {
+            if (microtime(true) >= $deadline) {
+                throw new SpacefastBootstrapConfigError('bootstrap_storage_retirement_busy');
+            }
+            usleep(50000);
+        }
+        foreach (['/spaces/*/blobs/*/*.demote', '/runtime/bucket-reclaim/*.json'] as $pattern) {
+            $records = glob($root . $pattern, GLOB_ERR);
+            if ($records === false || $records !== []) {
+                throw new SpacefastBootstrapConfigError('bootstrap_storage_retirement_requires_hot_storage');
+            }
+        }
+        $queued = glob($jobs . '/queue/*.json', GLOB_ERR);
+        if ($queued === false) {
+            throw new SpacefastBootstrapConfigError('bootstrap_storage_retirement_jobs_unreadable');
+        }
+        foreach ($queued as $path) {
+            $record = json_decode(file_get_contents($path), true);
+            if (!is_array($record)) {
+                throw new SpacefastBootstrapConfigError('bootstrap_storage_retirement_jobs_unreadable');
+            }
+            if (($record['type'] ?? null) === 'tier_demote') {
+                throw new SpacefastBootstrapConfigError('bootstrap_storage_retirement_demote_pending');
+            }
+        }
+        return $callback();
+    } finally {
+        flock($handle, LOCK_UN);
+        fclose($handle);
+    }
+}
+
+/** Write site-scoped config to `<docroot>/.stattic/storage/config.php`. */
 function spacefast_bootstrap_write_config(array $config, bool $onlyIfMissing = false): bool
 {
+    return spacefast_bootstrap_with_storage_retirement_lock(
+        static fn (): bool => spacefast_bootstrap_write_config_unlocked($config, $onlyIfMissing),
+    );
+}
+
+function spacefast_bootstrap_write_config_unlocked(array $config, bool $onlyIfMissing = false): bool
+{
+    $config = spacefast_bootstrap_site_config($config);
     $installRoot = spacefast_bootstrap_docroot() . '/.stattic/storage';
     if (!is_dir($installRoot) && !mkdir($installRoot, 0755, true) && !is_dir($installRoot)) {
         return false;
@@ -209,8 +294,15 @@ function spacefast_bootstrap_write_config(array $config, bool $onlyIfMissing = f
 
 class SpacefastBootstrapConfigError extends RuntimeException {}
 
-/** Restore only a missing config after the control plane verifies provider ownership. */
-function spacefast_bootstrap_restore_missing_config(array $config): string
+/** Restore missing config or remove shared storage authority from an owned site's existing config. */
+function spacefast_bootstrap_reconcile_config(array $config): string
+{
+    return spacefast_bootstrap_with_storage_retirement_lock(
+        static fn (): string => spacefast_bootstrap_reconcile_config_unlocked($config),
+    );
+}
+
+function spacefast_bootstrap_reconcile_config_unlocked(array $config): string
 {
     if (!class_exists('Atomic_Persistent_Data')) {
         throw new SpacefastBootstrapConfigError('bootstrap_config_provider_context_missing');
@@ -240,11 +332,18 @@ function spacefast_bootstrap_restore_missing_config(array $config): string
         if (!is_array($existing) || ($existing['SPACEFAST_RUNTIME_INSTANCE_ID'] ?? '') !== $expectedId) {
             throw new SpacefastBootstrapConfigError('bootstrap_config_existing_identity_missing');
         }
+        $sanitized = spacefast_bootstrap_site_config($existing);
+        if ($sanitized !== $existing) {
+            if (!spacefast_bootstrap_write_config_unlocked($sanitized)) {
+                throw new SpacefastBootstrapConfigError('bootstrap_config_sanitize_failed');
+            }
+            return 'sanitized';
+        }
         return 'unchanged';
     }
     // link() publishes the complete file only if no writer created the target
     // meanwhile. A concurrent confirm can never have its config overwritten.
-    if (!spacefast_bootstrap_write_config($config, true)) {
+    if (!spacefast_bootstrap_write_config_unlocked($config, true)) {
         throw new SpacefastBootstrapConfigError('bootstrap_config_restore_failed');
     }
     return 'restored';
@@ -418,7 +517,7 @@ function spacefast_bootstrap_handle_confirm(): void
     if (!is_array($config)) {
         spacefast_bootstrap_json(422, ['code' => 'bootstrap_config_invalid', 'error' => 'bootstrap_config_invalid']);
     }
-    if (!spacefast_bootstrap_write_config($config)) {
+    if (!spacefast_bootstrap_write_config_unlocked($config)) {
         spacefast_bootstrap_json(500, ['code' => 'bootstrap_config_write_failed', 'error' => 'bootstrap_config_write_failed']);
     }
 

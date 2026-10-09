@@ -270,7 +270,15 @@ async function restoreConfig(
   return result;
 }
 
-test("restoring missing runtime config preserves tenant files and existing matching config", async () => {
+function readEngineConfig(configPath: string): Record<string, string> {
+  const result = Bun.spawnSync({
+    cmd: ["php", "-r", "echo json_encode(require $argv[1]);", configPath],
+  });
+  expect(result.exitCode, result.stderr.toString()).toBe(0);
+  return z.record(z.string(), z.string()).parse(JSON.parse(result.stdout.toString()));
+}
+
+test("config reconciliation removes shared storage authority and preserves site identity, credentials, and content", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "spacefast-config-repair-"));
   const content = path.join(root, ".stattic/storage/spaces/spc_owned/blobs/content");
   await mkdir(path.dirname(content), { recursive: true });
@@ -278,6 +286,13 @@ test("restoring missing runtime config preserves tenant files and existing match
   const config = {
     SPACEFAST_RUNTIME_INSTANCE_ID: "box_owned",
     SPACEFAST_API_BASE_URL: "https://api.example.test",
+    SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "site-scoped-dispatch-token",
+  };
+  const sharedStorage = {
+    SPACEFAST_STORAGE_BUCKETS_JSON: JSON.stringify([
+      { getKeySecret: "shared-get", putKeySecret: "shared-put" },
+    ]),
+    SPACEFAST_BUCKET_INT1_PUT_KEY_SECRET: "shared-put",
   };
   const files = {
     "installer.php": await readFile(new URL("../installer.php", import.meta.url), "utf8"),
@@ -306,8 +321,13 @@ test("restoring missing runtime config preserves tenant files and existing match
   expect(stage().exitCode).toBe(0);
   const directory = path.join(root, ".stattic/installers", digest);
   expect(
-    await restoreConfig(root, config, true, path.join(directory, "restore-config.php")),
-  ).toEqual({ status: "restored" });
+    await restoreConfig(
+      root,
+      { ...config, ...sharedStorage },
+      true,
+      path.join(directory, "restore-config.php"),
+    ),
+  ).toEqual({ status: "restored", persistent_storage_keys: [] });
   const proof = Bun.spawnSync({
     cmd: ["php", "-d", "auto_prepend_file=", path.join(directory, "installer.php"), "--proof"],
     cwd: root,
@@ -321,10 +341,113 @@ test("restoring missing runtime config preserves tenant files and existing match
   });
 
   const configPath = path.join(root, ".stattic/storage/config.php");
+  expect(readEngineConfig(configPath)).toEqual(config);
+
+  // An old control plane already installed the manifest. Exercise the real
+  // config reader/writer, including provider data that survives a site reset.
+  const legacyConfig = Bun.spawnSync({
+    cmd: [
+      "php",
+      "-r",
+      "file_put_contents($argv[1], '<?php return ' . var_export(json_decode(stream_get_contents(STDIN), true), true) . ';');",
+      configPath,
+    ],
+    stdin: new TextEncoder().encode(JSON.stringify({ ...config, ...sharedStorage })),
+  });
+  expect(legacyConfig.exitCode, legacyConfig.stderr.toString()).toBe(0);
+  await writeFile(
+    path.join(root, ".atomic-persistent-data.json"),
+    JSON.stringify({
+      ...sharedStorage,
+      SPACEFAST_RUNTIME_JWKS_B64: "provider-trust-anchor",
+    }),
+  );
+  expect(await restoreConfig(root, { SPACEFAST_RUNTIME_INSTANCE_ID: "box_other" })).toEqual({
+    error: "bootstrap_config_runtime_id_conflict",
+  });
+  expect(readEngineConfig(configPath)).toEqual({ ...config, ...sharedStorage });
+  // Each persisted cold-storage obligation blocks retirement without changing
+  // the existing config. A remote blob, queued demotion, and cleanup record
+  // are independent obligations, so exercise their real filesystem shapes.
+  const obligations = [
+    [
+      "spaces/spc_owned/blobs/ab/" + "ab".repeat(32) + ".demote",
+      { demoted_at: "2026-10-09" },
+      "requires_hot_storage",
+    ],
+    ["runtime/bucket-reclaim/spc_deleted.json", { bucket: "bkt_old" }, "requires_hot_storage"],
+    ["runtime/jobs/queue/job_demote.json", { type: "tier_demote" }, "demote_pending"],
+  ] as const;
+  for (const [relative, record, reason] of obligations) {
+    const obligation = path.join(root, ".stattic/storage", relative);
+    await mkdir(path.dirname(obligation), { recursive: true });
+    await writeFile(obligation, JSON.stringify(record));
+    expect(await restoreConfig(root, config)).toEqual({
+      error: `bootstrap_storage_retirement_${reason}`,
+    });
+    expect(readEngineConfig(configPath)).toEqual({ ...config, ...sharedStorage });
+    await rm(obligation);
+  }
+  expect(
+    await restoreConfig(root, { ...config, SPACEFAST_API_BASE_URL: "https://other.test" }),
+  ).toEqual({
+    status: "sanitized",
+    persistent_storage_keys: Object.keys(sharedStorage),
+  });
+  expect(readEngineConfig(configPath)).toEqual(config);
+  await writeFile(
+    path.join(root, ".atomic-persistent-data.json"),
+    JSON.stringify({
+      SPACEFAST_RUNTIME_JWKS_B64: "provider-trust-anchor",
+    }),
+  );
+  // These obligations matter only while authority is being removed. The clean
+  // box remains repairable, including during normal bulk-lane maintenance.
+  const obsoleteMark = path.join(
+    root,
+    ".stattic/storage/spaces/spc_owned/blobs/ab",
+    "ab".repeat(32) + ".demote",
+  );
+  const unreadableJob = path.join(root, ".stattic/storage/runtime/jobs/queue/job_old.json");
+  await writeFile(obsoleteMark, JSON.stringify({ demoted_at: "2026-10-09" }));
+  await writeFile(unreadableJob, "invalid-record");
+  const lockPath = path.join(root, ".stattic/storage/runtime/jobs/lane-bulk.lock");
+  const lockHolder = Bun.spawn(
+    [
+      "php",
+      "-r",
+      "$lock = fopen($argv[1], 'c'); flock($lock, LOCK_EX); echo 'locked'; fflush(STDOUT); fgets(STDIN);",
+      lockPath,
+    ],
+    {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const reader = lockHolder.stdout.getReader();
+  try {
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("locked");
+    expect(await restoreConfig(root, config)).toEqual({
+      status: "unchanged",
+      persistent_storage_keys: [],
+    });
+    await rm(configPath);
+    expect(await restoreConfig(root, config)).toEqual({
+      status: "restored",
+      persistent_storage_keys: [],
+    });
+  } finally {
+    lockHolder.stdin.end("release\n");
+    expect(await lockHolder.exited).toBe(0);
+    reader.releaseLock();
+    await rm(obsoleteMark);
+    await rm(unreadableJob);
+  }
   const original = await readFile(configPath, "utf8");
   expect(
     await restoreConfig(root, { ...config, SPACEFAST_API_BASE_URL: "https://other.test" }),
-  ).toEqual({ status: "unchanged" });
+  ).toEqual({ status: "unchanged", persistent_storage_keys: [] });
   expect(await readFile(configPath, "utf8")).toBe(original);
   expect(await readFile(content, "utf8")).toBe("tenant-content");
   expect(await restoreConfig(root, { SPACEFAST_RUNTIME_INSTANCE_ID: "box_other" })).toEqual({

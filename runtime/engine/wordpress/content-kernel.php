@@ -99,8 +99,10 @@ if (function_exists('add_action')) {
     add_filter('wp_is_application_passwords_available', '__return_false');
     add_filter('rest_authentication_errors', 'spacefast_content_require_rest_scope', 1);
     add_action('rest_api_init', 'spacefast_content_admin_register_rest_routes');
-    add_action('rest_api_init', 'spacefast_context_register_routes');
-    add_filter('rest_pre_insert_page', 'spacefast_context_guard_rest', 10, 2);
+    add_action('rest_api_init', 'spacefast_context_register_fields');
+    add_filter('rest_pre_insert_page', 'spacefast_context_prepare_write', 10, 2);
+    add_filter('rest_prepare_page', 'spacefast_context_sanitize_rendered', 10, 2);
+    add_filter('rest_dispatch_request', 'spacefast_context_fenced_write', 10, 4);
     add_filter('rest_pre_dispatch', 'spacefast_content_redirection_rest', 10, 3);
     add_filter('rest_pre_dispatch', 'spacefast_content_guard_global_theme_rest', 10, 3);
     add_filter('redirection_role', static fn (): string => 'spacefast_manage_content');
@@ -986,7 +988,12 @@ function spacefast_content_rest_guard_single_read(mixed $response, mixed $handle
         return $response;
     }
     $postId = $match[1] === 'comments' ? (int) (get_comment((int) $match[2])->comment_post_ID ?? 0) : (int) $match[2];
-    if ($postId > 0 && spacefast_content_post_is_private($postId)) {
+    // Core reads any published post by id without asking `read_post`, so the
+    // Space fence in map_meta_cap never runs for it. Media stays out: a team's
+    // design-system media is shared across its Spaces by its own guard.
+    $foreign = $match[1] !== 'media' && $postId > 0 && spacefast_content_space_id() !== ''
+        && !spacefast_content_post_belongs_to_space($postId);
+    if ($foreign || ($postId > 0 && spacefast_content_post_is_private($postId))) {
         return new WP_Error(
             'spacefast_content_not_found',
             'This document is not available.',

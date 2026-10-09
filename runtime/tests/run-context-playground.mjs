@@ -15,6 +15,8 @@ import { generateContentModelPhp } from "../../packages/zero-compile/dist/conten
 import { compileZeroContentModel } from "../../packages/zero-compile/dist/content-model.js";
 import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
 
+// Run `bun zero/scripts/build.ts` first: it assembles runtime/wordpress/zero-dashboard.
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const output = path.join(root, ".cache/context-acceptance");
 await mkdir(output, { recursive: true });
@@ -57,6 +59,8 @@ $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $config['revision'];
 $GLOBALS['SPACEFAST_CONTENT_PUBLIC_ORIGIN'] = 'http://127.0.0.1:9419';
 require_once '/spacefast/runtime/engine/shared/lock.php';
 require_once '/spacefast/runtime/engine/wordpress/content-kernel.php';
+// The Space dashboard, mu-loaded on every box: its REST routes serve the editor's assets.
+require_once '/spacefast/runtime/wordpress/zero-dashboard/next-admin.php';
 ${preview ? "require_once '/spacefast/runtime/tests/context-preview-session.php';\n" : ""}`;
 await writeFile(path.join(mu, "spacefast-context.php"), kernelLoader(false));
 const wordpressMounts = [
@@ -92,13 +96,16 @@ assert.equal(result.status, 0, "WordPress blueprint must complete");
 const receipt = JSON.parse(await readFile(path.join(output, "receipt.json"), "utf8"));
 assert.deepEqual(receipt, {
   saved: 200,
+  unchanged: 200,
   stale: 409,
-  peerSaved: 200,
-  nativeBypass: 409,
+  missingRevision: 400,
+  markdown: 200,
   foreignSpace: 404,
-  unauthorized: 403,
+  viewerEdit: 401,
+  unauthorized: 401,
+  casedRoute: 400,
+  unbind: 400,
   history: true,
-  markdown: true,
   rendered: true,
   source: true,
 });
@@ -152,10 +159,10 @@ if (process.argv.includes("--serve")) {
   let ready = false;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch("http://127.0.0.1:9417/wp-json/spacefast/v1/context", {
+      const response = await fetch("http://127.0.0.1:9417/wp-json/wp/v2/pages?slug=context", {
         redirect: "manual",
       });
-      if (response.ok && (await response.json()).source === "content/context.blocks") {
+      if (response.ok && (await response.json()).length === 1) {
         ready = true;
         break;
       }

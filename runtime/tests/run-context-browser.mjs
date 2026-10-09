@@ -8,7 +8,7 @@ import { chromium, expect as playwrightExpect } from "@playwright/test";
 // Real WordPress in a single local wasm worker: a save and its read take seconds.
 const expect = playwrightExpect.configure({ timeout: 30000 });
 const origin = "http://127.0.0.1:9419";
-const api = `${origin}/wp-json/spacefast/v1/context`;
+const pages = `${origin}/wp-json/wp/v2/pages`;
 const output = path.resolve(".cache/context-acceptance");
 const browser = await chromium.launch({ headless: true });
 // These are signed cookies/nonces from the disposable native WordPress user,
@@ -32,12 +32,15 @@ const page = await editor.newPage();
 page.setDefaultTimeout(60000);
 // The header's save state; the Save button's spinner is a status too.
 const saveState = (target) => target.locator('header [role="status"][aria-live="polite"]');
-// People and agents share one write path: the context API's revision fence.
+// The document is the Space's `context` page; people and agents save it through
+// core's pages API behind one revision fence.
+const read = async () =>
+  (await (await editor.request.get(`${pages}?slug=context&context=edit`)).json())[0];
 const editorSave = (target, status) =>
   target.waitForResponse(
     (response) =>
-      response.url() === api &&
-      response.request().method() === "PATCH" &&
+      response.url().startsWith(`${pages}/`) &&
+      response.request().method() === "POST" &&
       (status === undefined || response.status() === status),
   );
 const errors = [];
@@ -47,25 +50,25 @@ try {
   const title = page.getByRole("textbox", { name: "Title", exact: true });
   const body = page.locator('.sf-context-blocks [contenteditable="true"]').first();
   await body.waitFor();
-  const original = await (await editor.request.get(api)).json();
-  assert.equal(original.canEdit, true);
+  const original = await read();
+  assert.match(original.spacefast_revision, /^sha256:/);
   const marker = `Human edit ${Date.now()} `;
   await body.click();
   await body.press(process.platform === "darwin" ? "Meta+ArrowUp" : "Control+Home");
   await body.pressSequentially(marker);
   await expect(saveState(page)).toHaveText("Unsaved changes");
   // The user chooses Save; editing alone has not mutated the WordPress record.
-  assert.equal((await (await editor.request.get(api)).json()).revision, original.revision);
+  assert.equal((await read()).spacefast_revision, original.spacefast_revision);
   const saved = editorSave(page, 200);
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await saved;
   await expect(saveState(page)).toHaveText("Saved");
-  const human = await (await editor.request.get(api)).json();
-  assert.match(human.blocks, new RegExp(marker.trim()));
+  const human = await read();
+  assert.match(human.content.raw, new RegExp(marker.trim()));
   // Gutenberg re-serializes on save; every original block must survive it.
   const blockNames = (markup) =>
     [...markup.matchAll(/<!-- wp:([a-z/-]+)/g)].map((match) => match[1]);
-  assert.deepEqual(blockNames(human.blocks), blockNames(original.blocks));
+  assert.deepEqual(blockNames(human.content.raw), blockNames(original.content.raw));
   await expect(saveState(page)).toHaveText("Saved");
 
   // Clicking the open page below the last block continues writing there,
@@ -89,12 +92,12 @@ try {
   await expect(blocks).toHaveCount(blockCount);
   await page.screenshot({ path: path.join(output, "context-editor-light.png"), fullPage: true });
 
-  // Agents save through the context API; concurrent writes serialize.
+  // Agents save through the same page; concurrent writes serialize.
   const race = await Promise.all(
     ["Agent revision A", "Agent revision B"].map(async (nextTitle) =>
       (
-        await editor.request.patch(api, {
-          data: { baseRevision: human.revision, title: nextTitle },
+        await editor.request.post(`${pages}/${human.id}`, {
+          data: { spacefast_revision: human.spacefast_revision, title: nextTitle },
         })
       ).status(),
     ),
@@ -103,7 +106,7 @@ try {
     race.toSorted((a, b) => a - b),
     [200, 409],
   );
-  const agentTitle = (await (await editor.request.get(api)).json()).title;
+  const agentTitle = (await read()).title.raw;
   // Saving over the agent's newer change is refused, and the edit is kept.
   await title.fill("Keep my local title");
   const conflict = editorSave(page, 409);
@@ -121,12 +124,22 @@ try {
 
   await page.reload();
   await body.waitFor();
-  await title.fill("");
-  const refused = editorSave(page, 400);
+  // A save the server cannot complete keeps the edit and offers a retry. The
+  // failure is injected at the network; every other request is real.
+  await page.route(`${pages}/*`, (route) =>
+    route.request().method() === "POST"
+      ? route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ code: "content_sync_busy", message: "Retry the save." }),
+        })
+      : route.fallback(),
+  );
+  await title.fill("Unsaved title");
   await page.getByRole("button", { name: "Save", exact: true }).click();
-  await refused;
-  await expect(title).toHaveValue("");
   await expect(saveState(page)).toHaveText("Save failed");
+  await expect(title).toHaveValue("Unsaved title");
+  await page.unroute(`${pages}/*`);
   await title.fill("Recovered context");
   const recovered = editorSave(page, 200);
   await page.getByRole("button", { name: "Save", exact: true }).click();
@@ -142,7 +155,7 @@ try {
   await expect(historyDialog.getByText("Current", { exact: true })).toHaveCount(1);
   await historyDialog
     .getByRole("listitem")
-    .filter({ hasText: human.title })
+    .filter({ hasText: human.title.raw })
     .filter({ hasText: marker.trim() })
     .first()
     .getByRole("button", { name: /^Restore/ })
@@ -150,7 +163,7 @@ try {
   await expect(historyDialog).toHaveCount(0);
   await expect(page.getByRole("status").filter({ hasText: "Save to keep it" })).toHaveCount(1);
   await body.waitFor();
-  await expect(title).toHaveValue(human.title);
+  await expect(title).toHaveValue(human.title.raw);
   const restored = editorSave(page, 200);
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await restored;
@@ -209,10 +222,10 @@ try {
   await readPage.goto(origin);
   await expect(saveState(readPage)).toHaveText("Read only");
   await expect(readPage.locator(".sf-context-prose")).toContainText(marker.trim());
-  const denied = await reader.request.patch(api, {
-    data: { baseRevision: human.revision, markdown: "Denied" },
+  const denied = await reader.request.post(`${pages}/${human.id}`, {
+    data: { spacefast_revision: human.spacefast_revision, markdown: "Denied" },
   });
-  assert.equal(denied.status(), 403);
+  assert.equal(denied.status(), 401);
   await readPage.screenshot({ path: path.join(output, "context-reader-dark.png"), fullPage: true });
   await reader.close();
   assert.deepEqual(errors, []);

@@ -36,64 +36,152 @@ function spacefast_context_post(): object
     return $post;
 }
 
+/**
+ * What a writer read: the words and the history entry they came from. The
+ * modified time is left out, so re-saving identical content invalidates no one.
+ */
 function spacefast_context_revision(object $post): string
 {
     return spacefast_content_sync_digest_text(json_encode([
-        $post->ID, $post->post_title, $post->post_content, $post->post_modified_gmt,
+        $post->ID, $post->post_title, $post->post_content,
         spacefast_content_sync_current_revision_id((int) $post->ID),
     ], JSON_THROW_ON_ERROR));
 }
 
-function spacefast_context_read(): array
+/** The context page id, or null when this Space has no context document. */
+function spacefast_context_post_id(): ?int
 {
-    $post = spacefast_context_post();
-    return ['id' => (int) $post->ID, 'title' => $post->post_title, 'blocks' => $post->post_content,
-        'markdown' => spacefast_content_markdown_representable($post->post_content) ? spacefast_content_markdown_from_blocks($post->post_content) : null,
-        'html' => wp_kses_post(do_blocks($post->post_content)),
-        'revision' => spacefast_context_revision($post), 'canEdit' => current_user_can('edit_post', $post->ID),
-        'url' => rtrim(spacefast_content_public_origin(), '/') . '/', 'source' => SPACEFAST_CONTEXT_SOURCE];
+    try {
+        return (int) spacefast_context_post()->ID;
+    } catch (Spacefast_Content_Error) {
+        return null;
+    }
 }
 
-function spacefast_context_require_edit(): object
+/**
+ * The context document is a WordPress page, read and saved through
+ * `/wp/v2/pages/{id}`. Two fields carry what core does not: the revision a
+ * writer read, which every save sends back, and the document as Markdown.
+ */
+function spacefast_context_register_fields(): void
 {
-    $post = spacefast_context_post();
-    if (!current_user_can('edit_post', $post->ID)) throw new Spacefast_Content_Error(403, 'content_context_edit_denied', 'The Space access settings do not permit editing.');
-    return $post;
+    register_rest_field('page', 'spacefast_revision', [
+        'get_callback' => static fn (array $page): ?string => (int) $page['id'] === spacefast_context_post_id() ? spacefast_context_revision(get_post((int) $page['id'])) : null,
+        // Writable so a save can send back the revision it read; the write fence consumes it.
+        'schema' => ['description' => 'The context revision you read. Send it back with every save.', 'type' => ['string', 'null'], 'context' => ['edit']],
+    ]);
+    register_rest_field('page', 'markdown', [
+        'get_callback' => 'spacefast_context_markdown',
+        'schema' => ['description' => 'The context document as Markdown; null when Markdown cannot represent its blocks. Write it instead of content to save Markdown.', 'type' => ['string', 'null'], 'context' => ['view', 'edit']],
+    ]);
+    register_rest_field('page-revision', 'spacefast_actor', ['get_callback' => 'spacefast_context_revision_actor', 'schema' => ['type' => 'object', 'context' => ['view', 'edit'], 'readonly' => true]]);
 }
 
-function spacefast_context_save(array $input): array
+function spacefast_context_markdown(array $page): ?string
 {
-    spacefast_context_require_edit();
-    if (empty($GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT']) || !function_exists('_stattic_space_write_lock_with')) throw new Spacefast_Content_Error(503, 'content_context_lock_unavailable', 'Context saves are unavailable. Retry later.');
-    return spacefast_content_sync_locked(static function () use ($input): array {
-        $post = spacefast_context_require_edit();
-        clean_post_cache($post->ID);
-        $post = spacefast_context_require_edit();
-        if (array_diff(array_keys($input), ['baseRevision', 'title', 'blocks', 'markdown']) !== []) throw new Spacefast_Content_Error(400, 'content_context_invalid', 'Supply only title, blocks or markdown, and baseRevision.');
-        $title = $input['title'] ?? $post->post_title;
-        if (!is_string($title) || strlen($title) > 1000 || trim(sanitize_text_field($title)) === '') throw new Spacefast_Content_Error(400, 'content_context_invalid', 'Supply a title of at most 1000 bytes.');
-        if (isset($input['blocks']) && isset($input['markdown'])) throw new Spacefast_Content_Error(400, 'content_context_invalid', 'Supply either blocks or markdown.');
-        $content = $input['blocks'] ?? $input['markdown'] ?? $post->post_content;
-        if (!is_string($content) || strlen($content) > 1000000) throw new Spacefast_Content_Error(400, 'content_context_invalid', 'Context content must be text of at most 1000000 bytes.');
-        $blocks = wp_kses_post(isset($input['markdown']) ? spacefast_content_markdown_to_blocks($content) : $content);
-        $title = sanitize_text_field($title);
-        $changed = $title !== $post->post_title || $blocks !== $post->post_content;
-        $revision = $input['baseRevision'] ?? null;
-        if (!is_string($revision)) throw new Spacefast_Content_Error(400, 'content_context_invalid', 'Supply the baseRevision you read.');
-        // Saving exactly the stored content loses nothing, whatever revision the
-        // caller read: answer saved without a new history entry.
-        if (!$changed) return spacefast_context_read();
-        if (!hash_equals(spacefast_context_revision($post), $revision)) throw new Spacefast_Content_Error(409, 'content_context_conflict', 'The context changed. Read it again before saving.');
-        $before = spacefast_content_sync_current_revision_id((int) $post->ID);
-        $result = wp_update_post(wp_slash(['ID' => $post->ID, 'post_title' => $title, 'post_content' => $blocks]), true);
-        if (is_wp_error($result)) throw new Spacefast_Content_Error(500, 'content_context_save_failed', 'The context could not be saved.');
-        // WordPress revisions the update itself; adding another duplicated every
-        // history entry. Only create one when the site's revisioning did not.
-        $revisionId = spacefast_content_sync_current_revision_id((int) $post->ID);
-        if ($revisionId === $before || $revisionId === (int) $post->ID) $revisionId = spacefast_content_sync_save_revision((int) $post->ID);
-        spacefast_context_record_actor($revisionId);
-        return spacefast_context_read();
-    });
+    if ((int) $page['id'] !== spacefast_context_post_id()) return null;
+    $blocks = get_post((int) $page['id'])->post_content;
+    try {
+        return spacefast_content_markdown_representable($blocks) ? spacefast_content_markdown_from_blocks($blocks) : null;
+    } catch (Spacefast_Content_Error) {
+        // The conversion logged its cause; the document is still readable as blocks.
+        return null;
+    }
+}
+
+/** The parameters a context save may carry. Status, slug, parent and the rest stay as source declares them. */
+const SPACEFAST_CONTEXT_WRITE_PARAMETERS = ['id', 'context', 'title', 'content', 'markdown', 'spacefast_revision'];
+
+/**
+ * Every page write reaches this filter, whatever its route. A write to the
+ * context page is admitted only from inside the revision fence, and stores
+ * sanitized markup: Markdown is converted to blocks first.
+ */
+function spacefast_context_prepare_write(mixed $prepared, mixed $request): mixed
+{
+    if (is_wp_error($prepared)) return $prepared;
+    $contextId = spacefast_context_post_id();
+    $id = (int) ($prepared->ID ?? 0);
+    if ($id === 0 || $id !== $contextId) {
+        return isset($request['markdown']) ? new WP_Error('content_context_markdown_invalid', 'Only the context document accepts markdown.', ['status' => 400]) : $prepared;
+    }
+    if (($GLOBALS['SPACEFAST_CONTEXT_FENCED_WRITE'] ?? null) !== $id) {
+        return new WP_Error('content_context_revision_required', 'Save the context document with POST /wp/v2/pages/{id} and the spacefast_revision you read.', ['status' => 400]);
+    }
+    if (isset($request['markdown'])) {
+        if (isset($request['content'])) return new WP_Error('content_context_markdown_invalid', 'Supply either content or markdown.', ['status' => 400]);
+        try {
+            $prepared->post_content = spacefast_content_markdown_to_blocks((string) $request['markdown']);
+        } catch (Spacefast_Content_Error $error) {
+            return new WP_Error($error->codeName, $error->getMessage(), ['status' => $error->status]);
+        }
+    }
+    // Core skips kses for editors holding unfiltered_html; every viewer renders this document.
+    if (isset($prepared->post_content)) $prepared->post_content = wp_kses_post($prepared->post_content);
+    if (isset($prepared->post_title)) $prepared->post_title = sanitize_text_field($prepared->post_title);
+    return $prepared;
+}
+
+/** The rendered document every viewer injects, sanitized like the stored one, source-written content included. */
+function spacefast_context_sanitize_rendered(mixed $response, mixed $post): mixed
+{
+    if (!$response instanceof WP_REST_Response || (int) ($post->ID ?? 0) !== spacefast_context_post_id()) return $response;
+    $data = $response->get_data();
+    foreach (['content', 'title'] as $field) {
+        if (isset($data[$field]['rendered'])) $data[$field]['rendered'] = wp_kses_post($data[$field]['rendered']);
+    }
+    $response->set_data($data);
+    return $response;
+}
+
+/**
+ * Every write to the context page names the revision it read, and runs inside
+ * the Space write lock so the check and the save cannot interleave with
+ * another writer. WordPress then saves the page through its own controller.
+ */
+function spacefast_context_fenced_write(mixed $result, mixed $request, string $route, array $handler): mixed
+{
+    // The matched route pattern, not the request path: WordPress matches paths case-insensitively.
+    if ($result !== null || $route !== '/wp/v2/pages/(?P<id>[\d]+)'
+        || !in_array($request->get_method(), ['POST', 'PUT', 'PATCH'], true)) return $result;
+    $id = (int) $request['id'];
+    if ($id !== spacefast_context_post_id()) return $result;
+    $sent = array_keys(($request->get_json_params() ?? []) + ($request->get_body_params() ?? []) + ($request->get_query_params() ?? []));
+    // `rest_route`, `_method`, `_fields`, `_wpnonce` and the like address the REST server, not the page.
+    $refused = array_filter(array_diff($sent, SPACEFAST_CONTEXT_WRITE_PARAMETERS), static fn (string $key): bool => $key !== 'rest_route' && !str_starts_with($key, '_'));
+    if ($refused !== []) return new WP_Error('content_context_invalid', 'A context save may change only title and content or markdown. Refused: ' . implode(', ', $refused) . '.', ['status' => 400]);
+    $expected = (string) ($request['spacefast_revision'] ?? '');
+    if ($expected === '') return new WP_Error('content_context_revision_required', 'Send back the spacefast_revision you read.', ['status' => 400]);
+    if (empty($GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT']) || !function_exists('_stattic_space_write_lock_with')) return new WP_Error('content_context_lock_unavailable', 'Context saves are unavailable. Retry later.', ['status' => 503]);
+    try {
+        return spacefast_content_sync_locked(static function () use ($id, $expected, $request, $handler): array {
+            clean_post_cache($id);
+            $post = get_post($id);
+            if (!hash_equals(spacefast_context_revision($post), $expected)) return [new WP_Error('content_context_conflict', 'The context changed. Read it again before saving.', ['status' => 409])];
+            $before = spacefast_content_sync_current_revision_id($id);
+            $GLOBALS['SPACEFAST_CONTEXT_FENCED_WRITE'] = $id;
+            try {
+                $response = call_user_func($handler['callback'], $request);
+            } finally {
+                unset($GLOBALS['SPACEFAST_CONTEXT_FENCED_WRITE']);
+            }
+            if (is_wp_error($response) || ($response instanceof WP_REST_Response && $response->is_error())) return [$response];
+            $saved = get_post($id);
+            if ($saved->post_title === $post->post_title && $saved->post_content === $post->post_content) return [$response];
+            // WordPress revisions the update itself; adding another duplicated every
+            // history entry. Only create one when the site's revisioning did not.
+            $revisionId = spacefast_content_sync_current_revision_id($id);
+            if ($revisionId === $before || $revisionId === $id) $revisionId = spacefast_content_sync_save_revision($id);
+            spacefast_context_record_actor($revisionId);
+            // The response named the revision before history recorded it.
+            if ($response instanceof WP_REST_Response && is_array($response->get_data()) && array_key_exists('spacefast_revision', $response->get_data())) {
+                $response->set_data(['spacefast_revision' => spacefast_context_revision(get_post($id))] + $response->get_data());
+            }
+            return [$response];
+        })[0];
+    } catch (Spacefast_Content_Error $error) {
+        return new WP_Error($error->codeName, $error->getMessage(), ['status' => $error->status]);
+    }
 }
 
 /**
@@ -109,88 +197,9 @@ function spacefast_context_revision_actor(array $revision): array
     return ['name' => get_the_author_meta('display_name', $author) ?: 'Space collaborator', 'kind' => 'user'];
 }
 
-/** One write path: the context API's revision fence. Native page writes cannot skip it. */
-function spacefast_context_guard_rest(mixed $prepared, mixed $request): mixed
-{
-    $id = (int) ($request['id'] ?? 0);
-    if ($id < 1) return $prepared;
-    try { $context = spacefast_context_post(); } catch (Spacefast_Content_Error) { return $prepared; }
-    return $id === (int) $context->ID ? new WP_Error('content_context_revision_required', 'Save this context through /spacefast/v1/context with baseRevision.', ['status' => 409]) : $prepared;
-}
-
 function spacefast_context_record_actor(int $revisionId): void
 {
     $user = wp_get_current_user();
     $identity = spacefast_content_principal_user_authority((int) $user->ID);
     update_metadata('post', $revisionId, '_spacefast_context_actor', ['name' => $user->display_name ?: 'Space collaborator', 'kind' => ($identity['kind'] ?? 'user') === 'service' ? 'service' : 'user']);
-}
-
-/** The editor asset path under wp-includes, or null. */
-function spacefast_context_asset_path(string $src, string $base): ?string
-{
-    $path = parse_url(str_starts_with($src, 'http') ? $src : $base . $src, PHP_URL_PATH);
-    return is_string($path) && str_starts_with($path, '/wp-includes/') ? $path : null;
-}
-
-/** Gutenberg assets come from the runtime that stores this document. */
-function spacefast_context_editor_assets(): array
-{
-    $post = spacefast_context_require_edit();
-    require_once ABSPATH . 'wp-admin/includes/admin.php';
-    $scripts = wp_scripts();
-    $context = new WP_Block_Editor_Context(['name' => 'spacefast-context', 'post' => $post]);
-    wp_add_inline_script('wp-block-library', 'wp.blocks.setCategories(' . wp_json_encode(get_block_categories($context)) . ');wp.blocks.unstable__bootstrapServerSideBlockDefinitions(' . wp_json_encode(get_block_editor_server_block_settings()) . ');', 'before');
-    $scripts->all_deps(['wp-block-editor', 'wp-block-library', 'wp-components', 'wp-format-library']);
-    $preload = array_reduce(['/wp/v2/types?context=view', '/wp/v2/pages/' . $post->ID . '?context=edit'], 'rest_preload_api_request', []);
-    $result = []; $moduleIds = [];
-    foreach ($scripts->to_do as $handle) {
-        $asset = $scripts->registered[$handle] ?? null;
-        if (!$asset || !$asset->src) continue;
-        $path = spacefast_context_asset_path($asset->src, $scripts->base_url);
-        if ($path === null) continue;
-        $before = $scripts->get_data($handle, 'before'); $data = $scripts->get_data($handle, 'data'); $after = $scripts->get_data($handle, 'after');
-        // No administrative nonce or user-meta persistence in the app editor.
-        // The responses core-data asks for first ship with the editor, as wp-admin
-        // preloads them: the page and its post types need no further round trip.
-        if ($handle === 'wp-api-fetch') $after = [
-            'wp.apiFetch.use(wp.apiFetch.createRootURLMiddleware(location.origin + "/wp-json/"));',
-            'wp.apiFetch.use(wp.apiFetch.createPreloadingMiddleware(' . wp_json_encode($preload) . '));',
-        ];
-        if ($handle === 'wp-preferences') $after = ['wp.data.dispatch(wp.preferences.store).setPersistenceLayer({get:async()=>{try{return JSON.parse(localStorage.getItem("context:gutenberg:preferences")||"{}")}catch{return {}}},set:(data)=>{try{localStorage.setItem("context:gutenberg:preferences",JSON.stringify(data))}catch{}}});'];
-        foreach (($scripts->get_data($handle, 'module_dependencies') ?: []) as $dependency) $moduleIds[] = is_string($dependency) ? $dependency : $dependency['id'];
-        $result[] = ['handle' => $handle, 'src' => $path . '?ver=' . rawurlencode((string) $asset->ver),
-            'before' => implode("\n", [...(is_array($before) ? $before : []), is_string($data) ? $data : '']), 'after' => implode("\n", is_array($after) ? $after : [])];
-    }
-    $styles = wp_styles(); $styles->all_deps(['wp-components', 'wp-block-editor', 'wp-block-library', 'wp-block-library-theme']); $urls = [];
-    foreach ($styles->to_do as $handle) {
-        $asset = $styles->registered[$handle] ?? null;
-        if (!$asset || !$asset->src) continue;
-        $path = spacefast_context_asset_path($asset->src, $styles->base_url);
-        if ($path !== null) $urls[] = $path . '?ver=' . rawurlencode((string) $asset->ver);
-    }
-    $imports = []; $modules = wp_script_modules();
-    while ($moduleIds !== []) {
-        $moduleId = array_pop($moduleIds);
-        if (isset($imports[$moduleId])) continue;
-        $module = $modules->get_registered($moduleId);
-        if ($module === null) throw new Spacefast_Content_Error(503, 'content_context_editor_unavailable', 'A Gutenberg module is unavailable.');
-        $path = spacefast_context_asset_path($module['src'], '');
-        if ($path === null) continue;
-        $version = $module['version'] === false ? get_bloginfo('version') : $module['version'];
-        $imports[$moduleId] = $path . ($version === null ? '' : '?ver=' . rawurlencode((string) $version));
-        foreach ($module['dependencies'] as $dependency) $moduleIds[] = $dependency['id'];
-    }
-    return ['scripts' => $result, 'styles' => $urls, 'imports' => (object) $imports,
-        'editorUser' => ['id' => get_current_user_id(), 'name' => wp_get_current_user()->display_name, 'capabilities' => (object) []]];
-}
-
-function spacefast_context_register_routes(): void
-{
-    $scope = static fn (): bool => spacefast_content_space_id() !== '';
-    spacefast_content_register_rest_route('spacefast/v1', '/context', [
-        ['methods' => 'GET', 'permission_callback' => $scope, 'callback' => static fn (): array => spacefast_context_read()],
-        ['methods' => 'PATCH', 'permission_callback' => $scope, 'callback' => static fn ($request): array => spacefast_context_save($request->get_json_params() ?? [])],
-    ]);
-    register_rest_field('page-revision', 'spacefast_actor', ['get_callback' => 'spacefast_context_revision_actor', 'schema' => ['type' => 'object', 'context' => ['view', 'edit'], 'readonly' => true]]);
-    spacefast_content_register_rest_route('spacefast/v1', '/context/editor', ['methods' => 'GET', 'permission_callback' => $scope, 'callback' => static fn (): array => spacefast_context_editor_assets()]);
 }

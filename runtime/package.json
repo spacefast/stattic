@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "ci:runtime": "bash tests/run-ci.sh",
-    "ci:runtime-browser": "bun run --cwd .. test:runtime:browser"
+    "ci:runtime-browser": "bash browser-specs/run-ci.sh"
   },
   "devDependencies": {
     "@spacefast/common": "workspace:*",

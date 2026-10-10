@@ -1,7 +1,7 @@
 {
-  "revision": "1dd3e4878f250dbc21347bbab8bd80ab816069c9",
+  "revision": "c9e14b83a20f9236cf320f3d68f50baf350a4ed6",
   "sourceHash": "56e10498a23b321885df44f8516cabdbbcf19d9e5616c568ca1e91352dff9a9a",
-  "manifestSha256": "4401083e9c48b86118bb9b09099e01aa09b8c09ddd13cd3e35c4f9e447aba8c4",
+  "manifestSha256": "577cec6f5f3d52e01e7cdac6db8932bf91f6a5e656d8e7413c4ded26fd9ac041",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "17e7287de85ad6b2473f3cc26a51c944bbd923ebf9bb7acfb7f5bce466a882a2"
+      "sha256": "473ec35a340d36439d22d56126388961282855588b65d693553ab8c026e19628"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "6fbf08827495041b69705c5544dfe89e555d709613b14064685f8b719b970494"
+      "sha256": "cfd77f5f75007b2dac1beb1b58721ad4f9fac34eda34b8c3ba22fafaf1a00264"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -390,6 +390,10 @@
     {
       "path": "runtime/browser-specs/origin-null-access.test.ts",
       "sha256": "9263196c75feceae58f5bf0d593e635171096e299deb09c7f6492b0626d4bc16"
+    },
+    {
+      "path": "runtime/browser-specs/run-ci.sh",
+      "sha256": "55d3256078c2682a09c28b438af9538f9f66be1e44b4536bfdf46622d6fb08f0"
     },
     {
       "path": "runtime/browser-specs/run.ts",
@@ -893,7 +897,7 @@
     },
     {
       "path": "runtime/package.json",
-      "sha256": "29e092ef09fea047d384d4fc9de2314fb5ebb7c75eb55db98e8453e7214932c6"
+      "sha256": "922b63b163826da0f0e9d2707cd1f2ae2a633549bbda587b050888e719c4a705"
     },
     {
       "path": "runtime/php-fpm-readiness.php",
@@ -1245,7 +1249,7 @@
     },
     {
       "path": "runtime/tests/run.sh",
-      "sha256": "c95d643efcb1922388027b73ed90bf8109d363597fd011e75c35d200e9d54963"
+      "sha256": "6a7ad6dc6fb277b894eda1143bb59dc0e2ee5c1e6fd2ba7a9de64d3737dfb70c"
     },
     {
       "path": "runtime/tests/s3-cli.php",

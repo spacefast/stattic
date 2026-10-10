@@ -17,37 +17,10 @@ php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 5 ? 0 : 1);' || {
 command -v bun >/dev/null || { echo "bun is required" >&2; exit 1; }
 command -v cargo >/dev/null || { echo "cargo is required" >&2; exit 1; }
 
-# Prepare the shared pinned library before independent workers read it. A cold
-# checkout should fetch once, rather than every shard racing the release host.
-echo "==> WordPress PHP toolkit"
-bun "$REPO_ROOT/scripts/fetch-wp-php-toolkit.mjs"
-
-# The PHP gates lint the dashboard build's generated PHP, so they follow it.
-# The native build shares nothing with that chain and runs beside it.
-php_gates() {
-  # Build the WordPress dashboard shipped in the engine manifest.
-  echo "==> Zero dashboard plugin"
-  bun "$REPO_ROOT/zero/scripts/build.ts" >/dev/null
-
-  echo "==> php -l (all runtime PHP files)"
-  while IFS= read -r -d '' file; do
-    php -l "$file" >/dev/null || exit 1
-  done < <(find "$RUNTIME_DIR" -name '*.php' -print0)
-
-  echo "==> php unit tests"
-  php "$RUNTIME_DIR/tests/unit.php"
-}
-
-php_gates &
-php_gates_pid=$!
-echo "==> native runtime test tools"
-cd "$REPO_ROOT"
-cargo_status=0
-cargo build --locked -p stattic-runtime-compiler --bin stattic-runtime || cargo_status=$?
-php_gates_status=0
-wait "$php_gates_pid" || php_gates_status=$?
-[[ "$cargo_status" = 0 ]] || exit "$cargo_status"
-[[ "$php_gates_status" = 0 ]] || exit "$php_gates_status"
+# CI runs the preparation as its own Turbo task, beside the workspace builds.
+if [[ "${SPACEFAST_RUNTIME_PREPARED:-}" != 1 ]]; then
+  bash "$RUNTIME_DIR/tests/prepare.sh"
+fi
 runtime_target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 if [[ "$runtime_target_dir" != /* ]]; then
   runtime_target_dir="$REPO_ROOT/$runtime_target_dir"

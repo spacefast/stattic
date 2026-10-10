@@ -9,7 +9,9 @@ source scripts/lib/cargo-llvm-cov.sh
 mkdir -p .ci-coverage/runtime/tests
 llvm_cov_begin "${RUNNER_TEMP:-$repo_root/.ci-results}/runtime-rust-coverage-env.sh"
 
-SPACEFAST_BUN_COVERAGE_DIR="$repo_root/.ci-coverage/runtime/tests" \
+# ci:runtime-prepare already built the instrumented binary and ran the PHP gates.
+SPACEFAST_RUNTIME_PREPARED=1 \
+  SPACEFAST_BUN_COVERAGE_DIR="$repo_root/.ci-coverage/runtime/tests" \
   bash runtime/tests/run.sh
 
 llvm_cov_report .ci-coverage/crates/runtime-integration/lcov.info

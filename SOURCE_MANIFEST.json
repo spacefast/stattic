@@ -1,7 +1,7 @@
 {
-  "revision": "d6910ce8c51ce46819b6680f04534dca1ddab3c6",
+  "revision": "1efd03e65703da1f7208d6b600dae1e6e83eff4a",
   "sourceHash": "56e10498a23b321885df44f8516cabdbbcf19d9e5616c568ca1e91352dff9a9a",
-  "manifestSha256": "7fbedb8b5c2740cc50e58ea910969c1f6d6bdf9d93be0a8ca0e66e0006d444d5",
+  "manifestSha256": "7947d0e555553bbd0efc92fcccd4c2a5039bd87b2b44217b4a9969335e33013d",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "dc3f99a5aa9a77cebeaf35d3d7613cd82ae688ae73df514189ec3a4a635a30b0"
+      "sha256": "4835dd41b8fb9afcedc102c824957a8feffbd8b31315e40575049c98c048a956"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "b7d49288aef6932f43edfa4e65f3d584751b664e0613c427c15c04b7eefa8f71"
+      "sha256": "1b4d8f195313e4c0bb60030ebb6808c482dae58e4e82f341984747a119e01e68"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -393,7 +393,7 @@
     },
     {
       "path": "runtime/browser-specs/run-ci.sh",
-      "sha256": "55d3256078c2682a09c28b438af9538f9f66be1e44b4536bfdf46622d6fb08f0"
+      "sha256": "78d9d706151cc399fbefd0af014f10af4b76bd7bb0589e1d201fb50b635cfa5f"
     },
     {
       "path": "runtime/browser-specs/run.ts",
@@ -897,7 +897,7 @@
     },
     {
       "path": "runtime/package.json",
-      "sha256": "922b63b163826da0f0e9d2707cd1f2ae2a633549bbda587b050888e719c4a705"
+      "sha256": "c9196d17871b945a89f4dc0d4c96b3642bfa509d19ca51f034e38f7d10571b3f"
     },
     {
       "path": "runtime/php-fpm-readiness.php",
@@ -1216,6 +1216,14 @@
       "sha256": "2f2b0ddc0ca8b041a8db753afd386b9b2e162d4a04e13ac833ee83c97fa1295d"
     },
     {
+      "path": "runtime/tests/prepare-ci.sh",
+      "sha256": "bf82f5fd0730a734ab11b636deffa6978560b59de0578a73c21719c43d48c39c"
+    },
+    {
+      "path": "runtime/tests/prepare.sh",
+      "sha256": "d9b7a2ad919154ea067df49534ab6744ff1b899e078a30fb35a3ce48c95483f8"
+    },
+    {
       "path": "runtime/tests/provenance-serving.test.ts",
       "sha256": "61d50f3b600011ca310fec8dc9012cf040a0daa851643baf78a8655c5b1cbd17"
     },
@@ -1237,7 +1245,7 @@
     },
     {
       "path": "runtime/tests/run-ci.sh",
-      "sha256": "a343484e822a72a43f66b558f974cdeff51574e8e3f339ef513a77afa32877f9"
+      "sha256": "b31d7d59e5d35eef398533ba8e082883baee921c2a8558fbf4d8f9a948555fd0"
     },
     {
       "path": "runtime/tests/run-context-browser.mjs",
@@ -1249,7 +1257,7 @@
     },
     {
       "path": "runtime/tests/run.sh",
-      "sha256": "6a7ad6dc6fb277b894eda1143bb59dc0e2ee5c1e6fd2ba7a9de64d3737dfb70c"
+      "sha256": "def59312601abfc11ff63683e1c767a2c5fca1803a6097093e43bb941ea378b1"
     },
     {
       "path": "runtime/tests/s3-cli.php",

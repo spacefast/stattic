@@ -127,8 +127,9 @@ function runtimeNativeBinaryPath(binary: string, packageName: string, configured
     nativeBinaryPaths.set(binary, configured);
     return configured;
   }
-  // `runtime/bin` is a CI bootstrap artifact: built in the same workflow run,
-  // from the same commit, so reusing it there is free and correct. It is also
+  // In CI, `runtime/bin` is restored from a cache that main writes, keyed on
+  // every native input, so a hit always matches this checkout's Rust; on a
+  // miss the job builds with cargo below. The directory is also
   // gitignored, which means a developer host can hold one from any earlier
   // build — and preferring it made the suite silently test a stale compiler
   // against fresh PHP. Outside CI the checkout is the only trustworthy source;

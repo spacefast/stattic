@@ -12,9 +12,7 @@ declare(strict_types=1);
  * its editor changes somewhere else names its own sink through the standard
  * config lane and the same store serves it.
  *
- * Mail is deliberately NOT a sink. A queued message is delivered by the box
- * itself, through the transport WordPress already has, and never travels to a
- * drainer at all — see shared/mail-outbox.php.
+ * Mail sends immediately through WordPress and never enters this drainer.
  */
 
 require_once __DIR__ . '/context.php';
@@ -57,10 +55,7 @@ function _stattic_application_journal_sinks(): array
 
 function _stattic_application_journal_sink_configured(string $sink): bool
 {
-    // The rolling control-plane drainer still owns this old wire name. Never
-    // let it lease editor changes, even if configuration repeats that name.
-    return $sink !== 'control-plane:mail'
-        && in_array($sink, _stattic_application_journal_sinks(), true);
+    return in_array($sink, _stattic_application_journal_sinks(), true);
 }
 
 function _stattic_application_journal_iso(string $mysqlTimestamp): string

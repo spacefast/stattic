@@ -8,6 +8,7 @@ test("component staging observes WordPress tables and provisions its delivery ta
   const componentApi = path.resolve(import.meta.dir, "../engine/admin/components.php");
   const script = String.raw`
 require $argv[1];
+function wp_mail(): bool { return true; }
 final class ComponentTestDatabase {
     public string $options = 'wp_options';
     public string $posts = 'wp_posts';

@@ -42,6 +42,7 @@ const REPORT_PHP = `<?php
 sf_json([
     'cron' => $_SERVER['HTTP_X_SPACEFAST_CRON'] ?? null,
     'authorization' => $_SERVER['HTTP_AUTHORIZATION'] ?? null,
+    'mail' => sf_email(['to' => 'visitor@example.com', 'subject' => 'Cron mail', 'text' => 'From the cron.']),
 ]);
 `;
 
@@ -105,17 +106,29 @@ function receipt(stderr: string): Record<string, unknown> {
 }
 
 beforeAll(async () => {
-  rt = await startRuntime();
+  rt = await startRuntime({ env: { SPACEFAST_SERVICE_EMAIL_SENDERS: "cron@example.com" } });
   // Coverage and provider prepends can register shutdown work before the CLI
   // entrypoint. Reproduce the dangerous ordering: its warning must not replace
   // a tenant fatal before the receipt derives the exit status.
   writeFileSync(
     path.join(rt.root, PREPEND),
     `<?php
+define('SPACEFAST_SERVICE_EMAIL_SENDERS', 'cron@example.com');
 register_shutdown_function(static function (): void {
     trigger_error("prepend cleanup warning", E_USER_WARNING);
 });
 require ${JSON.stringify(RUNTIME_TEST_ATOMIC_PREPEND)};
+`,
+  );
+  writeFileSync(
+    path.join(rt.root, "wp-load.php"),
+    `<?php
+function add_action(string $name, callable $callback): void {}
+function remove_action(string $name, callable $callback): void {}
+function wp_mail(array $to, string $subject, string $message, array $headers): bool {
+    file_put_contents(${JSON.stringify(path.join(rt.root, "cron-mail-capture.json"))}, json_encode(compact('to', 'subject', 'message', 'headers')));
+    return true;
+}
 `,
   );
   await deploy(rt, {
@@ -183,7 +196,15 @@ test("a declared cron runs its path and carries both proofs", async () => {
   expect(result.exitCode).toBe(0);
   expect(receipt(result.stderr)).toEqual({ method: "GET", path: "/cron/report", status: 200 });
 
-  const seen = JSON.parse(result.stdout) as { cron: string; authorization: string };
+  // SAFETY: The finalized report fixture above emits exactly this JSON shape.
+  const seen = JSON.parse(result.stdout) as { cron: string; authorization: string; mail: boolean };
+  expect(seen.mail).toBe(true);
+  expect(JSON.parse(readFileSync(path.join(rt.root, "cron-mail-capture.json"), "utf8"))).toEqual({
+    to: ["visitor@example.com"],
+    subject: "Cron mail",
+    message: "From the cron.",
+    headers: ["From: cron@example.com", "Reply-To: cron@example.com"],
+  });
   // The tenant's own secret, which is the half a handler can actually compare.
   expect(seen.authorization).toBe(`Bearer ${CRON_SECRET}`);
   // `<key>.<minute>.<hmac>`: the signature binds the header to this cron and

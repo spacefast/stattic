@@ -31,6 +31,7 @@ require_once __DIR__ . '/../engine/admin/jobs.php'; // job runner policy (§22),
 require_once __DIR__ . '/../engine/runtime/functions-artifacts.php'; // signed build-artifact reads
 require_once __DIR__ . '/../engine/runtime/functions-dispatch.php'; // origin -> host dispatch contract
 require_once __DIR__ . '/../engine/shared/runtime-log.php'; // the one runtime log writer
+require_once __DIR__ . '/../engine/shared/mail.php';
 require_once __DIR__ . '/../engine/shared/db-broker.php'; // MySQL broker value encoding (pure helpers only here)
 require_once __DIR__ . '/../engine/runtime/space-users.php'; // app-session cookie read before WordPress loads
 
@@ -45,6 +46,21 @@ function check(bool $condition, string $label): void
         $failures[] = $label;
     }
 }
+
+// Direct mail argument mapping owns header validation independently of transport.
+$mailPayload = [
+    'from' => ['email' => 'hello@example.com'],
+    'to' => [['email' => 'visitor@example.com']],
+    'subject' => 'Hello', 'html' => '<p>Hello</p>', 'text' => 'Hello',
+    'headers' => ['X-Campaign' => 'welcome'],
+];
+$mailArguments = _stattic_mail_arguments($mailPayload);
+check($mailArguments['message'] === '<p>Hello</p>' && $mailArguments['alt_body'] === 'Hello', 'HTML mail retains its plain-text alternative');
+check(in_array('X-Campaign: welcome', $mailArguments['headers'], true), 'mail preserves safe custom headers');
+$mailPayload['headers'] = ['From' => 'forged@example.com'];
+check(_stattic_mail_arguments($mailPayload) === null, 'custom headers cannot replace the authorized sender');
+$mailPayload['headers'] = ['X-Campaign' => "welcome\r\nBcc: victim@example.com"];
+check(_stattic_mail_arguments($mailPayload) === null, 'mail rejects header injection');
 
 // --- PHP 8.5 platform contract ------------------------------------------------------
 
@@ -2836,7 +2852,6 @@ $brandDefaults = _stattic_brand_resolve('');
 check(
     $brandDefaults['name'] === 'Spacefast'
         && $brandDefaults['problem_docs_base_url'] === 'https://spacefast.com/docs/errors'
-        && $brandDefaults['mail_domain'] === 'mail.spacefast.com'
         && $brandDefaults['wordmark_url'] === '',
     'brand: the compiled-in document is Spacefast'
 );
@@ -2847,8 +2862,7 @@ check(
     $partnerBrand['name'] === 'Partner Cloud'
         && $partnerBrand['problem_docs_base_url'] === 'https://partner.example/errors/'
         && $partnerBrand['fonts'] === []
-        && $partnerBrand['help_url'] === $brandDefaults['help_url']
-        && $partnerBrand['mail_domain'] === 'mail.spacefast.com',
+        && $partnerBrand['help_url'] === $brandDefaults['help_url'],
     'brand: an override replaces only the members it names, and may empty the fonts'
 );
 check(
@@ -3743,48 +3757,11 @@ check(
 );
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($contentRetentionRoot)));
 
-// --- Mail outbox delivery accounting ------------------------------------------
-require_once __DIR__ . '/../engine/shared/mail-outbox.php';
-
-// A settle that committed credits its own bucket; one that did not — a lost or
-// expired lease, or a failed write — is counted `lost`, never as a completed
-// transition, so a pass can never report a send it did not commit.
-$mailTally = ['claimed' => 0, 'delivered' => 0, 'retried' => 0, 'dead' => 0, 'lost' => 0, 'unavailable' => false];
-_stattic_mail_outbox_tally($mailTally, 'delivered', true);
-_stattic_mail_outbox_tally($mailTally, 'retried', false);
-_stattic_mail_outbox_tally($mailTally, 'dead', false);
-check($mailTally['delivered'] === 1, 'a committed settle credits its own bucket');
-check(
-    $mailTally['retried'] === 0 && $mailTally['dead'] === 0,
-    'an uncommitted settle credits no delivery bucket'
-);
-check($mailTally['lost'] === 2, 'each uncommitted settle is counted lost');
-
-// A claim whose lease has already lapsed is never handed to wp_mail: settling it
-// would commit nothing and the row is about to be re-served, so sending would be
-// a second delivery.
-check(
-    _stattic_mail_outbox_lease_expired(['lease_expires_at' => gmdate('Y-m-d H:i:s', time() - 1)]),
-    'a lapsed lease reads as expired'
-);
-check(
-    !_stattic_mail_outbox_lease_expired(['lease_expires_at' => gmdate('Y-m-d H:i:s', time() + 120)]),
-    'a live lease does not read as expired'
-);
-check(
-    _stattic_mail_outbox_lease_expired(['lease_expires_at' => '']),
-    'an unparseable lease is treated as expired rather than sent'
-);
-
-// The scheduled drain runs where NOTHING has bound the broker's database. An
-// unbound broker resolves only the reserved `SPACEFAST_ZERO_DATABASE_URL`, so on
-// a provider box that exposes the ordinary `DB_*` tuple the drain reported
-// `unavailable` and never claimed a row — mail queued fine and then never left.
-// The drain has to run the same provider resolution the rest of the engine does.
+// --- Provider database binding -----------------------------------------------
 define('DB_HOST', '127.0.0.1');
-define('DB_NAME', 'outbox_unit_db');
-define('DB_USER', 'outbox_unit_user');
-define('DB_PASSWORD', 'outbox-unit-secret');
+define('DB_NAME', 'provider_unit_db');
+define('DB_USER', 'provider_unit_user');
+define('DB_PASSWORD', 'provider-unit-secret');
 
 $unboundDsn = _stattic_db_broker_dsn();
 check(
@@ -3795,27 +3772,25 @@ check(
 _stattic_db_broker_bind_provider();
 $boundDsn = _stattic_db_broker_dsn();
 check(
-    ($boundDsn['db'] ?? '') === 'outbox_unit_db' && ($boundDsn['user'] ?? '') === 'outbox_unit_user',
-    'the drain binds the provider DB_* credentials before claiming'
+    ($boundDsn['db'] ?? '') === 'provider_unit_db' && ($boundDsn['user'] ?? '') === 'provider_unit_user',
+    'the broker binds provider DB_* credentials'
 );
 check(
     !array_key_exists('code', $boundDsn),
-    'the bound drain resolves a connection instead of a missing-URL refusal'
+    'the bound broker resolves a connection instead of a missing-URL refusal'
 );
 
 // --- CLI private-root binding -------------------------------------------------
 // A CLI lane resolved the storage path but never BOUND it, so
 // `_stattic_config_value()` could not reach the installed `<privateRoot>/config.php`
-// — the one config source provisioning owns end to end. A scheduled send
-// therefore ignored the SPACEFAST_BRAND_JSON that web requests on the same box
-// honored, and used the default mail domain instead.
+// — the one config source provisioning owns end to end.
 require_once __DIR__ . '/../engine/runtime/cli-invoke.php';
 
 $cliPrivateRoot = sys_get_temp_dir() . '/sf-cli-root-' . bin2hex(random_bytes(6)) . '/storage';
 mkdir($cliPrivateRoot, 0755, true);
 file_put_contents(
     $cliPrivateRoot . '/config.php',
-    "<?php\nreturn ['SPACEFAST_BRAND_JSON' => '{\"mailDomain\":\"mail.provider.test\"}'];\n"
+    "<?php\nreturn ['SPACEFAST_BRAND_JSON' => '{\"name\":\"Provider\"}'];\n"
 );
 
 check(
@@ -3831,8 +3806,8 @@ check(
     'resolving a CLI private root binds it, so configuration reads can see it'
 );
 check(
-    _stattic_config_value('SPACEFAST_BRAND_JSON') === '{"mailDomain":"mail.provider.test"}',
-    'a CLI lane reads the installed engine config, including mail branding'
+    _stattic_config_value('SPACEFAST_BRAND_JSON') === '{"name":"Provider"}',
+    'a CLI lane reads the installed engine config, including branding'
 );
 
 _stattic_job_runner_unit_rm_recursive(dirname($cliPrivateRoot));

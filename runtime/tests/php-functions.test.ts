@@ -12,9 +12,9 @@
 //   * the prelude's own jail/scrub mechanics under the CLI:
 //     tenant-prelude.test.ts;
 //   * what the service broker does with a frame (grant enforcement, Akismet's
-//     shape, the outbox row): services.rs and functions-relay.test.ts.
+//     shape, mail transport acceptance): services.rs and functions-relay.test.ts.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setImmediate } from "node:timers/promises";
@@ -160,6 +160,17 @@ beforeAll(async () => {
     phpBinary: process.env.SPACEFAST_REAL_PHP ?? "php",
     phpIni: { error_log: diagnosticsPath, "pcov.enabled": "0" },
   });
+  writeFileSync(
+    path.join(rt.root, "wp-load.php"),
+    `<?php
+function add_action(string $name, callable $callback): void {}
+function remove_action(string $name, callable $callback): void {}
+function wp_mail(array $to, string $subject, string $message, array $headers): bool {
+    file_put_contents(${JSON.stringify(path.join(rt.root, "mail-capture.json"))}, json_encode(compact('to', 'subject', 'message', 'headers')));
+    return true;
+}
+`,
+  );
   await deploy(rt, {
     spaceId: SPACE,
     versionId: VERSION,
@@ -339,10 +350,12 @@ test("brokered capabilities reach the native broker from inside the jail", async
   // service_payload_invalid / service_not_configured.
   const email = await get(rt, HOST, "/email");
   expect(email.status).toBe(200);
-  expect(((await email.json()) as { codes?: string[] }).codes).toEqual([
-    "email_outbox_unavailable",
-    "email_sender_unverified",
-  ]);
+  expect(await email.json()).toEqual({ codes: [true, "email_sender_unverified"] });
+
+  expect(JSON.parse(readFileSync(path.join(rt.root, "mail-capture.json"), "utf8"))).toMatchObject({
+    to: ["visitor@example.com"],
+    subject: "Thanks",
+  });
 
   // "No database attached" answered as its own problem document, not a driver
   // error: sf_db() hands back a handle and has no other moment to say so.

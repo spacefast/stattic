@@ -26,6 +26,17 @@ The runtime vocabulary is only **versions and routes**. A route pointer
 channels compile down to route pointers before they reach the runtime. The runtime never
 learns about users, teams, plans, billing, or domain ownership.
 
+## Space mail
+
+Space mail is sent once through the site's `wp_mail` transport. The runtime
+returns whether the transport accepted the message. Verified sender checks
+apply before sending. Mail needs no application database or control-plane
+mailbox, queue or drainer.
+
+The direct-mail cutover discards pending messages in the old Space mail outbox.
+It does not replay them through the new transport. Platform account and
+notification email is managed separately.
+
 ## Shared HTML source
 
 HTML pages may reference shared fragments with exactly this comment syntax:

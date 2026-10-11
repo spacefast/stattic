@@ -128,9 +128,7 @@ function _stattic_zero_execute_envelope(array $envelope, array $config, string $
 /**
  * The identity a brokered service call is attributed to.
  *
- * The request id is the invocation key, so two calls in one request share it
- * and an outbox row is written once per (invocation, effect). It comes from the
- * envelope the runtime built, never from a tenant-visible field.
+ * The identity comes from the envelope the runtime built.
  */
 function _stattic_zero_service_identity(array $envelope): array
 {

@@ -191,8 +191,7 @@ function _stattic_zero_route_entry_shape_valid(mixed $entry): bool
         && (!array_key_exists('schema_hash', $entry) || is_string($entry['schema_hash']) || $entry['schema_hash'] === null);
 }
 
-// The invocation half of the outbox key. The bound matches the outbox's
-// VARCHAR(96) invocation_id column; anything else yields an empty identity.
+// Restrict service invocation identities to the runtime's wire format.
 function _stattic_service_invocation_id(mixed $raw): string
 {
     return is_string($raw) && preg_match('/^[A-Za-z0-9_-]{1,96}$/', $raw) === 1 ? $raw : '';
@@ -213,8 +212,6 @@ function _stattic_service_invocation_id(mixed $raw): string
  * platform brokers no third-party service key: it forwards what the site
  * already holds, and a site holding none gets a refusal.
  *
- * The identity triple is the outbox's idempotency key. A replayed invocation
- * must arrive at the same key, or it sends the mail twice.
  */
 function _stattic_service_broker_env(array $identity, array $config = []): array
 {
@@ -238,8 +235,6 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
         }
     }
     foreach ([
-        'SPACEFAST_SERVICE_SPACE_ID' => 'spaceId',
-        'SPACEFAST_SERVICE_VERSION_ID' => 'versionId',
         'SPACEFAST_SERVICE_INVOCATION_ID' => 'invocationId',
         'SPACEFAST_SERVICE_CONTENT_URL' => 'contentUrl',
         'SPACEFAST_SERVICE_CONTENT_COOKIE' => 'contentCookie',
@@ -250,14 +245,20 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
             $env[$name] = $value;
         }
     }
-    // Every lane that can accept a message binds the broker through here — a
-    // capsule, a Functions worker over the relay, tenant PHP — so this is where
-    // the outbox gets its post-response pass: the request that COULD have
-    // queued mail is the one that ships it. A Space with no verified sender can
-    // queue nothing and schedules nothing.
     if (isset($env['SPACEFAST_SERVICE_EMAIL_SENDERS'])) {
-        require_once __DIR__ . '/mail-outbox.php';
-        _stattic_mail_outbox_deliver_after_response();
+        require_once __DIR__ . '/native-process.php';
+        $env['SPACEFAST_SERVICE_EMAIL_PHP'] = _stattic_runtime_php_cli_binary();
+        $env['SPACEFAST_SERVICE_EMAIL_SCRIPT'] = dirname(__DIR__) . '/runtime/mail.php';
+        $privateRoot = _stattic_access_private_root();
+        if ($privateRoot !== '') {
+            $env['SPACEFAST_SERVICE_EMAIL_ROOT'] = dirname($privateRoot, 2);
+        }
+        foreach (['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'] as $name) {
+            $value = _stattic_config_value($name);
+            if ($value !== '') {
+                $env[$name] = $value;
+            }
+        }
     }
     return $env;
 }

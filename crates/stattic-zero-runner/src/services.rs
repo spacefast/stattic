@@ -23,7 +23,8 @@
 //! has no such key gets a refusal, not a key belonging to somebody else.
 
 use std::cell::RefCell;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -201,9 +202,10 @@ struct ServiceConfig {
     /// not version content: rolling a version back must not roll back who a
     /// space has proven it owns.
     email_senders: Vec<String>,
-    space_id: String,
-    version_id: String,
     invocation_id: String,
+    email_php: Option<String>,
+    email_script: Option<String>,
+    email_root: Option<String>,
     content_url: Option<String>,
     content_cookie: Option<String>,
     content_authorization: Option<String>,
@@ -237,9 +239,10 @@ impl ServiceConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
-            space_id: value("SPACEFAST_SERVICE_SPACE_ID").unwrap_or_default(),
-            version_id: value("SPACEFAST_SERVICE_VERSION_ID").unwrap_or_default(),
             invocation_id: value("SPACEFAST_SERVICE_INVOCATION_ID").unwrap_or_default(),
+            email_php: value("SPACEFAST_SERVICE_EMAIL_PHP"),
+            email_script: value("SPACEFAST_SERVICE_EMAIL_SCRIPT"),
+            email_root: value("SPACEFAST_SERVICE_EMAIL_ROOT"),
             content_url: value("SPACEFAST_SERVICE_CONTENT_URL"),
             content_cookie: value("SPACEFAST_SERVICE_CONTENT_COOKIE"),
             content_authorization: value("SPACEFAST_SERVICE_CONTENT_AUTHORIZATION"),
@@ -745,31 +748,15 @@ fn akismet_call(
 /* Email                                                                       */
 /* -------------------------------------------------------------------------- */
 
-/// Accepts one email effect into the space's private outbox.
-///
-/// On the Zero path this insert joins whatever transaction the handler is
-/// already in, which is what makes "the row and the mail commit together" true
-/// rather than aspirational. Delivery is somebody else's job and happens later;
-/// nothing here contacts a mail transport.
+/// Attempt one send through the site's WordPress mail transport.
 fn email_send(
     config: &ServiceConfig,
     payload: &Map<String, Value>,
 ) -> Result<Value, BrokerRefusal> {
-    if config.space_id.is_empty() || config.invocation_id.is_empty() {
-        return Err(BrokerRefusal::new(
-            "service_not_configured",
-            "This runtime has no outbox identity.",
-        ));
-    }
-    // Refused before the row is written, not after.
-    //
-    // A queued message that no configured sender can carry would sit in the
-    // outbox looking accepted and never leave, and "accepted" is the one thing
-    // `send()` does promise. Better a refusal the author can see.
     if config.email_senders.is_empty() {
         return Err(BrokerRefusal::new(
             "service_not_configured",
-            "This space has no verified sender, so mail cannot be accepted.",
+            "This space has no verified sender.",
         ));
     }
     let from = payload
@@ -784,39 +771,46 @@ fn email_send(
             "The from address is not a verified sender for this space.",
         ));
     }
-    let normalized = serde_json::to_string(&Value::Object(payload.clone())).map_err(|_| {
-        BrokerRefusal::new("email_message_invalid", "The message could not be encoded.")
-    })?;
-
-    let effect_index = crate::db::next_email_effect_index();
-    // Deterministic rather than random: it is the idempotency identity, so a
-    // retried invocation must produce the same id and collide with the row it
-    // already wrote instead of sending twice.
-    let message_id = message_id(&config.space_id, &config.invocation_id, effect_index);
-
-    crate::db::insert_email_outbox_row(crate::db::EmailOutboxRow {
-        message_id: &message_id,
-        space_id: &config.space_id,
-        version_id: &config.version_id,
-        invocation_id: &config.invocation_id,
-        effect_index,
-        payload_json: &normalized,
-    })
-    .map_err(|error| BrokerRefusal::new("email_outbox_unavailable", error))?;
-
-    Ok(json!({ "messageId": message_id }))
-}
-
-fn message_id(space_id: &str, invocation_id: &str, effect_index: u32) -> String {
-    // The NUL separators are what stop (space "a", invocation "bc") and
-    // (space "ab", invocation "c") from hashing alike.
-    let mut input = Vec::with_capacity(space_id.len() + invocation_id.len() + 6);
-    input.extend_from_slice(space_id.as_bytes());
-    input.push(0);
-    input.extend_from_slice(invocation_id.as_bytes());
-    input.push(0);
-    input.extend_from_slice(&effect_index.to_be_bytes());
-    format!("msg_{}", &crate::artifacts::sha256_hex(&input)[..32])
+    let (Some(php), Some(script), Some(root)) = (
+        config.email_php.as_deref(),
+        config.email_script.as_deref(),
+        config.email_root.as_deref(),
+    ) else {
+        return Err(BrokerRefusal::new(
+            "service_not_configured",
+            "The site mail transport is not configured.",
+        ));
+    };
+    let unavailable = || {
+        BrokerRefusal::new(
+            "service_upstream_unavailable",
+            "The mail transport could not be invoked.",
+        )
+    };
+    let mut child = Command::new(php)
+        .args(["-d", "auto_prepend_file=", script, root])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|_| unavailable())?;
+    let input = serde_json::to_vec(payload).map_err(|_| unavailable())?;
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or_else(unavailable)?
+        .write_all(&input);
+    if write_result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(unavailable());
+    }
+    let output = child.wait_with_output().map_err(|_| unavailable())?;
+    if !output.status.success() {
+        return Err(unavailable());
+    }
+    let accepted: bool = serde_json::from_slice(&output.stdout).map_err(|_| unavailable())?;
+    Ok(Value::Bool(accepted))
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1078,24 +1072,10 @@ mod tests {
     }
 
     #[test]
-    fn email_refuses_before_writing_a_row_it_could_not_deliver() {
-        // No identity and no verified sender are configured in the test
-        // environment, so both gates are reachable here — and both run before
-        // anything touches the outbox.
+    fn email_requires_a_verified_sender() {
+        // Sender authority is checked before invoking the transport.
         let (code, _) = refusal(&frame("email", "send", json!({ "subject": "Hi" })));
         assert_eq!(code, "service_not_configured");
-    }
-
-    #[test]
-    fn message_ids_are_stable_per_effect_and_unique_across_them() {
-        let first = message_id("spc_1", "inv_1", 0);
-        assert_eq!(first, message_id("spc_1", "inv_1", 0));
-        assert_ne!(first, message_id("spc_1", "inv_1", 1));
-        assert_ne!(first, message_id("spc_2", "inv_1", 0));
-        // The separator is what stops (space "a", invocation "bc") and
-        // (space "ab", invocation "c") from hashing alike.
-        assert_ne!(message_id("a", "bc", 0), message_id("ab", "c", 0));
-        assert!(first.starts_with("msg_"));
     }
 
     #[test]
@@ -1265,9 +1245,10 @@ mod tests {
             akismet_key: None,
             blog_url: None,
             email_senders: Vec::new(),
-            space_id: String::new(),
-            version_id: String::new(),
             invocation_id: String::new(),
+            email_php: None,
+            email_script: None,
+            email_root: None,
             content_url: None,
             content_cookie: Some("__Host-spacefast_session=session".to_string()),
             content_authorization: Some("Bearer sfa_access_token".to_string()),

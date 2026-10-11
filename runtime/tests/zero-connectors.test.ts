@@ -36,8 +36,6 @@ test("connector broker credentials and visitor identity stay in the runtime envi
     SPACEFAST_ZERO_CONNECTORS_TOKEN: "test-version-token",
     SPACEFAST_SERVICE_CONNECTORS_TOKEN: "test-version-token",
     SPACEFAST_SERVICE_CONNECTORS_VISITOR: JSON.stringify(result.visitor),
-    SPACEFAST_SERVICE_SPACE_ID: "spc_test",
-    SPACEFAST_SERVICE_VERSION_ID: "ver_test",
   });
 });
 

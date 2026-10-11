@@ -225,6 +225,17 @@ globalThis.__statticZeroResult = JSON.stringify({
       SPACEFAST_SERVICE_EMAIL_SENDERS: "hello@example.com",
     },
   });
+  writeFileSync(
+    path.join(rt.root, "wp-load.php"),
+    `<?php
+function add_action(string $name, callable $callback): void {}
+function remove_action(string $name, callable $callback): void {}
+function wp_mail(array $to, string $subject, string $message, array $headers): bool {
+    file_put_contents(${JSON.stringify(path.join(rt.root, "mail-capture.jsonl"))}, json_encode(compact('to', 'subject', 'message', 'headers')) . PHP_EOL, FILE_APPEND);
+    return true;
+}
+`,
+  );
   await deploy(rt, {
     spaceId: "spc_zero_rust",
     versionId: "ver_zero_rust_1",
@@ -431,7 +442,7 @@ const capsule = {
           from: "hello@example.com",
           to: "reader@example.com",
           subject: "committed",
-          text: "commits with the row",
+          text: "sent immediately",
         });
         return {
           committedRow: await ctx.db.todos.get(row.id),
@@ -466,7 +477,7 @@ const capsule = {
           from: "hello@example.com",
           to: "reader@example.com",
           subject: "rolled back",
-          text: "must not leave the transaction",
+          text: "sent before rollback",
         });
         throw new Error("rollback mail");
       },
@@ -1697,50 +1708,25 @@ test("rolls back parent-owned writes when the complete handler output is invalid
   ).toBe("0");
 });
 
-test("mail intent lives and dies with the invocation transaction", async () => {
-  // Under the execution law the runner owns one transaction per write-mode
-  // invocation; a handler cannot open or close its own. A throwing handler
-  // therefore takes its outbox insert down with its row write, and a
-  // succeeding one commits both — intent cannot outlive the write it
-  // announces.
+test("mail sends immediately even when the invocation transaction rolls back", async () => {
   const rolledBack = await get(rt, GENERATED_HOST, "/api/generated/atomic-mail-rollback", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-request-id": "inv_atomic_mail_rb" },
   });
   expect(rolledBack.status).toBe(500);
-
-  const response = await get(rt, GENERATED_HOST, "/api/generated/atomic-mail", {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-request-id": "inv_atomic_mail" },
+  const response = await get(rt, GENERATED_HOST, "/api/generated/atomic-mail", { method: "POST" });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    committed: true,
+    committedRow: { title: "committed-mail" },
   });
-  const text = await response.text();
-  if (response.status !== 200) {
-    throw new Error(`expected 200, got ${response.status}: ${text}`);
-  }
-  // SAFETY: the 200 above is this fixture endpoint's own JSON, shaped by the
-  // handler defined in this file.
-  const result = JSON.parse(text) as {
-    committedRow: { title?: string } | null;
-    committed: { messageId?: string };
-  };
-  const messageId = result.committed.messageId ?? "";
-  expect(messageId).toMatch(/^msg_[a-f0-9]{32}$/);
-  expect(result.committedRow?.title).toBe("committed-mail");
-
-  // The thrown invocation's row is gone with its intent.
   expect(
     mysql.exec("SELECT todo_title FROM zero_items WHERE todo_title = 'rolled-back-mail';"),
   ).toBe("");
-
-  // One outbox row, and it is the committed one.
-  const outbox = mysql.exec(
-    "SELECT message_id, state, CONVERT(payload_json USING utf8mb4) FROM _spacefast_email_outbox;",
-  );
-  expect(outbox.split("\n")).toHaveLength(1);
-  expect(outbox).toContain(messageId);
-  expect(outbox).toContain("queued");
-  expect(outbox).toContain("commits with the row");
-  expect(outbox).not.toContain("must not leave the transaction");
+  const sent = readFileSync(path.join(rt.root, "mail-capture.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(sent.map((message) => message.subject)).toEqual(["rolled back", "committed"]);
 });
 
 test("keeps finalize-generated Zero artifacts private", async () => {

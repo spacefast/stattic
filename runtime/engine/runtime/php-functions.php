@@ -214,8 +214,6 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     // _stattic_php_functions_service_call for what it does and does not buy),
     // it only keeps the credential from reaching the handler by accident.
     //
-    // One resolution feeds both bindings: the service broker writes an accepted
-    // email into this space's own outbox, so it needs the same database URL.
     $runnerEnv = _stattic_php_functions_runner_env((string) $context['version_dir']);
     $state['database'] = _stattic_php_functions_bind_database($runnerEnv);
     $state['services'] = _stattic_php_functions_bind_services($context, $runnerEnv);
@@ -475,11 +473,6 @@ function _stattic_php_functions_bind_database(array $env): bool
  * (`SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT`, scrubbed by then). Resolving here
  * makes neither case depend on the install layout.
  *
- * The invocation identity is minted HERE and never read from a request header.
- * It is half of the outbox's primary key, so a visitor who could name it could
- * collide with another visitor's queued message and have it deduped away. Each
- * call spends its own ordinal of it.
- *
  * The trusted visitor IP is captured at the same moment, for the same reason:
  * it is the identity the ingress proved (`_stattic_zero_trusted_visitor_ip`,
  * the value a Zero capsule's invocation envelope carries), and where it arrives
@@ -487,7 +480,7 @@ function _stattic_php_functions_bind_database(array $env): bool
  * about to empty it. sf_spam()'s userIp default reads this capture.
  *
  * @param array<string,string> $runnerEnv
- * @return array{binary:string,env:array<string,string>,invocation:string,calls:int,visitorIp:?string}
+ * @return array{binary:string,env:array<string,string>,visitorIp:?string}
  */
 function _stattic_php_functions_bind_services(array $context, array $runnerEnv): array
 {
@@ -500,13 +493,10 @@ function _stattic_php_functions_bind_services(array $context, array $runnerEnv):
         'env' => $runnerEnv + _stattic_service_broker_env([
             'spaceId' => (string) $context['space_id'],
             'versionId' => (string) $context['version_id'],
-            // Set per call, not per request, at the call site.
             'invocationId' => '',
         ]) + [
             SPACEFAST_FUNCTIONS_SERVICE_BROKER_GRANT_ENV => implode(',', STATTIC_PHP_FUNCTIONS_SERVICE_GRANT),
         ],
-        'invocation' => 'phpfx_' . bin2hex(random_bytes(12)),
-        'calls' => 0,
     ];
 }
 
@@ -747,13 +737,7 @@ function _stattic_php_functions_service_call(string $service, string $operation,
         throw new SpacefastServiceError('service_payload_invalid', 'The service frame could not be encoded.');
     }
 
-    // The executor's lifetime is one frame, so its email effect counter always
-    // starts at zero. The invocation id, not the counter, separates two sends:
-    // each call spends its own ordinal of this request's minted identity, so
-    // two sf_email() calls write two outbox rows rather than one row twice.
     $env = $bundle['env'];
-    $env['SPACEFAST_SERVICE_INVOCATION_ID'] = $bundle['invocation'] . '_' . (string) $bundle['calls'];
-    $state['services']['calls'] = (int) $bundle['calls'] + 1;
 
     $result = _stattic_runtime_run_subprocess(
         [(string) $bundle['binary'], 'service-broker'],
@@ -863,44 +847,21 @@ function sf_report_ham(array $submission): void
 }
 
 /**
- * Queue one message and get its id back.
+ * Send one message through wp_mail(). True means the transport accepted it.
  *
- *   $messageId = sf_email([
- *       'to' => $body['email'],
- *       'subject' => 'Thanks for writing in',
- *       'text' => "We got your message.\n",
- *   ]);
- *
- * Fields are `EmailMessage` from the shared contract: `to` (an address, an
- * `['email' => ..., 'name' => ...]` pair, or a list of either), `subject`, and
- * at least one of `text` / `html`; `cc`, `bcc`, `replyTo` and `headers` are
- * optional. `from` defaults to the space's first verified sender, which this
- * request already resolved; an explicit one must still be a verified sender or
- * the broker refuses with `email_sender_unverified`. Who a space may send as is
- * management state, not version content: rolling a version back does not roll
- * back which addresses it has proven it owns.
- *
- * The id names the message; it is not a claim that anything was delivered.
- * Accepting it writes a row in this space's own outbox, which a later delivery
- * pass drains.
- *
- * That outbox row lands on the BROKER's connection, not this request's, so
- * unlike a capsule's send it does not join an sf_db() transaction. A handler
- * that rolls its transaction back has still queued the mail. Send after the
- * write it announces, not inside it. A Space with no database has nowhere to
- * queue, and the broker says so: `email_outbox_unavailable`.
+ * `to`, `subject`, and `text` or `html` are required. `from` defaults to the
+ * space's first verified sender. An explicit sender must also be verified.
+ * Sending is immediate and independent of sf_db() transactions.
  *
  * @param array<string,mixed> $message
  */
-function sf_email(array $message): string
+function sf_email(array $message): bool
 {
     $answer = _stattic_php_functions_service_call('email', 'send', _stattic_php_functions_email_payload($message));
-    $messageId = is_array($answer) && is_string($answer['messageId'] ?? null) ? $answer['messageId'] : '';
-    if ($messageId === '') {
-        throw new SpacefastServiceError('email_message_invalid', 'The message was not given an id.');
+    if (!is_bool($answer)) {
+        throw new SpacefastServiceError('email_message_invalid', 'The mail transport returned an invalid result.');
     }
-
-    return $messageId;
+    return $answer;
 }
 
 /**

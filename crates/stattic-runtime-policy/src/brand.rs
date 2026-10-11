@@ -56,8 +56,6 @@ pub struct Brand {
     pub tagline: String,
     /// Base for RFC 9457 problem-document `type` URIs: `{base}/{code}`.
     pub problem_docs_base_url: String,
-    /// Right-hand side of the outbound `Message-ID` addr-spec.
-    pub mail_domain: String,
     /// Image URL replacing the compiled-in wordmark. Empty keeps the built-in
     /// SVG, which is the only reason the default path stays byte-stable.
     pub wordmark_url: String,
@@ -74,7 +72,6 @@ impl Default for Brand {
             help_url: "https://spacefast.com/help".into(),
             tagline: "Best way to share what your agent made".into(),
             problem_docs_base_url: "https://spacefast.com/docs/errors".into(),
-            mail_domain: "mail.spacefast.com".into(),
             wordmark_url: String::new(),
             // The built-in pages set every tier in the SF Pro system stack, so
             // a bare Spacefast site downloads nothing. A white-label host that
@@ -104,7 +101,6 @@ impl Brand {
             (&mut brand.help_url, "helpUrl"),
             (&mut brand.tagline, "tagline"),
             (&mut brand.problem_docs_base_url, "problemDocsBaseUrl"),
-            (&mut brand.mail_domain, "mailDomain"),
             (&mut brand.wordmark_url, "wordmarkUrl"),
         ] {
             if let Some(value) = overrides
@@ -184,7 +180,6 @@ mod tests {
             brand.problem_type_url("version_not_found"),
             "https://spacefast.com/docs/errors/version_not_found"
         );
-        assert_eq!(brand.mail_domain, "mail.spacefast.com");
         assert_eq!(brand.wordmark_url, "");
         // A bare Spacefast page downloads no font.
         assert!(brand.fonts.is_empty());
@@ -202,7 +197,6 @@ mod tests {
         );
         // Untouched members stay compiled-in.
         assert_eq!(brand.help_url, Brand::default().help_url);
-        assert_eq!(brand.mail_domain, "mail.spacefast.com");
     }
 
     #[test]

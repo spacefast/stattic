@@ -109,9 +109,8 @@ function _stattic_functions_relay_bearer(): string
  * database URL, the grant, and the configured result limits are the only
  * things the child may see.
  *
- * The service broker gets the database URL too, because an accepted email is a
- * row in this space's outbox. The grant it receives names services, and an
- * ungranted one is refused inside the broker as well as here.
+ * The grant names services; an ungranted service is refused inside the broker
+ * as well as here.
  */
 function _stattic_functions_relay_executor_env(array $claims, string $broker, array $grant, array $config = [], ?array $visitor = null): array
 {
@@ -137,10 +136,7 @@ function _stattic_functions_relay_executor_env(array $claims, string $broker, ar
 
 /**
  * The invocation this frame belongs to, as the origin named it when it
- * dispatched. It is the outbox's idempotency key, so a worker must not be able
- * to supply its own. An absent header yields an empty identity, and the broker
- * refuses to enqueue without one rather than inventing a key that would let the
- * same message land twice.
+ * dispatched. An absent header yields an empty identity.
  */
 function _stattic_functions_relay_invocation_id(): string
 {

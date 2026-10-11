@@ -36,7 +36,6 @@ const STATTIC_BRAND_CONFIG_KEY = 'SPACEFAST_BRAND_JSON';
  * - `help_url`  Where a stuck visitor is sent from a built-in page.
  * - `tagline`   The one line of copy under the powered-by wordmark.
  * - `problem_docs_base_url`  Base for RFC 9457 `type` URIs: `{base}/{code}`.
- * - `mail_domain`   Right-hand side of the outbound Message-ID addr-spec.
  * - `wordmark_url`  Image replacing the compiled-in SVG wordmark. Empty keeps
  *               the built-in mark, which is why the default path is byte-stable.
  * - `fonts`     Faces the built-in pages embed and preload, in CSS order. Empty
@@ -60,7 +59,6 @@ function _stattic_brand_defaults(): array
         'help_url' => 'https://spacefast.com/help',
         'tagline' => 'Best way to share what your agent made',
         'problem_docs_base_url' => 'https://spacefast.com/docs/errors',
-        'mail_domain' => 'mail.spacefast.com',
         'wordmark_url' => '',
         'fonts' => $fonts,
     ];
@@ -73,7 +71,6 @@ const STATTIC_BRAND_STRING_MEMBERS = [
     'helpUrl' => 'help_url',
     'tagline' => 'tagline',
     'problemDocsBaseUrl' => 'problem_docs_base_url',
-    'mailDomain' => 'mail_domain',
     'wordmarkUrl' => 'wordmark_url',
 ];
 

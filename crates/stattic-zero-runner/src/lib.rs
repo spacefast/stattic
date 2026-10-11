@@ -83,10 +83,7 @@ pub fn self_test() -> Result<(), String> {
 /// authority question is already answered.
 ///
 /// Reading one byte past the limit is enough — the handler turns the overrun
-/// into its own typed refusal without buffering the rest. The rollback happens
-/// before the answer is printed: an email effect writes the outbox row on this
-/// process's own connection, and a client that vanishes mid-frame must not
-/// leave row locks behind for the lifetime of the connection pool.
+/// into its own typed refusal without buffering the rest.
 pub fn run_service_broker_stdio() {
     services::set_grant(services::ServiceGrant::from_wire(
         &std::env::var(services::SERVICE_BROKER_GRANT_ENV).unwrap_or_default(),
@@ -102,7 +99,6 @@ pub fn run_service_broker_stdio() {
                 .to_string()
         }
     };
-    db::rollback_open_transaction();
     println!("{response}");
 }
 
@@ -124,9 +120,6 @@ pub fn run_stdio() {
 pub fn handle_invoke(input: &str) -> Result<RunnerResponse, RunnerResponse> {
     let started = Instant::now();
     db::reset_metrics();
-    // Effect positions are the outbox's idempotency key and count within one
-    // invocation, so they reset with the rest of the per-invocation state.
-    db::reset_email_effect_index();
     reset_stage_metrics();
     handle_invoke_inner(input)
         .map(|mut response| {

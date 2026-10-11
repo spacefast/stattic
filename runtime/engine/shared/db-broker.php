@@ -99,7 +99,7 @@ function _stattic_db_broker_bind(?string $url, ?string $source = null): void
  * `_stattic_zero_runner_base_env()` is the engine's single provider-credential
  * resolver: the reserved labelled name, then `DATABASE_URL`, then the provider's
  * `DB_HOST`/`DB_NAME`/`DB_USER`/`DB_PASSWORD` tuple. Passing no application
- * configuration is deliberate — box-owned work (mail outbox, application
+ * configuration is deliberate — box-owned work (application
  * journal, D1 migrations) never binds whichever Space happens to be live.
  */
 function _stattic_db_broker_bind_provider(): void

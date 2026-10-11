@@ -312,7 +312,6 @@ function _stattic_component_wordpress_tables_ready(object $wpdb): bool
 function _stattic_component_provision_application_tables(object $wpdb, array &$problems): bool
 {
     $statements = [
-        "CREATE TABLE IF NOT EXISTS _spacefast_email_outbox (message_id VARCHAR(80) NOT NULL PRIMARY KEY, space_id VARCHAR(128) NOT NULL, version_id VARCHAR(128) NOT NULL, invocation_id VARCHAR(96) NOT NULL, effect_index SMALLINT UNSIGNED NOT NULL, state VARCHAR(24) NOT NULL, payload_json MEDIUMBLOB NOT NULL, attempt_count SMALLINT UNSIGNED NOT NULL DEFAULT 0, available_at DATETIME(6) NOT NULL, lease_token VARCHAR(80) NULL, lease_expires_at DATETIME(6) NULL, provider_message_id VARCHAR(255) NULL, last_error_code VARCHAR(96) NULL, accepted_at DATETIME(6) NULL, terminal_at DATETIME(6) NULL, created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL, UNIQUE KEY uniq_invocation_effect (space_id,invocation_id,effect_index), KEY idx_due (state,available_at), KEY idx_space_created (space_id,created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         "CREATE TABLE IF NOT EXISTS _spacefast_application_journal (entry_id VARCHAR(512) NOT NULL PRIMARY KEY, space_id VARCHAR(128) NOT NULL, operation_id VARCHAR(64) NOT NULL, effect_ordinal SMALLINT UNSIGNED NOT NULL, kind VARCHAR(32) NOT NULL, message_id VARCHAR(80) NULL, payload_digest VARCHAR(71) NOT NULL, payload_json MEDIUMBLOB NOT NULL, created_at DATETIME(6) NOT NULL, UNIQUE KEY uniq_operation_effect (space_id,operation_id,effect_ordinal), KEY idx_space_created (space_id,created_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         "CREATE TABLE IF NOT EXISTS _spacefast_application_deliveries (entry_id VARCHAR(512) NOT NULL, sink VARCHAR(160) NOT NULL, state VARCHAR(24) NOT NULL, attempt_count SMALLINT UNSIGNED NOT NULL DEFAULT 0, available_at DATETIME(6) NOT NULL, lease_id VARCHAR(80) NULL, lease_expires_at DATETIME(6) NULL, downstream_receipt VARCHAR(2000) NULL, last_problem_json TEXT NULL, delivered_at DATETIME(6) NULL, created_at DATETIME(6) NOT NULL, updated_at DATETIME(6) NOT NULL, PRIMARY KEY(entry_id,sink), CONSTRAINT fk_application_delivery_entry FOREIGN KEY(entry_id) REFERENCES _spacefast_application_journal(entry_id) ON DELETE CASCADE, KEY idx_due(state,available_at,lease_expires_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
     ];
@@ -322,7 +321,7 @@ function _stattic_component_provision_application_tables(object $wpdb, array &$p
             return false;
         }
     }
-    foreach (['_spacefast_email_outbox', '_spacefast_application_journal', '_spacefast_application_deliveries'] as $table) {
+    foreach (['_spacefast_application_journal', '_spacefast_application_deliveries'] as $table) {
         if (!_stattic_component_table_exists($wpdb, $table)) {
             _stattic_component_problem($problems, null, 'application_tables_missing', 'A managed application journal table is missing.');
             return false;
@@ -335,7 +334,7 @@ function _stattic_application_substrate_readiness(object $wpdb): array
 {
     return [
         'mail' => [
-            'state' => _stattic_component_table_exists($wpdb, '_spacefast_email_outbox') ? 'ready' : 'blocked',
+            'state' => function_exists('wp_mail') ? 'ready' : 'blocked',
         ],
         'journal' => [
             'state' => _stattic_component_table_exists($wpdb, '_spacefast_application_journal')

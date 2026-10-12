@@ -98,7 +98,7 @@ pub const ZERO_STATIC_FILE_LIMIT: usize = 16;
 pub const ZERO_ENTRY_LIMIT: usize = 128;
 /// Unique SQL statements in one compiled migrations artifact. The PHP broker
 /// applies them synchronously, so compile admission must hold its migration work bound.
-pub const ZERO_MIGRATION_STATEMENTS_MAX: usize = 256;
+pub const ZERO_MIGRATION_STATEMENTS_MAX: usize = 1024;
 pub const ZERO_SOURCE_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const ZERO_ID_MAX_CHARS: usize = 256;
 pub const ZERO_ROUTE_PATH_MAX_CHARS: usize = 2_048;

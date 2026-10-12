@@ -468,11 +468,17 @@ test("compiled migrations apply, and applying the same artifact again is a no-op
     "DROP INDEX mig_notes_retired ON mig_notes",
     "CREATE INDEX mig_notes_title ON mig_notes (title(32))",
     "CREATE UNIQUE INDEX mig_notes_unique_title ON mig_notes (title(32))",
+    ...Array.from(
+      { length: 297 },
+      (_, index) =>
+        `CREATE TABLE IF NOT EXISTS mig_capacity_${index} (id INT PRIMARY KEY) ENGINE=InnoDB`,
+    ),
   ]);
 
   expect((await php({ action: "migrate", path: artifact })).migrate).toEqual({ ok: true });
   expect(mysql.exec("SELECT COUNT(*) FROM mig_notes")).toBe("0");
   expect(mysql.exec("SHOW INDEX FROM mig_notes WHERE Key_name = 'mig_notes_title'")).not.toBe("");
+  expect(mysql.exec("SELECT COUNT(*) FROM mig_capacity_296")).toBe("0");
 
   // Duplicate column (1060) and duplicate key (1061) mean "already applied", so
   // a second publish of an unchanged schema succeeds instead of failing the
@@ -484,7 +490,7 @@ test("compiled migrations apply, and applying the same artifact again is a no-op
         " AND table_name = 'mig_notes' AND column_name = 'title'",
     ),
   ).toBe("1");
-});
+}, 30_000);
 
 test("a statement the server rejects fails the publish instead of half-migrating", async () => {
   const artifact = migrationsArtifact("reject", [

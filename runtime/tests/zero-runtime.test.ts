@@ -204,6 +204,14 @@ echo json_encode([
         {
           execution_mode: "read",
           method: "GET",
+          path: "/:namespace/functions/:id",
+          source: "globalThis.__statticZeroResult = '{}';",
+          endpoint_id: "GET /:namespace/functions/:id",
+          capabilities: { db: false },
+        },
+        {
+          execution_mode: "read",
+          method: "GET",
           path: "/api/default-capabilities",
           source: "globalThis.__statticZeroResult = '{}';",
           endpoint_id: "GET /api/default-capabilities",
@@ -1226,7 +1234,7 @@ test("native compiler defaults omitted Zero capabilities with fetch open", () =>
   const root = versionRoot(rt, "spc_zero_runtime", "ver_zero_runtime_1");
   const exactSlug = `post_api_status_${sha256("POST\n/api/status\n0").slice(0, 12)}`;
   const defaultSlug = `get_api_default_capabilities_${sha256(
-    "GET\n/api/default-capabilities\n2",
+    "GET\n/api/default-capabilities\n3",
   ).slice(0, 12)}`;
 
   // Outbound fetch is open to every handler kind — the space's egress scope
@@ -1493,6 +1501,12 @@ test("resolves dynamic Zero routes and params before spawning the runner", async
   expect(envelope.endpointId).toBe("GET /api/items/:id");
   expect(envelope.request.params).toEqual({ id: "todo_123" });
   expect(envelope.context.schemaHash).toBe("sha256:dynamic");
+  const authored = await get(rt, HOST, "/visitor/functions/example");
+  expect(authored.status).toBe(201);
+  expect(await authored.json()).toMatchObject({ endpointId: "GET /:namespace/functions/:id" });
+  const control = await get(rt, HOST, "/__SPACEFAST/functions/relay");
+  expect(control.status).toBe(404);
+  expect(await control.text()).not.toContain("GET /:namespace/functions/:id");
 });
 
 test("dynamic Zero route buckets accept literal consecutive dots", async () => {

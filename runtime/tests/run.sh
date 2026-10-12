@@ -60,12 +60,6 @@ if [[ -n "${SPACEFAST_RUNTIME_TEST_SHARD:-}" ]]; then
   test_args+=("--shard=$SPACEFAST_RUNTIME_TEST_SHARD")
 fi
 test_args+=(--timeout 30000)
-if [[ "$workers" = 1 ]]; then
-  if [[ -n "${SPACEFAST_BUN_COVERAGE_DIR:-}" ]]; then
-    test_args+=("--coverage-dir=$SPACEFAST_BUN_COVERAGE_DIR")
-  fi
-  exec bun "${test_args[@]}" tests
-fi
 
 # Lint, PHP units and the instrumented compiler build run once. Independent
 # Bun processes divide the files and release their application state on exit.
@@ -75,7 +69,9 @@ fi
 # Files that spend most of their time holding requests in flight on purpose.
 # Each starts first in its own process, so the suite's floor never waits
 # behind other shards, wherever Bun's file order puts the file.
-long_files=(tests/admission.test.ts)
+# Poppy owns an API database and must exit before another file imports the
+# cached API client. A dedicated child also keeps it out of general shards.
+long_files=(tests/admission.test.ts tests/poppy-publish.test.ts)
 reports=()
 running=0
 status=0
@@ -83,7 +79,11 @@ launch() {
   local name="$1"
   shift
   if [[ "$running" -ge "$workers" ]]; then
-    wait -n || status=1
+    if [[ "$workers" = 1 ]]; then
+      wait || status=1
+    else
+      wait -n || status=1
+    fi
     running=$((running - 1))
   fi
   local args=("${test_args[@]}" "$@")
@@ -101,12 +101,21 @@ for file in "${long_files[@]}"; do
   launch "$(basename "$file" .test.ts)" "./$file"
   ignore_args+=("--path-ignore-patterns=$file")
 done
-shard_count=$((workers * 3))
-for ((shard = 1; shard <= shard_count; shard++)); do
-  launch "shard-$shard" "${ignore_args[@]}" "--shard=$shard/$shard_count" tests
-done
+if [[ -n "${SPACEFAST_RUNTIME_TEST_SHARD:-}" ]]; then
+  launch "selected-shard" "${ignore_args[@]}" tests
+else
+  shard_count=$((workers * 3))
+  [[ "$workers" != 1 ]] || shard_count=1
+  for ((shard = 1; shard <= shard_count; shard++)); do
+    launch "shard-$shard" "${ignore_args[@]}" "--shard=$shard/$shard_count" tests
+  done
+fi
 for ((; running > 0; running--)); do
-  wait -n || status=1
+  if [[ "$workers" = 1 ]]; then
+    wait || status=1
+  else
+    wait -n || status=1
+  fi
 done
 if [[ "${#reports[@]}" -gt 0 ]]; then
   for report in "${reports[@]}"; do test -s "$report" || status=1; done

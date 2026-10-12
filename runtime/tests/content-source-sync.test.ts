@@ -8,6 +8,7 @@ import { expect, test } from "bun:test";
 import { verifySyncLedgerV1 } from "../../packages/common/src/contracts/content-contract-verification.ts";
 import {
   canonicalizeContentSourceDocument,
+  contentSourceInspectionSchema,
   parseContentSourceDocument,
   syncMaterializeReceiptV1Schema,
 } from "../../packages/common/src/contracts/content-sync.ts";
@@ -451,9 +452,9 @@ test("a stale base revision is refused instead of overwriting the common base", 
   expect(problem(stale).code).toBe("content_sync_conflict");
 });
 
-test("WordPress formatting Markdown cannot carry is never flattened into a source file", async () => {
+test("WordPress formatting Markdown cannot carry is never flattened or resolved over", async () => {
   const base = "# Launch\n\nOriginal line.\n";
-  const [, , refused] = await runScenario("md", [
+  const [, , refused, before, resolutionRefused, after] = await runScenario("md", [
     { op: "reconcile", state: "initial", text: base },
     {
       // `align` and `className` do not survive a Markdown round trip. Writing
@@ -473,9 +474,20 @@ test("WordPress formatting Markdown cannot carry is never flattened into a sourc
       text: base,
       baseRevision: "@previous",
     },
+    { op: "inspectSource" },
+    { op: "resolveSource", text: "# Selected resolution\n" },
+    { op: "inspectSource" },
   ]);
 
   expect(problem(refused).code).toBe("content_markdown_not_representable");
+  expect(problem(resolutionRefused).code).toBe("content_markdown_not_representable");
+  expect(before.ok).toBe(true);
+  expect(after.ok).toBe(true);
+  if (before.ok && after.ok) {
+    expect(contentSourceInspectionSchema.parse(after.receipt).wordpressText).toBe(
+      contentSourceInspectionSchema.parse(before.receipt).wordpressText,
+    );
+  }
 });
 
 test("a prepared source write is acknowledged, and only against the ledger it came from", async () => {

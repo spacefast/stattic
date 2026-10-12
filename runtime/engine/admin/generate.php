@@ -1169,6 +1169,73 @@ function _stattic_runtime_split_route_index(array $hostnames, array $hostRoutes)
 // or pruned by age. `gen` is a monotonically increasing int that counts REAL
 // index changes: an identical index skips the write below, so gen does not
 // move for no-op regenerations (overlay-only activations included).
+// Associative key order is serialization; list order and scalar types are serving state.
+function _stattic_runtime_projection_equal(mixed $before, mixed $after): bool
+{
+    if (!is_array($before) || !is_array($after)) {
+        return $before === $after;
+    }
+    if (count($before) !== count($after) || array_is_list($before) !== array_is_list($after)) {
+        return false;
+    }
+    foreach ($before as $key => $value) {
+        if (!array_key_exists($key, $after) || !_stattic_runtime_projection_equal($value, $after[$key])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** @return list<string> */
+function _stattic_runtime_index_changed_hostnames(string $privateRoot, ?array $before, array $after): array
+{
+    $oldFiles = is_array($before['shards'] ?? null) ? $before['shards'] : [];
+    $newFiles = $after['shards'];
+    $oldFiles['wildcards'] = $before['wildcards'] ?? null;
+    $newFiles['wildcards'] = $after['wildcards'];
+    $changed = [];
+    foreach (array_unique([...array_keys($oldFiles), ...array_keys($newFiles)]) as $key) {
+        $oldName = $oldFiles[$key] ?? null;
+        $newName = $newFiles[$key] ?? null;
+        if ($oldName === $newName) {
+            continue;
+        }
+        $old = is_string($oldName) && is_file($privateRoot . '/routes/' . $oldName)
+            ? _stattic_runtime_read_route_shard($privateRoot . '/routes/' . $oldName) : null;
+        $new = is_string($newName) ? _stattic_runtime_read_route_shard($privateRoot . '/routes/' . $newName) : null;
+        $hostnames = array_keys(($old['hostnames'] ?? []) + ($old['host_routes'] ?? [])
+            + ($new['hostnames'] ?? []) + ($new['host_routes'] ?? []));
+        foreach ($hostnames as $hostname) {
+            if (!_stattic_runtime_projection_equal(
+                [$old['hostnames'][$hostname] ?? null, $old['host_routes'][$hostname] ?? []],
+                [$new['hostnames'][$hostname] ?? null, $new['host_routes'][$hostname] ?? []]
+            )) {
+                $changed[(string) $hostname] = true;
+            }
+        }
+    }
+    return array_keys($changed);
+}
+
+/** @return list<string> */
+function _stattic_runtime_overlay_hostnames(string $privateRoot, string $spaceId): array
+{
+    $hostnames = array_fill_keys(_stattic_runtime_contribution_hostnames(
+        _stattic_runtime_space_index_contribution($privateRoot, $spaceId)
+    ), true);
+    $pointer = _stattic_runtime_read_route_pointer($privateRoot);
+    if ($pointer === false) {
+        throw new RuntimeException('route index read failed: ' . $privateRoot . '/routes/current.json');
+    }
+    $owners = is_array($pointer) ? _stattic_runtime_read_route_owners($privateRoot, $pointer) : null;
+    foreach ($owners ?? [] as $hostname => $spaces) {
+        if (in_array($spaceId, $spaces, true)) {
+            $hostnames[(string) $hostname] = true;
+        }
+    }
+    return array_keys($hostnames);
+}
+
 function _stattic_runtime_write_route_index(string $privateRoot, array $freshShards, array $reusedShards, array $wildcards, array $owners, ?callable $beforePublish = null): void
 {
     $routesRoot = $privateRoot . '/routes';
@@ -1244,7 +1311,7 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
     // Replays can repair a stale projection. Persist their invalidation before
     // either pointer changes; an identical index leaves warm caches alone.
     if ($beforePublish !== null) {
-        $beforePublish();
+        $beforePublish(_stattic_runtime_index_changed_hostnames($privateRoot, $previous, $pointer));
     }
 
     // previous.json is written BEFORE the swap, not after: it is what keeps the
@@ -1712,7 +1779,17 @@ function _stattic_runtime_write_space_overlay(string $privateRoot, string $space
     }
 
     if ($beforePublish !== null) {
-        $beforePublish();
+        $previousName = $current['overlay'] ?? null;
+        $previousOverlay = is_string($previousName) && is_file($spaceRoot . '/' . $previousName)
+            ? include $spaceRoot . '/' . $previousName : null;
+        $servingOverlay = $overlay;
+        unset($servingOverlay['schema']);
+        if (is_array($previousOverlay)) {
+            unset($previousOverlay['schema']);
+        }
+        if (!_stattic_runtime_projection_equal($previousOverlay, $servingOverlay)) {
+            $beforePublish(_stattic_runtime_overlay_hostnames($privateRoot, $spaceId));
+        }
     }
     _sf_json_write($pointerPath, [
         'schema' => STATTIC_RUNTIME_ARTIFACT_SCHEMA,

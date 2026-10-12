@@ -347,6 +347,7 @@ beforeAll(async () => {
       version_hostnames: [],
       proxy_host_routes: [
         { hostname: PUBLIC_HOST_ROUTE, upstream: upstreamBaseUrl },
+        { hostname: "machine-proxy.test", upstream: `${upstreamBaseUrl}/machine` },
         { hostname: PUBLIC_HOST, path_prefix: "/proxy", upstream: `${upstreamBaseUrl}/api` },
       ],
     },
@@ -417,6 +418,14 @@ beforeAll(async () => {
     },
   });
   const routeFixture = JSON.stringify([
+    {
+      location: "/__spacefast/functions/b",
+      route_action: {
+        action: "serve",
+        version_id: "ver_proxy_upstream_1",
+        target_prefix: "/",
+      },
+    },
     configuredHeaderRoute("/configured-authorization", {
       Authorization: "Bearer configured-token",
     }),
@@ -481,6 +490,20 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     expect(publicProxy.status).toBe(200);
     expect(await publicProxy.text()).toBe("GET /upstream/public\n");
     expect(publicProxy.headers.get("x-spacefast-version")).toBeNull();
+
+    // These paths are exempt from customer edge fences, so a host proxy must
+    // never turn an unauthenticated machine request into visitor content.
+    const mountedMachine = await get(rt, PUBLIC_HOST, "/__spacefast/functions/b/index.html");
+    expect(mountedMachine.status).toBe(404);
+    for (const [machinePath, method, status] of [
+      ["/__SPACEFAST/FUNCTIONS/b/unsigned/bundle.json", "GET", 404],
+      ["/__STATTIC/blob/unsigned", "GET", 404],
+      ["/__spacefast/functions/relay", "POST", 401],
+    ] as const) {
+      const machine = await get(rt, "machine-proxy.test", machinePath, { method });
+      expect(machine.status, machinePath).toBe(status);
+      if (status === 401) expect(await errorCode(machine)).toBe("relay_unauthorized");
+    }
 
     const denied = await get(rt, ACCESS_HOST_ROUTE, "/access/token");
     expect(denied.status).toBe(403);

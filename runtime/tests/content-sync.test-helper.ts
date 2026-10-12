@@ -317,6 +317,8 @@ export type Step =
       bootOutput?: string;
     }
   | { op: "reconcile"; state: "initial" | "bound"; text: string; baseRevision?: string }
+  | { op: "inspectSource" }
+  | { op: "resolveSource"; text: string }
   | {
       op: "editInWordPress";
       blocks?: string;
@@ -557,6 +559,12 @@ foreach ($steps as $step) {
       ]];
       continue;
     }
+    if ($step['op'] === 'inspectSource') {
+      $results[] = ['ok' => true, 'receipt' => spacefast_content_handle_request([
+        'operation' => 'source.inspect', 'bindingId' => ${JSON.stringify(BINDING)},
+      ])];
+      continue;
+    }
     if ($step['op'] === 'inspectPage') {
       $originalModel = require ${JSON.stringify(path.join(releaseDir, "content-model.php"))};
       $binding = spacefast_content_model_sync_binding(${JSON.stringify(TSX_BINDING)}) ?? $originalModel['syncBindings'][1];
@@ -648,6 +656,19 @@ foreach ($steps as $step) {
         'bindingId' => ${JSON.stringify(BINDING)},
         'operationId' => 'op_' . str_pad((string) ($step['ackOp'] ?? $op), 6, '0', STR_PAD_LEFT),
         'baseRevision' => $step['baseRevision'],
+      ];
+    } elseif ($step['op'] === 'resolveSource') {
+      $op++;
+      $observed = spacefast_content_inspect_source(['bindingId' => ${JSON.stringify(BINDING)}]);
+      $request = [
+        'operation' => 'source.resolve',
+        'bindingId' => ${JSON.stringify(BINDING)},
+        'source' => ${JSON.stringify(SOURCE[format])},
+        'text' => $step['text'],
+        'observedSourceRevision' => 'git-1',
+        'expectedBaseRevision' => $lastLedgerRevision,
+        'expectedWordpressDigest' => $observed['wordpressDigest'],
+        'operationId' => 'op_' . str_pad((string) $op, 6, '0', STR_PAD_LEFT),
       ];
     } else {
       $op++;

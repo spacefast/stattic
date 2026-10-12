@@ -346,19 +346,7 @@ fn readiness_statuses(
                     });
                 }
             },
-            "proxy" => {
-                return if public.is_some() {
-                    invalid(
-                        "runtime_readiness_proxy_target_unsupported",
-                        "A proxy route cannot own a public readiness target.",
-                    )
-                } else {
-                    invalid(
-                        "runtime_readiness_proxy_root_unsupported",
-                        "A proxy route cannot own the readiness root when the version has no public object.",
-                    )
-                };
-            }
+            "proxy" => statuses.extend(DYNAMIC_READINESS_STATUSES),
             _ => continue,
         }
         // An edge-placed rule is not the origin's to answer on a production
@@ -388,6 +376,12 @@ struct RuntimeReadinessRouting<'a> {
     root_listing: bool,
 }
 
+const DYNAMIC_READINESS_STATUSES: [u64; 9] = [200, 301, 302, 303, 307, 308, 401, 403, 404];
+
+fn dynamic_readiness_target() -> Value {
+    json!({"path":"/","expected_statuses":DYNAMIC_READINESS_STATUSES})
+}
+
 fn runtime_readiness_target(
     files: &BTreeMap<String, FileMeta>,
     public_files: &[String],
@@ -405,10 +399,7 @@ fn runtime_readiness_target(
     let lookup = &ReadinessLookup::new(lookup);
     if public_files.iter().all(|path| path == "robots.txt") {
         if !root_listing && lookup.action("/").is_none() && zero_route_can_own_root(zero_routes) {
-            return invalid(
-                "runtime_readiness_public_target_unavailable",
-                "A dynamic runtime route owns the readiness root and no stable public object exists.",
-            );
+            return Ok(dynamic_readiness_target());
         }
         return Ok(json!({
             "path":"/",
@@ -436,10 +427,7 @@ fn runtime_readiness_target(
                 .then_with(|| left_path.cmp(right_path))
         });
     let Some((_path, _, request_path)) = selected else {
-        return invalid(
-            "runtime_readiness_public_target_unavailable",
-            "Every public object is shadowed by a dynamic runtime action for HEAD readiness.",
-        );
+        return Ok(dynamic_readiness_target());
     };
     Ok(json!({
         "path":request_path,
@@ -2987,8 +2975,8 @@ mod tests {
     }
 
     #[test]
-    fn private_only_root_proxy_is_rejected_without_a_stable_readiness_status() {
-        let (_temp, _private, output) = finalize_fixture(
+    fn private_only_root_proxy_uses_canonical_version_readiness() {
+        let (_temp, private, output) = finalize_fixture(
             &[
                 ("sf.jsonc", b"{}"),
                 ("_redirects", b"/ https://origin.example.test/ 200"),
@@ -2996,17 +2984,15 @@ mod tests {
             json!({"mode":"website"}),
             json!({"serving":{"config":{}}}),
         );
-        assert!(matches!(
-            output,
-            Err(FinalizeError::Invalid {
-                code: "runtime_readiness_proxy_root_unsupported",
-                ..
-            })
-        ));
+        output.unwrap();
+        assert_eq!(
+            finalized_readiness_target(&private),
+            json!({"path":"/","expected_statuses":[200,301,302,303,307,308,401,403,404]})
+        );
     }
 
     #[test]
-    fn private_only_root_rejects_dynamic_zero_fallback_ownership() {
+    fn dynamic_zero_fallback_uses_canonical_version_readiness() {
         let temp = tempdir().unwrap();
         let private = temp.path().join(".stattic/storage");
         let manifest = accept_blobs(&private, &[("sf.jsonc", b"{}")]);
@@ -3028,13 +3014,11 @@ mod tests {
             db: None,
         }];
 
-        assert!(matches!(
-            finalize_site(input, false),
-            Err(FinalizeError::Invalid {
-                code: "runtime_readiness_public_target_unavailable",
-                ..
-            })
-        ));
+        finalize_site(input, false).unwrap();
+        assert_eq!(
+            finalized_readiness_target(&private),
+            json!({"path":"/","expected_statuses":[200,301,302,303,307,308,401,403,404]})
+        );
     }
 
     #[test]
@@ -3203,47 +3187,51 @@ mod tests {
 
     #[test]
     fn public_readiness_skips_a_file_shadowed_by_an_exact_zero_action() {
-        let temp = tempdir().unwrap();
-        let private = temp.path().join(".stattic/storage");
-        let manifest = accept_blobs(
-            &private,
-            &[
-                ("api/status", b"x"),
-                ("proof.txt", b"stable public readiness object"),
-            ],
-        );
-        let mut input = fixture_input(
-            &private,
-            manifest,
-            json!({"mode":"website"}),
-            json!({
-                "zero":{"runtimeKind":"zero"},
-                "serving":{
-                    "config":{},
-                    "redirects_exact":{},
-                    "redirects_pattern":[],
-                    "headers_exact":{},
-                    "headers_pattern":[]
-                }
-            }),
-        );
-        input.zero_endpoints = vec![RuntimeZeroEndpoint {
-            execution_mode: crate::model::ZeroExecutionMode::Write,
-            method: "POST".into(),
-            path: "/api/status".into(),
-            source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });".into(),
-            endpoint_id: None,
-            schema_hash: None,
-            capabilities: Default::default(),
-            crypto_keys: Vec::new(),
-            db: None,
-        }];
+        for stable_public_file in [true, false] {
+            let temp = tempdir().unwrap();
+            let private = temp.path().join(".stattic/storage");
+            let mut files: Vec<(&str, &[u8])> = vec![("api/status", b"x")];
+            if stable_public_file {
+                files.push(("proof.txt", b"stable public readiness object"));
+            }
+            let manifest = accept_blobs(&private, &files);
+            let mut input = fixture_input(
+                &private,
+                manifest,
+                json!({"mode":"website"}),
+                json!({
+                    "zero":{"runtimeKind":"zero"},
+                    "serving":{
+                        "config":{},
+                        "redirects_exact":{},
+                        "redirects_pattern":[],
+                        "headers_exact":{},
+                        "headers_pattern":[]
+                    }
+                }),
+            );
+            input.zero_endpoints = vec![RuntimeZeroEndpoint {
+                execution_mode: crate::model::ZeroExecutionMode::Write,
+                method: "POST".into(),
+                path: "/api/status".into(),
+                source: "globalThis.__statticZeroResult = JSON.stringify({ status: 200 });".into(),
+                endpoint_id: None,
+                schema_hash: None,
+                capabilities: Default::default(),
+                crypto_keys: Vec::new(),
+                db: None,
+            }];
 
-        finalize_site(input, false).unwrap();
-        assert_eq!(
-            finalized_readiness_target(&private),
-            json!({"path":"/proof.txt","expected_statuses":[200,302,401,403]})
-        );
+            finalize_site(input, false).unwrap();
+            assert_eq!(
+                finalized_readiness_target(&private),
+                if stable_public_file {
+                    json!({"path":"/proof.txt","expected_statuses":[200,302,401,403]})
+                } else {
+                    json!({"path":"/","expected_statuses":[200,301,302,303,307,308,401,403,404]})
+                }
+            );
+        }
     }
 
     #[test]
@@ -3766,7 +3754,7 @@ mod tests {
         // Repeated endpoint/run metadata must count once across the whole artifact.
         let mut tables = Map::new();
         let mut operations = Vec::new();
-        for index in 0..64 {
+        for index in 0..256 {
             let name = format!("items{index}");
             tables.insert(
                 name.clone(),
@@ -3804,10 +3792,10 @@ mod tests {
                 details,
             } => {
                 assert_eq!(code, "zero_migrations_too_many");
-                assert_eq!(message, "Zero migrations require 257 unique SQL statements; the limit is 256. Reduce the schema or migration changes before publishing.");
+                assert_eq!(message, "Zero migrations require 1025 unique SQL statements; the limit is 1024. Reduce the schema or migration changes before publishing.");
                 assert_eq!(
                     details,
-                    Some(json!({"statementCount": 257, "statementLimit": 256}))
+                    Some(json!({"statementCount": 1025, "statementLimit": 1024}))
                 );
             }
             other => panic!("expected migration capacity error, got {other:?}"),
@@ -3821,7 +3809,7 @@ mod tests {
         let migrations: Value =
             serde_json::from_slice(&fs::read(version.join("zero/migrations.json")).unwrap())
                 .unwrap();
-        assert_eq!(migrations["statements"].as_array().unwrap().len(), 256);
+        assert_eq!(migrations["statements"].as_array().unwrap().len(), 1024);
 
         let endpoint_index: Value =
             serde_json::from_slice(&fs::read(version.join("zero/endpoints-index.json")).unwrap())

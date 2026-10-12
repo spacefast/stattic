@@ -1021,7 +1021,11 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
 
 test("Comments configuration stays on-origin while the runtime authenticates upstream", async () => {
   const exchanges: Array<{ credential: string | null; payload: Record<string, unknown> }> = [];
-  const checkouts: Array<{ credential: string | null; payload: SellRuntimeCheckoutRequest }> = [];
+  const checkouts: Array<{
+    credential: string | null;
+    pagePath: string | null;
+    payload: SellRuntimeCheckoutRequest;
+  }> = [];
   let ticketFailureCode: string | null = null;
   const central = Bun.serve({
     port: 0,
@@ -1047,6 +1051,7 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
       if (new URL(request.url).pathname === "/sell/runtime/spc_sdk_exchange/checkout") {
         checkouts.push({
           credential: request.headers.get("spacefast-runtime-exchange"),
+          pagePath: request.headers.get("spacefast-visitor-page-path"),
           payload: sellRuntimeCheckoutRequestSchema.parse(await request.json()),
         });
         return Response.json({
@@ -1393,6 +1398,7 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     expect(checkouts).toEqual([
       {
         credential: "runtime-comments-credential-0000000000000000000000000000",
+        pagePath: "/docs",
         payload: {
           deploymentId: "ver_sdk_exchange_1",
           productKey: checkoutInput.productKey,
@@ -1408,6 +1414,10 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     );
     expect((await checkout(checkoutInput, "https://attacker.example")).status).toBe(403);
     expect(checkouts).toHaveLength(1);
+    // A directory page keeps its slash, so Checkout's back link lands without a redirect.
+    expect((await checkout({ ...checkoutInput, pagePath: "/docs/" })).status).toBe(200);
+    expect(checkouts.at(-1)?.pagePath).toBe("/docs/");
+    checkouts.pop();
     const productResponse = await get(
       runtime,
       "comments-exchange.site.test",

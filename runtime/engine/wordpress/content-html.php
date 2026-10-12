@@ -295,6 +295,10 @@ function spacefast_content_html_canonical_block(array $block): string
             $inner .= spacefast_content_html_canonical_block($child);
         }
     }
+    // The processor warns and returns null for unsupported repair cases. Keep
+    // those bytes intact so the representability comparison fails closed.
+    $normalizedInner = @WP_HTML_Processor::normalize($inner);
+    $inner = trim(is_string($normalizedInner) ? $normalizedInner : $inner);
     // A freeform block is the whitespace between two real ones. Dropping the
     // empty ones is the whole point of this normalization.
     if (!is_string($name)) {

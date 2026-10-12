@@ -76,6 +76,13 @@ function _stattic_sell_handle_exchange(string $privateRoot, array $serving, stri
     $context = _stattic_access_context($serving, $requestHost, $pagePath);
     $headers = _stattic_access_exchange_headers($exchange, $context, 'application/json');
     $headers[] = 'Spacefast-Visitor-Origin: ' . _stattic_runtime_request_origin($requestHost);
+    // Stripe's back link returns here. Browsers send pathnames percent-encoded,
+    // so a path that is not printable ASCII keeps the generic cancel page. The
+    // directory slash survives, or the buyer would come back through a redirect.
+    $returnPath = $pagePath !== '/' && str_ends_with($input['pagePath'], '/') ? $pagePath . '/' : $pagePath;
+    if (!$isProduct && preg_match('/\A\/[\x21-\x7E]*\z/D', $returnPath) === 1) {
+        $headers[] = 'Spacefast-Visitor-Page-Path: ' . $returnPath;
+    }
     $result = is_string($payload) ? _stattic_access_exchange_post(
         $url,
         [],

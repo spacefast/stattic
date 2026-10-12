@@ -41,7 +41,6 @@ database_url="${SPACEFAST_TEST_DATABASE_ADMIN_URL:-postgres://stattic:stattic@12
 DATABASE_URL="$database_url" bun run --cwd apps/control-plane db:migrate
 SPACEFAST_RUNTIME_BIN="${SPACEFAST_RUNTIME_BIN:-$cargo_target_dir/debug/stattic-runtime}" \
   SPACEFAST_TEST_DATABASE_URL="$database_url" \
-  SPACEFAST_TEST_REDIS_URL="${SPACEFAST_TEST_REDIS_ADMIN_URL:-redis://127.0.0.1:26379}" \
   bun runtime/browser-specs/run.ts
 
 if [[ -n "${CI:-}" ]]; then

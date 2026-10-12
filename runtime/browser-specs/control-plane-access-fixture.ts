@@ -303,7 +303,7 @@ try {
   controlPlane = createApp();
   await controlPlane.modules;
   // Attempt budgets key on the visitor IP and inbox address, which repeat
-  // across local runs against the shared Redis. Clear them so a rerun starts
+  // across local runs against the shared Postgres. Clear them so a rerun starts
   // with empty windows.
   await clearAllFixedWindowCountersForTests();
 

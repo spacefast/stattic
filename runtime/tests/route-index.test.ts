@@ -508,7 +508,7 @@ test("a takedown removes only its space's live claim regardless of space-id orde
   }
 });
 
-test("intent-only hostname update rebuilds the route index and purges only re-pointed hosts", async () => {
+test("intent-only hostname updates purge changed mappings and repair the route index on replay", async () => {
   const rt = await startRuntime({ captureEdgePurges: true });
   const host = "intent-only-index.test";
   try {
@@ -517,8 +517,33 @@ test("intent-only hostname update rebuilds the route index and purges only re-po
       versionId: "ver_idx_intent_1",
       files: { "index.html": "intent index" },
     });
+    await deploy(rt, {
+      spaceId: "spc_idx_intent",
+      versionId: "ver_idx_intent_2",
+      files: { "index.html": "next branch version" },
+    });
+    await deploy(rt, {
+      spaceId: "spc_idx_unrelated",
+      versionId: "ver_idx_unrelated",
+      files: { "index.html": "unrelated space" },
+      activate: productionActivation("unrelated-intent.test"),
+    });
     await putRoute(rt, "spc_idx_intent", "production", productionRoute([], "ver_idx_intent_1"));
     const beforeIntent = readPointer(rt);
+    const versionHostnames = [
+      { hostname: "intent--v1.test", version_id: "ver_idx_intent_1" },
+      { hostname: "intent--v2.test", version_id: "ver_idx_intent_2" },
+    ];
+    const branchHost = "br-intent.test";
+    const retiredHost = "retired-intent.test";
+    const newHost = "new-intent.test";
+    const initialIntent = {
+      production_hostnames: [host, retiredHost],
+      version_hostnames: [
+        versionHostnames[0],
+        { hostname: branchHost, version_id: "ver_idx_intent_1" },
+      ],
+    };
 
     const response = await api(
       rt,
@@ -526,12 +551,12 @@ test("intent-only hostname update rebuilds the route index and purges only re-po
       "/__spacefast/api.php/spaces/spc_idx_intent/hostname-intent",
       "update_hostname_intent",
       { space_id: "spc_idx_intent" },
-      { production_hostnames: [host], version_hostnames: [] },
+      initialIntent,
     );
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       space_id: "spc_idx_intent",
-      route_count: 1,
+      route_count: 4,
     });
 
     expect(hostEntry(rt, host)).toMatchObject({ space_id: "spc_idx_intent" });
@@ -540,79 +565,142 @@ test("intent-only hostname update rebuilds the route index and purges only re-po
     expect(await served.text()).toBe("intent index");
     const purgesBefore = edgePurgeCalls(rt).length;
     expect(purgesBefore).toBeGreaterThan(0);
+    const nextIntent = {
+      production_hostnames: [host, newHost],
+      noindex_production_hostnames: [host],
+      version_hostnames: [
+        ...versionHostnames,
+        { hostname: branchHost, version_id: "ver_idx_intent_2" },
+      ],
+    };
+    const changed = await api(
+      rt,
+      "PUT",
+      "/__spacefast/api.php/spaces/spc_idx_intent/hostname-intent",
+      "update_hostname_intent",
+      { space_id: "spc_idx_intent" },
+      nextIntent,
+    );
+    expect(changed.status).toBe(200);
+    expect(
+      edgePurgeCalls(rt)
+        .slice(purgesBefore)
+        .map((call) => call.hostname)
+        .toSorted(),
+    ).toEqual([host, retiredHost, newHost, branchHost, "intent--v2.test"].toSorted());
+    expect(hostEntry(rt, branchHost)).toMatchObject({ version_id: "ver_idx_intent_2" });
+    expect(hostEntry(rt, "intent--v1.test")).toMatchObject({ version_id: "ver_idx_intent_1" });
+    expect((await get(rt, host, "/")).headers.get("x-robots-tag")).toContain("noindex");
+    const purgesAfterChange = edgePurgeCalls(rt).length;
     const unchanged = await api(
       rt,
       "PUT",
       "/__spacefast/api.php/spaces/spc_idx_intent/hostname-intent",
       "update_hostname_intent",
       { space_id: "spc_idx_intent" },
-      { production_hostnames: [host], version_hostnames: [] },
+      nextIntent,
     );
     expect(unchanged.status).toBe(200);
-    expect(await unchanged.json()).toEqual({ space_id: "spc_idx_intent", route_count: 1 });
-    expect(edgePurgeCalls(rt).length).toBe(purgesBefore);
+    expect(await unchanged.json()).toEqual({ space_id: "spc_idx_intent", route_count: 5 });
+    expect(edgePurgeCalls(rt).length).toBe(purgesAfterChange);
 
-    // Reproduce a process death after hostname-intent.json was persisted but
-    // before the index pointer was published. The replay must repair and purge.
+    // A renderer release can give identical decoded artifacts different names.
+    // Rewriting those bytes must neither purge this Space nor touch another Space.
+    const rewriteArtifact = (relative: string): string => {
+      const rewritten = Bun.spawnSync([
+        "php",
+        "-r",
+        [
+          "require $argv[2] . '/shared/storage.php';",
+          "require $argv[2] . '/shared/artifacts.php';",
+          "$file = $argv[1] . '/' . $argv[3];",
+          "$value = include $file;",
+          "$source = str_replace('<?php', '<?php /* equivalent layout */', _sf_php_artifact_source($value));",
+          "echo _sf_php_artifact_write(dirname($file), 'layout', $source);",
+        ].join(" "),
+        rt.storageRoot,
+        rt.engineRoot,
+        relative,
+      ]);
+      expect(rewritten.exitCode).toBe(0);
+      const name = rewritten.stdout.toString();
+      return path.posix.join(path.posix.dirname(relative), name);
+    };
+    const equivalentIndex = readPointer(rt);
+    const changedShard = shardFor(branchHost);
+    equivalentIndex.shards[changedShard] = rewriteArtifact(
+      `routes/${equivalentIndex.shards[changedShard]}`,
+    ).slice("routes/".length);
+    writeFileSync(storagePath(rt, "routes", "current.json"), JSON.stringify(equivalentIndex));
+    const equivalentOverlay = spacePointer(rt, "spc_idx_intent");
+    if (!equivalentOverlay) throw new Error("Expected Space overlay pointer");
+    const spacePrefix = "spaces/spc_idx_intent/";
+    equivalentOverlay.overlay = rewriteArtifact(`${spacePrefix}${equivalentOverlay.overlay}`).slice(
+      spacePrefix.length,
+    );
+    writeFileSync(
+      storagePath(rt, "spaces", "spc_idx_intent", "space.json"),
+      JSON.stringify(equivalentOverlay),
+    );
+    const rewritten = await api(
+      rt,
+      "PUT",
+      "/__spacefast/api.php/spaces/spc_idx_intent/hostname-intent",
+      "update_hostname_intent",
+      { space_id: "spc_idx_intent" },
+      nextIntent,
+    );
+    expect(rewritten.status).toBe(200);
+    expect(await rewritten.json()).toEqual({ space_id: "spc_idx_intent", route_count: 5 });
+    expect(edgePurgeCalls(rt).length).toBe(purgesAfterChange);
+    expect(await (await get(rt, "unrelated-intent.test", "/")).text()).toBe("unrelated space");
+
+    // The earlier purge has completed, but the old index survived a process
+    // death after intent persistence. A different intent must purge the hosts
+    // it inherits from that unpublished write as well as its own additions.
     writeFileSync(storagePath(rt, "routes", "current.json"), JSON.stringify(beforeIntent));
     expect(hostEntry(rt, host)).toBeNull();
+    const supersedingHost = "superseding-intent.test";
+    const supersedingIntent = {
+      ...nextIntent,
+      production_hostnames: [...nextIntent.production_hostnames, supersedingHost],
+    };
+    const superseding = await api(
+      rt,
+      "PUT",
+      "/__spacefast/api.php/spaces/spc_idx_intent/hostname-intent",
+      "update_hostname_intent",
+      { space_id: "spc_idx_intent" },
+      supersedingIntent,
+    );
+    expect(superseding.status).toBe(200);
+    expect(
+      edgePurgeCalls(rt)
+        .slice(purgesAfterChange)
+        .map((call) => call.hostname),
+    ).toContain(branchHost);
+    expect(hostEntry(rt, branchHost)).toMatchObject({ version_id: "ver_idx_intent_2" });
+    const purgesAfterSuperseding = edgePurgeCalls(rt).length;
+
+    // An exact replay must also repair before publishing the serving pointer.
+    writeFileSync(storagePath(rt, "routes", "current.json"), JSON.stringify(beforeIntent));
     const replay = await api(
       rt,
       "PUT",
       "/__spacefast/api.php/spaces/spc_idx_intent/hostname-intent",
       "update_hostname_intent",
       { space_id: "spc_idx_intent" },
-      { production_hostnames: [host], version_hostnames: [] },
+      supersedingIntent,
     );
     expect(replay.status).toBe(200);
     expect(await replay.json()).toMatchObject({ purge: { mode: "domain" } });
     expect(hostEntry(rt, host)).toMatchObject({ space_id: "spc_idx_intent" });
-    expect(edgePurgeCalls(rt).length).toBeGreaterThan(purgesBefore);
-
-    // A git build moves its branch alias and adds the new version host. Retained
-    // version hosts and production keep their routes, so only the moved and
-    // added hosts are purged, not one purge per retained version.
-    await deploy(rt, {
-      spaceId: "spc_idx_intent",
-      versionId: "ver_idx_intent_2",
-      files: { "index.html": "intent index 2" },
-    });
-    const v1Host = "intent-only-index--v1.test";
-    const v2Host = "intent-only-index--v2.test";
-    const branchHost = "intent-only-index--br-main.test";
-    const putVersionHosts = (versionHostnames: Array<{ hostname: string; version_id: string }>) =>
-      api(
-        rt,
-        "PUT",
-        "/__spacefast/api.php/spaces/spc_idx_intent/hostname-intent",
-        "update_hostname_intent",
-        { space_id: "spc_idx_intent" },
-        { production_hostnames: [host], version_hostnames: versionHostnames },
-      );
-    expect(
-      (
-        await putVersionHosts([
-          { hostname: v1Host, version_id: "ver_idx_intent_1" },
-          { hostname: branchHost, version_id: "ver_idx_intent_1" },
-        ])
-      ).status,
-    ).toBe(200);
-    const purgesBeforeMove = edgePurgeCalls(rt).length;
-    expect(
-      (
-        await putVersionHosts([
-          { hostname: v1Host, version_id: "ver_idx_intent_1" },
-          { hostname: v2Host, version_id: "ver_idx_intent_2" },
-          { hostname: branchHost, version_id: "ver_idx_intent_2" },
-        ])
-      ).status,
-    ).toBe(200);
+    expect(edgePurgeCalls(rt).length).toBeGreaterThan(purgesAfterSuperseding);
     expect(
       edgePurgeCalls(rt)
-        .slice(purgesBeforeMove)
-        .map((call) => call.hostname)
-        .sort(),
-    ).toEqual([branchHost, v2Host].sort());
+        .slice(purgesAfterChange)
+        .map((call) => call.hostname),
+    ).not.toContain("unrelated-intent.test");
   } finally {
     rt.stop();
   }

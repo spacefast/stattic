@@ -169,7 +169,9 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // it answers before route, host and overlay resolution: a first publish has
     // no routes/current.json yet, and this gate is how finalize reads the
     // accepted source bytes that create that pointer.
-    if (str_starts_with($originalRequestPath, '/__stattic/blob/')) {
+    // Dispatch case-folded spellings to the token gate too. Its exact path
+    // parser rejects aliases before they can reach authored routes.
+    if (str_starts_with(strtolower($originalRequestPath), '/__stattic/blob/')) {
         require_once __DIR__ . '/../entrypoints/blob.php';
         _stattic_blob_gate_serve($privateRoot, $requestMethod, $originalRequestPath);
     }
@@ -283,11 +285,16 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // A non-empty union at the end of the ladder is a 405 naming it, never a
     // fall-through to the 404 tail: the path demonstrably exists.
     $GLOBALS['SPACEFAST_METHOD_DECLINED_ALLOW'] = [];
-    $functionsMachineRoute = str_starts_with($originalRequestPath, '/__spacefast/functions/');
+    $functionsMachineRoute = (_stattic_control_path_row($originalRequestPath)['stage'] ?? null) === 'functions';
     $storageRequest = $requestPath === '/storage' || str_starts_with($requestPath, '/storage/');
 
     // ---- host-level routes (mounts, sub-path redirects and proxies) ------
-    $matchedRoute = _stattic_v4_match_host_route($hostRoutes, $requestPath, $requestMethod);
+    // Machine lanes are exempt from visitor edge fences. Keep their original
+    // path and host version: a mount or proxy must not turn an unsigned machine
+    // request into customer content before its own credential check runs.
+    $matchedRoute = $functionsMachineRoute
+        ? null
+        : _stattic_v4_match_host_route($hostRoutes, $requestPath, $requestMethod);
     if (is_array($matchedRoute)) {
         $action = _stattic_matched_host_route_action($matchedRoute);
         if (!_stattic_action_allows_method($action, $requestMethod)) {
@@ -329,6 +336,9 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     }
 
     if ($versionId === null) {
+        if ($functionsMachineRoute) {
+            _stattic_opaque_not_found();
+        }
         _stattic_render_platform_action(_stattic_version_pending_action());
     }
     $versionDir = _stattic_version_root($privateRoot, $spaceId, $versionId);
@@ -371,6 +381,12 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     if ($requestPath === '/' . STATTIC_FUNCTIONS_PURGE_PATH) {
         require_once __DIR__ . '/functions-purge.php';
         _stattic_functions_purge_serve($privateRoot, $spaceId, $versionDir, $requestMethod);
+    }
+    // A case-folded control alias passes the front door classification
+    // without naming a canonical transport. Never let it fall through to an
+    // authored endpoint, table entry, or application shell.
+    if ($functionsMachineRoute) {
+        _stattic_opaque_not_found();
     }
 
     // `?__=` is redeemed HERE, before the response table is read, and the request

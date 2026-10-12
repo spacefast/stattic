@@ -16,6 +16,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { contentSourceInspectionSchema } from "../../packages/common/src/contracts/content-sync.ts";
 import { fetchBlocksEnginePlugin } from "../../scripts/fetch-blocks-engine.mjs";
 import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
 import { problem, receipt, runScenario } from "./content-sync.test-helper.ts";
@@ -85,6 +86,12 @@ function blocksToHtml(blocks: readonly string[]): string[] {
 function representable(blocks: readonly string[]): string[] {
   return serializer(
     blocks.map((argument) => ({ fn: "spacefast_content_html_representable", argument })),
+  );
+}
+
+function canonicalBlockMarkup(blocks: readonly string[]): string[] {
+  return serializer(
+    blocks.map((argument) => ({ fn: "spacefast_content_html_canonical_block_markup", argument })),
   );
 }
 
@@ -249,12 +256,42 @@ test("the block vocabulary a page is written in survives a round trip through HT
   }
 });
 
+test("WordPress-normalized image markup remains representable", () => {
+  const ksesMarkup =
+    '<!-- wp:image -->\n<figure class="wp-block-image"><img src="https://example.com/a.png" alt="An A" /></figure>\n<!-- /wp:image -->';
+  expect(representable([ksesMarkup])).toEqual(["true"]);
+});
+
 test("a document richer than HTML is refused by name instead of being flattened", () => {
   const names = Object.keys(REFUSED);
   const verdicts = representable(Object.values(REFUSED));
   expect(Object.fromEntries(names.map((name, index) => [name, verdicts[index]]))).toEqual(
     Object.fromEntries(names.map((name) => [name, "false"])),
   );
+});
+
+test("HTML requiring unsupported parser repair is not treated as representable", () => {
+  const adoptionAgencyMarkup =
+    "<!-- wp:paragraph -->\n<p><font>a<b>b</font>c</b></p>\n<!-- /wp:paragraph -->";
+  expect(representable([adoptionAgencyMarkup])).toEqual(["false"]);
+});
+
+test("nested block markup is normalized as one assembled HTML fragment", () => {
+  const [markup] = canonicalBlockMarkup([CARRIED.columns]);
+  expect(markup).toContain('<div class="wp-block-columns"><!-- wp:core/column -->');
+  expect(markup).toContain("</div><!-- /wp:core/columns -->");
+});
+
+test("editor-spaced nested list blocks canonicalize like compact blocks", () => {
+  const editorList =
+    '<!-- wp:list -->\n<ul class="wp-block-list">\n' +
+    "<!-- wp:list-item -->\n<li>One</li>\n<!-- /wp:list-item -->\n\n" +
+    "<!-- wp:list-item -->\n<li>Two</li>\n<!-- /wp:list-item -->\n" +
+    "</ul>\n<!-- /wp:list -->";
+  expect(canonicalBlockMarkup([editorList])).toEqual(
+    canonicalBlockMarkup([CARRIED["unordered list"]]),
+  );
+  expect(representable([editorList])).toEqual(["true"]);
 });
 
 test("canonical HTML is a fixed point, and authored HTML that is not is refused", () => {
@@ -289,7 +326,8 @@ test("an HTML source file binds, takes a WordPress edit, and is written back as 
       op: "editInWordPress",
       blocks:
         '<!-- wp:heading {"level":1} --><h1 class="wp-block-heading">Launch</h1><!-- /wp:heading -->' +
-        "<!-- wp:paragraph --><p>Edited in WordPress.</p><!-- /wp:paragraph -->",
+        "<!-- wp:paragraph --><p>Edited in WordPress.</p><!-- /wp:paragraph -->" +
+        '<!-- wp:image --><figure class="wp-block-image"><img src="https://example.com/a.png" alt="An A" /></figure><!-- /wp:image -->',
     },
     { op: "reconcile", state: "bound", text: source, baseRevision: "@previous" },
   ]);
@@ -322,4 +360,45 @@ test("an edit HTML cannot carry leaves the source file untouched", async () => {
   ]);
 
   expect(problem(refused).code).toBe("content_html_not_representable");
+});
+
+test("inspection returns an unrepresentable WordPress edit for conflict resolution", async () => {
+  const [, , inspection] = await runScenario("html", [
+    { op: "reconcile", state: "initial", text: "<p>Original line.</p>\n" },
+    {
+      op: "editInWordPress",
+      blocks:
+        '<!-- wp:group --><div class="wp-block-group"><!-- wp:paragraph --><p>Edited.</p><!-- /wp:paragraph --></div><!-- /wp:group -->',
+    },
+    { op: "inspectSource" },
+  ]);
+
+  expect(inspection.ok).toBe(true);
+  if (inspection.ok) {
+    const response = contentSourceInspectionSchema.parse(inspection.receipt);
+    expect(response.wordpressText).toContain("Edited.");
+  }
+});
+
+test("resolving an unrepresentable WordPress edit refuses without replacing it", async () => {
+  const [, , before, refused, after] = await runScenario("html", [
+    { op: "reconcile", state: "initial", text: "<p>Original line.</p>\n" },
+    {
+      op: "editInWordPress",
+      blocks:
+        '<!-- wp:group --><div class="wp-block-group"><!-- wp:paragraph --><p>Edited in WordPress.</p><!-- /wp:paragraph --></div><!-- /wp:group -->',
+    },
+    { op: "inspectSource" },
+    { op: "resolveSource", text: "<p>Selected resolution.</p>" },
+    { op: "inspectSource" },
+  ]);
+
+  expect(before.ok).toBe(true);
+  expect(problem(refused).code).toBe("content_html_not_representable");
+  expect(after.ok).toBe(true);
+  if (before.ok && after.ok) {
+    const beforeInspection = contentSourceInspectionSchema.parse(before.receipt);
+    const afterInspection = contentSourceInspectionSchema.parse(after.receipt);
+    expect(afterInspection.wordpressText).toBe(beforeInspection.wordpressText);
+  }
 });

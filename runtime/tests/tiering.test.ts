@@ -554,6 +554,9 @@ test("the blob GC deletes nothing when a live response table cannot be read", as
   const tableName = Object.values(responseTableFiles(rt, spaceId, versionId))[0];
   if (tableName === undefined) throw new Error("version response table missing");
   const tablePath = path.join(versionRoot(rt, spaceId, versionId), tableName);
+  const renderCache = path.join(versionRoot(rt, spaceId, versionId), "..", "zero-render-cache");
+  mkdirSync(renderCache, { recursive: true });
+  writeFileSync(path.join(renderCache, "cached-image.webp"), "derived render cache");
 
   chmodSync(tablePath, 0o000);
   try {
@@ -578,6 +581,9 @@ test("the blob GC deletes nothing when a live response table cannot be read", as
 
   const recovered = await maintenancePass(rt, spaceId);
   expect(recovered.status).toBe("complete");
+  expect(readFileSync(path.join(renderCache, "cached-image.webp"), "utf8")).toBe(
+    "derived render cache",
+  );
   expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(body);
 });
 

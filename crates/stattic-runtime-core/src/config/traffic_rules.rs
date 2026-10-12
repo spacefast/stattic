@@ -432,6 +432,7 @@ impl Checker {
         }
         if shape == RuleShape::Firewall {
             self.action(object);
+            self.firewall_condition_budget(object);
         }
         match object.get("match") {
             Some(declared) => self.at(Step::field("match"), |checker| {
@@ -471,6 +472,28 @@ impl Checker {
         }
         if action != Some("block") {
             self.invalid_at(Step::field("status"), "status only applies to block.");
+        }
+    }
+
+    fn firewall_condition_budget(&mut self, rule: &Map<String, Value>) {
+        let Some(declared) = rule.get("match").and_then(Value::as_object) else {
+            return;
+        };
+        let conditions: usize = declared
+            .iter()
+            .map(|(field, condition)| {
+                if KEYED_MATCH_FIELDS.contains(&field.as_str()) {
+                    condition.as_object().map_or(1, Map::len)
+                } else {
+                    1
+                }
+            })
+            .sum();
+        if conditions > CONDITION_LIMIT - 3 && conditions <= CONDITION_LIMIT {
+            self.invalid_at(
+                Step::field("match"),
+                "A firewall rule compares at most 47 conditions.",
+            );
         }
     }
 
@@ -980,6 +1003,23 @@ mod tests {
                 Some("cookie".to_string())
             )]
         );
+    }
+
+    #[test]
+    fn firewall_rules_reserve_the_platform_condition_budget() {
+        let headers = (0..48)
+            .map(|index| (format!("h{index}"), json!("x")))
+            .collect::<Map<_, _>>();
+        assert_eq!(
+            addressed(firewall(
+                json!({ "action": "block", "match": { "header": headers } })
+            )),
+            [("config_invalid", "$.firewall[0].match".to_string())]
+        );
+        assert!(addressed(firewall(
+            json!({ "action": "block", "any": true, "match": { "path": "/x", "country": "RU" } })
+        ))
+        .is_empty());
     }
 
     #[test]

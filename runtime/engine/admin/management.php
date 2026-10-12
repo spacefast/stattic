@@ -1116,19 +1116,24 @@ function _stattic_runtime_put_hostname_intent(string $privateRoot, string $space
     $routes = _stattic_runtime_routes_from_hostname_intent('production', $body);
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
     $previous = _stattic_runtime_space_routing_doc($spaceRoot, 'intent');
-    if ($previous !== null && !_stattic_runtime_hostname_intent_changed($previous, $routes)) {
-        $repairHostnames = null;
-        _stattic_runtime_update_route_index($privateRoot, $spaceId, static function () use ($privateRoot, &$repairHostnames): void {
-            if ($repairHostnames !== null) {
+    $repairHostnames = null;
+    // A crashed write may have persisted intent without publishing its index.
+    // Repair that projection before replacing the document used by the diff.
+    if ($previous !== null) {
+        _stattic_runtime_update_route_index($privateRoot, $spaceId, static function (array $changedHostnames) use ($privateRoot, &$repairHostnames): void {
+            $changedHostnames = array_values(array_diff($changedHostnames, $repairHostnames ?? []));
+            if ($changedHostnames === []) {
                 return;
             }
-            $repairHostnames = _stattic_runtime_repair_hostnames($privateRoot);
+            $repairHostnames = [...($repairHostnames ?? []), ...$changedHostnames];
             if (_stattic_runtime_require_edge_purge_endpoint() !== null) {
-                _stattic_runtime_purge_enqueue($privateRoot, $repairHostnames, 'hostname_intent_repaired', [
+                _stattic_runtime_purge_enqueue($privateRoot, $changedHostnames, 'hostname_intent_repaired', [
                     $privateRoot . '/routes/index.lock',
                 ]);
             }
         });
+    }
+    if ($previous !== null && !_stattic_runtime_hostname_intent_changed($previous, $routes)) {
         _stattic_json_response(200, [
             'space_id' => $spaceId,
             'route_count' => count($routes),
@@ -1137,14 +1142,15 @@ function _stattic_runtime_put_hostname_intent(string $privateRoot, string $space
                 : []),
         ]);
     }
-    // Only re-pointed hosts, each whole-host: which paths changed under them is
-    // not a question this mutation can answer. Retained version hosts are
-    // immutable, so sweeping them would cost one purge per version on every
-    // branch alias move.
-    $hostnames = _stattic_runtime_hostname_intent_purge_diff($previous['routes'] ?? [], $routes);
+    $hostnames = array_values(array_unique([
+        ...($repairHostnames ?? []),
+        ..._stattic_runtime_hostname_intent_purge_diff($previous['routes'] ?? [], $routes),
+    ]));
     _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'hostname_intent_updated');
     _stattic_runtime_store_hostname_intent_from_snapshot($privateRoot, $spaceId, $routes, $previous, $claims);
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
+    // Purge each changed mapping's whole host, including additions that may
+    // have cached a miss. Unchanged retained-version hosts keep their cache.
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'route_count' => count($routes),

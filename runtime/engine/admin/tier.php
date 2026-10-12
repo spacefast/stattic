@@ -139,7 +139,8 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
         if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
             return null;
         }
-        if (!is_dir($versionRoot)) {
+        $versionId = basename($versionRoot);
+        if (!is_dir($versionRoot) || !_stattic_runtime_id_valid($versionId) || !str_starts_with($versionId, 'ver_')) {
             continue;
         }
         // The tables were published with their version, so they share its clock.
@@ -162,10 +163,7 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
                 return null;
             }
         }
-        $versionId = basename($versionRoot);
-        if (_stattic_runtime_id_valid($versionId) && str_starts_with($versionId, 'ver_')) {
-            $versionIds[$versionId] = true;
-        }
+        $versionIds[$versionId] = true;
     }
     // The live overlay names blobs no version declares: a tag/SDK body too large
     // to sit inline in the opcached artifact lives in the CAS with only the

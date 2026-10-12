@@ -1567,22 +1567,41 @@ function spacefast_content_inspect_source(array $request): array
     $bindingId = $request['bindingId'] ?? null;
     $pending = is_string($bindingId) ? spacefast_content_sync_pending_source($bindingId) : null;
     if ($pending !== null) return spacefast_content_sync_pending_inspection($bindingId, $pending);
+    return spacefast_content_sync_source_inspection($request)['response'];
+}
+
+/** The wire response plus the serializer verdict needed by write paths. */
+function spacefast_content_sync_source_inspection(array $request): array
+{
+    $bindingId = $request['bindingId'] ?? null;
     $binding = is_string($bindingId) ? spacefast_content_model_sync_binding($bindingId) : null;
     $post = is_array($binding) ? spacefast_content_sync_find_post($bindingId, $binding, false) : null;
     $ledger = is_object($post) ? spacefast_content_sync_ledger((int) $post->ID) : null;
     if (!is_object($post) || !is_array($ledger) || !spacefast_content_post_belongs_to_space((int) $post->ID)) {
         throw new Spacefast_Content_Error(404, 'content_sync_not_bound', 'This source has no bound document.');
     }
-    $text = spacefast_content_sync_pullable_text($binding['format'], spacefast_content_sync_read_blocks($post, $binding), $post, $ledger['baseText']);
+    $blocks = spacefast_content_sync_read_blocks($post, $binding);
+    $representable = spacefast_content_sync_representable($binding['format'], $blocks);
+    if ($representable) {
+        $text = spacefast_content_sync_pullable_text($binding['format'], $blocks, $post, $ledger['baseText']);
+    } else {
+        $metadata = spacefast_content_sync_document_metadata($post);
+        $baseMetadata = spacefast_content_sync_document($ledger['baseText'])['metadata'];
+        if (isset($baseMetadata['componentSource'])) $metadata['componentSource'] = $baseMetadata['componentSource'];
+        $text = spacefast_content_sync_envelope($metadata, spacefast_content_sync_from_blocks($binding['format'], $blocks));
+    }
     return [
-        'bindingId' => $bindingId,
-        'postId' => (int) $post->ID,
-        'source' => $binding['source'],
-        'baseRevision' => $ledger['revision'],
-        'baseText' => $ledger['baseText'],
-        'wordpressText' => $text,
-        'wordpressDigest' => spacefast_content_sync_digest_text($text),
-        'wordpressRevisionId' => spacefast_content_sync_current_revision_id((int) $post->ID),
+        'response' => [
+            'bindingId' => $bindingId,
+            'postId' => (int) $post->ID,
+            'source' => $binding['source'],
+            'baseRevision' => $ledger['revision'],
+            'baseText' => $ledger['baseText'],
+            'wordpressText' => $text,
+            'wordpressDigest' => spacefast_content_sync_digest_text($text),
+            'wordpressRevisionId' => spacefast_content_sync_current_revision_id((int) $post->ID),
+        ],
+        'representable' => $representable,
     ];
 }
 
@@ -1610,7 +1629,11 @@ function spacefast_content_resolve_source(array $request): array
             if (is_array($replay) && ($replay['status'] ?? null) === 'pulled') {
                 return ['operationId' => $input['operationId'], 'bindingId' => $input['bindingId'], 'postId' => $postId, 'status' => 'queued'];
             }
-            $observed = spacefast_content_inspect_source(['bindingId' => $input['bindingId']]);
+            $inspection = spacefast_content_sync_source_inspection(['bindingId' => $input['bindingId']]);
+            $observed = $inspection['response'];
+            if (!$inspection['representable']) {
+                spacefast_content_sync_not_representable($input['format'], 'Its source file was left untouched.');
+            }
             if (!hash_equals($input['baseRevision'], $observed['baseRevision'])
                 || !hash_equals($expectedWordpressDigest, $observed['wordpressDigest'])) {
                 throw new Spacefast_Content_Error(409, 'content_sync_resolution_stale', 'The document changed while this conflict was being resolved. Refresh the comparison.');

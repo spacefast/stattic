@@ -1,6 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { canonicalPagePath, commentRoomKey } from "../../packages/collab-sdk/src/core.ts";
@@ -540,21 +541,31 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
 // being down is the last copy or an empty script, never an error on the page.
 test("t.js is Beacon's tracker from a copy the box fills once, and never an error", async () => {
   const TRACKER = "window.__beaconTracker=true;\n";
+  const NEXT_TRACKER = "window.__beaconTracker=2;\n";
+  let release = TRACKER;
+  // Beacon's edge answers no-cache when it served its copy stale.
+  let edgeStale = false;
   const upstream: Array<{ url: string; cookie: string | null }> = [];
   const beacon = Bun.serve({
     port: 0,
     fetch(request) {
       const url = new URL(request.url);
       upstream.push({ url: url.pathname + url.search, cookie: request.headers.get("cookie") });
-      return new Response(TRACKER, { headers: { "content-type": "text/javascript" } });
+      return new Response(release, {
+        headers: {
+          "content-type": "text/javascript",
+          "cache-control": edgeStale ? "no-cache" : "public, max-age=300",
+        },
+      });
     },
   });
   const endpoint = `http://127.0.0.1:${beacon.port}`;
   const nowhere = Bun.serve({ port: 0, fetch: () => new Response(null) });
   const unreachable = `http://127.0.0.1:${nowhere.port}`;
   await nowhere.stop(true);
+  const errorLog = path.join(os.tmpdir(), `sdk-tracker-${randomUUID()}.log`);
   try {
-    const runtime = await startRuntime();
+    const runtime = await startRuntime({ phpIni: { error_log: errorLog } });
     runtimes.push(runtime);
     const host = "tracker.site.test";
     const routeBody = (tracker: Record<string, string> | null) => {
@@ -594,7 +605,7 @@ test("t.js is Beacon's tracker from a copy the box fills once, and never an erro
     expect(served.status).toBe(200);
     expect(await served.text()).toBe(TRACKER);
     expect(served.headers.get("content-type")).toContain("application/javascript");
-    expect(served.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(served.headers.get("cache-control")).toBe("public, max-age=60, s-maxage=300");
     expect(served.headers.get("a8c-edge-cache")).toBe("cache");
     // The visitor's cookies stay on this host.
     expect(upstream).toEqual([{ url: "/t.js", cookie: null }]);
@@ -607,18 +618,50 @@ test("t.js is Beacon's tracker from a copy the box fills once, and never an erro
     await expectEmpty(await tracker("?cb=2"));
     expect(upstream).toEqual([{ url: "/t.js", cookie: null }]);
 
-    // Past its lifetime with Beacon down, the box serves its last copy for a
-    // minute at a time instead of nothing.
+    // Past its lifetime, the box takes Beacon's new release, and says so in
+    // the PHP log by the short shas of the old and new ETags.
     const copyPath = path.join(
       runtime.storageRoot,
       "runtime/tracker",
       `${createHash("sha256").update(endpoint).digest("hex")}.json`,
     );
     expect(JSON.parse(readFileSync(copyPath, "utf8"))).toMatchObject({ body: TRACKER });
-    writeFileSync(copyPath, JSON.stringify({ fetched_at: 0, attempted_at: 0, body: TRACKER }));
+    const expire = (body: string) =>
+      writeFileSync(copyPath, JSON.stringify({ fetched_at: 0, attempted_at: 0, body }));
+    const shortSha = (body: string) => createHash("sha256").update(body).digest("hex").slice(0, 12);
+    release = NEXT_TRACKER;
+    expire(TRACKER);
+    const refreshed = await tracker();
+    expect(await refreshed.text()).toBe(NEXT_TRACKER);
+    expect(refreshed.headers.get("cache-control")).toBe("public, max-age=60, s-maxage=300");
+    expect(readFileSync(errorLog, "utf8")).toContain(
+      `spacefast tracker copy refreshed endpoint=${endpoint}` +
+        ` sha256=${shortSha(NEXT_TRACKER)} previous=${shortSha(TRACKER)}`,
+    );
+
+    // A no-cache answer is served, but not as fresh, and the box does not ask
+    // again until the retry window has passed. Then it is fresh again.
+    edgeStale = true;
+    expire(NEXT_TRACKER);
+    const marked = await tracker();
+    expect(await marked.text()).toBe(NEXT_TRACKER);
+    expect(marked.headers.get("cache-control")).toBe("public, max-age=60");
+    const asked = upstream.length;
+    expect((await tracker()).headers.get("cache-control")).toBe("public, max-age=60");
+    expect(upstream).toHaveLength(asked);
+    edgeStale = false;
+    expire(NEXT_TRACKER);
+    const renewed = await tracker();
+    expect(await renewed.text()).toBe(NEXT_TRACKER);
+    expect(renewed.headers.get("cache-control")).toBe("public, max-age=60, s-maxage=300");
+    expect(upstream).toHaveLength(asked + 1);
+
+    // Past its lifetime with Beacon down, the box serves its last copy for a
+    // minute at a time instead of nothing.
+    expire(NEXT_TRACKER);
     await beacon.stop(true);
     const stale = await tracker();
-    expect(await stale.text()).toBe(TRACKER);
+    expect(await stale.text()).toBe(NEXT_TRACKER);
     expect(stale.headers.get("cache-control")).toBe("public, max-age=60");
 
     // A Beacon the box never reached leaves it nothing to serve.
@@ -637,6 +680,7 @@ test("t.js is Beacon's tracker from a copy the box fills once, and never an erro
     );
   } finally {
     await beacon.stop(true);
+    rmSync(errorLog, { force: true });
   }
 });
 

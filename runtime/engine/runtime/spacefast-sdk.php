@@ -399,13 +399,13 @@ function _stattic_spacefast_sdk_bootstrap(
 }
 
 // Beacon's own lifetime for t.js, so a new tracker reaches pages as fast
-// through this copy as it does from Beacon. It is also how long a box keeps its
-// copy before asking Beacon again.
+// through this copy as it does from Beacon. It is how long the edge keeps a
+// fresh copy, and how long a box keeps its copy before asking Beacon again.
 const STATTIC_SPACEFAST_TRACKER_TTL_SECONDS = 300;
-// Everything that is not a fresh copy: an empty script for a Space with no
-// tracker or a URL with a query, or an old copy while Beacon is down. The edge
-// asks again after a minute, so switching a Space on, or Beacon coming back,
-// shows within one.
+// A browser's lifetime for every answer, and the edge's for everything that is
+// not a fresh copy: an empty script for a Space with no tracker or a URL with a
+// query, or an old copy while Beacon is down. The edge asks again after a
+// minute, so switching a Space on, or Beacon coming back, shows within one.
 const STATTIC_SPACEFAST_TRACKER_SHORT_SECONDS = 60;
 const STATTIC_SPACEFAST_TRACKER_MAX_BYTES = 524288;
 const STATTIC_SPACEFAST_TRACKER_EMPTY = "/* No Spacefast analytics here. */\n";
@@ -505,11 +505,14 @@ function _stattic_serve_spacefast_tracker(string $privateRoot, array $serving, b
     http_response_code(200);
     header('Content-Type: application/javascript; charset=utf-8', true);
     header('X-Content-Type-Options: nosniff', true);
+    // A browser keeps even a fresh copy for only a minute. The edge sends no
+    // Age, so a browser counts its lifetime from its own fetch, however long
+    // the edge had already held that copy.
     _stattic_send_cache_policy_headers(
         $privateCache,
-        'public, max-age=' . ($copy['fresh']
-            ? STATTIC_SPACEFAST_TRACKER_TTL_SECONDS
-            : STATTIC_SPACEFAST_TRACKER_SHORT_SECONDS)
+        'public, max-age=' . STATTIC_SPACEFAST_TRACKER_SHORT_SECONDS . ($copy['fresh']
+            ? ', s-maxage=' . STATTIC_SPACEFAST_TRACKER_TTL_SECONDS
+            : '')
     );
     header('ETag: "' . hash('sha256', $body) . '"', true);
     header('Content-Length: ' . strlen($body), true);
@@ -523,7 +526,9 @@ function _stattic_serve_spacefast_tracker(string $privateRoot, array $serving, b
  * The box's copy of one Beacon's t.js: fresh for its lifetime, then refreshed by
  * the one worker that takes the lock while the others wait for its answer.
  * A refresh that fails keeps the old copy and is not tried again for a short
- * lifetime, so a Beacon outage costs a box one request a minute.
+ * lifetime, so a Beacon outage costs a box one request a minute. An answer
+ * Beacon's edge marked no-cache is waited out the same way, though its body
+ * replaces the copy.
  *
  * @return array{body: ?string, fresh: bool}
  */
@@ -549,7 +554,10 @@ function _stattic_spacefast_tracker_copy(string $privateRoot, string $endpoint):
     return _stattic_lock_with(
         $path . '.lock',
         STATTIC_LOCK_WAIT,
-        static fn (): array => $answer($copy),
+        static function () use ($path, $copy, $answer): array {
+            error_log('spacefast tracker copy busy, served the last copy path=' . $path);
+            return $answer($copy);
+        },
         static function () use ($path, $endpoint, $now, $answer): array {
             // Another worker may have refreshed it, or just failed to, while
             // this one waited.
@@ -560,9 +568,20 @@ function _stattic_spacefast_tracker_copy(string $privateRoot, string $endpoint):
             ) {
                 return $answer($copy);
             }
-            $fetched = _stattic_spacefast_tracker_upstream($endpoint);
+            $fetched = _stattic_spacefast_tracker_upstream($endpoint, $noCache);
+            // Once per tracker release per box. The short shas are the heads of
+            // the ETags t.js is served with, old and new.
+            if ($fetched !== null && $fetched !== $copy['body']) {
+                error_log(
+                    'spacefast tracker copy refreshed endpoint=' . $endpoint
+                    . ' sha256=' . substr(hash('sha256', $fetched), 0, 12)
+                    . ' previous=' . ($copy['body'] === null ? 'none' : substr(hash('sha256', $copy['body']), 0, 12))
+                );
+            }
+            // A no-cache answer is kept but already expired: it is served as not
+            // fresh, and asked for again once the retry window has passed.
             $next = [
-                'fetched_at' => $fetched === null ? $copy['fetched_at'] : $now,
+                'fetched_at' => $fetched === null ? $copy['fetched_at'] : ($noCache ? 0 : $now),
                 'attempted_at' => $now,
                 'body' => $fetched ?? $copy['body'],
             ];
@@ -590,11 +609,14 @@ function _stattic_spacefast_tracker_read(string $path): array
 
 // Beacon's t.js, or null when Beacon did not answer with a script. The
 // endpoint is the control plane's, so it is held to the platform destination
-// rule, not to the rule for URLs a tenant names.
-function _stattic_spacefast_tracker_upstream(string $endpoint): ?string
+// rule, not to the rule for URLs a tenant names. `$noCache` says the answer
+// carried Cache-Control no-cache, which Beacon's edge sends on a copy it served
+// stale while it asks Beacon again.
+function _stattic_spacefast_tracker_upstream(string $endpoint, ?bool &$noCache = null): ?string
 {
     require_once __DIR__ . '/../shared/egress.php';
     require_once __DIR__ . '/../shared/http.php';
+    $noCache = false;
     $url = $endpoint . '/t.js';
     if (!_stattic_platform_destination_allowed($url)) {
         return null;
@@ -616,6 +638,12 @@ function _stattic_spacefast_tracker_upstream(string $endpoint): ?string
         );
         return null;
     }
+    // Every Cache-Control line counts: the edge may add its own beside Beacon's.
+    $noCache = array_any(
+        $result['headers'],
+        static fn (array $header): bool => strtolower((string) $header[0]) === 'cache-control'
+            && _stattic_cache_control_has_directive((string) $header[1], 'no-cache')
+    );
     return $result['body'];
 }
 

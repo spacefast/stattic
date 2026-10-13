@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { canonicalPagePath, commentRoomKey } from "../../packages/collab-sdk/src/core.ts";
@@ -21,6 +21,7 @@ import {
   RUNTIME_SELL_CHECKOUT_PATH,
   RUNTIME_SELL_PRODUCT_PATH,
   RUNTIME_SELL_CLIENT_PATH,
+  RUNTIME_TRACKER_SCRIPT_PATH,
 } from "../../packages/common/src/utils/runtime-paths.ts";
 import {
   deploy,
@@ -238,7 +239,14 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   };
   accessConfig.sdk = {
     revision: "sdk-public-1",
-    config: { cast_api_base: "https://cast.example.test" },
+    config: {
+      cast_api_base: "https://cast.example.test",
+      tracker: {
+        src: RUNTIME_TRACKER_SCRIPT_PATH,
+        endpoint: "https://beacon.example.test",
+        key: "pk_sdk",
+      },
+    },
     body: "window.__embeddedTagLoaded=true;",
   };
   await deploy(runtime, {
@@ -311,7 +319,18 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   ]);
   expect(assigned.every((url) => new URL(url).origin === browser.origin)).toBe(true);
   expect(JSON.stringify(fakeWindow.Spacefast)).not.toContain("test-private-client-secret");
-  expect(appended).toHaveLength(0);
+  // With Comments off, the one script the loader adds is the analytics tracker,
+  // from this host and reporting to Beacon, not to the host it came from,
+  // marked as injected so a tag the author placed wins. The body ran twice
+  // above and added it once.
+  expect(appended).toEqual([
+    {
+      async: true,
+      dataset: { site: "pk_sdk", endpoint: "https://beacon.example.test", injected: "" },
+      src: RUNTIME_TRACKER_SCRIPT_PATH,
+      type: "",
+    },
+  ]);
   expect(fakeWindow.__embeddedTagLoaded).toBe(true);
   expect(response.headers.get("content-type")).toContain("application/javascript");
   expect(response.headers.get("access-control-allow-origin")).toBe("*");
@@ -372,7 +391,10 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   // the live surface whatever the URL is decorated with — otherwise the preview
   // Comments lane could be consulted from the live site by anyone who appended
   // a query parameter. The manifest is where that verdict is now published.
-  expect(await preview.text()).toContain("preview=preview-token");
+  const previewSdk = await preview.text();
+  expect(previewSdk).toContain("preview=preview-token");
+  // A draft is not a visit: a preview token loads no tracker.
+  expect(previewSdk).not.toContain(RUNTIME_TRACKER_SCRIPT_PATH);
   for (const url of [
     `${RUNTIME_COLLAB_MANIFEST_PATH}?preview=preview-token`,
     RUNTIME_COLLAB_MANIFEST_PATH,
@@ -504,12 +526,118 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
       head: { appendChild: (node: (typeof reviewNodes)[number]) => reviewNodes.push(node) },
     },
   );
+  // Neither is a review on a version host: the review script and no tracker.
   expect(reviewNodes.map((node) => node.src).filter(Boolean)).toEqual([
     "https://cast.example.test/sdk/v1/review.js",
   ]);
   expect(
     JSON.parse(reviewNodes.find((node) => node.id === "sf-visual-review")?.textContent ?? "null"),
   ).toEqual({ ...review, spaceId: "spc_sdk" });
+});
+
+// t.js is Beacon's, served from the Space's own origin. The box keeps one copy
+// per Beacon, so a miss anyone can manufacture never reaches Beacon, and Beacon
+// being down is the last copy or an empty script, never an error on the page.
+test("t.js is Beacon's tracker from a copy the box fills once, and never an error", async () => {
+  const TRACKER = "window.__beaconTracker=true;\n";
+  const upstream: Array<{ url: string; cookie: string | null }> = [];
+  const beacon = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      upstream.push({ url: url.pathname + url.search, cookie: request.headers.get("cookie") });
+      return new Response(TRACKER, { headers: { "content-type": "text/javascript" } });
+    },
+  });
+  const endpoint = `http://127.0.0.1:${beacon.port}`;
+  const nowhere = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const unreachable = `http://127.0.0.1:${nowhere.port}`;
+  await nowhere.stop(true);
+  try {
+    const runtime = await startRuntime();
+    runtimes.push(runtime);
+    const host = "tracker.site.test";
+    const routeBody = (tracker: Record<string, string> | null) => {
+      const config = publicAccessConfig({ mode: "website", site_title: "Tracker" });
+      config.sdk = { revision: "sdk-tracker-1", config: { tracker } };
+      return {
+        version_id: "ver_tracker_1",
+        config,
+        production_hostnames: [host],
+        noindex_production_hostnames: [],
+        version_hostnames: [],
+      };
+    };
+    const tracked = { src: RUNTIME_TRACKER_SCRIPT_PATH, endpoint, key: "pk_tracker" };
+    await deploy(runtime, {
+      spaceId: "spc_tracker",
+      versionId: "ver_tracker_1",
+      files: { "index.html": "<h1>Tracked</h1>\n" },
+      activate: { route_name: "production", ...routeBody(tracked) },
+    });
+    const tracker = (query = "") => get(runtime, host, `${RUNTIME_TRACKER_SCRIPT_PATH}${query}`);
+    // Every answer that is not Beacon's script: valid JavaScript that does
+    // nothing, held for a minute.
+    const expectEmpty = async (response: Response) => {
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).not.toContain("__beaconTracker");
+      expect(() => Function(body)).not.toThrow();
+      expect(response.headers.get("cache-control")).toBe("public, max-age=60");
+      expect(response.headers.get("a8c-edge-cache")).toBe("cache");
+      return body;
+    };
+
+    const served = await get(runtime, host, RUNTIME_TRACKER_SCRIPT_PATH, {
+      headers: { cookie: "harmless_publisher_cookie=one" },
+    });
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe(TRACKER);
+    expect(served.headers.get("content-type")).toContain("application/javascript");
+    expect(served.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(served.headers.get("a8c-edge-cache")).toBe("cache");
+    // The visitor's cookies stay on this host.
+    expect(upstream).toEqual([{ url: "/t.js", cookie: null }]);
+
+    // The next miss is the box's copy, not another request to Beacon.
+    expect(await (await tracker()).text()).toBe(TRACKER);
+    // A query is a new edge key, so anyone can make one miss after another
+    // with it. None of them reaches Beacon.
+    await expectEmpty(await tracker("?cb=1"));
+    await expectEmpty(await tracker("?cb=2"));
+    expect(upstream).toEqual([{ url: "/t.js", cookie: null }]);
+
+    // Past its lifetime with Beacon down, the box serves its last copy for a
+    // minute at a time instead of nothing.
+    const copyPath = path.join(
+      runtime.storageRoot,
+      "runtime/tracker",
+      `${createHash("sha256").update(endpoint).digest("hex")}.json`,
+    );
+    expect(JSON.parse(readFileSync(copyPath, "utf8"))).toMatchObject({ body: TRACKER });
+    writeFileSync(copyPath, JSON.stringify({ fetched_at: 0, attempted_at: 0, body: TRACKER }));
+    await beacon.stop(true);
+    const stale = await tracker();
+    expect(await stale.text()).toBe(TRACKER);
+    expect(stale.headers.get("cache-control")).toBe("public, max-age=60");
+
+    // A Beacon the box never reached leaves it nothing to serve.
+    await putRoute(runtime, "spc_tracker", "production", {
+      ...routeBody({ ...tracked, endpoint: unreachable }),
+    });
+    const empty = await expectEmpty(await tracker());
+
+    // Opting out is a route update, not a publish: the loader goes from sdk.js,
+    // and t.js answers exactly as it does for a query, so it tells a visitor
+    // nothing about the Space's analytics.
+    await putRoute(runtime, "spc_tracker", "production", routeBody(null));
+    expect(await expectEmpty(await tracker())).toBe(empty);
+    expect(await (await get(runtime, host, "/__spacefast/sdk.js")).text()).not.toContain(
+      RUNTIME_TRACKER_SCRIPT_PATH,
+    );
+  } finally {
+    await beacon.stop(true);
+  }
 });
 
 // A deployment that never configured an API base is misconfigured, and the
@@ -1763,6 +1891,11 @@ test("private SDK bytes require admission before any body", async () => {
       cast_ws_url: "wss://cast.example.test/socket/websocket",
       cast_resource_key: "resource_private",
       comments: LOCAL_COMMENTS,
+      tracker: {
+        src: RUNTIME_TRACKER_SCRIPT_PATH,
+        endpoint: "https://beacon.example.test",
+        key: "pk_private",
+      },
     },
     body: 'window.__privateTagSecret="private-tag-marker";',
   };
@@ -1786,6 +1919,20 @@ test("private SDK bytes require admission before any body", async () => {
   const bare = await get(runtime, host, "/__spacefast/sdk.js");
   expect(bare.status).toBe(403);
   expect(bare.headers.get("etag")).toBeNull();
+
+  // t.js waits for the access check too: a visitor who may not view the Space
+  // gets what any other path there gives, so nothing says it has analytics on.
+  // The access page names the path to come back to, and only that differs.
+  const answer = async (requestPath: string, headers: Record<string, string> = {}) => {
+    const response = await get(runtime, host, requestPath, { headers });
+    return {
+      status: response.status,
+      cacheControl: response.headers.get("cache-control"),
+      contentType: response.headers.get("content-type"),
+      body: (await response.text()).replaceAll(requestPath, "<path>"),
+    };
+  };
+  expect(await answer(RUNTIME_TRACKER_SCRIPT_PATH)).toEqual(await answer("/docs/app.js"));
 
   const forgedPageContext = await get(runtime, host, "/__spacefast/sdk.js", {
     headers: {
@@ -1843,6 +1990,16 @@ test("private SDK bytes require admission before any body", async () => {
   // leaks no ETag a revoked visitor could keep revalidating against.
   const privateEtag = admitted.headers.get("etag") ?? "";
   expect(privateEtag).toContain("runtime:");
+  // The admitted page's sdk.js writes the t.js tag, and t.js is the page's
+  // subresource as sdk.js is, kept out of shared caches.
+  expect(admittedBody).toContain(RUNTIME_TRACKER_SCRIPT_PATH);
+  expect(
+    await answer(RUNTIME_TRACKER_SCRIPT_PATH, {
+      cookie,
+      referer: `https://${host}/docs/`,
+      "sec-fetch-dest": "script",
+    }),
+  ).toMatchObject({ status: 200, cacheControl: "private, no-store" });
 
   // The manifest and the theme are subresources of the same admitted page and
   // reach the runtime with the `sec-fetch-dest` each is loaded with: `empty`

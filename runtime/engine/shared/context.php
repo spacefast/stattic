@@ -60,6 +60,10 @@ const SPACEFAST_RUNTIME_ENTRYPOINT_PATHS = [
 ];
 // END GENERATED runtime entrypoints
 const STATTIC_SPACEFAST_SDK_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sdk.js';
+// The Space's own copy of Beacon's analytics tracker, which the SDK loads when
+// the Space has analytics on. The TS mirror is
+// RUNTIME_TRACKER_SCRIPT_PATH in packages/common/src/utils/runtime-paths.ts.
+const STATTIC_SPACEFAST_TRACKER_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/t.js';
 // The two documents any collaboration client boots from — Spacefast's own
 // overlay bundle or a UI somebody built themselves. The manifest says what this
 // surface is and where to join it; the stylesheet is the Space's customization,
@@ -225,6 +229,9 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_SPACEFAST_SDK_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
     ['path' => STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
     ['path' => STATTIC_SPACEFAST_COLLAB_THEME_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
+    // Answered after the access check, beside sdk.js: whether a Space has
+    // analytics is not for a visitor who may not view it.
+    ['path' => STATTIC_SPACEFAST_TRACKER_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'tracker'],
     // Each is authorized by its own signed token rather than by being a known path.
     ['path' => '/' . STATTIC_FUNCTIONS_BUNDLE_PREFIX, 'match' => 'prefix', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_artifact'],
     ['path' => '/' . STATTIC_FUNCTIONS_RELAY_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_relay'],

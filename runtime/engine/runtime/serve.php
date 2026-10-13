@@ -514,10 +514,10 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     }
     if (!$open && !$publicPreviewImage) {
         require_once __DIR__ . '/access-rules.php';
-        // The SDK, the collaboration manifest and its theme are subresources of
-        // the page that embedded them and own no scope, so no page Grant lists
-        // them. The authority comes from the session
-        // (_stattic_spacefast_sdk_access_path).
+        // The SDK, the collaboration manifest, its theme and the tracker the SDK
+        // loads are subresources of the page that embedded them and own no
+        // scope, so no page Grant lists them. The authority comes from the
+        // session (_stattic_spacefast_sdk_access_path).
         $accessPath = _stattic_spacefast_sdk_access_dests($requestPath) !== []
             && $originalRequestPath === $requestPath
             ? _stattic_spacefast_sdk_access_path($serving, $requestHost, $requestPath)
@@ -586,6 +586,13 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             $privateCache,
             $requestPath
         );
+    }
+    // Whether a Space has analytics is the Space's own business, so t.js waits
+    // for the access check too: a visitor who may not view a protected Space
+    // gets the answer any other path there gives.
+    if ($requestPath === STATTIC_SPACEFAST_TRACKER_PATH) {
+        require_once __DIR__ . '/spacefast-sdk.php';
+        _stattic_serve_spacefast_tracker($privateRoot, $serving, $privateCache);
     }
 
     // Whether an anonymous visitor (a link unfurler) reads this exact URL,
@@ -2118,16 +2125,16 @@ function _stattic_render_method_declined_405_if_any(): void
 }
 
 // How each collaboration document is loaded, as the `sec-fetch-dest` the
-// browser sets: the `<script>` tag fetches sdk.js as `script`, the manifest
-// arrives through the SDK's `fetch()` as `empty`, and the theme arrives both
-// ways — as the `<link>` sdk.js writes for a self-built UI (`style`), and as
-// the default UI's own `fetch()` of the same bytes to adopt them inside its
-// shadow root (`empty`). A dest outside this list is not the page's subresource
-// and gets no Referer scope.
+// browser sets: the `<script>` tags fetch sdk.js and the t.js it writes as
+// `script`, the manifest arrives through the SDK's `fetch()` as `empty`, and
+// the theme arrives both ways — as the `<link>` sdk.js writes for a self-built
+// UI (`style`), and as the default UI's own `fetch()` of the same bytes to
+// adopt them inside its shadow root (`empty`). A dest outside this list is not
+// the page's subresource and gets no Referer scope.
 function _stattic_spacefast_sdk_access_dests(string $requestPath): array
 {
     return match ($requestPath) {
-        STATTIC_SPACEFAST_SDK_PATH => ['script'],
+        STATTIC_SPACEFAST_SDK_PATH, STATTIC_SPACEFAST_TRACKER_PATH => ['script'],
         STATTIC_SPACEFAST_COLLAB_THEME_PATH => ['style', 'empty'],
         STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH => ['empty'],
         default => [],

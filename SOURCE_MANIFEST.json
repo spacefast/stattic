@@ -1,7 +1,7 @@
 {
-  "revision": "5d3b180d670d84d5535e77e9a992042a4e5485ec",
-  "sourceHash": "8035f868028939d217a8830a240d9e342cf5e2aeb8f57f946e97984466fde7a0",
-  "manifestSha256": "89a4d8879efce023aa1646d9b1fb3abbe1a5fc927ae2f4110486c80e7ec4c2c1",
+  "revision": "fa4f24b2afe792f7869183708c1c18c95d3a5a8a",
+  "sourceHash": "1643a6fb07ebb7751dae55f6cced936d67d3f4fecb9b129ae4ed0c9db0306a3f",
+  "manifestSha256": "84fc8642d00d9ae6e7cc6844f6ce05d4e640c47b5556ea719fe20434ab5038e9",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "1768021b1507b58d61211ac081782aca208695998173732a8f66fdcbfc4c5020"
+      "sha256": "989de732376c5c8add10f5542b9df79bbb4ac46610b7da64aa105c5d5936adca"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "47ebb12f50e9ad27a7b7d7b6db20ef9faa25e880da8895091aadfeaa4f57b626"
+      "sha256": "7c18cb206856f6e833041ceaf89a0d4e8ba50fc7fb388a4e913d715a189c714f"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -585,7 +585,7 @@
     },
     {
       "path": "runtime/engine/runtime/sell-client.js",
-      "sha256": "f56126314b62a15e2ac4f79a0df5c874c53e798f40d96b4b3091882a539ea489"
+      "sha256": "44800875d441bcf6c91cbce095255c317043311f22c244c4337230ed36fa3a00"
     },
     {
       "path": "runtime/engine/runtime/sell.php",
@@ -593,7 +593,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "0cff994803279d6b3e719fe7bdc19b31f35cf28e09889b728f5746af179e015b"
+      "sha256": "f8dc6d41bb666157cf7e99ebb4e55961948265950bd3058b46046037caf6bfb6"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -601,7 +601,7 @@
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
-      "sha256": "8fef86258b735849cf225133ccd37405740376b9055052173e22522a9bac1d77"
+      "sha256": "62b5796c5661b2193e4c04365497fda54efca90578ca63cca9f7454b2471de96"
     },
     {
       "path": "runtime/engine/runtime/storage.php",
@@ -677,7 +677,7 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "29564ff37e896bd868629f558f88e8b8e094758081d235c4470e1482a15b9853"
+      "sha256": "593803dff3e77652678d7234244fdd7a5e036209d291a11c1f4f61d4345344b8"
     },
     {
       "path": "runtime/engine/shared/d1-broker.php",
@@ -1297,7 +1297,7 @@
     },
     {
       "path": "runtime/tests/spacefast-sdk.test.ts",
-      "sha256": "0c8dc480cac98ad3f4720ea06496a5df53d95989ca58c9385091119237d6cdeb"
+      "sha256": "9f081a64b744e544959b5c4dd7bae8c06c3b01d9e4f2cb1d710080fcef1c9720"
     },
     {
       "path": "runtime/tests/static-zip.test.ts",

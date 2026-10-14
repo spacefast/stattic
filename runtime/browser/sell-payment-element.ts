@@ -88,9 +88,11 @@ export function registerSellPaymentElement() {
             mode.hidden = !state.product;
             if (state.product) {
               details.textContent = `${state.product.name} · ${formatSellPrice(state.product.price)}`;
-              mode.textContent = state.product.testMode
-                ? "Test purchase · no real payment"
-                : "Live purchase";
+              mode.textContent = state.product.demoMode
+                ? "Demo purchase · payments not connected"
+                : state.product.testMode
+                  ? "Test purchase · no real payment"
+                  : "Live purchase";
               mode.className = state.product.testMode ? "mode test" : "mode";
             }
             status.textContent = state.message ?? "";

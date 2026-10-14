@@ -1,7 +1,7 @@
 {
-  "revision": "87873e3f1806479a8a92bad4fe1b5dd5e04ed998",
-  "sourceHash": "4f5116d5e60afc411fac82d46ce28fc5bc2b22ef4b1ce9d44bc3f223afdb99d7",
-  "manifestSha256": "d0c375c5f1ac4c4c6575255683cbff56a504cd08c8d3f3ce0264921ce1656770",
+  "revision": "e9c779e94b0b0e03062888119bc2e980b408ae89",
+  "sourceHash": "e047867ab941bd351e08cdb76ec1a0184005f7bbc89ce75831c6c1f14b087a4d",
+  "manifestSha256": "3023241d3c3b27ceb06c93c3fcedb6f3feb9d9f000b8efe976d50795ecd78c64",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "dfdb586872124aa395bf3e439c2b1681e78cfa8fcb92141210eecc59f8f90953"
+      "sha256": "da751603f52c0f1956d70e8a47eec1b0c88ec09e656c27f29ffe345db3b0acc5"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "a1d5ea4ed82d271d5797a1f35b4a70c62d8edb5b5074abe1ef27bf7d284fcf8b"
+      "sha256": "83b817a42e04c6c7558382db917e0b5467f7860c5b98a12cb5cb2310b2eded2e"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -401,11 +401,11 @@
     },
     {
       "path": "runtime/browser/sell-checkout-element.js",
-      "sha256": "a58f3131102848c3eb404cad0b210485e6aaaab34ddff56638d5f5572d469159"
+      "sha256": "0046833804a0dccc2e62b315b66e59841ff52d7e29dde360887d06e7725f3c11"
     },
     {
       "path": "runtime/browser/sell-payment-element.ts",
-      "sha256": "6da49d08a22fd02605859570e142cc423cf9a5335b5ef686b087a3cb49fd899c"
+      "sha256": "6d9821bd6b5042bba55321f7a644c0297c13be18a340629054d524dd935cf942"
     },
     {
       "path": "runtime/bunfig.toml",
@@ -585,7 +585,7 @@
     },
     {
       "path": "runtime/engine/runtime/sell-client.js",
-      "sha256": "44800875d441bcf6c91cbce095255c317043311f22c244c4337230ed36fa3a00"
+      "sha256": "6e150d71b7586612f1d6eff4c010cd9f6a36f8056c64c6d3fa30a06292e6f5c6"
     },
     {
       "path": "runtime/engine/runtime/sell.php",

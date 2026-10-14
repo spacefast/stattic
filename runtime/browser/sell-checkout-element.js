@@ -1,4 +1,8 @@
-import { sellCheckoutStatusSchema } from "../../packages/common/src/contracts/sell.js";
+import {
+  sellBrowserProductRequestSchema,
+  sellCheckoutStatusSchema,
+  sellPublicProductSchema,
+} from "../../packages/common/src/contracts/sell.js";
 
 function startCheckoutStatus(root) {
   const title = root.getElementById("status-title");
@@ -9,6 +13,50 @@ function startCheckoutStatus(root) {
   const download = root.getElementById("download");
   const recover = root.getElementById("recover");
   const query = new URLSearchParams(location.search);
+  if (query.get("demo") === "1" && !query.has("sessionId") && !query.has("purchaseToken")) {
+    const lifecycle = new AbortController();
+    title.textContent = "Checking demo checkout";
+    copy.textContent = "Checking this store's payment settings.";
+    product.textContent = "";
+    badge.hidden = true;
+    retry.hidden = true;
+    async function checkDemo() {
+      try {
+        const selectors = sellBrowserProductRequestSchema.parse({
+          productKey: query.get("productKey"),
+          pagePath: location.pathname,
+        });
+        const response = await fetch("/__spacefast/sell/product", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          referrerPolicy: "no-referrer",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify(selectors),
+          signal: AbortSignal.any([lifecycle.signal, AbortSignal.timeout(15_000)]),
+        });
+        if (!response.ok) throw new Error("Product unavailable.");
+        const details = sellPublicProductSchema.parse((await response.json()).data);
+        if (details.key !== selectors.productKey || details.demoMode !== true || !details.testMode)
+          throw new Error("This product does not use demo checkout.");
+        if (lifecycle.signal.aborted) return;
+        title.textContent = "Demo checkout complete";
+        copy.textContent =
+          "No payment was taken and no order was placed. Connect payments to test a purchase.";
+        product.textContent = details.name;
+        badge.hidden = false;
+        badge.textContent = "Demo · payments not connected";
+        document.title = "Demo checkout complete";
+      } catch {
+        if (lifecycle.signal.aborted) return;
+        title.textContent = "Demo checkout unavailable";
+        copy.textContent = "Return to the product page to start checkout.";
+        document.title = "Demo checkout unavailable";
+      }
+    }
+    void checkDemo();
+    return () => lifecycle.abort();
+  }
   const endpoint =
     "/__spacefast/sell/status?" +
     new URLSearchParams({

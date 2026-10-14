@@ -31,8 +31,6 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
       adminUrl,
       testWorkerDatabaseName(runId, 1),
     );
-    process.env.SPACEFAST_TEST_REDIS_URL =
-      process.env.SPACEFAST_TEST_REDIS_ADMIN_URL ?? "redis://127.0.0.1:26379";
     cleanup.defer(() => dropTestDatabases({ adminUrl, runId, workerCount: 1 }));
   }
   const runtimeBinary = process.env.SPACEFAST_RUNTIME_BIN;

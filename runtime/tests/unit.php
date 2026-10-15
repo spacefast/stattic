@@ -3037,6 +3037,27 @@ check(
     'zero dump: issues a bounded read without an order it cannot resolve'
 );
 check(
+    _stattic_zero_db_count_operation($dumpTables['notes'])
+        === '{"sql":"SELECT COUNT(*) AS `row_count` FROM `sf_spc_zero_dump_notes_a7a32efcd0`"}',
+    'zero dump: counts the scoped table exactly'
+);
+check(_stattic_zero_db_count_value([['row_count' => 3]]) === 3, 'zero dump: reads a native integer count');
+check(_stattic_zero_db_count_value([['row_count' => '1203']]) === 1203, 'zero dump: reads a decimal-text count');
+check(_stattic_zero_db_count_value([]) === null, 'zero dump: no count row is a failed count, not zero');
+check(
+    _stattic_zero_db_estimate_operation(['notes' => $dumpTables['notes'], 'todos' => $dumpTables['todos']])
+        === '{"sql":"SELECT TABLE_NAME AS `table_name`, TABLE_ROWS AS `table_rows` FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (?, ?)","params":["sf_spc_zero_dump_notes_a7a32efcd0","sf_spc_zero_dump_todos_b305997783"]}',
+    'zero dump: reads every scoped table\'s estimate in one statement, names as parameters'
+);
+check(
+    _stattic_zero_db_needs_exact_count(null) && _stattic_zero_db_needs_exact_count(49999) && !_stattic_zero_db_needs_exact_count(50000),
+    'zero dump: counts exactly below the estimate threshold, or when there is no estimate'
+);
+check(_stattic_zero_db_row_total(12, 9) === [12, true], 'zero dump: an exact count wins over the estimate');
+check(_stattic_zero_db_row_total(null, 1200000) === [1200000, false], 'zero dump: without a count a large estimate stands in, marked');
+check(_stattic_zero_db_row_total(null, 0) === [null, true], 'zero dump: a small estimate never stands in for a count that did not finish');
+check(_stattic_zero_db_row_total(null, null) === [null, true], 'zero dump: with neither the total is unknown');
+check(
     _stattic_zero_db_export_operation($dumpTables['notes'], 2, ['createdAt' => '2026-01-01T00:00:00.000Z', 'id' => '7'])
         === '{"sql":"SELECT * FROM `sf_spc_zero_dump_notes_a7a32efcd0` WHERE (`note_created_at` > ? OR (`note_created_at` = ? AND `note_id` > ?)) ORDER BY `note_created_at` ASC, `note_id` ASC LIMIT 3","params":["2026-01-01T00:00:00.000Z","2026-01-01T00:00:00.000Z","7"]}',
     'zero export: keysets over declared legacy physical columns'
@@ -3098,7 +3119,7 @@ check(
     'zero dump: every out-of-scope name is reported'
 );
 
-foreach ([['', 25], ['0', 25], ['abc', 25], ['-5', 25], ['7', 7], ['100', 100], ['5000', 100]] as [$raw, $expected]) {
+foreach ([['', 25], ['0', 0], ['abc', 25], ['-5', 25], ['7', 7], ['100', 100], ['5000', 100]] as [$raw, $expected]) {
     $_GET = $raw === '' ? [] : ['limit' => $raw];
     check(_stattic_zero_db_dump_limit() === $expected, "zero dump: limit '{$raw}' resolves to {$expected}");
 }

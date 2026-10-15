@@ -154,6 +154,111 @@ function _stattic_db_broker_set_read_deadline_ms(?int $deadlineMs): void
 }
 
 /**
+ * The server's own limits on the bound link: how long one statement may run and
+ * how long it may wait for a metadata lock. Unlike the read deadline these never
+ * touch the socket, so narrowing them for a few statements leaves the pooled
+ * link's read timeout alone; a socket timeout would outlive the request.
+ *
+ * @return array{statement:string,lock:string}|null the current values, as the server reports them
+ */
+function _stattic_db_broker_statement_limits(): ?array
+{
+    $link = _stattic_db_broker_connection();
+    if (!$link instanceof mysqli) {
+        return null;
+    }
+    $variable = _stattic_db_broker_statement_limit_variable($link->server_info);
+    $mysql = $variable === 'max_execution_time';
+    $result = $link->query(
+        "SELECT @@SESSION.{$variable} AS statement_limit, @@SESSION.lock_wait_timeout AS lock_limit"
+            . ($mysql ? ', @@SESSION.information_schema_stats_expiry AS stats_expiry' : ''),
+    );
+    $row = $result instanceof mysqli_result ? $result->fetch_assoc() : null;
+    if (
+        !is_array($row)
+        || !is_numeric($row['statement_limit'] ?? null)
+        || !is_numeric($row['lock_limit'] ?? null)
+        || ($mysql && !is_numeric($row['stats_expiry'] ?? null))
+    ) {
+        return null;
+    }
+
+    return [
+        'statement' => (string) $row['statement_limit'],
+        'lock' => (string) $row['lock_limit'],
+        'stats' => $mysql ? (string) $row['stats_expiry'] : null,
+    ];
+}
+
+/**
+ * Narrows the bound link's statement and metadata-lock limits. On MySQL it also
+ * reads table statistics fresh: MySQL otherwise serves information_schema row
+ * estimates from a cache up to a day old. MariaDB keeps no such cache.
+ */
+function _stattic_db_broker_limit_statements(int $statementMs, int $lockWaitSeconds): bool
+{
+    $link = _stattic_db_broker_connection();
+    if (!$link instanceof mysqli) {
+        return false;
+    }
+    $variable = _stattic_db_broker_statement_limit_variable($link->server_info);
+    // MariaDB counts seconds, MySQL milliseconds.
+    $statement = $variable === 'max_statement_time'
+        ? sprintf('%.3F', max(1, $statementMs) / 1000)
+        : (string) max(1, $statementMs);
+
+    return _stattic_db_broker_apply_statement_limits(
+        $link,
+        $variable,
+        $statement,
+        (string) max(1, $lockWaitSeconds),
+        $variable === 'max_execution_time' ? '0' : null,
+    );
+}
+
+/** @param array{statement:string,lock:string,stats:?string} $limits values from _stattic_db_broker_statement_limits() */
+function _stattic_db_broker_restore_statement_limits(array $limits): bool
+{
+    $link = _stattic_db_broker_connection();
+    if (!$link instanceof mysqli) {
+        return false;
+    }
+
+    return _stattic_db_broker_apply_statement_limits(
+        $link,
+        _stattic_db_broker_statement_limit_variable($link->server_info),
+        $limits['statement'],
+        $limits['lock'],
+        $limits['stats'],
+    );
+}
+
+/** MariaDB names the server's statement limit differently, and counts it in seconds. */
+function _stattic_db_broker_statement_limit_variable(string $serverInfo): string
+{
+    return stripos($serverInfo, 'mariadb') !== false ? 'max_statement_time' : 'max_execution_time';
+}
+
+/**
+ * A fixed statement the broker writes itself, never tenant SQL, so it skips the
+ * read-only classifier; the values are numbers or it does not run.
+ */
+function _stattic_db_broker_apply_statement_limits(
+    mysqli $link,
+    string $variable,
+    string $statement,
+    string $lock,
+    ?string $statsExpiry,
+): bool {
+    if (!is_numeric($statement) || !is_numeric($lock) || ($statsExpiry !== null && !is_numeric($statsExpiry))) {
+        return false;
+    }
+    $stats = $statsExpiry === null ? '' : ", SESSION information_schema_stats_expiry = {$statsExpiry}";
+
+    return $link->query("SET SESSION {$variable} = {$statement}, SESSION lock_wait_timeout = {$lock}{$stats}") !== false;
+}
+
+/**
  * Execute one operation and return the response JSON. The analogue of db.rs
  * `handle_db_operation`: raw JSON text in, one JSON object out, never a thrown
  * exception, byte-identical output for every input the two engines share.
@@ -1180,7 +1285,7 @@ function _stattic_db_broker_session_pin(?int $readDeadlineMs, string $serverInfo
     if ($readDeadlineMs === null) {
         return STATTIC_DB_SESSION_PIN;
     }
-    if (stripos($serverInfo, 'mariadb') !== false) {
+    if (_stattic_db_broker_statement_limit_variable($serverInfo) === 'max_statement_time') {
         $milliseconds = str_pad((string) ($readDeadlineMs % 1000), 3, '0', STR_PAD_LEFT);
         $seconds = intdiv($readDeadlineMs, 1000) . '.' . $milliseconds;
         return STATTIC_DB_SESSION_PIN . ', SESSION max_statement_time = ' . $seconds;

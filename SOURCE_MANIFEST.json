@@ -1,7 +1,7 @@
 {
-  "revision": "c994a2e8cface18ea4850a9f62fb7ebcaaecbd9b",
-  "sourceHash": "698118cd7cce4afdc2934ef47e42db6a8779854c9714fc263a453ec28cca06f2",
-  "manifestSha256": "ca3e3aa5f2c7e1def1d28834155d1e0565997ece1aacebc16bb5b308ee6dc9fb",
+  "revision": "274193fc47acb6f9816d6a522afa80c2aebf871a",
+  "sourceHash": "c52f0e862b160fa31294d0dc5faff5cae45c799a5da59e20c595cfa779a37968",
+  "manifestSha256": "946fbf93af0e66e11539c2ef26b1aa780fe8f6f3be937f88e35748f5ca1ccd77",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "fa6dc50398b04ca27136f3660e436f6e06288b67059311c8cd8c2c9ca0687de0"
+      "sha256": "1de9119efe801c1ad5672f236c4b9d2bd1c606de05f7c0317fb1b3fe9038506f"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "56020a4331540535f83f66862b671cd031e322f116c1cc3a29285080e7e8fddb"
+      "sha256": "c72fe6f1aa3ff4779ca8684864ce08d783dac27decedcf2c145e2342ab39f770"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -485,7 +485,7 @@
     },
     {
       "path": "runtime/engine/admin/zero-db.php",
-      "sha256": "26e71e899d53787208433cba99143e1e75d5e540498697d7e30b22e030bf4e5a"
+      "sha256": "3dce6271e05180a387e8e469a4c8e3a2ff1b7adfa2162ef23a9296b1a50039ab"
     },
     {
       "path": "runtime/engine/entrypoints/blob.php",
@@ -689,7 +689,7 @@
     },
     {
       "path": "runtime/engine/shared/db-broker.php",
-      "sha256": "2f2626fd6f91bc44d65fa3272b327b90d45f6e8832d60acca3fba2c666d5b510"
+      "sha256": "e60fe75d07150b6bbb769b295cbc62d02d82471c26a7558ff8e84701950d103a"
     },
     {
       "path": "runtime/engine/shared/design-upload.generated.php",
@@ -1045,7 +1045,7 @@
     },
     {
       "path": "runtime/tests/db-broker-cli.php",
-      "sha256": "8f7fc402d881fd89010e81fd460be34584ae55a33623039ceac421cfe1ca70d3"
+      "sha256": "62fe77559c18c878c8012bf2e8d86682efc6bbea25b8be9f73a0dcefc07c5388"
     },
     {
       "path": "runtime/tests/db-broker-corpus.ts",
@@ -1053,7 +1053,7 @@
     },
     {
       "path": "runtime/tests/db-broker-mariadb.test.ts",
-      "sha256": "fd45031fc054bb08fd7d50f0cb83149dd7902dd3c1d557725c5656bfd3171e6f"
+      "sha256": "aa5755a17c7f2701e4f5a0ff4e12a984d4930584ec8829e14de9cf3c2e9f89fa"
     },
     {
       "path": "runtime/tests/db-broker.test.ts",
@@ -1329,7 +1329,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "bc6879d63deb6c1f1a87a1715a4c475f686707deee55ac7a98ac39b9f8869ee9"
+      "sha256": "52d7c374e7b6aec03a1b2c4477bb9a75e3389005dff19c3b8a51bf8b4f0f1ba7"
     },
     {
       "path": "runtime/tests/uploads.test.ts",
@@ -1361,7 +1361,7 @@
     },
     {
       "path": "runtime/tests/zero-db-dump.test.ts",
-      "sha256": "5b2231435af3ec2b1bf5b45a8c151291be348b59f551451b5b3896c897d516c3"
+      "sha256": "74845f0b1ee76f5a8a868c06bc58f2a86707c6dfbff98c0577ad83ce59ad9b1c"
     },
     {
       "path": "runtime/tests/zero-runtime.test.ts",

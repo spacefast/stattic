@@ -29,6 +29,17 @@ const STATTIC_ZERO_DB_EXPORT_ROWS_DEFAULT = 500;
 const STATTIC_ZERO_DB_EXPORT_ROWS_MAX = 1000;
 const STATTIC_ZERO_DB_EXPORT_PAGE_MAX_BYTES = 16777216; // 16 MiB
 const STATTIC_ZERO_DB_READ_DEADLINE_MS = 30000;
+// A dump's row totals: the most one count may run, the most it may wait for a
+// metadata lock, and the budget all of them share. The budget stays well inside
+// the 10 s an MCP read waits for counts.
+const STATTIC_ZERO_DB_COUNT_DEADLINE_MS = 2500;
+const STATTIC_ZERO_DB_COUNT_LOCK_WAIT_SECONDS = 1;
+const STATTIC_ZERO_DB_COUNT_BUDGET_MS = 6000;
+// A count may also wait out the lock limit, so it needs at least that much left.
+const STATTIC_ZERO_DB_COUNT_MIN_MS = 1000;
+// Up to this many estimated rows a table is counted exactly; past it, the
+// database's own estimate stands in, as phpMyAdmin's MaxExactCount does.
+const STATTIC_ZERO_DB_EXACT_COUNT_MAX = 50000;
 
 function _stattic_zero_db_dump(string $privateRoot, string $spaceId, string $versionId): void
 {
@@ -60,31 +71,24 @@ function _stattic_zero_db_dump(string $privateRoot, string $spaceId, string $ver
         _stattic_zero_db_dump_too_large('This Zero database has more tables than one dump returns; request a single table.');
     }
 
-    $dumped = [];
     $bytes = 0;
+    // The total travels with every table so a bounded read can say how much it
+    // left out; `limit=0` asks for the totals alone. Only a caller that asks
+    // for totals gets them: an older control plane parses this answer strictly,
+    // so it keeps the shape it knows and never pays for the counts.
+    $withCounts = _stattic_zero_db_dump_wants_counts();
+    $totals = $withCounts ? _stattic_zero_db_dump_counts($resolved['config'], $tables, $bytes) : [];
+    $dumped = [];
     foreach ($tables as $name => $table) {
-        $response = _stattic_zero_db_read_operation($resolved['config'], _stattic_zero_db_dump_operation($table, $limit));
-        $bytes += strlen($response);
-        if ($bytes > STATTIC_ZERO_DB_DUMP_MAX_BYTES) {
-            _stattic_zero_db_dump_too_large('This Zero database dump exceeds the response size limit; request a single table or a smaller limit.');
+        $rows = $limit === 0
+            ? []
+            : _stattic_zero_db_dump_rows($resolved['config'], $name, _stattic_zero_db_dump_operation($table, $limit), $bytes);
+        if (!$withCounts) {
+            $dumped[] = ['name' => $name, 'rows' => $rows];
+            continue;
         }
-        // JSON_BIGINT_AS_STRING: PHP has no integer for an unsigned BIGINT past
-        // 2^63; decoding to float would round it away.
-        $decoded = json_decode($response, true, 512, JSON_BIGINT_AS_STRING);
-        if (!is_array($decoded) || ($decoded['ok'] ?? null) !== true || !is_array($decoded['rows'] ?? null)) {
-            // 500 rather than a retryable status: no broker refusal that lands
-            // here clears by asking again.
-            _stattic_problem_response(
-                500,
-                'zero_db_dump_failed',
-                'Zero database dump failed.',
-                ['details' => [
-                    'table' => $name,
-                    'zero_db_code' => is_array($decoded) && is_string($decoded['code'] ?? null) ? $decoded['code'] : null,
-                ]],
-            );
-        }
-        $dumped[] = ['name' => $name, 'rows' => array_values($decoded['rows'])];
+        [$rowCount, $exact] = $totals[$name];
+        $dumped[] = ['name' => $name, 'rowCount' => $rowCount, 'rowCountExact' => $exact, 'rows' => $rows];
     }
 
     _stattic_zero_db_dump_response($versionId, $schemaHash, $dumped);
@@ -238,10 +242,7 @@ function _stattic_zero_db_resolve_scoped(string $versionRoot, string $spaceId): 
 // document, which every caller treats as a failed read.
 function _stattic_zero_db_read_operation(array $config, string $operation): string
 {
-    $env = _stattic_zero_runner_base_env($config);
-    _stattic_db_broker_set_read_deadline_ms(_stattic_zero_db_read_deadline_ms());
-    _stattic_db_broker_bind_env($env);
-    _stattic_db_broker_grant(['db.read']);
+    _stattic_zero_db_bind_read($config);
     $answer = _stattic_db_broker_execute($operation);
     // A dump reads many tables on one link, so the rollback lands per operation,
     // not per route: no read here opens a transaction, and one that did must not
@@ -249,6 +250,13 @@ function _stattic_zero_db_read_operation(array $config, string $operation): stri
     _stattic_db_broker_rollback_open_transaction();
 
     return $answer;
+}
+
+function _stattic_zero_db_bind_read(array $config): void
+{
+    _stattic_db_broker_set_read_deadline_ms(_stattic_zero_db_read_deadline_ms());
+    _stattic_db_broker_bind_env(_stattic_zero_runner_base_env($config));
+    _stattic_db_broker_grant(['db.read']);
 }
 
 function _stattic_zero_db_read_deadline_ms(): int
@@ -345,6 +353,234 @@ function _stattic_zero_db_export_operation(array $table, int $limit, ?array $aft
 }
 
 /**
+ * One read through the broker, decoded, with its bytes charged against the
+ * dump's response budget.
+ *
+ * @return list<array<string,mixed>>
+ */
+function _stattic_zero_db_dump_rows(array $config, string $name, string $operation, int &$bytes): array
+{
+    $response = _stattic_zero_db_read_operation($config, $operation);
+    $bytes += strlen($response);
+    if ($bytes > STATTIC_ZERO_DB_DUMP_MAX_BYTES) {
+        _stattic_zero_db_dump_too_large('This Zero database dump exceeds the response size limit; request a single table or a smaller limit.');
+    }
+    // JSON_BIGINT_AS_STRING: PHP has no integer for an unsigned BIGINT past
+    // 2^63; decoding to float would round it away.
+    $decoded = json_decode($response, true, 512, JSON_BIGINT_AS_STRING);
+    if (!is_array($decoded) || ($decoded['ok'] ?? null) !== true || !is_array($decoded['rows'] ?? null)) {
+        _stattic_zero_db_dump_failed(
+            $name,
+            is_array($decoded) && is_string($decoded['code'] ?? null) ? $decoded['code'] : null,
+        );
+    }
+
+    return array_values($decoded['rows']);
+}
+
+// 500 rather than a retryable status: no broker refusal that lands here clears
+// by asking again.
+function _stattic_zero_db_dump_failed(string $name, ?string $code): never
+{
+    _stattic_problem_response(
+        500,
+        'zero_db_dump_failed',
+        'Zero database dump failed.',
+        ['details' => ['table' => $name, 'zero_db_code' => $code]],
+    );
+}
+
+/**
+ * Every table's total, read before any rows, as [count, exact]. One cheap read
+ * takes the database's own estimate for every table; a table estimated below
+ * STATTIC_ZERO_DB_EXACT_COUNT_MAX is then counted exactly, and a larger one keeps
+ * its estimate, so a big table never costs a full scan. A count that does not
+ * finish in time falls back to the estimate; a table with neither is null.
+ *
+ * Every read here is bounded by what is left of one shared budget, through the
+ * server's own statement and metadata-lock limits, narrowed on the dump's
+ * ordinary link and put back before the rows read; both MySQL and MariaDB
+ * enforce them. Never a shorter socket deadline: the broker's link is
+ * persistent, and a pooled socket keeps the read timeout it was opened with, so
+ * a short one would cut every later read on that worker.
+ *
+ * @param array<string,array{physical:string}> $tables
+ * @return array<string,array{0:?int,1:bool}>
+ */
+function _stattic_zero_db_dump_counts(array $config, array $tables, int &$bytes): array
+{
+    $deadlineMs = min(STATTIC_ZERO_DB_COUNT_DEADLINE_MS, _stattic_zero_db_read_deadline_ms());
+    $stopAt = hrtime(true) + STATTIC_ZERO_DB_COUNT_BUDGET_MS * 1_000_000;
+    $totals = array_fill_keys(array_keys($tables), [null, true]);
+    _stattic_zero_db_bind_read($config);
+    // Without the limits a read could run for the whole read deadline, so a link
+    // that will not report them gets no totals at all.
+    $prior = _stattic_db_broker_statement_limits();
+    if ($prior === null) {
+        return $totals;
+    }
+    // A bounded read, or false when the budget is spent or cannot be applied.
+    $bound = static function () use ($stopAt, $deadlineMs): bool {
+        $remainingMs = intdiv($stopAt - hrtime(true), 1_000_000);
+        return $remainingMs >= STATTIC_ZERO_DB_COUNT_MIN_MS
+            && _stattic_db_broker_limit_statements(min($deadlineMs, $remainingMs), STATTIC_ZERO_DB_COUNT_LOCK_WAIT_SECONDS);
+    };
+    try {
+        $estimates = $bound() ? _stattic_zero_db_dump_estimates($config, $tables, $bytes) : [];
+        foreach ($tables as $name => $table) {
+            $estimate = $estimates[$name] ?? null;
+            $count = _stattic_zero_db_needs_exact_count($estimate) && $bound()
+                ? _stattic_zero_db_dump_count($config, $table, $bytes)
+                : null;
+            $totals[$name] = _stattic_zero_db_row_total($count, $estimate);
+        }
+    } finally {
+        // A link that keeps the narrowed limits would cut the rows read; a fresh
+        // acquisition resets the session and re-applies the read deadline.
+        if (!_stattic_db_broker_restore_statement_limits($prior)) {
+            _stattic_db_broker_close();
+        }
+    }
+
+    return $totals;
+}
+
+/** A missing or small estimate is worth an exact count; a large one stands in. */
+function _stattic_zero_db_needs_exact_count(?int $estimate): bool
+{
+    return $estimate === null || $estimate < STATTIC_ZERO_DB_EXACT_COUNT_MAX;
+}
+
+/**
+ * The exact count when there is one; else a large table's estimate, marked as
+ * such. A small estimate never stands in for a count that did not finish: stale
+ * statistics can say 0 for a table that has since filled up.
+ *
+ * @return array{0:?int,1:bool} [rowCount, exact]
+ */
+function _stattic_zero_db_row_total(?int $count, ?int $estimate): array
+{
+    if ($count !== null) {
+        return [$count, true];
+    }
+    if ($estimate !== null && !_stattic_zero_db_needs_exact_count($estimate)) {
+        return [$estimate, false];
+    }
+
+    return [null, true];
+}
+
+/**
+ * The database's own row estimate for every table, in one read. A table the
+ * statistics do not cover (or a refused read) is simply absent.
+ *
+ * @param array<string,array{physical:string}> $tables
+ * @return array<string,int>
+ */
+function _stattic_zero_db_dump_estimates(array $config, array $tables, int &$bytes): array
+{
+    $response = _stattic_zero_db_read_operation($config, _stattic_zero_db_estimate_operation($tables));
+    $bytes += strlen($response);
+    $decoded = json_decode($response, true);
+    if (!is_array($decoded) || ($decoded['ok'] ?? null) !== true || !is_array($decoded['rows'] ?? null)) {
+        return [];
+    }
+    $byPhysical = [];
+    foreach ($decoded['rows'] as $row) {
+        if (!is_array($row) || !is_string($row['table_name'] ?? null)) {
+            continue;
+        }
+        $estimate = _stattic_zero_db_nonnegative_int($row['table_rows'] ?? null);
+        if ($estimate !== null) {
+            $byPhysical[$row['table_name']] = $estimate;
+        }
+    }
+    $estimates = [];
+    foreach ($tables as $name => $table) {
+        if (isset($byPhysical[$table['physical']])) {
+            $estimates[$name] = $byPhysical[$table['physical']];
+        }
+    }
+
+    return $estimates;
+}
+
+/**
+ * The scoped tables' estimates from the server's statistics. Only physical names
+ * the engine derived reach this SQL, and they travel as parameters.
+ *
+ * @param array<string,array{physical:string}> $tables
+ */
+function _stattic_zero_db_estimate_operation(array $tables): string
+{
+    $physical = array_values(array_map(static fn (array $table): string => $table['physical'], $tables));
+    $encoded = json_encode(
+        [
+            'sql' => 'SELECT TABLE_NAME AS `table_name`, TABLE_ROWS AS `table_rows` FROM information_schema.TABLES'
+                . ' WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('
+                . implode(', ', array_fill(0, count($physical), '?')) . ')',
+            'params' => $physical,
+        ],
+        JSON_UNESCAPED_SLASHES,
+    );
+
+    return is_string($encoded) ? $encoded : '{}';
+}
+
+/**
+ * A count the broker refuses, or that outruns its deadline on a large table,
+ * leaves the total unknown rather than failing the rows read beside it.
+ *
+ * @param array{physical:string} $table
+ */
+function _stattic_zero_db_dump_count(array $config, array $table, int &$bytes): ?int
+{
+    $response = _stattic_zero_db_read_operation($config, _stattic_zero_db_count_operation($table));
+    $bytes += strlen($response);
+    $decoded = json_decode($response, true);
+    if (!is_array($decoded) || ($decoded['ok'] ?? null) !== true || !is_array($decoded['rows'] ?? null)) {
+        return null;
+    }
+
+    return _stattic_zero_db_count_value(array_values($decoded['rows']));
+}
+
+/**
+ * Exact, not `information_schema`'s estimate: an estimate that says rows exist
+ * beside a dump that shows none is the confusion this count is here to end.
+ *
+ * @param array{physical:string} $table
+ */
+function _stattic_zero_db_count_operation(array $table): string
+{
+    $encoded = json_encode(
+        ['sql' => 'SELECT COUNT(*) AS `row_count` FROM ' . _stattic_zero_db_quote($table['physical'])],
+        JSON_UNESCAPED_SLASHES,
+    );
+
+    return is_string($encoded) ? $encoded : '{}';
+}
+
+/** @param list<array<string,mixed>> $rows */
+function _stattic_zero_db_count_value(array $rows): ?int
+{
+    return _stattic_zero_db_nonnegative_int($rows[0]['row_count'] ?? null);
+}
+
+function _stattic_zero_db_nonnegative_int(mixed $value): ?int
+{
+    if (is_int($value) && $value >= 0) {
+        return $value;
+    }
+    // A driver without native integer fetch answers in decimal text.
+    if (is_string($value) && ctype_digit($value)) {
+        return (int) $value;
+    }
+
+    return null;
+}
+
+/**
  * No part of this SQL is caller-supplied text: identifiers were validated as bare
  * identifiers before arriving and the limit is a literal integer.
  *
@@ -392,11 +628,20 @@ function _stattic_zero_db_requested_table(): ?string
     return $raw;
 }
 
-/** Clamped, not refused: the contract's bounds are enforced at the control plane. */
+/** A control plane that understands row totals asks for them with `counts=1`. */
+function _stattic_zero_db_dump_wants_counts(): bool
+{
+    return ($_GET['counts'] ?? null) === '1';
+}
+
+/**
+ * Clamped, not refused: the contract's bounds are enforced at the control plane.
+ * `0` is a real answer — every table's row count and none of its rows.
+ */
 function _stattic_zero_db_dump_limit(): int
 {
     $raw = $_GET['limit'] ?? null;
-    if (!is_string($raw) || !ctype_digit($raw) || (int) $raw < 1) {
+    if (!is_string($raw) || !ctype_digit($raw)) {
         return STATTIC_ZERO_DB_DUMP_ROWS_DEFAULT;
     }
 

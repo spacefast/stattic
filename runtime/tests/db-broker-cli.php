@@ -58,6 +58,23 @@ switch ((string) ($request['action'] ?? 'operations')) {
         $out['migrate'] = _stattic_db_broker_apply_migrations((string) ($request['path'] ?? ''));
         break;
 
+    case 'statement_limits':
+        // Narrows the server's statement limits for `limited`, puts them back,
+        // then runs `after` on the same process and link.
+        $run = static fn (array $operations): array => array_map(
+            static fn ($operation) => _stattic_db_broker_execute((string) $operation),
+            $operations,
+        );
+        $prior = _stattic_db_broker_statement_limits();
+        $out['narrowed'] = _stattic_db_broker_limit_statements(
+            (int) ($request['statementMs'] ?? 0),
+            (int) ($request['lockWaitSeconds'] ?? 0),
+        );
+        $out['limited'] = $run($request['limited'] ?? []);
+        $out['restored'] = $prior !== null && _stattic_db_broker_restore_statement_limits($prior);
+        $out['after'] = $run($request['after'] ?? []);
+        break;
+
     case 'abandon_transaction':
         // Opens a transaction, writes, and leaves without committing. The
         // `hard` variant dies before PHP's shutdown functions run, which only

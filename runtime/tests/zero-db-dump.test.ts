@@ -380,10 +380,11 @@ test("rows come back for the capsule's scoped tables, ordered and bounded by the
     "INSERT INTO sf_spc_zero_dump_live_notes_1f76cb914b (note_id, note_created_at, note_title) VALUES (1, '2026-01-01T00:00:00.000Z', 'first'), (2, '2026-01-01T00:00:00.000Z', 'second'), (3, '2026-01-02T00:00:00.000Z', 'third')",
   );
 
-  const all = await dumpOk(runtime, versionId, {}, spaceId);
+  const all = await dumpOk(runtime, versionId, { counts: "1" }, spaceId);
   expect(all.versionId).toBe(versionId);
   expect(all.schemaHash).toBe(SCHEMA_HASH);
   expect(all.tables.map((table) => table.name)).toEqual(["notes"]);
+  expect(all.tables[0]?.rowCount).toBe(3);
   expect(all.tables[0]?.rows).toEqual([
     { note_id: 1, note_created_at: "2026-01-01T00:00:00.000Z", note_title: "first" },
     { note_id: 2, note_created_at: "2026-01-01T00:00:00.000Z", note_title: "second" },
@@ -409,13 +410,32 @@ test("rows come back for the capsule's scoped tables, ordered and bounded by the
   expect(mysql.exec("SELECT COUNT(*) FROM sf_spc_zero_dump_live_notes_1f76cb914b")).toBe("3");
 
   // Naming the table answers with that table alone; the limit bounds rows, not
-  // tables.
-  const named = await dumpOk(runtime, versionId, { table: "notes", limit: "2" }, spaceId);
+  // tables, and never the count beside them.
+  const named = await dumpOk(
+    runtime,
+    versionId,
+    { table: "notes", limit: "2", counts: "1" },
+    spaceId,
+  );
   expect(named.tables.map((table) => table.name)).toEqual(["notes"]);
+  expect(named.tables[0]?.rowCount).toBe(3);
   expect(named.tables[0]?.rows).toEqual([
     { note_id: 1, note_created_at: "2026-01-01T00:00:00.000Z", note_title: "first" },
     { note_id: 2, note_created_at: "2026-01-01T00:00:00.000Z", note_title: "second" },
   ]);
+
+  // A zero limit is the counts-only read the dashboard's table list makes.
+  const counted = await dumpOk(runtime, versionId, { limit: "0", counts: "1" }, spaceId);
+  expect(counted.tables).toEqual([{ name: "notes", rowCount: 3, rowCountExact: true, rows: [] }]);
+  // An older control plane never asks for totals and parses the answer
+  // strictly, so it gets the shape it knows.
+  const legacy = await dump(runtime, versionId, { limit: "0" }, spaceId);
+  expect(await legacy.json()).toEqual({
+    versionId,
+    artifactId: null,
+    schemaHash: SCHEMA_HASH,
+    tables: [{ name: "notes", rows: [] }],
+  });
 
   // The same scope refusal the no-database lane proves, here against a table
   // that really exists in this database.
@@ -554,9 +574,39 @@ test("rows come back for the capsule's scoped tables, ordered and bounded by the
     expect(blockedExport.status).toBe(500);
     expect(await errorCode(blockedExport)).toBe("zero_db_export_failed");
     expect(deadlineElapsedMs).toBeLessThan(5_000);
+
+    // A count the lock holds past its limit is unknown, not a failed dump. A
+    // small table's estimate never stands in for it.
+    const countStarted = performance.now();
+    const blockedCount = await dumpOk(
+      runtime,
+      versionId,
+      { table: "notes", limit: "0", counts: "1" },
+      spaceId,
+    );
+    expect(blockedCount.tables).toEqual([
+      { name: "notes", rowCount: null, rowCountExact: true, rows: [] },
+    ]);
+    expect(performance.now() - countStarted).toBeLessThan(5_000);
   } finally {
     lockClient.stdin.write("UNLOCK TABLES; quit\n");
     lockClient.stdin.end();
     await lockClient.exited;
   }
+
+  // Past 50,000 estimated rows the server's estimate stands in for a full
+  // scan. ANALYZE settles InnoDB's sampled statistics, which a bulk insert
+  // refreshes only in the background.
+  mysql.exec(
+    "SET SESSION cte_max_recursion_depth = 60000; " +
+      "INSERT INTO sf_spc_zero_dump_live_notes_1f76cb914b (note_id, note_created_at, note_title) " +
+      "WITH RECURSIVE seq (n) AS (SELECT 4 UNION ALL SELECT n + 1 FROM seq WHERE n < 60003) " +
+      "SELECT n, '2026-01-03T00:00:00.000Z', 'bulk' FROM seq; " +
+      "ANALYZE TABLE sf_spc_zero_dump_live_notes_1f76cb914b",
+  );
+  const estimated = await dumpOk(runtime, versionId, { limit: "0", counts: "1" }, spaceId);
+  expect(estimated.tables).toEqual([
+    { name: "notes", rowCount: expect.any(Number), rowCountExact: false, rows: [] },
+  ]);
+  expect(estimated.tables[0]?.rowCount).toBeGreaterThanOrEqual(50_000);
 }, 600_000);

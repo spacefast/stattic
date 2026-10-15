@@ -96,8 +96,6 @@ function _stattic_private_file_alias_source(string $path): string|false|null
         || $canonical !== $source
         || str_starts_with($source, '/__stattic/')
         || str_starts_with($source, '/__spacefast/')
-        || $source === '/storage'
-        || str_starts_with($source, '/storage/')
     ) {
         return false;
     }
@@ -349,7 +347,6 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // ---- non-content lanes that must never resolve as content -----------
     if ($storageRequest) {
         require_once __DIR__ . '/storage.php';
-        _stattic_storage_apply_access_token();
         // A Functions binding carries its version-scoped machine grant rather
         // than a visitor session. Authenticate it here, then use the same
         // storage handler as a capsule request.
@@ -437,6 +434,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $rulesFirst = $entry === null
         || !empty($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_RULES_FIRST]);
     $redirectRules = _stattic_v4_rule_section($rulesEntry, 'redirects');
+    // `/storage` is shared: an exact authored read stays in content routing,
+    // while every other request keeps its original path in the object API.
+    $storageContentEntry = $storageRequest
+        && is_array($entry)
+        && in_array($requestMethod, ['GET', 'HEAD'], true);
     // Resolved once per request: whether the edge already answers this
     // version's placed rules for THIS host. Both rule lanes read the same
     // answer, so a redirect and a `_headers` rule can never disagree about
@@ -455,7 +457,8 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // paths, because a private-file alias and a mounted route each rewrite
     // $requestPath and the ladder below reads one or the other per handler.
     $reservedRoute = _stattic_path_is_reserved($requestPath)
-        || _stattic_path_is_reserved($originalRequestPath);
+        || _stattic_path_is_reserved($originalRequestPath)
+        || ($storageRequest && !$storageContentEntry);
     if ($rulesFirst && $redirectRules !== null && !$reservedRoute) {
         require_once __DIR__ . '/redirects.php';
         $result = _stattic_apply_redirects(
@@ -493,6 +496,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             parse_str((string) $result['query'], $_GET);
             $requestUri = $requestPath . ((string) $result['query'] !== '' ? '?' . (string) $result['query'] : '');
         }
+    }
+
+    if ($storageRequest && !$storageContentEntry) {
+        require_once __DIR__ . '/storage.php';
+        _stattic_storage_apply_access_token();
     }
 
     // ---- access ----------------------------------------------------------
@@ -552,7 +560,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         _stattic_private_file_alias_not_found();
     }
 
-    if ($storageRequest) {
+    if ($storageRequest && !$storageContentEntry) {
         _stattic_dispatch_storage(
             $privateRoot,
             $serving,

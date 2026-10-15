@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:26a30fbd285cad12dec8af8a6efc26bfb5cbb04d1c110a4e259b6059e3ae41d5",
+  "digest": "sha256:4c034ac4296ddbea2964af14386bc66f4a73a19938c30478db20dfbf1a625956",
   "components": [
     {
       "id": "spacefast-identity",
@@ -129,12 +129,12 @@
     {
       "id": "block-transformer",
       "kind": "block-transformer",
-      "version": "0.6.2",
-      "sha256": "sha256:16492638259e8f0c1676332e52df27dd005552cca4a3f50055274363030a5a49",
+      "version": "0.37.34",
+      "sha256": "sha256:e98cae39a6f5a8b809ad6d8d97b2b3372678e4e751064e7f5957e8a823ad4915",
       "source": {
         "kind": "archive",
-        "url": "https://codeload.github.com/Automattic/blocks-engine-php-transformer/zip/refs/tags/v0.6.2",
-        "bytes": 786827
+        "url": "https://codeload.github.com/Automattic/blocks-engine-php-transformer/zip/refs/tags/v0.37.34",
+        "bytes": 1679565
       },
       "provides": ["wordpress.block-transform"],
       "activation": "always"

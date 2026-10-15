@@ -203,7 +203,8 @@ function _stattic_path_is_internal_artifact(string $path): bool
 // tenant path and `/__span/x` is ours). `fold` compares case-insensitively.
 // `admit` narrows a row to the exact set its handler can answer.
 const SPACEFAST_CONTROL_PATHS = [
-    ['path' => '/storage', 'match' => 'namespace', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
+    // Shared namespace: authored GET/HEAD entries win; the storage handler owns the remaining requests.
+    ['path' => '/storage', 'match' => 'namespace', 'visitor' => true, 'tenant' => true, 'stage' => null, 'handler' => null],
     ['path' => '/identity', 'match' => 'namespace', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/__zero/auth/user', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/__zero/auth/complete', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],

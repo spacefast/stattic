@@ -2422,10 +2422,10 @@ check(!isset($fxHeadersNoUsage['sf-fx-usage']), 'dispatch: no usage intake witho
 check($fxHeadersNoUsage['sf-fx-bundle'] === 'https://shop.example/b/x/t/bundle.json', 'dispatch: a config without usage still dispatches');
 
 // The platform's own surfaces are never the worker's to answer.
-foreach (['/identity', '/identity/session', '/storage', '/storage/123', '/__spacefast/functions/relay', '/__spacefast/zero/run', '/__zero/run', '/__zero', '/__stattic/x', '/__span/y', '/__spacefast'] as $reserved) {
+foreach (['/identity', '/identity/session', '/__spacefast/functions/relay', '/__spacefast/zero/run', '/__zero/run', '/__zero', '/__stattic/x', '/__span/y', '/__spacefast'] as $reserved) {
     check(!_stattic_functions_dispatchable($reserved, 'GET'), 'dispatch: refuses reserved path ' . $reserved);
 }
-foreach (['/', '/api/orders', '/posts/1', '/identity-kit', '/storagebox/file', '/Storage/report.pdf', '/Identity/logo.svg', '/__spacefastish/ok'] as $ordinary) {
+foreach (['/', '/api/orders', '/posts/1', '/identity-kit', '/storage', '/storage/123', '/storagebox/file', '/Storage/report.pdf', '/Identity/logo.svg', '/__spacefastish/ok'] as $ordinary) {
     check(_stattic_functions_dispatchable($ordinary, 'GET'), 'dispatch: allows ' . $ordinary);
 }
 check(!_stattic_functions_dispatchable('/', 'TRACE'), 'dispatch: refuses TRACE');

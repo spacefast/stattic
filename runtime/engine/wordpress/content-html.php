@@ -45,6 +45,9 @@
  */
 declare(strict_types=1);
 
+/** The namespace of blocks the transformer generates for markup core has no block for. */
+const SPACEFAST_CONTENT_HTML_GENERATED_BLOCK_NAMESPACE = 'blocks-engine';
+
 /**
  * Make the blocks-engine transformer callable, or fail closed.
  *
@@ -162,7 +165,12 @@ function spacefast_content_html_to_blocks(string $html): string
     }
     spacefast_content_html_require_transformer();
     try {
-        $result = blocks_engine_php_transformer_transform_html($html);
+        // Generated blocks keep the namespace documents were first stored with.
+        // The transformer's default changed from `blocks-engine` to `custom`, and
+        // a renamed block would make every stored document unrepresentable.
+        $result = blocks_engine_php_transformer_transform_html($html, [
+            'generated_block_namespace' => SPACEFAST_CONTENT_HTML_GENERATED_BLOCK_NAMESPACE,
+        ]);
     } catch (Throwable $error) {
         error_log('spacefast html transform failed: ' . $error->getMessage());
         throw new Spacefast_Content_Error(
@@ -179,7 +187,33 @@ function spacefast_content_html_to_blocks(string $html): string
             'The HTML document could not be converted to WordPress blocks.'
         );
     }
-    return trim($blocks);
+    return spacefast_content_html_without_generated_labels(trim($blocks));
+}
+
+/**
+ * The transformer names landmark and sectioning groups for List View
+ * (`metadata.name`, e.g. "Header" or a section's first heading). HTML never
+ * carries those names, so storing them would let a routine edit relabel a block
+ * and read as a loss. Dropping them here means every label in post_content was
+ * set by a person in the editor.
+ */
+function spacefast_content_html_without_generated_labels(string $blocks): string
+{
+    if ($blocks === '' || !str_contains($blocks, '"metadata"')) {
+        return $blocks;
+    }
+    spacefast_content_html_require_block_parser();
+    $strip = static function (array $block) use (&$strip): array {
+        if (is_array($block['attrs']['metadata'] ?? null)) {
+            unset($block['attrs']['metadata']['name']);
+            if ($block['attrs']['metadata'] === []) {
+                unset($block['attrs']['metadata']);
+            }
+        }
+        $block['innerBlocks'] = array_map($strip, is_array($block['innerBlocks'] ?? null) ? $block['innerBlocks'] : []);
+        return $block;
+    };
+    return serialize_blocks(array_map($strip, parse_blocks($blocks)));
 }
 
 /**
@@ -259,6 +293,8 @@ function spacefast_content_html_representable(string $blocks): bool
         return true;
     }
     $reparsed = spacefast_content_html_to_blocks(spacefast_content_html_from_blocks($blocks));
+    // The reparse carries no labels (see without_generated_labels), so a label
+    // a person set in the editor is a difference HTML cannot carry.
     return spacefast_content_html_canonical_block_markup($reparsed)
         === spacefast_content_html_canonical_block_markup($blocks);
 }

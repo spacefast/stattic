@@ -244,6 +244,33 @@ function spacefast_content_sync_representable(string $format, string $blocks): b
     };
 }
 
+/** Refuse unsupported editor formatting before WordPress saves it and queues a source write. */
+function spacefast_content_sync_prepare_editor_save(mixed $post, mixed $request): mixed
+{
+    if (!is_object($post) || $post instanceof WP_Error) return $post;
+    // The autosave controller uses the prepared post without checking for WP_Error.
+    if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return $post;
+    $postId = (int) ($request['id'] ?? 0);
+    if ($postId < 1 || !spacefast_content_post_belongs_to_space($postId)) return $post;
+    $bindingId = spacefast_content_source_journal_binding_id($postId);
+    $binding = $bindingId === null ? null : spacefast_content_model_sync_binding($bindingId);
+    if (!is_array($binding) || $binding['format'] !== 'md') return $post;
+    $storage = $binding['field_storage'];
+    $blocks = $storage === 'post_content' ? ($post->post_content ?? null) : ($request['meta'][$storage] ?? null);
+    if (!is_string($blocks)) return $post;
+    try {
+        if (!spacefast_content_sync_representable($binding['format'], $blocks)) {
+            spacefast_content_sync_not_representable(
+                $binding['format'],
+                'Remove the unsupported formatting before you save. The document and source file did not change.'
+            );
+        }
+    } catch (Spacefast_Content_Error $error) {
+        return new WP_Error($error->codeName, $error->getMessage(), ['status' => $error->status]);
+    }
+    return $post;
+}
+
 /**
  * The refusal for a document richer than its binding's format. It is not an
  * error in the document — it means this document cannot be flattened into that
@@ -316,6 +343,9 @@ function spacefast_content_sync_digest_text(string $value): string
 function spacefast_content_sync_revision(array $ledger): string
 {
     unset($ledger['revision']);
+    // Storage is runtime-owned metadata. Keeping it out of the wire revision
+    // lets existing control-plane contracts verify receipts that omit it.
+    unset($ledger['fieldStorage']);
     return spacefast_content_sync_digest_text(_stattic_canonical_json($ledger));
 }
 
@@ -336,6 +366,7 @@ function spacefast_content_sync_make_ledger(
         'bindingId' => $input['bindingId'],
         'source' => $input['source'],
         'format' => $input['format'],
+        'fieldStorage' => $input['binding']['field_storage'],
         'baseText' => $text,
         'textDigest' => spacefast_content_sync_digest_text($text),
         'blocksDigest' => spacefast_content_sync_digest_text(spacefast_content_sync_read_blocks($post, $input['binding'])),
@@ -354,6 +385,7 @@ function spacefast_content_sync_receipt_payload(
     array $ledger,
     ?array $sourceWrite = null
 ): array {
+    unset($ledger['fieldStorage']);
     $receipt = [
         'format' => 'spacefast.content-sync',
         'version' => 1,
@@ -572,6 +604,7 @@ function spacefast_content_sync_retire_documents(?array $previous, ?array $next,
         if (spacefast_content_source_is_retired($postId)) continue;
         $ledger = spacefast_content_sync_ledger($postId);
         if (!is_array($ledger) || ($ledger['bindingId'] ?? null) !== $declaration['id']
+            || (($ledger['fieldStorage'] ?? $binding['field_storage']) !== $binding['field_storage'])
             || (!$commit && spacefast_content_sync_document_changed($ledger, $post, $binding))) {
             throw new Spacefast_Content_Error(409, 'content_document_retirement_conflict', 'The source was removed while its WordPress document had unpublished edits. Reconcile the document before removing its source.');
         }
@@ -637,9 +670,23 @@ function spacefast_content_sync_publish_document(array $input): array
         $nextBlocks = $input['text'];
     } else {
         $input['text'] = spacefast_content_sync_canonical_text($input['format'], $input['text']);
+        $ledgerStorage = $ledger['fieldStorage'] ?? ($input['previousFieldStorage'] ?? $input['binding']['field_storage']);
+        $storageChanged = is_array($ledger)
+            && ($ledger['source'] ?? null) === $input['source']
+            && ($ledger['format'] ?? null) === $input['format']
+            && $ledgerStorage !== $input['binding']['field_storage'];
         $sameBinding = is_array($ledger)
             && ($ledger['source'] ?? null) === $input['source']
-            && ($ledger['format'] ?? null) === $input['format'];
+            && ($ledger['format'] ?? null) === $input['format']
+            && !$storageChanged;
+        if (is_array($ledger) && ($ledger['source'] ?? null) === $input['source']
+            && ($ledger['format'] ?? null) === $input['format'] && !$sameBinding) {
+            $oldBinding = $input['binding'];
+            $oldBinding['field_storage'] = $ledgerStorage;
+            if (spacefast_content_sync_document_changed($ledger, $post, $oldBinding)) {
+                spacefast_content_sync_throw_conflict($input, (string) ($ledger['baseText'] ?? ''), (string) ($ledger['revision'] ?? ''), spacefast_content_sync_from_blocks($input['format'], spacefast_content_sync_read_blocks($post, $oldBinding)), spacefast_content_sync_current_revision_id($postId));
+            }
+        }
         if ($sameBinding) {
             $sourceChanged = !hash_equals((string) $ledger['textDigest'], spacefast_content_sync_digest_text($input['text']));
             $editorChanged = spacefast_content_sync_document_changed($ledger, $post, $input['binding']);
@@ -655,7 +702,7 @@ function spacefast_content_sync_publish_document(array $input): array
                     spacefast_content_sync_throw_conflict($input, (string) $ledger['baseText'], (string) $ledger['revision'], $editorText, spacefast_content_sync_current_revision_id($postId));
                 }
             }
-        } elseif (is_object($post) && is_array($preparedBase = get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_PREPARED_META, true))
+        } elseif (!$storageChanged && is_object($post) && is_array($preparedBase = get_post_meta($postId, SPACEFAST_CONTENT_SOURCE_PREPARED_META, true))
             && ($preparedBase['source'] ?? null) === $input['source']
             && ($preparedBase['format'] ?? null) === $input['format']
             && hash_equals(spacefast_content_sync_digest_text($preparedBase['text']), spacefast_content_sync_digest_text($input['text']))) {
@@ -669,7 +716,7 @@ function spacefast_content_sync_publish_document(array $input): array
             spacefast_content_sync_store_ledger($postId, $next);
             update_post_meta($postId, '_spacefast_document_release', $input['operationId']);
             return ['postId' => $postId, 'status' => 'adopted'];
-        } elseif (is_object($post) && trim($blocks) !== '') {
+        } elseif (!$storageChanged && is_object($post) && trim($blocks) !== '') {
             // Adoption and TSX -> HTML takeover must agree with the existing
             // document. A route-stable ID is not permission to discard edits.
             $editorText = spacefast_content_sync_pullable_text($input['format'], $blocks, $post, is_array($ledger) ? $ledger['baseText'] : null);
@@ -1068,6 +1115,9 @@ function spacefast_content_sync_reconcile_bound(array $input, ?object $post): ar
     if ($ledger['bindingId'] !== $input['bindingId'] || $ledger['source'] !== $input['source']) {
         throw new Spacefast_Content_Error(409, 'content_sync_binding_conflict', 'The binding identity changed.');
     }
+    if (($ledger['fieldStorage'] ?? $binding['field_storage']) !== $binding['field_storage']) {
+        throw new Spacefast_Content_Error(409, 'content_sync_binding_conflict', 'The binding storage changed.');
+    }
     // A ledger written before the HTML sync format named the common base
     // `baseMarkdown`/`markdownDigest`. Read it under the format-neutral names so
     // an already-bound Markdown space is not misread as fully changed (which
@@ -1448,6 +1498,7 @@ function spacefast_content_acknowledge_source(array $request): array
         if (!hash_equals((string) $ledger['revision'], $baseRevision)) {
             throw new Spacefast_Content_Error(409, 'content_sync_stale_acknowledgement', 'The sync ledger moved after this source write was prepared.');
         }
+        unset($ledger['fieldStorage']);
         return [
             'format' => 'spacefast.content-sync-ack-receipt',
             'version' => 1,

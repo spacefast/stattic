@@ -41,11 +41,11 @@ require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/st
 require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/runtime/content-page.php"))};
 $snapshotBytes = ${JSON.stringify(seed)};
 $context = ['private_root' => ${JSON.stringify(privateRoot)}, 'space_id' => 'spc_document', 'version_id' => 'ver_document', 'serving' => ['immutable' => isset($_GET['immutable']), 'inject' => ['head' => isset($_GET['disabled']) ? [] : [${JSON.stringify(snippet)}]]]];
+$context['version_dir'] = '/version'; $context['root'] = [];
 $route = ['id' => '${pageId}', 'bindingId' => '${bindingId}', 'path' => '/', 'render' => 'document', 'params' => []];
 file_put_contents(_stattic_version_root($context['private_root'], 'spc_document', 'ver_document') . '/metadata.json', json_encode(['catalog' => ['format' => STATTIC_RUNTIME_VERSION_CATALOG_FORMAT, 'spaceId' => 'spc_document', 'versionId' => 'ver_document', 'paths' => ['_spacefast/pages/documents/${pageId}.json' => ['source' => ['sha256' => hash('sha256', $snapshotBytes), 'size' => strlen($snapshotBytes), 'contentType' => 'application/json']]], 'variants' => []]]));
 function _stattic_v4_blob_contents($context, $sha) { return $GLOBALS['snapshotBytes']; }
-function _stattic_v4_entry($dir, $root, $key) { return null; }
-define('STATTIC_RUNTIME_THEME_STYLESHEET_URL', '/theme.css');
+function _stattic_v4_entry($dir, $root, $key) { return in_array($key, ['/zero.css', STATTIC_RUNTIME_THEME_STYLESHEET_URL], true) ? ['sha256' => str_repeat('a', 64)] : null; }
 header("Content-Security-Policy: frame-ancestors 'none'");
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['immutable'])) header('Content-Length: 1');
 _stattic_wordpress_page_try_serve($context, '/', $_SERVER['REQUEST_METHOD'], $route);
@@ -66,6 +66,13 @@ echo 'Document route declined';
         expect(html.split(snippet)).toHaveLength(2);
         expect(html).toContain(`<head>${snippet}<meta charset="utf-8">`);
         expect(html).toContain('<meta name="wordpress-head" content="present">');
+        const wordpressHead = html.indexOf('<meta name="wordpress-head"');
+        const utilities = html.indexOf('<link rel="stylesheet" href="/zero.css">');
+        const theme = html.indexOf(
+          '<link rel="stylesheet" href="/__spacefast_generated/theme.css">',
+        );
+        expect(utilities).toBeGreaterThan(wordpressHead);
+        expect(theme).toBeGreaterThan(utilities);
         expect(html).toContain("WordPress footer</footer></body></html>");
         expect(html).toContain(query === "" ? "Live document." : "Published document.");
       }

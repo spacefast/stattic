@@ -294,8 +294,10 @@ export type Step =
       format: SyncFormat | "tsx";
       release?: string;
       invalidDigest?: boolean;
+      fieldStorage?: "post_content" | "_zero_posts_body";
     }
   | { op: "inspectPage" }
+  | { op: "forgetLedgerStorage" }
   | { op: "inspectReceipts" }
   | { op: "removePage"; prepareOnly?: boolean }
   | { op: "commitPage"; stale?: boolean }
@@ -319,9 +321,11 @@ export type Step =
   | { op: "reconcile"; state: "initial" | "bound"; text: string; baseRevision?: string }
   | { op: "inspectSource" }
   | { op: "resolveSource"; text: string }
+  | { op: "prepareEditorSave"; blocks: string; autosave?: boolean }
   | {
       op: "editInWordPress";
       blocks?: string;
+      fieldStorage?: "post_content" | "_zero_posts_body";
       title?: string;
       slug?: string;
       status?: string;
@@ -352,6 +356,7 @@ export type SyncLedger = {
   bindingId: string;
   source: string;
   format: SyncFormat;
+  fieldStorage: string;
   baseText: string;
   textDigest: string;
   blocksDigest: string;
@@ -465,13 +470,30 @@ foreach ($steps as $step) {
   if (($step['baseRevision'] ?? null) === '@previous') {
     $step['baseRevision'] = $lastLedgerRevision ?? 'unset';
   }
+  if ($step['op'] === 'prepareEditorSave') {
+    $binding = spacefast_content_model_sync_binding(${JSON.stringify(BINDING)});
+    $post = spacefast_content_sync_find_post(${JSON.stringify(BINDING)}, $binding, false);
+    $prepared = (object) ['ID' => $post->ID, 'post_content' => $step['blocks']];
+    if (!empty($step['autosave'])) define('DOING_AUTOSAVE', true);
+    $result = spacefast_content_sync_prepare_editor_save($prepared, ['id' => $post->ID]);
+    if (!($result instanceof WP_Error) && empty($step['autosave'])) wp_insert_post((array) $result);
+    $results[] = $result instanceof WP_Error
+      ? ['ok' => false, 'error' => ['code' => $result->code, 'status' => $result->data['status'], 'message' => $result->message]]
+      : ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'accepted', 'content' => $result->post_content]];
+    continue;
+  }
   if ($step['op'] === 'editInWordPress') {
     // Stand in for a human editing in wp-admin: the post content changes
     // underneath the ledger, which is exactly what the pull path reconciles.
     global $posts;
     foreach ($posts as $id => $post) {
       foreach (['blocks' => 'post_content', 'title' => 'post_title', 'slug' => 'post_name', 'status' => 'post_status', 'dateGmt' => 'post_date_gmt'] as $field => $column) {
-        if (array_key_exists($field, $step)) $posts[$id][$column] = $step[$field];
+        if (!array_key_exists($field, $step)) continue;
+        if ($field === 'blocks' && ($step['fieldStorage'] ?? 'post_content') !== 'post_content') {
+          update_post_meta($id, $step['fieldStorage'], $step[$field]);
+        } else {
+          $posts[$id][$column] = $step[$field];
+        }
       }
     }
     $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'edited']];
@@ -496,6 +518,16 @@ foreach ($steps as $step) {
     $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'legacy-ledger', 'revision' => $ledger['revision']]];
     continue;
   }
+  if ($step['op'] === 'forgetLedgerStorage') {
+    $binding = spacefast_content_model_sync_binding(${JSON.stringify(TSX_BINDING)});
+    $post = spacefast_content_sync_find_post(${JSON.stringify(TSX_BINDING)}, $binding, false);
+    $ledger = spacefast_content_sync_ledger((int) $post->ID);
+    unset($ledger['fieldStorage']);
+    $ledger['revision'] = spacefast_content_sync_revision($ledger);
+    spacefast_content_sync_store_ledger((int) $post->ID, $ledger);
+    $results[] = ['ok' => true, 'receipt' => ['format' => 'test.driver', 'status' => 'legacy-ledger']];
+    continue;
+  }
   if ($step['op'] === 'createInWordPress') {
     // wp-admin creating a document: the Space meta every write path stamps, and
     // deliberately no sync external id, because no file backs it yet.
@@ -518,6 +550,7 @@ foreach ($steps as $step) {
       $model = require ${JSON.stringify(path.join(releaseDir, "content-model.php"))};
       $binding = $model['syncBindings'][1];
       $binding['format'] = $step['format'];
+      $binding['fieldStorage'] = $step['fieldStorage'] ?? 'post_content';
       $binding['source'] = preg_replace('/\\\\.tsx$/', '.' . $step['format'], $binding['source']);
       $digest = 'sha256:' . hash('sha256', $step['text']);
       $binding['documentSeed'] = ['text' => $step['text'], 'sha256' => !empty($step['invalidDigest']) ? 'sha256:' . str_repeat('0', 64) : $digest];

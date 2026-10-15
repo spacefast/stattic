@@ -1918,6 +1918,73 @@ mod tests {
     }
 
     #[test]
+    fn theme_json_preserves_global_authored_css_without_content_html() {
+        let authored = "@font-face{font-family:City;src:url('/assets/city.woff2')} .site-note > a{color:rebeccapurple}";
+        let theme = serde_json::to_vec(&json!({"version":3,"styles":{"css":authored}})).unwrap();
+        let run = run_pipeline(
+            &[("theme.json", &theme)],
+            json!({"mode":"website"}),
+            json!({"config":{}}),
+        );
+        run.result.as_ref().unwrap();
+        assert!(read(&run, "__spacefast_generated/theme.css").contains(authored));
+
+        for rejected in [
+            "@import url('/tracking.css');",
+            "body{background:url(javascript:alert(1))}",
+            "</style><script>alert(1)</script>",
+            "body{color:red}}",
+        ] {
+            let theme =
+                serde_json::to_vec(&json!({"version":3,"styles":{"css":rejected}})).unwrap();
+            let run = run_pipeline(
+                &[("theme.json", &theme)],
+                json!({"mode":"website"}),
+                json!({"config":{}}),
+            );
+            run.result.as_ref().unwrap();
+            assert!(!read(&run, "__spacefast_generated/theme.css").contains(rejected));
+        }
+    }
+
+    #[test]
+    fn theme_json_emits_font_faces_with_public_asset_urls() {
+        let theme = serde_json::to_vec(&json!({
+            "version": 3,
+            "settings": {"typography": {"fontFamilies": [{
+                "slug": "body", "fontFamily": "City, sans-serif",
+                "fontFace": [
+                    {"fontFamily":"City","fontWeight":"100 900","fontStyle":"normal","fontDisplay":"swap","src":["file:./assets/city.woff2","/assets/city.woff","https://fonts.example/city.woff2"]},
+                    {"fontFamily":"City","fontStyle":"italic","src":"assets/city-italic.woff2"},
+                    {"fontFamily":"'City Wide'","fontFeatureSettings":"\"liga\" 1","src":"/assets/city-wide.woff2"},
+                    {"fontFamily":"Invalid","src":["javascript:alert(1)"]},
+                    {"fontFamily":"Unsafe; } body{color:red","src":["/unsafe.woff2"]},
+                    {"fontFamily":"'Unclosed","src":"/invalid.woff2"},
+                    {"fontFamily":"Comment /*","src":"/invalid.woff2"},
+                    {"fontFamily":"City","fontWeight":"100 /*","src":"/invalid.woff2"},
+                    {"fontFamily":"City","fontStyle":"normal\\","src":"/invalid.woff2"}
+                ]
+            }]}}
+        })).unwrap();
+        let run = run_pipeline(
+            &[("theme.json", &theme)],
+            json!({"mode":"website"}),
+            json!({"config":{}}),
+        );
+        run.result.as_ref().unwrap();
+        let css = read(&run, "__spacefast_generated/theme.css");
+        assert!(css.contains("@font-face{font-family:City;font-style:normal;font-weight:100 900;font-display:swap;src:url('/assets/city.woff2'),url('/assets/city.woff'),url('https://fonts.example/city.woff2')}"));
+        assert!(css.contains("@font-face{font-family:City;font-style:italic;font-display:fallback;src:url('/assets/city-italic.woff2')}"));
+        assert!(css.contains(
+            "font-family:'City Wide';font-display:fallback;font-feature-settings:\"liga\" 1"
+        ));
+        assert_eq!(css.matches("@font-face").count(), 3);
+        assert!(!css.contains("javascript:"));
+        assert!(!css.contains("/unsafe.woff2"));
+        assert!(!css.contains("/invalid.woff2"));
+    }
+
+    #[test]
     fn theme_json_requires_version_three_and_links_only_committed_css() {
         let valid_theme = br##"{"version":3,"settings":{"color":{"palette":[{"slug":"accent","color":"#f00"}]},"typography":{"fontFamilies":[{"slug":"body","fontFamily":"Inter, sans-serif"}]}},"styles":{"typography":{"fontFamily":"var(--wp--preset--font-family--body)"}}}"##;
         let run = run_pipeline(

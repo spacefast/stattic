@@ -11,6 +11,7 @@ import {
   contentSourceInspectionSchema,
   parseContentSourceDocument,
   syncMaterializeReceiptV1Schema,
+  syncAcknowledgementReceiptV1Schema,
 } from "../../packages/common/src/contracts/content-sync.ts";
 import {
   materialized,
@@ -209,6 +210,61 @@ test("sealed Markdown activation retains editor-only edits and refuses conflicti
     postTitle: "Saved between prepare and serving",
   });
   expect(prepared[7]?.ok).toBe(true);
+});
+
+test("activation reseeds a document when its body storage changes", async () => {
+  const text = "The same release text.\n";
+  const results = await runScenario("md", [
+    { op: "activatePage", format: "md", text, fieldStorage: "_zero_posts_body" },
+    { op: "activatePage", format: "md", text, fieldStorage: "post_content" },
+    { op: "inspectPage" },
+  ]);
+  expect(inspected(results[2]).blocks).toContain("The same release text.");
+  expect(inspected(results[2]).ledger?.baseText).toContain("The same release text.");
+  expect(inspected(results[2]).ledger?.fieldStorage).toBe("post_content");
+
+  const restored = await runScenario("md", [
+    { op: "activatePage", format: "md", text: "Earlier source text.\n" },
+    { op: "activatePage", format: "md", text, fieldStorage: "_zero_posts_body" },
+    { op: "activatePage", format: "md", text: "Updated source text.\n" },
+    { op: "inspectPage" },
+  ]);
+  expect(restored[2]?.ok).toBe(true);
+  expect(inspected(restored[3]).blocks).toContain("Updated source text.");
+
+  const edited = await runScenario("md", [
+    { op: "activatePage", format: "md", text, fieldStorage: "_zero_posts_body" },
+    {
+      op: "editInWordPress",
+      blocks: "<!-- wp:paragraph --><p>Stranded edit.</p><!-- /wp:paragraph -->",
+      fieldStorage: "_zero_posts_body",
+    },
+    { op: "activatePage", format: "md", text, fieldStorage: "post_content" },
+  ]);
+  expect(problem(edited[2]).code).toBe("content_sync_conflict");
+
+  const metadataEdit = await runScenario("md", [
+    { op: "activatePage", format: "md", text, fieldStorage: "_zero_posts_body" },
+    { op: "editInWordPress", title: "Editor title", status: "draft" },
+    { op: "activatePage", format: "md", text, fieldStorage: "post_content" },
+  ]);
+  expect(problem(metadataEdit[2]).code).toBe("content_sync_conflict");
+
+  const legacy = await runScenario("md", [
+    { op: "activatePage", format: "md", text, fieldStorage: "_zero_posts_body" },
+    { op: "forgetLedgerStorage" },
+    {
+      op: "activatePage",
+      format: "md",
+      text: "Updated source text.\n",
+      fieldStorage: "_zero_posts_body",
+    },
+    { op: "inspectPage" },
+  ]);
+  expect(inspected(legacy[3]).ledger?.baseText).toContain("Updated source text.");
+  expect(legacy[2]?.ok).toBe(true);
+  const [wireReceipt] = await runScenario("md", [{ op: "reconcile", state: "initial", text }]);
+  expect("fieldStorage" in receipt(wireReceipt).ledger).toBe(false);
 });
 
 test("fractional UTC source dates canonicalize to WordPress precision", async () => {
@@ -504,7 +560,9 @@ test("a prepared source write is acknowledged, and only against the ledger it ca
     { op: "acknowledge", baseRevision: "@previous" },
   ]);
   expect(receipt(pulled).status).toBe("pulled");
-  expect(receipt(acknowledged).status).toBe("acknowledged");
+  expect(syncAcknowledgementReceiptV1Schema.parse(receipt(acknowledged)).status).toBe(
+    "acknowledged",
+  );
 
   // A revision the ledger never held cannot close a prepared write: the caller
   // would be claiming it landed bytes nobody reconciled.

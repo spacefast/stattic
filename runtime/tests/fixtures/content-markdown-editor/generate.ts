@@ -20,7 +20,15 @@ import path from "node:path";
 
 type EditorBlock = { readonly name: string; readonly isValid: boolean };
 type RichTextValue = { readonly toHTMLString: (options: { preserveWhiteSpace: true }) => string };
-type EditorAttributes = { readonly content?: string | RichTextValue; readonly anchor?: string };
+type EditorAttributes = {
+  readonly content?: string | RichTextValue;
+  readonly anchor?: string;
+  readonly id?: number;
+  readonly url?: string;
+  readonly alt?: string;
+  readonly sizeSlug?: string;
+  readonly linkDestination?: string;
+};
 type AttributeSchema = { readonly type?: string };
 type BlockSettings = { attributes?: { readonly [name: string]: AttributeSchema } };
 type SaveProps = { id?: string | null };
@@ -137,6 +145,16 @@ function blockAt(list: readonly EditorBlock[], index: number): EditorBlock {
 
 const edits = {
   saved: (list: readonly EditorBlock[]) => list,
+  uploaded: (list: readonly EditorBlock[]) => [
+    ...list,
+    blocks.createBlock("core/image", {
+      id: 42,
+      url: "https://example.com/photo.png",
+      alt: "Photo",
+      sizeSlug: "large",
+      linkDestination: "none",
+    }),
+  ],
   reordered: (list: readonly EditorBlock[]) => {
     const first = nth(list, "core/paragraph", 0);
     const second = nth(list, "core/paragraph", 1);

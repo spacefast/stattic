@@ -185,22 +185,25 @@ const CARRIED = {
     '<!-- wp:column --><div class="wp-block-column">' +
     "<!-- wp:paragraph --><p>Right.</p><!-- /wp:paragraph --></div><!-- /wp:column -->" +
     "</div><!-- /wp:columns -->",
+  // What the editor saves: fixed layout is core/table's default, so it has no
+  // comment attribute; auto layout is the explicit non-default.
+  "a fixed-layout table":
+    "<!-- wp:table -->" +
+    '<figure class="wp-block-table"><table class="has-fixed-layout"><tbody><tr><td>a</td><td>b</td></tr></tbody></table></figure>' +
+    "<!-- /wp:table -->",
+  "an auto-layout table with a caption":
+    '<!-- wp:table {"hasFixedLayout":false} -->' +
+    '<figure class="wp-block-table"><table><thead><tr><th>A</th></tr></thead><tbody><tr><td>1</td></tr></tbody></table>' +
+    '<figcaption class="wp-element-caption">Cap</figcaption></figure>' +
+    "<!-- /wp:table -->",
 } as const;
 
 /**
  * Documents the transformer cannot carry back. Each is a measured failure of
- * the pinned v0.6.2 bytes, and each names WHY, because the reason decides
+ * the pinned transformer, and each names WHY, because the reason decides
  * whether a later version fixes it.
  */
 const REFUSED = {
-  // The transformer derives a `blocks-engine-table-<hash>` class from the
-  // figure's own class list, so the class it adds feeds into the hash it
-  // computes next time and the markup oscillates with period two. There is no
-  // fixed point to store as a common base.
-  table:
-    "<!-- wp:table -->\n" +
-    '<figure class="wp-block-table"><table><tbody><tr><td>a</td><td>b</td></tr></tbody></table></figure>\n' +
-    "<!-- /wp:table -->",
   // `core/buttons` decays: first into a paragraph carrying a synthetic marker
   // class, then into a bare paragraph once that class round-trips away.
   buttons:
@@ -316,6 +319,72 @@ test("canonical HTML is a fixed point, and authored HTML that is not is refused"
   expect(article).toContain("<article");
   expect(dropped).toBe("ERROR:content_html_not_representable");
   expect(form).toBe("ERROR:content_html_not_representable");
+});
+
+test("documents stored by an earlier transformer stay representable after an upgrade", () => {
+  // Exactly what Blocks Engine 0.6.2 stored for a header holding a description
+  // list. Later releases label the header in List View (`metadata.name`) and
+  // default generated blocks to the `custom/` namespace; neither may turn
+  // existing documents into conflicts.
+  const stored =
+    '<!-- wp:group {"className":"hero","tagName":"header"} --><header class="wp-block-group hero">' +
+    '<!-- wp:blocks-engine/description-list {"className":"facts","groups":[{"wrapper":{"className":"cell"},' +
+    '"items":[{"tagName":"dt","content":"Client"},{"tagName":"dd","content":"Example Co"}]}]} -->' +
+    '<dl class="facts"><div class="cell"><dt>Client</dt><dd>Example Co</dd></div></dl>' +
+    "<!-- /wp:blocks-engine/description-list --></header><!-- /wp:group -->";
+  // A label someone set in the editor is not something HTML can carry, so a
+  // document holding one is still refused rather than silently losing it.
+  const labeled = stored.replace(
+    '{"className":"hero","tagName":"header"}',
+    '{"className":"hero","tagName":"header","metadata":{"name":"Company facts"}}',
+  );
+  expect(representable([stored, labeled])).toEqual(["true", "false"]);
+});
+
+test("transformer List View labels are never stored, so routine edits stay representable", () => {
+  const original =
+    '<section class="hero"><h2>Pricing</h2><p>x</p></section><header class="top"><p>Hi</p></header>';
+  const [stored] = serializer([{ fn: "spacefast_content_html_to_blocks", argument: original }]);
+  expect(stored).not.toContain('"name"');
+  // A heading edit and an appended landmark would each relabel a stored group.
+  const [renamed, extended] = serializer([
+    { fn: "spacefast_content_html_to_blocks", argument: original.replace("Pricing", "Plans") },
+    {
+      fn: "spacefast_content_html_to_blocks",
+      argument: `${original}<footer class="end"><p>Bye</p></footer>`,
+    },
+  ]);
+  expect(representable([stored, renamed, extended])).toEqual(["true", "true", "true"]);
+  // Labels a person set in the editor cannot travel through HTML, so they refuse.
+  expect(
+    representable([
+      '<!-- wp:heading {"metadata":{"name":"Plans"}} --><h2 class="wp-block-heading">Plans</h2><!-- /wp:heading -->',
+      '<!-- wp:group {"metadata":{"name":"Hero"}} --><div class="wp-block-group"><!-- wp:paragraph --><p>x</p><!-- /wp:paragraph --></div><!-- /wp:group -->',
+    ]),
+  ).toEqual(["false", "false"]);
+});
+
+test("captured page structures normalize once into a stored fixed point", () => {
+  // Loose links, links carrying inline SVG, and button rows are what captured
+  // marketing pages are made of. The transformer adds structure on the first
+  // pass, so the raw capture is refused, but that first pass is the source an
+  // importer writes and every later pass leaves it unchanged.
+  const captured = [
+    '<div class="cta"><a href="https://example.com/a">Start</a><a href="https://example.com/b">Message</a></div>',
+    '<div><a class="btn" href="/contact/">Contact <svg viewBox="0 0 24 24" class="icon"><path d="M5 12h14"></path></svg></a></div>',
+    '<div class="tags"><button type="button" class="pill">All</button><button type="button" class="pill">Strategy</button></div>',
+  ];
+  const once = serializer(
+    captured.map((argument) => ({ fn: "spacefast_content_html_normalize", argument })),
+  );
+  const twice = serializer(
+    once.map((argument) => ({ fn: "spacefast_content_html_normalize", argument })),
+  );
+  expect(twice).toEqual(once);
+  expect(canonicalHtml(once)).toEqual(once);
+  expect(canonicalHtml(captured)).toEqual(
+    captured.map(() => "ERROR:content_html_not_representable"),
+  );
 });
 
 test("an HTML source file binds, takes a WordPress edit, and is written back as HTML", async () => {

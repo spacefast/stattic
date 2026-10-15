@@ -210,9 +210,10 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
     $descriptionMeta = $description === ''
         ? ''
         : '<meta name="description" content="' . _stattic_wordpress_page_escape($description) . '">';
+    // Version-authored styles override WordPress's default global styles at equal specificity.
     $document = '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         . '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        . '<title>' . $title . '</title>' . $descriptionMeta . implode('', $styles) . $wordpressHead
+        . '<title>' . $title . '</title>' . $descriptionMeta . $wordpressHead . implode('', $styles)
         . '</head><body class="sf-content-page">'
         // A template brings its own document structure — the managed theme's is
         // a core/group with tagName main — so wrapping it again would nest one

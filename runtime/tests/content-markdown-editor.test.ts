@@ -203,6 +203,34 @@ test("an editor edit to a Markdown document pulls back into its source file", as
   expect(text).toContain("![Threat model](https://example.com/threats.png)");
 });
 
+test("an uploaded image that Markdown cannot carry is refused before the editor saves", async () => {
+  const [, accepted, refused, settled] = await runScenario("md", [
+    { op: "reconcile", state: "initial", text: document },
+    { op: "prepareEditorSave", blocks: fixture("bolded.html") },
+    { op: "prepareEditorSave", blocks: fixture("uploaded.html") },
+    { op: "reconcile", state: "bound", text: document, baseRevision: "@previous" },
+  ]);
+  expect(accepted).toEqual({
+    ok: true,
+    receipt: { format: "test.driver", status: "accepted", content: fixture("bolded.html") },
+  });
+  expect(refused).toMatchObject({
+    ok: false,
+    error: { code: "content_markdown_not_representable", status: 409 },
+  });
+  expect(receipt(settled).status).toBe("pulled");
+  expect(receipt(settled).sourceWrite?.text).toContain("Every system has **one**.");
+  expect(receipt(settled).sourceWrite?.text).not.toContain("photo.png");
+  const [, autosave] = await runScenario("md", [
+    { op: "reconcile", state: "initial", text: document },
+    { op: "prepareEditorSave", blocks: fixture("uploaded.html"), autosave: true },
+  ]);
+  expect(autosave).toEqual({
+    ok: true,
+    receipt: { format: "test.driver", status: "accepted", content: fixture("uploaded.html") },
+  });
+});
+
 test("a source file that already matches an editor edit settles without a conflict", async () => {
   // The author mirrors the editor's change in the repo before the drain pulls
   // it, so both sides moved to the same document.

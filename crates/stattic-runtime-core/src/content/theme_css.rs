@@ -157,6 +157,7 @@ pub(super) fn compile_theme(
         }
     }
     css.push_str("}\n");
+    append_theme_font_faces(&mut css, &theme);
     if let Some(palette) = theme
         .pointer("/settings/color/palette")
         .and_then(Value::as_array)
@@ -208,6 +209,105 @@ pub(super) fn compile_theme(
         css.as_bytes(),
         Some("text/css; charset=utf-8"),
     )
+}
+
+fn append_theme_font_faces(css: &mut String, theme: &Value) {
+    let Some(families) = theme
+        .pointer("/settings/typography/fontFamilies")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    'faces: for face in families
+        .iter()
+        .filter_map(|family| family.get("fontFace").and_then(Value::as_array))
+        .flatten()
+    {
+        let Some(family) = face
+            .get("fontFamily")
+            .and_then(Value::as_str)
+            .filter(|value| safe_font_descriptor(value))
+        else {
+            continue;
+        };
+        let sources: Vec<_> = match face.get("src") {
+            Some(Value::Array(sources)) => sources
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(theme_font_source)
+                .collect(),
+            Some(Value::String(source)) => theme_font_source(source).into_iter().collect(),
+            _ => Vec::new(),
+        };
+        if sources.is_empty() {
+            continue;
+        }
+        let mut declarations = vec![format!("font-family:{family}")];
+        for (key, property) in [
+            ("fontStyle", "font-style"),
+            ("fontWeight", "font-weight"),
+            ("fontStretch", "font-stretch"),
+            ("fontDisplay", "font-display"),
+            ("unicodeRange", "unicode-range"),
+            ("fontFeatureSettings", "font-feature-settings"),
+            ("fontVariationSettings", "font-variation-settings"),
+            ("ascentOverride", "ascent-override"),
+            ("descentOverride", "descent-override"),
+            ("lineGapOverride", "line-gap-override"),
+            ("sizeAdjust", "size-adjust"),
+        ] {
+            if let Some(value) = face.get(key).and_then(Value::as_str) {
+                if !safe_font_descriptor(value) {
+                    continue 'faces;
+                }
+                declarations.push(format!("{property}:{value}"));
+            } else if key == "fontDisplay" {
+                declarations.push("font-display:fallback".to_string());
+            }
+        }
+        declarations.push(format!("src:{}", sources.join(",")));
+        css.push_str(&format!("@font-face{{{}}}\n", declarations.join(";")));
+    }
+}
+
+fn safe_font_descriptor(value: &str) -> bool {
+    if !safe_css_value(value)
+        || value.contains("/*")
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let mut quote = None;
+    for character in value.chars() {
+        if quote == Some(character) {
+            quote = None;
+        } else if quote.is_none() && matches!(character, '\'' | '"') {
+            quote = Some(character);
+        }
+    }
+    quote.is_none()
+}
+
+fn theme_font_source(source: &str) -> Option<String> {
+    let source = source.trim();
+    if !safe_css_value(source) || source.chars().any(char::is_control) || source.contains('\\') {
+        return None;
+    }
+    // theme.json paths are relative to the published root, not the generated CSS directory.
+    let source = source.strip_prefix("file:./").unwrap_or(source);
+    let lower = source.to_ascii_lowercase();
+    let url =
+        if lower.starts_with("https://") || lower.starts_with("http://") || source.starts_with('/')
+        {
+            source.to_string()
+        } else {
+            if source.contains(':') || source.is_empty() {
+                return None;
+            }
+            format!("/{}", source.strip_prefix("./").unwrap_or(source))
+        };
+    Some(format!("url('{}')", url.replace('\'', "\\'")))
 }
 
 fn append_theme_presets(
@@ -691,13 +791,17 @@ fn append_theme_nested_css(css: &mut String, selector: &str, value: Option<&Valu
                 css.push('\n');
             }
         }
+    } else if selector == "body" && value.contains('{') {
+        // Root styles.css is a stylesheet; block and element CSS remains scoped.
+        css.push_str(value);
+        css.push('\n');
     } else if !value.contains(['{', '}']) {
         css.push_str(&format!("{selector}{{{value}}}\n"));
     }
 }
 
 fn safe_nested_css(value: &str) -> bool {
-    if value.trim().is_empty() || value.len() > 16_384 || value.contains(['<', '>']) {
+    if value.trim().is_empty() || value.len() > 16_384 || value.contains('<') {
         return false;
     }
     let lower = value.to_ascii_lowercase();

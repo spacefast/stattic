@@ -51,4 +51,5 @@ test("concurrent plugin fetches expose only a complete pinned tree", async () =>
     watcher.close();
     await rm(temporary, { recursive: true, force: true });
   }
-});
+  // Sixteen fetches, each unpacking and hashing the whole plugin tree.
+}, 30_000);

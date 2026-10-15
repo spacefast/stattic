@@ -297,6 +297,7 @@ function spacefast_content_model_register_rest_meta(array $contentModel): void
     }
     foreach ($contentModel['postTypes'] as $resource) {
         add_filter('rest_pre_insert_' . $resource['postType'], 'spacefast_content_model_preserve_absent_meta', 10, 2);
+        add_filter('rest_pre_insert_' . $resource['postType'], 'spacefast_content_sync_prepare_editor_save', 20, 2);
         add_filter('rest_prepare_' . $resource['postType'], 'spacefast_content_model_project_absent_meta', 10, 2);
         foreach ($resource['fields'] as $field) {
             if (!empty($field['native'])) {
@@ -887,7 +888,7 @@ function spacefast_content_model_is_canonical_page(array $binding): bool
 }
 
 /** The verified release carries seed bytes, so activation never guesses a live version root. */
-function spacefast_content_model_reconcile_documents(array $contentModel): array
+function spacefast_content_model_reconcile_documents(array $contentModel, array $previousStorage = []): array
 {
     $documents = [];
     foreach ($contentModel['syncBindings'] as $binding) {
@@ -924,6 +925,7 @@ function spacefast_content_model_reconcile_documents(array $contentModel): array
                 'post_type' => $binding['postType'],
                 'field_storage' => $binding['fieldStorage'],
             ],
+            'previousFieldStorage' => $previousStorage[$binding['id']] ?? null,
         ]);
     }
     return $documents;
@@ -1057,13 +1059,15 @@ function spacefast_content_model_activate_release(mixed $revision): array
     return spacefast_content_sync_locked(static function () use ($contentModel, $contentModelRoot, $revision): array {
         $previous = spacefast_content_model_current_release($contentModelRoot);
         $previousPaths = [];
+        $previousStorage = [];
         foreach ($previous['syncBindings'] ?? [] as $binding) {
             if (isset($binding['publicPath'])) $previousPaths[$binding['id']] = $binding['publicPath'];
+            if (isset($binding['fieldStorage'])) $previousStorage[$binding['id']] = $binding['fieldStorage'];
         }
         $documents = spacefast_content_sync_without_journal(
-            static fn (): array => spacefast_content_sync_with_transaction(static function () use ($previous, $contentModel, $contentModelRoot): array {
+            static fn (): array => spacefast_content_sync_with_transaction(static function () use ($previous, $contentModel, $contentModelRoot, $previousStorage): array {
                 spacefast_content_model_prepare_retirement($contentModelRoot, $previous, $contentModel);
-                return spacefast_content_model_reconcile_documents($contentModel);
+                return spacefast_content_model_reconcile_documents($contentModel, $previousStorage);
             })
         );
         spacefast_content_public_routes_refresh();

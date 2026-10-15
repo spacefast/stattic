@@ -52,7 +52,13 @@ beforeAll(async () => {
     await deploy(runtime, {
       spaceId: SPACE,
       versionId: VERSION,
-      files: { "index.html": "<h1>storage</h1>\n" },
+      files: {
+        // Tenant fallbacks must not intercept the object API.
+        _redirects: "/* /index.html 200\n",
+        "index.html": "<h1>storage</h1>\n",
+        "storage/index.html": "<h1>storage guide</h1>\n",
+        "storage/object.txt": "authored object page\n",
+      },
       activate: {
         route_name: "production",
         config: publicAccessConfig({ mode: "website", site_title: "Storage" }),
@@ -91,6 +97,24 @@ type OwnerObject = {
   sha256: string;
   url: string;
 };
+
+test("authored files under /storage win GET and HEAD without taking the object API", async () => {
+  const canonical = await get(rt, HOST, "/storage");
+  expect(canonical.status).toBe(308);
+  expect(canonical.headers.get("location")).toBe("/storage/");
+
+  const guide = await get(rt, HOST, "/storage/");
+  expect(guide.status).toBe(200);
+  expect(await guide.text()).toBe("<h1>storage guide</h1>\n");
+
+  const objectPage = await get(rt, HOST, "/storage/object.txt");
+  expect(objectPage.status).toBe(200);
+  expect(await objectPage.text()).toBe("authored object page\n");
+
+  const head = await get(rt, HOST, "/storage/", { method: "HEAD" });
+  expect(head.status).toBe(200);
+  expect(await head.text()).toBe("");
+});
 
 async function upload(
   body: string,

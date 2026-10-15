@@ -281,6 +281,9 @@ function spacefast_content_source_journal_entry(int $postId, object $post): ?arr
     if (!is_array($ledger) || ($ledger['bindingId'] ?? null) !== $bindingId) {
         return null;
     }
+    if (($ledger['fieldStorage'] ?? $binding['field_storage']) !== $binding['field_storage']) {
+        return null;
+    }
     if (!spacefast_content_sync_document_changed($ledger, $post, $binding)) {
         return null;
     }

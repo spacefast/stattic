@@ -43,6 +43,7 @@ export async function startMysqlContainer(input: {
   database: string;
   rootPassword: string;
   flavor?: "mysql" | "mariadb";
+  imagePullPolicy?: "missing" | "never";
   /** Suite setup may reserve a smaller readiness budget for its other work. */
   setupTimeoutMs?: number;
 }): Promise<MysqlContainer> {
@@ -57,6 +58,8 @@ export async function startMysqlContainer(input: {
     cmd: [
       "docker",
       "run",
+      "--pull",
+      input.imagePullPolicy ?? "missing",
       "-d",
       "--rm",
       "--name",

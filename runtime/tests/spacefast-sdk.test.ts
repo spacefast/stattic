@@ -246,6 +246,7 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
         src: RUNTIME_TRACKER_SCRIPT_PATH,
         endpoint: "https://beacon.example.test",
         key: "pk_sdk",
+        consent: "wait",
       },
     },
     body: "window.__embeddedTagLoaded=true;",
@@ -322,12 +323,17 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   expect(JSON.stringify(fakeWindow.Spacefast)).not.toContain("test-private-client-secret");
   // With Comments off, the one script the loader adds is the analytics tracker,
   // from this host and reporting to Beacon, not to the host it came from,
-  // marked as injected so a tag the author placed wins. The body ran twice
-  // above and added it once.
+  // marked as injected so a tag the author placed wins, and waiting for a
+  // grant as this Space asks. The body ran twice above and added it once.
   expect(appended).toEqual([
     {
       async: true,
-      dataset: { site: "pk_sdk", endpoint: "https://beacon.example.test", injected: "" },
+      dataset: {
+        site: "pk_sdk",
+        endpoint: "https://beacon.example.test",
+        consent: "wait",
+        injected: "",
+      },
       src: RUNTIME_TRACKER_SCRIPT_PATH,
       type: "",
     },

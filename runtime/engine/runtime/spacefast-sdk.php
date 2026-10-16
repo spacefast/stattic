@@ -414,7 +414,8 @@ const STATTIC_SPACEFAST_TRACKER_EMPTY = "/* No Spacefast analytics here. */\n";
  * The tracker this Space's pages load, as the control plane projected it, or
  * null when they load none: the Space has analytics off, or the deployment has
  * no Beacon. `src` is a path on this host (or a platform URL), `endpoint` is
- * Beacon's origin, and `key` is the tracker's `data-site`.
+ * Beacon's origin, `key` is the tracker's `data-site`, and `wait` says the
+ * tracker sends nothing until the visitor agrees in the page's consent banner.
  */
 function _stattic_spacefast_tracker_config(array $serving): ?array
 {
@@ -436,7 +437,12 @@ function _stattic_spacefast_tracker_config(array $serving): ?array
     ) {
         return null;
     }
-    return ['src' => $src, 'endpoint' => $endpoint, 'key' => $key];
+    return [
+        'src' => $src,
+        'endpoint' => $endpoint,
+        'key' => $key,
+        'wait' => ($tracker['consent'] ?? null) === 'wait',
+    ];
 }
 
 /**
@@ -445,7 +451,8 @@ function _stattic_spacefast_tracker_config(array $serving): ?array
  * immutable version host write nothing. `data-endpoint` is set because the
  * tracker otherwise reports to the origin it was loaded from, which is this
  * host and not Beacon. `data-injected` makes it give way to a t.js tag the
- * author placed by hand, whose settings are the page's own.
+ * author placed by hand, whose settings are the page's own. `data-consent`
+ * is written only for a Space that waits for a grant.
  */
 function _stattic_spacefast_tracker_loader(array $serving, ?string $previewToken): string
 {
@@ -464,6 +471,7 @@ function _stattic_spacefast_tracker_loader(array $serving, ?string $previewToken
         'a.src=' . json_encode($tracker['src'], JSON_UNESCAPED_SLASHES) . ';' .
         'a.dataset.site=' . json_encode($tracker['key'], JSON_UNESCAPED_SLASHES) . ';' .
         'a.dataset.endpoint=' . json_encode($tracker['endpoint'], JSON_UNESCAPED_SLASHES) . ';' .
+        ($tracker['wait'] ? 'a.dataset.consent="wait";' : '') .
         'a.dataset.injected="";document.head.appendChild(a);}';
 }
 

@@ -18,11 +18,18 @@ const add = spawnSync("rustup", ["target", "add", "--toolchain", toolchain, targ
   cwd: repoRoot,
   stdio: "inherit",
 });
+if (add.error) throw add.error;
 if (add.status !== 0) process.exit(add.status ?? 1);
-const rustc = spawnSync("rustup", ["which", "--toolchain", toolchain, "rustc"], {
+const compiler = spawnSync("rustup", ["which", "--toolchain", toolchain, "rustc"], {
   cwd: repoRoot,
   encoding: "utf8",
-}).stdout.trim();
+});
+if (compiler.error) throw compiler.error;
+if (compiler.status !== 0) {
+  process.stderr.write(compiler.stderr ?? "");
+  process.exit(compiler.status ?? 1);
+}
+const rustc = compiler.stdout.trim();
 if (!rustc) throw new Error("rust_toolchain_compiler_missing");
 
 const result = spawnSync(
@@ -41,6 +48,7 @@ const result = spawnSync(
   ],
   { cwd: repoRoot, env: { ...process.env, RUSTC: rustc }, stdio: "inherit" },
 );
+if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 
 const source = path.join(repoRoot, "target/wasm32-wasip1/release/stattic_runtime_wasi.wasm");

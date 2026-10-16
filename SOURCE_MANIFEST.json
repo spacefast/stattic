@@ -1,7 +1,7 @@
 {
-  "revision": "2535dbb87e9422aef56fe05436a0c25b7d790031",
+  "revision": "4670567c3f1e515b17498ae5395ece2541c1d6d0",
   "sourceHash": "07c316654f22becde0030961aad10cb8a0352cbb93c434c9f379c43d16ff60fc",
-  "manifestSha256": "4652b1349545e44a9643f897cfb1cae96bfec7d0bf0908b23ac22badaf9a5c2c",
+  "manifestSha256": "ca28731abc638e0064798a75d83958617be8ea9ca962a353222e03f0002a10e3",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "84375785c992ec6f9d3b69de2642392fcc6d56455db7cff706de31da6393d3f7"
+      "sha256": "6648d5dcc854845782c2d69f4af0c2db95567a4045032900890eb693da68ca2e"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "bd4d8556570387ad5c5e4211beb76a7cc68ef884e57b232c201e554a96bb11f0"
+      "sha256": "6c0eb5a3f3fb5bc95dcd480921c295b328eff46fc2fe914be3cc42cc7b35029c"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -1397,7 +1397,7 @@
     },
     {
       "path": "scripts/build-runtime-wasi.mjs",
-      "sha256": "fef9fef6f10de48d11ea77aeaa1bae5982743c952026756c863c6f475f8ef298"
+      "sha256": "de887d96617e1a0dee695d82fbff4c4d2a0e51e1334732bdb4eac3d60dd62b73"
     },
     {
       "path": "scripts/check-finalizer-protocol.mjs",

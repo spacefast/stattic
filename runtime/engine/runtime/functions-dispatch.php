@@ -584,7 +584,9 @@ function _stattic_functions_dispatch(
         }
     }
 
+    $startedAt = hrtime(true);
     $result = _stattic_http_request($request);
+    $elapsedSeconds = (hrtime(true) - $startedAt) / 1e9;
     if (is_resource($input)) {
         fclose($input);
     }
@@ -601,7 +603,7 @@ function _stattic_functions_dispatch(
             ],
         ], $versionId);
         _stattic_relay_abort_after_headers($headersSent);
-        _stattic_functions_bad_gateway($requestId);
+        _stattic_functions_bad_gateway($requestId, $elapsedSeconds);
     }
     if (!$headersSent) {
         http_response_code($status > 0 ? $status : 502);
@@ -621,16 +623,30 @@ function _stattic_functions_request_id(): string
     return 'fxr_' . bin2hex(random_bytes(12));
 }
 
-function _stattic_functions_bad_gateway(string $requestId): void
+function _stattic_functions_bad_gateway(string $requestId, float $elapsedSeconds): void
 {
     _stattic_serve_page('proxy-error', [
         'status' => 502,
         'code' => 'functions_transport_failed',
-        'message' => 'The function did not respond.',
+        'message' => _stattic_functions_transport_failure_message($elapsedSeconds),
         'headers' => ['X-Spacefast-Request-Id' => $requestId],
         'requestId' => $requestId,
         'customizable' => true,
     ]);
+}
+
+// curl stops the dispatch at the deadline, so a failure that took that long is
+// the time limit, not a refused or broken connection. The developer usually
+// meets the limit here first, so the detail names it and how to stay under it.
+function _stattic_functions_transport_failure_message(float $elapsedSeconds): string
+{
+    if ($elapsedSeconds < STATTIC_FUNCTIONS_DISPATCH_TIMEOUT_SECONDS) {
+        return 'The function did not respond.';
+    }
+    return 'The function did not respond within ' . STATTIC_FUNCTIONS_DISPATCH_TIMEOUT_SECONDS . ' seconds, '
+        . 'the time limit for a Functions request. Do less work per request: split long jobs into chunks '
+        . 'that each finish in time, and save progress (for example in env.DB) so the next request '
+        . 'or cron run picks up where the last one stopped.';
 }
 
 // A function path whose execution edge is unreachable answers 503, never a

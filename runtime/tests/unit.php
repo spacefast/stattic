@@ -2430,6 +2430,17 @@ foreach (['/', '/api/orders', '/posts/1', '/identity-kit', '/storage', '/storage
 }
 check(!_stattic_functions_dispatchable('/', 'TRACE'), 'dispatch: refuses TRACE');
 
+// The functions runtime docs, the limits page and the functions_transport_failed
+// error page quote this number; change them together.
+check(
+    str_starts_with(_stattic_functions_transport_failure_message(30.0), 'The function did not respond within 30 seconds, the time limit for a Functions request.'),
+    'dispatch: a failure at the deadline names the 30-second limit'
+);
+check(
+    _stattic_functions_transport_failure_message(0.2) === 'The function did not respond.',
+    'dispatch: a failure before the deadline is not blamed on the time limit'
+);
+
 // A tenant's worker crosses the untrusted response relay, but it is still the
 // application serving this hostname. Headers describing the internal hop,
 // reaching outside the response, or steering the platform edge do not survive.

@@ -1990,6 +1990,11 @@ $mintBundleToken = static function (array $claims) use ($artifactSecretKey): str
     return $signingInput . '.' . _stattic_base64url_encode(sodium_crypto_sign_detached($signingInput, $artifactSecretKey));
 };
 
+// Verified against a real version directory, like the relay: a token naming a
+// version this origin never had is a replay.
+$bundleRoot = realpath(sys_get_temp_dir()) . '/sf-fx-bundle-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
+mkdir($bundleRoot . '/spaces/spc_1/versions/ver_1', 0o777, true);
+
 $validClaims = [
     'aud' => 'spacefast-functions-bundle',
     'runtime_instance_id' => 'rti_test',
@@ -2001,15 +2006,17 @@ $validClaims = [
 ];
 
 check(
-    _stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken($validClaims), 'spc_1', 'ver_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
+    _stattic_artifact_bundle_token_valid($bundleRoot, $mintBundleToken($validClaims), 'spc_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
     'bundle token: a correctly scoped, correctly signed token verifies'
 );
 
-// Every scope claim is load-bearing: a token surviving a change of space,
-// version or digest would let one tenant replay a URL against another's source.
+// Every scope claim is load-bearing: a token surviving a change of space or
+// digest would let one tenant replay a URL against another's source. The
+// version need not be the one the host serves, but it must be one this Space
+// holds.
 foreach ([
     'space' => ['space_id' => 'spc_other'],
-    'version' => ['version_id' => 'ver_other'],
+    'version' => ['version_id' => 'ver_missing'],
     'digest' => ['sha256' => 'sha256:' . str_repeat('b', 64)],
     'runtime' => ['runtime_instance_id' => 'rti_other'],
     'audience' => ['aud' => 'stattic-runtime-file-fetch'],
@@ -2018,19 +2025,19 @@ foreach ([
     'artifact kind' => ['aud' => SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['seed']],
 ] as $label => $override) {
     check(
-        !_stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken(array_merge($validClaims, $override)), 'spc_1', 'ver_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
+        !_stattic_artifact_bundle_token_valid($bundleRoot, $mintBundleToken(array_merge($validClaims, $override)), 'spc_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
         'bundle token: refuses a token whose ' . $label . ' does not match'
     );
 }
 
 check(
-    !_stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken(array_merge($validClaims, ['exp' => time() - 1])), 'spc_1', 'ver_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
+    !_stattic_artifact_bundle_token_valid($bundleRoot, $mintBundleToken(array_merge($validClaims, ['exp' => time() - 1])), 'spc_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
     'bundle token: refuses an expired token'
 );
 $noExp = $validClaims;
 unset($noExp['exp']);
 check(
-    !_stattic_artifact_bundle_token_valid('/tmp', $mintBundleToken($noExp), 'spc_1', 'ver_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
+    !_stattic_artifact_bundle_token_valid($bundleRoot, $mintBundleToken($noExp), 'spc_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
     'bundle token: refuses a token with no expiry, so one cannot be unbounded by omission'
 );
 
@@ -2044,9 +2051,10 @@ $forgedToken = $forgedInput . '.' . _stattic_base64url_encode(
     sodium_crypto_sign_detached($forgedInput, sodium_crypto_sign_secretkey($forgedKeypair))
 );
 check(
-    !_stattic_artifact_bundle_token_valid('/tmp', $forgedToken, 'spc_1', 'ver_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
+    !_stattic_artifact_bundle_token_valid($bundleRoot, $forgedToken, 'spc_1', $digest, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['bundle']),
     'bundle token: refuses a token signed by a key that is not the runtime key'
 );
+_stattic_job_runner_unit_rm_recursive(dirname($bundleRoot, 2));
 
 // --- Relay: the credential carries the grant ----------------------------------------
 

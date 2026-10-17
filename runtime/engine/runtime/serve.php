@@ -362,7 +362,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     }
     if (str_starts_with($requestPath, '/' . STATTIC_FUNCTIONS_BUNDLE_PREFIX)) {
         require_once __DIR__ . '/functions-artifacts.php';
-        _stattic_artifact_serve($privateRoot, $spaceId, $versionId, $requestPath, $requestMethod);
+        _stattic_artifact_serve($privateRoot, $spaceId, $requestPath, $requestMethod);
     }
     if ($requestPath === '/' . STATTIC_FUNCTIONS_RELAY_PATH || $requestPath === '/' . STATTIC_FUNCTIONS_LOGS_PATH) {
         require_once __DIR__ . '/functions-relay.php';

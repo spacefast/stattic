@@ -1,7 +1,7 @@
 {
-  "revision": "a6027624e4c68d209fbc7ae237f480de5a725345",
-  "sourceHash": "e7f1242989ab2578d4e2d756531e257393f2ee9faea500ae58c821a5cb110620",
-  "manifestSha256": "01f63386a8c351651d8ad83d69e23d180e927d4a62286438dc098155ca12a232",
+  "revision": "66c4fae07b844686de3cd33cbae2f3a5317e5e14",
+  "sourceHash": "ad12a218cb9c7123e9b4d75c9b726beb384d5aee64d7d2048b9c8b3c49faa430",
+  "manifestSha256": "494a65f6987c1b26c8633639b63d741a7642f8a0e740d27a44fb554f745b4314",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "9988bb715a6bbe23a3234cae6a12656313dffedc869f2a404bbb87b8b96daf06"
+      "sha256": "92ea0033cbf55b7dd7b1787a29ff78275dd8c423773fbfb0e6369bf4bcd82250"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "5ff0497d158e13a2ab22c296df3da6a4d3144e219b2544daafe86b2f844869b0"
+      "sha256": "c8cb98a2c040c9638bd5ba7f3e8223636bbefb9ebf029066f7b3fcdb90745f4b"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -545,7 +545,7 @@
     },
     {
       "path": "runtime/engine/runtime/functions-artifacts.php",
-      "sha256": "70906e8a7f7b3a5c178cd634f3b173c821f0f3c1d42bc95f176dd05bf53cf397"
+      "sha256": "141eb68df224a9531b1c1d5520bca7c45ed9719c2b3e5423b16b663a80023a45"
     },
     {
       "path": "runtime/engine/runtime/functions-dispatch.php",
@@ -593,7 +593,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "fc6d40b5958fa965f9539fc6f831d2c39bea2d4ba8f6412eaa5ff17b26b097f2"
+      "sha256": "c7f7929e204cb91f3fc3a53bb983441ae78a2e5d6bd970291211a486467b6541"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -1153,7 +1153,7 @@
     },
     {
       "path": "runtime/tests/functions-artifacts.test.ts",
-      "sha256": "b7534b2f790b8aed83f17346236d34420d5e7269ed217982b5ba755d981aae19"
+      "sha256": "864aeba8df3fbe3e66f5abe87b2a767428ce90c24a5056cde5b6f9adb7d10f6b"
     },
     {
       "path": "runtime/tests/functions-purge.test.ts",
@@ -1329,7 +1329,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "191c20ed51a735e2aaa435d8498a6187e109463aa43cd7eb4d9f2bd5b4218eca"
+      "sha256": "69c037dfad680e8ea0e632ba80ff69172ab68fb4870c1d7cd80f9f8d67d455ea"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

@@ -32,6 +32,16 @@ const SEED = JSON.stringify({
 });
 const SEED_DIGEST = sha256(SEED);
 const SEED_STORAGE_PATH = `__spacefast/functions/seeds/${SEED_DIGEST}/seed.json`;
+// A preview: published after the live version and never promoted, so the
+// production host still resolves VERSION_ID. Its worker is dispatched from its
+// own version URL, but finalize signs the bundle URL on the Space's default host.
+const PREVIEW_VERSION_ID = "ver_fx_artifacts_2";
+const PREVIEW_BUNDLE = JSON.stringify({
+  format: "spacefast.functions.bundle.v1",
+  mainModule: "index.js",
+  modules: { "index.js": { js: "export default { fetch: () => new Response('preview') };" } },
+});
+const PREVIEW_DIGEST = sha256(PREVIEW_BUNDLE);
 
 let rt: Runtime | undefined;
 
@@ -51,6 +61,16 @@ beforeAll(async () => {
       production_hostnames: [HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
+    },
+  });
+  await deploy(runtime, {
+    spaceId: SPACE_ID,
+    versionId: PREVIEW_VERSION_ID,
+    files: {
+      [`__spacefast/functions/bundles/${PREVIEW_DIGEST}/bundle.json`]: {
+        content: PREVIEW_BUNDLE,
+        contentType: "application/json",
+      },
     },
   });
 });
@@ -76,6 +96,24 @@ test("a signed bundle route reads the private published bundle", async () => {
   // the content-addressed tokened URL (functions-host loadBundle).
   expect(signed.headers.get("a8c-edge-cache")).toBe("cache");
   expect(await signed.text()).toBe(BUNDLE);
+});
+
+test("an unpromoted version's signed bundle reads through the default host", async () => {
+  if (!rt) throw new Error("runtime_not_started");
+  const token = signToken({
+    aud: "spacefast-functions-bundle",
+    runtime_instance_id: RUNTIME_INSTANCE_ID,
+    space_id: SPACE_ID,
+    version_id: PREVIEW_VERSION_ID,
+    sha256: `sha256:${PREVIEW_DIGEST}`,
+  });
+  const preview = await get(
+    rt,
+    HOST,
+    `/__spacefast/functions/b/${PREVIEW_DIGEST}/${token}/bundle.json`,
+  );
+  expect(preview.status).toBe(200);
+  expect(await preview.text()).toBe(PREVIEW_BUNDLE);
 });
 
 test("the cache seed rides the same signed route under its own audience", async () => {

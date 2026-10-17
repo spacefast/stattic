@@ -55,16 +55,21 @@ function _stattic_artifact_bundle_token_valid(
     string $privateRoot,
     string $token,
     string $spaceId,
-    string $versionId,
     string $digest,
     string $audience
 ): bool {
     return _stattic_runtime_token_claims($privateRoot, $token, $audience, [
-        // All three bindings are required: dropping one lets a tenant replay a
-        // URL against another's bundle.
+        // Space and digest must match, and the version must exist: dropping one
+        // lets a tenant replay a URL against another's bundle.
         'scope_valid' => static fn (array $claims): bool => is_string($claims['space_id'] ?? null) && hash_equals($spaceId, (string) $claims['space_id'])
-            && is_string($claims['version_id'] ?? null) && hash_equals($versionId, (string) $claims['version_id'])
+            && is_string($claims['version_id'] ?? null) && _stattic_id_valid((string) $claims['version_id'])
             && is_string($claims['sha256'] ?? null) && hash_equals('sha256:' . $digest, (string) $claims['sha256']),
+        // Any real version of this Space, not the one the host serves. Finalize
+        // signs every version's URL on the default host, which serves live, so
+        // binding to the host's version would refuse every preview's bundle.
+        'state_valid' => static fn (array $claims): bool => is_dir(
+            _stattic_version_root($privateRoot, $spaceId, (string) $claims['version_id'])
+        ),
     ]) !== null;
 }
 
@@ -73,7 +78,6 @@ function _stattic_artifact_bundle_token_valid(
 function _stattic_artifact_serve(
     string $privateRoot,
     string $spaceId,
-    string $versionId,
     string $requestPath,
     string $requestMethod
 ): void {
@@ -86,7 +90,7 @@ function _stattic_artifact_serve(
         _stattic_opaque_not_found();
     }
 
-    if (!_stattic_artifact_bundle_token_valid($privateRoot, $parsed['token'], $spaceId, $versionId, $parsed['digest'], $parsed['aud'])) {
+    if (!_stattic_artifact_bundle_token_valid($privateRoot, $parsed['token'], $spaceId, $parsed['digest'], $parsed['aud'])) {
         _stattic_opaque_not_found();
     }
 

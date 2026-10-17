@@ -3324,6 +3324,32 @@ function _stattic_access_request_form(
         . '</details>';
 }
 
+// A refused account needs a way to become a different one. The sign-in host
+// owns accounts, so the switch is its add-account sign-in, same tab (an
+// embedded browser can lose both windows to a popup), and it keeps the
+// refused account signed in there.
+function _stattic_access_switch_account_button(string $returnPath): string
+{
+    $switchHref = _stattic_access_url_with_params(STATTIC_ACCESS_ACCOUNT_START_PATH, [
+        'return' => $returnPath,
+        'addAccount' => '1',
+    ]);
+    return '<a class="sf-button sf-button-quiet sf-access-switch" href="'
+        . _stattic_html_escape($switchHref) . '">Use another account</a>';
+}
+
+// Where that account's settings and other accounts live, for the visitor who
+// would rather sort it out there.
+function _stattic_access_dashboard_fragment(): string
+{
+    $dashboard = _stattic_dashboard_origin();
+    if ($dashboard === '') {
+        return '';
+    }
+    return '<p class="sf-sub sf-access-dashboard"><a href="' . _stattic_html_escape($dashboard . '/')
+        . '">Open your ' . _stattic_html_escape(_stattic_brand_value('name')) . ' dashboard</a></p>';
+}
+
 function _stattic_access_lanes_fragment(
     array $lanes,
     string $host,
@@ -3336,6 +3362,7 @@ function _stattic_access_lanes_fragment(
 {
     $html = '<div class="sf-access-lanes">';
     $buttons = '';
+    $dashboardLink = '';
     $hasPopup = false;
     if (is_string($lanes['account'])) {
         $accountHref = _stattic_access_url_with_params(STATTIC_ACCESS_ACCOUNT_START_PATH, [
@@ -3348,7 +3375,9 @@ function _stattic_access_lanes_fragment(
             // grants access later: sf_access stays in the address bar, so a reload
             // alone would keep showing this page.
             $buttons .= '<a class="sf-button sf-access-account" href="'
-                . _stattic_html_escape($accountHref) . '">Check again</a>';
+                . _stattic_html_escape($accountHref) . '">Check again</a>'
+                . _stattic_access_switch_account_button($returnPath);
+            $dashboardLink = _stattic_access_dashboard_fragment();
         } else {
             $hasPopup = true;
             $buttons .= '<a class="sf-button sf-access-account" data-sf-access-popup href="'
@@ -3441,7 +3470,7 @@ function _stattic_access_lanes_fragment(
             );
         }
     }
-    $html .= '</div>';
+    $html .= $dashboardLink . '</div>';
     if ($hasPopup) {
         // External and optional by contract: script-src 'self' enables the
         // popup; stricter policies keep the complete same-tab link.
@@ -3812,6 +3841,8 @@ function _stattic_access_handle_account_start(array $serving, string $requestHos
         'host' => _stattic_canonicalize_host($requestHost),
         'return' => $returnPath,
         'browserState' => _stattic_access_browser_state_begin(),
+        // "Use another account": sign in as someone else, not re-check this one.
+        ...(($_GET['addAccount'] ?? null) === '1' ? ['addAccount' => '1'] : []),
     ]);
     _stattic_access_redirect($redirect, 302, STATTIC_CACHE_CONTROL_NO_STORE, true);
 }

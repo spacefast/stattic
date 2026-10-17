@@ -4,6 +4,7 @@ import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 
 import {
+  DASHBOARD_ORIGIN,
   deploy,
   get,
   problemDocument,
@@ -546,7 +547,11 @@ beforeAll(async () => {
     },
   });
   exchangeOrigin = `http://127.0.0.1:${exchange.port}`;
-  runtime = await startRuntime({ env: { SPACEFAST_INSECURE_COOKIES: "" } });
+  // Boxes read the dashboard origin from their engine config file; the
+  // fixture's equivalent on the plain serving path is the process env.
+  runtime = await startRuntime({
+    env: { SPACEFAST_INSECURE_COOKIES: "", SPACEFAST_DASHBOARD_ORIGIN: DASHBOARD_ORIGIN },
+  });
   const fixtures = [
     {
       spaceId: LANES_SPACE,
@@ -1187,6 +1192,7 @@ test("a bounced silent probe renders the page instead of looping", async () => {
   expect(checked.status).toBe(403);
   const html = await checked.text();
   expect(html).toContain(">Sign in</a>");
+  expect(html).not.toContain("Use another account");
 
   const noGrant = await get(runtime, SILENT_HOST, "/docs/?sf_access=no-grant");
   const noGrantHtml = await noGrant.text();
@@ -1200,6 +1206,18 @@ test("a bounced silent probe renders the page instead of looping", async () => {
   expect(noGrantHtml).not.toContain("data-sf-access-popup");
   expect(noGrantHtml).not.toContain("/__spacefast/access/client.js");
   expect(noGrantHtml).toContain("Request an invite");
+  // Re-checking cannot change which account is signed in, so the page also
+  // offers the sign-in host's add-account sign-in, same tab, and the dashboard.
+  const switchHref = noGrantHtml.match(/href="([^"]+)">Use another account<\/a>/)?.[1];
+  expect(switchHref).toBe("/__spacefast/access/account?return=%2Fdocs%2F&amp;addAccount=1");
+  expect(noGrantHtml).toContain(`<a href="${DASHBOARD_ORIGIN}/">Open your Spacefast dashboard</a>`);
+  const switchStart = await get(runtime, SILENT_HOST, switchHref?.replaceAll("&amp;", "&") ?? "");
+  expect(switchStart.status).toBe(302);
+  const switchLocation = new URL(switchStart.headers.get("location") ?? "");
+  expect(`${switchLocation.origin}${switchLocation.pathname}`).toBe(ACCOUNT_URL);
+  expect(switchLocation.searchParams.get("addAccount")).toBe("1");
+  expect(switchLocation.searchParams.get("return")).toBe("/docs/");
+  expect(switchLocation.searchParams.get("browserState")).toMatch(/^[a-f0-9]{64}$/);
 
   const lanesNoGrant = await get(runtime, LANES_HOST, "/docs/?sf_access=no-grant");
   const lanesHtml = await lanesNoGrant.text();
@@ -1380,6 +1398,7 @@ test("the account lane redeems by GET, in the page or in a popup", async () => {
     "/__spacefast/access/account?return=%2Fdocs%2F",
   );
   expect(otherBrowserStart.status).toBe(302);
+  expect(otherBrowserStart.headers.get("location")).not.toContain("addAccount");
   const otherBrowserCookie = browserStateCookie(otherBrowserStart);
   expect(otherBrowserCookie).toMatch(/^__Host-spacefast_access_state_[a-f0-9]{16}=[a-f0-9]{64}$/);
   expect(otherBrowserCookie).not.toBe(stateCookie);

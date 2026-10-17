@@ -749,10 +749,14 @@ globalThis.__statticZeroResult = JSON.stringify({ status: 200, body: "unreachabl
     let response = handle_invoke(&fixture.envelope()).unwrap_err();
 
     assert_eq!(response.status, 504);
-    assert_eq!(
-        response_body(&response)["code"],
-        "zero_js_execution_timeout"
-    );
+    let body = response_body(&response);
+    assert_eq!(body["code"], "zero_js_execution_timeout");
+    // The docs and the zero_js_execution_timeout error page quote this number;
+    // change them together.
+    assert!(body["detail"]
+        .as_str()
+        .expect("detail")
+        .starts_with("Zero handler used more than 500 ms of CPU time"));
 }
 
 // --- Action execution mode ---------------------------------------------------
@@ -923,6 +927,10 @@ fn actions_bound_arguments_result_size_and_wall_time() {
         assert_eq!(response.status, status);
         if status == 504 {
             assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+            assert_eq!(
+                response_body(&response)["detail"],
+                "Zero action exceeded 5 seconds."
+            );
         }
     }
 }

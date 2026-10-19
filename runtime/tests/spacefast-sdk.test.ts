@@ -115,7 +115,7 @@ type FakeWindow = {
 // orb lands.
 function runSdk(
   source: string,
-  options: { host?: string; pathname?: string; storedPlacement?: string } = {},
+  options: { host?: string; pathname?: string; storedPlacement?: string; background?: string } = {},
 ) {
   const head: FakeElement[] = [];
   const body: FakeElement[] = [];
@@ -174,6 +174,7 @@ function runSdk(
     "localStorage",
     "innerWidth",
     "innerHeight",
+    "getComputedStyle",
     source,
   )(
     fakeWindow,
@@ -182,6 +183,13 @@ function runSdk(
     { getItem: () => options.storedPlacement ?? null },
     1_000,
     900,
+    // The body's painted background; html and anything else paint none.
+    (element: typeof fakeDocument.body) => ({
+      backgroundColor:
+        element === fakeDocument.body && options.background
+          ? options.background
+          : "rgba(0, 0, 0, 0)",
+    }),
   );
   return { head, body, events, window: fakeWindow };
 }
@@ -921,15 +929,20 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   // centred on a 44px disc -> top:275px (0.33*900-22).
   expect(placeholderOrb?.style.cssText).toContain("left:16px");
   expect(placeholderOrb?.style.cssText).toContain("top:275px");
-  // It wears the Space's accent, straight off the serving state — as the disc's
-  // fill, which is what the real orb boots into.
-  expect(placeholderOrb?.style.cssText).toContain("background:#4f46e5");
+  // Neutral ink read off the site, never the Space's color, which is what the
+  // real orb boots into: a page that paints no background is the browser's
+  // light canvas, so the disc is dark and its ink white.
+  expect(placeholderOrb?.style.cssText).toContain("background:#1d1d22");
+  expect(placeholderOrb?.style.cssText).not.toContain("#4f46e5");
   expect(placeholderOrb?.innerHTML).toContain("sf-boot-pulse");
   // The glyph and its ink are the SDK's, not a lookalike: a placeholder drawing
-  // a different shape or a different ink is a visible swap at boot. #4f46e5 is
-  // dark, so the ink is white.
+  // a different shape or a different ink is a visible swap at boot.
   expect(placeholderOrb?.innerHTML).toContain(ICON_PATHS.comment);
   expect(placeholderOrb?.innerHTML).toContain('stroke="#ffffff"');
+  // On a dark site the disc turns light, with dark ink.
+  const onDark = runSdk(body, { storedPlacement, background: "rgb(20, 18, 16)" }).body[0];
+  expect(onDark?.style.cssText).toContain("background:#f4f4f6");
+  expect(onDark?.innerHTML).toContain('stroke="#16161b"');
 
   // ...and it stands in for an overlay that is ARRIVING. A module that never
   // loads leaves it standing in for nothing, so the failure takes it down: a
@@ -1170,9 +1183,9 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   const hostileRun = runSdk(await hostileSdk.text(), { host: "hostile-accent.site.test" });
   const hostileOrb = hostileRun.body[0];
   expect(hostileOrb?.id).toBe("sf-collab-boot-orb");
-  // The accent fills the disc, so it lands in a CSS declaration: only a literal
-  // 6-hex is ever written there, and anything else is the overlay's fallback.
-  expect(hostileOrb?.style.cssText).toContain("background:#ff603d");
+  // The disc is neutral ink, never the accent, so a hostile accent has no way
+  // into its CSS declaration at all.
+  expect(hostileOrb?.style.cssText).toContain("background:#1d1d22");
   for (const painted of [hostileOrb?.style.cssText, hostileOrb?.innerHTML]) {
     expect(painted).not.toContain("<img");
     expect(painted).not.toContain("onerror");

@@ -312,9 +312,9 @@ function _stattic_spacefast_sdk_bootstrap(
     require_once __DIR__ . '/access-rules.php';
     $sdkConfig = _stattic_spacefast_sdk_config($serving);
     $review = _stattic_system_view_review();
-    // Only what this response has to PAINT: the orb's accent and whether this
-    // surface speaks at all. Everything else a client needs is one fetch away
-    // at the manifest, which is cacheable on its own terms.
+    // Only what this response has to PAINT: whether this surface speaks at
+    // all. Everything else a client needs is one fetch away at the manifest,
+    // which is cacheable on its own terms.
     $overlay = _stattic_comments_local_config($privateRoot, $serving, $requestHost);
     $collabBase = _stattic_spacefast_sdk_base_url($sdkConfig);
     $pageHost = _stattic_normalize_hostname($requestHost);
@@ -343,7 +343,7 @@ function _stattic_spacefast_sdk_bootstrap(
         json_encode(STATTIC_SPACEFAST_COLLAB_THEME_PATH . $query, JSON_UNESCAPED_SLASHES) . ';' .
         'document.head.appendChild(l);' .
         ($ui !== 'default' ? '' : (
-            _stattic_spacefast_sdk_placeholder_orb($overlay) .
+            _stattic_spacefast_sdk_placeholder_orb() .
             'var o=document.createElement("script");' .
             'o.async=true;o.type="module";' .
             'o.src=' . json_encode(rtrim((string) $collabBase, '/') . '/sdk/v1/collab.js', JSON_UNESCAPED_SLASHES) . ';' .
@@ -656,45 +656,19 @@ function _stattic_spacefast_tracker_upstream(string $endpoint, ?bool &$noCache =
 }
 
 /**
- * Ink that reads on a filled accent: dark on light accents, white on dark ones.
- * Mirrors the SDK's `deriveAccent` (theme/adaptive.ts), which draws the same
- * line at 0.45 relative luminance — the placeholder and the real orb must not
- * disagree about the colour of the glyph they both paint.
- */
-function _stattic_spacefast_sdk_accent_ink(string $accent): string
-{
-    if (!preg_match('/^#[0-9a-fA-F]{6}$/', $accent)) {
-        return '#ffffff';
-    }
-    $channel = static function (int $value): float {
-        $srgb = $value / 255;
-        return $srgb <= 0.04045 ? $srgb / 12.92 : (($srgb + 0.055) / 1.055) ** 2.4;
-    };
-    $luminance = 0.2126 * $channel((int) hexdec(substr($accent, 1, 2)))
-        + 0.7152 * $channel((int) hexdec(substr($accent, 3, 2)))
-        + 0.0722 * $channel((int) hexdec(substr($accent, 5, 2)));
-    return $luminance > 0.45 ? '#16161b' : '#ffffff';
-}
-
-/**
  * The orb, painted before a single Cast byte is fetched.
  *
- * An accent-filled disc carrying the comment glyph, in the placement the
- * visitor last dragged it to, with the `connecting` pulse — the same visuals the
- * real orb boots into (react/styles.ts `.sf-orb`, theme/icons.ts `comment`), so
- * the handover swaps no shape and no colour. It has no behaviour: the SDK
- * removes it when the real overlay mounts. Placement mirrors the store's
+ * A disc carrying the comment glyph, in the placement the visitor last dragged
+ * it to, with the `connecting` pulse. Like the real orb it is neutral ink read
+ * off the site's own background: a dark disc on a light site, a light one on a
+ * dark site (theme/tokens.ts `--sf-collab-accent`, theme/adaptive.ts), so the
+ * handover swaps no shape and no colour. It has no behaviour: the SDK removes
+ * it when the real overlay mounts. Placement mirrors the store's
  * `restoreOrbPlacement` + `orbDockStyle`; a rejected stored value falls back to
  * the default bottom-right dock.
  */
-function _stattic_spacefast_sdk_placeholder_orb(array $overlay): string
+function _stattic_spacefast_sdk_placeholder_orb(): string
 {
-    // This value is written into a CSS declaration, so only a literal 6-hex is
-    // ever accepted here; anything else is the overlay's own fallback.
-    $accent = $overlay['theme']['accent'] ?? null;
-    $accent = is_string($accent) && preg_match('/^#[0-9a-fA-F]{6}$/', $accent)
-        ? $accent
-        : '#ff603d';
     // Kept in one place with the SDK's copy: runtime/tests/spacefast-sdk.test.ts
     // pins this path against `ICON_PATHS.comment`.
     $glyph = 'M6 4h12a2 2 0 012 2v7a2 2 0 01-2 2h-7l-4 4v-4H6a2 2 0 01-2-2V6a2 2 0 012-2z';
@@ -706,15 +680,19 @@ function _stattic_spacefast_sdk_placeholder_orb(array $overlay): string
         'var pv=pe=="left"||pe=="right";' .
         'var ps=pv?innerHeight:innerWidth;' .
         'var pc=Math.min(Math.max(pa*ps-22,16),Math.max(16,ps-60));' .
+        // A dark site is one whose body (or html) paints a dark background; a
+        // page that paints none is the browser's light canvas.
+        'var pd=false;try{var pg=function(el){var m=el&&getComputedStyle(el).backgroundColor.match(/[\d.]+/g);' .
+        'return m&&m.length>2&&!(m.length>3&&+m[3]<.1)?(.2126*m[0]+.7152*m[1]+.0722*m[2])/255:null};' .
+        'var pl=pg(document.body);if(pl===null)pl=pg(document.documentElement);pd=pl!==null&&pl<.5}catch(e){}' .
         'var b=document.createElement("div");b.id="sf-collab-boot-orb";' .
         'b.style.cssText="position:fixed;z-index:2147483000;width:44px;height:44px;border-radius:999px;' .
-        'pointer-events:none;display:grid;place-items:center;background:' .
-        $accent . ';' .
+        'pointer-events:none;display:grid;place-items:center;background:"+(pd?"#f4f4f6":"#1d1d22")+";' .
         'box-shadow:0 2px 8px rgba(0,0,0,.12);"+' .
         'pe+":"+pi+"px;"+(pv?"top:":"left:")+pc+"px";' .
         'b.innerHTML=\'<style>@keyframes sf-boot-pulse{0%,100%{opacity:1}50%{opacity:.35}}</style>\'+' .
         '\'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="\'+' .
-        json_encode(_stattic_spacefast_sdk_accent_ink($accent), JSON_UNESCAPED_SLASHES) .
+        '(pd?"#16161b":"#ffffff")' .
         '+\'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ' .
         'style="animation:sf-boot-pulse 1.6s ease-in-out infinite"><path d="' . $glyph . '"/></svg>\';' .
         '(document.body||document.documentElement).appendChild(b);' .

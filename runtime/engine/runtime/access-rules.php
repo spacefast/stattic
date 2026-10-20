@@ -3281,7 +3281,7 @@ function _stattic_access_status_fragment(string $status, ?string $accountEmail =
         'link-revoked' => 'That link was turned off. Use another way in, or ask for a new one.',
         'link-invalid' => "That link doesn't work anymore.",
         'open-used' => 'That open link was already used. Use another way in.',
-        'session-expired' => 'Your access expired. Sign in again to continue.',
+        'session-expired' => 'Your access expired. Continue to check it again.',
         'rate-limited' => 'Too many tries. Give it a minute.',
         'exchange-unavailable' => "Couldn't reach Spacefast to check that. Try again in a moment.",
     ];
@@ -3380,8 +3380,14 @@ function _stattic_access_lanes_fragment(
             $dashboardLink = _stattic_access_dashboard_fragment();
         } else {
             $hasPopup = true;
-            $buttons .= '<a class="sf-button sf-access-account" data-sf-access-popup href="'
-                . _stattic_html_escape($accountHref) . '">Sign in</a>';
+            // Older published access templates carry no helper CSS, so the note
+            // styles itself instead of falling back to a full paragraph.
+            $buttons .= '<a class="sf-button sf-access-account" data-sf-access-popup'
+                . ' aria-describedby="sf-account-help" href="'
+                . _stattic_html_escape($accountHref) . '">Continue with '
+                . _stattic_html_escape(_stattic_brand_value('name')) . '</a>'
+                . '<p class="sf-account-help" id="sf-account-help" style="margin:0 0 8px;color:var(--sf-dim);font-size:13px">'
+                . 'Already signed in? We&#039;ll use your existing account to check access.</p>';
         }
     }
     foreach ($lanes['connections'] as $connection) {

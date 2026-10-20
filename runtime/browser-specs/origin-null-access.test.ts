@@ -30,7 +30,7 @@ const EXPECTED_REACHABLE_STATES = {
   "request-failed": "That request didn't go through. Try again in a moment.",
   "email-sent": "Check your email. Use the confirmation link we sent to finish opening this page.",
   "email-failed": "Couldn't send that confirmation. Enter the password and try again.",
-  "session-expired": "Your access expired. Sign in again to continue.",
+  "session-expired": "Your access expired. Continue to check it again.",
   "rate-limited": "Too many tries. Give it a minute.",
   "exchange-unavailable": "Couldn't reach Spacefast to check that. Try again in a moment.",
 } as const;
@@ -111,7 +111,7 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   });
 
   const popupPromise = passwordContext.waitForEvent("page");
-  await passwordPage.getByRole("link", { name: "Sign in", exact: true }).click();
+  await passwordPage.getByRole("link", { name: "Continue with Spacefast", exact: true }).click();
   const popup = await popupPromise;
   await popup.goto(fixture.pageUrl);
   await popup.locator('input[name="password"]').fill(PASSWORD);

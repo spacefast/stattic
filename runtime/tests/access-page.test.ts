@@ -765,7 +765,11 @@ test("the deny surface renders the access page with every configured lane", asyn
   expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   const html = await response.text();
   expect(html).toContain("Design Handbook is private");
-  expect(html).toContain(">Sign in</a>");
+  expect(html).toContain(">Continue with Spacefast</a>");
+  expect(html).toContain('aria-describedby="sf-account-help"');
+  expect(html).toContain(
+    'id="sf-account-help" style="margin:0 0 8px;color:var(--sf-dim);font-size:13px">Already signed in? We&#039;ll use your existing account to check access.',
+  );
   expect(html).toContain('href="/__spacefast/access/account?return=%2Fdocs%2F"');
   expect(html).toContain("Continue with Okta");
   expect(html).toContain('action="/__spacefast/access/password"');
@@ -1140,7 +1144,7 @@ test("identity-bound spaces probe the account session silently, once per browser
     headers: { cookie: guard },
   });
   expect(rendered.status).toBe(403);
-  expect(await rendered.text()).toContain(">Sign in</a>");
+  expect(await rendered.text()).toContain(">Continue with Spacefast</a>");
 
   // The memory is host-bound: the same value replayed on a sibling host proves
   // nothing there and is dropped instead of suppressing that host's probe.
@@ -1191,7 +1195,7 @@ test("a bounced silent probe renders the page instead of looping", async () => {
   const checked = await get(runtime, SILENT_HOST, "/docs/?sf_access=checked");
   expect(checked.status).toBe(403);
   const html = await checked.text();
-  expect(html).toContain(">Sign in</a>");
+  expect(html).toContain(">Continue with Spacefast</a>");
   expect(html).not.toContain("Use another account");
 
   const noGrant = await get(runtime, SILENT_HOST, "/docs/?sf_access=no-grant");
@@ -1199,7 +1203,8 @@ test("a bounced silent probe renders the page instead of looping", async () => {
   expect(noGrantHtml).toContain("hasn&#039;t let you in yet");
   // The refused account is already signed in, so the lane is offered as what it
   // is, a same-tab re-check for after the owner grants access, next to the invite.
-  expect(noGrantHtml).not.toContain(">Sign in</a>");
+  expect(noGrantHtml).not.toContain(">Continue with Spacefast</a>");
+  expect(noGrantHtml).not.toContain("Already signed in?");
   expect(noGrantHtml).toContain(
     'href="/__spacefast/access/account?return=%2Fdocs%2F">Check again</a>',
   );
@@ -1221,7 +1226,7 @@ test("a bounced silent probe renders the page instead of looping", async () => {
 
   const lanesNoGrant = await get(runtime, LANES_HOST, "/docs/?sf_access=no-grant");
   const lanesHtml = await lanesNoGrant.text();
-  expect(lanesHtml).not.toContain(">Sign in</a>");
+  expect(lanesHtml).not.toContain(">Continue with Spacefast</a>");
   expect(lanesHtml).toContain(">Check again</a>");
   expect(lanesHtml).toContain("Continue with Okta");
   expect(

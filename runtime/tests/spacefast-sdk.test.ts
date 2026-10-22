@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { canonicalPagePath, commentRoomKey } from "../../packages/collab-sdk/src/core.ts";
 import { ICON_PATHS } from "../../packages/collab-sdk/src/theme/icons.ts";
+import { SPACEFAST_MARK_PATH } from "../../packages/common/src/brand-assets.ts";
 import { collabManifestSchema } from "../../packages/common/src/contracts/collab-manifest.ts";
 import {
   sellRuntimeCheckoutRequestSchema,
@@ -548,6 +549,108 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   expect(
     JSON.parse(reviewNodes.find((node) => node.id === "sf-visual-review")?.textContent ?? "null"),
   ).toEqual({ ...review, spaceId: "spc_sdk" });
+});
+
+// The Remix button the owner turned on for a source-available Space: drawn on
+// the live host, never on a version host, a preview draft or inside a frame,
+// and only for a plain https remix link.
+test("sdk.js draws the Remix button on the live surface only", async () => {
+  const runtime = await startRuntime();
+  runtimes.push(runtime);
+  const host = "remix.site.test";
+  const versionHost = "remix--v1.site.test";
+  const remixUrl =
+    "https://my.spacefast.com/new?git=https%3A%2F%2Fgit.spacefast.com%2Fstudio%2Fremix";
+  const routeBody = (remix: string | null) => {
+    const config = publicAccessConfig(
+      { mode: "website", site_title: "Remix" },
+      "live_and_all_versions",
+    );
+    config.sdk = { revision: `sdk-remix-${remix ?? "none"}`, config: { remix_url: remix } };
+    return {
+      version_id: "ver_remix_1",
+      config,
+      production_hostnames: [host],
+      noindex_production_hostnames: [],
+      version_hostnames: [{ hostname: versionHost, version_id: "ver_remix_1" }],
+    };
+  };
+  await deploy(runtime, {
+    spaceId: "spc_remix",
+    versionId: "ver_remix_1",
+    files: { "index.html": "<h1>Remix me</h1>\n" },
+    activate: { route_name: "production", ...routeBody(remixUrl) },
+  });
+  type Anchor = { href: string; attributes: Record<string, string> };
+  type Host = { id: string; style: { cssText: string }; shadow: { innerHTML: string } };
+  type FakeWindow = { top?: object; Spacefast?: object };
+  // Runs the loader against a minimal DOM and returns what it appended.
+  const draw = (body: string, framed = false) => {
+    const appended: Host[] = [];
+    const anchor: Anchor = { href: "", attributes: {} };
+    const fakeWindow: FakeWindow = {};
+    fakeWindow.top = framed ? {} : fakeWindow;
+    const fakeDocument = {
+      body: {
+        attachShadow: () => undefined,
+        appendChild: (node: Host) => appended.push(node),
+      },
+      documentElement: {},
+      head: { appendChild: () => undefined },
+      getElementById: (id: string) => appended.find((node) => node.id === id) ?? null,
+      addEventListener: () => undefined,
+      createElement: () => {
+        const shadow = {
+          innerHTML: "",
+          querySelector: () => ({
+            set href(value: string) {
+              anchor.href = value;
+            },
+            setAttribute: (name: string, value: string) => {
+              anchor.attributes[name] = value;
+            },
+          }),
+        };
+        return { id: "", style: { cssText: "" }, shadow, attachShadow: () => shadow };
+      },
+    };
+    const run = Function("window", "document", body);
+    run(fakeWindow, fakeDocument);
+    // A page carrying the SDK tag twice still gets one button.
+    run(fakeWindow, fakeDocument);
+    return { appended, anchor };
+  };
+
+  const live = await get(runtime, host, "/__spacefast/sdk.js");
+  expect(live.status).toBe(200);
+  const liveBody = await live.text();
+  const { appended, anchor } = draw(liveBody);
+  expect(appended).toHaveLength(1);
+  expect(appended[0]?.id).toBe("sf-remix");
+  expect(appended[0]?.style.cssText).toContain("left:16px;bottom:16px");
+  expect(anchor.href).toBe(remixUrl);
+  expect(anchor.attributes["aria-label"]).toBe("Remix this site on Spacefast");
+  const markup = appended[0]?.shadow.innerHTML ?? "";
+  expect(markup).toContain("Remix this site");
+  expect(markup).toContain('target="_blank" rel="noopener"');
+  // The PHP copy of the star is the brand's own.
+  expect(markup).toContain(`<path d="${SPACEFAST_MARK_PATH}"/>`);
+
+  expect(draw(liveBody, true).appended).toHaveLength(0);
+  for (const response of [
+    await get(runtime, versionHost, "/__spacefast/sdk.js"),
+    await get(runtime, host, "/__spacefast/sdk.js?preview=preview-token"),
+  ]) {
+    expect(response.status).toBe(200);
+    expect(await response.text()).not.toContain("sf-remix");
+  }
+
+  for (const refused of ["javascript:alert(1)", "http://my.spacefast.com/new", null]) {
+    await putRoute(runtime, "spc_remix", "production", routeBody(refused));
+    const response = await get(runtime, host, "/__spacefast/sdk.js");
+    expect(response.status).toBe(200);
+    expect(await response.text()).not.toContain("sf-remix");
+  }
 });
 
 // t.js is Beacon's, served from the Space's own origin. The box keeps one copy

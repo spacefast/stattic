@@ -790,7 +790,13 @@ test("host classes: canonical redirects, and a version-pinned host serves its ve
 
 test("unknown hosts get the undeployed platform page", async () => {
   const response = await get(rt, "unknown.test", "/");
-  expect(response.status).toBe(503);
+  expect(response.status).toBe(404);
+  // The body, not the status, tells it apart from a missing page, and it must
+  // never be cached: the first publish has to replace it immediately.
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  // Control-plane crawlers key on this to retry instead of treating the 404 as a refusal.
+  expect(response.headers.get("x-spacefast-undeployed")).toBe("1");
+  expect(await response.text()).toContain("This space hasn't been published yet.");
 });
 
 test("the primary hostname serves content while runtime APIs remain authenticated", async () => {

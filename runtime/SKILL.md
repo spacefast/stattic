@@ -66,7 +66,7 @@ Deploy flow:
 - `runtime_jwks_key_missing` / `runtime_jwks_fetch_failed` → provision
   `SPACEFAST_RUNTIME_JWKS_PATH` for self-hosted, `SPACEFAST_RUNTIME_JWKS_B64`
   for WP.Cloud, or fix `SPACEFAST_API_BASE_URL`.
-- 503 `undeployed` on public hosts → no route generation yet; point a route at a
+- 404 `undeployed` on public hosts → no route generation yet; point a route at a
   finalized version.
 - Serving issues after manual storage surgery → `POST .../spaces/{spaceId}/repair`
   rebuilds the route index.

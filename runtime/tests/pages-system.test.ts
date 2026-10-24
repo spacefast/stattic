@@ -286,16 +286,19 @@ test("CSAM stays byte-identical to undeployed for every negotiated representatio
 
   // The CSAM page declares no-store, so it negotiates — which is exactly where a
   // difference would hide. Every representation has to match a host that was
-  // never deployed at all, or the 503 itself tells a reporter the Space exists.
+  // never deployed at all, or the response itself tells a reporter the Space exists.
   await Promise.all(
     ["text/html", "application/json", "text/plain"].map(async (accept) => {
       const [csam, undeployed] = await Promise.all([
         get(rt, host, "/", { headers: { Accept: accept } }),
         get(rt, "never-deployed.test", "/", { headers: { Accept: accept } }),
       ]);
-      expect(csam.status, accept).toBe(503);
+      expect(csam.status, accept).toBe(404);
       expect(csam.status, accept).toBe(undeployed.status);
       expect(csam.headers.get("x-robots-tag"), accept).toBeNull();
+      expect(csam.headers.get("x-spacefast-undeployed"), accept).toBe(
+        undeployed.headers.get("x-spacefast-undeployed"),
+      );
       expect(await csam.text(), accept).toBe(await undeployed.text());
     }),
   );
@@ -324,7 +327,7 @@ test("a brand document rebrands the built-in pages a version can never own", asy
     // Space can supply an artifact for — so nothing but the document can brand it.
     const host = "pages-branded.test";
     const page = await get(branded, host, "/", { headers: { Accept: "text/html" } });
-    expect(page.status).toBe(503);
+    expect(page.status).toBe(404);
     const html = await page.text();
     // The mark is the host's image, not the compiled-in Spacefast letterforms
     // relabelled — a wordmark URL is what makes a rebrand honest.

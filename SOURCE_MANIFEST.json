@@ -1,7 +1,7 @@
 {
-  "revision": "cc0027e8f974eae05b393d892c12d378e98ce7f3",
-  "sourceHash": "56ff92734fed12a6a9467f0b6f98115a6aa4750e4088a37301d839375c34d226",
-  "manifestSha256": "cbdcfb410535ff8e0ae94884520b5ea1e02042e35fb0d82fa8128bf9729ca791",
+  "revision": "bbd33703b6ca07aeb49404149589e43ac802e63e",
+  "sourceHash": "661a63096c68fb61f1da7aa8edf16d1a012ed8549f7bf71c3a19790694f40f40",
+  "manifestSha256": "7e2a3cee54e1d6f59c728b4703b3a8d7c8a0e287e21f003e879920baac01cfd0",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "ab36aa714e86a926e40d2be3cbc1aeebb5aba9b8272b13ed18ceff8f790aa015"
+      "sha256": "0fb18c3fa991183a0a159a301002b81f3cde78e6945b6808ddcd62c4a063cd08"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "40b3db53ad706177d346bf52ba417011792bcf16ac4290eedeebe9c992fa1ba6"
+      "sha256": "153b7d09b7f1d55d0ceabb6c7c5f14ab9ed201ecee9cd8c1c63f5dc12bb18010"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -369,7 +369,7 @@
     },
     {
       "path": "runtime/SKILL.md",
-      "sha256": "35656fa9fdda92c258a6ebdcd86e795e3cb9761917451de0de6457f720a09563"
+      "sha256": "e362a0784081c1edac268168851c40c885b38d813aa87187aa536fb928b54f68"
     },
     {
       "path": "runtime/bootstrap-plugin/restore-config.php",
@@ -449,11 +449,11 @@
     },
     {
       "path": "runtime/engine/admin/generate.php",
-      "sha256": "b960b97c4ebd147edab5abaadd07b87bc8e80f1caac6db9d5d4893a08d8f6b17"
+      "sha256": "8f388830fbd39996922cd5d6a1259ff041610f2aaf4e91c806dab69d0b6b1fbf"
     },
     {
       "path": "runtime/engine/admin/jobs.php",
-      "sha256": "64025c9d4e37ae033e62ccc4383ccef6acfa65684434a2b0d9062be421590e62"
+      "sha256": "f71078d35d69df759d182fac633cc4393a3d5880f6c560063551c33579c993ff"
     },
     {
       "path": "runtime/engine/admin/management.php",
@@ -473,7 +473,7 @@
     },
     {
       "path": "runtime/engine/admin/tier.php",
-      "sha256": "79242d97170e1c3878c2a603b223fa80f987a740f7a83c622ff0942b53513a91"
+      "sha256": "a4537cbc2817a4cea209b13550f476d01a0de53769ab24c859a9ac3beca5d08a"
     },
     {
       "path": "runtime/engine/admin/upload-policy.php",
@@ -593,7 +593,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "c7f7929e204cb91f3fc3a53bb983441ae78a2e5d6bd970291211a486467b6541"
+      "sha256": "1916ca989d7be2641fc5813f97d7c3b399098b62dba57a358ba50f35cecf77c0"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -633,7 +633,7 @@
     },
     {
       "path": "runtime/engine/shared/artifacts.php",
-      "sha256": "d88a442f857f2acb6bc995b521549af390c408d2190f9cebb707ddf80d8e63de"
+      "sha256": "fb5892e37b7ce0ce34468a6364101e8a969914f61a3ef93d874c029fd7d3ebb3"
     },
     {
       "path": "runtime/engine/shared/bootstrap-config.php",
@@ -701,7 +701,7 @@
     },
     {
       "path": "runtime/engine/shared/errors.php",
-      "sha256": "ec02d3e9f5200d77765f1a8400750be0d4d7c3fe99304e2f73e24fe62819a1eb"
+      "sha256": "5705868591bed81658e3c9f74817d5168327ea4296eb2797c828eeb6268739a0"
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
@@ -1060,6 +1060,14 @@
       "sha256": "ef5a43c987278d7d635cd7f393cb466b84a91b7a844f76e2918b032bb00c1f1f"
     },
     {
+      "path": "runtime/tests/disk-report.php",
+      "sha256": "8e1ee0b45788432c03129cfdf3db894a0d4db44b53c75512414aa00d05b7f56e"
+    },
+    {
+      "path": "runtime/tests/disk-report.test.ts",
+      "sha256": "60585e0b49ef2c7421f05ed5797d0e35e2f119c406018b417f355896a8acba15"
+    },
+    {
       "path": "runtime/tests/dispatch.test.ts",
       "sha256": "7a92f30d7412e5851b47c98d333edebc7cb9c730e85338e63df6d499a4ee4839"
     },
@@ -1197,7 +1205,7 @@
     },
     {
       "path": "runtime/tests/job-runner.test.ts",
-      "sha256": "4fcc168745ca9e28d9916fd57ff9288fccb45d04ac477824cf7b2121215cdd20"
+      "sha256": "410eae7568a64b617855bff4e7b5ad674c1003b524ce4a132f1dca586a1d932d"
     },
     {
       "path": "runtime/tests/mysql-container.ts",
@@ -1205,7 +1213,7 @@
     },
     {
       "path": "runtime/tests/pages-system.test.ts",
-      "sha256": "6a0a69d1a406208ec1c5fca147f78e3cd9676500e00560cf20a5a2c1232bcea1"
+      "sha256": "b9119c57159f2ecb9d90727b938d37c8adfa16d21a0044b50681577eb2450cef"
     },
     {
       "path": "runtime/tests/php-functions.test.ts",
@@ -1245,7 +1253,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "9e505262a0ddee70b8b22ad5e0d30916408e78a754b35f7dfb5a4d1f1690964d"
+      "sha256": "e07f2054bcf942266c94173302a55cb53ea769e42a0dfe665c8b722cc7da4c46"
     },
     {
       "path": "runtime/tests/run-ci.sh",

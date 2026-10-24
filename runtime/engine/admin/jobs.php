@@ -659,11 +659,11 @@ function _stattic_runtime_job_type_registry(): array
  */
 function _stattic_runtime_job_step_maintenance_tick(string $privateRoot, array $job, float $deadline): array
 {
-    $pass = _stattic_runtime_job_maintenance_tick($privateRoot, _stattic_runtime_job_event_claims($job), $deadline);
+    $pass = _stattic_runtime_job_maintenance_tick($privateRoot, _stattic_runtime_job_event_claims($job), $deadline, $job['cursor']['steps'] ?? []);
     return [
         'done' => $pass['complete'],
         'yield' => !$pass['complete'],
-        'cursor' => ['complete' => $pass['complete']],
+        'cursor' => ['complete' => $pass['complete'], 'steps' => $pass['steps']],
         'progress' => [
             'done' => count($pass['steps']),
             'total' => count(_stattic_runtime_job_maintenance_steps()),
@@ -820,7 +820,7 @@ function _stattic_runtime_job_maintenance_steps(): array
  *
  * @return array{steps:list<string>, skipped:list<array{step:string,reason:string}>, failed:list<array{step:string,error:string}>, complete:bool}
  */
-function _stattic_runtime_job_maintenance_tick(string $privateRoot, array $claims, float $deadline): array
+function _stattic_runtime_job_maintenance_tick(string $privateRoot, array $claims, float $deadline, array $completedSteps = []): array
 {
     // Loaded here, not at the top: retention.php requires this file back, and
     // the cron/CLI entry into the tick does not go through management.php.
@@ -832,6 +832,12 @@ function _stattic_runtime_job_maintenance_tick(string $privateRoot, array $claim
     $skipped = [];
     $failed = [];
     foreach (_stattic_runtime_job_maintenance_steps() as $name => $hook) {
+        // A resumed pass owes only unfinished hooks. Re-running earlier hooks
+        // can spend every tick's budget before a later hook ever gets a turn.
+        if (in_array($name, $completedSteps, true)) {
+            $ran[] = $name;
+            continue;
+        }
         if (microtime(true) >= $deadline) {
             $skipped[] = ['step' => $name, 'reason' => 'deadline'];
             continue;

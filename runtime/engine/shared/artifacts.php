@@ -100,10 +100,10 @@ function _stattic_functions_config_read(string $versionRoot): array
 }
 
 // Tombstone page variants (C10). The CSAM variant must stay byte-identical to a
-// never-deployed host: same 503 body, no page identity, and 'robots' => false
+// never-deployed host: same 404 body, no page identity, and 'robots' => false
 // to suppress the noindex marker other variants advertise.
 const STATTIC_TOMBSTONE_VARIANTS = [
-    'tombstone-csam' => ['template_id' => 'undeployed', 'status' => 503, 'body' => "This space hasn't been published yet.\n", 'robots' => false, 'cache_control' => STATTIC_CACHE_CONTROL_NO_STORE],
+    'tombstone-csam' => ['template_id' => 'undeployed', 'status' => 404, 'body' => "This space hasn't been published yet.\n", 'robots' => false, 'cache_control' => STATTIC_CACHE_CONTROL_NO_STORE],
     'tombstone-dmca' => ['template_id' => 'tombstone-dmca', 'status' => 451, 'body' => "This content is unavailable for legal reasons.\n", 'robots' => true, 'cache_control' => STATTIC_DEFAULT_EDGE_CACHE_CONTROL],
     'tombstone-suspended' => ['template_id' => 'tombstone-suspended', 'status' => 402, 'body' => "This space is paused.\n", 'robots' => true, 'cache_control' => STATTIC_DEFAULT_EDGE_CACHE_CONTROL],
     'tombstone-version-deleted' => ['template_id' => 'tombstone-version-deleted', 'status' => 404, 'body' => "This version has been deleted.\n", 'robots' => true, 'cache_control' => STATTIC_DEFAULT_EDGE_CACHE_CONTROL],

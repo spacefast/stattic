@@ -1866,7 +1866,7 @@ function _stattic_render_platform_action(array $action, bool $privateCache = fal
 {
     $actionKind = $action['action'] ?? null;
     if ($actionKind === 'tombstone') {
-        // Reason-differentiated tombstones: CSAM matches the undeployed 503 (no
+        // Reason-differentiated tombstones: CSAM matches the undeployed 404 (no
         // signal), DMCA/copyright 451, suspended tenant 402.
         $pageId = $action['page_id'] ?? null;
         $variant = is_string($pageId) ? _stattic_runtime_tombstone_page_variant($pageId) : null;
@@ -1930,9 +1930,11 @@ function _stattic_render_platform_action(array $action, bool $privateCache = fal
     _stattic_render_runtime_invariant_error_lazy('route-action-metadata-missing', 'Runtime platform action metadata is malformed.');
 }
 
+// A host with nothing published is a 404, not a fault: a 503 here pages the
+// fleet 5xx alert whenever a crawler finds an attached-but-unpublished domain.
 function _stattic_undeployed_action(): array
 {
-    return _stattic_platform_error_action('undeployed', 503, "This space hasn't been published yet.\n");
+    return _stattic_platform_error_action('undeployed', 404, "This space hasn't been published yet.\n");
 }
 
 function _stattic_method_not_allowed_action(array $allowedMethods = ['GET', 'HEAD']): array

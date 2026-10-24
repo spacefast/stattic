@@ -1050,6 +1050,46 @@ function _stattic_runtime_job_housekeeping_bucket_reclaim(string $privateRoot, a
     return true;
 }
 
+/** Decode and validate an untrusted disk-scan checkpoint before resuming it. */
+function _stattic_tier_disk_scan_checkpoint(mixed $saved, string $spaceRoot): ?array
+{
+    if (!is_array($saved) || ($saved['version'] ?? null) !== 1
+        || !is_string($saved['root'] ?? null)
+        || base64_decode($saved['root'], true) !== $spaceRoot
+        || !is_array($saved['stack'] ?? null) || !array_is_list($saved['stack']) || $saved['stack'] === []
+        || !is_array($saved['seen'] ?? null)
+        || !is_int($saved['bytes'] ?? null) || $saved['bytes'] < 0
+        || !is_int($saved['inodes'] ?? null) || $saved['inodes'] < 0) {
+        return null;
+    }
+    $parent = null;
+    foreach ($saved['stack'] as $index => $frame) {
+        if (!is_array($frame) || !is_string($frame['path'] ?? null) || !is_string($frame['after'] ?? null)) return null;
+        $path = base64_decode($frame['path'], true);
+        $after = base64_decode($frame['after'], true);
+        if ($path === false || $after === false || str_contains($path, "\0") || str_contains($after, "\0")
+            || str_contains($after, '/') || $after === '.' || $after === '..') return null;
+        if ($index === 0) {
+            if ($path !== '') return null;
+        } else {
+            $prefix = $parent === '' ? '' : $parent . '/';
+            if (!str_starts_with($path, $prefix)) return null;
+            $name = substr($path, strlen($prefix));
+            if ($name === '' || $name === '.' || $name === '..' || str_contains($name, '/')) return null;
+        }
+        $saved['stack'][$index] = ['path' => $path, 'after' => $after];
+        $parent = $path;
+    }
+    foreach ($saved['seen'] as $device => $inodes) {
+        if (!ctype_digit((string) $device) || !is_array($inodes)) return null;
+        foreach ($inodes as $inode => $seen) {
+            if (!ctype_digit((string) $inode) || $seen !== true) return null;
+        }
+    }
+    $saved['root'] = $spaceRoot;
+    return $saved;
+}
+
 /**
  * A Space's whole file tree, deduped by inode.
  *
@@ -1059,37 +1099,93 @@ function _stattic_runtime_job_housekeeping_bucket_reclaim(string $privateRoot, a
  *
  * @return array{bytes:int, inodes:int, complete:bool}
  */
-function _stattic_tier_space_disk_usage(string $spaceRoot, ?float $budgetDeadline = null): array
+function _stattic_tier_space_disk_usage(string $spaceRoot, ?float $budgetDeadline = null, ?string $checkpointPath = null, ?callable $budgetClock = null): array
 {
-    // Hardlink dedupe over a million-file space: int-keyed dev/ino maps, never
-    // one "dev:ino" string per file. Those strings are a memory hazard at CAS
-    // scale.
-    $seen = [];
-    $bytes = 0;
-    $inodes = 0;
+    $budgetClock ??= static fn (): float => microtime(true);
     if (!is_dir($spaceRoot)) {
         return ['bytes' => 0, 'inodes' => 0, 'complete' => true];
     }
-    foreach (_stattic_runtime_walk_private_files($spaceRoot) as $real) {
-        if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
-            return ['bytes' => $bytes, 'inodes' => $inodes, 'complete' => false];
+    _stattic_runtime_assert_private_path($spaceRoot);
+    $saved = $checkpointPath === null ? null : _stattic_runtime_read_json($checkpointPath);
+    $state = _stattic_tier_disk_scan_checkpoint($saved, $spaceRoot);
+    if ($state === null) {
+        if ($checkpointPath !== null && $saved !== null) @unlink($checkpointPath);
+        $state = ['root' => $spaceRoot, 'stack' => [['path' => '', 'after' => '']], 'seen' => [], 'bytes' => 0, 'inodes' => 0];
+    }
+    // Directory cursors retain the last name rather than an offset: removing an
+    // earlier entry between ticks must not skip a later file. A scan measures
+    // a changing tree just like the former single-request walk.
+    $entriesByDirectory = [];
+    while ($state['stack'] !== []) {
+        if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
+            if ($checkpointPath !== null) {
+                $encoded = $state;
+                $encoded['version'] = 1;
+                $encoded['root'] = base64_encode($spaceRoot);
+                $encoded['stack'] = array_map(static fn (array $frame): array => [
+                    'path' => base64_encode($frame['path']),
+                    'after' => base64_encode($frame['after']),
+                ], $state['stack']);
+                _stattic_runtime_write_private_string($checkpointPath, json_encode($encoded, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n");
+            }
+            return ['bytes' => $state['bytes'], 'inodes' => $state['inodes'], 'complete' => false];
         }
-        $stat = stat($real);
-        if (!is_array($stat)) {
+        $index = count($state['stack']) - 1;
+        $frame = $state['stack'][$index];
+        $relative = $frame['path'];
+        $directory = $spaceRoot . ($relative === '' ? '' : '/' . $relative);
+        _stattic_runtime_assert_private_path($directory);
+        if (!isset($entriesByDirectory[$directory])) {
+            $entries = _stattic_runtime_directory_entries($directory);
+            if ($entries === null) {
+                return ['bytes' => $state['bytes'], 'inodes' => $state['inodes'], 'complete' => false];
+            }
+            rsort($entries, SORT_STRING);
+            // Filter once per directory on resume, rather than walking the
+            // already-counted prefix for every remaining file.
+            $entriesByDirectory[$directory] = array_values(array_filter($entries, static fn (string $entry): bool => strcmp(basename($entry), $frame['after']) > 0));
+        }
+        // Pop in ascending order without shifting a large directory each time.
+        $entry = array_pop($entriesByDirectory[$directory]);
+        if ($entry === null) {
+            array_pop($state['stack']);
+            unset($entriesByDirectory[$directory]);
             continue;
         }
-        $dev = (int) ($stat['dev'] ?? 0);
-        $ino = (int) ($stat['ino'] ?? 0);
-        if ($ino !== 0) {
-            if (isset($seen[$dev][$ino])) {
+        $name = basename($entry);
+        $state['stack'][$index]['after'] = $name;
+        if (is_link($entry)) {
+            continue;
+        }
+        if (is_dir($entry)) {
+            $state['stack'][] = ['path' => $relative === '' ? $name : $relative . '/' . $name, 'after' => ''];
+            continue;
+        }
+        if (!is_file($entry)) {
+            continue;
+        }
+        $stat = stat($entry);
+        if (!is_array($stat)) {
+            return ['bytes' => $state['bytes'], 'inodes' => $state['inodes'], 'complete' => false];
+        }
+        // Only hardlinked files need retained inode identities. Ordinary files
+        // cannot repeat in this traversal, so a million-file tree does not need
+        // a million-element checkpoint just for deduplication.
+        if (($stat['nlink'] ?? 1) > 1) {
+            $dev = (int) $stat['dev'];
+            $ino = (int) $stat['ino'];
+            if (isset($state['seen'][$dev][$ino])) {
                 continue;
             }
-            $seen[$dev][$ino] = true;
+            $state['seen'][$dev][$ino] = true;
         }
-        $bytes += (int) ($stat['size'] ?? 0);
-        $inodes += 1;
+        $state['bytes'] += (int) $stat['size'];
+        $state['inodes'] += 1;
     }
-    return ['bytes' => $bytes, 'inodes' => $inodes, 'complete' => true];
+    if ($checkpointPath !== null && is_file($checkpointPath)) {
+        unlink($checkpointPath);
+    }
+    return ['bytes' => $state['bytes'], 'inodes' => $state['inodes'], 'complete' => true];
 }
 
 const STATTIC_TIER_DISK_REPORT_INTERVAL_SECONDS = 21600;
@@ -1117,7 +1213,7 @@ function _stattic_runtime_job_housekeeping_disk_report(string $privateRoot, arra
             $spaceRoot . '/disk-report.marker',
             STATTIC_TIER_DISK_REPORT_INTERVAL_SECONDS,
             static function () use ($privateRoot, $spaceRoot, $spaceId, $claims, $now, $deadline, &$complete): bool {
-                $usage = _stattic_tier_space_disk_usage($spaceRoot, $deadline);
+                $usage = _stattic_tier_space_disk_usage($spaceRoot, $deadline, $privateRoot . '/runtime/disk-reports/' . $spaceId . '.json');
                 if (!$usage['complete']) {
                     // An under-count is worse than no report: the control plane
                     // would bank it as this Space's size for the whole interval.

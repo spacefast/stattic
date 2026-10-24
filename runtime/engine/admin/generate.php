@@ -1117,7 +1117,7 @@ function _stattic_runtime_set_tombstone_host_entry(array &$hostnames, string $ho
     ];
 }
 
-// Variant table C10: CSAM matches an undeployed 503 (no signal the host ever
+// Variant table C10: CSAM matches an undeployed 404 (no signal the host ever
 // existed). Category wins over reason; unknown values degrade to the generic page.
 function _stattic_runtime_tombstone_variant(?string $reason, ?string $category): array
 {

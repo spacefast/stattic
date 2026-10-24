@@ -909,6 +909,7 @@ test("a maintenance hook that could not finish leaves the pass incomplete and th
   };
   expect(report.complete).toBe(false);
   expect(report.steps).not.toContain("blob_gc");
+  expect(report.steps).toContain("retention");
   expect(report.skipped.map((entry) => entry.step)).toContain("blob_gc");
 
   // The control plane retries under the same operation-derived idempotency key.
@@ -920,10 +921,18 @@ test("a maintenance hook that could not finish leaves the pass incomplete and th
 
   await release();
 
+  // A resumed pass must not spend its budget repeating completed hooks.
+  // Newly due retention work belongs to the next pass.
+  const laterBacklog = "runtime/blob-staging/completed-hook";
+  stageBacklog(laterBacklog, 1, 2 * 24 * 60 * 60);
+  rmSync(storagePath(rt, "runtime", "reclaim.marker"), { force: true });
+
   const clean = await tick(pass, 2500);
   expect(clean.tick_status).toBe("complete");
   // SAFETY: the maintenance stepper persists its pass report on every step.
   expect((clean.job?.result as { complete: boolean }).complete).toBe(true);
+  expect(stagedCount(laterBacklog)).toBe(1);
+  rmSync(storagePath(rt, laterBacklog), { recursive: true, force: true });
 
   // The other way a hook fails to finish: it started inside the budget and ran
   // out mid-walk. Deciding at the door alone bounded WHICH hooks ran and nothing

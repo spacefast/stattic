@@ -25,7 +25,13 @@ await rm(path.join(output, "failure.txt"), { force: true });
 const compiled = await compileZeroContentModel({
   declarations: {
     collections: {
-      pages: { fields: { content: { kind: "blocks", source: "content/context.blocks" } } },
+      pages: {
+        fields: {
+          content: { kind: "blocks", source: "content/context.blocks" },
+          // A rich-text field stored as post meta, beside the native content column.
+          summary: { kind: "blocks" },
+        },
+      },
     },
   },
   readDirectory: async (directory) => (directory === "content" ? ["context.blocks"] : []),

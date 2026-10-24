@@ -298,7 +298,7 @@ function spacefast_content_model_register_rest_meta(array $contentModel): void
     foreach ($contentModel['postTypes'] as $resource) {
         add_filter('rest_pre_insert_' . $resource['postType'], 'spacefast_content_model_preserve_absent_meta', 10, 2);
         add_filter('rest_pre_insert_' . $resource['postType'], 'spacefast_content_sync_prepare_editor_save', 20, 2);
-        add_filter('rest_prepare_' . $resource['postType'], 'spacefast_content_model_project_absent_meta', 10, 2);
+        add_filter('rest_prepare_' . $resource['postType'], 'spacefast_content_model_project_meta', 10, 2);
         foreach ($resource['fields'] as $field) {
             if (!empty($field['native'])) {
                 continue;
@@ -311,6 +311,10 @@ function spacefast_content_model_register_rest_meta(array $contentModel): void
                 ...($schema['type'] === 'boolean' ? [
                     'sanitize_callback' => static fn (mixed $value): string => rest_sanitize_boolean($value) ? '1' : '0',
                 ] : []),
+                // Meta never passes core's kses save filters, whoever writes it.
+                ...(spacefast_content_model_field_is_html($field) ? [
+                    'sanitize_callback' => static fn (mixed $value): string => wp_kses_post((string) $value),
+                ] : []),
                 'auth_callback' => static fn (bool $allowed, string $key, int $postId): bool =>
                     spacefast_content_post_belongs_to_space($postId) && current_user_can('edit_post', $postId)
                     && (spacefast_content_collection_for_post($postId)['name'] ?? null) === $resource['id'],
@@ -319,8 +323,17 @@ function spacefast_content_model_register_rest_meta(array $contentModel): void
     }
 }
 
-/** WordPress scalar defaults must not turn an absent optional value into zero. */
-function spacefast_content_model_project_absent_meta(mixed $response, mixed $post): mixed
+/** A rich-text field holds HTML that every editor of the document renders. */
+function spacefast_content_model_field_is_html(array $field): bool
+{
+    return ($field['definition']['type'] ?? null) === 'richText';
+}
+
+/**
+ * WordPress scalar defaults must not turn an absent optional value into zero,
+ * and rich text reads back sanitized, including values stored before writes were.
+ */
+function spacefast_content_model_project_meta(mixed $response, mixed $post): mixed
 {
     if (!($response instanceof WP_REST_Response)) {
         return $response;
@@ -336,9 +349,13 @@ function spacefast_content_model_project_absent_meta(mixed $response, mixed $pos
         }
         foreach ($resource['fields'] as $field) {
             $key = $field['storageName'];
-            if (empty($field['native']) && empty($field['definition']['required'])
-                && array_key_exists($key, $data['meta']) && !metadata_exists('post', (int) $post->ID, $key)) {
+            if (!empty($field['native']) || !array_key_exists($key, $data['meta'])) {
+                continue;
+            }
+            if (empty($field['definition']['required']) && !metadata_exists('post', (int) $post->ID, $key)) {
                 $data['meta'][$key] = null;
+            } elseif (spacefast_content_model_field_is_html($field) && is_string($data['meta'][$key])) {
+                $data['meta'][$key] = wp_kses_post($data['meta'][$key]);
             }
         }
     }

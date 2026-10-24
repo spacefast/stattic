@@ -1,7 +1,7 @@
 {
-  "revision": "1ecc178aad187954c8abe85896cdd9a990df9289",
-  "sourceHash": "4013db8b6fb8ece61881afe9a66fd4e84d88cfd34614d44640d6269591c433df",
-  "manifestSha256": "138882ac10e36b74c660a6a262319e5a899f135647d095e09ae92831623f4fa8",
+  "revision": "63bc84a4884bef77f8f4adbe0df9190f76057a1e",
+  "sourceHash": "a5d98d3efdb70f02f1e18bb42d9609a25abff30d05c65cb3146eaeb8d1c9e262",
+  "manifestSha256": "4b98d92c02eeb6daac2c0b918bd39639c52790d60e05cc77bcff821b7d3a2a0d",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "256f4cf12fc7452464c302827bb02444471f906e6adc7193f0dbc37082dc335a"
+      "sha256": "9fb355ee6d5f074f5e47609b57d888a4ca72b9fa7f32e5a610330d3e26a91896"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "c158b79a94a956bdaa2456d1de7157b2fdf2064ca242ceaca426dcca4e1d4b7e"
+      "sha256": "a42cfea61a9892d8d8287bca6074bfb6ba16f9bb44b87e5adc22e87476dd5d27"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -825,7 +825,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-model-kernel.php",
-      "sha256": "62548c1100b8747c37d98329cc1d0d347646bdfd367d63ca46eae248b3a26ef8"
+      "sha256": "22b2e61e3ceb9e8d1ddc8aff7967f7dd39b8ba2cd215c16a2d8c6c5fa2475468"
     },
     {
       "path": "runtime/engine/wordpress/content-native-scope.php",
@@ -1141,7 +1141,7 @@
     },
     {
       "path": "runtime/tests/fixtures/context-roundtrip.php",
-      "sha256": "aa2feac773d71adf4f3abd2d7cc3b02991539700493a8e9a2e5fb1b1188294af"
+      "sha256": "f9eee18e474c4e88faa3761fc2a6a52873b3a69dff13a3922e8b8c45c9ac6619"
     },
     {
       "path": "runtime/tests/fixtures/database-egress-addresses.json",
@@ -1257,7 +1257,7 @@
     },
     {
       "path": "runtime/tests/run-context-playground.mjs",
-      "sha256": "e5a9be3f95fa6bb9651a87dab66e2b43a314e85835a67c71cbae6a49b7b9b3b7"
+      "sha256": "b438525ecfaf2cdb0d3637195dce7b5016e75cbbb73ac8a190273a78ebae7d1b"
     },
     {
       "path": "runtime/tests/run.sh",

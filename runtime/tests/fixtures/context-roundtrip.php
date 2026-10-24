@@ -71,6 +71,22 @@ context_check($unbind->get_status() === 400 && context_page()['spacefast_revisio
 $script = context_save($contextId, $current['spacefast_revision'], ['content' => '<!-- wp:paragraph --><p>Safe<img src="x" onerror="alert(1)"></p><!-- /wp:paragraph -->']);
 context_check($script->get_status() === 200 && !str_contains($script->get_data()['content']['raw'], 'onerror') && !str_contains($script->get_data()['content']['rendered'], 'onerror'), 'Stored and rendered context markup must be sanitized.');
 $current = context_save($contextId, $script->get_data()['spacefast_revision'], ['content' => $current['content']['raw']])->get_data();
+// Rich-text meta never passes core's kses save filters. The kernel sanitizes it
+// for every writer, administrators included, and on read for rows stored earlier.
+$richMeta = '<p>Kept <a href="javascript:alert(1)">link</a></p><iframe src="javascript:alert(1)"></iframe>';
+$summaryRequest = new WP_REST_Request('POST', '/wp/v2/pages'); $summaryRequest->set_param('context', 'edit');
+$summaryRequest->set_header('content-type', 'application/json'); $summaryRequest->set_body(json_encode(['title' => 'Summary', 'meta' => ['_zero_pages_summary' => $richMeta]], JSON_THROW_ON_ERROR));
+$summary = rest_do_request($summaryRequest);
+context_check($summary->get_status() === 201, 'A rich-text field must save: ' . json_encode($summary->get_data()));
+$summaryId = (int) $summary->get_data()['id'];
+foreach (['response' => $summary->get_data()['meta']['_zero_pages_summary'], 'stored' => get_post_meta($summaryId, '_zero_pages_summary', true)] as $where => $value) {
+    context_check(str_contains($value, 'Kept') && !str_contains($value, 'iframe') && !str_contains($value, 'javascript:'), "The $where rich-text field must be sanitized: $value");
+}
+$wpdb->update($wpdb->postmeta, ['meta_value' => $richMeta], ['post_id' => $summaryId, 'meta_key' => '_zero_pages_summary']);
+wp_cache_delete($summaryId, 'post_meta');
+$legacyRequest = new WP_REST_Request('GET', '/wp/v2/pages/' . $summaryId); $legacyRequest->set_param('context', 'edit');
+$legacy = rest_do_request($legacyRequest)->get_data()['meta']['_zero_pages_summary'];
+context_check(str_contains($legacy, 'Kept') && !str_contains($legacy, 'iframe') && !str_contains($legacy, 'javascript:'), "A stored rich-text field must read back sanitized: $legacy");
 $markdown = context_save($contextId, $current['spacefast_revision'], ['markdown' => "# Human edit\n\nWritten as **Markdown**.\n"]);
 context_check($markdown->get_status() === 200 && str_contains($markdown->get_data()['content']['raw'], '<!-- wp:heading') && str_contains((string) $markdown->get_data()['markdown'], '**Markdown**'), 'A Markdown write must store blocks and read back as Markdown: ' . json_encode($markdown->get_data()));
 $both = context_save($contextId, $markdown->get_data()['spacefast_revision'], ['markdown' => 'One', 'content' => 'Two']);

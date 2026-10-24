@@ -16,7 +16,7 @@ $accepted = false;
 ob_start();
 try {
     if (is_array($payload) && is_string($argv[1] ?? null)) {
-        $accepted = _stattic_mail_send($payload, $argv[1]);
+        $accepted = _stattic_mail_send_metered($payload, $argv[1]);
     }
 } catch (Throwable $error) {
     error_log('spacefast mail send failed type=' . get_debug_type($error));

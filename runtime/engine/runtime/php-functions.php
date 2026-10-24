@@ -247,6 +247,9 @@ function _stattic_php_functions_serve(array $context, array $action, string $req
     // before open_basedir is pinned; provider delivery stays after the response.
     _stattic_run_deferred_work(beforeTenant: true);
 
+    require_once __DIR__ . '/../shared/retail-usage.php';
+    _stattic_record_retail_usage($privateRoot, $spaceId, 'origin_invocations', 1);
+
     // At the first output byte, however produced, including a tenant flush(),
     // the platform re-takes the headers it owns.
     header_register_callback('_stattic_php_functions_enforce_platform_headers');
@@ -494,7 +497,7 @@ function _stattic_php_functions_bind_services(array $context, array $runnerEnv):
             'spaceId' => (string) $context['space_id'],
             'versionId' => (string) $context['version_id'],
             'invocationId' => '',
-        ]) + [
+        ], is_array($context['serving'] ?? null) ? $context['serving'] : []) + [
             SPACEFAST_FUNCTIONS_SERVICE_BROKER_GRANT_ENV => implode(',', STATTIC_PHP_FUNCTIONS_SERVICE_GRANT),
         ],
     ];

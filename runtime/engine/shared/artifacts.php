@@ -220,7 +220,15 @@ function _stattic_service_invocation_id(mixed $raw): string
  */
 function _stattic_service_broker_env(array $identity, array $config = []): array
 {
-    $env = [];
+    require_once __DIR__ . '/context.php';
+    require_once __DIR__ . '/native-process.php';
+    $env = [
+        'SPACEFAST_SERVICE_USAGE_ROOT' => _stattic_access_private_root(),
+        'SPACEFAST_SERVICE_SPACE_ID' => (string) ($identity['spaceId'] ?? ''),
+        'SPACEFAST_SERVICE_EMAIL_DAILY_LIMIT' => isset($config['billing']['emailRecipientsDaily']) ? (string) $config['billing']['emailRecipientsDaily'] : '',
+        'SPACEFAST_SERVICE_USAGE_PHP' => _stattic_runtime_php_cli_binary(),
+        'SPACEFAST_SERVICE_USAGE_SCRIPT' => dirname(__DIR__) . '/runtime/usage.php',
+    ];
     $token = $config['connectors']['token'] ?? '';
     $apiUrl = rtrim(_stattic_config_value('SPACEFAST_API_BASE_URL'), '/');
     if (is_string($token) && $token !== '' && $apiUrl !== '') {
@@ -769,6 +777,7 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
         'visitor_issuer' => is_string($exchange['issuer'] ?? null) ? $exchange['issuer'] : null,
         'visitor_jwks' => is_array($exchange['jwks'] ?? null) ? $exchange['jwks'] : null,
         'projection_generation' => is_int($overlay['access_gen'] ?? null) ? $overlay['access_gen'] : null,
+        'billing' => is_array($overlay['billing'] ?? null) ? $overlay['billing'] : [],
         'admission' => is_array($overlay['admission'] ?? null) ? $overlay['admission'] : [],
         'route_name' => is_string($hostEntry['route_name'] ?? null) ? $hostEntry['route_name'] : null,
         'immutable' => !empty($hostEntry['immutable']),

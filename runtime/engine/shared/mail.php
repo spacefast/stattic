@@ -134,3 +134,46 @@ function _stattic_mail_send(array $payload, string $publicRoot): bool
         remove_action('phpmailer_init', $configure);
     }
 }
+
+function _stattic_mail_send_metered(array $payload, string $publicRoot): bool
+{
+    require_once __DIR__ . '/retail-usage.php';
+    require_once __DIR__ . '/context.php';
+    $privateRoot = (string) getenv('SPACEFAST_SERVICE_USAGE_ROOT');
+    $spaceId = (string) getenv('SPACEFAST_SERVICE_SPACE_ID');
+    // Existing callers outside the Space service broker retain their own mail
+    // policy. Platform notifications never enter this metering lane.
+    if ($privateRoot === '' || $spaceId === '') {
+        return _stattic_mail_send($payload, $publicRoot);
+    }
+    if (_stattic_mail_arguments($payload) === null) {
+        return false;
+    }
+    $recipients = count($payload['to']) + count($payload['cc'] ?? []) + count($payload['bcc'] ?? []);
+    // Route configs pushed before billing limits existed carry no limit.
+    $configuredLimit = (int) getenv('SPACEFAST_SERVICE_EMAIL_DAILY_LIMIT');
+    $limit = $configuredLimit > 0 ? $configuredLimit : PHP_INT_MAX;
+    $root = _stattic_space_root($privateRoot, $spaceId);
+    _stattic_runtime_mkdir($root);
+    return _stattic_lock_with($root . '/email-usage.lock', STATTIC_LOCK_WAIT, static fn (): bool => false,
+        static function () use ($privateRoot, $spaceId, $root, $limit, $recipients, $payload, $publicRoot): bool {
+            $path = $root . '/email-usage.json';
+            $day = gmdate('Y-m-d');
+            $previous = is_file($path) ? json_decode((string) file_get_contents($path), true) : null;
+            $used = is_array($previous) && ($previous['day'] ?? null) === $day ? (int) ($previous['recipients'] ?? 0) : 0;
+            if ($used + $recipients > $limit) {
+                return false;
+            }
+            // Reserve before transport acceptance. An interrupted ambiguous
+            // send consumes allowance but never becomes a usage charge.
+            _stattic_runtime_write_json_atomic($path, ['day' => $day, 'recipients' => $used + $recipients]);
+            $accepted = _stattic_mail_send($payload, $publicRoot);
+            if ($accepted) {
+                _stattic_record_retail_usage($privateRoot, $spaceId, 'email_recipients', $recipients);
+            } else {
+                _stattic_runtime_write_json_atomic($path, ['day' => $day, 'recipients' => $used]);
+            }
+            return $accepted;
+        },
+    );
+}

@@ -55,7 +55,10 @@ function _stattic_application_journal_sinks(): array
 
 function _stattic_application_journal_sink_configured(string $sink): bool
 {
-    return in_array($sink, _stattic_application_journal_sinks(), true);
+    // Mail is never a journal sink. A stale configured name must not lease
+    // editor changes.
+    return $sink !== 'control-plane:mail'
+        && in_array($sink, _stattic_application_journal_sinks(), true);
 }
 
 function _stattic_application_journal_iso(string $mysqlTimestamp): string

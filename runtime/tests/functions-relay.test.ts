@@ -21,6 +21,7 @@ import {
   get,
   publicAccessConfig,
   putRoute,
+  journalRecords,
   type Runtime,
   RUNTIME_HTTP_API_BASE,
   RUNTIME_INSTANCE_ID,
@@ -498,6 +499,13 @@ test("a service frame naming an ungranted service is refused inside the broker",
 });
 
 test("mail sends immediately through wp_mail and returns its acceptance result", async () => {
+  await putRoute(rt, SPACE_ID, "production", {
+    version_id: VERSION_ID,
+    config: {
+      ...publicAccessConfig({ mode: "website", site_title: "Functions relay" }),
+      billing: { emailRecipientsDaily: 4 },
+    },
+  });
   const token = relayToken({ capabilities: ["email.send"] });
   const message = {
     service: "email",
@@ -505,6 +513,8 @@ test("mail sends immediately through wp_mail and returns its acceptance result",
     payload: {
       from: { email: "hello@example.com" },
       to: [{ email: "someone@example.com" }],
+      cc: [{ email: "copy@example.com" }],
+      bcc: [{ email: "blind@example.com" }],
       subject: "Hi",
       html: "<p>Body</p>",
       text: "Body",
@@ -513,7 +523,7 @@ test("mail sends immediately through wp_mail and returns its acceptance result",
   const before = wpMailCaptures().length;
   const first = await relay(message, token, "services", "inv_mail_1");
   expect(first.status).toBe(200);
-  expect(await first.json()).toEqual({ ok: true, result: true });
+  expect(await first.json(), rt.diagnostics()).toEqual({ ok: true, result: true });
   const captured = wpMailCaptures();
   expect(captured).toHaveLength(before + 1);
   expect(captured.at(-1)?.to).toEqual(["someone@example.com"]);
@@ -521,13 +531,28 @@ test("mail sends immediately through wp_mail and returns its acceptance result",
   expect(captured.at(-1)?.headers).toContain("Content-Type: text/html; charset=UTF-8");
 
   const rejected = await relay(
-    { ...message, payload: { ...message.payload, subject: "Reject" } },
+    { ...message, payload: { ...message.payload, cc: [], bcc: [], subject: "Reject" } },
     token,
     "services",
     "inv_mail_1",
   );
   expect(await rejected.json()).toEqual({ ok: true, result: false });
   expect(wpMailCaptures()).toHaveLength(before + 2);
+  const finalMessage = { ...message, payload: { ...message.payload, cc: [], bcc: [] } };
+  expect(await (await relay(finalMessage, token, "services", "inv_mail_3")).json()).toEqual({
+    ok: true,
+    result: true,
+  });
+  expect(await (await relay(finalMessage, token, "services", "inv_mail_4")).json()).toEqual({
+    ok: true,
+    result: false,
+  });
+  expect(wpMailCaptures()).toHaveLength(before + 3);
+  expect(
+    journalRecords(rt)
+      .filter((event) => event.event === "retail.usage" && event.meter === "email_recipients")
+      .map((event) => event.quantity),
+  ).toEqual(["3", "1"]);
 });
 
 test("mail from an address the space has not verified is refused before sending", async () => {
@@ -971,6 +996,32 @@ test("visitor access policy cannot intercept a Functions machine callback", asyn
       version_id: VERSION_ID,
       config: { policy: null },
     });
+  }
+});
+
+test("journal drain exposes the broker failure stage without its configuration", async () => {
+  const unavailableRuntime = await startRuntime({
+    atomicData: {
+      SPACEFAST_ZERO_DATABASE_URL: "invalid://private-user:private-password@private-host/db",
+    },
+  });
+  try {
+    const response = await apiJson(
+      unavailableRuntime,
+      "POST",
+      `${RUNTIME_HTTP_API_BASE}/application-journal/drain`,
+      "drain_application_journal",
+      {},
+      { sink: "control-plane:mail", limit: 10, lease_seconds: 60 },
+      503,
+    );
+    expect(response).toMatchObject({
+      code: "application_journal_unavailable",
+      details: { stage: "connect", runtimeCode: "zero_db_url_invalid" },
+    });
+    expect(JSON.stringify(response)).not.toContain("private-");
+  } finally {
+    unavailableRuntime.stop();
   }
 });
 

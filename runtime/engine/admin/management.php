@@ -1817,6 +1817,9 @@ function _stattic_runtime_route_config(mixed $raw): array
                 : null,
         ], static fn ($value): bool => $value !== null);
     }
+    if (is_int($raw['billing']['emailRecipientsDaily'] ?? null) && $raw['billing']['emailRecipientsDaily'] > 0) {
+        $config['billing'] = ['emailRecipientsDaily' => $raw['billing']['emailRecipientsDaily']];
+    }
     if (is_array($raw['admission'] ?? null)) {
         $concurrency = $raw['admission']['concurrency'] ?? null;
         if (is_int($concurrency) || (is_string($concurrency) && preg_match('/^[0-9]+$/', $concurrency) === 1)) {

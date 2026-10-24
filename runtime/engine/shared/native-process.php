@@ -33,7 +33,7 @@ function _stattic_runtime_php_cli_binary(): string
     if ($configured !== '') {
         return $configured;
     }
-    return PHP_SAPI === 'cli' && PHP_BINARY !== '' ? PHP_BINARY : 'php';
+    return in_array(PHP_SAPI, ['cli', 'cli-server'], true) && PHP_BINARY !== '' ? PHP_BINARY : 'php';
 }
 
 /**

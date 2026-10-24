@@ -120,7 +120,9 @@
     "wordpress/managed-theme/theme.json",
     "wordpress/managed-theme/templates/index.html",
     "installer.php",
-    "custom-redirects.php"
+    "custom-redirects.php",
+    "engine/shared/retail-usage.php",
+    "engine/runtime/usage.php"
   ],
   "executables": ["bin/stattic-runtime"],
   "trees": [

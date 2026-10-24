@@ -4014,6 +4014,100 @@ check(_stattic_space_users_session_cookie() === 'dev', 'space users: plain-HTTP 
 putenv('SPACEFAST_INSECURE_COOKIES');
 $_COOKIE = $savedCookies;
 
+// --- Relay: a parsed multipart form re-encoded for the upstream --------------------
+$relayDoc = tempnam(sys_get_temp_dir(), 'sf-relay-');
+file_put_contents($relayDoc, "row two");
+$relayFiles = [
+    // items[1][doc]: a file inside an indexed row.
+    'items' => [
+        'name' => [1 => ['doc' => 'b.txt']],
+        'full_path' => [1 => ['doc' => 'b.txt']],
+        'type' => [1 => ['doc' => 'text/plain']],
+        'tmp_name' => [1 => ['doc' => $relayDoc]],
+        'error' => [1 => ['doc' => UPLOAD_ERR_OK]],
+        'size' => [1 => ['doc' => 7]],
+    ],
+    // photos[]: a plain list of files, sent under a directory path.
+    'photos' => [
+        'name' => ['a "q".txt'],
+        'full_path' => ['dir/a "q".txt'],
+        'type' => ['text/plain'],
+        'tmp_name' => [$relayDoc],
+        'error' => [UPLOAD_ERR_OK],
+        'size' => [7],
+    ],
+    // An empty file input.
+    'attachment' => ['name' => '', 'full_path' => '', 'type' => '', 'tmp_name' => '', 'error' => UPLOAD_ERR_NO_FILE, 'size' => 0],
+];
+$relayPost = [
+    'message' => "two\r\nlines",
+    'tags' => ['a', 'b'],
+    'items' => [['name' => 'A', 'qty' => '1'], ['name' => 'B']],
+    "quote\"d" => 'x',
+];
+$relayBody = _stattic_relay_multipart_body('XyZ', $relayPost, $relayFiles, null);
+$relayPart = static fn (string $disposition, string $content, string $type = ''): string => "--XyZ\r\nContent-Disposition: form-data; {$disposition}\r\n"
+    . ($type === '' ? '' : "Content-Type: {$type}\r\n") . "\r\n{$content}\r\n";
+$relayExpected = $relayPart('name="message"', "two\r\nlines")
+    . $relayPart('name="tags[]"', 'a')
+    . $relayPart('name="tags[]"', 'b')
+    . $relayPart('name="items[0][name]"', 'A')
+    . $relayPart('name="items[0][qty]"', '1')
+    . $relayPart('name="items[1][name]"', 'B')
+    . $relayPart('name="quote%22d"', 'x')
+    . $relayPart('name="items[1][doc]"; filename="b.txt"', 'row two', 'text/plain')
+    . $relayPart('name="photos[]"; filename="dir/a %22q%22.txt"', 'row two', 'text/plain')
+    . $relayPart('name="attachment"; filename=""', '')
+    . "--XyZ--\r\n";
+$relayBytes = isset($relayBody['stream']) ? stream_get_contents($relayBody['stream']) : '';
+check($relayBytes === $relayExpected, 'relay multipart: rows keep their index, value lists read as [], names and filenames are quoted, an empty file input keeps its part');
+check(($relayBody['size'] ?? null) === strlen($relayExpected), 'relay multipart: the declared size is the re-encoded byte count');
+
+$relayRefusal = static fn (array $files): ?array => isset(($result = _stattic_relay_multipart_body('XyZ', ['a' => 'b'], $files))['stream'])
+    ? null
+    : $result;
+$relayFile = static fn (int $error, int $size = 7): array => ['f' => ['name' => 'f.txt', 'full_path' => 'f.txt', 'type' => 'text/plain', 'tmp_name' => $relayDoc, 'error' => $error, 'size' => $size]];
+check($relayRefusal($relayFile(UPLOAD_ERR_INI_SIZE, 0))['status'] === 413, 'relay multipart: a file over upload_max_filesize is refused as too large');
+check($relayRefusal($relayFile(UPLOAD_ERR_CANT_WRITE, 0))['status'] === 500, 'relay multipart: a file PHP could not store is a server failure');
+check($relayRefusal($relayFile(UPLOAD_ERR_OK, 99))['status'] === 500, 'relay multipart: a short read of the stored upload is a server failure, not too large');
+// A buffer that takes no writes stands in for a full temp directory: php://temp
+// opens fine and then loses everything past its memory threshold.
+$relayReadOnly = fopen($relayDoc, 'rb');
+check(
+    (_stattic_relay_multipart_body('XyZ', ['a' => str_repeat('x', 64)], [], $relayReadOnly)['status'] ?? null) === 500,
+    'relay multipart: a body that could not be buffered whole is a server failure, never a shorter form'
+);
+
+$relayCutShort = static fn (string $warning): ?int => _stattic_relay_form_cut_short($warning)['status'] ?? null;
+check($relayCutShort('PHP Request Startup: Maximum number of allowable file uploads has been exceeded') === 413, 'relay cut short: past max_file_uploads is refused as too large');
+check($relayCutShort('PHP Request Startup: Multipart body parts limit exceeded 3. To increase the limit change max_multipart_body_parts in php.ini.') === 413, 'relay cut short: past max_multipart_body_parts is refused');
+check($relayCutShort('PHP Request Startup: File Upload Mime headers garbled') === 400, 'relay cut short: garbled part headers are a malformed request');
+check(
+    $relayCutShort('') === null
+        && $relayCutShort('PHP Request Startup: Input variables exceeded 3. To increase the limit change max_input_vars in php.ini.') === null,
+    'relay cut short: no warning, or one the query string or cookies can raise, leaves the form to PHP'
+);
+
+// Shapes PHP 8.5 produces with max_input_vars=3 and max_file_uploads=2.
+$relayVarsWarning = 'PHP Request Startup: Input variables exceeded 3. To increase the limit change max_input_vars in php.ini.';
+$relayVarsCutShort = static fn (string $warning, array $post, array $files = [], array $get = [], array $cookie = []): ?int
+    => _stattic_relay_form_vars_cut_short($warning, $post, $files, $get, $cookie, 3, 2)['status'] ?? null;
+check($relayVarsCutShort($relayVarsWarning, ['a' => '1', 'b' => '2', 'c' => '3']) === 413, 'relay vars cut short: fields past max_input_vars are refused, not forwarded as a shorter form');
+check($relayVarsCutShort($relayVarsWarning, ['r' => [['x' => '1', 'y' => '2'], ['x' => '3']]]) === 413, 'relay vars cut short: nested rows count each value the way PHP does');
+check($relayVarsCutShort($relayVarsWarning, ['a' => '3']) === 413, 'relay vars cut short: a body that repeated one name past the limit is refused while the query string and cookies are under it');
+check(
+    $relayVarsCutShort($relayVarsWarning, ['a' => '1', 'b' => '2', 'c' => '3'], [], [], ['w' => '1', 'x' => '2', 'y' => '3']) === 413,
+    'relay vars cut short: a full body is refused even when the cookies raised the last warning'
+);
+check(
+    $relayVarsCutShort($relayVarsWarning, ['a' => '1'], ['f' => ['name' => ['a', 'b'], 'error' => [UPLOAD_ERR_OK, UPLOAD_ERR_OK]]], [], ['w' => '1', 'x' => '2', 'y' => '3']) === 413,
+    'relay vars cut short: files at max_file_uploads are refused when a later warning could have hidden the file limit'
+);
+check($relayVarsCutShort($relayVarsWarning, ['a' => '1'], [], ['q' => '1', 'r' => '2', 's' => '3']) === null, 'relay vars cut short: a long query string with a small form forwards the form');
+check($relayVarsCutShort($relayVarsWarning, ['a' => '1'], [], [], ['w' => '1', 'x' => '2', 'y' => '3']) === null, 'relay vars cut short: a long cookie header with a small form forwards the form');
+check($relayVarsCutShort('', ['a' => '1', 'b' => '2', 'c' => '3']) === null, 'relay vars cut short: a form of exactly max_input_vars fields with no warning is whole');
+unlink($relayDoc);
+
 // --- Wrangler run_worker_first and D1 column affinity --------------------------------
 
 $workerFirstRoot = sys_get_temp_dir() . '/sf-unit-worker-first-' . bin2hex(random_bytes(4));

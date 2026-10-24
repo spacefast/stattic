@@ -1,6 +1,16 @@
 <?php
 declare(strict_types=1);
 
+// First thing on every request: PHP reports a multipart form it stopped reading
+// part way (past max_input_vars, max_file_uploads or max_multipart_body_parts)
+// as a request-startup warning, readable only until something else warns or
+// clears it. The relay lanes refuse such a form.
+// engine/init.php captures it too, for the lanes that start there; the first
+// capture wins.
+if (!array_key_exists('SPACEFAST_REQUEST_STARTUP_ERROR', $GLOBALS)) {
+    $GLOBALS['SPACEFAST_REQUEST_STARTUP_ERROR'] = error_get_last();
+}
+
 // The provider owns the error-log destination; the runtime owns whether PHP
 // reports to it. Keep diagnostics out of visitor responses without reducing
 // severity or disabling the provider's log pipeline.

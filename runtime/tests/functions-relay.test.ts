@@ -24,6 +24,7 @@ import {
   type Runtime,
   RUNTIME_HTTP_API_BASE,
   RUNTIME_INSTANCE_ID,
+  selfSignedCertificate,
   signToken,
   startRuntime,
 } from "./harness.ts";
@@ -783,6 +784,161 @@ test("a reachable edge receives the dispatch: the origin forwards to exactly the
   } finally {
     edgeRt.stop();
     await new Promise<void>((resolve) => edge.close(() => resolve()));
+  }
+});
+
+test("a multipart form reaches the worker whole, and one PHP cut short never reaches it", async () => {
+  // PHP parses a multipart POST into $_POST/$_FILES and leaves php://input
+  // empty, so a straight stream of the input forwards nothing. A TLS edge that
+  // reads the body with formData() is the worker's own view of the request.
+  const { certificate, key } = selfSignedCertificate(rt.root, "fx-multipart");
+  let received = 0;
+  const edge = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    tls: { cert: Bun.file(certificate), key: Bun.file(key) },
+    async fetch(request) {
+      received += 1;
+      const entries = [];
+      for (const [name, value] of await request.formData()) {
+        entries.push(
+          value instanceof File
+            ? { name, filename: value.name, type: value.type, text: await value.text() }
+            : { name, value },
+        );
+      }
+      return Response.json(entries);
+    },
+  });
+  const edgeRt = await startRuntime({
+    env: { SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "fx-dispatch-secret" },
+    phpIni: {
+      "curl.cainfo": certificate,
+      upload_max_filesize: "1K",
+      max_input_vars: "6",
+      max_file_uploads: "2",
+      max_multipart_body_parts: "30",
+      log_errors: "1",
+      error_log: runtimeLogPath,
+    },
+  });
+  const post = (form: FormData) =>
+    fetch(`${edgeRt.baseUrl}/api/contact`, {
+      method: "POST",
+      headers: { Connection: "close", Host: "fx-multipart.test", accept: "application/json" },
+      body: form,
+    });
+  try {
+    await deploy(edgeRt, {
+      spaceId: "spc_fx_multipart",
+      versionId: "ver_fx_multipart_1",
+      metadata: { mode: "website", title: "multipart" },
+      files: { "index.html": "<h1>static shell</h1>\n" },
+      functions: functionsFinalize(`127.0.0.1:${edge.port}`),
+      activate: {
+        route_name: "production",
+        config: publicAccessConfig({ mode: "website", site_title: "multipart" }),
+        production_hostnames: ["fx-multipart.test"],
+        noindex_production_hostnames: [],
+        version_hostnames: [],
+      },
+    });
+
+    // Exactly max_input_vars fields and max_file_uploads files: at a limit is
+    // not over it. An empty file input counts only once the limit is reached
+    // (PHP then drops it), so it goes first here.
+    const form = new FormData();
+    // An empty file input: the browser still sends the part, with no filename.
+    form.append("attachment", new File([], "", { type: "application/octet-stream" }));
+    form.append("message", "hello");
+    form.append("tags[]", "a");
+    form.append("tags[]", "b");
+    form.append("items[0][name]", "A");
+    form.append("items[0][qty]", "1");
+    form.append("items[1][name]", "B");
+    form.append("items[1][doc]", new File(["row two"], "b.pdf", { type: "application/pdf" }));
+    form.append("photo", new File(["png bytes"], "photo.png", { type: "image/png" }));
+    const dispatched = await post(form);
+    expect(dispatched.status).toBe(200);
+    // Files follow fields: PHP keeps the two apart.
+    expect(await dispatched.json()).toEqual([
+      { name: "message", value: "hello" },
+      { name: "tags[]", value: "a" },
+      { name: "tags[]", value: "b" },
+      { name: "items[0][name]", value: "A" },
+      { name: "items[0][qty]", value: "1" },
+      { name: "items[1][name]", value: "B" },
+      // Parsers disagree on how to surface an empty filename, so only the part
+      // itself is asserted.
+      expect.objectContaining({ name: "attachment", text: "" }),
+      { name: "items[1][doc]", filename: "b.pdf", type: "application/pdf", text: "row two" },
+      { name: "photo", filename: "photo.png", type: "image/png", text: "png bytes" },
+    ]);
+
+    // Each of these is a form PHP kept only part of, and forwarding it would
+    // hand the worker a smaller form that looks complete.
+    // Over upload_max_filesize: PHP keeps the field and records an error on the file.
+    const oversized = new FormData();
+    oversized.append("message", "hello");
+    oversized.append("photo", new File(["x".repeat(2048)], "large.png", { type: "image/png" }));
+    // Past max_file_uploads: only a startup warning says a file was dropped.
+    const tooMany = new FormData();
+    for (const name of ["a", "b", "c"]) {
+      tooMany.append(name, new File([name], `${name}.png`, { type: "image/png" }));
+    }
+    // A deliberate choice: an empty file input after max_file_uploads real files
+    // is refused too, because PHP drops that part and warns exactly as above.
+    const emptyAfterLimit = new FormData();
+    emptyAfterLimit.append("a", new File(["a"], "a.png", { type: "image/png" }));
+    emptyAfterLimit.append("b", new File(["b"], "b.png", { type: "image/png" }));
+    emptyAfterLimit.append("attachment", new File([], "", { type: "application/octet-stream" }));
+    // Past max_input_vars: PHP keeps the first six fields and every file, and
+    // only a startup warning says the rest were dropped.
+    const tooManyFields = new FormData();
+    for (const name of ["a", "b", "c", "d", "e", "f", "g"]) {
+      tooManyFields.append(name, name);
+    }
+    tooManyFields.append("photo", new File(["png bytes"], "photo.png", { type: "image/png" }));
+    const before = received;
+    for (const truncatedForm of [oversized, tooMany, emptyAfterLimit, tooManyFields]) {
+      const refused = await post(truncatedForm);
+      expect(refused.status).toBe(413);
+      expect(await refused.json()).toMatchObject({ status: 413, code: "request_too_large" });
+    }
+    // Past max_multipart_body_parts with plenty still unread: php://input then
+    // holds the unread tail, which on its own parses as a complete form. Sent
+    // with curl, the one client that left that tail in place in local runs.
+    const tail = path.join(edgeRt.root, "fx-multipart-tail.txt");
+    writeFileSync(tail, "y".repeat(30_000));
+    const curl = Bun.spawn(
+      [
+        "curl",
+        "-s",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "-H",
+        "Host: fx-multipart.test",
+        ...Array.from({ length: 30 }, (_, index) => ["-F", `f${index}=x`]).flat(),
+        "-F",
+        `tail0=<${tail}`,
+        "-F",
+        `tail1=<${tail}`,
+        `${edgeRt.baseUrl}/api/contact`,
+      ],
+      { stdout: "pipe" },
+    );
+    expect(await new Response(curl.stdout).text()).toBe("413");
+    expect(received).toBe(before);
+    expect(
+      runtimeLogRecords()
+        .filter((record) => record.versionId === "ver_fx_multipart_1")
+        .map((record) => record.metadata.code),
+    ).toEqual(Array.from({ length: 5 }, () => "request_body_not_relayed"));
+  } finally {
+    edgeRt.stop();
+    edge.stop(true);
   }
 });
 

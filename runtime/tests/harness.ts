@@ -958,6 +958,38 @@ export async function apiJson<T = Record<string, unknown>>(
   return JSON.parse(text) as T;
 }
 
+/**
+ * A throwaway certificate for a loopback TLS server, trusted by pointing PHP's
+ * `curl.cainfo` at the returned certificate.
+ */
+export function selfSignedCertificate(dir: string, name: string) {
+  const certificate = path.join(dir, `${name}-cert.pem`);
+  const key = path.join(dir, `${name}-key.pem`);
+  const generate = spawnSync(
+    "openssl",
+    [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-days",
+      "1",
+      "-subj",
+      "/CN=127.0.0.1",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1",
+      "-keyout",
+      key,
+      "-out",
+      certificate,
+    ],
+    { encoding: "utf8" },
+  );
+  if (generate.status !== 0) throw new Error(generate.stderr);
+  return { certificate, key };
+}
+
 // Public serving request against a virtual host.
 export async function get(
   rt: Runtime,

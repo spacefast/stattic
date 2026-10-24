@@ -1,6 +1,12 @@
 <?php
 declare(strict_types=1);
 
+// Before anything can warn: PHP's request-startup warning for a form it parsed
+// only partly (see custom-redirects.php, which captures it first when it runs).
+if (!array_key_exists('SPACEFAST_REQUEST_STARTUP_ERROR', $GLOBALS)) {
+    $GLOBALS['SPACEFAST_REQUEST_STARTUP_ERROR'] = error_get_last();
+}
+
 require_once __DIR__ . '/shared/context.php';
 
 // No batcache handling here: the static lanes serve and exit before WordPress

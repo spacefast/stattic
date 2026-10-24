@@ -1,7 +1,7 @@
 {
-  "revision": "5a6ff88d82d58c7e2a4601a0001d8bdbe6b7efa8",
-  "sourceHash": "c4d89aaea770cc58708b9c2e68b2b7124c918ae285e6c8291b21ee5867e4de41",
-  "manifestSha256": "690cc8cc43dd830342c8b8dbb8cc03085123a486a0cca774089d364b1e5c50a1",
+  "revision": "5bd42d154e4c0956fd548f728b76c1dd911fbae4",
+  "sourceHash": "b572ba03c201947bbd3606e1dba72e50cf30cc5588953c771ad56ca6a2fbb200",
+  "manifestSha256": "5995762ad1cd3f67e7d4cfeb73dfcc327c182d16b4d5616bf0ecf53344c4dd03",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "a138f96f5b7b9fe4ceb81a30a53542c65cb787b88967f049a8ebf447c8f606b7"
+      "sha256": "e01b6bd0b56cd1bb7e2fe5206c570c2b50fcb22369e18180d95b5d69b485602b"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "2fa0aaa57c24c8999b0ead6c97ea123e1c13b63c8d6cf6d111261388630978ed"
+      "sha256": "fd89f6ccaa4bae585bf856313384d301959f56f9549fae6196754be14e63c13a"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -413,7 +413,7 @@
     },
     {
       "path": "runtime/custom-redirects.php",
-      "sha256": "2238112babb20528cfd1bc21f07a924629ddf5a933a55db74cb0911f0522db3a"
+      "sha256": "920fd0dc9434739dd3ce45ef5ffd7bfd6ac98a3641468e08890f3d9f3900c0e4"
     },
     {
       "path": "runtime/engine-manifest.json",
@@ -525,7 +525,7 @@
     },
     {
       "path": "runtime/engine/init.php",
-      "sha256": "d27fc57f402c7a9da80603716a977b5c321e4712867a5af6e08cc607297891cf"
+      "sha256": "40bd880433abc6cfaba3b1762895225cda4054884d9bb4264b5c01eed867cc16"
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
@@ -549,7 +549,7 @@
     },
     {
       "path": "runtime/engine/runtime/functions-dispatch.php",
-      "sha256": "5c2e0e6f6c66901c52fbb3203e869b8aaadd7d2417793021cd9ae44e97a4f049"
+      "sha256": "d09e6187cbd897b6a1c884a53082ae16d08a548f8440e6ab643bbfc0ffed46a3"
     },
     {
       "path": "runtime/engine/runtime/functions-purge.php",
@@ -573,7 +573,7 @@
     },
     {
       "path": "runtime/engine/runtime/proxy.php",
-      "sha256": "ac2fab9a7a34a6acf396bfb8d3a3d0863d04b87c8f966a18685eac76bba244f0"
+      "sha256": "a99b517352f90ba773e34b366e6b5750aca8018d40ccd26e850f2e9d8e7b5391"
     },
     {
       "path": "runtime/engine/runtime/redirects.php",
@@ -797,7 +797,7 @@
     },
     {
       "path": "runtime/engine/shared/upstream-relay.php",
-      "sha256": "70fe8243f6b9154913f85bdb3c6073de7b4a6cdb589359a9ef9d0d8100dbeaa8"
+      "sha256": "a80fcabb4128496d7e9d329d63457c60f47cad2ce348d41c2dd7055959055036"
     },
     {
       "path": "runtime/engine/wordpress/components.json",
@@ -1173,7 +1173,7 @@
     },
     {
       "path": "runtime/tests/functions-relay.test.ts",
-      "sha256": "582847501f1d4a6382f6ed1895d84d381089c3fdb531bb04169849373ad9f344"
+      "sha256": "be26fcd2d3ab20565fd8b0d730ed74d8d8a325c0630e048715fbd88d06d9a922"
     },
     {
       "path": "runtime/tests/grant-conformance.php",
@@ -1185,7 +1185,7 @@
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "0e624420048ddf6d6d29fc23b79fe9d374ccb9bcf3e17ae10df773fcc8a453cb"
+      "sha256": "6536258edc8d2d62ef6dec431caa2a383d3878f1d813600b5a8475e13dde8196"
     },
     {
       "path": "runtime/tests/headers.test.ts",
@@ -1245,7 +1245,7 @@
     },
     {
       "path": "runtime/tests/proxy-cache-upstream.test.ts",
-      "sha256": "454d96134aca9e765dd1224a5892741167f4bad0f2b3747e82c8908c6bc942b1"
+      "sha256": "012628a1f8ec848237099d01735fc7e4c80c8b9ba6ba1d15794e2ba7e620e93d"
     },
     {
       "path": "runtime/tests/request-body.test.ts",
@@ -1341,11 +1341,11 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "7918ea0b88c0fe792837fa3f1cdce1e6e6c66312e6200da53b66b962d067d5c9"
+      "sha256": "a43b3646e5f9a4a419e89196244619bc8b42a57d82ab291d0384d57d1aa8b2a7"
     },
     {
       "path": "runtime/tests/uploads.test.ts",
-      "sha256": "a6cce9f40892b36348e2a965fe0d3813ad1f8b71c4cd181647f651fc8de3db46"
+      "sha256": "4603f293fb612514a8f1bd6095d4d9487a87700d1fed106392f7d59654ebb4d4"
     },
     {
       "path": "runtime/tests/version-files.test.ts",

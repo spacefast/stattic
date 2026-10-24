@@ -38,6 +38,7 @@ import {
   RUNTIME_UPLOAD_API_BASE,
   type Runtime,
   runtimeHttpPath,
+  selfSignedCertificate,
   sha256,
   startRuntime,
   uploadSessionBlobs,
@@ -1262,31 +1263,7 @@ test("URL fetch allowance survives workers and resident bytes recover the receip
 });
 
 test("URL transport rejects error headers without consuming the body and removes the staged file", async () => {
-  const certificate = path.join(rt.root, "url-transport-cert.pem");
-  const key = path.join(rt.root, "url-transport-key.pem");
-  const generate = Bun.spawn(
-    [
-      "openssl",
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-days",
-      "1",
-      "-subj",
-      "/CN=127.0.0.1",
-      "-addext",
-      "subjectAltName=IP:127.0.0.1",
-      "-keyout",
-      key,
-      "-out",
-      certificate,
-    ],
-    { stdout: "ignore", stderr: "pipe" },
-  );
-  const generationError = await new Response(generate.stderr).text();
-  if ((await generate.exited) !== 0) throw new Error(generationError);
+  const { certificate, key } = selfSignedCertificate(rt.root, "url-transport");
   const received = Promise.withResolvers<void>();
   const server = Bun.serve({
     hostname: "127.0.0.1",

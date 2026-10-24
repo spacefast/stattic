@@ -638,12 +638,13 @@ function _stattic_functions_dispatch(
     ];
     $input = null;
     if ($requestMethod !== 'GET' && $requestMethod !== 'HEAD') {
-        $input = _stattic_request_body_stream();
+        $body = _stattic_relay_request_body($requestId, $versionId);
+        $input = $body['stream'];
         if ($input !== false) {
             $request['body_stream'] = $input;
         }
-        if (isset($_SERVER['CONTENT_LENGTH'])) {
-            $request['body_size'] = (int) $_SERVER['CONTENT_LENGTH'];
+        if ($body['size'] !== null) {
+            $request['body_size'] = $body['size'];
         }
     }
 
@@ -679,11 +680,7 @@ function _stattic_functions_dispatch(
 // the request that created it.
 function _stattic_functions_request_id(): string
 {
-    $existing = $_SERVER['HTTP_X_SPACEFAST_REQUEST_ID'] ?? null;
-    if (is_string($existing) && preg_match('/^[A-Za-z0-9_-]{8,64}$/', $existing) === 1) {
-        return $existing;
-    }
-    return 'fxr_' . bin2hex(random_bytes(12));
+    return _stattic_relay_request_id('fxr_');
 }
 
 function _stattic_functions_bad_gateway(string $requestId, float $elapsedSeconds): void

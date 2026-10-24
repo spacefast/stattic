@@ -284,6 +284,21 @@ beforeAll(async () => {
       return;
     }
 
+    if (requestPath.startsWith("/echo-body")) {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        response.setHeader("Content-Type", "application/json");
+        response.end(
+          JSON.stringify({
+            contentType: request.headers["content-type"] ?? null,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      });
+      return;
+    }
+
     if (requestPath.startsWith("/configured-headers")) {
       response.setHeader("Content-Type", "application/json");
       response.end(
@@ -430,6 +445,21 @@ beforeAll(async () => {
       Authorization: "Bearer configured-token",
     }),
     configuredHeaderRoute("/configured-cookie", { Cookie: "session=configured" }),
+    {
+      // A host proxy route as generate.php compiles one: no forwarded headers.
+      location: "/echo-body",
+      route_action: {
+        action: "proxy",
+        upstream: `${upstreamBaseUrl}/echo-body`,
+        target_prefix: "/",
+        methods: ["POST"],
+        headers: {},
+        forwardHeaders: [],
+        bodySizeLimitBytes: 1_048_576,
+        timeoutSeconds: 30,
+        connectTimeoutSeconds: 10,
+      },
+    },
   ]);
   // Configured proxy headers have no ingress spelling (generate.php compiles
   // `headers` empty for every host proxy route), so the fixture is installed by
@@ -727,6 +757,45 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     expect(postResponse.headers.get("cache-control")).toBe("private, no-store");
     expect(postResponse.headers.get("a8c-edge-cache")).toBe("no-cache");
     expect(upstreamMethods).toHaveLength(beforePost);
+  });
+
+  test("a request body reaches the upstream with its own Content-Type, multipart included", async () => {
+    const echo = async (body: FormData | string, headers: Record<string, string> = {}) => {
+      const response = await fetch(`${rt.baseUrl}/echo-body`, {
+        method: "POST",
+        headers: { Connection: "close", Host: PUBLIC_HOST, ...headers },
+        body,
+      });
+      expect(response.status).toBe(200);
+      // SAFETY: the /echo-body upstream above answers exactly this shape.
+      return (await response.json()) as { contentType: string; body: string };
+    };
+
+    // The route forwards no visitor headers, yet the body keeps its media type.
+    expect(await echo('{"ok":true}', { "content-type": "application/json" })).toEqual({
+      contentType: "application/json",
+      body: '{"ok":true}',
+    });
+
+    // PHP consumed the multipart body before the engine ran; the upstream
+    // still receives it whole, under the boundary its Content-Type names.
+    const form = new FormData();
+    form.append("message", "hello");
+    form.append("file", new File(["file bytes"], "note.pdf", { type: "application/pdf" }));
+    const multipart = await echo(form);
+    expect(multipart.contentType).toStartWith("multipart/form-data; boundary=");
+    const parsed = await new Response(multipart.body, {
+      headers: { "content-type": multipart.contentType },
+    }).formData();
+    expect(parsed.get("message")).toBe("hello");
+    const file = parsed.get("file");
+    expect(file).toBeInstanceOf(File);
+    if (!(file instanceof File)) return;
+    expect([file.name, file.type, await file.text()]).toEqual([
+      "note.pdf",
+      "application/pdf",
+      "file bytes",
+    ]);
   });
 
   test("ETag revalidation forwards validators and preserves shared policy on 304", async () => {

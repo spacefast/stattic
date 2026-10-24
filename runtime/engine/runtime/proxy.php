@@ -133,7 +133,7 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
     $bodyLimit = $route['bodySizeLimitBytes'];
     $body = null;
     if ($method !== 'GET' && $method !== 'HEAD') {
-        $body = _stattic_read_proxy_request_body($bodyLimit);
+        $body = _stattic_read_proxy_request_body($bodyLimit, (string) ($serving['version_id'] ?? ''));
     }
 
     $responseHeaders = [];
@@ -236,6 +236,13 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
     ];
     if ($method !== 'GET' && $method !== 'HEAD' && $body !== null && $body !== '') {
         $request['body'] = $body;
+        // Content-Type describes the body, not the visitor, so it travels with
+        // the body whatever the route forwards. Without it curl labels every
+        // body application/x-www-form-urlencoded.
+        $contentType = (string) ($_SERVER['CONTENT_TYPE'] ?? '');
+        if ($contentType !== '' && !array_any($headers, static fn (string $line): bool => stripos($line, 'content-type:') === 0)) {
+            $request['headers'][] = 'Content-Type: ' . _stattic_relay_safe_header_value($contentType);
+        }
     }
 
     $result = _stattic_http_request($request);
@@ -412,14 +419,14 @@ function _stattic_collect_proxy_request_headers(
     return $forwarded;
 }
 
-function _stattic_read_proxy_request_body(int $bodyLimit): ?string
+function _stattic_read_proxy_request_body(int $bodyLimit, string $versionId): ?string
 {
     $contentLength = isset($_SERVER['CONTENT_LENGTH']) ? (int) $_SERVER['CONTENT_LENGTH'] : 0;
     if ($contentLength > $bodyLimit) {
         _stattic_render_platform_page('request-too-large', 413, [], "Proxy request body exceeds the configured limit.\n");
     }
 
-    $stream = _stattic_request_body_stream();
+    $stream = _stattic_relay_request_body(_stattic_relay_request_id('pxr_'), $versionId)['stream'];
     if ($stream === false) {
         return null;
     }

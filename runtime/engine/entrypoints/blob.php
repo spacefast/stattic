@@ -185,22 +185,10 @@ function _stattic_blob_gate_serve(string $privateRoot, string $requestMethod, st
 
     $blobPath = _stattic_runtime_blob_path($privateRoot, $spaceId, $sha256);
     if (!is_file($blobPath)) {
-        // Promote-on-read through the storage seam, required lazily so a local
-        // hit never parses the tier module.
-        $tier = __DIR__ . '/../runtime/tier.php';
-        if (is_file($tier)) {
-            require_once $tier;
-        }
-        $promoted = function_exists('_stattic_tier_promote_blob')
-            ? _stattic_tier_promote_blob($privateRoot, $spaceId, $sha256)
-            : null;
-        if (!is_string($promoted) || !is_file($promoted)) {
-            // Never a 404: authorization succeeded and the object exists, the
-            // bytes are momentarily unreachable. A scan that read this as "file
-            // gone" would report a version's files as deleted.
-            _stattic_blob_gate_refuse(503, "Blob bytes are unavailable.\n", ['Retry-After' => '5']);
-        }
-        $blobPath = $promoted;
+        // Never a 404: authorization succeeded and the object exists, the bytes
+        // are unreachable. A scan that read this as "file gone" would report a
+        // version's files as deleted.
+        _stattic_blob_gate_refuse(503, "Blob bytes are unavailable.\n", ['Retry-After' => '5']);
     }
 
     $size = filesize($blobPath);

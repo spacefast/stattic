@@ -1,24 +1,19 @@
 <?php
 declare(strict_types=1);
 
-// The bulk storage lane: demote, blob GC, version retention. The CAS is the
-// only byte store. Demote alone sends a live blob to S3, and only when asked
-// (§18: the runtime holds no tiering policy).
+// The bulk storage lane: blob GC and the disk report. The CAS is the only
+// byte store.
 //
 // No file time on a BLOB is ever read as a clock: its mtime is content-derived
 // and IS the accel-lane validator. Every clock here is a record we wrote. The
-// declarations carry publish time, the demote sidecars release time,
-// gc/marks.json candidacy time.
+// declarations carry publish time, gc/marks.json candidacy time.
 require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/storage.php';
-require_once __DIR__ . '/../shared/s3.php';
 
-const STATTIC_TIER_DEMOTE_CHUNK = 200;
-const STATTIC_TIER_GC_DELETE_BATCH = 200;
-const STATTIC_TIER_PUT_STREAMS = 4;
+const STATTIC_CAS_GC_DELETE_BATCH = 200;
 
-function _stattic_tier_gc_grace_seconds(): int
+function _stattic_cas_gc_grace_seconds(): int
 {
     // min=0: tests and ops pin this to 0 to collect on the spot.
     return _stattic_config_int('SPACEFAST_LOCAL_BLOB_GC_GRACE_SECONDS', 3600, 0);
@@ -27,19 +22,19 @@ function _stattic_tier_gc_grace_seconds(): int
 // The floor the undeclared/garbage lane keeps when the grace knob above is
 // pinned to 0. It covers the finalizer's install->declare window, where "no
 // declaration names this blob" means "not yet" rather than "never".
-function _stattic_tier_gc_undeclared_min_grace_seconds(): int
+function _stattic_cas_gc_undeclared_min_grace_seconds(): int
 {
     return _stattic_config_int('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS', 300, 0);
 }
 
-function _stattic_tier_gc_scan_interval_seconds(): int
+function _stattic_cas_gc_scan_interval_seconds(): int
 {
     return _stattic_config_int('SPACEFAST_LOCAL_BLOB_GC_SCAN_INTERVAL_SECONDS', 3600, 0);
 }
 
 // A declaration's own timestamp, for the shas it names; its file mtime is the
 // fallback (a record file is not a blob, so the validator rule does not apply).
-function _stattic_tier_record_time(mixed $decoded, string $path): int
+function _stattic_cas_record_time(mixed $decoded, string $path): int
 {
     if (is_array($decoded)) {
         foreach (['generatedAt', 'created_at', 'createdAt', 'updated_at', 'updatedAt'] as $field) {
@@ -57,7 +52,7 @@ function _stattic_tier_record_time(mixed $decoded, string $path): int
 // than a list of key paths: the finalizer owns the declarations that name
 // blobs, and a GC edited in lockstep with them eventually deletes live bytes.
 // Over-inclusion is free.
-function _stattic_tier_collect_shas(mixed $value, array &$shas, int $at, int $depth = 0): void
+function _stattic_cas_collect_shas(mixed $value, array &$shas, int $at, int $depth = 0): void
 {
     if (is_string($value)) {
         if (_stattic_is_sha256_hex($value)) {
@@ -72,26 +67,26 @@ function _stattic_tier_collect_shas(mixed $value, array &$shas, int $at, int $de
         if (is_string($key) && _stattic_is_sha256_hex($key)) {
             $shas[$key] = max($shas[$key] ?? 0, $at);
         }
-        _stattic_tier_collect_shas($child, $shas, $at, $depth + 1);
+        _stattic_cas_collect_shas($child, $shas, $at, $depth + 1);
     }
 }
 
 /** @return int|null the declaration's timestamp, or null when it is unreadable. */
-function _stattic_tier_collect_shas_from_json(string $path, array &$shas): ?int
+function _stattic_cas_collect_shas_from_json(string $path, array &$shas): ?int
 {
     $decoded = _stattic_runtime_read_json($path);
     if (!is_array($decoded)) {
         return null;
     }
-    $at = _stattic_tier_record_time($decoded, $path);
-    _stattic_tier_collect_shas($decoded, $shas, $at);
+    $at = _stattic_cas_record_time($decoded, $path);
+    _stattic_cas_collect_shas($decoded, $shas, $at);
     return $at;
 }
 
 // The response tables name blobs no other declaration has to mention. Reading
 // their BYTES, never including them, keeps the live set independent of whether
 // a compiler change mirrored a ref into metadata.json.
-function _stattic_tier_collect_shas_from_artifact(string $path, array &$shas, int $at): bool
+function _stattic_cas_collect_shas_from_artifact(string $path, array &$shas, int $at): bool
 {
     error_clear_last();
     $source = file_get_contents($path, false, null, 0, 4194304);
@@ -125,7 +120,7 @@ function _stattic_tier_collect_shas_from_artifact(string $path, array &$shas, in
  *
  * @return array{shas:array<string,int>,version_ids:list<string>}|null
  */
-function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?float $budgetDeadline = null, ?callable $budgetClock = null): ?array
+function _stattic_cas_space_live_set(string $privateRoot, string $spaceId, ?float $budgetDeadline = null, ?callable $budgetClock = null): ?array
 {
     $budgetClock ??= static fn (): float => microtime(true);
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
@@ -144,7 +139,7 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
             continue;
         }
         // The tables were published with their version, so they share its clock.
-        $publishedAt = _stattic_tier_collect_shas_from_json($versionRoot . '/metadata.json', $shas);
+        $publishedAt = _stattic_cas_collect_shas_from_json($versionRoot . '/metadata.json', $shas);
         if ($publishedAt === null) {
             _stattic_runtime_append_journal($privateRoot, [
                 'event' => 'blob_gc_declaration_gap',
@@ -159,7 +154,7 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
             return null;
         }
         foreach ($versionEntries as $table) {
-            if (fnmatch('responses-*.php', basename($table)) && !_stattic_tier_collect_shas_from_artifact($table, $shas, $publishedAt)) {
+            if (fnmatch('responses-*.php', basename($table)) && !_stattic_cas_collect_shas_from_artifact($table, $shas, $publishedAt)) {
                 return null;
             }
         }
@@ -177,10 +172,10 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
         : null;
     if ($overlayName !== null && strpos($overlayName, '..') === false) {
         $overlayPath = $spaceRoot . '/' . $overlayName;
-        if (!_stattic_tier_collect_shas_from_artifact(
+        if (!_stattic_cas_collect_shas_from_artifact(
             $overlayPath,
             $shas,
-            _stattic_tier_record_time(null, $overlayPath)
+            _stattic_cas_record_time(null, $overlayPath)
         )) {
             return null;
         }
@@ -194,7 +189,7 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
             if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
                 return null;
             }
-            if (is_file($path) && str_ends_with($path, '.json') && _stattic_tier_collect_shas_from_json($path, $shas) === null) {
+            if (is_file($path) && str_ends_with($path, '.json') && _stattic_cas_collect_shas_from_json($path, $shas) === null) {
                 return null;
             }
             if (!is_dir($path)) {
@@ -205,7 +200,7 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
                 return null;
             }
             foreach ($nestedEntries as $nestedPath) {
-                if (is_file($nestedPath) && str_ends_with($nestedPath, '.json') && _stattic_tier_collect_shas_from_json($nestedPath, $shas) === null) {
+                if (is_file($nestedPath) && str_ends_with($nestedPath, '.json') && _stattic_cas_collect_shas_from_json($nestedPath, $shas) === null) {
                     return null;
                 }
             }
@@ -216,9 +211,9 @@ function _stattic_tier_space_live_set(string $privateRoot, string $spaceId, ?flo
 }
 
 /** @return array<string,int>|null sha => publish timestamp */
-function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId, ?float $budgetDeadline = null, ?callable $budgetClock = null): ?array
+function _stattic_cas_space_live_shas(string $privateRoot, string $spaceId, ?float $budgetDeadline = null, ?callable $budgetClock = null): ?array
 {
-    $live = _stattic_tier_space_live_set($privateRoot, $spaceId, $budgetDeadline, $budgetClock);
+    $live = _stattic_cas_space_live_set($privateRoot, $spaceId, $budgetDeadline, $budgetClock);
     return $live === null ? null : $live['shas'];
 }
 
@@ -229,7 +224,7 @@ function _stattic_tier_space_live_shas(string $privateRoot, string $spaceId, ?fl
  *
  * @return array<string,true>|null
  */
-function _stattic_tier_space_pinned_shas(
+function _stattic_cas_space_pinned_shas(
     string $privateRoot,
     string $spaceId,
     int $now,
@@ -283,7 +278,7 @@ function _stattic_tier_space_pinned_shas(
 // entry per blob of the space: that map exhausts the 512MB request limit. Scans
 // stream one 2-hex prefix directory (1/256 of the CAS) at a time.
 
-function _stattic_tier_space_blobs_root(string $privateRoot, string $spaceId): string
+function _stattic_cas_space_blobs_root(string $privateRoot, string $spaceId): string
 {
     $blobsRoot = _stattic_space_root($privateRoot, $spaceId) . '/blobs';
     _stattic_runtime_assert_private_path($blobsRoot);
@@ -295,9 +290,9 @@ function _stattic_tier_space_blobs_root(string $privateRoot, string $spaceId): s
  *
  * @return list<string>|null null when the CAS root exists but is unreadable.
  */
-function _stattic_tier_space_blob_prefixes(string $privateRoot, string $spaceId): ?array
+function _stattic_cas_space_blob_prefixes(string $privateRoot, string $spaceId): ?array
 {
-    $blobsRoot = _stattic_tier_space_blobs_root($privateRoot, $spaceId);
+    $blobsRoot = _stattic_cas_space_blobs_root($privateRoot, $spaceId);
     $entries = _stattic_runtime_directory_entries($blobsRoot);
     if ($entries === null) {
         return null;
@@ -313,43 +308,32 @@ function _stattic_tier_space_blob_prefixes(string $privateRoot, string $spaceId)
 }
 
 /**
- * One prefix directory of a space's CAS, as {sha => ['size', 'demoted_at']}.
- * `size` is null when the body is gone but its demote mark survives: the
- * tombstone saying these bytes are in S3 and only a promote brings them back.
- * Only the size is kept, never the full stat record, because this map exists
- * once per prefix and its callers need nothing else per blob.
+ * One prefix directory of a space's CAS, as {sha => size}. Only the size is
+ * kept, never the full stat record, because this map exists once per prefix
+ * and its callers need nothing else per blob.
  *
- * @return array<string, array{size: int|null, demoted_at: int|null}>|null
+ * @return array<string, int>|null
  */
-function _stattic_tier_prefix_blobs(string $blobsRoot, string $prefix): ?array
+function _stattic_cas_prefix_blobs(string $blobsRoot, string $prefix): ?array
 {
     $entries = scandir($blobsRoot . '/' . $prefix);
     if (!is_array($entries)) {
         return null;
     }
     $blobs = [];
-    foreach ($entries as $entry) {
-        $isMark = str_ends_with($entry, STATTIC_BLOB_DEMOTE_MARK_SUFFIX);
-        $sha = $isMark ? substr($entry, 0, -strlen(STATTIC_BLOB_DEMOTE_MARK_SUFFIX)) : $entry;
+    foreach ($entries as $sha) {
         if (!_stattic_is_sha256_hex($sha) || !str_starts_with($sha, $prefix)) {
             continue;
         }
-        $path = $blobsRoot . '/' . $prefix . '/' . $sha;
-        $blobs[$sha] ??= ['size' => null, 'demoted_at' => null];
-        if ($isMark) {
-            $markedAt = filemtime($path . STATTIC_BLOB_DEMOTE_MARK_SUFFIX);
-            $blobs[$sha]['demoted_at'] = $markedAt === false ? 0 : (int) $markedAt;
-            continue;
-        }
-        $stat = stat($path);
+        $stat = stat($blobsRoot . '/' . $prefix . '/' . $sha);
         if (is_array($stat) && (((int) ($stat['mode'] ?? 0)) & 0170000) === 0100000) {
-            $blobs[$sha]['size'] = (int) ($stat['size'] ?? 0);
+            $blobs[$sha] = (int) ($stat['size'] ?? 0);
         }
     }
     return $blobs;
 }
 
-function _stattic_tier_gc_marks_path(string $privateRoot, string $spaceId): string
+function _stattic_cas_gc_marks_path(string $privateRoot, string $spaceId): string
 {
     return _stattic_space_root($privateRoot, $spaceId) . '/gc/marks.json';
 }
@@ -363,12 +347,12 @@ function _stattic_tier_gc_marks_path(string $privateRoot, string $spaceId): stri
  * per-space file holds the 2-hex prefix to resume at; the box-wide one holds the
  * space id, for the same reason one level up.
  */
-function _stattic_tier_gc_cursor_path(string $privateRoot, string $spaceId): string
+function _stattic_cas_gc_cursor_path(string $privateRoot, string $spaceId): string
 {
     return _stattic_space_root($privateRoot, $spaceId) . '/gc/cursor.json';
 }
 
-function _stattic_tier_read_cursor(string $path): ?string
+function _stattic_cas_read_cursor(string $path): ?string
 {
     $stored = _stattic_runtime_read_json($path);
     if (!is_array($stored)) {
@@ -380,7 +364,7 @@ function _stattic_tier_read_cursor(string $path): ?string
     return is_string($at) && $at !== '' ? $at : null;
 }
 
-function _stattic_tier_write_cursor(string $path, ?string $at): void
+function _stattic_cas_write_cursor(string $path, ?string $at): void
 {
     if ($at === null) {
         if (is_file($path)) {
@@ -399,7 +383,7 @@ function _stattic_tier_write_cursor(string $path, ?string $at): void
  * @param list<string> $items
  * @return list<string>
  */
-function _stattic_tier_resume_order(array $items, ?string $cursor): array
+function _stattic_cas_resume_order(array $items, ?string $cursor): array
 {
     if ($cursor === null || $items === []) {
         return $items;
@@ -418,14 +402,14 @@ function _stattic_tier_resume_order(array $items, ?string $cursor): array
 }
 
 /**
- * Pass 2. Every deletion in $deletions is `[sha, path, drop_mark, size]`,
- * applied in batches under one short per-space write lock each, so the
- * O(all blobs) scan above never holds the lock a publish needs. Nothing is
- * journaled from inside the lock; the caller emits one record for the pass.
+ * Pass 2. Every deletion in $deletions is `[sha, path, size]`, applied in
+ * batches under one short per-space write lock each, so the O(all blobs) scan
+ * above never holds the lock a publish needs. Nothing is journaled from inside
+ * the lock; the caller emits one record for the pass.
  *
- * @return array{collected: list<string>, evicted: list<string>, bytes: int, complete: bool}
+ * @return array{collected: list<string>, bytes: int, complete: bool}
  */
-function _stattic_tier_gc_apply_deletions(
+function _stattic_cas_gc_apply_deletions(
     string $privateRoot,
     string $spaceId,
     array $deletions,
@@ -434,10 +418,9 @@ function _stattic_tier_gc_apply_deletions(
 ): array {
     $budgetClock ??= static fn (): float => microtime(true);
     $collected = [];
-    $evicted = [];
     $bytes = 0;
     $complete = true;
-    foreach (array_chunk($deletions, STATTIC_TIER_GC_DELETE_BATCH) as $batch) {
+    foreach (array_chunk($deletions, STATTIC_CAS_GC_DELETE_BATCH) as $batch) {
         // A batch is the bounded unit here: it is one short lock hold, and a
         // batch this pass never applied simply keeps its mark, so the next pass
         // re-decides it against a freshly read live set.
@@ -450,24 +433,13 @@ function _stattic_tier_gc_apply_deletions(
             $spaceId,
             STATTIC_LOCK_TRY,
             null,
-            static function () use ($batch, &$collected, &$evicted, &$bytes): bool {
+            static function () use ($batch, &$collected, &$bytes): bool {
                 foreach ($batch as $deletion) {
-                    [$sha, $path, $dropMark, $size] = $deletion;
+                    [$sha, $path, $size] = $deletion;
                     if (is_file($path) && !unlink($path)) {
                         continue;
                     }
-                    // A garbage blob leaves with its mark; an evicted one keeps
-                    // it, because the mark is the evidence that S3 already holds
-                    // these bytes.
-                    if ($dropMark) {
-                        $demoteMark = _stattic_storage_blob_demote_mark_path($path);
-                        if (is_file($demoteMark)) {
-                            unlink($demoteMark);
-                        }
-                        $collected[] = $sha;
-                    } else {
-                        $evicted[] = $sha;
-                    }
+                    $collected[] = $sha;
                     $bytes += $size;
                 }
                 return true;
@@ -478,7 +450,7 @@ function _stattic_tier_gc_apply_deletions(
             $complete = false;
         }
     }
-    return ['collected' => $collected, 'evicted' => $evicted, 'bytes' => $bytes, 'complete' => $complete];
+    return ['collected' => $collected, 'bytes' => $bytes, 'complete' => $complete];
 }
 
 /**
@@ -509,7 +481,7 @@ function _stattic_tier_gc_apply_deletions(
  *
  * @return array{complete: bool, deleted: int, bytes: int}
  */
-function _stattic_tier_space_blob_gc(
+function _stattic_cas_space_blob_gc(
     string $privateRoot,
     string $spaceId,
     int $now,
@@ -519,39 +491,37 @@ function _stattic_tier_space_blob_gc(
 ): array {
     $budgetClock ??= static fn (): float => microtime(true);
     $skipped = ['complete' => false, 'deleted' => 0, 'bytes' => 0];
-    $prefixes = _stattic_tier_space_blob_prefixes($privateRoot, $spaceId);
+    $prefixes = _stattic_cas_space_blob_prefixes($privateRoot, $spaceId);
     if ($prefixes === null) {
         return $skipped;
     }
-    $live = _stattic_tier_space_live_shas($privateRoot, $spaceId, $budgetDeadline, $budgetClock);
+    $live = _stattic_cas_space_live_shas($privateRoot, $spaceId, $budgetDeadline, $budgetClock);
     if ($live === null) {
         return $skipped;
     }
-    $pinned = _stattic_tier_space_pinned_shas($privateRoot, $spaceId, $now, $budgetDeadline, $budgetClock);
+    $pinned = _stattic_cas_space_pinned_shas($privateRoot, $spaceId, $now, $budgetDeadline, $budgetClock);
     if ($pinned === null) {
         return $skipped;
     }
 
-    $blobsRoot = _stattic_tier_space_blobs_root($privateRoot, $spaceId);
-    $marksPath = _stattic_tier_gc_marks_path($privateRoot, $spaceId);
+    $blobsRoot = _stattic_cas_space_blobs_root($privateRoot, $spaceId);
+    $marksPath = _stattic_cas_gc_marks_path($privateRoot, $spaceId);
     $stored = _stattic_runtime_read_json($marksPath);
     if ($stored === false) {
         return $skipped;
     }
     $storedMarks = is_array($stored) ? $stored : [];
-    $cursorPath = _stattic_tier_gc_cursor_path($privateRoot, $spaceId);
-    $order = _stattic_tier_resume_order($prefixes, _stattic_tier_read_cursor($cursorPath));
-    $deadline = $now - max(0, $grace);
+    $cursorPath = _stattic_cas_gc_cursor_path($privateRoot, $spaceId);
+    $order = _stattic_cas_resume_order($prefixes, _stattic_cas_read_cursor($cursorPath));
     // With grace pinned to 0 both passes run inside one tick, so the two-pass
     // rule closes to nothing and the GC would delete bytes a publish is mid-way
     // through committing. The undeclared lane keeps a floor of its own.
-    $undeclaredDeadline = $now - max(0, $grace, _stattic_tier_gc_undeclared_min_grace_seconds());
+    $undeclaredDeadline = $now - max(0, $grace, _stattic_cas_gc_undeclared_min_grace_seconds());
 
     $marks = [];
     $visited = [];
     $resumeAt = null;
     $collected = [];
-    $evicted = [];
     $bytes = 0;
     $complete = true;
     foreach ($order as $prefix) {
@@ -562,7 +532,7 @@ function _stattic_tier_space_blob_gc(
             $complete = false;
             break;
         }
-        $blobs = _stattic_tier_prefix_blobs($blobsRoot, $prefix);
+        $blobs = _stattic_cas_prefix_blobs($blobsRoot, $prefix);
         if ($blobs === null) {
             // Skip it unvisited, so the merge keeps its stored marks while the
             // readable prefixes still collect. Incomplete, but not truncated:
@@ -571,35 +541,19 @@ function _stattic_tier_space_blob_gc(
             continue;
         }
         $deletions = [];
-        foreach ($blobs as $sha => $blob) {
-            // Candidacy first: every present non-live sha carries a mark, its
-            // stored first-seen time if it already had one, $now otherwise. A
-            // stored mark whose blob became live again or left the disk is
-            // dropped by construction, never re-added.
-            $firstSeen = null;
-            if (!isset($live[$sha])) {
-                $storedSeen = $storedMarks[$sha] ?? null;
-                $firstSeen = is_int($storedSeen) ? $storedSeen : $now;
-                $marks[$sha] = $firstSeen;
-            }
-            if (isset($pinned[$sha])) {
-                continue;
-            }
-            $path = $blobsRoot . '/' . $prefix . '/' . $sha;
-            if ($blob['size'] === null) {
-                // Body gone, only the demote sidecar left. For a LIVE sha that
-                // tombstone is the evidence S3 holds these bytes; for one
-                // nothing declares any more it is residue.
-                if ($firstSeen !== null && $firstSeen <= $undeclaredDeadline) {
-                    $deletions[] = [$sha, $path, true, 0];
-                }
-                continue;
-            }
+        foreach ($blobs as $sha => $size) {
+            // Live bytes are never candidates. A stored mark whose blob became
+            // live again or left the disk is dropped by construction, never
+            // re-added.
             if (isset($live[$sha])) {
-                // Live but demoted: the bytes are in S3. Body goes, mark stays.
-                if ($blob['demoted_at'] !== null && $blob['demoted_at'] <= $deadline) {
-                    $deletions[] = [$sha, $path, false, $blob['size']];
-                }
+                continue;
+            }
+            // Candidacy: every present non-live sha carries a mark, its stored
+            // first-seen time if it already had one, $now otherwise.
+            $storedSeen = $storedMarks[$sha] ?? null;
+            $firstSeen = is_int($storedSeen) ? $storedSeen : $now;
+            $marks[$sha] = $firstSeen;
+            if (isset($pinned[$sha])) {
                 continue;
             }
             // Garbage: nothing declares it, so the mark clock is the only
@@ -607,7 +561,7 @@ function _stattic_tier_space_blob_gc(
             // protection. A hot PREVIEW blob is not spared; the next request
             // regenerates it.
             if ($firstSeen <= $undeclaredDeadline) {
-                $deletions[] = [$sha, $path, true, $blob['size']];
+                $deletions[] = [$sha, $blobsRoot . '/' . $prefix . '/' . $sha, $size];
             }
         }
         // The prefix is walked, so this pass's marks for it are authoritative —
@@ -617,27 +571,24 @@ function _stattic_tier_space_blob_gc(
         if ($deletions === []) {
             continue;
         }
-        $applied = _stattic_tier_gc_apply_deletions($privateRoot, $spaceId, $deletions, $budgetDeadline, $budgetClock);
+        $applied = _stattic_cas_gc_apply_deletions($privateRoot, $spaceId, $deletions, $budgetDeadline, $budgetClock);
         $collected = [...$collected, ...$applied['collected']];
-        $evicted = [...$evicted, ...$applied['evicted']];
         $bytes += $applied['bytes'];
         $complete = $complete && $applied['complete'];
     }
 
-    $deleted = [...$collected, ...$evicted];
-    if ($deleted !== []) {
+    if ($collected !== []) {
         _stattic_runtime_append_journal($privateRoot, [
             'event' => 'local_blob_gc',
             'space_id' => $spaceId,
             'bytes' => $bytes,
             'collected' => $collected,
-            'evicted' => $evicted,
         ]);
     }
     // Only shas this pass removed lose their mark: a batch the lock refused
     // keeps its elapsed grace, so contention delays a deletion by one scan
     // instead of restarting its clock.
-    foreach ($deleted as $sha) {
+    foreach ($collected as $sha) {
         unset($marks[$sha]);
     }
     if (!$complete) {
@@ -655,11 +606,11 @@ function _stattic_tier_space_blob_gc(
     if ($marks !== $storedMarks && !($marks === [] && !is_array($stored))) {
         _stattic_runtime_write_json_atomic($marksPath, $marks);
     }
-    _stattic_tier_write_cursor($cursorPath, $resumeAt);
-    return ['complete' => $complete, 'deleted' => count($deleted), 'bytes' => $bytes];
+    _stattic_cas_write_cursor($cursorPath, $resumeAt);
+    return ['complete' => $complete, 'deleted' => count($collected), 'bytes' => $bytes];
 }
 
-function _stattic_tier_space_ids(string $privateRoot): array|false
+function _stattic_cas_space_ids(string $privateRoot): array|false
 {
     _stattic_runtime_assert_private_path($privateRoot . '/spaces');
     $roots = _stattic_runtime_space_roots($privateRoot);
@@ -686,7 +637,7 @@ function _stattic_tier_space_ids(string $privateRoot): array|false
  * unreadable declaration stopped — and the pass carrying it must not report a
  * step it did not finish.
  */
-function _stattic_tier_local_blob_gc_run(
+function _stattic_cas_local_blob_gc_run(
     string $privateRoot,
     int $now,
     int $grace,
@@ -713,12 +664,12 @@ function _stattic_tier_local_blob_gc_run(
         // Grace zero means "collect on every call" (test/ops pin).
         $grace === 0 ? 0 : max(0, $scanInterval),
         static function () use ($privateRoot, $now, $grace, $budgetDeadline, $budgetClock, $spaceCursorPath, &$complete): bool {
-            $spaceIds = _stattic_tier_space_ids($privateRoot);
+            $spaceIds = _stattic_cas_space_ids($privateRoot);
             if (!is_array($spaceIds)) {
                 $complete = false;
                 return false;
             }
-            $order = _stattic_tier_resume_order($spaceIds, _stattic_tier_read_cursor($spaceCursorPath));
+            $order = _stattic_cas_resume_order($spaceIds, _stattic_cas_read_cursor($spaceCursorPath));
             $resumeAt = null;
             foreach ($order as $spaceId) {
                 if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
@@ -727,12 +678,12 @@ function _stattic_tier_local_blob_gc_run(
                     break;
                 }
                 if (
-                    !_stattic_tier_space_blob_gc($privateRoot, $spaceId, $now, $grace, $budgetDeadline, $budgetClock)['complete']
+                    !_stattic_cas_space_blob_gc($privateRoot, $spaceId, $now, $grace, $budgetDeadline, $budgetClock)['complete']
                 ) {
                     $complete = false;
                 }
             }
-            _stattic_tier_write_cursor($spaceCursorPath, $resumeAt);
+            _stattic_cas_write_cursor($spaceCursorPath, $resumeAt);
             return $complete;
         },
         STATTIC_SWEEP_ADVANCE_ON_COMPLETE,
@@ -752,11 +703,11 @@ function _stattic_runtime_job_housekeeping_local_blob_gc(string $privateRoot, ar
         $lockPath,
         STATTIC_LOCK_TRY,
         static fn (): bool => false,
-        static fn (): bool => _stattic_tier_local_blob_gc_run(
+        static fn (): bool => _stattic_cas_local_blob_gc_run(
             $privateRoot,
             time(),
-            _stattic_tier_gc_grace_seconds(),
-            _stattic_tier_gc_scan_interval_seconds(),
+            _stattic_cas_gc_grace_seconds(),
+            _stattic_cas_gc_scan_interval_seconds(),
             null,
             // The tick's clock, so the CAS walk stops on it rather than running
             // every Space's prefixes to the end inside the bulk lane lock.
@@ -765,293 +716,8 @@ function _stattic_runtime_job_housekeeping_local_blob_gc(string $privateRoot, ar
     );
 }
 
-/**
- * Uploads local blobs to their derived keys, true only when every one landed
- * AND verified.
- *
- * A SigV4 PUT signs `x-amz-content-sha256` with the object's REAL digest and the
- * key derives from that same digest, so a 2xx from a `server_verified` bucket
- * proves the bytes are at that key. `unverified` buckets make no such promise
- * and pay one HEAD plus a content-length compare.
- *
- * @param array<string,string> $blobs sha => local path
- */
-function _stattic_tier_upload_blobs(string $privateRoot, string $spaceId, array $blobs): bool
-{
-    $bucketId = _stattic_s3_default_bucket_id();
-    $bucketRow = $bucketId === null ? null : _stattic_s3_bucket_row($bucketId);
-    if ($bucketRow === null) {
-        return false;
-    }
-    $items = [];
-    $sizes = [];
-    foreach ($blobs as $sha => $path) {
-        $key = _stattic_blob_relative_key($spaceId, (string) $sha);
-        if ($key === null || !is_file($path)) {
-            return false;
-        }
-        $sizes[$sha] = (int) filesize($path);
-        $items[] = [
-            'id' => (string) $sha,
-            'bucket' => $bucketId,
-            'key' => $key,
-            'source_path' => $path,
-            'sha256' => (string) $sha,
-        ];
-    }
-    if ($items === []) {
-        return true;
-    }
-
-    $results = _stattic_s3_multi_put($items, STATTIC_TIER_PUT_STREAMS);
-    $serverVerified = ($bucketRow['integrity'] ?? 'unverified') === 'server_verified';
-    foreach ($items as $item) {
-        $sha = (string) $item['id'];
-        if (($results[$sha]['ok'] ?? false) !== true) {
-            _stattic_runtime_append_journal($privateRoot, [
-                'event' => 'tier_demote_put_failed',
-                'space_id' => $spaceId,
-                'sha256' => $sha,
-                'status' => (int) ($results[$sha]['status'] ?? 0),
-                'error' => $results[$sha]['error'] ?? null,
-            ]);
-            return false;
-        }
-        if (!$serverVerified && _stattic_s3_blob_head($spaceId, $sha, $bucketId) !== $sizes[$sha]) {
-            _stattic_runtime_append_journal($privateRoot, [
-                'event' => 'tier_demote_verify_failed',
-                'space_id' => $spaceId,
-                'sha256' => $sha,
-            ]);
-            return false;
-        }
-    }
-    return true;
-}
-
-/**
- * The one demote operation. Payload:
- *   space_id  required
- *   shas      optional list; absent means every not-yet-demoted local blob of
- *             the space
- *
- * A successful pass uploads and verifies, marks the remote copy, then unlinks
- * the local body under the space write lock. The next read promotes it into the
- * CAS again. Only LIVE blobs are demoted: a preview's CAS name is a DERIVED key
- * rather than its content hash, so a demoted preview could never be promoted
- * back.
- *
- * Known gap: a blob later collected as garbage leaves its S3 object behind.
- * Per-blob reclamation is a bucket lifecycle rule's job; the whole-space case
- * is reclaimed at delete (_stattic_tier_reclaim_space_bucket_objects).
- */
-// $deadline is the tick's own: demote bounds itself by chunk, so it yields on a
-// chunk boundary and the runner's own budget check ends the tick.
-function _stattic_runtime_job_step_tier_demote(string $privateRoot, array $job, float $deadline): array
-{
-    $payload = is_array($job['payload'] ?? null) ? $job['payload'] : [];
-    // The Space is the record's OWN attested resource, taken from the signed
-    // create scope. A payload field naming a Space would be the caller telling
-    // the step which tenant's blobs to move.
-    $spaceId = _stattic_runtime_id((string) ($job['space_id'] ?? ''), 'space_id');
-    $prefixes = _stattic_tier_space_blob_prefixes($privateRoot, $spaceId);
-    if ($prefixes === null) {
-        throw new StatticJobRetry('tier_demote_scan_failed');
-    }
-    $liveSet = _stattic_tier_space_live_set($privateRoot, $spaceId);
-    if ($liveSet === null) {
-        throw new StatticJobRetry('tier_demote_live_set_unreadable');
-    }
-    $live = $liveSet['shas'];
-
-    $requested = null;
-    if (isset($payload['shas']) && is_array($payload['shas'])) {
-        $requested = [];
-        foreach ($payload['shas'] as $sha) {
-            if (is_string($sha) && _stattic_is_sha256_hex(strtolower($sha))) {
-                $requested[strtolower($sha)] = true;
-            }
-        }
-    }
-    // No index cursor: marking a blob REMOVES it from the target set, so each
-    // step takes the next N unmarked blobs. The scan streams one prefix at a
-    // time and holds at most one chunk of targets; blobs past the chunk are
-    // only counted, so a huge CAS costs directory walks, not memory.
-    $blobsRoot = _stattic_tier_space_blobs_root($privateRoot, $spaceId);
-    $chunk = [];
-    $remaining = 0;
-    foreach ($prefixes as $prefix) {
-        $blobs = _stattic_tier_prefix_blobs($blobsRoot, $prefix);
-        if ($blobs === null) {
-            throw new StatticJobRetry('tier_demote_scan_failed');
-        }
-        foreach ($blobs as $sha => $blob) {
-            if ($blob['size'] === null || $blob['demoted_at'] !== null || !isset($live[$sha])) {
-                continue;
-            }
-            if ($requested !== null && !isset($requested[$sha])) {
-                continue;
-            }
-            if (count($chunk) < STATTIC_TIER_DEMOTE_CHUNK) {
-                $chunk[$sha] = ['path' => $blobsRoot . '/' . $prefix . '/' . $sha, 'size' => $blob['size']];
-            } else {
-                $remaining += 1;
-            }
-        }
-    }
-
-    $cursor = is_array($job['cursor'] ?? null) ? $job['cursor'] : [];
-    $stats = is_array($cursor['stats'] ?? null) ? $cursor['stats'] : ['bytesMoved' => 0, 'blobCount' => 0];
-    $done = (int) $stats['blobCount'];
-    $total = $done + count($chunk) + $remaining;
-
-    if ($chunk === []) {
-        // A DRAINED management event, not a diagnostic: the control plane's
-        // archivedBytes rollup runs off this terminal record, and the drain
-        // only delivers entries carrying an event_id.
-        _stattic_runtime_record_management_event(
-            $privateRoot,
-            _stattic_runtime_job_event_claims($job),
-            [
-                'event' => 'space.tier.demoted',
-                'space_id' => $spaceId,
-                // The callback may be delivered after another publish. Only
-                // versions present in this final successful scan are proven to
-                // have had their complete declaration set considered here.
-                'version_ids' => $requested === null ? $liveSet['version_ids'] : [],
-                'bytesMoved' => (int) $stats['bytesMoved'],
-                'blobCount' => (int) $stats['blobCount'],
-            ]
-        );
-        return [
-            'done' => true,
-            'cursor' => ['complete' => true, 'stats' => $stats],
-            'progress' => ['done' => $total, 'total' => $total],
-            'result' => $stats,
-        ];
-    }
-
-    $upload = [];
-    foreach ($chunk as $sha => $target) {
-        $upload[$sha] = $target['path'];
-    }
-    if (!_stattic_tier_upload_blobs($privateRoot, $spaceId, $upload)) {
-        throw new StatticJobRetry('tier_demote_put_failed');
-    }
-    $released = _stattic_space_write_lock_with(
-        $privateRoot,
-        $spaceId,
-        STATTIC_LOCK_WAIT,
-        null,
-        static function () use ($chunk): array {
-            $released = [];
-            foreach ($chunk as $sha => $target) {
-                $path = $target['path'];
-                _stattic_storage_blob_demote_mark($path, ['reason' => 'demote', 'bytes' => $target['size']]);
-                if (is_file($path) && !unlink($path)) {
-                    // Leave it eligible for a retry. A mark beside a body says
-                    // this job already released it, so keeping the mark here
-                    // would strand bytes on disk after a transient unlink.
-                    unlink(_stattic_storage_blob_demote_mark_path($path));
-                    throw new StatticJobRetry('tier_demote_unlink_failed');
-                }
-                $released[$sha] = $target['size'];
-            }
-            return $released;
-        },
-    );
-    if (!is_array($released)) {
-        throw new StatticJobRetry('tier_demote_lock_unavailable');
-    }
-    foreach ($released as $size) {
-        $stats['bytesMoved'] += $size;
-        $stats['blobCount'] += 1;
-    }
-
-    return [
-        'done' => false,
-        'cursor' => ['stats' => $stats],
-        'progress' => ['done' => $done + count($chunk), 'total' => $total],
-        'result' => null,
-    ];
-}
-
-/** Queue deleted-Space bucket cleanup outside the removed Space tree. */
-function _stattic_tier_schedule_space_bucket_reclaim(string $privateRoot, string $spaceId): void
-{
-    if (!_stattic_runtime_id_valid($spaceId)) return;
-    $path = $privateRoot . '/runtime/bucket-reclaim/' . $spaceId . '.json';
-    // Repeated deletes must retain the bucket that owns the orphaned bytes.
-    if (file_exists($path)) return;
-    $bucketId = _stattic_s3_default_bucket_id();
-    if ($bucketId === null) {
-        return;
-    }
-    _stattic_runtime_write_json_atomic($privateRoot . '/runtime/bucket-reclaim/' . $spaceId . '.json', [
-        'space_id' => $spaceId,
-        'bucket' => $bucketId,
-    ]);
-}
-
-/** One bounded pass; the durable record survives failure and the object cap. */
-function _stattic_tier_reclaim_space_bucket_objects(
-    string $privateRoot,
-    string $spaceId,
-    ?float $deadline = null,
-    array $options = []
-): bool {
-    $path = $privateRoot . '/runtime/bucket-reclaim/' . $spaceId . '.json';
-    $record = _stattic_runtime_read_json($path);
-    if ($record === null) return true;
-    if (!is_array($record) || !is_string($record['bucket'] ?? null)
-        || ($record['space_id'] ?? null) !== $spaceId || !_stattic_runtime_id_valid($spaceId)) {
-        _stattic_runtime_append_journal($privateRoot, ['event' => 'space_bucket_reclaim_deferred', 'space_id' => $spaceId, 'reason' => 'invalid_record'], $deadline === null);
-        return false;
-    }
-    if ($deadline !== null) $options['deadline'] = $deadline;
-    $reclaimed = _stattic_s3_delete_prefix($record['bucket'], 'spaces/' . $spaceId . '/blobs/', STATTIC_TIER_GC_DELETE_BATCH, $options);
-    if ($reclaimed['deleted'] > 0 || !$reclaimed['complete']) {
-        _stattic_runtime_append_journal($privateRoot, [
-            'event' => 'space_bucket_objects_reclaimed',
-            'space_id' => $spaceId,
-            'bucket' => $record['bucket'],
-            'deleted' => $reclaimed['deleted'],
-            'complete' => $reclaimed['complete'],
-        ], $deadline === null);
-    }
-    if ($reclaimed['complete']) {
-        return @unlink($path) || !file_exists($path);
-    }
-    return $reclaimed['complete'];
-}
-
-function _stattic_runtime_job_housekeeping_bucket_reclaim(string $privateRoot, array $_claims, float $deadline): bool
-{
-    $now = microtime(true);
-    if ($now >= $deadline) return false;
-    // Best-effort remote cleanup gets at most a quarter of the remaining tick
-    // (and at most one second), leaving time for later local housekeeping.
-    $reclaimDeadline = $now + min(1.0, ($deadline - $now) / 4);
-    $entries = _stattic_runtime_directory_entries($privateRoot . '/runtime/bucket-reclaim');
-    if ($entries === null) return false;
-    $cursorPath = $privateRoot . '/runtime/bucket-reclaim-cursor.json';
-    $entries = _stattic_tier_resume_order($entries, _stattic_tier_read_cursor($cursorPath));
-    foreach ($entries as $index => $path) {
-        if (!str_ends_with($path, '.json')) continue;
-        if (microtime(true) >= $reclaimDeadline) return true;
-        $spaceId = substr(basename($path), 0, -5);
-        _stattic_tier_reclaim_space_bucket_objects($privateRoot, $spaceId, $reclaimDeadline);
-        _stattic_tier_write_cursor($cursorPath, $entries[($index + 1) % count($entries)]);
-    }
-    if (microtime(true) >= $reclaimDeadline) return true;
-    // Pending records belong to future periodic ticks, not this job. Preserve
-    // them even when a bucket is unavailable so recovery can reclaim its bytes.
-    _stattic_tier_write_cursor($cursorPath, null);
-    return true;
-}
-
 /** Decode and validate an untrusted disk-scan checkpoint before resuming it. */
-function _stattic_tier_disk_scan_checkpoint(mixed $saved, string $spaceRoot): ?array
+function _stattic_cas_disk_scan_checkpoint(mixed $saved, string $spaceRoot): ?array
 {
     if (!is_array($saved) || ($saved['version'] ?? null) !== 1
         || !is_string($saved['root'] ?? null)
@@ -1101,7 +767,7 @@ function _stattic_tier_disk_scan_checkpoint(mixed $saved, string $spaceRoot): ?a
  *
  * @return array{bytes:int, inodes:int, complete:bool}
  */
-function _stattic_tier_space_disk_usage(string $spaceRoot, ?float $budgetDeadline = null, ?string $checkpointPath = null, ?callable $budgetClock = null): array
+function _stattic_cas_space_disk_usage(string $spaceRoot, ?float $budgetDeadline = null, ?string $checkpointPath = null, ?callable $budgetClock = null): array
 {
     $budgetClock ??= static fn (): float => microtime(true);
     if (!is_dir($spaceRoot)) {
@@ -1109,7 +775,7 @@ function _stattic_tier_space_disk_usage(string $spaceRoot, ?float $budgetDeadlin
     }
     _stattic_runtime_assert_private_path($spaceRoot);
     $saved = $checkpointPath === null ? null : _stattic_runtime_read_json($checkpointPath);
-    $state = _stattic_tier_disk_scan_checkpoint($saved, $spaceRoot);
+    $state = _stattic_cas_disk_scan_checkpoint($saved, $spaceRoot);
     if ($state === null) {
         if ($checkpointPath !== null && $saved !== null) @unlink($checkpointPath);
         $state = ['stack' => [['path' => '', 'after' => '']], 'seen' => [], 'bytes' => 0, 'inodes' => 0];
@@ -1187,7 +853,7 @@ function _stattic_tier_space_disk_usage(string $spaceRoot, ?float $budgetDeadlin
     return ['bytes' => $state['bytes'], 'inodes' => $state['inodes'], 'complete' => true];
 }
 
-const STATTIC_TIER_DISK_REPORT_INTERVAL_SECONDS = 21600;
+const STATTIC_CAS_DISK_REPORT_INTERVAL_SECONDS = 21600;
 
 function _stattic_runtime_job_housekeeping_disk_report(string $privateRoot, array $claims, float $deadline): bool
 {
@@ -1210,9 +876,9 @@ function _stattic_runtime_job_housekeeping_disk_report(string $privateRoot, arra
         $spaceId = basename($spaceRoot);
         _stattic_sweep_throttled(
             $spaceRoot . '/disk-report.marker',
-            STATTIC_TIER_DISK_REPORT_INTERVAL_SECONDS,
+            STATTIC_CAS_DISK_REPORT_INTERVAL_SECONDS,
             static function () use ($privateRoot, $spaceRoot, $spaceId, $claims, $now, $deadline, &$complete): bool {
-                $usage = _stattic_tier_space_disk_usage($spaceRoot, $deadline, $privateRoot . '/runtime/disk-reports/' . $spaceId . '.json');
+                $usage = _stattic_cas_space_disk_usage($spaceRoot, $deadline, $privateRoot . '/runtime/disk-reports/' . $spaceId . '.json');
                 if (!$usage['complete']) {
                     // An under-count is worse than no report: the control plane
                     // would bank it as this Space's size for the whole interval.

@@ -67,7 +67,7 @@ function _stattic_runtime_publish_session_declared_sizes(array $session): array
 
 // A pin is the only thing that stops the GC collecting bytes; `expires_at`
 // bounds it. Fail-closed both ways: this writer refuses an unbounded pin, and
-// the GC (`_stattic_tier_space_pinned_shas`) treats an unparseable one as
+// the GC (`_stattic_cas_space_pinned_shas`) treats an unparseable one as
 // expired.
 function _stattic_runtime_publish_session_write_pin(string $privateRoot, string $spaceId, string $uploadId, array $session): void
 {

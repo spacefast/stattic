@@ -22,8 +22,8 @@ function _stattic_http_share_handle(): \CurlSharePersistentHandle
 }
 
 // One easy handle per process avoids allocations across sequential calls. The
-// persistent share also lets prepared curl_multi transfers reuse its DNS,
-// connection, and TLS state after every reset by _stattic_http_configure().
+// persistent share keeps its DNS, connection, and TLS state after every reset
+// by _stattic_http_configure().
 function _stattic_http_handle(): \CurlHandle
 {
     static $handle = null;
@@ -229,20 +229,4 @@ function _stattic_http_request(array $request): array
         'body' => $state->body,
         'error' => null,
     ];
-}
-
-// A handle configured by the same policy record but not run: the S3 batch lane
-// drives many of these through one curl_multi loop.
-#[\NoDiscard('Prepared HTTP transfers must be executed or rejected by the caller')]
-function _stattic_http_prepare(array $request): array|false
-{
-    $handle = curl_init();
-    if ($handle === false) {
-        return false;
-    }
-    $state = _stattic_http_state();
-    if (_stattic_http_configure($handle, $request, $state) !== null) {
-        return false;
-    }
-    return ['handle' => $handle, 'state' => $state];
 }

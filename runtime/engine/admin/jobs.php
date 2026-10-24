@@ -644,7 +644,6 @@ function _stattic_runtime_job_type_registry(): array
 {
     return [
         'maintenance_tick' => ['lane' => 'bulk', 'stepper' => '_stattic_runtime_job_step_maintenance_tick'],
-        'tier_demote' => ['lane' => 'bulk', 'stepper' => '_stattic_runtime_job_step_tier_demote'],
     ];
 }
 
@@ -792,7 +791,6 @@ function _stattic_runtime_job_maintenance_steps(): array
         'edge_purge' => '_stattic_runtime_job_housekeeping_edge_purge',
         'retention' => '_stattic_runtime_job_housekeeping_retention',
         'blob_gc' => '_stattic_runtime_job_housekeeping_local_blob_gc',
-        'bucket_reclaim' => '_stattic_runtime_job_housekeeping_bucket_reclaim',
         'route_shard_gc' => '_stattic_runtime_job_housekeeping_route_shard_gc',
         'disk_report' => '_stattic_runtime_job_housekeeping_disk_report',
     ];
@@ -827,7 +825,7 @@ function _stattic_runtime_job_maintenance_tick(string $privateRoot, array $claim
     // Loaded here, not at the top: retention.php requires this file back, and
     // the cron/CLI entry into the tick does not go through management.php.
     require_once __DIR__ . '/retention.php';
-    require_once __DIR__ . '/tier.php';
+    require_once __DIR__ . '/cas.php';
     require_once __DIR__ . '/generate.php';
 
     $ran = [];

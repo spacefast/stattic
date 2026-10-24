@@ -1972,10 +1972,8 @@ test("public requests load only the modules their request class needs", async ()
     }
     for (const forbidden of [
       "runtime/access-rules.php",
-      "runtime/tier.php",
       "shared/bootstrap-config.php",
       "shared/jwt.php",
-      "shared/s3.php",
       "shared/storage.php",
     ]) {
       expect(staticModules, forbidden).not.toContain(forbidden);

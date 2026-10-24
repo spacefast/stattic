@@ -16,10 +16,6 @@ require_once __DIR__ . '/../shared/functions-wire.generated.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
 require_once __DIR__ . '/../shared/errors.php';
 
-// A promote failure is a bucket round trip away from succeeding, never a
-// permanent verdict.
-const STATTIC_UPLOADS_PROMOTE_RETRY_AFTER_SECONDS = 5;
-
 const STATTIC_UPLOADS_ID_PATTERN = '/^[a-f0-9]{32}$/';
 
 // A stored type a browser could execute as a page rides `Content-Disposition:
@@ -251,6 +247,17 @@ function _stattic_uploads_serve(string $privateRoot, string $spaceId, string $re
     );
 }
 
+function _stattic_uploads_bytes_unavailable(): never
+{
+    _stattic_render_platform_page(
+        'runtime-unavailable',
+        503,
+        ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE],
+        "Stored object bytes are unavailable.\n"
+    );
+    exit;
+}
+
 // The one byte-sending path for both lanes (visitor /__stattic/u/ and the
 // /storage surface). Commerce delivery permits ranges after authorization.
 function _stattic_uploads_send(
@@ -268,13 +275,9 @@ function _stattic_uploads_send(
     // policy applies inside _stattic_send_response_headers.
     $headers = _stattic_uploads_headers($record, $publicCache);
     $size = $record['size'];
-    // Promote-on-read: the bytes land in the CAS first, then serve locally.
-    // There is no S3-to-visitor stream.
-    require_once __DIR__ . '/tier.php';
     $blobPath = _stattic_runtime_local_blob($privateRoot, $spaceId, $record['sha256']);
     if ($blobPath === null) {
-        _stattic_render_tier_fetch_unavailable(STATTIC_UPLOADS_PROMOTE_RETRY_AFTER_SECONDS);
-        exit;
+        _stattic_uploads_bytes_unavailable();
     }
 
     $status = 200;
@@ -312,13 +315,7 @@ function _stattic_uploads_send(
     }
     $stream = fopen($blobPath, 'rb');
     if ($stream === false) {
-        _stattic_render_platform_page(
-            'runtime-unavailable',
-            503,
-            ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE],
-            "Stored object bytes are unavailable.\n"
-        );
-        exit;
+        _stattic_uploads_bytes_unavailable();
     }
     _stattic_send_response_headers($headers);
     if ($offset > 0) fseek($stream, $offset);

@@ -1,12 +1,10 @@
 // Engine job runner (contracts §10, D54/D55): admin/jobs.php's tick driver,
 // dispatched over POST /jobs/tick and inspected over GET /jobs/{jobId}.
 //
-// v4 collapsed the framework to ONE registered maintenance tick and ONE demote
-// operation, both on the bulk lane, so this file tests the RUNNER (admission,
-// claim, fencing, reap, dead-letter, single-flight, housekeeping) and nothing
-// about what a particular job does. `maintenance_tick` is the cheap stand-in
-// for a job that runs; `tier_demote`'s multi-step/cursor behavior belongs to
-// tiering.test.ts, which drives it across ticks against the S3 fake.
+// The framework has ONE registered job type, the maintenance tick on the bulk
+// lane, so this file tests the RUNNER (admission, claim, fencing, reap,
+// dead-letter, single-flight, housekeeping) and nothing about what a particular
+// job does. `maintenance_tick` is the cheap stand-in for a job that runs.
 //
 // A tick is a capability for ONE job: the engine takes its target from the
 // verified token, so every tick here signs the job id and the job's Space.
@@ -554,7 +552,7 @@ test("POST /jobs takes the whole job from the signed scope, never the request bo
       payload: { note: "kept" },
     }),
     // D54: the rollout compatibility body cannot override the verified token.
-    { type: "tier_demote", space_id: "spc_body_lie", payload: { note: "ignored" } },
+    { type: "not_a_real_type", space_id: "spc_body_lie", payload: { note: "ignored" } },
     201,
   );
   expect(created.job.space_id).toBe("spc_create_route");

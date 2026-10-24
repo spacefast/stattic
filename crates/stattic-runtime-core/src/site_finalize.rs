@@ -2196,8 +2196,7 @@ fn existing_finalize_output(
     // `finalizeInputSha256` above proves the version on disk was produced by
     // exactly this input. The published surface is the pointer, the root it
     // names, and the tables that root names, so those three are checked and no
-    // per-file sweep runs — a demoted version legitimately has files unlinked
-    // from the tree with their bytes in the cold store.
+    // per-file sweep runs: the bytes live in the CAS, not the version tree.
     let pointer = version_root.join(VERSION_ROOT_POINTER_FILE);
     let root: Value = fs::read(&pointer)
         .ok()
@@ -4182,33 +4181,30 @@ mod tests {
         ));
     }
 
-    /// Storage tiering unlinks a demoted file from the version tree and keeps
-    /// its bytes in the cold store, so a published version is allowed to have
-    /// fewer files on disk than in its metadata. A replay of that version must
-    /// still answer idempotently rather than call it corrupt — and it answers
-    /// without walking the tree at all, so a space with a hundred thousand
-    /// unchanged files costs a replay nothing.
+    /// A replay answers from the pointer, root and tables alone, without
+    /// walking the version's files, so a space with a hundred thousand
+    /// unchanged files costs a replay nothing. Removing a blob the version
+    /// names proves no per-file sweep runs.
     #[test]
-    fn a_replay_answers_for_a_version_whose_files_were_tiered_out_of_the_tree() {
+    fn a_replay_answers_without_walking_the_version_files() {
         let temp = tempdir().unwrap();
         let private = temp.path().join(".stattic/storage");
         let manifest = accept_blobs(
             &private,
             &[
                 ("index.html", b"<p>home</p>"),
-                ("big/asset.bin", b"cold bytes"),
+                ("big/asset.bin", b"asset bytes"),
             ],
         );
         let input = fixture_input(
             &private,
             manifest,
-            json!({"title": "Tiered"}),
+            json!({"title": "Replay"}),
             json!({"serving":{"config":{}}}),
         );
         let published = finalize_site(input.clone(), false).unwrap();
 
-        // What a demote does to a blob whose bytes moved to S3: the
-        // local copy goes, the version keeps naming it.
+        // The local copy goes while the version keeps naming it.
         let sha = finalized_catalog(&private).paths["big/asset.bin"]
             .served
             .as_ref()

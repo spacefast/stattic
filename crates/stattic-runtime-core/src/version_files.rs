@@ -152,9 +152,7 @@ pub fn apply_access_pages(body: &Value, stage_root: &Path) -> Result<()> {
 ///
 /// There is no file tree to walk any more: a version is its root
 /// pointer, the root it names, and the tables the root names. The bytes live in
-/// the CAS, and a demoted blob is legitimately absent from local disk, so
-/// "every committed path exists here" stopped being a truth a publish could
-/// assert.
+/// the CAS, not the version tree.
 pub fn validate_artifacts(root: &Path, published: &PublishedArtifacts<'_>) -> Result<()> {
     for name in ["metadata.json", VERSION_ROOT_POINTER_FILE] {
         if !root.join(name).is_file() {

@@ -1297,8 +1297,7 @@ function _stattic_is_sha256_hex(mixed $value): bool
     return is_string($value) && preg_match('/\A[a-f0-9]{64}\z/', $value) === 1;
 }
 
-// The one spelling of a CAS blob's relative key: the local blob tree and the
-// S3 object namespace both derive from it and can never disagree on layout.
+// The one spelling of a CAS blob's relative key.
 function _stattic_blob_relative_key(string $spaceId, string $sha256): ?string
 {
     $sha256 = strtolower(trim($sha256));

@@ -105,9 +105,6 @@ function _stattic_cron_manifest(string $privateRoot, string $spaceId, string $ve
         return null;
     }
 
-    // The bytes may have aged out to the cold tier; same promotion every other
-    // blob read takes.
-    require_once __DIR__ . '/tier.php';
     $absolute = _stattic_runtime_local_blob($privateRoot, $spaceId, $sha);
     $raw = $absolute !== null
         ? file_get_contents($absolute, false, null, 0, STATTIC_CRONS_MANIFEST_MAX_BYTES + 1)

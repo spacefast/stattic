@@ -14,7 +14,7 @@
 //! * Content hashes stay plain JSON strings — never split, prefixed, or
 //!   wrapped. The blob collector sweeps every 64-hex string it finds in a
 //!   version's declarations down to 12 nesting levels
-//!   (`runtime/engine/admin/tier.php`) and is deliberately shape-agnostic so a
+//!   (`runtime/engine/admin/cas.php`) and is deliberately shape-agnostic so a
 //!   schema change cannot make it delete live bytes.
 //! * The catalog rides INSIDE `metadata.json`, under one `catalog` key — never
 //!   as a sibling document. The blob collector decides liveness by sweeping

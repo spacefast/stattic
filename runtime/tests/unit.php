@@ -1123,11 +1123,10 @@ check(
     'job time-stop: past 8h since first failure is stopped'
 );
 
-// D54: only a maintenance tick and a demote remain. Space moves are a
-// control-plane workflow (D21/D72/D96), so there is no transfer lane to derive.
+// Only the maintenance tick remains. Space moves are a control-plane workflow
+// (D21/D72/D96), so there is no transfer lane to derive.
 foreach ([
     'maintenance_tick' => 'bulk',
-    'tier_demote' => 'bulk',
 ] as $type => $expectedLane) {
     check(
         _stattic_runtime_job_lane_for_type($type) === $expectedLane,
@@ -1182,7 +1181,7 @@ function _stattic_job_runner_unit_rm_recursive(string $path): void
 
 $jobsPrivateRoot = _stattic_job_runner_unit_temp_private_root();
 $jobScope = [
-    'type' => 'tier_demote',
+    'type' => 'maintenance_tick',
     'idempotency_key' => 'idem-1',
     'payload' => ['target' => 3],
     'space_id' => 'spc_unit',
@@ -1192,7 +1191,7 @@ $jobBudget = static fn (): float => microtime(true) + 2.0;
 $admitted = _stattic_runtime_job_create($jobsPrivateRoot, $jobScope, $jobBudget());
 check($admitted['outcome'] === 'created', 'job_create: a new identity is admitted');
 $created = $admitted['job'];
-check($created['type'] === 'tier_demote', 'job_create: stamps the signed type');
+check($created['type'] === 'maintenance_tick', 'job_create: stamps the signed type');
 check($created['lane'] === 'bulk', 'job_create: lane derived from type');
 check($created['status'] === 'pending', 'job_create: starts pending');
 check($created['space_id'] === 'spc_unit', 'job_create: takes space_id from the signed scope');
@@ -1302,11 +1301,11 @@ check(
 // GC grace (§15/§17): blob mtime is never written, so the window comes from the
 // publish timestamps in pin/publish-session records, not the file. A zero default
 // would let a mark-then-delete pass collect within its own tick.
-require_once __DIR__ . '/../engine/admin/tier.php';
+require_once __DIR__ . '/../engine/admin/cas.php';
 check(getenv('SPACEFAST_LOCAL_BLOB_GC_GRACE_SECONDS') === false, 'gc grace: unit env leaves the knob unset');
-check(_stattic_tier_gc_grace_seconds() >= 1, 'gc grace: default grace window is non-zero seconds');
+check(_stattic_cas_gc_grace_seconds() >= 1, 'gc grace: default grace window is non-zero seconds');
 
-// GC at CAS scale (2026-08-15: tier.php OOM'd the 512MB request limit scanning a
+// GC at CAS scale (2026-08-15: the GC OOM'd the 512MB request limit scanning a
 // 431k-blob space): the scan streams one 2-hex prefix directory at a time and
 // never materializes a per-blob map. Per-blob stat arrays for this fixture would
 // cost tens of MB; the streamed pass stays an order of magnitude under that.
@@ -1326,7 +1325,7 @@ for ($p = 0; $p < 64; $p++) {
 putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS=0');
 $gcMemBefore = memory_get_usage(false);
 memory_reset_peak_usage();
-$gcResult = _stattic_tier_space_blob_gc($gcPrivateRoot, 'spc_gc_scale', time(), 0);
+$gcResult = _stattic_cas_space_blob_gc($gcPrivateRoot, 'spc_gc_scale', time(), 0);
 $gcPeakDelta = memory_get_peak_usage(false) - $gcMemBefore;
 putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS');
 check(
@@ -1362,7 +1361,7 @@ for ($p = 0; $p < 64; $p++) {
     }
 }
 putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS=0');
-$gcMarksPath = _stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_scale');
+$gcMarksPath = _stattic_cas_gc_marks_path($gcPrivateRoot, 'spc_gc_scale');
 $gcNow = time();
 // Expire the 5 ms clock after a real deletion rather than racing filesystem
 // speed or coverage overhead. One pre-aged blob stops the first pass early;
@@ -1396,7 +1395,7 @@ while ($gcPasses < 200 && $gcBudgetShas !== []) {
     };
     // Logical time advances two seconds a pass, so a mark this pass rewrote
     // rather than preserved would be visible as a later first-seen value.
-    $gcPass = _stattic_tier_space_blob_gc(
+    $gcPass = _stattic_cas_space_blob_gc(
         $gcPrivateRoot,
         'spc_gc_scale',
         $gcNow + $gcPasses * 2,
@@ -1458,33 +1457,33 @@ foreach (['spc_gc_first', 'spc_gc_second'] as $gcSpace) {
     touch($gcPrefixRoot . '/' . str_repeat('0', 64));
 }
 $gcSpaceCursorPath = $gcPrivateRoot . '/runtime/blob-gc-cursor.json';
-$gcObservedMarksPath = _stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_first');
+$gcObservedMarksPath = _stattic_cas_gc_marks_path($gcPrivateRoot, 'spc_gc_first');
 $gcSpaceClock = static function () use (&$gcObservedMarksPath): float {
     return is_file($gcObservedMarksPath) ? PHP_FLOAT_MAX : 0.0;
 };
 check(
-    !_stattic_tier_local_blob_gc_run($gcPrivateRoot, time(), 1, 0, null, PHP_FLOAT_MAX, $gcSpaceClock),
+    !_stattic_cas_local_blob_gc_run($gcPrivateRoot, time(), 1, 0, null, PHP_FLOAT_MAX, $gcSpaceClock),
     'blob gc across ticks: a budget-truncated box-wide pass reports incomplete'
 );
 check(
-    _stattic_tier_read_cursor($gcSpaceCursorPath) === 'spc_gc_second',
+    _stattic_cas_read_cursor($gcSpaceCursorPath) === 'spc_gc_second',
     'blob gc across ticks: a truncated box-wide pass resumes at the Space it did not reach'
 );
-$gcSecondMarks = _stattic_runtime_read_json(_stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_second'));
+$gcSecondMarks = _stattic_runtime_read_json(_stattic_cas_gc_marks_path($gcPrivateRoot, 'spc_gc_second'));
 check(
     !is_array($gcSecondMarks),
     'blob gc across ticks: the Space the pass never reached is left entirely untouched'
 );
-$gcObservedMarksPath = _stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_second');
-_stattic_tier_local_blob_gc_run($gcPrivateRoot, time() + 2, 1, 0, null, PHP_FLOAT_MAX, $gcSpaceClock);
-$gcSecondMarks = _stattic_runtime_read_json(_stattic_tier_gc_marks_path($gcPrivateRoot, 'spc_gc_second'));
+$gcObservedMarksPath = _stattic_cas_gc_marks_path($gcPrivateRoot, 'spc_gc_second');
+_stattic_cas_local_blob_gc_run($gcPrivateRoot, time() + 2, 1, 0, null, PHP_FLOAT_MAX, $gcSpaceClock);
+$gcSecondMarks = _stattic_runtime_read_json(_stattic_cas_gc_marks_path($gcPrivateRoot, 'spc_gc_second'));
 check(
     is_array($gcSecondMarks) && $gcSecondMarks !== [],
     'blob gc across ticks: the next pass at the same budget observes that Space rather than re-walking the first'
 );
 // A later unreadable prefix must preserve the work already completed.
 $gcFaultSpace = 'spc_gc_unreadable';
-$gcFaultRoot = _stattic_tier_space_blobs_root($gcPrivateRoot, $gcFaultSpace);
+$gcFaultRoot = _stattic_cas_space_blobs_root($gcPrivateRoot, $gcFaultSpace);
 $gcEarlySha = '00' . str_repeat('a', 62);
 $gcLateSha = 'ff' . str_repeat('b', 62);
 foreach ([$gcEarlySha, $gcLateSha] as $gcFaultSha) {
@@ -1492,12 +1491,12 @@ foreach ([$gcEarlySha, $gcLateSha] as $gcFaultSha) {
     _stattic_runtime_mkdir(dirname($gcFaultPath));
     file_put_contents($gcFaultPath, 'garbage');
 }
-$gcFaultMarksPath = _stattic_tier_gc_marks_path($gcPrivateRoot, $gcFaultSpace);
+$gcFaultMarksPath = _stattic_cas_gc_marks_path($gcPrivateRoot, $gcFaultSpace);
 _stattic_runtime_write_json_atomic($gcFaultMarksPath, [$gcEarlySha => $gcNow - 86400, $gcLateSha => $gcNow - 86400]);
 chmod($gcFaultRoot . '/ff', 0o000);
 set_error_handler(static fn (): bool => true, E_WARNING);
 try {
-    $gcFaultPass = _stattic_tier_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
+    $gcFaultPass = _stattic_cas_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
 } finally {
     restore_error_handler();
 }
@@ -1507,14 +1506,14 @@ check(
     $gcFaultPass === ['complete' => false, 'deleted' => 1, 'bytes' => 7]
         && !is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcEarlySha))
         && _stattic_runtime_read_json($gcFaultMarksPath) === [$gcLateSha => $gcNow - 86400]
-        && _stattic_tier_read_cursor(_stattic_tier_gc_cursor_path($gcPrivateRoot, $gcFaultSpace)) === null,
+        && _stattic_cas_read_cursor(_stattic_cas_gc_cursor_path($gcPrivateRoot, $gcFaultSpace)) === null,
     'blob gc: an unreadable prefix retains earlier deletion accounting and marks without pinning the cursor'
 );
 file_put_contents(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcEarlySha), 'garbage');
 _stattic_runtime_write_json_atomic($gcFaultMarksPath, [$gcEarlySha => $gcNow - 86400, $gcLateSha => $gcNow - 86400]);
 set_error_handler(static fn (): bool => true, E_WARNING);
 try {
-    $gcRepeatedPass = _stattic_tier_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
+    $gcRepeatedPass = _stattic_cas_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
 } finally {
     restore_error_handler();
     chmod($gcFaultRoot . '/ff', 0o777);
@@ -1524,10 +1523,10 @@ check(
         && !is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcEarlySha))
         && is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcLateSha))
         && _stattic_runtime_read_json($gcFaultMarksPath) === [$gcLateSha => $gcNow - 86400]
-        && _stattic_tier_read_cursor(_stattic_tier_gc_cursor_path($gcPrivateRoot, $gcFaultSpace)) === null,
+        && _stattic_cas_read_cursor(_stattic_cas_gc_cursor_path($gcPrivateRoot, $gcFaultSpace)) === null,
     'blob gc: a persistently unreadable prefix allows other prefixes to keep collecting'
 );
-$gcRecoveredPass = _stattic_tier_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
+$gcRecoveredPass = _stattic_cas_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
 check(
     $gcRecoveredPass === ['complete' => true, 'deleted' => 1, 'bytes' => 7]
         && !is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcLateSha)),
@@ -1852,91 +1851,6 @@ check(
     ]) === ['Accept: application/json', 'Authorization: Bearer callback-token'],
     'zero replay: the version-scoped callback capability authorizes replay without a fleet secret'
 );
-
-// --- S3 SigV4 signer + client: pure canonicalization/signing logic (§26, DECISIONS I-12/I-13) ---
-
-require_once __DIR__ . '/../engine/shared/s3.php';
-
-check(
-    _stattic_s3_canonical_object_path('spaces/spc_1/blobs/9f/9f3a hash') === '/spaces/spc_1/blobs/9f/9f3a%20hash',
-    's3 canonical path: encodes each segment, keeps slashes literal'
-);
-check(
-    _stattic_s3_canonical_object_path('') === '/',
-    's3 canonical path: empty key canonicalizes to "/"'
-);
-check(
-    _stattic_s3_canonical_object_path('a/b/c') === '/a/b/c',
-    's3 canonical path: plain segments pass through unencoded'
-);
-
-$pathBucket = [
-    'id' => 'b1', 'endpoint' => 'https://rustfs.internal:9000', 'region' => 'us-east-1',
-    'bucket' => 'stattic-cold', 'urlStyle' => 'path',
-];
-$pathLocator = _stattic_s3_locator($pathBucket, 'spaces/spc_1/blobs/9f/9f3a');
-check($pathLocator['host'] === 'rustfs.internal:9000', 's3 locator (path style): host is the bare endpoint host');
-check($pathLocator['path'] === '/stattic-cold/spaces/spc_1/blobs/9f/9f3a', 's3 locator (path style): bucket name prefixes the object path');
-check($pathLocator['url'] === 'https://rustfs.internal:9000/stattic-cold/spaces/spc_1/blobs/9f/9f3a', 's3 locator (path style): full URL assembled correctly');
-
-$vhostBucket = ['id' => 'b1', 'endpoint' => 'https://s3.example.com', 'region' => 'us-east-1', 'bucket' => 'stattic-cold', 'urlStyle' => 'vhost'];
-$vhostLocator = _stattic_s3_locator($vhostBucket, 'spaces/spc_1/blobs/9f/9f3a');
-check($vhostLocator['host'] === 'stattic-cold.s3.example.com', 's3 locator (vhost style): bucket prefixes the host');
-check($vhostLocator['path'] === '/spaces/spc_1/blobs/9f/9f3a', 's3 locator (vhost style): path is the bare object key');
-
-check(_stattic_s3_locator(['endpoint' => '', 'bucket' => 'x'], 'k') === null, 's3 locator: missing endpoint is rejected');
-check(_stattic_s3_locator(['endpoint' => 'https://x', 'bucket' => ''], 'k') === null, 's3 locator: missing bucket is rejected');
-
-[$canonicalHeaders, $signedHeaders] = _stattic_s3_canonical_headers([
-    'X-Amz-Date' => '20260703T000000Z',
-    'Host' => 'example.com',
-    'x-amz-content-sha256' => STATTIC_S3_EMPTY_PAYLOAD_SHA256,
-]);
-check(
-    $canonicalHeaders === "host:example.com\nx-amz-content-sha256:" . STATTIC_S3_EMPTY_PAYLOAD_SHA256 . "\nx-amz-date:20260703T000000Z\n",
-    's3 canonical headers: sorted lowercase "name:value\\n" block'
-);
-check($signedHeaders === 'host;x-amz-content-sha256;x-amz-date', 's3 canonical headers: ";"-joined sorted signed-header names');
-
-check(_stattic_s3_credentials(['getKeyId' => 'G', 'getKeySecret' => 'g', 'putKeyId' => 'P', 'putKeySecret' => 'p'], 'get') === ['key' => 'G', 'secret' => 'g'], 's3 credentials: get mode selects the GET-only key');
-check(_stattic_s3_credentials(['getKeyId' => 'G', 'getKeySecret' => 'g', 'putKeyId' => 'P', 'putKeySecret' => 'p'], 'put') === ['key' => 'P', 'secret' => 'p'], 's3 credentials: put mode selects the PUT-capable key');
-
-// Signing determinism and payload-hash sensitivity. The HMAC chain itself is
-// exercised end to end by the fixture round-trips in s3.test.ts.
-$signBucket = ['region' => 'us-east-1'];
-$signCreds = ['key' => 'AKIDEXAMPLE', 'secret' => 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'];
-$signedA = _stattic_s3_sign($signBucket, $signCreds, 'GET', 'example.com', '/key', [], STATTIC_S3_EMPTY_PAYLOAD_SHA256);
-check(
-    preg_match('/^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\/\d{8}\/us-east-1\/s3\/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=[0-9a-f]{64}$/', $signedA['authorization']) === 1,
-    's3 sign: Authorization header has the AWS4-HMAC-SHA256 shape'
-);
-$signedSamePayload = _stattic_s3_sign($signBucket, $signCreds, 'GET', 'example.com', '/key', [], STATTIC_S3_EMPTY_PAYLOAD_SHA256);
-check(
-    // Compare the full x-amz-date, not just YYYYMMDD: the signature covers the
-    // whole timestamp, so calls straddling a second boundary legitimately differ.
-    $signedA['authorization'] === $signedSamePayload['authorization'] || $signedA['x-amz-date'] !== $signedSamePayload['x-amz-date'],
-    's3 sign: identical inputs within the same second produce an identical signature'
-);
-$signedDifferentPayload = _stattic_s3_sign($signBucket, $signCreds, 'GET', 'example.com', '/key', [], hash('sha256', 'not empty'));
-check(
-    $signedA['authorization'] !== $signedDifferentPayload['authorization'],
-    's3 sign: a different payload hash changes the signature'
-);
-check(
-    $signedA['x-amz-content-sha256'] === STATTIC_S3_EMPTY_PAYLOAD_SHA256,
-    's3 sign: carries the payload hash through as a signed header'
-);
-
-// Bucket manifest reading (persist-data seam: SPACEFAST_STORAGE_BUCKETS_JSON).
-putenv('SPACEFAST_STORAGE_BUCKETS_JSON=' . json_encode([
-    ['id' => 'primary', 'endpoint' => 'https://rustfs.internal:9000', 'region' => 'us-east-1', 'bucket' => 'cold', 'urlStyle' => 'path'],
-]));
-$manifestRow = _stattic_s3_bucket_row('primary', true);
-check($manifestRow !== null && $manifestRow['bucket'] === 'cold', 's3 bucket manifest: reads a row by id from the env-delivered JSON');
-check(_stattic_s3_bucket_row('does-not-exist', true) === null, 's3 bucket manifest: unknown bucket id resolves to null');
-putenv('SPACEFAST_STORAGE_BUCKETS_JSON');
-check(_stattic_s3_bucket_row('primary', true) === null, 's3 bucket manifest: force-reloading after the env clears sees the change');
-
 
 // --- Signed build artifacts ------------------------------------------------------------
 

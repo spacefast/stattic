@@ -45,18 +45,6 @@ function _sf_load_generated_config(string $privateRoot): void
     }
 }
 
-function _sf_promote_blob(string $privateRoot, string $spaceId, string $blobRelativePath): string
-{
-    require_once __DIR__ . '/tier.php';
-    $localPath = _stattic_tier_promote_blob($privateRoot, $spaceId, basename($blobRelativePath));
-    if (!is_string($localPath) || $localPath === '') {
-        require_once __DIR__ . '/../shared/errors.php';
-        _stattic_render_tier_fetch_unavailable(5);
-        exit;
-    }
-    return $localPath;
-}
-
 const STATTIC_STATIC_STREAM_ADMISSION_BYTES = 262144;
 const STATTIC_PRIVATE_FILE_ALIAS_SUFFIX = ';sf-private';
 const STATTIC_ICON_FILE_ALIAS_SUFFIX = ';sf-icon';
@@ -1242,7 +1230,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         && $length <= 2097152
     ) {
         _stattic_acquire_static_stream_admission($context, $length);
-        $body = _stattic_v4_read_blob($context, $absolutePath, $blobRelativePath, $length);
+        $body = _stattic_v4_read_blob($absolutePath, $length);
         require_once __DIR__ . '/../shared/preview-images.php';
         $body = _stattic_normalize_preview_images($body, $context);
         $body = _stattic_apply_spacefast_sdk_preview_to_html($body, $tagPreviewToken);
@@ -1267,7 +1255,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     // window the compiler scans, then keep the rest of the document streaming.
     if (str_starts_with(strtolower($headers['content-type'] ?? ''), 'text/html')) {
         require_once __DIR__ . '/../shared/preview-images.php';
-        $stream = _stattic_v4_open_blob($context, $absolutePath, $blobRelativePath);
+        $stream = _stattic_v4_open_blob($absolutePath);
         $head = stream_get_contents($stream, min($length, 65536));
         if (!is_string($head)) {
             fclose($stream);
@@ -1287,7 +1275,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     }
 
     if ($lane === STATTIC_RUNTIME_RESPONSE_LANE_ACCEL && $status === 200) {
-        _stattic_v4_ensure_blob($context, $absolutePath, $blobRelativePath);
+        _stattic_v4_ensure_blob($absolutePath);
         _stattic_send_server_file(
             $absolutePath,
             (string) $context['private_root'],
@@ -1336,7 +1324,7 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     }
 
     _stattic_acquire_static_stream_admission($context, $length);
-    $stream = _stattic_v4_open_blob($context, $absolutePath, $blobRelativePath);
+    $stream = _stattic_v4_open_blob($absolutePath);
     $streamOffset = $normalizedHead === null ? $offset : $sourceHeadLength + max(0, $offset - strlen($normalizedHead));
     if ($streamOffset > 0 && fseek($stream, $streamOffset) !== 0) {
         fclose($stream);
@@ -1497,33 +1485,28 @@ function _stattic_v4_content_type_policy_check(array $context, array $headers): 
     return _stattic_content_type_allowlist_permits($policy, $contentType) ? null : $policy;
 }
 
-// _sf_promote_blob renders the tier-unavailable page and exits when the fetch
-// fails or is shed, so a return here means the bytes are local.
-function _stattic_v4_ensure_blob(array $context, string $absolutePath, string $blobRelativePath): void
+// A return here means the bytes are local; a missing blob is an invariant
+// violation, never a page.
+function _stattic_v4_ensure_blob(string $absolutePath): void
 {
-    if (is_file($absolutePath)) {
-        return;
+    if (!is_file($absolutePath)) {
+        _stattic_render_runtime_invariant_error_lazy('file-missing', 'Runtime response entry points to a missing blob.');
     }
-    _sf_promote_blob((string) $context['private_root'], (string) $context['space_id'], $blobRelativePath);
 }
 
 /** @return resource */
-function _stattic_v4_open_blob(array $context, string $absolutePath, string $blobRelativePath)
+function _stattic_v4_open_blob(string $absolutePath)
 {
     $stream = fopen($absolutePath, 'rb');
-    if ($stream === false) {
-        _sf_promote_blob((string) $context['private_root'], (string) $context['space_id'], $blobRelativePath);
-        $stream = fopen($absolutePath, 'rb');
-    }
     if ($stream === false) {
         _stattic_render_runtime_invariant_error_lazy('file-missing', 'Runtime response entry points to a missing blob.');
     }
     return $stream;
 }
 
-function _stattic_v4_read_blob(array $context, string $absolutePath, string $blobRelativePath, int $length): string
+function _stattic_v4_read_blob(string $absolutePath, int $length): string
 {
-    $stream = _stattic_v4_open_blob($context, $absolutePath, $blobRelativePath);
+    $stream = _stattic_v4_open_blob($absolutePath);
     $body = stream_get_contents($stream, $length);
     fclose($stream);
     if (!is_string($body)) {
@@ -1667,13 +1650,7 @@ function _stattic_v4_blob_contents(array $context, string $sha): ?string
     if ($relative === null) {
         return null;
     }
-    $absolute = (string) $context['private_root'] . '/' . $relative;
-    $body = file_get_contents($absolute);
-    if (is_string($body)) {
-        return $body;
-    }
-    _sf_promote_blob((string) $context['private_root'], (string) $context['space_id'], $relative);
-    $body = file_get_contents($absolute);
+    $body = file_get_contents((string) $context['private_root'] . '/' . $relative);
     return is_string($body) ? $body : null;
 }
 

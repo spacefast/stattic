@@ -757,6 +757,13 @@ function _stattic_runtime_blob_path(string $privateRoot, string $spaceId, string
     return $privateRoot . '/' . $relative;
 }
 
+/** A blob's local CAS path, or null when its bytes are not on disk. */
+function _stattic_runtime_local_blob(string $privateRoot, string $spaceId, string $sha256): ?string
+{
+    $path = _stattic_runtime_blob_path($privateRoot, $spaceId, $sha256);
+    return is_file($path) ? $path : null;
+}
+
 // Must agree exactly with `content_mtime` in
 // crates/stattic-runtime-core/src/finalize.rs: nginx stamps `ETag: "<hex
 // mtime>-<hex size>"` off the inode and never sees our sha256, so the same
@@ -827,7 +834,7 @@ function _stattic_runtime_path_size(string $path): ?int
 //     "variants": {"preview": {"config.js": {"sha256": "…", "size": 928, "contentType": "…"}}}
 //   }
 //
-// It rides INSIDE metadata.json, not beside it, because admin/tier.php sweeps
+// It rides INSIDE metadata.json, not beside it, because admin/cas.php sweeps
 // every 64-hex string in that one document to decide which blobs are still live
 // and is deliberately shape-agnostic. A sibling document would be invisible to
 // the collector, and live bytes would get deleted. `variants` is sparse: a
@@ -1211,8 +1218,8 @@ function _stattic_runtime_write_path_sidecars(string $root, string $spaceId, str
  * Absent path, absent view for that path, unreadable catalog and unnormalizable
  * path are ONE outcome: null, the stable `version_file_not_found`. A caller
  * cannot act differently on any of them and the gate must not say which it was.
- * Existence in the CAS is the caller's next question: the gate answers a cold
- * tier 503, never 404, once it has an identity.
+ * Existence in the CAS is the caller's next question: the gate answers 503,
+ * never 404, once it has an identity.
  *
  * @return array{sha: string, size: int, mime: string, visibility: string}|null
  */
@@ -1311,25 +1318,6 @@ function _stattic_runtime_catalog_manifest(array $catalog): array
     return $manifest;
 }
 
-// The demote sidecar: "these bytes are in S3". Written BEFORE the local copy is
-// released, and it OUTLIVES the body: with the body gone it is the evidence
-// that a promote is the only way back to these bytes. Deleted only together
-// with a body that has left the live set.
-const STATTIC_BLOB_DEMOTE_MARK_SUFFIX = '.demote';
-
-function _stattic_storage_blob_demote_mark_path(string $blobPath): string
-{
-    return $blobPath . STATTIC_BLOB_DEMOTE_MARK_SUFFIX;
-}
-
-function _stattic_storage_blob_demote_mark(string $blobPath, array $details = []): void
-{
-    _stattic_runtime_write_json_atomic(
-        _stattic_storage_blob_demote_mark_path($blobPath),
-        $details + ['demoted_at' => gmdate('c')]
-    );
-}
-
 // Expected input/limit failures are RETURNED so each surface keeps its own
 // error vocabulary; private-path invariant failures still fail hard.
 function _stattic_runtime_blob_stage_stream(
@@ -1395,15 +1383,6 @@ function _stattic_runtime_blob_commit_verified(string $privateRoot, string $spac
     }
     if (is_file($pending)) {
         unlink($pending);
-    }
-    // The body is back, so the demote mark must not survive: the GC releases a
-    // live blob whose mark is older than grace. Cleared here rather than at each
-    // installer (promote, URL fetch, upload, dedupe), and only on the install
-    // path. A body that is still present but marked is the pending-release
-    // state eviction depends on.
-    $demoteMark = _stattic_storage_blob_demote_mark_path($target);
-    if (is_file($demoteMark)) {
-        unlink($demoteMark);
     }
 }
 

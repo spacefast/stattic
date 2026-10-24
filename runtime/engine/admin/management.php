@@ -17,7 +17,7 @@ require_once __DIR__ . '/finalize-rust.php';
 require_once __DIR__ . '/upload.php';
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/jobs.php';
-require_once __DIR__ . '/tier.php';
+require_once __DIR__ . '/cas.php';
 require_once __DIR__ . '/retention.php';
 require_once __DIR__ . '/zero-db.php';
 require_once __DIR__ . '/storage.php';
@@ -1625,7 +1625,6 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
     $tombstones = _stattic_runtime_space_routing_doc($spaceRoot, 'tombstones') ?? [];
     $hostnames = _stattic_runtime_access_sweep_hostnames($intent, $tombstones);
     _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'space_deleted');
-    _stattic_tier_schedule_space_bucket_reclaim($privateRoot, $spaceId);
     _stattic_runtime_rm_recursive($spaceRoot);
     // Tombstones must survive the rm: retired hostnames keep serving the
     // tombstone page rather than degrading to the generic undeployed 503.
@@ -1633,12 +1632,6 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
         _stattic_runtime_write_json_atomic($spaceRoot . '/tombstones.json', $tombstones);
     }
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
-    // The space's demoted bytes are the one part of it that does not live under
-    // the tree just removed. Deferred: reclamation is the bucket's problem, and
-    // a delete that waited on S3 would fail whenever the bucket did.
-    _stattic_defer(static function () use ($privateRoot, $spaceId): void {
-        _stattic_tier_reclaim_space_bucket_objects($privateRoot, $spaceId);
-    });
     _stattic_runtime_record_management_event($privateRoot, $claims, [
         'event' => 'space_deleted',
         'space_id' => $spaceId,

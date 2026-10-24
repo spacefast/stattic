@@ -204,11 +204,11 @@ async function setAdmissionPolicy(
 // serialize behind the first and the counter never reaches capacity. Instead
 // each test proves REAL acquisition with a single held request (one request
 // always admits, no simultaneity required), then fills the counter file to
-// capacity directly — the same direct-counter idiom the tiering in-flight cap
-// test and the stale-fallback test below already use — before probing the shed
-// behavior. The hold keeps the real slot occupied while the probes run: the
-// engine caps the test hold at 5s (shared/admission.php), so use the full cap
-// and keep waitForCounter's deadline BELOW it — if the counter is observed at
+// capacity directly — the same direct-counter idiom the stale-fallback test
+// below already uses — before probing the shed behavior. The hold keeps the
+// real slot occupied while the probes run: the engine caps the test hold at 5s
+// (shared/admission.php), so use the full cap and keep waitForCounter's
+// deadline BELOW it — if the counter is observed at
 // all, real hold time provably remains for the seed+probe steps, and the
 // trackHold() guard turns a holder that released early into a loud failure
 // instead of a vacuously-green probe against a purely synthetic counter.

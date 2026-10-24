@@ -98,7 +98,6 @@ function _stattic_artifact_serve(
     // immutable response tables. The CAS is the only place published bytes
     // live, so the signed route resolves the digest there directly. The token
     // already binds this digest to this Space and version.
-    require_once __DIR__ . '/tier.php';
     $absolute = _stattic_runtime_local_blob($privateRoot, $spaceId, $parsed['digest']);
     if ($absolute === null) {
         _stattic_opaque_not_found();

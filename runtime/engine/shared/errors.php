@@ -355,11 +355,6 @@ function _stattic_render_admission_shed(int $retryAfterSeconds, string $code = '
     _stattic_serve_page('rate-limited', ['status' => 429, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'Retry-After' => (string) $retryAfterSeconds], 'message' => 'Too Many Requests', 'code' => $code, 'customizable' => true]);
 }
 
-function _stattic_render_tier_fetch_unavailable(int $retryAfterSeconds): void
-{
-    _stattic_serve_page('tier-unavailable', ['status' => 503, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'Retry-After' => (string) $retryAfterSeconds], 'message' => 'Service Unavailable', 'code' => 'tier_unavailable', 'customizable' => true]);
-}
-
 // A pointer/artifact that EXISTS could not be read this instant. Deliberately
 // NOT the invariant-error 500 (nothing is violated) and never a state page:
 // rendering `undeployed`/`denied`/404 off a failed read is the lie this code

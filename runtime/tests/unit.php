@@ -378,6 +378,13 @@ check(_stattic_egress_resolve_public_ips('127.0.0.1') === null, 'resolve denies 
 check(_stattic_egress_resolve_public_ips('[::1]') === null, 'resolve denies bracketed loopback');
 check(_stattic_egress_resolve_public_ips('169.254.169.254') === null, 'resolve denies metadata literal');
 check(_stattic_egress_resolve_public_ips('8.8.8.8') === ['8.8.8.8'], 'resolve pins public literal');
+// A spelling libcurl rewrites before its own lookup would be vetted under one
+// name and connected under another, so resolution refuses it before any DNS
+// query.
+foreach (['%61.example.com', "\u{fc}.example.com", 'example.com.', 'exa mple.com', '127.1', '0x7f000001'] as $host) {
+    check(!_stattic_egress_hostname_canonical($host), "resolve refuses non-canonical host spelling: {$host}");
+}
+check(_stattic_egress_hostname_canonical('api_v2.example-cdn.com'), 'resolve accepts a plain ASCII hostname');
 check(
     _stattic_egress_curl_resolve_entries('Example.COM', 443, ['8.47.69.0', '2606:4700:10::ac42:93f3']) === ['example.com:443:8.47.69.0'],
     'egress curl pinning prefers public IPv4 when DNS also returns IPv6',

@@ -1,7 +1,7 @@
 {
-  "revision": "63bc84a4884bef77f8f4adbe0df9190f76057a1e",
-  "sourceHash": "a5d98d3efdb70f02f1e18bb42d9609a25abff30d05c65cb3146eaeb8d1c9e262",
-  "manifestSha256": "4b98d92c02eeb6daac2c0b918bd39639c52790d60e05cc77bcff821b7d3a2a0d",
+  "revision": "cc0027e8f974eae05b393d892c12d378e98ce7f3",
+  "sourceHash": "56ff92734fed12a6a9467f0b6f98115a6aa4750e4088a37301d839375c34d226",
+  "manifestSha256": "cbdcfb410535ff8e0ae94884520b5ea1e02042e35fb0d82fa8128bf9729ca791",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "9fb355ee6d5f074f5e47609b57d888a4ca72b9fa7f32e5a610330d3e26a91896"
+      "sha256": "ab36aa714e86a926e40d2be3cbc1aeebb5aba9b8272b13ed18ceff8f790aa015"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "a42cfea61a9892d8d8287bca6074bfb6ba16f9bb44b87e5adc22e87476dd5d27"
+      "sha256": "40b3db53ad706177d346bf52ba417011792bcf16ac4290eedeebe9c992fa1ba6"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -153,7 +153,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/policy.rs",
-      "sha256": "d0c051d44a7e6523c39084fe2e88edf51774da0603910066dc536f8c1662416b"
+      "sha256": "036a6cffa39927b7764d4371b61a008c7d817e3cd4fad17f011201023e1b328d"
     },
     {
       "path": "crates/stattic-runtime-core/src/prepare.rs",
@@ -697,7 +697,7 @@
     },
     {
       "path": "runtime/engine/shared/egress.php",
-      "sha256": "17e4f3f23610afc9535c27affade65e709fa92354ec614d0dd03461f43cc8a89"
+      "sha256": "905bb504591507172dd46e49e9501177a1b82c303a2a041fbdaee5bb70292381"
     },
     {
       "path": "runtime/engine/shared/errors.php",
@@ -833,7 +833,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-principals.php",
-      "sha256": "f2866cb966e1171791c16be3a96c7fce13e4349f336ffbb1ef2c119f23576daa"
+      "sha256": "558546a47ec16316a8708e6f10eb8220ba9e8a23307d3b0fbce79fb441958d89"
     },
     {
       "path": "runtime/engine/wordpress/content-source-journal.php",
@@ -977,7 +977,7 @@
     },
     {
       "path": "runtime/tests/content-kernel.test.ts",
-      "sha256": "de8d33bca8a38f509c2e40fee2a607f0df557665a94c7b6cea1c9bacedc8db56"
+      "sha256": "d24c15c5a6f9ecf945a86888130b8da735d97672688480925d5cbeb9a4608906"
     },
     {
       "path": "runtime/tests/content-markdown-editor.test.ts",
@@ -1329,7 +1329,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "69c037dfad680e8ea0e632ba80ff69172ab68fb4870c1d7cd80f9f8d67d455ea"
+      "sha256": "3484baf58718fc9f84be7113338bb60e09cc4d86331b3b2f366e269e8f434231"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

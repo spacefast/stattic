@@ -241,6 +241,9 @@ function _stattic_egress_resolve_public_ips_compute(string $host, ?int $port = n
     if (filter_var($normalized, FILTER_VALIDATE_IP)) {
         return _stattic_egress_ip_public($normalized) ? [$normalized] : null;
     }
+    if (!_stattic_egress_hostname_canonical($normalized)) {
+        return null;
+    }
 
     $ips = [];
     foreach (dns_get_record($normalized, DNS_A) ?: [] as $record) {
@@ -262,6 +265,22 @@ function _stattic_egress_resolve_public_ips_compute(string $host, ?int $port = n
         }
     }
     return array_values(array_unique($ips));
+}
+
+// The CURLOPT_RESOLVE pin only holds when libcurl looks up the same name the
+// policy resolved. libcurl canonicalizes the URL host first (percent-decoding,
+// IDNA, trailing-dot and numeric-IPv4 forms), so any spelling it would rewrite
+// is refused rather than vetted under one name and connected under another.
+// Accepts plain lowercase ASCII names only; IP literals are handled by callers.
+function _stattic_egress_hostname_canonical(string $host): bool
+{
+    if (preg_match('/^[a-z0-9_-]+(?:\.[a-z0-9_-]+)*$/D', $host) !== 1) {
+        return false;
+    }
+    // A last label that parses as a number makes the whole name an IPv4
+    // shorthand (`127.1`, `0x7f000001`) to URL parsers, not a DNS name.
+    $last = substr((string) strrchr('.' . $host, '.'), 1);
+    return preg_match('/^(?:[0-9]+|0x[0-9a-f]*)$/D', $last) !== 1;
 }
 
 // Test-only escape: production does not set this process env var and a tenant

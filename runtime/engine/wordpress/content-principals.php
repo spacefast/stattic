@@ -306,7 +306,11 @@ function spacefast_content_principal_scope_capabilities(array $capabilities): ar
     if (spacefast_content_space_id() === '') {
         return $capabilities;
     }
-    foreach (['manage_options', 'promote_users', 'create_users', 'delete_users', 'remove_users', 'activate_plugins', 'install_plugins', 'update_plugins', 'delete_plugins', 'edit_plugins', 'install_themes', 'update_themes', 'delete_themes', 'switch_themes', 'edit_themes', 'update_core', 'manage_network', 'manage_network_options', 'manage_network_plugins', 'manage_network_themes', 'manage_sites', 'create_sites', 'delete_sites'] as $capability) {
+    // A Space role conveys authority over this Space only. These capabilities
+    // gate installation-wide work, and their WordPress consumers (export.php,
+    // import.php, site-health.php, the personal-data tools) read and write with
+    // direct SQL that never passes through the Space scoping filters.
+    foreach (['manage_options', 'promote_users', 'create_users', 'delete_users', 'remove_users', 'activate_plugins', 'install_plugins', 'update_plugins', 'delete_plugins', 'edit_plugins', 'install_themes', 'update_themes', 'delete_themes', 'switch_themes', 'edit_themes', 'update_core', 'manage_network', 'manage_network_options', 'manage_network_plugins', 'manage_network_themes', 'manage_sites', 'create_sites', 'delete_sites', 'export', 'import', 'view_site_health_checks', 'export_others_personal_data', 'erase_others_personal_data', 'manage_privacy_options'] as $capability) {
         $capabilities[$capability] = false;
     }
     return $capabilities;

@@ -339,7 +339,7 @@ function get_user_meta(int $userId, string $name, bool $single = true): mixed { 
 function delete_user_meta(int $userId, string $name): void { unset($GLOBALS['metas'][$userId][$name]); }
 function get_role(string $name): object {
   return (object) ['capabilities' => match ($name) {
-    'administrator' => ['edit_posts' => true, 'publish_posts' => true, 'manage_options' => true],
+    'administrator' => ['edit_posts' => true, 'publish_posts' => true, 'manage_options' => true, 'export' => true, 'view_site_health_checks' => true],
     'editor' => ['edit_posts' => true, 'publish_posts' => true],
     default => ['read' => true],
   }];
@@ -427,6 +427,8 @@ echo json_encode([
     'admin_can_manage_content' => $scopedAdmin['spacefast_manage_content'],
     'admin_can_manage_installation' => $scopedAdmin['manage_options'],
     'admin_can_install_plugins' => $scopedAdmin['install_plugins'],
+    'admin_can_export_installation' => $scopedAdmin['export'],
+    'admin_can_read_site_health' => $scopedAdmin['view_site_health_checks'],
     'native_can_edit' => $nativeAdmin['edit_posts'],
     'other_space_can_edit' => $otherSpace['edit_posts'] ?? false,
     'other_space_can_manage' => $otherSpace['spacefast_manage_content'],
@@ -510,6 +512,10 @@ echo json_encode([
     admin_can_manage_content: true,
     admin_can_manage_installation: false,
     admin_can_install_plugins: false,
+    // export.php and site-health.php read the whole installation with direct
+    // SQL, beneath every Space scope, so a Space administrator holds neither.
+    admin_can_export_installation: false,
+    admin_can_read_site_health: false,
     native_can_edit: true,
     other_space_can_edit: false,
     other_space_can_manage: false,
@@ -538,6 +544,8 @@ echo json_encode([
     edit_posts: true,
     publish_posts: true,
     manage_options: true,
+    export: true,
+    view_site_health_checks: true,
   });
   // A second user's capability test gets nothing from this request's principal.
   expect(result.other_user_capabilities).toEqual({ read: true });

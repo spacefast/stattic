@@ -373,8 +373,43 @@ fn public_proxy_destination(destination: &str) -> std::result::Result<(), Egress
         EgressScope::Open,
         destination,
         proxy_internal_hosts(),
-    )
-    .map(|_| ())
+    )?;
+    // The destination is stored as written and the runtime pins its connect
+    // address on that spelling, so it must already be the host this policy
+    // just judged: no percent-escapes, IDNA, trailing dot or IPv4 shorthand
+    // for a URL parser to rewrite.
+    if destination_host_canonical(destination) {
+        Ok(())
+    } else {
+        Err(EgressDenial::Host)
+    }
+}
+
+fn destination_host_canonical(destination: &str) -> bool {
+    let Ok(url) = url::Url::parse(destination) else {
+        return false;
+    };
+    let Some(canonical) = url.host_str() else {
+        return false;
+    };
+    let authority = destination
+        .split_once("://")
+        .map_or("", |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    // An IPv6 literal names its address directly and is never looked up, so
+    // its textual form does not matter; the address check above judged it.
+    if authority.starts_with('[') {
+        return true;
+    }
+    let raw = authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, _)| host);
+    !raw.ends_with('.') && raw.eq_ignore_ascii_case(canonical)
 }
 
 fn egress_denial_reason(denial: EgressDenial) -> &'static str {
@@ -597,6 +632,16 @@ mod tests {
                 "example.com",
                 "proxy upstreams must be http or https",
             ),
+            (
+                "http://%61.example.com/",
+                "a.example.com",
+                "loopback or malformed hostname",
+            ),
+            (
+                "http://example.com./",
+                "example.com.",
+                "loopback or malformed hostname",
+            ),
         ] {
             let redirects_pattern = [json!({"action":"proxy","destination":destination})];
             let result = validate_finalize_policy(FinalizePolicyContext {
@@ -647,6 +692,8 @@ mod tests {
         // and the MCP server read, instead of a copy baked at build time.
         for destination in [
             "https://example.com/x",
+            "https://API.Example.com:8443/x",
+            "http://[2606:4700:4700::1111]/x",
             "https://api.spacefast.com/setup.md",
         ] {
             let redirects_pattern = [json!({"action":"proxy","destination":destination})];

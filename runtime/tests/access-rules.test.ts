@@ -113,6 +113,8 @@ const CREDENTIAL_SCOPE_VERSION = "ver_access_credential_scope";
 
 const EXCHANGE_CREDENTIAL = "runtime-exchange-credential-0123456789abcdef";
 const COOKIE_NAME = "spacefast_session_dev";
+// The returning-account marker's plain-HTTP spelling, which this suite serves.
+const RETURNING_MARKER = "spacefast_returning_dev";
 const SESSION_PREFIX = "sfv2_";
 const ANONYMOUS_PREFIX = "sfa1_";
 const EDGE_CACHE_HEADER = "a8c-edge-cache";
@@ -1527,8 +1529,12 @@ test("logout revokes only the presented session and fails closed when the record
   );
 
   const callsBefore = collaborationLogoutCalls.length;
-  const loggedOut = await logout(firstCookie);
+  // Signed out here means staying out: the returning-account marker goes with
+  // the session, so the overlay never signs this browser straight back in.
+  const loggedOut = await logout(`${firstCookie}; ${RETURNING_MARKER}=1`);
   expect(loggedOut.status).toBe(303);
+  const cleared = loggedOut.headers.getSetCookie().map((cookie) => cookie.split(";")[0]);
+  expect(cleared).toEqual([`${COOKIE_NAME}=`, `${RETURNING_MARKER}=`]);
   expect(loggedOut.headers.get("set-cookie")).toContain("Max-Age=0");
   const revokes = collaborationLogoutCalls.slice(callsBefore);
   expect(revokes).toHaveLength(1);
@@ -2118,18 +2124,23 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
 });
 
 test("a scope exclusion cannot be widened by an alternate spelling of the same path", async () => {
-  // A public page carries inert share-image placeholders until the control
+  // A public page advertises the brand's fallback image until the control
   // plane reports its screenshot rendered, so an unfurler never caches the
   // screenshot service's "generating" placeholder.
   const metaContents = (html: string, key: string) =>
     html
       .match(new RegExp(`<meta [^>]*(?:property|name)="${key}"[^>]*>`, "g"))
       ?.map((tag) => tag.match(/content="([^"]*)"/)?.[1]);
+  const fallbackPlaceholder =
+    '<meta data-spacefast-auto-image="og:image" property="og:image" content="https://my.spacefast.com/app-icon-512x512.png">';
   const before = await get(runtime, BOUNDARY_HOST, "/");
   expect(before.status).toBe(200);
   const beforeHtml = await before.text();
-  expect(metaContents(beforeHtml, "og:image")).toBeUndefined();
-  expect(beforeHtml).toContain('<meta data-spacefast-auto-image="og:image">');
+  expect(metaContents(beforeHtml, "og:image")).toEqual([
+    "https://my.spacefast.com/app-icon-512x512.png",
+  ]);
+  expect(metaContents(beforeHtml, "twitter:card")).toEqual(["summary"]);
+  expect(beforeHtml).toContain(fallbackPlaceholder);
 
   // The capture URL names the version, so each publish is its own screenshot,
   // and that query leaves the page public and shared-cacheable.
@@ -2198,8 +2209,8 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
   ).toHaveLength(1);
 
   // A Public Grant constrained by expiry admits an anonymous fetch, but the
-  // page is not public: no eligibility statement, and placeholders stay inert
-  // even though / is on the ready list.
+  // page is not public: no eligibility statement, and the page keeps the
+  // fallback even though / is on the ready list.
   await putRoute(runtime, BOUNDARY_SPACE, "production", {
     version_id: BOUNDARY_VERSION,
     config: boundaryProjection({ expiresAt: new Date(Date.now() + 60 * 60_000).toISOString() }),
@@ -2208,7 +2219,7 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
     const constrained = await get(runtime, BOUNDARY_HOST, "/");
     expect(constrained.status).toBe(200);
     expect(constrained.headers.get("x-spacefast-share-image")).toBeNull();
-    expect(await constrained.text()).toContain('<meta data-spacefast-auto-image="og:image">');
+    expect(await constrained.text()).toContain(fallbackPlaceholder);
   } finally {
     await putRoute(runtime, BOUNDARY_SPACE, "production", {
       version_id: BOUNDARY_VERSION,
@@ -2244,9 +2255,9 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
   const docsHtml = await admitted.text();
   expect(docsHtml).toContain("<h1>docs</h1>");
   // The owner reads a page anonymous visitors cannot, so it advertises no
-  // share image and its placeholders stay inert.
+  // screenshot, only the fallback.
   expect(docsHtml).not.toContain("mshots");
-  expect(docsHtml).toContain('<meta data-spacefast-auto-image="og:image">');
+  expect(docsHtml).toContain(fallbackPlaceholder);
   expect(admitted.headers.get("x-spacefast-share-image")).toBeNull();
 });
 

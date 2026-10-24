@@ -969,6 +969,9 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
     // Never the descriptor's own URL: the page goes to this host's account
     // start route, which is what mints browser state before the handoff.
     accountUrl: "http://local-sdk.site.test/__spacefast/access/account",
+    // The marker this engine writes for a returning account, in the spelling
+    // this plain-HTTP host uses, and the overlay's cue that it can renew one.
+    returningAccountCookie: "spacefast_returning_dev",
     features: { picker: true, drawing: true, capture: false, attachments: true },
     // The revocable read key rides the manifest: that IS the fresh-URL
     // mechanism, so its exact value is asserted against the box's key file.
@@ -1307,8 +1310,10 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   const parsedNoUploads = collabManifestSchema.parse(await noUploads.json());
   expect(parsedNoUploads.features.attachments).toBe(false);
   expect(parsedNoUploads.uploads).toBeNull();
-  // An unclaimed Space names no account to continue with.
+  // An unclaimed Space names no account to continue with, nor a marker to
+  // come back to one.
   expect(parsedNoUploads.accountUrl).toBeNull();
+  expect(parsedNoUploads.returningAccountCookie).toBeNull();
   // The rest of the Space still speaks: withholding the store is not a shutdown.
   expect(parsedNoUploads.cast).not.toBeNull();
 });

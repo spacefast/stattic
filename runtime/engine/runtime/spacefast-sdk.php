@@ -1024,6 +1024,14 @@ function _stattic_spacefast_collab_manifest(
     // place. Withheld unless there is actually somewhere to upload to, so the
     // UI can never offer an endpoint this manifest did not address.
     $uploads = is_array($overlay['uploads'] ?? null) ? $overlay['uploads'] : null;
+    // Null while the Space is unclaimed: there is no account to continue
+    // with. The descriptor's own `accountUrl` is the gate; the URL the page
+    // goes to is this host's account start route.
+    $accountStart = is_array($descriptor)
+        && is_string($descriptor['accountUrl'] ?? null)
+        && $origin !== null
+        ? $origin . STATTIC_ACCESS_ACCOUNT_START_PATH
+        : null;
 
     return [
         'version' => 5,
@@ -1063,13 +1071,13 @@ function _stattic_spacefast_collab_manifest(
         // deployment names none — a self-host, a local harness — so the page
         // refuses that lane instead of guessing an origin.
         'apiBase' => _stattic_spacefast_sdk_api_base_url(),
-        // Null while the Space is unclaimed: there is no account to continue
-        // with. The descriptor's own `accountUrl` is the gate; the URL the page
-        // goes to is this host's account start route.
-        'accountUrl' => is_array($descriptor)
-            && is_string($descriptor['accountUrl'] ?? null)
-            && $origin !== null
-            ? $origin . STATTIC_ACCESS_ACCOUNT_START_PATH
+        'accountUrl' => $accountStart,
+        // The one cookie name this engine writes when an account signs in here
+        // and spends on a silent start. Naming it is the promise that the
+        // account start honours `silent=1`, so an engine that predates the
+        // renewal says nothing and the overlay never tries.
+        'returningAccountCookie' => $accountStart !== null
+            ? _stattic_returning_account_cookie_name()
             : null,
         'features' => [
             'picker' => ($features['picker'] ?? null) !== false,

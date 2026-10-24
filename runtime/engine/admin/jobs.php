@@ -810,13 +810,15 @@ function _stattic_runtime_job_maintenance_steps(): array
  * when it expires; the remaining steps are reported skipped, not silently
  * dropped.
  *
- * Checking it only HERE bounded which hooks ran and nothing else: a hook that
- * started inside the budget then walked a whole queue, staging backlog, CAS
- * tree or Space to the end, hundreds of milliseconds inside the bulk lane lock,
- * and the steps behind it were reported skipped as if the time had been saved.
- * Every hook consults it while walking now, stops at a bounded unit of work,
+ * Every hook also consults it while walking, stops at a bounded unit of work,
  * advances its own cadence marker only for a pass that finished, and answers
- * false so the job stays resumable.
+ * false so the job stays resumable. Otherwise one hook could walk a whole queue,
+ * staging backlog, CAS tree or Space inside the bulk lane lock while the steps
+ * behind it were reported skipped as if the time had been saved.
+ *
+ * $completedSteps are hooks an earlier tick of this pass already finished. They
+ * are reported as run and not repeated, so earlier hooks cannot spend every
+ * tick's budget before a later hook gets a turn.
  *
  * @return array{steps:list<string>, skipped:list<array{step:string,reason:string}>, failed:list<array{step:string,error:string}>, complete:bool}
  */
@@ -832,8 +834,6 @@ function _stattic_runtime_job_maintenance_tick(string $privateRoot, array $claim
     $skipped = [];
     $failed = [];
     foreach (_stattic_runtime_job_maintenance_steps() as $name => $hook) {
-        // A resumed pass owes only unfinished hooks. Re-running earlier hooks
-        // can spend every tick's budget before a later hook ever gets a turn.
         if (in_array($name, $completedSteps, true)) {
             $ran[] = $name;
             continue;

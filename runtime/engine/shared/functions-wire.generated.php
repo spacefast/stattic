@@ -21,6 +21,7 @@ const SPACEFAST_FUNCTIONS_DISPATCH_HEADERS = [
     'relayToken' => 'sf-fx-relay-token',
     'env' => 'sf-fx-env',
     'd1' => 'sf-fx-d1',
+    'assets' => 'sf-fx-assets',
     'visitor' => 'sf-fx-visitor',
     'logUrl' => 'sf-fx-log',
     'logToken' => 'sf-fx-log-token',
@@ -66,6 +67,7 @@ const SPACEFAST_FUNCTIONS_BROKERS = [
     'services' => ['gravatar.profile', 'spam.check', 'email.send', 'connectors.call'],
     'storage' => ['storage.read', 'storage.write'],
     'next-cache' => ['next.cache'],
+    'assets' => ['storage.read'],
 ];
 
 // The env var the native service-broker executor reads its grant from.

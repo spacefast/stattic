@@ -3,6 +3,8 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:c
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 
+import { collabManifestSchema } from "../../packages/common/src/contracts/collab-manifest.ts";
+import { RUNTIME_COLLAB_MANIFEST_PATH } from "../../packages/common/src/utils/runtime-paths.ts";
 import {
   DASHBOARD_ORIGIN,
   deploy,
@@ -163,6 +165,24 @@ function frameSessionSetCookie(response: Response): string {
       .getSetCookie()
       .find((cookie) => cookie.startsWith("__Host-spacefast_frame=")) ?? ""
   );
+}
+
+// The returning-account marker on HTTPS, where `__Host-` holds it to this host.
+const RETURNING_MARKER = "__Host-spacefast_returning";
+
+// Whole, attributes and all: who may read it is half of what it promises.
+function returningAccountSetCookie(response: Response): string {
+  return (
+    response.headers.getSetCookie().find((cookie) => cookie.startsWith(`${RETURNING_MARKER}=`)) ??
+    ""
+  );
+}
+
+function accountHandoff(host: string, spaceId: string, authority: string): string {
+  return handoffToken(host, spaceId, [authority], {
+    principal: "account:usr_returning_editor",
+    profile: { name: "Returning Editor" },
+  });
 }
 
 function browserStateCookie(response: Response): string {
@@ -768,7 +788,7 @@ test("the deny surface renders the access page with every configured lane", asyn
   expect(html).toContain(">Continue with Spacefast</a>");
   expect(html).toContain('aria-describedby="sf-account-help"');
   expect(html).toContain(
-    'id="sf-account-help" style="margin:0 0 8px;color:var(--sf-dim);font-size:13px">Already signed in? We&#039;ll use your existing account to check access.',
+    'id="sf-account-help" style="margin:0 0 8px;color:var(--sf-dim);font-size:13px">We&#039;ll use your Spacefast account to check whether you have access to this site.',
   );
   expect(html).toContain('href="/__spacefast/access/account?return=%2Fdocs%2F"');
   expect(html).toContain("Continue with Okta");
@@ -1049,14 +1069,16 @@ test("the request-invite lane relays centrally and remembers only the requested 
     headers: { cookie: requested },
   });
   const pendingHtml = await pending.text();
-  expect(pendingHtml).toContain("Request sent.");
+  expect(pendingHtml).toContain("Access requested.");
+  expect(pendingHtml).toContain("check your email for a confirmation link.");
+  expect(pendingHtml).toContain("when the site owner approves your request.");
   expect(pendingHtml).not.toContain("Request again</summary>");
 
   const rendered = await get(runtime, LANES_HOST, "/docs/guide/", {
     headers: { cookie: requested },
   });
   const html = await rendered.text();
-  expect(html).toContain("Invite requested for /docs.");
+  expect(html).toContain(`Access requested for ${LANES_HOST}/docs.`);
   expect(html).toContain("Request again</summary>");
   expect(html).not.toContain("Request access</summary>");
 
@@ -1065,7 +1087,7 @@ test("the request-invite lane relays centrally and remembers only the requested 
   });
   const unrelatedHtml = await unrelated.text();
   expect(unrelatedHtml).toContain("Request access</summary>");
-  expect(unrelatedHtml).not.toContain("Invite requested for /docs.");
+  expect(unrelatedHtml).not.toContain(`Access requested for ${LANES_HOST}/docs.`);
 
   const call = exchangeRequests.findLast(
     (request) => request.pathname === "/acquire/runtime-page/request",
@@ -1073,6 +1095,20 @@ test("the request-invite lane relays centrally and remembers only the requested 
   expect(call?.form.get("email")).toBe("visitor@example.com");
   expect(call?.form.get("message")).toBe("It's me");
   expect(call?.form.has("accountHint")).toBe(false);
+
+  const rootRequest = await get(runtime, LANES_HOST, "/__spacefast/access/request", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${LANES_HOST}`,
+    },
+    body: new URLSearchParams({ email: "visitor@example.com", return: "/" }),
+  });
+  expect(rootRequest.status).toBe(303);
+  const rootPage = await get(runtime, LANES_HOST, "/", {
+    headers: { cookie: sessionCookie(rootRequest) },
+  });
+  expect(await rootPage.text()).toContain(`Access requested for ${LANES_HOST}.`);
 });
 
 test("the request-invite lane forwards only this browser's hint for the posted address", async () => {
@@ -1460,6 +1496,8 @@ test("the account lane redeems by GET, in the page or in a popup", async () => {
   expect(redeem.headers.get("referrer-policy")).toBe("no-referrer");
   const cookie = sessionCookie(redeem);
   expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
+  // A password says nothing about who is here, so there is no account to renew.
+  expect(returningAccountSetCookie(redeem)).toBe("");
   const admitted = await get(runtime, LANES_HOST, "/docs/", { headers: { cookie } });
   expect(admitted.status).toBe(200);
 
@@ -1518,6 +1556,100 @@ test("a public Grant retains a signed-in account identity without team membershi
   });
   expect(sessionRecords(PUBLIC_SPACE)).toHaveLength(1);
   expect((await get(runtime, PUBLIC_HOST, "/", { headers: { cookie } })).status).toBe(200);
+
+  // The account leaves one bit behind for the visit after this session: no id,
+  // host-only, and readable by the overlay that renews it, which looks for the
+  // name this host's collab manifest gives it.
+  const marker = returningAccountSetCookie(redeem);
+  expect(marker).toStartWith(`${RETURNING_MARKER}=1;`);
+  const manifest = await get(runtime, PUBLIC_HOST, RUNTIME_COLLAB_MANIFEST_PATH);
+  expect(collabManifestSchema.parse(await manifest.json()).returningAccountCookie).toBe(
+    RETURNING_MARKER,
+  );
+  expect(marker).toContain("Path=/");
+  expect(marker).toContain("Max-Age=15552000");
+  expect(marker).toContain("SameSite=Lax");
+  expect(marker).toContain("Secure");
+  expect(marker).not.toContain("HttpOnly");
+  expect(marker).not.toContain("Domain");
+});
+
+test("a returning account's silent start spends its marker and never prompts", async () => {
+  const marker = `${RETURNING_MARKER}=1`;
+  // A page opened in place by a share link still carries its secret; the
+  // trip to the sign-in host never does.
+  const start = await get(
+    runtime,
+    PUBLIC_HOST,
+    "/__spacefast/access/account?silent=1&return=%2Fdocs%2F%3Fq%3Da%2520b%26__%3Dsfl_secret%26sf_access%3Dchecked",
+    { headers: { cookie: marker } },
+  );
+  expect(start.status).toBe(302);
+  const signIn = new URL(start.headers.get("location") ?? "");
+  expect(`${signIn.origin}${signIn.pathname}`).toBe(ACCOUNT_URL);
+  expect(signIn.searchParams.get("silent")).toBe("1");
+  expect(signIn.searchParams.get("host")).toBe(PUBLIC_HOST);
+  expect(signIn.searchParams.get("return")).toBe("/docs/?q=a%20b");
+  expect(start.headers.get("location")).not.toContain("sfl_secret");
+  expect(signIn.searchParams.get("browserState")).toMatch(/^[a-f0-9]{64}$/);
+  // Spent on the way out: only an account session coming back writes it again,
+  // so a trip that returns empty-handed is never taken twice.
+  expect(returningAccountSetCookie(start)).toContain("Max-Age=0");
+
+  // Asked for by hand, the start may prompt, and leaves the marker alone; its
+  // return sheds the secret all the same.
+  const asked = await get(
+    runtime,
+    PUBLIC_HOST,
+    "/__spacefast/access/account?return=%2F%3F__%3Dsfl_secret",
+    { headers: { cookie: marker } },
+  );
+  expect(asked.status).toBe(302);
+  const askedSignIn = new URL(asked.headers.get("location") ?? "");
+  expect(askedSignIn.searchParams.has("silent")).toBe(false);
+  expect(askedSignIn.searchParams.get("return")).toBe("/");
+  expect(returningAccountSetCookie(asked)).toBe("");
+
+  // Already an account here, and read-only all the same: that is the account's
+  // own answer, so the trip stops at this host and is never taken again.
+  const redeemed = await get(
+    runtime,
+    PUBLIC_HOST,
+    `/__sf/redeem?sf_token=${encodeURIComponent(accountHandoff(PUBLIC_HOST, PUBLIC_SPACE, PUBLIC_AUTHORITY))}&return=%2F`,
+  );
+  const account = sessionCookie(redeemed);
+  expect(account).toStartWith("__Host-spacefast_session=");
+  const signedIn = await get(
+    runtime,
+    PUBLIC_HOST,
+    "/__spacefast/access/account?silent=1&return=%2Fdocs%2F",
+    { headers: { cookie: `${account}; ${marker}` } },
+  );
+  expect(signedIn.status).toBe(303);
+  expect(signedIn.headers.get("location")).toBe("/docs/");
+  expect(returningAccountSetCookie(signedIn)).toContain("Max-Age=0");
+
+  // With no sign-in host to ask, the silent trip ends back on the page.
+  const nowhere = await get(
+    runtime,
+    UNCLAIMED_HOST,
+    "/__spacefast/access/account?silent=1&return=%2Fdocs%2F",
+    { headers: { cookie: marker } },
+  );
+  expect(nowhere.status).toBe(303);
+  expect(nowhere.headers.get("location")).toBe("/docs/");
+  expect(returningAccountSetCookie(nowhere)).toContain("Max-Age=0");
+
+  // A silent handoff that will not redeem lands back on the page, not on an
+  // error nobody clicked for.
+  const unredeemable = await get(
+    runtime,
+    PUBLIC_HOST,
+    "/__sf/redeem?sf_token=not-a-handoff&return=%2Fdocs%2F&silent=1",
+  );
+  expect(unredeemable.status).toBe(303);
+  expect(unredeemable.headers.get("location")).toBe("/docs/");
+  expect(sessionCookie(unredeemable)).toBe("");
 });
 
 // The shape of a share link: the page you want with the secret appended,

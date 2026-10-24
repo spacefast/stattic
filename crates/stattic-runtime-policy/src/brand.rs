@@ -6,7 +6,8 @@
 //! byte-for-byte as it always has. A white-label host sets the document once and
 //! every branded surface follows: the problem-document `type` base, the built-in
 //! error/gate pages (wordmark, help link, powered-by line, font preloads), the
-//! access badge, and the outbound mail Message-ID domain.
+//! access badge, the share-preview fallback image, and the outbound mail
+//! Message-ID domain.
 //!
 //! It lives in this leaf crate for the same reason the header lists do: the two
 //! Rust consumers sit on opposite sides of the `stattic-runtime-core` /
@@ -59,6 +60,9 @@ pub struct Brand {
     /// Image URL replacing the compiled-in wordmark. Empty keeps the built-in
     /// SVG, which is the only reason the default path stays byte-stable.
     pub wordmark_url: String,
+    /// The link-preview image a page gets when it declares none and has no
+    /// screenshot ready. Square, because it rides a `summary` card.
+    pub share_image_url: String,
     /// Faces the built-in pages embed and preload. Empty is legitimate: a host
     /// whose pages use system stacks downloads nothing.
     pub fonts: Vec<BrandFont>,
@@ -73,6 +77,7 @@ impl Default for Brand {
             tagline: "Best way to share what your agent made".into(),
             problem_docs_base_url: "https://spacefast.com/docs/errors".into(),
             wordmark_url: String::new(),
+            share_image_url: "https://my.spacefast.com/app-icon-512x512.png".into(),
             // The built-in pages set every tier in the SF Pro system stack, so
             // a bare Spacefast site downloads nothing. A white-label host that
             // wants its own faces declares them on the document instead.
@@ -102,6 +107,7 @@ impl Brand {
             (&mut brand.tagline, "tagline"),
             (&mut brand.problem_docs_base_url, "problemDocsBaseUrl"),
             (&mut brand.wordmark_url, "wordmarkUrl"),
+            (&mut brand.share_image_url, "shareImageUrl"),
         ] {
             if let Some(value) = overrides
                 .get(key)
@@ -181,6 +187,10 @@ mod tests {
             "https://spacefast.com/docs/errors/version_not_found"
         );
         assert_eq!(brand.wordmark_url, "");
+        assert_eq!(
+            brand.share_image_url,
+            "https://my.spacefast.com/app-icon-512x512.png"
+        );
         // A bare Spacefast page downloads no font.
         assert!(brand.fonts.is_empty());
     }

@@ -353,11 +353,14 @@ function _stattic_cookies_secure(): bool
     return _stattic_config_value('SPACEFAST_INSECURE_COOKIES') !== '1';
 }
 
+// HttpOnly unless the caller names a cookie that holds no secret and exists for
+// a page script to read.
 function _stattic_set_cookie(
     string $name,
     string $value,
     int $maxAgeSeconds,
-    bool $partitioned = false
+    bool $partitioned = false,
+    bool $scriptReadable = false
 ): void {
     if ($name === _stattic_session_cookie_name()) {
         _stattic_identity_cookie_mutated(true);
@@ -371,7 +374,7 @@ function _stattic_set_cookie(
         $name . '=' . rawurlencode($value),
         'Path=/',
         'Max-Age=' . max(0, $maxAgeSeconds),
-        'HttpOnly',
+        ...($scriptReadable ? [] : ['HttpOnly']),
         'SameSite=' . ($usePartitioned ? 'None' : 'Lax'),
     ];
     if ($secure) {
@@ -1036,6 +1039,12 @@ function _stattic_cache_policy_request_varying(bool $mark = false): bool
 // structurally instead of re-deciding it.
 function _stattic_request_method_forbids_shared_store(): bool
 {
+    // An assets-binding read is a GET of a file carried inside a POST to the
+    // relay URL (functions-relay.php): the edge sees the POST, and keyed on the
+    // relay URL alone a stored copy would answer the next relay call.
+    if (isset($GLOBALS['SPACEFAST_FUNCTIONS_ASSETS_REQUEST'])) {
+        return true;
+    }
     return !in_array(_stattic_runtime_request_method(), ['GET', 'HEAD'], true);
 }
 

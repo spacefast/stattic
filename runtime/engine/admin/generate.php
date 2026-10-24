@@ -1117,7 +1117,7 @@ function _stattic_runtime_set_tombstone_host_entry(array &$hostnames, string $ho
     ];
 }
 
-// Variant table C10: CSAM matches an undeployed 404 (no signal the host ever
+// Variant table C10: CSAM matches the undeployed page (no signal the host ever
 // existed). Category wins over reason; unknown values degrade to the generic page.
 function _stattic_runtime_tombstone_variant(?string $reason, ?string $category): array
 {
@@ -1403,9 +1403,9 @@ const STATTIC_RUNTIME_ROUTE_SHARD_GRACE_SECONDS = 300;
 //
 // The referenced set must be PROVEN, never inferred from a failed read: a
 // transient failure on current.json would read as "nothing is referenced" and
-// unlink every live shard, a persistent site-wide 503 until the next route
-// write. So: no valid current pointer (including never-provisioned), no pass;
-// previous.json may be genuinely absent, but not unreadable. The index lock
+// unlink every live shard: every host answers the undeployed page until the
+// next route write. So: no valid current pointer (including never-provisioned),
+// no pass; previous.json may be genuinely absent, but not unreadable. The index lock
 // (try, skip on miss: the pass is idempotent and reruns every tick) closes
 // the stat-then-unlink race against a concurrent writer's is_file+touch reuse.
 // Null is that lock miss: no shard was examined. Reporting it as zero deletions

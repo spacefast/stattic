@@ -8,7 +8,7 @@
 // access-rules.test.ts — neither is re-proven here.
 //
 // What is left is the class of response the PUBLISHER can never own: the
-// platform fault pages (tombstones, undeployed), the fonts they embed, and the
+// platform pages (tombstones, undeployed), the fonts they embed, and the
 // front door's uniform denial for the reserved namespace. Those exist precisely
 // so a suspended or taken-down Space cannot answer with its own bytes, which is
 // why they are tested against a Space that shipped documents of its own.
@@ -293,7 +293,6 @@ test("CSAM stays byte-identical to undeployed for every negotiated representatio
         get(rt, host, "/", { headers: { Accept: accept } }),
         get(rt, "never-deployed.test", "/", { headers: { Accept: accept } }),
       ]);
-      expect(csam.status, accept).toBe(404);
       expect(csam.status, accept).toBe(undeployed.status);
       expect(csam.headers.get("x-robots-tag"), accept).toBeNull();
       expect(csam.headers.get("x-spacefast-undeployed"), accept).toBe(
@@ -327,7 +326,6 @@ test("a brand document rebrands the built-in pages a version can never own", asy
     // Space can supply an artifact for — so nothing but the document can brand it.
     const host = "pages-branded.test";
     const page = await get(branded, host, "/", { headers: { Accept: "text/html" } });
-    expect(page.status).toBe(404);
     const html = await page.text();
     // The mark is the host's image, not the compiled-in Spacefast letterforms
     // relabelled — a wordmark URL is what makes a rebrand honest.

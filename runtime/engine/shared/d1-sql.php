@@ -149,12 +149,48 @@ final class SpacefastD1Sql
         return $parts;
     }
 
+    private const COLUMN_CONSTRAINT_WORDS = [
+        'AS', 'AUTOINCREMENT', 'CHECK', 'COLLATE', 'CONSTRAINT', 'DEFAULT', 'GENERATED',
+        'NOT', 'NULL', 'PRIMARY', 'REFERENCES', 'UNIQUE',
+    ];
+
+    /**
+     * SQLite's column affinity rules (datatype3 section 3.1), applied in its
+     * order, so `BIGINT`, `VARCHAR(255)` and `DOUBLE PRECISION` store what
+     * SQLite would store. NUMERIC affinity keeps each value as whatever it
+     * looks like, which one MySQL type cannot do; only booleans, always 0 or 1,
+     * have an exact home.
+     */
+    private static function affinity(string $declared): string
+    {
+        if ($declared === '') throw new RuntimeException('D1_SQL_UNSUPPORTED: column type is missing.');
+        if (str_contains($declared, 'INT')) return 'INTEGER';
+        if (str_contains($declared, 'CHAR') || str_contains($declared, 'CLOB') || str_contains($declared, 'TEXT')) return 'TEXT';
+        if (str_contains($declared, 'BLOB')) return 'BLOB';
+        if (str_contains($declared, 'REAL') || str_contains($declared, 'FLOA') || str_contains($declared, 'DOUB')) return 'REAL';
+        if ($declared === 'BOOLEAN' || $declared === 'BOOL') return 'INTEGER';
+        throw new RuntimeException('D1_SQL_UNSUPPORTED: column type ' . $declared . ' has NUMERIC affinity; declare INTEGER, REAL or TEXT.');
+    }
+
     /** Schema facts also determine which indexes need MySQL text prefixes. */
     private function column(): array
     {
         $name = $this->identifier();
-        $type = strtoupper($this->identifier());
-        if (!in_array($type, ['TEXT', 'INTEGER', 'REAL', 'BLOB'], true)) throw new RuntimeException('D1_SQL_UNSUPPORTED: column type ' . $type . '.');
+        $words = [];
+        while (
+            ($token = $this->tokens[$this->position] ?? null) !== null
+            && $token[0] === 'word'
+            && !in_array(strtoupper($token[1]), self::COLUMN_CONSTRAINT_WORDS, true)
+        ) {
+            $words[] = strtoupper($token[1]);
+            $this->position++;
+        }
+        // `VARCHAR(255)`, `DECIMAL(10, 2)`: SQLite ignores the size arguments.
+        if ($words !== [] && ($this->tokens[$this->position] ?? null) === ['symbol', '(']) {
+            $this->group();
+        }
+        $declared = implode(' ', $words);
+        $type = self::affinity($declared);
         $primary = false; $notNull = false; $auto = false; $default = null;
         while ($this->position < count($this->tokens)) {
             if ($this->take('PRIMARY')) { $this->need('KEY'); $primary = true; }
@@ -171,13 +207,15 @@ final class SpacefastD1Sql
                 }
             } else { throw new RuntimeException('D1_SQL_UNSUPPORTED: column constraint.'); }
         }
-        if ($auto && (!$primary || $type !== 'INTEGER')) throw new RuntimeException('D1_SQL_UNSUPPORTED: AUTOINCREMENT requires INTEGER PRIMARY KEY.');
+        // Only the exact spelling `INTEGER PRIMARY KEY` aliases SQLite's rowid;
+        // `BIGINT PRIMARY KEY` is an ordinary key there and here.
+        if ($auto && (!$primary || $declared !== 'INTEGER')) throw new RuntimeException('D1_SQL_UNSUPPORTED: AUTOINCREMENT requires INTEGER PRIMARY KEY.');
         $mysqlType = match ($type) {
             'INTEGER' => 'BIGINT', 'REAL' => 'DOUBLE', 'BLOB' => 'LONGBLOB',
             'TEXT' => $primary ? 'VARBINARY(3072)' : 'LONGTEXT',
         };
         // A SQLite INTEGER PRIMARY KEY generates rowids even without AUTOINCREMENT.
-        if ($primary && $type === 'INTEGER') $auto = true;
+        if ($primary && $declared === 'INTEGER') $auto = true;
         if ($primary && !in_array($type, ['INTEGER', 'TEXT'], true)) throw new RuntimeException('D1_SQL_UNSUPPORTED: primary key type.');
         return [
             'name' => $name, 'type' => $type, 'primary' => $primary,

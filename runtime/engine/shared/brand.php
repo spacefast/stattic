@@ -8,8 +8,8 @@ declare(strict_types=1);
 // in as its defaults, so a bare Spacefast site configures nothing and answers
 // byte-for-byte as it always has. A white-label host sets the document once and
 // every branded surface follows: the problem-document `type` base, the built-in
-// error/gate pages (wordmark, help link, powered-by line, font preloads) and the
-// outbound mail Message-ID domain.
+// error/gate pages (wordmark, help link, powered-by line, font preloads), the
+// share-preview fallback image and the outbound mail Message-ID domain.
 //
 // This mirrors `Brand` in crates/stattic-runtime-policy/src/brand.rs, which the
 // Zero runner and the page compiler resolve from — same members, same defaults,
@@ -38,6 +38,10 @@ const STATTIC_BRAND_CONFIG_KEY = 'SPACEFAST_BRAND_JSON';
  * - `problem_docs_base_url`  Base for RFC 9457 `type` URIs: `{base}/{code}`.
  * - `wordmark_url`  Image replacing the compiled-in SVG wordmark. Empty keeps
  *               the built-in mark, which is why the default path is byte-stable.
+ * - `share_image_url`  The link-preview image a page gets when it declares
+ *               none and has no screenshot ready. The finalizer writes the
+ *               default into the page; any other value is substituted at serve
+ *               time (shared/preview-images.php).
  * - `fonts`     Faces the built-in pages embed and preload, in CSS order. Empty
  *               is legitimate: a host whose pages use system stacks downloads
  *               nothing.
@@ -60,6 +64,7 @@ function _stattic_brand_defaults(): array
         'tagline' => 'Best way to share what your agent made',
         'problem_docs_base_url' => 'https://spacefast.com/docs/errors',
         'wordmark_url' => '',
+        'share_image_url' => 'https://my.spacefast.com/app-icon-512x512.png',
         'fonts' => $fonts,
     ];
 }
@@ -72,6 +77,7 @@ const STATTIC_BRAND_STRING_MEMBERS = [
     'tagline' => 'tagline',
     'problemDocsBaseUrl' => 'problem_docs_base_url',
     'wordmarkUrl' => 'wordmark_url',
+    'shareImageUrl' => 'share_image_url',
 ];
 
 /**

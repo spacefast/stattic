@@ -2359,6 +2359,13 @@ $_SERVER['GEOIP_COUNTRY_CODE'] = 'GB';
 $_SERVER['GEOIP_CITY'] = 'London';
 $fxHeaders = _stattic_functions_dispatch_headers($fxConfig, 'spc_1', 'ver_1', 'fxr_abc', $fxDispatchToken, 'https://shop.example', 'open');
 check($fxHeaders['sf-fx-d1'] === 'DB', 'dispatch: imports the declared D1 binding');
+check(!array_key_exists('sf-fx-assets', $fxHeaders), 'dispatch: a worker without an assets binding names none');
+$fxAssetsConfig = $fxConfig;
+$fxAssetsConfig['artifact']['assets'] = ['binding' => 'ASSETS', 'runWorkerFirst' => false, 'navigationFallback' => false];
+check(
+    _stattic_functions_dispatch_headers($fxAssetsConfig, 'spc_1', 'ver_1', 'r', 'd', 'https://shop.example', 'open')['sf-fx-assets'] === 'ASSETS',
+    'dispatch: names the Wrangler assets binding'
+);
 check(json_decode(base64_decode($fxHeaders['sf-fx-visitor']), true) === ['ip' => '198.51.100.7', 'country' => 'GB', 'city' => 'London'], 'dispatch: visitor context uses only server-owned values');
 unset($_SERVER['SPACEFAST_VISITOR_IP'], $_SERVER['GEOIP_COUNTRY_CODE'], $_SERVER['GEOIP_CITY']);
 check(_stattic_functions_visitor_context() === [], 'dispatch: forged forwarding headers supply no visitor context');
@@ -2878,7 +2885,8 @@ $brandDefaults = _stattic_brand_resolve('');
 check(
     $brandDefaults['name'] === 'Spacefast'
         && $brandDefaults['problem_docs_base_url'] === 'https://spacefast.com/docs/errors'
-        && $brandDefaults['wordmark_url'] === '',
+        && $brandDefaults['wordmark_url'] === ''
+        && $brandDefaults['share_image_url'] === 'https://my.spacefast.com/app-icon-512x512.png',
     'brand: the compiled-in document is Spacefast'
 );
 check($brandDefaults['fonts'] === [], 'brand: the compiled-in document downloads no font');
@@ -2920,6 +2928,44 @@ if (is_string($previousBrandDocument)) {
 } else {
     putenv('SPACEFAST_BRAND_JSON');
 }
+
+// The finalizer writes the default brand's share-image fallback into the page,
+// so a default-brand site serves the stored bytes untouched. A brand document
+// naming another image gets it substituted at serve time. Each case runs in its
+// own process because the brand document resolves once per process.
+$previewImagesProbe = <<<'PHP'
+require $argv[1];
+echo _stattic_normalize_preview_images($argv[2], ['host' => 'share.example.test', 'client_path' => '/']);
+PHP;
+$fallbackPlaceholder = '<html><head><meta data-spacefast-auto-image="og:image" property="og:image" content="https://my.spacefast.com/app-icon-512x512.png">'
+    . '<meta name="twitter:card" content="summary" data-spacefast-auto-image="twitter:card"></head><body></body></html>';
+$runPreviewImages = static function (string $brandDocument) use ($previewImagesProbe, $fallbackPlaceholder): string {
+    $output = [];
+    exec(
+        ($brandDocument === '' ? 'env -u SPACEFAST_BRAND_JSON ' : 'SPACEFAST_BRAND_JSON=' . escapeshellarg($brandDocument) . ' ')
+            . escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($previewImagesProbe) . ' '
+            . escapeshellarg(__DIR__ . '/../engine/shared/preview-images.php') . ' '
+            . escapeshellarg($fallbackPlaceholder) . ' 2>&1',
+        $output
+    );
+    return implode("\n", $output);
+};
+check(
+    $runPreviewImages('') === $fallbackPlaceholder,
+    'share image: the default brand keeps the finalizer\'s fallback bytes'
+);
+check(
+    $runPreviewImages('{"name":"Partner Cloud"}') === $fallbackPlaceholder,
+    'share image: a brand document that names no share image keeps the default fallback'
+);
+check(
+    $runPreviewImages('{"shareImageUrl":"https://partner.example/share.png"}') === str_replace(
+        'https://my.spacefast.com/app-icon-512x512.png',
+        'https://partner.example/share.png',
+        $fallbackPlaceholder
+    ),
+    'share image: a brand document naming a share image replaces the fallback and leaves the card a summary'
+);
 
 $trustedProviderEnv = _stattic_zero_runner_base_env([
     'variableValues' => ['DATABASE_URL' => 'mysql://provider.internal/app'],
@@ -3967,6 +4013,72 @@ $_COOKIE = ['sfi_session' => 'dev'];
 check(_stattic_space_users_session_cookie() === 'dev', 'space users: plain-HTTP development reads the bare session name');
 putenv('SPACEFAST_INSECURE_COOKIES');
 $_COOKIE = $savedCookies;
+
+// --- Wrangler run_worker_first and D1 column affinity --------------------------------
+
+$workerFirstRoot = sys_get_temp_dir() . '/sf-unit-worker-first-' . bin2hex(random_bytes(4));
+mkdir($workerFirstRoot . '/functions', 0700, true);
+$writeWorkerFirst = static function (mixed $rule) use ($workerFirstRoot): void {
+    file_put_contents($workerFirstRoot . '/functions/config.json', json_encode([
+        'runtimeKind' => 'functions',
+        'artifact' => [
+            'mainModule' => 'index.js',
+            'compatibilityDate' => '2025-11-24',
+            'assets' => ['binding' => null, 'runWorkerFirst' => $rule, 'navigationFallback' => false],
+        ],
+        'host' => ['hostname' => 'fx.example', 'bundleUrl' => 'https://shop.example/b/x/t/bundle.json'],
+    ]));
+};
+$writeWorkerFirst(['/api/*', '!/api/docs/*', '/mcp', '/.well-known/oauth-*']);
+foreach (['/api/', '/api/a/b', '/mcp', '/.well-known/oauth-authorization-server'] as $path) {
+    check(_stattic_functions_worker_first($workerFirstRoot, $path), "worker first: {$path} reaches the worker first");
+}
+foreach (['/api', '/api/docs/intro', '/mcp/x', '/apix/y', '/', '/.well-knownXoauth-x'] as $path) {
+    check(!_stattic_functions_worker_first($workerFirstRoot, $path), "worker first: {$path} keeps files first");
+}
+// The config is memoized per version, so each rule shape gets its own root.
+$workerFirstAll = $workerFirstRoot . '-all';
+mkdir($workerFirstAll . '/functions', 0700, true);
+copy($workerFirstRoot . '/functions/config.json', $workerFirstAll . '/functions/config.json');
+$allConfig = json_decode((string) file_get_contents($workerFirstAll . '/functions/config.json'), true);
+$allConfig['artifact']['assets']['runWorkerFirst'] = true;
+file_put_contents($workerFirstAll . '/functions/config.json', json_encode($allConfig));
+check(_stattic_functions_worker_first($workerFirstAll, '/assets/app.js'), 'worker first: true puts the worker in front of every file');
+check(!_stattic_functions_worker_first($workerFirstRoot . '-absent', '/api/x'), 'worker first: a version without Functions keeps files first');
+foreach ([$workerFirstRoot, $workerFirstAll] as $root) {
+    unlink($root . '/functions/config.json');
+    rmdir($root . '/functions');
+    rmdir($root);
+}
+
+require_once __DIR__ . '/../engine/shared/d1-sql.php';
+$d1Migrate = static function (string $sql): string {
+    $schema = [];
+    return (new SpacefastD1Sql($sql))->migration('scope', $schema);
+};
+$d1Table = $d1Migrate('CREATE TABLE t (id BIGINT PRIMARY KEY, slug VARCHAR(64) NOT NULL, body NVARCHAR(255), '
+    . 'n UNSIGNED BIG INT, score DOUBLE PRECISION, ratio FLOAT, data BLOB, done BOOLEAN DEFAULT 0)');
+check(str_contains($d1Table, '`id` BIGINT PRIMARY KEY') && !str_contains($d1Table, 'AUTO_INCREMENT'), 'd1: BIGINT PRIMARY KEY is an ordinary key, not a rowid alias');
+check(str_contains($d1Table, '`slug` LONGTEXT NOT NULL'), 'd1: VARCHAR(n) has TEXT affinity');
+check(str_contains($d1Table, '`body` LONGTEXT'), 'd1: NVARCHAR has TEXT affinity');
+check(str_contains($d1Table, '`n` BIGINT'), 'd1: a multi-word INT type has INTEGER affinity');
+check(str_contains($d1Table, '`score` DOUBLE') && str_contains($d1Table, '`ratio` DOUBLE'), 'd1: DOUBLE PRECISION and FLOAT have REAL affinity');
+check(str_contains($d1Table, '`data` LONGBLOB'), 'd1: BLOB stays BLOB');
+check(str_contains($d1Table, '`done` BIGINT DEFAULT 0'), 'd1: BOOLEAN stores its 0 and 1 as integers');
+check(str_contains($d1Migrate('CREATE TABLE r (id INTEGER PRIMARY KEY, v TEXT)'), '`id` BIGINT PRIMARY KEY AUTO_INCREMENT'), 'd1: INTEGER PRIMARY KEY still aliases the rowid');
+foreach (['CREATE TABLE x (at DATETIME)', 'CREATE TABLE x (amount DECIMAL(10, 2))', 'CREATE TABLE x (id BIGINT PRIMARY KEY AUTOINCREMENT)'] as $refused) {
+    $threw = false;
+    try { $d1Migrate($refused); } catch (RuntimeException $error) { $threw = str_starts_with($error->getMessage(), 'D1_SQL_UNSUPPORTED'); }
+    check($threw, "d1: refuses {$refused}");
+}
+
+// Last on purpose: the request-varying mark is sticky for the process. A
+// worker answer the SPA navigation rule could have claimed must not be stored,
+// however public the worker says it is.
+$publicWorker = [['Cache-Control', 'public, max-age=60']];
+check(_stattic_functions_response_cache_policy(false, $publicWorker)['cache_control'] === null, 'navigation fallback: a public worker answer is otherwise its own to cache');
+_stattic_cache_policy_request_varying(true);
+check(_stattic_functions_response_cache_policy(false, $publicWorker)['cache_control'] === STATTIC_CACHE_CONTROL_NO_STORE, 'navigation fallback: a worker answer that varies by Sec-Fetch-Mode is no-store');
 
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");

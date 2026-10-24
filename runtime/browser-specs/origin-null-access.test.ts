@@ -26,7 +26,8 @@ type Fixture = {
 
 const EXPECTED_REACHABLE_STATES = {
   "invalid-password": "That password didn't work.",
-  "request-pending": "Request sent. You'll get an email when someone approves it.",
+  "request-pending":
+    "Access requested. If you haven't confirmed your email address yet, check your email for a confirmation link. You'll receive another email when the site owner approves your request.",
   "request-failed": "That request didn't go through. Try again in a moment.",
   "email-sent": "Check your email. Use the confirmation link we sent to finish opening this page.",
   "email-failed": "Couldn't send that confirmation. Enter the password and try again.",
@@ -218,7 +219,7 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   const inviteHeaders = await inviteResponse.request().allHeaders();
   expect(inviteHeaders.origin).toBe("null");
   expect(inviteHeaders["sec-fetch-site"]).toBe("same-origin");
-  await invitePage.getByText("Request sent.").waitFor();
+  await invitePage.getByText("Access requested.").waitFor();
   await inviteContext.close();
 });
 
@@ -390,7 +391,7 @@ test("denied and expired requests can be replaced through the production request
     await page.locator("details.sf-access-request summary").click();
     await page.locator('input[name="email"]').fill(fixture.requestLifecycleEmail);
     await page.getByRole("button", { name: "Request an invite" }).click();
-    await page.getByText("Request sent.").waitFor();
+    await page.getByText("Access requested.").waitFor();
   };
   const moveRequestTo = async (action: "deny" | "expire") => {
     const response = await fetch(fixture.requestStateUrl, {
@@ -419,7 +420,7 @@ test("denied and expired requests can be replaced through the production request
     await page.goto(payload.url);
     await page.locator('input[name="displayName"]').fill("Lifecycle Visitor");
     await page.getByRole("button", { name: "Verify email and send request" }).click();
-    await page.getByText("Your access request was sent.").waitFor();
+    await page.getByRole("heading", { name: "Waiting for approval" }).waitFor();
   };
   const requestStatuses = async () => {
     const response = await fetch(fixture.requestStateUrl);

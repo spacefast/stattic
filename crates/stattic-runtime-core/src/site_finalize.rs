@@ -1250,7 +1250,7 @@ fn pipeline_context_digest(
         "engine": env!("CARGO_PKG_VERSION"),
         "previewMetadata": 1,
         "providerIconAlias": 1,
-        "autoShareImage": 1,
+        "autoShareImage": 2,
         "config": config,
         "siteThemeCss": serving.get("theme_css"),
         "viewer": viewer,
@@ -5476,7 +5476,7 @@ mod tests {
         assert_eq!(output.telemetry.as_ref().unwrap().skipped_files, 0);
         let body = String::from_utf8(served_body(&private, "v2", "index.html")).unwrap();
         assert!(
-            body.contains("<meta data-spacefast-auto-image=\"og:image\">"),
+            body.contains("<meta data-spacefast-auto-image=\"og:image\" property=\"og:image\""),
             "{body}"
         );
     }

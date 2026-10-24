@@ -181,6 +181,65 @@ function _stattic_functions_bypass_requested(array $bypassCookies): bool
     return false;
 }
 
+/**
+ * A Wrangler Worker's `assets` block as published, or null for every other
+ * worker and for a config this request cannot read. Unreadable means the
+ * Spacefast default (files first, then the worker), never a guess.
+ */
+function _stattic_functions_assets_config(string $versionRoot): ?array
+{
+    $read = _stattic_functions_config_read($versionRoot);
+    if ($read['kind'] !== 'present') {
+        return null;
+    }
+    $assets = $read['value']['artifact']['assets'] ?? null;
+    return is_array($assets) ? $assets : null;
+}
+
+/**
+ * Cloudflare `assets.run_worker_first`: `true` puts the worker in front of
+ * every file; a pattern list does it for the paths an inclusion matches and
+ * no `!` exclusion does. `*` matches any run of characters, `/` included.
+ */
+function _stattic_functions_worker_first(string $versionRoot, string $requestPath): bool
+{
+    $rule = _stattic_functions_assets_config($versionRoot)['runWorkerFirst'] ?? false;
+    if ($rule === true) {
+        return true;
+    }
+    if (!is_array($rule)) {
+        return false;
+    }
+    $included = false;
+    foreach ($rule as $pattern) {
+        if (!is_string($pattern) || $pattern === '' || $pattern === '!') {
+            continue;
+        }
+        $exclude = $pattern[0] === '!';
+        $glob = $exclude ? substr($pattern, 1) : $pattern;
+        $regex = '#^' . str_replace('\*', '.*', preg_quote($glob, '#')) . '$#';
+        if (preg_match($regex, $requestPath) !== 1) {
+            continue;
+        }
+        if ($exclude) {
+            return false;
+        }
+        $included = true;
+    }
+    return $included;
+}
+
+/**
+ * Whether a browser navigation that matches no file is answered with the SPA
+ * document rather than the worker, Cloudflare's
+ * `assets_navigation_prefers_asset_serving`. Publish already resolved the
+ * compatibility rules into this one flag.
+ */
+function _stattic_functions_navigation_fallback(string $versionRoot): bool
+{
+    return (_stattic_functions_assets_config($versionRoot)['navigationFallback'] ?? false) === true;
+}
+
 // Control paths stay terminal: a tenant worker must never answer
 // `/__spacefast/...` or `/_headers` on the platform's behalf.
 function _stattic_functions_dispatchable(string $requestPath, string $requestMethod): bool
@@ -272,6 +331,10 @@ function _stattic_functions_dispatch_headers(
     // URL. Optional: a version without one starts its cache cold.
     if (is_string($host['seedUrl'] ?? null) && $host['seedUrl'] !== '') {
         $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['seedUrl']] = (string) $host['seedUrl'];
+    }
+    $assetsBinding = is_array($artifact['assets'] ?? null) ? ($artifact['assets']['binding'] ?? null) : null;
+    if (is_string($assetsBinding) && $assetsBinding !== '') {
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['assets']] = $assetsBinding;
     }
     // A needed relay is a usable one: when it is not, the filter above leaves
     // only relay-free capabilities behind.

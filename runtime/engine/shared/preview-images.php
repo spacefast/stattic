@@ -51,8 +51,9 @@ function _stattic_auto_share_image_ready(array $context, string $target): bool
 //
 // When `share_image` is set (an anonymously readable 200 page) and the
 // control plane has seen this URL's screenshot render, the finalizer's
-// placeholders advertise it. Otherwise they stay inert, so private pages never
-// advertise one.
+// placeholders advertise it, so private pages never advertise one. Otherwise
+// the og:image is the brand's fallback: the finalizer writes the default one,
+// and a brand document naming another has it substituted here.
 function _stattic_normalize_preview_images(string $html, array $context): string
 {
     if (!class_exists('WP_HTML_Tag_Processor')) {
@@ -60,6 +61,7 @@ function _stattic_normalize_preview_images(string $html, array $context): string
         spacefast_content_sync_require_toolkit();
     }
     require_once __DIR__ . '/context.php';
+    require_once __DIR__ . '/brand.php';
     $origin = _stattic_request_scheme() . '://' . (string) $context['host'];
     $documentPath = (string) ($context['client_path'] ?? '/');
     $base = Uri\WhatWg\Url::parse($origin . $documentPath);
@@ -73,6 +75,8 @@ function _stattic_normalize_preview_images(string $html, array $context): string
             $shareImage = _stattic_auto_share_image_url($target);
         }
     }
+    $fallbackImage = _stattic_brand_value('share_image_url');
+    $brandedFallback = $fallbackImage !== _stattic_brand_defaults()['share_image_url'] ? $fallbackImage : null;
     $baseProcessor = new WP_HTML_Tag_Processor($html);
     while ($baseProcessor->next_tag()) {
         if ($baseProcessor->get_tag() === 'BODY') {
@@ -102,6 +106,9 @@ function _stattic_normalize_preview_images(string $html, array $context): string
                     $processor->set_attribute('content', 'summary_large_image');
                 }
                 $processor->remove_attribute(STATTIC_AUTO_SHARE_IMAGE_ATTR);
+            } elseif ($brandedFallback !== null && $placeholder === 'og:image') {
+                $processor->set_attribute('property', 'og:image');
+                $processor->set_attribute('content', $brandedFallback);
             }
             continue;
         }

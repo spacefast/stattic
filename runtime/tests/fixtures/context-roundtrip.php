@@ -79,14 +79,14 @@ $summaryRequest->set_header('content-type', 'application/json'); $summaryRequest
 $summary = rest_do_request($summaryRequest);
 context_check($summary->get_status() === 201, 'A rich-text field must save: ' . json_encode($summary->get_data()));
 $summaryId = (int) $summary->get_data()['id'];
-foreach (['response' => $summary->get_data()['meta']['_zero_pages_summary'], 'stored' => get_post_meta($summaryId, '_zero_pages_summary', true)] as $where => $value) {
-    context_check(str_contains($value, 'Kept') && !str_contains($value, 'iframe') && !str_contains($value, 'javascript:'), "The $where rich-text field must be sanitized: $value");
-}
+$richSanitized = static fn (string $value): bool => str_contains($value, 'Kept') && !str_contains($value, 'iframe') && !str_contains($value, 'javascript:');
+$stored = get_post_meta($summaryId, '_zero_pages_summary', true);
+context_check($richSanitized($stored), "The stored rich-text field must be sanitized: $stored");
 $wpdb->update($wpdb->postmeta, ['meta_value' => $richMeta], ['post_id' => $summaryId, 'meta_key' => '_zero_pages_summary']);
 wp_cache_delete($summaryId, 'post_meta');
 $legacyRequest = new WP_REST_Request('GET', '/wp/v2/pages/' . $summaryId); $legacyRequest->set_param('context', 'edit');
 $legacy = rest_do_request($legacyRequest)->get_data()['meta']['_zero_pages_summary'];
-context_check(str_contains($legacy, 'Kept') && !str_contains($legacy, 'iframe') && !str_contains($legacy, 'javascript:'), "A stored rich-text field must read back sanitized: $legacy");
+context_check($richSanitized($legacy), "A stored rich-text field must read back sanitized: $legacy");
 $markdown = context_save($contextId, $current['spacefast_revision'], ['markdown' => "# Human edit\n\nWritten as **Markdown**.\n"]);
 context_check($markdown->get_status() === 200 && str_contains($markdown->get_data()['content']['raw'], '<!-- wp:heading') && str_contains((string) $markdown->get_data()['markdown'], '**Markdown**'), 'A Markdown write must store blocks and read back as Markdown: ' . json_encode($markdown->get_data()));
 $both = context_save($contextId, $markdown->get_data()['spacefast_revision'], ['markdown' => 'One', 'content' => 'Two']);

@@ -318,11 +318,12 @@ function _stattic_render_platform_page(string $pageId, int $status, array $heade
         'tombstone-generic' => 'gone',
     ];
     $resolvedPageId = $map[$pageId] ?? $pageId;
+    $undeployed = $resolvedPageId === 'undeployed';
     // Marks the "nothing is serving here" page (unknown host and the CSAM
     // tombstone alike, so they stay identical) for control-plane crawlers: a 404
     // from a live version still means "refused", but this one means "not
     // attached yet, ask again".
-    if ($resolvedPageId === 'undeployed') {
+    if ($undeployed) {
         $headers['X-Spacefast-Undeployed'] = '1';
     }
     // CSAM must remain indistinguishable from an unknown host. It deliberately
@@ -335,7 +336,7 @@ function _stattic_render_platform_page(string $pageId, int $status, array $heade
         'message' => $fallback,
         'code' => str_replace('-', '_', $pageId),
         'private' => $private,
-        'customizable' => $pageId !== 'tombstone-csam' && $resolvedPageId !== 'undeployed',
+        'customizable' => $pageId !== 'tombstone-csam' && !$undeployed,
     ]);
 }
 

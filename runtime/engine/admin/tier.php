@@ -1086,16 +1086,18 @@ function _stattic_tier_disk_scan_checkpoint(mixed $saved, string $spaceRoot): ?a
             if (!ctype_digit((string) $inode) || $seen !== true) return null;
         }
     }
-    $saved['root'] = $spaceRoot;
     return $saved;
 }
 
 /**
- * A Space's whole file tree, deduped by inode.
+ * A Space's whole file tree; hardlinked files count once.
  *
- * `complete` is false when $budgetDeadline stopped the walk. A partial total is
- * not a smaller total — it is a wrong one — so the caller reports nothing rather
- * than a usage figure that under-counts by however much budget was left.
+ * With $checkpointPath, a walk the budget cuts short saves its cursor there and
+ * the next call resumes it. A checkpoint that fails validation is discarded.
+ *
+ * `complete` is false when $budgetDeadline stopped the walk or a directory
+ * could not be listed. A partial total is not a smaller total — it is a
+ * wrong one — so the caller reports nothing rather than an under-count.
  *
  * @return array{bytes:int, inodes:int, complete:bool}
  */
@@ -1110,11 +1112,10 @@ function _stattic_tier_space_disk_usage(string $spaceRoot, ?float $budgetDeadlin
     $state = _stattic_tier_disk_scan_checkpoint($saved, $spaceRoot);
     if ($state === null) {
         if ($checkpointPath !== null && $saved !== null) @unlink($checkpointPath);
-        $state = ['root' => $spaceRoot, 'stack' => [['path' => '', 'after' => '']], 'seen' => [], 'bytes' => 0, 'inodes' => 0];
+        $state = ['stack' => [['path' => '', 'after' => '']], 'seen' => [], 'bytes' => 0, 'inodes' => 0];
     }
     // Directory cursors retain the last name rather than an offset: removing an
-    // earlier entry between ticks must not skip a later file. A scan measures
-    // a changing tree just like the former single-request walk.
+    // earlier entry between ticks must not skip a later file.
     $entriesByDirectory = [];
     while ($state['stack'] !== []) {
         if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
@@ -1154,19 +1155,17 @@ function _stattic_tier_space_disk_usage(string $spaceRoot, ?float $budgetDeadlin
         }
         $name = basename($entry);
         $state['stack'][$index]['after'] = $name;
-        if (is_link($entry)) {
-            continue;
-        }
-        if (is_dir($entry)) {
+        // One lstat per entry: symlinks are never followed, directories are
+        // descended, and only regular files count. An entry that vanished since
+        // the listing is skipped.
+        $stat = @lstat($entry);
+        $type = is_array($stat) ? ((int) $stat['mode']) & 0170000 : null;
+        if ($type === 0040000) {
             $state['stack'][] = ['path' => $relative === '' ? $name : $relative . '/' . $name, 'after' => ''];
             continue;
         }
-        if (!is_file($entry)) {
+        if ($type !== 0100000) {
             continue;
-        }
-        $stat = stat($entry);
-        if (!is_array($stat)) {
-            return ['bytes' => $state['bytes'], 'inodes' => $state['inodes'], 'complete' => false];
         }
         // Only hardlinked files need retained inode identities. Ordinary files
         // cannot repeat in this traversal, so a million-file tree does not need

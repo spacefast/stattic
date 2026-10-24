@@ -108,6 +108,25 @@ const STATTIC_ACCESS_SESSION_SWEEP_THROTTLE_SECONDS = 3600;
 const STATTIC_ACCESS_BROWSER_STATE_COOKIE_PREFIX = '__Host-spacefast_access_state_';
 const STATTIC_ACCESS_BROWSER_STATE_DEV_COOKIE_PREFIX = 'spacefast_access_state_dev_';
 const STATTIC_ACCESS_BROWSER_STATE_SECONDS = 600;
+// Returning accounts. A browser that held an account session on this host may
+// renew one without a click: the Comments overlay, about to make it a visitor,
+// navigates to the account start with `silent=1`, which is the existing account
+// lane (a top-level navigation, so the sign-in host sees only its own
+// first-party cookie, and the session arrives as the usual one-use, host-bound,
+// 60-second handoff at /__sf/redeem). The marker that allows it is one bit, "an
+// account signed in here": no id, no secret. It is host-only and script-readable
+// because the overlay reads it, so a script on this host's pages can tell, for
+// as long as it lasts and after the session itself has lapsed, that an account
+// signed in from this browser; it never says which. Only an account session
+// born at the redeem writes it; logout and every silent start spend it, so a
+// renewal that comes back without an account never runs again, and a forged
+// marker buys one round trip that ends where it began. The collab manifest
+// names it (`returningAccountCookie`), and naming it is what tells the overlay
+// this engine renews at all.
+const STATTIC_RETURNING_ACCOUNT_COOKIE = '__Host-spacefast_returning';
+const STATTIC_RETURNING_ACCOUNT_DEV_COOKIE = 'spacefast_returning_dev';
+// Well past the session's own 30 days: the marker is for the visit after that.
+const STATTIC_RETURNING_ACCOUNT_SECONDS = 15552000;
 
 function _stattic_page_serving(): array
 {
@@ -3156,6 +3175,37 @@ function _stattic_access_browser_state_from_request(?string $expected = null): s
     return '';
 }
 
+function _stattic_returning_account_cookie_name(): string
+{
+    return _stattic_config_value('SPACEFAST_INSECURE_COOKIES') === '1'
+        ? STATTIC_RETURNING_ACCOUNT_DEV_COOKIE
+        : STATTIC_RETURNING_ACCOUNT_COOKIE;
+}
+
+function _stattic_access_remember_returning_account(): void
+{
+    // It says something about who is here, so the response that writes it is
+    // as private as one that writes the session.
+    _stattic_identity_cookie_mutated(true);
+    _stattic_set_cookie(
+        _stattic_returning_account_cookie_name(),
+        '1',
+        STATTIC_RETURNING_ACCOUNT_SECONDS,
+        false,
+        true
+    );
+}
+
+// Only a browser that holds the marker hears about it: everyone else's
+// response stays exactly what it was.
+function _stattic_access_forget_returning_account(): void
+{
+    $name = _stattic_returning_account_cookie_name();
+    if (isset($_COOKIE[$name])) {
+        _stattic_clear_cookie($name);
+    }
+}
+
 // Each nonce gets its own short-lived cookie name, so concurrent first-time
 // starts cannot overwrite each other before their callbacks return. Sequential
 // starts reuse an existing nonce and avoid growing the cookie jar.
@@ -3191,12 +3241,9 @@ function _stattic_access_clean_return_path(): string
         : null;
     // A share-link token that did not open the page is spent: never carry it
     // into the gate's forms or the redirect they bounce through.
-    unset(
-        $params['sf_access'],
-        $params['sf_access_return'],
-        $params[STATTIC_ACCESS_ACCOUNT_HINT_PARAM],
-        $params[STATTIC_ACCESS_QUERY_TOKEN_PARAM]
-    );
+    foreach (STATTIC_ACCESS_FLOW_PARAMS as $flowParam) {
+        unset($params[$flowParam]);
+    }
     if ($explicitReturn !== null) {
         return $explicitReturn;
     }
@@ -3224,6 +3271,37 @@ function _stattic_request_is_document_navigation(): bool
 // that exact address skip the "confirm your address" email.
 const STATTIC_ACCESS_ACCOUNT_HINT_PARAM = 'sf_access_as';
 const STATTIC_ACCESS_ACCOUNT_HINT_PURPOSE = 'account-hint';
+// The access flow's own params. None of them is ever part of a page a flow
+// returns to, and `__` is a durable share-link secret.
+const STATTIC_ACCESS_FLOW_PARAMS = [
+    'sf_access',
+    'sf_access_return',
+    STATTIC_ACCESS_ACCOUNT_HINT_PARAM,
+    STATTIC_ACCESS_QUERY_TOKEN_PARAM,
+];
+
+// A return path as the browser sent it, minus the flow's own params. Every other
+// pair keeps its exact spelling, and a return that leaves this origin never
+// carries a share-link secret.
+function _stattic_access_return_without_flow_params(string $returnPath): string
+{
+    $fragmentAt = strpos($returnPath, '#');
+    $fragment = $fragmentAt === false ? '' : substr($returnPath, $fragmentAt);
+    $withoutFragment = $fragmentAt === false ? $returnPath : substr($returnPath, 0, $fragmentAt);
+    $queryAt = strpos($withoutFragment, '?');
+    if ($queryAt === false) {
+        return $returnPath;
+    }
+    $kept = [];
+    foreach (_stattic_runtime_query_pairs(substr($withoutFragment, $queryAt + 1)) as [$name, , $rawPart]) {
+        if ($rawPart !== '' && !in_array($name, STATTIC_ACCESS_FLOW_PARAMS, true)) {
+            $kept[] = $rawPart;
+        }
+    }
+    return substr($withoutFragment, 0, $queryAt)
+        . ($kept === [] ? '' : '?' . implode('&', $kept))
+        . $fragment;
+}
 
 // The token's browserState claim when this browser holds the matching state
 // cookie, else ''.
@@ -3275,7 +3353,7 @@ function _stattic_access_status_fragment(string $status, ?string $accountEmail =
         'no-grant' => "You're signed in, but this space hasn't let you in yet. Ask for an invite below.",
         'email-sent' => 'Check your email. Use the confirmation link we sent to finish opening this page.',
         'email-failed' => "Couldn't send that confirmation. Enter the password and try again.",
-        'request-pending' => "Request sent. You'll get an email when someone approves it.",
+        'request-pending' => "Access requested. If you haven't confirmed your email address yet, check your email for a confirmation link. You'll receive another email when the site owner approves your request.",
         'request-failed' => "That request didn't go through. Try again in a moment.",
         'link-expired' => 'That link has expired. Ask whoever sent it for a fresh one — or use another way in.',
         'link-revoked' => 'That link was turned off. Use another way in, or ask for a new one.',
@@ -3387,7 +3465,8 @@ function _stattic_access_lanes_fragment(
                 . _stattic_html_escape($accountHref) . '">Continue with '
                 . _stattic_html_escape(_stattic_brand_value('name')) . '</a>'
                 . '<p class="sf-account-help" id="sf-account-help" style="margin:0 0 8px;color:var(--sf-dim);font-size:13px">'
-                . 'Already signed in? We&#039;ll use your existing account to check access.</p>';
+                . 'We&#039;ll use your ' . _stattic_html_escape(_stattic_brand_value('name'))
+                . ' account to check whether you have access to this site.</p>';
         }
     }
     foreach ($lanes['connections'] as $connection) {
@@ -3458,9 +3537,11 @@ function _stattic_access_lanes_fragment(
             );
         if ($requested) {
             if ($status !== 'request-pending') {
-                $html .= '<p class="sf-copy sf-access-requested">Invite requested for '
-                    . _stattic_html_escape($markedScope ?? ($currentScope ?? '/'))
-                    . '. You\'ll get an email when someone approves it.</p>';
+                $scope = $markedScope ?? ($currentScope ?? '/');
+                $html .= '<p class="sf-copy sf-access-requested">Access requested for '
+                    . _stattic_html_escape($host . ($scope === '/' ? '' : $scope))
+                    . '. If you haven\'t confirmed your email address yet, check your email for a confirmation link.'
+                    . ' You\'ll receive another email when the site owner approves your request.</p>';
             }
             // The marker is only a browser hint, so keep a way back into the
             // flow after a denial or expiry.
@@ -3844,17 +3925,42 @@ function _stattic_access_handle_account_start(array $serving, string $requestHos
     if (!in_array($method, ['GET', 'HEAD'], true)) {
         _stattic_method_not_allowed('GET, HEAD');
     }
+    // The return leaves this origin, so it leaves without the flow's own params:
+    // a page opened in place by a share link carries its secret in `__`.
+    $returnPath = _stattic_access_return_without_flow_params(_stattic_safe_return_path(
+        is_string($_GET['return'] ?? null) ? (string) $_GET['return'] : '/'
+    ) ?? '/');
+    // A silent start is a returning account renewing itself, and it spends the
+    // marker that asked for it: only an account session born at the redeem
+    // writes it again, so a renewal that comes back without one never repeats.
+    $silent = ($_GET['silent'] ?? null) === '1';
     $descriptor = _stattic_access_page_descriptor($serving);
     $accountUrl = is_array($descriptor) && is_string($descriptor['accountUrl'] ?? null)
         ? $descriptor['accountUrl']
         : '';
+    if ($silent) {
+        _stattic_access_forget_returning_account();
+        // Nobody asked to see this trip, so it never dead-ends, and it never
+        // leaves for the sign-in host on behalf of a session that is already an
+        // account: whatever that account was refused here, renewing it again
+        // will not change.
+        $identity = _stattic_visitor_cookie_from_request() !== ''
+            ? _stattic_current_session_identity($serving, $requestHost)
+            : null;
+        if (
+            $accountUrl === ''
+            || _stattic_access_principal_is_account(_stattic_access_identity_principal($identity))
+        ) {
+            _stattic_access_redirect($returnPath, 303);
+        }
+    }
     if ($accountUrl === '') {
         _stattic_render_access_route_not_found();
     }
-    $returnPath = _stattic_safe_return_path(
-        is_string($_GET['return'] ?? null) ? (string) $_GET['return'] : '/'
-    ) ?? '/';
     $redirect = _stattic_access_url_with_params($accountUrl, [
+        // The sign-in host's no-prompt mode: signed out, or signed in without a
+        // way in here, it sends the browser straight back.
+        ...($silent ? ['silent' => '1'] : []),
         'host' => _stattic_canonicalize_host($requestHost),
         'return' => $returnPath,
         'browserState' => _stattic_access_browser_state_begin(),
@@ -5137,11 +5243,21 @@ function _stattic_access_handle_callback(array $serving, string $requestHost, st
     }
 
     $host = _stattic_canonicalize_host($requestHost);
-    $sessionToken = _stattic_access_consume_handoff_token($serving, $host, $token);
+    $session = null;
+    $sessionToken = _stattic_access_consume_handoff_token($serving, $host, $token, $session);
     if ($sessionToken === null) {
+        // A returning account's renewal: nobody asked for this hop, so a
+        // handoff that will not redeem lands back on the page, signed out as
+        // it was, instead of on an error nobody clicked for.
+        if ($requestMethod === 'GET' && ($fields['silent'] ?? null) === '1') {
+            _stattic_access_redirect($returnTo, 303);
+        }
         _stattic_render_json_or_deny('access_handoff_invalid', 'Access token handoff is invalid.');
     }
     _stattic_access_set_session_cookie($sessionToken);
+    if (_stattic_access_principal_is_account((string) ($session['principal'] ?? ''))) {
+        _stattic_access_remember_returning_account();
+    }
     header('Cache-Control: no-store', true);
     header('Referrer-Policy: no-referrer', true);
     if (($fields['display'] ?? '') === 'popup') {
@@ -5333,6 +5449,8 @@ function _stattic_access_handle_logout(string $requestHost): void
         _stattic_access_logout_unavailable();
     }
     _stattic_clear_cookie(_stattic_session_cookie_name());
+    // Signing out here means staying out: no silent renewal on the next visit.
+    _stattic_access_forget_returning_account();
     // The clearUrl is cross-origin: the return= param in this URL must not
     // leak as a Referer.
     _stattic_access_redirect($clearUrl ?? $returnTo, 303);

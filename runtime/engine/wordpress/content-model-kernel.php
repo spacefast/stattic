@@ -331,7 +331,8 @@ function spacefast_content_model_field_is_html(array $field): bool
 
 /**
  * WordPress scalar defaults must not turn an absent optional value into zero,
- * and rich text reads back sanitized, including values stored before writes were.
+ * and rich text is sanitized on read too, so a stored value that skipped the
+ * write sanitizer still reads back clean.
  */
 function spacefast_content_model_project_meta(mixed $response, mixed $post): mixed
 {

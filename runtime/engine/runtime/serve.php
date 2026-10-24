@@ -344,6 +344,18 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // response may name one: naming it above leaks which version a host points at.
     _stattic_emit_runtime_identity($versionId);
 
+    // A worker reading its own files through its assets binding (set by
+    // functions-relay.php after the relay credential verified). The host must
+    // resolve to exactly that worker's Space and version: the credential speaks
+    // for one version's files, not for whatever another hostname serves.
+    $assetsRequest = is_array($GLOBALS['SPACEFAST_FUNCTIONS_ASSETS_REQUEST'] ?? null)
+        ? $GLOBALS['SPACEFAST_FUNCTIONS_ASSETS_REQUEST']
+        : null;
+    if ($assetsRequest !== null
+        && (($assetsRequest['space_id'] ?? null) !== $spaceId || ($assetsRequest['version_id'] ?? null) !== $versionId)) {
+        _stattic_opaque_not_found();
+    }
+
     // ---- non-content lanes that must never resolve as content -----------
     if ($storageRequest) {
         require_once __DIR__ . '/storage.php';
@@ -642,6 +654,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         // asset rewrite (C21/D146) keys on it, and a mount or a residue rewrite
         // moves the entry's key away from it.
         'client_path' => $originalRequestPath,
+        'functions_assets_request' => $assetsRequest !== null,
     ];
 
     // `?spacefast_view=1` selects the finalized preview document for this
@@ -671,7 +684,15 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $page = $hasPages && !_stattic_path_is_reserved($requestPath)
         && !_stattic_lookup_not_found_is_terminal(ltrim($requestPath, '/'))
         ? _stattic_page_resolve($versionDir, $requestPath) : null;
-    if (is_array($entry)) {
+    // Wrangler `assets.run_worker_first`: on these paths the worker answers
+    // before any file does, so a committed file does not shadow it. The worker
+    // can still read that file through its assets binding.
+    $workerFirst = false;
+    if ($assetsRequest === null && _stattic_version_has_functions($versionDir)) {
+        require_once __DIR__ . '/functions-dispatch.php';
+        $workerFirst = _stattic_functions_worker_first($versionDir, $requestPath);
+    }
+    if (is_array($entry) && !$workerFirst) {
         // A draft/preview session must not be answered from an extracted file:
         // when the request carries one of the version's declared bypass cookies
         // AND the worker claims this path, the file yields to the pattern lane
@@ -684,9 +705,12 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         // sides: its bytes are identical in and out of a draft session, so it
         // keeps serving from disk and keeps its immutable year, which a
         // whole-site middleware claim would cost every hashed chunk.
+        //
+        // An assets-binding read is the worker asking for the file itself, so
+        // nothing here may hand it back to the worker.
         $immutableEntry = ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_CACHE_CLASS] ?? null)
             === STATTIC_RUNTIME_CACHE_CLASS_IMMUTABLE;
-        $bypassCookies = $immutableEntry ? null : _stattic_v4_functions_static_bypass_cookies(
+        $bypassCookies = $immutableEntry || $assetsRequest !== null ? null : _stattic_v4_functions_static_bypass_cookies(
             $versionDir,
             $requestPath,
             $requestMethod,
@@ -709,6 +733,30 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // catch-alls and WordPress must not swallow the platform's defaults.
     require_once __DIR__ . '/sell.php';
     _stattic_sell_page_fallback($serving, $requestPath);
+
+    // Cloudflare's `assets_navigation_prefers_asset_serving`: a browser
+    // navigation that matched no file gets the SPA document without waking the
+    // worker. The same URL fetched by script still reaches the worker, so both
+    // answers vary by a request header the shared cache cannot key on: neither
+    // may be stored, or whichever came first would answer the other.
+    if (!$workerFirst && $assetsRequest === null && $page === null
+        && in_array($requestMethod, ['GET', 'HEAD'], true)
+        && !_stattic_lookup_not_found_is_terminal(ltrim($requestPath, '/'))
+        && !_stattic_lookup_is_known_asset_extension(ltrim($requestPath, '/'))
+        && _stattic_version_has_functions($versionDir)) {
+        require_once __DIR__ . '/functions-dispatch.php';
+        $spa = _stattic_functions_navigation_fallback($versionDir)
+            ? _stattic_v4_entry($versionDir, $root, STATTIC_RUNTIME_RESPONSE_KEY_SPA)
+            : null;
+        if (is_array($spa)) {
+            _stattic_cache_policy_request_varying(true);
+            if (strtolower((string) ($_SERVER['HTTP_SEC_FETCH_MODE'] ?? '')) === 'navigate') {
+                $spaContext = $sendContext;
+                $spaContext['request_varying'] = true;
+                _stattic_v4_send_entry($spaContext, $spa, $requestPath);
+            }
+        }
+    }
 
     // Pattern-matched Zero endpoints and Function routes cannot be table keys;
     // their exact forms already were, so a committed file still wins.
@@ -1764,7 +1812,9 @@ function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath
         }
     }
 
-    if (_stattic_version_has_functions($versionDir)) {
+    // An assets-binding read never re-enters the worker that made it: a miss
+    // takes the version's not-found handling (SPA document, 404 page, 404).
+    if (empty($context['functions_assets_request']) && _stattic_version_has_functions($versionDir)) {
         require_once __DIR__ . '/functions-dispatch.php';
         $functionsRoute = _stattic_resolve_functions_route_action($versionDir, $lookup, $requestMethod);
         // A path the table claims at other methods ends at a 405, never a fall
@@ -1866,8 +1916,8 @@ function _stattic_render_platform_action(array $action, bool $privateCache = fal
 {
     $actionKind = $action['action'] ?? null;
     if ($actionKind === 'tombstone') {
-        // Reason-differentiated tombstones: CSAM matches the undeployed 404 (no
-        // signal), DMCA/copyright 451, suspended tenant 402.
+        // Reason-differentiated tombstones (STATTIC_TOMBSTONE_VARIANTS): CSAM
+        // takes the undeployed page so it carries no signal the host existed.
         $pageId = $action['page_id'] ?? null;
         $variant = is_string($pageId) ? _stattic_runtime_tombstone_page_variant($pageId) : null;
         // Fail closed: a tombstone that cannot name its variant must never fall
@@ -1930,11 +1980,9 @@ function _stattic_render_platform_action(array $action, bool $privateCache = fal
     _stattic_render_runtime_invariant_error_lazy('route-action-metadata-missing', 'Runtime platform action metadata is malformed.');
 }
 
-// A host with nothing published is a 404, not a fault: a 503 here pages the
-// fleet 5xx alert whenever a crawler finds an attached-but-unpublished domain.
 function _stattic_undeployed_action(): array
 {
-    return _stattic_platform_error_action('undeployed', 404, "This space hasn't been published yet.\n");
+    return _stattic_platform_error_action('undeployed', STATTIC_UNDEPLOYED_STATUS, STATTIC_UNDEPLOYED_BODY, STATTIC_CACHE_CONTROL_NO_STORE);
 }
 
 function _stattic_method_not_allowed_action(array $allowedMethods = ['GET', 'HEAD']): array

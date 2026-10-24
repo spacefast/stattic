@@ -44,6 +44,16 @@ const SPACEFAST_FUNCTIONS_RELAY_BROKERS = [
         'grant_env' => SPACEFAST_FUNCTIONS_SERVICE_BROKER_GRANT_ENV,
         'identity' => true,
     ],
+    'assets' => ['capabilities' => SPACEFAST_FUNCTIONS_BROKERS['assets']],
+];
+
+// Request headers an assets-binding read may carry: the ones that choose a
+// representation of a file, plus the visitor's cookie so a private Space
+// answers exactly as it would answer that visitor. Mirrors
+// ASSETS_FORWARDED_HEADERS in packages/functions-host/src/assets-binding.ts.
+const STATTIC_FUNCTIONS_ASSETS_REQUEST_HEADERS = [
+    'accept', 'accept-language', 'cookie', 'if-match', 'if-modified-since',
+    'if-none-match', 'if-range', 'if-unmodified-since', 'range',
 ];
 
 // Operations over the executor's 64 KiB limit still transit so the caller gets
@@ -183,6 +193,10 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
         _stattic_problem_refused(413, 'relay_payload_too_large', 'Relay frame exceeds the size limit.');
     }
 
+    if ($broker === 'assets') {
+        _stattic_functions_assets_serve($privateRoot, $spaceId, $claims, $body);
+    }
+
     if ($broker === 'database') {
         // The broker is bound to the same URL resolution every other database
         // lane uses, and to exactly the grant this credential carries; the
@@ -259,6 +273,81 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     _stattic_response_send(200, $stdout, 'application/json; charset=utf-8', [
         'Cache-Control' => 'no-store',
     ]);
+}
+
+/**
+ * A worker's `env.ASSETS.fetch()`: one GET of the version's own static
+ * files, answered by the ordinary serve path so headers, ranges, conditional
+ * requests and the published not-found handling all behave as they do for a
+ * visitor. The relay call's own request is replaced by the one it carries,
+ * and serve.php refuses any host that does not resolve to the credential's
+ * Space and version, never re-enters the worker, and keeps the answer out of
+ * every shared cache. Never returns.
+ */
+function _stattic_functions_assets_serve(string $privateRoot, string $spaceId, array $claims, string $body): void
+{
+    $frame = json_decode($body, true);
+    $method = is_array($frame) ? ($frame['method'] ?? null) : null;
+    $target = is_array($frame) ? ($frame['path'] ?? null) : null;
+    $host = is_array($frame) ? ($frame['host'] ?? null) : null;
+    $headers = is_array($frame) && is_array($frame['headers'] ?? null) ? $frame['headers'] : [];
+    if (
+        // GET only: the answer rides this POST's response, which must carry
+        // the body its Content-Length announces. The binding turns HEAD into GET.
+        $method !== 'GET'
+        || !is_string($target) || !str_starts_with($target, '/') || strlen($target) > 8192
+        || preg_match('/[\x00-\x20\x7f]/', $target) === 1
+        || ($host !== null && (!is_string($host) || preg_match('/^[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?$/', $host) !== 1))
+    ) {
+        _stattic_problem_refused(400, 'assets_request_invalid', 'Static-asset request is not valid.');
+    }
+    $path = _stattic_canonical_request_path(_stattic_request_uri_path($target));
+    if ($path === null || _stattic_path_is_reserved($path)) {
+        _stattic_opaque_not_found();
+    }
+    // Without a visitor (a scheduled handler) the read resolves on the relay's
+    // own hostname, which serves the live version.
+    $requestHost = _stattic_normalize_host_authority(is_string($host) ? $host : (string) ($_SERVER['HTTP_HOST'] ?? ''));
+
+    foreach (array_keys($_SERVER) as $name) {
+        if (is_string($name) && (str_starts_with($name, 'HTTP_') || str_starts_with($name, 'REDIRECT_HTTP_'))) {
+            unset($_SERVER[$name]);
+        }
+    }
+    unset($_SERVER['CONTENT_TYPE'], $_SERVER['CONTENT_LENGTH'], $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW']);
+    foreach (STATTIC_FUNCTIONS_ASSETS_REQUEST_HEADERS as $name) {
+        $value = $headers[$name] ?? null;
+        if (is_string($value) && $value !== '' && strlen($value) <= 8192 && preg_match('/[\r\n\x00]/', $value) !== 1) {
+            $_SERVER['HTTP_' . strtoupper(str_replace('-', '_', $name))] = $value;
+        }
+    }
+    $query = (string) (parse_url($target, PHP_URL_QUERY) ?? '');
+    $_SERVER['REQUEST_METHOD'] = $method;
+    $_SERVER['REQUEST_URI'] = $target;
+    $_SERVER['QUERY_STRING'] = $query;
+    $_SERVER['HTTP_HOST'] = $requestHost;
+    $_SERVER['SERVER_NAME'] = $requestHost;
+    parse_str($query, $_GET);
+    $_POST = [];
+    // What the CGI layer would have parsed from the forwarded Cookie header:
+    // the first occurrence of a name wins, and values are URL-decoded.
+    $_COOKIE = [];
+    foreach (explode(';', (string) ($_SERVER['HTTP_COOKIE'] ?? '')) as $pair) {
+        [$name, $value] = array_pad(explode('=', trim($pair), 2), 2, '');
+        $name = strtr(trim($name), ['.' => '_', ' ' => '_', '[' => '_']);
+        if ($name !== '' && !array_key_exists($name, $_COOKIE)) {
+            $_COOKIE[$name] = urldecode($value);
+        }
+    }
+
+    $GLOBALS['SPACEFAST_FUNCTIONS_ASSETS_REQUEST'] = [
+        'space_id' => $spaceId,
+        'version_id' => (string) $claims['version_id'],
+    ];
+    require_once __DIR__ . '/serve.php';
+    _stattic_serve_request($privateRoot, $method, $target, $path, $requestHost);
+    // Only a deferred WordPress page returns, and a Functions version has none.
+    _stattic_opaque_not_found();
 }
 
 // Tail events from a dispatched worker, on the relay credential. Delivery is

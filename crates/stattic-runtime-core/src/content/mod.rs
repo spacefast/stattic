@@ -19,6 +19,8 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
+use stattic_runtime_policy::brand::Brand;
+
 use crate::finalize::{
     file_meta_from_parts, invalid, read_bounded, write_generated, AdoptablePath, FileMeta,
     FinalizeError, Result,
@@ -1243,13 +1245,18 @@ fn decorate_html(
                 ));
             }
         }
-        // With no image anywhere, leave inert placeholders that the runtime
-        // fills with a screenshot once one is ready and only while the page is
-        // publicly readable. Both change without a republish. They open the
-        // head because the runtime rewrites only the document's first 64 KiB.
+        // With no image anywhere, leave placeholders that the runtime fills
+        // with a screenshot once one is ready and only while the page is
+        // publicly readable. Both change without a republish. Until then the
+        // og:image is the brand's square fallback, written here so pages keep
+        // their stored bytes (and the X-Accel lane) on the default brand. They
+        // open the head because the runtime rewrites only the first 64 KiB.
         let auto_image = image.is_none() && !declares_preview_image.get();
         if auto_image {
-            share_image.push(format!("<meta {AUTO_SHARE_IMAGE_ATTR}=\"og:image\">"));
+            share_image.push(format!(
+                "<meta {AUTO_SHARE_IMAGE_ATTR}=\"og:image\" property=\"og:image\" content=\"{}\">",
+                escape_attr(&Brand::default().share_image_url)
+            ));
         }
         if !meta_names.borrow().contains("twitter:card")
             && (title.is_some() || image.is_some() || auto_image)
@@ -1858,12 +1865,14 @@ mod tests {
         // not read past.
         assert!(once.starts_with(concat!(
             "<html><head><!-- spacefast:share-image -->\n",
-            "<meta data-spacefast-auto-image=\"og:image\">\n",
+            "<meta data-spacefast-auto-image=\"og:image\" property=\"og:image\" content=\"https://my.spacefast.com/app-icon-512x512.png\">\n",
             "<meta name=\"twitter:card\" content=\"summary\" data-spacefast-auto-image=\"twitter:card\">\n",
             "<!-- /spacefast:share-image -->\n<meta charset=\"utf-8\">",
         )));
         assert_eq!(once.matches("name=\"twitter:card\"").count(), 1);
-        assert!(!once.contains("property=\"og:image\""));
+        assert_eq!(once.matches("property=\"og:image\"").count(), 1);
+        // The fallback is off-site, so it never needs the public preview-image
+        // exemption.
         assert!(run.result.as_ref().unwrap().preview_images.is_empty());
         let run = run_pipeline(
             &[("index.html", once.as_bytes())],

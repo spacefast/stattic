@@ -73,17 +73,11 @@ function _stattic_serve_spacefast_sdk(
 
     http_response_code(200);
     header('Content-Type: ' . $mediaType, false);
-    // A versioned SDK URL (?v=<engine/content token>, baked in by the control
-    // plane) is content-addressed: the token changes whenever the body would,
-    // so this response may pin immutably. The unversioned URL and every preview
-    // stay short-lived and revalidated, so an engine revision is never frozen
-    // into a visitor's cache. `_stattic_send_cache_policy_headers` still
-    // downgrades private responses whatever this value is.
-    $publicCacheControl = (isset($_GET['review']) || _stattic_system_view_review() !== null)
+    // SDK bytes include revocable platform and customer state. A version token
+    // cannot make that state immutable; overlays can change at the same URL.
+    $publicCacheControl = ($previewToken !== null || isset($_GET['review']) || _stattic_system_view_review() !== null)
         ? STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE
-        : (($previewToken === null && _stattic_spacefast_sdk_versioned_request())
-        ? 'public, max-age=31536000, immutable'
-        : STATTIC_DEFAULT_EDGE_CACHE_CONTROL);
+        : STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
     _stattic_send_cache_policy_headers($privateCache, $publicCacheControl);
     header('ETag: ' . $etag, false);
     header('X-Spacefast-Sdk-Revision: ' . $revision, false);
@@ -380,13 +374,21 @@ function _stattic_spacefast_sdk_bootstrap(
     // "already loading" flags so a page carrying two SDK tags boots once. The
     // tracker goes before Comments, whose latch returns early, and whether or
     // not Comments is on.
+    require_once __DIR__ . '/../shared/brand.php';
+    $runtimeContext = json_encode([
+        'live' => $previewToken === null
+            && !isset($_GET['review'])
+            && $review === null
+            && !_stattic_spacefast_preview_surface($serving),
+        'brand' => _stattic_brand()['name'],
+    ], JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
     $loader = '(function(){' .
         'var root=window.Spacefast=window.Spacefast||{};' .
         $reviewReload .
+        'root.runtime=' . $runtimeContext . ';' .
         (($serving['users']['enabled'] ?? false) === true ? _stattic_space_users_browser_script() : '') .
         $tagLoader .
         _stattic_spacefast_tracker_loader($serving, $previewToken) .
-        _stattic_spacefast_remix_loader($serving, $previewToken) .
         $collab .
         '})();';
     if ($review !== null && $collabBase !== null) {
@@ -397,94 +399,6 @@ function _stattic_spacefast_sdk_bootstrap(
         $loader .= ';(function(){var c=document.createElement("script");c.type="application/json";c.id="sf-visual-review";c.textContent=' . json_encode($reviewJson) . ';document.head.appendChild(c);var s=document.createElement("script");s.type="module";s.src=' . $reviewUrl . ';document.head.appendChild(s);})();';
     }
     return $loader . ($embeddedTagBody !== '' ? "\n" . $embeddedTagBody : '');
-}
-
-// The Spacefast star, as in SPACEFAST_MARK_PATH (packages/common/src/brand-assets.ts).
-// runtime/tests/spacefast-sdk.test.ts pins the two copies together.
-const STATTIC_SPACEFAST_REMIX_MARK_PATH = 'M14.1562 0C13.5044 3.88452 13.2779 6.03061 14.0938 7.69824C14.5697 8.67108 15.2776 9.51194 16.1553 10.1465C17.6863 11.2533 19.8895 11.3807 23.9619 11.3955V12.2988C19.5436 12.3085 17.1644 12.4107 15.2783 13.4951C14.3494 14.0292 13.5232 14.7253 12.8389 15.5498C11.4432 17.2314 10.9399 19.5719 10.1729 23.9619H9.26953C9.94097 20.0281 10.2172 17.9224 9.50488 16.2764C8.99186 15.091 8.14236 14.0822 7.06152 13.375C5.63143 12.4393 3.6374 12.3159 0 12.2998V11.3955C3.97342 11.3847 6.14005 11.2861 7.89258 10.3652C9.04487 9.75977 10.052 8.91136 10.8447 7.87891C12.0784 6.27199 12.5382 4.0913 13.252 0H14.1562Z';
-
-/**
- * The dashboard remix link the owner put behind a Remix button, as the control
- * plane projected it, or null when the live site shows no button: the source is
- * not available, the owner left the button off, or an older control plane sent
- * nothing. The URL lands in an `href`, so anything but a plain https URL is
- * refused rather than escaped.
- */
-function _stattic_spacefast_remix_url(array $serving): ?string
-{
-    $url = _stattic_spacefast_sdk_config($serving)['remix_url'] ?? null;
-    if (!is_string($url) || $url === '' || strlen($url) > 4096 || preg_match('/[\x00-\x20\x7f"\'<>\\\\`]/', $url) === 1) {
-        return null;
-    }
-    $parts = parse_url($url);
-    if (
-        !is_array($parts)
-        || strtolower((string) ($parts['scheme'] ?? '')) !== 'https'
-        || ($parts['host'] ?? '') === ''
-        || isset($parts['user'])
-        || isset($parts['pass'])
-    ) {
-        return null;
-    }
-    return $url;
-}
-
-/**
- * The Remix button, written by sdk.js. Like the tracker, only a visitor's view
- * of the live surface gets it: a visual review, a preview token's draft and an
- * immutable version host draw nothing, and neither does a page shown inside a
- * frame, such as a dashboard preview. It sits bottom-left because the Comments
- * button defaults to bottom-right, and it reads the page background the same
- * way that button does, so it is dark on light sites and light on dark ones. A
- * closed shadow root keeps the page's CSS off it; a browser without one gets no
- * button rather than a stylesheet leaking into the page.
- */
-function _stattic_spacefast_remix_loader(array $serving, ?string $previewToken): string
-{
-    $url = _stattic_spacefast_remix_url($serving);
-    if (
-        $url === null
-        || $previewToken !== null
-        || isset($_GET['review'])
-        || _stattic_system_view_review() !== null
-        || _stattic_spacefast_preview_surface($serving)
-    ) {
-        return '';
-    }
-    require_once __DIR__ . '/../shared/brand.php';
-    $brand = _stattic_brand();
-    $name = is_string($brand['name'] ?? null) && $brand['name'] !== '' ? $brand['name'] : 'Spacefast';
-    $icon = $name === 'Spacefast'
-        ? '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="' . STATTIC_SPACEFAST_REMIX_MARK_PATH . '"/></svg>'
-        : '';
-    $markup = '<style>' .
-        'a{all:initial;box-sizing:border-box;display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 13px 0 11px;' .
-        'border-radius:999px;font:500 13px/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;letter-spacing:-.01em;' .
-        'cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.12);background:var(--b);color:var(--f);transition:background .15s,color .15s}' .
-        'svg{width:15px;height:15px;flex:none;fill:var(--i)}' .
-        'a:hover{background:#1efe57;color:#000}a:hover svg{fill:#000}' .
-        'a:focus-visible{outline:2px solid #1efe57;outline-offset:2px}' .
-        '.s{display:none}' .
-        '@media (max-width:480px){.l{display:none}.s{display:inline}a{height:32px;padding:0 11px 0 10px}}' .
-        '@media (prefers-reduced-motion:reduce){a{transition:none}}' .
-        '@media print{a{display:none}}' .
-        '</style><a target="_blank" rel="noopener">' . $icon .
-        '<span class="l">Remix this site</span><span class="s">Remix</span></a>';
-    return 'if(!root.remixButton&&window.top===window){root.remixButton=true;' .
-        'var rm=function(){try{' .
-        'if(document.getElementById("sf-remix")||!document.body||!document.body.attachShadow)return;' .
-        'var rd=false;try{var rg=function(el){var m=el&&getComputedStyle(el).backgroundColor.match(/[\d.]+/g);' .
-        'return m&&m.length>2&&!(m.length>3&&+m[3]<.1)?(.2126*m[0]+.7152*m[1]+.0722*m[2])/255:null};' .
-        'var rl=rg(document.body);if(rl===null)rl=rg(document.documentElement);rd=rl!==null&&rl<.5}catch(e){}' .
-        'var h=document.createElement("div");h.id="sf-remix";' .
-        'h.style.cssText="position:fixed;left:16px;bottom:16px;z-index:2147482999;"+' .
-        '(rd?"--b:#f4f4f6;--f:#16161b;--i:#16161b":"--b:#1d1d22;--f:#ffffff;--i:#1efe57");' .
-        'var sr=h.attachShadow({mode:"closed"});sr.innerHTML=' . json_encode($markup, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG) . ';' .
-        'var ra=sr.querySelector("a");ra.href=' . json_encode($url, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG) . ';' .
-        'ra.setAttribute("aria-label",' . json_encode('Remix this site on ' . $name, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG) . ');' .
-        'document.body.appendChild(h);' .
-        '}catch(e){}};' .
-        'if(document.body)rm();else document.addEventListener("DOMContentLoaded",rm);}';
 }
 
 // Beacon's own lifetime for t.js, so a new tracker reaches pages as fast
@@ -1162,14 +1076,6 @@ function _stattic_spacefast_sdk_preview_token(): ?string
         return trim($_GET['preview']);
     }
     return null;
-}
-
-// The `v` query component the control plane bakes into the injected SDK URL.
-// Its presence, not its value, admits the immutable cache policy: the token is
-// opaque here and changes only when the served body would.
-function _stattic_spacefast_sdk_versioned_request(): bool
-{
-    return isset($_GET['v']) && is_string($_GET['v']) && trim($_GET['v']) !== '';
 }
 
 function _stattic_send_spacefast_sdk_cors_headers(): void

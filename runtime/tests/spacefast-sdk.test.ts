@@ -4,6 +4,9 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync 
 import os from "node:os";
 import path from "node:path";
 
+import { Window, type ShadowRoot } from "happy-dom";
+
+import { remixButtonScript } from "../../apps/control-plane/src/tags/platform-tags.ts";
 import { canonicalPagePath, commentRoomKey } from "../../packages/collab-sdk/src/core.ts";
 import { ICON_PATHS } from "../../packages/collab-sdk/src/theme/icons.ts";
 import { SPACEFAST_MARK_PATH } from "../../packages/common/src/brand-assets.ts";
@@ -359,29 +362,25 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   expect(response.headers.get("x-spacefast-sdk-revision")).toContain("runtime:");
   expect(response.headers.get("vary")).toBeNull();
 
-  // A versioned SDK URL (?v=<token>, baked in by the control plane) is
-  // content-addressed, so the same-host response may pin immutably while still
-  // keeping ACAO * for cross-origin loads. The unversioned URL above must never
-  // be immutable — an engine revision would freeze into the visitor's cache.
+  // Version tokens do not make revocable overlay state immutable.
   const versioned = await get(runtime, SITE, "/__spacefast/sdk.js?v=engine-rev-abc", {
     headers: { origin: "https://third.example.test" },
   });
   expect(versioned.status).toBe(200);
   expect(await versioned.text()).toBe(body);
-  expect(versioned.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  expect(versioned.headers.get("cache-control")).toBe(
+    "public, max-age=0, s-maxage=600, must-revalidate",
+  );
   expect(versioned.headers.get("access-control-allow-origin")).toBe("*");
 
-  // Preview overrides the version token: preview bytes are capability-selected,
-  // so a versioned preview URL stays short-lived and revalidated, never pinned.
+  // Capability-selected previews must not enter a shared cache.
   const versionedPreview = await get(
     runtime,
     SITE,
     "/__spacefast/sdk.js?v=engine-rev-abc&preview=preview-token",
   );
   expect(versionedPreview.status).toBe(200);
-  expect(versionedPreview.headers.get("cache-control")).toBe(
-    "public, max-age=0, s-maxage=600, must-revalidate",
-  );
+  expect(versionedPreview.headers.get("cache-control")).toBe("private, no-store");
 
   const otherOrigin = await get(runtime, SITE, "/__spacefast/sdk.js", {
     headers: { origin: "https://second.example.test" },
@@ -400,9 +399,7 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
     },
   });
   expect(preview.status).toBe(200);
-  expect(preview.headers.get("cache-control")).toBe(
-    "public, max-age=0, s-maxage=600, must-revalidate",
-  );
+  expect(preview.headers.get("cache-control")).toBe("private, no-store");
   // A `?preview=` token names a tag release, never a surface. The live host is
   // the live surface whatever the URL is decorated with — otherwise the preview
   // Comments lane could be consulted from the live site by anyone who appended
@@ -566,7 +563,11 @@ test("sdk.js draws the Remix button on the live surface only", async () => {
       { mode: "website", site_title: "Remix" },
       "live_and_all_versions",
     );
-    config.sdk = { revision: `sdk-remix-${remix ?? "none"}`, config: { remix_url: remix } };
+    config.sdk = {
+      revision: `sdk-remix-${remix ?? "none"}`,
+      config: {},
+      body: remixButtonScript(remix),
+    };
     return {
       version_id: "ver_remix_1",
       config,
@@ -581,75 +582,59 @@ test("sdk.js draws the Remix button on the live surface only", async () => {
     files: { "index.html": "<h1>Remix me</h1>\n" },
     activate: { route_name: "production", ...routeBody(remixUrl) },
   });
-  type Anchor = { href: string; attributes: Record<string, string> };
-  type Host = { id: string; style: { cssText: string }; shadow: { innerHTML: string } };
-  type FakeWindow = { top?: object; Spacefast?: object };
-  // Runs the loader against a minimal DOM and returns what it appended.
+  const windows: Window[] = [];
   const draw = (body: string, framed = false) => {
-    const appended: Host[] = [];
-    const anchor: Anchor = { href: "", attributes: {} };
-    const fakeWindow: FakeWindow = {};
-    fakeWindow.top = framed ? {} : fakeWindow;
-    const fakeDocument = {
-      body: {
-        attachShadow: () => undefined,
-        appendChild: (node: Host) => appended.push(node),
-      },
-      documentElement: {},
-      head: { appendChild: () => undefined },
-      getElementById: (id: string) => appended.find((node) => node.id === id) ?? null,
-      addEventListener: () => undefined,
-      createElement: () => {
-        const shadow = {
-          innerHTML: "",
-          querySelector: () => ({
-            set href(value: string) {
-              anchor.href = value;
-            },
-            setAttribute: (name: string, value: string) => {
-              anchor.attributes[name] = value;
-            },
-          }),
-        };
-        return { id: "", style: { cssText: "" }, shadow, attachShadow: () => shadow };
-      },
+    const view = new Window({ url: `https://${host}/` });
+    windows.push(view);
+    const shadows: ShadowRoot[] = [];
+    const attachShadow = view.HTMLElement.prototype.attachShadow;
+    view.HTMLElement.prototype.attachShadow = function (options) {
+      const shadow = attachShadow.call(this, options);
+      shadows.push(shadow);
+      return shadow;
     };
-    const run = Function("window", "document", body);
-    run(fakeWindow, fakeDocument);
-    // A page carrying the SDK tag twice still gets one button.
-    run(fakeWindow, fakeDocument);
-    return { appended, anchor };
+    Object.defineProperty(view, "top", { value: framed ? {} : view });
+    view.eval(body);
+    view.eval(body);
+    return { view, shadow: shadows[0] };
   };
-
-  const live = await get(runtime, host, "/__spacefast/sdk.js");
-  expect(live.status).toBe(200);
-  const liveBody = await live.text();
-  const { appended, anchor } = draw(liveBody);
-  expect(appended).toHaveLength(1);
-  expect(appended[0]?.id).toBe("sf-remix");
-  expect(appended[0]?.style.cssText).toContain("left:16px;bottom:16px");
-  expect(anchor.href).toBe(remixUrl);
-  expect(anchor.attributes["aria-label"]).toBe("Remix this site on Spacefast");
-  const markup = appended[0]?.shadow.innerHTML ?? "";
-  expect(markup).toContain("Remix this site");
-  expect(markup).toContain('target="_blank" rel="noopener"');
-  // The PHP copy of the star is the brand's own.
-  expect(markup).toContain(`<path d="${SPACEFAST_MARK_PATH}"/>`);
-
-  expect(draw(liveBody, true).appended).toHaveLength(0);
-  for (const response of [
-    await get(runtime, versionHost, "/__spacefast/sdk.js"),
-    await get(runtime, host, "/__spacefast/sdk.js?preview=preview-token"),
-  ]) {
-    expect(response.status).toBe(200);
-    expect(await response.text()).not.toContain("sf-remix");
-  }
-
-  for (const refused of ["javascript:alert(1)", "http://my.spacefast.com/new", null]) {
-    await putRoute(runtime, "spc_remix", "production", routeBody(refused));
-    const response = await get(runtime, host, "/__spacefast/sdk.js");
-    expect(response.status).toBe(200);
-    expect(await response.text()).not.toContain("sf-remix");
+  try {
+    const live = await get(runtime, host, "/__spacefast/sdk.js?v=saved-revision");
+    expect(live.status).toBe(200);
+    const liveBody = await live.text();
+    const { view, shadow } = draw(liveBody);
+    expect(view.document.querySelectorAll("#sf-remix")).toHaveLength(1);
+    expect(view.document.getElementById("sf-remix")?.style.left).toBe("16px");
+    expect(shadow?.querySelector("a")?.href).toBe(remixUrl);
+    expect(shadow?.querySelector("a")?.getAttribute("aria-label")).toBe(
+      "Remix this site on Spacefast",
+    );
+    expect(shadow?.querySelector("a")?.target).toBe("_blank");
+    expect(shadow?.querySelector("path")?.getAttribute("d")).toBe(SPACEFAST_MARK_PATH);
+    expect(shadow?.textContent).toContain("Remix this site");
+    expect(draw(liveBody, true).view.document.getElementById("sf-remix")).toBeNull();
+    for (const response of [
+      await get(runtime, versionHost, "/__spacefast/sdk.js"),
+      await get(runtime, host, "/__spacefast/sdk.js?preview=preview-token"),
+      await get(runtime, host, "/__spacefast/sdk.js?review=review-token"),
+    ]) {
+      expect(response.status).toBe(200);
+      expect(draw(await response.text()).view.document.getElementById("sf-remix")).toBeNull();
+    }
+    for (const refused of ["javascript:alert(1)", "http://my.spacefast.com/new", null]) {
+      await putRoute(runtime, "spc_remix", "production", routeBody(refused));
+      const response = await get(runtime, host, "/__spacefast/sdk.js?v=saved-revision", {
+        headers: { "if-none-match": live.headers.get("etag") ?? "" },
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("etag")).not.toBe(live.headers.get("etag"));
+      expect(response.headers.get("cache-control")).toBe(
+        "public, max-age=0, s-maxage=600, must-revalidate",
+      );
+      expect(draw(await response.text()).view.document.getElementById("sf-remix")).toBeNull();
+    }
+  } finally {
+    await Promise.all(windows.map((view) => view.happyDOM.close()));
   }
 });
 

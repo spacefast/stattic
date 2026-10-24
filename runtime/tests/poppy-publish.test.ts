@@ -64,6 +64,7 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     app,
     "teams:read spaces:write spaces:publish offline_access",
   );
+  const originalFetch = globalThis.fetch;
   const teamId = await seedTeam("poppy-publish");
   const user = await seedSessionUser("poppy-publish", { activeTeamId: teamId });
   let spaceId: string | undefined;
@@ -139,6 +140,26 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
       .update(runtimeBoxes)
       .set({ boxHostname: runtime.baseUrl })
       .where(eq(runtimeBoxes.id, box.boxId));
+    const hostname = await db.query.spaceHostnames.findFirst({
+      where: eq(spaceHostnames.spaceId, spaceId),
+    });
+    if (!hostname) throw new Error("Created Space has no hostname");
+    const servingOrigin = runtime.baseUrl;
+    // Bind the fixture's public address to real PHP, preserving its virtual host.
+    // Readiness must observe the actual response, not a simulated success.
+    globalThis.fetch = Object.assign(
+      (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const url = new URL(input instanceof Request ? input.url : input);
+        if (url.hostname !== hostname.hostname) return originalFetch(input, init);
+        const headers = new Headers(init?.headers);
+        headers.set("host", hostname.hostname);
+        return originalFetch(new URL(`${url.pathname}${url.search}`, servingOrigin), {
+          ...init,
+          headers,
+        });
+      },
+      { preconnect: originalFetch.preconnect },
+    );
     const marker = `poppy-published-${randomUUID()}`;
     const html = `<!doctype html><html><head><title>Poppy publishing demo</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f5f8;color:#17213a;font:18px system-ui}main{max-width:700px;padding:64px;background:white;border-radius:20px;box-shadow:0 12px 50px #17213a12}small{color:#6752d5;font-weight:700}h1{font-size:48px;line-height:1.1;letter-spacing:-2px}p{line-height:1.7;color:#586277}code{font-size:12px;overflow-wrap:anywhere}</style></head><body><main><small>SPACEFAST × POPPY</small><h1>Published by a personal agent.</h1><p>Discovery → Sign in → Create a Space → Publish → Serve</p><p>This page was uploaded through the Spacefast API with a DPoP session token, finalized by the runtime worker, and served by the real PHP runtime.</p><code>${marker}</code></main></body></html>`;
     const form = new FormData();
@@ -164,14 +185,11 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
       .parse(await published.json());
     const channel = await db.query.channels.findFirst({ where: eq(channels.spaceId, spaceId) });
     expect(channel?.versionId).toBe(receipt.data.version.id);
-    const hostname = await db.query.spaceHostnames.findFirst({
-      where: eq(spaceHostnames.spaceId, spaceId),
-    });
-    if (!hostname) throw new Error("Published Space has no hostname");
     const served = await fetch(runtime.baseUrl, { headers: { host: hostname.hostname } });
     expect(served.status, await served.clone().text()).toBe(200);
     expect(await served.text()).toContain(marker);
   } finally {
+    globalThis.fetch = originalFetch;
     runtime?.stop();
     agent.restore();
     await db.delete(authSessions).where(eq(authSessions.clientId, agent.clientId));

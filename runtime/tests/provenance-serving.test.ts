@@ -113,12 +113,17 @@ test("public objects carry exact provenance and bytes on every hostname", async 
   expect(head.headers.get("content-length")).toBe(String(ASSET.byteLength));
   expectProvenance(head, VERSION);
   expect((await head.arrayBuffer()).byteLength).toBe(0);
+
+  const proof = await get(rt, HOST, "/spacefast-readiness/*");
+  expect(proof.status).toBe(404);
+  expectProvenance(proof, VERSION);
 });
 
 test("the production probe answers before any route action, with runtime identity only", async () => {
-  const redirected = await get(rt, PROBE_HOST, "/ordinary");
+  const redirected = await get(rt, PROBE_HOST, "/spacefast-readiness/*");
   expect(redirected.status).toBe(302);
   expect(redirected.headers.get("location")).toBe("/elsewhere");
+  expectProvenance(redirected, PROBE_VERSION);
 
   const probe = await get(rt, PROBE_HOST, "/__stattic_probe", { method: "HEAD" });
   expect(probe.status).toBe(204);

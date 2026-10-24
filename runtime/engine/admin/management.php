@@ -1110,6 +1110,26 @@ function _stattic_runtime_put_route(string $privateRoot, string $spaceId, string
     ]);
 }
 
+function _stattic_runtime_delete_route(string $privateRoot, string $spaceId, string $routeName, array $claims): void
+{
+    // Intent survives deletion, so retries retain the same purge set even if
+    // the pointer was removed before an interrupted index publication.
+    $hostnames = _stattic_runtime_affected_intent_hostnames($privateRoot, $spaceId, $routeName);
+    _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'route_deleted');
+    $routePath = _stattic_route_pointer_path($privateRoot, $spaceId, $routeName);
+    _stattic_runtime_assert_private_path($routePath);
+    if ((file_exists($routePath) || is_link($routePath)) && !unlink($routePath)) {
+        throw new RuntimeException('runtime route deletion failed: ' . $routePath);
+    }
+    _stattic_runtime_update_route_index($privateRoot, $spaceId);
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'route_name' => $routeName,
+        'status' => 'deleted',
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'route_deleted', $hostnames),
+    ]);
+}
+
 function _stattic_runtime_put_hostname_intent(string $privateRoot, string $spaceId, array $claims): void
 {
     $body = _stattic_json_body();

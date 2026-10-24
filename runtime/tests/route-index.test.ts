@@ -166,6 +166,63 @@ test("an exact host stays ahead of an older wildcard route", async () => {
   }
 });
 
+test("deleting production restores undeployed serving and retains immutable artifacts", async () => {
+  const rt = await startRuntime({ captureEdgePurges: true });
+  const spaceId = "spc_delete_route";
+  const versionId = "ver_delete_route";
+  const host = "delete-route.test";
+  const immutable = "delete-route-v1.test";
+  try {
+    await deploy(rt, {
+      spaceId,
+      versionId,
+      files: { "index.html": "candidate" },
+      activate: {
+        route_name: "production",
+        ...productionRoute(host),
+        config: publicAccessConfig({}, "live_and_all_versions"),
+        version_hostnames: [{ hostname: immutable, version_id: versionId }],
+      },
+    });
+    expect(await (await get(rt, host, "/")).text()).toBe("candidate");
+    const purgeStart = edgePurgeCalls(rt).length;
+    // Repeating after the pointer is absent must also repair serving state.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await apiJson(
+        rt,
+        "DELETE",
+        `/__spacefast/api.php/spaces/${spaceId}/routes/production`,
+        "delete_route",
+        { space_id: spaceId, route_name: "production" },
+      );
+      expect(response.status).toBe("deleted");
+      const publicResponse = await get(rt, host, "/");
+      expect(publicResponse.status).toBe(404);
+      expect(publicResponse.headers.get("x-spacefast-undeployed")).toBe("1");
+      // The artifact stays addressable by its immutable host, but the access
+      // policy came from the deleted route, so the preview fails closed.
+      const preview = await get(rt, immutable, "/");
+      expect(preview.status).toBe(403);
+      expect(preview.headers.get("x-spacefast-version")).toBe(versionId);
+    }
+    expect(
+      edgePurgeCalls(rt)
+        .slice(purgeStart)
+        .some((call) => call.hostname === host),
+    ).toBe(true);
+    // The retained artifact remains promotable.
+    await putRoute(rt, spaceId, "production", {
+      ...productionRoute(host, versionId),
+      config: publicAccessConfig({}, "live_and_all_versions"),
+      version_hostnames: [{ hostname: immutable, version_id: versionId }],
+    });
+    expect(await (await get(rt, host, "/")).text()).toBe("candidate");
+    expect(await (await get(rt, immutable, "/")).text()).toBe("candidate");
+  } finally {
+    rt.stop();
+  }
+});
+
 test("activating a new version swaps the space overlay and leaves every route shard addressed the same", async () => {
   const rt = await startRuntime();
   try {

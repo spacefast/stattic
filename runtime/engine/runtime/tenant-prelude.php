@@ -14,7 +14,7 @@ declare(strict_types=1);
  * data. It owns NONE of the OS-level isolation knobs: no second fpm master,
  * no per-space uid, no site-level `disable_functions`, `open_basedir`,
  * `clear_env`, and no accel-ignoring nginx location (verified:
- * .agents/skills/wpcloud-runtime-behavior, private-notes:internal-docs/platform.md). The
+ * private-notes:internal-docs/platform.md). The
  * only OS-level isolation primitive wp.cloud offers is a SEPARATE SITE.
  *
  * So until a provider request buys those knobs, containment is IN-PROCESS: the

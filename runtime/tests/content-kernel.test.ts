@@ -129,6 +129,13 @@ function get_post_meta(int $id, string $key, bool $single): mixed {
 function update_post_meta(int $id, string $key, mixed $value): void {
   global $savedMeta; $savedMeta[$id][$key] = $value;
 }
+// User 4 joined spc_alpha; user 6 only spc_beta.
+function get_user_meta(int $id, string $key, bool $single): mixed {
+  return $key === SPACEFAST_CONTENT_SPACE_META ? ([4 => ['spc_alpha'], 6 => ['spc_beta']][$id] ?? []) : [];
+}
+class WP_Error {
+  public function __construct(public string $code, public string $message, public array $data) {}
+}
 final class ScopeTestQuery {
   public array $vars = [];
   public function get(string $name): mixed { return $this->vars[$name] ?? null; }
@@ -144,6 +151,18 @@ spacefast_content_scope_post_query($postQuery);
 $capability = static fn (int $postId): array =>
   spacefast_content_scope_meta_cap(['edit_posts'], 'edit_post', 1, [$postId]);
 $capabilities = [$capability(9), $capability(7), $capability(5), $capability(3)];
+
+// Core answers these by id without asking read_post, so the Space fence must
+// hold before the controller runs.
+$singleRead = static function (string $route): mixed {
+  $result = spacefast_content_rest_guard_single_read(null, [], new class($route) {
+    public function __construct(private string $route) {}
+    public function get_method(): string { return 'GET'; }
+    public function get_route(): string { return $this->route; }
+  });
+  return $result instanceof WP_Error ? $result->data['status'] : 'controller';
+};
+$singleReads = array_map($singleRead, ['/wp/v2/media/9', '/wp/v2/media/7', '/wp/v2/users/4', '/wp/v2/users/6']);
 
 $alphaOwnsNine = spacefast_content_post_belongs_to_space(9);
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_beta';
@@ -179,6 +198,7 @@ echo json_encode([
   ]),
   'capabilities' => $capabilities,
   'ownership' => [$alphaOwnsNine, $betaOwnsNine, $betaCapability],
+  'single_reads' => $singleReads,
   'upload_scope' => [$uploads['basedir'], $uploads['baseurl'], $uploads['path'], $uploads['url']],
   'visitor_home' => $visitorHome,
   'editor_home' => spacefast_content_public_url('https://provider.example/hey/?preview=1#content'),
@@ -219,6 +239,9 @@ echo json_encode([
     capabilities: [["edit_posts"], ["do_not_allow"], ["edit_posts"], ["do_not_allow"]],
     // The same row seen from the other Space on the same box.
     ownership: [true, false, ["do_not_allow"]],
+    // Single REST reads of media and users: own Space reaches the controller,
+    // another Space's row is a 404.
+    single_reads: ["controller", 404, "controller", 404],
     upload_scope: [
       // The directory the content-media lane serves from, never ABSPATH's.
       "/srv/htdocs/.stattic/storage/spaces/spc_alpha/content-media",

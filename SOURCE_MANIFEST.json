@@ -1,7 +1,7 @@
 {
-  "revision": "bbd33703b6ca07aeb49404149589e43ac802e63e",
-  "sourceHash": "661a63096c68fb61f1da7aa8edf16d1a012ed8549f7bf71c3a19790694f40f40",
-  "manifestSha256": "7e2a3cee54e1d6f59c728b4703b3a8d7c8a0e287e21f003e879920baac01cfd0",
+  "revision": "35f35a649aada7a650fca67124bd7bd55a5fbf93",
+  "sourceHash": "d7f2adfc95bbdd78019bd3330dfa4796f796e52759ed38f02c5a8f07d2d46a38",
+  "manifestSha256": "b66dd246b72d1bf8cb96682f12677e136db33d5ab071c42430befd5158cfd0af",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "0fb18c3fa991183a0a159a301002b81f3cde78e6945b6808ddcd62c4a063cd08"
+      "sha256": "4a5b10e6410c17dccabb18e8d5075783bf0c4c96495df241af8c6bb9673f4c5c"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "153b7d09b7f1d55d0ceabb6c7c5f14ab9ed201ecee9cd8c1c63f5dc12bb18010"
+      "sha256": "6d7920b156b2617be175c9347b3d157af6c7b7fef31cfc64eff17a6315846e4c"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -385,11 +385,11 @@
     },
     {
       "path": "runtime/browser-specs/control-plane-access-fixture.ts",
-      "sha256": "ee2bebfd295f39ea36e8ea38d6f1daba43912754271a44eb8a5104771037b471"
+      "sha256": "738aca248e22344d7d1daad1435ba72e6aef3073a9cec46dd49f52e2f936a8d3"
     },
     {
       "path": "runtime/browser-specs/origin-null-access.test.ts",
-      "sha256": "b6fadb44a3c2a60c0926e818ca7c7953948e082467a203dcccbf1b8064017729"
+      "sha256": "f8e0634f6ff1be72454db546632b06966c41e5f08ce53db1d82420aa67e35ee0"
     },
     {
       "path": "runtime/browser-specs/run-ci.sh",
@@ -529,7 +529,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "bceefb4d314653167763e70fe20b88fd56909211e421ca64864b5c3a9ba52f53"
+      "sha256": "153f7e2fef5be266f1af701a22e837f1433e49d5be6de7bda6613cf489953fe6"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -801,7 +801,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "181285d395290811b96165a9e26c5a5739ef4ecf22a8e67ce8cc3f4087e19ee4"
+      "sha256": "990c08a1572544681b74b3e2e5f56c23796eca4ab62d1452e8066871498d4cb0"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -817,7 +817,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-kernel.php",
-      "sha256": "50328a52ace21e2136519a22685a4ea0858ff3145bad8047318363dc1cde357c"
+      "sha256": "ac80a1f17b2f0de4b706d53e88859e07a13119d2b691fce820b6ff99461baf57"
     },
     {
       "path": "runtime/engine/wordpress/content-markdown.php",
@@ -977,7 +977,7 @@
     },
     {
       "path": "runtime/tests/content-kernel.test.ts",
-      "sha256": "d24c15c5a6f9ecf945a86888130b8da735d97672688480925d5cbeb9a4608906"
+      "sha256": "462f7108168bcb1b5b9cbcc53e1cf3de150ae536af404d8e693891c85cbc8e90"
     },
     {
       "path": "runtime/tests/content-markdown-editor.test.ts",

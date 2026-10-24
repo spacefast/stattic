@@ -984,16 +984,25 @@ function spacefast_content_scope_meta_cap(array $caps, string $cap, int $userId,
 function spacefast_content_rest_guard_single_read(mixed $response, mixed $handler, mixed $request): mixed
 {
     if ($response !== null || !in_array($request->get_method(), ['GET', 'HEAD'], true)
-        || !preg_match('#\A/wp/v2/(posts|pages|media|comments)/([1-9][0-9]*)(?:/|$)#', $request->get_route(), $match)) {
+        || !preg_match('#\A/wp/v2/(posts|pages|media|comments|users)/([1-9][0-9]*)(?:/|$)#', $request->get_route(), $match)) {
         return $response;
     }
-    $postId = $match[1] === 'comments' ? (int) (get_comment((int) $match[2])->comment_post_ID ?? 0) : (int) $match[2];
-    // Core reads any published post by id without asking `read_post`, so the
-    // Space fence in map_meta_cap never runs for it. Media stays out: a team's
-    // design-system media is shared across its Spaces by its own guard.
-    $foreign = $match[1] !== 'media' && $postId > 0 && spacefast_content_space_id() !== ''
-        && !spacefast_content_post_belongs_to_space($postId);
-    if ($foreign || ($postId > 0 && spacefast_content_post_is_private($postId))) {
+    $id = (int) $match[2];
+    $scoped = spacefast_content_space_id() !== '';
+    if ($match[1] === 'users') {
+        // Core admits one user on `list_users` or on any published post on the
+        // site. Neither is membership of this Space.
+        $hidden = $scoped && !spacefast_content_users_in_space($id);
+    } else {
+        $postId = $match[1] === 'comments' ? (int) (get_comment($id)->comment_post_ID ?? 0) : $id;
+        // Core reads a published post, or an inherit-status attachment, by id
+        // without asking `read_post`, so the Space fence in map_meta_cap never
+        // runs for it. Team design-system media is stamped with its storage
+        // Space too, and its own guard narrows it further.
+        $hidden = $postId > 0 && (($scoped && !spacefast_content_post_belongs_to_space($postId))
+            || spacefast_content_post_is_private($postId));
+    }
+    if ($hidden) {
         return new WP_Error(
             'spacefast_content_not_found',
             'This document is not available.',

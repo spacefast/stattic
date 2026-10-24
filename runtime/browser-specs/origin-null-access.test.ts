@@ -7,7 +7,7 @@ import { browserTestOptions } from "../../scripts/browser-test-options.cjs";
 setDefaultTimeout(120_000);
 
 const PASSWORD = "correct horse battery staple";
-const VERIFIED_EMAIL_PASSWORD = "verified email horse battery staple";
+const VERIFIED_EMAIL_PASSWORD = " verified email horse battery staple ";
 const CROSS_SITE_HOST = "cross-site-attacker.test";
 
 type Fixture = {
@@ -89,6 +89,15 @@ async function passwordExchangeCount() {
   return body.password;
 }
 
+async function pastePassword(page: Awaited<ReturnType<Browser["newPage"]>>, text: string) {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: new URL(page.url()).origin,
+  });
+  await page.evaluate((value) => navigator.clipboard.writeText(value), text);
+  await page.locator('input[name="password"]').focus();
+  await page.keyboard.press("Control+V");
+}
+
 test("custom access page CSP permits its same-origin script and forms", async () => {
   const passwordContext = await browser.newContext();
   const passwordPage = await passwordContext.newPage();
@@ -114,7 +123,37 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   await passwordPage.getByRole("link", { name: "Continue with Spacefast", exact: true }).click();
   const popup = await popupPromise;
   await popup.goto(fixture.pageUrl);
-  await popup.locator('input[name="password"]').fill(PASSWORD);
+  const passwordInput = popup.locator('input[name="password"]');
+  const trimButton = popup.getByRole("button", { name: "Remove surrounding whitespace" });
+  await passwordInput.pressSequentially("keep");
+  await pastePassword(popup, " secret ");
+  expect(await passwordInput.inputValue()).toBe("keep secret ");
+  await trimButton.waitFor({ state: "visible" });
+  await passwordInput.press("Control+Z");
+  expect(await passwordInput.inputValue()).toBe("keep");
+  await trimButton.waitFor({ state: "hidden" });
+
+  await passwordInput.fill("prefix old suffix");
+  await passwordInput.evaluate((input) => {
+    if (!(input instanceof HTMLInputElement)) throw new Error("password field is unavailable");
+    input.setSelectionRange(7, 10);
+  });
+  await pastePassword(popup, " new value ");
+  expect(await passwordInput.inputValue()).toBe("prefix  new value  suffix");
+
+  await passwordInput.fill("a".repeat(1023));
+  await pastePassword(popup, "bc");
+  expect(await passwordInput.inputValue()).toBe(`${"a".repeat(1023)}b`);
+
+  await passwordInput.fill("");
+  await pastePassword(popup, ` ${PASSWORD} `);
+  expect(await passwordInput.inputValue()).toBe(` ${PASSWORD} `);
+  await trimButton.click();
+  expect(await passwordInput.inputValue()).toBe(PASSWORD);
+  await passwordInput.press("Control+Z");
+  expect(await passwordInput.inputValue()).toBe(` ${PASSWORD} `);
+  await trimButton.click();
+  expect(await passwordInput.inputValue()).toBe(PASSWORD);
   const passwordResponsePromise = popup.waitForResponse(
     (response) => new URL(response.url()).pathname === "/__spacefast/access/password",
   );
@@ -134,7 +173,10 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   const verifiedEmailContext = await browser.newContext();
   const verifiedEmailPage = await verifiedEmailContext.newPage();
   expect((await verifiedEmailPage.goto(fixture.pageUrl))?.status()).toBe(403);
-  await verifiedEmailPage.locator('input[name="password"]').fill(VERIFIED_EMAIL_PASSWORD);
+  await pastePassword(verifiedEmailPage, VERIFIED_EMAIL_PASSWORD);
+  expect(await verifiedEmailPage.locator('input[name="password"]').inputValue()).toBe(
+    VERIFIED_EMAIL_PASSWORD,
+  );
   const verifiedPasswordResponsePromise = verifiedEmailPage.waitForResponse(
     (response) => new URL(response.url()).pathname === "/__spacefast/access/password",
   );
@@ -205,7 +247,8 @@ test("production transitions render every locally reachable state with independe
     const page = await context.newPage();
 
     await page.goto(fixture.defaultPageUrl);
-    await page.locator('input[name="password"]').fill("definitely wrong");
+    await pastePassword(page, " definitely wrong ");
+    expect(await page.locator('input[name="password"]').inputValue()).toBe(" definitely wrong ");
     await page.getByRole("button", { name: "Continue", exact: true }).click();
     await expectStatus(page, "invalid-password");
 

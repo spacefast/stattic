@@ -3477,9 +3477,9 @@ function _stattic_access_lanes_fragment(
         }
     }
     $html .= $dashboardLink . '</div>';
-    if ($hasPopup) {
+    if ($hasPopup || $lanes['password']) {
         // External and optional by contract: script-src 'self' enables the
-        // popup; stricter policies keep the complete same-tab link.
+        // enhancements; stricter policies keep native links and forms usable.
         $html .= '<script src="' . _stattic_html_escape(STATTIC_ACCESS_CLIENT_SCRIPT_PATH)
             . '" defer></script>';
     }
@@ -3814,6 +3814,17 @@ function _stattic_access_handle_client_script(): void
         exit;
     }
     echo '(function(){var popup=null;'
+        . 'var password=document.getElementById("sf-access-password-input");'
+        . 'if(password){var trimButton=document.createElement("button");'
+        . 'trimButton.type="button";trimButton.className="sf-button sf-button-quiet";'
+        . 'trimButton.textContent="Remove surrounding whitespace";'
+        . 'function updateTrim(){if(password.value===password.value.trim()){trimButton.remove();}'
+        . 'else{password.form.appendChild(trimButton);}}updateTrim();'
+        . 'password.addEventListener("input",updateTrim);'
+        . 'trimButton.addEventListener("click",function(){'
+        . 'var trimmed=password.value.trim();password.focus();password.select();'
+        . 'document.execCommand("insertText",false,trimmed);updateTrim();'
+        . '});}'
         . 'var links=document.querySelectorAll("[data-sf-access-popup]");'
         . 'function openPopup(event){var href=event.currentTarget.getAttribute("href");'
         . 'popup=window.open(href+(href.indexOf("?")<0?"?":"&")+"display=popup","sf-access","popup=yes,width=480,height=640");'

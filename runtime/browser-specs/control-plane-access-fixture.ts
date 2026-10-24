@@ -48,7 +48,7 @@ const [
 ]);
 
 const PASSWORD = "correct horse battery staple";
-const VERIFIED_EMAIL_PASSWORD = "verified email horse battery staple";
+const VERIFIED_EMAIL_PASSWORD = " verified email horse battery staple ";
 const accessRulesPath = fileURLToPath(
   new URL("../engine/runtime/access-rules.php", import.meta.url),
 );

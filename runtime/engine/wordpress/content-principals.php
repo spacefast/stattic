@@ -272,10 +272,12 @@ function spacefast_content_principal_capabilities(
         || !function_exists('get_current_user_id')
         || $subjectId !== get_current_user_id()
     ) {
-        return $allCapabilities;
+        return spacefast_content_principal_scope_capabilities($allCapabilities);
     }
     $roleName = spacefast_content_principal_role();
-    if (spacefast_content_space_id() !== '') {
+    // Only a lane that admitted this request projects a role; WP-CLI, cron and
+    // other unlaned processes keep the user's native role, minus installation caps.
+    if (spacefast_content_lane_space_id() !== '') {
         if ($roleName === null && function_exists('get_user_meta')) {
             $nativeRole = get_user_meta($subjectId, '_spacefast_native_role_' . spacefast_content_space_id(), true);
             $roleName = in_array($nativeRole, ['subscriber', 'editor', 'administrator'], true) ? $nativeRole : null;
@@ -301,15 +303,14 @@ function spacefast_content_principal_capabilities(
     return spacefast_content_principal_scope_capabilities($allCapabilities);
 }
 
+/**
+ * No user on a box administers the installation: plugins, themes, core, user
+ * accounts and site options belong to the platform. Unconditional, for every
+ * user and every entry point, with or without a Space in scope; a Space ID that
+ * fails to resolve must never hand an administrator these back.
+ */
 function spacefast_content_principal_scope_capabilities(array $capabilities): array
 {
-    if (spacefast_content_space_id() === '') {
-        return $capabilities;
-    }
-    // A Space role conveys authority over this Space only. These capabilities
-    // gate installation-wide work, and their WordPress consumers (export.php,
-    // import.php, site-health.php, the personal-data tools) read and write with
-    // direct SQL that never passes through the Space scoping filters.
     foreach (['manage_options', 'promote_users', 'create_users', 'delete_users', 'remove_users', 'activate_plugins', 'install_plugins', 'update_plugins', 'delete_plugins', 'edit_plugins', 'install_themes', 'update_themes', 'delete_themes', 'switch_themes', 'edit_themes', 'update_core', 'manage_network', 'manage_network_options', 'manage_network_plugins', 'manage_network_themes', 'manage_sites', 'create_sites', 'delete_sites', 'export', 'import', 'view_site_health_checks', 'export_others_personal_data', 'erase_others_personal_data', 'manage_privacy_options'] as $capability) {
         $capabilities[$capability] = false;
     }

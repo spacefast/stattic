@@ -356,11 +356,8 @@ $references = [
   $reference(['type' => 'json'], 'not json'),
 ];
 
-// The site editor's own post types are scoped by the same two hooks every other
-// content type uses: a stamp on save, a meta clause on read. Without both, one
-// co-hosted Space would see and overwrite another's templates and global styles.
-// Two saved rows under one theme on one box: 301 is this Space's edit of the
-// single template, 303 is a co-hosted Space's edit of the page template.
+// Saved editor templates carry the Space stamp; a plugin's unstamped or
+// differently stamped template cannot replace the source model's defaults.
 $templatePosts = [
   (object) ['ID' => 301, 'post_name' => 'single', 'post_content' => 'alpha-saved-single', 'post_date' => '2026-10-01 12:00:00', 'post_modified' => '2026-10-05 12:00:00'],
   (object) ['ID' => 303, 'post_name' => 'page', 'post_content' => 'beta-saved-page'],
@@ -368,8 +365,6 @@ $templatePosts = [
 $savedMeta[303]['_spacefast_space_id'] = 'spc_beta';
 do_action('save_post', 301, (object) ['ID' => 301, 'post_type' => 'wp_template']);
 do_action('save_post', 302, (object) ['ID' => 302, 'post_type' => 'wp_global_styles']);
-$templateQuery = new ContentModelTestQuery();
-spacefast_content_scope_post_query($templateQuery);
 // What core asks for when it resolves a document's template: the hierarchy's
 // slugs, through the kernel's own registered filter.
 $filteredTemplates = array_map(
@@ -409,7 +404,6 @@ echo json_encode([
     $savedMeta[301]['_spacefast_space_id'] ?? null,
     $savedMeta[302]['_spacefast_space_id'] ?? null,
   ],
-  'template_query' => $templateQuery->get('meta_query'),
   'template_theme_term' => $assignedTerms[301]['wp_theme'] ?? null,
   'filtered_templates' => $filteredTemplates,
   'staged' => $staged,
@@ -505,13 +499,8 @@ echo json_encode([
     ]);
     expect(output.templates_without_release).toEqual([]);
 
-    // Templates and global styles are private to the Space that saved them. A
-    // wp_template row is scoped by the wp_theme taxonomy, not by Space, so
-    // without this stamp every co-hosted Space would edit one shared set.
+    // Saved templates and global styles identify their source model's Space.
     expect(output.template_scope).toEqual(["spc_alpha", "spc_alpha"]);
-    expect(output.template_query).toEqual(
-      expect.arrayContaining([{ key: "_spacefast_space_id", value: "spc_alpha", compare: "=" }]),
-    );
     // And it carries the theme association core scopes template rows by.
     // `get_block_templates()` — the query WordPress's own front controller
     // resolves a document's template through — is fenced by a wp_theme tax_query,
@@ -899,8 +888,8 @@ $editorQuery = $readQuery();
 $editorCaps = $readCaps(5);
 $editorRestGuard = $restGuardVerdict($restGuard(24));
 $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = null;
-// A Space with no release has no declared collection to hide, and asking must
-// not cost it the clause that scopes it to its own content.
+// A Space with no release has no declared collection to hide. Source-row
+// visibility still excludes stale bindings and retired documents.
 $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = null;
 $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = null;
 $releaselessQuery = $readQuery();
@@ -961,12 +950,29 @@ echo json_encode([
 
     // `publicRead` is the gate it was always described as. A declared collection
     // defaults to private, and its items live on `post` behind a term — so an
-    // anonymous reader's query excludes that term while keeping the Space clause,
+    // anonymous reader's query excludes that term while keeping source privacy,
     // and the by-id read is refused the same way rather than staying open.
-    const spaceClause = [{ key: "_spacefast_space_id", value: "spc_alpha", compare: "=" }];
+    const sourcePrivacy = (selected: string[]) => {
+      const visible = {
+        relation: "OR",
+        0: { key: "_spacefast_external_id", compare: "NOT EXISTS" },
+        1: { key: "_spacefast_external_id", value: "^source:", compare: "NOT REGEXP" },
+      };
+      return {
+        relation: "AND",
+        0:
+          selected.length === 0
+            ? visible
+            : {
+                ...visible,
+                2: { key: "_spacefast_external_id", value: selected, compare: "IN" },
+              },
+        1: { key: "_spacefast_source_retired", compare: "NOT EXISTS" },
+      };
+    };
     const projectsTerm = `sf-${spaceDigest("spc_alpha", 16)}-projects`;
     expect(output.anonymous_query).toEqual({
-      meta: expect.arrayContaining(spaceClause),
+      meta: sourcePrivacy(["source:sync.posts.launch"]),
       tax: [
         {
           taxonomy: "zero_collection",
@@ -984,11 +990,11 @@ echo json_encode([
       public: { id: "response" },
     });
     // An editor session keeps seeing everything in its own Space, on both lanes.
-    expect(output.editor_query).toEqual({ meta: spaceClause, tax: "" });
+    expect(output.editor_query).toEqual({ meta: "", tax: "" });
     expect(output.editor_caps).toEqual({ private: ["read"], public: ["read"] });
     expect(output.editor_rest_guard).toEqual({ id: "response" });
     expect(output.releaseless_query).toEqual({
-      meta: expect.arrayContaining(spaceClause),
+      meta: sourcePrivacy([]),
       tax: "",
     });
 

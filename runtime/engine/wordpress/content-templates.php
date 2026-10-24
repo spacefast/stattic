@@ -220,11 +220,9 @@ function spacefast_content_templates_filter(mixed $templates, mixed $query = [],
  * the templated page at one extra bounded lookup over the untemplated one, never
  * one per block and never one per slug in the hierarchy.
  *
- * The Space fence is stated on the query rather than left to the `pre_get_posts`
- * filter. A template read that answers with a co-hosted Space's row is a leak,
- * not a wrong screen, so this query carries its own scope whatever a caller does
- * with filters. The clause is the same one the filter would add, and
- * `spacefast_content_scope_meta_query()` recognizes it rather than stacking it.
+ * Only templates this Space's editor saved count: the query names the Space
+ * stamp the save wrote, so a theme's or plugin's own `wp_template` row never
+ * stands in for a Space template.
  *
  * @param list<string> $slugs
  * @return array<string,object>

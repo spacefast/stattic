@@ -97,7 +97,6 @@ if (function_exists('add_action')) {
     add_filter('redirect_canonical', '__return_false');
     add_filter('xmlrpc_enabled', '__return_false');
     add_filter('wp_is_application_passwords_available', '__return_false');
-    add_filter('rest_authentication_errors', 'spacefast_content_require_rest_scope', 1);
     add_action('rest_api_init', 'spacefast_content_admin_register_rest_routes');
     add_action('rest_api_init', 'spacefast_context_register_fields');
     add_filter('rest_pre_insert_page', 'spacefast_context_prepare_write', 10, 2);
@@ -116,8 +115,6 @@ if (function_exists('add_action')) {
         define('REDIRECTION_DISABLE', true);
     }
     add_filter('next_admin_get_admin_menu_items', 'spacefast_content_admin_menu_items');
-    add_filter('rest_user_query', 'spacefast_content_scope_rest_user_query', 10, 2);
-    add_action('pre_get_users', 'spacefast_content_scope_user_query');
     add_filter('pre_wp_unique_post_slug', 'spacefast_content_unique_slug', 10, 5);
     add_filter('wp_insert_post_data', 'spacefast_content_unique_draft_slug', 10, 2);
     add_filter('rest_request_before_callbacks', 'spacefast_content_rest_write_collection', 10, 3);
@@ -130,15 +127,13 @@ if (function_exists('add_action')) {
     add_action('admin_action_delete', 'spacefast_content_admin_guard_source_delete');
     add_filter('rest_request_after_callbacks', static function ($response) { unset($GLOBALS['SPACEFAST_CONTENT_WRITE_COLLECTION']); return $response; });
     add_action('post_updated', 'spacefast_content_remember_editor_slug', 10, 3);
-    add_action('pre_get_terms', 'spacefast_content_scope_term_query');
-    add_action('created_term', 'spacefast_content_scope_new_term');
+    add_action('created_term', 'spacefast_content_public_routes_schedule');
     add_action('edited_term', 'spacefast_content_public_routes_schedule');
     add_action('deleted_term', 'spacefast_content_public_routes_schedule');
     add_filter('comments_clauses', 'spacefast_content_scope_comment_clauses');
     add_action('pre_get_comments', 'spacefast_content_scope_comment_cache');
     add_filter('map_meta_cap', 'spacefast_content_native_meta_cap', 20, 4);
     add_filter('rest_prepare_comment', 'spacefast_content_native_rest_read', 10, 2);
-    add_action('rest_api_init', 'spacefast_content_native_rest_hooks');
     // Public links use the Space origin carried by the editor session; admin
     // assets and REST stay on its cookie-bearing host. Visitor aliases keep
     // their request origin because they have no editor public-origin claim.
@@ -157,7 +152,6 @@ if (function_exists('add_action')) {
     add_filter('wp_is_site_protected_by_basic_auth', '__return_false');
     add_filter('admin_email_check_interval', '__return_zero');
     add_filter('admin_footer_text', 'spacefast_content_admin_footer');
-    add_filter('ajax_query_attachments_args', 'spacefast_content_scope_attachment_query');
     add_filter('map_meta_cap', 'spacefast_content_scope_meta_cap', 10, 4);
     add_filter('rest_request_before_callbacks', 'spacefast_content_rest_guard_single_read', 5, 3);
     add_filter('get_block_templates', 'spacefast_content_templates_filter', 10, 3);
@@ -168,15 +162,73 @@ if (function_exists('add_action')) {
     add_filter('acf/update_value', 'spacefast_content_prepare_scf_value', 10, 3);
     add_filter('acf/validate_value', 'spacefast_content_validate_scf_value', 10, 4);
 }
+/**
+ * The Space this WordPress serves.
+ *
+ * A box hosts exactly one Space. A lane that admitted a request names it; a
+ * process no lane started (WP-CLI, cron, a plugin's own endpoint) reads it from
+ * the box itself, so every entry point sees the same Space.
+ */
 function spacefast_content_space_id(): string
 {
+    $spaceId = $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? spacefast_content_box_space_id();
+    return spacefast_content_space_id_valid($spaceId) ? $spaceId : '';
+}
+
+/**
+ * The Space a runtime lane admitted for this request, or '' when no lane
+ * started the process.
+ */
+function spacefast_content_lane_space_id(): string
+{
     $spaceId = $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? null;
+    return spacefast_content_space_id_valid($spaceId) ? $spaceId : '';
+}
+
+/**
+ * WP-CLI and wp-cron are started by the platform, not by a visitor: no lane
+ * projected a principal, and their users keep their native roles.
+ */
+function spacefast_content_platform_process(): bool
+{
+    if (spacefast_content_lane_space_id() !== '') {
+        return false;
+    }
+    return (defined('WP_CLI') && WP_CLI)
+        || (function_exists('wp_doing_cron') && wp_doing_cron());
+}
+
+function spacefast_content_space_id_valid(mixed $spaceId): bool
+{
     return is_string($spaceId)
         && strlen($spaceId) >= 1
         && strlen($spaceId) <= 128
-        && preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*$/', $spaceId) === 1
-        ? $spaceId
-        : '';
+        && preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*$/', $spaceId) === 1;
+}
+
+/**
+ * The box's one Space: the single Space directory under the private storage
+ * root. No root, no Space yet (a warm-pool box), or more than one answers '':
+ * an ambiguous box never guesses.
+ */
+function spacefast_content_box_space_id(): string
+{
+    static $resolved = [];
+    $root = spacefast_content_upload_private_root();
+    if ($root === '') {
+        return '';
+    }
+    if (!array_key_exists($root, $resolved)) {
+        $spaces = [];
+        $entries = is_dir($root . '/spaces') ? scandir($root . '/spaces') : false;
+        foreach (is_array($entries) ? $entries : [] as $entry) {
+            if ($entry !== '.' && $entry !== '..' && spacefast_content_space_id_valid($entry) && is_dir($root . '/spaces/' . $entry)) {
+                $spaces[] = $entry;
+            }
+        }
+        $resolved[$root] = count($spaces) === 1 ? $spaces[0] : '';
+    }
+    return $resolved[$root];
 }
 
 function spacefast_content_require_space_id(): string
@@ -259,6 +311,14 @@ function spacefast_content_upload_private_root(): string
     return is_string($root) && str_starts_with($root, '/') ? rtrim($root, '/') : '';
 }
 
+/**
+ * Every upload on the box lands in the Space's private media root and is served
+ * by the content-media lane, which applies the Space's access rules. That is
+ * the reason to keep it on a one-Space box: files under `wp-content/uploads`
+ * are static files the access engine never sees, so a private Space's media
+ * would leak there. Plugin uploads (product images, Woo's own subdirectories) follow the
+ * same root, from every entry point, including WP-CLI and cron.
+ */
 function spacefast_content_scope_upload_dir(array $uploads): array
 {
     $spaceId = spacefast_content_space_id();
@@ -278,32 +338,6 @@ function spacefast_content_scope_upload_dir(array $uploads): array
     $uploads['path'] = $uploads['basedir'] . $subdir;
     $uploads['url'] = $uploads['baseurl'] . $subdir;
     return $uploads;
-}
-
-/** WordPress owns endpoint permissions; the runtime supplies the tenant boundary. */
-function spacefast_content_require_rest_scope(mixed $result): mixed
-{
-    if ($result !== null || spacefast_content_space_id() !== '' || !class_exists('WP_Error')) {
-        return $result;
-    }
-    return new WP_Error('content_space_scope_invalid', 'Content requires a Space scope.', ['status' => 403]);
-}
-
-function spacefast_content_scope_rest_user_query(array $args, mixed $request): array
-{
-    // Scope core's user queries to this request's Space, the same membership
-    // meta spacefast_content_users_list() filters on, so /wp/v2/users is the
-    // Space's directory and not the box's. The scope depends only on the Space,
-    // never on the caller: both REST doors reach this filter, and the WP API
-    // door (spacefast_content_require_rest_scope) admits on a principal role
-    // while setting no SPACEFAST_CONTENT_ADMIN_USER_ID. Keying on that global
-    // would leave the API door unscoped, so the guard is the Space alone.
-    $spaceId = spacefast_content_space_id();
-    if ($spaceId !== '') {
-        $args['meta_key'] = SPACEFAST_CONTENT_SPACE_META;
-        $args['meta_value'] = $spaceId;
-    }
-    return $args;
 }
 
 function spacefast_content_lock_admin(): void
@@ -338,32 +372,12 @@ function spacefast_content_enforce_admin_resource(string $page): void
     if (!function_exists('wp_die')) {
         return;
     }
-    if (in_array($page, ['post.php', 'revision.php', 'media.php'], true) && function_exists('get_post')) {
-        $postId = (int) (
-            $_GET['post']
-            ?? $_GET['revision']
-            ?? $_GET['attachment_id']
-            ?? $_POST['post_ID']
-            ?? $_POST['attachment_id']
-            ?? 0
-        );
-        $post = $postId > 0 ? get_post($postId) : null;
-        if (is_object($post) && ($page === 'revision.php' || (string) ($post->post_type ?? '') === 'revision')) {
-            $post = get_post((int) ($post->post_parent ?? 0));
-        }
-        $postType = is_object($post) ? (string) ($post->post_type ?? '') : '';
-        $allowed = $postType === 'attachment'
-            ? spacefast_content_post_belongs_to_space((int) ($post->ID ?? 0))
-            : spacefast_content_collection_for_post_type($postType) !== null
-                && spacefast_content_post_belongs_to_space((int) ($post->ID ?? 0));
-        if (!$allowed) {
-            wp_die('This content belongs to another Space.', 'Unavailable', ['response' => 403]);
-        }
-    }
+    // post.php, revision.php and media.php answer under WordPress's own
+    // capabilities: everything on the box is this Space's, native plugin post
+    // types included.
     if ($page === 'site-editor.php') {
-        // The editor addresses one resource at a time. A template id belonging
-        // to another Space is a 403 here rather than a rendered editor, which is
-        // the same answer post.php gives for another Space's post.
+        // The editor addresses one resource at a time. A template id the site
+        // editor does not own here is a 403 rather than a rendered editor.
         $resourceId = is_string($_GET['postId'] ?? null) ? $_GET['postId'] : '';
         $postType = is_string($_GET['postType'] ?? null) ? $_GET['postType'] : '';
         if ($postType !== '' && !in_array($postType, SPACEFAST_CONTENT_TEMPLATE_POST_TYPES, true)) {
@@ -689,31 +703,6 @@ function spacefast_content_space_meta_clause(): array
     ];
 }
 
-function spacefast_content_scope_meta_query(mixed $query): array
-{
-    $query = is_array($query) ? $query : [];
-    if ($query === []) {
-        return [spacefast_content_space_meta_clause()];
-    }
-    $relation = strtoupper((string) ($query['relation'] ?? 'AND'));
-    foreach ($query as $clause) {
-        if (
-            $relation === 'AND'
-            && is_array($clause)
-            && ($clause['key'] ?? null) === SPACEFAST_CONTENT_SPACE_META
-            && ($clause['value'] ?? null) === spacefast_content_space_id()
-            && ($clause['compare'] ?? '=') === '='
-        ) {
-            return $query;
-        }
-    }
-    return [
-        'relation' => 'AND',
-        spacefast_content_space_meta_clause(),
-        $query,
-    ];
-}
-
 /**
  * Whether this request may read a resource that is not publicRead.
  *
@@ -721,13 +710,12 @@ function spacefast_content_scope_meta_query(mixed $query): array
  * WordPress role; false for an anonymous visitor, which is what an island on a
  * public page is. Deliberately not `is_user_logged_in()`: the WP API door
  * admits a machine caller without ever creating a user for a person, and the
- * role is the thing that says how much of WordPress a request may touch. It is
- * the same pair spacefast_content_require_rest_scope() reads, for the same reason
- * — there is one policy here, not two.
+ * role is the thing that says how much of WordPress a request may touch.
  */
 function spacefast_content_may_read_private_resources(): bool
 {
     return ($GLOBALS['SPACEFAST_CONTENT_SYSTEM_OPERATION'] ?? false) === true
+        || spacefast_content_platform_process()
         || (int) ($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? 0) > 0
         || spacefast_content_principal_role() !== null
         || (function_exists('current_user_can') && current_user_can('edit_posts'));
@@ -844,18 +832,9 @@ function spacefast_content_scope_post_query(mixed $query): void
     ) {
         return;
     }
-    // Revisions inherit the authorized parent's Space. WordPress redirects
-    // update_post_meta() on revision IDs to that parent, so revision rows do
-    // not carry the Space meta fence themselves.
-    $revisionParentId = $query->get('post_type') === 'revision'
-        ? (int) $query->get('post_parent')
-        : 0;
-    if ($revisionParentId > 0
-        && spacefast_content_may_read_private_resources()
-        && spacefast_content_post_belongs_to_space($revisionParentId)) {
-        return;
-    }
-    $query->set('meta_query', spacefast_content_scope_meta_query($query->get('meta_query')));
+    // Every row on the box is this Space's, native plugin rows included; what
+    // remains is privacy: an anonymous reader never sees an unselected or
+    // retired source document, or a collection that is not publicRead.
     if (!spacefast_content_may_read_private_resources()) {
         $visible = ['relation' => 'OR',
             ['key' => SPACEFAST_CONTENT_EXTERNAL_ID_META, 'compare' => 'NOT EXISTS'],
@@ -863,10 +842,13 @@ function spacefast_content_scope_post_query(mixed $query): void
         ];
         $selected = spacefast_content_selected_source_ids();
         if ($selected !== []) $visible[] = ['key' => SPACEFAST_CONTENT_EXTERNAL_ID_META, 'value' => $selected, 'compare' => 'IN'];
+        $retired = ['key' => SPACEFAST_CONTENT_SOURCE_RETIRED_META, 'compare' => 'NOT EXISTS'];
         $meta = $query->get('meta_query');
-        $meta[] = $visible;
-        $meta[] = ['key' => SPACEFAST_CONTENT_SOURCE_RETIRED_META, 'compare' => 'NOT EXISTS'];
-        $query->set('meta_query', $meta);
+        // The caller's own query keeps its shape (an OR stays an OR) under a
+        // mandatory AND, so a privacy clause can never become an alternative.
+        $query->set('meta_query', is_array($meta) && $meta !== []
+            ? ['relation' => 'AND', $meta, $visible, $retired]
+            : ['relation' => 'AND', $visible, $retired]);
     }
     $requested = spacefast_content_requested_collection_term();
     if ($requested !== null) {
@@ -934,50 +916,28 @@ function spacefast_content_scope_posts(array $posts, mixed $query = null): array
     return $visible;
 }
 
-function spacefast_content_scope_attachment_query(array $query): array
-{
-    if (spacefast_content_space_id() !== '') {
-        $query['meta_query'] = spacefast_content_scope_meta_query($query['meta_query'] ?? []);
-    }
-    return $query;
-}
-
+/**
+ * The by-id half of publicRead. Without it the list lane is closed and the
+ * single-item route stays open, which is the worse half of a half-fix. Every
+ * other post capability is WordPress's own: product, coupon and order editing
+ * included.
+ */
 function spacefast_content_scope_meta_cap(array $caps, string $cap, int $userId, array $args): array
 {
-    if (spacefast_content_space_id() !== '' && in_array($cap, ['edit_user', 'delete_user', 'remove_user', 'promote_user'], true) && (int) ($args[0] ?? 0) !== $userId) {
-        return ['do_not_allow'];
-    }
-
     if (
-        spacefast_content_space_id() === ''
-        || !in_array($cap, ['delete_post', 'edit_post', 'read_post'], true)
+        $cap !== 'read_post'
+        || spacefast_content_space_id() === ''
         || !isset($args[0])
         || !function_exists('get_post')
     ) {
         return $caps;
     }
     $post = get_post((int) $args[0]);
-    if (!is_object($post)) {
-        return $caps;
-    }
-    $postType = (string) ($post->post_type ?? '');
-    if ($postType === 'revision') {
+    if (is_object($post) && (string) ($post->post_type ?? '') === 'revision') {
         $post = get_post((int) ($post->post_parent ?? 0));
-        $postType = is_object($post) ? (string) ($post->post_type ?? '') : '';
     }
     $postId = is_object($post) ? (int) ($post->ID ?? 0) : 0;
-    $allowedType = $postType === 'attachment'
-        || in_array($postType, SPACEFAST_CONTENT_TEMPLATE_POST_TYPES, true)
-        || spacefast_content_collection_for_post_type($postType) !== null;
-    if (!$allowedType || !spacefast_content_post_belongs_to_space($postId)) {
-        return ['do_not_allow'];
-    }
-    // The by-id half of publicRead. Without it the list lane is closed and the
-    // single-item route stays open, which is the worse half of a half-fix.
-    if ($cap === 'read_post' && spacefast_content_post_is_private($postId)) {
-        return ['do_not_allow'];
-    }
-    return $caps;
+    return $postId > 0 && spacefast_content_post_is_private($postId) ? ['do_not_allow'] : $caps;
 }
 
 /** Check single reads before core prepares a response and appends link headers. */
@@ -995,11 +955,11 @@ function spacefast_content_rest_guard_single_read(mixed $response, mixed $handle
         $hidden = $scoped && !spacefast_content_users_in_space($id);
     } else {
         $postId = $match[1] === 'comments' ? (int) (get_comment($id)->comment_post_ID ?? 0) : $id;
-        // Core reads a published post, or an inherit-status attachment, by id
-        // without asking `read_post`, so the Space fence in map_meta_cap never
-        // runs for it. Team design-system media is stamped with its storage
-        // Space too, and its own guard narrows it further.
-        $hidden = $postId > 0 && (($scoped && !spacefast_content_post_belongs_to_space($postId))
+        // Core reads published posts and inherit-status attachments without
+        // asking `read_post`. Keep source privacy and the media storage-Space
+        // check here; native posts need no membership stamp on a one-Space box.
+        // Team design-system media has its storage-Space stamp and own guard.
+        $hidden = $postId > 0 && (($match[1] === 'media' && $scoped && !spacefast_content_post_belongs_to_space($postId))
             || spacefast_content_post_is_private($postId));
     }
     if ($hidden) {

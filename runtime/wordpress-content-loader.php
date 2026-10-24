@@ -36,16 +36,22 @@ declare(strict_types=1);
     if (is_file($nativeProcess)) {
         require_once $nativeProcess;
     }
+    // A process no runtime lane started (WP-CLI, cron, a plugin's own endpoint)
+    // still runs on this box, whose private root is where the kernel finds the
+    // box's one Space and puts its media.
+    if (!is_string($GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? null) && is_dir($installRoot . '/storage')) {
+        $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $installRoot . '/storage';
+    }
     $kernel = $releaseReal . '/engine/wordpress/content-kernel.php';
     if (is_file($kernel)) {
         require $kernel;
     }
 
-    // ContentModelReleases are per Space. One wp.cloud site hosts many Spaces, so a
-    // request without an exact Space scope (wp-cron and similar) loads no
-    // content model at all. The release is data: the kernel projects it into native
-    // WordPress. No generated plugin is executed here. The kernel owns the scope
-    // check, and without a kernel nothing below has a reader.
+    // The box's one Space selects its ContentModelRelease, from every entry
+    // point. A box with no Space yet loads no content model at all. The release
+    // is data: the kernel projects it into native WordPress. No generated plugin
+    // is executed here. The kernel owns the Space resolution, and without a
+    // kernel nothing below has a reader.
     $spaceId = function_exists('spacefast_content_space_id') ? spacefast_content_space_id() : '';
     if ($spaceId === '') {
         return;

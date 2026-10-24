@@ -90,7 +90,12 @@ function spacefast_context_markdown(array $page): ?string
 }
 
 /** The parameters a context save may carry. Status, slug, parent and the rest stay as source declares them. */
-const SPACEFAST_CONTEXT_WRITE_PARAMETERS = ['id', 'context', 'title', 'content', 'markdown', 'spacefast_revision'];
+const SPACEFAST_CONTEXT_WRITE_PARAMETERS = ['id', 'context', 'title', 'content', 'markdown', 'spacefast_revision', 'meta'];
+
+/** The meta key the Gutenberg plugin's editor saves its shared real-time document under. */
+const SPACEFAST_CONTEXT_CRDT_META = '_crdt_document';
+/** Revisions produced by live-editor saves since the last write from outside the live session. */
+const SPACEFAST_CONTEXT_LIVE_REVISIONS_META = '_spacefast_context_live_revisions';
 
 /**
  * Every page write reaches this filter, whatever its route. A write to the
@@ -149,15 +154,32 @@ function spacefast_context_fenced_write(mixed $result, mixed $request, string $r
     $sent = array_keys(($request->get_json_params() ?? []) + ($request->get_body_params() ?? []) + ($request->get_query_params() ?? []));
     // `rest_route`, `_method`, `_fields`, `_wpnonce` and the like address the REST server, not the page.
     $refused = array_filter(array_diff($sent, SPACEFAST_CONTEXT_WRITE_PARAMETERS), static fn (string $key): bool => $key !== 'rest_route' && !str_starts_with($key, '_'));
+    // The live editor's own save also persists the shared real-time document; no other meta.
+    $meta = $request['meta'] ?? null;
+    if ($meta !== null && (!is_array($meta) || array_keys($meta) !== [SPACEFAST_CONTEXT_CRDT_META])) $refused[] = 'meta';
     if ($refused !== []) return new WP_Error('content_context_invalid', 'A context save may change only title and content or markdown. Refused: ' . implode(', ', $refused) . '.', ['status' => 400]);
     $expected = (string) ($request['spacefast_revision'] ?? '');
     if ($expected === '') return new WP_Error('content_context_revision_required', 'Send back the spacefast_revision you read.', ['status' => 400]);
+    $fromLiveEditor = $meta !== null;
     if (empty($GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT']) || !function_exists('_stattic_space_write_lock_with')) return new WP_Error('content_context_lock_unavailable', 'Context saves are unavailable. Retry later.', ['status' => 503]);
     try {
-        return spacefast_content_sync_locked(static function () use ($id, $expected, $request, $handler): array {
+        return spacefast_content_sync_locked(static function () use ($id, $expected, $request, $handler, $fromLiveEditor): array {
             clean_post_cache($id);
             $post = get_post($id);
-            if (!hash_equals(spacefast_context_revision($post), $expected)) return [new WP_Error('content_context_conflict', 'The context changed. Read it again before saving.', ['status' => 409])];
+            // Collaborators share one live draft, so a peer may already have saved
+            // exactly this content. Saving it again loses nothing, whatever revision
+            // this writer read.
+            $unchanged = !isset($request['markdown'])
+                && (!isset($request['title']) || $request['title'] === $post->post_title)
+                && (!isset($request['content']) || $request['content'] === $post->post_content);
+            $current = spacefast_context_revision($post);
+            // Collaborators also save over each other's saves: an editor may still hold the
+            // revision a peer just replaced. That is not a conflict while the post has only
+            // moved through live-editor saves, so no outside write is being overwritten.
+            $liveRevisions = $fromLiveEditor ? spacefast_context_live_revisions($id) : [];
+            $inLiveSession = $liveRevisions !== [] && end($liveRevisions) === $current && in_array($expected, $liveRevisions, true);
+            if (!$unchanged && !$inLiveSession && !hash_equals($current, $expected)) return [new WP_Error('content_context_conflict', 'The context changed. Read it again before saving.', ['status' => 409])];
+            if (!$fromLiveEditor && spacefast_context_live_editors($post)) return [new WP_Error('content_context_live_editing', 'People are editing this context live. Try again after they finish, or ask them to make the change.', ['status' => 409])];
             $before = spacefast_content_sync_current_revision_id($id);
             $GLOBALS['SPACEFAST_CONTEXT_FENCED_WRITE'] = $id;
             try {
@@ -167,7 +189,14 @@ function spacefast_context_fenced_write(mixed $result, mixed $request, string $r
             }
             if (is_wp_error($response) || ($response instanceof WP_REST_Response && $response->is_error())) return [$response];
             $saved = get_post($id);
-            if ($saved->post_title === $post->post_title && $saved->post_content === $post->post_content) return [$response];
+            if ($saved->post_title === $post->post_title && $saved->post_content === $post->post_content) {
+                if ($fromLiveEditor) spacefast_context_track_live_revision($id, $current, $liveRevisions, $current);
+                return [$response];
+            }
+            if (!$fromLiveEditor) {
+                spacefast_context_reset_live_state($post);
+                delete_post_meta($id, SPACEFAST_CONTEXT_LIVE_REVISIONS_META);
+            }
             // WordPress revisions the update itself; adding another duplicated every
             // history entry. Only create one when the site's revisioning did not.
             $revisionId = spacefast_content_sync_current_revision_id($id);
@@ -177,11 +206,105 @@ function spacefast_context_fenced_write(mixed $result, mixed $request, string $r
             if ($response instanceof WP_REST_Response && is_array($response->get_data()) && array_key_exists('spacefast_revision', $response->get_data())) {
                 $response->set_data(['spacefast_revision' => spacefast_context_revision(get_post($id))] + $response->get_data());
             }
+            if ($fromLiveEditor) spacefast_context_track_live_revision($id, $current, $liveRevisions, spacefast_context_revision(get_post($id)));
             return [$response];
         })[0];
     } catch (Spacefast_Content_Error $error) {
         return new WP_Error($error->codeName, $error->getMessage(), ['status' => $error->status]);
     }
+}
+
+/** @return list<string> */
+function spacefast_context_live_revisions(int $id): array
+{
+    $stored = get_post_meta($id, SPACEFAST_CONTEXT_LIVE_REVISIONS_META, true);
+    return is_array($stored) ? array_values(array_filter($stored, 'is_string')) : [];
+}
+
+/**
+ * Remember a live-editor save's resulting revision. When the post had moved
+ * since the last live save, an outside write intervened, so start a new chain
+ * from the revision this save read.
+ *
+ * @param list<string> $chain
+ */
+function spacefast_context_track_live_revision(int $id, string $before, array $chain, string $after): void
+{
+    if ($chain === [] || end($chain) !== $before) $chain = [$before];
+    if (end($chain) !== $after) $chain[] = $after;
+    update_post_meta($id, SPACEFAST_CONTEXT_LIVE_REVISIONS_META, array_slice($chain, -50));
+}
+
+/**
+ * Real-time editing is the Gutenberg plugin's, which the platform installs on
+ * every box. The kernel owns its experiment switch so the policy ships with the
+ * engine instead of living as mutable box state.
+ */
+function spacefast_context_enable_collaboration(mixed $experiments): array
+{
+    return [...(is_array($experiments) ? $experiments : []), 'gutenberg-real-time-collaboration' => 1];
+}
+
+/**
+ * The plugin hands the editor its collaboration flags on admin_init only. The
+ * Space dashboard's editor assets are served over REST, where admin_init never
+ * runs, so run the plugin's own setup when those assets are gathered. (The
+ * dashboard sets a screen first, which makes is_admin() true there.)
+ */
+function spacefast_context_collaboration_flags(): void
+{
+    if (did_action('admin_init')) return;
+    if (function_exists('gutenberg_enable_experiments')) gutenberg_enable_experiments();
+    if (function_exists('gutenberg_inject_collaboration_disabled_post_types')) gutenberg_inject_collaboration_disabled_post_types();
+}
+
+function spacefast_context_collaboration_enabled(): bool
+{
+    return function_exists('wp_is_collaboration_enabled') && wp_is_collaboration_enabled();
+}
+
+/** The Gutenberg plugin's storage post for this document's live editing room, if one exists. */
+function spacefast_context_room_post(object $post): ?int
+{
+    // Found the way the plugin finds it, so a read never creates a room.
+    $ids = get_posts(['post_type' => SPACEFAST_CONTENT_SYNC_ROOM_POST_TYPE, 'name' => md5('postType/page:' . $post->ID), 'post_status' => 'publish', 'fields' => 'ids', 'posts_per_page' => 1]);
+    return isset($ids[0]) ? (int) $ids[0] : null;
+}
+
+/**
+ * Whether people have this document open in the live editor now. An editor
+ * polls continuously; the plugin forgets a client after its awareness timeout.
+ */
+function spacefast_context_live_editors(object $post): bool
+{
+    if (!spacefast_context_collaboration_enabled() || !class_exists('WP_Sync_Post_Meta_Storage') || spacefast_context_room_post($post) === null) return false;
+    $timeout = class_exists('WP_HTTP_Polling_Sync_Server') ? WP_HTTP_Polling_Sync_Server::AWARENESS_TIMEOUT : 30;
+    foreach ((new WP_Sync_Post_Meta_Storage())->get_awareness_state('postType/page:' . $post->ID) as $entry) {
+        if (time() - (int) ($entry['updated_at'] ?? 0) < $timeout) return true;
+    }
+    return false;
+}
+
+/**
+ * A write from outside the live editor is not in the room's queued updates.
+ * Nobody is live (the save checked), so drop them: the next session opens from
+ * the persisted shared document, which then takes the saved content, instead
+ * of replaying edits made against the older text over it. The persisted
+ * document stays, so a tab that slept through this still shares its ancestry
+ * and merges like any concurrent edit rather than duplicating text.
+ */
+function spacefast_context_reset_live_state(object $post): void
+{
+    if (!class_exists('WP_Sync_Post_Meta_Storage') || spacefast_context_room_post($post) === null) return;
+    // Every queued update: the storage's own cursor is per-request state.
+    (new WP_Sync_Post_Meta_Storage())->remove_updates_before_cursor('postType/page:' . $post->ID, PHP_INT_MAX);
+}
+
+function spacefast_context_record_actor(int $revisionId): void
+{
+    $user = wp_get_current_user();
+    $identity = spacefast_content_principal_user_authority((int) $user->ID);
+    update_metadata('post', $revisionId, '_spacefast_context_actor', ['name' => $user->display_name ?: 'Space collaborator', 'kind' => ($identity['kind'] ?? 'user') === 'service' ? 'service' : 'user']);
 }
 
 /**
@@ -195,11 +318,4 @@ function spacefast_context_revision_actor(array $revision): array
     // Read the revision post itself: a `_fields` request leaves `author` out of $revision.
     $author = (int) (get_post((int) $revision['id'])->post_author ?? 0);
     return ['name' => get_the_author_meta('display_name', $author) ?: 'Space collaborator', 'kind' => 'user'];
-}
-
-function spacefast_context_record_actor(int $revisionId): void
-{
-    $user = wp_get_current_user();
-    $identity = spacefast_content_principal_user_authority((int) $user->ID);
-    update_metadata('post', $revisionId, '_spacefast_context_actor', ['name' => $user->display_name ?: 'Space collaborator', 'kind' => ($identity['kind'] ?? 'user') === 'service' ? 'service' : 'user']);
 }

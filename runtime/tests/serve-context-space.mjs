@@ -46,8 +46,12 @@ createServer(async (request, response) => {
     return;
   }
   // As on a Space: the whole REST lane under the visitor's session, plus core
-  // static assets.
-  if (url.pathname.startsWith("/wp-json/") || url.pathname.startsWith("/wp-includes/")) {
+  // and plugin static assets (the Gutenberg plugin serves the editor build).
+  if (
+    url.pathname.startsWith("/wp-json/") ||
+    url.pathname.startsWith("/wp-includes/") ||
+    url.pathname.startsWith("/wp-content/plugins/")
+  ) {
     const headers = { ...request.headers, host: "127.0.0.1:9417" };
     if (url.pathname.startsWith("/wp-json/")) {
       const nonce = (request.headers.cookie ?? "")

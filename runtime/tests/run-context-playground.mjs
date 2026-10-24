@@ -1,11 +1,12 @@
 /**
  * Real WordPress/SQLite acceptance. Run through pinned wp-playground-cli, not a
- * database substitute. WordPress is the exact archive the platform component
- * lock pins for every Space.
+ * database substitute. WordPress and the Gutenberg plugin are the exact
+ * archives the platform component lock pins for every Space.
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { openSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, openSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,7 +54,31 @@ const config = {
 };
 await writeFile(path.join(output, "config.json"), JSON.stringify(config));
 
-// The kernel loads as a must-use plugin, as on a box: before any request work.
+/** The locked plugin archive, verified against the lock and unpacked once. */
+async function lockedPlugin(component, folder) {
+  const cache = path.join(root, ".cache/wordpress-components");
+  const unpacked = path.join(cache, `${folder}-${component.version}`);
+  if (existsSync(path.join(unpacked, folder))) return path.join(unpacked, folder);
+  await mkdir(unpacked, { recursive: true });
+  const response = await fetch(component.archiveUrl);
+  assert.equal(response.ok, true, `Download ${component.archiveUrl}`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  assert.equal(bytes.length, component.archiveBytes, `${folder} archive size must match the lock`);
+  assert.equal(
+    `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+    component.archiveSha256,
+    `${folder} archive digest must match the lock`,
+  );
+  const archive = path.join(unpacked, "archive.zip");
+  await writeFile(archive, bytes);
+  assert.equal(spawnSync("unzip", ["-q", archive, "-d", unpacked]).status, 0, `Unpack ${folder}`);
+  await rm(archive);
+  return path.join(unpacked, folder);
+}
+const gutenberg = await lockedPlugin(release.gutenberg, "gutenberg");
+
+// The kernel loads as a must-use plugin, as on a box: before `init`, which is
+// where the Gutenberg plugin reads its collaboration switch.
 const mu = path.join(output, "mu-plugins");
 await mkdir(mu, { recursive: true });
 const kernelLoader = (preview) => `<?php
@@ -74,11 +99,14 @@ const wordpressMounts = [
   `${root}:/spacefast`,
   "--mount",
   `${mu}:/wordpress/wp-content/mu-plugins`,
+  "--mount",
+  `${gutenberg}:/wordpress/wp-content/plugins/gutenberg`,
 ];
 
 const blueprint = {
   preferredVersions: { php: "8.5", wp: release.wordpress.archiveUrl },
   steps: [
+    { step: "activatePlugin", pluginPath: "gutenberg/gutenberg.php" },
     {
       step: "runPHP",
       code: "<?php try { require '/wordpress/wp-load.php'; require '/spacefast/runtime/tests/fixtures/context-roundtrip.php'; } catch (Throwable $error) { file_put_contents('/spacefast/.cache/context-acceptance/failure.txt', get_class($error) . ': ' . $error->getMessage() . '\\n' . $error->getTraceAsString()); exit(1); }",
@@ -106,7 +134,10 @@ assert.deepEqual(receipt, {
   stale: 409,
   missingRevision: 400,
   markdown: 200,
-  foreignSpace: 404,
+  peerSaved: 200,
+  foreignMeta: 400,
+  styles: 200,
+  collaboration: { assets: true, sync: 200, viewerSync: 401, agentDuringLive: 409, liveSave: 200 },
   viewerEdit: 401,
   unauthorized: 401,
   casedRoute: 400,
@@ -148,9 +179,9 @@ if (process.argv.includes("--serve")) {
       "9417",
       "--wp",
       release.wordpress.archiveUrl,
-      // One worker: parallel workers contend for the one SQLite file and answer
-      // with database-error pages instead of JSON. A box runs MySQL; this is a
-      // local-preview limit.
+      // One worker: live editing polls every second from each tab, and parallel
+      // workers contend for the one SQLite file, answering with database-error
+      // pages instead of JSON. A box runs MySQL; this is a local-preview limit.
       "--workers",
       "1",
       "--blueprint",

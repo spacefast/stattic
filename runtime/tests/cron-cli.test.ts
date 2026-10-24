@@ -159,8 +159,8 @@ function wp_mail(array $to, string $subject, string $message, array $headers): b
       "functions/cron/body.php": BODY_PHP,
       "sf.jsonc": JSON.stringify({
         crons: [
-          { path: "/cron/report", schedule: "0 7 * * *" },
-          { path: "/cron/fail", schedule: "*/5 * * * *" },
+          { path: "/cron/report", schedule: "daily" },
+          { path: "/cron/fail", schedule: "12h" },
           { path: "/cron/fatal", schedule: "hourly" },
         ],
       }),

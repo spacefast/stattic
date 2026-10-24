@@ -1940,14 +1940,14 @@ mod tests {
     #[test]
     fn carries_crons_through_both_projections_and_addresses_their_issues() {
         let declared = json!([
-            { "path": "/api/cron/growth-report", "schedule": "0 7 * * *" },
+            { "path": "/api/cron/growth-report", "schedule": "daily" },
             { "path": "/api/cron/digest", "schedule": "twicedaily" }
         ]);
         let output = compile_source(
             r#"{
               "version": 1,
               "crons": [
-                { "path": "/api/cron/growth-report", "schedule": "0 7 * * *" },
+                { "path": "/api/cron/growth-report", "schedule": "daily" },
                 { "path": "/api/cron/digest", "schedule": "twicedaily" }
               ]
             }"#,

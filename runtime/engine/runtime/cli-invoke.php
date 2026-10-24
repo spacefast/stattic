@@ -46,6 +46,26 @@ const STATTIC_RUNTIME_INVOKE_EXIT_USAGE = 2;
 const STATTIC_RUNTIME_INVOKE_EXIT_UNRESOLVED = 3;
 const STATTIC_RUNTIME_INVOKE_EXIT_FAILED = 1;
 
+/**
+ * The execution-time ceiling for one scheduled run, under the one-minute floor
+ * any provider tick may have. It is a guard against a run that spins: the
+ * wall-clock bound comes from each remote call's own timeout.
+ */
+const STATTIC_SCHEDULED_RUN_MAX_SECONDS = 55;
+
+/**
+ * Cap a scheduled run's own execution time. On Linux this counts CPU, not time
+ * spent waiting on the network or a database, so every remote call a run makes
+ * carries its own timeout; this catches a run that spins. A host that disables
+ * `set_time_limit` removes the function, so its absence is not an error.
+ */
+function _stattic_cli_cap_scheduled_run(): void
+{
+    if (function_exists('set_time_limit')) {
+        set_time_limit(STATTIC_SCHEDULED_RUN_MAX_SECONDS);
+    }
+}
+
 function _stattic_cli_fail(string $message, int $code = STATTIC_RUNTIME_INVOKE_EXIT_USAGE): never
 {
     fwrite(STDERR, $message . "\n");

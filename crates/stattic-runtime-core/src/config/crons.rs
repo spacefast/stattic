@@ -99,7 +99,7 @@ pub fn json_schema() -> Value {
                 },
                 "schedule": {
                     "type": "string",
-                    "description": "hourly, daily, twicedaily, weekly, an Nh/Nd/Nw interval, or a five-field crontab expression."
+                    "description": "hourly, daily, twicedaily, weekly, or an Nh/Nd/Nw interval. Crontab expressions are not supported."
                 }
             },
             "required": ["path", "schedule"],
@@ -214,7 +214,7 @@ fn cron_schedule(entry: &Map<String, Value>) -> Result<String, String> {
     };
     if !schedule_is_valid(schedule) {
         return Err(format!(
-            "The crons schedule {schedule} must be hourly, daily, twicedaily, weekly, an Nh/Nd/Nw interval, or a five-field crontab expression."
+            "The crons schedule {schedule} must be hourly, daily, twicedaily, weekly, or an Nh/Nd/Nw interval. Crontab expressions are not supported."
         ));
     }
     Ok(schedule.to_string())
@@ -235,92 +235,31 @@ pub fn cron_key(path: &str) -> String {
     key.trim_matches('-').to_string()
 }
 
-/// The wp.cloud schedule grammar: named intervals, `Nh`/`Nd`/`Nw` shorthand, or
-/// a five-field crontab expression. No `@daily` macros and no month/day names —
-/// the provider does not accept them either.
+/// The provider's basic schedule grammar: named intervals or `Nh`/`Nd`/`Nw`
+/// shorthand. Five-field crontab expressions are not accepted: they need the
+/// provider's advanced cron, which the platform does not use, because a
+/// per-minute expression multiplied across a fleet floods the provider's job
+/// queue. The TypeScript config schema holds the same grammar.
 #[must_use]
 pub fn schedule_is_valid(schedule: &str) -> bool {
     if matches!(schedule, "hourly" | "daily" | "twicedaily" | "weekly") {
         return true;
     }
-    if let Some(unit) = schedule.chars().last() {
-        let limit = match unit {
-            'h' => Some(12u32),
-            'd' => Some(23),
-            'w' => Some(6),
-            _ => None,
-        };
-        if let Some(limit) = limit {
-            let digits = &schedule[..schedule.len() - 1];
-            return !digits.is_empty()
-                && digits.bytes().all(|byte| byte.is_ascii_digit())
-                && digits
-                    .parse::<u32>()
-                    .is_ok_and(|count| (1..=limit).contains(&count));
-        }
-    }
-    crontab_expression_is_valid(schedule)
-}
-
-/// Field bounds, in crontab order: minute, hour, day of month, month, weekday.
-const CRON_FIELD_BOUNDS: [(u32, u32); 5] = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)];
-
-fn crontab_expression_is_valid(schedule: &str) -> bool {
-    let fields = schedule.split(' ').collect::<Vec<_>>();
-    fields.len() == 5
-        && fields
-            .iter()
-            .zip(CRON_FIELD_BOUNDS)
-            .all(|(field, bounds)| cron_field_is_valid(field, bounds))
-}
-
-fn cron_field_is_valid(field: &str, (min, max): (u32, u32)) -> bool {
-    !field.is_empty()
-        && field.split(',').all(|item| {
-            let (range, step) = match item.split_once('/') {
-                Some((range, step)) => (range, Some(step)),
-                None => (item, None),
-            };
-            // A step only makes sense over a span, which is what `*` and `a-b`
-            // are; `5/2` names one value and then asks to skip within it.
-            let span = match range {
-                "*" => true,
-                _ => match range.split_once('-') {
-                    Some((start, end)) => {
-                        let (Some(start), Some(end)) =
-                            (cron_number(start, min, max), cron_number(end, min, max))
-                        else {
-                            return false;
-                        };
-                        if start > end {
-                            return false;
-                        }
-                        true
-                    }
-                    None => {
-                        if cron_number(range, min, max).is_none() {
-                            return false;
-                        }
-                        false
-                    }
-                },
-            };
-            match step {
-                None => true,
-                Some(step) => {
-                    span && !step.is_empty()
-                        && step.bytes().all(|byte| byte.is_ascii_digit())
-                        && step.parse::<u32>().is_ok_and(|step| step >= 1)
-                }
-            }
-        })
-}
-
-fn cron_number(value: &str, min: u32, max: u32) -> Option<u32> {
-    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-        .then(|| value.parse::<u32>().ok())
-        .flatten()
-        .filter(|number| (min..=max).contains(number))
+    let Some(unit) = schedule.chars().last() else {
+        return false;
+    };
+    let limit = match unit {
+        'h' => 12u32,
+        'd' => 23,
+        'w' => 6,
+        _ => return false,
+    };
+    let digits = &schedule[..schedule.len() - 1];
+    !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && digits
+            .parse::<u32>()
+            .is_ok_and(|count| (1..=limit).contains(&count))
 }
 
 /// The generated runtime file, or `None` when the version declares no crons.
@@ -351,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_schedules_cover_named_shorthand_and_crontab_forms() {
+    fn accepted_schedules_cover_named_and_shorthand_forms() {
         for schedule in [
             "hourly",
             "daily",
@@ -361,17 +300,13 @@ mod tests {
             "12h",
             "23d",
             "6w",
-            "0 7 * * *",
-            "*/5 * * * *",
-            "0,30 0-23/2 1-31 1,6,12 0-7",
-            "59 23 31 12 7",
         ] {
             assert!(schedule_is_valid(schedule), "{schedule} must be accepted");
         }
     }
 
     #[test]
-    fn rejected_schedules_cover_bounds_macros_names_and_malformed_fields() {
+    fn rejected_schedules_cover_crontab_expressions_bounds_and_macros() {
         for schedule in [
             "",
             "0h",
@@ -381,23 +316,11 @@ mod tests {
             "1H",
             "hourly ",
             "@daily",
-            "0 7 * *",
-            "0 7 * * * *",
-            "0  7 * * *",
-            "jan 7 * * *",
-            "0 7 * jan *",
-            "0 7 * * mon",
-            "60 * * * *",
-            "* 24 * * *",
-            "* * 0 * *",
-            "* * * 13 *",
-            "* * * * 8",
-            "5-1 * * * *",
-            "*/0 * * * *",
-            "5/2 * * * *",
-            "0, * * * *",
-            "*/ * * * *",
-            "-5 * * * *",
+            "nightly",
+            // Crontab expressions of any cadence need the provider's advanced cron.
+            "* * * * *",
+            "*/5 * * * *",
+            "0 7 * * *",
         ] {
             assert!(!schedule_is_valid(schedule), "{schedule} must be rejected");
         }
@@ -465,7 +388,7 @@ mod tests {
     fn the_artifact_carries_verbatim_schedules_and_only_when_declared() {
         assert_eq!(artifact(&[]), None);
         let (entries, issues) = validate(&json!([
-            { "path": "/api/cron/growth-report", "schedule": "0 7 * * *" },
+            { "path": "/api/cron/growth-report", "schedule": "daily" },
             { "path": "/api/cron/digest", "schedule": "twicedaily" },
         ]));
         assert!(issues.is_empty(), "{issues:?}");
@@ -477,7 +400,7 @@ mod tests {
                     {
                         "key": "api-cron-growth-report",
                         "path": "/api/cron/growth-report",
-                        "schedule": "0 7 * * *"
+                        "schedule": "daily"
                     },
                     {
                         "key": "api-cron-digest",

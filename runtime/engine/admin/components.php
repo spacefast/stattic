@@ -171,6 +171,7 @@ function _stattic_component_plugins(array $lock, array &$problems): array
     $wanted = [
         'secure-custom-fields' => 'secure-custom-fields',
         'redirection' => 'redirection',
+        'gutenberg' => 'gutenberg',
         'block-transformer' => 'blocks-engine-php-transformer',
     ];
     foreach ($wanted as $componentId => $textDomain) {

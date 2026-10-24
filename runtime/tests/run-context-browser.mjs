@@ -30,6 +30,8 @@ await editor.route("**/*", (route) => {
 });
 const page = await editor.newPage();
 page.setDefaultTimeout(60000);
+// The editor saves through Gutenberg itself (the native page endpoint), which
+// also persists the shared real-time document. Agents save the same page.
 // The header's save state; the Save button's spinner is a status too.
 const saveState = (target) => target.locator('header [role="status"][aria-live="polite"]');
 // The document is the Space's `context` page; people and agents save it through
@@ -40,11 +42,22 @@ const editorSave = (target, status) =>
   target.waitForResponse(
     (response) =>
       response.url().startsWith(`${pages}/`) &&
-      response.request().method() === "POST" &&
+      ["POST", "PUT"].includes(response.request().method()) &&
       (status === undefined || response.status() === status),
   );
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
+// Each editor's identity in the live room, as Gutenberg's sync announces it.
+const liveClients = new Map();
+const trackLiveClient = (target) =>
+  target.on("request", (request) => {
+    if (!request.url().includes("/wp-sync/v1/updates")) return;
+    const room = JSON.parse(request.postData() ?? "{}").rooms?.find((entry) =>
+      entry.room.startsWith("postType/page:"),
+    );
+    if (room) liveClients.set(target, room.client_id);
+  });
+trackLiveClient(page);
 try {
   await page.goto(origin);
   const title = page.getByRole("textbox", { name: "Title", exact: true });
@@ -92,12 +105,71 @@ try {
   await expect(blocks).toHaveCount(blockCount);
   await page.screenshot({ path: path.join(output, "context-editor-light.png"), fullPage: true });
 
-  // Agents save through the same page; concurrent writes serialize.
+  // Live co-editing through the Gutenberg plugin's sync: a second editor sees
+  // typing and title changes as they happen, without saving or reloading.
+  const peerContext = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    extraHTTPHeaders: { "x-wp-nonce": native.nonce },
+  });
+  await peerContext.addCookies([{ name: native.cookie, value: native.value, url: origin }]);
+  const peer = await peerContext.newPage();
+  peer.setDefaultTimeout(60000);
+  peer.on("pageerror", (error) => errors.push(`peer: ${error.message}`));
+  trackLiveClient(peer);
+  await peer.goto(origin);
+  const peerTitle = peer.getByRole("textbox", { name: "Title", exact: true });
+  await peer.locator('.sf-context-blocks [contenteditable="true"]').first().waitFor();
+  const live = `Typed live ${Date.now()}`;
+  await body.click();
+  await body.press("End");
+  await body.pressSequentially(` ${live}`);
+  await expect(peer.locator(".sf-context-blocks")).toContainText(live);
+  await peerTitle.fill("Co-edited title");
+  await expect(title).toHaveValue("Co-edited title");
+  await peer.screenshot({ path: path.join(output, "context-coedit-peer.png") });
+  // One person saves the shared draft; the other sees it saved without acting.
+  await expect(saveState(peer)).toHaveText("Unsaved changes");
+  const shared = editorSave(page, 200);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await shared;
+  await expect(saveState(page)).toHaveText("Saved");
+  await expect(saveState(peer)).toHaveText("Saved", { timeout: 60000 });
+  await peerContext.close();
+
+  const coEdited = await read();
+  assert.equal(coEdited.title.raw, "Co-edited title");
+  assert.match(coEdited.content.raw, new RegExp(live));
+  // An outside write cannot merge into a live session, so agents wait for it.
+  const duringLive = await editor.request.post(`${pages}/${coEdited.id}`, {
+    data: { spacefast_revision: coEdited.spacefast_revision, title: "Agent revision" },
+  });
+  assert.equal(duringLive.status(), 409);
+  assert.equal((await duringLive.json()).code, "content_context_live_editing");
+  // The closed peer and a tab that went quiet (asleep, offline) drop out of the
+  // live session; the plugin would also forget them after its awareness timeout.
+  await page.route("**/wp-json/wp-sync/**", (route) => route.abort());
+  for (const clientId of liveClients.values()) {
+    const left = await editor.request.post(`${origin}/wp-json/wp-sync/v1/updates`, {
+      data: {
+        rooms: [
+          {
+            room: `postType/page:${coEdited.id}`,
+            client_id: clientId,
+            after: 0,
+            awareness: null,
+            updates: [],
+          },
+        ],
+      },
+    });
+    assert.equal(left.status(), 200);
+  }
+  // ...so agents may write again, and concurrent writes still serialize.
   const race = await Promise.all(
     ["Agent revision A", "Agent revision B"].map(async (nextTitle) =>
       (
-        await editor.request.post(`${pages}/${human.id}`, {
-          data: { spacefast_revision: human.spacefast_revision, title: nextTitle },
+        await editor.request.post(`${pages}/${coEdited.id}`, {
+          data: { spacefast_revision: coEdited.spacefast_revision, title: nextTitle },
         })
       ).status(),
     ),
@@ -107,17 +179,19 @@ try {
     [200, 409],
   );
   const agentTitle = (await read()).title.raw;
-  // Saving over the agent's newer change is refused, and the edit is kept.
+  // Back in the quiet tab, saving over the agent's change is refused, not lost.
   await title.fill("Keep my local title");
   const conflict = editorSave(page, 409);
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await conflict;
   await expect(title).toHaveValue("Keep my local title");
+  await page.unroute("**/wp-json/wp-sync/**");
   await page.getByRole("button", { name: "Load current context", exact: true }).click();
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Load current context", exact: true })
     .click();
+  // A fresh session on the saved document: the stale copy is not merged in.
   await body.waitFor();
   await expect(title).toHaveValue(agentTitle);
   await expect(saveState(page)).toHaveText("Saved");
@@ -230,7 +304,7 @@ try {
   await reader.close();
   assert.deepEqual(errors, []);
   console.log(
-    "Context browser proof passed: native Gutenberg, explicit Save, stale/concurrent fencing, failed-save recovery, history restore, one shared URL, dark/mobile layout, and read-only Space access.",
+    "Context browser proof passed: native Gutenberg, live co-editing between two editors, explicit Save, stale/concurrent fencing, failed-save recovery, history restore, one shared URL, dark/mobile layout, and read-only Space access.",
   );
 } catch (error) {
   await page.screenshot({ path: path.join(output, "context-failure.png"), fullPage: true });

@@ -37,6 +37,8 @@ require_once __DIR__ . '/team-knowledge.php';
 require_once __DIR__ . '/team-design-system.php';
 const SPACEFAST_CONTENT_EXTERNAL_ID_META = '_spacefast_external_id';
 const SPACEFAST_CONTENT_SPACE_META = '_spacefast_space_id';
+/** The Gutenberg plugin's per-room real-time editing storage. */
+const SPACEFAST_CONTENT_SYNC_ROOM_POST_TYPE = 'wp_sync_storage';
 final class Spacefast_Content_Error extends RuntimeException
 {
     public function __construct(
@@ -102,6 +104,12 @@ if (function_exists('add_action')) {
     add_filter('rest_pre_insert_page', 'spacefast_context_prepare_write', 10, 2);
     add_filter('rest_prepare_page', 'spacefast_context_sanitize_rendered', 10, 2);
     add_filter('rest_dispatch_request', 'spacefast_context_fenced_write', 10, 4);
+    // Gutenberg registers this option as a setting with an empty default, and
+    // WordPress applies registered defaults as a priority-10 filter once REST
+    // starts. Running later keeps the switch on whether or not it was stored.
+    add_filter('option_gutenberg-experiments', 'spacefast_context_enable_collaboration', 20);
+    add_filter('default_option_gutenberg-experiments', 'spacefast_context_enable_collaboration', 20);
+    add_action('enqueue_block_editor_assets', 'spacefast_context_collaboration_flags');
     add_filter('rest_pre_dispatch', 'spacefast_content_redirection_rest', 10, 3);
     add_filter('rest_pre_dispatch', 'spacefast_content_guard_global_theme_rest', 10, 3);
     add_filter('redirection_role', static fn (): string => 'spacefast_manage_content');
@@ -654,10 +662,13 @@ function spacefast_content_scope_post(int $postId, object $post): void
     // an unstamped one leaks into every co-hosted Space's editor, and an
     // unstamped wp_global_styles gives them all one shared appearance.
     $scopedTemplate = in_array($postType, SPACEFAST_CONTENT_TEMPLATE_POST_TYPES, true);
+    // Record the owning Space on Gutenberg's real-time editing storage posts.
+    $scopedSyncRoom = $postType === SPACEFAST_CONTENT_SYNC_ROOM_POST_TYPE;
     if (
         spacefast_content_space_id() === ''
         || (!$scopedRevision
             && !$scopedTemplate
+            && !$scopedSyncRoom
             && $postType !== 'wp_knowledge'
             && spacefast_content_collection_for_post_type($postType) === null)
         || !function_exists('update_post_meta')

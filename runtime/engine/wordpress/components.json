@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:908ff48b1d9bb65d812f01772a9b3fa1c73099ae781a56f8e4481138c95e82fb",
+  "digest": "sha256:a85b50cdc02207bad76505c5dc5748e125afee84d36ca06791a5204b33f9ee99",
   "components": [
     {
       "id": "spacefast-identity",
@@ -68,7 +68,7 @@
       "id": "content-kernel",
       "kind": "mu-plugin",
       "version": "source-tree",
-      "sha256": "sha256:9901422d9fc452348c1c5a9350b088f523d97e926783554aed5209dd4db8119b",
+      "sha256": "sha256:e9e4b7623e4cf535b992c19525fe3c4c66d197a186a721e14ec3c0ad9d4dac51",
       "source": {
         "kind": "embedded",
         "path": "engine/wordpress/content-kernel.php"
@@ -124,6 +124,19 @@
         "bytes": 494067
       },
       "provides": ["wordpress.redirection"],
+      "activation": "always"
+    },
+    {
+      "id": "gutenberg",
+      "kind": "plugin",
+      "version": "24.1.0",
+      "sha256": "sha256:8cef24dcb3ee8816a7552e7f39e6f0b07a072131900b9ec27642b2549f4ba82c",
+      "source": {
+        "kind": "archive",
+        "url": "https://downloads.wordpress.org/plugin/gutenberg.24.1.0.zip",
+        "bytes": 49349545
+      },
+      "provides": ["wordpress.gutenberg", "wordpress.collaboration"],
       "activation": "always"
     },
     {

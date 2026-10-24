@@ -3487,7 +3487,7 @@ mod tests {
                     "sf.jsonc",
                     br#"{
                       "crons": [
-                        { "path": "/api/cron/growth-report", "schedule": "0 7 * * *" },
+                        { "path": "/api/cron/growth-report", "schedule": "daily" },
                         { "path": "/api/cron/digest", "schedule": "twicedaily" }
                       ]
                     }"#,
@@ -3512,7 +3512,7 @@ mod tests {
                     {
                         "key": "api-cron-growth-report",
                         "path": "/api/cron/growth-report",
-                        "schedule": "0 7 * * *"
+                        "schedule": "daily"
                     },
                     { "key": "api-cron-digest", "path": "/api/cron/digest", "schedule": "twicedaily" }
                 ]

@@ -36,6 +36,9 @@ require_once dirname(__DIR__) . '/runtime/cli-invoke.php';
 require_once dirname(__DIR__) . '/runtime/crons.php';
 
 ['flags' => $_stattic_flags] = _stattic_cli_flags(is_array($argv ?? null) ? $argv : []);
+// The dispatch below bounds each remote call (Functions and Zero runners at
+// 30s); this caps the run as a whole.
+_stattic_cli_cap_scheduled_run();
 
 $_stattic_host = trim((string) ($_stattic_flags['host'] ?? ''));
 $_stattic_key = trim((string) ($_stattic_flags['key'] ?? ''));

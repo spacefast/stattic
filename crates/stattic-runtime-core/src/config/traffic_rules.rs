@@ -156,8 +156,9 @@ fn shorthand_op(field: &str, value: &Value) -> Option<&'static str> {
 
 /// A rule name addresses the rule in the API path, so it must stay a path
 /// segment and must not read as one of that route's own verbs.
-const RESERVED_RULE_NAMES: [&str; 6] = [
+const RESERVED_RULE_NAMES: [&str; 7] = [
     "add",
+    "ingress-allowlist",
     "validate",
     "preview",
     "bulk",

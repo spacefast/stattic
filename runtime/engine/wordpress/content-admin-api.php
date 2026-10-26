@@ -651,6 +651,13 @@ function spacefast_content_register_rest_route(string $namespace, string $route,
     register_rest_route($namespace, $route, $endpoints);
 }
 
+function spacefast_content_scope_user_query(mixed $query): void
+{
+    if (spacefast_content_space_id() !== '') {
+        $query->set('meta_query', spacefast_content_scope_meta_query($query->get('meta_query')));
+    }
+}
+
 function spacefast_content_public_routes_schedule(): void
 {
     if (empty($GLOBALS['SPACEFAST_CONTENT_ROUTES_SCHEDULED'])) {

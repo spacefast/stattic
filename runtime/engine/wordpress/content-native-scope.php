@@ -1,5 +1,5 @@
 <?php
-/** Native WordPress routes over the box's one Space: content-model identity and privacy. */
+/** Native WordPress routes share the installation, never its content identities. */
 declare(strict_types=1);
 
 function spacefast_content_write_collection(int $postId = 0): ?string
@@ -11,9 +11,8 @@ function spacefast_content_write_collection(int $postId = 0): ?string
     $terms = $_POST['tax_input'][SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY] ?? null;
     if (is_array($terms)) {
         foreach ($terms as $termId) {
-            $resourceId = (int) $termId > 0 ? (string) get_term_meta((int) $termId, '_zero_resource_id', true) : '';
-            if ($resourceId !== '') {
-                return $resourceId;
+            if ((int) $termId > 0 && get_term_meta((int) $termId, SPACEFAST_CONTENT_SPACE_META, true) === spacefast_content_space_id()) {
+                return (string) get_term_meta((int) $termId, '_zero_resource_id', true);
             }
         }
     }
@@ -31,11 +30,10 @@ function spacefast_content_rest_write_collection(mixed $response, mixed $handler
         return new WP_Error('content_collection_ambiguous', 'A document belongs to one collection.', ['status' => 400]);
     }
     foreach ($terms as $termId) {
-        $resourceId = (string) get_term_meta((int) $termId, '_zero_resource_id', true);
-        if ($resourceId === '') {
+        if (get_term_meta((int) $termId, SPACEFAST_CONTENT_SPACE_META, true) !== spacefast_content_space_id()) {
             return new WP_Error('content_collection_not_found', 'Collection not found.', ['status' => 404]);
         }
-        $GLOBALS['SPACEFAST_CONTENT_WRITE_COLLECTION'] = $resourceId;
+        $GLOBALS['SPACEFAST_CONTENT_WRITE_COLLECTION'] = (string) get_term_meta((int) $termId, '_zero_resource_id', true);
     }
     return $response;
 }
@@ -89,6 +87,25 @@ function spacefast_content_remember_editor_slug(int $postId, mixed $post, mixed 
     }
 }
 
+function spacefast_content_scope_term_query(mixed $query): void
+{
+    $taxonomies = (array) ($query->query_vars['taxonomy'] ?? []);
+    if ($taxonomies !== [] && array_diff($taxonomies, ['wp_theme', 'wp_template_part_area', 'wp_pattern_category']) === []) {
+        return;
+    }
+    if (spacefast_content_space_id() !== '') {
+        $query->query_vars['meta_query'] = spacefast_content_scope_meta_query($query->query_vars['meta_query'] ?? []);
+    }
+}
+
+function spacefast_content_scope_new_term(int $termId): void
+{
+    if (spacefast_content_space_id() !== '') {
+        update_term_meta($termId, SPACEFAST_CONTENT_SPACE_META, spacefast_content_space_id());
+        spacefast_content_public_routes_schedule();
+    }
+}
+
 /** Core caches comment queries before applying the SQL scope and visibility clauses. */
 function spacefast_content_scope_comment_cache(mixed $query): void
 {
@@ -104,9 +121,8 @@ function spacefast_content_scope_comment_clauses(array $clauses): array
     if (spacefast_content_space_id() === '') {
         return $clauses;
     }
-    // Every comment on the box is this Space's (Woo order notes included); a
-    // comment is hidden only when the document it sits on is private.
     global $wpdb;
+    $clauses['where'] .= $wpdb->prepare(" AND EXISTS (SELECT 1 FROM {$wpdb->postmeta} sf_comment_scope WHERE sf_comment_scope.post_id={$wpdb->comments}.comment_post_ID AND sf_comment_scope.meta_key=%s AND sf_comment_scope.meta_value=%s)", SPACEFAST_CONTENT_SPACE_META, spacefast_content_space_id());
     if (!spacefast_content_may_read_private_resources()) {
         $clauses['where'] .= $wpdb->prepare(" AND NOT EXISTS (SELECT 1 FROM {$wpdb->postmeta} sf_retired WHERE sf_retired.post_id={$wpdb->comments}.comment_post_ID AND sf_retired.meta_key=%s)", SPACEFAST_CONTENT_SOURCE_RETIRED_META);
         $selected = spacefast_content_selected_source_ids();
@@ -129,16 +145,36 @@ function spacefast_content_native_meta_cap(array $caps, string $cap, int $userId
     if ($cap === 'customize' || ($cap === 'edit_theme_options' && spacefast_content_global_customization_request())) {
         return ['do_not_allow'];
     }
+    if (!isset($args[0])) {
+        return $caps;
+    }
+    if (in_array($cap, ['edit_term', 'delete_term', 'assign_term'], true)
+        && get_term_meta((int) $args[0], SPACEFAST_CONTENT_SPACE_META, true) !== spacefast_content_space_id()) {
+        return ['do_not_allow'];
+    }
+    if ($cap === 'edit_comment') {
+        $comment = get_comment((int) $args[0]);
+        if (!$comment || !spacefast_content_post_belongs_to_space((int) $comment->comment_post_ID)) {
+            return ['do_not_allow'];
+        }
+    }
     return $caps;
 }
 
-/** A comment on a private document is not there for this reader. */
-function spacefast_content_native_rest_read(mixed $response, mixed $comment): mixed
+function spacefast_content_native_rest_read(mixed $response, mixed $object): mixed
 {
-    $postId = (int) ($comment->comment_post_ID ?? 0);
-    return $postId > 0 && spacefast_content_space_id() !== '' && spacefast_content_post_is_private($postId)
-        ? new WP_Error('content_not_found', 'Content not found.', ['status' => 404])
-        : $response;
+    $postId = isset($object->comment_post_ID) ? (int) $object->comment_post_ID : null;
+    $allowed = $postId !== null
+        ? spacefast_content_post_belongs_to_space($postId) && !spacefast_content_post_is_private($postId)
+        : get_term_meta((int) $object->term_id, SPACEFAST_CONTENT_SPACE_META, true) === spacefast_content_space_id();
+    return $allowed ? $response : new WP_Error('content_not_found', 'Content not found.', ['status' => 404]);
+}
+
+function spacefast_content_native_rest_hooks(): void
+{
+    foreach (get_taxonomies(['show_in_rest' => true]) as $taxonomy) {
+        add_filter('rest_prepare_' . $taxonomy, 'spacefast_content_native_rest_read', PHP_INT_MAX, 2);
+    }
 }
 
 function spacefast_content_assign_collection(int $postId, string $resourceId): void

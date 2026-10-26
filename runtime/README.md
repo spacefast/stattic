@@ -29,8 +29,9 @@ learns about users, teams, plans, billing, or domain ownership.
 ## Space mail
 
 Space mail is sent once through the site's `wp_mail` transport. The runtime
-returns whether the transport accepted the message. Verified sender checks
-apply before sending. Mail needs no application database or control-plane
+returns whether the transport accepted the message. A positive daily allowance
+in the route config grants email to a Space; without one the sender list is
+withheld and every send is refused. Verified sender checks apply before sending. Mail needs no application database or control-plane
 mailbox, queue or drainer.
 
 The direct-mail cutover discards pending messages in the old Space mail outbox.

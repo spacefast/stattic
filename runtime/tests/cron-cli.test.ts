@@ -167,7 +167,10 @@ function wp_mail(array $to, string $subject, string $message, array $headers): b
     },
     activate: {
       route_name: "production",
-      config: publicAccessConfig({ mode: "website", site_title: "Crons" }, "live_and_all_versions"),
+      config: {
+        ...publicAccessConfig({ mode: "website", site_title: "Crons" }, "live_and_all_versions"),
+        billing: { emailRecipientsDaily: 20 },
+      },
       production_hostnames: [HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],

@@ -191,7 +191,10 @@ function wp_mail(array $to, string $subject, string $message, array $headers): b
     },
     activate: {
       route_name: "production",
-      config: publicAccessConfig({ mode: "website", site_title: "PHP Functions" }),
+      config: {
+        ...publicAccessConfig({ mode: "website", site_title: "PHP Functions" }),
+        billing: { emailRecipientsDaily: 20 },
+      },
       production_hostnames: [HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
@@ -308,7 +311,10 @@ test("the handler runs inside the prelude's jail, with platform secrets scrubbed
   } finally {
     await putRoute(rt, SPACE, "production", {
       version_id: VERSION,
-      config: publicAccessConfig({ mode: "website", site_title: "PHP Functions" }),
+      config: {
+        ...publicAccessConfig({ mode: "website", site_title: "PHP Functions" }),
+        billing: { emailRecipientsDaily: 20 },
+      },
     });
   }
 });

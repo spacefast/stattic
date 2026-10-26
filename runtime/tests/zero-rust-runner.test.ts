@@ -750,10 +750,10 @@ globalThis.__statticZeroResult = JSON.stringify({ status: query === "mode=redire
     },
     activate: {
       route_name: "production",
-      config: publicAccessConfig({
-        mode: "website",
-        site_title: "Zero Generated Rust Runner",
-      }),
+      config: {
+        ...publicAccessConfig({ mode: "website", site_title: "Zero Generated Rust Runner" }),
+        billing: { emailRecipientsDaily: 20 },
+      },
       production_hostnames: [GENERATED_HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],

@@ -237,11 +237,13 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
         $env['SPACEFAST_SERVICE_CONNECTORS_TOKEN'] = $env['SPACEFAST_ZERO_CONNECTORS_TOKEN'];
         $env['SPACEFAST_SERVICE_CONNECTORS_VISITOR'] = json_encode($identity['visitor'] ?? null, JSON_UNESCAPED_SLASHES);
     }
-    foreach ([
-        'WPCOM_API_KEY',
-        'SPACEFAST_SERVICE_BLOG_URL',
-        'SPACEFAST_SERVICE_EMAIL_SENDERS',
-    ] as $name) {
+    $names = ['WPCOM_API_KEY', 'SPACEFAST_SERVICE_BLOG_URL'];
+    // Email is granted by a positive daily allowance in the route config. Without
+    // one the space has no sender, and the broker refuses every send.
+    if ((int) ($config['billing']['emailRecipientsDaily'] ?? 0) > 0) {
+        $names[] = 'SPACEFAST_SERVICE_EMAIL_SENDERS';
+    }
+    foreach ($names as $name) {
         $value = _stattic_config_value($name);
         if ($value !== '') {
             $env[$name] = $value;

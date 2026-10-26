@@ -150,9 +150,11 @@ function _stattic_mail_send_metered(array $payload, string $publicRoot): bool
         return false;
     }
     $recipients = count($payload['to']) + count($payload['cc'] ?? []) + count($payload['bcc'] ?? []);
-    // Route configs pushed before billing limits existed carry no limit.
-    $configuredLimit = (int) getenv('SPACEFAST_SERVICE_EMAIL_DAILY_LIMIT');
-    $limit = $configuredLimit > 0 ? $configuredLimit : PHP_INT_MAX;
+    // No allowance, no email: the route config grants it per Space.
+    $limit = (int) getenv('SPACEFAST_SERVICE_EMAIL_DAILY_LIMIT');
+    if ($limit <= 0) {
+        return false;
+    }
     $root = _stattic_space_root($privateRoot, $spaceId);
     _stattic_runtime_mkdir($root);
     return _stattic_lock_with($root . '/email-usage.lock', STATTIC_LOCK_WAIT, static fn (): bool => false,

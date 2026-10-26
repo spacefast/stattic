@@ -498,14 +498,15 @@ test("a service frame naming an ungranted service is refused inside the broker",
   });
 });
 
-test("mail sends immediately through wp_mail and returns its acceptance result", async () => {
-  await putRoute(rt, SPACE_ID, "production", {
-    version_id: VERSION_ID,
-    config: {
-      ...publicAccessConfig({ mode: "website", site_title: "Functions relay" }),
-      billing: { emailRecipientsDaily: 4 },
-    },
-  });
+test("mail needs a daily allowance, then sends through wp_mail and returns its acceptance result", async () => {
+  const routeWithAllowance = (emailRecipientsDaily: number) =>
+    putRoute(rt, SPACE_ID, "production", {
+      version_id: VERSION_ID,
+      config: {
+        ...publicAccessConfig({ mode: "website", site_title: "Functions relay" }),
+        billing: { emailRecipientsDaily },
+      },
+    });
   const token = relayToken({ capabilities: ["email.send"] });
   const message = {
     service: "email",
@@ -521,6 +522,16 @@ test("mail sends immediately through wp_mail and returns its acceptance result",
     },
   };
   const before = wpMailCaptures().length;
+  // A team outside the email feature gets a zero allowance: the sender list is
+  // withheld, so the broker refuses before the transport is ever reached.
+  await routeWithAllowance(0);
+  expect(await (await relay(message, token, "services", "inv_mail_0")).json()).toMatchObject({
+    ok: false,
+    code: "service_not_configured",
+  });
+  expect(wpMailCaptures()).toHaveLength(before);
+
+  await routeWithAllowance(4);
   const first = await relay(message, token, "services", "inv_mail_1");
   expect(first.status).toBe(200);
   expect(await first.json(), rt.diagnostics()).toEqual({ ok: true, result: true });

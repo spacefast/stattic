@@ -17,6 +17,11 @@ function _stattic_runtime_native_binary(): string
     if ($configured !== '') {
         return $configured;
     }
+    // The loader's answer: the chroot keeps the binary outside the engine.
+    $resolved = $GLOBALS['SPACEFAST_RUNTIME_NATIVE_BINARY'] ?? null;
+    if (is_string($resolved) && $resolved !== '') {
+        return $resolved;
+    }
     return dirname(__DIR__, 2) . '/bin/stattic-runtime';
 }
 

@@ -35,6 +35,12 @@ const STATTIC_LEGACY_NOINDEX_ROBOTS_BODY = "User-agent: *\nDisallow: /\n";
 
 function _stattic_runtime_install_root(string $engineRoot): string
 {
+    // The loaders name the site's install root. An engine running from the
+    // Spacefast chroot cannot find it from its own location.
+    $installRoot = $GLOBALS['SPACEFAST_RUNTIME_INSTALL_ROOT'] ?? null;
+    if (is_string($installRoot) && $installRoot !== '') {
+        return $installRoot;
+    }
     $releaseRoot = dirname($engineRoot);
     $releasesRoot = dirname($releaseRoot);
     return basename($releasesRoot) === 'releases' ? dirname($releasesRoot) : $releaseRoot;

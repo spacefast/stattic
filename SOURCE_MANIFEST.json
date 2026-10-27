@@ -1,7 +1,7 @@
 {
-  "revision": "fe9028e7efcd24423238a51aa8c3957ae18e872c",
-  "sourceHash": "e4f5b42c8d782782590b53f6210560e5c63e08d59bd3e4eff2b008f67e527de1",
-  "manifestSha256": "38efef6a52d2cbc66b0342c4866dbfb1b5784c77d321a1592a40ce9f03aa985a",
+  "revision": "0b3770d0f20a5e99b1627546e206ecd7b009a1bd",
+  "sourceHash": "0d7abf986dbc84d9e5b99c97840df5f3b166c93ee07f6f3eb91622bb36182300",
+  "manifestSha256": "00e6668a5d1284f94a4bb762ddf0506fc9af14d3350d547c531e8fac35760e35",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "5037e289a1299e465f92800ae46a6da23a6e84f4eb05b5e8bfbe3a5020506fa0"
+      "sha256": "e30f4d2d82660d5f4ba8f76d7da86ed615bfb310292669ae9404f16982bcac1f"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "d50d272c2b45000457c089a755743bc716738400aa2d0225f005b8b251e802b4"
+      "sha256": "b32485cbcbd8651221e0c342e269b98d3fbc1511383428ab16830b209a2c3f34"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -365,7 +365,7 @@
     },
     {
       "path": "runtime/README.md",
-      "sha256": "422146762e0c76fd3f362ba4d62dab73b53044046f5e1c3e0ab5cb1d4bbfc323"
+      "sha256": "afa707be7e57da7780ef35223615216d74bca40de9677c075e89011a9e96ce2b"
     },
     {
       "path": "runtime/SKILL.md",
@@ -413,11 +413,11 @@
     },
     {
       "path": "runtime/custom-redirects.php",
-      "sha256": "920fd0dc9434739dd3ce45ef5ffd7bfd6ac98a3641468e08890f3d9f3900c0e4"
+      "sha256": "e20e082b6a1b47dc15817498a67f73f19ca151df480386f68be6db6bf44467f8"
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "a490c9f11b4cfd55a7fb8fe7577decb874a86039215cebe9b4e68ec70d68b836"
+      "sha256": "debfada6a2dfa5c9ed118a1f6c1b77148876d6a403fe5ffa4010c3cb5c7dd8cd"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -437,7 +437,7 @@
     },
     {
       "path": "runtime/engine/admin/components.php",
-      "sha256": "1879b0f07c5432f538f580da33e5dad82f56456e99ba9fdefc7b8be38113629c"
+      "sha256": "2b34ada57b88de7a2741103e17732db7133610c7b9668961c794a57168f6b336"
     },
     {
       "path": "runtime/engine/admin/dispatch.php",
@@ -445,7 +445,7 @@
     },
     {
       "path": "runtime/engine/admin/engine-update.php",
-      "sha256": "ad1b36b0798a97192dde52e09dcabc758728769cb252204db696bad3d27c7c3c"
+      "sha256": "95e2f60d0643d3c736d12f44eb68b78ea13619fa92b3a3e34af40b0b54a668ab"
     },
     {
       "path": "runtime/engine/admin/finalize-rust.php",
@@ -509,7 +509,7 @@
     },
     {
       "path": "runtime/engine/entrypoints/health.php",
-      "sha256": "a6cd869a4a9a678360ccdeb6e9798c8ec0bb3b33005e025492ab9b7664156f34"
+      "sha256": "549b4470aaac5a89e6d3e971954b6d270df60a15e7cb6a5c3b96d53426cce570"
     },
     {
       "path": "runtime/engine/entrypoints/invoke.php",
@@ -677,7 +677,7 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "356eab5d4a018b0509f8f32d3a226e91e359cbf86c366e984e0a0e04f8690e7a"
+      "sha256": "54b12f22236807a9b92fcf152ecf944e1150b4e78eeb8072214e553f3147c538"
     },
     {
       "path": "runtime/engine/shared/d1-broker.php",
@@ -698,6 +698,10 @@
     {
       "path": "runtime/engine/shared/egress.php",
       "sha256": "905bb504591507172dd46e49e9501177a1b82c303a2a041fbdaee5bb70292381"
+    },
+    {
+      "path": "runtime/engine/shared/engine-source.php",
+      "sha256": "12858b33711797cea6b7988f3a2023d59354782c2e7f3e466103e4b61fa86e00"
     },
     {
       "path": "runtime/engine/shared/errors.php",
@@ -733,7 +737,7 @@
     },
     {
       "path": "runtime/engine/shared/native-process.php",
-      "sha256": "71b90246a226a1f983d6ef7f918f17b907f880916670cb692098bf4beaf2e2de"
+      "sha256": "81853b66eed3ac16dfc956c738295eaadac14ce65358d2beb19d6a75c94bb48d"
     },
     {
       "path": "runtime/engine/shared/page-css.generated.php",
@@ -801,7 +805,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "70171ea250d5e64ca0de8c7dfb59ede9a898caf199524053ee7e3875b8e9d5f8"
+      "sha256": "9d8b73cc22b877d6be3f9271d13edba967481df4ea4a8a520d111df84ffd7232"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -837,7 +841,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-source-journal.php",
-      "sha256": "99ebf8062cf92fcaa21f7effacfb066c3f50aa25115069cbf60835ee1fed1ee2"
+      "sha256": "8800acd027d067cff3254d9d6494d7d5698101dd54d9f01706d4b4ee389c45bb"
     },
     {
       "path": "runtime/engine/wordpress/content-source-sync.php",
@@ -937,7 +941,7 @@
     },
     {
       "path": "runtime/tests/atomic-prepend.php",
-      "sha256": "745eeba14c2efd6ced36f648fbd6fd9eb15bfa48f8c057f1b50d7c6964cf9619"
+      "sha256": "a0e584b5148f759918a92043c918c8896948a698a9c431dc7cb360c9b13d91e2"
     },
     {
       "path": "runtime/tests/auto-prepend.test.ts",
@@ -1084,8 +1088,12 @@
       "sha256": "cdff370750040378a90617798a689dcb36cf6aeb914135e0863afff40f098575"
     },
     {
+      "path": "runtime/tests/engine-source.test.ts",
+      "sha256": "c24c8e874b8c2f04f14cd753339fdf194a01a84bf1a77b517e74846960aa2b16"
+    },
+    {
       "path": "runtime/tests/engine-update-route.test.ts",
-      "sha256": "63230fbaaf3811168ab9b111165eb5a8000f4a24d69a844006e79ce10b9ecb64"
+      "sha256": "f0c72a79f167047af1e83d176592cdc1863912f225d471219cc32c6c8926e3c1"
     },
     {
       "path": "runtime/tests/entrypoint-probes.ts",
@@ -1261,7 +1269,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "2f1cb28688854175eba43f7006f7d72ad1c31c4804d3e304d3b5f644d49d5d02"
+      "sha256": "fb1ad2843311f6bc201aa5e033ff6e55d7b174dbe66e838470f7fc81f81a8008"
     },
     {
       "path": "runtime/tests/run-ci.sh",
@@ -1373,7 +1381,7 @@
     },
     {
       "path": "runtime/wordpress-content-loader.php",
-      "sha256": "bfdc9bd687181b250d901e0941f553439fe28e66b366105700f43b42ed7944a6"
+      "sha256": "4c645f8cd635a3b0fb14f0d4cb9c523dfe8462f17a4377d4c805a7362d97644d"
     },
     {
       "path": "runtime/wordpress/managed-theme/style.css",

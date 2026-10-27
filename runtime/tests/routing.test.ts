@@ -1949,11 +1949,14 @@ test("public requests load only the modules their request class needs", async ()
     // shared/brand.php rides problem.php (the `type` base is the brand
     // document's) and is load-time inert: constants and function declarations,
     // no config read until a problem document is actually built.
+    // shared/engine-source.php is the loader's choice of engine, made on every
+    // request before any entrypoint runs; it reads one small file and no config.
     expect(modulesFor("/__spacefast/health.php")).toEqual(
       [
         "entrypoints/health.php",
         "shared/brand.php",
         "shared/context.php",
+        "shared/engine-source.php",
         "shared/finalizer-protocol.generated.php",
         "shared/problem.php",
         "shared/response.php",

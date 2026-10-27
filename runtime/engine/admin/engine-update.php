@@ -215,8 +215,47 @@ function _stattic_engine_public_payload_matches(string $releaseRoot, string $pub
     return true;
 }
 
+function _stattic_engine_serves_from_chroot(): bool
+{
+    return ($GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] ?? null) === 'chroot';
+}
+
+// A chroot engine is an immutable revision directory the site never installed,
+// so it has no release authority, proof or payload marker to check. What makes
+// it current is that it IS the requested revision, its native binary is the
+// requested one, and the site's loaders are that revision's: the loaders run
+// before the engine on every request, so loaders from another revision would
+// make this box serve a mix.
+function _stattic_engine_chroot_installation_proven(string $privateRoot, string $revision, string $nativeSha256): bool
+{
+    $installRoot = realpath(dirname($privateRoot));
+    $releaseRoot = $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] ?? null;
+    $releaseRoot = is_string($releaseRoot) ? realpath($releaseRoot) : false;
+    $native = $GLOBALS['SPACEFAST_RUNTIME_NATIVE_BINARY'] ?? null;
+    if (!is_string($installRoot) || !is_string($releaseRoot) || !is_string($native)) {
+        return false;
+    }
+    foreach (['install-transaction.json', 'rollback-failure.json'] as $blocked) {
+        if (file_exists($installRoot . '/' . $blocked) || is_link($installRoot . '/' . $blocked)) {
+            return false;
+        }
+    }
+    $manifest = _stattic_engine_public_manifest($releaseRoot);
+    $loaderIdentity = is_array($manifest) ? _stattic_engine_loader_identity($releaseRoot, $manifest) : null;
+    $actualNativeSha256 = is_file($native) ? hash_file('sha256', $native) : false;
+    return is_array($manifest)
+        && is_string($loaderIdentity)
+        && $revision === SPACEFAST_RUNTIME_ENGINE_REVISION
+        && is_string($actualNativeSha256)
+        && hash_equals($nativeSha256, $actualNativeSha256)
+        && _stattic_engine_public_payload_matches($releaseRoot, dirname($privateRoot, 2), $manifest, $loaderIdentity);
+}
+
 function _stattic_engine_installation_proven(string $privateRoot, string $revision, string $nativeSha256): bool
 {
+    if (_stattic_engine_serves_from_chroot()) {
+        return _stattic_engine_chroot_installation_proven($privateRoot, $revision, $nativeSha256);
+    }
     if (!_stattic_engine_release_layout_active($privateRoot)) {
         return false;
     }
@@ -372,17 +411,21 @@ function _stattic_engine_update_route(string $privateRoot, array $_claims): void
 
     if (_stattic_engine_installation_proven($privateRoot, $revision, $nativeSha256)) {
         _stattic_engine_update_purge($privateRoot, $revision);
+        // A chroot revision directory is a release layout too; the source
+        // says which one is serving.
         _stattic_json_response(200, [
             'status' => 'current',
             'engine_revision' => SPACEFAST_RUNTIME_ENGINE_REVISION,
             'layout' => 'release',
+            'engine_source' => _stattic_engine_serves_from_chroot() ? 'chroot' : 'site',
         ]);
     }
 
     _stattic_problem_response(409, 'runtime_engine_update_required', 'The requested runtime release is not active.', [
         'details' => [
             'active_revision' => SPACEFAST_RUNTIME_ENGINE_REVISION,
-            'layout' => _stattic_engine_release_layout_active($privateRoot) ? 'release' : 'legacy',
+            'layout' => _stattic_engine_serves_from_chroot() || _stattic_engine_release_layout_active($privateRoot) ? 'release' : 'legacy',
+            'engine_source' => _stattic_engine_serves_from_chroot() ? 'chroot' : 'site',
         ],
     ]);
 }

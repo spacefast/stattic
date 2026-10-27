@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../shared/finalizer-protocol.generated.php';
 require_once __DIR__ . '/../shared/canonical-json.php';
+require_once __DIR__ . '/../shared/native-process.php';
 
 function _stattic_component_digest(mixed $value): string
 {
@@ -409,7 +410,9 @@ function _stattic_runtime_stage_components(string $privateRoot, array $claims): 
     }
 
     $publicRoot = dirname(dirname($privateRoot));
-    _stattic_component_check_embedded($lock, 'runtime-engine', dirname($engineRoot) . '/bin/stattic-runtime', $problems);
+    // The binary this engine runs, wherever it lives: a chroot engine has no
+    // bin/ beside it.
+    _stattic_component_check_embedded($lock, 'runtime-engine', _stattic_runtime_native_binary(), $problems);
     _stattic_component_check_embedded($lock, 'immutable-loader', $publicRoot . '/wp-content/mu-plugins/spacefast-content.php', $problems);
     _stattic_component_check_embedded($lock, 'content-kernel', $engineRoot . '/wordpress/content-kernel.php', $problems);
     _stattic_component_check_embedded($lock, 'spacefast-identity', $publicRoot . '/wp-content/mu-plugins/spacefast-identity', $problems, true);

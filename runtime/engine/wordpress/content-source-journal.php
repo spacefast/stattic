@@ -56,7 +56,9 @@ function spacefast_content_source_journal_publish_scheduled(int $postId): void
     if (!is_string($releaseRoot)) {
         throw new Spacefast_Content_Error(503, 'content_runtime_unavailable', 'Scheduled publication needs the installed runtime.');
     }
-    $privateRoot = dirname($releaseRoot, 2) . '/storage';
+    // A chroot engine is not inside the install root, so the loader names it.
+    $installRoot = $GLOBALS['SPACEFAST_RUNTIME_INSTALL_ROOT'] ?? null;
+    $privateRoot = (is_string($installRoot) && $installRoot !== '' ? $installRoot : dirname($releaseRoot, 2)) . '/storage';
     $modelRoot = spacefast_content_model_root($privateRoot, $spaceId);
     $revision = _stattic_private_tree_read_pointer($modelRoot . '/active-release', 128);
     $context = [

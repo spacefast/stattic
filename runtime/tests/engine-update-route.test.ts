@@ -108,7 +108,11 @@ test("reports that a divergent release needs a provider install", async () => {
   expect(response.status).toBe(409);
   const body = await response.json();
   expect(body.code).toBe("runtime_engine_update_required");
-  expect(body.details).toEqual({ active_revision: "source-tree", layout: "release" });
+  expect(body.details).toEqual({
+    active_revision: "source-tree",
+    layout: "release",
+    engine_source: "site",
+  });
 });
 
 test("rejects a request snapshot after the active pointer moves", () => {

@@ -82,6 +82,19 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             exit(1);
         }
         $releaseRoot = $releaseReal;
+        // The site's release decides whether the engine runs from it or from
+        // the Spacefast chroot (engine/shared/engine-source.php). A release
+        // older than that rule has no chroot to offer.
+        $engineSource = $releaseReal . '/engine/shared/engine-source.php';
+        if (is_file($engineSource)) {
+            require_once $engineSource;
+            $engine = _spacefast_runtime_engine_source($installReal, $releaseReal);
+            $releaseRoot = $engine['release_root'];
+            $GLOBALS['SPACEFAST_RUNTIME_NATIVE_BINARY'] = $engine['native_binary'];
+            $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] = $engine['source'];
+        }
+        // Named, not derived: a chroot engine lives outside this install root.
+        $GLOBALS['SPACEFAST_RUNTIME_INSTALL_ROOT'] = $installReal;
         $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseRoot;
     }
 

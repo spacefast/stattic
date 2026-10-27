@@ -1,6 +1,14 @@
 <?php
 declare(strict_types=1);
 
+// The Spacefast chroot lives at `/` on a box. Tests stand one up under a
+// temporary root and name it here, where a box's provider prepend would run.
+$spacefastTestChrootRoot = getenv('SPACEFAST_TEST_CHROOT_ROOT');
+if (is_string($spacefastTestChrootRoot) && $spacefastTestChrootRoot !== '' && !defined('SPACEFAST_RUNTIME_CHROOT_ROOT')) {
+    define('SPACEFAST_RUNTIME_CHROOT_ROOT', $spacefastTestChrootRoot);
+}
+unset($spacefastTestChrootRoot);
+
 if (!class_exists('Atomic_Persistent_Data', false)) {
     final class Atomic_Persistent_Data implements Iterator
     {

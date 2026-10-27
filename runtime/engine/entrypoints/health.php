@@ -16,6 +16,8 @@ _stattic_json_response(200, [
     'schema' => STATTIC_RUNTIME_SCHEMA,
     'engine_version' => SPACEFAST_RUNTIME_ENGINE_VERSION,
     'engine_revision' => SPACEFAST_RUNTIME_ENGINE_REVISION,
+    // Where that engine runs from: the site's own release, or the Spacefast chroot.
+    'engine_source' => ($GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] ?? null) === 'chroot' ? 'chroot' : 'site',
     'site_state' => is_dir($storageRoot) ? 'configured' : 'unconfigured',
     'request_hostname' => _stattic_normalize_host_authority((string) ($_SERVER['HTTP_HOST'] ?? '')),
 ], 'application/json', ['Cache-Control' => 'no-store']);

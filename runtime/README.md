@@ -119,10 +119,11 @@ On WP Cloud the engine can also run from the Spacefast chroot, where every site 
 shares one copy: `/scripts/sf-engine-<revision>/` with its binary at
 `/usr/local/bin/sf-bin-<revision>/stattic-runtime`, and each environment's
 `sf-engine-<environment>-{latest,previous}` and `sf-bin-<environment>-{latest,previous}` links
-beside them. A site opts in when `.stattic/engine-source` names one of those channels, for
-example `chroot/production/latest`. The
-loaders still resolve the site's own release first and ask its `engine/shared/engine-source.php`
-which engine to run. The site's install root keeps its storage and its publication lock either
+beside them. A site opts in when its WP Cloud persistent data names one of those channels in
+`SPACEFAST_RUNTIME_ENGINE_SOURCE`, for example `chroot/production/latest`. The control plane
+sets it through the WP Cloud API. The loaders, and the control plane's scheduled and SSH
+commands, still resolve the site's own release first and ask its
+`engine/shared/engine-selection.php` which engine to run. The site's install root keeps its storage and its publication lock either
 way, and a missing or incomplete chroot falls back to the site's release. Health and the
 engine-update receipt report `engine_source`.
 
@@ -243,8 +244,6 @@ publishes its schema at `OPTIONS /wp-json/wp/v2/<collection>`.
 
 ```text
 htdocs/.stattic/active-release              atomic relative path to the active release
-htdocs/.stattic/engine-source               optional chroot/<environment>/<latest|previous>:
-                                            run the engine from the Spacefast chroot instead
 htdocs/.stattic/loader-version              sha256 of the installed public loader payload
 htdocs/.stattic/releases/<release>/         immutable managed engine, native binary, manifest
 htdocs/.stattic/storage

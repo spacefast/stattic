@@ -30,10 +30,10 @@ declare(strict_types=1);
             return;
         }
         // The same choice the request prepend makes, from the same file.
-        $engineSource = $releaseReal . '/engine/shared/engine-source.php';
+        $engineSource = $releaseReal . '/engine/shared/engine-selection.php';
         if (is_file($engineSource)) {
             require_once $engineSource;
-            $engine = _spacefast_runtime_engine_source($installReal, $releaseReal);
+            $engine = _spacefast_runtime_engine_source($releaseReal);
             $releaseReal = $engine['release_root'];
             $GLOBALS['SPACEFAST_RUNTIME_NATIVE_BINARY'] = $engine['native_binary'];
             $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] = $engine['source'];

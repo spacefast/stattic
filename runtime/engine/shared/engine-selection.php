@@ -7,11 +7,13 @@ declare(strict_types=1);
 // loader read this file from that site release, so the rule ships with the
 // engine instead of being restated in each copy.
 //
-// A site runs its own release unless `.stattic/engine-source` names an
-// environment and channel of the Spacefast chroot, `chroot/<environment>/<channel>`
-// (say `chroot/production/latest`). The control plane writes that file; nothing
-// else does. One chroot carries every environment, each revision and link as a
-// top-level entry:
+// A site runs its own release unless its WP Cloud persistent data names an
+// environment and channel of the Spacefast chroot in
+// `SPACEFAST_RUNTIME_ENGINE_SOURCE`, `chroot/<environment>/<channel>` (say
+// `chroot/production/latest`). The control plane sets it through the WP Cloud
+// API; nothing else does. The provider stores it encrypted under a key derived
+// from DB_PASSWORD, so a caller defines that before asking. One chroot carries
+// every environment, each revision and link as a top-level entry:
 //
 //   /scripts/sf-engine-<revision>/                              engine (no bin/, no installer)
 //   /scripts/sf-engine-<environment>-{latest,previous}          -> sf-engine-<revision>
@@ -23,25 +25,25 @@ declare(strict_types=1);
 // binary. A chroot that is missing or incomplete answers with the site's own
 // release: a site switched back to the generic chroot keeps serving.
 
-const SPACEFAST_RUNTIME_ENGINE_SOURCE_FILE = 'engine-source';
 const SPACEFAST_RUNTIME_CHROOT_SELECTION = '#^chroot/(staging|production)/(latest|previous)$#D';
 
 /**
  * @return array{release_root:string,native_binary:string,source:'chroot'|'site'}
  */
-function _spacefast_runtime_engine_source(string $installRoot, string $siteReleaseRoot): array
+function _spacefast_runtime_engine_source(string $siteReleaseRoot): array
 {
     $site = [
         'release_root' => $siteReleaseRoot,
         'native_binary' => $siteReleaseRoot . '/bin/stattic-runtime',
         'source' => 'site',
     ];
-    $selection = $installRoot . '/' . SPACEFAST_RUNTIME_ENGINE_SOURCE_FILE;
-    if (!is_file($selection) || is_link($selection)) {
+    // The provider defines the class in its prepend. A PHP process without it
+    // (a bare CLI, a local stack) has no persistent data to select with.
+    if (!class_exists('Atomic_Persistent_Data')) {
         return $site;
     }
-    $raw = file_get_contents($selection, false, null, 0, 64);
-    if (preg_match(SPACEFAST_RUNTIME_CHROOT_SELECTION, is_string($raw) ? trim($raw) : '', $selected) !== 1) {
+    $selection = (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE;
+    if (preg_match(SPACEFAST_RUNTIME_CHROOT_SELECTION, is_string($selection) ? trim($selection) : '', $selected) !== 1) {
         return $site;
     }
     $channel = $selected[1] . '-' . $selected[2];
@@ -54,10 +56,11 @@ function _spacefast_runtime_engine_source(string $installRoot, string $siteRelea
         || !is_string($engineReal)
         || dirname($engineReal) !== $scriptsReal
         || preg_match('/^sf-engine-([0-9a-f]{40})$/D', basename($engineReal), $match) !== 1
-        // An engine older than this file derives the install root from its
-        // own location, which in the chroot is not the site's. It cannot run
-        // from there.
-        || !is_file($engineReal . '/engine/shared/engine-source.php')
+        // An engine without this rule selects some other way, or not at all.
+        // Running it would put its loaders on the site at its next install,
+        // and the site would stop reading its channel: the site's own release
+        // serves instead, until the chroot carries an engine with this rule.
+        || !is_file($engineReal . '/engine/shared/engine-selection.php')
         || !is_file($engineReal . '/engine/init.php')
     ) {
         return $site;

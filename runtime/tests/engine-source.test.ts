@@ -1,4 +1,4 @@
-// A site runs its own release unless `.stattic/engine-source` selects an
+// A site runs its own release unless its persistent data selects an
 // environment's channel of the Spacefast chroot. These run the real loaders against a chroot stood up
 // beside the box: the selected revision serves and proves itself while the
 // site's own install root keeps its data, and an incomplete chroot falls back
@@ -21,7 +21,13 @@ import {
 import os from "node:os";
 import path from "node:path";
 
-import { api, RUNTIME_HTTP_API_BASE, startRuntime, type Runtime } from "./harness";
+import {
+  api,
+  RUNTIME_ATOMIC_DATA,
+  RUNTIME_HTTP_API_BASE,
+  startRuntime,
+  type Runtime,
+} from "./harness";
 
 const CHROOT_REVISION = "c".repeat(40);
 
@@ -30,7 +36,10 @@ let chrootRoot: string;
 
 beforeAll(async () => {
   chrootRoot = realpathSync(mkdtempSync(path.join(os.tmpdir(), "spacefast-chroot-")));
-  rt = await startRuntime({ env: { SPACEFAST_TEST_CHROOT_ROOT: chrootRoot } });
+  rt = await startRuntime({
+    env: { SPACEFAST_TEST_CHROOT_ROOT: chrootRoot },
+    atomicData: { SPACEFAST_RUNTIME_ENGINE_SOURCE: "chroot/production/latest" },
+  });
   // The external's layout: the release without its binary, the binary under
   // usr/local/bin, and a channel link beside each. The revision constant is the
   // only byte that differs from the site's release, so a response naming it
@@ -61,7 +70,6 @@ beforeAll(async () => {
     `sf-bin-${CHROOT_REVISION}`,
     path.join(chrootRoot, "usr/local/bin/sf-bin-production-latest"),
   );
-  writeFileSync(path.join(rt.root, ".stattic/engine-source"), "chroot/production/latest\n");
 });
 
 afterAll(() => {
@@ -118,17 +126,26 @@ test("serves and proves the chroot revision the site selected", async () => {
   expect((await update("source-tree")).status).toBe(409);
 });
 
-test("falls back to the site's release when the chroot cannot serve it", async () => {
+test("falls back to the site's release when the chroot is unselected or cannot serve it", async () => {
+  const persistentData = path.join(rt.root, ".atomic-persistent-data.json");
+  const selected = readFileSync(persistentData);
+  writeFileSync(persistentData, `${JSON.stringify(RUNTIME_ATOMIC_DATA)}\n`);
+  try {
+    await expectHealth({ engine_revision: "source-tree", engine_source: "site" });
+  } finally {
+    writeFileSync(persistentData, selected);
+  }
+
   // Each file stands for one way the chroot fails the site: a revision without
-  // its binary, and an engine older than explicit install roots, which would
-  // look for the site's storage beside itself.
+  // its binary, and an engine without this selection rule, whose loaders would
+  // stop the site reading its channel once installed.
   for (const file of [
     path.join(chrootRoot, "usr/local/bin", `sf-bin-${CHROOT_REVISION}`, "stattic-runtime"),
     path.join(
       chrootRoot,
       "scripts",
       `sf-engine-${CHROOT_REVISION}`,
-      "engine/shared/engine-source.php",
+      "engine/shared/engine-selection.php",
     ),
   ]) {
     const bytes = readFileSync(file);

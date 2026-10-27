@@ -62,6 +62,20 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
     if (file_exists($installTransaction) || is_link($installTransaction)) {
         $publicationUnavailable();
     }
+    $bindDatabasePassword = static function (): void {
+        if (!defined('DB_PASSWORD')) {
+            $spacefastDbPassword = getenv('DB_PASSWORD');
+            if (is_string($spacefastDbPassword)) {
+                define('DB_PASSWORD', $spacefastDbPassword);
+                if (PHP_SAPI !== 'cli') {
+                    unset($_SERVER['DB_PASSWORD'], $_ENV['DB_PASSWORD']);
+                    putenv('DB_PASSWORD');
+                }
+            }
+            unset($spacefastDbPassword);
+        }
+    };
+
     $releaseRoot = $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] ?? null;
     if (!is_string($releaseRoot)) {
         $pointerPath = $installRoot . '/active-release';
@@ -83,12 +97,16 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
         }
         $releaseRoot = $releaseReal;
         // The site's release decides whether the engine runs from it or from
-        // the Spacefast chroot (engine/shared/engine-source.php). A release
+        // the Spacefast chroot (engine/shared/engine-selection.php). A release
         // older than that rule has no chroot to offer.
-        $engineSource = $releaseReal . '/engine/shared/engine-source.php';
+        $engineSource = $releaseReal . '/engine/shared/engine-selection.php';
         if (is_file($engineSource)) {
+            // The selection is encrypted persistent data, keyed by DB_PASSWORD,
+            // which the provider defines only after this prepend returns. It
+            // defines it the same way, so binding it here changes nothing else.
+            $bindDatabasePassword();
             require_once $engineSource;
-            $engine = _spacefast_runtime_engine_source($installReal, $releaseReal);
+            $engine = _spacefast_runtime_engine_source($releaseReal);
             $releaseRoot = $engine['release_root'];
             $GLOBALS['SPACEFAST_RUNTIME_NATIVE_BINARY'] = $engine['native_binary'];
             $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] = $engine['source'];
@@ -97,20 +115,6 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
         $GLOBALS['SPACEFAST_RUNTIME_INSTALL_ROOT'] = $installReal;
         $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseRoot;
     }
-
-    $bindDatabasePassword = static function (): void {
-        if (!defined('DB_PASSWORD')) {
-            $spacefastDbPassword = getenv('DB_PASSWORD');
-            if (is_string($spacefastDbPassword)) {
-                define('DB_PASSWORD', $spacefastDbPassword);
-                if (PHP_SAPI !== 'cli') {
-                    unset($_SERVER['DB_PASSWORD'], $_ENV['DB_PASSWORD']);
-                    putenv('DB_PASSWORD');
-                }
-            }
-            unset($spacefastDbPassword);
-        }
-    };
 
     $script = basename(__FILE__);
     // Which pass this is, for the one lane that cannot run inside the

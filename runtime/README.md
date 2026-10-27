@@ -125,7 +125,10 @@ sets it through the WP Cloud API. The loaders, and the control plane's scheduled
 commands, still resolve the site's own release first and ask its
 `engine/shared/engine-selection.php` which engine to run. The site's install root keeps its storage and its publication lock either
 way, and a missing or incomplete chroot falls back to the site's release. Health and the
-engine-update receipt report `engine_source`.
+engine-update receipt report `engine_source`. Health also reports `engine_source_reason`
+(`chroot`, `no_persistent_data`, `unselected`, `chroot_missing`, `chroot_engine_unsupported` or
+`chroot_binary_missing`) and the `chroot_revision` the selected channel resolved to, so a site
+that selects the chroot and still runs its own release says why.
 
 ## Configuration
 

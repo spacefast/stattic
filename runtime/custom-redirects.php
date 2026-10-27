@@ -110,6 +110,8 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             $releaseRoot = $engine['release_root'];
             $GLOBALS['SPACEFAST_RUNTIME_NATIVE_BINARY'] = $engine['native_binary'];
             $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] = $engine['source'];
+            $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE_REASON'] = $engine['reason'];
+            $GLOBALS['SPACEFAST_RUNTIME_CHROOT_REVISION'] = $engine['chroot_revision'];
         }
         // Named, not derived: a chroot engine lives outside this install root.
         $GLOBALS['SPACEFAST_RUNTIME_INSTALL_ROOT'] = $installReal;

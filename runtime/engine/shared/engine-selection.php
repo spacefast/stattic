@@ -28,23 +28,29 @@ declare(strict_types=1);
 const SPACEFAST_RUNTIME_CHROOT_SELECTION = '#^chroot/(staging|production)/(latest|previous)$#D';
 
 /**
- * @return array{release_root:string,native_binary:string,source:'chroot'|'site'}
+ * `reason` says why the site runs where it does, and `chroot_revision` which
+ * revision the selected channel resolved to, so health can explain a site
+ * that selects the chroot and still runs its own release.
+ *
+ * @return array{release_root:string,native_binary:string,source:'chroot'|'site',reason:string,chroot_revision:?string}
  */
 function _spacefast_runtime_engine_source(string $siteReleaseRoot): array
 {
-    $site = [
+    $site = static fn (string $reason, ?string $chrootRevision = null): array => [
         'release_root' => $siteReleaseRoot,
         'native_binary' => $siteReleaseRoot . '/bin/stattic-runtime',
         'source' => 'site',
+        'reason' => $reason,
+        'chroot_revision' => $chrootRevision,
     ];
     // The provider defines the class in its prepend. A PHP process without it
     // (a bare CLI, a local stack) has no persistent data to select with.
     if (!class_exists('Atomic_Persistent_Data')) {
-        return $site;
+        return $site('no_persistent_data');
     }
     $selection = (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE;
     if (preg_match(SPACEFAST_RUNTIME_CHROOT_SELECTION, is_string($selection) ? trim($selection) : '', $selected) !== 1) {
-        return $site;
+        return $site('unselected');
     }
     $channel = $selected[1] . '-' . $selected[2];
     // Tests stand a chroot up under a temporary root; the box has it at `/`.
@@ -56,18 +62,28 @@ function _spacefast_runtime_engine_source(string $siteReleaseRoot): array
         || !is_string($engineReal)
         || dirname($engineReal) !== $scriptsReal
         || preg_match('/^sf-engine-([0-9a-f]{40})$/D', basename($engineReal), $match) !== 1
-        // An engine without this rule selects some other way, or not at all.
-        // Running it would put its loaders on the site at its next install,
-        // and the site would stop reading its channel: the site's own release
-        // serves instead, until the chroot carries an engine with this rule.
-        || !is_file($engineReal . '/engine/shared/engine-selection.php')
+    ) {
+        return $site('chroot_missing');
+    }
+    // An engine without this rule selects some other way, or not at all.
+    // Running it would put its loaders on the site at its next install, and
+    // the site would stop reading its channel: the site's own release serves
+    // instead, until the chroot carries an engine with this rule.
+    if (
+        !is_file($engineReal . '/engine/shared/engine-selection.php')
         || !is_file($engineReal . '/engine/init.php')
     ) {
-        return $site;
+        return $site('chroot_engine_unsupported', $match[1]);
     }
     $binary = $chrootRoot . '/usr/local/bin/sf-bin-' . $match[1] . '/stattic-runtime';
     if (!is_file($binary) || !is_executable($binary)) {
-        return $site;
+        return $site('chroot_binary_missing', $match[1]);
     }
-    return ['release_root' => $engineReal, 'native_binary' => $binary, 'source' => 'chroot'];
+    return [
+        'release_root' => $engineReal,
+        'native_binary' => $binary,
+        'source' => 'chroot',
+        'reason' => 'chroot',
+        'chroot_revision' => $match[1],
+    ];
 }

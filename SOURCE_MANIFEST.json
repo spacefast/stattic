@@ -1,7 +1,7 @@
 {
-  "revision": "b08747a325bd78b49f8ccd0ac0bfe68bc62e16bd",
-  "sourceHash": "f81f85a3908498fe993b12ec7e8220523e23ae9964f25fd641603121bf48a609",
-  "manifestSha256": "8455579c4deb9a99ddc78230ae746b88f06f0baa8a21d2c55f4817bcfb4107a0",
+  "revision": "df1f18d2fbbc68742634df67935839905698dc6b",
+  "sourceHash": "fa0351604b9f8d98f836738a8f0e939089aa6bfadc70f27f4f0843aae7ae06af",
+  "manifestSha256": "89bd20c0f6bfbb073750f6316dad2b469af061180246be814d03a93f42a2464b",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "893e63ed5df7daaa1e047c30e349a5d14e3bd5cae59d764acddb97d50e8a69ea"
+      "sha256": "5c6bd8bef54e061526208f6709d909eb964c143419f065df0feee270a31ccc7a"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "3f8c9ff3cae9394f654e2b53d7243b869701b4804911ffc4ce6edda57a2af988"
+      "sha256": "3bf37be61eeaadc130b35d762dc0a2f9bbf17ee8e80cc8ba6c5d7eed32a23ecc"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -365,7 +365,7 @@
     },
     {
       "path": "runtime/README.md",
-      "sha256": "9762663384ba323575d02940596be99332d32bac2aef484b1149ca8a444814b1"
+      "sha256": "bc5ebe73fe62ffc1cc20f280f29b8280fff5d5db279b30a2e56c413dcadc2dad"
     },
     {
       "path": "runtime/SKILL.md",
@@ -413,7 +413,7 @@
     },
     {
       "path": "runtime/custom-redirects.php",
-      "sha256": "1eec4951f671d576fa298f9a70069c8c8e24c041315accfd61040eb318922a7b"
+      "sha256": "85b154a14a45544ce25594e28c0e1f54d35cfe323bb65c93717c0d8fe8a6338c"
     },
     {
       "path": "runtime/engine-manifest.json",
@@ -509,7 +509,7 @@
     },
     {
       "path": "runtime/engine/entrypoints/health.php",
-      "sha256": "549b4470aaac5a89e6d3e971954b6d270df60a15e7cb6a5c3b96d53426cce570"
+      "sha256": "9fceea02b15fb91823a5aade194822680674f00f09f94e2821859dbc1636a8fa"
     },
     {
       "path": "runtime/engine/entrypoints/invoke.php",
@@ -701,7 +701,7 @@
     },
     {
       "path": "runtime/engine/shared/engine-selection.php",
-      "sha256": "a898fe9b19e379c3321f0c757ecdb26b43a60754923770f434df1d23cd54b3d9"
+      "sha256": "1aa1385f680104f12d486af32e04705a468281b2e84b27fd45c71656b1a6c56b"
     },
     {
       "path": "runtime/engine/shared/errors.php",
@@ -1089,7 +1089,7 @@
     },
     {
       "path": "runtime/tests/engine-source.test.ts",
-      "sha256": "513483b5bd229aefd4249db4d8ded71e45d0ab1c1bcea4c8bc177742ae591288"
+      "sha256": "44c9f5c4f81813af3cd2ab70c6935cd8b92ac43e247a73279cd3ab73acf2c800"
     },
     {
       "path": "runtime/tests/engine-update-route.test.ts",

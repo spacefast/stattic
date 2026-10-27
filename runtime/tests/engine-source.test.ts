@@ -77,7 +77,7 @@ afterAll(() => {
   if (chrootRoot) rmSync(chrootRoot, { recursive: true, force: true });
 });
 
-async function expectHealth(expected: Record<string, string>): Promise<void> {
+async function expectHealth(expected: Record<string, string | null>): Promise<void> {
   const response = await fetch(`${rt.baseUrl}/__spacefast/health.php`);
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject(expected);
@@ -90,6 +90,8 @@ test("serves and proves the chroot revision the site selected", async () => {
   await expectHealth({
     engine_revision: CHROOT_REVISION,
     engine_source: "chroot",
+    engine_source_reason: "chroot",
+    chroot_revision: CHROOT_REVISION,
     site_state: "configured",
   });
 
@@ -131,23 +133,34 @@ test("falls back to the site's release when the chroot is unselected or cannot s
   const selected = readFileSync(persistentData);
   writeFileSync(persistentData, `${JSON.stringify(RUNTIME_ATOMIC_DATA)}\n`);
   try {
-    await expectHealth({ engine_revision: "source-tree", engine_source: "site" });
+    await expectHealth({
+      engine_revision: "source-tree",
+      engine_source: "site",
+      engine_source_reason: "unselected",
+      chroot_revision: null,
+    });
   } finally {
     writeFileSync(persistentData, selected);
   }
 
-  // Each file stands for one way the chroot fails the site: a revision without
-  // its binary, and an engine without this selection rule, whose loaders would
-  // stop the site reading its channel once installed.
-  for (const file of [
-    path.join(chrootRoot, "usr/local/bin", `sf-bin-${CHROOT_REVISION}`, "stattic-runtime"),
-    path.join(
-      chrootRoot,
-      "scripts",
-      `sf-engine-${CHROOT_REVISION}`,
-      "engine/shared/engine-selection.php",
-    ),
-  ]) {
+  // Each file stands for one way the chroot fails the site, and health names
+  // it: a revision without its binary, and an engine without this selection
+  // rule, whose loaders would stop the site reading its channel once installed.
+  for (const [file, reason] of [
+    [
+      path.join(chrootRoot, "usr/local/bin", `sf-bin-${CHROOT_REVISION}`, "stattic-runtime"),
+      "chroot_binary_missing",
+    ],
+    [
+      path.join(
+        chrootRoot,
+        "scripts",
+        `sf-engine-${CHROOT_REVISION}`,
+        "engine/shared/engine-selection.php",
+      ),
+      "chroot_engine_unsupported",
+    ],
+  ] as const) {
     const bytes = readFileSync(file);
     const { mode } = statSync(file);
     rmSync(file);
@@ -155,6 +168,8 @@ test("falls back to the site's release when the chroot is unselected or cannot s
       await expectHealth({
         engine_revision: "source-tree",
         engine_source: "site",
+        engine_source_reason: reason,
+        chroot_revision: CHROOT_REVISION,
         site_state: "configured",
       });
     } finally {

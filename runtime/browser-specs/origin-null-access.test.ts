@@ -26,8 +26,8 @@ type Fixture = {
 
 const EXPECTED_REACHABLE_STATES = {
   "invalid-password": "That password didn't work.",
-  "request-pending":
-    "Access requested. If you haven't confirmed your email address yet, check your email for a confirmation link. You'll receive another email when the site owner approves your request.",
+  "request-confirm":
+    "Check your email to finish your request. Open the confirmation link we sent. It expires in 30 minutes.",
   "request-failed": "That request didn't go through. Try again in a moment.",
   "email-sent": "Check your email. Use the confirmation link we sent to finish opening this page.",
   "email-failed": "Couldn't send that confirmation. Enter the password and try again.",
@@ -44,6 +44,7 @@ const EXPECTED_REACHABLE_STATES = {
 const UNREACHABLE_IN_THIS_FIXTURE = {
   checked: "requires a signed-out central account probe",
   "no-grant": "requires a signed-in central account with no matching Grant",
+  "request-pending": "requires a central account hint for the requested address",
   "link-expired": "requires an expired central Link credential",
   "link-revoked": "requires a revoked central Link credential",
   "link-invalid": "requires a centrally rejected live Link credential",
@@ -219,7 +220,8 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   const inviteHeaders = await inviteResponse.request().allHeaders();
   expect(inviteHeaders.origin).toBe("null");
   expect(inviteHeaders["sec-fetch-site"]).toBe("same-origin");
-  await invitePage.getByText("Access requested.").waitFor();
+  await invitePage.waitForURL(/[?&]sf_access=request-confirm(?:&|$)/);
+  await invitePage.locator(".sf-access-status-action").waitFor();
   await inviteContext.close();
 });
 
@@ -257,7 +259,7 @@ test("production transitions render every locally reachable state with independe
     await page.getByText("Request access").click();
     await page.locator('input[name="email"]').fill("visitor@example.com");
     await page.getByRole("button", { name: "Request an invite" }).click();
-    await expectStatus(page, "request-pending");
+    await expectStatus(page, "request-confirm");
 
     await context.clearCookies();
     await page.goto(fixture.defaultPageUrl);
@@ -391,7 +393,8 @@ test("denied and expired requests can be replaced through the production request
     await page.locator("details.sf-access-request summary").click();
     await page.locator('input[name="email"]').fill(fixture.requestLifecycleEmail);
     await page.getByRole("button", { name: "Request an invite" }).click();
-    await page.getByText("Access requested.").waitFor();
+    await page.waitForURL(/[?&]sf_access=request-confirm(?:&|$)/);
+    await page.locator(".sf-access-status-action").waitFor();
   };
   const moveRequestTo = async (action: "deny" | "expire") => {
     const response = await fetch(fixture.requestStateUrl, {

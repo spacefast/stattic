@@ -1056,7 +1056,7 @@ test("the request-invite lane relays centrally and remembers only the requested 
     }),
   });
   expect(submitted.status).toBe(303);
-  expect(submitted.headers.get("location")).toBe("/docs/?sf_access=request-pending");
+  expect(submitted.headers.get("location")).toBe("/docs/?sf_access=request-confirm");
   // The requested scope is remembered on the host session, not in a cookie of
   // its own. Nobody proved anything here, so that session is the stateless
   // form: asking for an invite writes no revocation record, and a flood of
@@ -1065,14 +1065,19 @@ test("the request-invite lane relays centrally and remembers only the requested 
   expect(requested).toStartWith(`__Host-spacefast_session=${STATELESS_SESSION_PREFIX}`);
   expect(sessionRecords(LANES_SPACE)).toEqual(recordsBefore);
 
-  const pending = await get(runtime, LANES_HOST, "/docs/?sf_access=request-pending", {
+  const pending = await get(runtime, LANES_HOST, "/docs/?sf_access=request-confirm", {
     headers: { cookie: requested },
   });
   const pendingHtml = await pending.text();
-  expect(pendingHtml).toContain("Access requested.");
-  expect(pendingHtml).toContain("check your email for a confirmation link.");
-  expect(pendingHtml).toContain("when the site owner approves your request.");
+  expect(pendingHtml).toContain('class="sf-copy sf-access-status sf-access-status-action"');
   expect(pendingHtml).not.toContain("Request again</summary>");
+
+  const hinted = await get(runtime, LANES_HOST, "/docs/?sf_access=request-pending", {
+    headers: { cookie: requested },
+  });
+  const hintedHtml = await hinted.text();
+  expect(hintedHtml).toContain('class="sf-copy sf-access-status" role="status"');
+  expect(hintedHtml).not.toContain("Request again</summary>");
 
   const rendered = await get(runtime, LANES_HOST, "/docs/guide/", {
     headers: { cookie: requested },
@@ -1127,12 +1132,16 @@ test("the request-invite lane forwards only this browser's hint for the posted a
       body: new URLSearchParams({ return: "/docs/", ...body }),
     });
     expect(submitted.status).toBe(303);
-    expect(submitted.headers.get("location")).toBe("/docs/?sf_access=request-pending");
     const call = exchangeRequests.findLast(
       (request) => request.pathname === "/acquire/runtime-page/request",
     );
     expect(call?.form.get("email")).toBe(body.email);
-    return call?.form.get("accountHint") ?? null;
+    const forwardedHint = call?.form.get("accountHint") ?? null;
+    // Only an unhinted request is sure to need the emailed confirmation.
+    expect(submitted.headers.get("location")).toBe(
+      `/docs/?sf_access=${forwardedHint === null ? "request-confirm" : "request-pending"}`,
+    );
+    return forwardedHint;
   };
 
   expect(await forwarded({ email: "anne@example.com", account_hint: hint })).toBe(hint);

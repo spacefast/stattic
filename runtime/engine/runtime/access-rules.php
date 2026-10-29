@@ -3120,7 +3120,7 @@ function _stattic_access_page_lanes(array $serving): ?array
 
 const STATTIC_ACCESS_STATUS_CODES = [
     'checked', 'no-grant', 'invalid-password', 'email-sent', 'email-failed',
-    'request-pending', 'request-failed', 'link-expired', 'link-revoked',
+    'request-confirm', 'request-pending', 'request-failed', 'link-expired', 'link-revoked',
     'link-invalid', 'open-used', 'session-expired', 'rate-limited',
     'exchange-unavailable',
 ];
@@ -3349,9 +3349,23 @@ function _stattic_access_status_fragment(string $status, ?string $accountEmail =
             . _stattic_html_escape($accountEmail)
             . '</strong>, but this space hasn&#039;t let you in yet. Ask for an invite below.</p>';
     }
+    // The visitor still has to act on an email link that expires, so these
+    // lead with the action instead of reading like a passing notice. The
+    // 30 minutes is REQUEST_VERIFY_TTL_SECONDS in the control plane.
+    $actions = [
+        'email-sent' => ['Check your email.', 'Use the confirmation link we sent to finish opening this page.'],
+        'request-confirm' => [
+            'Check your email to finish your request.',
+            'Open the confirmation link we sent. It expires in 30 minutes.',
+        ],
+    ];
+    if (isset($actions[$status])) {
+        return '<p class="sf-copy sf-access-status sf-access-status-action" role="status"><strong>'
+            . _stattic_html_escape($actions[$status][0]) . '</strong> '
+            . _stattic_html_escape($actions[$status][1]) . '</p>';
+    }
     $messages = [
         'no-grant' => "You're signed in, but this space hasn't let you in yet. Ask for an invite below.",
-        'email-sent' => 'Check your email. Use the confirmation link we sent to finish opening this page.',
         'email-failed' => "Couldn't send that confirmation. Enter the password and try again.",
         'request-pending' => "Access requested. If you haven't confirmed your email address yet, check your email for a confirmation link. You'll receive another email when the site owner approves your request.",
         'request-failed' => "That request didn't go through. Try again in a moment.",
@@ -3528,7 +3542,8 @@ function _stattic_access_lanes_fragment(
             is_string($returnPathOnly) && $returnPathOnly !== '' ? $returnPathOnly : '/'
         );
         $markedScope = $requestedScope;
-        $requested = $status === 'request-pending'
+        $justRequested = $status === 'request-pending' || $status === 'request-confirm';
+        $requested = $justRequested
             || (
                 $status !== 'request-failed'
                 && $markedScope !== null
@@ -3536,7 +3551,7 @@ function _stattic_access_lanes_fragment(
                 && _stattic_scope_contains($markedScope, $currentScope)
             );
         if ($requested) {
-            if ($status !== 'request-pending') {
+            if (!$justRequested) {
                 $scope = $markedScope ?? ($currentScope ?? '/');
                 $html .= '<p class="sf-copy sf-access-requested">Access requested for '
                     . _stattic_html_escape($host . ($scope === '/' ? '' : $scope))
@@ -3545,7 +3560,7 @@ function _stattic_access_lanes_fragment(
             }
             // The marker is only a browser hint, so keep a way back into the
             // flow after a denial or expiry.
-            if ($status !== 'request-pending') {
+            if (!$justRequested) {
                 $html .= _stattic_access_request_form($returnPath, 'Request again');
             }
         } else {
@@ -4218,7 +4233,13 @@ function _stattic_access_handle_request_invite(array $serving, string $requestHo
         _stattic_current_session_identity($serving, $requestHost),
         $requestedScope
     );
-    _stattic_access_gate_after_post($serving, $requestHost, $returnPath, 'request-pending');
+    // Without a forwarded hint the platform always mails a confirmation link.
+    _stattic_access_gate_after_post(
+        $serving,
+        $requestHost,
+        $returnPath,
+        $accountHint === '' ? 'request-confirm' : 'request-pending'
+    );
 }
 
 function _stattic_callback_authorities(array $verified): array

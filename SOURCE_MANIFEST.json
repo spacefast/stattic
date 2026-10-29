@@ -1,7 +1,7 @@
 {
-  "revision": "106cf9bc2b2c8d3c60b79445684ec2f704e852aa",
-  "sourceHash": "fa0351604b9f8d98f836738a8f0e939089aa6bfadc70f27f4f0843aae7ae06af",
-  "manifestSha256": "7ca6718bc4c47dfbaa09f625ed19b7fd04f402193b57e2b53ba3a35d82a348f4",
+  "revision": "87b0e340c3276a1488fa5fd4262a2e41fd3ced8c",
+  "sourceHash": "0ac203c249f0ee5ab8a0ff1f4ff81e8a47ce9bccff7feeb1b77d500b56d34e65",
+  "manifestSha256": "eaf40bc5c01f9fa651c1f1af938a5922b0452ddb96814854026df2fe669253aa",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "524529271e3362e4f3849ef8439861c8a150421cb260df66b9d04460c0229549"
+      "sha256": "5559957ee353cef2f2eeb53714c52d5e2a52e8b346b3a2ff7e6f6358c1650e1c"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "07325379393b419856c366c854a694885679df6b76e4c2b2f18779bc61f85ddf"
+      "sha256": "2d9146d37046d755e3119923aa806e058398bdbbf1fdf27af8661ef201f4d645"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -461,7 +461,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "a86ac5a4eaa358a28ead64876814f21ff72ef279787f78b6f2dbaac146308be1"
+      "sha256": "3f832392b1109d681f6d6e484b226af862229cc5bb4164e24e5ad62b9ccb93ae"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -513,7 +513,7 @@
     },
     {
       "path": "runtime/engine/entrypoints/invoke.php",
-      "sha256": "a45e8ba549bee135df9aa560340115a88eb60209612a308808ef12f47cf61b16"
+      "sha256": "7fe585b01533096ed8cca78027fefb863195ce384043ca60ff6b325eb1c17d32"
     },
     {
       "path": "runtime/engine/entrypoints/management.php",
@@ -533,7 +533,7 @@
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
-      "sha256": "b43beafca183115072571c0ddebc7689a89b3fa838055cc22daa0d8bccb1b47a"
+      "sha256": "1ba77428405e3c548ce3dbbec6f170df2617f2d19852b9d50715983f8ac3e6ac"
     },
     {
       "path": "runtime/engine/runtime/content-page.php",
@@ -1041,7 +1041,7 @@
     },
     {
       "path": "runtime/tests/cron-cli.test.ts",
-      "sha256": "853e66cbce63a134020837b09b16d3d977156856d3c3bf50f7f4ae02ef44b394"
+      "sha256": "fa024b888faa5a65d0876be9ece0b13aec8b3aa1fe039d4abae1f606b6c7bf14"
     },
     {
       "path": "runtime/tests/db-broker-admission.test.ts",
@@ -1077,7 +1077,7 @@
     },
     {
       "path": "runtime/tests/dispatch.test.ts",
-      "sha256": "7a92f30d7412e5851b47c98d333edebc7cb9c730e85338e63df6d499a4ee4839"
+      "sha256": "bd7200c638defbc239cb2da645f3e8546ae9f5a6f949a6f8a908d11373dc033a"
     },
     {
       "path": "runtime/tests/edge-purge.test.ts",

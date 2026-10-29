@@ -272,10 +272,14 @@ function _stattic_cli_observed_fatal(?bool $observed = null): bool
  */
 function _stattic_cli_receipt(array $request, int $status): never
 {
+    // Which engine answered, as health reports it: a scheduled command picks its
+    // engine on its own, so only its receipt can say which one ran.
     $receipt = json_encode([
         'method' => $request['method'],
         'path' => $request['path'],
         'status' => $status,
+        'engine_revision' => SPACEFAST_RUNTIME_ENGINE_REVISION,
+        'engine_source' => ($GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] ?? null) === 'chroot' ? 'chroot' : 'site',
     ], JSON_UNESCAPED_SLASHES);
     fwrite(STDERR, STATTIC_RUNTIME_INVOKE_RESULT_SENTINEL . (is_string($receipt) ? $receipt : '{}') . "\n");
 

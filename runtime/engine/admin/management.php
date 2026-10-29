@@ -663,6 +663,7 @@ function _stattic_runtime_state_route(string $privateRoot): void
         'ok' => true,
         'runtime' => 'stattic-php',
         'engine_revision' => SPACEFAST_RUNTIME_ENGINE_REVISION,
+        'engine_source' => _stattic_engine_serves_from_chroot() ? 'chroot' : 'site',
         'routes_generation' => $summary['routes_generation'],
         'spaces' => $summary['spaces'],
     ]);

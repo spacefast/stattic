@@ -197,7 +197,13 @@ test("a declared cron runs its path and carries both proofs", async () => {
   const after = Math.floor(Date.now() / 60_000);
 
   expect(result.exitCode).toBe(0);
-  expect(receipt(result.stderr)).toEqual({ method: "GET", path: "/cron/report", status: 200 });
+  expect(receipt(result.stderr)).toEqual({
+    method: "GET",
+    path: "/cron/report",
+    status: 200,
+    engine_revision: "source-tree",
+    engine_source: "site",
+  });
 
   // SAFETY: The finalized report fixture above emits exactly this JSON shape.
   const seen = JSON.parse(result.stdout) as { cron: string; authorization: string; mail: boolean };

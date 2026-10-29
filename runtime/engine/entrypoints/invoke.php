@@ -15,7 +15,8 @@ declare(strict_types=1);
  *   stdin   the request body, verbatim. The CLI entrypoint stages it for the
  *           visitor lane, so the shell's own redirect is the body flag.
  *   stdout  the response body, unmodified.
- *   stderr  one `spacefast-invoke-result: {…}` line carrying the final status,
+ *   stderr  one `spacefast-invoke-result: {…}` line carrying the final status
+ *           and the engine that answered (`engine_revision`, `engine_source`),
  *           plus whatever the dispatched route logged. Response HEADERS are not
  *           in it: the CLI SAPI discards `header()` outright, so reporting them
  *           would mean inventing them.

@@ -105,6 +105,7 @@ test("state over dispatch runs the same handler as HTTP", async () => {
   expect(envelope.status).toBe(200);
   expect(envelope.body.ok).toBe(true);
   expect(envelope.body.runtime).toBe("stattic-php");
+  expect(envelope.body).toMatchObject({ engine_revision: "source-tree", engine_source: "site" });
   // Generation-state summary rides the same response shape as HTTP.
   expect(Array.isArray(envelope.body.spaces)).toBe(true);
 });

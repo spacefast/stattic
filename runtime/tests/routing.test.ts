@@ -926,7 +926,8 @@ test("a configured SPA fallback owns `/` without hiding prerendered pages", asyn
     "sign-in/_shell.html": "<h1>not a directory index</h1>\n",
   };
   for (const [suffix, config] of [
-    ["inferred", { fallback: { path: "_shell.html", status: 200 } }],
+    // Zero config: `_shell.html` is the SPA fallback and the homepage.
+    ["inferred", {}],
     ["pinned", { index: "_shell.html", fallback: { path: "_shell.html", status: 200 } }],
   ] as const) {
     const host = `spa-root-${suffix}.test`;
@@ -951,6 +952,71 @@ test("a configured SPA fallback owns `/` without hiding prerendered pages", asyn
     expect(await (await get(rt, host, "/secondary")).text(), suffix).toBe("<h1>secondary</h1>\n");
     expect(await (await get(rt, host, "/sign-in/")).text(), suffix).toBe("<h1>sign in</h1>\n");
   }
+});
+
+// Framework builds with no `sf.jsonc`, on the shapes their generators write:
+// the shell answers client routes only for an app build, a root `404.html`
+// keeps misses honest, and an opt-out sticks.
+test("an app build gets its SPA fallback with no config", async () => {
+  const cases = [
+    {
+      label: "Nuxt generate (200.html beside index.html and 404.html)",
+      files: {
+        "index.html": "<h1>home</h1>\n",
+        "200.html": "<h1>nuxt shell</h1>\n",
+        "404.html": "<h1>nuxt 404</h1>\n",
+        "_nuxt/entry.js": "void 0;\n",
+      },
+      route: { status: 200, body: "<h1>nuxt shell</h1>\n" },
+    },
+    {
+      label: "Vite SPA with an extra page",
+      files: {
+        "index.html": "<h1>vite shell</h1>\n",
+        "privacy.html": "<h1>privacy</h1>\n",
+        "assets/index-DiwrgTda.js": "void 0;\n",
+      },
+      route: { status: 200, body: "<h1>vite shell</h1>\n" },
+    },
+    {
+      label: "Next.js export (a root 404.html means routes can miss)",
+      files: {
+        "index.html": "<h1>next home</h1>\n",
+        "404.html": "<h1>next 404</h1>\n",
+        "_next/static/chunks/main.js": "void 0;\n",
+      },
+      route: { status: 404, body: "<h1>next 404</h1>\n" },
+    },
+    {
+      label: "Vite SPA that opted out",
+      files: { "index.html": "<h1>vite shell</h1>\n", "assets/index-DiwrgTda.js": "void 0;\n" },
+      config: { fallback: false },
+      route: { status: 404 },
+    },
+  ];
+  for (const [index, { label, files, config, route }] of cases.entries()) {
+    const host = `spa-inferred-${index}.test`;
+    await deploy(rt, {
+      spaceId: `spc_spa_inferred_${index}`,
+      versionId: `ver_spa_inferred_${index}_1`,
+      files,
+      serving: { config: config ?? {} },
+      activate: {
+        route_name: "production",
+        config: publicAccessConfig(),
+        production_hostnames: [host],
+        version_hostnames: [],
+      },
+    });
+    const deep = await get(rt, host, "/dashboard/42");
+    expect(deep.status, label).toBe(route.status);
+    if (route.body) expect(await deep.text(), label).toBe(route.body);
+    // A typo'd asset never gets the shell.
+    expect((await get(rt, host, "/assets/missing.js")).status, label).toBe(404);
+  }
+  expect(await (await get(rt, "spa-inferred-1.test", "/privacy")).text()).toBe(
+    "<h1>privacy</h1>\n",
+  );
 });
 
 test("W7.1 a committed page wins its clean URL over a 200 SPA fallback unless clean URLs are off", async () => {

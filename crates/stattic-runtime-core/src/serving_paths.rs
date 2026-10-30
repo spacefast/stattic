@@ -1,6 +1,10 @@
 //! Which committed paths are privately held configuration versus publicly
 //! served content. Shared by the transform resolvers and finalize policy.
 
+use std::sync::LazyLock;
+
+use regex::Regex;
+
 use crate::protocol::{COMPILE_SIDECAR_FILES, CONFIG_ACCEPTED_FILES, CONFIG_TYPESCRIPT_FILE};
 
 /// The document a directory URL serves: `/docs/` answers `docs/index.html`.
@@ -69,6 +73,23 @@ pub(crate) fn precompressed_source(path: &str) -> Option<&str> {
 fn ends_with_ignore_ascii_case(path: &str, suffix: &str) -> bool {
     let (path, suffix) = (path.as_bytes(), suffix.as_bytes());
     path.len() >= suffix.len() && path[path.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
+static HEX_DIGEST_NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^.*[.\-_]([0-9a-f]{8,32})\.[a-z0-9]{1,8}$").expect("hex digest name regex")
+});
+
+/// `app.3f9c2d1a.js`, `styles.abc123def456.css`: a hex digest needs both a
+/// letter and a digit, or it is a date or a counter.
+pub(crate) fn carries_hex_digest(name: &str) -> bool {
+    HEX_DIGEST_NAME
+        .captures(name)
+        .and_then(|hit| hit.get(1))
+        .is_some_and(|digest| {
+            let digest = digest.as_str();
+            digest.bytes().any(|byte| byte.is_ascii_alphabetic())
+                && digest.bytes().any(|byte| byte.is_ascii_digit())
+        })
 }
 
 #[cfg(test)]

@@ -332,7 +332,6 @@ pub fn resolve_serving_config(
     config: &Map<String, Value>,
     files: &BTreeMap<String, FileMeta>,
     private: &BTreeSet<String>,
-    metadata: &Map<String, Value>,
     has_worker: bool,
 ) -> Result<Map<String, Value>> {
     if config.get("index").is_some_and(|index| match index {
@@ -347,6 +346,7 @@ pub fn resolve_serving_config(
     }
     if let Some(fallback) = config.get("fallback") {
         let valid = fallback.is_null()
+            || fallback == &Value::Bool(false)
             || fallback.as_object().is_some_and(|fallback| {
                 fallback.len() == 2
                     && fallback
@@ -361,7 +361,7 @@ pub fn resolve_serving_config(
         if !valid {
             return invalid(
                 "invalid_serving_config",
-                "fallback must be null or { path: non-empty string, status: 200 | 404 }.",
+                "fallback must be null, false, or { path: non-empty string, status: 200 | 404 }.",
             );
         }
     }
@@ -374,15 +374,6 @@ pub fn resolve_serving_config(
         }
     }
     let mut file_config = config.clone();
-    if !file_config.contains_key("fallback")
-        && metadata.get("spa").and_then(Value::as_bool) == Some(true)
-        && files.contains_key("index.html")
-    {
-        file_config.insert(
-            "fallback".into(),
-            json!({"path": "index.html", "status": 200}),
-        );
-    }
     if let Some(clean_urls) = file_config.remove("clean_urls") {
         file_config.insert("cleanUrls".into(), clean_urls);
     }
@@ -858,7 +849,6 @@ mod tests {
                 fallback_config.as_object().unwrap(),
                 &files,
                 &private,
-                &Map::new(),
                 false,
             ),
             Err(FinalizeError::Invalid {
@@ -904,30 +894,11 @@ mod tests {
                 .collect::<BTreeMap<_, _>>();
             let private = private.into_iter().map(str::to_string).collect();
             let resolved =
-                resolve_serving_config(&Map::new(), &files, &private, &Map::new(), has_worker)
-                    .unwrap();
+                resolve_serving_config(&Map::new(), &files, &private, has_worker).unwrap();
             assert_eq!(resolved.get("index"), Some(&expected_index));
             assert_eq!(resolved.get("listing"), Some(&json!(expected_listing)));
             assert_eq!(resolved.get("fallback"), Some(&Value::Null));
         }
-
-        let files = ["index.html", "page.html"]
-            .into_iter()
-            .map(|path| (path.to_string(), file_meta(path, b"content", None)))
-            .collect::<BTreeMap<_, _>>();
-        let resolved = resolve_serving_config(
-            &Map::new(),
-            &files,
-            &BTreeSet::new(),
-            &Map::from_iter([("spa".into(), Value::Bool(true))]),
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            resolved.get("fallback"),
-            Some(&json!({"path": "index.html", "status": 200}))
-        );
-        assert_eq!(resolved.get("clean_urls"), Some(&Value::Bool(true)));
     }
 
     #[test]

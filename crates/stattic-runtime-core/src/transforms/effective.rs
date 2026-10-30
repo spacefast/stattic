@@ -3,7 +3,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::serving_paths::{is_private_serving_path, precompressed_source};
+use crate::serving_paths::{carries_hex_digest, is_private_serving_path, precompressed_source};
 
 /// Overlay-writable keys the effective config takes by REPLACEMENT: whatever
 /// the overlay declares stands in for the file's value, and a key the overlay
@@ -181,8 +181,28 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
         config.insert((*key).into(), value);
     }
 
-    let fallback = normalize_fallback(config.get("fallback"));
     let mut issues = Vec::new();
+    // `"fallback": false` is the opt-out from SPA inference; any declared
+    // value, `false` included, means the publisher decided.
+    let inferred_fallback = (!config.contains_key("fallback")
+        && !input.has_worker
+        && config.get("index") != Some(&Value::Bool(false))
+        && config.get("listing") != Some(&Value::Bool(true)))
+    .then(|| infer_spa_fallback(&public_manifest))
+    .flatten();
+    if let Some((path, signal)) = inferred_fallback {
+        issues.push(EffectiveIssue {
+            severity: "info",
+            code: "spa_fallback_inferred",
+            message: format!(
+                "This looks like a single-page app, so routes with no file serve /{path} with 200. Commit a 404.html or set \"fallback\": false in sf.jsonc to turn this off."
+            ),
+            path: "fallback",
+            details: Some(json!({ "path": path, "signal": signal })),
+        });
+        config.insert("fallback".into(), json!({ "path": path, "status": 200 }));
+    }
+    let fallback = normalize_fallback(config.get("fallback"));
     if let Some(path) = fallback
         .as_ref()
         .and_then(|value| value.get("path"))
@@ -643,6 +663,80 @@ fn normalize_fallback(value: Option<&Value>) -> Option<Value> {
     }
 }
 
+/// Where a build that ships a client-side router left its shell, so routes
+/// with no file reach it with 200: Surge's and SvelteKit's `200.html`,
+/// TanStack Start's `_shell.html`, else a root `index.html` beside a bundler's
+/// output with no root `404.html` (Cloudflare Pages' rule). A bundler signs its
+/// output: a framework directory, or a content-hashed script directly under
+/// `assets/` or under `static/js/`, so a multi-page site keeps its real 404s.
+/// Committed files still win, so prerendered pages beside the shell keep their
+/// own URLs.
+fn infer_spa_fallback(public_manifest: &BTreeSet<String>) -> Option<(&'static str, &'static str)> {
+    if public_manifest.contains("200.html") {
+        return Some(("200.html", "200.html"));
+    }
+    if public_manifest.contains("_shell.html") {
+        return Some(("_shell.html", "_shell.html"));
+    }
+    let bundled = public_manifest.iter().any(|path| {
+        // Vite writes hashed chunks to a flat `assets/`, CRA to `static/js/`. A
+        // nested `assets/js/main.js` or an unhashed `assets/app.js` is how
+        // hand-written and generator-built multi-page sites lay out scripts.
+        let hashed_script = (path.ends_with(".js") || path.ends_with(".mjs"))
+            && (path
+                .strip_prefix("assets/")
+                .is_some_and(|rest| !rest.contains('/'))
+                || path.starts_with("static/js/"))
+            && (has_rollup_chunk_hash(path)
+                || carries_hex_digest(path.rsplit('/').next().unwrap_or_default()));
+        hashed_script
+            || path.starts_with("_app/")
+            || path.starts_with("_next/static/")
+            || path.starts_with("_nuxt/")
+            || path == "asset-manifest.json"
+    });
+    (bundled && public_manifest.contains("index.html") && !public_manifest.contains("404.html"))
+        .then_some(("index.html", "app_shell"))
+}
+
+/// The 8-character hash bundlers put after a separator: Vite and Rollup's
+/// base64url `index-k9x_2qzb.js`, esbuild's `chunk-ABCD1234.js`, Parcel's
+/// `index.1a2b3c4d.js`. Longer webpack digests are hex and checked apart.
+/// A tail that reads as words (`home-Carousel`, `app-v2-final`, `my-Slider01`)
+/// is how people name scripts by hand, so it does not count. That rejects
+/// well under 0.5% of real hashes, so a build rarely flips between publishes.
+fn has_rollup_chunk_hash(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or_default();
+    let stem = name
+        .strip_suffix(".js")
+        .or_else(|| name.strip_suffix(".mjs"))
+        .unwrap_or(name)
+        .as_bytes();
+    if stem.len() < 10 {
+        return false;
+    }
+    let (head, hash) = stem.split_at(stem.len() - 8);
+    matches!(head.last(), Some(b'-' | b'.'))
+        && hash
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && !hash.split(|byte| *byte == b'-').all(reads_as_word)
+}
+
+/// `final`, `Carousel`, `Slider01`, `v2`, `2024`: a lowercase or capitalized
+/// word with optional trailing digits, or a number.
+fn reads_as_word(piece: &[u8]) -> bool {
+    let letters = piece
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphabetic())
+        .count();
+    let (word, digits) = piece.split_at(letters);
+    digits.iter().all(u8::is_ascii_digit)
+        && (word.is_empty() && !digits.is_empty()
+            || word.first().is_some_and(u8::is_ascii_alphabetic)
+                && word[1..].iter().all(u8::is_ascii_lowercase))
+}
+
 fn has_explicit_serving_shape(config: &Map<String, Value>) -> bool {
     config.contains_key("index") || config.contains_key("listing")
 }
@@ -657,6 +751,30 @@ fn html_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollup_chunk_hashes_without_an_uppercase_letter_still_count() {
+        for name in [
+            "assets/index-k9x_2qzb.js",
+            "assets/index-a1b2c3d4.js",
+            "assets/index-BuPq_-1x.js",
+            "assets/vendor-zzzz9zzz.mjs",
+        ] {
+            assert!(has_rollup_chunk_hash(name), "{name}");
+        }
+        for name in [
+            "assets/app-register.js",
+            "assets/home-Carousel.js",
+            "assets/app-v2-final.js",
+            "assets/my-Slider01.js",
+            "assets/main.js",
+            "assets/jquery-3.7.1.min.js",
+            "assets/index-12.js",
+            "assets/index-abcdefgh.css",
+        ] {
+            assert!(!has_rollup_chunk_hash(name), "{name}");
+        }
+    }
 
     #[test]
     fn infers_single_html_and_builds_wire_payload() {
@@ -831,6 +949,118 @@ mod tests {
             .issues
             .iter()
             .all(|issue| issue.code != "custom_index_not_folder_index"));
+    }
+
+    /// A build that ships a client-side router gets its shell as the 200
+    /// fallback with no config, whichever publish path it took. Each row is
+    /// one signal or one veto.
+    #[test]
+    fn a_client_side_app_infers_its_spa_fallback() {
+        let resolve = |paths: &[&str], file_config: Option<Value>, has_worker: bool| {
+            resolve_effective_config(ResolveEffectiveInput {
+                manifest_paths: paths.iter().map(|path| (*path).to_string()).collect(),
+                file_config: file_config.and_then(|value| value.as_object().cloned()),
+                overlay: None,
+                template_entries: Vec::new(),
+                has_worker,
+            })
+        };
+        let vite = ["index.html", "about.html", "assets/index-DiwrgTda.js"];
+        for (label, paths, config, worker, expected) in [
+            (
+                "200.html wins over index.html",
+                &["index.html", "200.html", "404.html", "_nuxt/a.js"][..],
+                None,
+                false,
+                Some(("200.html", "200.html")),
+            ),
+            (
+                "_shell.html",
+                &["_shell.html", "sign-in/index.html"][..],
+                None,
+                false,
+                Some(("_shell.html", "_shell.html")),
+            ),
+            (
+                "index.html beside a bundle, prerendered pages too",
+                &vite[..],
+                None,
+                false,
+                Some(("index.html", "app_shell")),
+            ),
+            (
+                "a root 404.html means routes can miss",
+                &["index.html", "404.html", "_next/static/a.js"][..],
+                None,
+                false,
+                None,
+            ),
+            (
+                "scripts nested under assets/ are not a bundle",
+                &["index.html", "generic.html", "assets/js/main.js"][..],
+                None,
+                false,
+                None,
+            ),
+            (
+                "no bundle is a plain site",
+                &["index.html", "about.html", "style.css"][..],
+                None,
+                false,
+                None,
+            ),
+            (
+                "a worker keeps unmatched routes",
+                &vite[..],
+                None,
+                true,
+                None,
+            ),
+            (
+                "fallback false opts out",
+                &vite[..],
+                Some(json!({ "fallback": false })),
+                false,
+                None,
+            ),
+            (
+                "files mode opts out",
+                &vite[..],
+                Some(json!({ "listing": true })),
+                false,
+                None,
+            ),
+        ] {
+            let output = resolve(paths, config, worker);
+            let inferred = output
+                .issues
+                .iter()
+                .find(|issue| issue.code == "spa_fallback_inferred");
+            match expected {
+                Some((path, signal)) => {
+                    assert_eq!(
+                        output.serving["fallback"],
+                        json!({ "path": path, "status": 200 }),
+                        "{label}"
+                    );
+                    assert_eq!(
+                        inferred.and_then(|issue| issue.details.clone()),
+                        Some(json!({ "path": path, "signal": signal })),
+                        "{label}"
+                    );
+                }
+                None => {
+                    assert_eq!(output.serving["fallback"], Value::Null, "{label}");
+                    assert!(inferred.is_none(), "{label}");
+                }
+            }
+        }
+        // An explicit fallback is never second-guessed.
+        let explicit = resolve(&vite, Some(json!({ "fallback": "/about.html" })), false);
+        assert_eq!(
+            explicit.serving["fallback"],
+            json!({ "path": "about.html", "status": 200 })
+        );
     }
 
     /// Two root HTML files and no `index.html` leave no inferable homepage, so

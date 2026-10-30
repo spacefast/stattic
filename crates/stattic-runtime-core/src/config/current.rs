@@ -289,6 +289,7 @@ fn validate_config_shape(
     }
     if let Some(value) = object.get("fallback") {
         let valid = value.as_str().is_some_and(|value| !value.is_empty())
+            || value == &Value::Bool(false)
             || value.as_object().is_some_and(|fallback| {
                 fallback
                     .get("path")
@@ -306,7 +307,7 @@ fn validate_config_shape(
             invalid(
                 diagnostics,
                 "fallback",
-                "a non-empty string or { path, status } object",
+                "a non-empty string, false, or { path, status } object",
             );
         }
     }

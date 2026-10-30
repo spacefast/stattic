@@ -196,6 +196,9 @@ beforeAll(async () => {
         "/doc-rewrite /doc.md 200! Cookie=beta",
       ].join("\n"),
     },
+    // A multi-page site beside a bundle would infer a SPA fallback; this
+    // fixture asserts the platform 404 page.
+    serving: { config: { fallback: false } },
     finalize: {
       // The Space's own header rules — what the Headers tab writes. They are
       // not staged content, so they ride the finalize body.

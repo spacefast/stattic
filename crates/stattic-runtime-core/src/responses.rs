@@ -32,7 +32,7 @@ use crate::protocol::{
     RESPONSE_TABLE_SINGLE_KEY, RESPONSE_TABLE_SPLIT_BYTES, THEME_STYLESHEET_URL,
     VERSION_ROOT_BASENAME, VERSION_ROOT_POINTER_FILE,
 };
-use crate::serving_paths::{is_private_serving_path, DIRECTORY_INDEX_SUFFIX};
+use crate::serving_paths::{carries_hex_digest, is_private_serving_path, DIRECTORY_INDEX_SUFFIX};
 
 /// The deny-all `robots.txt` a noindex or preview host serves. It reduces crawl
 /// load; the noindex that actually binds is the `X-Robots-Tag` on the HTML
@@ -279,9 +279,6 @@ fn allowlisted_extension(key: &str) -> bool {
 /// browser for a year, while a false negative costs one revalidation. So
 /// `photo_20240115.jpg` (all digits), `hero-image1.jpg` (a word) and
 /// `jquery-3.7.1.min.js` (a version) stay out.
-static HEX_DIGEST_NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^.*[.\-_]([0-9a-f]{8,32})\.[a-z0-9]{1,8}$").expect("hex digest name regex")
-});
 static CHUNK_ID_NAME: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^.*[.\-_]([A-Za-z0-9_-]{6,32})\.[A-Za-z0-9]{1,8}$").expect("chunk id name regex")
 });
@@ -335,15 +332,8 @@ pub(crate) fn compiled_cache_class(
 
 pub(crate) fn carries_content_hash(key: &str) -> bool {
     let name = key.rsplit('/').next().unwrap_or_default();
-    // `app.3f9c2d1a.js`, `styles.abc123def456.css` — a hex digest needs both a
-    // letter and a digit, or it is a date or a counter.
-    if let Some(digest) = HEX_DIGEST_NAME.captures(name).and_then(|hit| hit.get(1)) {
-        let digest = digest.as_str();
-        if digest.bytes().any(|byte| byte.is_ascii_alphabetic())
-            && digest.bytes().any(|byte| byte.is_ascii_digit())
-        {
-            return true;
-        }
+    if carries_hex_digest(name) {
+        return true;
     }
     // `chunk-XK2FA9.css`, `index-DiwrgTda.js` — a base36/base64url chunk id.
     // An uppercase letter is what separates one from an English word, and it
@@ -1359,7 +1349,6 @@ mod tests {
                 payload.as_object().unwrap(),
                 &files,
                 &BTreeSet::new(),
-                &Map::new(),
                 false,
             )
             .unwrap();

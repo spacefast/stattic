@@ -705,7 +705,7 @@ fn run_finalize_pipeline(
     // dispatch configuration rides in: the control plane sends `functions` only
     // for a version whose compiled metadata carries a worker.
     let has_worker = input.body.get("functions").is_some_and(Value::is_object);
-    let mut serving_config = resolve_serving_config(config, files, &private, metadata, has_worker)?;
+    let mut serving_config = resolve_serving_config(config, files, &private, has_worker)?;
     if let Some(pages) = pages {
         serving_config.remove("fallback");
         write_php(&stage_root.join("pages.php"), &json!(pages))?;

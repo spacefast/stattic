@@ -117,6 +117,7 @@ beforeAll(async () => {
     files: {
       "index.html": INDEX,
       "about.html": "<h1>about</h1>\n",
+      "loop-page.html": "<h1>loop page</h1>\n",
       "café.html": "<h1>café</h1>\n",
       "404.html": ROOT_404,
       "docs/index.html": "<h1>docs</h1>\n",
@@ -151,6 +152,9 @@ beforeAll(async () => {
       // it into the canonical ordered `\0rules` map.
       _redirects: [
         "/old /about.html 301",
+        // Sends a clean URL to its `.html` file: that page keeps the `.html`
+        // spelling, or the two redirects would loop.
+        "/loop-page /loop-page.html 301",
         "/found /about.html 302",
         "/docs-redirect /docs/ 302",
         // Forced: the target path is a committed file and the rewrite still wins.
@@ -273,6 +277,31 @@ test("W7.1 clean URLs serve <path>.html and canonicalize the slashed form", asyn
   const slashed = await get(rt, SITE, "/blog/post/");
   expect(slashed.status).toBe(308);
   expect(slashed.headers.get("location")).toBe("/blog/post");
+
+  // One page, one URL, as on Cloudflare Pages and Vercel: a page's own file
+  // URL moves to the URL it is served at, query intact.
+  for (const [from, to] of [
+    ["/blog/post.html?ref=a", "/blog/post?ref=a"],
+    ["/index.html", "/"],
+    ["/docs/index.html", "/docs/"],
+    ["/docs/index", "/docs/"],
+    ["/index", "/"],
+  ]) {
+    const moved = await get(rt, SITE, from);
+    expect(moved.status, from).toBe(308);
+    expect(moved.headers.get("location"), from).toBe(to);
+  }
+  // A publisher rule sends `/loop-page` to its file, so that file stays put.
+  const ruled = await get(rt, SITE, "/loop-page");
+  expect(ruled.status).toBe(301);
+  expect(ruled.headers.get("location")).toBe("/loop-page.html");
+  const kept = await get(rt, SITE, "/loop-page.html");
+  expect(kept.status).toBe(200);
+  expect(await kept.text()).toBe("<h1>loop page</h1>\n");
+  // An internal rewrite onto a page's file URL is not a client redirect.
+  const rewritten = await get(rt, SITE, "/yield/absent-page");
+  expect(rewritten.status).toBe(200);
+  expect(await rewritten.text()).toBe(INDEX);
 });
 
 test("the nearest custom 404 answers, walking up from the requested directory", async () => {
@@ -363,9 +392,10 @@ test("path identity is NFC at both intake and serve time", async () => {
     },
   });
 
-  // Declared as NFD, addressable by either spelling.
+  // Declared as NFD, addressable by either spelling of its clean URL.
   for (const requestForm of [nfc, nfd]) {
-    const response = await get(rt, "nfc.test", `/${encodeURIComponent(requestForm)}`);
+    const clean = requestForm.replace(/\.html$/, "");
+    const response = await get(rt, "nfc.test", `/${encodeURIComponent(clean)}`);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe(content);
   }
@@ -397,7 +427,11 @@ test("literal consecutive dots in a file name survive finalization", async () =>
     },
   });
 
-  const response = await get(rt, host, `/${filePath}`);
+  // The lone HTML file is the homepage, so its own URL moves to `/`.
+  const own = await get(rt, host, `/${filePath}`);
+  expect(own.status).toBe(308);
+  expect(own.headers.get("location")).toBe("/");
+  const response = await get(rt, host, "/");
   expect(response.status).toBe(200);
   expect(await response.text()).toBe(contents);
 });
@@ -674,7 +708,7 @@ test("static entries answer GET and HEAD only", async () => {
   expect(rejected.status).toBe(405);
   expect(rejected.headers.get("allow")).toBe("GET, HEAD");
 
-  const head = await get(rt, SITE, "/blog/post.html", {
+  const head = await get(rt, SITE, "/blog/post", {
     method: "HEAD",
     headers: { range: "bytes=0-1" },
   });
@@ -800,7 +834,7 @@ test("unknown hosts get the undeployed platform page", async () => {
 });
 
 test("the primary hostname serves content while runtime APIs remain authenticated", async () => {
-  const content = await get(rt, SITE, "/index.html");
+  const content = await get(rt, SITE, "/");
   expect(content.status).toBe(200);
   expect(await content.text()).toBe(INDEX);
 
@@ -1213,7 +1247,10 @@ test("a single HTML file becomes the version's index", async () => {
   });
 
   expect(await (await get(rt, "single.test", "/")).text()).toBe("<h1>single</h1>\n");
-  expect(await (await get(rt, "single.test", "/page.html")).text()).toBe("<h1>single</h1>\n");
+  // The file's own URL is not a second homepage.
+  const own = await get(rt, "single.test", "/page.html");
+  expect(own.status).toBe(308);
+  expect(own.headers.get("location")).toBe("/");
 });
 
 test("a Functions version dispatches its compiled routes; everything else routes normally", async () => {
@@ -1521,7 +1558,7 @@ test("template variants select per-channel bytes; a version host serves the comm
   expect(await production.text()).toBe(productionVariant);
   for (const [pagePath, expected] of [
     ["/", "<header>production</header><main>production</main>"],
-    ["/docs/guide.html", "<header>production</header><main>guide</main>"],
+    ["/docs/guide", "<header>production</header><main>guide</main>"],
   ]) {
     const page = await get(rt, host, pagePath);
     expect(page.status).toBe(200);

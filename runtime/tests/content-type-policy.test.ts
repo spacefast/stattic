@@ -71,7 +71,7 @@ afterAll(() => rt?.stop());
 
 test("web content types keep serving under the allowlist", async () => {
   for (const [path, contentType] of [
-    ["/index.html", "text/html; charset=utf-8"],
+    ["/", "text/html; charset=utf-8"],
     ["/assets/app.js", "text/javascript; charset=utf-8"],
     ["/assets/logo.png", "image/png"],
     ["/pagefind/index/en.pf_index", "application/gzip"],

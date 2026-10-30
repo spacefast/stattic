@@ -171,13 +171,13 @@ test("native finalize publishes and serves a site end to end", async () => {
     "<header><h1>shared one</h1></header><main>native home</main><footer>kept</footer>\n";
   expect(await home.text()).toBe(firstHome);
 
-  const guide = await get(rt, HOST, "/docs/guide.html");
+  const guide = await get(rt, HOST, "/docs/guide");
   expect(guide.status).toBe(200);
   const firstGuide =
     "<header><h1>shared one</h1></header><main>guide</main><footer>kept</footer>\n";
   expect(await guide.text()).toBe(firstGuide);
   expect((await get(rt, HOST, "/parts/header-shared.html")).status).toBe(404);
-  const publicPart = await get(rt, HOST, "/parts/public.html");
+  const publicPart = await get(rt, HOST, "/parts/public");
   expect(publicPart.status).toBe(200);
   expect(await publicPart.text()).toBe(sourceFiles["parts/public.html"]);
   const css = await get(rt, HOST, "/assets/site.css");
@@ -228,10 +228,10 @@ test("native finalize publishes and serves a site end to end", async () => {
   const updatedHome = await get(rt, HOST, "/");
   expect(updatedHome.status).toBe(200);
   expect(await updatedHome.text()).toBe(firstHome.replace("shared one", "shared two"));
-  const updatedGuide = await get(rt, HOST, "/docs/guide.html");
+  const updatedGuide = await get(rt, HOST, "/docs/guide");
   expect(updatedGuide.status).toBe(200);
   expect(await updatedGuide.text()).toBe(firstGuide.replace("shared one", "shared two"));
-  const unchangedPublicPart = await get(rt, HOST, "/parts/public.html");
+  const unchangedPublicPart = await get(rt, HOST, "/parts/public");
   expect(unchangedPublicPart.status).toBe(200);
   expect(await unchangedPublicPart.text()).toBe(sourceFiles["parts/public.html"]);
   expect(publishedBody("spc_native", "ver_native_1", "/")).toBe(firstHome);

@@ -93,7 +93,7 @@ beforeAll(async () => {
 afterAll(() => rt?.stop());
 
 test("public objects carry exact provenance and bytes on every hostname", async () => {
-  const page = await get(rt, HOST, "/index.html");
+  const page = await get(rt, HOST, "/");
   expect(page.status).toBe(200);
   expect(await page.text()).toBe(PAGE);
   expectProvenance(page, VERSION);
@@ -177,7 +177,9 @@ test("every finalized readiness target names a status the serving lane answers",
       suffix: "denied",
       files: { "proof.html": "protected proof\n" },
       open: false,
-      target: { path: "/proof.html", expected_statuses: [200, 302, 401, 403] },
+      // 308 too: an admitted visitor's request for the page's own `.html` URL
+      // moves to the URL it is served at.
+      target: { path: "/proof.html", expected_statuses: [200, 302, 308, 401, 403] },
       status: 403,
       location: null,
     },

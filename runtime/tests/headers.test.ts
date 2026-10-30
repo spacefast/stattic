@@ -401,7 +401,7 @@ test("a tokened URL is private: never immutable, never edge-stored", async () =>
 // platform's: a tenant naming it, the provider's x-ac/x-sc/x-nc diagnostics, and
 // HSTS never reach the wire.
 test("the engine owns the edge-cache channel and the provider headers next to it", async () => {
-  const response = await get(rt, HOST, "/owned.html");
+  const response = await get(rt, HOST, "/owned");
   expect(response.status).toBe(200);
   expect(cachePolicy(response)).toEqual([HTML_OPEN, "cache"]);
   expect(response.headers.get("x-ac")).toBeNull();
@@ -442,7 +442,7 @@ test("header names the platform owns never compile into an artifact", async () =
 
   // Nothing reaches the visitor either. `x-bad header` is skipped: not a legal
   // header name, so it cannot be looked up.
-  const served = await get(rt, REJECTED_NAMES_HOST, "/index.html");
+  const served = await get(rt, REJECTED_NAMES_HOST, "/");
   expect(served.status).toBe(200);
   for (const name of ["Set-Cookie", "Strict-Transport-Security", "CDN-Cache-Control"]) {
     expect(served.headers.get(name), name).toBeNull();

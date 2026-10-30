@@ -492,21 +492,21 @@ test(
     expect(shed.status).toBe(429);
     expect(shed.headers.get("retry-after")).toBe("2");
 
-    const preview = await get(rt, HOST_X, "/large.html?spacefast_tag_preview=fixture");
+    const preview = await get(rt, HOST_X, "/large?spacefast_tag_preview=fixture");
     expect(preview.status).toBe(429);
     expect(preview.headers.get("retry-after")).toBe("2");
     expect(await preview.text()).toBe("Too Many Requests\n");
 
-    const head = await get(rt, HOST_X, "/large.html", { method: "HEAD" });
+    const head = await get(rt, HOST_X, "/large", { method: "HEAD" });
     expect(head.status).toBe(200);
     expect(Number(head.headers.get("content-length"))).toBeGreaterThan(262144);
     expect(await head.text()).toBe("");
-    const notModified = await get(rt, HOST_X, "/large.html", {
+    const notModified = await get(rt, HOST_X, "/large", {
       headers: { "if-none-match": "*" },
     });
     expect(notModified.status).toBe(304);
     expect(await notModified.text()).toBe("");
-    const precondition = await get(rt, HOST_X, "/large.html", {
+    const precondition = await get(rt, HOST_X, "/large", {
       headers: { "if-match": '"stale"' },
     });
     expect(precondition.status).toBe(412);

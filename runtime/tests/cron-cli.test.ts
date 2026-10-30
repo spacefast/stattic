@@ -259,10 +259,10 @@ test("malformed runtime variables fail the invocation closed", async () => {
 });
 
 test("invoke runs any path through the visitor lane and streams the body", async () => {
-  const result = await runCli("invoke.php", [`--host=${HOST}`, "--path=/index.html"]);
+  const result = await runCli("invoke.php", [`--host=${HOST}`, "--path=/"]);
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toBe("<h1>static home</h1>\n");
-  expect(receipt(result.stderr)).toMatchObject({ path: "/index.html", status: 200 });
+  expect(receipt(result.stderr)).toMatchObject({ path: "/", status: 200 });
 
   const body = await runCli(
     "invoke.php",

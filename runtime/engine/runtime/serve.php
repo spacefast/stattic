@@ -680,6 +680,22 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         require_once __DIR__ . '/functions-dispatch.php';
         $workerFirst = _stattic_functions_worker_first($versionDir, $requestPath);
     }
+    // One page, one URL, as on Cloudflare Pages and Vercel: a visitor's GET or
+    // HEAD for a page's own `.html` path moves to the URL that page is served
+    // at. Only the URL the visitor asked for. A rewrite, mount or alias that
+    // lands here, and a worker reading its own assets, still get the file.
+    if (is_array($entry) && !$workerFirst && $assetsRequest === null && $page === null
+        && is_string($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_CANONICAL] ?? null)
+        && $requestPath === $originalRequestPath
+        && in_array($requestMethod, ['GET', 'HEAD'], true)) {
+        _stattic_v4_send_entry($sendContext, [
+            STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS => 308,
+            STATTIC_RUNTIME_RESPONSE_ENTRY_HEADERS => [
+                'location' => $entry[STATTIC_RUNTIME_RESPONSE_ENTRY_CANONICAL],
+            ],
+            STATTIC_RUNTIME_RESPONSE_ENTRY_CACHE_CLASS => STATTIC_RUNTIME_CACHE_CLASS_REVALIDATE,
+        ], $requestPath);
+    }
     if (is_array($entry) && !$workerFirst) {
         // A draft/preview session must not be answered from an extracted file:
         // when the request carries one of the version's declared bypass cookies

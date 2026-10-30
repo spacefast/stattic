@@ -190,11 +190,11 @@ fn zero_route_can_own_root(zero_routes: &[PhpActionRecord]) -> bool {
         .any(|PhpActionRecord::InvokeZero { pattern, .. }| pattern == "/:splat")
 }
 
-fn readiness_clean_urls_enabled(serving_config: &Map<String, Value>, fallback: &Value) -> bool {
+fn readiness_clean_urls_enabled(serving_config: &Map<String, Value>) -> bool {
     serving_config
         .get("clean_urls")
         .and_then(Value::as_bool)
-        .unwrap_or_else(|| fallback.get("status").and_then(Value::as_u64) != Some(200))
+        .unwrap_or(true)
 }
 
 fn readiness_rewrite_target_path(destination: &str, request_path: &str) -> String {
@@ -245,7 +245,7 @@ fn readiness_rewrite_status(
     let lookup_path = target_path.trim_start_matches('/');
     if !lookup_path.is_empty()
         && Path::new(lookup_path).extension().is_none()
-        && readiness_clean_urls_enabled(serving_config, fallback)
+        && readiness_clean_urls_enabled(serving_config)
     {
         let clean_path = format!("{lookup_path}.html");
         if lookup
@@ -374,6 +374,9 @@ struct RuntimeReadinessRouting<'a> {
     fallback: &'a Value,
     zero_routes: &'a [PhpActionRecord],
     root_listing: bool,
+    /// Published paths whose own URL answers a visitor with a 308 to the URL
+    /// the page is served at (`RESPONSE_ENTRY_CANONICAL`).
+    canonical_paths: &'a BTreeSet<String>,
 }
 
 const DYNAMIC_READINESS_STATUSES: [u64; 9] = [200, 301, 302, 303, 307, 308, 401, 403, 404];
@@ -395,6 +398,7 @@ fn runtime_readiness_target(
         fallback,
         zero_routes,
         root_listing,
+        canonical_paths,
     } = routing;
     let lookup = &ReadinessLookup::new(lookup);
     if public_files.iter().all(|path| path == "robots.txt") {
@@ -426,18 +430,23 @@ fn runtime_readiness_target(
                 .cmp(right_size)
                 .then_with(|| left_path.cmp(right_path))
         });
-    let Some((_path, _, request_path)) = selected else {
+    let Some((path, _, request_path)) = selected else {
         return Ok(dynamic_readiness_target());
     };
+    let mut statuses = readiness_statuses(
+        &request_path,
+        redirects_exact,
+        redirects_pattern,
+        lookup,
+        Some((serving_config, fallback)),
+    )?;
+    if canonical_paths.contains(path) && !statuses.contains(&308) {
+        statuses.push(308);
+        statuses.sort_unstable();
+    }
     Ok(json!({
         "path":request_path,
-        "expected_statuses":readiness_statuses(
-            &request_path,
-            redirects_exact,
-            redirects_pattern,
-            lookup,
-            Some((serving_config, fallback)),
-        )?
+        "expected_statuses":statuses
     }))
 }
 
@@ -961,6 +970,11 @@ fn run_finalize_pipeline(
             .collect();
         (table, route_tables)
     });
+    let canonical_paths: BTreeSet<String> = table
+        .iter()
+        .filter(|(_, entry)| entry.canonical.is_some())
+        .map(|(key, _)| key.trim_start_matches('/').to_string())
+        .collect();
     let readiness_target = runtime_readiness_target(
         files,
         &public_files,
@@ -971,6 +985,7 @@ fn run_finalize_pipeline(
             serving_config: &serving_config,
             fallback: &fallback,
             zero_routes: &compiled_zero.php_routes,
+            canonical_paths: &canonical_paths,
             root_listing: table.get("/").is_some_and(|entry| {
                 entry
                     .action
@@ -3244,7 +3259,8 @@ mod tests {
         output.unwrap();
         assert_eq!(
             finalized_readiness_target(&private),
-            json!({"path":"/docs/page/index.html","expected_statuses":[200,302,401,403]})
+            // The page's own URL redirects a visitor to `/docs/page/`.
+            json!({"path":"/docs/page/index.html","expected_statuses":[200,302,308,401,403]})
         );
     }
 

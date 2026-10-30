@@ -23,14 +23,14 @@ use crate::protocol::{
     CACHE_CLASS_IMMUTABLE, CACHE_CLASS_REVALIDATE, PHP_LANE_BODY_MAX_BYTES,
     PROVIDER_ASSET_EXTENSIONS, RESPONSE_ACTION_LISTING, RESPONSE_ACTION_NOT_FOUND,
     RESPONSE_ACTION_PHP, RESPONSE_ENTRY_ACTION, RESPONSE_ENTRY_ALLOWLISTED_EXT,
-    RESPONSE_ENTRY_BLOB, RESPONSE_ENTRY_CACHE_CLASS, RESPONSE_ENTRY_ETAG, RESPONSE_ENTRY_HEADERS,
-    RESPONSE_ENTRY_LANE, RESPONSE_ENTRY_LENGTH, RESPONSE_ENTRY_PLACED_HOSTNAMES,
-    RESPONSE_ENTRY_PREVIEW_IMAGE, RESPONSE_ENTRY_PREVIEW_IMAGE_HOSTS, RESPONSE_ENTRY_RULES_FIRST,
-    RESPONSE_ENTRY_STATUS, RESPONSE_KEY_NOT_FOUND, RESPONSE_KEY_NOT_FOUND_PREFIX,
-    RESPONSE_KEY_ROBOTS, RESPONSE_KEY_RULES, RESPONSE_KEY_SPA, RESPONSE_LANE_ACCEL,
-    RESPONSE_LANE_PHP, RESPONSE_TABLE_BASENAME, RESPONSE_TABLE_MAX_BYTES,
-    RESPONSE_TABLE_SINGLE_KEY, RESPONSE_TABLE_SPLIT_BYTES, THEME_STYLESHEET_URL,
-    VERSION_ROOT_BASENAME, VERSION_ROOT_POINTER_FILE,
+    RESPONSE_ENTRY_BLOB, RESPONSE_ENTRY_CACHE_CLASS, RESPONSE_ENTRY_CANONICAL, RESPONSE_ENTRY_ETAG,
+    RESPONSE_ENTRY_HEADERS, RESPONSE_ENTRY_LANE, RESPONSE_ENTRY_LENGTH,
+    RESPONSE_ENTRY_PLACED_HOSTNAMES, RESPONSE_ENTRY_PREVIEW_IMAGE,
+    RESPONSE_ENTRY_PREVIEW_IMAGE_HOSTS, RESPONSE_ENTRY_RULES_FIRST, RESPONSE_ENTRY_STATUS,
+    RESPONSE_KEY_NOT_FOUND, RESPONSE_KEY_NOT_FOUND_PREFIX, RESPONSE_KEY_ROBOTS, RESPONSE_KEY_RULES,
+    RESPONSE_KEY_SPA, RESPONSE_LANE_ACCEL, RESPONSE_LANE_PHP, RESPONSE_TABLE_BASENAME,
+    RESPONSE_TABLE_MAX_BYTES, RESPONSE_TABLE_SINGLE_KEY, RESPONSE_TABLE_SPLIT_BYTES,
+    THEME_STYLESHEET_URL, VERSION_ROOT_BASENAME, VERSION_ROOT_POINTER_FILE,
 };
 use crate::serving_paths::{carries_hex_digest, is_private_serving_path, DIRECTORY_INDEX_SUFFIX};
 
@@ -68,6 +68,8 @@ pub(crate) struct ResponseEntry {
     /// [`RESPONSE_ENTRY_PREVIEW_IMAGE`].
     pub preview_image: bool,
     pub preview_image_hosts: BTreeSet<String>,
+    /// See [`RESPONSE_ENTRY_CANONICAL`].
+    pub canonical: Option<String>,
 }
 
 impl ResponseEntry {
@@ -84,6 +86,7 @@ impl ResponseEntry {
             html: false,
             preview_image: false,
             preview_image_hosts: BTreeSet::new(),
+            canonical: None,
         }
     }
 
@@ -106,6 +109,7 @@ impl ResponseEntry {
             html: false,
             preview_image: false,
             preview_image_hosts: BTreeSet::new(),
+            canonical: None,
         }
     }
 
@@ -236,6 +240,9 @@ impl ResponseEntry {
         }
         if self.rules_first {
             entry.insert(RESPONSE_ENTRY_RULES_FIRST.into(), json!(1));
+        }
+        if let Some(canonical) = &self.canonical {
+            entry.insert(RESPONSE_ENTRY_CANONICAL.into(), json!(canonical));
         }
         Value::Object(entry)
     }
@@ -394,8 +401,11 @@ pub(crate) fn compile_response_table(
         .serving_config
         .get("clean_urls")
         .and_then(Value::as_bool)
-        .unwrap_or(false);
+        .unwrap_or(true);
 
+    // The page each clean URL ended up serving, so a page's own `.html` path
+    // only ever points at a URL that answers with that same page.
+    let mut served_by = BTreeMap::<String, &str>::new();
     for (path, meta) in input.files {
         // Private paths and functions-route handlers alike exist but never
         // serve their own bytes: a handler is code, not content.
@@ -427,9 +437,12 @@ pub(crate) fn compile_response_table(
                     // settable header names both follow the URL the visitor
                     // asks for, and a `_headers` rule can name one and not the
                     // other.
-                    table
-                        .entry(key.clone())
-                        .or_insert_with(|| file_entry(&key, path, meta, input, &rules, 200));
+                    if let std::collections::btree_map::Entry::Vacant(slot) =
+                        table.entry(key.clone())
+                    {
+                        slot.insert(file_entry(&key, path, meta, input, &rules, 200));
+                        served_by.insert(key, path);
+                    }
                 }
                 CleanUrl::Canonical { from, to } => {
                     table
@@ -582,6 +595,49 @@ pub(crate) fn compile_response_table(
         table.insert(RESPONSE_KEY_RULES.into(), entry);
     }
 
+    // One page, one URL: an HTML page's own path points at the clean URL that
+    // serves it. Checked against the finished table, so a key a later action,
+    // page, or exact redirect took over is never pointed at.
+    // `cleanUrls: false` keeps every page at its file URL, and files mode
+    // serves every file at its own URL, so neither has canonical page URLs.
+    let files_mode = input
+        .serving_config
+        .get("listing")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    for (key, path) in served_by.iter().filter(|_| clean_urls && !files_mode) {
+        let Some(meta) = input.files.get(*path).filter(|_| html_page(path)) else {
+            continue;
+        };
+        // A publisher rule at the page's own URL, or `_headers` that differ
+        // between its two URLs, means the `.html` spelling is addressed on
+        // purpose, so it keeps answering. A rule at the clean URL counts too:
+        // rules run before files, so `/about /about.html 301` would otherwise
+        // loop against the canonical 308 back to `/about`.
+        if rules.claims(&request_key(path))
+            || rules.claims(key)
+            || rules.settable_header_names(key) != rules.settable_header_names(&request_key(path))
+        {
+            continue;
+        }
+        let serves_page = |entry: &ResponseEntry| {
+            entry.status == 200
+                && entry.action.is_none()
+                && entry.blob.as_deref() == Some(meta.sha256.as_str())
+        };
+        if !table.get(key).is_some_and(serves_page) {
+            continue;
+        }
+        // Keys iterate in order, so the homepage's `/` wins over a single-file
+        // homepage's own clean URL (`page.html` serves at `/` and `/page`).
+        if let Some(entry) = table
+            .get_mut(&request_key(path))
+            .filter(|entry| entry.canonical.is_none() && serves_page(entry))
+        {
+            entry.canonical = Some(key.clone());
+        }
+    }
+
     // The ordered rules bind to a KEY, not to an entry kind, and one sweep over
     // the finished table is the only shape that cannot forget a kind.
     //
@@ -650,8 +706,20 @@ enum CleanUrl {
 /// owns this redirect because `canonicalize_aliases` is pinned off on wp.cloud.
 fn clean_url_keys(path: &str, index_name: &str, clean_urls: bool) -> Vec<CleanUrl> {
     let mut keys = Vec::new();
+    // With clean URLs on, an index page's extensionless spelling (`/index`,
+    // `/docs/index`) redirects to the folder URL it is served at, as on
+    // Cloudflare Pages, instead of falling through to the fallback.
+    let extensionless = |served: &str| {
+        path.strip_suffix(".html")
+            .filter(|_| clean_urls)
+            .map(|stem| CleanUrl::Canonical {
+                from: format!("/{stem}"),
+                to: served.to_string(),
+            })
+    };
     if path == index_name {
         keys.push(CleanUrl::Serve("/".into()));
+        keys.extend(extensionless("/"));
         return keys;
     }
     if let Some(directory) = path.strip_suffix(DIRECTORY_INDEX_SUFFIX) {
@@ -659,8 +727,9 @@ fn clean_url_keys(path: &str, index_name: &str, clean_urls: bool) -> Vec<CleanUr
         keys.push(CleanUrl::Serve(served.clone()));
         keys.push(CleanUrl::Canonical {
             from: format!("/{directory}"),
-            to: served,
+            to: served.clone(),
         });
+        keys.extend(extensionless(&served));
         return keys;
     }
     if clean_urls {
@@ -674,6 +743,10 @@ fn clean_url_keys(path: &str, index_name: &str, clean_urls: bool) -> Vec<CleanUr
         }
     }
     keys
+}
+
+fn html_page(path: &str) -> bool {
+    path.len() > ".html".len() && path.ends_with(".html")
 }
 
 fn redirect_entry(status: u64, location: &str) -> ResponseEntry {
@@ -744,6 +817,7 @@ fn file_entry(
         html: is_html,
         preview_image: false,
         preview_image_hosts: BTreeSet::new(),
+        canonical: None,
     }
 }
 
@@ -2115,6 +2189,104 @@ mod tests {
             table["/docs/"].headers.get("location").map(String::as_str),
             Some("/docs")
         );
+    }
+
+    /// A page's own `.html` path names the URL it is served at, so a visitor
+    /// lands on one URL per page. It stays a plain file where the `.html`
+    /// spelling is the only URL (clean URLs off, files mode) or where a
+    /// publisher rule addresses it.
+    #[test]
+    fn a_page_names_the_one_url_it_is_served_at() {
+        let files: &[(&str, &[u8])] = &[
+            ("index.html", b"home"),
+            ("about.html", b"about"),
+            ("docs/index.html", b"docs"),
+            ("kept.html", b"kept"),
+            ("style.css", b"body{}"),
+        ];
+        let compile_with = |config: Value| {
+            compile(
+                files,
+                config,
+                json!({"/kept.html": [{"action": "redirect", "destination": "/x", "status": 301, "order": 0}]}),
+                json!([]),
+                json!({}),
+                json!([]),
+            )
+        };
+        let table = compile_with(json!({"index": "index.html", "clean_urls": true}));
+        for (key, canonical) in [
+            ("/index.html", Some("/")),
+            ("/about.html", Some("/about")),
+            ("/docs/index.html", Some("/docs/")),
+            ("/kept.html", None),
+            ("/style.css", None),
+        ] {
+            assert_eq!(table[key].canonical.as_deref(), canonical, "{key}");
+        }
+        for config in [
+            json!({"index": "index.html", "clean_urls": false}),
+            json!({"index": false, "clean_urls": true, "listing": true}),
+        ] {
+            let table = compile_with(config.clone());
+            assert!(
+                table.values().all(|entry| entry.canonical.is_none()),
+                "{config}"
+            );
+        }
+    }
+
+    /// A publisher rule that sends the clean URL to the `.html` file keeps the
+    /// `.html` URL as the page's address; a canonical 308 back would loop.
+    #[test]
+    fn a_rule_at_the_clean_url_keeps_the_html_spelling() {
+        let files: &[(&str, &[u8])] = &[("about.html", b"about"), ("docs/index.html", b"docs")];
+        let table = compile(
+            files,
+            json!({"index": "index.html", "clean_urls": true}),
+            json!({
+                "/about": [{"action": "redirect", "destination": "/about.html", "status": 301, "order": 0}],
+                "/docs/": [{"action": "redirect", "destination": "/docs/index.html", "status": 301, "order": 1}],
+            }),
+            json!([]),
+            json!({}),
+            json!([]),
+        );
+        for key in ["/about.html", "/docs/index.html"] {
+            assert_eq!(table[key].canonical, None, "{key}");
+        }
+    }
+
+    /// An index page's extensionless spelling (`/index`, `/guide/index`)
+    /// redirects to the folder URL it serves at; with clean URLs off it stays a
+    /// miss, as the file's own `.html` URL is the only other one it answers.
+    #[test]
+    fn an_index_page_extensionless_spelling_redirects_to_its_folder() {
+        let files: &[(&str, &[u8])] = &[("index.html", b"home"), ("guide/index.html", b"guide")];
+        let table = compile(
+            files,
+            json!({"index": "index.html", "clean_urls": true}),
+            json!({}),
+            json!([]),
+            json!({}),
+            json!([]),
+        );
+        for (from, to) in [("/index", "/"), ("/guide/index", "/guide/")] {
+            assert_eq!(table[from].status, 308, "{from}");
+            assert_eq!(
+                table[from].headers.get("location").map(String::as_str),
+                Some(to)
+            );
+        }
+        let off = compile(
+            files,
+            json!({"index": "index.html", "clean_urls": false}),
+            json!({}),
+            json!([]),
+            json!({}),
+            json!([]),
+        );
+        assert!(!off.contains_key("/index") && !off.contains_key("/guide/index"));
     }
 
     /// Every emitted key an ordered rule can claim carries `r`, whatever kind of

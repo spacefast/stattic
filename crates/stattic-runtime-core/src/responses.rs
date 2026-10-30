@@ -32,7 +32,7 @@ use crate::protocol::{
     RESPONSE_TABLE_SINGLE_KEY, RESPONSE_TABLE_SPLIT_BYTES, THEME_STYLESHEET_URL,
     VERSION_ROOT_BASENAME, VERSION_ROOT_POINTER_FILE,
 };
-use crate::serving_paths::is_private_serving_path;
+use crate::serving_paths::{is_private_serving_path, DIRECTORY_INDEX_SUFFIX};
 
 /// The deny-all `robots.txt` a noindex or preview host serves. It reduces crawl
 /// load; the noindex that actually binds is the `X-Robots-Tag` on the HTML
@@ -405,11 +405,6 @@ pub(crate) fn compile_response_table(
         .get("clean_urls")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let directory_index = input
-        .serving_config
-        .get("directory_index")
-        .and_then(Value::as_str)
-        .unwrap_or(&index_name);
 
     for (path, meta) in input.files {
         // Private paths and functions-route handlers alike exist but never
@@ -435,7 +430,7 @@ pub(crate) fn compile_response_table(
                 .unwrap_or_default();
         }
         table.insert(key.clone(), entry);
-        for alias in clean_url_keys(path, &index_name, directory_index, clean_urls) {
+        for alias in clean_url_keys(path, &index_name, clean_urls) {
             match alias {
                 CleanUrl::Serve(key) => {
                     // Resolved against the ALIAS key: the cache class and the
@@ -663,21 +658,13 @@ enum CleanUrl {
 
 /// The clean-URL and canonical-slash keys one published path owns. The runtime
 /// owns this redirect because `canonicalize_aliases` is pinned off on wp.cloud.
-fn clean_url_keys(
-    path: &str,
-    index_name: &str,
-    directory_index: &str,
-    clean_urls: bool,
-) -> Vec<CleanUrl> {
+fn clean_url_keys(path: &str, index_name: &str, clean_urls: bool) -> Vec<CleanUrl> {
     let mut keys = Vec::new();
     if path == index_name {
         keys.push(CleanUrl::Serve("/".into()));
         return keys;
     }
-    if let Some(directory) = path
-        .strip_suffix(directory_index)
-        .and_then(|directory| directory.strip_suffix('/'))
-    {
+    if let Some(directory) = path.strip_suffix(DIRECTORY_INDEX_SUFFIX) {
         let served = format!("/{directory}/");
         keys.push(CleanUrl::Serve(served.clone()));
         keys.push(CleanUrl::Canonical {
@@ -1334,12 +1321,16 @@ mod tests {
         build_runtime_payload, resolve_effective_config, ResolveEffectiveInput, RuntimePayloadInput,
     };
 
+    /// An app shell homepage, inferred or pinned with `index`, never renames
+    /// the file a folder serves: prerendered `sign-in/index.html` answers
+    /// `/sign-in/` and flat `drop.html` answers `/drop`, ahead of the shell.
     #[test]
-    fn inferred_homepage_does_not_replace_prerender_directory_indexes() {
+    fn an_app_shell_homepage_keeps_prerendered_pages_served() {
         let entries: &[(&str, &[u8])] = &[
             ("_shell.html", b"shell"),
             ("sign-in/index.html", b"sign-in"),
-            ("sign-in/_shell.html", b"custom directory index"),
+            ("sign-in/_shell.html", b"not a directory index"),
+            ("drop.html", b"drop"),
         ];
         for explicit_index in [None, Some("_shell.html")] {
             let mut file_config = Map::from_iter([("fallback".into(), json!("/_shell.html"))]);
@@ -1385,14 +1376,9 @@ mod tests {
                 table[RESPONSE_KEY_SPA].blob.as_deref(),
                 Some(sha256(b"shell").as_str())
             );
-            let expected: &[u8] = if explicit_index.is_some() {
-                b"custom directory index"
-            } else {
-                b"sign-in"
-            };
             assert_eq!(
                 table["/sign-in/"].blob.as_deref(),
-                Some(sha256(expected).as_str())
+                Some(sha256(b"sign-in").as_str())
             );
             assert_eq!(
                 table["/sign-in"]
@@ -1400,6 +1386,10 @@ mod tests {
                     .get("location")
                     .map(String::as_str),
                 Some("/sign-in/")
+            );
+            assert_eq!(
+                table["/drop"].blob.as_deref(),
+                Some(sha256(b"drop").as_str())
             );
         }
     }

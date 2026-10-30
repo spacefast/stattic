@@ -1,7 +1,7 @@
 {
-  "revision": "7d2e0de457ca9eb5e1eb1503989b12b94dae4798",
-  "sourceHash": "b5074b6c9db8384a5b8d02fad6b58ee0fe8d16c5cccc1bf9a29b2402dba9fb8c",
-  "manifestSha256": "7e44ea45050bc9c4ec6476c31e634521296a117eae41d090acc7b0db3b9955f9",
+  "revision": "a6da527bb570ed5b2c7e9bf077cb25ffeaf1c4fc",
+  "sourceHash": "78f29fe662b75d5c05db9250284555d5fca2872a8b999f9546670e725c7b6d3d",
+  "manifestSha256": "071f7a2797c07c2d7481d35bedf5ad28f0bae0fe7241753d2753482778f8f40d",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "8256d1b7e60df73699a52e557da00ce07b0c25c9e5da15c039971de651f5fe8c"
+      "sha256": "028229579028e45b46ef3594a4e1484078bca1a4f8b8870f0e6f12d923a0e17f"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "371c784dcd06c77473a7de0c799152fd76c4e0b2da0aa21647e420dbed6bf279"
+      "sha256": "da956512b409b99d5457760a1237dd45941b5e44631f35c40a0567ef1a6369a2"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -45,11 +45,11 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/artifacts.rs",
-      "sha256": "6be773e577929950e536962821df56805992df87622f78071759640f8d68e0fb"
+      "sha256": "3cc37ada60fbf1df5edd672b8c509fc029417e9fbd0a595ce5c8e6f31126438c"
     },
     {
       "path": "crates/stattic-runtime-core/src/catalog.rs",
-      "sha256": "03ef66babbe9dfb4c50190a029b2f81566f6e5478f8e517eb2d8a1e1002e0520"
+      "sha256": "bc0340a77571e50be2781757b48699efca1bbe459b8f093283bae4ff1be38d1e"
     },
     {
       "path": "crates/stattic-runtime-core/src/config/access.rs",
@@ -169,7 +169,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/responses.rs",
-      "sha256": "85c997808ff065e861d8ae8cad80b5d91db4871944824532041d030f9f57198c"
+      "sha256": "1f248c7ca809fa92f1fbc3e8e8a3afadfd796552989cf87227546077ebe30149"
     },
     {
       "path": "crates/stattic-runtime-core/src/route_inventory.rs",
@@ -197,11 +197,11 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/serving_paths.rs",
-      "sha256": "9e931c8e1089e8a6c18661902736ec66d67a206f44d9e57c4de6893b8b612e70"
+      "sha256": "14f7e9ea7af5f1d197341ea8422116a96f437218438155ffc1e7569186377310"
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "f1bd4baf17a5dca5ce89b0562f25639517ab55a3c087db0f7ef43c89d4f6fa24"
+      "sha256": "389f2f144669ddb1b33896bc82d1d87190e40b90189db5365f96f52ecbc40d1d"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -213,7 +213,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/transforms/effective.rs",
-      "sha256": "fa7f93f9652df9530e3d2c79236c731acbe6c6692d2491981c82a26e5b6b19e8"
+      "sha256": "acd311e9fabfe398c957086f44d59e6d214e92c0e12857d996faf8c15a8ea31e"
     },
     {
       "path": "crates/stattic-runtime-core/src/transforms/html.rs",
@@ -1269,7 +1269,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "deee01c1e2db26654a5361de18503a63482e13eff44c7e3f27481f155452befa"
+      "sha256": "c505c6c980e3b253f1f6ab836a51f3a9d53ba3a01029f0067bc5fe39f11fa225"
     },
     {
       "path": "runtime/tests/run-ci.sh",

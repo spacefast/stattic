@@ -204,14 +204,28 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
     // every unresolved application route, `/` first among them. Inferring a
     // directory listing there would compile a real `/` entry that shadows the
     // shell and turns the app into a file browser. A 404 fallback is a custom
-    // not-found page, not SPA routing (same reading as the cleanUrls default
-    // below), so it leaves files mode alone. An explicit `listing` still wins —
-    // this only changes the inferred default.
+    // not-found page, not SPA routing, so it leaves files mode alone. An
+    // explicit `listing` still wins — this only changes the inferred default.
     let spa_fallback = fallback
         .as_ref()
         .and_then(|value| value.get("status"))
         .and_then(Value::as_u64)
         == Some(200);
+    // Without a root `index.html`, that shell is also the homepage: an app
+    // shell beside prerendered pages (`_shell.html` + `about.html`) is not an
+    // ambiguous pile of root documents. A Functions version keeps `/` for its
+    // worker, which hands the shell only to browser navigations.
+    let fallback_homepage = (!has_root_index && spa_fallback && !input.has_worker)
+        .then(|| {
+            fallback
+                .as_ref()
+                .and_then(|value| value.get("path"))
+                .and_then(Value::as_str)
+                .filter(|path| manifest.contains(*path))
+                .map(str::to_owned)
+        })
+        .flatten();
+    let inferred_index = fallback_homepage.clone().or(inferred_index);
     let listing = config
         .get("listing")
         .and_then(Value::as_bool)
@@ -219,13 +233,13 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
     config
         .entry("listing")
         .or_insert_with(|| Value::Bool(listing));
-    // An inferred homepage does not rename directory index files. Only the
-    // publisher's index setting can change that convention.
-    let directory_index = config
+    // `index` names the homepage only. A directory URL always resolves its
+    // `index.html`, the file every static generator and prerenderer writes, so
+    // pinning an app shell as the homepage never hides prerendered subpages.
+    let declared_index = config
         .get("index")
         .and_then(Value::as_str)
-        .unwrap_or("index.html")
-        .to_owned();
+        .map(str::to_owned);
     let index = config
         .entry("index")
         .or_insert_with(|| {
@@ -234,16 +248,13 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
                 .map_or(Value::Bool(false), Value::String)
         })
         .clone();
+    // A committed file wins over the fallback, as on every major static host:
+    // a prerendered `about.html` answers `/about` and the app shell takes only
+    // what no file claims.
     let clean_urls = config
         .get("cleanUrls")
         .and_then(Value::as_bool)
-        .unwrap_or_else(|| {
-            fallback
-                .as_ref()
-                .and_then(|value| value.get("status"))
-                .and_then(Value::as_u64)
-                != Some(200)
-        });
+        .unwrap_or(true);
     let pages_theme = config
         .get("theme")
         .and_then(Value::as_object)
@@ -256,9 +267,10 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
         .filter(|value| !value.is_null());
     let meta = config.get("meta").cloned().filter(|value| !value.is_null());
 
-    if inferred_index
-        .as_deref()
-        .is_some_and(|value| value != "index.html")
+    if fallback_homepage.is_none()
+        && inferred_index
+            .as_deref()
+            .is_some_and(|value| value != "index.html")
         && index.as_str() == inferred_index.as_deref()
     {
         let selected = inferred_index.as_deref().expect("checked inferred index");
@@ -274,6 +286,37 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
                 "rootHtmlCount": root_html.len()
             })),
         });
+    }
+    // Folders answer only their `index.html`, as on every major static host. A
+    // custom `index` names the homepage alone, so say which folders that
+    // leaves without a page instead of letting them 404 after a green publish.
+    // Only a name the publisher wrote counts: an inferred homepage (the lone
+    // root file, a 200-fallback shell, a root `404.html`) never renamed folder
+    // indexes, and its nested namesakes lose nothing.
+    if let Some(name) = declared_index
+        .as_deref()
+        .filter(|name| *name != "index.html")
+    {
+        let suffix = format!("/{name}");
+        let folders = public_manifest
+            .iter()
+            .filter_map(|path| path.strip_suffix(&suffix))
+            .filter(|folder| !public_manifest.contains(&format!("{folder}/index.html")))
+            .collect::<Vec<_>>();
+        if let Some(first) = folders.first() {
+            issues.push(EffectiveIssue {
+                severity: "warning",
+                code: "custom_index_not_folder_index",
+                message: format!(
+                    "index \"{name}\" names only the homepage. Folders serve their own index.html, so /{first}/ has no page: rename {first}/{name} to {first}/index.html."
+                ),
+                path: "index",
+                details: Some(json!({
+                    "index": name,
+                    "folders": folders.iter().map(|folder| format!("/{folder}/")).collect::<Vec<_>>()
+                })),
+            });
+        }
     }
     if inferred_index.is_none() && index == Value::Bool(false) && listing && !explicit_serving_shape
     {
@@ -325,7 +368,6 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
 
     let serving = json!({
         "index": index,
-        "directoryIndex": directory_index,
         "fallback": fallback,
         "cleanUrls": clean_urls,
         "listing": listing,
@@ -336,7 +378,6 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
     });
     let mut runtime = Map::new();
     runtime.insert("index".into(), serving["index"].clone());
-    runtime.insert("directory_index".into(), serving["directoryIndex"].clone());
     runtime.insert("fallback".into(), serving["fallback"].clone());
     runtime.insert("clean_urls".into(), Value::Bool(clean_urls));
     runtime.insert("listing".into(), Value::Bool(listing));
@@ -387,7 +428,6 @@ pub fn build_runtime_payload(input: RuntimePayloadInput) -> Value {
     let mut payload = Map::new();
     for (source, target) in [
         ("index", "index"),
-        ("directoryIndex", "directory_index"),
         ("fallback", "fallback"),
         ("cleanUrls", "clean_urls"),
         ("listing", "listing"),
@@ -722,18 +762,75 @@ mod tests {
     }
 
     #[test]
-    fn spa_fallback_disables_clean_urls_by_default() {
+    fn clean_urls_default_on_behind_an_spa_fallback() {
+        let resolve = |extra: Option<(&str, Value)>| {
+            let mut file_config =
+                Map::from_iter([("fallback".into(), Value::String("/index.html".into()))]);
+            if let Some((key, value)) = extra {
+                file_config.insert(key.into(), value);
+            }
+            resolve_effective_config(ResolveEffectiveInput {
+                manifest_paths: vec!["index.html".into()],
+                file_config: Some(file_config),
+                overlay: None,
+                template_entries: Vec::new(),
+                has_worker: false,
+            })
+        };
+        assert_eq!(resolve(None).serving["cleanUrls"], true);
+        assert_eq!(
+            resolve(Some(("cleanUrls", Value::Bool(false)))).serving["cleanUrls"],
+            false
+        );
+    }
+
+    /// A custom `index` names only the homepage, so a folder holding that name
+    /// and no `index.html` is called out instead of silently losing its page.
+    #[test]
+    fn a_custom_index_warns_about_folders_it_no_longer_serves() {
         let output = resolve_effective_config(ResolveEffectiveInput {
-            manifest_paths: vec!["index.html".into()],
+            manifest_paths: vec![
+                "home.htm".into(),
+                "docs/home.htm".into(),
+                "guide/home.htm".into(),
+                "guide/index.html".into(),
+            ],
             file_config: Some(Map::from_iter([(
-                "fallback".into(),
-                Value::String("/index.html".into()),
+                "index".into(),
+                Value::String("home.htm".into()),
             )])),
             overlay: None,
             template_entries: Vec::new(),
             has_worker: false,
         });
-        assert_eq!(output.serving["cleanUrls"], false);
+        let warning = output
+            .issues
+            .iter()
+            .find(|issue| issue.code == "custom_index_not_folder_index")
+            .expect("custom index warning");
+        assert_eq!(warning.severity, "warning");
+        assert_eq!(
+            warning.details,
+            Some(json!({ "index": "home.htm", "folders": ["/docs/"] }))
+        );
+    }
+
+    /// An inferred homepage never renamed folder indexes, so nested files that
+    /// share its name are not reported as lost pages.
+    #[test]
+    fn an_inferred_index_does_not_warn_about_same_named_folder_files() {
+        let output = resolve_effective_config(ResolveEffectiveInput {
+            manifest_paths: vec!["404.html".into(), "docs/404.html".into()],
+            file_config: None,
+            overlay: None,
+            template_entries: Vec::new(),
+            has_worker: false,
+        });
+        assert_eq!(output.serving["index"], "404.html");
+        assert!(output
+            .issues
+            .iter()
+            .all(|issue| issue.code != "custom_index_not_folder_index"));
     }
 
     /// Two root HTML files and no `index.html` leave no inferable homepage, so
@@ -865,6 +962,25 @@ mod tests {
         assert_eq!(static_version.serving["index"], false);
         assert_eq!(static_version.serving["listing"], true);
         assert_eq!(static_version.issues[0].code, "files_mode_inferred");
+
+        // An app shell behind a 200 fallback is a static version's homepage,
+        // but a worker keeps `/` and hands the shell only to navigations.
+        let shell = |has_worker| {
+            resolve_effective_config(ResolveEffectiveInput {
+                manifest_paths: vec!["_shell.html".into(), "about.html".into()],
+                file_config: Some(Map::from_iter([(
+                    "fallback".into(),
+                    Value::String("/_shell.html".into()),
+                )])),
+                overlay: None,
+                template_entries: Vec::new(),
+                has_worker,
+            })
+            .serving["index"]
+                .clone()
+        };
+        assert_eq!(shell(false), "_shell.html");
+        assert_eq!(shell(true), false);
     }
 
     #[test]

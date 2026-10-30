@@ -3,6 +3,11 @@
 
 use crate::protocol::{COMPILE_SIDECAR_FILES, CONFIG_ACCEPTED_FILES, CONFIG_TYPESCRIPT_FILE};
 
+/// The document a directory URL serves: `/docs/` answers `docs/index.html`.
+/// Fixed, not configurable: `index` picks the homepage, and every static
+/// generator and prerenderer writes this name for nested pages.
+pub(crate) const DIRECTORY_INDEX_SUFFIX: &str = "/index.html";
+
 const EXACT_PRIVATE_PATHS: &[&str] = &[
     ".well-known/spacefast-runtime",
     ".well-known/stattic-runtime",

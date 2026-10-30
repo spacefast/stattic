@@ -33,6 +33,7 @@ use crate::finalize::{invalid, invalid_error, FileMeta, FinalizeError, Result};
 use crate::hash::stable_json_sha256;
 use crate::protocol::CACHE_CLASS_IMMUTABLE;
 use crate::responses::compiled_cache_class;
+use crate::serving_paths::DIRECTORY_INDEX_SUFFIX;
 
 pub const FILE_CATALOG_FORMAT: &str = "spacefast.runtime.file-catalog.v1";
 
@@ -200,7 +201,6 @@ pub struct CatalogDelta {
 pub struct DeltaServing {
     /// The homepage document name, or `None` for `index: false`.
     pub index: Option<String>,
-    pub directory_index: Option<String>,
     pub listing: bool,
     pub viewer: bool,
 }
@@ -213,14 +213,8 @@ impl DeltaServing {
             Some(Value::Bool(false)) => None,
             _ => Some("index.html".into()),
         };
-        let directory_index = config
-            .get("directory_index")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| index.clone());
         Self {
             index,
-            directory_index,
             listing: config
                 .get("listing")
                 .and_then(Value::as_bool)
@@ -556,11 +550,9 @@ pub fn catalog_delta(
         }
         if serving.index.as_ref() == Some(path) {
             request_paths.insert("/".into());
-        } else if let Some(index) = &serving.directory_index {
-            if let Some(directory) = path.strip_suffix(&format!("/{index}")) {
-                request_paths.insert(format!("/{directory}"));
-                request_paths.insert(format!("/{directory}/"));
-            }
+        } else if let Some(directory) = path.strip_suffix(DIRECTORY_INDEX_SUFFIX) {
+            request_paths.insert(format!("/{directory}"));
+            request_paths.insert(format!("/{directory}/"));
         }
     }
     if request_paths.len() > CHANGED_PATHS_MAX {
@@ -818,7 +810,6 @@ mod tests {
     fn static_serving() -> DeltaServing {
         DeltaServing {
             index: Some("index.html".into()),
-            directory_index: Some("index.html".into()),
             listing: false,
             viewer: false,
         }
@@ -841,7 +832,7 @@ mod tests {
                 ("new.css", b"new"),
             ],
             &DeltaServing::from_serving_config(
-                serde_json::json!({"index": "_shell.html", "directory_index": "index.html"})
+                serde_json::json!({"index": "_shell.html"})
                     .as_object()
                     .unwrap(),
             ),
@@ -863,8 +854,10 @@ mod tests {
             ])
         );
 
-        let removed_custom_index = delta_between(
-            &[("docs/home.htm", b"docs")],
+        // A custom homepage purges `/`; a same-named file in a folder is just
+        // a file, because folders always answer with their `index.html`.
+        let custom_homepage = delta_between(
+            &[("home.htm", b"home"), ("docs/home.htm", b"docs")],
             &[],
             &DeltaServing::from_serving_config(
                 serde_json::json!({"index": "home.htm"})
@@ -873,11 +866,11 @@ mod tests {
             ),
         );
         assert_eq!(
-            removed_custom_index.changed_paths,
+            custom_homepage.changed_paths,
             Some(vec![
-                "/docs".into(),
-                "/docs/".into(),
-                "/docs/home.htm".into()
+                "/".into(),
+                "/docs/home.htm".into(),
+                "/home.htm".into()
             ])
         );
     }

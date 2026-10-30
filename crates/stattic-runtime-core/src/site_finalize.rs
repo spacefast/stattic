@@ -824,15 +824,7 @@ fn run_finalize_pipeline(
     })?;
     // The exact-path projection is not an artifact: it exists only to pick the
     // readiness target the control plane probes after activation.
-    let mut lookup = build_lookup_map(
-        files.keys(),
-        &redirects_exact,
-        &redirects_pattern,
-        &private,
-        serving_config
-            .get("directory_index")
-            .unwrap_or(&Value::String("index.html".into())),
-    );
+    let mut lookup = build_lookup_map(files.keys(), &redirects_exact, &redirects_pattern, &private);
     // Zero owns its exact paths ahead of any file. Readiness only needs to
     // know an invocation answers there, never which one.
     let zero_actions = zero_response_actions(&input.body, &compiled_zero.php_routes);

@@ -20,6 +20,7 @@ use crate::finalize::{invalid, FileMeta, Result};
 #[cfg(not(target_family = "wasm"))]
 use crate::protocol::{LISTING_ROWS_MARKER, PAGE_MAX_BYTES};
 use crate::serving_paths::is_private_serving_path as is_private;
+use crate::serving_paths::DIRECTORY_INDEX_SUFFIX;
 #[cfg(not(target_family = "wasm"))]
 use crate::storage::put_blob;
 use crate::transforms::{resolve_effective_config, ResolveEffectiveInput};
@@ -373,17 +374,6 @@ pub fn resolve_serving_config(
         }
     }
     let mut file_config = config.clone();
-    if let Some(directory_index) = config.get("directory_index") {
-        if directory_index
-            .as_str()
-            .is_none_or(|value| value.trim().is_empty())
-        {
-            return invalid(
-                "invalid_serving_config",
-                "directory_index must be a non-empty string.",
-            );
-        }
-    }
     if !file_config.contains_key("fallback")
         && metadata.get("spa").and_then(Value::as_bool) == Some(true)
         && files.contains_key("index.html")
@@ -432,12 +422,9 @@ pub fn resolve_serving_config(
     result.retain(|key, _| {
         matches!(
             key.as_str(),
-            "index" | "directory_index" | "fallback" | "clean_urls" | "listing" | "viewer"
+            "index" | "fallback" | "clean_urls" | "listing" | "viewer"
         )
     });
-    if let Some(directory_index) = config.get("directory_index") {
-        result.insert("directory_index".into(), directory_index.clone());
-    }
     if let Some(viewer) = config.get("viewer") {
         result.insert("viewer".into(), viewer.clone());
     }
@@ -454,12 +441,8 @@ pub fn build_lookup_map<'a>(
     exact_redirects: &Map<String, Value>,
     pattern_redirects: &[Value],
     private: &BTreeSet<String>,
-    index: &Value,
 ) -> Map<String, Value> {
     let mut lookup = Map::new();
-    let index_name = index
-        .as_str()
-        .or_else(|| (index.as_bool() == Some(false)).then_some("index.html"));
     for path in paths {
         if private.contains(path) || is_private(path) {
             lookup.insert(path.clone(), not_found_action());
@@ -470,11 +453,9 @@ pub fn build_lookup_map<'a>(
         if path == "index.html" {
             lookup.insert(String::new(), action.clone());
         }
-        if let Some(name) = index_name {
-            if let Some(dir) = path.strip_suffix(&format!("/{name}")) {
-                lookup.insert(dir.into(), action.clone());
-                lookup.insert(format!("{dir}/"), action.clone());
-            }
+        if let Some(dir) = path.strip_suffix(DIRECTORY_INDEX_SUFFIX) {
+            lookup.insert(dir.into(), action.clone());
+            lookup.insert(format!("{dir}/"), action.clone());
         }
     }
     // Compiling a regex costs orders of magnitude more than matching one, and
@@ -946,14 +927,14 @@ mod tests {
             resolved.get("fallback"),
             Some(&json!({"path": "index.html", "status": 200}))
         );
-        assert_eq!(resolved.get("clean_urls"), Some(&Value::Bool(false)));
+        assert_eq!(resolved.get("clean_urls"), Some(&Value::Bool(true)));
     }
 
     #[test]
     fn lookup_conceals_absent_private_paths_and_maps_directory_indexes() {
         let paths = ["index.html".to_string(), "docs/index.html".to_string()];
         let private = BTreeSet::from(["_headers".to_string()]);
-        let lookup = build_lookup_map(paths.iter(), &Map::new(), &[], &private, &json!(false));
+        let lookup = build_lookup_map(paths.iter(), &Map::new(), &[], &private);
 
         assert_eq!(
             lookup
@@ -979,13 +960,7 @@ mod tests {
                 "order": 0,
             }]),
         )]);
-        let lookup = build_lookup_map(
-            paths.iter(),
-            &redirects,
-            &[],
-            &BTreeSet::new(),
-            &json!("index.html"),
-        );
+        let lookup = build_lookup_map(paths.iter(), &redirects, &[], &BTreeSet::new());
         assert_eq!(lookup["old.html"]["action"], json!("redirect"));
         assert_eq!(
             lookup["old.html"]["methods"],
@@ -1017,13 +992,7 @@ mod tests {
             "status": 301,
             "order": 0,
         })];
-        let lookup = build_lookup_map(
-            [].iter(),
-            &redirects,
-            &patterns,
-            &BTreeSet::new(),
-            &json!("index.html"),
-        );
+        let lookup = build_lookup_map([].iter(), &redirects, &patterns, &BTreeSet::new());
 
         assert!(!lookup.contains_key("docs/intro"));
         // A path no earlier pattern claims still gets the fast path.

@@ -913,36 +913,49 @@ test("SPA mode serves the shell for app routes, never for asset-looking paths", 
 // infer a file browser for. A dashboard build that emitted `_shell.html` plus a
 // second root-level HTML file and no `index.html` served `<title>Files</title>`
 // at `/` while every deep route correctly served the shell.
-test("a configured SPA fallback owns `/` when no root index can be inferred", async () => {
+//
+// The same app shell, pinned as the homepage with `index`, must not hide the
+// pages the framework prerendered beside it: `index` names the homepage only,
+// and every folder still serves its own `index.html`.
+test("a configured SPA fallback owns `/` without hiding prerendered pages", async () => {
   const shell = "<h1>app shell</h1>\n";
-  await deploy(rt, {
-    spaceId: "spc_spa_root",
-    versionId: "ver_spa_root_1",
-    files: { "_shell.html": shell, "secondary.html": "<h1>secondary</h1>\n" },
-    serving: { config: { fallback: { path: "_shell.html", status: 200 } } },
-    activate: {
-      route_name: "production",
-      config: publicAccessConfig(),
-      production_hostnames: ["spa-root.test"],
-      version_hostnames: [],
-    },
-  });
+  const files = {
+    "_shell.html": shell,
+    "secondary.html": "<h1>secondary</h1>\n",
+    "sign-in/index.html": "<h1>sign in</h1>\n",
+    "sign-in/_shell.html": "<h1>not a directory index</h1>\n",
+  };
+  for (const [suffix, config] of [
+    ["inferred", { fallback: { path: "_shell.html", status: 200 } }],
+    ["pinned", { index: "_shell.html", fallback: { path: "_shell.html", status: 200 } }],
+  ] as const) {
+    const host = `spa-root-${suffix}.test`;
+    await deploy(rt, {
+      spaceId: `spc_spa_root_${suffix}`,
+      versionId: `ver_spa_root_${suffix}_1`,
+      files,
+      serving: { config },
+      activate: {
+        route_name: "production",
+        config: publicAccessConfig(),
+        production_hostnames: [host],
+        version_hostnames: [],
+      },
+    });
 
-  const home = await get(rt, "spa-root.test", "/", { headers: { accept: "text/html" } });
-  expect(home.status).toBe(200);
-  expect(await home.text()).toBe(shell);
-
-  // The deep routes that already worked keep working, and the second root
-  // document is still reachable at its own path.
-  expect(await (await get(rt, "spa-root.test", "/client/route/42")).text()).toBe(shell);
-  expect(await (await get(rt, "spa-root.test", "/secondary.html")).text()).toBe(
-    "<h1>secondary</h1>\n",
-  );
+    const home = await get(rt, host, "/", { headers: { accept: "text/html" } });
+    expect(home.status, suffix).toBe(200);
+    expect(await home.text(), suffix).toBe(shell);
+    expect(await (await get(rt, host, "/client/route/42")).text(), suffix).toBe(shell);
+    // Prerendered pages answer at their clean URLs, ahead of the shell.
+    expect(await (await get(rt, host, "/secondary")).text(), suffix).toBe("<h1>secondary</h1>\n");
+    expect(await (await get(rt, host, "/sign-in/")).text(), suffix).toBe("<h1>sign in</h1>\n");
+  }
 });
 
-test("W7.1 a 200 SPA fallback owns extensionless routes unless clean URLs are asked for", async () => {
-  // Default: no implicit extension guessing on an SPA site — /doc is a client
-  // route, not a probe for doc.html.
+test("W7.1 a committed page wins its clean URL over a 200 SPA fallback unless clean URLs are off", async () => {
+  // Default: a prerendered `doc.html` answers `/doc`, and only routes no file
+  // claims reach the shell — the order every major static host uses.
   await deploy(rt, {
     spaceId: "spc_spa_clean",
     versionId: "ver_spa_clean_1",
@@ -955,27 +968,26 @@ test("W7.1 a 200 SPA fallback owns extensionless routes unless clean URLs are as
       version_hostnames: [],
     },
   });
-  expect(await (await get(rt, "spa-clean.test", "/doc")).text()).toBe("<h1>spa shell</h1>\n");
-  expect(await (await get(rt, "spa-clean.test", "/doc.html")).text()).toBe("<h1>doc</h1>\n");
+  expect(await (await get(rt, "spa-clean.test", "/doc")).text()).toBe("<h1>doc</h1>\n");
+  expect(await (await get(rt, "spa-clean.test", "/client/route")).text()).toBe(
+    "<h1>spa shell</h1>\n",
+  );
 
-  // Explicit clean_urls re-enables the alias on the same shape, and unmatched
-  // routes still reach the shell.
+  // Explicit clean_urls: false hands extensionless routes back to the shell.
   await deploy(rt, {
-    spaceId: "spc_spa_clean_on",
-    versionId: "ver_spa_clean_on_1",
+    spaceId: "spc_spa_clean_off",
+    versionId: "ver_spa_clean_off_1",
     files: { "index.html": "<h1>spa shell</h1>\n", "doc.html": "<h1>doc</h1>\n" },
-    serving: { config: { fallback: { path: "index.html", status: 200 }, clean_urls: true } },
+    serving: { config: { fallback: { path: "index.html", status: 200 }, clean_urls: false } },
     activate: {
       route_name: "production",
       config: publicAccessConfig(),
-      production_hostnames: ["spa-clean-on.test"],
+      production_hostnames: ["spa-clean-off.test"],
       version_hostnames: [],
     },
   });
-  expect(await (await get(rt, "spa-clean-on.test", "/doc")).text()).toBe("<h1>doc</h1>\n");
-  expect(await (await get(rt, "spa-clean-on.test", "/client/route")).text()).toBe(
-    "<h1>spa shell</h1>\n",
-  );
+  expect(await (await get(rt, "spa-clean-off.test", "/doc")).text()).toBe("<h1>spa shell</h1>\n");
+  expect(await (await get(rt, "spa-clean-off.test", "/doc.html")).text()).toBe("<h1>doc</h1>\n");
 });
 
 test("W7.1 clean URLs follow the config, and a 404 fallback is not SPA routing", async () => {

@@ -1,7 +1,7 @@
 {
-  "revision": "a4ad3f3f10d39800e4c2eaba3d6de4d6f6452dad",
+  "revision": "3fcb8b8d5f4184e17e89952cf417dc4c43b63d71",
   "sourceHash": "b4a1f22d5a20f5c5940de03e4169086d40460e8c077fc12c4b55ba59913cef8e",
-  "manifestSha256": "a9fa636efc55c988939f0278838786d5f02969cf3ac5ee45dae82408d2ff7dea",
+  "manifestSha256": "f56b838c21bc599c0b5edf9d548e33e0d752774c33a434214815c7f0398ceba8",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "2f235a0702a16082066cd557f53d7e5b15682a33de30a0dd45e58e4586983a47"
+      "sha256": "5655541a1a9bcfbfa4cbde7a3bafabce5a4afe654500363a366e46a490dd5d5d"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "0b4cb276f1e1141d4b1d205b401b7461f3421cda3e8dc251bcb229c8f7de5f76"
+      "sha256": "4a119d1cf5387b0f6a3a2528d551a1632021b5ef2f82be847de7a69483761b5f"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",

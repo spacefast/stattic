@@ -522,10 +522,13 @@ fn enforce_response_body_base64_limit(
     let Some(body) = body else {
         return Ok(None);
     };
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(&body)
+    let mut decoded = base64::read::DecoderReader::new(
+        body.as_bytes(),
+        &base64::engine::general_purpose::STANDARD,
+    );
+    let decoded_len = std::io::copy(&mut decoded, &mut std::io::sink())
         .map_err(|error| error_response(502, "zero_js_response_malformed", &error.to_string()))?;
-    if decoded.len() > ZERO_RESPONSE_BODY_MAX_BYTES {
+    if decoded_len > ZERO_RESPONSE_BODY_MAX_BYTES as u64 {
         return Err(error_response(
             502,
             "zero_response_too_large",
@@ -533,6 +536,33 @@ fn enforce_response_body_base64_limit(
         ));
     }
     Ok(Some(body))
+}
+
+#[cfg(test)]
+mod response_body_tests {
+    use super::*;
+
+    #[test]
+    fn base64_response_budget_preserves_canonical_validation() {
+        let at_limit =
+            base64::engine::general_purpose::STANDARD.encode(vec![0; ZERO_RESPONSE_BODY_MAX_BYTES]);
+        assert_eq!(
+            enforce_response_body_base64_limit(Some(at_limit.clone())).unwrap(),
+            Some(at_limit)
+        );
+        let over_limit =
+            base64::engine::general_purpose::STANDARD
+                .encode(vec![0; ZERO_RESPONSE_BODY_MAX_BYTES + 1]);
+        let refused = enforce_response_body_base64_limit(Some(over_limit)).unwrap_err();
+        let problem: Value = serde_json::from_str(&refused.body).unwrap();
+        assert_eq!(problem["code"], "zero_response_too_large");
+
+        for malformed in ["Y Q==", "YQ", "YR==", "YQ==AAAA"] {
+            let refused = enforce_response_body_base64_limit(Some(malformed.into())).unwrap_err();
+            let problem: Value = serde_json::from_str(&refused.body).unwrap();
+            assert_eq!(problem["code"], "zero_js_response_malformed", "{malformed}");
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

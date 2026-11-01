@@ -73,6 +73,7 @@ if (function_exists('add_action')) {
     add_action('deleted_post', 'spacefast_content_public_routes_schedule');
     add_action('post_updated', 'spacefast_content_slug_redirect', 30, 3);
     add_action('pre_get_posts', 'spacefast_content_scope_post_query');
+    add_filter('posts_where', 'spacefast_content_scope_native_where');
     add_filter('the_posts', 'spacefast_content_scope_posts', 10, 2);
     add_filter('render_block_core/heading', 'spacefast_content_markdown_render_heading', 10, 3);
     // Retirement moves a source-owned document to Trash and rollback brings it
@@ -802,6 +803,55 @@ function spacefast_content_private_collection_terms(): array|string|null
     return $terms === [] ? null : $terms;
 }
 
+/** Native rows have no collection term; collections sharing `post` keep their own policy. */
+function spacefast_content_private_native_post_types(): array
+{
+    $types = [];
+    foreach (spacefast_content_model_resources() as $resource) {
+        if (($resource['kind'] ?? '') !== 'collection' && ($resource['publicRead'] ?? true) !== true) {
+            $types[] = $resource['postType'];
+        }
+    }
+    return array_values(array_unique($types));
+}
+
+function spacefast_content_public_collection_terms(): array
+{
+    $terms = [];
+    foreach (spacefast_content_model_resources() as $resource) {
+        if (($resource['kind'] ?? '') === 'collection' && ($resource['publicRead'] ?? false) === true) {
+            $terms[] = spacefast_content_model_collection_term_slug(spacefast_content_require_space_id(), $resource['id']);
+        }
+    }
+    return $terms;
+}
+
+/** Apply native privacy in SQL so pagination and counts describe only visible rows. */
+function spacefast_content_scope_native_where(string $where): string
+{
+    if (spacefast_content_space_id() === '' || spacefast_content_may_read_private_resources()) return $where;
+    try {
+        $types = spacefast_content_private_native_post_types();
+        $terms = $types === [] ? [] : spacefast_content_public_collection_terms();
+    } catch (Throwable $error) {
+        return $where . ' AND 1=0';
+    }
+    if ($types === []) return $where;
+    global $wpdb;
+    $placeholders = implode(',', array_fill(0, count($types), '%s'));
+    $nativeClause = $wpdb->prepare("{$wpdb->posts}.post_type NOT IN ($placeholders)", ...$types);
+    if ($terms === []) return $where . " AND ($nativeClause)";
+    $termPlaceholders = implode(',', array_fill(0, count($terms), '%s'));
+    return $where . $wpdb->prepare(
+        " AND ($nativeClause OR EXISTS ("
+        . "SELECT 1 FROM {$wpdb->term_relationships} sf_rel INNER JOIN {$wpdb->term_taxonomy} sf_tax "
+        . "ON sf_tax.term_taxonomy_id = sf_rel.term_taxonomy_id "
+        . "INNER JOIN {$wpdb->terms} sf_term ON sf_term.term_id = sf_tax.term_id "
+        . "WHERE sf_rel.object_id = {$wpdb->posts}.ID AND sf_tax.taxonomy = %s AND sf_term.slug IN ($termPlaceholders)))",
+        ...[SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY, ...$terms]
+    );
+}
+
 function spacefast_content_scope_tax_query(mixed $query, array $clause): array
 {
     $query = is_array($query) ? $query : [];
@@ -994,18 +1044,22 @@ function spacefast_content_scope_meta_cap(array $caps, string $cap, int $userId,
 /** Check single reads before core prepares a response and appends link headers. */
 function spacefast_content_rest_guard_single_read(mixed $response, mixed $handler, mixed $request): mixed
 {
-    if ($response !== null || !in_array($request->get_method(), ['GET', 'HEAD'], true)
-        || !preg_match('#\A/wp/v2/(posts|pages|media|comments|users)/([1-9][0-9]*)(?:/|$)#', $request->get_route(), $match)) {
-        return $response;
-    }
-    $id = (int) $match[2];
+    if ($response !== null || !in_array($request->get_method(), ['GET', 'HEAD'], true)) return $response;
+    $callback = is_array($handler) ? ($handler['callback'] ?? null) : null;
+    if (!is_array($callback) || ($callback[1] ?? null) !== 'get_item') return $response;
+    $controller = $callback[0] ?? null;
+    if (!$controller instanceof WP_REST_Posts_Controller
+        && !$controller instanceof WP_REST_Comments_Controller
+        && !$controller instanceof WP_REST_Users_Controller) return $response;
+    // Core merges body/query/url parameters before this hook. Authorize that same id.
+    $id = (int) $request->get_param('id');
     $scoped = spacefast_content_space_id() !== '';
-    if ($match[1] === 'users') {
+    if ($controller instanceof WP_REST_Users_Controller) {
         // Core admits one user on `list_users` or on any published post on the
         // site. Neither is membership of this Space.
         $hidden = $scoped && !spacefast_content_users_in_space($id);
     } else {
-        $postId = $match[1] === 'comments' ? (int) (get_comment($id)->comment_post_ID ?? 0) : $id;
+        $postId = $controller instanceof WP_REST_Comments_Controller ? (int) (get_comment($id)->comment_post_ID ?? 0) : $id;
         // Core reads a published post, or an inherit-status attachment, by id
         // without asking `read_post`, so the Space fence in map_meta_cap never
         // runs for it. Team design-system media is stamped with its storage
@@ -1023,12 +1077,25 @@ function spacefast_content_rest_guard_single_read(mixed $response, mixed $handle
     return $response;
 }
 
-/** Whether this post sits in a collection the current request may not read. */
+/** Whether the selected native or collection policy hides this record. */
 function spacefast_content_post_is_private(int $postId): bool
 {
     if (!spacefast_content_may_read_private_resources()
         && (spacefast_content_source_is_retired($postId) || spacefast_content_source_is_unselected($postId))) {
         return true;
+    }
+    if (!spacefast_content_may_read_private_resources()) {
+        try {
+            $post = get_post($postId);
+            $types = spacefast_content_private_native_post_types();
+            $publicCollections = $types === [] ? [] : spacefast_content_public_collection_terms();
+            if (is_object($post) && in_array($post->post_type, $types, true)
+                && ($publicCollections === [] || !function_exists('has_term') || !has_term($publicCollections, SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY, $postId))) {
+                return true;
+            }
+        } catch (Throwable $error) {
+            return true;
+        }
     }
     $private = spacefast_content_private_collection_terms();
     if ($private === null) {

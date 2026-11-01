@@ -504,8 +504,12 @@ fn collect_requirements(content: &str, requirements: &mut BTreeSet<String>) {
     }
 }
 
+const SUBSTITUTION_MAX_BYTES: usize = TEMPLATE_MAX_BYTES;
+const SUBSTITUTION_TOTAL_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Default)]
 struct SubstitutionSink {
+    output_bytes: usize,
     dependencies: BTreeMap<String, String>,
     system_dependencies: BTreeSet<String>,
     diagnostics: Vec<PrepareDiagnostic>,
@@ -549,10 +553,12 @@ fn substitute_text(
     sink: &mut SubstitutionSink,
 ) -> Option<String> {
     let mut failed = false;
-    let replaced = variable_pattern().replace_all(content, |captures: &regex::Captures<'_>| {
+    let mut output = String::new();
+    let mut cursor = 0;
+    for captures in variable_pattern().captures_iter(content) {
         let whole = captures.get(0).expect("whole variable match");
         let name = captures.get(1).expect("variable name").as_str();
-        match resolve_variable(
+        let value = resolve_variable(
             name,
             path,
             channel,
@@ -561,15 +567,42 @@ fn substitute_text(
             scopes,
             system,
             sink,
-        ) {
-            Some(value) => value,
-            None => {
-                failed = true;
-                whole.as_str().to_string()
-            }
+        );
+        let replacement = value.unwrap_or_else(|| whole.as_str());
+        failed |= value.is_none();
+        if !append_substitution(&mut output, &content[cursor..whole.start()], path, sink)
+            || !append_substitution(&mut output, replacement, path, sink)
+        {
+            return None;
         }
-    });
-    (!failed).then(|| replaced.into_owned())
+        cursor = whole.end();
+    }
+    if !append_substitution(&mut output, &content[cursor..], path, sink) {
+        return None;
+    }
+    (!failed).then_some(output)
+}
+
+fn append_substitution(
+    output: &mut String,
+    value: &str,
+    path: &str,
+    sink: &mut SubstitutionSink,
+) -> bool {
+    if value.len() > SUBSTITUTION_MAX_BYTES - output.len()
+        || value.len() > SUBSTITUTION_TOTAL_MAX_BYTES - sink.output_bytes
+    {
+        sink.diagnostics.push(diagnostic(
+            DiagnosticSeverity::Error,
+            "template_output_too_large",
+            format!("{path} exceeds the substitution output budget."),
+            Some(path.into()),
+        ));
+        return false;
+    }
+    output.push_str(value);
+    sink.output_bytes += value.len();
+    true
 }
 
 /// One `{{ vars.NAME }}` reference, resolved. Scope walk, secret refusal, system
@@ -578,16 +611,16 @@ fn substitute_text(
 /// `_headers` text, and the `sf.jsonc` routing rules that spell the same
 /// grammar in JSON — resolves a name the same way.
 #[allow(clippy::too_many_arguments)]
-fn resolve_variable(
+fn resolve_variable<'a>(
     name: &str,
     path: &str,
     channel: Option<&str>,
     content: &str,
     offset: usize,
-    scopes: &[VariableScope],
-    system: &BTreeMap<String, String>,
+    scopes: &'a [VariableScope],
+    system: &'a BTreeMap<String, String>,
     sink: &mut SubstitutionSink,
-) -> Option<String> {
+) -> Option<&'a str> {
     if name
         .to_ascii_uppercase()
         .starts_with(SYSTEM_VARIABLE_PREFIX)
@@ -607,7 +640,7 @@ fn resolve_variable(
             return None;
         };
         sink.system_dependencies.insert(name.to_string());
-        return Some(value.clone());
+        return Some(value);
     }
     for scope in scopes {
         let Some(variable) = scope.values.get(name) else {
@@ -634,8 +667,10 @@ fn resolve_variable(
         let dependency = channel
             .map(|channel| format!("{name}@{channel}"))
             .unwrap_or_else(|| name.to_string());
-        sink.dependencies.insert(dependency, sha256(value));
-        return Some(value.clone());
+        sink.dependencies
+            .entry(dependency)
+            .or_insert_with(|| sha256(value));
+        return Some(value);
     }
     sink.diagnostics.push(variable_diagnostic(
         "template_variable_unresolved",
@@ -667,10 +702,11 @@ fn substitute_routing_config(
 ) -> Option<String> {
     let spans = crate::config::strict::routing_string_spans(source);
     if spans.is_empty() {
-        return Some(source.to_string());
+        let mut output = String::new();
+        return append_substitution(&mut output, source, path, sink).then_some(output);
     }
     let mut failed = false;
-    let mut output = String::with_capacity(source.len());
+    let mut output = String::new();
     let mut cursor = 0;
     for captures in variable_pattern().captures_iter(source) {
         let whole = captures.get(0).expect("whole variable match");
@@ -694,11 +730,22 @@ fn substitute_routing_config(
             failed = true;
             continue;
         };
-        output.push_str(&source[cursor..whole.start()]);
-        output.push_str(&json_string_body(&value));
+        if !append_substitution(&mut output, &source[cursor..whole.start()], path, sink) {
+            return None;
+        }
+        // Refuse before JSON escaping can allocate a larger temporary value.
+        if value.len() > SUBSTITUTION_MAX_BYTES - output.len() {
+            append_substitution(&mut output, value, path, sink);
+            return None;
+        }
+        if !append_substitution(&mut output, &json_string_body(value), path, sink) {
+            return None;
+        }
         cursor = whole.end();
     }
-    output.push_str(&source[cursor..]);
+    if !append_substitution(&mut output, &source[cursor..], path, sink) {
+        return None;
+    }
     (!failed).then_some(output)
 }
 
@@ -797,6 +844,61 @@ mod tests {
                 },
             )]),
         }]
+    }
+
+    #[test]
+    fn substitution_limits_rendered_bytes_per_file_and_request() {
+        let scopes = space_scope("VALUE", &"x".repeat(super::SUBSTITUTION_MAX_BYTES));
+        let system = BTreeMap::new();
+        let mut sink = SubstitutionSink::default();
+        assert!(super::substitute_text(
+            "{{ vars.VALUE }}{{ vars.VALUE }}",
+            "_headers",
+            None,
+            &scopes,
+            &system,
+            &mut sink
+        )
+        .is_none());
+        assert_eq!(sink.diagnostics[0].code, "template_output_too_large");
+        let mut sink = SubstitutionSink::default();
+        for _ in 0..super::SUBSTITUTION_TOTAL_MAX_BYTES / super::SUBSTITUTION_MAX_BYTES {
+            assert_eq!(
+                super::substitute_text(
+                    "{{ vars.VALUE }}",
+                    "page.html",
+                    None,
+                    &scopes,
+                    &system,
+                    &mut sink
+                )
+                .unwrap()
+                .len(),
+                super::SUBSTITUTION_MAX_BYTES
+            );
+        }
+        assert!(super::substitute_text(
+            "{{ vars.VALUE }}",
+            "page.html",
+            None,
+            &scopes,
+            &system,
+            &mut sink
+        )
+        .is_none());
+        assert_eq!(sink.dependencies.len(), 1);
+        assert_eq!(sink.diagnostics[0].code, "template_output_too_large");
+        let mut sink = SubstitutionSink::default();
+        let scopes = space_scope("VALUE", &"\"".repeat(super::SUBSTITUTION_MAX_BYTES / 2));
+        assert!(substitute_routing_config(
+            r#"{"redirects":[{"source":"/a","destination":"{{ vars.VALUE }}"}]}"#,
+            "sf.jsonc",
+            &scopes,
+            &system,
+            &mut sink
+        )
+        .is_none());
+        assert_eq!(sink.diagnostics[0].code, "template_output_too_large");
     }
 
     // The routing sections get values written into them; the rest of the

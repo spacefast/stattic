@@ -62,6 +62,11 @@ pub fn normalize_resource_pattern(input: &str) -> Result<String, &'static str> {
         return Err("resource pattern contains an unsafe character");
     }
 
+    // Canonical patterns pass through the shared schema again at finalization.
+    if decoded.contains('%') {
+        return Err("resource pattern contains nested percent encoding");
+    }
+
     let mut segments = Vec::new();
     for raw_segment in decoded.split('/') {
         let segment = raw_segment.nfc().collect::<String>();
@@ -78,12 +83,6 @@ pub fn normalize_resource_pattern(input: &str) -> Result<String, &'static str> {
             return Err("resource wildcards must occupy a whole path segment");
         }
         segments.push(segment);
-    }
-    if segments
-        .last()
-        .is_some_and(|segment| segment == "index.html")
-    {
-        segments.pop();
     }
     Ok(if segments.is_empty() {
         "/".into()
@@ -185,11 +184,20 @@ mod tests {
             normalize_resource_pattern("/docs/./guides/../**"),
             Ok("/docs/**".into())
         );
-        assert_eq!(normalize_resource_pattern("/index.html"), Ok("/".into()));
+        assert_eq!(
+            normalize_resource_pattern("/index.html"),
+            Ok("/index.html".into())
+        );
+        let canonical = normalize_resource_pattern("/docs/%2e/guide/%2e%2e/api/**").unwrap();
+        assert_eq!(canonical, "/docs/api/**");
+        assert_eq!(normalize_resource_pattern(&canonical), Ok(canonical));
         for invalid in [
             "/docs/*.html",
             "/docs/%2f/private",
             "/%aé/**",
+            "/docs/%252e%252e/private/**",
+            "/docs/%2541.txt",
+            "/docs/100%25/**",
             "../docs",
             "/../../docs",
         ] {

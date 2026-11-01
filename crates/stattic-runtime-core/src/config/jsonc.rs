@@ -1,5 +1,11 @@
 //! One JSON-with-comments reader for every finalizer config surface.
 
+use crate::protocol::CONFIG_FILE_MAX_BYTES;
+
+const MAX_DEPTH: usize = 64;
+const MAX_NODES: usize = 32_768;
+const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
+
 use serde_json::{Map, Number, Value};
 use std::collections::BTreeMap;
 
@@ -27,6 +33,12 @@ pub fn parse(source: &str) -> Result<Value, String> {
 }
 
 pub fn parse_document(source: &str) -> Result<Document, ParseError> {
+    if source.len() > CONFIG_FILE_MAX_BYTES {
+        return Err(ParseError {
+            message: format!("Config supports up to {CONFIG_FILE_MAX_BYTES} bytes."),
+            offset: 0,
+        });
+    }
     let mut reader = Reader::new(source);
     let value = reader.read()?;
     Ok(Document {
@@ -40,6 +52,9 @@ pub fn parse_document(source: &str) -> Result<Document, ParseError> {
 struct Reader<'a> {
     source: &'a str,
     offset: usize,
+    depth: usize,
+    nodes: usize,
+    metadata_bytes: usize,
     key_offsets: BTreeMap<String, usize>,
     object_keys: BTreeMap<String, Vec<String>>,
     string_spans: BTreeMap<String, (usize, usize)>,
@@ -50,6 +65,9 @@ impl<'a> Reader<'a> {
         Self {
             source,
             offset: 0,
+            depth: 0,
+            nodes: 0,
+            metadata_bytes: 0,
             key_offsets: BTreeMap::new(),
             object_keys: BTreeMap::new(),
             string_spans: BTreeMap::new(),
@@ -66,8 +84,13 @@ impl<'a> Reader<'a> {
     }
 
     fn value(&mut self, path: &str) -> Result<Value, ParseError> {
+        self.nodes += 1;
+        if self.nodes > MAX_NODES || self.depth >= MAX_DEPTH {
+            return self.fail("Config exceeds the nesting or value limit", self.offset);
+        }
         self.trivia()?;
-        match self.byte() {
+        self.depth += 1;
+        let result = match self.byte() {
             Some(b'{') => self.object(path),
             Some(b'[') => self.array(path),
             Some(b'"') => {
@@ -77,7 +100,9 @@ impl<'a> Reader<'a> {
                 Ok(value)
             }
             _ => self.token(),
-        }
+        };
+        self.depth -= 1;
+        result
     }
 
     fn object(&mut self, path: &str) -> Result<Value, ParseError> {
@@ -97,9 +122,10 @@ impl<'a> Reader<'a> {
                 return self.fail("Expected an object key", self.offset);
             }
             let key = self.string()?;
-            if keys.contains(&key) {
+            if map.contains_key(&key) {
                 return self.fail(&format!("Duplicate key {key:?}"), key_offset);
             }
+            self.charge_metadata(3 * (path.len() + key.len() + 1) + key.len())?;
             let child = format!("{path}.{key}");
             self.key_offsets.insert(child.clone(), key_offset);
             keys.push(key.clone());
@@ -139,6 +165,7 @@ impl<'a> Reader<'a> {
             return Ok(Value::Array(values));
         }
         loop {
+            self.charge_metadata(3 * (path.len() + 22))?;
             let child = format!("{path}[{}]", values.len());
             self.key_offsets.insert(child.clone(), self.offset);
             values.push(self.value(&child)?);
@@ -159,6 +186,14 @@ impl<'a> Reader<'a> {
                 _ => return self.fail("Expected ',' or ']'", self.offset),
             }
         }
+    }
+
+    fn charge_metadata(&mut self, bytes: usize) -> Result<(), ParseError> {
+        if bytes > MAX_METADATA_BYTES - self.metadata_bytes {
+            return self.fail("Config exceeds the diagnostic metadata limit", self.offset);
+        }
+        self.metadata_bytes += bytes;
+        Ok(())
     }
 
     fn string(&mut self) -> Result<String, ParseError> {
@@ -278,6 +313,21 @@ mod tests {
             parse("{/* comment */ \"a\": [1, 2,],}").expect("valid JSONC"),
             json!({"a": [1, 2]})
         );
+    }
+
+    #[test]
+    fn rejects_config_complexity_before_expansion() {
+        assert!(parse(&" ".repeat(CONFIG_FILE_MAX_BYTES + 1))
+            .unwrap_err()
+            .contains("bytes"));
+        let nested = format!("{}0{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
+        assert!(parse(&nested).unwrap_err().contains("nesting"));
+        let wide = format!("[{}0]", "0,".repeat(MAX_NODES));
+        assert!(parse(&wide).unwrap_err().contains("value limit"));
+        let repeated_path = format!("{{\"{}\":[{}0]}}", "a".repeat(8192), "0,".repeat(512));
+        assert!(parse(&repeated_path)
+            .unwrap_err()
+            .contains("metadata limit"));
     }
 
     #[test]

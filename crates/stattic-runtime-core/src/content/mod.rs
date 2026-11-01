@@ -85,6 +85,19 @@ pub struct HtmlPipelineOutcome {
     pub preview_image_hosts: BTreeMap<String, BTreeSet<String>>,
 }
 
+/// Bound content keeps its source bytes for synchronization, but a resource's
+/// readership also governs static representations of those bytes.
+pub(crate) fn private_bound_sources(serving: &Map<String, Value>) -> BTreeSet<String> {
+    serving
+        .get("private_sources")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
 /// Site-wide configuration and origins used to render a version's HTML.
 pub struct HtmlPipelineContext<'a> {
     pub serving: &'a Map<String, Value>,
@@ -131,16 +144,26 @@ pub fn materialize_html_pipeline(
         .into_iter()
         .flatten()
         .any(|value| value == "gutenberg-blocks");
-    let mut private = BTreeSet::new();
+    let bound_private = private_bound_sources(serving);
+    let mut private = bound_private.clone();
     let mut generated = BTreeSet::new();
     let mut decorated = 0usize;
     let mut pages = Vec::new();
-    let mut includes = includes::Includes::new(files_root, files.keys().cloned());
+    let mut includes = includes::Includes::new(
+        files_root,
+        files
+            .keys()
+            .filter(|path| !bound_private.contains(*path))
+            .cloned(),
+    );
     // Expand once from staged source, before any renderer rewrites an input.
     // Only actual references claim private fragments. Include-bearing pages
     // compile on every publish; ordinary pages keep their existing adoption.
     let mut expanded = BTreeMap::new();
-    for path in files.keys().filter(|path| includes::is_html(path)) {
+    for path in files
+        .keys()
+        .filter(|path| includes::is_html(path) && !bound_private.contains(*path))
+    {
         // The normal content lane owns oversized-source diagnostics.
         if files[path].size > PIPELINE_SOURCE_MAX_BYTES as u64 {
             continue;
@@ -324,6 +347,7 @@ pub fn materialize_html_pipeline(
             page,
             files_root,
             files,
+            &bound_private,
             site_title,
             &mut layout_sources,
             diagnostics,
@@ -706,6 +730,7 @@ fn apply_layouts(
     page: &Page,
     files_root: &Path,
     files: &BTreeMap<String, FileMeta>,
+    private: &BTreeSet<String>,
     site_title: &str,
     layout_sources: &mut BTreeMap<String, String>,
     diagnostics: &mut Vec<Value>,
@@ -725,6 +750,12 @@ fn apply_layouts(
         return Ok(format!("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title></head><body><main>{}</main></body></html>", escape_html(&page.title), document));
     }
     for layout in layouts.into_iter().rev() {
+        if private.contains(&layout) {
+            return invalid(
+                "layout_private",
+                format!("Layout {layout} belongs to a private content resource."),
+            );
+        }
         let Some(template) = layout_source(layout_sources, files_root, &layout, diagnostics)?
         else {
             continue;
@@ -1739,6 +1770,38 @@ mod tests {
                     assert!(message.contains("index.html"), "{message}");
                 }
                 error => panic!("{source}: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn private_bound_sources_cannot_be_used_as_public_compile_inputs() {
+        for (files, private, expected) in [
+            (
+                vec![
+                    ("index.html", "<!--#include virtual=\"/parts/a.html\" -->"),
+                    ("parts/a.html", "secret"),
+                ],
+                "parts/a.html",
+                "html_include_missing",
+            ),
+            (
+                vec![
+                    ("index.md", "# Public"),
+                    ("_layout.html", "secret {{ content }}"),
+                ],
+                "_layout.html",
+                "layout_private",
+            ),
+        ] {
+            let files: Vec<_> = files
+                .iter()
+                .map(|(path, bytes)| (*path, bytes.as_bytes()))
+                .collect();
+            let run = run_pipeline(&files, json!({}), json!({"private_sources":[private]}));
+            match run.result.err().unwrap() {
+                FinalizeError::Invalid { code, .. } => assert_eq!(code, expected),
+                error => panic!("{error}"),
             }
         }
     }

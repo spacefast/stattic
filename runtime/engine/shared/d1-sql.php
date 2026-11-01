@@ -65,6 +65,7 @@ final class SpacefastD1Sql
             }
             throw new RuntimeException('D1_SQL_UNSUPPORTED: unsupported SQL token.');
         }
+        self::validateTokens($tokens);
         return $tokens;
     }
 
@@ -81,8 +82,24 @@ final class SpacefastD1Sql
         return $statements;
     }
 
+    private static function validateTokens(array $tokens): void
+    {
+        if (count($tokens) > 16384) throw new RuntimeException('D1_SQL_UNSUPPORTED: too many SQL tokens.');
+        $depth = 0;
+        foreach ($tokens as $token) {
+            if ($token === ['symbol', '('] && ++$depth > 32) {
+                throw new RuntimeException('D1_SQL_UNSUPPORTED: expression nesting exceeds 32 levels.');
+            }
+            if ($token === ['symbol', ')'] && --$depth < 0) {
+                throw new RuntimeException('D1_SQL_UNSUPPORTED: unbalanced expression.');
+            }
+        }
+        if ($depth !== 0) throw new RuntimeException('D1_SQL_UNSUPPORTED: unbalanced expression.');
+    }
+
     public static function fromTokens(array $tokens): self
     {
+        self::validateTokens($tokens);
         $parser = new self('');
         $parser->tokens = $tokens;
         return $parser;

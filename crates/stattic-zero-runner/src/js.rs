@@ -261,9 +261,12 @@ fn install_globals(
     // Key variables leave the bootstrap before any tenant code can read it, and
     // the keyring is reset even when there are none, so an earlier invocation's
     // keys cannot outlive it on this thread.
-    let (variables, keys) =
+    let (mut variables, keys) =
         crate::crypto::partition_variables(&envelope.variables, &artifact.crypto_keys);
     crate::crypto::set_keyring(keys);
+    if !artifact.capabilities.env {
+        variables.clear();
+    }
     let bootstrap_json = serde_json::to_string(&serde_json::json!({
         "request": envelope.request,
         "context": envelope.context,

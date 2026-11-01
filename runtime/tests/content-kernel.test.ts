@@ -133,6 +133,9 @@ function update_post_meta(int $id, string $key, mixed $value): void {
 function get_user_meta(int $id, string $key, bool $single): mixed {
   return $key === SPACEFAST_CONTENT_SPACE_META ? ([4 => ['spc_alpha'], 6 => ['spc_beta']][$id] ?? []) : [];
 }
+class WP_REST_Posts_Controller {}
+class WP_REST_Comments_Controller {}
+class WP_REST_Users_Controller {}
 class WP_Error {
   public function __construct(public string $code, public string $message, public array $data) {}
 }
@@ -154,15 +157,20 @@ $capabilities = [$capability(9), $capability(7), $capability(5), $capability(3)]
 
 // Core answers these by id without asking read_post, so the Space fence must
 // hold before the controller runs.
-$singleRead = static function (string $route): mixed {
-  $result = spacefast_content_rest_guard_single_read(null, [], new class($route) {
-    public function __construct(private string $route) {}
+$singleRead = static function (string $route, ?int $effectiveId = null): mixed {
+  $id = $effectiveId ?? (int) basename($route);
+  $controller = str_contains(strtolower($route), '/users/') ? new WP_REST_Users_Controller() : new WP_REST_Posts_Controller();
+  $result = spacefast_content_rest_guard_single_read(null, ['callback' => [$controller, 'get_item']], new class($route, $id) {
+    public function __construct(private string $route, private int $id) {}
+    public function get_param(string $key): int { return $this->id; }
     public function get_method(): string { return 'GET'; }
     public function get_route(): string { return $this->route; }
   });
   return $result instanceof WP_Error ? $result->data['status'] : 'controller';
 };
 $singleReads = array_map($singleRead, ['/wp/v2/media/9', '/wp/v2/media/7', '/wp/v2/users/4', '/wp/v2/users/6']);
+$singleReads[] = $singleRead('/WP/v2/MEDIA/7');
+$singleReads[] = $singleRead('/wp/v2/media/9', 7);
 
 $alphaOwnsNine = spacefast_content_post_belongs_to_space(9);
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_beta';
@@ -241,7 +249,7 @@ echo json_encode([
     ownership: [true, false, ["do_not_allow"]],
     // Single REST reads of media and users: own Space reaches the controller,
     // another Space's row is a 404.
-    single_reads: ["controller", 404, "controller", 404],
+    single_reads: ["controller", 404, "controller", 404, 404, 404],
     upload_scope: [
       // The directory the content-media lane serves from, never ABSPATH's.
       "/srv/htdocs/.stattic/storage/spaces/spc_alpha/content-media",

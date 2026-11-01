@@ -3,6 +3,11 @@ import { createHash, createHmac } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import { generateContentModelPhp } from "../../packages/zero-compile/src/content-model-php.ts";
+import {
+  compileZeroContentModel,
+  parseContentDeclarations,
+} from "../../packages/zero-compile/src/content-model.ts";
 import {
   DASHBOARD_ORIGIN,
   deploy,
@@ -18,6 +23,8 @@ const PRIVATE_HOST = "content-media-private.test";
 const PRIVATE_SPACE = "spc_content_media_private";
 const OPEN_HOST = "content-media-open.test";
 const OPEN_SPACE = "spc_content_media_open";
+const RESTRICTED_HOST = "content-media-restricted.test";
+const RESTRICTED_SPACE = "spc_content_media_restricted";
 const UNPUBLISHED_HOST = "content-media-unpublished.test";
 const UNPUBLISHED_SPACE = "spc_content_media_unpublished";
 const RELATIVE_MEDIA_PATH = "2026/08/secret.txt";
@@ -119,6 +126,42 @@ beforeAll(async () => {
       version_hostnames: [],
     },
   });
+  const source = `export default capsule({ collections: { media: { publicRead: false, fields: {} } } });`;
+  const declarations = parseContentDeclarations(source, source);
+  if (declarations === null) throw new Error("expected media declaration");
+  const { artifacts } = await compileZeroContentModel({
+    declarations,
+    readDirectory: async () => [],
+  });
+  const model = await generateContentModelPhp(artifacts.model);
+  const modelRoot = path.join(
+    runtime.storageRoot,
+    "spaces",
+    RESTRICTED_SPACE,
+    "content-model",
+    "releases",
+    artifacts.model.revision.slice(7),
+  );
+  mkdirSync(modelRoot, { recursive: true });
+  writeFileSync(path.join(modelRoot, "content-model.php"), model.php);
+  writeFileSync(path.join(modelRoot, "content-model.sha256"), `${model.sha256}\n`);
+  await deploy(runtime, {
+    spaceId: RESTRICTED_SPACE,
+    versionId: "ver_content_media_restricted",
+    files: {
+      "index.html": "open",
+      "_spacefast/pages/documents/model.json": JSON.stringify({
+        revision: artifacts.model.revision,
+      }),
+    },
+    activate: {
+      route_name: "production",
+      config: publicAccessConfig({}, "live_and_all_versions"),
+      production_hostnames: [RESTRICTED_HOST],
+      version_hostnames: [],
+    },
+  });
+  writeMedia(RESTRICTED_SPACE, RELATIVE_MEDIA_PATH, "restricted-media-bytes");
   writeMedia(PRIVATE_SPACE, RELATIVE_MEDIA_PATH, "private-media-bytes");
   writeMedia(OPEN_SPACE, RELATIVE_MEDIA_PATH, "open-media-bytes");
   writeMedia(UNPUBLISHED_SPACE, RELATIVE_MEDIA_PATH, "unpublished-media-bytes");
@@ -133,6 +176,14 @@ test("protected Content media never reaches an unauthenticated requester", async
   expect(response.status).toBe(403);
   expect(response.headers.get("cache-control")).toBe("private, no-store");
   expect(await response.text()).not.toContain("private-media-bytes");
+  const restricted = await get(runtime, RESTRICTED_HOST, mediaUrl(RESTRICTED_SPACE));
+  expect(restricted.status).toBe(404);
+  const editor = mintContentAdminSession(RESTRICTED_HOST, RESTRICTED_SPACE);
+  const allowed = await get(runtime, RESTRICTED_HOST, mediaUrl(RESTRICTED_SPACE), {
+    headers: { cookie: `spacefast_content_admin=${editor}` },
+  });
+  expect(allowed.status).toBe(200);
+  expect(await allowed.text()).toBe("restricted-media-bytes");
 });
 
 test("a host-bound Content admin session reads unpublished Space media", async () => {

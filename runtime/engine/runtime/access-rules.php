@@ -445,6 +445,7 @@ const STATTIC_ACCESS_SESSION_AUTHORITY_KEYS = [
     'emailVerifiedUntil' => 'e',
     'openedAt' => 'o',
     'lastSeenAt' => 's',
+    'expiresAt' => 'x',
 ];
 
 function _stattic_access_session_pack_authorities(array $entries): array
@@ -783,6 +784,10 @@ function _stattic_access_session_create(
         ...(in_array($claims['authProvider'] ?? null, ['google', 'gravatar'], true) ? ['authProvider' => $claims['authProvider']] : []),
         ..._stattic_access_session_carried_identity($inherit),
     ];
+    $principalDeadline = _stattic_access_principal_from_claims($claims) !== null
+        ? ($claims['authorityExpiresAt'] ?? null)
+        : ($inherit['principalExpiresAt'] ?? null);
+    if (is_int($principalDeadline)) $session['principalExpiresAt'] = $principalDeadline;
     $accountIdentity = _stattic_access_account_identity($claims)
         ?? (_stattic_access_principal_from_claims($claims) === null ? _stattic_access_account_identity($inherit) : null);
     if ($accountIdentity !== null) $session['identity'] = $accountIdentity;
@@ -832,6 +837,7 @@ function _stattic_access_session_inheritable(?array $identity): array
     $record = _stattic_access_identity_record($identity) ?? [];
     return [
         'principal' => $record['principal'] ?? null,
+        'principalExpiresAt' => $record['principalExpiresAt'] ?? null,
         'identity' => $record['identity'] ?? null,
         'anonymousId' => $record['anonymousId'] ?? null,
         'identityCheckedAt' => $record['identityCheckedAt'] ?? null,
@@ -1064,6 +1070,7 @@ function _stattic_access_session_authority_entry_valid(mixed $value): bool
                 && $value['emailVerifiedUntil'] > 0
             )
         )
+        && (($value['expiresAt'] ?? null) === null || (is_int($value['expiresAt']) && $value['expiresAt'] > 0))
         && is_int($value['openedAt'] ?? null)
         && $value['openedAt'] > 0
         && is_int($value['lastSeenAt'] ?? null)
@@ -1076,6 +1083,7 @@ function _stattic_access_session_retained_authority_entries(array $entries, int 
         $entries,
         static fn ($entry): bool =>
             _stattic_access_session_authority_entry_valid($entry)
+            && (($entry['expiresAt'] ?? null) === null || $entry['expiresAt'] > $now)
             && $entry['openedAt'] > $now - STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS
             && $entry['lastSeenAt'] > $now - STATTIC_ACCESS_SESSION_IDLE_SECONDS
     ));
@@ -1100,7 +1108,7 @@ function _stattic_grant_pattern_segments(mixed $value): ?array
         || $value[0] !== '/'
         || str_starts_with($value, '//')
         || preg_match('/[\x00-\x1F\x7F\\\\?#]/', $value) === 1
-        || preg_match('/%(?:2f|5c|2a)/i', $value) === 1
+        || str_contains($value, '%')
     ) {
         return null;
     }
@@ -1121,48 +1129,23 @@ function _stattic_grant_segments_match(array $patternSegments, array $pathSegmen
 {
     $patternCount = count($patternSegments);
     $pathCount = count($pathSegments);
-    // Memo on (patternIndex,pathIndex): without it a run of k consecutive '**'
-    // makes the '**' recursion re-explore the same suffix O(pathCount^k) times,
-    // run per include/exclude on every visitor request. Compile collapses
-    // adjacent '**' (see _stattic_grant_pattern_compiled_segments), so at most
-    // one '**' recurses, but the memo keeps a hostile pattern/path pair bounded.
-    $memo = [];
-    $match = function (int $patternIndex, int $pathIndex) use (
-        &$match,
-        &$memo,
-        $patternSegments,
-        $pathSegments,
-        $patternCount,
-        $pathCount
-    ): bool {
-        $memoKey = $patternIndex . ',' . $pathIndex;
-        if (isset($memo[$memoKey])) {
-            return $memo[$memoKey];
-        }
-        if ($patternIndex >= $patternCount) {
-            return $memo[$memoKey] = ($pathIndex === $pathCount);
-        }
+    // Match the shared evaluator: O(patternCount * pathCount) work and
+    // O(pathCount) memory, without recursive suffix enumeration.
+    $next = array_fill(0, $pathCount + 1, false);
+    $next[$pathCount] = true;
+    for ($patternIndex = $patternCount - 1; $patternIndex >= 0; $patternIndex--) {
         $segment = $patternSegments[$patternIndex];
-        if ($segment === '**') {
-            if ($patternIndex === $patternCount - 1) {
-                return $memo[$memoKey] = true;
-            }
-            for ($next = $pathIndex; $next <= $pathCount; $next += 1) {
-                if ($match($patternIndex + 1, $next)) {
-                    return $memo[$memoKey] = true;
-                }
-            }
-            return $memo[$memoKey] = false;
+        $current = array_fill(0, $pathCount + 1, false);
+        for ($pathIndex = $pathCount; $pathIndex >= 0; $pathIndex--) {
+            $current[$pathIndex] = $segment === '**'
+                ? ($next[$pathIndex] || ($current[$pathIndex + 1] ?? false))
+                : ($pathIndex < $pathCount
+                    && ($segment === '*' || $segment === $pathSegments[$pathIndex])
+                    && $next[$pathIndex + 1]);
         }
-        if ($pathIndex >= $pathCount) {
-            return $memo[$memoKey] = false;
-        }
-        if ($segment !== '*' && $segment !== $pathSegments[$pathIndex]) {
-            return $memo[$memoKey] = false;
-        }
-        return $memo[$memoKey] = $match($patternIndex + 1, $pathIndex + 1);
-    };
-    return $match(0, 0);
+        $next = $current;
+    }
+    return $next[0];
 }
 
 function _stattic_grant_valid(mixed $grant): bool
@@ -1362,10 +1345,11 @@ function _stattic_grant_pattern_compiled_segments(array $segments): array
     return $collapsed;
 }
 
-// An exclude pattern ending in 'index.html' ALSO compiles to the stripped form:
-// the URL lane collapses a trailing index.html while the artifact lane keeps
+// An exclude pattern ending in 'index.html' ALSO compiles to every stripped form:
+// the URL lane collapses all trailing index.html segments while the artifact lane keeps
 // it, and an exclude naming an index artifact must close the route it serves.
 //
+// A terminal '**' retains its subtree and adds only exact stripped aliases.
 // Includes deliberately do NOT get that variant: granting the stripped route
 // would hand out access nobody wrote down. The asymmetry IS the rule, and
 // packages/common/src/utils/grants.ts reads exclude as widely and include as
@@ -1374,10 +1358,27 @@ function _stattic_grant_exclude_pattern_variants(array $segments): array
 {
     $collapsed = _stattic_grant_pattern_compiled_segments($segments);
     $variants = [$collapsed];
-    if (array_last($collapsed) === 'index.html') {
-        $variants[] = array_slice($collapsed, 0, -1);
+    while (true) {
+        if (array_last($collapsed) === '**') {
+            array_pop($collapsed);
+        }
+        if (array_last($collapsed) !== 'index.html') break;
+        do {
+            array_pop($collapsed);
+            $variants[] = $collapsed;
+        } while (array_last($collapsed) === 'index.html');
     }
     return $variants;
+}
+
+function _stattic_grant_exclude_segments_match(array $pattern, array $resource): bool
+{
+    // Stored projections retain the original pattern even when an older
+    // compiler emitted only its first index alias.
+    foreach (_stattic_grant_exclude_pattern_variants($pattern) as $variant) {
+        if (_stattic_grant_segments_match($variant, $resource)) return true;
+    }
+    return false;
 }
 
 // Fail-closed bucket key for a grant's compiled include list: the single literal
@@ -1923,7 +1924,7 @@ function _stattic_grant_decision(
         foreach (is_array($grant['exclude'] ?? null) ? $grant['exclude'] : [] as $patternSegments) {
             if (
                 is_array($patternSegments)
-                && _stattic_grant_segments_match($patternSegments, $pathSegments)
+                && _stattic_grant_exclude_segments_match($patternSegments, $pathSegments)
             ) {
                 continue 2;
             }
@@ -2409,7 +2410,7 @@ function _stattic_scope_path(string $path, bool $canonicalizeIndexAlias = true):
         }
         $segments[] = $segment;
     }
-    if ($canonicalizeIndexAlias && array_last($segments) === 'index.html') {
+    while ($canonicalizeIndexAlias && array_last($segments) === 'index.html') {
         array_pop($segments);
     }
     return $segments === [] ? '/' : '/' . implode('/', $segments);
@@ -2644,8 +2645,14 @@ function _stattic_access_session_verify(
     $now = _stattic_access_session_now();
     $accessGeneration = _stattic_projection_generation($serving);
     $projection = is_array($serving['authorization'] ?? null) ? $serving['authorization'] : [];
+    $principalExpired = is_int($claims['principalExpiresAt'] ?? null)
+        && $claims['principalExpiresAt'] <= $now;
+    if ($principalExpired) {
+        $claims['principal'] = STATTIC_SESSION_PRINCIPAL_ANONYMOUS;
+        unset($claims['principalExpiresAt'], $claims['identity'], $claims['profile'], $claims['authProvider']);
+    }
     $retained = _stattic_access_session_retained_authority_entries($claims['authorities'], $now);
-    $stale = $claims['exp'] <= $now
+    $stale = $principalExpired || $claims['exp'] <= $now
         || $claims['accessGeneration'] !== $accessGeneration
         || count($retained) !== count($claims['authorities']);
 
@@ -2703,7 +2710,7 @@ function _stattic_access_session_verify(
     ));
     $exp = max(array_map(
         static fn (array $entry): int =>
-            $entry['openedAt'] + STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS,
+            min($entry['openedAt'] + STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS, $entry['expiresAt'] ?? PHP_INT_MAX),
         $authorityEntries
     ));
     $profile = _stattic_access_public_profile($claims['profile'] ?? null);
@@ -2956,6 +2963,7 @@ function _stattic_visitor_verify_options(array $serving, string $host, ?array $i
 {
     $generation = _stattic_projection_generation($serving);
     return array_merge([
+        'now' => _stattic_access_session_now(),
         'issuers' => $issuers ?? _stattic_visitor_issuers($serving),
         'issuer' => is_string($serving['visitor_issuer'] ?? null)
             ? $serving['visitor_issuer']
@@ -4259,7 +4267,8 @@ function _stattic_merge_authority_lru(
     array $incoming,
     array $projection,
     bool $emailVerified,
-    ?int $now = null
+    ?int $now = null,
+    ?int $expiresAt = null
 ): array
 {
     $openedAt = $now ?? _stattic_access_session_now();
@@ -4298,6 +4307,7 @@ function _stattic_merge_authority_lru(
             'emailVerifiedUntil' => $emailVerified ? $openedAt + 3600 : null,
             'openedAt' => $openedAt,
             'lastSeenAt' => $openedAt,
+            ...($expiresAt !== null ? ['expiresAt' => $expiresAt] : []),
         ];
     }
     while (count($ordered) > 16) {
@@ -4344,6 +4354,7 @@ function _stattic_access_consume_handoff_token(
     if (array_key_exists('browserState', $claims) && _stattic_access_claims_browser_state($claims) === '') {
         return null;
     }
+    $authorityExpiresAt = $claims['authorityExpiresAt'] ?? null;
     $current = _stattic_current_session_identity($serving, $host);
     $currentSid = is_array($current) && is_string($current['sessionId'] ?? null)
         ? $current['sessionId']
@@ -4357,7 +4368,8 @@ function _stattic_access_consume_handoff_token(
         is_array($serving['authorization'] ?? null) ? $serving['authorization'] : [],
         is_array($verified['claims'] ?? null)
             && (($verified['claims']['emailVerified'] ?? false) === true),
-        _stattic_access_session_now()
+        _stattic_access_session_now(),
+        $authorityExpiresAt
     );
     $verified = _stattic_visitor_verify(
         $token,
@@ -4441,7 +4453,7 @@ function _stattic_frame_grant_matches_path(array $grant, string $path): bool
         return false;
     }
     foreach (is_array($grant['exclude'] ?? null) ? $grant['exclude'] : [] as $pattern) {
-        if (is_array($pattern) && _stattic_grant_segments_match($pattern, $segments)) {
+        if (is_array($pattern) && _stattic_grant_exclude_segments_match($pattern, $segments)) {
             return false;
         }
     }

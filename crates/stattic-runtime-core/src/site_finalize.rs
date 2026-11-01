@@ -1262,6 +1262,7 @@ fn pipeline_context_digest(
         "siteThemeCss": serving.get("theme_css"),
         "viewer": viewer,
         "siteTitle": metadata.get("title"),
+        "privateBoundSources": crate::content::private_bound_sources(serving),
         "faviconIco": staged_sha(IMPLICIT_FAVICON_PATH),
         "themeJson": staged_sha("theme.json"),
         "themeStylesheet": staged_sha(THEME_STYLESHEET_PATH),
@@ -2025,11 +2026,8 @@ fn write_crons_artifact(
     let Some((config_path, source)) = routing_config else {
         return Ok(());
     };
-    // A config that does not parse has already failed this publish through the
-    // shared config lane; there is nothing this pass could add.
-    let Ok(document) = parse_jsonc(source) else {
-        return Ok(());
-    };
+    let document = parse_jsonc(source)
+        .map_err(|message| invalid_error("config_invalid", format!("{config_path}: {message}")))?;
     let Some(declared) = document.get("crons") else {
         return Ok(());
     };
@@ -3542,6 +3540,25 @@ mod tests {
         assert!(!finalized_catalog(&private)
             .paths
             .contains_key(CRONS_ARTIFACT_PATH));
+
+        let (_temp, _private, output) = finalize_fixture(
+            &[("index.html", b"home"), ("sf.jsonc", br#"{
+                "headers": [{"source":"/*","headers":[{"key":"Content-Security-Policy","value":"{{ vars.POLICY }}"}]}],
+                "crons": [{"path":"/api/cron/digest","schedule":"daily"}]
+            }"#)],
+            json!({"mode":"website"}),
+            json!({"serving":{"config":{}},"variable_scopes":[{"kind":"space","values":{
+                "POLICY":{"value":"x".repeat(CONFIG_FILE_MAX_BYTES)}
+            }}]}),
+        );
+        match output {
+            Err(FinalizeError::Invalid { code, message, .. }) => {
+                assert_eq!(code, "config_invalid");
+                assert!(message.contains("sf.jsonc"), "{message}");
+                assert!(message.contains("262144"), "{message}");
+            }
+            other => panic!("oversized substituted config must reject publication: {other:?}"),
+        }
     }
 
     #[test]
@@ -4257,6 +4274,10 @@ mod tests {
         let (_temp, private, output) = finalize_fixture(
             &[
                 ("index.html", b"<h1>hi</h1>"),
+                ("confidential.html", b"<p>Confidential</p>"),
+                ("confidential.md", b"# Confidential markdown"),
+                ("confidential.html.gz", b"compressed confidential"),
+                ("shared.md", b"# Shared markdown"),
                 ("sf.jsonc", b"{}"),
                 ("theme.json", b"{}"),
                 ("_pages/404.html", b"<h1>gone</h1>"),
@@ -4287,7 +4308,7 @@ mod tests {
                 ),
             ],
             json!({"mode":"website"}),
-            json!({"serving":{"config":{}}}),
+            json!({"serving":{"config":{},"private_sources":["confidential.html","confidential.md"]}}),
         );
         output.unwrap();
         let catalog = finalized_catalog(&private);
@@ -4307,6 +4328,7 @@ mod tests {
                 "assets/app.js.br".into(),
                 "assets/app.js.gz".into(),
                 "index.html".into(),
+                "shared/index.html".into(),
                 "standalone.gz".into(),
             ]
         );
@@ -4314,6 +4336,9 @@ mod tests {
         // `view=served` read of one cannot reach bytes — while its source view
         // still names the object the publisher uploaded.
         for path in [
+            "confidential.html",
+            "confidential.html.gz",
+            "confidential.md",
             "sf.jsonc",
             "sf.jsonc.gz",
             "draft.md",
@@ -4328,6 +4353,12 @@ mod tests {
             assert!(catalog.paths[path].served.is_none(), "{path} serves");
             assert_eq!(catalog.paths[path].source.sha256.len(), 64);
         }
+        assert!(!catalog.paths.contains_key("confidential/index.html"));
+        assert!(
+            String::from_utf8(finalized_body(&private, "shared/index.html"))
+                .unwrap()
+                .contains("Shared markdown")
+        );
         for path in ["assets/app.js.gz", "assets/app.js.br"] {
             let entry = &catalog.paths[path];
             assert_eq!(entry.served.as_ref().unwrap().sha256, entry.source.sha256);

@@ -398,6 +398,7 @@ function callbackToken(
     principal,
     identity,
     generation = 0,
+    authorityExpiresAt,
   }: {
     audience?: string | null;
     tokenHost?: string | null;
@@ -405,12 +406,14 @@ function callbackToken(
     principal?: string;
     identity?: { issuer: string; subject: string };
     generation?: number;
+    authorityExpiresAt?: number;
   } = {},
 ) {
   const now = Math.floor(Date.now() / 1000);
   return signEd25519Jwt(keyPair.privateKey, issuer.kid, {
     sub: authorities[0],
     purpose: "handoff",
+    authorityExpiresAt,
     grants: authorities,
     authorities,
     iss: "spacefast-api",
@@ -493,6 +496,7 @@ type SessionAuthority = {
   emailVerifiedUntil: number | null;
   openedAt: number;
   lastSeenAt: number;
+  expiresAt?: number;
 };
 
 type SessionClaims = {
@@ -519,6 +523,7 @@ const AUTHORITY_KEYS = [
   ["emailVerifiedUntil", "e"],
   ["openedAt", "o"],
   ["lastSeenAt", "s"],
+  ["expiresAt", "x"],
 ] as const;
 
 function sessionSigningKey(label: string): string {
@@ -1265,6 +1270,17 @@ test("a signed platform header admits directly without creating a browser cookie
     headers: { "x-sf-authorization": `Bearer ${token}` },
   });
   expect(replayed.status).toBe(403);
+
+  const expiredAuthority = callbackToken(PRIVATE_HOST, ["member:mem_owner"], {
+    authorityExpiresAt: Math.floor(Date.now() / 1000) - 1,
+  });
+  expect(
+    (
+      await get(runtime, PRIVATE_HOST, "/docs/", {
+        headers: { "x-sf-authorization": `Bearer ${expiredAuthority}` },
+      })
+    ).status,
+  ).toBe(403);
 
   const reusableToken = runtimeBearerToken(PRIVATE_HOST, ["member:mem_owner"]);
   const bearerHeaders = { "x-sf-authorization": `Bearer ${reusableToken}` };
@@ -2514,6 +2530,63 @@ test("authority entries expire independently and unrelated use does not extend t
   });
   expect(afterAbsolute.status).toBe(200);
   expect(authorityReferences(setCookieValue(afterAbsolute))).toEqual(["person:per_lru_4"]);
+
+  const deadline = now + 1200;
+  const providerCallback = await postAccessCallback(
+    runtime,
+    AUTHORITY_LRU_HOST,
+    callbackToken(AUTHORITY_LRU_HOST, ["person:per_lru_3"], {
+      authorityExpiresAt: deadline,
+      principal: "account:usr_provider",
+      identity: { issuer: "https://api.spacefast.com/v1/auth", subject: "usr_provider" },
+    }),
+    "/",
+  );
+  expect(providerCallback.status).toBe(303);
+  const providerCookie = setCookieValue(providerCallback);
+  expect(authorityIn(decodeSession(providerCookie), "person:per_lru_3").expiresAt).toBe(deadline);
+  const renewed = await get(runtime, AUTHORITY_LRU_HOST, "/p3/", {
+    headers: { cookie: providerCookie, ...sessionClockHeaders(now + 1000) },
+  });
+  expect(renewed.status).toBe(200);
+  const renewedCookie = setCookieValue(renewed);
+  expect(authorityIn(decodeSession(renewedCookie), "person:per_lru_3").expiresAt).toBe(deadline);
+  expect(
+    (
+      await get(runtime, AUTHORITY_LRU_HOST, "/p3/", {
+        headers: { cookie: renewedCookie, ...sessionClockHeaders(deadline) },
+      })
+    ).status,
+  ).toBe(403);
+  const expiredCallback = await postAccessCallback(
+    runtime,
+    AUTHORITY_LRU_HOST,
+    callbackToken(AUTHORITY_LRU_HOST, ["person:per_lru_3"], { authorityExpiresAt: now - 1 }),
+    "/",
+  );
+  expect(expiredCallback.status).toBe(403);
+
+  const principalCallback = await postAccessCallback(
+    runtime,
+    AUTHORITY_LRU_HOST,
+    callbackToken(AUTHORITY_LRU_HOST, ["person:per_lru_3"], {
+      authorityExpiresAt: deadline,
+      principal: "account:usr_provider",
+      identity: { issuer: "https://api.spacefast.com/v1/auth", subject: "usr_provider" },
+    }),
+    "/",
+  );
+  const attached = await openAuthorities(AUTHORITY_LRU_HOST, ["person:per_lru_4"], {
+    cookie: setCookieValue(principalCallback),
+  });
+  expect(decodeSession(attached).principal).toBe("account:usr_provider");
+  const retainedCapability = await get(runtime, AUTHORITY_LRU_HOST, "/p4/", {
+    headers: { cookie: attached, ...sessionClockHeaders(deadline) },
+  });
+  expect(retainedCapability.status).toBe(200);
+  const afterIdentityExpiry = decodeSession(setCookieValue(retainedCapability));
+  expect(afterIdentityExpiry.principal).toBe("anonymous");
+  expect(afterIdentityExpiry.identity).toBeUndefined();
 
   // Idle expiry is the same shape, measured from last use rather than acquisition.
   const idle = editSession(AUTHORITY_LRU_HOST, await twoAuthorities(), (claims) => {

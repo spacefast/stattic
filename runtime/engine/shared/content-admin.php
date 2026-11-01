@@ -483,29 +483,18 @@ function _stattic_content_rest_request_path(string $path, array $query = []): bo
 {
     return $path === '/wp-json'
         || str_starts_with($path, '/wp-json/')
-        || ($path === '/' && isset($query['rest_route']));
+        || !empty($query['rest_route']);
 }
 
-/**
- * The path a REST request is admitted and role-derived against. The pretty
- * spelling already names the resource (`/wp-json/...`); the query spelling
- * `/?rest_route=/wp/v2/posts` addresses the SAME resource but arrives at `/`,
- * so it is canonicalized to its `/wp-json` equivalent here. Without this the two
- * spellings would be enforced against different paths, and a Grant that scopes
- * `/wp-json` would bind only the pretty one — letting the query form reach REST
- * under the `/` policy the exclude never touched. Both spellings must resolve to
- * the same path so the lane can never be wider than page serving.
- */
+/** Resolve the same request selector that WordPress uses before deriving a role. */
 function _stattic_content_rest_access_path(string $path, array $query = []): string
 {
-    if ($path !== '/' || !isset($query['rest_route'])) {
+    if ($path === '/zero-admin' || str_starts_with($path, '/zero-admin/') || empty($query['rest_route'])) {
         return $path;
     }
     $restRoute = $query['rest_route'];
-    // Any REST-lane request resolves to `/wp-json` or deeper, never to `/`: an
-    // empty, array, or otherwise unusable `rest_route` still names the REST root,
-    // so the lane predicate's `isset` and this canonicalization admit the same
-    // set of requests against the same policy.
+    // Nonempty invalid selectors reach WordPress's REST validation; empty
+    // selectors leave WordPress on its ordinary page or feed path.
     return is_string($restRoute) && $restRoute !== '' && $restRoute !== '/'
         ? '/wp-json/' . ltrim($restRoute, '/')
         : '/wp-json';

@@ -721,6 +721,15 @@ test("canonical WordPress documents share Customization styles", async () => {
 
   const collision = await get(runtime, OPEN_HOST, "/collision/");
   const collisionBody = await collision.text();
+  const queryCollision = await get(runtime, OPEN_HOST, "/collision/?rest_route=/wp/v2/posts");
+  expect(queryCollision.status).toBe(200);
+  expect(await queryCollision.text()).toContain("static collision");
+  const postCollision = await get(runtime, OPEN_HOST, "/collision/", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: "rest_route=/wp/v2/posts",
+  });
+  expect(postCollision.status).toBe(405);
   expect(collision.status).toBe(200);
   expect(collisionBody).toContain("static collision");
   expect(collisionBody).not.toContain("WordPress collision");

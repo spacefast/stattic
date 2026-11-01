@@ -444,7 +444,11 @@ function _stattic_visitor_verify(string $token, array $options): ?array
     $alg = $header['alg'] ?? null;
     $kid = is_string($header['kid'] ?? null) ? $header['kid'] : '';
 
-    $now = time();
+    $now = is_int($options['now'] ?? null) ? $options['now'] : time();
+    if (array_key_exists('authorityExpiresAt', $claims)
+        && (!is_int($claims['authorityExpiresAt']) || $claims['authorityExpiresAt'] <= $now)) {
+        return null;
+    }
     $claimExp = isset($claims['exp']) ? (int) $claims['exp'] : null;
     if ($claimExp === null || $claimExp < $now - 300) {
         return null;

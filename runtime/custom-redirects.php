@@ -210,9 +210,10 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             && is_file($releaseRoot . '/engine/shared/content-admin.php')
         ) {
             require_once $releaseRoot . '/engine/shared/content-admin.php';
+            $restSelectors = (is_array($_GET) ? $_GET : []) + (is_array($_POST) ? $_POST : []);
             $isContentAdminPath = _stattic_content_admin_request_path(
                 $path,
-                is_array($_GET) ? $_GET : []
+                $restSelectors
             );
             // WordPress routes /wp-json through the document root's index.php,
             // and this engine installs its own copy of THIS file over that
@@ -226,7 +227,7 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             // editor behind it.
             if (
                 $isContentAdminPath
-                && (_stattic_content_rest_request_path($path, is_array($_GET) ? $_GET : [])
+                && (_stattic_content_rest_request_path($path, $restSelectors)
                     || $path === '/zero-admin' || str_starts_with($path, '/zero-admin/'))
             ) {
                 // WordPress core is not the document root on a managed box: the
@@ -282,7 +283,10 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     'This Space is not editable right now.'
                 );
             }
-            if (_stattic_content_deployment_claims_path($privateRoot, $host, _stattic_content_rest_access_path($path, is_array($_GET) ? $_GET : []), strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')))) {
+            $deploymentPath = $path === '/'
+                ? _stattic_content_rest_access_path($path, $restSelectors)
+                : $path;
+            if (_stattic_content_deployment_claims_path($privateRoot, $host, $deploymentPath, strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')))) {
                 require $releaseRoot . '/engine/init.php';
                 return;
             }
@@ -321,7 +325,7 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 // a Grant that scopes `/wp-json` binds only the pretty spelling.
                 $accessPath = _stattic_content_rest_access_path(
                     $path,
-                    is_array($_GET) ? $_GET : []
+                    $restSelectors
                 );
                 $target = _stattic_content_access_target($privateRoot, $host);
                 if ($target['kind'] === 'unavailable') {

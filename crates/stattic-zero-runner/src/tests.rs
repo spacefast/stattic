@@ -52,6 +52,7 @@ globalThis.__statticZeroResult = JSON.stringify({
     fetchInstalled: typeof globalThis.__statticFetch === "function",
     authInstalled: typeof globalThis.__statticAuth === "object",
     envInstalled: typeof globalThis.__statticEnv === "object",
+    bootstrapVariables: globalThis.__statticZeroBootstrap.variables,
     realtimeInstalled: typeof globalThis.__statticRealtime === "object",
     loggingInstalled: typeof globalThis.__statticLog === "function",
     serviceInstalled: typeof globalThis.__statticService === "function",
@@ -277,12 +278,21 @@ fn invokes_bytecode_endpoint_artifact() {
             "fetchInstalled": false,
             "authInstalled": false,
             "envInstalled": false,
+            "bootstrapVariables": {},
             "realtimeInstalled": false,
             "loggingInstalled": false,
             "serviceInstalled": false,
             "cryptoInstalled": false
         })
     );
+    let run_response =
+        handle_invoke(&run_fixture_envelope(&fixture, "action")).expect("run response");
+    assert_eq!(run_response.status, 202);
+    assert_eq!(
+        response_body(&run_response)["bootstrapVariables"],
+        json!({})
+    );
+    assert_eq!(response_body(&run_response)["envInstalled"], false);
 }
 
 /// A capsule finalized before the execution law declares no `executionMode`,
@@ -327,6 +337,7 @@ fn renders_capability_templates_only_when_declared() {
     assert_eq!(body["fetchInstalled"], false);
     assert_eq!(body["authInstalled"], true);
     assert_eq!(body["envInstalled"], true);
+    assert_eq!(body["bootstrapVariables"]["FEATURE_FLAG"], "enabled");
     assert_eq!(body["realtimeInstalled"], false);
     assert_eq!(body["loggingInstalled"], true);
     assert_eq!(body["serviceInstalled"], true);

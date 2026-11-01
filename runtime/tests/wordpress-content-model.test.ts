@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -64,6 +65,13 @@ $templatePosts = [];
 // that already exists unless the statement says IF NOT EXISTS.
 final class ContentModelTestWpdb {
   public string $prefix = 'wp_';
+  public string $posts = 'wp_posts';
+  public string $comments = 'wp_comments';
+  public string $postmeta = 'wp_postmeta';
+  public function esc_like(string $value): string { return addcslashes($value, '_%\\'); }
+  public string $term_relationships = 'wp_term_relationships';
+  public string $term_taxonomy = 'wp_term_taxonomy';
+  public string $terms = 'wp_terms';
   public array $queries = [];
   public array $created = [];
   public array $ledger = [];
@@ -98,6 +106,8 @@ final class ContentModelTestWpdb {
 }
 $wpdb = new ContentModelTestWpdb();
 
+function post_type_exists(string $name): bool { return $name === 'wp_knowledge'; }
+function taxonomy_exists(string $name): bool { return $name === 'wp_knowledge_type'; }
 function register_taxonomy(string $name, array $types, array $args): void {
   global $registered; $registered['taxonomies'][$name] = [$types, $args];
 }
@@ -218,6 +228,11 @@ function wp_insert_term(string $name, string $taxonomy, array $args): array {
 function update_term_meta(int $termId, string $key, mixed $value): void {}
 function wp_set_object_terms(int $postId, mixed $terms, string $taxonomy): void {
   $GLOBALS['assignedTerms'][$postId][$taxonomy] = (array) $terms;
+  // Core advances the terms cache generation after a successful relationship write.
+  $GLOBALS['termCacheGeneration'] = ($GLOBALS['termCacheGeneration'] ?? 0) + 1;
+}
+function wp_cache_get_last_changed(string $group): string {
+  return (string) ($group === 'terms' ? ($GLOBALS['termCacheGeneration'] ?? 0) : 0);
 }
 function get_permalink(object $post): string { return '/' . $post->post_name . '/'; }
 function wp_parse_url(string $url, int $component): mixed { return parse_url($url, $component); }
@@ -256,8 +271,9 @@ function get_post_meta(int $postId, string $key, bool $single): mixed {
 function get_post(int $id): ?object {
   return match ($id) {
     // 24 is the one that sits in a collection; the rest are plain posts.
-    21, 22, 24 => (object) ['ID' => $id, 'post_type' => 'post'],
+    21, 22, 24, 26 => (object) ['ID' => $id, 'post_type' => 'post'],
     23 => (object) ['ID' => 23, 'post_type' => 'attachment'],
+    25 => (object) ['ID' => 25, 'post_type' => 'page'],
     default => null,
   };
 }
@@ -466,7 +482,7 @@ echo json_encode([
       ],
       { cwd: repoRoot, stderr: "pipe", stdout: "pipe" },
     );
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
     const output = JSON.parse(result.stdout.toString());
 
     expect(output.staged).toEqual({
@@ -674,6 +690,10 @@ test("content model preparation preserves committed ownership and refuses unknow
 function get_posts(array $args): array { return []; }
 final class PointerTestWpdb {
   public string $prefix = 'wp_';
+  public string $posts = 'wp_posts';
+  public string $term_relationships = 'wp_term_relationships';
+  public string $term_taxonomy = 'wp_term_taxonomy';
+  public string $terms = 'wp_terms';
   public function prepare(string $query, mixed ...$values): string { return $query; }
   public function query(string $query): int { return 1; }
   public function get_var(string $query): mixed { return null; }
@@ -722,7 +742,7 @@ echo json_encode([
       ],
       { cwd: repoRoot, stderr: "pipe", stdout: "pipe" },
     );
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
     expect(JSON.parse(result.stdout.toString())).toEqual({
       after_activate: olderRevision,
       // Preparation cannot change the committed model before the serving switch.
@@ -766,7 +786,7 @@ catch (Spacefast_Content_Error $error) { echo $error->codeName; }
       stderr: "pipe",
       stdout: "pipe",
     });
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
     expect(result.stdout.toString()).toBe("content_model_digest_mismatch");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -803,7 +823,7 @@ catch (Spacefast_Content_Error $error) {
       stderr: "pipe",
       stdout: "pipe",
     });
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
     expect(JSON.parse(result.stdout.toString())).toEqual([
       409,
       "content_model_republish_required",
@@ -882,11 +902,17 @@ $readCaps = static fn (int $userId): array => [
 ];
 $anonymousQuery = $readQuery();
 $anonymousCaps = $readCaps(0);
+if (!class_exists('WP_REST_Posts_Controller')) {
+  class WP_REST_Posts_Controller {}
+  class WP_REST_Comments_Controller {}
+  class WP_REST_Users_Controller {}
+}
 $restGuard = static fn (int $postId): mixed =>
-  spacefast_content_rest_guard_single_read(null, [], new class($postId) {
+  spacefast_content_rest_guard_single_read(null, ['callback' => [new WP_REST_Posts_Controller(), 'get_item']], new class($postId) {
     public function __construct(private int $id) {}
     public function get_method(): string { return 'GET'; }
     public function get_route(): string { return '/wp/v2/posts/' . $this->id; }
+    public function get_param(string $key): int { return $this->id; }
   }) ?? ['id' => 'response'];
 $restGuardVerdict = static fn (mixed $result): mixed =>
   $result instanceof WP_Error ? ['status' => $result->data['status'] ?? null] : $result;
@@ -942,7 +968,7 @@ echo json_encode([
       ],
       { cwd: repoRoot, stderr: "pipe", stdout: "pipe" },
     );
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
     const output = JSON.parse(result.stdout.toString());
 
     expect(output.staged).toEqual({
@@ -1024,6 +1050,9 @@ test("a collection read filters by its term and never past publicRead", async ()
 
 export default capsule({
   collections: {
+    posts: { publicRead: false, fields: {} },
+    pages: { publicRead: false, fields: {} },
+    media: { publicRead: false, fields: {} },
     notes: { publicRead: true, fields: { deck: { kind: "text" } } },
     projects: { fields: { deck: { kind: "text" } } },
   },
@@ -1066,6 +1095,16 @@ $read = static function (?string $slug): mixed {
 $notes = spacefast_content_model_collection_term_slug('spc_alpha', 'notes');
 $projects = spacefast_content_model_collection_term_slug('spc_alpha', 'projects');
 
+$GLOBALS['objectTerms'] = [24 => [$notes], 26 => ['retired-collection']];
+$nativePrivacy = array_map('spacefast_content_post_is_private', [21, 23, 25, 24, 26]);
+$nativeWhere = apply_filters('posts_where', ' WHERE 1=1');
+$commentWhere = spacefast_content_scope_comment_clauses(['where' => ' WHERE 1=1'])['where'];
+$commentCacheBefore = (object) ['query_vars' => []];
+do_action('pre_get_comments', $commentCacheBefore);
+wp_set_object_terms(24, [$projects], SPACEFAST_CONTENT_MODEL_COLLECTION_TAXONOMY);
+$commentCacheAfter = (object) ['query_vars' => []];
+do_action('pre_get_comments', $commentCacheAfter);
+$nativeRendered = array_map(static fn (object $post): int => $post->ID, spacefast_content_scope_posts(array_map('get_post', [21, 23, 25, 24, 26])));
 $anonymousNotes = $read($notes);
 $anonymousProjects = $read($projects);
 $anonymousNone = $read(null);
@@ -1078,6 +1117,14 @@ $nativeNumeric->set('tax_query', [['taxonomy' => 'zero_collection', 'field' => '
 spacefast_content_scope_post_query($nativeNumeric);
 
 echo json_encode([
+  'native_privacy' => $nativePrivacy,
+  'native_where' => $nativeWhere,
+  'comment_where' => $commentWhere,
+  'comment_cache_before' => $commentCacheBefore->query_vars['cache_domain'],
+  'comment_cache_after' => $commentCacheAfter->query_vars['cache_domain'],
+  'editor_comment_where' => spacefast_content_scope_comment_clauses(['where' => ' WHERE 1=1'])['where'],
+  'native_rendered' => $nativeRendered,
+  'editor_native' => array_map('spacefast_content_post_is_private', [21, 23, 25, 24, 26]),
   'terms' => ['notes' => $notes, 'projects' => $projects],
   'anonymous_notes' => $anonymousNotes,
   'anonymous_projects' => $anonymousProjects,
@@ -1101,10 +1148,46 @@ echo json_encode([
       ],
       { cwd: repoRoot, stderr: "pipe", stdout: "pipe" },
     );
-    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
     const output = JSON.parse(result.stdout.toString());
 
+    expect(output.comment_cache_after).not.toBe(output.comment_cache_before);
+    expect(output.native_privacy).toEqual([true, true, true, false, true]);
+    expect(output.native_rendered).toEqual([24]);
+    expect(output.editor_native).toEqual([false, false, false, false, false]);
     const notesTerm = `sf-${spaceDigest("spc_alpha", 16)}-notes`;
+    const database = new Database(":memory:");
+    try {
+      database.exec(`CREATE TABLE wp_posts (ID INTEGER, post_type TEXT);
+        CREATE TABLE wp_comments (comment_ID INTEGER, comment_post_ID INTEGER);
+        CREATE TABLE wp_postmeta (post_id INTEGER, meta_key TEXT, meta_value TEXT);
+        CREATE TABLE wp_term_relationships (object_id INTEGER, term_taxonomy_id INTEGER);
+        CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER, taxonomy TEXT, term_id INTEGER);
+        CREATE TABLE wp_terms (term_id INTEGER, slug TEXT);
+        INSERT INTO wp_posts VALUES (21, 'post'), (23, 'attachment'), (25, 'page'), (24, 'post'), (26, 'post');
+        INSERT INTO wp_comments VALUES (1, 21), (2, 23), (3, 25), (4, 24), (5, 26);
+        INSERT INTO wp_postmeta SELECT ID, '_spacefast_space_id', 'spc_alpha' FROM wp_posts;
+        INSERT INTO wp_term_relationships VALUES (24, 1), (26, 2);
+        INSERT INTO wp_term_taxonomy VALUES (1, 'zero_collection', 1), (2, 'zero_collection', 2);
+        INSERT INTO wp_terms VALUES (1, '${notesTerm}'), (2, 'retired-collection');`);
+      expect(
+        database.query(`SELECT comment_ID FROM wp_comments ${output.comment_where}`).all(),
+      ).toEqual([{ comment_ID: 4 }]);
+      expect(
+        database
+          .query(`SELECT COUNT(*) AS total FROM wp_comments ${output.editor_comment_where}`)
+          .get(),
+      ).toEqual({ total: 5 });
+      expect(database.query(`SELECT ID FROM wp_posts ${output.native_where}`).all()).toEqual([
+        { ID: 24 },
+      ]);
+      expect(
+        database.query(`SELECT COUNT(*) AS total FROM wp_posts ${output.native_where}`).get(),
+      ).toEqual({ total: 1 });
+    } finally {
+      database.close();
+    }
+
     const projectsTerm = `sf-${spaceDigest("spc_alpha", 16)}-projects`;
     expect(output.terms).toEqual({ notes: notesTerm, projects: projectsTerm });
 

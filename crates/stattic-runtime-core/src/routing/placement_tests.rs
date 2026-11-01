@@ -105,7 +105,7 @@ fn reports_why_each_rule_stays_at_the_origin() {
     // One row per predicate, each asserting the whole verdict vector. Every
     // rule in a row is otherwise edge-expressible, so a predicate that stopped
     // refusing would move exactly that row's rule and nothing else.
-    let cases: [(&str, &str, &[&str], &[&str]); 20] = [
+    let cases: [(&str, &str, &[&str], &[&str]); 22] = [
         // (_redirects, _headers, manifest, expected verdicts)
         ("/old /new 303", "", &[], &["origin:edge_ineligible_status"]),
         (
@@ -158,6 +158,18 @@ fn reports_why_each_rule_stays_at_the_origin() {
         // the edge would forward it.
         (
             "/old https://elsewhere.example/new 301",
+            "",
+            &[],
+            &["origin:edge_ineligible_destination"],
+        ),
+        (
+            "/old //elsewhere.example/new 301",
+            "",
+            &[],
+            &["origin:edge_ineligible_destination"],
+        ),
+        (
+            r"/old /\elsewhere.example/new 301",
             "",
             &[],
             &["origin:edge_ineligible_destination"],

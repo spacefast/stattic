@@ -136,6 +136,29 @@ if (is_array($target) && !$target['open']) {
     _stattic_access_enforce_v4($requestHost, $requestPath, $requestPath);
 }
 
+if (!is_array($adminSession)) {
+    require_once $engineRoot . '/wordpress/content-kernel.php';
+    $revision = _stattic_content_version_model_revision($privateRoot, $spaceId, $target['version_id']);
+    if ($revision !== null) {
+        $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $revision;
+        $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $privateRoot . '/spaces/' . $spaceId
+            . '/content-model/releases/' . substr($revision, 7);
+    }
+    try {
+        $privateMedia = in_array('attachment', spacefast_content_private_native_post_types(), true);
+    } catch (Throwable $error) {
+        _stattic_content_media_refuse(503);
+    }
+    if ($privateMedia) {
+        require_once $engineRoot . '/runtime/access-rules.php';
+        $requestPath = parse_url((string) ($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?: '/';
+        _stattic_access_enforce_v4($requestHost, $requestPath, $requestPath);
+        if (_stattic_access_wordpress_principal($target['serving'], $requestHost, $requestPath) === null) {
+            _stattic_content_media_refuse(404);
+        }
+    }
+}
+
 $mediaRoot = $privateRoot . '/spaces/' . $spaceId . '/content-media';
 $rootReal = realpath($mediaRoot);
 $fileReal = realpath($mediaRoot . '/' . $request['relative']);

@@ -613,7 +613,9 @@ fn static_path_violation(path: &str) -> Option<(&'static str, &'static str)> {
         return Some(("invalid_file_path", "File path is invalid."));
     }
     let basename = segments.last().expect("normalized path has a segment");
-    if [".htaccess", ".user.ini"].contains(&basename.to_ascii_lowercase().as_str()) {
+    if [".htaccess", ".user.ini", "spacefast.config.ts"]
+        .contains(&basename.to_ascii_lowercase().as_str())
+    {
         return Some((
             "static_control_file_not_supported",
             "Static deploys cannot upload execution-control files.",
@@ -751,6 +753,17 @@ fn html_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_paths_reject_executable_project_configuration() {
+        assert_eq!(
+            super::static_path_violation("nested/SPACEFAST.CONFIG.TS"),
+            Some((
+                "static_control_file_not_supported",
+                "Static deploys cannot upload execution-control files."
+            )),
+        );
+    }
 
     #[test]
     fn rollup_chunk_hashes_without_an_uppercase_letter_still_count() {

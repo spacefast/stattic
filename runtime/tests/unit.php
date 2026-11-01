@@ -922,6 +922,38 @@ check(
     'version 4 compiled projections upgrade on read with a null team reference'
 );
 
+$nestedIndexGrant = $indexedGrant(0, ['kind' => 'public']);
+$nestedIndexGrant['resources'] = ['include' => ['/docs/**'], 'exclude' => ['/docs/index.html/index.html']];
+$legacyIndexProjection = _stattic_compile_authorization_projection($projectionEnvelope([$nestedIndexGrant]));
+// A stored version-5 projection has the original exclude and only one alias.
+$legacyIndexProjection['grantIndex']['public']['by_first_segment']['docs'][0]['exclude'] = [
+    ['docs', 'index.html', 'index.html'], ['docs', 'index.html'],
+];
+$legacyIndexDecision = _stattic_grant_decision($legacyIndexProjection, '/docs/index.html/index.html', ['kind' => 'live'], []);
+check(
+    $legacyIndexDecision['capabilities'] === []
+        && !_stattic_frame_grant_matches_path(
+            $legacyIndexProjection['grantIndex']['public']['by_first_segment']['docs'][0],
+            '/docs'
+        ),
+    'stored projections close every nested index alias for serving and frames without republishing'
+);
+
+$indexSubtreeGrant = $nestedIndexGrant;
+$indexSubtreeGrant['resources']['exclude'] = ['/docs/index.html/**'];
+$storedSubtreeProjection = _stattic_compile_authorization_projection($projectionEnvelope([$indexSubtreeGrant]));
+$storedSubtreeProjection['grantIndex']['public']['by_first_segment']['docs'][0]['exclude'] = [
+    ['docs', 'index.html', '**'],
+];
+$storedSubtreeDecision = _stattic_grant_decision($storedSubtreeProjection, '/docs/index.html', ['kind' => 'live'], []);
+$storedSubtreeCompiled = $storedSubtreeProjection['grantIndex']['public']['by_first_segment']['docs'][0];
+check(
+    $storedSubtreeDecision['capabilities'] === []
+        && !_stattic_frame_grant_matches_path($storedSubtreeCompiled, '/docs')
+        && _stattic_frame_grant_matches_path($storedSubtreeCompiled, '/docs/child'),
+    'stored index subtree exclusions close the index route without hiding sibling routes or frames'
+);
+
 // --- Grant-decision conformance: the shared corpus ------------------------------------
 //
 // This engine re-implements the Grant vocabulary of
@@ -1075,6 +1107,8 @@ check(
 
 // The request boundary decodes and NFC-normalizes once. Access scoping only
 // canonicalizes the already-decoded identity it receives.
+check(_stattic_grant_pattern_segments('/docs/%2541.txt') === null, 'grant projection refuses residual percent encodings');
+check(_stattic_scope_path('/docs/index.html/index.html') === '/docs', 'access path index aliases have a stable identity');
 check(_stattic_scope_path('/docs//intro/') === '/docs/intro', 'access path collapses duplicate and trailing separators');
 check(_stattic_scope_path('/docs/./guide/../intro/index.html') === '/docs/intro', 'access path resolves dots and index alias');
 check(_stattic_artifact_scope_path('/docs/./guide/../intro/index.html') === '/docs/intro/index.html', 'artifact access path retains the resolved index file');
@@ -4084,6 +4118,19 @@ foreach (['CREATE TABLE x (at DATETIME)', 'CREATE TABLE x (amount DECIMAL(10, 2)
     $threw = false;
     try { $d1Migrate($refused); } catch (RuntimeException $error) { $threw = str_starts_with($error->getMessage(), 'D1_SQL_UNSUPPORTED'); }
     check($threw, "d1: refuses {$refused}");
+}
+
+$nestedD1 = static fn (int $depth): string => str_repeat('ABS(', $depth) . '1' . str_repeat(')', $depth);
+$d1Schema = ['t' => ['id' => ['type' => 'INTEGER', 'primary' => true]]];
+check(str_contains((new SpacefastD1Sql('SELECT ' . $nestedD1(32) . ' FROM t'))->query('scope', $d1Schema)['sql'], 'ABS('), 'd1: accepts bounded nested functions');
+foreach ([
+    'SELECT ' . $nestedD1(33) . ' FROM t',
+    'CREATE TABLE t (id INTEGER DEFAULT (' . $nestedD1(32) . '))',
+    'SELECT ' . implode('+', array_fill(0, 8193, '1')) . ' FROM t',
+] as $sql) {
+    $threw = false;
+    try { new SpacefastD1Sql($sql); } catch (RuntimeException $error) { $threw = str_starts_with($error->getMessage(), 'D1_SQL_UNSUPPORTED:'); }
+    check($threw, 'd1: refuses expression depth or token capacity before translation');
 }
 
 // Last on purpose: the request-varying mark is sticky for the process. A

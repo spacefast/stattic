@@ -113,6 +113,7 @@ function spacefast_content_scope_comment_cache(mixed $query): void
     $release = spacefast_content_model_active_release();
     $query->query_vars['cache_domain'] = 'spacefast:' . hash('sha256', json_encode([
         spacefast_content_space_id(), $release['revision'] ?? null, spacefast_content_may_read_private_resources(),
+        wp_cache_get_last_changed('terms'),
     ]));
 }
 
@@ -128,6 +129,10 @@ function spacefast_content_scope_comment_clauses(array $clauses): array
         $selected = spacefast_content_selected_source_ids();
         $notSelected = $selected === [] ? '' : ' AND sf_source.meta_value NOT IN (' . implode(',', array_map(static fn (string $id): string => $wpdb->prepare('%s', $id), $selected)) . ')';
         $clauses['where'] .= $wpdb->prepare(" AND NOT EXISTS (SELECT 1 FROM {$wpdb->postmeta} sf_source WHERE sf_source.post_id={$wpdb->comments}.comment_post_ID AND sf_source.meta_key=%s AND sf_source.meta_value LIKE %s", SPACEFAST_CONTENT_EXTERNAL_ID_META, $wpdb->esc_like(SPACEFAST_CONTENT_SYNC_EXTERNAL_ID_PREFIX) . '%') . $notSelected . ')';
+    }
+    $nativeWhere = spacefast_content_scope_native_where('');
+    if ($nativeWhere !== '') {
+        $clauses['where'] .= " AND EXISTS (SELECT 1 FROM {$wpdb->posts} WHERE {$wpdb->posts}.ID={$wpdb->comments}.comment_post_ID$nativeWhere)";
     }
     $private = spacefast_content_private_collection_terms();
     if ($private !== null) {

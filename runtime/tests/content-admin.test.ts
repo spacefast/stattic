@@ -378,13 +378,18 @@ test("the REST access path canonicalizes the query spelling onto /wp-json", asyn
     ["/", { rest_route: [] }],
     ["/", {}],
     ["/about", {}],
+    ["/wp-json/wp/v2/posts", { rest_route: "/spacefast/v1/redirects" }],
+    ["/about", { rest_route: "/wp/v2/posts" }],
+    ["/feed/", { rest_route: "" }],
+    ["/zero-admin", { rest_route: "/wp/v2/posts" }],
+    ["/zero-admin/users", { rest_route: "/wp/v2/posts" }],
   ] as const;
 
   const script = String.raw`
 require $argv[1];
 $cases = json_decode($argv[2], true);
 echo json_encode(array_map(
-  static fn (array $case): string => _stattic_content_rest_access_path($case[0], $case[1]),
+  static fn (array $case): array => [_stattic_content_rest_access_path($case[0], $case[1]), _stattic_content_rest_request_path($case[0], $case[1])],
   $cases
 ));
 `;
@@ -400,17 +405,19 @@ echo json_encode(array_map(
   ]);
   expect(exitCode, stderr).toBe(0);
   expect(JSON.parse(stdout)).toEqual([
-    "/wp-json",
-    "/wp-json/wp/v2/posts",
-    // Both spellings of wp/v2/posts land on the same enforced path.
-    "/wp-json/wp/v2/posts",
-    "/wp-json",
-    "/wp-json",
-    "/wp-json/wp/v2/posts",
-    // An array (`?rest_route[]=`) or otherwise unusable value still names the
-    // REST root, never `/`.
-    "/wp-json",
-    "/",
-    "/about",
+    ["/wp-json", true],
+    ["/wp-json/wp/v2/posts", true],
+    ["/wp-json/wp/v2/posts", true],
+    ["/wp-json", true],
+    ["/", false],
+    ["/wp-json/wp/v2/posts", true],
+    ["/", false],
+    ["/", false],
+    ["/about", false],
+    ["/wp-json/spacefast/v1/redirects", true],
+    ["/wp-json/wp/v2/posts", true],
+    ["/feed/", false],
+    ["/zero-admin", true],
+    ["/zero-admin/users", true],
   ]);
 });

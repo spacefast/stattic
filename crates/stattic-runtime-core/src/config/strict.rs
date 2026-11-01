@@ -304,11 +304,7 @@ pub fn compile(input: Input) -> Output {
             return invalid(&error.message, loc.line, loc.column);
         }
     };
-    let mut locations = document
-        .key_offsets
-        .iter()
-        .map(|(path, offset)| (path.clone(), locate(&input.source, &newlines, *offset)))
-        .collect::<BTreeMap<_, _>>();
+    let mut locations = locate_all(&input.source, &document.key_offsets);
     locations.insert("$".into(), Location { line: 1, column: 1 });
     let Some(root) = document.value.as_object() else {
         return Output {
@@ -963,23 +959,24 @@ fn locate_overlay_entry(
 /// checked here — what a rule MEANS is settled once, in the merge, so the two
 /// never drift.
 ///
-/// A document that does not parse states no routing rules and reports nothing:
-/// the serving-config lane reads the same file and already says so, and one
-/// broken-JSON message per publish is enough.
+/// Substituted documents must pass the same parser budget: a parse failure
+/// rejects compilation rather than publishing a version with its rules removed.
 pub fn routing_sections(source: &str) -> (ConfigRouting, Vec<Issue>) {
     let mut issues = Vec::new();
-    let Ok(document) = parse_document(source) else {
-        return (ConfigRouting::default(), issues);
+    let document = match parse_document(source) {
+        Ok(document) => document,
+        Err(error) => {
+            let loc = locate(source, &newline_offsets(source), error.offset);
+            return (
+                ConfigRouting::default(),
+                invalid(&error.message, loc.line, loc.column).issues,
+            );
+        }
     };
     let Some(root) = document.value.as_object() else {
         return (ConfigRouting::default(), issues);
     };
-    let newlines = newline_offsets(source);
-    let mut locations = document
-        .key_offsets
-        .iter()
-        .map(|(path, offset)| (path.clone(), locate(source, &newlines, *offset)))
-        .collect::<BTreeMap<_, _>>();
+    let mut locations = locate_all(source, &document.key_offsets);
     locations.insert("$".into(), Location { line: 1, column: 1 });
     let redirects = collect_config_redirects(
         CONFIG_ROUTING_PREFIX,
@@ -1840,6 +1837,29 @@ fn newline_offsets(source: &str) -> Vec<usize> {
         .map(|(index, _)| index)
         .collect()
 }
+fn locate_all(source: &str, offsets: &BTreeMap<String, usize>) -> BTreeMap<String, Location> {
+    let mut ordered: Vec<_> = offsets.iter().collect();
+    ordered.sort_unstable_by_key(|(_, offset)| **offset);
+    let mut cursor = 0;
+    let mut line = 1;
+    let mut column = 1;
+    ordered
+        .into_iter()
+        .map(|(path, offset)| {
+            for character in source[cursor..*offset].chars() {
+                if character == '\n' {
+                    line += 1;
+                    column = 1;
+                } else {
+                    column += character.len_utf16();
+                }
+            }
+            cursor = *offset;
+            (path.clone(), Location { line, column })
+        })
+        .collect()
+}
+
 fn locate(source: &str, newlines: &[usize], offset: usize) -> Location {
     let offset = offset.min(source.len());
     let line = newlines.partition_point(|index| *index < offset) + 1;
@@ -1903,6 +1923,23 @@ fn invalid(message: &str, line: usize, column: usize) -> Output {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn batch_locations_match_utf16_columns_in_source_order() {
+        let source = "{\"z😀\":[0,1],\"a\":{\n\"b\":true}}";
+        let document = super::parse_document(source).unwrap();
+        let locations = super::locate_all(source, &document.key_offsets);
+        let newlines = super::newline_offsets(source);
+        for (path, offset) in &document.key_offsets {
+            let expected = super::locate(source, &newlines, *offset);
+            assert_eq!(
+                (locations[path].line, locations[path].column),
+                (expected.line, expected.column)
+            );
+        }
+        assert_eq!(locations["$.a"].column, 14);
+        assert_eq!(locations["$.a.b"].line, 2);
+    }
+
     use serde_json::json;
 
     use super::{compile, public_json_schema, Input, SCHEMA};

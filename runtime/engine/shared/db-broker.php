@@ -805,13 +805,9 @@ function _stattic_db_broker_run_statement(array $statement): array
     if ($mutation) {
         $affected = _stattic_db_broker_unsigned_literal($prepared->affected_rows);
         $insertId = _stattic_db_broker_unsigned_literal($prepared->insert_id);
-        // A mutation-mode statement that returned a result set leaves the
-        // statement unusable until the set is drained.
+        // Closing an unexpected result cancels it without buffering discarded rows.
         if ($prepared->field_count > 0) {
-            $discard = $prepared->get_result();
-            if ($discard instanceof mysqli_result) {
-                $discard->free();
-            }
+            _stattic_db_broker_evict($cacheKey);
         }
 
         return ['ok' => true, 'json' => '{"affectedRows":' . $affected . ',"lastInsertId":' . $insertId . ',"ok":true}'];
@@ -829,7 +825,7 @@ function _stattic_db_broker_run_statement(array $statement): array
  */
 function _stattic_db_broker_rows(mysqli $connection, mysqli_stmt $prepared, string $cacheKey): array
 {
-    $result = $prepared->get_result();
+    $result = $prepared->result_metadata();
     if (!$result instanceof mysqli_result) {
         if ($prepared->field_count > 0) {
             $failure = _stattic_db_broker_driver_error('zero_db_query_failed', $connection, $prepared);
@@ -845,6 +841,9 @@ function _stattic_db_broker_rows(mysqli $connection, mysqli_stmt $prepared, stri
     }
 
     $fields = $result->fetch_fields();
+    $result->free();
+    $row = array_fill(0, count($fields), null);
+    $prepared->bind_result(...$row);
     // Column names are sorted bytewise and duplicates collapse to the last
     // occurrence, because db.rs collects a row into a BTreeMap keyed by name.
     $order = range(0, count($fields) - 1);
@@ -862,10 +861,9 @@ function _stattic_db_broker_rows(mysqli $connection, mysqli_stmt $prepared, stri
     $encoded = [];
     $bytes = 0;
     $count = 0;
-    while (($row = $result->fetch_row()) !== null) {
+    while (($fetched = $prepared->fetch()) === true) {
         $count += 1;
         if ($count > $rowsMax) {
-            $result->free();
             _stattic_db_broker_evict($cacheKey);
             return _stattic_db_broker_error('zero_db_result_too_many_rows', 'Zero DB result set exceeded the row limit.');
         }
@@ -877,13 +875,17 @@ function _stattic_db_broker_rows(mysqli $connection, mysqli_stmt $prepared, stri
         $json = '{' . implode(',', $parts) . '}';
         $bytes += strlen($json) + 1;
         if ($bytes > $bytesMax) {
-            $result->free();
             _stattic_db_broker_evict($cacheKey);
             return _stattic_db_broker_error('zero_db_result_too_large', 'Zero DB result set exceeded the encoded size limit.');
         }
         $encoded[] = $json;
     }
-    $result->free();
+    if ($fetched === false) {
+        $failure = _stattic_db_broker_driver_error('zero_db_query_failed', $connection, $prepared);
+        _stattic_db_broker_evict($cacheKey);
+        return $failure;
+    }
+    $prepared->free_result();
 
     return ['ok' => true, 'json' => '{"ok":true,"rows":[' . implode(',', $encoded) . ']}'];
 }

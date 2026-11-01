@@ -68,12 +68,22 @@ type CliResponse = {
 async function phpRaw(
   request: CliRequest,
   env: Record<string, string> = {},
+  memoryLimit = "128M",
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(["php", CLI_PATH, JSON.stringify({ url: mysql.url, ...request })], {
-    env: { ...process.env, ...env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = Bun.spawn(
+    [
+      "php",
+      "-d",
+      `memory_limit=${memoryLimit}`,
+      CLI_PATH,
+      JSON.stringify({ url: mysql.url, ...request }),
+    ],
+    {
+      env: { ...process.env, ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -370,6 +380,21 @@ test("each size cap refuses with its own code", async () => {
     },
   );
   expect(JSON.parse(bytesRefused.responses?.[0] as string).code).toBe("zero_db_result_too_large");
+
+  const expanded = "SELECT REPEAT('x', 65536) AS payload FROM wide a CROSS JOIN wide b LIMIT 1024";
+  for (const mode of ["query", "execute"] as const) {
+    const bounded = await phpRaw(
+      { operations: [op({ mode, sql: expanded }), op({ sql: "SELECT 1 AS alive" })] },
+      { SPACEFAST_ZERO_DB_ROWS_MAX: "10" },
+      "32M",
+    );
+    expect(bounded.exitCode, bounded.stderr).toBe(0);
+    const output: CliResponse = JSON.parse(bounded.stdout);
+    expect(JSON.parse(output.responses?.[0] ?? "null")).toMatchObject(
+      mode === "query" ? { code: "zero_db_result_too_many_rows" } : { ok: true },
+    );
+    expect(JSON.parse(output.responses?.[1] ?? "null")).toEqual({ ok: true, rows: [{ alive: 1 }] });
+  }
 });
 
 // --- capability gating ---------------------------------------------------------------------

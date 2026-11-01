@@ -1954,6 +1954,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("spacefast.jsonc", 3, "redirect_shadowed_by_file")]
         );
+
+        let oversized = compile_routing_files(&RoutingInput {
+            config_source: Some(format!(
+                "{{\"headers\":[],\"padding\":\"{}\"}}",
+                "x".repeat(crate::protocol::CONFIG_FILE_MAX_BYTES)
+            )),
+            config_path: Some("sf.jsonc".into()),
+            ..RoutingInput::default()
+        });
+        let diagnostic = oversized
+            .diagnostics
+            .first()
+            .expect("parser errors must be reported");
+        assert_eq!(diagnostic.code, "config_invalid");
+        assert_eq!(diagnostic.file, "sf.jsonc");
+        assert_eq!(diagnostic.severity, "error");
     }
 
     #[test]

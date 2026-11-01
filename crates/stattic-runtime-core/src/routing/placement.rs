@@ -587,9 +587,12 @@ fn is_host_redirect(rule: &RedirectRule) -> bool {
     rule.host.is_some() && is_off_origin_destination(&rule.destination)
 }
 
-/// Whether the destination leaves this origin. An absolute URL does.
+/// Only an unambiguous origin-relative path can bypass runtime credential handling.
 fn is_off_origin_destination(destination: &str) -> bool {
-    super::absolute_url_regex().is_match(destination)
+    !destination.starts_with('/')
+        || destination.starts_with("//")
+        || destination.contains('\\')
+        || destination.chars().any(|character| character.is_control())
 }
 
 /// Whether the source matcher is a literal path the provider can compare

@@ -3,7 +3,7 @@ export const cronReportSource = `
 const headers = globalThis.__statticZeroRequest.headers;
 globalThis.__statticZeroResult = JSON.stringify({
   status: 200,
-  body: JSON.stringify({ cron: headers['x-spacefast-cron'] ?? null, authorization: headers.authorization ?? null }),
+  body: JSON.stringify({ cron: headers['x-spacefast-cron'] ?? null, authorization: headers.authorization ?? null }) + '\\n',
 });
 `;
 

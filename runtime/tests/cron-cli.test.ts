@@ -225,6 +225,8 @@ test("a declared cron runs its path and carries both proofs", async () => {
   const after = Math.floor(Date.now() / 60_000);
 
   expect(result.exitCode, result.stderr + result.stdout).toBe(0);
+  // wp.cloud can merge the CLI streams; the receipt must start on its own line.
+  expect(result.stdout.endsWith("\n")).toBe(true);
   expect(receipt(result.stderr)).toEqual({
     method: "GET",
     path: "/cron/report",

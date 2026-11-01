@@ -70,6 +70,14 @@ export async function acceptSpaceUsersHttp(input: {
   };
   await protectedUser(alice.cookie, alice.subject);
   await protectedUser(bob.cookie, bob.subject);
+  const foreignRead = await call(input.protectedPath, alice.cookie, {
+    headers: { Origin: "https://other.example.test" },
+  });
+  assert.equal(foreignRead.status, 403);
+  assert.equal(
+    z.object({ code: z.string() }).parse(await foreignRead.json()).code,
+    "space_users_origin_denied",
+  );
   const config = await call("/__zero/auth/api/config", "");
   assert.equal(config.status, 200);
   assert.equal(
@@ -85,11 +93,27 @@ export async function acceptSpaceUsersHttp(input: {
   }
   assert.match(configHead.headers.get("allow") ?? "", /GET/);
   assert.equal(configHead.headers.get("cache-control"), "no-store");
-  const forged = await call(input.protectedPath, alice.cookie, {
+  // Exercise the same mutation with valid credentials and CSRF, changing only
+  // the origin. A read-only fixture would reject POST before this boundary.
+  const forged = await call("/__zero/auth/api/account/delete", carol.cookie, {
     method: "POST",
-    headers: { Origin: "https://other.example.test" },
+    headers: {
+      Origin: "https://other.example.test",
+      "Content-Type": "application/json",
+      "X-Identity-CSRF": carol.csrf,
+    },
+    body: JSON.stringify({ confirmation: "DELETE" }),
   });
   assert.equal(forged.status, 403);
+  assert.equal(
+    z.object({ error: z.object({ code: z.string() }) }).parse(await forged.json()).error.code,
+    "invalid_origin",
+  );
+  assert.equal(
+    spaceUserAccountSchema.parse(await owner("account-get", { id: carol.id })).status,
+    "active",
+  );
+  await protectedUser(carol.cookie, carol.subject);
   const directory = spaceUsersListSchema.parse(
     await owner("account-list", { page: 1, perPage: 20, search: input.search }),
   );

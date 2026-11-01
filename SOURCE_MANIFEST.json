@@ -1,7 +1,7 @@
 {
-  "revision": "cf431b51333ae7b55d859024465c870ded038be8",
+  "revision": "74ba4514f3a046f694a8f0c8897cfedb508c67ae",
   "sourceHash": "a252dd4358d7a273d5ac02b2f6b8a86cd727bca25d6d5de29e319058eaea2eaa",
-  "manifestSha256": "4a0840b1805c1bef87b19c8cbd025d020bfab59abc59621bcd3a1b4a71c93383",
+  "manifestSha256": "23a7eca2b434414467f87de991381db9f86ad050b2bf8b393dd23b47bad50c86",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "a80b3fe1fd50b3b25dabaaafcd00411e86500e7caebd419b8ea375a75480bcd7"
+      "sha256": "2d8986a9fd34776577948a47433aa57f35a425fcfa0cb56d8e352745d37e11dc"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "ec055ecf2a3b33f8817e597a0ca2a82ef9507842bc99592bb163972f3a1fa196"
+      "sha256": "c682a2c4900bc384810de7eda131ba96f6365818a0ea6c7b241efa61cc2f9704"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -1041,7 +1041,7 @@
     },
     {
       "path": "runtime/tests/cron-cli.test.ts",
-      "sha256": "63da9e8c0dc615af7e2c659dc47598040ea1ec63cde2e8f17b96360897851c6c"
+      "sha256": "aa9b21729e758e72aee2c53646ddf4b7931e7a10393f16b59b5b4296096bf44e"
     },
     {
       "path": "runtime/tests/db-broker-admission.test.ts",
@@ -1305,7 +1305,7 @@
     },
     {
       "path": "runtime/tests/space-users-http.ts",
-      "sha256": "c84ef3824bd9805c3a57800463f4dd38911735f296e64901fab54b4146b58829"
+      "sha256": "cf1c24a48911e16ea7e4ae1f74fb61f2206fec71a6309b860f1462e4badd838a"
     },
     {
       "path": "runtime/tests/space-users-verify.test.ts",
@@ -1373,7 +1373,7 @@
     },
     {
       "path": "runtime/tests/zero-contract-fixtures.ts",
-      "sha256": "ed395b89cfcc65404c260212ddf51616b7c6299b40ec5663cfa23efb849b9104"
+      "sha256": "c93d205d86fce288579ce170733382f27e4ec6166895a2c034dbb6080c53bd28"
     },
     {
       "path": "runtime/tests/zero-db-dump.test.ts",

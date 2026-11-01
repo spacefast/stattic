@@ -2297,6 +2297,10 @@ const systemViewRefusals: Array<{ name: string; token: () => string }> = [
     name: "minted before a session-version rotation",
     token: () => systemViewToken({ sessionVersion: 1 }),
   },
+  {
+    name: "carrying no session version",
+    token: () => systemViewToken({ sessionVersion: undefined }),
+  },
   // An explicit-but-unusable scope fails closed: it must never widen to the
   // whole Space the way an absent scope does.
   { name: "carrying an unreadable scope", token: () => systemViewToken({ scope: "docs/../.." }) },

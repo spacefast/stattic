@@ -3,40 +3,11 @@
 declare(strict_types=1);
 
 /**
- * PHP Functions: the `t=php` response action (slice A).
+ * PHP Functions dispatch and sf_* support.
  *
- * Executes a committed `functions/<route>.php` IN THIS php-fpm worker, after
- * `_stattic_tenant_harden()` (tenant-prelude.php) jails the worker's filesystem
- * view to the space's own content store and scrubs every platform secret from
- * the environment. A wp.cloud site owns no second fpm pool, no per-space uid
- * and no `disable_functions`, so in-process `include` is the only execution
- * model and the prelude is the only containment available (see
- * tenant-prelude.php's header for the full model and its limits).
- *
- * Hard sequencing contract, all before the prelude runs:
- *   1. every engine `require` (nothing outside the jail is readable after);
- *   2. the visitor identity verify (it reads `.stattic/**` keys the jail
- *      denies). sf_auth() serves that result, it never verifies;
- *   3. every brokered capability's configuration: the database credential, the
- *      service broker's binary path, the platform service keys. All of it comes
- *      from the process environment the scrub is about to empty, so a lazy
- *      resolve would resolve to nothing;
- *   4. the request body read, the scratch tmp mkdir, the admission slot flock.
- * After the prelude: the tenant include, and a response path that touches no
- * file outside the jail. Platform error pages are template files, so every
- * post-harden failure answers as an inline problem+json document.
- *
- * One request executes ONE space's handler, latched by `active` below.
- * `open_basedir` can only tighten, so a second space's pin in the same request
- * would be trapped by the first (tenant-prelude.php "PER-REQUEST INI RESET is
- * load-bearing").
- *
- * Admission is a per-space set of flock slots rather than
- * `_stattic_admission_acquire_or_shed`: that lane's release reopens counter
- * files under the private root at shutdown, which the still-pinned jail denies,
- * leaking the slot for the whole stale window. A flock held on a pre-opened
- * handle is released by the kernel when the request's handles close, jail or no
- * jail, crash or no crash.
+ * Authored PHP execution is disabled for every caller, including HTTP, CLI
+ * invoke, and declared cron targets. In-process hardening cannot isolate
+ * platform credentials; execution needs a separate credential-free boundary.
  */
 
 require_once __DIR__ . '/../shared/context.php';
@@ -132,166 +103,15 @@ function _stattic_php_functions_api_base_url(): string
     return $apiBaseUrl;
 }
 
-/**
- * The `t=php` dispatch: containment, then capability, then the tenant file.
- */
-function _stattic_php_functions_serve(array $context, array $action, string $requestPath): never
+/** The shared `t=php` refusal, before any authored handler is loaded. */
+function _stattic_php_functions_serve(array $context): never
 {
     $state = &_stattic_php_functions_state();
-    if ($state['active']) {
-        // The prelude's jail cannot be re-pinned, so a second dispatch in this
-        // worker request is a platform invariant failure, never a second
-        // include.
-        _stattic_php_functions_problem(500, 'runtime_invariant_violation', 'A PHP function already executed on this request.');
-    }
-
-    $method = (string) $context['method'];
-    if ($method === 'TRACE' || $method === 'CONNECT') {
+    $state['method'] = (string) $context['method'];
+    if ($state['method'] === 'TRACE' || $state['method'] === 'CONNECT') {
         _stattic_render_method_not_allowed_lazy();
     }
-    // Control paths stay terminal as on the JS Functions lane: a tenant handler
-    // must never answer `/__spacefast/...` or `/_headers` for the platform.
-    if (_stattic_path_is_reserved($requestPath)) {
-        _stattic_php_functions_problem(404, 'not_found', 'Not found.');
-    }
-
-    $privateRoot = (string) $context['private_root'];
-    $spaceId = (string) $context['space_id'];
-    $serving = is_array($context['serving']) ? $context['serving'] : [];
-    $sha = is_string($action['sha'] ?? null) ? $action['sha'] : '';
-    if ($spaceId === '' || !_stattic_is_sha256_hex($sha)) {
-        _stattic_render_runtime_invariant_error_lazy('route-action-metadata-missing', 'Runtime PHP function action metadata is malformed.');
-    }
-
-    // The handler bytes live in the space's own content store, which is also
-    // the prelude jail: the include target stays readable after hardening, and
-    // a handler can never resolve outside its own space.
-    $phpRoot = _stattic_space_root($privateRoot, $spaceId) . '/blobs';
-    $handler = $phpRoot . '/' . substr($sha, 0, 2) . '/' . $sha;
-    if (!is_file($handler)) {
-        _stattic_render_runtime_invariant_error_lazy('file-missing', 'Runtime PHP function handler blob is missing.');
-    }
-
-    // ---- admission: one flock slot per concurrent execution ---------------
-    $limit = _stattic_admission_configured_limit($serving);
-    $slotRoot = $privateRoot . '/runtime/admission';
-    _stattic_runtime_mkdir($slotRoot);
-    $held = false;
-    for ($slot = 0; $slot < $limit; $slot++) {
-        $handle = _stattic_lock_acquire(
-            $slotRoot . '/' . _stattic_admission_sanitize_key($spaceId) . '.php-fx.slot' . $slot,
-            STATTIC_LOCK_TRY
-        );
-        if ($handle !== false) {
-            // Held for the request's lifetime; the kernel releases it when the
-            // request's handles close, which no jail can prevent.
-            $held = true;
-            break;
-        }
-    }
-    if (!$held) {
-        _stattic_admission_record_shed($privateRoot, $spaceId, $limit, 'php_function');
-        _stattic_render_admission_shed(STATTIC_ADMISSION_RETRY_AFTER_SECONDS);
-    }
-
-    // The request's one admission slot: `_stattic_admission_acquire_once` takes no second.
-    $GLOBALS['SPACEFAST_ADMISSION_ACQUIRED'] = true;
-
-    // ---- everything the handler may ask for, resolved BEFORE the jail -----
-    $state['method'] = $method;
-    $state['private'] = (bool) $context['private_cache'];
-    $state['noindex'] = !empty(is_array($context['host_entry'] ?? null) ? $context['host_entry']['noindex'] ?? null : null);
-    $state['api_base_url'] = _stattic_php_functions_api_base_url();
-    // Same verify, same shape as a Zero endpoint's auth context. Runs now
-    // because verification reads `.stattic/**` key material the jail denies.
-    $state['auth'] = _stattic_zero_auth_context($serving, (string) $context['host']);
-    $state['private'] = $state['private'] || _stattic_access_private_cache_flag();
-
-    // Same reason, same moment: the database credential comes from platform
-    // configuration the jail is about to deny, and is bound into the broker's
-    // process memory. The handler gets frames, never a DSN or a connection.
-    // That is not a credential boundary against the tenant (same process; see
-    // _stattic_php_functions_service_call for what it does and does not buy),
-    // it only keeps the credential from reaching the handler by accident.
-    //
-    $runnerEnv = _stattic_php_functions_runner_env((string) $context['version_dir']);
-    $state['database'] = _stattic_php_functions_bind_database($runnerEnv);
-    $state['services'] = _stattic_php_functions_bind_services($context, $runnerEnv);
-
-    $raw = in_array($method, ['GET', 'HEAD'], true)
-        ? ''
-        : _stattic_bounded_request_body(STATTIC_RUNTIME_EXECUTION_BODY_BYTES_DEFAULT);
-    if ($raw === null) {
-        // Over-declared, over-read, or unreadable: refuse rather than hand the
-        // handler an empty body a failed read would have produced.
-        _stattic_php_functions_problem(413, 'payload_too_large', 'Request body exceeds the PHP function body limit.');
-    }
-    $state['raw_body'] = $raw;
-
-    // Per-request scratch tmp inside the space's own private area, so it is
-    // part of the jail: uploads/sessions/sys-temp land here and the cleanup
-    // below still works after hardening.
-    $scratchTmp = _stattic_space_root($privateRoot, $spaceId) . '/tmp/php-fx-' . bin2hex(random_bytes(8));
-    _stattic_runtime_mkdir($scratchTmp);
-    register_shutdown_function(static function () use ($scratchTmp): void {
-        // The jail may refuse a symlink whose target is outside it. Leave that
-        // entry for the unrestricted retention pass, with one cleanup diagnostic.
-        [$removed, $warning] = _sf_fs_attempt(static fn (): bool => _stattic_private_tree_remove($scratchTmp));
-        if (!$removed) {
-            error_log('spacefast PHP function scratch cleanup deferred path=' . $scratchTmp
-                . ($warning !== null ? ' msg=' . $warning : ''));
-        }
-    });
-
-    // File maintenance needs the platform storage root. Drain only that work
-    // before open_basedir is pinned; provider delivery stays after the response.
-    _stattic_run_deferred_work(beforeTenant: true);
-
-    require_once __DIR__ . '/../shared/retail-usage.php';
-    _stattic_record_retail_usage($privateRoot, $spaceId, 'origin_invocations', 1);
-
-    // At the first output byte, however produced, including a tenant flush(),
-    // the platform re-takes the headers it owns.
-    header_register_callback('_stattic_php_functions_enforce_platform_headers');
-    ob_start();
-    $state['active'] = true;
-
-    // ---- containment, then control handover -------------------------------
-    try {
-        _stattic_tenant_harden($spaceId, $phpRoot, $scratchTmp);
-    } catch (Throwable $error) {
-        error_log(sprintf(
-            'spacefast php function containment failed type=%s message=%s',
-            get_debug_type($error),
-            $error->getMessage(),
-        ));
-        // Fail closed: never run tenant code unhardened. File-free response,
-        // because platform error pages are templates the jail may already deny.
-        _stattic_php_functions_problem(500, 'runtime_invariant_violation', 'PHP function containment failed.');
-    }
-
-    try {
-        // A bare scope: the handler sees the sf_* helpers and superglobals,
-        // never the bridge's locals.
-        (static function (string $__stattic_handler): void {
-            include $__stattic_handler;
-        })($handler);
-    } catch (Throwable $error) {
-        // Through the runtime log writer, not a bare error_log: an untagged
-        // line lands in the same file but the space's own log surface cannot
-        // tell it from the engine's, so the author never sees the throw.
-        _stattic_runtime_log_write([
-            'level' => 'error',
-            'message' => $error->getMessage(),
-            'handlerName' => $requestPath,
-            'metadata' => ['uncaught' => true, 'class' => $error::class],
-        ], (string) $context['version_id']);
-        _stattic_php_functions_problem(500, 'php_function_error', 'The PHP function failed.');
-    }
-
-    $body = (string) ob_get_clean();
-    $status = http_response_code();
-    _stattic_php_functions_send(is_int($status) && $status > 0 ? $status : 200, [], $body);
+    _stattic_php_functions_problem(503, 'tenant_php_unavailable', 'PHP handlers are temporarily unavailable.');
 }
 
 /**

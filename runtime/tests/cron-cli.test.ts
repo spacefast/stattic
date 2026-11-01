@@ -1,19 +1,16 @@
 // Native crons, engine side: the two CLI entries a wp.cloud crontab command
 // runs on the box.
 //
-// What this suite holds, and only this: the seams the CLI lane adds over the
-// visitor lane it reuses — key -> path resolution out of the active version's
-// crons manifest, the two headers the dispatcher asserts, the exit code the
-// provider's cron-results webhook keys on, and the strip that makes
-// `x-spacefast-cron` unforgeable from the wire. It does NOT re-prove PHP
-// Functions execution, the jail, or the sf_* helpers: php-functions.test.ts
-// owns those, and this lane reaches them through the same _sf_serve_fast() call
-// engine/init.php makes.
+// The real Zero runner owns the supported handler fixtures. Authored PHP
+// targets must refuse execution through the same visitor dispatch.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+
+import { z } from "zod";
 
 import {
   deploy,
@@ -25,6 +22,11 @@ import {
   startRuntime,
   versionRoot,
 } from "./harness.ts";
+import {
+  cachePolicySource,
+  cronReportSource,
+  usersProtectedSource,
+} from "./zero-contract-fixtures.ts";
 
 const HOST = "crons.test";
 const SPACE = "spc_crons";
@@ -35,28 +37,14 @@ const EMPTY_VERSION = "ver_crons_empty_1";
 const CRON_SECRET = "sk_cron_fixture_secret";
 const PREPEND = "cron-cli-prepend.php";
 
-// Reports the request context a cron handler is supposed to be able to branch
-// on. Both names are request params, never process environment, so the tenant
-// prelude's env scrub does not (and must not) reach them.
-const REPORT_PHP = `<?php
-sf_json([
-    'cron' => $_SERVER['HTTP_X_SPACEFAST_CRON'] ?? null,
-    'authorization' => $_SERVER['HTTP_AUTHORIZATION'] ?? null,
-    'mail' => sf_email(['to' => 'visitor@example.com', 'subject' => 'Cron mail', 'text' => 'From the cron.']),
-]);
-`;
-
-const FAIL_PHP = `<?php
-http_response_code(500);
-echo "the job failed\\n";
-`;
-
-const FATAL_PHP = `<?php
-trigger_error("the job crashed", E_USER_ERROR);
-`;
-
-const BODY_PHP = `<?php
-sf_json(['body' => sf_body()]);
+const FAIL_SOURCE = `globalThis.__statticZeroResult = JSON.stringify({ status: 500, body: "the job failed\\n" });`;
+const BODY_SOURCE = `globalThis.__statticZeroResult = JSON.stringify({
+  status: 200,
+  body: JSON.stringify({ body: globalThis.__statticZeroRequest.bodyBase64 }),
+});`;
+const DISABLED_PHP = `<?php
+file_put_contents(__DIR__ . '/cron-executed', 'executed');
+sf_json(['authorization' => $_SERVER['HTTP_AUTHORIZATION'] ?? null]);
 `;
 
 let rt: Runtime;
@@ -79,7 +67,15 @@ function runCli(entrypoint: string, args: string[], stdin = ""): Promise<CliResu
       `--private-root=${rt.storageRoot}`,
       ...args,
     ],
-    { cwd: rt.root, env: { PATH: process.env.PATH, HOME: process.env.HOME }, stdio: "pipe" },
+    {
+      cwd: rt.root,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        SPACEFAST_RUNTIME_BIN: path.join(rt.engineRoot, "../bin/stattic-runtime"),
+      },
+      stdio: "pipe",
+    },
   );
   let stdout = "";
   let stderr = "";
@@ -91,44 +87,40 @@ function runCli(entrypoint: string, args: string[], stdin = ""): Promise<CliResu
   });
   child.stdin.end(stdin);
   return once(child, "close").then(([code]) => ({
-    exitCode: (code as number | null) ?? 1,
+    exitCode: z.number().int().nullable().parse(code) ?? 1,
     stdout,
     stderr,
   }));
 }
 
-function receipt(stderr: string): Record<string, unknown> {
+function receipt(stderr: string) {
   const line = stderr
     .split("\n")
     .find((candidate) => candidate.startsWith("spacefast-invoke-result: "));
   if (line === undefined) throw new Error(`no receipt line in stderr:\n${stderr}`);
-  return JSON.parse(line.slice("spacefast-invoke-result: ".length)) as Record<string, unknown>;
+  return z
+    .object({
+      method: z.string(),
+      path: z.string(),
+      status: z.number().int(),
+      engine_revision: z.string(),
+      engine_source: z.enum(["site", "chroot"]),
+    })
+    .parse(JSON.parse(line.slice("spacefast-invoke-result: ".length)));
 }
 
 beforeAll(async () => {
-  rt = await startRuntime({ env: { SPACEFAST_SERVICE_EMAIL_SENDERS: "cron@example.com" } });
+  rt = await startRuntime();
   // Coverage and provider prepends can register shutdown work before the CLI
   // entrypoint. Reproduce the dangerous ordering: its warning must not replace
   // a tenant fatal before the receipt derives the exit status.
   writeFileSync(
     path.join(rt.root, PREPEND),
     `<?php
-define('SPACEFAST_SERVICE_EMAIL_SENDERS', 'cron@example.com');
 register_shutdown_function(static function (): void {
     trigger_error("prepend cleanup warning", E_USER_WARNING);
 });
 require ${JSON.stringify(RUNTIME_TEST_ATOMIC_PREPEND)};
-`,
-  );
-  writeFileSync(
-    path.join(rt.root, "wp-load.php"),
-    `<?php
-function add_action(string $name, callable $callback): void {}
-function remove_action(string $name, callable $callback): void {}
-function wp_mail(array $to, string $subject, string $message, array $headers): bool {
-    file_put_contents(${JSON.stringify(path.join(rt.root, "cron-mail-capture.json"))}, json_encode(compact('to', 'subject', 'message', 'headers')));
-    return true;
-}
 `,
   );
   await deploy(rt, {
@@ -153,15 +145,12 @@ function wp_mail(array $to, string $subject, string $message, array $headers): b
     metadata: { mode: "website", title: "Crons" },
     files: {
       "index.html": "<h1>static home</h1>\n",
-      "functions/cron/report.php": REPORT_PHP,
-      "functions/cron/fail.php": FAIL_PHP,
-      "functions/cron/fatal.php": FATAL_PHP,
-      "functions/cron/body.php": BODY_PHP,
+      "functions/cron/php.php": DISABLED_PHP,
       "sf.jsonc": JSON.stringify({
         crons: [
           { path: "/cron/report", schedule: "daily" },
           { path: "/cron/fail", schedule: "12h" },
-          { path: "/cron/fatal", schedule: "hourly" },
+          { path: "/cron/php", schedule: "hourly" },
         ],
       }),
     },
@@ -174,6 +163,45 @@ function wp_mail(array $to, string $subject, string $message, array $headers): b
       production_hostnames: [HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
+    },
+    serving: {
+      zero_endpoints: [
+        {
+          execution_mode: "read",
+          method: "GET",
+          path: "/cache-policy-contract",
+          source: cachePolicySource,
+          capabilities: { db: false, auth: true },
+        },
+        {
+          execution_mode: "read",
+          method: "GET",
+          path: "/users-contract",
+          source: usersProtectedSource,
+          capabilities: { db: false, auth: true },
+        },
+        {
+          execution_mode: "read",
+          method: "GET",
+          path: "/cron/report",
+          source: cronReportSource,
+          capabilities: { db: false },
+        },
+        {
+          execution_mode: "read",
+          method: "GET",
+          path: "/cron/fail",
+          source: FAIL_SOURCE,
+          capabilities: { db: false },
+        },
+        {
+          execution_mode: "read",
+          method: "POST",
+          path: "/cron/body",
+          source: BODY_SOURCE,
+          capabilities: { db: false },
+        },
+      ],
     },
     // The space's own runtime variables, resolved beside the version at
     // finalize — the document functions-dispatch.php reads `sf-fx-env` from.
@@ -196,7 +224,7 @@ test("a declared cron runs its path and carries both proofs", async () => {
   const result = await runCli("cron.php", [`--host=${HOST}`, "--key=cron-report"]);
   const after = Math.floor(Date.now() / 60_000);
 
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, result.stderr + result.stdout).toBe(0);
   expect(receipt(result.stderr)).toEqual({
     method: "GET",
     path: "/cron/report",
@@ -205,15 +233,9 @@ test("a declared cron runs its path and carries both proofs", async () => {
     engine_source: "site",
   });
 
-  // SAFETY: The finalized report fixture above emits exactly this JSON shape.
-  const seen = JSON.parse(result.stdout) as { cron: string; authorization: string; mail: boolean };
-  expect(seen.mail).toBe(true);
-  expect(JSON.parse(readFileSync(path.join(rt.root, "cron-mail-capture.json"), "utf8"))).toEqual({
-    to: ["visitor@example.com"],
-    subject: "Cron mail",
-    message: "From the cron.",
-    headers: ["From: cron@example.com", "Reply-To: cron@example.com"],
-  });
+  const seen = z
+    .object({ cron: z.string(), authorization: z.string() })
+    .parse(JSON.parse(result.stdout));
   // The tenant's own secret, which is the half a handler can actually compare.
   expect(seen.authorization).toBe(`Bearer ${CRON_SECRET}`);
   // `<key>.<minute>.<hmac>`: the signature binds the header to this cron and
@@ -232,9 +254,6 @@ test("a route that answers 500 exits non-zero", async () => {
   expect(result.exitCode).toBe(1);
   expect(receipt(result.stderr)).toMatchObject({ path: "/cron/fail", status: 500 });
   expect(result.stdout).toBe("the job failed\n");
-  const fatal = await runCli("cron.php", [`--host=${HOST}`, "--key=cron-fatal"]);
-  expect(fatal.exitCode).toBe(1);
-  expect(receipt(fatal.stderr)).toMatchObject({ path: "/cron/fatal", status: 500 });
   expect(readFileSync(signingKeyPath, "utf8")).toBe(signingKeyBefore);
 });
 
@@ -260,7 +279,7 @@ test("malformed runtime variables fail the invocation closed", async () => {
 
 test("invoke runs any path through the visitor lane and streams the body", async () => {
   const result = await runCli("invoke.php", [`--host=${HOST}`, "--path=/"]);
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, result.stderr + result.stdout).toBe(0);
   expect(result.stdout).toBe("<h1>static home</h1>\n");
   expect(receipt(result.stderr)).toMatchObject({ path: "/", status: 200 });
 
@@ -274,14 +293,73 @@ test("invoke runs any path through the visitor lane and streams the body", async
     ],
     '{"from":"stdin"}',
   );
-  expect(body.exitCode).toBe(0);
-  expect(JSON.parse(body.stdout)).toEqual({ body: { from: "stdin" } });
+  expect(body.exitCode, body.stderr + body.stdout).toBe(0);
+  expect(JSON.parse(body.stdout)).toEqual({
+    body: Buffer.from('{"from":"stdin"}').toString("base64"),
+  });
 });
 
-test("a visitor cannot present the cron header", async () => {
+test("declared PHP cron targets refuse execution without a handler side effect", async () => {
+  const result = await runCli("cron.php", [`--host=${HOST}`, "--key=cron-php"]);
+  expect(result.exitCode).toBe(1);
+  expect(receipt(result.stderr)).toMatchObject({ method: "GET", path: "/cron/php", status: 503 });
+  expect(JSON.parse(result.stdout)).toMatchObject({ status: 503, code: "tenant_php_unavailable" });
+  const sha = createHash("sha256").update(DISABLED_PHP).digest("hex");
+  expect(
+    existsSync(
+      path.join(rt.storageRoot, "spaces", SPACE, "blobs", sha.slice(0, 2), "cron-executed"),
+    ),
+  ).toBe(false);
+});
+
+test("a visitor cannot forge the cron proof sent to a Zero handler", async () => {
   const response = await get(rt, HOST, "/cron/report", {
     headers: { "x-spacefast-cron": "report.0.forged" },
   });
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({ cron: null });
+  expect(await response.json()).toEqual({ cron: null, authorization: null });
+});
+
+test("a prepend cleanup warning cannot hide a fatal from the CLI receipt", () => {
+  const script = path.join(rt.root, "receipt-fatal.php");
+  writeFileSync(
+    script,
+    `<?php
+require ${JSON.stringify(path.join(rt.engineRoot, "runtime/cli-invoke.php"))};
+_stattic_cli_arm_receipt(['method' => 'GET', 'path' => '/fatal']);
+trigger_error("the job crashed", E_USER_ERROR);
+`,
+  );
+  const result = spawnSync(
+    PHP_BINARY,
+    ["-d", `auto_prepend_file=${path.join(rt.root, PREPEND)}`, script],
+    {
+      cwd: rt.root,
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, HOME: process.env.HOME },
+    },
+  );
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("prepend cleanup warning");
+  expect(receipt(result.stderr)).toMatchObject({ method: "GET", path: "/fatal", status: 500 });
+});
+
+test("the shared live-contract Zero endpoints enforce guest auth and no-store responses", async () => {
+  const users = await get(rt, HOST, "/users-contract");
+  expect(users.status).toBe(401);
+  expect(await users.json()).toEqual({ error: "sign_in_required" });
+  expect(users.headers.get("cache-control")).toContain("no-store");
+  for (const { policy, headers, cacheControl } of [
+    { policy: "no-store", headers: {}, cacheControl: "no-store" },
+    {
+      policy: "private-no-store",
+      headers: { cookie: "app=fixture" },
+      cacheControl: "private, no-store",
+    },
+  ]) {
+    const response = await get(rt, HOST, `/cache-policy-contract?policy=${policy}`, { headers });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ policy, authenticated: false });
+    expect(response.headers.get("cache-control")).toBe(cacheControl);
+  }
 });

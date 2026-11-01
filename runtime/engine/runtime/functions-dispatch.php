@@ -329,6 +329,10 @@ function _stattic_functions_dispatch_headers(
     ];
     // The cache seed's signed read URL, minted at finalize beside the bundle
     // URL. Optional: a version without one starts its cache cold.
+    $visitorCookie = $_SERVER['HTTP_COOKIE'] ?? '';
+    if (is_string($visitorCookie) && $visitorCookie !== '') {
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['visitorSession']] = _stattic_relay_safe_header_value($visitorCookie);
+    }
     if (is_string($host['seedUrl'] ?? null) && $host['seedUrl'] !== '') {
         $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['seedUrl']] = (string) $host['seedUrl'];
     }
@@ -380,13 +384,13 @@ function _stattic_functions_dispatch_headers(
 // Inbound `sf-fx-*` is stripped: a visitor's `sf-fx-caps: db.write` must not
 // reach the host, where it would be indistinguishable from ours.
 // `authorization` is absent on purpose. Spacefast credentials ride
-// `x-sf-authorization`, so Authorization belongs to the customer's application
-// and reaches the worker unchanged. Accept-Encoding goes because the response
-// relay strips Content-Encoding.
+// `x-sf-authorization`, which the inbound map already drops, so Authorization
+// belongs to the customer's application and reaches the worker unchanged.
+// Accept-Encoding goes because the response relay strips Content-Encoding.
 function _stattic_functions_relay_request_lane(): array
 {
     return [
-        'deny' => ['x-sf-authorization', 'accept-encoding'],
+        'deny' => ['accept-encoding'],
         'deny_prefixes' => [SPACEFAST_FUNCTIONS_DISPATCH_HEADER_PREFIX],
     ];
 }

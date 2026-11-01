@@ -33,6 +33,41 @@ const STATTIC_RELAY_DENIED_REQUEST_HEADERS = ['host', 'content-length', 'connect
 // inbound copy is forged by definition.
 const STATTIC_RELAY_DENIED_REQUEST_PREFIXES = ['spacefast-access-'];
 
+// Spacefast's own credentials. The runtime reads them to authenticate a request,
+// and nothing it hands to authored code or an upstream may carry them: not Zero,
+// not tenant PHP, not a Functions worker, not a proxy origin. X-SF-Authorization
+// exists so these never ride Authorization, which belongs to the customer's
+// application and passes untouched.
+const STATTIC_PLATFORM_CREDENTIAL_REQUEST_HEADERS = ['x-sf-authorization'];
+
+// Every cookie the runtime sets on a Space host: the visitor session, system
+// view and frame proofs, browser state, and the content editor session. A
+// prefix, so a new platform cookie is covered the day it ships. The Users app
+// session (`sfi_*`) is not on the list: it is the customer's own app session,
+// and `verifyUser` in @spacefast/zero/server reads it in the customer's server.
+const STATTIC_PLATFORM_COOKIE_PREFIXES = ['spacefast_', '__Host-spacefast_'];
+
+function _stattic_platform_cookie_name(string $name): bool
+{
+    return array_any(STATTIC_PLATFORM_COOKIE_PREFIXES, static fn (string $prefix): bool => str_starts_with($name, $prefix));
+}
+
+/**
+ * The Cookie header without the platform's cookies. Pairs are kept verbatim and
+ * in order, so the customer's application parses exactly what the browser sent.
+ */
+function _stattic_cookie_header_without_platform_cookies(string $raw): string
+{
+    $kept = [];
+    foreach (explode(';', $raw) as $pair) {
+        $name = trim(explode('=', $pair, 2)[0]);
+        if ($name !== '' && !_stattic_platform_cookie_name($name)) {
+            $kept[] = trim($pair);
+        }
+    }
+    return implode('; ', $kept);
+}
+
 function _stattic_relay_header_prefixed(string $lowerName, array $prefixes): bool
 {
     return array_any($prefixes, static fn (string $prefix): bool => str_starts_with($lowerName, $prefix));
@@ -55,6 +90,9 @@ function _stattic_relay_safe_header_value(string $value): string
  * the same map the strip and the platform assertion in shared/context.php
  * operate on.
  *
+ * Every consumer of this map hands it to code Spacefast does not own, so the
+ * platform's credentials leave here, once, for every lane.
+ *
  * @return array<string,string>
  */
 function _stattic_relay_inbound_headers(bool $lowercase = false): array
@@ -72,10 +110,20 @@ function _stattic_relay_inbound_headers(bool $lowercase = false): array
         } else {
             continue;
         }
+        $name = strtolower(str_replace('_', '-', $name));
+        $value = (string) $value;
+        if (in_array($name, STATTIC_PLATFORM_CREDENTIAL_REQUEST_HEADERS, true)) {
+            continue;
+        }
+        if ($name === 'cookie') {
+            $value = _stattic_cookie_header_without_platform_cookies($value);
+            if ($value === '') {
+                continue;
+            }
+        }
         // One pass builds the caller's casing, lowercase for Zero and canonical
         // Header-Case for the relay, so nobody rebuilds the map after.
-        $name = strtolower(str_replace('_', '-', $name));
-        $headers[$lowercase ? $name : ucwords($name, '-')] = (string) $value;
+        $headers[$lowercase ? $name : ucwords($name, '-')] = $value;
     }
     return $headers;
 }

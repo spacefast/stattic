@@ -25,12 +25,6 @@ export const usersHttpFixtureSchema = z
   )
   .length(4);
 
-export const usersProtectedPhp = `<?php
-$auth = sf_auth();
-if (!$auth['isAuthenticated']) sf_json(['error' => 'sign_in_required'], 401);
-sf_json(['userId' => $auth['userId'], 'wordpressLoaded' => class_exists('Spacefast\\Identity\\Plugin', false)]);
-`;
-
 /** The installed HTTPS boundary on the retained provider site, driven with production cookie names. */
 export async function acceptSpaceUsersHttp(input: {
   origin: string;
@@ -53,9 +47,7 @@ export async function acceptSpaceUsersHttp(input: {
     const response = await call(input.protectedPath, cookie);
     assert.equal(response.status, expected === null ? 401 : 200);
     if (expected !== null) {
-      const result = z
-        .object({ userId: z.string(), wordpressLoaded: z.literal(false) })
-        .parse(await response.json());
+      const result = z.object({ userId: z.string() }).parse(await response.json());
       assert.equal(result.userId, expected);
     }
     assert.match(response.headers.get("cache-control") ?? "", /no-store/);

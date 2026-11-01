@@ -1,17 +1,19 @@
-// App-session verification for PHP Functions and Zero on a Users-enabled Space.
+// App-session verification for Zero on a Users-enabled Space.
 //
 // The php-fpm worker on a wp.cloud box cannot spawn WP-CLI (no `php`/`wp` in
 // the pool's mount namespace) and cannot boot WordPress from the auto_prepend
 // pass, so sf_auth() verifies the `sfi_session` cookie straight against the
 // site's database. This suite is that seam: a real MySQL server carrying the
 // identity plugin's tables, wp-config.php with the salts and prefix, and the
-// engine's own request path from cookie to identity.
+// engine's verifier from cookie to identity. Tenant HTTP PHP is disabled, so
+// this owner runs the verifier directly instead of dispatching tenant code.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { deploy, get, publicAccessConfig, type Runtime, startRuntime } from "./harness.ts";
+import { type Runtime, startRuntime } from "./harness.ts";
 import {
   MYSQL_SETUP_TIMEOUT_MS,
   type MysqlContainer,
@@ -21,7 +23,6 @@ import {
 
 const HOST = "users-verify.test";
 const SPACE = "spc_users_verify";
-const VERSION = "ver_users_verify_1";
 const OTHER_SPACE = "spc_users_verify_other";
 const CONTAINER_NAME_PREFIX = "stattic-space-users-verify";
 const ROOT_PASSWORD = "space-users-verify-pw";
@@ -29,12 +30,6 @@ const DATABASE = "users_verify";
 const AUTH_KEY = "unit-auth-key-" + "k".repeat(40);
 const AUTH_SALT = "unit-auth-salt-" + "s".repeat(40);
 const SUBJECT = `usr_${"a".repeat(64)}`;
-
-const WHOAMI_PHP = `<?php
-$auth = sf_auth();
-if (!$auth['isAuthenticated']) sf_json(['error' => 'sign_in_required'], 401);
-sf_json(['userId' => $auth['userId'], 'displayName' => $auth['displayName'], 'provider' => $auth['provider']]);
-`;
 
 const usersSettings = {
   enabled: true,
@@ -115,25 +110,6 @@ beforeAll(async () => {
       "",
     ].join("\n"),
   );
-  await deploy(rt, {
-    spaceId: SPACE,
-    versionId: VERSION,
-    metadata: { mode: "website", title: "Users verify" },
-    files: {
-      "index.html": "<h1>users verify</h1>\n",
-      "functions/whoami.php": WHOAMI_PHP,
-    },
-    activate: {
-      route_name: "production",
-      config: {
-        ...publicAccessConfig({ mode: "website", site_title: "Users verify" }),
-        users: usersSettings,
-      },
-      production_hostnames: [HOST],
-      noindex_production_hostnames: [],
-      version_hostnames: [],
-    },
-  });
 }, MYSQL_SETUP_TIMEOUT_MS + 60_000);
 
 afterAll(() => {
@@ -141,7 +117,7 @@ afterAll(() => {
   stopMysqlContainers(CONTAINER_NAME_PREFIX);
 });
 
-test("a PHP function sees the app user behind a live sfi_session cookie, and only that user", async () => {
+test("the verifier accepts only live Users sessions for this Space and an active account", () => {
   const now = Math.floor(Date.now() / 1000);
   const live = "live-secret-" + randomBytes(8).toString("hex");
   const revoked = "revoked-secret-" + randomBytes(8).toString("hex");
@@ -154,28 +130,49 @@ test("a PHP function sees the app user behind a live sfi_session cookie, and onl
   seedSession({ userId: 8, secret: otherSpace, expiresAt: now + 3600 });
   seedSession({ userId: 9, secret: suspended, expiresAt: now + 3600 });
 
-  const whoami = (cookie: string | null) =>
-    get(rt, HOST, "/whoami", {
-      headers:
-        cookie === null
-          ? { Origin: `http://${HOST}` }
-          : { Origin: `http://${HOST}`, Cookie: `sfi_session=${cookie}` },
-    });
+  const verify = (cookie: string) => {
+    const url = new URL(mysql.url);
+    const result = spawnSync(
+      process.env.SPACEFAST_REAL_PHP ?? "php",
+      [
+        "-r",
+        "require $argv[1] . '/shared/context.php'; require $argv[1] . '/runtime/space-users.php'; " +
+          "$auth = _stattic_space_users_verify_session($argv[2], $argv[3], $argv[4], json_decode($argv[5], true), $argv[6]);" +
+          "if (class_exists('Spacefast\\\\Identity\\\\Plugin', false)) throw new RuntimeException('Session verification booted WordPress.');" +
+          "echo json_encode($auth, JSON_THROW_ON_ERROR);",
+        rt.engineRoot,
+        rt.storageRoot,
+        SPACE,
+        HOST,
+        JSON.stringify(usersSettings),
+        cookie,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          DATABASE_URL: "",
+          SPACEFAST_ZERO_DATABASE_URL: "",
+          DB_HOST: `${url.hostname}:${url.port}`,
+          DB_NAME: DATABASE,
+          DB_USER: decodeURIComponent(url.username),
+          DB_PASSWORD: decodeURIComponent(url.password),
+        },
+      },
+    );
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    return JSON.parse(result.stdout);
+  };
 
-  const signedIn = await whoami(live);
-  expect(signedIn.status, await signedIn.clone().text()).toBe(200);
-  expect(signedIn.headers.get("cache-control")).toBe("private, no-store");
-  expect(await signedIn.json()).toEqual({
+  expect(verify(live)).toEqual({
+    user: { id: SUBJECT, displayName: "Alice App" },
     userId: SUBJECT,
     displayName: "Alice App",
     provider: "space-users",
+    isAuthenticated: true,
+    isGuest: false,
   });
-
-  // Every refusal is the guest answer, not a verifier failure: a cookie that
-  // names no live session on THIS Space's app account is nobody.
-  for (const cookie of [null, revoked, expired, otherSpace, suspended, "not-a-session"]) {
-    const response = await whoami(cookie);
-    expect(`${cookie ?? "none"}:${response.status}`).toBe(`${cookie ?? "none"}:401`);
-    expect(await response.json()).toEqual({ error: "sign_in_required" });
+  for (const cookie of ["", revoked, expired, otherSpace, suspended, "not-a-session"]) {
+    expect(verify(cookie)).toBeNull();
   }
 });

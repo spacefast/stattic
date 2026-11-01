@@ -9,21 +9,11 @@ declare(strict_types=1);
  * ---------------------------------------------------------------------------
  * The corrected containment model
  * ---------------------------------------------------------------------------
- * Tenant PHP runs in the engine's OWN php-fpm pool, the only pool a wp.cloud
- * site is given. A site owns file content under /srv/htdocs and its persistent
- * data. It owns NONE of the OS-level isolation knobs: no second fpm master,
- * no per-space uid, no site-level `disable_functions`, `open_basedir`,
- * `clear_env`, and no accel-ignoring nginx location (verified:
- * private-notes:internal-docs/platform.md). The
- * only OS-level isolation primitive wp.cloud offers is a SEPARATE SITE.
- *
- * So until a provider request buys those knobs, containment is IN-PROCESS: the
- * engine hardens its own worker before it hands control to any tenant `.php`.
- * `custom-redirects.php` is already the `auto_prepend` front controller that
- * runs before every request; the committed-`.php` dispatch path
- * (runtime/engine/runtime/serve.php `_stattic_v4_dispatch_action`, action
- * `ACTION_PHP`) hands off to runtime/engine/runtime/php-functions.php, which
- * calls this prelude immediately before including the tenant file.
+ * Authored PHP Functions are disabled in php-functions.php for HTTP, CLI
+ * invoke, and cron dispatch. This prelude is retained for its containment
+ * probes; it does not provide a safe execution boundary for authored PHP.
+ * A wp.cloud site has no second fpm pool, per-space uid, or site-level
+ * `disable_functions` policy. The site is the OS isolation boundary.
  *
  * Each Space owns one site, box, and engine pool. This function pins
  * `open_basedir` to the active version's php-root before tenant code runs. The
@@ -47,6 +37,11 @@ declare(strict_types=1);
  *      persistent-data blob that embeds it are platform control credentials,
  *      not tenant inputs. They are removed from `$_SERVER`, `$_ENV`, and the C
  *      environment (`putenv` with no `=`) before tenant code runs.
+ *   3. REQUEST-CREDENTIAL SCRUB. The visitor's Spacefast credentials
+ *      (X-SF-Authorization and the platform cookies) authenticated the request
+ *      before this point; `sf_auth()` carries the verified identity. They are
+ *      removed from `$_SERVER`, `$_ENV` and `$_COOKIE`, so the customer's
+ *      handler and anything it includes see only the application's own.
  *
  * CANNOT (needs a wp.cloud provider request and a separate tenant fpm pool):
  *   A. FUNCTION REMOVAL. `disable_functions` is PHP_INI_SYSTEM: it is read at
@@ -66,6 +61,13 @@ declare(strict_types=1);
  *      widened once tightened, php-fpm must restore ini to the pool baseline at
  *      the end of every request (`php_request_shutdown`). The next request can
  *      then pin the active version's current php-root.
+ *   D. FASTCGI PARAMS. php-fpm keeps the request params in a table PHP code
+ *      cannot change: `getenv('HTTP_COOKIE')` and `getallheaders()` still
+ *      return the raw values after 3. (`putenv` does not reach them; measured
+ *      on php-fpm 8.5). A handler that asks for them by those names can read
+ *      the visitor's platform credentials. All authored PHP Functions are
+ *      disabled in php-functions.php until a credential-free execution
+ *      boundary exists, including CLI invoke and cron dispatch.
  */
 
 /**
@@ -100,6 +102,33 @@ function _stattic_tenant_scrub_secret_env(): void
 }
 
 /**
+ * Remove the visitor's Spacefast credentials from the request superglobals
+ * (HOLDS.3). `$_ENV` gets the same treatment because php-fpm copies the
+ * request params into it under `variables_order` E. `$_COOKIE` is reduced to
+ * the cookies the application owns. What PHP parsed stays as parsed.
+ */
+function _stattic_tenant_scrub_request_credentials(): void
+{
+    require_once __DIR__ . '/../shared/upstream-relay.php';
+    foreach (STATTIC_PLATFORM_CREDENTIAL_REQUEST_HEADERS as $header) {
+        $key = 'HTTP_' . strtoupper(str_replace('-', '_', $header));
+        unset($_SERVER[$key], $_SERVER['REDIRECT_' . $key], $_ENV[$key]);
+    }
+    $cookie = is_string($_SERVER['HTTP_COOKIE'] ?? null)
+        ? _stattic_cookie_header_without_platform_cookies($_SERVER['HTTP_COOKIE'])
+        : '';
+    unset($_SERVER['HTTP_COOKIE'], $_ENV['HTTP_COOKIE']);
+    if ($cookie !== '') {
+        $_SERVER['HTTP_COOKIE'] = $cookie;
+    }
+    foreach (array_keys($_COOKIE) as $name) {
+        if (_stattic_platform_cookie_name((string) $name)) {
+            unset($_COOKIE[$name]);
+        }
+    }
+}
+
+/**
  * Harden the current php-fpm worker in place before it executes a tenant
  * `.php` for `$spaceId`. Fail-closed: on any bad input or a jail that does not
  * take effect it throws, and the dispatch caller must abort the request (a 500
@@ -121,6 +150,7 @@ function _stattic_tenant_harden(string $spaceId, string $phpRoot, string $scratc
     // Scrub first: even if the jail step below throws, the secrets are already
     // gone from the process, so an error path can never leak them to a handler.
     _stattic_tenant_scrub_secret_env();
+    _stattic_tenant_scrub_request_credentials();
 
     $rootReal = realpath($phpRoot);
     $tmpReal = realpath($scratchTmp);

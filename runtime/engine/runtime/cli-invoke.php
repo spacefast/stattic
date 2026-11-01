@@ -6,11 +6,9 @@ declare(strict_types=1);
  *
  * The provider's crontab runs a shell command on the site's box, and that
  * command has to reach the SAME routing a visitor reaches: static entries,
- * PHP Functions, Zero, the Functions relay. A loopback HTTP kick would answer
- * that by racing the visitor pool for a worker, and a second router would answer
- * it by drifting. So neither: this file STAGES a request into the superglobals the
- * front door already reads and then calls `_sf_serve_fast()`, the exact call
- * engine/init.php makes. Everything downstream is unaware it is on the CLI.
+ * Zero, the Functions relay. PHP Functions return an unavailable response.
+ * This file stages a request into the superglobals the front door reads and
+ * calls `_sf_serve_fast()`, the same router engine/init.php calls.
  *
  * What the CLI SAPI changes, and what it does not:
  *   * `header()` is a silent no-op and `headers_list()` is empty, so response
@@ -24,11 +22,9 @@ declare(strict_types=1);
  *     entrypoint stages stdin in the shared request-body override before the
  *     visitor lane runs. There is no --body flag: the shell already has one.
  *
- * Hardening is NOT relaxed anywhere. tenant-prelude.php CANNOT.C requires that
- * one request execute at most one space's tenant file, because `open_basedir`
- * cannot be widened once tightened and only php-fpm's per-request ini reset
- * un-pins it. A CLI process has no such reset, so this file runs exactly ONE
- * request and exits. Never loop it.
+ * Each CLI process runs exactly one request and exits. PHP Functions reach
+ * the same unconditional refusal as HTTP; Zero and Functions keep their
+ * existing execution boundaries.
  */
 
 require_once __DIR__ . '/../shared/context.php';
@@ -212,7 +208,7 @@ function _stattic_cli_invoke(
  *
  * Two hops on purpose. Registering here puts this FIRST in the shutdown
  * sequence, ahead of the cleanup the serve lanes register DURING the request
- * (php-functions.php's scratch tmp, context.php's deferred-work queue), and
+ * (context.php's deferred-work queue), and
  * the receipt has to exit(), which would skip all of it. So the first hop
  * captures the terminal status before cleanup can replace error_get_last(),
  * then re-queues: a shutdown function registered from inside the shutdown

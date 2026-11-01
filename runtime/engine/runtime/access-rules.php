@@ -4701,11 +4701,8 @@ function _stattic_access_verify_system_view_token(
     // Revocation for a stateless token: rotating the Space's session version
     // invalidates every token minted before it.
     if (
-        array_key_exists('sessionVersion', $claims)
-        && (
-            !is_int($claims['sessionVersion'])
-            || $claims['sessionVersion'] !== _stattic_session_version($serving)
-        )
+        !is_int($claims['sessionVersion'] ?? null)
+        || $claims['sessionVersion'] !== _stattic_session_version($serving)
     ) {
         return false;
     }
@@ -4913,7 +4910,8 @@ function _stattic_access_handle_link_entry(
     _stattic_render_access_route_not_found();
 }
 
-// The raw access/API token never becomes a cookie and never reaches tenant code.
+// The raw access/API token never becomes a cookie, and X-SF-Authorization is
+// dropped from every header map handed to tenant code (upstream-relay.php).
 function _stattic_access_verify_platform_identity_token(
     array $serving,
     string $host,

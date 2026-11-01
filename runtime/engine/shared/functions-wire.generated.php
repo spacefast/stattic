@@ -23,6 +23,7 @@ const SPACEFAST_FUNCTIONS_DISPATCH_HEADERS = [
     'd1' => 'sf-fx-d1',
     'assets' => 'sf-fx-assets',
     'visitor' => 'sf-fx-visitor',
+    'visitorSession' => 'sf-fx-visitor-session',
     'logUrl' => 'sf-fx-log',
     'logToken' => 'sf-fx-log-token',
     'usageUrl' => 'sf-fx-usage',

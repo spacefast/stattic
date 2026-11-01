@@ -7,6 +7,17 @@ version tree plus this engine is a complete self-hosted site. Exit is real.
 
 External PRs are welcome. Supporting freedom on the web is the point.
 
+Authored native PHP Functions are disabled across HTTP, CLI invoke, and cron
+dispatch. Their routes return `503 tenant_php_unavailable` with
+`Cache-Control: no-store` before tenant code executes. PHP-FPM retains raw
+request credentials outside mutable PHP globals, so header scrubbing cannot
+make an in-process tenant handler safe. Re-enabling PHP Functions requires a
+separate execution boundary that receives no platform credentials. Static
+content, Zero, Functions workers, proxy routes, and non-PHP cron and invoke
+targets remain available. Their request maps
+remove `X-SF-Authorization` and platform cookies while preserving application
+`Authorization` and Users app cookies.
+
 > Pre-1.0 notice: contracts are unstable. Management/upload API shapes, artifact schemas,
 > and storage layout can change without compatibility shims until 1.0.
 

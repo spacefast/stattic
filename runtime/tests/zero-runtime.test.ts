@@ -1040,6 +1040,49 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
     );
     expect(secondRuntimeBearerMutation.status).toBe(200);
 
+    // ctx.auth carries what the Spacefast credentials proved; the handler's
+    // request headers never carry the credentials themselves. Authorization
+    // belongs to the customer's application and passes untouched, and so does
+    // the Users app session (sfi_*).
+    const headerBearerToken = signEd25519Jwt(key.privateKey, issuer.kid, {
+      sub: "member:mem_zero",
+      purpose: "runtime-bearer",
+      authorities: ["member:mem_zero"],
+      iss: "spacefast-api",
+      aud: "spc_zero_identity",
+      host,
+      spaceId: "spc_zero_identity",
+      generation: 1,
+      principal: "account:usr_zero",
+      sid: "3".repeat(64),
+      iat: now - 120,
+      nbf: now - 120,
+      exp: now + 3600,
+      jti: "jti_zero_header_strip",
+    });
+    rmSync(capturePath, { force: true });
+    const headerVisibility = await get(idRuntime, host, "/api/whoami", {
+      headers: {
+        cookie: [
+          "tenant_cookie=keep",
+          "__Host-spacefast_session=drop-session",
+          "__Host-spacefast_frame=drop-frame",
+          "__Host-sfi_session=app-session",
+          "theme=dark",
+        ].join("; "),
+        authorization: "Bearer customer-application-token",
+        "x-sf-authorization": `Bearer ${headerBearerToken}`,
+      },
+    });
+    expect(headerVisibility.status).toBe(201);
+    envelope = JSON.parse(readFileSync(capturePath, "utf8"));
+    expect(envelope.auth).toMatchObject({ userId: "account:usr_zero", isAuthenticated: true });
+    expect(envelope.request.headers.cookie).toBe(
+      "tenant_cookie=keep; __Host-sfi_session=app-session; theme=dark",
+    );
+    expect(envelope.request.headers.authorization).toBe("Bearer customer-application-token");
+    expect(envelope.request.headers["x-sf-authorization"]).toBeUndefined();
+
     const sessionToken = sessionCookie.slice(sessionCookie.indexOf("=") + 1);
     const storageUpload = await get(
       idRuntime,

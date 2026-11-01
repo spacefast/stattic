@@ -2571,6 +2571,7 @@ check(
 stage_inbound_headers([
     'Authorization' => 'Bearer tenant-api-key',
     'X-Sf-Authorization' => 'Bearer platform-secret',
+    'Cookie' => 'cart=1; __Host-spacefast_session=s; spacefast_session_dev=d; __Host-sfi_session=app; theme=dark',
     'Sf-Fx-Caps' => 'db.write',
     'Sf-Fx-Egress' => 'open',
     'Spacefast-Access-Sub' => 'user:forged',
@@ -2584,6 +2585,11 @@ foreach (_stattic_relay_request_headers(_stattic_functions_relay_request_lane())
 }
 check($fxForwarded['authorization'] === 'Bearer tenant-api-key', 'dispatch: Authorization reaches the customer application unchanged');
 check($fxForwarded['content-type'] === 'application/json', 'dispatch: ordinary request headers forward');
+check($fxForwarded['cookie'] === 'cart=1; __Host-sfi_session=app; theme=dark', 'relay: Spacefast cookies stop at the runtime, application cookies forward in order');
+$fxVisitorDispatch = _stattic_functions_dispatch_headers($fxConfig, 'spc_a', 'ver_a', 'req_a', 'dispatch-token', 'https://shop.example', 'trusted');
+check($fxVisitorDispatch[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['visitorSession']] === $_SERVER['HTTP_COOKIE'], 'dispatch: the trusted host receives visitor evidence outside tenant headers');
+stage_inbound_headers(['Cookie' => '__Host-spacefast_session=s']);
+check(!isset(_stattic_relay_inbound_headers(true)['cookie']), 'relay: a Cookie header holding only Spacefast cookies is dropped whole');
 foreach (['x-sf-authorization', 'sf-fx-caps', 'sf-fx-egress', 'spacefast-access-sub', 'accept-encoding', 'host'] as $denied) {
     check(!isset($fxForwarded[$denied]), 'dispatch: refuses to forward inbound ' . $denied);
 }

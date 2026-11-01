@@ -1578,11 +1578,10 @@ function _stattic_v4_dispatch_action(array $context, array $action, array $entry
         );
     }
     if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_PHP) {
-        // A committed functions/<route>.php, executed in this worker AFTER the
-        // in-process hardening prelude. The bridge owns the whole lifecycle
-        // (admission, identity, jail, include, send) and never returns.
+        // Authored PHP is unavailable for HTTP and every CLI caller, including
+        // cron. The shared refusal never loads the handler.
         require_once __DIR__ . '/php-functions.php';
-        _stattic_php_functions_serve($context, $action, $requestPath);
+        _stattic_php_functions_serve($context);
     }
     if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_LISTING) {
         _stattic_v4_serve_listing($context, $action, $entry, $requestPath);

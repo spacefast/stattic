@@ -126,7 +126,7 @@ beforeAll(async () => {
       version_hostnames: [],
     },
   });
-  const source = `export default capsule({ collections: { media: { publicRead: false, fields: {} } } });`;
+  const source = `import { capsule } from "@spacefast/zero/server"; export default capsule({ collections: { media: { publicRead: false, fields: {} } } });`;
   const declarations = parseContentDeclarations(source, source);
   if (declarations === null) throw new Error("expected media declaration");
   const { artifacts } = await compileZeroContentModel({

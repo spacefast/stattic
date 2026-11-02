@@ -148,6 +148,7 @@ function relayToken(overrides: Record<string, unknown> = {}): string {
     runtime_instance_id: RUNTIME_INSTANCE_ID,
     space_id: SPACE_ID,
     version_id: VERSION_ID,
+    ownership_revision: null,
     capabilities: ["db.read", "db.write"],
     ...overrides,
   });
@@ -296,6 +297,33 @@ test("every scope claim in the credential is enforced by the live route", async 
     // database: a scoped-out caller never learns whether the query would work.
     expect(body.code, name).toBe("relay_unauthorized");
     expect(body.rows, name).toBeUndefined();
+  }
+});
+
+test("ownership projection revokes retained relay credentials", async () => {
+  await putRoute(rt, SPACE_ID, "production", {
+    version_id: VERSION_ID,
+    config: {
+      ...publicAccessConfig({ mode: "website", site_title: "Functions relay" }),
+      ownership_revision: "new-owner",
+    },
+  });
+  try {
+    const stale = await relay({ mode: "query", sql: "SELECT 1" }, relayToken());
+    expect(stale.status).toBe(401);
+    const current = await relay(
+      { mode: "query", sql: "SELECT 1 AS current_owner" },
+      relayToken({ ownership_revision: "new-owner" }),
+    );
+    expect(current.status).toBe(200);
+  } finally {
+    await putRoute(rt, SPACE_ID, "production", {
+      version_id: VERSION_ID,
+      config: {
+        ...publicAccessConfig({ mode: "website", site_title: "Functions relay" }),
+        ownership_revision: null,
+      },
+    });
   }
 });
 

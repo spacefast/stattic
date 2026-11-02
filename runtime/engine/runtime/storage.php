@@ -735,7 +735,8 @@ function _stattic_storage_function_auth(
     $claims = _stattic_functions_relay_claims(
         $privateRoot,
         $spaceId,
-        _stattic_functions_relay_bearer()
+        _stattic_functions_relay_bearer(),
+        $serving
     );
     if ($claims === null) {
         return null;

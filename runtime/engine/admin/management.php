@@ -1813,6 +1813,9 @@ function _stattic_runtime_route_config(mixed $raw): array
             ? $raw['visitor_jwks']
             : null;
     }
+    if (array_key_exists('ownership_revision', $raw)) {
+        $config['ownership_revision'] = is_string($raw['ownership_revision']) ? $raw['ownership_revision'] : null;
+    }
     if (array_key_exists('projection_generation', $raw)) {
         $config['projection_generation'] = is_int($raw['projection_generation'])
             && $raw['projection_generation'] >= 0

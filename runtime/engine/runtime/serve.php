@@ -369,7 +369,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         if ($requestPath === '/' . STATTIC_FUNCTIONS_RELAY_PATH) {
             _stattic_functions_relay_serve($privateRoot, $spaceId, $requestMethod, $serving);
         }
-        _stattic_functions_logs_serve($privateRoot, $spaceId, $requestMethod);
+        _stattic_functions_logs_serve($privateRoot, $spaceId, $requestMethod, $serving);
     }
     // Machine purge intake, on the purge credential the control plane minted
     // into this version's functions/config.json. Like the relay and log lanes

@@ -1698,6 +1698,7 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
         'open' => $open,
         'fence' => $fence === 'none' ? null : $fence,
         // A tuple, never summed (D30).
+        'ownership_revision' => $config['ownership_revision'] ?? null,
         'access_gen' => is_int($authorization['generation'] ?? null) ? $authorization['generation'] : 0,
         'session_ver' => is_int($authorization['sessionVersion'] ?? null) ? $authorization['sessionVersion'] : 0,
         'versions' => $versions,

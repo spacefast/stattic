@@ -2022,6 +2022,7 @@ mkdir($relayRoot . '/spaces/spc_1/versions/ver_1', 0o777, true);
 
 $relayClaims = [
     'aud' => 'spacefast-functions-relay',
+    'ownership_revision' => null,
     'runtime_instance_id' => 'rti_test',
     'space_id' => 'spc_1',
     'version_id' => 'ver_1',
@@ -2030,7 +2031,7 @@ $relayClaims = [
     'nbf' => time() - 5,
 ];
 
-$verified = _stattic_functions_relay_claims($relayRoot, 'spc_1', $mintBundleToken($relayClaims));
+$verified = _stattic_functions_relay_claims($relayRoot, 'spc_1', $mintBundleToken($relayClaims), ['ownership_revision' => null]);
 check($verified !== null, 'relay token: a correctly scoped, correctly signed token verifies');
 check(_stattic_functions_relay_grant($verified ?? [], SPACEFAST_FUNCTIONS_RELAY_BROKERS['database']['capabilities']) === ['db.read', 'db.write'], 'relay token: the grant comes from the credential, not from a lookup');
 
@@ -2040,11 +2041,13 @@ foreach ([
     ['aud' => 'spacefast-functions-bundle'],
     ['space_id' => 'spc_other'],
     ['runtime_instance_id' => 'rti_other'],
+    ['ownership_revision' => 'displaced-owner'],
+    ['ownership_revision' => 123],
     ['version_id' => 'ver_missing'],
     ['exp' => time() - 1],
 ] as $index => $tamper) {
     check(
-        _stattic_functions_relay_claims($relayRoot, 'spc_1', $mintBundleToken(array_merge($relayClaims, $tamper))) === null,
+        _stattic_functions_relay_claims($relayRoot, 'spc_1', $mintBundleToken(array_merge($relayClaims, $tamper)), ['ownership_revision' => null]) === null,
         'relay token: refuses tampered claim set ' . $index
     );
 }
@@ -2052,7 +2055,7 @@ foreach ([
 // Requiring `exp` is what stops an unbounded token being minted by omission.
 $relayNoExp = $relayClaims;
 unset($relayNoExp['exp']);
-check(_stattic_functions_relay_claims($relayRoot, 'spc_1', $mintBundleToken($relayNoExp)) === null, 'relay token: refuses a token with no expiry');
+check(_stattic_functions_relay_claims($relayRoot, 'spc_1', $mintBundleToken($relayNoExp), ['ownership_revision' => null]) === null, 'relay token: refuses a token with no expiry');
 
 // A forged or expired request must be rejected before version storage is
 // touched. The stream wrapper makes that filesystem effect observable.
@@ -2070,7 +2073,7 @@ check(stream_wrapper_register('sfrelaystat', SpacefastRelayStatProbe::class), 'r
 $expiredRelayClaims = array_merge($relayClaims, ['exp' => time() - 1]);
 SpacefastRelayStatProbe::$calls = 0;
 check(
-    _stattic_functions_relay_claims('sfrelaystat://private', 'spc_1', $mintBundleToken($expiredRelayClaims)) === null,
+    _stattic_functions_relay_claims('sfrelaystat://private', 'spc_1', $mintBundleToken($expiredRelayClaims), ['ownership_revision' => null]) === null,
     'relay token: refuses an expired token when storage is unavailable'
 );
 check(SpacefastRelayStatProbe::$calls === 0, 'relay token: refuses an expired token before probing version storage');
@@ -2081,7 +2084,7 @@ stream_wrapper_unregister('sfrelaystat');
 $relayForged = _stattic_base64url_encode(json_encode(['alg' => 'EdDSA', 'typ' => 'JWT', 'kid' => 'runtime'], JSON_UNESCAPED_SLASHES))
     . '.' . _stattic_base64url_encode(json_encode($relayClaims, JSON_UNESCAPED_SLASHES));
 $relayForged .= '.' . _stattic_base64url_encode(sodium_crypto_sign_detached($relayForged, sodium_crypto_sign_secretkey($forgedKeypair)));
-check(_stattic_functions_relay_claims($relayRoot, 'spc_1', $relayForged) === null, 'relay token: refuses a token signed by a foreign key');
+check(_stattic_functions_relay_claims($relayRoot, 'spc_1', $relayForged, ['ownership_revision' => null]) === null, 'relay token: refuses a token signed by a foreign key');
 
 // A grant is only what the credential says.
 foreach ([

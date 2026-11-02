@@ -778,6 +778,7 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
         'space_claimed' => ($overlay['space_claimed'] ?? null) === true,
         'visitor_issuer' => is_string($exchange['issuer'] ?? null) ? $exchange['issuer'] : null,
         'visitor_jwks' => is_array($exchange['jwks'] ?? null) ? $exchange['jwks'] : null,
+        'ownership_revision' => $overlay['ownership_revision'] ?? null,
         'projection_generation' => is_int($overlay['access_gen'] ?? null) ? $overlay['access_gen'] : null,
         'billing' => is_array($overlay['billing'] ?? null) ? $overlay['billing'] : [],
         'admission' => is_array($overlay['admission'] ?? null) ? $overlay['admission'] : [],

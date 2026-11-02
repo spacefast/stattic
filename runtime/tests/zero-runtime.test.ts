@@ -742,6 +742,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       runtime_instance_id: RUNTIME_INSTANCE_ID,
       space_id: "spc_zero_identity",
       version_id: "ver_zero_identity_1",
+      ownership_revision: null,
       capabilities: ["zero.call"],
     });
     for (const [op, cookie, principal] of [

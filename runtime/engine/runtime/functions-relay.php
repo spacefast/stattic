@@ -75,7 +75,8 @@ const STATTIC_FUNCTIONS_LOG_MAX_BODY_BYTES = 262144; // 256 KiB per delivery
 function _stattic_functions_relay_claims(
     string $privateRoot,
     string $spaceId,
-    string $token
+    string $token,
+    array $serving
 ): ?array {
     return _stattic_runtime_token_claims($privateRoot, $token, SPACEFAST_FUNCTIONS_TOKEN_AUDIENCES['relay'], [
         'scope_valid' => static function (array $claims) use ($spaceId): bool {
@@ -85,12 +86,12 @@ function _stattic_functions_relay_claims(
             $versionId = is_string($claims['version_id'] ?? null) ? (string) $claims['version_id'] : '';
             return $versionId !== '' && preg_match('/^[A-Za-z0-9_-]{1,128}$/', $versionId) === 1;
         },
-        // Any real version of this space, not the live one: an in-flight request
-        // still belongs to the version that started it. Revocation rides the
-        // isolate identity, not this check.
-        'state_valid' => static fn (array $claims): bool => is_dir(
-            _stattic_version_root($privateRoot, $spaceId, (string) $claims['version_id'])
-        ),
+        // Retained versions keep their capabilities only within the current authorization generation.
+        'state_valid' => static fn (array $claims): bool =>
+            array_key_exists('ownership_revision', $claims)
+            && array_key_exists('ownership_revision', $serving)
+            && $claims['ownership_revision'] === $serving['ownership_revision']
+            && is_dir(_stattic_version_root($privateRoot, $spaceId, (string) $claims['version_id'])),
     ]);
 }
 // Fail closed: an absent or malformed claim yields an empty grant.
@@ -172,7 +173,7 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     if ($requestMethod !== 'POST') {
         _stattic_method_not_allowed('POST', ['code' => 'method_not_allowed', 'message' => 'Relay accepts POST.']);
     }
-    $claims = _stattic_functions_relay_claims($privateRoot, $spaceId, _stattic_functions_relay_bearer());
+    $claims = _stattic_functions_relay_claims($privateRoot, $spaceId, _stattic_functions_relay_bearer(), $serving);
     if ($claims === null) {
         _stattic_problem_refused(401, 'relay_unauthorized', 'Relay credential is not valid.');
     }
@@ -353,12 +354,12 @@ function _stattic_functions_assets_serve(string $privateRoot, string $spaceId, a
 
 // Tail events from a dispatched worker, on the relay credential. Delivery is
 // best-effort by design: a worker whose logs cannot be stored still serves.
-function _stattic_functions_logs_serve(string $privateRoot, string $spaceId, string $requestMethod): void
+function _stattic_functions_logs_serve(string $privateRoot, string $spaceId, string $requestMethod, array $serving): void
 {
     if ($requestMethod !== 'POST') {
         _stattic_method_not_allowed('POST', ['code' => 'method_not_allowed', 'message' => 'Log intake accepts POST.']);
     }
-    $claims = _stattic_functions_relay_claims($privateRoot, $spaceId, _stattic_functions_relay_bearer());
+    $claims = _stattic_functions_relay_claims($privateRoot, $spaceId, _stattic_functions_relay_bearer(), $serving);
     if ($claims === null) {
         _stattic_problem_refused(401, 'relay_unauthorized', 'Relay credential is not valid.');
     }

@@ -164,6 +164,7 @@ function assetsToken(
     runtime_instance_id: RUNTIME_INSTANCE_ID,
     space_id: ROUTED.spaceId,
     version_id: ROUTED.versionId,
+    ownership_revision: null,
     capabilities: ["storage.read", "storage.write"],
     ...overrides,
   });

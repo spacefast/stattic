@@ -6,7 +6,10 @@ import path from "node:path";
 
 import { Window, type ShadowRoot } from "happy-dom";
 
-import { remixButtonScript } from "../../apps/control-plane/src/tags/platform-tags.ts";
+import {
+  remixButtonScript,
+  referralChipScript,
+} from "../../apps/control-plane/src/tags/platform-tags.ts";
 import { canonicalPagePath, commentRoomKey } from "../../packages/collab-sdk/src/core.ts";
 import { ICON_PATHS } from "../../packages/collab-sdk/src/theme/icons.ts";
 import { SPACEFAST_MARK_PATH } from "../../packages/common/src/brand-assets.ts";
@@ -551,13 +554,14 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
 // The Remix button the owner turned on for a source-available Space: drawn on
 // the live host, never on a version host, a preview draft or inside a frame,
 // and only for a plain https remix link.
-test("sdk.js draws the Remix button on the live surface only", async () => {
+test("sdk.js draws platform buttons on the live surface only", async () => {
   const runtime = await startRuntime();
   runtimes.push(runtime);
   const host = "remix.site.test";
   const versionHost = "remix--v1.site.test";
   const remixUrl =
     "https://my.spacefast.com/new?git=https%3A%2F%2Fgit.spacefast.com%2Fstudio%2Fremix";
+  const referralUrl = "https://spacefast.com/?sf_ref=studio";
   const routeBody = (remix: string | null) => {
     const config = publicAccessConfig(
       { mode: "website", site_title: "Remix" },
@@ -566,7 +570,7 @@ test("sdk.js draws the Remix button on the live surface only", async () => {
     config.sdk = {
       revision: `sdk-remix-${remix ?? "none"}`,
       config: {},
-      body: remixButtonScript(remix),
+      body: remixButtonScript(remix) + referralChipScript(remix === remixUrl ? referralUrl : remix),
     };
     return {
       version_id: "ver_remix_1",
@@ -596,13 +600,13 @@ test("sdk.js draws the Remix button on the live surface only", async () => {
     Object.defineProperty(view, "top", { value: framed ? {} : view });
     view.eval(body);
     view.eval(body);
-    return { view, shadow: shadows[0] };
+    return { view, shadow: shadows[0], referralShadow: shadows[1] };
   };
   try {
     const live = await get(runtime, host, "/__spacefast/sdk.js?v=saved-revision");
     expect(live.status).toBe(200);
     const liveBody = await live.text();
-    const { view, shadow } = draw(liveBody);
+    const { view, shadow, referralShadow } = draw(liveBody);
     expect(view.document.querySelectorAll("#sf-remix")).toHaveLength(1);
     expect(view.document.getElementById("sf-remix")?.style.left).toBe("16px");
     expect(shadow?.querySelector("a")?.href).toBe(remixUrl);
@@ -612,6 +616,11 @@ test("sdk.js draws the Remix button on the live surface only", async () => {
     expect(shadow?.querySelector("a")?.target).toBe("_blank");
     expect(shadow?.querySelector("path")?.getAttribute("d")).toBe(SPACEFAST_MARK_PATH);
     expect(shadow?.textContent).toContain("Remix this site");
+    expect(view.document.querySelectorAll("#sf-referral")).toHaveLength(1);
+    expect(view.document.getElementById("sf-referral")?.style.right).toBe("16px");
+    expect(referralShadow?.querySelector("a")?.href).toBe(referralUrl);
+    expect(referralShadow?.querySelector("a")?.textContent).toContain("Made with Spacefast");
+    expect(draw(liveBody, true).view.document.getElementById("sf-referral")).toBeNull();
     expect(draw(liveBody, true).view.document.getElementById("sf-remix")).toBeNull();
     for (const response of [
       await get(runtime, versionHost, "/__spacefast/sdk.js"),
@@ -619,7 +628,9 @@ test("sdk.js draws the Remix button on the live surface only", async () => {
       await get(runtime, host, "/__spacefast/sdk.js?review=review-token"),
     ]) {
       expect(response.status).toBe(200);
-      expect(draw(await response.text()).view.document.getElementById("sf-remix")).toBeNull();
+      const drawn = draw(await response.text());
+      expect(drawn.view.document.getElementById("sf-remix")).toBeNull();
+      expect(drawn.view.document.getElementById("sf-referral")).toBeNull();
     }
     for (const refused of ["javascript:alert(1)", "http://my.spacefast.com/new", null]) {
       await putRoute(runtime, "spc_remix", "production", routeBody(refused));
@@ -631,7 +642,9 @@ test("sdk.js draws the Remix button on the live surface only", async () => {
       expect(response.headers.get("cache-control")).toBe(
         "public, max-age=0, s-maxage=600, must-revalidate",
       );
-      expect(draw(await response.text()).view.document.getElementById("sf-remix")).toBeNull();
+      const drawn = draw(await response.text());
+      expect(drawn.view.document.getElementById("sf-remix")).toBeNull();
+      expect(drawn.view.document.getElementById("sf-referral")).toBeNull();
     }
   } finally {
     await Promise.all(windows.map((view) => view.happyDOM.close()));

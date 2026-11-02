@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { eq } from "drizzle-orm";
+import { Window } from "happy-dom";
 import { z } from "zod";
 
 import { startRuntime } from "./harness.ts";
@@ -45,6 +46,7 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     authGrants,
     authOAuthConsents,
     authOAuthClientResources,
+    authTeams,
   } = await import("../../apps/control-plane/src/db/schema/auth.js");
   const { channels, runtimeBoxes, spaceHostnames, spaces } =
     await import("../../apps/control-plane/src/db/schema/core.js");
@@ -73,6 +75,13 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     await db
       .insert(authMembers)
       .values({ id: createId("mbr"), teamId, userId: user.userId, role: "owner" });
+    const [team] = await db
+      .update(authTeams)
+      .set({ referralChipEnabled: true })
+      .where(eq(authTeams.id, teamId))
+      .returning({ slug: authTeams.slug });
+    if (!team) throw new Error("Created team is missing");
+    const referralUrl = `https://spacefast.com/?sf_ref=${team.slug}`;
     const started = credentialsSchema.parse(
       await (
         await agent.token({
@@ -180,14 +189,50 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
         data: z.object({
           version: z.object({ id: z.string(), status: z.literal("ready") }),
           activation: z.object({ outcome: z.literal("activated") }),
+          referral: z.object({ url: z.string(), message: z.string() }),
         }),
       })
       .parse(await published.json());
+    expect(receipt.data.referral.url).toBe(referralUrl);
+    expect(receipt.data.referral.message).toContain(referralUrl);
     const channel = await db.query.channels.findFirst({ where: eq(channels.spaceId, spaceId) });
     expect(channel?.versionId).toBe(receipt.data.version.id);
     const served = await fetch(runtime.baseUrl, { headers: { host: hostname.hostname } });
     expect(served.status, await served.clone().text()).toBe(200);
-    expect(await served.text()).toContain(marker);
+    const servedHtml = await served.text();
+    expect(servedHtml).toContain(marker);
+    const view = new Window({
+      url: `https://${hostname.hostname}/`,
+      settings: {
+        enableJavaScriptEvaluation: true,
+        suppressInsecureJavaScriptEnvironmentWarning: true,
+        disableJavaScriptFileLoading: true,
+      },
+    });
+    try {
+      view.document.write(servedHtml);
+      const sdk = view.document.querySelector('script[src*="/__spacefast/sdk.js"]');
+      expect(sdk).not.toBeNull();
+      const source = sdk?.getAttribute("src");
+      if (!source) throw new Error("Published page has no SDK source");
+      const sdkResponse = await fetch(new URL(source, runtime.baseUrl), {
+        headers: { host: hostname.hostname },
+      });
+      expect(sdkResponse.status).toBe(200);
+      const shadows: ShadowRoot[] = [];
+      const attachShadow = view.HTMLElement.prototype.attachShadow;
+      view.HTMLElement.prototype.attachShadow = function (options) {
+        const shadow = attachShadow.call(this, options);
+        shadows.push(shadow);
+        return shadow;
+      };
+      view.eval(await sdkResponse.text());
+      await view.happyDOM.whenAsyncComplete();
+      expect(view.document.querySelectorAll("#sf-referral")).toHaveLength(1);
+      expect(shadows.map((shadow) => shadow.querySelector("a")?.href)).toContain(referralUrl);
+    } finally {
+      await view.happyDOM.close();
+    }
   } finally {
     globalThis.fetch = originalFetch;
     runtime?.stop();

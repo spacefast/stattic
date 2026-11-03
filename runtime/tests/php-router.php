@@ -11,6 +11,12 @@ if (is_string($coverageBootstrap) && $coverageBootstrap !== '') {
 }
 unset($coverageBootstrap);
 
+// Model the provider-owned connection signal explicitly. This is fixture
+// configuration, never an HTTP header, and does not prove wp.cloud behavior.
+if (getenv('SPACEFAST_TEST_VISITOR_SCHEME') === 'https') {
+    $_SERVER['HTTPS'] = 'on';
+}
+
 $root = realpath((string) getcwd());
 require_once __DIR__ . '/atomic-prepend.php';
 

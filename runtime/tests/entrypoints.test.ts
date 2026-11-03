@@ -19,7 +19,7 @@ import path from "node:path";
 
 import { writeActiveReleasePointer } from "./active-release.ts";
 import { ENTRYPOINT_PATHS, ENTRYPOINT_PROBES } from "./entrypoint-probes.ts";
-import { startRuntime, type Runtime } from "./harness.ts";
+import { startPhpServer, startRuntime, type PhpServer, type Runtime } from "./harness.ts";
 
 let rt: Runtime;
 
@@ -365,6 +365,111 @@ test("a CLI process with no request passes through custom-redirects unserved", (
     expect(result.exitCode, result.stderr.toString()).toBe(0);
     expect(result.stdout.toString()).toBe("CLI_TOOL_RAN");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("managed HTTP upgrades before release lookup, access decisions or cookies", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-https-gate-"));
+  let server: PhpServer | undefined;
+  try {
+    copyFileSync(
+      path.resolve(import.meta.dir, "../custom-redirects.php"),
+      path.join(root, "custom-redirects.php"),
+    );
+    const driver = path.join(root, "driver.php");
+    writeFileSync(
+      driver,
+      `<?php
+$request = json_decode(file_get_contents('php://input'), true);
+if (!is_array($request)) { echo 'ready'; return; }
+// Native server values are fixture inputs, not forwarding headers. The live
+// provider contract separately proves who owns HTTPS at that boundary.
+$_SERVER = array_merge($_SERVER, $request);
+require __DIR__ . '/custom-redirects.php';
+setcookie('gate_passed', '1');
+echo 'PASSED';
+`,
+    );
+    server = await startPhpServer({ args: [], router: driver, cwd: root, env: process.env });
+    const baseUrl = server.baseUrl;
+    const request = (values: Record<string, string>) =>
+      fetch(baseUrl, {
+        method: "POST",
+        body: JSON.stringify({ REQUEST_METHOD: "GET", HTTPS: "off", ...values }),
+        redirect: "manual",
+      });
+
+    // No install root exists yet: even a broken/updating engine must upgrade.
+    const upgrades = [
+      { host: "space.fast", target: "/?campaign=a%2Fb&empty=", method: "GET" },
+      {
+        host: "Demo.Space.Fast.:80",
+        target: "/docs/a%2Fb?q=%0D%0A&next=//other.test",
+        method: "HEAD",
+      },
+      { host: "nested.demo.space.fast", target: "/wp-admin/edit.php", method: "GET" },
+      { host: "view.fast", target: "/", method: "GET" },
+      { host: "demo.view.fast", target: "/__spacefast/upload.php?route=/files", method: "PUT" },
+      { host: "demo.space.fast", target: "/wp-login.php", method: "POST" },
+      { host: "demo.space.fast", target: "/__spacefast/content-media/image.jpg", method: "GET" },
+      { host: "demo.space.fast", target: "/xmlrpc.php", method: "POST" },
+      { host: "demo.space.fast", target: "/__spacefast/health.php", method: "GET" },
+    ];
+    for (const { host, target, method } of upgrades) {
+      const response = await request({
+        HTTP_HOST: host,
+        REQUEST_URI: target,
+        REQUEST_METHOD: method,
+        HTTP_X_FORWARDED_PROTO: "https",
+        HTTP_FORWARDED: "proto=https",
+        HTTP_HTTPS: "on",
+      });
+      expect(response.status, `${host}${target}`).toBe(308);
+      expect(response.headers.get("location")).toBe(
+        `https://${host.toLowerCase().replace(/\.:80$/, "")}${target}`,
+      );
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(await response.text()).toBe("");
+    }
+    for (const values of [
+      { HTTP_HOST: "user@demo.space.fast", REQUEST_URI: "/" },
+      { HTTP_HOST: `${"a".repeat(64)}.space.fast`, REQUEST_URI: "/" },
+      { HTTP_HOST: "demo.space.fast:65536", REQUEST_URI: "/" },
+      { HTTP_HOST: "demo.space.fast", REQUEST_URI: "https://other.test/" },
+      { HTTP_HOST: "demo.space.fast", REQUEST_URI: "/\r\nSet-Cookie: injected=1" },
+      { HTTP_HOST: "demo.space.fast", REQUEST_URI: "/\\other.test/" },
+      { HTTP_HOST: "demo.space.fast", REQUEST_URI: "/path#fragment" },
+    ]) {
+      const response = await request(values);
+      expect(response.status).toBe(400);
+      expect(response.headers.get("location")).toBeNull();
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+    }
+
+    const engineRoot = path.join(root, ".stattic/releases/test/engine");
+    mkdirSync(engineRoot, { recursive: true });
+    writeActiveReleasePointer(path.join(root, ".stattic"), "releases/test");
+    // A canonical entrypoint returns to its script after classification.
+    for (const values of [
+      { HTTP_HOST: "demo.space.fast", HTTPS: "on", HTTP_X_FORWARDED_PROTO: "http" },
+      { HTTP_HOST: "customer.example" },
+      { HTTP_HOST: "demo.space.fast.other.test" },
+      { HTTP_HOST: "notspace.fast" },
+      { HTTP_HOST: "localhost:8080" },
+      { HTTP_HOST: "[::1]:8080" },
+      { HTTP_HOST: "demo.preview.space" },
+    ]) {
+      const response = await request({ REQUEST_URI: "/__spacefast/api.php", ...values });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("location")).toBeNull();
+      expect(response.headers.get("set-cookie")).toBe("gate_passed=1");
+      expect(await response.text()).toBe("PASSED");
+    }
+  } finally {
+    server?.stop();
     rmSync(root, { recursive: true, force: true });
   }
 });

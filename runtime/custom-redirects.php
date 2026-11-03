@@ -35,6 +35,50 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
     if (PHP_SAPI === 'cli' && !isset($_SERVER['REQUEST_METHOD'])) {
         return;
     }
+
+    // wp.cloud sets HTTPS from the visitor connection before this prepend.
+    // Forwarding headers are visitor input here, never a scheme authority.
+    // Run before release selection, route/access decisions and cookie writes.
+    if (empty($_SERVER['HTTPS']) || $_SERVER['HTTPS'] === 'off') {
+        // BEGIN GENERATED managed HTTPS apexes — DO NOT EDIT
+        // Source: packages/common/src/config/domains.ts (production current and legacy apexes).
+        // Regenerate: bun --filter @spacefast/control-plane runtime:codegen-policy
+        $httpsApexes = ['space.fast', 'view.fast'];
+        // END GENERATED managed HTTPS apexes
+        $authority = (string) ($_SERVER['HTTP_HOST'] ?? '');
+        $hostname = strtolower(rtrim(preg_replace('/:[0-9]+\z/', '', trim($authority)), '.'));
+        $managed = false;
+        foreach ($httpsApexes as $apex) {
+            if ($hostname === $apex || str_ends_with($hostname, '.' . $apex)) {
+                $managed = true;
+                break;
+            }
+        }
+        if ($managed) {
+            $target = (string) ($_SERVER['REQUEST_URI'] ?? '/');
+            // Reflect only a DNS authority and an origin-form request target.
+            // Keep encoded path/query bytes intact; never decode into a header.
+            $validAuthority = strlen($hostname) <= 253
+                && preg_match('/\A(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?(?::([0-9]{1,5}))?\z/i', $authority, $parts) === 1
+                && (!isset($parts[1]) || ((int) $parts[1] >= 1 && (int) $parts[1] <= 65535));
+            $validTarget = str_starts_with($target, '/')
+                && preg_match('/[\x00-\x20\x7f\\\\#]/', $target) === 0;
+            // A redirect cached without the visitor scheme in its cache key
+            // would loop on HTTPS. Do not let an edge or browser store it.
+            header('Cache-Control: private, no-store', true);
+            if (!$validAuthority || !$validTarget) {
+                http_response_code(400);
+                exit;
+            }
+            // HTTP ports do not carry over to the managed host's TLS listener.
+            header('Location: https://' . $hostname . $target, true, 308);
+            exit;
+        }
+        // Custom domains remain under the provider's certificate-aware HTTPS
+        // policy. This loader has no certificate-readiness evidence for them.
+        // Local hosts and the development apex also keep plain HTTP working.
+    }
+
     $publicRoot = basename(__DIR__) === '__spacefast' ? dirname(__DIR__) : __DIR__;
     $installRoot = $publicRoot . '/.stattic';
     $publicationUnavailable = static function (): never {

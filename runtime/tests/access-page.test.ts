@@ -570,6 +570,7 @@ beforeAll(async () => {
   // Boxes read the dashboard origin from their engine config file; the
   // fixture's equivalent on the plain serving path is the process env.
   runtime = await startRuntime({
+    visitorScheme: "https",
     env: { SPACEFAST_INSECURE_COOKIES: "", SPACEFAST_DASHBOARD_ORIGIN: DASHBOARD_ORIGIN },
   });
   const fixtures = [

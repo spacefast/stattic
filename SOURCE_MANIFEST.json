@@ -1,7 +1,7 @@
 {
-  "revision": "b83b5a872eb7a315a12c5e01af8906ffdaa2224e",
-  "sourceHash": "ac18a257a08f7cb11890c830fda5b10b7e9cfc6c23a0a068368672a8a7c9823b",
-  "manifestSha256": "1fcb3e5e0bd1d5c0af962a70ddcff53a1affc5745361c38f5b45be7a9d5121af",
+  "revision": "fa66d9ca36c79e2610a1422eea7da0151524acb1",
+  "sourceHash": "16b62901b10c23e9cdc90e50f8d94ccca74ae2b2144cd6fba8775379de599ec3",
+  "manifestSha256": "2d0a061f2430990bb0aacd80e413ab08d361edf11c8a00824d8700f4bd568764",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "5715a2b0cc6ff55aa4317ba4ffb22089c1fd96dfac22d4c4dee04c9a49317b9a"
+      "sha256": "2909a020810c90b57229ed97586269b59c767496b87e5772716450027bee930b"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "9e06c734da90798a21a613399d7f4b2b3f95870471642671975c9a78f0d91e29"
+      "sha256": "e58333a7761ee255b55bfca6b56dadc69485e01a4df3ab5c3847406d50601e52"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -413,7 +413,7 @@
     },
     {
       "path": "runtime/custom-redirects.php",
-      "sha256": "d84c20ba10f7f0c34c34e78f96cc4c42d21d705892f7cc826756eafe7e9be0f6"
+      "sha256": "1e733501ae3513e113fdc5981ddc84deb3316eef3116226f2da43f9a16422b24"
     },
     {
       "path": "runtime/engine-manifest.json",
@@ -913,7 +913,7 @@
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "1e0a95b05e12e585af7f4af4b3bfd0783315811134cb289c842f3a58069da0cd"
+      "sha256": "1e32fd26459b40a15b6cd8c947ff4a71e3d2ab9cbeb7308b2cc950d5a3859233"
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
@@ -1101,7 +1101,7 @@
     },
     {
       "path": "runtime/tests/entrypoints.test.ts",
-      "sha256": "1f242e449db3f5b766e8d2aaf9e2bd91910d34f141c92901813608c3d9166fad"
+      "sha256": "49eb3f22ff68417f571405a23134a3fcf5e58bf3c8725194662b16045afd699c"
     },
     {
       "path": "runtime/tests/finalize-rust.test.ts",
@@ -1197,7 +1197,7 @@
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "6536258edc8d2d62ef6dec431caa2a383d3878f1d813600b5a8475e13dde8196"
+      "sha256": "feb28d7197f26059672a36ee6b178b51a46cea6934ba91bf45bc8e9e6f11fd2a"
     },
     {
       "path": "runtime/tests/headers.test.ts",
@@ -1241,11 +1241,11 @@
     },
     {
       "path": "runtime/tests/php-router.php",
-      "sha256": "2f2b0ddc0ca8b041a8db753afd386b9b2e162d4a04e13ac833ee83c97fa1295d"
+      "sha256": "38598d7b391d95fcdbef5518bbe7f8d88db55bd0331afccd0f8ea992a10f3962"
     },
     {
       "path": "runtime/tests/poppy-publish.test.ts",
-      "sha256": "30a2b39ca75718674b05a63d762c824dea3a39633900817ea3a7e5c8d080a8de"
+      "sha256": "1af7f8cf05e270c85601f36129f02d164ad5c0451e787361292d3f1831866181"
     },
     {
       "path": "runtime/tests/prepare-ci.sh",

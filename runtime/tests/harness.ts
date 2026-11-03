@@ -415,6 +415,8 @@ export type Runtime = {
 export type RuntimeOptions = {
   env?: Record<string, string>;
   atomicData?: Record<string, string>;
+  /** Native visitor scheme supplied by the fixture's provider prepend, over loopback HTTP. */
+  visitorScheme?: "http" | "https";
   autoPrependInit?: boolean;
   phpBinary?: string;
   phpIni?: Record<string, string>;
@@ -777,6 +779,7 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
         SPACEFAST_RUNTIME_BIN: options.env?.SPACEFAST_RUNTIME_BIN ?? runtimeBinaryPath(),
         ...edgeCaptureEnv,
         ...options.env,
+        SPACEFAST_TEST_VISITOR_SCHEME: options.visitorScheme ?? "http",
       },
     });
   } catch (cause) {

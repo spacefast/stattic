@@ -139,6 +139,7 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     ).toBe(spaceId);
     const box = await seedBoxForSpace(spaceId);
     runtime = await startRuntime({
+      visitorScheme: "https",
       atomicData: {
         SPACEFAST_RUNTIME_INSTANCE_ID: box.boxId,
         SPACEFAST_RUNTIME_JWKS_B64: Buffer.from(JSON.stringify(runtimeJwks())).toString("base64"),

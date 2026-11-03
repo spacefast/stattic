@@ -1,7 +1,7 @@
 {
-  "revision": "7eaa80495c51835183b62a9b9faa00383d98bd4a",
-  "sourceHash": "1e1034564fbaf263dbed089ed9a3563b0c0dd4a5b2714ad3032318c038429b1a",
-  "manifestSha256": "dccb41053834fd77645711405b6ce5fe6ee916a93676d92289be8e02324899aa",
+  "revision": "7d88c0ebaf71492820bdc2edafe814efbc08570b",
+  "sourceHash": "d9dfac8c4eac6eb22eae6ae55ac30051efd882ad7aa08ae27ac9a95be8ee03fe",
+  "manifestSha256": "2e539f714a271a599da639c5d9371d84cbee090c09965f4cbf1df9fa9f2c61cf",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "4af5fb44b5a30eb3bade6fa60a86151d0fa98022132ac5054955b2b04d6e398d"
+      "sha256": "05bbda0f368e92b1c1329244bb2f171a24fe1410c50e5c26c69d91f380de754c"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "c4d93143e43f85e8bc7aed58151bfa61a34193141785c44ecf232f7dc5d71f71"
+      "sha256": "8090726eda666f87af09130a5c7175d31f7333fe20ef28a19d5561a1d7fb6bcc"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -372,6 +372,10 @@
       "sha256": "e362a0784081c1edac268168851c40c885b38d813aa87187aa536fb928b54f68"
     },
     {
+      "path": "runtime/bootstrap-plugin/qualification.php",
+      "sha256": "3e4fd6f1fb293097b701a28c53440ac1ab9950420ef17e43a5f8ef87712226ee"
+    },
+    {
       "path": "runtime/bootstrap-plugin/restore-config.php",
       "sha256": "49099e1e8635d5a337d082b973d694c950da5d530b4c2c112c0e1c24f4870705"
     },
@@ -412,12 +416,16 @@
       "sha256": "e18821f0ef5b98947c02cdbc2ff90021f4cf82241fe336dac8c63d5ac14fc122"
     },
     {
+      "path": "runtime/config-data.php",
+      "sha256": "32fd856d620991b44679e0c9617fe377da72afd963191acd369645dd5dfb9dd3"
+    },
+    {
       "path": "runtime/custom-redirects.php",
       "sha256": "1e733501ae3513e113fdc5981ddc84deb3316eef3116226f2da43f9a16422b24"
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "7c58bece8496cb750e7e8f20857f1f9710e8cfeb95f3c2e3d90ffd315a58a4c5"
+      "sha256": "2bd50946b113d461ee30f3c0d7727c6aac3c6d13e0fa3ed3e2bac4038c7ddc34"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -477,7 +485,7 @@
     },
     {
       "path": "runtime/engine/admin/upload-policy.php",
-      "sha256": "d43a9dc0c73d41134b1cc9d61ccd340f8e4b69863be9f5254afcc652c03005a8"
+      "sha256": "6e1a7cb2fe1c3848885429609111e65fbc01181a0d23d05fdbddd87a24d50c0e"
     },
     {
       "path": "runtime/engine/admin/upload.php",
@@ -901,7 +909,7 @@
     },
     {
       "path": "runtime/installer.php",
-      "sha256": "68b0044468f30cb4ab45f0a0c51bc02827cc1ab2a51c8dee8a847ece350e2ec6"
+      "sha256": "49033deb09b7fc39528f0970150959f2edf9d213dcf517702805d5e37522f3c2"
     },
     {
       "path": "runtime/package.json",

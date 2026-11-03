@@ -124,7 +124,8 @@
     "installer.php",
     "custom-redirects.php",
     "engine/shared/retail-usage.php",
-    "engine/runtime/usage.php"
+    "engine/runtime/usage.php",
+    "config-data.php"
   ],
   "executables": ["bin/stattic-runtime"],
   "trees": [

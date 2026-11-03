@@ -2718,7 +2718,18 @@ function assert_engine_publication_instance(string $publicRoot, string $expected
         && ($opcacheRestriction === '' || ($callingScript !== '' && str_starts_with($callingScript, $opcacheRestriction)))) {
         opcache_invalidate($configPath, true);
     }
-    $config = is_file($configPath) ? require $configPath : [];
+    $qualificationHash = installer_config_value('SPACEFAST_RUNTIME_QUALIFICATION_CONFIG_SHA256');
+    if ($qualificationHash !== '') {
+        // Qualification never executes config PHP, even when its hash was reviewed.
+        $bytes = is_file($configPath) ? file_get_contents($configPath) : false;
+        if (!is_string($bytes) || !hash_equals($qualificationHash, hash('sha256', $bytes))) fail('qualification_config_changed');
+        require_once __DIR__ . '/config-data.php';
+        if (!spacefast_qualification_cli_ready()) fail('qualification_php_unavailable');
+        try { $config = spacefast_config_data($bytes); }
+        catch (Throwable) { fail('qualification_config_not_data'); }
+    } else {
+        $config = is_file($configPath) ? require $configPath : [];
+    }
     $persistent = class_exists('Atomic_Persistent_Data') ? new Atomic_Persistent_Data() : null;
     $identities = [
         is_array($config) ? ($config['SPACEFAST_RUNTIME_INSTANCE_ID'] ?? '') : '',

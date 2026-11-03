@@ -416,6 +416,9 @@ function _stattic_cas_gc_apply_deletions(
     ?float $budgetDeadline = null,
     ?callable $budgetClock = null
 ): array {
+    if (_stattic_evidence_deletion_held('runtime.blobs', count($deletions))) {
+        return ['collected' => [], 'bytes' => 0, 'complete' => true];
+    }
     $budgetClock ??= static fn (): float => microtime(true);
     $collected = [];
     $bytes = 0;

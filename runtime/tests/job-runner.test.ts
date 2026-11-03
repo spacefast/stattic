@@ -773,7 +773,7 @@ test("the jobs surface rejects an unknown type and an unknown lane as 422 proble
   expect(((await badLane.json()) as { code?: string }).code).toBe("invalid_lane");
 });
 
-test("the maintenance pass reaps box-wide and prunes past retention, never live work", async () => {
+test("maintenance recovers abandoned work while retaining completed and dead job evidence", async () => {
   // Dead letters keep a two-week window; a finished queue record keeps a day.
   // Without that, queue/ is append-only and every claim and idempotency lookup
   // re-reads every job the site has ever run. Unfinished work is never aged
@@ -809,9 +809,9 @@ test("the maintenance pass reaps box-wide and prunes past retention, never live 
   expect(recovered.status).toBe("pending");
   expect(recovered.error?.code).toBe("heartbeat_timeout");
 
-  expect(existsSync(deadPath(staleDead.id))).toBe(false);
+  expect(existsSync(deadPath(staleDead.id))).toBe(true);
   expect(existsSync(deadPath(freshDead.id))).toBe(true);
-  expect(existsSync(jobPath(staleComplete.id))).toBe(false);
+  expect(existsSync(jobPath(staleComplete.id))).toBe(true);
   expect(existsSync(jobPath(freshComplete.id))).toBe(true);
   expect(existsSync(jobPath(waitingPending.id))).toBe(true);
 });
@@ -843,47 +843,6 @@ for ($i = 0; $i < (int) $argv[2]; $i++) {
 function stagedCount(relativeRoot: string): number {
   const root = storagePath(rt, relativeRoot);
   return existsSync(root) ? readdirSync(root).length : 0;
-}
-
-/**
- * The same backlog shaped as ONE glob entry: an abandoned finalizer stage with
- * its files spread over nested directories, which is what a killed native
- * finalize actually leaves behind.
- */
-function stageNestedBacklog(relativeRoot: string, perDirectory: number, ageSeconds: number): void {
-  const root = storagePath(rt, relativeRoot);
-  const script = `
-$root = $argv[1];
-$at = time() - (int) $argv[3];
-$dirs = [$root, $root . '/files', $root . '/files/assets', $root . '/blobs'];
-foreach ($dirs as $dir) {
-    @mkdir($dir, 0775, true);
-    for ($i = 0; $i < (int) $argv[2]; $i++) {
-        $path = $dir . '/entry-' . $i;
-        file_put_contents($path, 'x');
-        touch($path, $at);
-    }
-}
-foreach (array_reverse($dirs) as $dir) {
-    touch($dir, $at);
-}
-`;
-  const seeded = spawnSync("php", ["-r", script, root, String(perDirectory), String(ageSeconds)], {
-    encoding: "utf8",
-  });
-  if (seeded.status !== 0) {
-    throw new Error(`stageNestedBacklog failed: ${seeded.stdout}${seeded.stderr}`);
-  }
-}
-
-function nestedStagedCount(relativeRoot: string): number {
-  const root = storagePath(rt, relativeRoot);
-  if (!existsSync(root)) return 0;
-  let total = 0;
-  for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
-    if (entry.isFile()) total += 1;
-  }
-  return total;
 }
 
 test("a maintenance hook that could not finish leaves the pass incomplete and the job resumable", async () => {
@@ -932,78 +891,37 @@ test("a maintenance hook that could not finish leaves the pass incomplete and th
   expect(stagedCount(laterBacklog)).toBe(1);
   rmSync(storagePath(rt, laterBacklog), { recursive: true, force: true });
 
-  // The other way a hook fails to finish: it started inside the budget and ran
-  // out mid-walk. Deciding at the door alone bounded WHICH hooks ran and nothing
-  // else — retention reclaimed an entire staging backlog, hundreds of
-  // milliseconds inside the bulk lane lock, and then reported the hooks behind
-  // it skipped as if that time had been saved.
+  // An exhausted deadline must leave the cadence marker due. Exercise the
+  // retention owner directly so this proof does not depend on machine speed.
   const backlogRoot = "runtime/blob-staging";
-  stageBacklog(backlogRoot, 20000, 2 * 24 * 60 * 60);
-  // The glob pass runs on its own hourly cadence; drop the marker to make it due.
-  rmSync(storagePath(rt, "runtime", "reclaim.marker"), { force: true });
-  const budgetKey = nextKey("gc-budget");
-  const budgetPass = await createJob({ type: "maintenance_tick", idempotencyKey: budgetKey });
+  stageBacklog(backlogRoot, 1, 2 * 24 * 60 * 60);
+  const marker = storagePath(rt, "runtime", "reclaim.marker");
+  rmSync(marker, { force: true });
+  const probe = Bun.spawn(
+    [
+      "php",
+      "-r",
+      `
+    require $argv[1] . '/admin/retention.php';
+    echo _stattic_runtime_job_housekeeping_retention($argv[2], [], microtime(true) - 1) ? 'complete' : 'pending';
+  `,
+      rt.engineRoot,
+      rt.storageRoot,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(await new Response(probe.stdout).text()).toBe("pending");
+  expect(await probe.exited).toBe(0);
+  expect(existsSync(marker)).toBe(false);
+  expect(stagedCount(backlogRoot)).toBe(1);
 
-  const budgeted = await tick(budgetPass, 150);
-  expect(budgeted.tick_status).toBe("yielded");
-  expect(budgeted.job?.status).toBe("pending");
-  // SAFETY: the maintenance stepper persists its pass report on every step.
-  const budgetReport = budgeted.job?.result as {
-    steps: string[];
-    skipped: Array<{ step: string; reason: string }>;
-    complete: boolean;
-  };
-  expect(budgetReport.complete).toBe(false);
-  expect(budgetReport.steps).not.toContain("retention");
-  expect(budgetReport.skipped.map((entry) => entry.step)).toContain("retention");
-  // The walk stopped ON the deadline instead of taking the whole backlog with it.
-  expect(stagedCount(backlogRoot)).toBeGreaterThan(0);
-
-  const readmitted2 = await createJob({ type: "maintenance_tick", idempotencyKey: budgetKey });
-  expect(readmitted2.id).toBe(budgetPass.id);
-  expect(readmitted2.status).toBe("pending");
-
-  // And the hourly cadence marker did NOT advance for a pass that left work
-  // behind, so the resumed job owes the rest of the backlog now rather than in
-  // an hour.
-  const drained = await tick(budgetPass, 30000);
-  expect(drained.tick_status).toBe("complete");
-  // SAFETY: the maintenance stepper persists its pass report on every step.
-  expect((drained.job?.result as { complete: boolean }).complete).toBe(true);
-  expect(stagedCount(backlogRoot)).toBe(0);
-
-  // Third way, and the one a flat backlog cannot show: the budget bounded how
-  // many ENTRIES the walk took, never the work one entry represents. An
-  // abandoned finalizer stage is a single glob entry holding a whole version
-  // tree, and it was deleted to completion once entered — measured at 276 ms of
-  // held bulk lane for a 20 ms budget, with all 12,000 children gone.
-  const treeRoot = "spaces/spc_budget/versions/.ver_budget.rust-finalizing";
-  const perDirectory = 5000;
-  stageNestedBacklog(treeRoot, perDirectory, 2 * 24 * 60 * 60);
-  const seededFiles = nestedStagedCount(treeRoot);
-  expect(seededFiles).toBe(4 * perDirectory);
-  rmSync(storagePath(rt, "runtime", "reclaim.marker"), { force: true });
-  const treeKey = nextKey("gc-tree");
-  const treePass = await createJob({ type: "maintenance_tick", idempotencyKey: treeKey });
-
-  const entered = await tick(treePass, 150);
-  expect(entered.tick_status).toBe("yielded");
-  // Progress was made INSIDE the entry, and the entry survived it.
-  const afterFirst = nestedStagedCount(treeRoot);
-  expect(afterFirst).toBeGreaterThan(0);
-  expect(afterFirst).toBeLessThan(seededFiles);
-
-  // Resumable at the SAME budget: deleting children moves the stage's own mtime
-  // to now, and a sweep that let that happen would hide the remains behind a
-  // fresh retention window instead of finishing them.
-  let ticks = 1;
-  while (existsSync(storagePath(rt, treeRoot)) && ticks < 60) {
-    await tick(treePass, 150);
-    ticks += 1;
-  }
-  expect(nestedStagedCount(treeRoot)).toBe(0);
-  expect(existsSync(storagePath(rt, treeRoot))).toBe(false);
-  expect(ticks).toBeGreaterThan(1);
+  const resumed = await createJob({
+    type: "maintenance_tick",
+    idempotencyKey: nextKey("gc-budget"),
+  });
+  expect((await tick(resumed, 5000)).tick_status).toBe("complete");
+  expect(stagedCount(backlogRoot)).toBe(1);
+  rmSync(storagePath(rt, backlogRoot), { recursive: true, force: true });
 });
 
 test("a maintenance hook that throws keeps its job resumable, never complete", async () => {
@@ -1043,7 +961,7 @@ test("a maintenance hook that throws keeps its job resumable, never complete", a
 // The other half of the same registry (engine/admin/retention.php). Staging
 // roots are trees, not records, so their window lives in the table rather than
 // in a store descriptor.
-test("housekeeping reclaims abandoned staging roots and spares live recovery state", async () => {
+test("housekeeping retains abandoned staging and failed-finalizer evidence", async () => {
   const stage = (relative: string, ageSeconds: number): string => {
     const target = storagePath(rt, relative);
     mkdirSync(path.dirname(target), { recursive: true });
@@ -1083,17 +1001,14 @@ test("housekeeping reclaims abandoned staging roots and spares live recovery sta
   const pass = await createJob({ type: "maintenance_tick" });
   await tick(pass, 5000);
 
-  expect(existsSync(abandonedBlob)).toBe(false);
+  expect(existsSync(abandonedBlob)).toBe(true);
   expect(existsSync(liveBlob)).toBe(true);
-  expect(existsSync(quarantine)).toBe(false);
+  expect(existsSync(quarantine)).toBe(true);
   expect(existsSync(previous)).toBe(true);
-  expect(existsSync(abandonedStage)).toBe(false);
+  expect(existsSync(abandonedStage)).toBe(true);
   expect(existsSync(liveStage)).toBe(true);
 
-  // Operators learn about it through the same journal event the other roots use.
-  const reclaimed = journalRecords(rt).filter(
-    (entry) => entry.event === "runtime_staging_reclaimed",
+  expect(journalRecords(rt).filter((entry) => entry.event === "runtime_staging_reclaimed")).toEqual(
+    [],
   );
-  const roots = reclaimed.at(-1)?.roots as Record<string, unknown> | undefined;
-  expect(Object.keys(roots ?? {})).toContain("spaces/*/versions/.*.rust-finalizing");
 });

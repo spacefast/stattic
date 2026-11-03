@@ -293,14 +293,14 @@ test("build source archives persist, stream, scope, and delete on the provider r
     method: "DELETE",
     headers: auth("build_source_delete"),
   });
-  expect(deleted.status).toBe(200);
-  expect(await deleted.json()).toEqual({ build_id: buildId, deleted: true });
+  expect(deleted.status).toBe(503);
+  expect(await errorCode(deleted)).toBe("evidence_retention_hold");
 
   const missing = await fetch(managementUrl(route), {
     headers: auth("build_source_get"),
   });
-  expect(missing.status).toBe(404);
-  expect(await errorCode(missing)).toBe("build_source_not_found");
+  expect(missing.status).toBe(200);
+  expect(await missing.json()).toMatchObject({ size: bytes.length });
 });
 
 // Auth lanes are hard security boundaries in the unified admin dispatcher

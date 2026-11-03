@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/evidence-retention.php';
+
 require_once __DIR__ . '/private-tree.php';
 require_once __DIR__ . '/streaming.php';
 require_once __DIR__ . '/problem.php';
@@ -403,6 +405,7 @@ function _stattic_reclaim_stale_paths(
     $now ??= time();
     $staleBefore = $now - max(0, $maxAgeSeconds);
     $reclaimed = 0;
+    $held = 0;
     foreach (glob($pattern) ?: [] as $path) {
         if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
             break;
@@ -414,12 +417,17 @@ function _stattic_reclaim_stale_paths(
         if ($mtime === false || $mtime > $staleBefore) {
             continue;
         }
+        if (STATTIC_EVIDENCE_RETENTION_HOLD) {
+            $held++;
+            continue;
+        }
         if (_stattic_runtime_rm_recursive_bounded($path, $budgetDeadline)) {
             $reclaimed += 1;
             continue;
         }
         _stattic_reclaim_keep_resumable($path, $mtime);
     }
+    _stattic_evidence_deletion_held("runtime.stale_paths", $held);
     return $reclaimed;
 }
 
@@ -913,6 +921,7 @@ function _stattic_runtime_publish_sessions_store(string $privateRoot, string $sp
     $spaceId = _stattic_runtime_id($spaceId, 'space_id');
     $root = _stattic_space_root($privateRoot, $spaceId) . '/publish-sessions';
     return _stattic_record_store($root, [
+        'evidence_retention' => true,
         'retention' => [
             'field' => 'expires_at',
             'fallback_field' => 'created_at',

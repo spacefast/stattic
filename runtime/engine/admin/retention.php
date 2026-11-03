@@ -116,6 +116,7 @@ function _stattic_runtime_reclaim_atomic_temps(string $privateRoot, ?int $now = 
     $now ??= time();
     $staleBefore = $now - STATTIC_RUNTIME_STAGING_RETENTION_SECONDS;
     $reclaimed = 0;
+    $held = 0;
     foreach (glob($privateRoot . '/runtime/atomic-staging/.tmp-*') ?: [] as $path) {
         if ($deadline !== null && microtime(true) >= $deadline) {
             break;
@@ -125,10 +126,15 @@ function _stattic_runtime_reclaim_atomic_temps(string $privateRoot, ?int $now = 
             || filectime($path) > $staleBefore) {
             continue;
         }
+        if (STATTIC_EVIDENCE_RETENTION_HOLD) {
+            $held++;
+            continue;
+        }
         if (unlink($path)) {
             $reclaimed++;
         }
     }
+    _stattic_evidence_deletion_held("runtime.atomic_temps", $held);
     return $reclaimed;
 }
 
@@ -155,6 +161,7 @@ function _stattic_runtime_reclaim_content_releases(
     $now ??= time();
     $staleBefore = $now - STATTIC_RUNTIME_CONTENT_RELEASE_RETENTION_SECONDS;
     $reclaimed = 0;
+    $held = 0;
     foreach (glob($privateRoot . '/spaces/*/content') ?: [] as $contentRoot) {
         // RANKING one Space is the indivisible part: its releases are ranked
         // against each other, so stopping inside that decision would reclaim by
@@ -176,6 +183,9 @@ function _stattic_runtime_reclaim_content_releases(
         arsort($releases);
         $kept = 0;
         foreach ($releases as $release => $mtime) {
+            if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
+                break 2;
+            }
             if (basename($release) === $active) {
                 continue;
             }
@@ -184,6 +194,10 @@ function _stattic_runtime_reclaim_content_releases(
                 continue;
             }
             if ($mtime > $staleBefore) {
+                continue;
+            }
+            if (STATTIC_EVIDENCE_RETENTION_HOLD) {
+                $held++;
                 continue;
             }
             if (_stattic_runtime_rm_recursive_bounded($release, $budgetDeadline)) {
@@ -199,6 +213,7 @@ function _stattic_runtime_reclaim_content_releases(
             }
         }
     }
+    _stattic_evidence_deletion_held("runtime.content_releases", $held);
     return $reclaimed;
 }
 

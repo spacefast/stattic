@@ -480,7 +480,7 @@ test("cross-space hostname collisions stay correct through incremental pointer s
         "delete_space",
         { space_id: "spc_idx_t" },
       );
-      expect(failedDelete.status).toBe(500);
+      expect(failedDelete.status).toBe(503);
       expect(existsSync(storagePath(rt, "spaces", "spc_idx_t"))).toBe(true);
       expect((await get(rt, sharedHost, "/")).status).toBe(404);
     } finally {
@@ -991,7 +991,7 @@ async function maintenanceTick(
   expect(ran.job?.status).toBe(expected);
 }
 
-test("the maintenance tick reclaims only shards no pointer names and only past the grace window", async () => {
+test("the maintenance tick retains aged route shards during the hold", async () => {
   const rt = await startRuntime();
   const spaceId = "spc_idx_gc";
   try {
@@ -1036,7 +1036,7 @@ test("the maintenance tick reclaims only shards no pointer names and only past t
     await maintenanceTick(rt, spaceId);
 
     for (const name of aged) {
-      expect(existsSync(storagePath(rt, "routes", name))).toBe(false);
+      expect(existsSync(storagePath(rt, "routes", name))).toBe(true);
     }
     // Unreferenced but freshly marked: still inside the 300 s grace, so a
     // request mid-flight over the swap can still include it.
@@ -1075,9 +1075,9 @@ test("the maintenance tick reclaims only shards no pointer names and only past t
 
     // The SAME job, resumed under the same idempotency key once the pointer
     // reads again: the retry is what performs the examination the incomplete
-    // pass skipped, and only now is the unreferenced shard reclaimed.
+    // pass skipped. The hold still retains the unreferenced shard.
     await maintenanceTick(rt, spaceId, "unreadable-pointer");
-    expect(existsSync(storagePath(rt, "routes", String(withinGrace)))).toBe(false);
+    expect(existsSync(storagePath(rt, "routes", String(withinGrace)))).toBe(true);
     for (const name of referenced) {
       expect(existsSync(storagePath(rt, "routes", name))).toBe(true);
     }

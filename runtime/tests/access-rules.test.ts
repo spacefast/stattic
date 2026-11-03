@@ -1347,6 +1347,40 @@ test("the cookie decides the request and the record only revokes it", async () =
   expect(reissuedClaims.exp - reissuedClaims.iat).toBe(SESSION_CLAIM_TTL_SECONDS);
 });
 
+test("retained idle session records cannot renew a stale cookie", async () => {
+  const cookie = await openAuthorities(SESSION_HOST, ["member:mem_session"]);
+  const recordPath = sessionRecordPath(SESSION_SPACE, cookie);
+  const record = JSON.parse(readFileSync(recordPath, "utf8"));
+  record.lastSeenAt = Math.floor(Date.now() / 1000) - SESSION_IDLE_SECONDS - 1;
+  record.openedAt = record.lastSeenAt;
+  writeFileSync(recordPath, JSON.stringify(record));
+  const probe = spawnSync(
+    PHP_BINARY,
+    [
+      "-r",
+      `
+    require $argv[1];
+    $GLOBALS['SPACEFAST_PAGE_SERVING'] = ['space_id' => $argv[3]];
+    $store = _stattic_access_session_store($argv[2]);
+    touch($argv[4], time() - STATTIC_ACCESS_SESSION_IDLE_SECONDS - 60);
+    echo _stattic_record_store_sweep($store);
+  `,
+      path.resolve(import.meta.dir, "../engine/runtime/access-rules.php"),
+      runtime.storageRoot,
+      SESSION_SPACE,
+      recordPath,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(probe.status, probe.stderr).toBe(0);
+  expect(probe.stdout).toBe("0");
+  expect(existsSync(recordPath)).toBe(true);
+  const stale = editSession(SESSION_HOST, cookie, (claims) => {
+    claims.exp = claims.iat - 1;
+  });
+  expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie: stale } })).status).toBe(403);
+});
+
 test("a globally retired session version denies every cookie minted before it", async () => {
   const cookie = await openAuthorities(SESSION_HOST, ["member:mem_session"]);
   expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie } })).status).toBe(200);

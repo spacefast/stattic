@@ -80,6 +80,7 @@ function _stattic_runtime_jobs_ensure_root(string $privateRoot): void
 function _stattic_runtime_jobs_queue_store(string $privateRoot): array
 {
     return _stattic_record_store(_stattic_runtime_jobs_queue_dir($privateRoot), [
+        'evidence_retention' => true,
         'retention' => [
             'mtime_seconds' => STATTIC_RUNTIME_JOB_COMPLETE_RETENTION_SECONDS,
             'statuses' => ['complete'],
@@ -90,6 +91,7 @@ function _stattic_runtime_jobs_queue_store(string $privateRoot): array
 function _stattic_runtime_jobs_dead_store(string $privateRoot): array
 {
     return _stattic_record_store(_stattic_runtime_jobs_dead_dir($privateRoot), [
+        'evidence_retention' => true,
         'retention' => ['mtime_seconds' => STATTIC_RUNTIME_JOB_DEAD_LETTER_RETENTION_SECONDS],
     ]);
 }

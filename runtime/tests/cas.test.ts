@@ -201,7 +201,7 @@ test("the blob GC deletes nothing when a live response table cannot be read", as
   expect(readBlob(rt, spaceId, sha)?.toString("utf8")).toBe(body);
 });
 
-test("targeted version deletion makes its exclusive blobs collectable and leaves the live version serving", async () => {
+test("the hold blocks targeted purges and preserves unreferenced blobs while live content still serves", async () => {
   const spaceId = nextId("spc_cas_delete");
   const versionOld = nextId("ver_cas_delete_old");
   const versionLive = nextId("ver_cas_delete_live");
@@ -248,18 +248,19 @@ test("targeted version deletion makes its exclusive blobs collectable and leaves
   const oldSha = entrySha(rt, spaceId, versionOld, "/assets/old.txt");
   const liveSha = entrySha(rt, spaceId, versionLive, "/assets/live.txt");
 
-  const deleted = await apiJson<{ space_id: string; version_id: string; status: string }>(
-    rt,
-    "POST",
-    `/__spacefast/api.php/spaces/${spaceId}/versions/${versionOld}/delete`,
-    "delete_version",
-    { space_id: spaceId, version_id: versionOld },
+  const deleted = await fetch(
+    `${rt.baseUrl}${runtimeHttpPath(`/__spacefast/api.php/spaces/${spaceId}/versions/${versionOld}/delete`)}`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${managementToken("delete_version", { space_id: spaceId, version_id: versionOld })}`,
+      },
+    },
   );
-  expect(deleted).toMatchObject({
-    space_id: spaceId,
-    version_id: versionOld,
-    status: "deleted",
-  });
+  expect(deleted.status).toBe(503);
+  expect(await errorCode(deleted)).toBe("evidence_retention_hold");
+  // Remove only the test declaration so the collector faces genuinely orphaned bytes.
+  rmSync(versionRoot(rt, spaceId, versionOld), { recursive: true, force: true });
 
   await maintenancePass(rt, spaceId);
 
@@ -269,7 +270,7 @@ test("targeted version deletion makes its exclusive blobs collectable and leaves
   // The deleted version was the only declaration naming these bytes, so the
   // maintenance pass collects them. The routed version and its private source
   // object remain declared and serving.
-  expect(readBlob(rt, spaceId, oldSha)).toBeNull();
+  expect(readBlob(rt, spaceId, oldSha)?.toString("utf8")).toBe(oldBody);
   expect(readBlob(rt, spaceId, paid.sha256)?.toString("utf8")).toBe(paidBody);
   const paidDownload = await fetch(
     `${rt.baseUrl}${runtimeHttpPath(`/__spacefast/api.php/spaces/${spaceId}/storage/commerce/${paid.id}`)}`,
@@ -290,13 +291,13 @@ test("targeted version deletion makes its exclusive blobs collectable and leaves
       },
     },
   );
-  expect(deletePaidSpace.status).toBe(409);
-  expect(await errorCode(deletePaidSpace)).toBe("storage_object_retained");
+  expect(deletePaidSpace.status).toBe(503);
+  expect(await errorCode(deletePaidSpace)).toBe("evidence_retention_hold");
 
   const collected = journalRecords(rt).find(
     (e) => e.event === "local_blob_gc" && (e.collected ?? []).includes(oldSha),
   );
-  expect(collected).toBeDefined();
+  expect(collected).toBeUndefined();
   expect(readBlob(rt, spaceId, liveSha)?.toString("utf8")).toBe("still routed");
   expect(readBlob(rt, spaceId, privateSha)?.toString("utf8")).toBe(privateBody);
   const served = await get(rt, host, "/assets/live.txt");

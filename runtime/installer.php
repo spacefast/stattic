@@ -7,6 +7,9 @@ error_reporting(E_ALL);
 ini_set('log_errors', '1');
 ini_set('display_errors', '0');
 
+// Release together with the engine and control-plane evidence holds.
+const SPACEFAST_INSTALLER_EVIDENCE_RETENTION_HOLD = true;
+
 // CLI only, run by the SSH bootstrap and the /engine/update route. Refuse
 // providers that direct-execute arbitrary PHP files before inspecting input.
 if (PHP_SAPI !== 'cli') {
@@ -2521,12 +2524,20 @@ function sweep_stale_install_artifacts(string $privateRoot, string $installRoot)
     );
     foreach ($staleDirs as $dir) {
         if (is_dir($dir) && !is_link($dir) && (filemtime($dir) ?: 0) < $cutoff) {
+            if (SPACEFAST_INSTALLER_EVIDENCE_RETENTION_HOLD) {
+                error_log('{"event":"evidence.deletion_held","owner":"installer.staging","blockedCount":1}');
+                continue;
+            }
             rrmdir($dir);
         }
     }
     $staleFiles = glob($privateRoot . '/incoming/runtime-engine-*.zip') ?: [];
     foreach ($staleFiles as $file) {
         if (is_file($file) && (filemtime($file) ?: 0) < $cutoff) {
+            if (SPACEFAST_INSTALLER_EVIDENCE_RETENTION_HOLD) {
+                error_log('{"event":"evidence.deletion_held","owner":"installer.bundle","blockedCount":1}');
+                continue;
+            }
             unlink_if_present($file);
         }
     }
@@ -2545,6 +2556,10 @@ function prune_old_releases(string $releasesRoot, array $keep): void
             || release_authority($installRoot, $release) === null
             || (filemtime($release) ?: 0) >= $cutoff
         ) {
+            continue;
+        }
+        if (SPACEFAST_INSTALLER_EVIDENCE_RETENTION_HOLD) {
+            error_log('{"event":"evidence.deletion_held","owner":"installer.release","blockedCount":1}');
             continue;
         }
         rrmdir($release);

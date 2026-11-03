@@ -1463,7 +1463,8 @@ function _stattic_runtime_route_shard_gc(string $privateRoot, ?float $budgetDead
                     continue;
                 }
                 $mtime = filemtime($path);
-                if (is_int($mtime) && $mtime < $unreferencedBefore && unlink($path)) {
+                if (is_int($mtime) && $mtime < $unreferencedBefore
+                    && !_stattic_evidence_deletion_held('runtime.route_shards', 1) && unlink($path)) {
                     $deleted += 1;
                 }
             }

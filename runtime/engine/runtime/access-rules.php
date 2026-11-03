@@ -294,7 +294,8 @@ function _stattic_access_session_store(string $privateRoot): ?array
     }
     $root = _stattic_access_session_dir($privateRoot);
     return _stattic_record_store($root, [
-        // An idle record is debris: its cookie can no longer be renewed.
+        // Retaining an idle record does not extend its admission lifetime.
+        'evidence_retention' => true,
         'retention' => [
             'mtime_seconds' => STATTIC_ACCESS_SESSION_IDLE_SECONDS,
             'throttle_seconds' => STATTIC_ACCESS_SESSION_SWEEP_THROTTLE_SECONDS,

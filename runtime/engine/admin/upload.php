@@ -134,6 +134,17 @@ function _stattic_runtime_publish_session_release(string $privateRoot, string $s
     $sessions = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
     $release = static function () use ($privateRoot, $spaceId, $uploadId, $sessions): bool {
         return _stattic_record_store_mutate($sessions, $uploadId, static function (?array $_session) use ($privateRoot, $spaceId, $uploadId, $sessions): bool {
+            // Releasing authority still happens. Keep the terminal declaration
+            // and accepted hashes without leaving a live upload capability.
+            if ($_session !== null && _stattic_evidence_deletion_held('runtime.publish_session', 1)) {
+                $_session['expires_at'] = gmdate('c', time() - 1);
+                _stattic_record_store_put($sessions, $uploadId, $_session);
+                _stattic_record_store_delete(
+                    _stattic_runtime_publish_pins_store($privateRoot, $spaceId),
+                    _stattic_runtime_publish_pin_id($uploadId),
+                );
+                return true;
+            }
             _stattic_record_store_delete($sessions, $uploadId);
             _stattic_record_store_delete(
                 _stattic_runtime_publish_pins_store($privateRoot, $spaceId),

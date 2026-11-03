@@ -466,11 +466,11 @@ test("delete_version takes the per-space lock: free of the site lock, serialized
   const underSiteLock = await deleteVersionDispatch(spaceId, "ver_lock_del_site").finally(
     releaseSiteLock,
   );
-  expectDispatchStatus(underSiteLock, 200);
+  expectDispatchStatus(underSiteLock, 503);
 
   await holdFlockExternally(spaceLockPath(spaceId), HOLD_MS);
   const underOwnSpaceLock = await deleteVersionDispatch(spaceId, "ver_lock_del_own");
-  expectDispatchStatus(underOwnSpaceLock, 200);
+  expectDispatchStatus(underOwnSpaceLock, 503);
   expect(underOwnSpaceLock.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
 });
 
@@ -525,13 +525,13 @@ test("repair alone serializes on the site-wide write lock; space delete and the 
   ]);
 
   expectDispatchStatus(repair, 200);
-  expectDispatchStatus(deleted, 200);
+  expectDispatchStatus(deleted, 503);
   expectDispatchStatus(drained, 200);
   expect(repair?.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
   expect(deleted?.elapsedMs).toBeLessThan(BLOCKED_FLOOR_MS);
   expect(drained?.elapsedMs).toBeLessThan(BLOCKED_FLOOR_MS);
   expect(repair?.body).toMatchObject({ space_id: SPACE_A, status: "repaired" });
-  expect(deleted?.body).toMatchObject({ space_id: deleteSpace, status: "deleted" });
+  expect(deleted?.body).toMatchObject({ code: "evidence_retention_hold" });
   // The drain really read the journal instead of short-circuiting: it hands
   // back a page-end cursor over runtime/journal.jsonl.
   expect(drained?.body.cursor).toMatchObject({ offset: expect.any(Number) });

@@ -1634,6 +1634,7 @@ function _stattic_runtime_put_share_images(string $privateRoot, string $spaceId,
 
 function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, array $claims): void
 {
+    _stattic_assert_evidence_deletion_allowed('runtime.space');
     require_once __DIR__ . '/storage.php';
     $retained = _stattic_storage_has_commerce_retention($privateRoot, $spaceId);
     if ($retained === null) _stattic_problem_response(503, 'storage_unavailable', 'Paid asset retention could not be checked.');
@@ -1667,6 +1668,7 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
 
 function _stattic_runtime_delete_version(string $privateRoot, string $spaceId, string $versionId, array $claims): void
 {
+    _stattic_assert_evidence_deletion_allowed('runtime.version');
     $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
     if (!is_dir($versionRoot)) {
         _stattic_problem_response(404, 'version_not_found', 'Version not found.');

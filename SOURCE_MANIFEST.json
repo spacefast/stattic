@@ -1,7 +1,7 @@
 {
-  "revision": "fa66d9ca36c79e2610a1422eea7da0151524acb1",
-  "sourceHash": "16b62901b10c23e9cdc90e50f8d94ccca74ae2b2144cd6fba8775379de599ec3",
-  "manifestSha256": "2d0a061f2430990bb0aacd80e413ab08d361edf11c8a00824d8700f4bd568764",
+  "revision": "4db3eea81ae4a73f9745323af9a37e77b883b59a",
+  "sourceHash": "15ad4656b9a5e553241ca01660a4992a62d2a095e25c8c04a0e8bb535119a4ee",
+  "manifestSha256": "91c314154d84efbd45e0ea32be617f309eaab0b595fb2b4d1f6ed82bd4b2055f",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "2909a020810c90b57229ed97586269b59c767496b87e5772716450027bee930b"
+      "sha256": "be6a545c745d3042827dd5361a683b39854b04f339252c575ee4a7627b26bbb6"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "e58333a7761ee255b55bfca6b56dadc69485e01a4df3ab5c3847406d50601e52"
+      "sha256": "436e7fef2b85e43f2a749f68f05a162f5bd9ff9ea86775680c7cd867cbdb870c"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -701,7 +701,7 @@
     },
     {
       "path": "runtime/engine/shared/engine-selection.php",
-      "sha256": "1aa1385f680104f12d486af32e04705a468281b2e84b27fd45c71656b1a6c56b"
+      "sha256": "14e24232a725589576c016ed37e9194157f67f65f58747706e55d1679d29cf52"
     },
     {
       "path": "runtime/engine/shared/errors.php",
@@ -805,7 +805,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "9b96f6f0edc762a8cb5c19720b36d58ada77d608947b69b58ad50098faf6a775"
+      "sha256": "4163720b0be10bb8a9f38e8068016aab2407faa4d29680cc546289a2318c4cbb"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -1089,7 +1089,7 @@
     },
     {
       "path": "runtime/tests/engine-source.test.ts",
-      "sha256": "44c9f5c4f81813af3cd2ab70c6935cd8b92ac43e247a73279cd3ab73acf2c800"
+      "sha256": "0755d32e465261f3daceba3ced0009791ba65a90340822471204382ee9589624"
     },
     {
       "path": "runtime/tests/engine-update-route.test.ts",
@@ -1217,7 +1217,7 @@
     },
     {
       "path": "runtime/tests/installer-update.test.ts",
-      "sha256": "fc56d476392d3e9d4ad6393b4e3000e87030d53d938322ccfc502f8694fdfefb"
+      "sha256": "31cc44a9464b60ec1db8337d8e8499c3f2911abcba3ddfba4b8a3924537a2d39"
     },
     {
       "path": "runtime/tests/job-runner.test.ts",

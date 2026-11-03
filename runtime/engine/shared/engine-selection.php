@@ -75,6 +75,24 @@ function _spacefast_runtime_engine_source(string $siteReleaseRoot): array
     ) {
         return $site('chroot_engine_unsupported', $match[1]);
     }
+    // Read data from the resolved release, never execute candidate PHP to ask
+    // whether it is safe. The artifact publisher owns this capability claim.
+    $inventory = json_decode((string) @file_get_contents($engineReal . '/engine/wordpress/components.json'), true);
+    $contained = false;
+    foreach (is_array($inventory['components'] ?? null) ? $inventory['components'] : [] as $component) {
+        if (
+            is_array($component)
+            && ($component['id'] ?? null) === 'runtime-engine'
+            && is_array($component['provides'] ?? null)
+            && in_array('runtime.security.tenant-containment.v1', $component['provides'], true)
+        ) {
+            $contained = true;
+            break;
+        }
+    }
+    if (!$contained) {
+        return $site('chroot_containment_missing', $match[1]);
+    }
     $binary = $chrootRoot . '/usr/local/bin/sf-bin-' . $match[1] . '/stattic-runtime';
     if (!is_file($binary) || !is_executable($binary)) {
         return $site('chroot_binary_missing', $match[1]);

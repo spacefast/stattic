@@ -148,6 +148,15 @@ test("falls back to the site's release when the chroot is unselected or cannot s
   // rule, whose loaders would stop the site reading its channel once installed.
   for (const [file, reason] of [
     [
+      path.join(
+        chrootRoot,
+        "scripts",
+        `sf-engine-${CHROOT_REVISION}`,
+        "engine/wordpress/components.json",
+      ),
+      "chroot_containment_missing",
+    ],
+    [
       path.join(chrootRoot, "usr/local/bin", `sf-bin-${CHROOT_REVISION}`, "stattic-runtime"),
       "chroot_binary_missing",
     ],
@@ -164,6 +173,13 @@ test("falls back to the site's release when the chroot is unselected or cannot s
     const bytes = readFileSync(file);
     const { mode } = statSync(file);
     rmSync(file);
+    // A valid older inventory can claim app support while lacking containment.
+    if (reason === "chroot_containment_missing") {
+      writeFileSync(
+        file,
+        JSON.stringify({ components: [{ id: "runtime-engine", provides: ["runtime.serving"] }] }),
+      );
+    }
     try {
       await expectHealth({
         engine_revision: "source-tree",

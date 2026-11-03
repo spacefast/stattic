@@ -1022,6 +1022,22 @@ test("a hard-killed publication stays gated until a retry fully converges", asyn
   const [exitCode] = await Promise.all([child.exited, stdout, stderr]);
   expect(exitCode).not.toBe(0);
 
+  // Sync consumes this SSH proof before enabling any shared selection. A
+  // killed publication still names the old release and explicitly stays busy.
+  const publicationProof = () => {
+    const result = Bun.spawnSync({
+      cmd: ["php", "-d", "auto_prepend_file=", next.installerPath, "--proof"],
+      cwd: old.publicRoot,
+      stdin: new TextEncoder().encode(
+        JSON.stringify({ runtime_instance_id: "installer-test-instance" }),
+      ),
+      env: { ...process.env, SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance" },
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    return JSON.parse(result.stdout.toString());
+  };
+  expect(publicationProof()).toMatchObject({ engine_revision: old.revision, in_progress: true });
+
   const transaction = path.join(old.publicRoot, ".stattic/install-transaction.json");
   expect(existsSync(transaction)).toBe(true);
   const userAliasBackup = path.join(old.publicRoot, "index.php.previous.4242-deadbeef");
@@ -1068,6 +1084,11 @@ test("a hard-killed publication stays gated until a retry fully converges", asyn
   });
   expect(publicationNonce(old.publicRoot)).toBe(reservedNonce);
   expect(repaired.exitCode, repaired.stderr).toBe(0);
+  expect(publicationProof()).toMatchObject({
+    engine_revision: next.revision,
+    in_progress: false,
+    publication: { command_id: commandId },
+  });
   expect(readVisitor(old.publicRoot)).toEqual({ context: next.revision, module: next.revision });
   expect(existsSync(transaction)).toBe(false);
   expect(existsSync(path.join(old.publicRoot, ".stattic/rollback-failure.json"))).toBe(false);

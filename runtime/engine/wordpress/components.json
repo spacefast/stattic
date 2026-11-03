@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:480d49a868cbaa84771134476a4e74e315dffb9885d83397c06b5da7cb7c763f",
+  "digest": "sha256:2264790bffe0af79cccbd4d3eb27b53324009d99c1e80bdf5b1efc089d3e5204",
   "components": [
     {
       "id": "spacefast-identity",
@@ -41,6 +41,7 @@
       "provides": [
         "runtime.access.browser-state.v1",
         "runtime.access.account-hint.v1",
+        "runtime.security.tenant-containment.v1",
         "runtime.functions.ownership.v1",
         "runtime.serving",
         "runtime.routing",

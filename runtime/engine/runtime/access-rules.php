@@ -4012,6 +4012,7 @@ function _stattic_access_handle_account_start(array $serving, string $requestHos
         'host' => _stattic_canonicalize_host($requestHost),
         'return' => $returnPath,
         'browserState' => _stattic_access_browser_state_begin(),
+        ...(($_GET['display'] ?? null) === 'popup' ? ['display' => 'popup'] : []),
         // "Use another account": sign in as someone else, not re-check this one.
         ...(($_GET['addAccount'] ?? null) === '1' ? ['addAccount' => '1'] : []),
     ]);

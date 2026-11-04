@@ -1476,6 +1476,9 @@ test("the account lane redeems by GET, in the page or in a popup", async () => {
   );
   expect(otherBrowserStart.status).toBe(302);
   expect(otherBrowserStart.headers.get("location")).not.toContain("addAccount");
+  expect(new URL(otherBrowserStart.headers.get("location") ?? "").searchParams.has("display")).toBe(
+    false,
+  );
   const otherBrowserCookie = browserStateCookie(otherBrowserStart);
   expect(otherBrowserCookie).toMatch(/^__Host-spacefast_access_state_[a-f0-9]{16}=[a-f0-9]{64}$/);
   expect(otherBrowserCookie).not.toBe(stateCookie);
@@ -1547,15 +1550,27 @@ test("the account lane redeems by GET, in the page or in a popup", async () => {
   expect(replayed.status).toBe(403);
   expect(replayed.headers.get("set-cookie")).toBeNull();
 
-  const popupToken = handoffToken(LANES_HOST, LANES_SPACE, ["password:pwd_page_test"], {
-    browserState,
-  });
-  const popup = await get(
+  const popupStart = await get(
     runtime,
     LANES_HOST,
-    `/__sf/redeem?sf_token=${encodeURIComponent(popupToken)}&return=%2Fdocs%2F&display=popup`,
-    { headers: { cookie: stateCookie } },
+    "/__spacefast/access/account?return=%2Fdocs%2F&display=popup",
   );
+  expect(popupStart.status).toBe(302);
+  const popupAcquire = new URL(popupStart.headers.get("location") ?? "");
+  expect(popupAcquire.searchParams.get("display")).toBe("popup");
+  expect(popupAcquire.searchParams.get("return")).toBe("/docs/");
+  const popupStateCookie = browserStateCookie(popupStart);
+  const popupToken = handoffToken(LANES_HOST, LANES_SPACE, ["password:pwd_page_test"], {
+    browserState: popupAcquire.searchParams.get("browserState") ?? "",
+  });
+  const popupReturn = new URLSearchParams({
+    sf_token: popupToken,
+    return: popupAcquire.searchParams.get("return") ?? "",
+    display: popupAcquire.searchParams.get("display") ?? "",
+  });
+  const popup = await get(runtime, LANES_HOST, `/__sf/redeem?${popupReturn}`, {
+    headers: { cookie: popupStateCookie },
+  });
   expect(popup.status).toBe(200);
   expect(popup.headers.get("set-cookie") ?? "").toContain(RECORDED_SESSION_PREFIX);
   const html = await popup.text();

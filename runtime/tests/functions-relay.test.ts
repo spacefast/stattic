@@ -316,6 +316,35 @@ test("ownership projection revokes retained relay credentials", async () => {
       relayToken({ ownership_revision: "new-owner" }),
     );
     expect(current.status).toBe(200);
+    // A credential minted before ownership binding has no revision claim.
+    const unbound = signToken({
+      iat: Math.floor(Date.now() / 1000),
+      aud: "spacefast-functions-relay",
+      runtime_instance_id: RUNTIME_INSTANCE_ID,
+      space_id: SPACE_ID,
+      version_id: VERSION_ID,
+      capabilities: ["db.read", "db.write"],
+    });
+    const unboundAfterUnknownRevision = await relay({ mode: "query", sql: "SELECT 1" }, unbound);
+    expect(unboundAfterUnknownRevision.status).toBe(401);
+    const projectRevision = (revision: string | null) =>
+      putRoute(rt, SPACE_ID, "production", {
+        version_id: VERSION_ID,
+        config: {
+          ...publicAccessConfig({ mode: "website", site_title: "Functions relay" }),
+          ownership_revision: revision,
+        },
+      });
+    // Without a projected revision there is nothing to judge the credential by.
+    await projectRevision(null);
+    const unboundWithoutRevision = await relay({ mode: "query", sql: "SELECT 1" }, unbound);
+    expect(unboundWithoutRevision.status).toBe(401);
+    await projectRevision(new Date(Date.now() - 5_000).toISOString());
+    const unboundAfterOwnership = await relay({ mode: "query", sql: "SELECT 1" }, unbound);
+    expect(unboundAfterOwnership.status).toBe(200);
+    await projectRevision(new Date(Date.now() + 10 * 60_000).toISOString());
+    const unboundBeforeTransfer = await relay({ mode: "query", sql: "SELECT 1" }, unbound);
+    expect(unboundBeforeTransfer.status).toBe(401);
   } finally {
     await putRoute(rt, SPACE_ID, "production", {
       version_id: VERSION_ID,

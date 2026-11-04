@@ -88,11 +88,31 @@ function _stattic_functions_relay_claims(
         },
         // Retained versions keep their capabilities only within the current authorization generation.
         'state_valid' => static fn (array $claims): bool =>
-            array_key_exists('ownership_revision', $claims)
-            && array_key_exists('ownership_revision', $serving)
-            && $claims['ownership_revision'] === $serving['ownership_revision']
+            _stattic_functions_relay_ownership_valid($claims, $serving)
             && is_dir(_stattic_version_root($privateRoot, $spaceId, (string) $claims['version_id'])),
     ]);
+}
+
+// A credential minted before ownership binding carries no revision. It stays
+// valid until a refresh re-mints it, but only if it was signed no earlier than
+// the Space's last ownership change; a transfer always projects a new revision.
+// Without a projected revision there is nothing to judge it against.
+function _stattic_functions_relay_ownership_valid(array $claims, array $serving): bool
+{
+    if (array_key_exists('ownership_revision', $claims)) {
+        return array_key_exists('ownership_revision', $serving)
+            && $claims['ownership_revision'] === $serving['ownership_revision'];
+    }
+    $revision = $serving['ownership_revision'] ?? null;
+    if (!is_string($revision) || !is_int($claims['iat'] ?? null)) {
+        return false;
+    }
+    try {
+        $changedAt = (new DateTimeImmutable($revision))->getTimestamp();
+    } catch (Exception) {
+        return false;
+    }
+    return $claims['iat'] >= $changedAt;
 }
 // Fail closed: an absent or malformed claim yields an empty grant.
 function _stattic_functions_relay_grant(array $claims, array $allowed): array

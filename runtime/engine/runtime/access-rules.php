@@ -3403,8 +3403,12 @@ function _stattic_access_request_form(
     // intrinsic dimensions the SVG renders at the 300x150 replaced-element default.
     $lock = '<svg width="16" height="16" viewBox="' . STATTIC_PAGE_ICON_VIEW_BOX . '" aria-hidden="true" focusable="false"><path d="'
         . STATTIC_PAGE_ICON_LOCK_CLOSED . '"></path></svg>';
-    return '<details class="sf-access-request"' . ($open ? ' open' : '') . '>'
-        . '<summary>' . $lock . _stattic_html_escape($summary) . '</summary>'
+    // Opened for the visitor (a refused account), the form is the page's main
+    // action, so it skips the disclosure: a summary would only read as a second
+    // button that collapses it.
+    return ($open
+            ? '<div class="sf-access-request">'
+            : '<details class="sf-access-request"><summary>' . $lock . _stattic_html_escape($summary) . '</summary>')
         . '<form method="post" action="' . _stattic_html_escape(STATTIC_ACCESS_REQUEST_PATH) . '">'
         . '<input type="hidden" name="return" value="' . _stattic_html_escape($returnPath) . '">'
         // A signed-in account is named in the status line; its address and
@@ -3412,9 +3416,12 @@ function _stattic_access_request_form(
         . ($accountHint !== null
             ? '<input type="hidden" name="email" value="' . _stattic_html_escape($accountHint['email']) . '">'
                 . '<input type="hidden" name="account_hint" value="' . _stattic_html_escape($accountHint['token']) . '">'
-            : '<input class="sf-input" type="email" name="email" required autocomplete="email" placeholder="you@example.com">')
-        . '<textarea class="sf-input" name="message" maxlength="280" placeholder="Anything the owner should know (optional)"></textarea>'
-        . '<button class="sf-button" type="submit">Request an invite</button>'
+            : '<label class="sf-access-field-label" for="sf-access-request-email">Email address</label>'
+                . '<input id="sf-access-request-email" class="sf-input" type="email" name="email" required autocomplete="email" placeholder="you@example.com">')
+        . '<label class="sf-access-field-label" for="sf-access-request-message">Note to the owner (optional)</label>'
+        . '<textarea id="sf-access-request-message" class="sf-input" name="message" maxlength="280" placeholder="A little context goes a long way."></textarea>'
+        . '<button class="sf-button sf-button-accent" type="submit">Request access' . _stattic_access_arrow() . '</button>'
+        . '<p class="sf-access-hint">The owner will review your request.</p>'
         . '</form>'
         // Another address (a work one, say) drops the hint and gets confirmed by email.
         . ($accountHint !== null
@@ -3422,7 +3429,7 @@ function _stattic_access_request_form(
                 . _stattic_html_escape(_stattic_access_url_with_params($returnPath, ['sf_access' => 'no-grant']))
                 . '">Use a different email</a></p>'
             : '')
-        . '</details>';
+        . ($open ? '</div>' : '</details>');
 }
 
 // A refused account needs a way to become a different one. The sign-in host
@@ -3439,6 +3446,15 @@ function _stattic_access_switch_account_button(string $returnPath): string
         . _stattic_html_escape($switchHref) . '">Use another account</a>';
 }
 
+// The page draws one arrow glyph, pointing forward. Sized and turned inline so
+// older templates without the current CSS still render it small and the right
+// way round.
+function _stattic_access_arrow(): string
+{
+    return '<svg width="18" height="18" style="transform:scaleX(-1)" viewBox="' . STATTIC_PAGE_ICON_VIEW_BOX
+        . '" aria-hidden="true" focusable="false"><path d="' . STATTIC_PAGE_ICON_ARROW_LEFT . '"></path></svg>';
+}
+
 // Where that account's settings and other accounts live, for the visitor who
 // would rather sort it out there.
 function _stattic_access_dashboard_fragment(): string
@@ -3447,8 +3463,8 @@ function _stattic_access_dashboard_fragment(): string
     if ($dashboard === '') {
         return '';
     }
-    return '<p class="sf-sub sf-access-dashboard"><a href="' . _stattic_html_escape($dashboard . '/')
-        . '">Open your ' . _stattic_html_escape(_stattic_brand_value('name')) . ' dashboard</a></p>';
+    return '<a class="sf-button sf-button-quiet sf-access-dashboard" href="' . _stattic_html_escape($dashboard . '/')
+        . '">Open dashboard' . _stattic_access_arrow() . '</a>';
 }
 
 function _stattic_access_lanes_fragment(
@@ -3463,6 +3479,7 @@ function _stattic_access_lanes_fragment(
 {
     $html = '<div class="sf-access-lanes">';
     $buttons = '';
+    $secondary = '';
     $dashboardLink = '';
     $hasPopup = false;
     if (is_string($lanes['account'])) {
@@ -3474,10 +3491,13 @@ function _stattic_access_lanes_fragment(
             // so "Sign in" only re-ran the same check and looked dead. The check is
             // still worth offering by its real name, same tab, for when the owner
             // grants access later: sf_access stays in the address bar, so a reload
-            // alone would keep showing this page.
-            $buttons .= '<a class="sf-button sf-access-account" href="'
-                . _stattic_html_escape($accountHref) . '">Check again</a>'
-                . _stattic_access_switch_account_button($returnPath);
+            // alone would keep showing this page. Neither re-check nor switch can
+            // let this account in today, so both sit quietly under the invite.
+            $secondary = '<div class="sf-actions sf-access-more">'
+                . _stattic_access_switch_account_button($returnPath)
+                . '<a class="sf-button sf-button-quiet sf-access-account" href="'
+                . _stattic_html_escape($accountHref) . '">Check access again</a>'
+                . '</div>';
             $dashboardLink = _stattic_access_dashboard_fragment();
         } else {
             $hasPopup = true;
@@ -3573,6 +3593,10 @@ function _stattic_access_lanes_fragment(
                 $html .= _stattic_access_request_form($returnPath, 'Request again');
             }
         } else {
+            // The open form has no summary to set it apart from a lane above it.
+            if ($status === 'no-grant' && ($buttons !== '' || $lanes['password'])) {
+                $html .= '<div class="sf-access-or" aria-hidden="true">or</div>';
+            }
             $html .= _stattic_access_request_form(
                 $returnPath,
                 'Request access',
@@ -3581,7 +3605,7 @@ function _stattic_access_lanes_fragment(
             );
         }
     }
-    $html .= $dashboardLink . '</div>';
+    $html .= $secondary . $dashboardLink . '</div>';
     if ($hasPopup || $lanes['password']) {
         // External and optional by contract: script-src 'self' enables the
         // enhancements; stricter policies keep native links and forms usable.

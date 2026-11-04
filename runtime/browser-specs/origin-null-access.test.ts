@@ -207,14 +207,14 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   const inviteContext = await browser.newContext();
   const invitePage = await inviteContext.newPage();
   expect((await invitePage.goto(fixture.pageUrl))?.status()).toBe(403);
-  await invitePage.getByText("Request access").click();
+  await invitePage.locator("details.sf-access-request summary").click();
   const inviteForm = invitePage.locator(".sf-access-request > form");
   expect(await inviteForm.locator(":scope > .sf-input").count()).toBe(2);
   await invitePage.locator('input[name="email"]').fill("visitor@example.com");
   const inviteResponsePromise = invitePage.waitForResponse(
     (response) => new URL(response.url()).pathname === "/__spacefast/access/request",
   );
-  await invitePage.getByRole("button", { name: "Request an invite" }).click();
+  await invitePage.getByRole("button", { name: "Request access", exact: true }).click();
   const inviteResponse = await inviteResponsePromise;
   expect(inviteResponse.status()).toBe(303);
   const inviteHeaders = await inviteResponse.request().allHeaders();
@@ -256,9 +256,9 @@ test("production transitions render every locally reachable state with independe
     await expectStatus(page, "invalid-password");
 
     await page.goto(fixture.defaultPageUrl);
-    await page.getByText("Request access").click();
+    await page.locator("details.sf-access-request summary").click();
     await page.locator('input[name="email"]').fill("visitor@example.com");
-    await page.getByRole("button", { name: "Request an invite" }).click();
+    await page.getByRole("button", { name: "Request access", exact: true }).click();
     await expectStatus(page, "request-confirm");
 
     await context.clearCookies();
@@ -392,7 +392,7 @@ test("denied and expired requests can be replaced through the production request
     await page.goto(fixture.pageUrl);
     await page.locator("details.sf-access-request summary").click();
     await page.locator('input[name="email"]').fill(fixture.requestLifecycleEmail);
-    await page.getByRole("button", { name: "Request an invite" }).click();
+    await page.getByRole("button", { name: "Request access", exact: true }).click();
     await page.waitForURL(/[?&]sf_access=request-confirm(?:&|$)/);
     await page.locator(".sf-access-status-action").waitFor();
   };

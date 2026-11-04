@@ -1,7 +1,7 @@
 {
-  "revision": "2ef580ef1c8d681ca366479918d09b96f5b46b18",
-  "sourceHash": "5a29441fb85f4942b83a9ccc95204c6090662e0c7b02b190de21a93a1b18f9a9",
-  "manifestSha256": "969d6091693cf720ab576353c090c876064663c67e90fa73cd7bded01b1a75c9",
+  "revision": "70a9f510d3ca3afcc8aa85dd3020257aeb99be65",
+  "sourceHash": "29910b259bcc5c769ff8344508729230109297a32a5d842325cc000e8eb52e98",
+  "manifestSha256": "acdf8978fd79a22d6f29318dff15f50752b37318427d51381b599ec5b5eced5a",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "07dfddcce5928c33318bf2ba2e1aa95700d12c87b0fe7ff68318e631b04d6332"
+      "sha256": "4873173132b776b19cc672b181701a24f5ebf50f392859030d7ca5e8820947ad"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "5a9d86c6013d463a2f968de0785f5224255b76923657a4dc49b20946cbf8873f"
+      "sha256": "b33741c1517cb13ff957b0b70fe2d076a116a3441a7829fa235a40057b8f743a"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -393,7 +393,7 @@
     },
     {
       "path": "runtime/browser-specs/origin-null-access.test.ts",
-      "sha256": "b86777a0af4075d15baad2b1e2a8f206527c3a14e1dd304acb46bc7cb20ee9b1"
+      "sha256": "f0557d78f556b36108ccd5aaafc8c104a168dc9acb70fd36638ac7abbcd678b7"
     },
     {
       "path": "runtime/browser-specs/run-ci.sh",
@@ -537,7 +537,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "adf014dd3b7d6623a580b983a6dc3eda3de6401cf9d0c1aae957961ab1a6d789"
+      "sha256": "13fd03a29e2b483da4f2bfcc8381e2fc945d973201e212f4162ff3d8e2fe0123"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -753,7 +753,7 @@
     },
     {
       "path": "runtime/engine/shared/page-css.generated.php",
-      "sha256": "fc76cc4297a07730dc3e5f9f025948a00174b9c07d1db636dc2782e78ed1723d"
+      "sha256": "89ae1a31d13ef0f15c5537fde8dac7ed9361df05e93be0487013be10234daa13"
     },
     {
       "path": "runtime/engine/shared/pointers.php",
@@ -925,7 +925,7 @@
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "1e32fd26459b40a15b6cd8c947ff4a71e3d2ab9cbeb7308b2cc950d5a3859233"
+      "sha256": "9111c3466547b867c30dc6871bfd3a5007138aa93acb3a7eed3f29ef5614c725"
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",

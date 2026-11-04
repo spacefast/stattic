@@ -795,7 +795,7 @@ test("the deny surface renders the access page with every configured lane", asyn
   expect(html).toContain("Continue with Okta");
   expect(html).toContain('action="/__spacefast/access/password"');
   expect(html).toContain('name="password"');
-  expect(html).toContain("Request an invite");
+  expect(html).toContain('type="submit">Request access<svg');
   const requestDetails = html.match(
     /<details\b[^>]*class="[^"]*\bsf-access-request\b[^"]*"[^>]*>/,
   )?.[0];
@@ -1252,16 +1252,18 @@ test("a bounced silent probe renders the page instead of looping", async () => {
   expect(noGrantHtml).not.toContain(">Continue with Spacefast</a>");
   expect(noGrantHtml).not.toContain("Already signed in?");
   expect(noGrantHtml).toContain(
-    'href="/__spacefast/access/account?return=%2Fdocs%2F">Check again</a>',
+    'href="/__spacefast/access/account?return=%2Fdocs%2F">Check access again</a>',
   );
   expect(noGrantHtml).not.toContain("data-sf-access-popup");
   expect(noGrantHtml).not.toContain("/__spacefast/access/client.js");
-  expect(noGrantHtml).toContain("Request an invite");
+  expect(noGrantHtml).toContain('type="submit">Request access<svg');
   // Re-checking cannot change which account is signed in, so the page also
   // offers the sign-in host's add-account sign-in, same tab, and the dashboard.
   const switchHref = noGrantHtml.match(/href="([^"]+)">Use another account<\/a>/)?.[1];
   expect(switchHref).toBe("/__spacefast/access/account?return=%2Fdocs%2F&amp;addAccount=1");
-  expect(noGrantHtml).toContain(`<a href="${DASHBOARD_ORIGIN}/">Open your Spacefast dashboard</a>`);
+  expect(noGrantHtml).toContain(
+    `<a class="sf-button sf-button-quiet sf-access-dashboard" href="${DASHBOARD_ORIGIN}/">Open dashboard<svg`,
+  );
   const switchStart = await get(runtime, SILENT_HOST, switchHref?.replaceAll("&amp;", "&") ?? "");
   expect(switchStart.status).toBe(302);
   const switchLocation = new URL(switchStart.headers.get("location") ?? "");
@@ -1273,11 +1275,35 @@ test("a bounced silent probe renders the page instead of looping", async () => {
   const lanesNoGrant = await get(runtime, LANES_HOST, "/docs/?sf_access=no-grant");
   const lanesHtml = await lanesNoGrant.text();
   expect(lanesHtml).not.toContain(">Continue with Spacefast</a>");
-  expect(lanesHtml).toContain(">Check again</a>");
+  expect(lanesHtml).toContain(">Check access again</a>");
   expect(lanesHtml).toContain("Continue with Okta");
-  expect(
-    lanesHtml.match(/<details\b[^>]*class="[^"]*\bsf-access-request\b[^"]*"[^>]*>/)?.[0],
-  ).toMatch(/\sopen(?:\s|>)/);
+  // The invite is the way forward for a refused account, so its form is shown
+  // outright (no disclosure to open) and set apart from the lanes above it.
+  expect(lanesHtml).not.toContain("<details");
+  expect(lanesHtml).toContain(
+    '<div class="sf-access-or" aria-hidden="true">or</div><div class="sf-access-request"><form',
+  );
+  // Re-check and switch can't admit this account today: both are quiet and
+  // come after the invite, ahead of the dashboard link.
+  const invite = lanesHtml.indexOf('type="submit">Request access');
+  const checkAgain = lanesHtml.indexOf(">Check access again</a>");
+  expect(invite).toBeGreaterThan(-1);
+  expect(checkAgain).toBeGreaterThan(invite);
+  expect(lanesHtml.indexOf(">Open dashboard<svg")).toBeGreaterThan(checkAgain);
+  expect(lanesHtml).toContain(
+    '<div class="sf-actions sf-access-more"><a class="sf-button sf-button-quiet sf-access-switch"',
+  );
+  // Every visible field is named by a label, not only a placeholder.
+  expect(noGrantHtml).toContain(
+    '<label class="sf-access-field-label" for="sf-access-request-email">',
+  );
+  expect(noGrantHtml).toContain('id="sf-access-request-email"');
+  expect(noGrantHtml).toContain(
+    '<label class="sf-access-field-label" for="sf-access-request-message">',
+  );
+  expect(noGrantHtml).toContain('id="sf-access-request-message"');
+  // With no other lane, nothing needs setting apart.
+  expect(noGrantHtml).not.toContain('class="sf-access-or"');
 });
 
 type AccountHintClaims = {

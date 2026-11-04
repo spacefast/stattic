@@ -16,6 +16,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -232,6 +233,10 @@ async function runInstaller(
     md5?: string;
     nativeSha256?: string;
     publicRoot?: string;
+    pause?: {
+      phase: "pause_before_publication" | "pause_after_commit";
+      run: () => Promise<void>;
+    };
     failurePhase?:
       | "pointer_publication"
       | "post_publication_check"
@@ -251,6 +256,7 @@ async function runInstaller(
     ],
     stdout: "pipe",
     stderr: "pipe",
+    stdin: "pipe",
     env: {
       ...process.env,
       SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE:
@@ -263,15 +269,43 @@ async function runInstaller(
       SPACEFAST_RUNTIME_ENGINE_REVISION: fixture.revision,
       SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256: options?.nativeSha256 ?? "",
       SPACEFAST_RUNTIME_PUBLIC_ROOT: options?.publicRoot ?? "",
-      SPACEFAST_RUNTIME_INSTALLER_TEST_FAILURE: options?.failurePhase ?? "",
+      SPACEFAST_RUNTIME_INSTALLER_TEST_FAILURE:
+        options?.pause?.phase ?? options?.failurePhase ?? "",
+      SPACEFAST_RUNTIME_INSTALLER_TEST_PAUSE_FILE: path.join(fixture.root, "prepared"),
+      SPACEFAST_RUNTIME_INSTALLER_TEST_RESUME_STDIN: options?.pause ? "1" : "",
     },
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
+  const stdout = (async () => {
+    const reader = child.stdout.getReader();
+    const decoder = new TextDecoder();
+    let result = "";
+    try {
+      if (options?.pause) {
+        const signal = await reader.read();
+        expect(decoder.decode(signal.value)).toBe("runtime_engine_test_paused\n");
+        await options.pause.run();
+        child.stdin.write("publish\n");
+      }
+      child.stdin.end();
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) return result + decoder.decode();
+        result += decoder.decode(chunk.value, { stream: true });
+      }
+    } catch (error) {
+      child.kill("SIGKILL");
+      await child.exited;
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+  })();
+  const [output, stderr, exitCode] = await Promise.all([
+    stdout,
     new Response(child.stderr).text(),
     child.exited,
   ]);
-  return { exitCode, stdout, stderr };
+  return { exitCode, stdout: output, stderr };
 }
 
 test("installs the engine tree and prints the receipt", async () => {
@@ -1107,11 +1141,22 @@ test("serves only complete old or new revisions while the real installer flips t
   const old = await startUpdateFixture({
     revision: oldRevision,
     visitorEngine: true,
+    tree: true,
   });
   expect((await runInstaller(old)).exitCode).toBe(0);
   const fixture = await startUpdateFixture({
     revision: "new-concurrent-release",
     visitorEngine: true,
+    treeFiles: {
+      "entry.php": "<?php // prepared entry\n",
+      ...Object.fromEntries(
+        Array.from({ length: 3000 }, (_, index) => [
+          `lib/module-${index}.php`,
+          `<?php // ${"prepared".repeat(512)}\n`,
+        ]),
+      ),
+    },
+    loaderNote: "new loader",
     publicRoot: old.publicRoot,
   });
   writeFileSync(path.join(fixture.publicRoot, ".stattic/storage/sentinel"), "keep-storage");
@@ -1169,7 +1214,16 @@ test("serves only complete old or new revisions while the real installer flips t
       await fetch(url);
     }
     expect(observations.some((entry) => entry.body.includes(oldRevision))).toBe(true);
-    const installed = await runInstaller(fixture);
+    const installed = await runInstaller(fixture, {
+      pause: {
+        phase: "pause_before_publication",
+        run: async () => {
+          const response = await fetch(url);
+          expect(response.status).toBe(200);
+          expect(await response.json()).toEqual({ context: oldRevision, module: oldRevision });
+        },
+      },
+    });
     expect(installed.exitCode, installed.stderr).toBe(0);
     const newDeadline = Date.now() + 10_000;
     while (
@@ -1192,12 +1246,7 @@ test("serves only complete old or new revisions while the real installer flips t
     expect(decoded.length).toBeGreaterThan(1);
     expect(decoded.some((entry) => entry.body.context === oldRevision)).toBe(true);
     expect(decoded.some((entry) => entry.body.context === fixture.revision)).toBe(true);
-    for (const entry of unavailable) {
-      expect(JSON.parse(entry.body)).toMatchObject({
-        code: "runtime_engine_update_busy",
-        status: 503,
-      });
-    }
+    expect(unavailable).toEqual([]);
     expect(
       decoded.filter(
         (entry) =>
@@ -1220,6 +1269,107 @@ test("serves only complete old or new revisions while the real installer flips t
     await php.exited;
   }
 }, 20_000);
+
+test("a killed preparation leaves only private scratch under the staging owner", async () => {
+  const old = await startUpdateFixture({
+    revision: "old-private-prepare",
+    visitorEngine: true,
+    tree: true,
+  });
+  expect((await runInstaller(old)).exitCode).toBe(0);
+  const publishedTrees = treeReleaseVersions(old.publicRoot);
+  const next = await startUpdateFixture({
+    revision: "new-private-prepare",
+    visitorEngine: true,
+    loaderNote: "private preparation",
+    tree: true,
+    publicRoot: old.publicRoot,
+  });
+  await expect(
+    runInstaller(next, {
+      pause: {
+        phase: "pause_before_publication",
+        run: async () => {
+          expect(readVisitor(old.publicRoot)).toEqual({
+            context: old.revision,
+            module: old.revision,
+          });
+          expect(treeReleaseVersions(old.publicRoot)).toEqual(publishedTrees);
+          throw new Error("kill private preparation");
+        },
+      },
+    }),
+  ).rejects.toThrow("kill private preparation");
+  expect(
+    readdirSync(old.publicRoot).filter((name) => name.startsWith(".spacefast-alias-")),
+  ).toEqual([]);
+  expect(treeReleaseVersions(old.publicRoot)).toEqual(publishedTrees);
+  const incoming = path.join(installRootOf(old.publicRoot), "incoming");
+  const scratch = readdirSync(incoming).filter((name) => /^public-(tree|alias)-/.test(name));
+  expect(scratch.some((name) => name.startsWith("public-tree-"))).toBe(true);
+  expect(scratch.some((name) => name.startsWith("public-alias-"))).toBe(true);
+  for (const name of scratch) utimesSync(path.join(incoming, name), 0, 0);
+  const retried = await runInstaller(next);
+  expect(retried.exitCode, retried.stderr).toBe(0);
+  const held = retried.stderr
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(held).toContainEqual({
+    event: "evidence.deletion_held",
+    owner: "installer.staging",
+    blockedCount: 1,
+  });
+  expect(held).toContainEqual({
+    event: "evidence.deletion_held",
+    owner: "installer.bundle",
+    blockedCount: 1,
+  });
+  expect(readVisitor(old.publicRoot)).toEqual({ context: next.revision, module: next.revision });
+});
+
+test("keeps serving a committed release if cleanup is interrupted", async () => {
+  const old = await startUpdateFixture({
+    revision: "old-cleanup",
+    visitorEngine: true,
+    tree: true,
+  });
+  expect((await runInstaller(old)).exitCode).toBe(0);
+  const next = await startUpdateFixture({
+    revision: "new-cleanup",
+    visitorEngine: true,
+    tree: true,
+    publicRoot: old.publicRoot,
+  });
+  const transactionPath = path.join(installRootOf(old.publicRoot), "install-transaction.json");
+  await expect(
+    runInstaller(next, {
+      pause: {
+        phase: "pause_after_commit",
+        run: async () => {
+          expect(readVisitor(old.publicRoot)).toEqual({
+            context: next.revision,
+            module: next.revision,
+          });
+          const transaction = readFileSync(transactionPath, "utf8");
+          writeFileSync(
+            transactionPath,
+            JSON.stringify({ ...JSON.parse(transaction), release: "releases/wrong-release" }),
+          );
+          expect(readVisitor(old.publicRoot)).toMatchObject({ code: "runtime_engine_update_busy" });
+          writeFileSync(transactionPath, transaction);
+          throw new Error("interrupt committed cleanup");
+        },
+      },
+    }),
+  ).rejects.toThrow("interrupt committed cleanup");
+  expect(existsSync(transactionPath)).toBe(true);
+  expect(readVisitor(old.publicRoot)).toEqual({ context: next.revision, module: next.revision });
+  const repaired = await runInstaller(next);
+  expect(repaired.exitCode, repaired.stderr).toBe(0);
+  expect(existsSync(transactionPath)).toBe(false);
+  expect(readVisitor(old.publicRoot)).toEqual({ context: next.revision, module: next.revision });
+});
 
 test("publication ownership rejects late commands after rollback and retries the same command", async () => {
   const a = await startUpdateFixture({ revision: "a".repeat(40), visitorEngine: true });

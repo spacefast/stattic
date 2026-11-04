@@ -98,12 +98,50 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
         $publicationUnavailable();
     }
     $publicationLock = fopen($publicationLockPath, 'ce');
-    if (!is_resource($publicationLock) || !flock($publicationLock, LOCK_SH | LOCK_NB)) {
+    if (!is_resource($publicationLock)) {
         $publicationUnavailable();
+    }
+    $requestPath = explode('?', (string) ($_SERVER['REQUEST_URI'] ?? '/'), 2)[0];
+    $managementRequest = in_array($requestPath, [
+        '/__spacefast/api.php',
+        '/__spacefast/upload.php',
+        '/__spacefast/health.php',
+    ], true);
+    // Staging runs beside the active release. Visitors only wait for the
+    // final publication transaction; management keeps its retryable receipt.
+    $publicationDeadline = hrtime(true) + 5_000_000_000;
+    while (!flock($publicationLock, LOCK_SH | LOCK_NB)) {
+        if ($managementRequest || hrtime(true) >= $publicationDeadline) {
+            $publicationUnavailable();
+        }
+        usleep(10000);
     }
     $GLOBALS['SPACEFAST_RUNTIME_PUBLICATION_LOCK'] = $publicationLock;
     $installTransaction = $installRoot . '/install-transaction.json';
+    $committedTarget = null;
     if (file_exists($installTransaction) || is_link($installTransaction)) {
+        $transaction = !is_link($installTransaction) && is_file($installTransaction)
+            ? json_decode((string) @file_get_contents($installTransaction, false, null, 0, 16384), true)
+            : null;
+        if ($transaction === null) {
+            clearstatcache(true, $installTransaction);
+        }
+        if ($transaction === null && !file_exists($installTransaction) && !is_link($installTransaction)) {
+            // Completed cleanup unlinked the journal between the two reads.
+        } elseif (($transaction['phase'] ?? null) !== 'committed'
+            || ($transaction['format'] ?? null) !== 'spacefast.runtime.install-transaction.v2'
+            || !is_string($transaction['release'] ?? null)) {
+            $publicationUnavailable();
+        } else {
+            $committedTarget = $transaction['release'];
+        }
+    }
+    $pointerPath = $installRoot . '/active-release';
+    $pointer = is_file($pointerPath)
+        ? file_get_contents($pointerPath, false, null, 0, 256)
+        : false;
+    $target = is_string($pointer) ? trim($pointer) : '';
+    if ($committedTarget !== null && $committedTarget !== $target) {
         $publicationUnavailable();
     }
     $bindDatabasePassword = static function (): void {
@@ -122,11 +160,6 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
 
     $releaseRoot = $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] ?? null;
     if (!is_string($releaseRoot)) {
-        $pointerPath = $installRoot . '/active-release';
-        $pointer = is_file($pointerPath)
-            ? file_get_contents($pointerPath, false, null, 0, 256)
-            : false;
-        $target = is_string($pointer) ? trim($pointer) : '';
         if (preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) !== 1) {
             exit(1);
         }

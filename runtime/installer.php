@@ -1612,6 +1612,12 @@ function installer_test_pause(string $phase): void
     $GLOBALS['spacefast_test_pause_reached'] = true;
     fwrite(STDOUT, "runtime_engine_test_paused\n");
     fflush(STDOUT);
+    if (installer_config_value('SPACEFAST_RUNTIME_INSTALLER_TEST_RESUME_STDIN') === '1') {
+        if (fgets(STDIN) === false) {
+            fail('runtime_engine_test_resume_failed');
+        }
+        return;
+    }
     while (true) {
         usleep(10000);
     }
@@ -2090,6 +2096,7 @@ function read_install_transaction(string $installRoot): ?array
     if (
         !is_array($transaction)
         || ($transaction['format'] ?? null) !== 'spacefast.runtime.install-transaction.v2'
+        || !in_array($transaction['phase'] ?? 'publishing', ['publishing', 'committed'], true)
         || !is_string($transaction['revision'] ?? null)
         || preg_match('/^[a-f0-9]{64}$/', $transaction['loader_identity'] ?? '') !== 1
         || !is_array($transaction['recoveries'] ?? null)
@@ -2389,14 +2396,13 @@ function commit_registered_tree_swaps(): bool
 }
 
 /** @param array{source:string,path:string,files:list<string>} $tree */
-function publish_manifest_tree(
+function prepare_manifest_tree(
     string $releaseRoot,
     string $publicRoot,
     array $tree,
     string $identity,
     string $suffix,
-    array $historicalOwners,
-): void
+): array
 {
     $source = $releaseRoot . '/' . $tree['source'];
     $resolvedSource = realpath($source);
@@ -2410,40 +2416,42 @@ function publish_manifest_tree(
     }
 
     $target = $publicRoot . '/' . $tree['path'];
-    $targetParent = ensure_public_directory($publicRoot, dirname($tree['path']));
-    if (!is_string($targetParent)) {
-        fail('runtime_engine_tree_mkdir_failed:' . $tree['path']);
-    }
+    $targetParent = dirname($target);
 
     // WordPress derives plugin asset URLs from resolved PHP paths. Keep the
     // immutable tree under the public plugin parent, then atomically swap a
     // stable relative link to it.
-    $versionStore = ensure_public_directory(
-        $publicRoot,
-        dirname($tree['path']) . '/spacefast-tree-releases/' . basename($tree['path']),
-    );
-    if (!is_string($versionStore)) {
-        fail('runtime_engine_tree_mkdir_failed:' . $tree['path']);
-    }
+    $versionStore = $targetParent . '/spacefast-tree-releases/' . basename($tree['path']);
     $relativeVersion = 'spacefast-tree-releases/' . basename($tree['path']) . '/' . $identity . '-' . $suffix;
     $version = $targetParent . '/' . $relativeVersion;
-    $versionStage = $version . '.tmp';
+    $versionStage = $publicRoot . '/.stattic/incoming/public-tree-' . $suffix . '-'
+        . substr(hash('sha256', $tree['path']), 0, 16);
     rrmdir($versionStage);
     register_cleanup_path($versionStage);
     copy_manifest_tree($resolvedSource, $versionStage);
     if (!sync_tree($versionStage)) {
         fail('runtime_engine_tree_sync_failed:' . $tree['path']);
     }
+    return compact('publicRoot', 'target', 'version', 'versionStage', 'versionStore', 'relativeVersion', 'tree');
+}
+
+function publish_manifest_tree(array $prepared, array $historicalOwners, string $suffix): void
+{
+    ['publicRoot' => $publicRoot, 'target' => $target, 'version' => $version, 'versionStage' => $versionStage,
+        'versionStore' => $versionStore, 'relativeVersion' => $relativeVersion, 'tree' => $tree] = $prepared;
+    if (!is_string(ensure_public_directory($publicRoot, dirname($tree['path'])))
+        || ensure_public_directory($publicRoot, dirname($tree['path']) . '/spacefast-tree-releases/' . basename($tree['path'])) !== $versionStore) {
+        fail('runtime_engine_tree_mkdir_failed:' . $tree['path']);
+    }
     register_cleanup_path($version);
     $GLOBALS['spacefast_public_versions'][] = $version;
     if (!rename($versionStage, $version)) {
         fail('runtime_engine_tree_commit_failed:' . $tree['path']);
     }
-    if (!sync_directory($versionStore)) {
+    if (!sync_directory($versionStore) || !sync_directory(dirname($versionStage))) {
         fail('runtime_engine_tree_sync_failed:' . $tree['path']);
     }
     unregister_cleanup_path($versionStage);
-
     $temporary = $target . '.next.' . $suffix;
     if (file_exists($temporary) || is_link($temporary)) {
         fail('runtime_engine_tree_stage_collision:' . $tree['path']);
@@ -2513,6 +2521,41 @@ function publish_manifest_tree(
     }
 }
 
+function prepare_manifest_alias(string $releaseRoot, string $publicRoot, array $entry, string $suffix): array
+{
+    $source = $releaseRoot . '/' . $entry['source'];
+    $target = $publicRoot . '/' . $entry['path'];
+    $temporary = $publicRoot . '/.stattic/incoming/public-alias-' . $suffix . '-'
+        . substr(hash('sha256', $entry['path']), 0, 16);
+    if (!create_exclusive_regular_file($temporary)) {
+        fail('runtime_engine_alias_copy_failed:' . $entry['path']);
+    }
+    register_cleanup_path($temporary);
+    if (!copy($source, $temporary) || !chmod($temporary, $entry['executable'] ? 0755 : 0644)) {
+        fail('runtime_engine_alias_copy_failed:' . $entry['path']);
+    }
+    if (!sync_regular_file($temporary)) {
+        fail('runtime_engine_alias_sync_failed:' . $entry['path']);
+    }
+    return compact('publicRoot', 'target', 'temporary', 'entry');
+}
+
+function publish_manifest_alias(array $prepared, string $suffix): void
+{
+    ['publicRoot' => $publicRoot, 'target' => $target, 'temporary' => $temporary, 'entry' => $entry] = $prepared;
+    if (!is_string(ensure_public_directory($publicRoot, dirname($entry['path'])))) {
+        fail('runtime_engine_alias_mkdir_failed:' . $entry['path']);
+    }
+    register_file_swap($target, $suffix);
+    if (!rename($temporary, $target)) {
+        fail('runtime_engine_alias_install_failed:' . $entry['path']);
+    }
+    if (!sync_directory(dirname($target)) || !sync_directory(dirname($temporary))) {
+        fail('runtime_engine_alias_sync_failed:' . $entry['path']);
+    }
+    unregister_cleanup_path($temporary);
+}
+
 // Backstop for artifacts a hard-killed process left behind; only a hard kill
 // skips fail()'s cleanup.
 function sweep_stale_install_artifacts(string $privateRoot, string $installRoot): void
@@ -2521,6 +2564,7 @@ function sweep_stale_install_artifacts(string $privateRoot, string $installRoot)
     $staleDirs = array_merge(
         glob($privateRoot . '/runtime-install-*') ?: [],
         glob($installRoot . '/release-stage-*') ?: [],
+        glob($installRoot . '/incoming/public-tree-*', GLOB_ONLYDIR) ?: [],
     );
     foreach ($staleDirs as $dir) {
         if (is_dir($dir) && !is_link($dir) && (filemtime($dir) ?: 0) < $cutoff) {
@@ -2531,7 +2575,10 @@ function sweep_stale_install_artifacts(string $privateRoot, string $installRoot)
             rrmdir($dir);
         }
     }
-    $staleFiles = glob($privateRoot . '/incoming/runtime-engine-*.zip') ?: [];
+    $staleFiles = array_merge(
+        glob($privateRoot . '/incoming/runtime-engine-*.zip') ?: [],
+        glob($installRoot . '/incoming/public-alias-*') ?: [],
+    );
     foreach ($staleFiles as $file) {
         if (is_file($file) && (filemtime($file) ?: 0) < $cutoff) {
             if (SPACEFAST_INSTALLER_EVIDENCE_RETENTION_HOLD) {
@@ -2658,9 +2705,11 @@ function write_install_transaction(
     string $loaderIdentity,
     array $recoveries,
     array $publication,
+    string $phase = 'publishing',
 ): bool {
     $payload = json_encode([
         'format' => 'spacefast.runtime.install-transaction.v2',
+        'phase' => $phase,
         'publication' => $publication,
         'release' => $newTarget,
         'revision' => $revision,
@@ -2892,7 +2941,8 @@ $recoveryReleaseTargets = array_values(array_map(
     fn (array $record): string => $record['release'],
     $recoveryRecords,
 ));
-$GLOBALS['spacefast_recovery_in_progress'] = is_array($recoveryTransaction);
+$GLOBALS['spacefast_recovery_in_progress'] = is_array($recoveryTransaction)
+    && ($recoveryTransaction['phase'] ?? 'publishing') !== 'committed';
 $GLOBALS['spacefast_installer_running'] = true;
 register_shutdown_function(static function (): void {
     if (($GLOBALS['spacefast_install_phase'] ?? null) === 'publishing') {
@@ -3109,6 +3159,18 @@ if (!sync_tree($releaseRoot) || !sync_directory($releasesRoot)) {
     fail('runtime_engine_release_sync_failed');
 }
 
+$preparedTrees = array_map(
+    fn (array $tree): array => prepare_manifest_tree($releaseRoot, $publicRoot, $tree, $loaderIdentity, $suffix),
+    $manifest['trees'],
+);
+$preparedAliases = $installAliases
+    ? array_map(
+        fn (array $entry): array => prepare_manifest_alias($releaseRoot, $publicRoot, $entry, $suffix),
+        $manifest['alias'],
+    )
+    : [];
+installer_test_pause('pause_before_publication');
+
 $publicationLock = acquire_publication_lock($installRoot);
 require_legacy_engine_jobs_drained($installRoot);
 $recoveryScratchClean = cleanup_install_transaction_scratch(
@@ -3141,49 +3203,13 @@ $historicalOwners = historical_public_owners(
 );
 validate_public_path_transitions($publicRoot, $manifest, $historicalOwners);
 
-foreach ($manifest['trees'] as $tree) {
-    publish_manifest_tree(
-        $releaseRoot,
-        $publicRoot,
-        $tree,
-        $loaderIdentity,
-        $suffix,
-        $historicalOwners,
-    );
+foreach ($preparedTrees as $tree) {
+    publish_manifest_tree($tree, $historicalOwners, $suffix);
     installer_test_pause('pause_after_first_tree');
 }
 
-if ($installAliases) {
-    foreach ($manifest['alias'] as $entry) {
-        $source = $releaseRoot . '/' . $entry['source'];
-        $target = $publicRoot . '/' . $entry['path'];
-        if (!is_string(ensure_public_directory($publicRoot, dirname($entry['path'])))) {
-            fail('runtime_engine_alias_mkdir_failed:' . $entry['path']);
-        }
-        $tmp = dirname($target) . '/.spacefast-alias-' . $suffix . '-'
-            . substr(hash('sha256', $entry['path']), 0, 16);
-        if (!create_exclusive_regular_file($tmp)) {
-            fail('runtime_engine_alias_copy_failed:' . $entry['path']);
-        }
-        register_cleanup_path($tmp);
-        if (!copy($source, $tmp) || !chmod($tmp, $entry['executable'] ? 0755 : 0644)) {
-            unlink_if_present($tmp);
-            fail('runtime_engine_alias_copy_failed:' . $entry['path']);
-        }
-        if (!sync_regular_file($tmp)) {
-            unlink_if_present($tmp);
-            fail('runtime_engine_alias_sync_failed:' . $entry['path']);
-        }
-        register_file_swap($target, $suffix);
-        if (!rename($tmp, $target)) {
-            unlink_if_present($tmp);
-            fail('runtime_engine_alias_install_failed:' . $entry['path']);
-        }
-        if (!sync_directory(dirname($target))) {
-            fail('runtime_engine_alias_sync_failed:' . $entry['path']);
-        }
-        unregister_cleanup_path($tmp);
-    }
+foreach ($preparedAliases as $alias) {
+    publish_manifest_alias($alias, $suffix);
 }
 
 // No opcache work here, deliberately. CLI opcache is a different SHM from
@@ -3284,6 +3310,24 @@ if (!write_active_release_proof(
 )) {
     fail('runtime_engine_release_proof_failed');
 }
+if (!write_install_transaction(
+    $installRoot,
+    $newReleaseTarget,
+    $actualRevision,
+    $releaseIdentity,
+    $loaderIdentity,
+    compact_install_transaction_recoveries($recoveryRecords, $releaseIdentity),
+    $publication,
+    'committed',
+)) {
+    fail('runtime_engine_transaction_commit_failed');
+}
+// The live tree and its proof are durable. Keep cleanup debt in the journal,
+// but let new requests use the complete release while old artifacts are pruned.
+preserve_registered_rollback_artifacts();
+flock($publicationLock, LOCK_UN);
+fclose($publicationLock);
+installer_test_pause('pause_after_commit');
 $fileSwapsCommitted = commit_registered_file_swaps();
 $treeSwapsCommitted = commit_registered_tree_swaps();
 $committedOwners = historical_public_owners(
@@ -3309,9 +3353,9 @@ if (
 ) {
     fail('runtime_engine_recovery_cleanup_failed');
 }
-// The durable transaction unlink is the publication commit point. Every
-// release named by the WAL must remain intact until this succeeds, otherwise a
-// kill can leave an unreadable WAL and keep visitor traffic gated forever.
+// Retire cleanup debt only after all public artifacts are accounted for. Keep
+// every private release named by the journal until unlink so a retry can still
+// validate the journal after an interrupted cleanup.
 if (!clear_regular_state_file($installRoot . '/install-transaction.json')) {
     fail('runtime_engine_recovery_cleanup_failed');
 }

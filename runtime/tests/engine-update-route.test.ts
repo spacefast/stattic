@@ -58,11 +58,12 @@ test("returns a retryable HTTP receipt while publication is locked", async () =>
     cmd: [
       "php",
       "-r",
-      '$lock = fopen($argv[1], "ce"); flock($lock, LOCK_EX); echo "locked\\n"; flush(); sleep(30);',
+      '$lock = fopen($argv[1], "ce"); flock($lock, LOCK_EX); echo "locked\\n"; flush(); fgets(STDIN);',
       lockPath,
     ],
     stdout: "pipe",
     stderr: "pipe",
+    stdin: "pipe",
   });
   const reader = holder.stdout.getReader();
   try {
@@ -72,6 +73,11 @@ test("returns a retryable HTTP receipt while publication is locked", async () =>
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("1");
     expect(await errorCode(response)).toBe("runtime_engine_update_busy");
+    const started = performance.now();
+    const visitor = await fetch(rt.baseUrl, { signal: AbortSignal.timeout(10_000) });
+    expect(visitor.status).toBe(503);
+    expect(await errorCode(visitor)).toBe("runtime_engine_update_busy");
+    expect(performance.now() - started).toBeGreaterThanOrEqual(4_500);
   } finally {
     holder.kill("SIGKILL");
     await holder.exited;

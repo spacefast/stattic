@@ -315,11 +315,13 @@ function _stattic_assert_proxy_target_allowed(string $target, string $egressScop
 {
     $parts = parse_url($target);
     if (!is_array($parts)) {
+        _stattic_security_outbound($target, _stattic_runtime_request_method(), false, null, 0);
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy target is invalid.\n");
     }
     $parts['scheme'] = strtolower((string) ($parts['scheme'] ?? ''));
     $host = (string) ($parts['host'] ?? '');
     if (!in_array($parts['scheme'], STATTIC_RUNTIME_EGRESS_PROXY_ROUTE_ALLOWED_SCHEMES, true) || $host === '') {
+        _stattic_security_outbound($target, _stattic_runtime_request_method(), false, null, 0);
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy target must be an absolute HTTP(S) URL.\n");
     }
     $port = (int) ($parts['port'] ?? ($parts['scheme'] === 'https' ? 443 : 80));
@@ -329,16 +331,19 @@ function _stattic_assert_proxy_target_allowed(string $target, string $egressScop
         // metadata address.
         $untrusted = $egressScope === STATTIC_EGRESS_SCOPE_TRUSTED
             && _stattic_egress_host_allowed($host, $port, STATTIC_EGRESS_SCOPE_OPEN);
+        _stattic_security_outbound($target, _stattic_runtime_request_method(), false, null, 0);
         _stattic_render_platform_page('proxy-disabled', 403, [], $untrusted
             ? "This host isn't reachable from an unclaimed space. Claim the space to reach any public host.\n"
             : "Proxy target host is not allowed.\n");
     }
     if (isset($parts['user']) || isset($parts['pass'])) {
+        _stattic_security_outbound($target, _stattic_runtime_request_method(), false, null, 0);
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy target must not include credentials.\n");
     }
     $path = (string) ($parts['path'] ?? '/');
     // Ordinary control namespaces belong to this Space, not the upstream host.
     if (str_starts_with('/' . trim(strtolower($path), '/'), '/__') && _stattic_path_is_reserved($path)) {
+        _stattic_security_outbound($target, _stattic_runtime_request_method(), false, null, 0);
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy route cannot target runtime control paths.\n");
     }
     return $parts;
@@ -353,6 +358,7 @@ function _stattic_proxy_upstream_pins(array $parts): array
     $port = (int) ($parts['port'] ?? ($scheme === 'https' ? 443 : 80));
     $ips = _stattic_egress_resolve_public_ips($host, $port);
     if ($ips === null) {
+        _stattic_security_outbound($scheme . '://' . $host, _stattic_runtime_request_method(), false, null, 0);
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy target host is not allowed.\n");
     }
     return _stattic_egress_curl_resolve_entries($host, $port, $ips);

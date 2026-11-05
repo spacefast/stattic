@@ -447,18 +447,23 @@ function _stattic_reclaim_keep_resumable(string $path, int $mtime): void
 
 // THE atomic private-write primitive: every private-root write goes through it,
 // do not open-code the tmp+rename idiom at call sites.
-function _stattic_runtime_write_private_string(string $path, string $content): void
+function _stattic_runtime_write_private_string(string $path, string $content, bool $throwOnFailure = false): void
 {
-    _stattic_runtime_mkdir(dirname($path));
+    if ($throwOnFailure) {
+        if (!_stattic_runtime_mkdir_soft(dirname($path))) throw new RuntimeException('private_storage_unavailable');
+    } else {
+        _stattic_runtime_mkdir(dirname($path));
+    }
     _stattic_runtime_assert_private_path($path);
     if (!_sf_atomic_put($path, $content, true)) {
+        if ($throwOnFailure) throw new RuntimeException('private_storage_unavailable');
         _stattic_problem_response(500, 'runtime_write_failed', 'Runtime private write failed.');
     }
 }
 
-function _stattic_runtime_write_json_atomic(string $path, array $value): void
+function _stattic_runtime_write_json_atomic(string $path, array $value, bool $throwOnFailure = false): void
 {
-    _stattic_runtime_write_private_string($path, json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+    _stattic_runtime_write_private_string($path, json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n", $throwOnFailure);
 }
 
 function _stattic_runtime_json_object(array $value): object|array
@@ -486,28 +491,28 @@ const STATTIC_RUNTIME_JOURNAL_READ_CHUNK_BYTES = 262144;
 // $blocking = false is the serve-path mode: a contended append is skipped
 // rather than making a visitor wait for the lock. Best-effort either way. An
 // unwritable root loses the records, it never fails the request.
-function _stattic_runtime_append_journal(string $privateRoot, array $entry, bool $blocking = true): void
+function _stattic_runtime_append_journal(string $privateRoot, array $entry, bool $blocking = true): bool
 {
     $entry['created_at'] = gmdate('c');
     $line = json_encode($entry, JSON_UNESCAPED_SLASHES);
     $path = $privateRoot . '/runtime/journal.jsonl';
     if (!is_string($line) || !_stattic_runtime_mkdir_soft(dirname($path))) {
-        return;
+        return false;
     }
     // Appends lock beside the file, never on the file itself: a roll-aside
     // renames the data file out from under any handle on it, so the lock has to
     // outlive the bytes it guards.
-    _stattic_lock_with(
+    return _stattic_lock_with(
         $privateRoot . '/runtime/journal.lock',
         $blocking ? STATTIC_LOCK_WAIT : STATTIC_LOCK_TRY,
         null,
-        static function () use ($privateRoot, $path, $line): void {
+        static function () use ($privateRoot, $path, $line): bool {
             if (!_stattic_runtime_journal_admits($privateRoot, $path)) {
-                return;
+                return false;
             }
-            file_put_contents($path, $line . "\n", FILE_APPEND);
+            return file_put_contents($path, $line . "\n", FILE_APPEND) === strlen($line) + 1;
         },
-    );
+    ) === true;
 }
 
 // Under the append lock: a live file at the cap is rolled aside so the append

@@ -1413,7 +1413,12 @@ export async function drainEvents(
     `${RUNTIME_HTTP_API_BASE}/events/drain`,
     "drain_events",
     {},
-    { session_id: `ses_${randomUUID().replace(/-/g, "")}`, page_id: "page_1", ...body },
+    {
+      security_telemetry: true,
+      session_id: `ses_${randomUUID().replace(/-/g, "")}`,
+      page_id: "page_1",
+      ...body,
+    },
   );
 }
 
@@ -1422,7 +1427,14 @@ export async function ackEvents(
   rt: Runtime,
   body: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  return apiJson(rt, "POST", `${RUNTIME_HTTP_API_BASE}/events/ack`, "ack_events", {}, body);
+  return apiJson(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/events/ack`,
+    "ack_events",
+    {},
+    { security_telemetry: true, ...body },
+  );
 }
 
 // ---------------------------------------------------------------------------

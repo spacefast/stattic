@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/../shared/record-store.php';
+require_once __DIR__ . '/../shared/security-telemetry.php';
 require_once __DIR__ . '/../shared/purge.php';
 require_once __DIR__ . '/jobs.php';
 require_once __DIR__ . '/upload.php';
@@ -55,6 +56,7 @@ function _stattic_runtime_retention_stores(string $privateRoot): array
     $stores = [
         _stattic_runtime_jobs_queue_store($privateRoot),
         _stattic_runtime_jobs_dead_store($privateRoot),
+        _stattic_security_gap_store($privateRoot),
     ];
     // Per-space stores: publish sessions and GC pins both carry their own
     // expires_at. A pin outlives its session whenever the release call never

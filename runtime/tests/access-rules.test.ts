@@ -17,6 +17,7 @@ import { createHash, createHmac, generateKeyPairSync, randomUUID } from "node:cr
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import { runtimeSecurityTelemetrySchema } from "../../packages/common/src/contracts/security-telemetry.ts";
 import {
   api,
   deploy,
@@ -1411,6 +1412,7 @@ test("a globally retired session version denies every cookie minted before it", 
 });
 
 test("a durable session survives an access-generation move but not losing its Grant", async () => {
+  const journalStart = journalRecords(runtime).length;
   const cookie = await openAuthorities(SESSION_HOST, ["member:mem_session"]);
   try {
     // Ordinary Grant edits rotate the generation so stale handoffs cannot be
@@ -1435,6 +1437,19 @@ test("a durable session survives an access-generation move but not losing its Gr
     const removed = await get(runtime, SESSION_HOST, "/", { headers: { cookie } });
     expect(removed.status).toBe(403);
     expect(existsSync(sessionRecordPath(SESSION_SPACE, cookie))).toBe(false);
+    const records = journalRecords(runtime)
+      .slice(journalStart)
+      .filter((record) => record.event === "security.telemetry")
+      .map((record) => runtimeSecurityTelemetrySchema.parse(record));
+    const sessionId = sha256(`audit:session:v1:${SESSION_SPACE}:${decodeSession(cookie).sid}`);
+    const lifecycle = records
+      .map((record) => record.payload)
+      .filter((payload) => payload.kind === "session" && payload.sessionId === sessionId);
+    expect(
+      lifecycle.map((payload) => (payload.kind === "session" ? payload.lifecycle : null)),
+    ).toEqual(["issued", "renewed", "revoked", "degraded"]);
+    expect(JSON.stringify(records)).not.toContain(cookie);
+    expect(JSON.stringify(records)).not.toContain(decodeSession(cookie).sid);
   } finally {
     await putRoute(runtime, SESSION_SPACE, "production", {
       version_id: SESSION_VERSION,
@@ -1665,6 +1680,16 @@ test("logout revokes only the presented session and fails closed when the record
     expect(failed.status).toBe(503);
     expect(failed.headers.get("location")).toBeNull();
     expect(failed.headers.get("set-cookie")).toBeNull();
+    const sessionHash = createHash("sha256")
+      .update(`audit:session:v1:${PRIVATE_SPACE}:${decodeSession(undeletable).sid}`)
+      .digest("hex");
+    const failures = journalRecords(runtime)
+      .filter((entry) => entry.event === "security.telemetry")
+      .map((entry) => runtimeSecurityTelemetrySchema.parse(entry).payload)
+      .filter((entry) => entry.kind === "session" && entry.sessionId === sessionHash);
+    expect(
+      failures.map((entry) => (entry.kind === "session" ? entry.lifecycle : entry.kind)),
+    ).toEqual(["issued", "revocation_failed"]);
   } finally {
     rmSync(undeletablePath, { recursive: true, force: true });
     writeFileSync(undeletablePath, contents);

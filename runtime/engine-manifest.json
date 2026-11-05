@@ -91,6 +91,7 @@
     "engine/shared/response.php",
     "engine/shared/runtime-log.php",
     "engine/shared/safety.php",
+    "engine/shared/security-telemetry.php",
     "engine/shared/server-file.php",
     "engine/shared/storage-policy.generated.php",
     "engine/shared/storage.php",

@@ -1,10 +1,10 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Read;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::Deserialize;
@@ -37,6 +37,7 @@ thread_local! {
     /// on its own: a code path that forgets the guard reaches the trusted list,
     /// not the internet.
     static EGRESS_SCOPE: Cell<EgressScope> = const { Cell::new(EgressScope::Trusted) };
+    static EGRESS_DENIED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Binds the invocation's egress scope for the fetch bridge, which is called
@@ -100,7 +101,13 @@ impl FetchRefusal {
     }
 }
 
+/// Marks this fetch as an egress policy refusal; telemetry reads only this flag.
+fn deny_egress() {
+    EGRESS_DENIED.with(|denied| denied.set(true));
+}
+
 fn target_refusal(denial: EgressDenial) -> FetchRefusal {
+    deny_egress();
     match denial {
         EgressDenial::Untrusted => {
             FetchRefusal::new("zero_fetch_host_untrusted", 403, UNTRUSTED_HOST_MESSAGE)
@@ -156,16 +163,22 @@ impl Resolver for GuardedResolver {
             &uri.to_string(),
             &self.internal_hosts,
         )
-        .map_err(|_| Error::HostNotFound)?;
+        .map_err(|_| {
+            deny_egress();
+            Error::HostNotFound
+        })?;
         let resolved: Vec<SocketAddr> = (target.host.as_str(), target.port)
             .to_socket_addrs()
             .map_err(|_| Error::HostNotFound)?
             .collect();
-        if resolved.is_empty()
-            || resolved
-                .iter()
-                .any(|address| !address_allowed(address.ip()))
+        if resolved.is_empty() {
+            return Err(Error::HostNotFound);
+        }
+        if resolved
+            .iter()
+            .any(|address| !address_allowed(address.ip()))
         {
+            deny_egress();
             return Err(Error::HostNotFound);
         }
         let mut addresses = self.empty();
@@ -208,6 +221,22 @@ fn fetch_agent() -> &'static Agent {
     })
 }
 
+thread_local! {
+    static OUTBOUND: RefCell<(Vec<Value>, u64)> = const { RefCell::new((Vec::new(), 0)) };
+}
+
+pub(crate) fn reset_outbound() {
+    OUTBOUND.with(|state| *state.borrow_mut() = (Vec::new(), 0));
+}
+
+pub(crate) fn attach_outbound(response: &mut crate::response::RunnerResponse) {
+    OUTBOUND.with(|state| {
+        let (events, dropped) = std::mem::take(&mut *state.borrow_mut());
+        response.outbound = events;
+        response.outbound_dropped = dropped;
+    });
+}
+
 pub(crate) fn handle_fetch_frame(raw: &str) -> String {
     match execute_fetch_frame(raw) {
         Ok(result) => json!({ "ok": true, "result": result }).to_string(),
@@ -227,6 +256,63 @@ fn execute_fetch_frame(raw: &str) -> Result<Value, FetchRefusal> {
 }
 
 fn execute_fetch_frame_with_timeout(raw: &str, timeout: Duration) -> Result<Value, FetchRefusal> {
+    let started = Instant::now();
+    EGRESS_DENIED.with(|denied| denied.set(false));
+    let result = perform_fetch_frame(raw, timeout);
+    let frame = (raw.len() <= FETCH_FRAME_MAX_BYTES)
+        .then(|| serde_json::from_str::<FetchFrame>(raw).ok())
+        .flatten();
+    let host = frame
+        .as_ref()
+        .and_then(|frame| frame.url.parse::<Uri>().ok())
+        .and_then(|uri| uri.host().map(str::to_ascii_lowercase))
+        .filter(|host| {
+            host.len() <= 253
+                && host.bytes().all(|ch| {
+                    ch.is_ascii_lowercase() || ch.is_ascii_digit() || b".:[-]".contains(&ch)
+                })
+        });
+    let method = frame
+        .as_ref()
+        .map(|frame| frame.method.to_ascii_uppercase())
+        .unwrap_or_default();
+    let method = match method.as_str() {
+        "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "CONNECT" | "TRACE" => {
+            method.as_str()
+        }
+        _ => "OTHER",
+    };
+    // Only an egress policy refusal is a denial; a malformed request failed.
+    let permitted = !EGRESS_DENIED.with(Cell::get);
+    let status = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value["status"].as_u64());
+    let outcome = if !permitted {
+        "denied"
+    } else if result.is_err() {
+        "failed"
+    } else if status.is_some_and(|status| status >= 400) {
+        "http_error"
+    } else {
+        "succeeded"
+    };
+    let received = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value["bodyBase64"].as_str())
+        .map(|body| body.len() / 4 * 3 - body.bytes().rev().take_while(|ch| *ch == b'=').count());
+    OUTBOUND.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.0.len() < 32 {
+            state.0.push(json!({ "host": host, "method": method, "permitted": permitted, "outcome": outcome, "status": status,
+                "durationMs": started.elapsed().as_secs_f64() * 1000.0, "requestBytes": null, "responseBytes": received }));
+        } else { state.1 = state.1.saturating_add(1); }
+    });
+    result
+}
+
+fn perform_fetch_frame(raw: &str, timeout: Duration) -> Result<Value, FetchRefusal> {
     if timeout.is_zero() {
         return Err(FetchRefusal::new(
             "zero_fetch_upstream_unavailable",
@@ -252,6 +338,7 @@ fn execute_fetch_frame_with_timeout(raw: &str, timeout: Duration) -> Result<Valu
     let method = Method::from_bytes(frame.method.as_bytes())
         .map_err(|_| FetchRefusal::payload_invalid("The fetch method is not valid."))?;
     if matches!(method, Method::CONNECT | Method::TRACE) {
+        deny_egress();
         return Err(FetchRefusal::new(
             "zero_fetch_method_denied",
             403,

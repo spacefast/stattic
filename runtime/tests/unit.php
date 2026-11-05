@@ -3651,6 +3651,18 @@ check(
 );
 // The unrestricted retention lane handles scratch entries PHP's jail cannot
 // inspect: outside and dangling links. Their targets must never be followed.
+$gapStore = _stattic_security_gap_store($contentRetentionRoot);
+_stattic_record_store_ensure($gapStore);
+_stattic_record_store_claim($gapStore, 'expired-gap', ['reported' => false], time() - 86401);
+_stattic_record_store_claim($gapStore, 'recent-gap', ['reported' => true], time());
+foreach (_stattic_runtime_retention_stores($contentRetentionRoot) as $retainedStore) {
+    _stattic_record_store_sweep($retainedStore);
+}
+check(
+    _stattic_record_store_read($gapStore, 'expired-gap')['state'] === 'absent'
+        && _stattic_record_store_read($gapStore, 'recent-gap')['state'] === 'present',
+    'maintenance bounds contention markers even when their journal delivery is unavailable'
+);
 $scratchRoot = $contentRetentionRoot . '/spaces/spc_scratch/tmp';
 mkdir($scratchRoot . '/php-fx-stale/nested', 0o777, true);
 mkdir($scratchRoot . '/php-fx-live', 0o777, true);

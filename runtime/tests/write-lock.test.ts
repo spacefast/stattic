@@ -519,6 +519,7 @@ test("repair alone serializes on the site-wide write lock; space delete and the 
         {
           session_id: "ses_lock_drain",
           page_id: "page_lock_drain",
+          security_telemetry: true,
         },
       ),
     ),

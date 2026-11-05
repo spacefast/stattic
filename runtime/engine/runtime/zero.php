@@ -196,6 +196,8 @@ function _stattic_zero_run_process(string $payload, array $config, array $identi
         _stattic_problem_refused(502, 'zero_runner_invalid_response', _stattic_zero_debug_message('Zero runner returned an invalid response.', $stdout));
     }
 
+    _stattic_security_zero_outbound($decoded, $identity);
+    unset($decoded["outbound"], $decoded["outboundDropped"]);
     return $decoded;
 }
 

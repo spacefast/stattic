@@ -21,6 +21,10 @@ thread_local! {
     static STAGE_METRICS: RefCell<RunnerStageMetrics> = RefCell::new(RunnerStageMetrics::default());
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Serialize)]
 pub struct RunnerResponse {
     pub status: u16,
@@ -30,6 +34,10 @@ pub struct RunnerResponse {
     pub body_base64: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outbound: Vec<Value>,
+    #[serde(rename = "outboundDropped", skip_serializing_if = "is_zero")]
+    pub outbound_dropped: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<RunnerMetrics>,
 }
@@ -183,6 +191,8 @@ pub(crate) fn json_response(status: u16, body: Value) -> RunnerResponse {
         body: serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string()),
         body_base64: None,
         events: Vec::new(),
+        outbound: Vec::new(),
+        outbound_dropped: 0,
         metrics: None,
     }
 }

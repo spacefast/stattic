@@ -945,3 +945,68 @@ fn actions_bound_arguments_result_size_and_wall_time() {
         }
     }
 }
+
+#[test]
+fn outbound_evidence_survives_js_failure_and_bounds_host_owned_records() {
+    let fixture = Fixture::with_source_and_capabilities(
+        r#"
+for (let i = 0; i < 33; i++) {
+  globalThis.__statticFetchHost(JSON.stringify({
+    url: 'https://127.0.0.1/private-path?token=private-query',
+    method: 'POST',
+    headers: { authorization: 'Bearer private-header' },
+    bodyBase64: 'cHJpdmF0ZS1ib2R5'
+  }));
+}
+throw new Error('handler failed');
+"#,
+        EndpointCapabilities {
+            fetch: true,
+            ..no_capabilities()
+        },
+    );
+    let response = handle_invoke(&fixture.envelope()).expect_err("JS failure");
+    assert_eq!(response.status, 500);
+    assert_eq!(response.outbound.len(), 32);
+    assert_eq!(response.outbound_dropped, 1);
+    let observation = &response.outbound[0];
+    assert_eq!(observation["host"], "127.0.0.1");
+    assert_eq!(observation["method"], "POST");
+    assert_eq!(observation["permitted"], false);
+    assert_eq!(observation["outcome"], "denied");
+    assert!(observation["status"].is_null());
+    assert!(observation["durationMs"].as_f64().unwrap() >= 0.0);
+    let serialized = serde_json::to_string(&response.outbound).expect("serialize");
+    for secret in [
+        "private-path",
+        "private-query",
+        "private-header",
+        "cHJpdmF0ZS1ib2R5",
+    ] {
+        assert!(!serialized.contains(secret));
+    }
+    let next = handle_invoke(&Fixture::new(false).envelope()).expect("next invocation");
+    assert!(next.outbound.is_empty());
+    assert_eq!(next.outbound_dropped, 0);
+}
+
+#[test]
+fn outbound_evidence_records_a_malformed_fetch_as_failed_not_denied() {
+    // The frame is not valid JSON, so it fails before egress policy runs: a
+    // failed request, not a refusal.
+    let fixture = Fixture::with_source_and_capabilities(
+        r#"
+try { globalThis.__statticFetchHost('{not json'); } catch {}
+throw new Error('handler failed');
+"#,
+        EndpointCapabilities {
+            fetch: true,
+            ..no_capabilities()
+        },
+    );
+    let response = handle_invoke(&fixture.envelope()).expect_err("JS failure");
+    assert_eq!(response.outbound.len(), 1);
+    let observation = &response.outbound[0];
+    assert_eq!(observation["permitted"], true);
+    assert_eq!(observation["outcome"], "failed");
+}

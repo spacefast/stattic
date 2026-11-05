@@ -96,7 +96,7 @@ function _stattic_record_store_records(array $store): array
 
 function _stattic_record_store_put(array $store, string $id, array $record): void
 {
-    _stattic_runtime_write_json_atomic(_stattic_record_store_path($store, $id), $record);
+    _stattic_runtime_write_json_atomic(_stattic_record_store_path($store, $id), $record, $store['throw_on_failure'] ?? false);
 }
 
 // An exclusive create is the only atomic "first writer wins" the filesystem
@@ -147,11 +147,15 @@ function _stattic_record_store_delete(array $store, string $id): void
 // put/delete on this or any store keyed by the same id.
 function _stattic_record_store_mutate(array $store, string $id, callable $critical): mixed
 {
-    _stattic_runtime_mkdir($store['root']);
+    if ($store['throw_on_failure'] ?? false) {
+        if (!_stattic_runtime_mkdir_soft($store['root'])) throw new RuntimeException('record_store_unavailable');
+    } else {
+        _stattic_runtime_mkdir($store['root']);
+    }
     return _stattic_lock_with(
         _stattic_lock_stripe_path($store['root'], $id),
         STATTIC_LOCK_WAIT,
-        null,
+        ($store['throw_on_failure'] ?? false) ? static fn () => throw new RuntimeException('record_store_unavailable') : null,
         static fn (): mixed => $critical(_stattic_record_store_get($store, $id)),
     );
 }

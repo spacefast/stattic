@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . "/../shared/security-telemetry.php";
+
 require_once __DIR__ . '/../shared/jwt.php';
 require_once __DIR__ . '/../shared/response.php';
 require_once __DIR__ . '/../shared/errors.php';
@@ -651,6 +653,7 @@ function _stattic_access_session_issue(array $serving, string $host, array &$cla
         return false;
     }
     _stattic_access_set_session_cookie($value);
+    _stattic_security_session($serving, $claims["spaceId"], $claims["sid"], "renewed");
     return true;
 }
 
@@ -705,7 +708,14 @@ function _stattic_access_session_record_delete(string $privateRoot, string $sess
     if ($store === null || !_stattic_is_sha256_hex($sessionId)) {
         return false;
     }
+    $record = _stattic_record_store_get($store, $sessionId);
     _stattic_record_store_delete($store, $sessionId);
+    $serving = _stattic_page_serving();
+    $spaceId = $record['spaceId'] ?? $serving['space_id'] ?? null;
+    if (is_string($spaceId)) {
+        $lifecycle = _stattic_record_store_read($store, $sessionId)['state'] === 'absent' ? 'revoked' : 'revocation_failed';
+        _stattic_security_session($serving, $spaceId, $sessionId, $lifecycle);
+    }
     return true;
 }
 
@@ -810,6 +820,7 @@ function _stattic_access_session_create(
         return null;
     }
     $storedRecord = $session;
+    _stattic_security_session($serving, $spaceId, $sessionId, "issued");
     return $credential;
 }
 
@@ -2617,6 +2628,7 @@ function _stattic_access_session_degrade(
     ) {
         return null;
     }
+    _stattic_security_session($serving, $record["spaceId"], $record["sid"], "degraded");
     return _stattic_anonymous_session_identity($payload);
 }
 
@@ -3790,6 +3802,11 @@ function _stattic_access_exchange_post(string $url, array $fields, array $header
     // decision is answered from the projection on disk.
     require_once __DIR__ . '/../shared/http.php';
 
+    // Carry one bounded correlation value across the exchange seam. Both
+    // journals hash it under the same domain; neither retains the header.
+    $headers = array_values(array_filter($headers, static fn (string $header): bool => stripos($header, 'x-request-id:') !== 0));
+    $headers[] = 'X-Request-Id: ' . _stattic_security_request_correlation();
+
     if (!_stattic_platform_destination_allowed($url)) {
         return null;
     }
@@ -4416,6 +4433,9 @@ function _stattic_access_consume_handoff_token(
     );
     if ($credential === null) {
         return null;
+    }
+    if ($currentSid !== null && $currentSid !== (string) ($storedRecord['sid'] ?? '')) {
+        _stattic_security_session($serving, (string) ($storedRecord['spaceId'] ?? ''), (string) ($storedRecord['sid'] ?? ''), 'renewed', $currentSid);
     }
     // The session id rotates to the token's; the session being left carried its
     // identity forward and must not outlive the attach, so its revocation

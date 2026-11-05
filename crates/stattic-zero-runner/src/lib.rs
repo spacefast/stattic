@@ -120,13 +120,16 @@ pub fn run_stdio() {
 pub fn handle_invoke(input: &str) -> Result<RunnerResponse, RunnerResponse> {
     let started = Instant::now();
     db::reset_metrics();
+    fetch::reset_outbound();
     reset_stage_metrics();
     handle_invoke_inner(input)
         .map(|mut response| {
+            fetch::attach_outbound(&mut response);
             attach_runner_metrics(&mut response, started);
             response
         })
         .map_err(|mut response| {
+            fetch::attach_outbound(&mut response);
             attach_runner_metrics(&mut response, started);
             response
         })

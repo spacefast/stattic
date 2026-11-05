@@ -24,12 +24,12 @@ function _stattic_http_share_handle(): \CurlSharePersistentHandle
 // One easy handle per process avoids allocations across sequential calls. The
 // persistent share keeps its DNS, connection, and TLS state after every reset
 // by _stattic_http_configure().
-function _stattic_http_handle(): \CurlHandle
+function _stattic_http_handle(bool $reset = true): \CurlHandle
 {
     static $handle = null;
     if ($handle === null) {
         $handle = curl_init();
-    } else {
+    } elseif ($reset) {
         curl_reset($handle);
     }
     return $handle;
@@ -202,6 +202,20 @@ function _stattic_http_state(): object
 // transport with error null, so callers classify status themselves.
 #[\NoDiscard('HTTP outcomes must be classified by the caller')]
 function _stattic_http_request(array $request): array
+{
+    $started = microtime(true);
+    $result = _stattic_http_execute($request);
+    require_once __DIR__ . '/security-telemetry.php';
+    $configured = !in_array($result['error'], ['http_url_invalid', 'http_scheme_not_allowed', 'http_transport_unconfigurable'], true);
+    $handle = _stattic_http_handle(false);
+    _stattic_security_outbound((string) ($request['url'] ?? ''), (string) ($request['method'] ?? 'GET'), $configured, $result,
+        (microtime(true) - $started) * 1000,
+        $configured && $handle !== null ? (int) curl_getinfo($handle, CURLINFO_SIZE_UPLOAD_T) : null,
+        $configured && $handle !== null ? (int) curl_getinfo($handle, CURLINFO_SIZE_DOWNLOAD_T) : null);
+    return $result;
+}
+
+function _stattic_http_execute(array $request): array
 {
     $state = _stattic_http_state();
     $handle = _stattic_http_handle();

@@ -10,6 +10,7 @@ require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/safety.php';
 require_once __DIR__ . '/../shared/server-file.php';
 require_once __DIR__ . '/../shared/application-journal.php';
+require_once __DIR__ . '/../shared/security-telemetry.php';
 require_once __DIR__ . '/upload-policy.php';
 require_once __DIR__ . '/../shared/storage.php';
 require_once __DIR__ . '/generate.php';
@@ -821,7 +822,11 @@ function _stattic_runtime_drain_callback_events(string $privateRoot, array $clai
     if ($finishSession) {
         _stattic_runtime_drain_response($privateRoot, $cursor, [], 0);
     }
+    if (($body['security_telemetry'] ?? null) !== true) {
+        _stattic_problem_response(409, 'runtime_event_reader_incompatible', 'The journal reader must support security telemetry.');
+    }
 
+    _stattic_security_flush_drops($privateRoot);
     $page = _stattic_runtime_journal_page($privateRoot, $cursor, STATTIC_RUNTIME_EVENT_DRAIN_MAX);
     $events = [];
     foreach ($page['records'] as $record) {
@@ -870,6 +875,9 @@ function _stattic_runtime_ack_callback_events(string $privateRoot): void
         _stattic_problem_response(422, 'runtime_event_ack_invalid', 'Runtime event acknowledgements are invalid.');
     };
     $body = _stattic_json_body();
+    if (($body['security_telemetry'] ?? null) !== true) {
+        _stattic_problem_response(409, 'runtime_event_reader_incompatible', 'The journal reader must support security telemetry.');
+    }
     if (isset($body['session_id']) && !is_string($body['session_id'])) {
         $reject();
     }

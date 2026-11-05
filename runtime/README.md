@@ -219,6 +219,93 @@ member session at its next revalidation; adding a member needs no projection wri
 Grants expanded per member (`external` audiences with issuer `spacefast-membership`)
 keep working unchanged.
 
+## Security observations
+
+The control plane stores authenticated API-key-to-Space exchanges, managed outbound
+metadata, and recorded visitor-session lifecycle changes in `activity_events`.
+These `security.*` codes reuse the activity catalog and bypass notification and
+webhook fan-out. They are excluded from team-plan deletion; the audit journal's
+security-class retention work owns the eventual retention policy. There is no
+new table or migration. Dashboard activity reads still apply their plan window;
+investigations that need older records must use the stored journal.
+
+An authenticated `sfa_` exchange records stable credential, grant, subject, creator,
+Space and runtime IDs, result, status, time, duration, and hashed request correlation.
+Forwarded IP and user-agent data use domain-separated HMACs under the application
+auth key; rotation changes those pseudonyms. Country is restricted to two uppercase
+letters, and the record identifies the network evidence as runtime-forwarded.
+Unknown credentials and invalid serving hosts rejected before authentication have
+no authenticated exchange record. No credential, cookie, header value, URL path,
+query string, or request/response body is retained by these observations.
+
+Runtime observations cover the shared PHP HTTP adapter (including platform relay
+traffic), proxy policy/DNS denials, and Zero's native fetch host. They carry only
+destination host, method, permission, result, status, duration, and bytes where
+observed. PHP uses cURL's measured transfer bytes. Zero reports a buffered response
+length, not wire bytes, and leaves request bytes unknown. Redirect hops are not
+separate records. Direct PHP/WordPress network primitives bypass this adapter;
+this is not a complete egress inventory. A killed native runner cannot return
+its observations. Zero retains at most 32 observations per invocation and reports
+the remaining count to the runtime.
+
+Session observations cover durable issuance, cookie renewal, record deletion,
+degradation, failed record deletion, and handoff rotation. Their IDs hash the Space and a random session
+ID, never an access-bearing cookie/token. Outbound records use the same session
+hash and request correlation where available. Stateless anonymous sessions and
+requests with no managed outbound call have no per-request security record.
+Logging does not change access rules: a signed cookie's hot path does not consult
+the revocation record; cold revalidation occurs at the existing 900-second claim
+TTL, generation changes, and stale authority checks. Record deletion therefore
+does not mean an already issued cookie stops working immediately.
+
+The runtime's canonical record store and striped locks reserve at most 1,200
+observation attempts per Space per hour, shared across workers and versions.
+Reservations persist before journal appends and are not refunded on append failure.
+Each reservation retains one metadata-only unfinished append in its Space's budget
+record. The next writer or drain recovers it into the canonical journal using the
+original observation ID; a crash after append can replay that ID, which intake
+deduplicates. If recovery cannot append, it persists a dropped count instead.
+Unreadable or corrupt counters refuse admission. Both budget and journal locks
+are nonblocking: journal contention increments the durable dropped count; budget
+contention creates one exclusive gap marker per Space/hour without the budget
+lock. It records a minimum of one lost observation, not an exact count. The
+drain retries these markers; the maintenance retention owner expires them after
+24 hours, including undelivered markers during a long outage, to bound storage.
+Failure to retain a marker emits the storage-failure diagnostic. Delivery uses the existing
+runtime journal and authenticated management drain. API intake validates strict
+observation schemas, runtime placement and version ownership, then persists before
+acknowledgement. Malformed runtime observations, stale placement/version ownership,
+and timestamps more than five minutes ahead are discarded and acknowledged so they
+cannot block later journal entries. `security.telemetry_discarded` warns with a
+fixed reason and trusted runtime ID, plus a validated event digest when available;
+it never includes the rejected payload. These warnings share the production logger's
+line budget and are not durable gap rows. Infrastructure failures remain pending
+for retry. Postgres's shared counters cap runtime/Functions rows together at
+1,200 per Space per hour. Exchange rows have a separate 1,200-per-Space hourly
+budget. Gap markers are additional bounded rows. Beyond a budget, individual
+destinations/identities are lost; gaps are explicitly recorded, not sampled silently.
+
+Producer loss reports are cumulative, so retries must not be added together.
+Postgres stores the maximum producer count and separate counts of API delivery
+attempts dropped by intake; a lost-ack replay can increment the latter again.
+Exchange overflow counters count attempts by outcome. Gap rows identify their
+counter through `counterDigest`; the canonical counter rows retain these counts
+for 30 days after their last update. Immutable gap rows contain only a minimum
+at marker creation. Local storage failure cannot retain an exact count: it emits
+`security.telemetry_storage_failed` without exception text and lets serving continue.
+Security observations are excluded from the default customer activity feed;
+an explicit security event code filter retrieves them. Runtime journal
+rotation/retention can also remove undrained evidence during a
+long outage; delivery is durable within the existing journal's retention limits.
+
+Drain and acknowledgement requests must declare `security_telemetry: true`.
+An older reader receives `409 runtime_event_reader_incompatible` before events
+are returned or a cursor is committed. Deploy the supporting control plane before
+activating this runtime or the Functions producer. Keep that reader support in any
+control-plane rollback while newer producers or retained security records exist;
+downgrading the runtime removes its compatibility guard. Restore a compatible
+reader to resume a blocked drain rather than acknowledging records manually.
+
 ## WordPress API
 
 A Space with managed content exposes WordPress's own REST API at `/wp-json/`. There is no

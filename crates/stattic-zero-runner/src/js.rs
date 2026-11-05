@@ -161,6 +161,8 @@ pub(crate) fn execute_endpoint_module(
             body: enforce_response_body_limit(body)?,
             body_base64: enforce_response_body_base64_limit(body_base64)?,
             events: if rollback { Vec::new() } else { events },
+            outbound: Vec::new(),
+            outbound_dropped: 0,
             metrics: None,
         })
     });

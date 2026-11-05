@@ -1742,6 +1742,7 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
         // moved into the CAS.
         'sdk' => _stattic_runtime_overlay_sdk_section($privateRoot, $spaceId, $config['sdk'] ?? null),
         'billing' => is_array($config['billing'] ?? null) ? $config['billing'] : [],
+        'email' => is_array($config['email'] ?? null) ? $config['email'] : null,
         'admission' => is_array($config['admission'] ?? null) ? $config['admission'] : [],
         // Read at serve time so a `planGated` proxy rule follows the current
         // plan, not what publish baked.

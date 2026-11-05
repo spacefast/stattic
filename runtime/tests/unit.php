@@ -31,7 +31,8 @@ require_once __DIR__ . '/../engine/admin/jobs.php'; // job runner policy (§22),
 require_once __DIR__ . '/../engine/runtime/functions-artifacts.php'; // signed build-artifact reads
 require_once __DIR__ . '/../engine/runtime/functions-dispatch.php'; // origin -> host dispatch contract
 require_once __DIR__ . '/../engine/shared/runtime-log.php'; // the one runtime log writer
-require_once __DIR__ . '/../engine/shared/mail.php';
+require_once __DIR__ . '/../engine/shared/space-mail.php';
+require_once __DIR__ . '/../engine/runtime/php-functions.php';
 require_once __DIR__ . '/../engine/shared/db-broker.php'; // MySQL broker value encoding (pure helpers only here)
 require_once __DIR__ . '/../engine/runtime/space-users.php'; // app-session cookie read before WordPress loads
 
@@ -54,13 +55,49 @@ $mailPayload = [
     'subject' => 'Hello', 'html' => '<p>Hello</p>', 'text' => 'Hello',
     'headers' => ['X-Campaign' => 'welcome'],
 ];
-$mailArguments = _stattic_mail_arguments($mailPayload);
+$mailPayload['cc'] = [['email' => 'copy@example.com', 'name' => 'extra@example.com, Copy']];
+$mailArguments = _stattic_space_mail_arguments($mailPayload);
+check($mailArguments['recipients'] === 2 && in_array('Cc: =?UTF-8?B?' . base64_encode('extra@example.com, Copy') . '?= <copy@example.com>', $mailArguments['headers'], true), 'display names cannot introduce extra comma-separated recipients');
 check($mailArguments['message'] === '<p>Hello</p>' && $mailArguments['alt_body'] === 'Hello', 'HTML mail retains its plain-text alternative');
 check(in_array('X-Campaign: welcome', $mailArguments['headers'], true), 'mail preserves safe custom headers');
+$longMailName = str_repeat('a', 44) . 'Żółw, ' . str_repeat('🙂', 14);
+$formattedMailName = _stattic_space_mail_address(['email' => 'copy@example.com', 'name' => $longMailName]);
+$encodedMailWords = explode(' ', substr($formattedMailName, 0, -strlen(' <copy@example.com>')));
+$decodedMailName = '';
+foreach ($encodedMailWords as $word) {
+    $decodedWord = base64_decode(substr($word, 10, -2), true);
+    check(strlen($word) <= 75 && is_string($decodedWord) && preg_match('//u', $decodedWord) === 1, 'encoded display-name words fit RFC 2047 and preserve UTF-8 boundaries');
+    $decodedMailName .= $decodedWord;
+}
+check($decodedMailName === $longMailName, 'long Unicode display names round-trip without losing spaces or commas');
+check(_stattic_space_mail_address(['email' => 'copy@example.com', 'name' => "invalid\x80"]) === null, 'mail rejects malformed UTF-8 display names');
+$mailPayload['cc'] = [['email' => '"x,a@b.com,c@d.com,z"@example.com']];
+check(_stattic_space_mail_arguments($mailPayload) === null, 'quoted local-part commas cannot introduce unmetered recipients');
+$mailPayload['cc'] = [['email' => 'copy@example.com']];
 $mailPayload['headers'] = ['From' => 'forged@example.com'];
-check(_stattic_mail_arguments($mailPayload) === null, 'custom headers cannot replace the authorized sender');
+check(_stattic_space_mail_arguments($mailPayload) === null, 'custom headers cannot replace the authorized sender');
 $mailPayload['headers'] = ['X-Campaign' => "welcome\r\nBcc: victim@example.com"];
-check(_stattic_mail_arguments($mailPayload) === null, 'mail rejects header injection');
+check(_stattic_space_mail_arguments($mailPayload) === null, 'mail rejects header injection');
+$mailPayload['headers'] = [];
+$mailBootstrapRoot = realpath(sys_get_temp_dir()) . '/sf-mail-grant-' . bin2hex(random_bytes(6));
+mkdir($mailBootstrapRoot);
+file_put_contents($mailBootstrapRoot . '/wp-load.php', '<?php throw new RuntimeException("mail_bootstrap_without_grant");');
+$mailUsageRoot = getenv('SPACEFAST_SERVICE_USAGE_ROOT');
+putenv('SPACEFAST_SERVICE_USAGE_ROOT');
+try {
+    check(!_stattic_space_mail_send($mailPayload, $mailBootstrapRoot), 'Space mail requires a metered grant before WordPress bootstrap');
+} finally {
+    putenv($mailUsageRoot === false ? 'SPACEFAST_SERVICE_USAGE_ROOT' : 'SPACEFAST_SERVICE_USAGE_ROOT=' . $mailUsageRoot);
+    unlink($mailBootstrapRoot . '/wp-load.php');
+    rmdir($mailBootstrapRoot);
+}
+$phpFunctionsState = &_stattic_php_functions_state();
+$phpFunctionsState['services'] = ['env' => ['SPACEFAST_SERVICE_EMAIL_DOMAIN' => 'example.com']];
+$defaultFromPayload = _stattic_php_functions_email_payload([
+    'to' => 'visitor@example.com', 'subject' => 'Hello', 'text' => 'Hello',
+]);
+check($defaultFromPayload['from']['email'] === 'noreply@example.com', 'PHP mail defaults to noreply on the primary domain');
+$phpFunctionsState['services'] = null;
 
 // --- PHP 8.5 platform contract ------------------------------------------------------
 

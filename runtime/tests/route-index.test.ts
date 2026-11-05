@@ -11,6 +11,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   unlinkSync,
   utimesSync,
@@ -878,7 +879,11 @@ test("a replayed route activation repairs a stale route pointer before returning
   const host = "replayed-activation-index.test";
   const spaceId = "spc_idx_replay";
   const versionId = "ver_idx_replay_1";
-  const activation = productionRoute(host, versionId);
+  const activation = {
+    ...productionRoute(host, versionId),
+    config: { ...publicAccessConfig(), email: { senderDomain: host } },
+    config_digest: sha256("replayed-mail-config"),
+  };
   try {
     await deploy(rt, { spaceId, versionId, files: { "index.html": "replayed activation" } });
     await putRoute(rt, spaceId, "production", activation);
@@ -894,6 +899,39 @@ test("a replayed route activation repairs a stale route pointer before returning
     const served = await get(rt, host, "/");
     expect(served.status).toBe(200);
     expect(await served.text()).toBe("replayed activation");
+
+    // An old parser can retain the new digest but omit the new email field.
+    // The same input must repair that stored configuration, then become a no-op.
+    const stored: { config: { email?: { senderDomain: string } } } = JSON.parse(
+      readFileSync(storagePath(rt, "spaces", spaceId, "routes", "production.json"), "utf8"),
+    );
+    if (!stored) throw new Error("missing production pointer");
+    const { email: _email, ...oldConfig } = stored.config;
+    writeFileSync(
+      storagePath(rt, "spaces", spaceId, "routes", "production.json"),
+      JSON.stringify({ ...stored, config: oldConfig }),
+    );
+    // Rebuild from the old route so the served overlay also lacks email,
+    // matching the state left by the old engine rather than the initial PUT.
+    const oldOverlay = await api(
+      rt,
+      "POST",
+      `/__spacefast/api.php/spaces/${spaceId}/repair`,
+      "repair_space",
+      { space_id: spaceId },
+    );
+    expect(oldOverlay.status).toBe(200);
+    expect(spaceOverlay(rt, spaceId)?.email).toBeNull();
+    const repaired = await putRoute(rt, spaceId, "production", activation);
+    expect(await repaired.json()).toMatchObject({ version_id: versionId });
+    const restored = JSON.parse(
+      readFileSync(storagePath(rt, "spaces", spaceId, "routes", "production.json"), "utf8"),
+    );
+    expect(restored.config.email).toEqual({ senderDomain: host });
+    expect(spaceOverlay(rt, spaceId)?.email).toEqual({ senderDomain: host });
+    expect(await (await putRoute(rt, spaceId, "production", activation)).json()).toMatchObject({
+      unchanged: true,
+    });
   } finally {
     rt.stop();
   }

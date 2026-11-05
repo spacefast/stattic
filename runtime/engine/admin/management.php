@@ -1233,6 +1233,10 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
     $operationId = is_string($claims['operation_id'] ?? null)
         ? trim($claims['operation_id'])
         : '';
+    // An older engine may have stored the incoming digest while dropping fields
+    // it did not understand. Compare today's parsed config before a no-op.
+    $config = _stattic_runtime_route_config($body['config'] ?? null);
+    $configUnchanged = ($previousRoute['config'] ?? null) === $config;
     $requestDigest = _stattic_runtime_canonical_request_digest($body);
     $storedActivationEventId = is_string($previousRoute['activation_event_id'] ?? null)
         && _stattic_is_sha256_hex($previousRoute['activation_event_id'])
@@ -1248,6 +1252,7 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
         && ($previousRoute['activation_request_digest'] ?? null) === $requestDigest
         && ($previousRoute['version_id'] ?? null) === $versionId
         && !$intentChanged
+        && $configUnchanged
     ) {
         // Repair a receipt persisted before the route-index generation was
         // published, before claiming the activation is already complete.
@@ -1266,6 +1271,7 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
         && !array_key_exists('changed_paths', $body)
         && _stattic_runtime_route_pointer_unchanged($privateRoot, $spaceId, $routeName, $versionId, $configDigest, is_array($previousRoute) ? $previousRoute : [])
         && !$intentChanged
+        && $configUnchanged
     ) {
         // The guard above proves the receipt is present, so the event id is the
         // stored one. The durable queue independently owns any pending purge.
@@ -1275,7 +1281,6 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
             'activation_event_id' => $storedActivationEventId,
         ];
     }
-    $config = _stattic_runtime_route_config($body['config'] ?? null);
     $releasedTombstoneHostnames = [];
     if ($storeIntent) {
         $tombstoned = [];
@@ -1853,6 +1858,17 @@ function _stattic_runtime_route_config(mixed $raw): array
     }
     if (is_int($raw['billing']['emailRecipientsDaily'] ?? null) && $raw['billing']['emailRecipientsDaily'] > 0) {
         $config['billing'] = ['emailRecipientsDaily' => $raw['billing']['emailRecipientsDaily']];
+    }
+    if (array_key_exists('email', $raw)) {
+        $email = $raw['email'];
+        $domain = is_array($email) && is_string($email['senderDomain'] ?? null)
+            ? strtolower($email['senderDomain'])
+            : '';
+        if ($email !== null && ($domain === '' || strlen($domain) > 253
+            || preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/D', $domain) !== 1)) {
+            _stattic_problem_response(422, 'space_email_config_invalid', 'Email sender domain is invalid.');
+        }
+        $config['email'] = $email === null ? null : ['senderDomain' => $domain];
     }
     if (is_array($raw['admission'] ?? null)) {
         $concurrency = $raw['admission']['concurrency'] ?? null;

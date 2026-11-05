@@ -238,11 +238,6 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
         $env['SPACEFAST_SERVICE_CONNECTORS_VISITOR'] = json_encode($identity['visitor'] ?? null, JSON_UNESCAPED_SLASHES);
     }
     $names = ['WPCOM_API_KEY', 'SPACEFAST_SERVICE_BLOG_URL'];
-    // Email is granted by a positive daily allowance in the route config. Without
-    // one the space has no sender, and the broker refuses every send.
-    if ((int) ($config['billing']['emailRecipientsDaily'] ?? 0) > 0) {
-        $names[] = 'SPACEFAST_SERVICE_EMAIL_SENDERS';
-    }
     foreach ($names as $name) {
         $value = _stattic_config_value($name);
         if ($value !== '') {
@@ -260,10 +255,13 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
             $env[$name] = $value;
         }
     }
-    if (isset($env['SPACEFAST_SERVICE_EMAIL_SENDERS'])) {
-        require_once __DIR__ . '/native-process.php';
+    $emailDomain = is_string($config['email']['senderDomain'] ?? null)
+        ? strtolower(trim($config['email']['senderDomain']))
+        : '';
+    if ((int) ($config['billing']['emailRecipientsDaily'] ?? 0) > 0 && $emailDomain !== '') {
+        $env['SPACEFAST_SERVICE_EMAIL_DOMAIN'] = $emailDomain;
         $env['SPACEFAST_SERVICE_EMAIL_PHP'] = _stattic_runtime_php_cli_binary();
-        $env['SPACEFAST_SERVICE_EMAIL_SCRIPT'] = dirname(__DIR__) . '/runtime/mail.php';
+        $env['SPACEFAST_SERVICE_EMAIL_SCRIPT'] = dirname(__DIR__) . '/runtime/space-mail.php';
         $privateRoot = _stattic_access_private_root();
         if ($privateRoot !== '') {
             $env['SPACEFAST_SERVICE_EMAIL_ROOT'] = dirname($privateRoot, 2);
@@ -781,6 +779,7 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
         'ownership_revision' => $overlay['ownership_revision'] ?? null,
         'projection_generation' => is_int($overlay['access_gen'] ?? null) ? $overlay['access_gen'] : null,
         'billing' => is_array($overlay['billing'] ?? null) ? $overlay['billing'] : [],
+        'email' => is_array($overlay['email'] ?? null) ? $overlay['email'] : null,
         'admission' => is_array($overlay['admission'] ?? null) ? $overlay['admission'] : [],
         'route_name' => is_string($hostEntry['route_name'] ?? null) ? $hostEntry['route_name'] : null,
         'immutable' => !empty($hostEntry['immutable']),

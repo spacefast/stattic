@@ -128,7 +128,9 @@ beforeAll(async () => {
     throw new Error(`cargo build failed:\n${build.stdout.toString()}\n${build.stderr.toString()}`);
   }
   runtimePath = path.join(REPO_ROOT, "target/debug/stattic-runtime");
-  const bunPath = Bun.which("bun") ?? "/usr/bin/env bun";
+  // PATH can resolve Bun to a package-manager shell shim, which cannot serve
+  // as the interpreter of another shebang on macOS.
+  const bunPath = process.execPath;
   const runtimeWrapperRoot = path.join(
     "/tmp",
     `stattic-runtime-wrapper-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -222,12 +224,12 @@ globalThis.__statticZeroResult = JSON.stringify({
       SPACEFAST_ZERO_RUNNER_CAPTURE: runtimeCapturePath,
       SPACEFAST_ZERO_RUNNER_DEBUG: "1",
       SPACEFAST_ZERO_DATABASE_URL: mysql.url,
-      SPACEFAST_SERVICE_EMAIL_SENDERS: "hello@example.com",
     },
   });
   writeFileSync(
     path.join(rt.root, "wp-load.php"),
     `<?php
+define('DOMAIN_NAME', 'example.com');
 function add_action(string $name, callable $callback): void {}
 function remove_action(string $name, callable $callback): void {}
 function wp_mail(array $to, string $subject, string $message, array $headers): bool {
@@ -439,7 +441,7 @@ const capsule = {
       async handler(ctx) {
         const row = await ctx.db.todos.insert({ title: "committed-mail" });
         const committed = await ctx.email.send({
-          from: "hello@example.com",
+          from: globalThis.__statticZeroRequest.query === "foreign" ? "hello@other.example" : "hello@example.com",
           to: "reader@example.com",
           subject: "committed",
           text: "sent immediately",
@@ -474,7 +476,7 @@ const capsule = {
       async handler(ctx) {
         await ctx.db.todos.insert({ title: "rolled-back-mail" });
         await ctx.email.send({
-          from: "hello@example.com",
+          from: "receipts+orders@example.com",
           to: "reader@example.com",
           subject: "rolled back",
           text: "sent before rollback",
@@ -753,6 +755,7 @@ globalThis.__statticZeroResult = JSON.stringify({ status: query === "mode=redire
       config: {
         ...publicAccessConfig({ mode: "website", site_title: "Zero Generated Rust Runner" }),
         billing: { emailRecipientsDaily: 20 },
+        email: { senderDomain: "example.com" },
       },
       production_hostnames: [GENERATED_HOST],
       noindex_production_hostnames: [],
@@ -1708,7 +1711,7 @@ test("rolls back parent-owned writes when the complete handler output is invalid
   ).toBe("0");
 });
 
-test("mail sends immediately even when the invocation transaction rolls back", async () => {
+test("primary-domain senders reach PHP immediately, foreign senders do not, and rollback cannot unsend", async () => {
   const rolledBack = await get(rt, GENERATED_HOST, "/api/generated/atomic-mail-rollback", {
     method: "POST",
   });
@@ -1722,11 +1725,19 @@ test("mail sends immediately even when the invocation transaction rolls back", a
   expect(
     mysql.exec("SELECT todo_title FROM zero_items WHERE todo_title = 'rolled-back-mail';"),
   ).toBe("");
+  const refused = await get(rt, GENERATED_HOST, "/api/generated/atomic-mail?foreign", {
+    method: "POST",
+  });
+  expect(refused.status).toBe(500);
   const sent = readFileSync(path.join(rt.root, "mail-capture.jsonl"), "utf8")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
   expect(sent.map((message) => message.subject)).toEqual(["rolled back", "committed"]);
+  expect(sent.map((message) => message.headers[0])).toEqual([
+    "From: receipts+orders@example.com",
+    "From: hello@example.com",
+  ]);
 });
 
 test("keeps finalize-generated Zero artifacts private", async () => {

@@ -198,10 +198,8 @@ struct ServiceConfig {
     /// The site's own key, not the platform's. See [`SITE_AKISMET_KEY_ENV`].
     akismet_key: Option<String>,
     blog_url: Option<String>,
-    /// The addresses this space may send as, comma separated. Management state,
-    /// not version content: rolling a version back must not roll back who a
-    /// space has proven it owns.
-    email_senders: Vec<String>,
+    /// The primary sending domain from this Space's trusted route config.
+    email_domain: Option<String>,
     invocation_id: String,
     email_php: Option<String>,
     email_script: Option<String>,
@@ -233,14 +231,8 @@ impl ServiceConfig {
             connectors_visitor: value("SPACEFAST_SERVICE_CONNECTORS_VISITOR"),
             akismet_key: value(SITE_AKISMET_KEY_ENV),
             blog_url: value("SPACEFAST_SERVICE_BLOG_URL"),
-            email_senders: value("SPACEFAST_SERVICE_EMAIL_SENDERS")
-                .map(|raw| {
-                    raw.split(',')
-                        .map(|entry| entry.trim().to_ascii_lowercase())
-                        .filter(|entry| !entry.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default(),
+            email_domain: value("SPACEFAST_SERVICE_EMAIL_DOMAIN")
+                .map(|domain| domain.to_ascii_lowercase()),
             invocation_id: value("SPACEFAST_SERVICE_INVOCATION_ID").unwrap_or_default(),
             email_php: value("SPACEFAST_SERVICE_EMAIL_PHP"),
             email_script: value("SPACEFAST_SERVICE_EMAIL_SCRIPT"),
@@ -777,22 +769,21 @@ fn email_send(
     config: &ServiceConfig,
     payload: &Map<String, Value>,
 ) -> Result<Value, BrokerRefusal> {
-    if config.email_senders.is_empty() {
+    let Some(domain) = config.email_domain.as_deref() else {
         return Err(BrokerRefusal::new(
             "service_not_configured",
-            "This space has no verified sender.",
+            "Email is not configured for this Space's primary domain.",
         ));
-    }
+    };
     let from = payload
         .get("from")
         .and_then(|value| value.get("email"))
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !config.email_senders.contains(&from) {
+        .unwrap_or_default();
+    if !email_sender_matches(from, domain) {
         return Err(BrokerRefusal::new(
             "email_sender_unverified",
-            "The from address is not a verified sender for this space.",
+            format!("The From address must use this Space's primary domain: {domain}."),
         ));
     }
     let (Some(php), Some(script), Some(root)) = (
@@ -835,6 +826,21 @@ fn email_send(
     }
     let accepted: bool = serde_json::from_slice(&output.stdout).map_err(|_| unavailable())?;
     Ok(Value::Bool(accepted))
+}
+
+fn email_sender_matches(address: &str, expected_domain: &str) -> bool {
+    let Some((local, domain)) = address.split_once('@') else {
+        return false;
+    };
+    domain.eq_ignore_ascii_case(expected_domain)
+        && !local.is_empty()
+        && local.len() <= 64
+        && local.split('.').all(|atom| {
+            !atom.is_empty()
+                && atom.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || b"!#$%&'*+-/=?^_`{|}~".contains(&byte)
+                })
+        })
 }
 
 /* -------------------------------------------------------------------------- */
@@ -973,6 +979,32 @@ mod tests {
         assert_eq!(code, "service_capability_denied");
     }
 
+    #[test]
+    fn email_senders_use_only_the_primary_domain() {
+        assert!(email_sender_matches(
+            "orders+receipt@EXAMPLE.COM",
+            "example.com"
+        ));
+        assert!(email_sender_matches(
+            "other.sender@example.com",
+            "example.com"
+        ));
+        for address in [
+            "sender@sub.example.com",
+            "sender@example.com.attacker.test",
+            "sender@other.test",
+            "sender@other.test@example.com",
+            "sender@example.com\r\nBcc: victim@example.com",
+            "@example.com",
+            "sender..name@example.com",
+        ] {
+            assert!(
+                !email_sender_matches(address, "example.com"),
+                "accepted {address}"
+            );
+        }
+    }
+
     /// The batch-query lane is gone from the engine, and a frozen capsule still
     /// calls it. It gets a code of its own rather than an upstream refusal that
     /// names no cause, and it never spends a round trip to learn that.
@@ -1096,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn email_requires_a_verified_sender() {
+    fn email_requires_a_primary_domain() {
         // Sender authority is checked before invoking the transport.
         let (code, _) = refusal(&frame("email", "send", json!({ "subject": "Hi" })));
         assert_eq!(code, "service_not_configured");
@@ -1268,7 +1300,7 @@ mod tests {
             connectors_visitor: None,
             akismet_key: None,
             blog_url: None,
-            email_senders: Vec::new(),
+            email_domain: None,
             invocation_id: String::new(),
             email_php: None,
             email_script: None,

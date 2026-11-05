@@ -10,16 +10,16 @@ if (PHP_SAPI !== 'cli') {
 ini_set('log_errors', '1');
 ini_set('display_errors', 'stderr');
 error_reporting(E_ALL);
-require_once __DIR__ . '/../shared/mail.php';
+require_once __DIR__ . '/../shared/space-mail.php';
 $payload = json_decode((string) file_get_contents('php://stdin', false, null, 0, 1048577), true);
 $accepted = false;
 ob_start();
 try {
     if (is_array($payload) && is_string($argv[1] ?? null)) {
-        $accepted = _stattic_mail_send_metered($payload, $argv[1]);
+        $accepted = _stattic_space_mail_send($payload, $argv[1]);
     }
 } catch (Throwable $error) {
-    error_log('spacefast mail send failed type=' . get_debug_type($error));
+    error_log('space mail send failed type=' . get_debug_type($error));
 } finally {
     ob_end_clean();
 }

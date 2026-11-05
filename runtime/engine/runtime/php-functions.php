@@ -673,7 +673,7 @@ function sf_report_ham(array $submission): void
  * Send one message through wp_mail(). True means the transport accepted it.
  *
  * `to`, `subject`, and `text` or `html` are required. `from` defaults to the
- * space's first verified sender. An explicit sender must also be verified.
+ * noreply@<primary-domain>. An explicit sender must use that primary domain.
  * Sending is immediate and independent of sf_db() transactions.
  *
  * @param array<string,mixed> $message
@@ -845,25 +845,16 @@ function _stattic_php_functions_email_payload(array $message): array
 }
 
 /**
- * The space's first verified sender, so the common call is
- * `sf_email(['to' => …, 'subject' => …, 'text' => …])`. The list was resolved
- * before the jail; an empty one leaves `from` empty and the broker refuses, the
- * same answer a capsule gets.
+ * Omitted From uses noreply on the Space's primary sending domain.
  */
 function _stattic_php_functions_default_sender(): string
 {
     $state = &_stattic_php_functions_state();
     $bundle = is_array($state['services']) ? $state['services'] : [];
-    $senders = is_array($bundle['env'] ?? null) && is_string($bundle['env']['SPACEFAST_SERVICE_EMAIL_SENDERS'] ?? null)
-        ? explode(',', $bundle['env']['SPACEFAST_SERVICE_EMAIL_SENDERS'])
-        : [];
-    foreach ($senders as $sender) {
-        if (trim($sender) !== '') {
-            return trim($sender);
-        }
-    }
-
-    return '';
+    $domain = is_array($bundle['env'] ?? null) && is_string($bundle['env']['SPACEFAST_SERVICE_EMAIL_DOMAIN'] ?? null)
+        ? trim($bundle['env']['SPACEFAST_SERVICE_EMAIL_DOMAIN'])
+        : '';
+    return $domain === '' ? '' : 'noreply@' . $domain;
 }
 
 /**

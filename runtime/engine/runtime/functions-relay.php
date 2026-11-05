@@ -252,6 +252,7 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
         $config = $functions['kind'] === 'present' ? $functions['value'] : [];
     }
     $config['billing'] = is_array($serving['billing'] ?? null) ? $serving['billing'] : [];
+    $config['email'] = is_array($serving['email'] ?? null) ? $serving['email'] : null;
     $serving['space_id'] = $spaceId;
     $serving['version_id'] = $claims['version_id'];
     $visitorHost = $_SERVER[SPACEFAST_FUNCTIONS_RELAY_SERVER_VARS['visitorHost']] ?? null;

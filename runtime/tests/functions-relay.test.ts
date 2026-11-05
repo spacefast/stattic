@@ -84,14 +84,27 @@ const wpMailCapturePath = path.join(
 );
 
 /** Every message wp_mail() has been handed on this site so far. */
-function wpMailCaptures(): Array<{ to: string[]; subject: string; headers: string[] }> {
+function wpMailCaptures(): Array<{
+  to: string[];
+  subject: string;
+  headers: string[];
+  host: string;
+  serverName: string;
+}> {
   const lines = readFileSync(wpMailCapturePath, "utf8")
     .split("\n")
     .filter((line) => line.trim() !== "");
   // SAFETY: the wp-load.php stub in beforeAll writes exactly this shape, one
   // JSON object per line, and nothing else appends to the capture file.
   return lines.map(
-    (line) => JSON.parse(line) as { to: string[]; subject: string; headers: string[] },
+    (line) =>
+      JSON.parse(line) as {
+        to: string[];
+        subject: string;
+        headers: string[];
+        host: string;
+        serverName: string;
+      },
   );
 }
 
@@ -194,9 +207,6 @@ beforeAll(async () => {
     phpIni: { log_errors: "1", error_log: runtimeLogPath },
     env: {
       ...providerDatabaseEnv(),
-      // Management state, supplied by the control plane per space. Without it
-      // the broker refuses mail rather than sending from an unverified address.
-      SPACEFAST_SERVICE_EMAIL_SENDERS: "hello@example.com",
       SPACEFAST_TEST_WP_MAIL_CAPTURE: wpMailCapturePath,
     },
   });
@@ -205,10 +215,12 @@ beforeAll(async () => {
     path.join(rt.root, "wp-load.php"),
     [
       "<?php",
+      "define('DOMAIN_NAME', 'example.com');",
       "function add_action(string $name, callable $callback): void { $GLOBALS['sf_mail_hook'] = $callback; }",
       "function remove_action(string $name, callable $callback): void { unset($GLOBALS['sf_mail_hook']); }",
       "function wp_mail(array $to, string $subject, string $message, array $headers): bool {",
-      `  file_put_contents(${JSON.stringify(wpMailCapturePath)}, json_encode(compact('to', 'subject', 'message', 'headers')) . PHP_EOL, FILE_APPEND);`,
+      "  $host = $_SERVER['HTTP_HOST'] ?? ''; $serverName = $_SERVER['SERVER_NAME'] ?? '';",
+      `  file_put_contents(${JSON.stringify(wpMailCapturePath)}, json_encode(compact('to', 'subject', 'message', 'headers', 'host', 'serverName')) . PHP_EOL, FILE_APPEND);`,
       "  return $subject !== 'Reject';",
       "}",
       "",
@@ -556,12 +568,24 @@ test("a service frame naming an ungranted service is refused inside the broker",
 });
 
 test("mail needs a daily allowance, then sends through wp_mail and returns its acceptance result", async () => {
-  const routeWithAllowance = (emailRecipientsDaily: number) =>
+  const invalidConfig = await putRoute(
+    rt,
+    SPACE_ID,
+    "production",
+    { version_id: VERSION_ID, config: { email: { senderDomain: "example.com\r\nInjected" } } },
+    422,
+  );
+  expect(await invalidConfig.json()).toMatchObject({ code: "space_email_config_invalid" });
+  const routeWithAllowance = (
+    emailRecipientsDaily: number,
+    senderDomain: string | null = "example.com",
+  ) =>
     putRoute(rt, SPACE_ID, "production", {
       version_id: VERSION_ID,
       config: {
         ...publicAccessConfig({ mode: "website", site_title: "Functions relay" }),
         billing: { emailRecipientsDaily },
+        email: senderDomain === null ? null : { senderDomain },
       },
     });
   const token = relayToken({ capabilities: ["email.send"] });
@@ -569,7 +593,7 @@ test("mail needs a daily allowance, then sends through wp_mail and returns its a
     service: "email",
     operation: "send",
     payload: {
-      from: { email: "hello@example.com" },
+      from: { email: "orders+receipt@EXAMPLE.COM" },
       to: [{ email: "someone@example.com" }],
       cc: [{ email: "copy@example.com" }],
       bcc: [{ email: "blind@example.com" }],
@@ -579,13 +603,34 @@ test("mail needs a daily allowance, then sends through wp_mail and returns its a
     },
   };
   const before = wpMailCaptures().length;
-  // A team outside the email feature gets a zero allowance: the sender list is
-  // withheld, so the broker refuses before the transport is ever reached.
+  // The grant needs both the allowance and the control-plane sender domain.
   await routeWithAllowance(0);
   expect(await (await relay(message, token, "services", "inv_mail_0")).json()).toMatchObject({
     ok: false,
     code: "service_not_configured",
   });
+  expect(wpMailCaptures()).toHaveLength(before);
+
+  await routeWithAllowance(4, null);
+  expect(
+    await (await relay(message, token, "services", "inv_mail_missing_domain")).json(),
+  ).toMatchObject({
+    ok: false,
+    code: "service_not_configured",
+  });
+  expect(wpMailCaptures()).toHaveLength(before);
+
+  await routeWithAllowance(4, "previous.example");
+  expect(
+    await (
+      await relay(
+        { ...message, payload: { ...message.payload, from: { email: "hello@previous.example" } } },
+        token,
+        "services",
+        "inv_mail_stale_domain",
+      )
+    ).json(),
+  ).toEqual({ ok: true, result: false });
   expect(wpMailCaptures()).toHaveLength(before);
 
   await routeWithAllowance(4);
@@ -595,7 +640,9 @@ test("mail needs a daily allowance, then sends through wp_mail and returns its a
   const captured = wpMailCaptures();
   expect(captured).toHaveLength(before + 1);
   expect(captured.at(-1)?.to).toEqual(["someone@example.com"]);
-  expect(captured.at(-1)?.headers).toContain("From: hello@example.com");
+  expect(captured.at(-1)?.host).toBe("example.com");
+  expect(captured.at(-1)?.serverName).toBe("example.com");
+  expect(captured.at(-1)?.headers).toContain("From: orders+receipt@EXAMPLE.COM");
   expect(captured.at(-1)?.headers).toContain("Content-Type: text/html; charset=UTF-8");
 
   const rejected = await relay(
@@ -621,16 +668,23 @@ test("mail needs a daily allowance, then sends through wp_mail and returns its a
       .filter((event) => event.event === "retail.usage" && event.meter === "email_recipients")
       .map((event) => event.quantity),
   ).toEqual(["3", "1"]);
+  await routeWithAllowance(4, null);
+  expect(
+    await (await relay(finalMessage, token, "services", "inv_mail_disabled")).json(),
+  ).toMatchObject({ ok: false, code: "service_not_configured" });
+  expect(wpMailCaptures()).toHaveLength(before + 3);
+  // Leave an enabled route for the unauthorized-domain refusal below.
+  await routeWithAllowance(4);
 });
 
-test("mail from an address the space has not verified is refused before sending", async () => {
+test("mail from a domain other than the Space primary is refused before sending", async () => {
   const before = wpMailCaptures().length;
   const response = await relay(
     {
       service: "email",
       operation: "send",
       payload: {
-        from: { email: "someone-else@example.com" },
+        from: { email: "hello@another.example" },
         to: [{ email: "victim@example.com" }],
         subject: "Hi",
         text: "Body",
@@ -911,6 +965,8 @@ test("a multipart form reaches the worker whole, and one PHP cut short never rea
       max_input_vars: "6",
       max_file_uploads: "2",
       max_multipart_body_parts: "30",
+      // Startup upload-limit warnings belong in the log, not before JSON.
+      display_errors: "0",
       log_errors: "1",
       error_log: runtimeLogPath,
     },

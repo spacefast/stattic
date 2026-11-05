@@ -53,6 +53,7 @@ function _stattic_invoke_zero(
     $operation = is_string($action['operation'] ?? null) ? $action['operation'] : 'endpoint';
     $config = _stattic_zero_runtime_config($versionRoot);
     $config['billing'] = is_array($serving['billing'] ?? null) ? $serving['billing'] : [];
+    $config['email'] = is_array($serving['email'] ?? null) ? $serving['email'] : null;
     if ($operation === 'config') {
         _stattic_zero_send_config_response($config, $serving);
     }
@@ -389,6 +390,7 @@ function _stattic_zero_send_config_response(array $config, array $serving = []):
 function _stattic_zero_send_run_response(array $config, string $versionRoot, array $serving, string $requestMethod, string $requestHost, ?string $relayBody = null, ?array $relayAuth = null): void
 {
     $config['billing'] = is_array($serving['billing'] ?? null) ? $serving['billing'] : [];
+    $config['email'] = is_array($serving['email'] ?? null) ? $serving['email'] : null;
     if ($requestMethod !== 'POST') {
         _stattic_method_not_allowed('POST', [
             'code' => 'zero_method_not_allowed',

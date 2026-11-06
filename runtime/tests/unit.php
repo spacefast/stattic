@@ -98,6 +98,10 @@ $defaultFromPayload = _stattic_php_functions_email_payload([
 ]);
 check($defaultFromPayload['from']['email'] === 'noreply@example.com', 'PHP mail defaults to noreply on the primary domain');
 $phpFunctionsState['services'] = null;
+foreach (['clear-site-data', 'x-accel-redirect', 'a8c-edge-cache', 'strict-transport-security'] as $refusedHandlerHeader) {
+    check(_stattic_php_functions_header_denied($refusedHandlerHeader), 'PHP handlers cannot set ' . $refusedHandlerHeader);
+}
+check(!_stattic_php_functions_header_denied('x-safe'), 'PHP handlers keep ordinary response headers');
 
 // --- PHP 8.5 platform contract ------------------------------------------------------
 

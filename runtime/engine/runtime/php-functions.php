@@ -115,6 +115,23 @@ function _stattic_php_functions_serve(array $context): never
 }
 
 /**
+ * Whether a handler may not set this (lowercased) response header. The
+ * platform-owned set is context.php's, so every lane strips the same names;
+ * this lane adds its own prefixes. Browser-state controls are refused at every
+ * Space-authored boundary: a handler's Clear-Site-Data would clear sibling
+ * Spaces on a shared parent domain.
+ */
+function _stattic_php_functions_header_denied(string $name): bool
+{
+    return _stattic_platform_owns_header($name)
+        || isset(SPACEFAST_SPACE_CONTROLLED_HEADERS[$name])
+        || array_any(
+            STATTIC_PHP_FUNCTIONS_DENIED_HEADER_PREFIXES,
+            static fn (string $prefix): bool => str_starts_with($name, $prefix)
+        );
+}
+
+/**
  * Platform header ownership at send time. As the header callback it fires
  * however the response starts: the bridge's own send, a tenant echo that fills
  * the buffer, or a tenant flush().
@@ -133,13 +150,7 @@ function _stattic_php_functions_enforce_platform_headers(): void
         if ($name === '') {
             continue;
         }
-        // The platform-owned set is context.php's (every lane strips the same
-        // names); this lane adds only its own prefixes on top.
-        $denied = _stattic_platform_owns_header($name);
-        foreach (STATTIC_PHP_FUNCTIONS_DENIED_HEADER_PREFIXES as $prefix) {
-            $denied = $denied || str_starts_with($name, $prefix);
-        }
-        if ($denied) {
+        if (_stattic_php_functions_header_denied($name)) {
             header_remove($name);
             continue;
         }

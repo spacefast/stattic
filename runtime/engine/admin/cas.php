@@ -112,11 +112,25 @@ function _stattic_cas_collect_shas_from_artifact(string $path, array &$shas, int
  * Null means one live declaration was unreadable, so this space cannot be
  * reasoned about and the caller touches nothing in it.
  *
- * $budgetDeadline makes running out of clock mean exactly the same thing. This
- * set is a WHOLE-SPACE answer — a partial one reads as "nothing declares these
- * bytes" and is a delete-live-data hazard — so the walk never returns what it
- * had when the budget expired. It aborts, having spent at most one directory
- * read past the deadline instead of every version of a large space.
+ * $budgetDeadline makes running out of clock mean the same thing for THIS
+ * tick. The set is a WHOLE-SPACE answer — a partial one reads as "nothing
+ * declares these bytes" and is a delete-live-data hazard — so a walk cut short
+ * never returns what it had. It does keep it: the walk checkpoints in
+ * gc/live-set.json and the next tick resumes where this one stopped, instead
+ * of starting over and never finishing a space with thousands of versions
+ * (the dashboard Space's pass timed out on every run for three weeks that way).
+ *
+ * A completed scan serves every pass of its Space until the box-wide run
+ * completes. Each tick folds the declarations written since the last fold —
+ * versions the scan never saw, version roots rewritten since, declaration
+ * records touched since, the overlay — into the checkpoint and advances its
+ * watermark, so the answer the pass decides against is still complete and
+ * nothing is read twice; a fold the budget interrupts resumes from its own
+ * ledger. The run that completes every Space discards the checkpoints
+ * (_stattic_cas_local_blob_gc_run), and the next run scans afresh, so what
+ * retention deleted in between leaves the live set then. A completed scan
+ * older than _stattic_cas_live_set_max_age_seconds() is discarded for the
+ * same reason when a run cannot complete.
  *
  * @return array{shas:array<string,int>,version_ids:list<string>}|null
  */
@@ -124,90 +138,432 @@ function _stattic_cas_space_live_set(string $privateRoot, string $spaceId, ?floa
 {
     $budgetClock ??= static fn (): float => microtime(true);
     $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
-    $shas = [];
-    $versionIds = [];
+    $checkpointPath = _stattic_cas_live_set_checkpoint_path($privateRoot, $spaceId);
+    $state = _stattic_cas_live_set_load($checkpointPath);
+    // A completed scan whose pass has not finished in all this time is a stale
+    // picture: what retention deleted since is still in it. Read disk afresh.
+    if ($state !== null && $state['phase'] === 'complete'
+        && (int) $state['completed_at'] + _stattic_cas_live_set_max_age_seconds() < time()) {
+        _stattic_cas_live_set_discard_path($checkpointPath);
+        _stattic_runtime_append_journal($privateRoot, [
+            'event' => 'blob_gc_live_set_expired',
+            'space_id' => $spaceId,
+            'completed_at' => $state['completed_at'],
+        ]);
+        $state = null;
+    }
+    if ($state === null) {
+        $state = [
+            'version' => STATTIC_CAS_LIVE_SET_CHECKPOINT_VERSION,
+            'started_at' => time(),
+            'completed_at' => null,
+            'delta_since' => null,
+            'phase' => 'versions',
+            'cursor' => null,
+            'fold_started_at' => null,
+            'fold_seen' => [],
+            'shas' => [],
+            'version_ids' => [],
+        ];
+    }
+    // Declarations read this tick, across the scan and the fold: the step
+    // limit lets a test drive both without a clock.
+    $stepLimit = _stattic_cas_live_set_step_limit();
+    $steps = 0;
+    $spent = static function () use ($budgetDeadline, $budgetClock, $stepLimit, &$steps): bool {
+        return ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline)
+            || ($stepLimit > 0 && $steps >= $stepLimit);
+    };
+    if ($state['phase'] !== 'complete') {
+        $outcome = _stattic_cas_live_set_scan($state, $spaceRoot, $privateRoot, $spaceId, $spent, $steps);
+        if ($outcome === 'complete') {
+            $state['completed_at'] = time();
+            // Everything written before the scan began was ahead of its walk
+            // and read; what was written since has a file time at or after it,
+            // less the second a coarse kernel clock can lag the one time() read.
+            $state['delta_since'] = (int) $state['started_at'] - 1;
+        }
+        // Progress is kept on every outcome. An unreadable declaration leaves the
+        // cursor before it, so the next tick retries that one file rather than
+        // the whole space, and the pass stays unfinished until it reads.
+        _stattic_cas_live_set_write($checkpointPath, $state);
+        if ($outcome !== 'complete') {
+            _stattic_runtime_append_journal($privateRoot, [
+                'event' => 'blob_gc_live_set_yielded',
+                'space_id' => $spaceId,
+                'phase' => $state['phase'],
+                'reason' => $outcome,
+                'versions' => count($state['version_ids']),
+            ]);
+            return null;
+        }
+        _stattic_runtime_append_journal($privateRoot, [
+            'event' => 'blob_gc_live_set_complete',
+            'space_id' => $spaceId,
+            'versions' => count($state['version_ids']),
+            'shas' => count($state['shas']),
+            'scan_seconds' => max(0, (int) $state['completed_at'] - (int) $state['started_at']),
+        ]);
+    }
+    $before = [$state['fold_started_at'], $state['fold_seen'], $state['delta_since']];
+    $fold = _stattic_cas_live_set_fold_delta($state, $spaceRoot, $privateRoot, $spaceId, $spent, $steps);
+    if ($fold['folded'] > 0 || $before !== [$state['fold_started_at'], $state['fold_seen'], $state['delta_since']]) {
+        // Whatever moved is kept: what a cut-short fold read (over-inclusion
+        // is safe), what it has seen, and a finished fold's cleared ledger and
+        // advanced watermark. A stale ledger left on disk would be resumed
+        // forever, skipping everything it names.
+        _stattic_cas_live_set_write($checkpointPath, $state);
+    }
+    if ($fold['outcome'] !== 'complete') {
+        _stattic_runtime_append_journal($privateRoot, [
+            'event' => 'blob_gc_live_set_yielded',
+            'space_id' => $spaceId,
+            'phase' => 'fold',
+            'reason' => $fold['outcome'],
+            'versions' => count($state['version_ids']),
+        ]);
+        return null;
+    }
+    $versionIds = $state['version_ids'];
+    ksort($versionIds, SORT_STRING);
+    return ['shas' => $state['shas'], 'version_ids' => array_keys($versionIds)];
+}
+
+const STATTIC_CAS_LIVE_SET_CHECKPOINT_VERSION = 1;
+
+function _stattic_cas_live_set_checkpoint_path(string $privateRoot, string $spaceId): string
+{
+    return _stattic_space_root($privateRoot, $spaceId) . '/gc/live-set.json';
+}
+
+function _stattic_cas_live_set_discard(string $privateRoot, string $spaceId): void
+{
+    _stattic_cas_live_set_discard_path(_stattic_cas_live_set_checkpoint_path($privateRoot, $spaceId));
+}
+
+// Declarations a scan collects per tick before it yields, so a test can drive
+// the checkpoint without a clock. 0, the default, means budget-bounded only.
+function _stattic_cas_live_set_step_limit(): int
+{
+    return _stattic_config_int('SPACEFAST_LOCAL_BLOB_GC_LIVE_SET_STEP_LIMIT', 0, 0);
+}
+
+// How long a completed scan may serve when the box-wide run does not finish.
+// The live set only grows while it serves (folds add, nothing removes), so a
+// run that cannot complete would otherwise never collect what retention deleted.
+function _stattic_cas_live_set_max_age_seconds(): int
+{
+    return _stattic_config_int('SPACEFAST_LOCAL_BLOB_GC_LIVE_SET_MAX_AGE_SECONDS', 21600, 1);
+}
+
+/**
+ * The checkpoint on disk, or null when there is none worth resuming. Like the
+ * prefix cursor, it is an optimization about where to resume, never a safety
+ * property: anything unreadable or malformed costs a restart, not a wrong answer.
+ */
+function _stattic_cas_live_set_load(string $path): ?array
+{
+    $stored = _stattic_runtime_read_json($path);
+    if (!is_array($stored)
+        || ($stored['version'] ?? null) !== STATTIC_CAS_LIVE_SET_CHECKPOINT_VERSION
+        || !is_int($stored['started_at'] ?? null)
+        || !(is_int($stored['completed_at'] ?? null) || ($stored['completed_at'] ?? null) === null)
+        || !(is_int($stored['delta_since'] ?? null) || ($stored['delta_since'] ?? null) === null)
+        || !(is_int($stored['fold_started_at'] ?? null) || ($stored['fold_started_at'] ?? null) === null)
+        || !is_array($stored['fold_seen'] ?? null)
+        || !in_array($stored['phase'] ?? null, ['versions', 'declarations', 'complete'], true)
+        || (($stored['phase'] ?? null) === 'complete') !== is_int($stored['completed_at'] ?? null)
+        || !(is_string($stored['cursor'] ?? null) || ($stored['cursor'] ?? null) === null)
+        || !is_array($stored['shas'] ?? null)
+        || !is_array($stored['version_ids'] ?? null)) {
+        if ($stored !== null) {
+            _stattic_cas_live_set_discard_path($path);
+        }
+        return null;
+    }
+    foreach ($stored['shas'] as $sha => $at) {
+        if (!is_string($sha) || !_stattic_is_sha256_hex($sha) || !is_int($at)) {
+            _stattic_cas_live_set_discard_path($path);
+            return null;
+        }
+    }
+    return [
+        'version' => STATTIC_CAS_LIVE_SET_CHECKPOINT_VERSION,
+        'started_at' => $stored['started_at'],
+        'completed_at' => $stored['completed_at'],
+        'delta_since' => $stored['delta_since'],
+        'phase' => $stored['phase'],
+        'cursor' => $stored['cursor'],
+        'fold_started_at' => $stored['fold_started_at'],
+        'fold_seen' => $stored['fold_seen'],
+        'shas' => $stored['shas'],
+        'version_ids' => $stored['version_ids'],
+    ];
+}
+
+// The ledger is keyed by entry and read back as a map, so an empty one must
+// encode as {} rather than PHP's [] for an empty array.
+function _stattic_cas_live_set_write(string $path, array $state): void
+{
+    $state['fold_seen'] = _stattic_runtime_json_object($state['fold_seen']);
+    _stattic_runtime_write_json_atomic($path, $state);
+}
+
+function _stattic_cas_live_set_discard_path(string $path): void
+{
+    clearstatcache(true, $path);
+    if (is_file($path)) {
+        unlink($path);
+    }
+}
+
+/** The version ids under a space's versions root, ascending, with their roots. */
+function _stattic_cas_live_set_version_roots(string $spaceRoot): ?array
+{
     $versionRoots = _stattic_runtime_directory_entries($spaceRoot . '/versions');
     if ($versionRoots === null) {
         return null;
     }
+    $versions = [];
     foreach ($versionRoots as $versionRoot) {
-        if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
-            return null;
-        }
         $versionId = basename($versionRoot);
         if (!is_dir($versionRoot) || !_stattic_runtime_id_valid($versionId) || !str_starts_with($versionId, 'ver_')) {
             continue;
         }
-        // The tables were published with their version, so they share its clock.
-        $publishedAt = _stattic_cas_collect_shas_from_json($versionRoot . '/metadata.json', $shas);
-        if ($publishedAt === null) {
-            _stattic_runtime_append_journal($privateRoot, [
-                'event' => 'blob_gc_declaration_gap',
-                'space_id' => $spaceId,
-                'version_id' => basename($versionRoot),
-                'reason' => 'version_metadata_unreadable',
-            ]);
-            return null;
-        }
-        $versionEntries = _stattic_runtime_directory_entries($versionRoot);
-        if ($versionEntries === null) {
-            return null;
-        }
-        foreach ($versionEntries as $table) {
-            if (fnmatch('responses-*.php', basename($table)) && !_stattic_cas_collect_shas_from_artifact($table, $shas, $publishedAt)) {
-                return null;
-            }
-        }
-        $versionIds[$versionId] = true;
+        $versions[$versionId] = $versionRoot;
     }
-    // The live overlay names blobs no version declares: a tag/SDK body too large
-    // to sit inline in the opcached artifact lives in the CAS with only the
-    // overlay pointing at it.
+    ksort($versions, SORT_STRING);
+    return $versions;
+}
+
+/** One version's declarations: its catalog and its response tables, on its own clock. */
+function _stattic_cas_live_set_collect_version(string $versionRoot, array &$shas, string $privateRoot, string $spaceId): bool
+{
+    // The tables were published with their version, so they share its clock.
+    $publishedAt = _stattic_cas_collect_shas_from_json($versionRoot . '/metadata.json', $shas);
+    if ($publishedAt === null) {
+        _stattic_runtime_append_journal($privateRoot, [
+            'event' => 'blob_gc_declaration_gap',
+            'space_id' => $spaceId,
+            'version_id' => basename($versionRoot),
+            'reason' => 'version_metadata_unreadable',
+        ]);
+        return false;
+    }
+    $versionEntries = _stattic_runtime_directory_entries($versionRoot);
+    if ($versionEntries === null) {
+        return false;
+    }
+    foreach ($versionEntries as $table) {
+        if (fnmatch('responses-*.php', basename($table)) && !_stattic_cas_collect_shas_from_artifact($table, $shas, $publishedAt)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A record store keeps locks and markers beside its records; those are touched
+// on every tick and declare nothing, so they are not walked, counted or
+// remembered.
+function _stattic_cas_live_set_is_declaration(string $path): bool
+{
+    return is_dir($path) || (is_file($path) && str_ends_with($path, '.json'));
+}
+
+/** One entry of a declarations root: a record, or a directory of records. */
+function _stattic_cas_live_set_collect_declaration(string $path, array &$shas): bool
+{
+    if (is_file($path)) {
+        return !str_ends_with($path, '.json') || _stattic_cas_collect_shas_from_json($path, $shas) !== null;
+    }
+    if (!is_dir($path)) {
+        return true;
+    }
+    $nestedEntries = _stattic_runtime_directory_entries($path);
+    if ($nestedEntries === null) {
+        return false;
+    }
+    foreach ($nestedEntries as $nestedPath) {
+        if (is_file($nestedPath) && str_ends_with($nestedPath, '.json') && _stattic_cas_collect_shas_from_json($nestedPath, $shas) === null) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The live overlay names blobs no version declares: a tag/SDK body too large
+// to sit inline in the opcached artifact lives in the CAS with only the
+// overlay pointing at it.
+function _stattic_cas_live_set_collect_overlay(string $spaceRoot, array &$shas): bool
+{
     $spacePointer = _stattic_runtime_read_json($spaceRoot . '/space.json');
     if ($spacePointer === false) {
-        return null;
+        return false;
     }
     $overlayName = is_array($spacePointer) && is_string($spacePointer['overlay'] ?? null)
         ? $spacePointer['overlay']
         : null;
-    if ($overlayName !== null && strpos($overlayName, '..') === false) {
-        $overlayPath = $spaceRoot . '/' . $overlayName;
-        if (!_stattic_cas_collect_shas_from_artifact(
-            $overlayPath,
-            $shas,
-            _stattic_cas_record_time(null, $overlayPath)
-        )) {
-            return null;
-        }
+    if ($overlayName === null || strpos($overlayName, '..') !== false) {
+        return true;
     }
-    foreach ([$spaceRoot . '/uploads', $spaceRoot . '/publish-sessions', $spaceRoot . '/commerce-assets'] as $declarationsRoot) {
-        $declarationEntries = _stattic_runtime_directory_entries($declarationsRoot);
-        if ($declarationEntries === null) {
-            return null;
+    $overlayPath = $spaceRoot . '/' . $overlayName;
+    return _stattic_cas_collect_shas_from_artifact($overlayPath, $shas, _stattic_cas_record_time(null, $overlayPath));
+}
+
+const STATTIC_CAS_LIVE_SET_DECLARATION_ROOTS = ['uploads', 'publish-sessions', 'commerce-assets'];
+
+/**
+ * Advance the scan within this tick's budget. Returns 'complete', 'yielded'
+ * (budget or step limit spent, cursor after the last declaration collected)
+ * or 'unreadable' (cursor before the declaration that could not be read).
+ */
+function _stattic_cas_live_set_scan(array &$state, string $spaceRoot, string $privateRoot, string $spaceId, callable $spent, int &$steps): string
+{
+    if ($state['phase'] === 'versions') {
+        $versions = _stattic_cas_live_set_version_roots($spaceRoot);
+        if ($versions === null) {
+            return 'unreadable';
         }
-        foreach ($declarationEntries as $path) {
-            if ($budgetDeadline !== null && $budgetClock() >= $budgetDeadline) {
-                return null;
-            }
-            if (is_file($path) && str_ends_with($path, '.json') && _stattic_cas_collect_shas_from_json($path, $shas) === null) {
-                return null;
-            }
-            if (!is_dir($path)) {
+        foreach ($versions as $versionId => $versionRoot) {
+            if ($state['cursor'] !== null && strcmp($versionId, $state['cursor']) <= 0) {
                 continue;
             }
-            $nestedEntries = _stattic_runtime_directory_entries($path);
-            if ($nestedEntries === null) {
-                return null;
+            if ($spent()) {
+                return 'yielded';
             }
-            foreach ($nestedEntries as $nestedPath) {
-                if (is_file($nestedPath) && str_ends_with($nestedPath, '.json') && _stattic_cas_collect_shas_from_json($nestedPath, $shas) === null) {
-                    return null;
-                }
+            if (!_stattic_cas_live_set_collect_version($versionRoot, $state['shas'], $privateRoot, $spaceId)) {
+                return 'unreadable';
             }
+            $state['version_ids'][$versionId] = true;
+            $state['cursor'] = $versionId;
+            $steps++;
+        }
+        $state['phase'] = 'declarations';
+        $state['cursor'] = null;
+    }
+    foreach (STATTIC_CAS_LIVE_SET_DECLARATION_ROOTS as $index => $name) {
+        $entries = _stattic_runtime_directory_entries($spaceRoot . '/' . $name);
+        if ($entries === null) {
+            return 'unreadable';
+        }
+        sort($entries, SORT_STRING);
+        foreach ($entries as $path) {
+            // Roots are walked in declaration order, so a key sorts by root first.
+            $key = $index . ':' . basename($path);
+            if ($state['cursor'] !== null && strcmp($key, $state['cursor']) <= 0) {
+                continue;
+            }
+            if (!_stattic_cas_live_set_is_declaration($path)) {
+                continue;
+            }
+            if ($spent()) {
+                return 'yielded';
+            }
+            if (!_stattic_cas_live_set_collect_declaration($path, $state['shas'])) {
+                return 'unreadable';
+            }
+            $state['cursor'] = $key;
+            $steps++;
         }
     }
-    ksort($versionIds);
-    return ['shas' => $shas, 'version_ids' => array_keys($versionIds)];
+    if (!_stattic_cas_live_set_collect_overlay($spaceRoot, $state['shas'])) {
+        return 'unreadable';
+    }
+    $state['phase'] = 'complete';
+    $state['cursor'] = null;
+    return 'complete';
+}
+
+/**
+ * Fold everything declared since the checkpoint's watermark into it. A fold
+ * the budget cuts short keeps what it read (over-inclusion is safe — the live
+ * set may only grow) and a ledger of what it saw, each entry at the file time
+ * it was read with. The next tick resumes by reading what the ledger does not
+ * name and what it names with a newer file time, so a fold that walks to the
+ * end has read everything written up to then and its answer is whole,
+ * whether it took one tick or several. Only then does the watermark move, to
+ * when the fold began less a second of clock slack, so a declaration written
+ * while it walked is read once more by the next fold, never missed. File
+ * times are whole seconds: a rewrite inside the second an entry was read
+ * with waits for the next fold, which the slack guarantees reads it.
+ * Returns 'complete', 'yielded' or 'unreadable' with the count folded.
+ *
+ * @return array{outcome:string,folded:int}
+ */
+function _stattic_cas_live_set_fold_delta(array &$state, string $spaceRoot, string $privateRoot, string $spaceId, callable $spent, int &$steps): array
+{
+    if (!is_int($state['fold_started_at'])) {
+        $state['fold_started_at'] = time();
+        $state['fold_seen'] = [];
+    }
+    $since = is_int($state['delta_since']) ? $state['delta_since'] : (int) $state['started_at'];
+    $folded = 0;
+    // The file time to read an entry with, or null when this fold has read it as it is.
+    $due = static function (string $key, string $path) use (&$state, $since): ?int {
+        clearstatcache(true, $path);
+        $mtime = filemtime($path);
+        if ($mtime === false) {
+            return null;
+        }
+        $seen = $state['fold_seen'][$key] ?? null;
+        return (is_int($seen) ? $mtime > $seen : $mtime >= $since) ? $mtime : null;
+    };
+    $versions = _stattic_cas_live_set_version_roots($spaceRoot);
+    if ($versions === null) {
+        return ['outcome' => 'unreadable', 'folded' => $folded];
+    }
+    foreach ($versions as $versionId => $versionRoot) {
+        $key = '0:' . $versionId;
+        $mtime = $due($key, $versionRoot);
+        // A root the scan saw changes only when something is written into it
+        // (a finalize artifact, a sidecar); a root it never saw is read whole.
+        if ($mtime === null && (isset($state['version_ids'][$versionId]) || isset($state['fold_seen'][$key]))) {
+            continue;
+        }
+        if ($spent()) {
+            return ['outcome' => 'yielded', 'folded' => $folded];
+        }
+        if (!_stattic_cas_live_set_collect_version($versionRoot, $state['shas'], $privateRoot, $spaceId)) {
+            return ['outcome' => 'unreadable', 'folded' => $folded];
+        }
+        $state['version_ids'][$versionId] = true;
+        $state['fold_seen'][$key] = $mtime ?? (int) (filemtime($versionRoot) ?: 0);
+        $steps++;
+        $folded++;
+    }
+    foreach (STATTIC_CAS_LIVE_SET_DECLARATION_ROOTS as $index => $name) {
+        $entries = _stattic_runtime_directory_entries($spaceRoot . '/' . $name);
+        if ($entries === null) {
+            return ['outcome' => 'unreadable', 'folded' => $folded];
+        }
+        foreach ($entries as $path) {
+            if (!_stattic_cas_live_set_is_declaration($path)) {
+                continue;
+            }
+            $key = '1:' . $index . ':' . basename($path);
+            $mtime = $due($key, $path);
+            if ($mtime === null) {
+                continue;
+            }
+            if ($spent()) {
+                return ['outcome' => 'yielded', 'folded' => $folded];
+            }
+            if (!_stattic_cas_live_set_collect_declaration($path, $state['shas'])) {
+                return ['outcome' => 'unreadable', 'folded' => $folded];
+            }
+            $state['fold_seen'][$key] = $mtime;
+            $steps++;
+            $folded++;
+        }
+    }
+    // One artifact: cheaper to re-read than to reason about its pointer moving.
+    if (!_stattic_cas_live_set_collect_overlay($spaceRoot, $state['shas'])) {
+        return ['outcome' => 'unreadable', 'folded' => $folded];
+    }
+    $state['delta_since'] = (int) $state['fold_started_at'] - 1;
+    $state['fold_started_at'] = null;
+    $state['fold_seen'] = [];
+    return ['outcome' => 'complete', 'folded' => $folded];
 }
 
 /** @return array<string,int>|null sha => publish timestamp */
@@ -687,6 +1043,13 @@ function _stattic_cas_local_blob_gc_run(
                 }
             }
             _stattic_cas_write_cursor($spaceCursorPath, $resumeAt);
+            if ($complete) {
+                // Every scan has served its run. The next run starts from what
+                // is on disk then, so what retention deleted leaves the live set.
+                foreach ($spaceIds as $spaceId) {
+                    _stattic_cas_live_set_discard($privateRoot, $spaceId);
+                }
+            }
             return $complete;
         },
         STATTIC_SWEEP_ADVANCE_ON_COMPLETE,

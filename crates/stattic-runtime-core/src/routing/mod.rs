@@ -1563,10 +1563,10 @@ mod tests {
     }
 
     #[test]
-    fn provider_owned_headers_fail_with_the_authored_location() {
+    fn managed_headers_fail_with_the_authored_location() {
         let result = compile_routing_files(&RoutingInput {
             headers:
-                "/feed\n  A8C-Edge-Cache: cache\n  !X-Ac\n  X-Hacker-Test: yes\n  X-App-Result: ok"
+                "/feed\n  A8C-Edge-Cache: cache\n  !X-Ac\n  X-Hacker-Test: yes\n  cLeAr-SiTe-DaTa: cookies\n  !Clear-Site-Data\n  X-App-Result: ok"
                     .into(),
             ..RoutingInput::default()
         });
@@ -1581,7 +1581,9 @@ mod tests {
             vec![
                 ("error", "header_name_unsupported", 2),
                 ("error", "header_name_unsupported", 3),
-                ("error", "header_name_unsupported", 4)
+                ("error", "header_name_unsupported", 4),
+                ("error", "header_name_unsupported", 5),
+                ("error", "header_name_unsupported", 6)
             ]
         );
     }
@@ -2109,7 +2111,7 @@ mod tests {
     fn config_header_removes_mirror_the_files_bang_lines() {
         let result = compile_routing_files(&RoutingInput {
             config_source: Some(
-                "{\n  \"headers\": [\n    { \"source\": \"/keep\", \"headers\": [\n      { \"key\": \"x-frame-options\", \"remove\": true },\n      { \"key\": \"Content-Type\", \"remove\": true },\n      { \"key\": \"X-Ok\", \"value\": \"1\" }\n    ] }\n  ]\n}\n".into(),
+                "{\n  \"headers\": [\n    { \"source\": \"/keep\", \"headers\": [\n      { \"key\": \"x-frame-options\", \"remove\": true },\n      { \"key\": \"Content-Type\", \"remove\": true },\n      { \"key\": \"X-Ok\", \"value\": \"1\" },\n      { \"key\": \"Clear-Site-Data\", \"value\": \"cookies\" }\n    ] }\n  ]\n}\n".into(),
             ),
             ..RoutingInput::default()
         });
@@ -2137,11 +2139,18 @@ mod tests {
                 .iter()
                 .map(|item| (item.severity, item.code, item.source.as_str()))
                 .collect::<Vec<_>>(),
-            vec![(
-                "error",
-                "header_name_unsupported",
-                "$.headers[0].headers[1].key"
-            )]
+            vec![
+                (
+                    "error",
+                    "header_name_unsupported",
+                    "$.headers[0].headers[1].key"
+                ),
+                (
+                    "error",
+                    "header_name_unsupported",
+                    "$.headers[0].headers[3].key"
+                )
+            ]
         );
     }
 

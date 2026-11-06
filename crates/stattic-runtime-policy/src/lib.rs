@@ -36,6 +36,11 @@ pub const PROVIDER_OWNED_RESPONSE_HEADER_PREFIXES: &[&str] =
 pub const PROVIDER_OWNED_RESPONSE_HEADERS: &[&str] =
     &["x-ac", "x-nc", "x-sc", "strict-transport-security"];
 
+/// Browser state controls are reserved from Space-authored responses because
+/// they can affect sibling Spaces sharing a registrable domain. This is not a
+/// platform-wide ban: platform-owned logout responses may still use them.
+pub const SPACE_CONTROLLED_RESPONSE_HEADERS: &[&str] = &["clear-site-data"];
+
 /// Reserved namespaces carrying the platform's own serving signature.
 pub const PLATFORM_MANAGED_RESPONSE_HEADER_PREFIXES: &[&str] = &["x-spacefast-", "x-stattic-"];
 
@@ -110,6 +115,7 @@ pub fn platform_managed_response_header(name: &str) -> bool {
         || TRANSPORT_MANAGED_RESPONSE_HEADERS.contains(&name.as_str())
         || INTERNAL_REDIRECT_RESPONSE_HEADERS.contains(&name.as_str())
         || PROVIDER_OWNED_RESPONSE_HEADERS.contains(&name.as_str())
+        || SPACE_CONTROLLED_RESPONSE_HEADERS.contains(&name.as_str())
         || PROVIDER_OWNED_RESPONSE_HEADER_PREFIXES
             .iter()
             .any(|prefix| name.starts_with(prefix))
@@ -136,6 +142,7 @@ pub fn typescript_source() -> String {
         .iter()
         .chain(INTERNAL_REDIRECT_RESPONSE_HEADERS.iter())
         .chain(PROVIDER_OWNED_RESPONSE_HEADERS.iter())
+        .chain(SPACE_CONTROLLED_RESPONSE_HEADERS.iter())
         .copied()
         .collect::<Vec<_>>();
     format!(
@@ -153,6 +160,9 @@ pub fn typescript_source() -> String {
          \x20*/\n\
          export const INTERNAL_REDIRECT_RESPONSE_HEADERS: readonly string[] = {internal_redirect};\n\
          \n\
+         /** Browser state controls forbidden on Space-authored responses, including upstream relays. */\n\
+         export const SPACE_CONTROLLED_RESPONSE_HEADERS: readonly string[] = {space_controlled};\n\
+         \n\
          /**\n\
          \x20* Rejected/platform-managed response headers: user `_headers` rules can never set or remove\n\
          \x20* these. The internal-redirect family above is a strict subset — anything the proxy lane\n\
@@ -163,6 +173,7 @@ pub fn typescript_source() -> String {
         prefixes = typescript_string_array(&PLATFORM_MANAGED_RESPONSE_HEADER_PREFIXES.iter()
             .chain(PROVIDER_OWNED_RESPONSE_HEADER_PREFIXES.iter()).copied().collect::<Vec<_>>()),
         internal_redirect = typescript_string_array(INTERNAL_REDIRECT_RESPONSE_HEADERS),
+        space_controlled = typescript_string_array(SPACE_CONTROLLED_RESPONSE_HEADERS),
         managed = typescript_string_array(&managed),
     )
 }
@@ -183,6 +194,7 @@ mod tests {
             "X-Ac",
             "X-Nananana-Test",
             "Host-Header",
+            " Clear-Site-Data ",
         ] {
             assert!(platform_managed_response_header(name), "{name}");
         }
@@ -201,6 +213,11 @@ mod tests {
         for name in PROVIDER_OWNED_RESPONSE_HEADERS {
             assert!(!TRANSPORT_MANAGED_RESPONSE_HEADERS.contains(name));
             assert!(!INTERNAL_REDIRECT_RESPONSE_HEADERS.contains(name));
+        }
+        for name in SPACE_CONTROLLED_RESPONSE_HEADERS {
+            assert!(!TRANSPORT_MANAGED_RESPONSE_HEADERS.contains(name));
+            assert!(!INTERNAL_REDIRECT_RESPONSE_HEADERS.contains(name));
+            assert!(!PROVIDER_OWNED_RESPONSE_HEADERS.contains(name));
         }
         for name in INTERNAL_REDIRECT_RESPONSE_HEADERS {
             assert!(

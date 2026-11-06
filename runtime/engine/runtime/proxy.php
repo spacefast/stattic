@@ -59,7 +59,8 @@ function _stattic_proxy_response_header_lines(array $originHeaders, array $platf
     foreach ($platformHeaders as [$name, $value]) {
         $lowerName = strtolower($name);
         if (
-            in_array($lowerName, STATTIC_RELAY_STRIPPED_RESPONSE_HEADERS, true)
+            isset(SPACEFAST_SPACE_CONTROLLED_HEADERS[$lowerName])
+            || in_array($lowerName, STATTIC_RELAY_STRIPPED_RESPONSE_HEADERS, true)
             || in_array($lowerName, STATTIC_RELAY_STRIPPED_PROXY_STATE_HEADERS, true)
             || in_array($lowerName, STATTIC_PRIVATE_STRIPPED_CACHE_HEADERS, true)
         ) {

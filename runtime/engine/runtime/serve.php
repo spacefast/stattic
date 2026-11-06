@@ -1700,7 +1700,9 @@ function _stattic_v4_entry_headers(array $context, array $entry): array
 {
     $headers = [];
     foreach (is_array($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_HEADERS] ?? null) ? $entry[STATTIC_RUNTIME_RESPONSE_ENTRY_HEADERS] : [] as $name => $value) {
-        if (is_string($name) && is_scalar($value)) {
+        // Retained artifacts keep serving; discard browser state controls that
+        // an older compiler admitted before applying the current rule policy.
+        if (is_string($name) && is_scalar($value) && !isset(SPACEFAST_SPACE_CONTROLLED_HEADERS[strtolower(trim($name))])) {
             $headers[strtolower($name)] = (string) $value;
         }
     }

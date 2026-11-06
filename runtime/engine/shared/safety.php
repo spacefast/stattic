@@ -60,6 +60,7 @@ const SPACEFAST_PLATFORM_MANAGED_HEADERS = [
     'x-nc' => true,
     'x-sc' => true,
     'strict-transport-security' => true,
+    'clear-site-data' => true,
 ];
 const SPACEFAST_PLATFORM_MANAGED_HEADER_PREFIXES = ['x-spacefast-', 'x-stattic-', 'a8c-', 'x-nananana', 'x-hacker', 'host-header'];
 
@@ -79,6 +80,12 @@ const SPACEFAST_INTERNAL_REDIRECT_HEADERS = [
     'x-lighttpd-sendfile2' => true,
     'x-reproxy-url' => true,
     'x-sendfile' => true,
+];
+
+// Browser state controls are forbidden only at Space-authored response boundaries.
+// Platform-owned recovery/logout responses may still emit them.
+const SPACEFAST_SPACE_CONTROLLED_HEADERS = [
+    'clear-site-data' => true,
 ];
 
 // Akismet's recognised content types, as sf_spam() validates a submission

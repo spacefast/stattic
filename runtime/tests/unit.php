@@ -1587,12 +1587,13 @@ check(in_array(['ETag', '"abc123"'], $protectedLines, true), 'proxy relay: prote
 $platformOverride = _stattic_proxy_response_header_lines(
     [['Cache-Control', 'public, max-age=600'], ['X-Origin', 'up']],
     ['cache-control' => true, 'x-origin' => true],
-    [['Cache-Control', 'no-cache']],
+    [['Cache-Control', 'no-cache'], ['cLeAr-SiTe-DaTa', '"cookies"']],
     _stattic_proxy_response_cache_policy(false, 200, [], false)
 );
 check(in_array(['Cache-Control', STATTIC_PROXY_EDGE_CACHE_POLICY], $platformOverride, true), 'proxy cache: classifier policy wins over platform and origin cache metadata');
 check(!in_array(['Cache-Control', 'public, max-age=600'], $platformOverride, true), 'proxy relay: platform-overridden origin Cache-Control is suppressed');
 check(!in_array(['X-Origin', 'up'], $platformOverride, true), 'proxy relay: platform-suppressed origin headers stay suppressed');
+check(count(array_filter($platformOverride, static fn (array $line): bool => strtolower($line[0]) === 'clear-site-data')) === 0, 'proxy relay: retained configured headers cannot clear browser state');
 check(count(array_filter($platformOverride, static fn (array $line): bool => strtolower($line[0]) === 'cache-control')) === 1, 'proxy relay: platform override emits exactly one Cache-Control');
 
 foreach ([
@@ -2416,6 +2417,7 @@ $fxRelayed = _stattic_relay_response_header_lines([
     ['content-type', 'text/html'],
     ['cache-control', 'public, s-maxage=30'],
     ['x-custom', 'value'],
+    ['cLeAr-SiTe-DaTa', '"cookies"'],
 ], $fxPublicPolicy, _stattic_functions_relay_response_lane());
 $fxRelayedNames = array_map(static fn (array $line): string => strtolower($line[0]), $fxRelayed);
 foreach ([
@@ -2433,6 +2435,7 @@ foreach ([
     'x-accel-redirect',
     'x-sendfile',
     'surrogate-control',
+    'clear-site-data',
 ] as $stripped) {
     check(!in_array($stripped, $fxRelayedNames, true), 'dispatch: strips response header ' . $stripped);
 }

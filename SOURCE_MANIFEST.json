@@ -1,7 +1,7 @@
 {
-  "revision": "95fd85fbd0964875438e33db2d3dddf4fa77c3bc",
-  "sourceHash": "bae7af1ed65d3c55eacd548d704a95071b662993fc80921a842630c5b426b2ca",
-  "manifestSha256": "39e64bbe6a853e5b037a751d417a48016a57eda26b905fd871764dc849750475",
+  "revision": "ce01a70b432a610928438822f32a5e24813ae85b",
+  "sourceHash": "fa5940480e1636668a55db09b5f4828a565928eb80dc35d0f36d7470defa177a",
+  "manifestSha256": "26546f97b2e9116ed817af74ac420fa902406c507229e050076c256e39e5e6a6",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "54f7d539e29bbb40b47fba97749e3e0d7e314b2a8a594d45d7f1b99c324165a4"
+      "sha256": "0066a1d67f8f8a976f64610112e7d947942144796b9dc0bba8cbcd9b2d86ddd0"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "47e181a0dfaca9a42c8e0974f21d1a7e49a672b08414f0b14986d6a3c287b717"
+      "sha256": "6a535f6c950aaa06377c29018ec42c79f3b11a3516a5e41e358253fc5df2a7ef"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -181,7 +181,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/routing/mod.rs",
-      "sha256": "cd1a45caef44387682471fb1a0b9cd1679bef1bc0e94a2de2338a0b544893e76"
+      "sha256": "f881470738075629a10b802117d04ea3e919d086fe263e95fb99bd9744f09207"
     },
     {
       "path": "crates/stattic-runtime-core/src/routing/placement.rs",
@@ -265,7 +265,7 @@
     },
     {
       "path": "crates/stattic-runtime-policy/src/lib.rs",
-      "sha256": "dee8bd948cefd42e5c3b0e1aec8a56375dcd64837e3d0cdd206eec94a0278a95"
+      "sha256": "0ea1b8b0cfb3dc58bda35c516a08f1490ae013c9f9be92aae676eecf77b788c3"
     },
     {
       "path": "crates/stattic-runtime-wasi/Cargo.toml",
@@ -341,7 +341,7 @@
     },
     {
       "path": "crates/stattic-zero-runner/src/response_headers.rs",
-      "sha256": "a18418387bc4a595efde5a29efdf16f8315cea83469be2384999d1ccd421996a"
+      "sha256": "5f4ec20fe352250c0c35f571d10764ca64874fadd90801c3c9ae391cf02cfd57"
     },
     {
       "path": "crates/stattic-zero-runner/src/services.rs",
@@ -577,7 +577,7 @@
     },
     {
       "path": "runtime/engine/runtime/proxy.php",
-      "sha256": "932916c1fb6ca97a9ed313c6a2c8cdb116f6409dcc64b0fc7cafbc5e22adb7d9"
+      "sha256": "8367aee54a2fa010c0ba3958b4e02f7fe4d859d5675ff269097749b8d1dde479"
     },
     {
       "path": "runtime/engine/runtime/redirects.php",
@@ -597,7 +597,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "9fcbb5295ed2d650c7505686c67ef3fad86da15a7f1b684087f1c6a2e8c3e9d7"
+      "sha256": "04268fbd2483d3cd83e94bd72ad2ea2aa168cbb321d8930bb305ad8336b46175"
     },
     {
       "path": "runtime/engine/runtime/space-mail.php",
@@ -789,7 +789,7 @@
     },
     {
       "path": "runtime/engine/shared/safety.php",
-      "sha256": "50c7dafee014878dcd8730f8492eb7bce44ee7f2b94c3dd85f6dd59e2af286e3"
+      "sha256": "f3b84b4daf0c1102bafab24e7fdd6656f0002861b636245862dc2ed033d4736c"
     },
     {
       "path": "runtime/engine/shared/security-telemetry.php",
@@ -817,7 +817,7 @@
     },
     {
       "path": "runtime/engine/shared/upstream-relay.php",
-      "sha256": "7e87fb9582746d5c8282756b40171dd3ba1e0dd5f35e2ad7b935c2ca4501641d"
+      "sha256": "918ce3472b92fa3be967fa0a09b029cc43fa1fb350bc3d511251c776a0ea2c06"
     },
     {
       "path": "runtime/engine/wordpress/components.json",
@@ -1217,7 +1217,7 @@
     },
     {
       "path": "runtime/tests/headers.test.ts",
-      "sha256": "e1f1586c3c87df3fefbc9fbf3f32232955f080aa22c37bf859d9c6223335275a"
+      "sha256": "8bdf3acd803a62d76230bd9b9232cd49c19e8179d6bd2794182b8e3e2e77ac4e"
     },
     {
       "path": "runtime/tests/html-inject.test.ts",
@@ -1357,7 +1357,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "febd8cdbd1141e6b369918ac68608ba20f8d6a9f3e21949d6c58520600887196"
+      "sha256": "0271bcbd4dbe0219293ab4551e09f8c5ac269f926ea002e05a9431f2cd2f1b4c"
     },
     {
       "path": "runtime/tests/uploads.test.ts",
@@ -1397,7 +1397,7 @@
     },
     {
       "path": "runtime/tests/zero-runtime.test.ts",
-      "sha256": "11d476f444c2428d237f4546f0845e7d0f851f49dec83c4dcef65fd2354814f6"
+      "sha256": "b0fd8ed547abd5a2c98e5e6b93a34c6fe0b793fe50dc339a8486fee9c47c8b67"
     },
     {
       "path": "runtime/tests/zero-rust-runner.test.ts",

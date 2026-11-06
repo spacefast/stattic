@@ -90,6 +90,7 @@ mod tests {
             "Upgrade",
             "Trailer",
             "Set-Cookie",
+            "cLeAr-SiTe-DaTa",
             "Location",
             "X-Spacefast-Zero-Runner-Metrics",
             "x-stattic-anything",

@@ -25,6 +25,7 @@ import {
   type Runtime,
   startRuntime,
   visitorIssuer,
+  versionRoot,
 } from "./harness.ts";
 
 let rt: Runtime;
@@ -411,8 +412,14 @@ test("the engine owns the edge-cache channel and the provider headers next to it
 // A compiled artifact is replayed into every response, so a platform-owned name
 // or a string that is not a header name at all dies at compile time. The version
 // still publishes; the rule never becomes an entry.
-test("header names the platform owns never compile into an artifact", async () => {
-  const names = ["Set-Cookie", "Strict-Transport-Security", "CDN-Cache-Control", "x-bad header"];
+test("managed header rules are rejected and retained browser state controls are dropped", async () => {
+  const names = [
+    "Set-Cookie",
+    "Clear-Site-Data",
+    "Strict-Transport-Security",
+    "CDN-Cache-Control",
+    "x-bad header",
+  ];
   const spaceId = "spc_headers_rejected_names";
   const versionId = "ver_headers_rejected_names_1";
   await deploy(rt, {
@@ -444,9 +451,45 @@ test("header names the platform owns never compile into an artifact", async () =
   // header name, so it cannot be looked up.
   const served = await get(rt, REJECTED_NAMES_HOST, "/");
   expect(served.status).toBe(200);
-  for (const name of ["Set-Cookie", "Strict-Transport-Security", "CDN-Cache-Control"]) {
+  for (const name of [
+    "Set-Cookie",
+    "Clear-Site-Data",
+    "Strict-Transport-Security",
+    "CDN-Cache-Control",
+  ]) {
     expect(served.headers.get(name), name).toBeNull();
   }
+
+  // A version published by an older compiler still serves its body. Replace
+  // immutable artifacts through their pointers, as a real publish does.
+  const retained = Bun.spawnSync([
+    PHP_BINARY,
+    "-r",
+    [
+      "require $argv[1];",
+      "$dir = $argv[2];",
+      "$pointer = json_decode(file_get_contents($dir . '/root.json'), true, 512, JSON_THROW_ON_ERROR);",
+      "$root = include $dir . '/' . $pointer['root'];",
+      "foreach ($root['tables'] as $shard => $file) {",
+      "  $table = include $dir . '/' . $file;",
+      "  if (!isset($table['/'])) { continue; }",
+      "  $table['/'][$argv[3]]['cLeAr-SiTe-DaTa'] = '\"cookies\"';",
+      "  $table['/'][$argv[3]]['x-retained-artifact'] = 'yes';",
+      "  $root['tables'][$shard] = _sf_php_artifact_write($dir, 'responses', _sf_php_artifact_source($table));",
+      "}",
+      "$pointer['root'] = _sf_php_artifact_write($dir, 'root', _sf_php_artifact_source($root));",
+      "_sf_json_write($dir . '/root.json', $pointer);",
+    ].join("\n"),
+    `${rt.engineRoot}/shared/pointers.php`,
+    versionRoot(rt, spaceId, versionId),
+    RESPONSES.entryKeys.headers,
+  ]);
+  expect(retained.exitCode, retained.stderr.toString()).toBe(0);
+  const legacy = await get(rt, REJECTED_NAMES_HOST, "/");
+  expect(legacy.status).toBe(200);
+  expect(legacy.headers.get("x-retained-artifact")).toBe("yes");
+  expect(legacy.headers.get("clear-site-data")).toBeNull();
+  expect(await legacy.text()).toBe("<h1>bad</h1>\n");
 });
 
 // Removals cover the publisher's own metadata but stop at the platform boundary:

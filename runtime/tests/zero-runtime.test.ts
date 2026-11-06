@@ -136,6 +136,7 @@ if (($envelope['endpointId'] ?? null) === 'GET /api/spoofed-headers') {
     $headers['X-Spacefast-Zero-Runner-Metrics'] = 'spoofed';
     $headers['x-stattic-internal'] = 'spoofed';
     $headers['Set-Cookie'] = 'evil=1';
+    $headers['cLeAr-SiTe-DaTa'] = '"cookies"';
     $headers['Location'] = '/pwned';
     // ...and the provider-owned edge channel (contracts §16): steering
     // A8C-Edge-Cache would put a per-visitor Zero response in the shared edge.
@@ -1771,6 +1772,7 @@ test("platform-managed headers from the runner never reach the client", async ()
   expect(response.headers.get("x-spacefast-zero-runner-metrics")).toBeNull();
   expect(response.headers.get("x-stattic-internal")).toBeNull();
   expect(response.headers.get("set-cookie")).toBeNull();
+  expect(response.headers.get("clear-site-data")).toBeNull();
   expect(response.headers.get("location")).toBeNull();
   const redirected = await get(rt, host, "/api/spoofed-headers?redirect=1", { redirect: "manual" });
   expect(redirected.status).toBe(303);

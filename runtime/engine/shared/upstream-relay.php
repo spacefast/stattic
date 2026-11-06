@@ -465,7 +465,8 @@ function _stattic_relay_multipart_quote(string $value): string
 
 /**
  * What an untrusted upstream may put on the space's hostname. Everything not
- * named below relays verbatim, EXCEPT the internal-redirect/sendfile family:
+ * named below relays verbatim, EXCEPT browser state controls and the
+ * internal-redirect/sendfile family:
  * under nginx X-Accel-Redirect/X-Sendfile would make the server serve an
  * arbitrary internal path (every space's private version tree) and
  * X-Accel-Limit-Rate pins the worker.
@@ -504,6 +505,7 @@ function _stattic_relay_response_header_lines(array $upstreamHeaders, array $cac
         if (
             in_array($lowerName, $deny, true)
             || isset(SPACEFAST_INTERNAL_REDIRECT_HEADERS[$lowerName])
+            || isset(SPACEFAST_SPACE_CONTROLLED_HEADERS[$lowerName])
             || isset($suppress[$lowerName])
             || _stattic_relay_header_prefixed($lowerName, $denyPrefixes)
         ) {

@@ -182,6 +182,30 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
     }
 
     let mut issues = Vec::new();
+    // Earlier CLIs saved their SPA guess into Space settings. A saved path
+    // this version does not ship is stale, not a decision: drop it, say so,
+    // and let inference decide. A fallback in `sf.jsonc` stays binding.
+    let file_declares_fallback = input
+        .file_config
+        .as_ref()
+        .is_some_and(|file| file.contains_key("fallback"));
+    let stale_settings_fallback = (!file_declares_fallback)
+        .then(|| normalize_fallback(config.get("fallback")))
+        .flatten()
+        .and_then(|value| value.get("path").and_then(Value::as_str).map(str::to_owned))
+        .filter(|path| !manifest.contains(path));
+    if let Some(path) = stale_settings_fallback {
+        issues.push(EffectiveIssue {
+            severity: "warning",
+            code: "settings_fallback_ignored",
+            message: format!(
+                "The Space's saved fallback /{path} is not in this version, so it was ignored. Set \"fallback\" in sf.jsonc to choose one."
+            ),
+            path: "fallback",
+            details: Some(json!({ "path": path })),
+        });
+        config.remove("fallback");
+    }
     // `"fallback": false` is the opt-out from SPA inference; any declared
     // value, `false` included, means the publisher decided.
     let inferred_fallback = (!config.contains_key("fallback")
@@ -1074,6 +1098,35 @@ mod tests {
             explicit.serving["fallback"],
             json!({ "path": "about.html", "status": 200 })
         );
+        // A saved settings fallback this version does not ship is stale: it
+        // warns and inference decides. The same path in sf.jsonc still fails.
+        let with_overlay = |file_config: Option<Value>| {
+            resolve_effective_config(ResolveEffectiveInput {
+                manifest_paths: vite.iter().map(|path| (*path).to_string()).collect(),
+                file_config: file_config.and_then(|value| value.as_object().cloned()),
+                overlay: json!({ "fallback": "/_shell.html" }).as_object().cloned(),
+                template_entries: Vec::new(),
+                has_worker: false,
+            })
+        };
+        let stale = with_overlay(None);
+        let codes = |output: &ResolveEffectiveOutput| {
+            output
+                .issues
+                .iter()
+                .map(|issue| (issue.severity, issue.code))
+                .collect::<Vec<_>>()
+        };
+        assert!(codes(&stale).contains(&("warning", "settings_fallback_ignored")));
+        assert!(!codes(&stale)
+            .iter()
+            .any(|(severity, _)| *severity == "error"));
+        assert_eq!(
+            stale.serving["fallback"],
+            json!({ "path": "index.html", "status": 200 })
+        );
+        let declared = resolve(&vite, Some(json!({ "fallback": "/_shell.html" })), false);
+        assert!(codes(&declared).contains(&("error", "config_invalid")));
     }
 
     /// Two root HTML files and no `index.html` leave no inferable homepage, so

@@ -455,8 +455,13 @@ fn validate_crons_config(
             Some((index, field)) => format!("crons.{index}.{field}"),
             None => "crons".to_string(),
         };
+        let severity = if issue.is_error() {
+            DiagnosticSeverity::Error
+        } else {
+            DiagnosticSeverity::Warning
+        };
         diagnostics.push(diagnostic(
-            DiagnosticSeverity::Error,
+            severity,
             issue.code(),
             issue.message(),
             Some(path),

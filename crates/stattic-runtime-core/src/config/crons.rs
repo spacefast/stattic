@@ -16,7 +16,11 @@ use crate::protocol::{CONFIG_CRON_LIMIT, CONFIG_CRON_PATH_MAX_CHARS};
 pub struct CronEntry {
     pub key: String,
     pub path: String,
+    /// What the author wrote.
     pub schedule: String,
+    /// What the provider runs: `schedule` itself, or the closest basic
+    /// cadence for a crontab.
+    pub basic_schedule: String,
 }
 
 /// Why a declaration was rejected. One variant per published issue code; the
@@ -38,6 +42,12 @@ pub enum CronIssue {
         index: usize,
         message: String,
     },
+    /// A five-field crontab, kept as written and run at its closest basic
+    /// cadence. A warning: the publish goes ahead.
+    ScheduleConverted {
+        index: usize,
+        message: String,
+    },
 }
 
 impl CronIssue {
@@ -49,6 +59,7 @@ impl CronIssue {
             Self::InvalidPath { .. } => "config_cron_invalid_path",
             Self::InvalidSchedule { .. } => "config_cron_invalid_schedule",
             Self::DuplicatePath { .. } => "config_cron_duplicate_path",
+            Self::ScheduleConverted { .. } => "config_cron_schedule_converted",
         }
     }
 
@@ -61,7 +72,8 @@ impl CronIssue {
             }
             Self::InvalidPath { message, .. }
             | Self::InvalidSchedule { message, .. }
-            | Self::DuplicatePath { message, .. } => message.clone(),
+            | Self::DuplicatePath { message, .. }
+            | Self::ScheduleConverted { message, .. } => message.clone(),
         }
     }
 
@@ -74,8 +86,16 @@ impl CronIssue {
             Self::InvalidPath { index, .. } | Self::DuplicatePath { index, .. } => {
                 Some((*index, "path"))
             }
-            Self::InvalidSchedule { index, .. } => Some((*index, "schedule")),
+            Self::InvalidSchedule { index, .. } | Self::ScheduleConverted { index, .. } => {
+                Some((*index, "schedule"))
+            }
         }
+    }
+
+    /// Only a converted crontab lets the publish continue.
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        !matches!(self, Self::ScheduleConverted { .. })
     }
 }
 
@@ -99,7 +119,7 @@ pub fn json_schema() -> Value {
                 },
                 "schedule": {
                     "type": "string",
-                    "description": "hourly, daily, twicedaily, weekly, or an Nh/Nd/Nw interval. Crontab expressions are not supported."
+                    "description": "hourly, daily, twicedaily, weekly, or an Nh/Nd/Nw count (N times per hour, day or week). A five-field crontab runs at its closest basic cadence, with a warning."
                 }
             },
             "required": ["path", "schedule"],
@@ -134,13 +154,21 @@ pub fn validate(value: &Value) -> (Vec<CronEntry>, Vec<CronIssue>) {
                 continue;
             }
         };
-        let schedule = match cron_schedule(entry) {
-            Ok(schedule) => schedule,
+        let (schedule, basic_schedule) = match cron_schedule(entry) {
+            Ok(pair) => pair,
             Err(message) => {
                 issues.push(CronIssue::InvalidSchedule { index, message });
                 continue;
             }
         };
+        if schedule != basic_schedule {
+            issues.push(CronIssue::ScheduleConverted {
+                index,
+                message: format!(
+                    "{path} runs {basic_schedule}: Spacefast runs the crontab {schedule} at its closest basic schedule, at times the provider picks."
+                ),
+            });
+        }
         let key = cron_key(&path);
         if let Some(previous) = accepted
             .iter()
@@ -164,6 +192,7 @@ pub fn validate(value: &Value) -> (Vec<CronEntry>, Vec<CronIssue>) {
             key,
             path,
             schedule,
+            basic_schedule,
         });
     }
     (accepted, issues)
@@ -208,16 +237,20 @@ fn cron_path(entry: &Map<String, Value>) -> Result<String, String> {
     Ok(path.to_string())
 }
 
-fn cron_schedule(entry: &Map<String, Value>) -> Result<String, String> {
+/// The schedule as written, and the basic schedule the provider runs.
+fn cron_schedule(entry: &Map<String, Value>) -> Result<(String, String), String> {
     let Some(schedule) = entry.get("schedule").and_then(Value::as_str) else {
         return Err("crons entries require a schedule string.".into());
     };
-    if !schedule_is_valid(schedule) {
-        return Err(format!(
-            "The crons schedule {schedule} must be hourly, daily, twicedaily, weekly, or an Nh/Nd/Nw interval. Crontab expressions are not supported."
-        ));
+    if schedule_is_valid(schedule) {
+        return Ok((schedule.to_string(), schedule.to_string()));
     }
-    Ok(schedule.to_string())
+    if let Some(basic) = crontab_basic_schedule(schedule) {
+        return Ok((schedule.to_string(), basic));
+    }
+    Err(format!(
+        "The crons schedule {schedule} must be hourly, daily, twicedaily, weekly, an Nh/Nd/Nw count, or a numeric five-field crontab."
+    ))
 }
 
 /// The artifact key for a path: lowercase, leading `/` stripped, every run of
@@ -236,10 +269,11 @@ pub fn cron_key(path: &str) -> String {
 }
 
 /// The provider's basic schedule grammar: named intervals or `Nh`/`Nd`/`Nw`
-/// shorthand. Five-field crontab expressions are not accepted: they need the
-/// provider's advanced cron, which the platform does not use, because a
+/// counts (N runs per hour, day or week). The provider runs a five-field
+/// crontab only with its advanced cron, which the platform does not use: a
 /// per-minute expression multiplied across a fleet floods the provider's job
-/// queue. The TypeScript config schema holds the same grammar.
+/// queue. `crontab_basic_schedule` maps a crontab onto this grammar instead.
+/// The TypeScript config schema holds the same grammar.
 #[must_use]
 pub fn schedule_is_valid(schedule: &str) -> bool {
     if matches!(schedule, "hourly" | "daily" | "twicedaily" | "weekly") {
@@ -262,6 +296,107 @@ pub fn schedule_is_valid(schedule: &str) -> bool {
             .is_ok_and(|count| (1..=limit).contains(&count))
 }
 
+/// The closest basic schedule for a numeric five-field crontab, or `None` when
+/// the expression is not one. Keeps the cadence, never more often than the
+/// basic grammar allows (12 runs an hour); the provider picks the times.
+#[must_use]
+pub fn crontab_basic_schedule(schedule: &str) -> Option<String> {
+    if schedule.len() > 256
+        || !schedule
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || b"*,/- ".contains(&byte))
+    {
+        return None;
+    }
+    let fields: Vec<&str> = schedule.split(' ').collect();
+    let [minute, hour, day_of_month, month, day_of_week] = fields.as_slice() else {
+        return None;
+    };
+    let minutes = crontab_field_values(minute, 0, 59)?.len();
+    let hours = crontab_field_values(hour, 0, 23)?.len();
+    let dates = crontab_field_values(day_of_month, 1, 31)?.len();
+    let months = crontab_field_values(month, 1, 12)?.len();
+    // Sunday is both 0 and 7.
+    let weekdays = crontab_field_values(day_of_week, 0, 7)?
+        .into_iter()
+        .map(|day| day % 7)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let basic = if hours == 24 {
+        if minutes == 1 {
+            "hourly".to_string()
+        } else {
+            format!("{}h", minutes.min(12))
+        }
+    } else if dates < 31 || months < 12 {
+        // Monthly and yearly cadences have no basic form; weekly is closest.
+        "weekly".to_string()
+    } else {
+        let per_day = hours * minutes;
+        if weekdays < 7 && per_day == 1 {
+            if weekdays == 1 {
+                "weekly".to_string()
+            } else {
+                format!("{weekdays}w")
+            }
+        } else {
+            match per_day {
+                1 => "daily".to_string(),
+                2 => "twicedaily".to_string(),
+                count => format!("{}d", count.min(23)),
+            }
+        }
+    };
+    Some(basic)
+}
+
+/// The values a crontab field selects, or `None` when it is malformed.
+fn crontab_field_values(
+    field: &str,
+    min: u32,
+    max: u32,
+) -> Option<std::collections::BTreeSet<u32>> {
+    let mut selected = std::collections::BTreeSet::new();
+    for part in field.split(',') {
+        let mut stepped = part.split('/');
+        let base = stepped.next()?;
+        let step = match stepped.next() {
+            Some(step) => parse_field_number(step).filter(|step| *step >= 1)?,
+            None => 1,
+        };
+        if stepped.next().is_some() {
+            return None;
+        }
+        let (start, end) = if base == "*" {
+            (min, max)
+        } else {
+            let mut range = base.split('-');
+            let start = parse_field_number(range.next()?)?;
+            let end = match range.next() {
+                Some(end) => parse_field_number(end)?,
+                None if part.contains('/') => max,
+                None => start,
+            };
+            if range.next().is_some() {
+                return None;
+            }
+            (start, end)
+        };
+        if start < min || end > max || start > end {
+            return None;
+        }
+        selected.extend((start..=end).step_by(usize::try_from(step).ok()?));
+    }
+    (!selected.is_empty()).then_some(selected)
+}
+
+fn parse_field_number(text: &str) -> Option<u32> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 /// The generated runtime file, or `None` when the version declares no crons.
 #[must_use]
 pub fn artifact(entries: &[CronEntry]) -> Option<Value> {
@@ -275,7 +410,7 @@ pub fn artifact(entries: &[CronEntry]) -> Option<Value> {
             .map(|entry| json!({
                 "key": entry.key,
                 "path": entry.path,
-                "schedule": entry.schedule,
+                "schedule": entry.basic_schedule,
             }))
             .collect::<Vec<_>>(),
     }))
@@ -317,13 +452,62 @@ mod tests {
             "hourly ",
             "@daily",
             "nightly",
-            // Crontab expressions of any cadence need the provider's advanced cron.
-            "* * * * *",
+            // Crontabs are not basic; validate maps them instead.
             "*/5 * * * *",
-            "0 7 * * *",
         ] {
             assert!(!schedule_is_valid(schedule), "{schedule} must be rejected");
         }
+    }
+
+    #[test]
+    fn crontabs_run_at_their_closest_basic_schedule() {
+        for (crontab, basic) in [
+            ("0 * * * *", "hourly"),
+            ("17 * * * *", "hourly"),
+            ("*/5 * * * *", "12h"),
+            ("* * * * *", "12h"),
+            ("*/15 * * * *", "4h"),
+            ("*/30 * * * *", "2h"),
+            ("3,33 * * * *", "2h"),
+            ("0 7 * * *", "daily"),
+            ("0 1,13 * * *", "twicedaily"),
+            ("0 */3 * * *", "8d"),
+            ("*/10 17-23 * * 2,3", "23d"),
+            ("0 11 * * 1-5", "5w"),
+            ("30 14 * * 4", "weekly"),
+            ("0 9 * * 0,7", "weekly"),
+            ("0 0 1 * *", "weekly"),
+        ] {
+            assert_eq!(
+                crontab_basic_schedule(crontab).as_deref(),
+                Some(basic),
+                "{crontab}"
+            );
+        }
+        for malformed in [
+            "60 * * * *",
+            "0 24 * * *",
+            "*/0 * * * *",
+            "5-2 * * * *",
+            "0 * * *",
+            "0 7 * * MON",
+            "0  7 * * *",
+        ] {
+            assert_eq!(crontab_basic_schedule(malformed), None, "{malformed}");
+        }
+
+        let (entries, issues) =
+            validate(&json!([{ "path": "/api/tick", "schedule": "*/5 * * * *" }]));
+        assert_eq!(
+            issues.iter().map(CronIssue::code).collect::<Vec<_>>(),
+            ["config_cron_schedule_converted"]
+        );
+        assert!(!issues[0].is_error());
+        assert_eq!(entries[0].schedule, "*/5 * * * *");
+        assert_eq!(
+            artifact(&entries).and_then(|value| value.pointer("/crons/0/schedule").cloned()),
+            Some(json!("12h"))
+        );
     }
 
     #[test]

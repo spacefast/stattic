@@ -1522,14 +1522,11 @@ fn validate_crons(
             Some((index, field)) => format!("$.crons[{index}].{field}"),
             None => "$.crons".to_string(),
         };
-        push_issue(
-            issues,
-            locations,
-            issue.code(),
-            &path,
-            &issue.message(),
-            None,
-        );
+        let mut made = make_issue(locations, issue.code(), &path, &issue.message(), None);
+        if !issue.is_error() {
+            made.severity = "warning";
+        }
+        issues.push(made);
     }
 }
 

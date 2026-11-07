@@ -2032,7 +2032,7 @@ fn write_crons_artifact(
         return Ok(());
     };
     let (entries, issues) = crons::validate(declared);
-    if let Some(issue) = issues.first() {
+    if let Some(issue) = issues.iter().find(|issue| issue.is_error()) {
         return invalid(issue.code(), format!("{config_path}: {}", issue.message()));
     }
     let Some(artifact) = crons::artifact(&entries) else {

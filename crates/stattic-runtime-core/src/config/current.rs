@@ -109,7 +109,8 @@ pub fn parse_config(
         return None;
     };
 
-    let keys = object.keys().cloned().collect::<Vec<_>>();
+    let mut keys = object.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
     for key in keys {
         if KNOWN_CONFIG_KEYS.contains(&key.as_str()) {
             continue;
@@ -525,33 +526,7 @@ fn validate_runtime_config(
     };
 
     if kind == "zero" {
-        retain_runtime_keys(runtime, &["kind", "server", "client"], diagnostics);
-        // Zero is never inferred: the server remains explicit. Server-only
-        // capsules use the compiler's platform client when the default is absent.
-        if !runtime.contains_key("client") {
-            runtime.insert("client".into(), Value::String("client/index.tsx".into()));
-        }
-        for key in ["server", "client"] {
-            let trimmed = runtime
-                .get(key)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|entry| !entry.is_empty())
-                .map(str::to_owned);
-            match trimmed {
-                Some(entry) => {
-                    runtime.insert(key.into(), Value::String(entry));
-                }
-                None => diagnostics.push(diagnostic(
-                    DiagnosticSeverity::Error,
-                    "config_runtime_entry_missing",
-                    format!(
-                        "runtime.{key} is required and must name a module when runtime.kind is \"zero\"."
-                    ),
-                    Some(format!("runtime.{key}")),
-                )),
-            }
-        }
+        crate::legacy_zero::normalize_runtime(runtime, diagnostics);
         return;
     }
 
@@ -1213,16 +1188,7 @@ pub fn public_json_schema() -> Value {
     // teach `sf.jsonc#runtime`, so editors and agents get it too.
     let runtime = json!({
         "oneOf": [
-            {
-                "type": "object",
-                "required": ["kind", "server"],
-                "properties": {
-                    "kind": { "const": "zero" },
-                    "server": { "type": "string", "minLength": 1 },
-                    "client": { "type": "string", "minLength": 1, "default": "client/index.tsx" }
-                },
-                "additionalProperties": false
-            },
+            crate::legacy_zero::runtime_schema(),
             {
                 "type": "object",
                 "required": ["kind"],
@@ -1410,16 +1376,17 @@ export type SpaceConfigFile = SpaceConfig & {
 /// Strips everything a runtime kind does not declare, warning per key the way
 /// top-level unknown keys warn: a `database` or `fetch` left over from when
 /// capabilities were config would otherwise vanish without a word.
-fn retain_runtime_keys(
+pub(crate) fn retain_runtime_keys(
     runtime: &mut Map<String, Value>,
     known: &[&str],
     diagnostics: &mut Vec<PrepareDiagnostic>,
 ) {
-    let unknown: Vec<String> = runtime
+    let mut unknown: Vec<String> = runtime
         .keys()
         .filter(|key| !known.contains(&key.as_str()))
         .cloned()
         .collect();
+    unknown.sort();
     for key in unknown {
         diagnostics.push(diagnostic(
             DiagnosticSeverity::Warning,

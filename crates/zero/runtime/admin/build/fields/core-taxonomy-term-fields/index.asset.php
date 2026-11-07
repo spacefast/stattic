@@ -1,0 +1,1 @@
+<?php return array('name' => 'core-taxonomy-term-fields', 'dependencies' => array('react', 'react-dom', 'wp-compose', 'wp-dom', 'wp-element', 'wp-html-entities', 'wp-i18n', 'wp-primitives', 'wp-private-apis', 'wp-theme', 'wp-warning'), 'moduleDependencies' => array('@wordpress/a11y', '@zero-admin/theme'), 'version' => '15d6b9f59f050ad8192f');

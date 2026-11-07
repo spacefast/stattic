@@ -1,0 +1,32 @@
+{
+	"name": "@zero-admin/term-edit",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/types/$type/taxonomies/$taxonomy/edit/$termId",
+		"beforeLoad": true,
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "term_details"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/core-data-next": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/fields-next": "workspace:*",
+		"@zero-admin/views": "workspace:*",
+		"@wordpress/route": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/element": "catalog:",
+		"@wordpress/html-entities": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/notices": "catalog:",
+		"@zero-admin/telemetry": "workspace:*"
+	}
+}

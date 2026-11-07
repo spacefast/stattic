@@ -1,0 +1,13 @@
+{
+	"name": "@zero-admin/post-edit",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/types/$type/edit/$id",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "post_details"
+			}
+		}
+	}
+}

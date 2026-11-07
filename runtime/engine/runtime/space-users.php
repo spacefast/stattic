@@ -47,7 +47,7 @@ function _stattic_space_users_prepare(
         return false;
     }
     require_once __DIR__ . '/content-page.php';
-    require_once __DIR__ . '/zero.php';
+    require_once __DIR__ . '/identity-context.php';
     $spaceId = (string) ($serving['space_id'] ?? '');
     $wpLoad = dirname(dirname($privateRoot)) . '/wp-load.php';
     if ($spaceId === '' || !is_file($wpLoad)) {

@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/legacy-zero.php';
+
 require_once __DIR__ . '/../shared/context.php';
 require_once __DIR__ . '/../shared/canonical-json.php';
 require_once __DIR__ . '/../shared/bootstrap-config.php';
@@ -350,24 +352,26 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     }
 
     _stattic_runtime_publish_session_require_complete($session);
+    require_once __DIR__ . '/../shared/zero-v2.php';
     $functionsFinalize = is_array($body['functions'] ?? null) ? $body['functions'] : null;
     if ($functionsFinalize !== null) _stattic_runtime_apply_d1_migrations($functionsFinalize, $spaceId);
-    $finalized = _stattic_runtime_finalize_with_rust(
-        $privateRoot,
-        $spaceId,
-        $versionId,
-        $uploadId,
-        $session,
-        $body,
-    );
+    $zeroLock = _stattic_zero_v2_finalize_lock($privateRoot, $spaceId, $session);
+    try {
+        $finalized = _stattic_runtime_finalize_with_rust($privateRoot, $spaceId, $versionId, $uploadId, $session, $body);
+        try {
+            _stattic_zero_v2_write_variables($privateRoot, $spaceId, $versionId, $body['zero_v2']['variableValues'] ?? []);
+            require_once __DIR__ . '/../runtime/zero-v2-realtime.php';
+            _stattic_zero_v2_write_realtime($privateRoot, $spaceId, $versionId, $body['zero_v2']['realtime'] ?? null);
+            _stattic_zero_v2_initialize($privateRoot, $spaceId, $versionId, $body);
+        } catch (Throwable $error) {
+            _stattic_problem_response(422, 'zero_v2_initialize_failed', 'Zero could not initialize against this box WordPress platform.', ['details' => ['reason' => $error->getMessage()]]);
+        }
+    } finally {
+        if (is_resource($zeroLock)) { flock($zeroLock, LOCK_UN); fclose($zeroLock); }
+    }
     _stattic_runtime_publish_session_release($privateRoot, $spaceId, $uploadId);
     $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
-    $zeroFinalize = is_array($body['zero'] ?? null) ? $body['zero'] : null;
-    // The config artifact is the marker that turns the pattern-route lane on,
-    // so it follows the compiled Zero pack, not the caller's `zero` block.
-    if ($zeroFinalize !== null || _stattic_runtime_version_has_zero_pack($versionRoot)) {
-        _stattic_runtime_write_zero_config_artifact($versionRoot, $zeroFinalize ?? []);
-    }
+    _stattic_legacy_zero_write_version_config($versionRoot, $body);
     if ($functionsFinalize !== null) {
         _stattic_runtime_write_functions_config_artifact($versionRoot, $functionsFinalize);
     }
@@ -412,23 +416,6 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     );
 }
 
-function _stattic_runtime_apply_version_zero_migrations(string $privateRoot, string $spaceId, string $versionId): void
-{
-    $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
-    if (!is_dir($versionRoot)) {
-        _stattic_problem_response(404, 'version_not_found', 'Version not found.');
-    }
-    if (!is_file($versionRoot . '/zero/migrations.json')) {
-        _stattic_problem_response(409, 'zero_migrations_not_found', 'This version has no stored Zero migration plan.');
-    }
-    _stattic_runtime_apply_zero_migrations($versionRoot);
-    _stattic_json_response(200, [
-        'space_id' => $spaceId,
-        'version_id' => $versionId,
-        'applied' => true,
-    ]);
-}
-
 function _stattic_runtime_activation_route_name(array $activation): string
 {
     return isset($activation['route_name']) && is_string($activation['route_name'])
@@ -443,7 +430,11 @@ function _stattic_runtime_activation_route_name(array $activation): string
  */
 function _stattic_runtime_finalize_ready_response(string $privateRoot, string $spaceId, string $versionId, string $versionRoot, ?string $activationEventId = null, ?array $metadata = null, ?array $purge = null, ?array $telemetry = null): never
 {
+    require_once __DIR__ . '/../shared/zero-v2.php';
     $metadata ??= _stattic_runtime_read_json($versionRoot . '/metadata.json');
+    if (is_file($versionRoot . '/.zero-compiled/manifest.json') && !is_file($versionRoot . '/.zero-compiled/ready.json')) {
+        _stattic_problem_response(409, 'zero_v2_not_initialized', 'The Zero version has not initialized.');
+    }
     $readinessTarget = is_array($metadata) && is_array($metadata['readinessTarget'] ?? null)
         ? $metadata['readinessTarget']
         : null;
@@ -488,6 +479,8 @@ function _stattic_runtime_finalize_ready_response(string $privateRoot, string $s
         'version_id' => $versionId,
         'status' => 'ready',
         'zero_endpoint_count' => _stattic_runtime_zero_endpoint_count($versionRoot),
+        ...(_stattic_zero_v2_seed_receipt($versionRoot) ?? []),
+        ...(is_array($metadata['zeroV2']['summary'] ?? null) ? ['zero_v2_app' => $metadata['zeroV2']['summary']] : []),
         'manifest' => _stattic_runtime_catalog_manifest($catalog),
         'preview_image_path' => $previewImagePath,
         'readiness_target' => $readinessTarget,
@@ -593,12 +586,6 @@ function _stattic_runtime_finalize_idempotent_ready_response(string $privateRoot
     _stattic_runtime_finalize_ready_response($privateRoot, $spaceId, $versionId, $versionRoot, $activationEventId ?? null, $metadata, $purge ?? null);
 }
 
-function _stattic_runtime_zero_endpoint_count(string $versionRoot): int
-{
-    $index = _stattic_runtime_read_json($versionRoot . '/zero/endpoints-index.json');
-    return is_array($index) && is_array($index['endpoints'] ?? null) ? count($index['endpoints']) : 0;
-}
-
 // The whole-domain purge every space mutation owes the edge. `$hostnames` is
 // supplied when the caller already narrowed the set (a tombstone push, an
 // intent diff); otherwise it is the space's full event hostname set.
@@ -643,6 +630,7 @@ function _stattic_runtime_state_summary(string $privateRoot): array
         $tombstones = _stattic_runtime_space_routing_doc($spaceRoot, 'tombstones') ?? [];
         $spaces[] = [
             'space_id' => basename($spaceRoot),
+            'zero_worker' => _stattic_runtime_read_json($spaceRoot . '/zero-v2-worker-status.json'),
             'routes' => (object) $routes,
             'tombstone_count' => count($tombstones['hostnames'] ?? []),
             'intent_hostnames' => _stattic_runtime_route_intent_hostnames($spaceRoot, $intent),
@@ -935,20 +923,6 @@ function _stattic_runtime_ack_callback_events(string $privateRoot): void
     ]);
 }
 
-// The one authority for "this version HAS Zero" during finalize: a Space with
-// no Zero must not acquire the pattern-route lane.
-function _stattic_runtime_version_has_zero_pack(string $versionRoot): bool
-{
-    return is_file($versionRoot . '/zero/routes.php')
-        || is_file($versionRoot . '/zero/endpoints-index.json')
-        || is_file($versionRoot . '/zero/runs-index.json');
-}
-
-function _stattic_runtime_write_zero_config_artifact(string $versionRoot, array $zero): void
-{
-    _stattic_runtime_write_json_atomic($versionRoot . '/zero/config.json', _stattic_runtime_zero_config_artifact($zero));
-}
-
 // Security: this artifact names the execution host, granted capabilities, and
 // the worker's broker credential, so it lives BESIDE the version's file tree. A
 // publish reaches `files/` and nothing else, so no upload can forge it. Fields
@@ -1066,32 +1040,6 @@ function _stattic_runtime_functions_capabilities($value): array
         }
     }
     return $capabilities;
-}
-
-function _stattic_runtime_zero_config_artifact(array $zero): array
-{
-    $artifact = [
-        'runtimeKind' => 'zero',
-        'artifact' => is_array($zero['artifact'] ?? null) ? $zero['artifact'] : [],
-        'install' => is_array($zero['install'] ?? null) ? $zero['install'] : [],
-        'variables' => is_array($zero['variables'] ?? null) ? $zero['variables'] : [],
-        'variableValues' => is_array($zero['variableValues'] ?? null) ? _stattic_zero_string_map($zero['variableValues']) : [],
-        'auth' => is_array($zero['auth'] ?? null) ? $zero['auth'] : [],
-        'realtime' => is_array($zero['realtime'] ?? null) ? $zero['realtime'] : [],
-        'inspect' => is_array($zero['inspect'] ?? null) ? $zero['inspect'] : [],
-    ];
-    if (is_string($zero['connectors']['token'] ?? null) && $zero['connectors']['token'] !== '') {
-        $artifact['connectors'] = ['token' => $zero['connectors']['token']];
-    }
-    if (in_array($zero['databaseUrlSource'] ?? null, ['application', 'provider'], true)) {
-        // Only ever from the authenticated control-plane finalize request; never
-        // inferred from tenant variable contents.
-        $artifact['databaseUrlSource'] = $zero['databaseUrlSource'];
-    }
-    if (array_key_exists('migrations', $zero)) {
-        $artifact['migrations'] = $zero['migrations'];
-    }
-    return $artifact;
 }
 
 function _stattic_runtime_put_route(string $privateRoot, string $spaceId, string $routeName, array $claims): void
@@ -1212,6 +1160,10 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
     $configDigest = is_string($body['config_digest'] ?? null) && $body['config_digest'] !== ''
         ? $body['config_digest']
         : null;
+    $compiled = _stattic_version_root($privateRoot, $spaceId, $versionId) . '/.zero-compiled';
+    if (is_file($compiled . '/manifest.json') && !is_file($compiled . '/ready.json')) {
+        _stattic_problem_response(409, 'zero_v2_not_initialized', 'The Zero version has not initialized.');
+    }
     $routePath = _stattic_route_pointer_path($privateRoot, $spaceId, $routeName);
     // Snapshot every document that can change the write or its purge before
     // mutating anything. The space lock prevents a concurrent writer from
@@ -1275,6 +1227,7 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
     ) {
         // The guard above proves the receipt is present, so the event id is the
         // stored one. The durable queue independently owns any pending purge.
+        _stattic_runtime_update_route_index($privateRoot, $spaceId);
         return [
             'changed_paths' => [],
             'unchanged' => true,
@@ -1828,6 +1781,8 @@ function _stattic_runtime_route_config(mixed $raw): array
             ? $raw['visitor_jwks']
             : null;
     }
+    $config['zero_generation'] = in_array($raw['zero_generation'] ?? null, ['none', 'legacy_0_8', 'v2'], true) ? $raw['zero_generation'] : 'none';
+    $config['zero_generation_set_at'] = is_string($raw['zero_generation_set_at'] ?? null) ? $raw['zero_generation_set_at'] : null;
     if (array_key_exists('ownership_revision', $raw)) {
         $config['ownership_revision'] = is_string($raw['ownership_revision']) ? $raw['ownership_revision'] : null;
     }

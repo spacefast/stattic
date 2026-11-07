@@ -4,7 +4,6 @@
 
 use regex::Regex;
 use serde_json::{json, Map, Value};
-use stattic_zero_runner::{ZERO_ENDPOINTS_INDEX_FORMAT, ZERO_ENDPOINTS_INDEX_KIND};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,11 +32,17 @@ use crate::content::{
 use crate::csp::PlatformCspSources;
 use crate::finalize::{
     artifact_metadata, create_dir_all, file_meta, invalid, invalid_error, invalid_with_details,
-    mime_for_path, php_source, read_bounded, remove_any, sha256, validate_id,
-    validate_relative_path, write_generated, write_json, write_json_compact, write_php,
-    AdoptablePath, FileMeta, FinalizeError, Result,
+    mime_for_path, read_bounded, remove_any, sha256, validate_id, validate_relative_path,
+    write_generated, write_json, write_json_compact, write_php, AdoptablePath, FileMeta,
+    FinalizeError, Result,
 };
 use crate::hash::stable_json_sha256;
+#[cfg(test)]
+use crate::legacy_zero::compile_zero_endpoints;
+use crate::legacy_zero::{
+    compile_trunk_zero, validate_zero_artifacts, write_zero_artifacts, zero_pack_sha256,
+    zero_response_actions, zero_route_can_own_root,
+};
 use crate::model::{
     FinalizeTelemetry, PhpActionRecord, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
     SiteFinalizeInput, SiteFinalizeOutput, SITE_FINALIZE_OUTPUT_FORMAT,
@@ -57,23 +62,15 @@ use crate::protocol::{
 use crate::responses::{
     compile_response_table, publish_response_tables, ResponseCompileInput, DENY_ALL_ROBOTS,
 };
-use crate::route_inventory::{compile_route_inventory, RouteInventoryInput, ZERO_CONTROL_ROUTES};
+use crate::route_inventory::{compile_route_inventory, RouteInventoryInput};
 use crate::routing::{strip_trailing_slash, EdgeRuleSpec, OverlayRouting, PlacementReportEntry};
 use crate::storage::{
     apply_templates, blob_path, blob_root, commit_session_files, install_blob_from, put_blob,
-    write_blob_backed,
 };
 use crate::version_files::{
     apply_access_pages, apply_page_artifacts, convention_files, resolved_viewer,
     validate_artifacts, validate_embedded_page_inputs, PublishedArtifacts,
 };
-use crate::zero::{
-    compile_zero_endpoints, zero_endpoint_artifact_path, zero_pack_sha256, zero_run_artifact_path,
-    CompiledZeroEndpoints,
-};
-
-const ZERO_ROUTES_FORMAT: &str = "stattic.zero.routes.v1";
-const ZERO_RUNS_INDEX_FORMAT: &str = "stattic.zero.runs-index.v1";
 
 fn readiness_rules_for_path<'a>(
     request_path: &str,
@@ -183,12 +180,6 @@ impl<'a> ReadinessLookup<'a> {
                 .is_some_and(|methods| methods.iter().any(|method| method.as_str() == Some("HEAD")))
         })
     }
-}
-
-fn zero_route_can_own_root(zero_routes: &[PhpActionRecord]) -> bool {
-    zero_routes
-        .iter()
-        .any(|PhpActionRecord::InvokeZero { pattern, .. }| pattern == "/:splat")
 }
 
 fn readiness_clean_urls_enabled(serving_config: &Map<String, Value>) -> bool {
@@ -524,6 +515,50 @@ pub fn finalize_site(input: SiteFinalizeInput, dry_run: bool) -> Result<SiteFina
     })
 }
 
+/// Server-owned generation is independent of publisher metadata and capture mode.
+fn validate_zero_generation(
+    input: &SiteFinalizeInput,
+    files: &BTreeMap<String, FileMeta>,
+) -> Result<()> {
+    let source = files
+        .keys()
+        .any(|path| path == "zero.config.ts" || path.starts_with(".zero-source/"));
+    // `zero/` is an ordinary tenant folder; only the platform deploy manifest
+    // or a declared capsule marks a 0.8 version.
+    let legacy = input.body.get("zero").is_some_and(Value::is_object)
+        || !input.zero_endpoints.is_empty()
+        || !input.zero_runs.is_empty()
+        || files.contains_key("__spacefast/zero/deploy.json");
+    let generation = input.body.get("zero_generation").and_then(Value::as_str);
+    if source && legacy {
+        return invalid(
+            "zero_mixed_generation",
+            "A version cannot combine Zero v2 source and Zero 0.8 capsules.",
+        );
+    }
+    if legacy && generation == Some("v2") {
+        return invalid(
+            "zero_generation_locked",
+            "A Zero v2 Space cannot finalize a Zero 0.8 capsule.",
+        );
+    }
+    if source {
+        if !matches!(generation, Some("none" | "legacy_0_8" | "v2")) {
+            return invalid(
+                "zero_generation_locked",
+                "Zero source requires server-owned Space generation.",
+            );
+        }
+        if generation == Some("legacy_0_8") {
+            return invalid(
+                "zero_migration_required",
+                "This Space can't publish a zero.config.ts app yet. Moving existing Zero Spaces is coming.",
+            );
+        }
+    }
+    Ok(())
+}
+
 /// What one finalize produced, beyond the immutable version it published.
 struct FinalizePipelineResult {
     diagnostics: Vec<RuntimeDiagnostic>,
@@ -567,20 +602,54 @@ fn run_finalize_pipeline(
         )
     })?;
     telemetry.staged_files = files.len();
+    validate_zero_generation(input, files)?;
+    let zero_v2 = timed(&mut telemetry.zero_v2_compile_ms, || {
+        crate::zero_v2::compile(input, private_root, stage_root, files)
+    })?;
     let mut diagnostics = Vec::new();
     let substitution = timed(&mut telemetry.template_substitution_ms, || {
         let substitution = resolve_template_substitution(input, stage_root, &mut diagnostics)?;
+        if zero_v2.is_some()
+            && substitution
+                .template_files
+                .keys()
+                .chain(
+                    substitution
+                        .template_variants
+                        .values()
+                        .flat_map(|files| files.keys()),
+                )
+                .any(|path| path.starts_with(".zero-source/"))
+        {
+            return invalid(
+                "zero_v2_source_transformed",
+                "Zero source bundles cannot contain host template substitutions.",
+            );
+        }
         apply_templates(&substitution.template_files, stage_root, files)?;
         Ok::<_, FinalizeError>(substitution)
     })?;
     write_crons_artifact(stage_root, files, substitution.routing_config.as_ref())?;
 
     let absent = Map::new();
-    let serving = input
+    let mut serving = input
         .body
         .get("serving")
         .and_then(Value::as_object)
-        .unwrap_or(&absent);
+        .cloned()
+        .unwrap_or_default();
+    if let Some(compiled) = &zero_v2 {
+        if !compiled.private_paths.is_empty() {
+            let mut private_sources = serving
+                .get("private_sources")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            private_sources.extend(compiled.private_paths.iter().cloned().map(Value::String));
+            serving.insert("private_sources".into(), Value::Array(private_sources));
+        }
+    }
+    let serving = &serving;
     let config = serving
         .get("config")
         .and_then(Value::as_object)
@@ -687,7 +756,8 @@ fn run_finalize_pipeline(
             .keys()
             .chain(pipeline.generated.iter())
             .filter(|path| {
-                path.starts_with("_spacefast/pages/documents/")
+                path.starts_with(".zero-source/")
+                    || path.starts_with("_spacefast/pages/documents/")
                     || (pages.is_some() && path.starts_with("pages/"))
             })
             .cloned(),
@@ -1083,6 +1153,7 @@ fn run_finalize_pipeline(
             "spaceId": input.space_id,
             "finalizeInputSha256": input_hash,
             "hostingKind": "static",
+            "zeroV2": zero_v2.map(|compiled| compiled.manifest),
             "servingConfig": serving_config,
             "siteTitle": metadata.get("title").and_then(Value::as_str).unwrap_or(""),
             "viewer": {
@@ -1923,82 +1994,6 @@ fn original_objects(
     Ok(originals)
 }
 
-/// The Zero control and exact-endpoint routes, as response-table actions.
-/// A pattern route stays in `zero/routes.php`, which the miss lane consults.
-fn zero_response_actions(body: &Value, zero_routes: &[PhpActionRecord]) -> Map<String, Value> {
-    let mut actions = Map::new();
-    if body.get("zero").is_some_and(Value::is_object) {
-        for (path, method, operation) in ZERO_CONTROL_ROUTES {
-            actions.insert(
-                path.trim_start_matches('/').to_string(),
-                json!({
-                    "t": "zero",
-                    "operation": operation,
-                    "methods": zero_methods(method),
-                }),
-            );
-        }
-    }
-    for PhpActionRecord::InvokeZero {
-        pattern,
-        method,
-        execution_mode,
-        endpoint_id,
-        zero_artifact,
-        schema_hash,
-        capabilities,
-    } in zero_routes
-    {
-        if pattern.contains(':') {
-            continue;
-        }
-        let mut action = json!({
-            "endpoint": endpoint_id,
-            "artifact": zero_artifact,
-            "execution_mode": execution_mode,
-            "capabilities": capabilities,
-        });
-        if let Some(schema_hash) = schema_hash {
-            action["schema_hash"] = json!(schema_hash);
-        }
-        let route = actions
-            .entry(pattern.trim_matches('/').to_string())
-            .or_insert_with(|| json!({"t": "zero", "methods": [], "endpoints": {}}));
-        // Stored versions survive engine rollback. Older dispatchers read one
-        // handler at the top level; prefer GET regardless of compiler order.
-        if method == "GET" || route.get("endpoint").is_none() {
-            for (key, value) in action.as_object().expect("Zero handler metadata") {
-                route[key] = value.clone();
-            }
-            if schema_hash.is_none() {
-                route
-                    .as_object_mut()
-                    .expect("Zero route metadata")
-                    .remove("schema_hash");
-            }
-        }
-        route["endpoints"][method] = action;
-        let methods = route["methods"].as_array_mut().expect("Zero route methods");
-        for allowed in zero_methods(method)
-            .as_array()
-            .expect("Zero endpoint methods")
-        {
-            if !methods.contains(allowed) {
-                methods.push(allowed.clone());
-            }
-        }
-    }
-    actions
-}
-
-fn zero_methods(method: &str) -> Value {
-    if method == "GET" {
-        json!(["GET", "HEAD"])
-    } else {
-        json!([method])
-    }
-}
-
 /// The staged `sf.jsonc` this version publishes, by committed path. Reading its
 /// routing sections is the routing compiler's job, so the file goes over whole.
 fn staged_config_source(stage_root: &Path) -> Result<Option<(String, String)>> {
@@ -2053,121 +2048,6 @@ fn write_crons_artifact(
         &bytes,
         Some("application/json"),
     )
-}
-
-/// Compiles the Zero endpoints and run handlers. Error-severity diagnostics
-/// abort the finalize before anything is published; info/warning diagnostics
-/// join the shared stream.
-fn compile_trunk_zero(
-    input: &SiteFinalizeInput,
-    artifact_meta: &Map<String, Value>,
-    diagnostics: &mut Vec<Value>,
-) -> Result<CompiledZeroEndpoints> {
-    let mut zero_diagnostics = Vec::new();
-    let metadata = Value::Object(artifact_meta.clone());
-    let compiled = compile_zero_endpoints(
-        Some(&metadata),
-        &input.zero_endpoints,
-        &input.zero_runs,
-        &mut zero_diagnostics,
-    );
-    if let Some(error) = zero_diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic.severity == RuntimeDiagnosticSeverity::Error)
-    {
-        if error.code == "zero_migrations_too_many" {
-            return Err(FinalizeError::Invalid {
-                code: "zero_migrations_too_many",
-                message: error.message.clone(),
-                details: error.details.clone().map(Value::Object),
-            });
-        }
-        let code = match error.code.as_str() {
-            "zero_endpoint_duplicate" => "zero_endpoint_duplicate",
-            _ => "zero_endpoint_compile_failed",
-        };
-        return invalid(code, format!("{}: {}", error.code, error.message));
-    }
-    diagnostics.extend(
-        zero_diagnostics
-            .iter()
-            .filter_map(|diagnostic| serde_json::to_value(diagnostic).ok()),
-    );
-    Ok(compiled)
-}
-
-/// A compiled Zero artifact as JSON. These types are finalizer-owned and always
-/// serialize; a failure here is a bug in this crate, not bad publisher input.
-fn serialized<T: serde::Serialize>(value: &T) -> Value {
-    serde_json::to_value(value).expect("compiled Zero artifact serializes")
-}
-
-/// Writes the Zero pack into the version tree through the space CAS, so a
-/// republish that compiles to the same bytes links the blob it already has
-/// instead of storing another copy. Returns path → sha for `metadata.json`,
-/// which is what keeps those blobs live for the collector.
-fn write_zero_artifacts(
-    stage_root: &Path,
-    blobs: &Path,
-    compiled: &CompiledZeroEndpoints,
-) -> Result<BTreeMap<String, String>> {
-    let mut written = BTreeMap::new();
-    let mut place = |path: String, bytes: &[u8]| -> Result<()> {
-        validate_relative_path(&path)?;
-        let sha = write_blob_backed(blobs, &stage_root.join(&path), bytes)?;
-        written.insert(path, sha);
-        Ok(())
-    };
-    let json = |value: &Value| -> Result<Vec<u8>> {
-        let mut bytes = serde_json::to_vec_pretty(value).map_err(|source| FinalizeError::Json {
-            path: stage_root.join("zero"),
-            source,
-        })?;
-        bytes.push(b'\n');
-        Ok(bytes)
-    };
-    // Each Zero index is published twice — JSON for tooling, PHP for the serving
-    // lane's `require` — and both spellings must always come from one value.
-    for (basename, value) in [
-        ("routes", compiled.zero_routes.as_ref().map(serialized)),
-        (
-            "migrations",
-            compiled.zero_migrations.as_ref().map(serialized),
-        ),
-        (
-            "endpoints-index",
-            compiled.zero_endpoint_index.as_ref().map(serialized),
-        ),
-        (
-            "runs-index",
-            compiled.zero_run_index.as_ref().map(serialized),
-        ),
-    ] {
-        let Some(value) = value else {
-            continue;
-        };
-        place(format!("zero/{basename}.json"), &json(&value)?)?;
-        place(
-            format!("zero/{basename}.php"),
-            php_source(&value).as_bytes(),
-        )?;
-    }
-    for artifact in &compiled.endpoint_artifacts {
-        place(
-            zero_endpoint_artifact_path(artifact),
-            &json(&serialized(artifact))?,
-        )?;
-    }
-    for artifact in &compiled.run_artifacts {
-        place(
-            zero_run_artifact_path(artifact),
-            &json(&serialized(artifact))?,
-        )?;
-    }
-    for generated in &compiled.generated_files {
-        place(generated.path.clone(), &generated.bytes)?;
-    }
-    Ok(written)
 }
 
 fn finalize_input_hash(input: &SiteFinalizeInput) -> String {
@@ -2324,242 +2204,6 @@ fn existing_finalize_output(
         // would put fake work in the very numbers the incremental path is
         // measured by, so a replay reports nothing.
         telemetry: None,
-    })
-}
-
-/// Validates the presence and internal consistency of the Zero artifacts
-/// against the counts recorded in immutable metadata.
-fn validate_zero_artifacts(
-    version_root: &Path,
-    endpoint_count: usize,
-    run_count: usize,
-) -> Result<()> {
-    validate_zero_index(
-        version_root,
-        "zero/endpoints-index.json",
-        ZERO_ENDPOINTS_INDEX_FORMAT,
-        ZERO_ENDPOINTS_INDEX_KIND,
-        "endpoints",
-        endpoint_count,
-        "endpointId",
-    )?;
-    validate_zero_routes(version_root, endpoint_count)?;
-    validate_zero_index(
-        version_root,
-        "zero/runs-index.json",
-        ZERO_RUNS_INDEX_FORMAT,
-        "zero_runs_index",
-        "runs",
-        run_count,
-        "runId",
-    )
-}
-
-fn validate_zero_routes(version_root: &Path, expected_count: usize) -> Result<()> {
-    let path = version_root.join("zero/routes.json");
-    if expected_count == 0 {
-        if path.exists() {
-            return invalid(
-                "runtime_artifact_validation_failed",
-                "Unexpected zero/routes.json.",
-            );
-        }
-        return Ok(());
-    }
-    let routes: Value = read_json_artifact(&path)?;
-    if routes.get("format").and_then(Value::as_str) != Some(ZERO_ROUTES_FORMAT)
-        || routes.get("artifact_kind").and_then(Value::as_str) != Some("zero_routes")
-    {
-        return invalid(
-            "runtime_artifact_validation_failed",
-            "zero/routes.json has invalid metadata.",
-        );
-    }
-    let endpoint_index: Value =
-        read_json_artifact(&version_root.join("zero/endpoints-index.json"))?;
-    let endpoints = endpoint_index
-        .get("endpoints")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            invalid_error(
-                "runtime_artifact_validation_failed",
-                "Zero endpoint index entries are invalid.",
-            )
-        })?;
-    let mut entries = Vec::new();
-    entries.extend(
-        routes
-            .get("exact")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten(),
-    );
-    entries.extend(
-        routes
-            .get("by_first_segment")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flat_map(|buckets| buckets.values())
-            .filter_map(Value::as_array)
-            .flatten(),
-    );
-    entries.extend(
-        routes
-            .get("fallback")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten(),
-    );
-    if entries.len() != expected_count {
-        return invalid(
-            "runtime_artifact_validation_failed",
-            "Zero route count does not match version metadata.",
-        );
-    }
-    for entry in entries {
-        let endpoint_id = entry.get("endpoint_id").and_then(Value::as_str);
-        let artifact = entry.get("artifact").and_then(Value::as_str);
-        if endpoint_id.is_none()
-            || artifact.is_none()
-            || endpoints
-                .get(endpoint_id.unwrap_or_default())
-                .and_then(Value::as_str)
-                != artifact
-            || !entry
-                .get("execution_mode")
-                .and_then(Value::as_str)
-                .is_some_and(|mode| matches!(mode, "read" | "write"))
-            || !entry
-                .get("method")
-                .and_then(Value::as_str)
-                .is_some_and(|method| {
-                    matches!(
-                        method,
-                        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
-                    )
-                })
-            || !entry
-                .get("pattern")
-                .and_then(Value::as_str)
-                .is_some_and(|pattern| pattern.starts_with('/'))
-        {
-            return invalid(
-                "runtime_artifact_validation_failed",
-                "Zero route does not match the endpoint index.",
-            );
-        }
-    }
-    Ok(())
-}
-
-fn validate_zero_index(
-    version_root: &Path,
-    relative_path: &str,
-    format: &str,
-    artifact_kind: &str,
-    entries_key: &str,
-    expected_count: usize,
-    identity_key: &str,
-) -> Result<()> {
-    let path = version_root.join(relative_path);
-    if expected_count == 0 {
-        if path.exists() {
-            return invalid(
-                "runtime_artifact_validation_failed",
-                format!("Unexpected {relative_path}."),
-            );
-        }
-        return Ok(());
-    }
-    let index: Value = read_json_artifact(&path)?;
-    if index.get("format").and_then(Value::as_str) != Some(format)
-        || index.get("artifact_kind").and_then(Value::as_str) != Some(artifact_kind)
-    {
-        return invalid(
-            "runtime_artifact_validation_failed",
-            format!("{relative_path} has invalid metadata."),
-        );
-    }
-    let entries = index
-        .get(entries_key)
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            invalid_error(
-                "runtime_artifact_validation_failed",
-                format!("{relative_path} has invalid entries."),
-            )
-        })?;
-    if entries.len() != expected_count {
-        return invalid(
-            "runtime_artifact_validation_failed",
-            format!("{relative_path} count does not match version metadata."),
-        );
-    }
-    for (identity, artifact_path) in entries {
-        let artifact_path = artifact_path.as_str().ok_or_else(|| {
-            invalid_error(
-                "runtime_artifact_validation_failed",
-                format!("{relative_path} contains an invalid artifact path."),
-            )
-        })?;
-        validate_relative_path(artifact_path)?;
-        let artifact: Value = read_json_artifact(&version_root.join(artifact_path))?;
-        if artifact.get(identity_key).and_then(Value::as_str) != Some(identity) {
-            return invalid(
-                "runtime_artifact_validation_failed",
-                format!("{artifact_path} identity does not match its index."),
-            );
-        }
-        for (path_key, hash_key) in [
-            ("sourcePath", "sourceSha256"),
-            ("bytecodePath", "bytecodeSha256"),
-        ] {
-            let generated_path =
-                artifact
-                    .get(path_key)
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        invalid_error(
-                            "runtime_artifact_validation_failed",
-                            format!("{artifact_path} is missing {path_key}."),
-                        )
-                    })?;
-            validate_relative_path(generated_path)?;
-            let generated = fs::read(version_root.join(generated_path)).map_err(|source| {
-                FinalizeError::Io {
-                    path: version_root.join(generated_path),
-                    source,
-                }
-            })?;
-            let expected = artifact
-                .get(hash_key)
-                .and_then(Value::as_str)
-                .and_then(|value| value.strip_prefix("sha256:"))
-                .ok_or_else(|| {
-                    invalid_error(
-                        "runtime_artifact_validation_failed",
-                        format!("{artifact_path} is missing {hash_key}."),
-                    )
-                })?;
-            if sha256(&generated) != expected {
-                return invalid(
-                    "runtime_artifact_validation_failed",
-                    format!("{generated_path} hash does not match its artifact."),
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn read_json_artifact(path: &Path) -> Result<Value> {
-    let bytes = fs::read(path).map_err(|source| FinalizeError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    serde_json::from_slice(&bytes).map_err(|source| FinalizeError::Json {
-        path: path.to_path_buf(),
-        source,
     })
 }
 
@@ -2746,6 +2390,167 @@ mod tests {
         let input = fixture_input(&private, manifest, metadata, body);
         let result = finalize_site(input, false);
         (temp, private, result)
+    }
+
+    #[test]
+    fn finalize_refuses_uploaded_php_and_reserved_compiled_output_for_v2() {
+        for (path, code) in [
+            ("unsafe.PHP", "zero_v2_php_uploaded"),
+            (".zero-compiled/manifest.json", "zero_v2_output_uploaded"),
+        ] {
+            let (_temp, _private, result) = finalize_fixture(
+                &[(".zero-source/manifest.json", b"{}"), (path, b"unsafe")],
+                json!({"mode":"website"}),
+                json!({"zero_generation":"none"}),
+            );
+            match result {
+                Err(FinalizeError::Invalid { code: actual, .. }) => assert_eq!(actual, code),
+                other => panic!("expected source-only refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn finalize_enforces_server_owned_zero_generation() {
+        for (files, body, code) in [
+            (
+                vec![(".zero-source/manifest.json", b"{}".as_slice())],
+                json!({}),
+                "zero_generation_locked",
+            ),
+            (
+                vec![("zero.config.ts", b"export default {};".as_slice())],
+                json!({"zero_generation":"legacy_0_8"}),
+                "zero_migration_required",
+            ),
+            (
+                vec![("zero.config.ts", b"export default {};".as_slice())],
+                json!({"zero_generation":"legacy_0_8","zero_migration":{"operationId":"op_any"}}),
+                "zero_migration_required",
+            ),
+            (
+                vec![("__spacefast/zero/deploy.json", b"{}".as_slice())],
+                json!({"zero_generation":"v2"}),
+                "zero_generation_locked",
+            ),
+            (
+                vec![
+                    ("__spacefast/zero/deploy.json", b"{}".as_slice()),
+                    (".zero-source/manifest.json", b"{}".as_slice()),
+                ],
+                json!({"zero_generation":"v2"}),
+                "zero_mixed_generation",
+            ),
+        ] {
+            let (_temp, _private, result) =
+                finalize_fixture(&files, json!({"mode":"website"}), body);
+            match result {
+                Err(FinalizeError::Invalid { code: actual, .. }) => assert_eq!(actual, code),
+                other => panic!("expected generation refusal, got {other:?}"),
+            }
+        }
+        // A tenant's own zero/ folder is static content on any Space.
+        for generation in ["none", "v2"] {
+            let (_temp, _private, result) = finalize_fixture(
+                &[
+                    ("index.html", b"<h1>home</h1>".as_slice()),
+                    ("zero/actions/index.html", b"<h1>actions</h1>".as_slice()),
+                    ("zero/capsule.json", b"{}".as_slice()),
+                ],
+                json!({"mode":"website"}),
+                json!({ "zero_generation": generation }),
+            );
+            assert!(result.is_ok(), "{generation}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn finalize_compiles_raw_zero_sources_in_process() {
+        let (_temp, private, result) = finalize_fixture(
+            &[
+                ("zero.config.ts", br#"import { defineConfig } from "zero"; import { ping } from "./actions"; export default defineConfig({ name: "hosted", actions: { ping } });"#),
+                ("actions.ts", br#"import { action } from "zero"; export const ping = action({ access: "anyone", handler() { return { ok: true }; } });"#),
+                ("public/index.html", b"hosted"),
+                ("notes.md", b"# Private project notes"),
+            ],
+            json!({"mode":"website"}),
+            json!({"zero_generation":"none"}),
+        );
+        result.unwrap();
+        let catalog = finalized_catalog(&private);
+        for path in [
+            "zero.config.ts",
+            "actions.ts",
+            "public/index.html",
+            "notes.md",
+        ] {
+            assert!(!catalog.paths[path].public, "{path} exposes source");
+            assert!(catalog.paths[path].served.is_none());
+        }
+        assert!(!catalog.paths.contains_key("notes.html"));
+        assert!(catalog.paths["index.html"].public);
+        assert_eq!(served_body(&private, "v", "index.html"), b"hosted");
+        let compiled = private.join("spaces/s/versions/v/.zero-compiled");
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(compiled.join("manifest.json")).unwrap()).unwrap();
+        let source: Value = serde_json::from_str(include_str!("../../zero/SOURCE.json")).unwrap();
+        assert_eq!(manifest["compilerRevision"], source["revision"]);
+        assert!(compiled
+            .join("plugins/zero-app-hosted/zero/app/functions.php")
+            .is_file());
+    }
+
+    #[test]
+    fn finalize_compiles_captured_zero_bundle_with_snapshot_revision() {
+        let project = tempdir().unwrap();
+        fs::write(
+            project.path().join("zero.config.ts"),
+            r#"import { defineConfig } from "zero"; export default defineConfig({ name: "captured" });"#,
+        )
+        .unwrap();
+        let sources = project.path().join(".zero-source");
+        zero::host::sources(project.path(), &sources).unwrap();
+        let app = fs::read(sources.join("app.zero.json")).unwrap();
+        let vendor = fs::read(sources.join("vendor.zero.json")).unwrap();
+        let source_manifest = fs::read(sources.join("manifest.json")).unwrap();
+        let (_temp, private, result) = finalize_fixture(
+            &[
+                (".zero-source/app.zero.json", &app),
+                (".zero-source/vendor.zero.json", &vendor),
+                (".zero-source/manifest.json", &source_manifest),
+                ("index.html", b"captured"),
+            ],
+            json!({"mode":"website"}),
+            json!({"zero_generation":"none"}),
+        );
+        result.unwrap();
+        let compiled = private.join("spaces/s/versions/v/.zero-compiled");
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(compiled.join("manifest.json")).unwrap()).unwrap();
+        let source: Value = serde_json::from_str(include_str!("../../zero/SOURCE.json")).unwrap();
+        assert_eq!(manifest["compilerRevision"], source["revision"]);
+        assert!(compiled
+            .join("plugins/zero-app-captured/zero/app/schema.php")
+            .is_file());
+    }
+
+    #[test]
+    fn finalize_requires_local_capture_for_raw_npm_imports() {
+        let (_temp, _private, result) = finalize_fixture(
+            &[(
+                "zero.config.ts",
+                br#"import thing from "some-npm-package"; export default thing;"#,
+            )],
+            json!({"mode":"website"}),
+            json!({"zero_generation":"none"}),
+        );
+        match result {
+            Err(FinalizeError::Invalid { code, message, .. }) => {
+                assert_eq!(code, "zero_source_needs_local_capture");
+                assert!(message.contains("some-npm-package"));
+            }
+            other => panic!("expected local capture diagnostic, got {other:?}"),
+        }
     }
 
     fn finalized_readiness_target(private: &Path) -> Value {
@@ -3985,7 +3790,8 @@ mod tests {
             }
         })
         .to_string();
-        let response = stattic_zero_runner::handle_invoke(&envelope).expect("compiled endpoint");
+        let response =
+            stattic_zero_runner::legacy_zero::handle_invoke(&envelope).expect("compiled endpoint");
         let body = if response.body.is_empty() {
             Value::Null
         } else {

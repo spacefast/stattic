@@ -1,0 +1,1 @@
+<?php return array('name' => 'settings-experiments', 'dependencies' => array('wp-data', 'wp-preferences'), 'moduleDependencies' => array(), 'version' => '300c74ea9b64c094b8fa');

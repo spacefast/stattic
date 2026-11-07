@@ -1,0 +1,1 @@
+<?php return array('name' => '@zero-admin/schema', 'dependencies' => array('react', 'wp-api-fetch', 'wp-components'), 'moduleDependencies' => array('@wordpress/route', '@zero-admin/admin-toolkit', '@zero-admin/attachment-importer', '@zero-admin/dataviews'), 'version' => '00a1836abf0f06a614a9');

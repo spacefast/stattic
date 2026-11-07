@@ -1,0 +1,1 @@
+<?php return array('name' => 'design-navigation', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array('@wordpress/route'), 'version' => '005b977f720e66205a68');

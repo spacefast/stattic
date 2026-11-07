@@ -50,6 +50,7 @@ function _stattic_runtime_native_body_payload(array $body): array
             is_array($body['system_variables']) ? $body['system_variables'] : []
         );
     }
+    if (is_array($body['zero'] ?? null)) $body['zero'] = _stattic_runtime_json_object($body['zero']);
     return $body;
 }
 
@@ -165,6 +166,11 @@ function _stattic_runtime_finalize_with_rust(
     }
     $session = _stattic_runtime_prepare_retained_blobs($canonicalPrivateRoot, $spaceId, $session);
 
+    require_once __DIR__ . '/../shared/zero-v2.php';
+    // The control plane owns generation and migration intent; the engine owns
+    // baseline selection. Upload-session metadata is never authority.
+    $current = _stattic_runtime_read_json($canonicalPrivateRoot . '/spaces/' . $spaceId . '/zero-v2-current.json');
+    $body['zero_v2_previous'] = is_array($current) ? ($current['version_id'] ?? null) : null;
     $input = [
         'format' => 'stattic.runtime.finalize.input.v2',
         // v2 is filesystem-rooted: `versionRoot` is the PRIVATE STORAGE ROOT,
@@ -241,6 +247,9 @@ function _stattic_runtime_finalize_with_rust(
             && is_array($structuredError['details'] ?? null);
         $rustCode = $structuredValid ? $structuredError['code'] : 'runtime_finalizer_failed';
         $conflictCodes = [
+            'zero_mixed_generation',
+            'zero_generation_locked',
+            'zero_migration_required',
             'version_upload_incomplete',
             'version_reusable_file_missing',
             'version_existing_mismatch',

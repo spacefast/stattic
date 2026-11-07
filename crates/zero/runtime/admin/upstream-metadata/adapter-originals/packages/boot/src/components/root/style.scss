@@ -1,0 +1,302 @@
+@use "@wordpress/base-styles/variables";
+@use "@wordpress/base-styles/mixins";
+@use "@wordpress/base-styles/colors";
+@use "pkg:@wordpress/theme/design-tokens.css";
+
+.zero-admin-layout {
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+	color: var( --wpds-color-fg-content-neutral );
+
+	// Create an separate stacking context for Base UI portal rendering.
+	// See: https://base-ui.com/react/overview/quick-start#set-up-portals
+	isolation: isolate;
+
+	@include mixins.break-medium {
+		background: var( --wpds-color-bg-surface-neutral-weak );
+	}
+
+	.editor-visual-editor:not( .has-padding ) {
+		background: none;
+	}
+}
+
+.zero-admin-layout__content {
+	height: 100%;
+	flex-grow: 1;
+	display: flex;
+}
+
+.zero-admin-layout__sidebar-region {
+	flex-shrink: 0;
+
+	@include mixins.break-medium {
+		width: 288px;
+	}
+
+	// This is only necessary for the exit animation
+	.zero-admin-layout.has-full-canvas & {
+		position: fixed !important;
+		height: 100vh;
+		left: 0;
+		top: 0;
+	}
+
+	.resizable-editor__drag-handle {
+		right: 0;
+	}
+}
+
+.zero-admin-layout__sidebar-backdrop {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background-color: rgba( 0, 0, 0, 0.5 );
+	z-index: 4; // Above all surfaces, below sidebar
+}
+
+.zero-admin-layout__surface {
+	margin: 0;
+	overflow: hidden;
+	box-shadow: variables.$elevation-x-small;
+
+	// Mobile-first: surfaces take full screen
+	width: 100vw;
+	height: 100vh;
+	border-radius: 0;
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	color: var( --wpds-color-fg-content-neutral );
+	background: var( --wpds-color-bg-surface-neutral );
+
+	&.is-inspector {
+		z-index: 3; // Medium surface priority
+
+		// AI Agent inspector should always be on the far right
+		// TODO: Work with design to figure out how to handle multiple inspectors
+		&.ai-agent-inspector {
+			order: 10;
+
+			&.is-collapsed {
+				display: none;
+			}
+		}
+	}
+
+	&.is-stage {
+		z-index: 2; // Highest surface priority
+	}
+
+	// Desktop: restore original styles
+	@include mixins.break-medium {
+		position: static;
+		width: auto;
+		height: auto;
+		border-radius: 8px;
+		margin: variables.$grid-unit-10 variables.$grid-unit-10
+			variables.$grid-unit-10 0;
+
+		border: 1px solid var( --wpds-color-stroke-surface-neutral );
+
+		&.is-stage {
+			flex-grow: 1;
+		}
+
+		&.is-inspector {
+			width: 380px;
+		}
+	}
+}
+
+// List views.
+.zero-admin-layout__content:has( .zero-admin-layout__canvas-container )
+	.zero-admin-layout__surface.is-stage {
+	@include mixins.break-medium() {
+		width: 380px;
+		flex-grow: 0;
+	}
+}
+
+// Inverse layout preset: canvas is a 380px rail, stage expands.
+.zero-admin-layout.is-canvas-compact {
+	@include mixins.break-medium() {
+		// Ensure stage remains flexible when a canvas exists.
+		.zero-admin-layout__content:has( .zero-admin-layout__canvas-container )
+			.zero-admin-layout__surface.is-stage {
+			width: auto;
+			flex-grow: 1;
+		}
+
+		// Make the canvas container a fixed-width column.
+		.zero-admin-layout__canvas-container {
+			flex-grow: 0;
+			flex-shrink: 0;
+			width: calc( 400px + #{variables.$grid-unit-10} );
+		}
+	}
+}
+
+.zero-admin-layout__canvas-container {
+	// Mobile: canvas takes full screen with lowest priority
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	z-index: 1; // Lowest surface priority
+	overflow: visible;
+
+	// Desktop: restore original positioning
+	@include mixins.break-medium {
+		position: relative;
+		flex-grow: 1;
+		z-index: 2;
+	}
+}
+
+.zero-admin-layout__canvas {
+	// Mobile-first: full screen canvas within container
+	align-items: center;
+	display: flex;
+	justify-content: center;
+	position: absolute;
+	top: 0;
+	left: 0;
+	bottom: 0;
+	right: 0;
+	width: 100%;
+	border-radius: 0;
+	overflow: hidden;
+	background-color: var( --wpds-color-bg-surface-neutral );
+	border: 1px solid var( --wpds-color-stroke-surface-neutral-weak );
+
+	// Desktop: restore original positioning
+	@include mixins.break-medium {
+		bottom: variables.$grid-unit-10;
+		top: variables.$grid-unit-10;
+		width: calc( 100% - #{variables.$grid-unit-10} );
+		border-radius: 8px;
+		right: auto;
+	}
+
+	&.is-full-canvas {
+		position: fixed;
+		width: 100%;
+		top: 0;
+		left: 0;
+		bottom: 0;
+		right: 0;
+		border-radius: 0;
+		border: none;
+	}
+}
+
+.zero-admin-layout__sidebar {
+	height: 100%;
+	// Animation for customization menu shouldn't show scrollbars.
+	position: relative;
+	overflow: hidden;
+
+	&.is-mobile {
+		position: fixed;
+		top: 0;
+		bottom: 0;
+		width: fit-content;
+		min-width: 300px;
+		background: var( --wpds-color-bg-surface-neutral-weak );
+		z-index: 5; // Above backdrop and all surfaces
+	}
+}
+
+.zero-admin-layout__mobile-sidebar-drawer {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	z-index: 3;
+	background: colors.$white;
+	padding: variables.$grid-unit-15;
+	border-bottom: 1px solid var( --wpds-color-stroke-surface-neutral-weak );
+	display: flex;
+	justify-content: flex-start;
+	align-items: center;
+}
+
+.zero-admin-layout__canvas.has-mobile-drawer {
+	top: variables.$grid-unit-15 * 2 + variables.$grid-unit-40;
+}
+
+.zero-admin-notices__snackbar {
+	@include mixins.snackbar-container;
+}
+
+.ai-agent-bubble {
+	&__wrapper {
+		z-index: 4; // Above all surfaces, below sidebar
+		inset-block-end: 2rem;
+		inset-inline-end: 2rem;
+		pointer-events: auto;
+		backdrop-filter: blur( 30px ) brightness( 120% ) saturate( 120% );
+		background: rgba( 255, 255, 255, 0.98 );
+		box-shadow:
+			0 0 1px rgba( 0, 0, 0, 0.25 ),
+			0 3px 8px rgba( 0, 0, 0, 0.1 ),
+			0 1px 3px rgba( 0, 0, 0, 0.1 ),
+			inset 0 0 1px rgb( 232 232 237/11% );
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		overflow: hidden;
+		position: absolute;
+	}
+
+	&__wrapper,
+	& {
+		// Apply the same size to both the wrapper and the button
+		// to avoid button outline on focus
+		width: 4rem;
+		height: 4rem;
+		border-radius: 50%;
+	}
+
+	&.components-button.is-secondary {
+		&:hover,
+		& {
+			// Remove outline
+			outline: none;
+			box-shadow: none;
+		}
+	}
+
+	svg {
+		width: 2.5rem;
+		height: 2.5rem;
+	}
+}
+
+// Hide the FAB button when the sidebar is visible
+@include mixins.break-medium {
+	// Hide the floating chat button — CIAB sidebar has its own IconButton
+	body:has(
+			.zero-admin-layout:not( .has-full-canvas )
+				.zero-admin-layout__sidebar-region
+		)
+		[data-slot="chat-floating"]:has( [data-slot="collapsed-view"] ) {
+		visibility: hidden;
+	}
+
+	// Hide the docked chat's FAB button — same condition: only when sidebar is a real panel
+	body:has(
+			.zero-admin-layout:not( .has-full-canvas )
+				.zero-admin-layout__sidebar-region
+		)
+		.agents-manager-sidebar-fab {
+		display: none;
+	}
+}

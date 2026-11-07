@@ -34,7 +34,7 @@ fi
 # ci:runtime-prepare in this run. Locally the gitignored directory can be stale
 # or half-written.
 if [[ -z "${CI:-}" || ! -f runtime/wordpress/zero-dashboard/zero-dashboard.php ]]; then
-  bun zero/scripts/build.ts >/dev/null
+  bun legacy/zero-0.8/dashboard/scripts/build.ts >/dev/null
 fi
 
 database_url="${SPACEFAST_TEST_DATABASE_ADMIN_URL:-postgres://stattic:stattic@127.0.0.1:25432/stattic}"

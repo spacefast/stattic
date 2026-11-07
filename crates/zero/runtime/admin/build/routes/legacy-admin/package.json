@@ -1,0 +1,16 @@
+{
+	"name": "@zero-admin/route-legacy-admin",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/legacy/$slug"
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@wordpress/route": "catalog:",
+		"@types/react": "catalog:",
+		"@wordpress/compose": "catalog:",
+		"@zero-admin/boot": "workspace:*"
+	},
+	"license": "GPL-2.0-or-later"
+}

@@ -1,0 +1,21 @@
+{
+	"name": "@zero-admin/post-importer",
+	"version": "1.0.0",
+	"description": "Post importer",
+	"type": "module",
+	"wpModule": true,
+	"private": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@wordpress/element": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/blocks": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/notices": "next"
+	}
+}

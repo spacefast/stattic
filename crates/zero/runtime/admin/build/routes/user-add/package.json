@@ -1,0 +1,29 @@
+{
+	"name": "@zero-admin/user-add",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/users/add",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "user_add"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/core-data-next": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/fields-next": "workspace:*",
+		"@zero-admin/views": "workspace:*",
+		"@zero-admin/telemetry": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:"
+	}
+}

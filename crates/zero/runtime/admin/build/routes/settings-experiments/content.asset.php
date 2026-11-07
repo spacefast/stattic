@@ -1,0 +1,1 @@
+<?php return array('name' => 'settings-experiments', 'dependencies' => array('react', 'wp-components', 'wp-i18n'), 'moduleDependencies' => array('@zero-admin/admin-toolkit'), 'version' => 'b1787f001d5afef6cf1b');

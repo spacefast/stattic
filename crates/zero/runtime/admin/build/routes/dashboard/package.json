@@ -1,0 +1,34 @@
+{
+	"name": "@zero-admin/route-dashboard",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/dashboard",
+		"beforeLoad": true,
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "post_launch_dash",
+				"customPageView": true
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/boot": "workspace:*",
+		"@zero-admin/dashboard": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/telemetry": "workspace:*",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/preferences": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:"
+	},
+	"devDependencies": {
+		"@testing-library/react": "catalog:"
+	}
+}

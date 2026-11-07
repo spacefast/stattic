@@ -1,0 +1,1 @@
+<?php return array('name' => 'core-weather', 'dependencies' => array('wp-i18n'), 'moduleDependencies' => array(), 'version' => 'b9a62de1e141e13123cd');

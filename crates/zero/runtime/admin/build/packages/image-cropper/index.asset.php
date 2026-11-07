@@ -1,0 +1,1 @@
+<?php return array('name' => '@zero-admin/image-cropper', 'dependencies' => array('react', 'wp-element'), 'moduleDependencies' => array(), 'version' => 'b2ec3243006623b0bcca');

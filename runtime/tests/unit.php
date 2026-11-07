@@ -3087,7 +3087,7 @@ check(
 
 // --- The scoping rule itself: what a physical name has to be to be addressed.
 //
-// The expected names come from apps/control-plane/src/zero/db-scope.ts for the
+// The expected names come from apps/control-plane/src/legacy/zero-0.8/db-scope.ts for the
 // same inputs, so these assertions are a parity pin, not a restatement of the PHP.
 check(
     _stattic_zero_db_expected_physical_name('spc_zero_dump', 'notes') === 'sf_spc_zero_dump_notes_a7a32efcd0',

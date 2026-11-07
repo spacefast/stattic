@@ -46,6 +46,14 @@ declare(strict_types=1);
     if (is_file($nativeProcess)) {
         require_once $nativeProcess;
     }
+    $zeroHost = $releaseReal . '/engine/shared/zero-v2.php';
+    if (is_file($zeroHost)) require_once $zeroHost;
+    if (isset($GLOBALS['SPACEFAST_ZERO_V2_ROOT'])) {
+        require_once $releaseReal . '/engine/shared/zero-v2-scope.php';
+        _stattic_zero_v2_bind_wordpress();
+        add_action('plugins_loaded', '_stattic_zero_v2_mount', 1);
+        return;
+    }
     $kernel = $releaseReal . '/engine/wordpress/content-kernel.php';
     if (is_file($kernel)) {
         require $kernel;

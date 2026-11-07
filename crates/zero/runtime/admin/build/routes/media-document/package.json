@@ -1,0 +1,12 @@
+{
+	"name": "@zero-admin/route-media-document",
+	"version": "1.0.0",
+	"private": true,
+	"license": "GPL-2.0-or-later",
+	"route": {
+		"path": "/media/$id"
+	},
+	"dependencies": {
+		"@zero-admin/schema": "workspace:*"
+	}
+}

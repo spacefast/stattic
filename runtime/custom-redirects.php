@@ -457,6 +457,15 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                     $target['version_id']
                 );
             }
+            $zeroTarget = $session !== null ? _stattic_content_access_target($privateRoot, $host) : $target;
+            if ($zeroTarget['kind'] === 'present') {
+                $zeroHost = $releaseRoot . '/engine/shared/zero-v2.php';
+                if (is_file($zeroHost)) {
+                    require_once $zeroHost;
+                    _stattic_zero_generation_serve(_stattic_version_root($privateRoot, $zeroTarget['space_id'], $zeroTarget['version_id']), $zeroTarget['serving']);
+                    _stattic_zero_v2_select($privateRoot, $zeroTarget['space_id'], $zeroTarget['version_id'], $zeroTarget['serving']);
+                }
+            }
             // Both REST doors end here. /wp-admin needs none of it: those are
             // real WordPress scripts, and returning is exactly how they run.
             if ($restFrontController !== null) {

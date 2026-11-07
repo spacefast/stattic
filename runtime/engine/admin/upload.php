@@ -540,6 +540,10 @@ function _stattic_runtime_manifest_files(mixed $files, bool $allowInternalArtifa
         }
         $normalized[] = $entry;
     }
+    $zeroV2 = array_any($normalized, static fn ($file): bool => str_starts_with($file['path'], '.zero-source/'));
+    if ($zeroV2 && array_any($normalized, static fn ($file): bool => str_ends_with(strtolower($file['path']), '.php'))) {
+        _stattic_problem_response(422, 'zero_v2_php_uploaded', 'Zero v2 accepts source only; uploaded PHP is forbidden.');
+    }
     return $normalized;
 }
 

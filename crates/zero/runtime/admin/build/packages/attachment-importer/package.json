@@ -1,0 +1,25 @@
+{
+	"name": "@zero-admin/attachment-importer",
+	"version": "1.0.0",
+	"description": "Attachment importer",
+	"type": "module",
+	"wpModule": true,
+	"private": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@wordpress/blob": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/media-utils": "catalog:",
+		"@wordpress/notices": "catalog:",
+		"@wordpress/api-fetch": "catalog:",
+		"@wordpress/data": "catalog:"
+	},
+	"license": "GPL-2.0-or-later"
+}

@@ -1,0 +1,52 @@
+Zero is licensed by component. The rule: anything that runs inside WordPress
+is GPL-2.0-or-later, because WordPress plugins are derivative works of
+WordPress. Everything else is MIT.
+
+GPL-2.0-or-later (full text in LICENSE-GPL)
+
+  runtime/Zero/          the PHP runtime, shipped as the zero-runtime plugin
+  runtime/identity/      the zero-identity plugin and its screens
+  runtime/admin/         the zero-admin plugin and its screens, emitted
+                         with `admin: true`
+  runtime/wp-plugin/     the zero-runtime and zero-app plugin templates
+  packages/pages/wp/     the optional pages runtime, copied into the
+                         zero-pages-<app> plugin that zero-pages build emits
+
+  and every plugin that `zero build` emits from them.
+
+MIT (full text in LICENSE-MIT)
+
+  src/, build.rs, Cargo.toml, Cargo.lock   the Rust compiler and CLI
+  runtime/client/                          the typed TypeScript client
+  types/                                   the "zero" type declarations
+  examples/, docs/, scripts/, tests/       examples, documentation, tooling, tests
+  everything else not listed above
+
+How the two meet. The compiler binary embeds the GPL runtime files as opaque
+bytes and writes them into the plugins it emits, the runtime unchanged and the
+plugin headers with their version placeholders filled in. It never links
+against or derives from them; where a command needs the runtime, it runs
+it as a separate PHP process. The runtime is to the compiler what
+an installer's payload is to the installer: distributed together, but
+separate works. The compiler's sources stay MIT, and because the packaged
+crate carries the embedded runtime, Cargo.toml declares the package as
+MIT AND GPL-2.0-or-later. The plugins written under
+.zero/wp-content/plugins (zero-runtime, zero-identity, zero-app-<name>) are
+GPL-2.0-or-later and each carries the license text. Files the compiler
+generates from your zero.config.ts (schema.php, functions.php, migrations,
+zero.gen.ts, zero/client/types.ts and schema.ts) are yours. The client's
+index.ts and README.md are copied from runtime/client/ and stay MIT; the
+copy ships with its LICENSE.
+
+Third-party code keeps its own license and is not relicensed by this file:
+
+  runtime/Zero/vendor-prefixed/            WordPress PHP toolkit (GPL-2.0-or-later)
+                                           and the libraries it bundles
+  runtime/identity/vendor-prefixed/        passkey, JWT and TOTP libraries
+  runtime/identity/build/                  the bundled identity screens
+  runtime/admin/build/                     the bundled admin screens
+
+  Each of those directories carries a THIRD-PARTY-LICENSES.txt listing every
+  package and its license. Rust dependencies are under their own permissive
+  licenses, recorded in each crate's metadata and license files (Cargo.lock
+  names the crates and versions).

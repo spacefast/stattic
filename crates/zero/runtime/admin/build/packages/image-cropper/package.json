@@ -1,0 +1,20 @@
+{
+	"name": "@zero-admin/image-cropper",
+	"version": "1.0.0",
+	"description": "Image cropper and basic editor tools",
+	"type": "module",
+	"wpModule": true,
+	"private": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@wordpress/element": "catalog:",
+		"clsx": "^2.1.1",
+		"dequal": "^2.0.3",
+		"react-easy-crop": "^5.4.2"
+	}
+}

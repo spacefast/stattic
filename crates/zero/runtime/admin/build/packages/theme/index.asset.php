@@ -1,0 +1,1 @@
+<?php return array('name' => '@zero-admin/theme', 'dependencies' => array('react', 'wp-theme'), 'moduleDependencies' => array('@zero-admin/private-apis'), 'version' => '0b9eb656a7a7dedb74be');

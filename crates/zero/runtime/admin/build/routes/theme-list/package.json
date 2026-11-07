@@ -1,0 +1,39 @@
+{
+	"name": "@zero-admin/theme-list",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/design/themes",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "theme_list",
+				"customPageView": true
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/core-data-next": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/fields-next": "workspace:*",
+		"@zero-admin/views": "workspace:*",
+		"@zero-admin/telemetry": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/base-styles": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/escape-html": "catalog:",
+		"@wordpress/html-entities": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/notices": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:",
+		"dequal": "2.0.3"
+	},
+	"devDependencies": {
+		"@testing-library/react": "catalog:",
+		"@testing-library/user-event": "catalog:"
+	}
+}

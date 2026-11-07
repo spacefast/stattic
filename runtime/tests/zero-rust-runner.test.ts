@@ -10,7 +10,6 @@ import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 
 import { verifyPartnerToken } from "../../apps/control-plane/src/auth/partner-token.ts";
-import { ZERO_RUNTIME_HOST_SOURCE } from "../../packages/zero-compile/src/runtime-host.ts";
 import {
   blobPath,
   deploy,
@@ -25,6 +24,7 @@ import {
   startRuntime,
   versionRoot,
 } from "./harness.ts";
+import { ZERO_RUNTIME_HOST_SOURCE } from "./legacy-zero.ts";
 import {
   type MysqlContainer,
   startMysqlContainer,

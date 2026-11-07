@@ -1,0 +1,123 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Zero\Identity\Vendor\Webauthn;
+
+use Zero\Identity\Vendor\CBOR\ByteStringObject;
+use Zero\Identity\Vendor\CBOR\Decoder;
+use Zero\Identity\Vendor\CBOR\ListObject;
+use Zero\Identity\Vendor\CBOR\MapObject;
+use Zero\Identity\Vendor\CBOR\NegativeIntegerObject;
+use Zero\Identity\Vendor\CBOR\TextStringObject;
+use Zero\Identity\Vendor\CBOR\UnsignedIntegerObject;
+use function chr;
+use function ord;
+use Zero\Identity\Vendor\Symfony\Component\Uid\Uuid;
+use Zero\Identity\Vendor\Webauthn\AuthenticationExtensions\AuthenticationExtensionLoader;
+use Zero\Identity\Vendor\Webauthn\Exception\InvalidDataException;
+
+final readonly class AuthenticatorDataLoader
+{
+    private Decoder $decoder;
+
+    private function __construct()
+    {
+        $this->decoder = Decoder::create();
+    }
+
+    public static function create(): self
+    {
+        return new self();
+    }
+
+    public function load(string $authData): AuthenticatorData
+    {
+        $authData = $this->fixIncorrectEdDSAKey($authData);
+        $authDataStream = new StringStream($authData);
+        $rp_id_hash = $authDataStream->read(32);
+        $flags = $authDataStream->read(1);
+        $signCountRaw = $authDataStream->read(4);
+        /** @var array{1: int} $signCount */
+        $signCount = unpack('N', $signCountRaw);
+
+        $attestedCredentialData = null;
+        if (0 !== (ord($flags) & AuthenticatorData::FLAG_AT)) {
+            $aaguid = Uuid::fromBinary($authDataStream->read(16));
+            $credentialLengthRaw = $authDataStream->read(2);
+            /** @var array{1: int} $credentialLength */
+            $credentialLength = unpack('n', $credentialLengthRaw);
+            $credentialId = $authDataStream->read($credentialLength[1]);
+            $credentialPublicKey = $this->decoder->decode($authDataStream);
+            $credentialPublicKey instanceof MapObject || throw InvalidDataException::create(
+                $authData,
+                'The data does not contain a valid credential public key.'
+            );
+            $attestedCredentialData = AttestedCredentialData::create(
+                $aaguid,
+                $credentialId,
+                (string) $credentialPublicKey
+            );
+        }
+
+        $extension = null;
+        if (0 !== (ord($flags) & AuthenticatorData::FLAG_ED)) {
+            $extension = $this->decoder->decode($authDataStream);
+            $extension = AuthenticationExtensionLoader::load($extension);
+        }
+        $authDataStream->isEOF() || throw InvalidDataException::create(
+            $authData,
+            'Invalid authentication data. Presence of extra bytes.'
+        );
+        $authDataStream->close();
+
+        return AuthenticatorData::create(
+            $authData,
+            $rp_id_hash,
+            $flags,
+            $signCount[1],
+            $attestedCredentialData,
+            $extension
+        );
+    }
+
+    private function fixIncorrectEdDSAKey(string $data): string
+    {
+        /** @var string $needle */
+        $needle = hex2bin('a301634f4b500327206745643235353139');
+        /** @var string $correct */
+        $correct = hex2bin('a401634f4b500327206745643235353139');
+        $position = strpos($data, $needle);
+        if ($position === false) {
+            return $data;
+        }
+
+        $begin = substr($data, 0, $position);
+        $end = substr($data, $position);
+        $end = str_replace($needle, $correct, $end);
+        $cbor = new StringStream($end);
+        $badKey = $this->decoder->decode($cbor);
+
+        ($badKey instanceof MapObject && $cbor->isEOF()) || throw InvalidDataException::create(
+            $end,
+            'Invalid authentication data. Presence of extra bytes.'
+        );
+        $badX = $badKey->get(-2);
+        $badX instanceof ListObject || throw InvalidDataException::create($end, 'Invalid authentication data.');
+        /** @var list<string> $normalizedBadX */
+        $normalizedBadX = $badX->normalize();
+        $keyBytes = array_reduce(
+            $normalizedBadX,
+            static fn (string $carry, string $item): string => $carry . chr((int) $item),
+            ''
+        );
+        $correctX = ByteStringObject::create($keyBytes);
+        $correctKey = MapObject::create()
+            ->add(UnsignedIntegerObject::create(1), TextStringObject::create('OKP'))
+            ->add(UnsignedIntegerObject::create(3), NegativeIntegerObject::create(-8))
+            ->add(NegativeIntegerObject::create(-1), TextStringObject::create('Ed25519'))
+            ->add(NegativeIntegerObject::create(-2), $correctX);
+
+        return $begin . $correctKey;
+    }
+}

@@ -4,6 +4,7 @@
 mod hash;
 #[cfg(not(target_family = "wasm"))]
 mod io;
+pub mod legacy_zero;
 #[cfg(not(target_family = "wasm"))]
 mod metadata;
 mod model;
@@ -11,8 +12,6 @@ mod model;
 mod route_inventory;
 #[cfg(not(target_family = "wasm"))]
 mod site_finalize;
-#[cfg(not(target_family = "wasm"))]
-mod zero;
 
 pub mod access;
 pub mod artifacts;
@@ -48,3 +47,6 @@ pub use io::{read_site_finalize_input, write_site_finalize_error, write_site_fin
 pub use model::*;
 #[cfg(not(target_family = "wasm"))]
 pub use site_finalize::finalize_site;
+
+#[cfg(not(target_family = "wasm"))]
+mod zero_v2;

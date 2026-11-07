@@ -1,0 +1,31 @@
+{
+	"name": "@zero-admin/design-navigation-edit",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/design/navigation/edit/$id",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "navigation_details"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/lazy-editor": "workspace:*",
+		"@wordpress/route": "next",
+		"@wordpress/block-editor": "next",
+		"@wordpress/blocks": "next",
+		"@wordpress/components": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/editor": "next",
+		"@wordpress/element": "next",
+		"@wordpress/html-entities": "next",
+		"@wordpress/icons": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/notices": "next",
+		"@wordpress/ui": "next"
+	}
+}

@@ -157,13 +157,8 @@ function _stattic_content_deployment_claims_path(string $privateRoot, string $ho
             return true;
         }
     }
-    if (is_file($versionDir . '/zero/routes.php')) {
-        require_once __DIR__ . '/../runtime/zero-routes.php';
-        $route = _stattic_resolve_zero_route_action($versionDir, ltrim($path, '/'), $method);
-        if (is_array($route['action'] ?? null) || !empty($route['method_not_allowed'])) {
-            return true;
-        }
-    }
+    require_once __DIR__ . '/../runtime/zero-routes.php';
+    if (_stattic_legacy_zero_path_has_route($versionDir, $path, $method)) return true;
     $rulesEntry = _stattic_v4_entry($versionDir, $root, STATTIC_RUNTIME_RESPONSE_KEY_RULES);
     $redirects = _stattic_v4_rule_section($rulesEntry, 'redirects');
     if ($redirects !== null) {

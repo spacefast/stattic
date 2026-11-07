@@ -1,0 +1,39 @@
+{
+	"name": "@zero-admin/attachment",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/types/attachment/edit/$id",
+		"beforeLoad": true,
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "attachment_details"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/core-data-next": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/fields-next": "workspace:*",
+		"@zero-admin/image-cropper": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/base-styles": "next",
+		"@wordpress/commands": "next",
+		"@wordpress/components": "next",
+		"@wordpress/compose": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@wordpress/dom": "next",
+		"@wordpress/editor": "next",
+		"@wordpress/element": "next",
+		"@wordpress/fields": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/icons": "next",
+		"@wordpress/keycodes": "next",
+		"@wordpress/notices": "next",
+		"@wordpress/route": "next",
+		"@wordpress/ui": "next",
+		"clsx": "^2.1.1"
+	}
+}

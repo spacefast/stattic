@@ -1,0 +1,17 @@
+Zero Admin is licensed under GPL-2.0-or-later.
+Copyright (c) 2026 Spacefast.
+
+Portions are adapted from CIAB Admin / next-admin, by Automattic and
+contributors, distributed under GPL-2.0-or-later. The source archive has no
+verified upstream Git revision. upstream-inventory.json records its exact
+source hashes and the local adaptations. Upstream private tracker and service
+references in documentation have been redacted.
+Complete normalized inputs for adapted files remain under
+upstream-metadata/adapter-originals, outside the active plugin loader.
+
+The existing Zero WordPress integration and telemetry adapter derive from
+Spacefast's earlier admin work under the same license. Bundled WordPress
+packages are copyright the WordPress contributors, GPL-2.0-or-later;
+build/THIRD-PARTY-LICENSES.txt records dependency and workspace notices.
+Dashicons retain apps/packages/boot/src/dashicons/LICENSE.md. The Brotli
+decoder retains its MIT license and original copyright notice.

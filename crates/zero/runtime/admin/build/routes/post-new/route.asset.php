@@ -1,0 +1,1 @@
+<?php return array('name' => 'post-new', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array(), 'version' => '536b27d356023ab258cd');

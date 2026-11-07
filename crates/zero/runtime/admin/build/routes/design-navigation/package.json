@@ -1,0 +1,19 @@
+{
+	"name": "@zero-admin/route-design-navigation",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/design/navigation",
+		"beforeLoad": true,
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "navigation"
+			}
+		}
+	},
+	"dependencies": {
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/route": "catalog:"
+	}
+}

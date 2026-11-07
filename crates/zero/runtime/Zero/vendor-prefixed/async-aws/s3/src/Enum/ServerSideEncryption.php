@@ -1,0 +1,27 @@
+<?php
+
+namespace Zero\Vendor\AsyncAws\S3\Enum;
+
+final class ServerSideEncryption
+{
+    public const AES256 = 'AES256';
+    public const AWS_BACKUP = 'aws:backup';
+    public const AWS_FSX = 'aws:fsx';
+    public const AWS_KMS = 'aws:kms';
+    public const AWS_KMS_DSSE = 'aws:kms:dsse';
+    public const UNKNOWN_TO_SDK = 'UNKNOWN_TO_SDK';
+
+    /**
+     * @psalm-assert-if-true self::* $value
+     */
+    public static function exists(string $value): bool
+    {
+        return isset([
+            self::AES256 => true,
+            self::AWS_BACKUP => true,
+            self::AWS_FSX => true,
+            self::AWS_KMS => true,
+            self::AWS_KMS_DSSE => true,
+        ][$value]);
+    }
+}

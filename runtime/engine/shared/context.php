@@ -46,6 +46,7 @@ function _stattic_runtime_install_root(string $engineRoot): string
     return basename($releasesRoot) === 'releases' ? dirname($releasesRoot) : $releaseRoot;
 }
 const STATTIC_RUNTIME_NAMESPACE_PATH = '/__spacefast';
+
 const STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH = '/__sf';
 // Security boundary: only these files may be direct-executed. The drift guard
 // proves this region matches the manifest; it cannot see a second table added
@@ -79,13 +80,6 @@ const STATTIC_SPACEFAST_TRACKER_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/t.js';
 const STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/collab.json';
 const STATTIC_SPACEFAST_COLLAB_THEME_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/collab.css';
 const STATTIC_COMMENTS_TICKET_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/ticket';
-const STATTIC_ZERO_REALTIME_TICKET_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/realtime-ticket';
-// The canonical Zero control namespace. `/__spacefast/zero/*` is served forever
-// as an alias: frozen capsule clients baked those paths at build time and a
-// republish cannot be assumed. Registration covers both prefixes; every
-// emission (config JSON, invocation descriptors) uses the canonical one.
-const STATTIC_ZERO_CANONICAL_NAMESPACE_PATH = '/__zero';
-const STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH = STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/realtime-ticket';
 const STATTIC_COMMENTS_VERSION_URLS_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/version-urls';
 // Mirrors COLLAB_VERSION_URLS_MAX_IDS in packages/common.
 const STATTIC_COMMENTS_VERSION_URLS_MAX_IDS = 50;
@@ -162,20 +156,6 @@ const STATTIC_SELL_CHECKOUT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sell/check
 const STATTIC_SELL_STATUS_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sell/status';
 const STATTIC_SELL_PRODUCT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sell/product';
 const STATTIC_SELL_CLIENT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sell/client.js';
-// The namespace is private-by-default: a Zero control route missing from this
-// table silently 403s at the front door (init.php).
-const STATTIC_ZERO_CONTROL_ROUTES = [
-    '__zero/config' => ['operation' => 'config', 'methods' => ['GET', 'HEAD']],
-    '__zero/run' => ['operation' => 'run', 'methods' => ['POST']],
-    '__zero/auth/start' => ['operation' => 'auth_start', 'methods' => ['GET', 'HEAD']],
-    '__zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD', 'POST']],
-    '__zero/realtime/events' => ['operation' => 'realtime_events', 'methods' => ['GET', 'HEAD']],
-    '__spacefast/zero/config' => ['operation' => 'config', 'methods' => ['GET', 'HEAD']],
-    '__spacefast/zero/run' => ['operation' => 'run', 'methods' => ['POST']],
-    '__spacefast/zero/auth/gravatar/start' => ['operation' => 'auth_start', 'methods' => ['GET', 'HEAD']],
-    '__spacefast/zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD']],
-    '__spacefast/zero/realtime/events' => ['operation' => 'realtime_events', 'methods' => ['GET', 'HEAD']],
-];
 
 // Backed by no file under the publish root, so the namespace's
 // private-by-default rule 403s them unless named here.
@@ -183,6 +163,14 @@ const STATTIC_FUNCTIONS_BUNDLE_PREFIX = '__spacefast/functions/b/';
 const STATTIC_FUNCTIONS_RELAY_PATH = '__spacefast/functions/relay';
 const STATTIC_FUNCTIONS_LOGS_PATH = '__spacefast/functions/logs';
 const STATTIC_FUNCTIONS_PURGE_PATH = '__spacefast/functions/purge';
+
+// The version's generated app module composes with the shared engine client.
+const STATTIC_SPACEFAST_CLIENT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/client.js';
+const STATTIC_SPACEFAST_CLIENT_TYPES_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/client.d.ts';
+const STATTIC_ZERO_V2_CLIENT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/client.js';
+const STATTIC_ZERO_V2_CLIENT_TYPES_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/client.d.ts';
+// The Zero v2 Cast transport; it registers itself with every Zero client on the page.
+const STATTIC_ZERO_V2_REALTIME_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/realtime.js';
 
 // The ONE stable visitor URL of a public uploads-store object.
 const STATTIC_UPLOADS_PUBLIC_URL_PREFIX = '/__stattic/u/';
@@ -192,7 +180,9 @@ const STATTIC_UPLOADS_PUBLIC_URL_PREFIX = '/__stattic/u/';
 function _stattic_path_is_internal_artifact(string $path): bool
 {
     $foldedPlatformPath = strtolower(trim($path, '/'));
-    return $foldedPlatformPath === '__spacefast'
+    return str_starts_with($foldedPlatformPath, '.zero-source/')
+        || str_starts_with($foldedPlatformPath, '.zero-compiled/')
+        || $foldedPlatformPath === '__spacefast'
         || str_starts_with($foldedPlatformPath, '__spacefast/');
 }
 
@@ -205,89 +195,17 @@ function _stattic_path_is_internal_artifact(string $path): bool
 // `match`: exact | prefix | namespace (whole-segment, so `/__spanish/page` is a
 // tenant path and `/__span/x` is ours). `fold` compares case-insensitively.
 // `admit` narrows a row to the exact set its handler can answer.
-const SPACEFAST_CONTROL_PATHS = [
-    // Shared namespace: authored GET/HEAD entries win; the storage handler owns the remaining requests.
-    ['path' => '/storage', 'match' => 'namespace', 'visitor' => true, 'tenant' => true, 'stage' => null, 'handler' => null],
-    ['path' => '/identity', 'match' => 'namespace', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => '/__zero/auth/user', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => '/__zero/auth/complete', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => '/__zero/auth/native', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => '/__zero/auth/api/', 'match' => 'prefix', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => '/__stattic_probe', 'match' => 'exact', 'visitor' => true, 'tenant' => true, 'stage' => 'probe', 'handler' => 'probe'],
-    ['path' => STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH . '/redeem', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_callback'],
-    ['path' => STATTIC_ACCESS_CLIENT_SCRIPT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_client_script'],
-    ['path' => STATTIC_ACCESS_ACCOUNT_START_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_account_start'],
-    ['path' => STATTIC_ACCESS_LOGOUT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_logout'],
-    ['path' => STATTIC_ACCESS_PASSWORD_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_password'],
-    ['path' => STATTIC_ACCESS_EMAIL_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_email'],
-    ['path' => STATTIC_ACCESS_REQUEST_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_request'],
-    ['path' => STATTIC_SELL_CHECKOUT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'sell_exchange'],
-    ['path' => STATTIC_SELL_PRODUCT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'sell_exchange'],
-    ['path' => STATTIC_SELL_STATUS_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'sell_status'],
-    ['path' => STATTIC_SELL_CLIENT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'sell_client'],
-    ['path' => STATTIC_COMMENTS_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
-    ['path' => STATTIC_COMMENTS_VERSION_URLS_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
-    ['path' => STATTIC_ZERO_REALTIME_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
-    ['path' => STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
-    ['path' => STATTIC_ACCESS_ENTRY_PREFIX, 'match' => 'prefix', 'admit' => '_stattic_access_entry_token', 'visitor' => true, 'tenant' => true, 'stage' => 'entry', 'handler' => 'access_link_entry'],
-    ['path' => STATTIC_SPACEFAST_SDK_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
-    ['path' => STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
-    ['path' => STATTIC_SPACEFAST_COLLAB_THEME_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
-    // Answered after the access check, beside sdk.js: whether a Space has
-    // analytics is not for a visitor who may not view it.
-    ['path' => STATTIC_SPACEFAST_TRACKER_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'tracker'],
-    // Each is authorized by its own signed token rather than by being a known path.
-    ['path' => '/' . STATTIC_FUNCTIONS_BUNDLE_PREFIX, 'match' => 'prefix', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_artifact'],
-    ['path' => '/' . STATTIC_FUNCTIONS_RELAY_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_relay'],
-    ['path' => '/' . STATTIC_FUNCTIONS_LOGS_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_logs'],
-    ['path' => '/' . STATTIC_FUNCTIONS_PURGE_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_purge'],
-    ['path' => STATTIC_ZERO_CANONICAL_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'admit' => '_stattic_control_path_is_zero_route', 'visitor' => true, 'tenant' => false, 'stage' => 'route-index', 'handler' => 'invoke_zero'],
-    ['path' => STATTIC_RUNTIME_NAMESPACE_PATH . '/zero', 'match' => 'namespace', 'fold' => true, 'admit' => '_stattic_control_path_is_zero_route', 'visitor' => true, 'tenant' => false, 'stage' => 'route-index', 'handler' => 'invoke_zero'],
-    // Unknown `/__zero/*` paths refuse exactly like unknown `/__spacefast/*`:
-    // the namespace is private-by-default on both spellings.
-    ['path' => STATTIC_ZERO_CANONICAL_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => STATTIC_RUNTIME_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
-    // An entry-stage row so the front door admits it and no tenant can publish
-    // over it; serve.php dispatches it AFTER the Space access check. Must precede
-    // the '/__stattic' catch-all below.
-    ['path' => STATTIC_UPLOADS_PUBLIC_URL_PREFIX, 'match' => 'prefix', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'uploads_object'],
-    // No visitor route lives here, but a tenant must not own them either.
-    ['path' => '/__stattic', 'match' => 'namespace', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => '/__span', 'match' => 'namespace', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
-];
-
-function _stattic_control_path_is_zero_route(string $path): bool
+// Health needs only engine constants; route registration stays lazy.
+function _stattic_control_path_rows(): array
 {
-    return isset(STATTIC_ZERO_CONTROL_ROUTES[trim(strtolower($path), '/')]) || _stattic_zero_connector_route($path) !== null;
-}
-
-function _stattic_zero_connector_route(string $path): ?array
-{
-    if (preg_match('~^/__spacefast/zero/connectors/([a-z][a-zA-Z0-9]{0,63})(?:/(connect|callback|disconnect))?$~D', $path, $matches) !== 1) return null;
-    return ['role' => $matches[1], 'operation' => $matches[2] ?? 'disconnect'];
-}
-
-// Response tables compiled before the /__zero cutover carry only the legacy
-// spellings, and a version is immutable: the serve ladder folds a canonical
-// control path to its legacy twin when the table has no canonical row.
-function _stattic_zero_legacy_control_path(string $path): ?string
-{
-    $normalized = '/' . trim(strtolower($path), '/');
-    if ($normalized === STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/auth/start') {
-        return STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/auth/gravatar/start';
-    }
-    if (str_starts_with($normalized, STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/')) {
-        return STATTIC_RUNTIME_NAMESPACE_PATH . '/zero'
-            . substr($normalized, strlen(STATTIC_ZERO_CANONICAL_NAMESPACE_PATH));
-    }
-    return null;
+    require_once __DIR__ . '/control-paths.php';
+    return SPACEFAST_CONTROL_PATHS;
 }
 
 function _stattic_control_path_row(string $path): ?array
 {
     $folded = '/' . trim(strtolower($path), '/');
-    foreach (SPACEFAST_CONTROL_PATHS as $row) {
+    foreach (_stattic_control_path_rows() as $row) {
         $subject = empty($row['fold']) ? $path : $folded;
         $target = $row['path'];
         $matches = match ($row['match']) {
@@ -328,7 +246,7 @@ function _stattic_control_path_namespace_is_private(string $path): bool
     if (!str_starts_with($folded, '/__')) {
         return false;
     }
-    return array_any(SPACEFAST_CONTROL_PATHS, static fn (array $row): bool =>
+    return array_any(_stattic_control_path_rows(), static fn (array $row): bool =>
         $row['match'] === 'namespace'
         && $row['visitor'] === false
         && ($folded === $row['path'] || str_starts_with($folded, $row['path'] . '/')));

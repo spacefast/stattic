@@ -1,0 +1,27 @@
+{
+	"name": "@zero-admin/route-settings-reading",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/settings/reading",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "settings_reading"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/components": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@wordpress/element": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/icons": "next",
+		"@wordpress/preferences": "next",
+		"@wordpress/route": "next",
+		"@wordpress/ui": "next"
+	}
+}

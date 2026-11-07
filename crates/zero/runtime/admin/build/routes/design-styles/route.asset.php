@@ -1,0 +1,1 @@
+<?php return array('name' => 'design-styles', 'dependencies' => array('react', 'wp-block-editor', 'wp-blocks', 'wp-components', 'wp-core-data', 'wp-data', 'wp-editor', 'wp-element', 'wp-i18n', 'wp-media-utils'), 'moduleDependencies' => array('@wordpress/route', '@zero-admin/global-styles-engine'), 'version' => 'c9d0c7873380a5df8c47');

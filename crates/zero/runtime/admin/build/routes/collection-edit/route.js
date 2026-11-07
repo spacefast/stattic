@@ -1,0 +1,2 @@
+import '__i18n__';
+import{allowed as i,bootstrap as l,collectionSpec as r,native as s,nativeEditor as d,read as u}from"@zero-admin/schema";var p={canvas:async({params:t})=>{let e=await r(t.collection),o=s(t.collection);if(!(!o||!e.content||!i(e.access.update,l().role))){try{let{row:n,editable:c}=await u(e,t.slug);if(!d(e,n,c))return}catch{return}return{postType:o.postType,postId:t.slug,editLink:`/collections/${t.collection}/${encodeURIComponent(t.slug)}`}}}};export{p as route};

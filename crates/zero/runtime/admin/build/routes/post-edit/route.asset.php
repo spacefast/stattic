@@ -1,0 +1,1 @@
+<?php return array('name' => 'post-edit', 'dependencies' => array(), 'moduleDependencies' => array(), 'version' => '8ecdb6bca81c73b55851');

@@ -1,0 +1,1 @@
+<?php return array('name' => '@zero-admin/attachment-importer', 'dependencies' => array('wp-api-fetch', 'wp-core-data', 'wp-notices'), 'moduleDependencies' => array(), 'version' => '0dcfcee1de39d03efecd');

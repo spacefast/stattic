@@ -1,0 +1,13 @@
+{
+	"name": "@zero-admin/route-global-edit",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/globals/$name"
+	},
+	"license": "GPL-2.0-or-later",
+	"dependencies": {
+		"@zero-admin/schema": "workspace:*",
+		"@wordpress/route": "catalog:"
+	}
+}

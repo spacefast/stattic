@@ -1,0 +1,17 @@
+{
+	"name": "@zero-admin/dataviews",
+	"version": "1.0.0",
+	"description": "Private wrapper around @wordpress/dataviews for Zero Admin",
+	"type": "module",
+	"private": true,
+	"wpModule": true,
+	"files": [
+		"build"
+	],
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@wordpress/dataviews": "next"
+	}
+}

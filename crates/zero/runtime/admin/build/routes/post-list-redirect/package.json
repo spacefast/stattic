@@ -1,0 +1,12 @@
+{
+	"name": "@zero-admin/post-list-redirect",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/types/$type/list",
+		"beforeLoad": true
+	},
+	"dependencies": {
+		"@wordpress/route": "catalog:"
+	}
+}

@@ -407,6 +407,7 @@ export type Runtime = {
   storageRoot: string;
   processId: number;
   diagnostics: () => string;
+  restart: () => Promise<void>;
   /** Present only when startRuntime({ captureEdgePurges: true }): the purge POSTs the runtime made. */
   edgePurges?: EdgePurgeCall[];
   stop: () => void;
@@ -432,16 +433,32 @@ export type RuntimeOptions = {
 
 function ensureZeroDashboardPlugin(): void {
   if (existsSync(path.join(RUNTIME_DIR, "wordpress/zero-dashboard/next-admin.php"))) return;
-  const build = spawnSync(process.execPath, [path.join(REPO_ROOT, "zero/scripts/build.ts")], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-  });
+  const build = spawnSync(
+    process.execPath,
+    [path.join(REPO_ROOT, "legacy/zero-0.8/dashboard/scripts/build.ts")],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    },
+  );
   if (build.status !== 0) {
     throw new Error(`Zero dashboard build failed:\n${build.stdout}\n${build.stderr}`);
   }
 }
 
+function ensureIdentityPlugin(): void {
+  // The build is idempotent and safe to run concurrently: it returns at once
+  // when this archive is already installed, and swaps in a new tree atomically.
+  const build = spawnSync(process.execPath, [path.join(RUNTIME_DIR, "identity/build.ts")], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  if (build.status !== 0)
+    throw new Error(`Identity build failed:\n${build.stdout}\n${build.stderr}`);
+}
+
 type InstalledEngineManifest = {
+  files: string[];
   executables: string[];
   aliases: Array<{ source: string; path: string }>;
   trees: Array<{ source: string; path: string }>;
@@ -519,12 +536,16 @@ function installEngine(root: string): void {
     executables: string[];
   };
   ensureZeroDashboardPlugin();
+  ensureIdentityPlugin();
   // The manifest is the single authority for what ships, and it is edited by
   // the orchestrator at commit time rather than by the streams that add or
   // delete engine files. A drifted manifest therefore fails here first — report
   // it as drift naming the entries, not as a bare ENOENT from cpSync.
   const missing = manifest.files.filter(
-    (file) => file !== "bin/stattic-runtime" && !existsSync(path.join(RUNTIME_DIR, file)),
+    (file) =>
+      !["bin/stattic-runtime", "bin/zero", "bin/zero.SOURCE.json", "bin/zero.LICENSES"].includes(
+        file,
+      ) && !existsSync(path.join(RUNTIME_DIR, file)),
   );
   if (missing.length > 0) {
     throw new Error(
@@ -535,6 +556,9 @@ function installEngine(root: string): void {
   const release = "releases/test";
   const releaseRoot = path.join(root, ".stattic", release);
   for (const file of manifest.files) {
+    // Generic runtime cases need no compiler. The source-hosting proof supplies
+    // the real compiler explicitly, and release builds require verified assets.
+    if (file.startsWith("bin/zero") && !existsSync(path.join(RUNTIME_DIR, file))) continue;
     const target = path.join(releaseRoot, file);
     mkdirSync(path.dirname(target), { recursive: true });
     const source =
@@ -559,7 +583,8 @@ function installEngine(root: string): void {
     chmodSync(target, manifest.executables.includes(alias.source) ? 0o755 : 0o644);
   }
   const installedManifest: InstalledEngineManifest = {
-    executables: manifest.executables,
+    files: manifest.files.filter((file) => existsSync(path.join(releaseRoot, file))),
+    executables: manifest.executables.filter((file) => existsSync(path.join(releaseRoot, file))),
     aliases: manifest.aliases.filter((alias) => existsSync(path.join(releaseRoot, alias.source))),
     trees: manifest.trees.filter((tree) => existsSync(path.join(releaseRoot, tree.source))),
   };
@@ -766,9 +791,8 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
       }
     : {};
 
-  let server: PhpServer;
-  try {
-    server = await startPhpServer({
+  const bootServer = () =>
+    startPhpServer({
       binary: options.phpBinary,
       args: phpArgs,
       router: RUNTIME_TEST_ROUTER,
@@ -782,6 +806,9 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
         SPACEFAST_TEST_VISITOR_SCHEME: options.visitorScheme ?? "http",
       },
     });
+  let server: PhpServer;
+  try {
+    server = await bootServer();
   } catch (cause) {
     edgeCapture?.stop();
     rmSync(root, { recursive: true, force: true });
@@ -789,12 +816,20 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
   }
 
   return {
-    baseUrl: server.baseUrl,
+    get baseUrl() {
+      return server.baseUrl;
+    },
     root,
     engineRoot: path.join(root, ".stattic/releases/test/engine"),
     storageRoot: path.join(root, ".stattic", "storage"),
-    processId: server.processId,
-    diagnostics: server.diagnostics,
+    get processId() {
+      return server.processId;
+    },
+    diagnostics: () => server.diagnostics(),
+    restart: async () => {
+      server.stop();
+      server = await bootServer();
+    },
     edgePurges: edgeCapture ? edgePurges : undefined,
     stop: () => {
       server.stop();

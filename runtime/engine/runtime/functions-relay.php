@@ -244,7 +244,8 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
         ]);
     }
 
-    require_once __DIR__ . '/zero.php';
+    require_once __DIR__ . '/identity-context.php';
+    require_once __DIR__ . '/legacy-zero.php';
     $versionRoot = _stattic_version_root($privateRoot, $spaceId, $claims['version_id']);
     $config = _stattic_zero_runtime_config($versionRoot);
     if ($config === []) {
@@ -264,19 +265,7 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     ));
     $visitor = $identity['isAuthenticated'] ? ['subject' => $identity['userId']] : null;
     if ($broker === 'zero') {
-        $frame = json_decode($body, true);
-        if (!is_array($frame) || !in_array($frame['op'] ?? null, ['query.run', 'mutation.run'], true)) {
-            _stattic_problem_refused(400, 'zero_run_operation_unsupported', 'Use query or mutate to call the capsule.');
-        }
-        if ($visitor === null) {
-            $principal = 'service:' . $spaceId;
-            $identity = [
-                'user' => ['id' => $principal, 'displayName' => 'Worker'],
-                'userId' => $principal, 'displayName' => 'Worker', 'provider' => 'service',
-                'isGuest' => false, 'isAuthenticated' => true,
-            ];
-        }
-        _stattic_zero_send_run_response($config, $versionRoot, $serving, 'POST', $host, $body, $identity);
+        _stattic_legacy_zero_relay_run($body, $visitor, $identity, $spaceId, $config, $versionRoot, $serving, $host);
     }
 
     $result = _stattic_runtime_run_subprocess(

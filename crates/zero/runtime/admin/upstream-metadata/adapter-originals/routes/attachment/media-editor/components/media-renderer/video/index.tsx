@@ -1,0 +1,17 @@
+import type { MediaItem } from '../../../types';
+
+export default function VideoRenderer( { post }: { post: MediaItem } ) {
+	if ( ! post ) {
+		return null;
+	}
+
+	return (
+		<video
+			className="zero-admin-media-editor-content__video"
+			controls={ true }
+			// poster={ % use the attachment's featured image % }
+			preload="true"
+			src={ post?.source_url }
+		/>
+	);
+}

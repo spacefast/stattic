@@ -52,8 +52,11 @@ const repoRoot = path.resolve(here, "../../../..");
 const resolveFrom = (workspace: string, id: string) =>
   Bun.resolveSync(id, path.join(repoRoot, workspace));
 
-const blocksEntry = resolveFrom("packages/zero-compile", "@wordpress/blocks");
-const libraryEntry = resolveFrom("packages/zero-compile", "@wordpress/block-library");
+const blocksEntry = resolveFrom("legacy/zero-0.8/packages/zero-compile", "@wordpress/blocks");
+const libraryEntry = resolveFrom(
+  "legacy/zero-0.8/packages/zero-compile",
+  "@wordpress/block-library",
+);
 // The one hooks instance @wordpress/blocks registers through.
 const hooksEntry = Bun.resolveSync("@wordpress/hooks", path.dirname(blocksEntry));
 // The rich-text values the parser sources a code block's content into.

@@ -1,0 +1,40 @@
+{
+	"name": "@zero-admin/design-styles",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/design/styles",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "design_styles"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/global-styles-engine": "workspace:*",
+		"@wordpress/a11y": "catalog:",
+		"@wordpress/api-fetch": "catalog:",
+		"@wordpress/block-editor": "catalog:",
+		"@wordpress/blocks": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/compose": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/date": "catalog:",
+		"@wordpress/editor": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/keycodes": "catalog:",
+		"@wordpress/media-utils": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/style-engine": "catalog:",
+		"@wordpress/ui": "catalog:",
+		"classnames": "*",
+		"clsx": "^2.1.1",
+		"colord": "^2.9.2",
+		"fast-deep-equal": "^3.1.3"
+	}
+}

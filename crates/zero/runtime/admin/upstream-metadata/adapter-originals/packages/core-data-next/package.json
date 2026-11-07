@@ -1,0 +1,27 @@
+{
+	"name": "@zero-admin/core-data-next",
+	"version": "1.0.0",
+	"description": "Extended core data functionality for Zero Admin",
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@wordpress/api-fetch": "next",
+		"@wordpress/compose": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/element": "next",
+		"@wordpress/private-apis": "next",
+		"@wordpress/url": "next"
+	},
+	"peerDependencies": {
+		"react": "^18.0.0"
+	}
+}

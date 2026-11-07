@@ -1,0 +1,1 @@
+<?php return array('name' => 'collection-new', 'dependencies' => array(), 'moduleDependencies' => array('@zero-admin/schema'), 'version' => '6b00dcc94ede192d8b40');

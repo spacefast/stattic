@@ -1,0 +1,1 @@
+<?php return array('name' => 'plugin-list', 'dependencies' => array('wp-core-data', 'wp-data', 'wp-i18n'), 'moduleDependencies' => array('@zero-admin/core-data-next'), 'version' => '638e2ea14a42bd42ce36');

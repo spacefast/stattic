@@ -1,0 +1,1 @@
+<?php return array('name' => 'theme-list', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array('@zero-admin/core-data-next', '@zero-admin/views'), 'version' => '832ca0b90f3bd80bd7c2');

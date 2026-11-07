@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/zero",
   "crates/stattic-runtime-egress",
   "crates/stattic-runtime-compiler",
   "crates/stattic-runtime-core",
@@ -19,7 +20,7 @@ pulldown-cmark = "0.13.4"
 regex = "1"
 serde_yaml = "0.9"
 # PNG raster output only: no animation codecs, no rayon. `woff2` decodes the
-# embedded default face (crates/stattic-zero-runner/assets/fonts). `svg-source`
+# embedded default face in the legacy Zero runner. `svg-source`
 # is not optional in practice — takumi-raster 0.4.13 fails to compile with the
 # feature off (`RenderedImage`/`draw_image` are used outside their
 # `#[cfg(feature = "svg")]` gates).
@@ -42,3 +43,11 @@ incremental = true
 codegen-units = 1
 lto = "thin"
 strip = "symbols"
+
+[profile.wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

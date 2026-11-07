@@ -3,23 +3,14 @@
 // JavaScript consumers ship it as `stattic-runtime-core.wasm`.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { copyFileAtomic } from "../packages/routing/scripts/copy-file-atomic.mjs";
+import { ensureRustTarget } from "./lib/rust-toolchain.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
-const toolchainFile = readFileSync(path.join(repoRoot, "rust-toolchain.toml"), "utf8");
-const toolchain = toolchainFile.match(/^channel\s*=\s*"([^"]+)"/m)?.[1];
-if (!toolchain) throw new Error("rust_toolchain_channel_missing");
-
 const target = "wasm32-wasip1";
-const add = spawnSync("rustup", ["target", "add", "--toolchain", toolchain, target], {
-  cwd: repoRoot,
-  stdio: "inherit",
-});
-if (add.error) throw add.error;
-if (add.status !== 0) process.exit(add.status ?? 1);
+const toolchain = ensureRustTarget(target);
 const compiler = spawnSync("rustup", ["which", "--toolchain", toolchain, "rustc"], {
   cwd: repoRoot,
   encoding: "utf8",

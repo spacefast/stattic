@@ -1,0 +1,20 @@
+{
+	"route": {
+		"path": "/settings/experiments",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "settings_experiments"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@wordpress/components": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@wordpress/element": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/notices": "next",
+		"@wordpress/preferences": "next"
+	}
+}

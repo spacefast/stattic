@@ -26,7 +26,7 @@ const SPACEFAST_UPLOAD_RESERVED_ROOT_SEGMENTS = ['__sf', '__span', '__zero'];
 // door: it also holds '__spacefast_generated/' and the planned '__stattic/*'.
 const SPACEFAST_UPLOAD_RESERVED_SEGMENT_PREFIXES = ['__spacefast', '__stattic'];
 const SPACEFAST_UPLOAD_RESERVED_PATHS = ['.well-known/spacefast-runtime', '.well-known/stattic-runtime'];
-const SPACEFAST_UPLOAD_RESERVED_PREFIXES = ['.spacefast/storage', '.spacefast/engine', '.stattic/storage', '.stattic/engine'];
+const SPACEFAST_UPLOAD_RESERVED_PREFIXES = ['.zero-compiled', '.spacefast/storage', '.spacefast/engine', '.stattic/storage', '.stattic/engine'];
 // The one subtree and the one file a publish may write inside the control
 // prefix: a compiled Functions bundle and the Zero deploy record. Their
 // siblings are the signing key, the runtime artifact and the runtime binary, so

@@ -387,6 +387,10 @@ function _stattic_spacefast_sdk_bootstrap(
         $reviewReload .
         'root.runtime=' . $runtimeContext . ';' .
         (($serving['users']['enabled'] ?? false) === true ? _stattic_space_users_browser_script() : '') .
+        // Zero v2 live updates: the Cast transport registers with every Zero client on the page.
+        (($serving['zero_generation'] ?? null) === 'v2'
+            ? 'if(!root.zeroRealtime){root.zeroRealtime=true;var z=document.createElement("script");z.src=' . json_encode(STATTIC_ZERO_V2_REALTIME_PATH) . ';document.head.appendChild(z);}'
+            : '') .
         $tagLoader .
         _stattic_spacefast_tracker_loader($serving, $previewToken) .
         $collab .

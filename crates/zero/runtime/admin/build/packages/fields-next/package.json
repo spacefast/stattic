@@ -1,0 +1,33 @@
+{
+	"name": "@zero-admin/fields-next",
+	"version": "1.0.0",
+	"description": "Fields for Zero Admin",
+	"type": "module",
+	"wpModule": true,
+	"private": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/core-data-next": "workspace:*",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/editor": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/html-entities": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/url": "catalog:",
+		"clsx": "catalog:"
+	},
+	"devDependencies": {
+		"@testing-library/react": "catalog:"
+	},
+	"license": "GPL-2.0-or-later"
+}

@@ -1,0 +1,1 @@
+<?php return array('name' => 'design-navigation-edit', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array(), 'version' => 'c2266b72ba985bdba1a8');

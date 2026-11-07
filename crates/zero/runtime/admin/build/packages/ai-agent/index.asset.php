@@ -1,0 +1,1 @@
+<?php return array('name' => '@zero-admin/ai-agent', 'dependencies' => array('react', 'wp-api-fetch', 'wp-core-data', 'wp-data', 'wp-element', 'wp-i18n'), 'moduleDependencies' => array('@wordpress/route', '@zero-admin/admin-toolkit', '@zero-admin/theme'), 'version' => '4309126233a402281afd');

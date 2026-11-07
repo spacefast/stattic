@@ -1,0 +1,1 @@
+<?php return array('name' => '@zero-admin/lazy-editor', 'dependencies' => array('react', 'wp-blocks', 'wp-core-data', 'wp-data', 'wp-element', 'wp-i18n', 'wp-private-apis', 'wp-style-engine'), 'moduleDependencies' => array('@zero-admin/admin-toolkit', '@zero-admin/core-data-next', '@zero-admin/load-assets', '@zero-admin/theme'), 'version' => 'c977d6733de959946ae5');

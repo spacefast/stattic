@@ -1,0 +1,1 @@
+<?php return array('name' => 'media', 'dependencies' => array(), 'moduleDependencies' => array('@zero-admin/schema'), 'version' => '67a006fa13bf429fb72e');

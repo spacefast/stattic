@@ -1,0 +1,23 @@
+{
+	"name": "@zero-admin/global-styles-engine",
+	"version": "1.0.0",
+	"description": "A library for processing global styles objects",
+	"type": "module",
+	"wpModule": true,
+	"private": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"colord": "^2.9.2",
+		"deepmerge": "^4.3.0",
+		"is-plain-object": "^5.0.0",
+		"@wordpress/blocks": "next",
+		"@wordpress/data": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/style-engine": "next"
+	}
+}

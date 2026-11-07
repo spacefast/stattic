@@ -1,0 +1,1 @@
+<?php return array('name' => '@zero-admin/load-assets', 'dependencies' => array(), 'moduleDependencies' => array(), 'version' => '6fac5cdb36f9bbbf9926');

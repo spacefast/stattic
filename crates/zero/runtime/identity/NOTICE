@@ -1,0 +1,11 @@
+Spacefast Identity is licensed under GPL-2.0-or-later.
+
+The admin DataViews adapter is adapted from CIAB Admin,
+wordpress/plugins/ciab-admin/packages/dataviews/src/index.ts and style.scss.
+Copyright the CIAB Admin contributors. GPL-2.0-or-later.
+The adapter uses the standalone package export instead of the WordPress-global build.
+CIAB source snapshot: spacefast-identity-references/ciab-admin.
+
+WordPress DataViews and related UI packages are copyright the WordPress contributors,
+GPL-2.0-or-later. Their package distributions include their licenses.
+Composer dependencies retain upstream license files in the packaged vendor directory.

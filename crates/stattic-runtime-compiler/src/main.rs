@@ -77,7 +77,7 @@ fn run() -> Result<(), CliError> {
     let command = parse_args(env::args().skip(1))?;
     match command {
         Command::Finalize(args) => finalize_site_command(args)?,
-        Command::Invoke => stattic_zero_runner::run_stdio(),
+        Command::Invoke => stattic_zero_runner::legacy_zero::run_stdio(),
         Command::ServiceBroker => stattic_zero_runner::run_service_broker_stdio(),
         Command::MarkdownToHtml => markdown_to_html()?,
         Command::SelfTest => self_test()?,
@@ -141,11 +141,11 @@ fn self_test() -> Result<(), CliError> {
     let result = self_test_finalize(&root);
     let _ = fs::remove_dir_all(&root);
     result?;
-    stattic_zero_runner::self_test().map_err(CliError::SelfTest)?;
+    stattic_zero_runner::legacy_zero::self_test().map_err(CliError::SelfTest)?;
     println!(
         "{{\"format\":\"stattic.runtime.self-test.v1\",\"version\":\"{}\",\"abi\":\"{}\"}}",
         env!("CARGO_PKG_VERSION"),
-        stattic_zero_runner::RUNNER_ABI
+        stattic_zero_runner::legacy_zero::RUNNER_ABI
     );
     Ok(())
 }

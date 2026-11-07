@@ -1,0 +1,36 @@
+{
+	"name": "@zero-admin/user-list",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/users/list/$slug",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "user_list",
+				"customPageView": true
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/core-data-next": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/fields-next": "workspace:*",
+		"@zero-admin/views": "workspace:*",
+		"@zero-admin/telemetry": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/api-fetch": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/editor": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/notices": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:",
+		"clsx": "^2.1.1",
+		"dequal": "^2.0.3"
+	}
+}

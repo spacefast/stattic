@@ -1,0 +1,20 @@
+{
+	"route": {
+		"path": "/settings/experiments",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "settings_experiments"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/notices": "catalog:",
+		"@wordpress/preferences": "catalog:"
+	}
+}

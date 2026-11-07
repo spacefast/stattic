@@ -18,7 +18,7 @@ bun "$REPO_ROOT/scripts/fetch-wp-php-toolkit.mjs"
 php_gates() {
   # Build the WordPress dashboard shipped in the engine manifest.
   echo "==> Zero dashboard plugin"
-  bun "$REPO_ROOT/zero/scripts/build.ts" >/dev/null
+  bun "$REPO_ROOT/legacy/zero-0.8/dashboard/scripts/build.ts" >/dev/null
 
   echo "==> php -l (all runtime PHP files)"
   while IFS= read -r -d '' file; do

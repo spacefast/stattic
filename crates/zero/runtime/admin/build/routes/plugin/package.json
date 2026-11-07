@@ -1,0 +1,12 @@
+{
+	"name": "@zero-admin/plugin",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/plugins",
+		"beforeLoad": true
+	},
+	"dependencies": {
+		"@wordpress/route": "catalog:"
+	}
+}

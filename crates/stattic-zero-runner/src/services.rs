@@ -31,8 +31,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::artifacts::ExecutionMode;
-use crate::db::BrokerRefusal;
+use crate::broker::BrokerRefusal;
+use crate::execution::ExecutionMode;
 
 /// Every host this module can reach. Exported for the runtime egress allowlist
 /// to consume, so the set of upstreams is declared once.
@@ -73,7 +73,7 @@ pub(crate) const SERVICE_FRAME_MAX_BYTES: usize = 1024 * 1024;
 
 thread_local! {
     static SERVICE_GRANT: RefCell<ServiceGrant> = const { RefCell::new(ServiceGrant::NONE) };
-    static ZERO_EXECUTION_MODE: RefCell<Option<ExecutionMode>> = const { RefCell::new(None) };
+    static EXECUTION_MODE: RefCell<Option<ExecutionMode>> = const { RefCell::new(None) };
 }
 
 /// Which services this invocation may reach.
@@ -161,16 +161,16 @@ pub(crate) fn set_grant(grant: ServiceGrant) {
     SERVICE_GRANT.with(|state| *state.borrow_mut() = grant);
 }
 
-pub(crate) fn set_zero_execution_mode(mode: Option<ExecutionMode>) {
-    ZERO_EXECUTION_MODE.with(|state| *state.borrow_mut() = mode);
+pub(crate) fn set_execution_mode(mode: Option<ExecutionMode>) {
+    EXECUTION_MODE.with(|state| *state.borrow_mut() = mode);
 }
 
 /// The mode the invocation on this thread is running under, for the brokers
 /// that answer differently per mode: the database broker refuses a write under
 /// `Action`, and the fetch broker spends a shorter budget under `Write`, where
 /// the call is holding an open transaction. `None` outside an invocation.
-pub(crate) fn zero_execution_mode() -> Option<ExecutionMode> {
-    ZERO_EXECUTION_MODE.with(|state| *state.borrow())
+pub(crate) fn execution_mode() -> Option<ExecutionMode> {
+    EXECUTION_MODE.with(|state| *state.borrow())
 }
 
 fn grant() -> ServiceGrant {
@@ -275,7 +275,7 @@ fn execute_service_frame(raw: &str) -> Result<Value, BrokerRefusal> {
             ),
         ));
     }
-    let read_only = zero_execution_mode().is_some_and(|mode| mode == ExecutionMode::Read);
+    let read_only = execution_mode().is_some_and(|mode| mode == ExecutionMode::Read);
     if read_only
         && matches!(
             (frame.service.as_str(), frame.operation.as_str()),
@@ -945,7 +945,7 @@ mod tests {
     use super::*;
 
     fn frame(service: &str, operation: &str, payload: Value) -> String {
-        set_zero_execution_mode(None);
+        set_execution_mode(None);
         set_grant(ServiceGrant {
             gravatar: true,
             spam: true,
@@ -1075,7 +1075,7 @@ mod tests {
         ));
         assert_eq!(code, "service_not_configured");
 
-        set_zero_execution_mode(Some(ExecutionMode::Read));
+        set_execution_mode(Some(ExecutionMode::Read));
         let (code, _) = refusal(&handle_service_frame(
             &json!({
                 "service": "spam",
@@ -1085,7 +1085,7 @@ mod tests {
             .to_string(),
         ));
         assert_eq!(code, "service_read_only");
-        set_zero_execution_mode(None);
+        set_execution_mode(None);
     }
 
     #[test]
@@ -1107,7 +1107,7 @@ mod tests {
         // listing stays available and gets as far as the transport check.
         // Dispatched directly rather than through `frame()`, which resets the
         // execution mode as part of its per-call setup.
-        set_zero_execution_mode(Some(ExecutionMode::Read));
+        set_execution_mode(Some(ExecutionMode::Read));
         let (code, _) = refusal(&handle_service_frame(
             &json!({ "service": "storage", "operation": "delete", "payload": { "id": 7 } })
                 .to_string(),
@@ -1117,7 +1117,7 @@ mod tests {
             &json!({ "service": "storage", "operation": "list", "payload": {} }).to_string(),
         ));
         assert_eq!(code, "service_not_configured");
-        set_zero_execution_mode(None);
+        set_execution_mode(None);
 
         // And an ungranted storage call never reaches any of that.
         set_grant(ServiceGrant::NONE);

@@ -1,0 +1,37 @@
+{
+	"name": "@zero-admin/route-media",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/media"
+	},
+	"dependencies": {
+		"@wordpress/block-editor": "catalog:",
+		"@wordpress/commands": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/compose": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/dom": "catalog:",
+		"@wordpress/editor": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/fields": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/keycodes": "catalog:",
+		"@wordpress/notices": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:",
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/attachment-importer": "workspace:*",
+		"@zero-admin/core-data-next": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/fields-next": "workspace:*",
+		"@zero-admin/views": "workspace:*",
+		"clsx": "catalog:",
+		"dequal": "catalog:",
+		"@zero-admin/schema": "workspace:*"
+	},
+	"license": "GPL-2.0-or-later"
+}

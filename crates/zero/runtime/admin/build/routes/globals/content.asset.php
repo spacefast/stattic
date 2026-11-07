@@ -1,0 +1,1 @@
+<?php return array('name' => 'globals', 'dependencies' => array(), 'moduleDependencies' => array('@zero-admin/schema'), 'version' => '798f91549225bae0c0d0');

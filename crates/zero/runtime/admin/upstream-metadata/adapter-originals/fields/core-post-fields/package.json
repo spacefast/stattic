@@ -1,0 +1,20 @@
+{
+	"name": "core-post-fields",
+	"version": "1.0.0",
+	"dependencies": {
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/lazy-editor": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/block-editor": "next",
+		"@wordpress/blocks": "next",
+		"@wordpress/components": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@wordpress/editor": "next",
+		"@wordpress/element": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/icons": "next",
+		"@wordpress/ui": "next",
+		"clsx": "^2.1.1"
+	}
+}

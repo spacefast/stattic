@@ -1,0 +1,1 @@
+<?php return array('name' => '@zero-admin/post-importer', 'dependencies' => array('wp-blocks', 'wp-core-data', 'wp-i18n', 'wp-notices'), 'moduleDependencies' => array(), 'version' => '977e9e3d64ef78c3db86');

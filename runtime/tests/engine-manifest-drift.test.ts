@@ -53,6 +53,10 @@ const BUILD_ARTIFACTS = new Set([
   // Built by scripts/build-runtime-native.mjs into gitignored runtime/bin/;
   // installer-real-manifest.test.ts stubs it for the same reason.
   "bin/stattic-runtime",
+  // build-runtime-engine-zip.ts stages the pinned compiler and its source/license receipts.
+  "bin/zero",
+  "bin/zero.SOURCE.json",
+  "bin/zero.LICENSES",
   // scripts/fetch-wp-php-toolkit.mjs verifies and extracts the pinned library.
   "engine/vendor/php-toolkit.phar",
 ]);
@@ -63,7 +67,7 @@ const BUILD_ARTIFACTS = new Set([
 const EXPECTED_TREES = {
   // runtime/identity/build.ts verifies and extracts the pinned Identity distribution.
   "wordpress/spacefast-identity": "wp-content/mu-plugins/spacefast-identity",
-  // zero/scripts/build.ts (the vendored Zero dashboard plugin)
+  // legacy/zero-0.8/dashboard/scripts/build.ts (the vendored Zero dashboard plugin)
   "wordpress/zero-dashboard": "wp-content/mu-plugins/zero-dashboard",
 } as const;
 

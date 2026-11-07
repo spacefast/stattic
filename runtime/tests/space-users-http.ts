@@ -12,7 +12,7 @@ import {
   spaceUserSessionsSchema,
   spaceUsersListSchema,
 } from "../../packages/common/src/contracts/space-users.js";
-import { verifyUser } from "../../packages/zero/src/users.js";
+import { verifyUser } from "./legacy-zero-users.js";
 
 export const usersHttpFixtureSchema = z
   .array(

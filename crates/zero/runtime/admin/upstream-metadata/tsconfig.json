@@ -1,0 +1,28 @@
+{
+	"extends": "../../../tsconfig.base.json",
+	"composite": true,
+	"compilerOptions": {
+		"outDir": "build",
+		"rootDir": ".",
+		"baseUrl": ".",
+		"paths": {
+			"@wordpress/abilities": [
+				"./vendor/wordpress/abilities-api/packages/client/build-types"
+			]
+		}
+	},
+	"include": [ "**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx" ],
+	"exclude": [
+		"**/build",
+		"**/node_modules",
+		"**/*.test.ts",
+		"**/*.test.tsx",
+		"**/test/**",
+		"routes/design-styles/global-styles-ui/font-library-modal/lib/unbrotli.js"
+	],
+	"references": [
+		{
+			"path": "./packages/theme"
+		}
+	]
+}

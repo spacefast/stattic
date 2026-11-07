@@ -1,0 +1,23 @@
+{
+	"name": "@zero-admin/user-data",
+	"version": "1.0.0",
+	"description": "User invite data store for Zero Admin",
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@wordpress/api-fetch": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/i18n": "catalog:"
+	},
+	"peerDependencies": {
+		"react": "^18.0.0"
+	}
+}

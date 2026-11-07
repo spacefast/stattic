@@ -12,11 +12,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { SPACEFAST_WORDPRESS_COMPONENT_RELEASE as release } from "../../packages/common/dist/contracts/runtime-components.js";
-import { generateContentModelPhp } from "../../packages/zero-compile/dist/content-model-php.js";
-import { compileZeroContentModel } from "../../packages/zero-compile/dist/content-model.js";
 import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
+import { compileZeroContentModel, generateContentModelPhp } from "./legacy-zero-dist.mjs";
 
-// Run `bun zero/scripts/build.ts` first: it assembles runtime/wordpress/zero-dashboard.
+// Run `bun legacy/zero-0.8/dashboard/scripts/build.ts` first: it assembles runtime/wordpress/zero-dashboard.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const output = path.join(root, ".cache/context-acceptance");

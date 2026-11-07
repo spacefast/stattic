@@ -4,7 +4,7 @@ import path from "node:path";
 import { ZERO_PUBLIC_CLIENT_SHELL_PATH } from "@spacefast/common/contracts/zero";
 
 import { runZeroInit, runZeroBuildForRoot } from "../../packages/cli/src/zero-commands.js";
-import { assembleZeroCapsulePublish } from "../../packages/zero-compile/src/capsule.js";
+import { assembleZeroCapsulePublish } from "./legacy-zero.js";
 
 const output = path.resolve(process.argv[2] ?? ".cache/context-acceptance");
 await mkdir(output, { recursive: true });

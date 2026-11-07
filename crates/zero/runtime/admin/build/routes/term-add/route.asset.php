@@ -1,0 +1,1 @@
+<?php return array('name' => 'term-add', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array('@wordpress/route', '@zero-admin/core-data-next'), 'version' => 'f15ddadf03bd5937454e');

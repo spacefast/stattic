@@ -5,11 +5,11 @@ import os from "node:os";
 import path from "node:path";
 
 import { ZERO_PLATFORM_ABILITIES } from "../../packages/common/src/contracts/zero-platform-abilities.generated.ts";
-import { generateContentModelPhp } from "../../packages/zero-compile/src/content-model-php.ts";
 import {
   compileZeroContentModel,
+  generateContentModelPhp,
   parseContentDeclarations,
-} from "../../packages/zero-compile/src/content-model.ts";
+} from "./legacy-zero.ts";
 
 const platformAbilityNames = ZERO_PLATFORM_ABILITIES.map((ability) => ability.name).toSorted();
 

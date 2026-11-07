@@ -31,9 +31,8 @@ require_once __DIR__ . '/../shared/errors.php';
 require_once __DIR__ . '/../shared/runtime-log.php';
 require_once __DIR__ . '/tenant-prelude.php';
 require_once __DIR__ . '/access-rules.php';
-// Identity-shape authority: sf_auth() answers exactly what a Zero endpoint's
-// `auth` context answers, from the same `_stattic_zero_auth_context`.
-require_once __DIR__ . '/zero.php';
+// Shared identity service for PHP Functions, Space Users and capsule callers.
+require_once __DIR__ . '/identity-context.php';
 
 /**
  * Header names only the platform may decide, beyond the generated

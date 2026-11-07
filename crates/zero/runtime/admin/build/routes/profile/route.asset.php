@@ -1,0 +1,1 @@
+<?php return array('name' => 'profile', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array('@zero-admin/core-data-next'), 'version' => '31107542894bbd3d9d25');

@@ -71,7 +71,10 @@ test_args+=(--timeout 30000)
 # behind other shards, wherever Bun's file order puts the file.
 # Poppy owns an API database and must exit before another file imports the
 # cached API client. A dedicated child also keeps it out of general shards.
-long_files=(tests/admission.test.ts tests/poppy-publish.test.ts)
+# Start the 300-table capacity probe before WordPress fixtures contend for DDL.
+# The access-page suite imports the API test environment; its process must exit
+# before another fixture can inherit that environment's Postgres DATABASE_URL.
+long_files=(tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/access-page.test.ts)
 reports=()
 running=0
 status=0

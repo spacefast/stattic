@@ -1,0 +1,1 @@
+<?php return array('name' => '@zero-admin/core-data-next', 'dependencies' => array('wp-api-fetch', 'wp-compose', 'wp-data', 'wp-element', 'wp-url'), 'moduleDependencies' => array('@zero-admin/admin-toolkit'), 'version' => 'd92218ec3cb3a607d0f0');

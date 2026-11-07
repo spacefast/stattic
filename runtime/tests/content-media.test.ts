@@ -3,11 +3,6 @@ import { createHash, createHmac } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { generateContentModelPhp } from "../../packages/zero-compile/src/content-model-php.ts";
-import {
-  compileZeroContentModel,
-  parseContentDeclarations,
-} from "../../packages/zero-compile/src/content-model.ts";
 import {
   DASHBOARD_ORIGIN,
   deploy,
@@ -16,6 +11,11 @@ import {
   type Runtime,
   startRuntime,
 } from "./harness.ts";
+import {
+  compileZeroContentModel,
+  generateContentModelPhp,
+  parseContentDeclarations,
+} from "./legacy-zero.ts";
 
 let runtime: Runtime;
 

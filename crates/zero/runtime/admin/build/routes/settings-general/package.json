@@ -1,0 +1,26 @@
+{
+	"name": "@zero-admin/route-settings-general",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/settings/general",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "settings_general"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/preferences": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:"
+	}
+}

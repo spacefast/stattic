@@ -1,0 +1,47 @@
+/**
+ * Temporary bridge between @wordpress/admin-ui Page and CIAB's @zero-admin/admin-toolkit Page.
+ *
+ * Both are structurally identical (NavigableRegion + Header + content) but use
+ * different class names and design tokens. This will be removed when CIAB
+ * migrates to @wordpress/admin-ui upstream.
+ * See: [upstream private reference omitted]
+ */
+
+/* Hide Jetpack branding in CIAB */
+.zero-admin-layout__surface .admin-ui-page .jetpack-logo {
+	display: none;
+}
+
+/* Match zero-admin-page background (neutral instead of neutral-strong) */
+.zero-admin-layout__surface .admin-ui-page {
+	margin: 0;
+	background: var( --wpds-color-bg-surface-neutral );
+}
+
+/* Match zero-admin-page header: padding, background, border, z-index */
+.zero-admin-layout__surface .admin-ui-page__header {
+	background: var( --wpds-color-bg-surface-neutral );
+	border-bottom: none;
+	padding: 8px 20px;
+	z-index: 2;
+	transition: padding ease-out 0.1s;
+	flex-shrink: 0;
+}
+
+.zero-admin-layout__surface .admin-ui-page__header.has-tabs {
+	padding-block-end: 0;
+	border-bottom: 1px solid var( --wpds-color-stroke-surface-neutral-weak );
+}
+
+/* Match zero-admin-page content: gap, background, stacking context */
+.zero-admin-layout__surface .admin-ui-page__content {
+	gap: 24px;
+	background: var( --wpds-color-bg-surface-neutral );
+	clip-path: inset( 0 );
+}
+
+/* Fix breadcrumb list-item bullets */
+.zero-admin-layout__surface .admin-ui-breadcrumbs__list {
+	list-style: none;
+	padding: 0;
+}

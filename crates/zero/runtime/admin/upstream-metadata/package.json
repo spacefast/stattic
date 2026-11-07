@@ -1,0 +1,79 @@
+{
+	"name": "zero-admin",
+	"version": "1.0.0",
+	"description": "A plugin that takes over the WordPress admin interface",
+	"type": "module",
+	"files": [
+		"build",
+		"vendor",
+		"**/*.php",
+		"routes.js",
+		"!fields/**/*.php",
+		"!packages/**/*",
+		"packages/**/*.php",
+		"!**/*.md",
+		"!**/*.map",
+		"!**/*.test.ts",
+		"!**/*.test.tsx",
+		"!**/*.test.js",
+		"!**/*.test.jsx",
+		"!**/*.test.php",
+		"!test/**",
+		"!tests/**",
+		"!phpunit.xml",
+		"!phpcs.xml.dist"
+	],
+	"scripts": {
+		"build": "pnpm run clean-build && wp-build build",
+		"build:meta": "wp-build --meta build",
+		"build:start": "pnpm build && pnpm env:start",
+		"clean-build": "rm -rf build",
+		"dev": "pnpm clean-build && wp-build dev",
+		"dev:start": "pnpm env:start & pnpm dev",
+		"plugin-zip": "wp-scripts plugin-zip",
+		"preplugin-zip": "pnpm run \"/^(preplugin-zip:|build\\$)/\"",
+		"preplugin-zip:require-clean-workdir": "test -z \"$(git status --porcelain --untracked=no)\"",
+		"test:php": "cd ../../.. && wp-env --config=.wp-env.test.json run --env-cwd='managed-software/plugins/zero-admin' cli vendor/bin/phpunit -c phpunit.xml --verbose"
+	},
+	"author": "Your Name",
+	"license": "GPL-2.0-or-later",
+	"devEngines": {
+		"runtime": {
+			"name": "node",
+			"onFail": "error"
+		},
+		"packageManager": {
+			"name": "pnpm",
+			"onFail": "error"
+		}
+	},
+	"engines": {
+		"node": ">=22.18.0",
+		"pnpm": ">=10.16.0"
+	},
+	"dependencies": {
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/theme": "workspace:*",
+		"@zero-admin/user-data": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@paypal/react-paypal-js": "^8.9.1",
+		"@woocommerce-next/shipping": "workspace:*",
+		"@wordpress/base-styles": "next",
+		"@wordpress/core-data": "next",
+		"clsx": "^2.1.1",
+		"dequal": "^2.0.3",
+		"react": "^18.3.1"
+	},
+	"optionalDependencies": {
+		"sass-embedded-linux-x64": "^1.89.2"
+	},
+	"browserslist": [
+		"extends @wordpress/browserslist-config"
+	],
+	"packageManager": "pnpm@10.18.0+sha512.e804f889f1cecc40d572db084eec3e4881739f8dec69c0ff10d2d1beff9a4e309383ba27b5b750059d7f4c149535b6cd0d2cb1ed3aeb739239a4284a68f40cfa",
+	"lint-staged": {
+		"*.{js,jsx,ts,tsx,cjs}": "eslint --fix",
+		"*.{css,scss}": "stylelint --fix",
+		"*.{json,md,yml,yaml}": "prettier --write"
+	}
+}

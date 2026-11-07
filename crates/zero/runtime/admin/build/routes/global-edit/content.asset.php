@@ -1,0 +1,1 @@
+<?php return array('name' => 'global-edit', 'dependencies' => array(), 'moduleDependencies' => array('@zero-admin/schema'), 'version' => '33e891847a5c45de21dd');

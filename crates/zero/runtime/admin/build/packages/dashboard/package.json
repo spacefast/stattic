@@ -1,0 +1,36 @@
+{
+	"name": "@zero-admin/dashboard",
+	"version": "1.0.0",
+	"description": "Dashboard widgets store, components, and types",
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@zero-admin/design-system": "workspace:*",
+		"@automattic/grid": "catalog:",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/base-styles": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/compose": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/hooks": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/preferences": "catalog:",
+		"@wordpress/ui": "catalog:",
+		"clsx": "^2.1.1",
+		"fast-deep-equal": "^3.1.3",
+		"react": "^18.3.1",
+		"react-dom": "^18.3.1",
+		"uuid": "^9.0.1"
+	},
+	"devDependencies": {
+		"@types/uuid": "^9.0.1"
+	}
+}

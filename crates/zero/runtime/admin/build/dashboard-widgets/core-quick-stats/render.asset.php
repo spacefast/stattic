@@ -1,0 +1,1 @@
+<?php return array('name' => 'core-quick-stats', 'dependencies' => array('react'), 'moduleDependencies' => array(), 'version' => '594b134c47d17a01e1c4');

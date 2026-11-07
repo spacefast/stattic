@@ -1,0 +1,52 @@
+import {
+	type ElementType,
+	type ComponentPropsWithoutRef,
+	type HTMLAttributes,
+	type Ref,
+} from 'react';
+import type { Field } from '..';
+
+export type DistributiveOmit< T, K extends PropertyKey > = T extends T
+	? Omit< T, K >
+	: never;
+
+type HTMLAttributesWithRef< T extends ElementType = any > =
+	HTMLAttributes< T > & { ref?: Ref< T > | undefined };
+
+type ComponentRenderFn< Props > = (
+	props: Props
+) => React.ReactElement< unknown >;
+
+export type ComponentProps< E extends ElementType > = Omit<
+	ComponentPropsWithoutRef< E >,
+	'className' | 'children' | 'render'
+> & {
+	/**
+	 * CSS class name to apply to the component.
+	 */
+	className?: string;
+
+	/**
+	 * Replaces the component's default HTML element using a given React
+	 * element, or a function that returns a React element.
+	 */
+	render?:
+		| ComponentRenderFn< HTMLAttributesWithRef >
+		| React.ReactElement< Record< string, unknown > >;
+};
+
+export type ControlProps = {
+	/**
+	 * The accessible label. All controls must be labeled.
+	 */
+	label: React.ComponentProps< typeof Field.Label >[ 'children' ];
+	/**
+	 * The accessible description, associated using `aria-describedby`.
+	 *
+	 * For screen reader accessibility, this should only contain plain text,
+	 * and no semantics such as links.
+	 */
+	description?: React.ComponentProps<
+		typeof Field.Description
+	>[ 'children' ];
+};

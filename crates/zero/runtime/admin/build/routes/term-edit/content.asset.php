@@ -1,0 +1,1 @@
+<?php return array('name' => 'term-edit', 'dependencies' => array('react', 'wp-core-data', 'wp-data', 'wp-element', 'wp-html-entities', 'wp-i18n', 'wp-notices', 'wp-primitives'), 'moduleDependencies' => array('@wordpress/route', '@zero-admin/admin-toolkit', '@zero-admin/dataviews', '@zero-admin/fields-next', '@zero-admin/views'), 'version' => '7a09df0ace3bb6eddae1');

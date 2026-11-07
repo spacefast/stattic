@@ -1,0 +1,43 @@
+{
+	"name": "@zero-admin/admin-toolkit",
+	"version": "1.0.0",
+	"description": "Shared components and utilities for Zero Admin",
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@zero-admin/private-apis": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/theme": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/a11y": "catalog:",
+		"@wordpress/base-styles": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/compose": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/editor": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/html-entities": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/keyboard-shortcuts": "catalog:",
+		"@wordpress/keycodes": "catalog:",
+		"@wordpress/preferences": "catalog:",
+		"@wordpress/private-apis": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:",
+		"clsx": "catalog:",
+		"react": "catalog:",
+		"react-dom": "catalog:"
+	},
+	"devDependencies": {
+		"@testing-library/react": "catalog:"
+	},
+	"license": "GPL-2.0-or-later"
+}

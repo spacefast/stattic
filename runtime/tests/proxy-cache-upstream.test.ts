@@ -4,6 +4,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
 
+import { EGRESS_UNTRUSTED_MESSAGE } from "../../packages/common/src/contracts/egress.ts";
 import {
   deploy,
   errorCode,
@@ -567,7 +568,7 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
 
     const untrusted = await get(rt, UNCLAIMED_HOST, "/untrusted");
     expect(untrusted.status).toBe(403);
-    expect(await untrusted.text()).toContain("Claim the space to reach any public host.");
+    expect(await untrusted.text()).toContain(EGRESS_UNTRUSTED_MESSAGE);
     // Lexical refusal: the hop never happened.
     expect(upstreamMethods.length).toBe(beforeRequestCount);
 

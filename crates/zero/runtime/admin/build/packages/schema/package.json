@@ -1,0 +1,21 @@
+{
+	"name": "@zero-admin/schema",
+	"version": "1.0.0",
+	"private": true,
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.tsx"
+	},
+	"license": "GPL-2.0-or-later",
+	"dependencies": {
+		"@wordpress/api-fetch": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"react": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@zero-admin/attachment-importer": "workspace:*"
+	}
+}

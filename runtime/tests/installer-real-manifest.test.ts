@@ -73,13 +73,19 @@ async function installFromShippedManifest(
     aliases: Array<{ source: string; path: string }>;
     trees?: Array<{ source: string; path: string }>;
   };
+  // Native artifacts are generated outside this suite. Stand them in so this
+  // test proves installation and executable permissions in a fresh checkout.
+  const generatedFiles = new Map([
+    [
+      "bin/stattic-runtime",
+      "#!/bin/sh\nprintf '%s\\n' '{\"format\":\"stattic.runtime.self-test.v1\"}'\n",
+    ],
+  ]);
   for (const file of manifest.files) {
     mkdirSync(path.dirname(path.join(payload, file)), { recursive: true });
-    if (file === "bin/stattic-runtime") {
-      writeFileSync(
-        path.join(payload, file),
-        "#!/bin/sh\nprintf '%s\\n' '{\"format\":\"stattic.runtime.self-test.v1\"}'\n",
-      );
+    const generated = generatedFiles.get(file);
+    if (generated !== undefined) {
+      writeFileSync(path.join(payload, file), generated);
       continue;
     }
     copyFileSync(path.join(runtimeRoot, file), path.join(payload, file));

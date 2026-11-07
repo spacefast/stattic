@@ -21,6 +21,7 @@ stattic-runtime-egress = { path = "../stattic-runtime-egress" }
 stattic-runtime-policy = { path = "../stattic-runtime-policy" }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+zero = { path = "../zero", default-features = false, features = ["host"] }
 stattic-zero-runner = { path = "../stattic-zero-runner" }
 
 # utimensat(2), to stamp a placed file's mtime by path. std can only set times

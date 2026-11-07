@@ -1,0 +1,22 @@
+{
+	"name": "@zero-admin/attachment-importer",
+	"version": "1.0.0",
+	"description": "Attachment importer",
+	"type": "module",
+	"wpModule": true,
+	"private": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@wordpress/blob": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/element": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/media-utils": "next",
+		"@wordpress/notices": "next"
+	}
+}

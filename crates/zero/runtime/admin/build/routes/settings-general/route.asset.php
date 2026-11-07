@@ -1,0 +1,1 @@
+<?php return array('name' => 'settings-general', 'dependencies' => array('wp-core-data', 'wp-data', 'wp-preferences'), 'moduleDependencies' => array(), 'version' => 'b86fe211a07c8ed57098');

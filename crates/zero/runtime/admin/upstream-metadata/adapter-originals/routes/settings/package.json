@@ -1,0 +1,12 @@
+{
+	"name": "@zero-admin/route-settings",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/settings",
+		"beforeLoad": true
+	},
+	"dependencies": {
+		"@wordpress/route": "next"
+	}
+}

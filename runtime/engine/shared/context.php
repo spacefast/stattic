@@ -191,11 +191,8 @@ const STATTIC_UPLOADS_PUBLIC_URL_PREFIX = '/__stattic/u/';
 // They are implementation state, regardless of any catalog visibility bit.
 function _stattic_path_is_internal_artifact(string $path): bool
 {
-    $normalized = trim($path, '/');
-    $foldedPlatformPath = strtolower($normalized);
-    return $normalized === 'zero'
-        || str_starts_with($normalized, 'zero/')
-        || $foldedPlatformPath === '__spacefast'
+    $foldedPlatformPath = strtolower(trim($path, '/'));
+    return $foldedPlatformPath === '__spacefast'
         || str_starts_with($foldedPlatformPath, '__spacefast/');
 }
 

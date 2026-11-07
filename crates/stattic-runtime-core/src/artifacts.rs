@@ -785,7 +785,6 @@ mod tests {
             (".well-known/spacefast-runtime", b"private pointer"),
             (".well-known/stattic-runtime", b"private pointer"),
             (".well-known/.internal/token", b"secret"),
-            ("zero/endpoint.wasm", b"private endpoint"),
             ("_headers.GZ", b"compressed convention"),
             (".well-known/acme-challenge/token", b"public token"),
             ("public.txt", b"public"),
@@ -819,7 +818,6 @@ mod tests {
             ".well-known/spacefast-runtime",
             ".well-known/stattic-runtime",
             ".well-known/.internal/token",
-            "zero/endpoint.wasm",
             "_headers.GZ",
         ] {
             assert!(!listing.contains(private_path));

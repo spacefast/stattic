@@ -2112,8 +2112,6 @@ function _stattic_lookup_not_found_is_terminal(string $lookup): bool
     if (
         $path === '.well-known/spacefast-runtime'
         || $path === '.well-known/stattic-runtime'
-        || $path === 'zero'
-        || str_starts_with($path, 'zero/')
     ) {
         return true;
     }

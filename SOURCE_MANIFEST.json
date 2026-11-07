@@ -1,7 +1,7 @@
 {
-  "revision": "098c61f8c0ab80c94c908ab19ad5562b255a0e0c",
-  "sourceHash": "f2129a28eb6a220a81f201d2c550406b5434e177a723f0c45297edde4be1f875",
-  "manifestSha256": "3112449e2abf63a71975776cba9b33479cbb80679e84488add946a400b3799aa",
+  "revision": "f09a6bea7433054622487681ad6c6765eb75a1b4",
+  "sourceHash": "ac53c7eeed83ce57ee0265a822e1a39ad9e6ae6af59ae75336d5a572878c9952",
+  "manifestSha256": "d7a4e07b5500c17a17f595e65e629614bbc260a788a6f521fca6e2e7b32e7d81",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "6f0ce179acd51f1976f347e7da4eb72545c35e36be629b00b46230906ec05d13"
+      "sha256": "16d864cb16056336e8127470303dec57810086ca4500df88349698e3fe00e589"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "8ab6b3b0c87f381fd4d19b8dfe588dadb7dbfc4f1c7c94cc1f255770033da3f0"
+      "sha256": "b702a351c7380d9a84d300744c3e6048d648a46302014f54f3a82445d50aa617"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -45,7 +45,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/artifacts.rs",
-      "sha256": "8263b969ea14cf70704a7b275d2f8653410737110c975c2d458638ae0442627a"
+      "sha256": "18e71a87e56693b60a88866fbc6a1c98d49eb7959f29204115c9ec2582a7acf7"
     },
     {
       "path": "crates/stattic-runtime-core/src/catalog.rs",
@@ -197,7 +197,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/serving_paths.rs",
-      "sha256": "2cd892e00b8fca866129415cc2894052885e8f931062473071202234377ba03b"
+      "sha256": "403fd9f686fc1af2bdceecc8a7f6bb26becb355dce2597726efb5da5a6d1bb04"
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
@@ -213,7 +213,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/transforms/effective.rs",
-      "sha256": "2c5a7fa5c55e29f424a565bca9888e56c6da8780ed0219fa1c3c6831f1b754ec"
+      "sha256": "f030d052450ad5528cc4175bdf079a4d805a8a92079e7f2416b3e493e090d0c7"
     },
     {
       "path": "crates/stattic-runtime-core/src/transforms/html.rs",
@@ -597,7 +597,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "04268fbd2483d3cd83e94bd72ad2ea2aa168cbb321d8930bb305ad8336b46175"
+      "sha256": "756df9c781ae8ae49d1e4de1ae1c7c57ad5b15adfc2c93990538f4860a9e7bf9"
     },
     {
       "path": "runtime/engine/runtime/space-mail.php",
@@ -685,7 +685,7 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "54b12f22236807a9b92fcf152ecf944e1150b4e78eeb8072214e553f3147c538"
+      "sha256": "af03e3206b4e50fd27ac1816202fb6731d2d94985ecc5d9732de3b48e6d4366a"
     },
     {
       "path": "runtime/engine/shared/d1-broker.php",
@@ -1289,7 +1289,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "165e8cf98af3f94dc046ae7119e987ae67991deff1b26d18c06003e77c680a12"
+      "sha256": "59920387bf11f13ed30719665f2ea89737123828df2a2f7ccb872ea6db9b4d84"
     },
     {
       "path": "runtime/tests/run-ci.sh",

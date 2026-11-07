@@ -121,6 +121,10 @@ beforeAll(async () => {
       "café.html": "<h1>café</h1>\n",
       "404.html": ROOT_404,
       "docs/index.html": "<h1>docs</h1>\n",
+      // An ordinary folder: Zero's runtime artifacts sit in the version root,
+      // never in the file catalog, so they cannot claim this name.
+      "zero/index.html": "<h1>zero</h1>\n",
+      "zero/notes.txt": "zero notes\n",
       "blog/404.html": BLOG_404,
       "blog/post.html": POST,
       "assets/app.js": APP_JS,
@@ -265,6 +269,9 @@ test("index and directory URLs resolve to their compiled keys", async () => {
   const canonical = await get(rt, SITE, "/docs");
   expect(canonical.status).toBe(308);
   expect(canonical.headers.get("location")).toBe("/docs/");
+
+  expect(await (await get(rt, SITE, "/zero/")).text()).toBe("<h1>zero</h1>\n");
+  expect(await (await get(rt, SITE, "/zero/notes.txt")).text()).toBe("zero notes\n");
 });
 
 test("W7.1 clean URLs serve <path>.html and canonicalize the slashed form", async () => {

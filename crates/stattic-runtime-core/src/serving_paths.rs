@@ -15,7 +15,6 @@ pub(crate) const DIRECTORY_INDEX_SUFFIX: &str = "/index.html";
 const EXACT_PRIVATE_PATHS: &[&str] = &[
     ".well-known/spacefast-runtime",
     ".well-known/stattic-runtime",
-    "zero",
     // The Zero compiler uploads this runtime-owned receipt beside public
     // files. The PHP front door already keeps the __spacefast namespace
     // private; classify it the same way here so finalize never selects the
@@ -41,7 +40,6 @@ pub(crate) fn is_private_serving_path(path: &str) -> bool {
             .iter()
             .chain(CASE_INSENSITIVE_CONFIG_PATHS)
             .any(|config| config.eq_ignore_ascii_case(path))
-        || path.starts_with("zero/")
         || path.starts_with("__spacefast/functions/bundles/")
         || path.starts_with("__spacefast/functions/seeds/")
         // Page templates and the layout cascade are compile inputs too: the
@@ -126,11 +124,11 @@ mod tests {
     }
 
     #[test]
-    fn serving_visibility_matches_control_zero_and_sidecar_policy() {
+    fn serving_visibility_matches_control_and_sidecar_policy() {
         assert!(is_private_serving_path("SF.JSONC"));
         assert!(is_private_serving_path("SPACEFAST.CONFIG.TS"));
         assert!(is_private_serving_path("spacefast.config.ts.gz"));
-        assert!(is_private_serving_path("zero/endpoints-index.json"));
+        assert!(!is_private_serving_path("zero/index.html"));
         assert!(is_private_serving_path(
             "__spacefast/functions/bundles/worker/bundle.json"
         ));

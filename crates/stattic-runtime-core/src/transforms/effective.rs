@@ -1280,8 +1280,8 @@ mod tests {
     }
 
     #[test]
-    fn hidden_control_zero_and_sidecar_paths_do_not_change_single_html_inference() {
-        for companion in ["SF.JSONC", "zero/endpoints-index.json", "docs/page.html.gz"] {
+    fn hidden_control_and_sidecar_paths_do_not_change_single_html_inference() {
+        for companion in ["SF.JSONC", "docs/page.html.gz"] {
             let output = resolve_effective_config(ResolveEffectiveInput {
                 manifest_paths: vec!["docs/page.html".into(), companion.into()],
                 file_config: None,

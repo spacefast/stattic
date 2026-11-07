@@ -55,7 +55,7 @@ function _stattic_runtime_api_base_url(): string
 // through Atomic persistent data. `$allowFetch` is the management lane's flag.
 // The public serving lane never makes a visitor wait on an outbound HTTPS round
 // trip for a key: it reads local/cached only and denies when neither answers.
-function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$reason = null): ?array
+function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$reason = null, bool $readOnly = false): ?array
 {
     $cachePath = $privateRoot . '/runtime/jwks.json';
     $jwksPath = _stattic_config_value('SPACEFAST_RUNTIME_JWKS_PATH');
@@ -80,7 +80,8 @@ function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$
                 '/.stattic/storage'
             );
             if (
-                $persistentRuntimeRoot
+                !$readOnly
+                && $persistentRuntimeRoot
                 && (($cached['source'] ?? null) !== 'configured' || ($cached['jwks'] ?? null) !== $decoded)
             ) {
                 if (_stattic_runtime_mkdir_soft(dirname($cachePath))) {
@@ -106,7 +107,7 @@ function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$
     ) {
         return $cached['jwks'];
     }
-    if (!$allowFetch) {
+    if ($readOnly || !$allowFetch) {
         $reason = 'key_missing';
         return null;
     }
@@ -159,9 +160,9 @@ function _stattic_runtime_jwks_usable(mixed $jwks): bool
  * @return list<array> every Ed25519 key for this kid; a kid-less token matches
  *         them all, and the caller stops at the first that verifies.
  */
-function _stattic_runtime_signing_jwks(string $privateRoot, string $kid, bool $allowFetch, ?string &$reason = null): array
+function _stattic_runtime_signing_jwks(string $privateRoot, string $kid, bool $allowFetch, ?string &$reason = null, bool $readOnly = false): array
 {
-    $jwks = _stattic_runtime_jwks($privateRoot, $allowFetch, $reason);
+    $jwks = _stattic_runtime_jwks($privateRoot, $allowFetch, $reason, $readOnly);
     $candidates = [];
     foreach (($jwks['keys'] ?? []) as $key) {
         if (is_array($key) && ($key['kty'] ?? null) === 'OKP' && ($key['crv'] ?? null) === 'Ed25519' && ($kid === '' || ($key['kid'] ?? null) === $kid)) {
@@ -253,6 +254,7 @@ function _stattic_runtime_token_claims(
         is_string($parsed['header']['kid'] ?? null) ? $parsed['header']['kid'] : '',
         ($profile['allow_jwks_fetch'] ?? false) === true,
         $keyReason,
+        ($profile['read_only'] ?? false) === true,
     );
     if ($jwks === []) {
         return $reject((string) $keyReason);

@@ -1968,16 +1968,27 @@ function _stattic_runtime_version_source_send($stream, int $size, string $conten
  * 204 because the caller's file-reader contract treats a missing optional file
  * as null.
  */
+function _stattic_runtime_read_version_evidence_route(string $privateRoot, string $spaceId, string $versionId, array $claims): void
+{
+    _stattic_runtime_read_version_source_route($privateRoot, $spaceId, $versionId, $claims, true);
+}
+
 function _stattic_runtime_read_version_source_route(
     string $privateRoot,
     string $spaceId,
     string $versionId,
-    array $_claims
+    array $_claims,
+    bool $readOnly = false
 ): void {
     $uploadId = _stattic_runtime_version_files_param('upload_id');
     $sha256 = _stattic_runtime_version_files_param('sha256');
     $path = _stattic_runtime_version_files_param('path');
     $view = _stattic_runtime_version_files_param('view') ?? 'source';
+    $channel = _stattic_runtime_version_files_param('channel');
+    if ($channel !== null) {
+        if (!$readOnly || $view !== 'served') _stattic_problem_response(422, 'runtime_version_source_request_invalid', 'channel requires a served evidence read.');
+        $channel = _stattic_runtime_id($channel, 'channel');
+    }
     $rawMaxBytes = _stattic_runtime_version_files_param('max_bytes');
     if (!in_array($view, STATTIC_RUNTIME_VERSION_FILE_VIEWS, true)) {
         _stattic_problem_response(
@@ -1998,6 +2009,12 @@ function _stattic_runtime_read_version_source_route(
         );
     }
     $maxBytes = (int) $rawMaxBytes;
+    if ($readOnly && ($uploadId !== null || $sha256 !== null || $path === null)) {
+        _stattic_problem_response(422, 'runtime_version_source_request_invalid', 'Evidence reads require a finalized catalog path.');
+    }
+    if ($readOnly && !_stattic_runtime_version_finalized(_stattic_version_root($privateRoot, $spaceId, $versionId))) {
+        _stattic_runtime_version_source_empty();
+    }
     $resolved = null;
     if ($uploadId !== null || $sha256 !== null) {
         if (
@@ -2025,13 +2042,20 @@ function _stattic_runtime_read_version_source_route(
             strtolower($sha256)
         );
     } elseif ($path !== null) {
-        $resolved = _stattic_runtime_resolve_version_file(
-            $privateRoot,
-            $spaceId,
-            $versionId,
-            $path,
-            $view
-        );
+        if ($channel !== null) {
+            if (_stattic_runtime_file_path_or_null($path, true) !== $path || _stattic_path_is_internal_artifact($path)) _stattic_runtime_version_source_empty();
+            $catalog = _stattic_runtime_version_catalog_read_only($privateRoot, $spaceId, $versionId);
+            $resolved = _stattic_runtime_catalog_object(is_array($catalog) ? ($catalog['variants'][$channel][$path] ?? null) : null);
+        } else {
+            $resolved = _stattic_runtime_resolve_version_file(
+                $privateRoot,
+                $spaceId,
+                $versionId,
+                $path,
+                $view,
+                $readOnly
+            );
+        }
     } else {
         _stattic_problem_response(
             422,
@@ -2041,6 +2065,20 @@ function _stattic_runtime_read_version_source_route(
     }
     if (!is_array($resolved)) {
         _stattic_runtime_version_source_empty();
+    }
+    if ($readOnly) {
+        $bytes = _stattic_runtime_read_evidence_object($privateRoot, $spaceId, $resolved, $maxBytes);
+        if ($bytes === null) {
+            _stattic_runtime_version_source_empty();
+        }
+        _stattic_runtime_version_source_reset_headers();
+        header('Content-Type: application/octet-stream', true);
+        header('Content-Length: ' . strlen($bytes), true);
+        header('Cache-Control: ' . STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
+        header('X-Content-Type-Options: nosniff', true);
+        _stattic_runtime_version_source_status(200);
+        echo $bytes;
+        exit;
     }
     $blobPath = _stattic_runtime_blob_path($privateRoot, $spaceId, (string) $resolved['sha']);
     $size = is_file($blobPath) ? filesize($blobPath) : false;
@@ -2065,6 +2103,215 @@ function _stattic_runtime_read_version_source_route(
     _stattic_runtime_version_source_send($stream, $size, (string) ($resolved['mime'] ?? 'application/octet-stream'));
 }
 
+/** Immutable incident readers use JSON only: no PHP sidecar creation or execution. */
+function _stattic_runtime_investigation_catalog(string $privateRoot, string $spaceId, string $versionId): ?array
+{
+    $root = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    if (!_stattic_runtime_version_finalized($root)) return null;
+    $file = _stattic_runtime_investigation_path($root, 'metadata.json');
+    if ($file !== null && filesize($file) > 16777216) _stattic_problem_response(503, 'runtime_investigation_catalog_budget_exceeded', 'The immutable catalog exceeds the bounded investigation read.');
+    $catalog = _stattic_runtime_version_catalog_read_only($privateRoot, $spaceId, $versionId);
+    if (is_array($catalog) && count($catalog['paths']) > 50000) _stattic_problem_response(503, 'runtime_investigation_catalog_budget_exceeded', 'The immutable catalog exceeds the bounded investigation row limit.');
+    return $catalog;
+}
+
+function _stattic_runtime_investigation_path(string $root, string $path): ?string
+{
+    $base = realpath($root);
+    $resolved = realpath($root . '/' . $path);
+    return is_string($base) && is_string($resolved) && str_starts_with($resolved, $base . '/') && is_file($resolved) ? $resolved : null;
+}
+
+function _stattic_runtime_investigation_json(string $root, string $path, int $limit): ?array
+{
+    $file = _stattic_runtime_investigation_path($root, $path);
+    if ($file === null) return null;
+    $stream = fopen($file, 'rb');
+    if ($stream === false) return null;
+    $bytes = stream_get_contents($stream, $limit + 1);
+    fclose($stream);
+    if (!is_string($bytes) || strlen($bytes) > $limit) return null;
+    $value = json_decode($bytes, true, 32);
+    return is_array($value) ? $value : null;
+}
+
+function _stattic_runtime_execution_kind(string $path): string
+{
+    if (str_starts_with($path, '__spacefast/functions/bundles/')) return 'functions_bundle';
+    if ($path === '__spacefast/zero/bundles/server.qjs.mjs') return 'zero_bundle';
+    return 'internal_unknown';
+}
+
+function _stattic_runtime_execution_row(string $kind, string $path, ?string $sha = null, ?int $size = null, string $state = 'unavailable'): array
+{
+    return ['id' => hash('sha256', $kind . "\0" . $path), 'kind' => $kind, 'path' => $path, 'sha256' => $sha, 'size' => $size, 'state' => $state];
+}
+
+/** Indexes are bounded; artifact metadata and bodies are read only for the requested page. */
+function _stattic_runtime_execution_candidates(string $root, array $catalog): array
+{
+    $rows = [];
+    foreach ($catalog['paths'] as $path => $entry) {
+        if (!is_string($path) || _stattic_runtime_file_path_or_null($path, true) !== $path || !_stattic_path_is_internal_artifact($path)) continue;
+        $kind = _stattic_runtime_execution_kind($path);
+        $object = is_array($entry) ? _stattic_runtime_catalog_object($entry['source'] ?? null) : null;
+        $row = _stattic_runtime_execution_row($kind, $path, $object['sha'] ?? null, $object['size'] ?? null, $kind === 'internal_unknown' ? 'unsupported' : (is_array($object) ? 'available' : 'unavailable'));
+        $rows[$row['id']] = $row;
+    }
+    foreach (['endpoints', 'runs'] as $lane) {
+        $indexPath = 'zero/' . $lane . '-index.json';
+        if (!file_exists($root . '/' . $indexPath)) continue;
+        $index = _stattic_runtime_investigation_json($root, $indexPath, 1048576);
+        $entries = is_array($index) ? ($index[$lane] ?? null) : null;
+        if (!is_array($entries) || count($entries) > 10000 || ($index['format'] ?? null) !== 'stattic.zero.' . $lane . '-index.v1' || ($index['artifact_kind'] ?? null) !== 'zero_' . $lane . '_index') {
+            foreach (['zero_source', 'zero_bytecode'] as $kind) {
+                $row = _stattic_runtime_execution_row($kind, $indexPath);
+                $rows[$row['id']] = $row;
+            }
+            continue;
+        }
+        foreach ($entries as $identity => $artifactPath) {
+            if (!is_string($artifactPath) || preg_match('~\Azero/' . $lane . '/[a-z0-9_]+\.json\z~', $artifactPath) !== 1) {
+                foreach (['zero_source', 'zero_bytecode'] as $kind) {
+                    $row = _stattic_runtime_execution_row($kind, $indexPath . '#' . hash('sha256', (string) $identity));
+                    $rows[$row['id']] = $row;
+                }
+                continue;
+            }
+            foreach (['zero_source' => '.source.js', 'zero_bytecode' => '.bytecode'] as $kind => $suffix) {
+                $path = substr($artifactPath, 0, -5) . $suffix;
+                $row = _stattic_runtime_execution_row($kind, $path);
+                $row['_metadata'] = $artifactPath;
+                $row['_identity'] = (string) $identity;
+                $row['_identity_key'] = $lane === 'endpoints' ? 'endpointId' : 'runId';
+                $rows[$row['id']] = $row;
+            }
+        }
+    }
+    ksort($rows, SORT_STRING);
+    return $rows;
+}
+
+function _stattic_runtime_execution_resolve(string $root, array $row): array
+{
+    if (!isset($row['_metadata'])) return $row;
+    $metadata = _stattic_runtime_investigation_json($root, $row['_metadata'], 65536);
+    $source = $row['kind'] === 'zero_source';
+    $pathKey = $source ? 'sourcePath' : 'bytecodePath';
+    $shaKey = $source ? 'sourceSha256' : 'bytecodeSha256';
+    $sha = is_array($metadata) ? ($metadata[$shaKey] ?? null) : null;
+    $file = _stattic_runtime_investigation_path($root, $row['path']);
+    $size = $file !== null ? filesize($file) : false;
+    $expectedKind = $row['_identity_key'] === 'endpointId' ? 'endpoint' : 'run';
+    if (is_array($metadata) && ($metadata['kind'] ?? null) === $expectedKind && ($metadata['format'] ?? null) === 'stattic.zero.' . $expectedKind . '.v1' && ($metadata[$row['_identity_key']] ?? null) === $row['_identity'] && ($metadata[$pathKey] ?? null) === $row['path'] && is_string($sha) && preg_match('/\Asha256:([a-f0-9]{64})\z/', $sha, $match) === 1) {
+        $row['sha256'] = $match[1];
+        $row['size'] = is_int($size) ? $size : null;
+        $row['state'] = is_int($size) ? 'available' : 'unavailable';
+    }
+    unset($row['_metadata'], $row['_identity'], $row['_identity_key']);
+    return $row;
+}
+
+function _stattic_runtime_list_execution_artifacts_route(string $privateRoot, string $spaceId, string $versionId): void
+{
+    $root = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    $catalog = _stattic_runtime_investigation_catalog($privateRoot, $spaceId, $versionId);
+    if ($catalog === null) _stattic_problem_response(503, 'runtime_execution_catalog_unavailable', 'The immutable execution catalog is unavailable.');
+    $limit = _stattic_runtime_version_files_param('limit') ?? '50';
+    $cursor = _stattic_runtime_version_files_param('cursor');
+    $id = _stattic_runtime_version_files_param('artifact_id');
+    if (preg_match('/\A[1-9][0-9]?\z|\A100\z/', $limit) !== 1 || ($cursor !== null && !_stattic_is_sha256_hex($cursor)) || ($id !== null && !_stattic_is_sha256_hex($id))) _stattic_runtime_version_files_request_invalid('Invalid execution catalog page selector.');
+    $candidates = _stattic_runtime_execution_candidates($root, $catalog);
+    $page = [];
+    $next = null;
+    foreach ($candidates as $key => $row) {
+        if (($id !== null && $key !== $id) || ($cursor !== null && strcmp($key, $cursor) <= 0)) continue;
+        if (count($page) >= (int) $limit) { $next = $page[count($page) - 1]['id']; break; }
+        $page[] = _stattic_runtime_execution_resolve($root, $row);
+    }
+    $channels = array_keys(is_array($catalog['variants'] ?? null) ? $catalog['variants'] : []);
+    sort($channels, SORT_STRING);
+    _stattic_json_response(200, ['space_id' => $spaceId, 'version_id' => $versionId, 'artifacts' => $page, 'next_cursor' => $next, 'channels' => array_slice($channels, 0, 8), 'channels_omitted' => max(0, count($channels) - 8)]);
+}
+
+/**
+ * Incident-only byte reader for immutable compiled code. The management JWT
+ * binds both identities; the selector must match the committed catalog and
+ * physical bytes. It never grants a browser URL, reads a seed, or executes code.
+ */
+function _stattic_runtime_read_version_investigation_code_artifact_route(
+    string $privateRoot,
+    string $spaceId,
+    string $versionId,
+    array $_claims
+): void {
+    $path = _stattic_runtime_version_files_param('path');
+    $sha256 = _stattic_runtime_version_files_param('sha256');
+    $rawSize = _stattic_runtime_version_files_param('size');
+    $rawMaxBytes = _stattic_runtime_version_files_param('max_bytes');
+    $normalized = is_string($path) ? _stattic_runtime_file_path_or_null($path, true) : null;
+    $codePath = $normalized === '__spacefast/zero/bundles/server.qjs.mjs'
+        || (is_string($normalized) && str_starts_with($normalized, '__spacefast/functions/bundles/'))
+        || (is_string($normalized) && preg_match('~\Azero/(endpoints|runs)/[a-z0-9_]+\.(source\.js|bytecode)\z~', $normalized) === 1);
+    if (!$codePath || $normalized !== $path) {
+        _stattic_runtime_version_file_not_found();
+    }
+    if (
+        !is_string($sha256) || !_stattic_is_sha256_hex($sha256)
+        || !is_string($rawSize) || preg_match('/\A(?:0|[1-9][0-9]{0,7})\z/', $rawSize) !== 1
+        || !is_string($rawMaxBytes) || preg_match('/\A[1-9][0-9]{0,7}\z/', $rawMaxBytes) !== 1
+        || (int) $rawMaxBytes > 8388608
+    ) {
+        _stattic_problem_response(422, 'runtime_code_artifact_request_invalid', 'Code reads require the exact catalog SHA-256 and size and a byte budget up to 8 MiB.');
+    }
+    $root = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    $catalog = _stattic_runtime_investigation_catalog($privateRoot, $spaceId, $versionId);
+    $entry = is_array($catalog) ? ($catalog['paths'][$normalized] ?? null) : null;
+    $resolved = is_array($entry) ? _stattic_runtime_catalog_object($entry['source'] ?? null) : null;
+    if (str_starts_with($normalized, 'zero/')) {
+        $kind = str_ends_with($normalized, '.source.js') ? 'zero_source' : 'zero_bytecode';
+        $id = hash('sha256', $kind . "\0" . $normalized);
+        $candidate = is_array($catalog) ? (_stattic_runtime_execution_candidates($root, $catalog)[$id] ?? null) : null;
+        $row = is_array($candidate) ? _stattic_runtime_execution_resolve($root, $candidate) : null;
+        $resolved = is_array($row) && $row['state'] === 'available' ? ['sha' => $row['sha256'], 'size' => $row['size']] : null;
+    }
+    if (!is_array($resolved)) {
+        _stattic_runtime_version_source_empty();
+    }
+    if ((string) $resolved['sha'] !== $sha256 || (int) $resolved['size'] !== (int) $rawSize) {
+        _stattic_problem_response(409, 'runtime_code_artifact_identity_mismatch', 'The requested code does not match the committed version catalog.');
+    }
+    if ((int) $rawSize > (int) $rawMaxBytes) {
+        _stattic_runtime_version_source_empty();
+    }
+    if (!str_starts_with($normalized, 'zero/')) {
+        $bytes = _stattic_runtime_read_evidence_object($privateRoot, $spaceId, $resolved, (int) $rawMaxBytes);
+        if ($bytes === null) _stattic_runtime_version_source_empty();
+        _stattic_runtime_version_source_reset_headers();
+        header('Content-Type: application/octet-stream', true);
+        header('Content-Length: ' . strlen($bytes), true);
+        header('Cache-Control: ' . STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
+        header('X-Content-Type-Options: nosniff', true);
+        _stattic_runtime_version_source_status(200);
+        echo $bytes;
+        exit;
+    }
+    $blobPath = _stattic_runtime_investigation_path($root, $normalized);
+    $stream = $blobPath !== null ? fopen($blobPath, 'rb') : false;
+    if ($stream === false) {
+        _stattic_problem_response(503, 'runtime_code_artifact_unavailable', 'Compiled code bytes are unavailable on this runtime instance.');
+    }
+    $state = fstat($stream);
+    $actualSha = hash_init('sha256');
+    $hashedBytes = hash_update_stream($actualSha, $stream, (int) $rawSize + 1);
+    if (!is_array($state) || ($state['size'] ?? null) !== (int) $rawSize || $hashedBytes !== (int) $rawSize || hash_final($actualSha) !== $sha256) {
+        fclose($stream);
+        _stattic_problem_response(409, 'runtime_code_artifact_identity_mismatch', 'Compiled code bytes do not match their immutable identity.');
+    }
+    rewind($stream);
+    _stattic_runtime_version_source_send($stream, (int) $rawSize, 'application/octet-stream');
+}
+
 function _stattic_runtime_version_files_request_invalid(string $message): never
 {
     _stattic_problem_response(422, 'runtime_version_files_request_invalid', $message);
@@ -2086,7 +2333,12 @@ function _stattic_runtime_version_files_request_invalid(string $message): never
  * bounded round trip instead of a full drain. A path the view does not hold is
  * an EMPTY page, not a 404.
  */
-function _stattic_runtime_list_version_files_route(string $privateRoot, string $spaceId, string $versionId): void
+function _stattic_runtime_list_version_evidence_route(string $privateRoot, string $spaceId, string $versionId, array $claims): void
+{
+    _stattic_runtime_list_version_files_route($privateRoot, $spaceId, $versionId, $claims, true);
+}
+
+function _stattic_runtime_list_version_files_route(string $privateRoot, string $spaceId, string $versionId, array $_claims = [], bool $readOnly = false): void
 {
     $view = _stattic_runtime_version_files_param('view') ?? 'source';
     if (!in_array($view, STATTIC_RUNTIME_VERSION_FILE_VIEWS, true)) {
@@ -2101,7 +2353,7 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
     }
     $exactPath = _stattic_runtime_version_files_param('path');
     if ($exactPath !== null) {
-        $exactPath = _stattic_runtime_file_path_or_null($exactPath);
+        $exactPath = _stattic_runtime_file_path_or_null($exactPath, $readOnly);
         if ($exactPath === null) {
             _stattic_runtime_version_files_request_invalid('path is not a canonical version path.');
         }
@@ -2133,7 +2385,9 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
     if (!_stattic_runtime_version_finalized(_stattic_version_root($privateRoot, $spaceId, $versionId))) {
         _stattic_problem_response(404, 'version_not_found', 'Version not found.');
     }
-    $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
+    $catalog = $readOnly
+        ? _stattic_runtime_version_catalog_read_only($privateRoot, $spaceId, $versionId)
+        : _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
     if ($catalog === null) {
         // A committed version with no readable catalog is a repair job, not a
         // degraded read: there is no second projection to reconstruct it from.
@@ -2146,6 +2400,10 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
 
     $rows = [];
     foreach ($catalog['paths'] as $path => $entry) {
+        // JSON object keys that are decimal filenames decode as integer keys.
+        if ($readOnly) {
+            $path = (string) $path;
+        }
         if (
             !is_string($path)
             || $path === ''
@@ -2158,7 +2416,9 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
         if ($publicOnly && !$public) {
             continue;
         }
-        $object = _stattic_runtime_catalog_object($entry[$view] ?? null);
+        $object = $readOnly
+            ? _stattic_runtime_evidence_catalog_object($entry[$view] ?? null)
+            : _stattic_runtime_catalog_object($entry[$view] ?? null);
         if ($object === null) {
             continue;
         }
@@ -2167,6 +2427,9 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
     if ($channel !== null) {
         $variant = is_array($catalog['variants'][$channel] ?? null) ? $catalog['variants'][$channel] : [];
         foreach ($variant as $path => $object) {
+            if ($readOnly) {
+                $path = (string) $path;
+            }
             if (!is_string($path) || $path === '' || (!$includeInternal && _stattic_path_is_internal_artifact($path))) {
                 continue;
             }
@@ -2177,7 +2440,9 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
             if ($publicOnly && !$public) {
                 continue;
             }
-            $normalized = _stattic_runtime_catalog_object($object);
+            $normalized = $readOnly
+                ? _stattic_runtime_evidence_catalog_object($object)
+                : _stattic_runtime_catalog_object($object);
             if ($normalized === null) {
                 continue;
             }

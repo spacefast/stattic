@@ -102,7 +102,7 @@ function _stattic_runtime_new_id(string $prefix): string
  * responding, so fail-closed callers like the blob gate reuse the intake rule
  * without inheriting intake's 422.
  */
-function _stattic_runtime_file_path_or_null(string $path): ?string
+function _stattic_runtime_file_path_or_null(string $path, bool $readOnly = false): ?string
 {
     // A path that is not UTF-8 has no canonical form, and every surface below
     // assumes one.
@@ -110,7 +110,7 @@ function _stattic_runtime_file_path_or_null(string $path): ?string
         return null;
     }
     // NFC is the spec's canonical path form; every path surface means it.
-    $path = _stattic_nfc_path($path);
+    $path = _stattic_nfc_path($path, !$readOnly);
     $original = $path;
     $path = trim($path);
     if ($path !== $original || str_contains($path, '\\') || str_contains($path, '//')) {
@@ -1018,29 +1018,10 @@ function _stattic_runtime_version_catalog(string $privateRoot, string $spaceId, 
     if (is_array($cached) && is_array($cached['paths'] ?? null) && is_array($cached['variants'] ?? null)) {
         return $memo[$memoKey] = ['paths' => $cached['paths'], 'variants' => $cached['variants']];
     }
-    $path = $root . '/metadata.json';
-    if (!is_file($path)) {
+    $catalog = _stattic_runtime_version_catalog_metadata($privateRoot, $spaceId, $versionId);
+    if ($catalog === null) {
         return $memo[$memoKey] = null;
     }
-    $size = filesize($path);
-    if ($size === false || $size > STATTIC_RUNTIME_VERSION_CATALOG_MAX_BYTES) {
-        return $memo[$memoKey] = null;
-    }
-    $metadata = _stattic_runtime_read_json($path);
-    $decoded = is_array($metadata) ? ($metadata[STATTIC_RUNTIME_VERSION_CATALOG_KEY] ?? null) : null;
-    if (
-        !is_array($decoded)
-        || ($decoded['format'] ?? null) !== STATTIC_RUNTIME_VERSION_CATALOG_FORMAT
-        || ($decoded['spaceId'] ?? null) !== $spaceId
-        || ($decoded['versionId'] ?? null) !== $versionId
-        || !is_array($decoded['paths'] ?? null)
-    ) {
-        return $memo[$memoKey] = null;
-    }
-    $catalog = [
-        'paths' => $decoded['paths'],
-        'variants' => is_array($decoded['variants'] ?? null) ? $decoded['variants'] : [],
-    ];
     // A catalog too large for the whole sidecar falls to path shards, so the
     // per-path lane never re-decodes metadata.json once a reader has built
     // them. The sha lane has its own gate shards.
@@ -1048,6 +1029,99 @@ function _stattic_runtime_version_catalog(string $privateRoot, string $spaceId, 
         _stattic_runtime_write_path_sidecars($root, $spaceId, $versionId, $catalog['paths']);
     }
     return $memo[$memoKey] = $catalog;
+}
+
+/**
+ * Evidence authority: bounded metadata JSON only. Never include executable PHP
+ * sidecars, populate caches, or reconstruct a missing or malformed catalog.
+ *
+ * @return array{paths: array<string,mixed>, variants: array<string,mixed>}|null
+ */
+function _stattic_runtime_version_catalog_read_only(string $privateRoot, string $spaceId, string $versionId): ?array
+{
+    $catalog = _stattic_runtime_version_catalog_metadata($privateRoot, $spaceId, $versionId, true);
+    if ($catalog === null) {
+        return null;
+    }
+    foreach ($catalog['paths'] as $path => $entry) {
+        if (
+            _stattic_runtime_file_path_or_null((string) $path, true) !== (string) $path
+            || !is_array($entry)
+            || !is_bool($entry['public'] ?? null)
+            || _stattic_runtime_evidence_catalog_object($entry['source'] ?? null) === null
+            || (isset($entry['served']) && _stattic_runtime_evidence_catalog_object($entry['served']) === null)
+        ) {
+            return null;
+        }
+    }
+    foreach ($catalog['variants'] as $variant) {
+        if (!is_array($variant)) {
+            return null;
+        }
+        foreach ($variant as $path => $object) {
+            if (
+                _stattic_runtime_file_path_or_null((string) $path, true) !== (string) $path
+                || _stattic_runtime_evidence_catalog_object($object) === null
+            ) {
+                return null;
+            }
+        }
+    }
+    return $catalog;
+}
+
+/**
+ * Immutable object fields must be facts, not values the serving resolver coerces.
+ * @return array{sha: string, size: int, mime: string}|null
+ */
+function _stattic_runtime_evidence_catalog_object(mixed $object): ?array
+{
+    if (
+        !is_array($object)
+        || !is_string($object['sha256'] ?? null)
+        || !_stattic_is_sha256_hex(strtolower($object['sha256']))
+        || !is_int($object['size'] ?? null)
+        || $object['size'] < 0
+        || !is_string($object['contentType'] ?? null)
+    ) {
+        return null;
+    }
+    return ['sha' => strtolower($object['sha256']), 'size' => $object['size'], 'mime' => $object['contentType']];
+}
+
+/** Bounded JSON decode shared with ordinary catalog reads, without evidence coercion rules. */
+function _stattic_runtime_version_catalog_metadata(string $privateRoot, string $spaceId, string $versionId, bool $strict = false): ?array
+{
+    $root = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    $path = $root . '/metadata.json';
+    if (!is_file($path)) {
+        return null;
+    }
+    $size = filesize($path);
+    if ($size === false || $size > STATTIC_RUNTIME_VERSION_CATALOG_MAX_BYTES) {
+        return null;
+    }
+    // Bound the read itself as well as stat, including concurrent replacement.
+    $json = @file_get_contents($path, false, null, 0, STATTIC_RUNTIME_VERSION_CATALOG_MAX_BYTES + 1);
+    if (!is_string($json) || strlen($json) > STATTIC_RUNTIME_VERSION_CATALOG_MAX_BYTES) {
+        return null;
+    }
+    $metadata = json_decode($json, true);
+    $decoded = is_array($metadata) ? ($metadata[STATTIC_RUNTIME_VERSION_CATALOG_KEY] ?? null) : null;
+    if (
+        !is_array($decoded)
+        || ($decoded['format'] ?? null) !== STATTIC_RUNTIME_VERSION_CATALOG_FORMAT
+        || ($decoded['spaceId'] ?? null) !== $spaceId
+        || ($decoded['versionId'] ?? null) !== $versionId
+        || !is_array($decoded['paths'] ?? null)
+        || ($strict && array_key_exists('variants', $decoded) && !is_array($decoded['variants']))
+    ) {
+        return null;
+    }
+    return [
+        'paths' => $decoded['paths'],
+        'variants' => is_array($decoded['variants'] ?? null) ? $decoded['variants'] : [],
+    ];
 }
 
 /**
@@ -1073,6 +1147,29 @@ function _stattic_runtime_catalog_object(mixed $object): ?array
         'size' => max(0, (int) ($object['size'] ?? 0)),
         'mime' => $mime,
     ];
+}
+
+/**
+ * Bounded, inert CAS bytes for an object selected from the read-only catalog.
+ * Typed artifact readers may reuse this without exposing arbitrary paths.
+ *
+ * @param array{sha: string, size: int} $object
+ */
+function _stattic_runtime_read_evidence_object(string $privateRoot, string $spaceId, array $object, int $maxBytes): ?string
+{
+    if ($object['size'] > $maxBytes) {
+        return null;
+    }
+    $blob = _stattic_runtime_blob_path($privateRoot, $spaceId, $object['sha']);
+    $bytes = @file_get_contents($blob, false, null, 0, $maxBytes + 1);
+    if (
+        !is_string($bytes)
+        || strlen($bytes) !== $object['size']
+        || !hash_equals($object['sha'], hash('sha256', $bytes))
+    ) {
+        _stattic_problem_response(503, 'runtime_version_source_unavailable', 'Version evidence bytes do not match the retained catalog.');
+    }
+    return $bytes;
 }
 
 /** @return array<string,string> sha256 => content type, first declaration wins. */
@@ -1229,9 +1326,9 @@ function _stattic_runtime_write_path_sidecars(string $root, string $spaceId, str
  * THE version-file resolver, shared by the blob gate and the management list
  * route.
  *
- * Absent path, absent view for that path, unreadable catalog and unnormalizable
- * path are ONE outcome: null, the stable `version_file_not_found`. A caller
- * cannot act differently on any of them and the gate must not say which it was.
+ * Ordinary serving returns null for an absent path/view, unreadable catalog or
+ * unnormalizable path. Evidence reads refuse an unreadable catalog separately,
+ * so corrupt retained identities cannot be reported as absent files.
  * Existence in the CAS is the caller's next question: the gate answers 503,
  * never 404, once it has an identity.
  *
@@ -1242,12 +1339,13 @@ function _stattic_runtime_resolve_version_file(
     string $spaceId,
     string $versionId,
     string $path,
-    string $view
+    string $view,
+    bool $readOnly = false
 ): ?array {
     if (!in_array($view, STATTIC_RUNTIME_VERSION_FILE_VIEWS, true)) {
         return null;
     }
-    $path = _stattic_runtime_file_path_or_null($path);
+    $path = _stattic_runtime_file_path_or_null($path, $readOnly);
     if ($path === null || _stattic_path_is_internal_artifact($path)) {
         return null;
     }
@@ -1255,23 +1353,33 @@ function _stattic_runtime_resolve_version_file(
     // shard holds this path's entry (or its authoritative absence) without
     // touching metadata.json.
     $root = _stattic_version_root($privateRoot, $spaceId, $versionId);
-    $shard = _sf_php_cache_read(
-        $root . '/' . STATTIC_RUNTIME_VERSION_PATH_SHARD_DIR . '/' . substr(hash('sha256', $path), 0, 2) . '.php',
-        ['spaceId' => $spaceId, 'versionId' => $versionId]
-    );
-    if (is_array($shard) && is_array($shard['paths'] ?? null)) {
-        $entry = $shard['paths'][$path] ?? null;
-    } else {
-        $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
+    if ($readOnly) {
+        $catalog = _stattic_runtime_version_catalog_read_only($privateRoot, $spaceId, $versionId);
         if ($catalog === null) {
-            return null;
+            _stattic_problem_response(503, 'runtime_version_source_unavailable', 'Version evidence catalog is unavailable.');
         }
         $entry = $catalog['paths'][$path] ?? null;
+    } else {
+        $shard = _sf_php_cache_read(
+            $root . '/' . STATTIC_RUNTIME_VERSION_PATH_SHARD_DIR . '/' . substr(hash('sha256', $path), 0, 2) . '.php',
+            ['spaceId' => $spaceId, 'versionId' => $versionId]
+        );
+        if (is_array($shard) && is_array($shard['paths'] ?? null)) {
+            $entry = $shard['paths'][$path] ?? null;
+        } else {
+            $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
+            if ($catalog === null) {
+                return null;
+            }
+            $entry = $catalog['paths'][$path] ?? null;
+        }
     }
     if (!is_array($entry)) {
         return null;
     }
-    $object = _stattic_runtime_catalog_object($entry[$view] ?? null);
+    $object = $readOnly
+        ? _stattic_runtime_evidence_catalog_object($entry[$view] ?? null)
+        : _stattic_runtime_catalog_object($entry[$view] ?? null);
     if ($object === null) {
         return null;
     }

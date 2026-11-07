@@ -42,6 +42,9 @@ function _stattic_runtime_jwt_refuse(array $rejection, array $vocabulary = []): 
 
 function _stattic_runtime_require_management_jwt(string $privateRoot, string $action, array $required = []): array
 {
+    // These distinct actions authorize repeatable reads only. Verification must
+    // neither persist configured keys nor consume a filesystem replay marker.
+    $readOnly = in_array($action, ['list_version_evidence', 'read_version_evidence', 'list_version_execution_artifacts', 'read_version_investigation_code_artifact'], true);
     $claims = ['action' => ['equals' => $action], 'operation_id' => ['present' => true]];
     foreach ($required as $key => $value) {
         $claims[$key] = ['equals' => $value];
@@ -51,7 +54,20 @@ function _stattic_runtime_require_management_jwt(string $privateRoot, string $ac
         $privateRoot,
         _stattic_runtime_bearer_token_from_request() ?? '',
         'stattic-runtime-management',
-        ['claims' => $claims, 'allow_jwks_fetch' => true],
+        [
+            'claims' => $claims,
+            'allow_jwks_fetch' => !$readOnly,
+            'read_only' => $readOnly,
+            'state_valid' => static fn (array $token): bool => !$readOnly || (
+                is_int($token['iat'] ?? null)
+                && is_int($token['exp'] ?? null)
+                && $token['exp'] > $token['iat']
+                && $token['exp'] - $token['iat'] <= 60
+                && $token['exp'] <= time() + 60
+                && is_string($token['jti'] ?? null)
+                && trim($token['jti']) !== ''
+            ),
+        ],
         $rejection,
     );
     if ($verified === null) {
@@ -60,7 +76,9 @@ function _stattic_runtime_require_management_jwt(string $privateRoot, string $ac
             'claim:operation_id' => [403, 'runtime_operation_missing', 'Runtime management token requires an operation id.'],
         ]);
     }
-    _stattic_jwt_reject_replayed_jti($privateRoot, 'stattic-runtime-management', $verified, time());
+    if (!$readOnly) {
+        _stattic_jwt_reject_replayed_jti($privateRoot, 'stattic-runtime-management', $verified, time());
+    }
     return $verified;
 }
 

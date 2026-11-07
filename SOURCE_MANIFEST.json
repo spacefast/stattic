@@ -1,7 +1,7 @@
 {
-  "revision": "4ed499feee792750f5d78664f0775e9435077938",
-  "sourceHash": "0b5ca788241e2b5209c14e4b3f0affbe8ee8398c4ba2d3cda27a752d96283d04",
-  "manifestSha256": "54171280e294327afe790bf5613049158ebd5e7d6685e012088c66aefc246047",
+  "revision": "7322c893f0cf3d7c9b5a8c1d990d2928a432464b",
+  "sourceHash": "9fe79371b95f25f9e2ad904d058cb9d71728e087054dd58e7ef96b3334f7aeea",
+  "manifestSha256": "b069b12da652de9b82a19763a2cf7fa7eef743261bf98c55dc06ace1002a31e3",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "4bfb2e5cfaee8c27eb7086a25a150eb66f3aad7029f5efa44b6fd3081191b71f"
+      "sha256": "043dc506f7b24e0275053d55ec0726a572511f8936589505ea71cc9e853d22ea"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "55495aec219602562ec6040e4a460e78996ba25af7d76117f4b1eb31525ff4b4"
+      "sha256": "86ddb251da07096c00b33752333cbaf84a52de024a261fb51ca50b6f3a2356b9"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13849,7 +13849,7 @@
     },
     {
       "path": "runtime/custom-redirects.php",
-      "sha256": "60a37a5555dfaa6f8bb99c7aec785b1c33aae0cb0e98f289fa590b49ba4131c3"
+      "sha256": "0d0d129857434f1ceb472567a3dbecf56b041f1dde77bddde05cb97cdd39f752"
     },
     {
       "path": "runtime/engine-manifest.json",
@@ -13857,11 +13857,11 @@
     },
     {
       "path": "runtime/engine/admin/api.php",
-      "sha256": "ad5d5fa41711151e77fb06e0053f53ecae985d120d7199f25ab3ad0d4293d186"
+      "sha256": "06d4db4193bf142d8e35266d2963e60c86fba92aa2bf90373df0c52a1633b9b9"
     },
     {
       "path": "runtime/engine/admin/auth.php",
-      "sha256": "e1bf809bd28c19535b5c7af70246dcf19d5caca53d361cbbd61cf44d33bddbc5"
+      "sha256": "0ce75800a248722202455df32acbb012437e7f792aa1c8549addf489fbe98feb"
     },
     {
       "path": "runtime/engine/admin/build-source.php",
@@ -13901,7 +13901,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "204ea1bb02c6cc1e35e22fd7938900091dcdb4cad875afdff6a77a934b8016dc"
+      "sha256": "3515bcb2d87dce6ce8a403ffa77851d7f98d1594bbbed7efe1ea9bac24727d55"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -14189,7 +14189,7 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "4ba799c24deb76efa53be0bec4e0f155d90d6d82e0c9e1c9baf8dd638557af13"
+      "sha256": "eee3c36933f12bce7667c9a4085338ee511f1437086336af1f73c8d790cb84a7"
     },
     {
       "path": "runtime/engine/shared/control-paths.php",
@@ -14245,7 +14245,7 @@
     },
     {
       "path": "runtime/engine/shared/jwt.php",
-      "sha256": "c48add509270f56d0b41b2b5c09818fe98f397a7d17e6a25b9a2c65b8eccc71a"
+      "sha256": "e5a20ce09d12d293a90f69b9d05e1dfd508c731ab7de7832022ebe9217f778a5"
     },
     {
       "path": "runtime/engine/shared/legacy-zero.php",
@@ -14325,7 +14325,7 @@
     },
     {
       "path": "runtime/engine/shared/storage.php",
-      "sha256": "b8d1c9fdad7e90b6bf77421c45d6bbba2fdcabc37a4ed9b5c435d5a991720497"
+      "sha256": "7c0b4bb214fd072ab6830622c2cb31518af959d93464a7210375d8f1db7203b1"
     },
     {
       "path": "runtime/engine/shared/streaming.php",
@@ -14353,7 +14353,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "19611a40c766ce0f6ce51093d08a4ac70e69921154ceac21b71c7211235cf042"
+      "sha256": "3e3035ca16489f277441914ddb00c240a1be4de28e44b51df1657cd413152042"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -14649,7 +14649,7 @@
     },
     {
       "path": "runtime/tests/entrypoints.test.ts",
-      "sha256": "49eb3f22ff68417f571405a23134a3fcf5e58bf3c8725194662b16045afd699c"
+      "sha256": "db36fb1ef34be388395da265a573a020caab5e23ec23ea1a97a3dbcf7c2b75c2"
     },
     {
       "path": "runtime/tests/finalize-rust.test.ts",
@@ -14718,6 +14718,10 @@
     {
       "path": "runtime/tests/fixtures/tenant-prelude-probe.php",
       "sha256": "b032e8a4da3cca4ea3deb7ab72a6265b4720abf6c2bfd6b549a2c8c6a6f65617"
+    },
+    {
+      "path": "runtime/tests/fixtures/without-intl-prepend.php",
+      "sha256": "6251268fbfb55afff9a74e324ff2dfd1a7f168cac48886ce9aae964cafafa702"
     },
     {
       "path": "runtime/tests/fixtures/zero-v2-migrated/server/index.ts",
@@ -14929,7 +14933,7 @@
     },
     {
       "path": "runtime/tests/version-files.test.ts",
-      "sha256": "39fc4c017abec518a13b283f94e951227468b0218199e948782b6b2ccf573b55"
+      "sha256": "bcb3bc57e95f912cc48c04ef9184b59dbaaac5250a2ebc4b54c78d73d56c5658"
     },
     {
       "path": "runtime/tests/wordpress-content-model.test.ts",

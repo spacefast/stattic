@@ -97,7 +97,8 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
     if (is_link($installRoot) || is_link($publicationLockPath)) {
         $publicationUnavailable();
     }
-    $publicationLock = fopen($publicationLockPath, 'ce');
+    // Only installation creates this lock; retained-evidence reads never do.
+    $publicationLock = @fopen($publicationLockPath, 're');
     if (!is_resource($publicationLock)) {
         $publicationUnavailable();
     }

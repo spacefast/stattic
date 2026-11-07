@@ -1305,17 +1305,18 @@ function _stattic_config_value(string $envName): string
 // Spec "Upload Contract": every object path is UTF-8, NFC, percent-decoded
 // exactly once. Applied at upload intake, manifest intake and the serve-time
 // route-map lookup, so NFC and NFD forms resolve identically.
-function _stattic_nfc_path(string $path): string
+function _stattic_nfc_path(string $path, bool $journalMissingIntl = true): string
 {
-    $normalized = _stattic_nfc_string($path);
+    $normalized = _stattic_nfc_string($path, $journalMissingIntl);
     return is_string($normalized) ? $normalized : $path;
 }
 
 // ASCII is already NFC, so the fast path never touches intl. Without intl, NFD
 // and NFC spellings of one path stop resolving to each other. That degrades
 // matching without corrupting anything, so the request proceeds unnormalized and
-// the operator gets one journal record per process instead of a hard failure.
-function _stattic_nfc_string(string $value): string|false
+// ordinary callers journal once per process instead of a hard failure.
+// Evidence callers retain that fallback without recording a diagnostic.
+function _stattic_nfc_string(string $value, bool $journalMissingIntl = true): string|false
 {
     if (preg_match('/[\x80-\xff]/', $value) !== 1) {
         return $value;
@@ -1323,7 +1324,9 @@ function _stattic_nfc_string(string $value): string|false
     if (class_exists('Normalizer')) {
         return Normalizer::normalize($value, Normalizer::FORM_C);
     }
-    _stattic_nfc_no_intl_journal_once();
+    if ($journalMissingIntl) {
+        _stattic_nfc_no_intl_journal_once();
+    }
     return preg_match('//u', $value) === 1 ? $value : false;
 }
 

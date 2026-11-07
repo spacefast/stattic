@@ -51,6 +51,7 @@ test("wp.cloud config is decryptable before a clean route enters the runtime", (
       '<?php echo json_encode(["dbPassword" => defined("DB_PASSWORD") ? DB_PASSWORD : null]);',
     );
     mkdirSync(path.join(root, ".stattic"), { recursive: true });
+    writeFileSync(path.join(root, ".stattic/publication.lock"), "");
     writeActiveReleasePointer(path.join(root, ".stattic"), "releases/test");
     copyFileSync(
       path.resolve(import.meta.dir, "../custom-redirects.php"),
@@ -171,6 +172,7 @@ function _stattic_content_access_target(string $root, string $host): array {
       path.join(sharedRoot, "content-admin.php"),
     );
     mkdirSync(path.join(root, ".stattic"), { recursive: true });
+    writeFileSync(path.join(root, ".stattic/publication.lock"), "");
     writeActiveReleasePointer(path.join(root, ".stattic"), "releases/test");
     copyFileSync(
       path.resolve(import.meta.dir, "../custom-redirects.php"),
@@ -451,6 +453,7 @@ echo 'PASSED';
 
     const engineRoot = path.join(root, ".stattic/releases/test/engine");
     mkdirSync(engineRoot, { recursive: true });
+    writeFileSync(path.join(root, ".stattic/publication.lock"), "");
     writeActiveReleasePointer(path.join(root, ".stattic"), "releases/test");
     // A canonical entrypoint returns to its script after classification.
     for (const values of [

@@ -355,10 +355,12 @@ pub fn write_json_compact(path: &Path, value: &Value) -> Result<()> {
 
 /// Writes a `<?php return ...;` artifact the PHP serving layer can `include`.
 pub fn write_php(path: &Path, value: &Value) -> Result<()> {
-    write_bytes(
-        path,
-        format!("<?php\nreturn {};\n", php_export(value, 0)).as_bytes(),
-    )
+    write_bytes(path, php_source(value).as_bytes())
+}
+
+/// The `<?php return ...;` source [`write_php`] writes.
+pub(crate) fn php_source(value: &Value) -> String {
+    format!("<?php\nreturn {};\n", php_export(value, 0))
 }
 
 /// The PHP literal for one exported value, at the top level.

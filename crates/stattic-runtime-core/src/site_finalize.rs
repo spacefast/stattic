@@ -33,9 +33,9 @@ use crate::content::{
 use crate::csp::PlatformCspSources;
 use crate::finalize::{
     artifact_metadata, create_dir_all, file_meta, invalid, invalid_error, invalid_with_details,
-    mime_for_path, read_bounded, remove_any, sha256, validate_id, validate_relative_path,
-    write_bytes, write_generated, write_json, write_json_compact, write_php, AdoptablePath,
-    FileMeta, FinalizeError, Result,
+    mime_for_path, php_source, read_bounded, remove_any, sha256, validate_id,
+    validate_relative_path, write_generated, write_json, write_json_compact, write_php,
+    AdoptablePath, FileMeta, FinalizeError, Result,
 };
 use crate::hash::stable_json_sha256;
 use crate::model::{
@@ -61,6 +61,7 @@ use crate::route_inventory::{compile_route_inventory, RouteInventoryInput, ZERO_
 use crate::routing::{strip_trailing_slash, EdgeRuleSpec, OverlayRouting, PlacementReportEntry};
 use crate::storage::{
     apply_templates, blob_path, blob_root, commit_session_files, install_blob_from, put_blob,
+    write_blob_backed,
 };
 use crate::version_files::{
     apply_access_pages, apply_page_artifacts, convention_files, resolved_viewer,
@@ -1071,6 +1072,7 @@ fn run_finalize_pipeline(
         "diagnostics": diagnostics,
     });
     let artifacts_started = Instant::now();
+    let zero_files = write_zero_artifacts(stage_root, &blobs, &compiled_zero)?;
     // Compact: the runtime is the only reader, and the embedded catalog can
     // name six figures of paths (see `write_json_compact`).
     write_json_compact(
@@ -1093,6 +1095,8 @@ fn run_finalize_pipeline(
             "zeroEndpointCount": zero_endpoint_count,
             "zeroRunCount": zero_run_count,
             "zeroPackSha256": zero_pack_sha256(&compiled_zero),
+            // The pack's bytes live in the CAS; naming them here keeps them live.
+            "zeroFiles": zero_files,
             "debugJsonSha256": stable_json_sha256(&debug_json),
             "redirects": redirect_rules,
             "headers": header_rules,
@@ -1133,7 +1137,6 @@ fn run_finalize_pipeline(
         }),
     )?;
     write_json(&stage_root.join("debug.json"), &debug_json)?;
-    write_zero_artifacts(stage_root, &compiled_zero)?;
     validate_zero_artifacts(stage_root, zero_endpoint_count, zero_run_count)?;
     validate_artifacts(
         stage_root,
@@ -2099,7 +2102,30 @@ fn serialized<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).expect("compiled Zero artifact serializes")
 }
 
-fn write_zero_artifacts(stage_root: &Path, compiled: &CompiledZeroEndpoints) -> Result<()> {
+/// Writes the Zero pack into the version tree through the space CAS, so a
+/// republish that compiles to the same bytes links the blob it already has
+/// instead of storing another copy. Returns path → sha for `metadata.json`,
+/// which is what keeps those blobs live for the collector.
+fn write_zero_artifacts(
+    stage_root: &Path,
+    blobs: &Path,
+    compiled: &CompiledZeroEndpoints,
+) -> Result<BTreeMap<String, String>> {
+    let mut written = BTreeMap::new();
+    let mut place = |path: String, bytes: &[u8]| -> Result<()> {
+        validate_relative_path(&path)?;
+        let sha = write_blob_backed(blobs, &stage_root.join(&path), bytes)?;
+        written.insert(path, sha);
+        Ok(())
+    };
+    let json = |value: &Value| -> Result<Vec<u8>> {
+        let mut bytes = serde_json::to_vec_pretty(value).map_err(|source| FinalizeError::Json {
+            path: stage_root.join("zero"),
+            source,
+        })?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    };
     // Each Zero index is published twice — JSON for tooling, PHP for the serving
     // lane's `require` — and both spellings must always come from one value.
     for (basename, value) in [
@@ -2120,26 +2146,28 @@ fn write_zero_artifacts(stage_root: &Path, compiled: &CompiledZeroEndpoints) -> 
         let Some(value) = value else {
             continue;
         };
-        write_json(&stage_root.join(format!("zero/{basename}.json")), &value)?;
-        write_php(&stage_root.join(format!("zero/{basename}.php")), &value)?;
+        place(format!("zero/{basename}.json"), &json(&value)?)?;
+        place(
+            format!("zero/{basename}.php"),
+            php_source(&value).as_bytes(),
+        )?;
     }
     for artifact in &compiled.endpoint_artifacts {
-        write_json(
-            &stage_root.join(zero_endpoint_artifact_path(artifact)),
-            &serialized(artifact),
+        place(
+            zero_endpoint_artifact_path(artifact),
+            &json(&serialized(artifact))?,
         )?;
     }
     for artifact in &compiled.run_artifacts {
-        write_json(
-            &stage_root.join(zero_run_artifact_path(artifact)),
-            &serialized(artifact),
+        place(
+            zero_run_artifact_path(artifact),
+            &json(&serialized(artifact))?,
         )?;
     }
     for generated in &compiled.generated_files {
-        validate_relative_path(&generated.path)?;
-        write_bytes(&stage_root.join(&generated.path), &generated.bytes)?;
+        place(generated.path.clone(), &generated.bytes)?;
     }
-    Ok(())
+    Ok(written)
 }
 
 fn finalize_input_hash(input: &SiteFinalizeInput) -> String {
@@ -3995,9 +4023,47 @@ mod tests {
         fs::create_dir_all(blob.parent().unwrap()).unwrap();
         fs::write(&blob, &body).unwrap();
         input.version_root = private.to_string_lossy().into_owned();
+        let mut republish = input.clone();
 
         let output = finalize_site(input, false).expect("fixture finalizes");
         assert_eq!(output.zero_endpoint_count, 4);
+
+        // The pack is stored once: a republish that compiles to the same bytes
+        // links the blobs the first version wrote, and each version's
+        // metadata names them so the collector keeps them.
+        republish.version_id = "ver_zero_all_features_2".into();
+        republish.upload_id = None;
+        finalize_site(republish, false).expect("republish finalizes");
+        {
+            use std::os::unix::fs::MetadataExt;
+            let space = private.join("spaces/spc_zero_all_features");
+            let declared = |version: &str| -> Map<String, Value> {
+                let metadata: Value = serde_json::from_slice(
+                    &fs::read(space.join("versions").join(version).join("metadata.json")).unwrap(),
+                )
+                .unwrap();
+                metadata["zeroFiles"]
+                    .as_object()
+                    .expect("zeroFiles")
+                    .clone()
+            };
+            let first = declared("ver_zero_all_features");
+            assert!(first.len() >= 14, "declared {} Zero files", first.len());
+            for (path, sha) in &first {
+                let sha = sha.as_str().unwrap();
+                let blob = fs::metadata(blob_path(&space.join("blobs"), sha)).unwrap();
+                for version in ["ver_zero_all_features", "ver_zero_all_features_2"] {
+                    let file =
+                        fs::metadata(space.join("versions").join(version).join(path)).unwrap();
+                    assert_eq!(file.ino(), blob.ino(), "{version}/{path}");
+                }
+            }
+            let second = declared("ver_zero_all_features_2");
+            assert_eq!(
+                first.keys().collect::<Vec<_>>(),
+                second.keys().collect::<Vec<_>>()
+            );
+        }
         assert!(
             output
                 .diagnostics

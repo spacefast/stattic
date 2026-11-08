@@ -1,0 +1,861 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "classes",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "classes_match_node_through_generated_php_and_wire_client_types",
+      "guidance": "Named module-level classes compile inside callbacks: constructors, public fields and typed parameter properties, methods, lexical this in arrows, static members, named inheritance, super and instanceof. Private names (#field, #method, static #x, #x in value) are per declaring class: subclasses get separate slots, private state is invisible to enumeration/JSON/clone, and foreign receivers throw TypeError. Classes extending Error/TypeError/RangeError get non-enumerable message/cause/stack, prototype name/message/toString, instanceof along the chain, and keep their identity through throw/catch; stack is the header line without frames and Error.captureStackTrace sets it. Class and static get/set accessors dispatch after own data and before methods; getter-only writes are refused or throw TypeError; super reads parent getters; class toJSON methods run in JSON.stringify. Classes in imported JavaScript need no annotations and use checked values; class method values keep one identity per class. Instances share object identity; JSON and clone boundaries expose only own fields and drop class identity. See config-api.md for initialization, inference and refusal limits."
+    },
+    {
+      "id": "javascript-promises",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "promise_jobs_generators_and_async_iteration_match_node_in_generated_php",
+      "guidance": "Imported JavaScript can hold promises as values: new Promise, then/catch/finally, Promise.resolve/reject/all/allSettled/any/race/withResolvers and async callbacks. Reactions run on a deterministic per-request job queue in ECMA-262 order, and async bodies run on PHP Fibers. The queue drains to empty at handler end; an unhandled rejection is then a runtime error, and so is a promise nothing can settle (no job or timer is left). Real I/O completes in issue order. See docs/decisions/2026-11-07-promises-generators-streams.md."
+    },
+    {
+      "id": "javascript-generators",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "promise_jobs_generators_and_async_iteration_match_node_in_generated_php",
+      "guidance": "Imported JavaScript generators and async generators compile to PHP Generators behind the iterator protocol: yield, yield*, next/return/throw, and finally on early exit. for…of and for await…of follow the protocol and close the iterator when the loop breaks, returns or throws. Authored TypeScript still refuses generators and for await."
+    },
+    {
+      "id": "javascript-streams",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "promise_jobs_generators_and_async_iteration_match_node_in_generated_php",
+      "guidance": "ReadableStream (start/pull/cancel, default reader, tee, async iteration), WritableStream and TransformStream, with pipeTo and pipeThrough, are pull-driven chunk queues over the job queue. Byte streams, BYOB readers, size() strategies and pipeTo signals are refused at runtime. Zero\\JsReadableStream::fromResource wraps a PHP stream resource."
+    },
+    {
+      "id": "class-metaprogramming",
+      "status": "refused",
+      "code": "Z1101",
+      "fixture": "tests/fixtures/reject-class",
+      "message": "abstract, ambient or generic classes",
+      "guidance": "Use concrete named classes with public fields and methods. See config-api.md for the supported surface."
+    },
+    {
+      "id": "uninstalled-package",
+      "status": "refused",
+      "code": "Z1102",
+      "fixture": "tests/fixtures/reject-uninstalled-package",
+      "message": "package is not installed in node_modules",
+      "guidance": "Install the package with your package manager. Zero reads supported local TypeScript/ESM sources; it does not install packages or execute JavaScript."
+    },
+    {
+      "id": "installed-source-packages",
+      "status": "supported",
+      "evidence": "src/loader.rs",
+      "test": "installed_sources_follow_nearest_packages_exact_exports_and_relative_ts_imports",
+      "guidance": "Locally installed source packages resolve through nearest node_modules: exact exports with import/default conditions, module entries, and supported main/index entries. Scoped packages and exact exported subpaths are supported. Static CommonJS runs once at build time: top-level `require(\"<literal>\")` of relative files and CommonJS packages (require/default conditions), `module.exports = …` and `exports.name = …`, with named exports for ESM importers found like Node's cjs-module-lexer. Dynamic require, require inside functions, require of ES modules, require cycles, writes to module or exports inside functions, other module properties, implicit sloppy arguments, Node built-ins other than node:crypto, export patterns, package aliases, declaration-only entries and package-target escapes are refused. Raw JavaScript uses checked runtime operations; TypeScript keeps static checking. Resolving a package does not establish compatibility with its host APIs or every export. Pinned npm probes compare selected real imports to Node."
+    },
+    {
+      "id": "unannotated-javascript",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "unannotated_javascript_uses_checked_value_operations_without_weakening_typescript_unknown",
+      "guidance": "Raw .js/.mjs/.cjs functions compile supported property access, calls, mutations and coercions through checked PHP dispatch. Missing values preserve undefined identity, invalid methods and null receivers throw TypeError, and TypeScript unknown still requires refinement. This supplies no Node/browser APIs, arbitrary prototypes, accessors, sparse arrays or custom iterators. The pinned npm matrix separately qualifies selected original library algorithms and combinations."
+    },
+    {
+      "id": "javascript-symbols",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "symbols_and_weak_collections_match_node_in_imported_javascript",
+      "guidance": "Imported JavaScript can create symbols with Symbol(description), Symbol.for and Symbol.keyFor, and read Symbol.iterator, Symbol.asyncIterator, Symbol.toStringTag and Symbol.hasInstance. typeof is \"symbol\", identity is per symbol and Symbol.for registers one symbol per key for the request. description, toString() and String(symbol) work; implicit string or number conversion throws TypeError. Plain objects hold symbol-keyed properties apart from string keys, so Object.keys, Object.entries, for...in and JSON.stringify skip them; object spread copies enumerable ones, and Object.hasOwn sees them. Object.defineProperty accepts data descriptors: symbol keys keep writable/enumerable/configurable, string keys accept only the ordinary all-true descriptor. `key in object` and `delete object[key]` accept symbol keys. Built-in values and class instances may inherit well-known symbol methods Zero doesn't model, so reading, testing or writing a well-known symbol on them, or any symbol on a class instance without that own symbol, throws TypeError instead of guessing; other symbols on built-in values are absent. Class computed members such as static [Symbol.hasInstance]() belong to the class work."
+    },
+    {
+      "id": "typescript-symbols",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-typescript-symbol",
+      "message": "symbols aren't supported in TypeScript code yet",
+      "guidance": "Authored TypeScript has no symbol type yet. Use a string key, or keep the symbol inside an imported JavaScript module. Symbol-keyed properties can't be created while the config is evaluated."
+    },
+    {
+      "id": "javascript-weak-collections",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "symbols_and_weak_collections_match_node_in_imported_javascript",
+      "guidance": "Imported JavaScript can use WeakMap (get, set, has, delete) and WeakSet (add, has, delete), built on PHP's native WeakMap. Keys must be objects or unregistered symbols; primitives, undefined and Symbol.for symbols throw TypeError as in JavaScript. A module-level new WeakMap() is one empty collection per request; entries given while the config is evaluated are refused, so populate it in code that runs in PHP. Authored TypeScript refuses WeakMap and WeakSet like Map."
+    },
+    {
+      "id": "globalthis-detection",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-globalthis-host",
+      "message": "depends on the host and can't be resolved at compile time",
+      "guidance": "typeof globalThis, typeof globalThis.X and globalThis.X compared with undefined are resolved at compile time when X is one of Zero's globals (its JavaScript typeof) or a runtime Zero never provides (window, document, self, location, Bun, Deno, EdgeRuntime, DOMParser, WebSocketPair, XMLHttpRequest, importScripts, WorkerGlobalScope: undefined). Host globals such as fetch, process, crypto, Buffer, atob and timers, and any other name, are refused at the read; call supported capabilities directly instead of detecting them. Calling an absent global is refused because it always throws."
+    },
+    {
+      "id": "erased-package-typescript",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "installed_package_typescript_is_type_erased_like_javascript_and_matches_node",
+      "guidance": "TypeScript sources installed under node_modules compile like JavaScript: annotations, type declarations, type-only imports and re-exports, generics, overload and abstract signatures, `this` parameters, assertion signatures and type assertions are erased, not modelled. Runtime constructs keep the checked-JavaScript subset and its refusals; enums, namespaces, parameter properties and decorators are not erased. Values crossing into authored code are JavaScript values that need refinement, and authored code can't name a package type until declaration hydration lands."
+    },
+    {
+      "id": "bitwise-operators",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "language_constructs_match_node_through_generated_php",
+      "guidance": "`&`, `|`, `^`, `~`, `<<`, `>>`, `>>>` and their compound assignments compile in typed code, imported JavaScript and configuration evaluation. Operands go through ToNumber, then ToInt32 (ToUint32 for the left side of `>>>`); shift counts use ToUint32 masked to five bits, so negative counts and counts of 32 or more wrap as in JavaScript. Results are signed 32-bit integers, except `>>>`, which is unsigned. NaN, the infinities and -0 become 0. Typed code requires number operands; imported JavaScript coerces strings, booleans, null, undefined and objects through their primitive value."
+    },
+    {
+      "id": "in-operator",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "language_constructs_match_node_through_generated_php",
+      "guidance": "`key in object` compiles in typed code, imported JavaScript and configuration evaluation. The key goes through ToPropertyKey after the key expression runs; own properties are checked first, then the value's fixed prototype chain: class methods and statics, the built-in prototype of arrays, arguments, functions, errors, regexes, Map, Set, Date and Math, then Object.prototype. Arrays are dense, so an index is present exactly when it is below the length. A primitive right side throws JavaScript's TypeError. `\"key\" in x` narrows object unions like TypeScript; members with an optional key stay on both branches, and `unknown` narrows to an object whose key reads stay checked. Configuration evaluation inspects plain objects, arrays and arguments, and refuses a primitive right side at build time."
+    },
+    {
+      "id": "delete-operator",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "language_constructs_match_node_through_generated_php",
+      "guidance": "`delete obj.key`, `delete obj[key]` and `delete obj?.key` compile in typed code, imported JavaScript and configuration evaluation with strict-mode semantics. They return true, also for absent and inherited properties, and remove own object keys without reordering the rest. Non-configurable properties (array and string length, string indexes, regex lastIndex, class and function prototype, arguments callee, Math constants) throw JavaScript's TypeError; null and undefined receivers throw TypeError. Typed code may delete only optional properties and map entries, as TypeScript requires, so later reads stay sound; a property the closed type lacks is a missing-field error."
+    },
+    {
+      "id": "delete-required-property",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-delete-required",
+      "message": "the type requires it",
+      "guidance": "TypeScript allows `delete` only on optional properties. Declare the property optional (`key?: T`) or build a new object without it."
+    },
+    {
+      "id": "delete-array-element",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-delete-array-element",
+      "message": "would leave a hole",
+      "guidance": "Zero arrays are dense, and deleting an element leaves a hole that keeps the length. Use `splice(index, 1)` to remove it, or assign `undefined` to keep the length. Imported JavaScript throws RangeError at runtime instead."
+    },
+    {
+      "id": "do-while-and-labels",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "language_constructs_match_node_through_generated_php",
+      "guidance": "`do…while` runs its body before the first test; `continue` goes to the test. Labeled loops, switches and blocks compile with `break label` and `continue label` in typed code, imported JavaScript and configuration evaluation, through nested loops, switches and labeled blocks. Labeled function declarations are refused, as in strict mode."
+    },
+    {
+      "id": "destructuring-assignment",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "language_constructs_match_node_through_generated_php",
+      "guidance": "Array and object patterns on the left of `=` assign existing variables, object fields and array elements, including elisions, defaults, rest elements, nested patterns and computed keys. The right side is evaluated once and is the expression's value. Each leaf runs in JavaScript order: computed key, target reference, read, default (only for undefined), write. Typed targets must accept the value, so a missing optional field needs a default or an optional target; computed keys need an open map or a literal key. Compound destructuring assignment does not exist in JavaScript."
+    },
+    {
+      "id": "typed-for-await",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "typed_for_await_accepts_only_settled_sync_iterables",
+      "guidance": "In authored TypeScript, `for await` runs over arrays, tuples and strings whose elements are plain values or Zero's own promises, which the blocking model settles exactly. Async iterables, generators and values from imported JavaScript need the job queue and are refused there; imported JavaScript runs every `for await` through it."
+    },
+    {
+      "id": "for-await-promise-literal",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-for-await-promise-literal",
+      "message": "over a promise written in an array literal",
+      "guidance": "`for await` awaits each element as the loop reaches it, but Zero's blocking calls would all run before the loop starts. Await each call where it is written: `for (const v of [await a(), await b()])`."
+    },
+    {
+      "id": "for-await-class-instance",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-for-await-class-instance",
+      "message": "over class instances",
+      "guidance": "`for await` adopts an instance with a `then` method as a promise, which needs the job queue. Use `for (const v of items)`, or call the method explicitly."
+    },
+    {
+      "id": "tagged-templates",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "language_constructs_match_node_through_generated_php",
+      "guidance": "tag`…${x}…` calls the tag with the call site's strings array, then the substitutions, in typed code and imported JavaScript. The strings array has a `raw` property with the source text, cooked strings are undefined where an escape is invalid, each call site keeps one array across calls, and both arrays are frozen. String.raw is supported, including its object form in imported JavaScript. Configuration evaluation refuses tagged templates; call the tag inside a handler."
+    },
+    {
+      "id": "bigint",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "language_constructs_match_node_through_generated_php",
+      "guidance": "BigInt literals, the `bigint` type, BigInt(), BigInt.asIntN/asUintN, Number(b), String(b) and b.toString(radix) compile in typed code and imported JavaScript with ECMAScript semantics, in pure PHP (Zero\\JsBigInt, no GMP or bcmath). Arithmetic is exact, division truncates, bitwise operators and shifts act on infinite two's complement, comparisons and loose equality compare mathematically across BigInt, number and numeric strings. Mixing BigInt and number in arithmetic, `>>>`, unary `+`, JSON serialization and Math functions throw JavaScript's TypeError; typed code refuses a static mix at the source. Configuration evaluation refuses BigInt. tests/php/bigint_test.php checks 8,800 Node-computed results."
+    },
+    {
+      "id": "build-time-clock",
+      "status": "refused",
+      "code": "Z2101",
+      "fixture": "tests/fixtures/reject-build-time-clock",
+      "message": "Date.now()",
+      "guidance": "Use the clock in a handler or timestamp().defaultNow(). Configuration evaluation stays pure."
+    },
+    {
+      "id": "access-database-query",
+      "status": "refused",
+      "code": "Z4101",
+      "fixture": "tests/fixtures/reject-access-query",
+      "message": "access rules can't query",
+      "guidance": "Return a row filter; put database effects in a hook or action."
+    },
+    {
+      "id": "field-ui-width",
+      "status": "refused",
+      "code": "Z3101",
+      "fixture": "tests/fixtures/reject-field-ui",
+      "message": "width must be an integer from 1 to 100",
+      "guidance": "Use an integer percentage from 1 to 100 for .ui({ width })."
+    },
+    {
+      "id": "undefined-as-null",
+      "status": "divergence",
+      "evidence": "tests/compiler_contracts.rs",
+      "guidance": "Explicit undefined preserves typeof, coercion and JSON omission in compiled PHP. Some statically typed missing reads and annotation-only undefined/void still normalize to null; raw imported JavaScript uses a distinct undefined sentinel. The differential oracle normalizes final undefined results explicitly.",
+      "test": "documented_runtime_differences_are_measured_in_evaluation_and_compiled_php"
+    },
+    {
+      "id": "unicode-codepoint-indexing",
+      "status": "divergence",
+      "evidence": "tests/compiler_contracts.rs",
+      "guidance": "Configuration evaluation and compiled PHP index and slice strings in UTF-16 code units, like JS. A result that would split a surrogate pair is refused at build time or throws a RangeError at runtime, because UTF-8 cannot represent a lone surrogate. Diagnostic columns also count UTF-16 code units.",
+      "test": "documented_runtime_differences_are_measured_in_evaluation_and_compiled_php"
+    },
+    {
+      "id": "uri-encoding",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "guidance": "encodeURI and encodeURIComponent accept one string in configuration and handlers. Component punctuation is preserved; whole-URI delimiters are preserved only by encodeURI. Values must be valid Unicode scalar strings.",
+      "test": "uri_vectors_agree_in_node_pure_evaluation_and_generated_php"
+    },
+    {
+      "id": "field-presentation",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "guidance": "Field .ui() metadata survives nested schema emission and schema description and maps to native SCF. It does not affect data paths, validation or access.",
+      "test": "nested_presentation_reaches_scf_and_public_schema_without_storage_migrations"
+    },
+    {
+      "id": "finite-type-algebra",
+      "status": "supported",
+      "evidence": "tests/compiler.rs",
+      "test": "compiled_php_matches_node_on_every_differential_case",
+      "guidance": "Finite object interface inheritance and intersections, generic aliases/interfaces with constraints and defaults, finite keyof/indexed access and dynamic key reads, mapped types and selected utility/conditional types retain literal and optional boundaries. Concrete aliases also preserve class identity, typed fields/constructor parameter properties and method results while generated clients erase methods at the wire boundary. See runtime-contract.md (TypeScript type normalization) for the supported domains and refusals; the strict type-semantics fixture also checks generated-client boundaries and native/WASM parity."
+    },
+    {
+      "id": "declared-type-predicates",
+      "status": "supported",
+      "evidence": "tests/compiler.rs",
+      "test": "compiled_php_matches_node_on_every_differential_case",
+      "guidance": "Synchronous concrete helpers and inline callbacks can return named-parameter type predicates. The target must be a subtype of the parameter and the body must return booleans. Calls narrow their checked argument on the true branch; filter, find and findLast narrow elements when their first callback parameter is refined. Function aliases preserve predicates; map produces booleans. As in TypeScript, the authored predicate declares the refinement; the compiler does not prove nested runtime checks. Assertions, this predicates and predicate function-type annotations are refused. Direct Boolean callbacks retain JavaScript truthiness. Required tuple destructuring positions retain their declared types; array positions may be undefined, and mutation widens tuple read views. The type-semantics fixture checks native/WASM emission and strict client types."
+    },
+    {
+      "id": "finite-key-validation",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-keyof",
+      "message": "isn't assignable to",
+      "guidance": "A finite keyof is a literal union, not string."
+    },
+    {
+      "id": "generic-constraint-validation",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-constraint",
+      "message": "doesn't satisfy constraint",
+      "guidance": "Generic arguments must satisfy their declared structural constraints."
+    },
+    {
+      "id": "generic-required-argument",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-arity",
+      "message": "needs type argument",
+      "guidance": "Provide every required argument; missing arguments never widen to unknown."
+    },
+    {
+      "id": "indexed-union-missing-key",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-index",
+      "message": "has no field",
+      "guidance": "An indexed key must exist in every member of an object union."
+    },
+    {
+      "id": "open-keyof",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-open-keyof",
+      "message": "keyof supports finite object types",
+      "guidance": "Use an explicit string key type for open maps. Array/prototype and symbol key spaces are not modeled."
+    },
+    {
+      "id": "recursive-type-expansion",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-recursion",
+      "message": "96-level limit",
+      "guidance": "Recursive types are refused by bounded expansion; type operations also have a step and finite-key budget."
+    },
+    {
+      "id": "runtime-generic-functions",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-runtime-generic",
+      "message": "generic runtime functions aren't supported",
+      "guidance": "Use generic aliases with concrete PHP-reachable function signatures. There is no generic runtime specialization."
+    },
+    {
+      "id": "finite-record-presence",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-record-keys",
+      "message": "isn't assignable to",
+      "guidance": "Record with finite string keys requires every declared key; it is not an open string map."
+    },
+    {
+      "id": "boxed-structural-conditional",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-structural-predicate",
+      "message": "conditional structural matching",
+      "guidance": "Conditional matching of primitive/array prototype properties is refused; use concrete scalar, array or finite object comparisons."
+    },
+    {
+      "id": "type-declaration-merging",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-merging",
+      "message": "type declaration merging",
+      "guidance": "Combine interface declarations explicitly or use interface extends. Repeated declarations never silently replace earlier fields."
+    },
+    {
+      "id": "conditional-check-provenance",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-conditional-alias",
+      "message": "conditional check expressions need",
+      "guidance": "Use direct type parameters for distributive checks, or tuple-wrap alias/type-operation checks to make non-distributivity explicit. Alias reduction can otherwise change TypeScript distributivity before instantiation."
+    },
+    {
+      "id": "mapped-key-provenance",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-type-mapped-provenance",
+      "message": "mapped keys need direct keyof",
+      "guidance": "Use direct keyof T, a direct key parameter constrained by keyof T, or literal key domains. Aliased or reduced mapped key expressions (including Keys<T>, Identity<K> and keyof T | never) are refused before shape emission because reduction can change optional presence. Aliased or reduced key-parameter constraints are also refused."
+    },
+    {
+      "id": "scalar-typeof-guards",
+      "status": "supported",
+      "evidence": "tests/compiler.rs",
+      "test": "compiled_php_matches_node_on_every_differential_case",
+      "guidance": "Equality and inequality comparisons of typeof with number, string or boolean narrow unknown values and known scalar unions, including reversed operand order, property paths, conjunctions and early returns. False branches remove matching known union members; the complement of unknown remains unknown. Object, function, symbol, bigint and undefined guard domains are not added. The type-semantics fixture checks identical native/WASM output and strict generated-client types."
+    },
+    {
+      "id": "numeric-finiteness",
+      "status": "supported",
+      "evidence": "tests/compiler.rs",
+      "test": "compiled_php_matches_node_on_every_differential_case",
+      "guidance": "Global isFinite accepts zero or one argument and applies numeric coercion; Number.isFinite checks numbers without coercion. Number.isFinite is available as a stable function value, including local and captured aliases and feature detection. The differential numeric owner compares NaN, infinities, numbers, strings, null, booleans and arrays in pure configuration evaluation and PHP. Missing reads, built-in results and explicit undefined preserve their identity separately from null."
+    },
+    {
+      "id": "map-set-collections",
+      "status": "supported",
+      "evidence": "tests/compiler.rs",
+      "test": "compiled_php_matches_node_on_every_differential_case",
+      "guidance": "Typed `Map<K, V>`, `Set<T>`, `ReadonlyMap` and `ReadonlySet` compile to `Zero\\JsMap`/`Zero\\JsSet`: insertion order, SameValueZero keys (NaN equals NaN, -0 is +0), object keys by identity, and O(1) lookup. get/set/has/delete/clear/size/forEach, keys/values/entries, for...of, spread, Array.from and array-pattern destructuring follow JavaScript's live iteration: entries added during iteration are visited, deleted ones are skipped. An empty `new Map()`/`new Set()` needs type arguments. Module-level `new Map(entries)`/`new Set(values)` of static data are built once during configuration evaluation, which can read them with has/get/size but not mutate them, and compiled code captures one shared collection per request. Type arguments are invariant, because both collections are mutable. Calling `next()` on an iterator by hand is refused in typed code but supported in checked JavaScript, which also covers array keys/values/entries. Set algebra methods and Map getOrInsert are refused."
+    },
+    {
+      "id": "whatwg-url",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "url_vectors_agree_in_node_and_generated_php",
+      "guidance": "`URL` and `URLSearchParams` follow the WHATWG URL Standard through the bundled rowbot/url 4.2.1 parser (MIT), not PHP's parse_url. All 886 cases in web-platform-tests urltestdata.json (pinned revision, see tests/differential/URL-WPT-NOTICE.txt) produce WPT's expected href and components, and invalid input throws TypeError. Node 22 passes 879 of them; it lags the standard on seven newer cases. URLSearchParams and setter results match Node byte for byte. Supported: construction with a base, URL.parse and URL.canParse, component getters and setters, searchParams live-linked to its URL, toString/toJSON and JSON.stringify, and URLSearchParams from a string, [name, value] pairs or a record, with get/getAll/has/append/set/delete/sort/size/forEach/keys/values/entries and for...of. Refused: URL.createObjectURL/revokeObjectURL, and instanceof URL, because instanceof works only with named Zero classes."
+    },
+    {
+      "id": "abort-signals-and-timers",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "timers_run_only_while_the_request_waits_and_refuse_to_outlive_the_handler",
+      "guidance": "`AbortController`, `AbortSignal` (aborted, reason, throwIfAborted, onabort, add/removeEventListener for \"abort\" with { once }), `AbortSignal.abort`, `AbortSignal.any` and `AbortSignal.timeout` follow the DOM standard. PHP has no event loop, so `abort()` dispatches synchronously in registration order, as Node does. `setTimeout`/`clearTimeout` create `Zero\\Timers` entries that run only while the request waits: the promise job loop calls `Timers::runNext()` once microtasks are empty. That makes a timeout an observation at the next await, never an interruption mid-statement. Waiting is capped by the request budget (`ZERO_TIMER_BUDGET_MS`, default 30000, and the remaining max_execution_time), and with ZERO_NOW pinned it advances a virtual clock. A user setTimeout still pending when the handler returns is a runtime Error naming its creation site, because in Node it would fire after the response. A non-Error abort reason, dispatchEvent and listener options other than once are refused. Nested AbortSignal.any folds to its root sources, and a throwing listener doesn't stop dispatch: the error is rethrown once every listener has run, where Node would report it as uncaught. Plugins record timers in the capability lock (`timers`). The differential cases in tests/differential/cases.ts (jsAbort, typedAbort, jsTimers) compare abort ordering, backoff sleeps and timer/microtask interleaving with Node."
+    },
+    {
+      "id": "builtin-overloads",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "builtin_vectors_agree_in_evaluation_generated_php_and_node",
+      "guidance": "src/builtins.rs owns JavaScript built-in overloads, arity and phase support. Unsupported arguments are refused at the call site; runtime-only dynamic receivers throw a TypeError. Captured and runtime vectors compare UTF-16 ordering, replacement substitution, ECMAScript whitespace, modulo radix conversion and signed-zero rounding to Node. Positioned includes/startsWith/endsWith are refused in typed code and configuration evaluation; checked imported JavaScript implements those positions. Callback thisArg and nondecimal numeric toString are refused. Object.freeze is refused because freezing is not modeled. JSON parsing/serialization and Error construction are runtime-only; configuration evaluation refuses them. Custom object and function coercion are refused during configuration evaluation; handlers use the checked runtime conversion path. parseInt supports correctly rounded large values in base 10 and power-of-two bases; other radices require safe integer results. Database builders, configuration/schema factories and column modifiers share the source arity contract. Build-time function-coercion refusals include extracted methods; typed replacement callbacks preserve undefined captures and receive named groups. Captured explicit undefined remains distinct from null in both language modes. Dynamic method values use the shared built-in contract. Unknown built-in properties are refused during configuration evaluation. Powers accept safe integer results, integral binary scaling, squares, square roots and IEEE special values; other powers are refused at source or explicitly at runtime. Prototype setter literals are refused; computed __proto__ data properties remain supported. Extracted method calls are refused during configuration evaluation. Database writes require static collection references. Configuration for-of and destructuring use live iterators. Addition uses default primitive conversion. Sorting keeps undefined last and excludes it from comparators. JSON schemas must accept serialized values, and custom toJSON callbacks are refused. Typed Dates require explicit toISOString/toJSON before JSON.stringify or action returns. Imported JavaScript for-of uses live iterators. Ignore-case regexes require literal ASCII source and ASCII input in both modes; non-ASCII folding and encoded character escapes are refused. RegExp source and string conversion escape delimiters and line terminators. Regex split on astral text requires the u flag. Astral pattern literals and surrogate escapes also require u, even for ASCII/BMP subjects. Lone surrogate escapes in classes are refused; valid surrogate pairs and braced scalar escapes remain supported in Unicode mode. Typed invalid-Date toJSON returns null. Generated undefined defaults become null at the storage boundary. Object overwrites preserve key order. Stored JSON defaults omit undefined object properties and normalize undefined array slots to null. Numeric string conversion uses ECMAScript shortest ties-to-even formatting. Nullish narrowing retains undefined. Cyclic array string conversion omits recursive visits. Dynamic array/arguments prototype writes are refused. Typed Date string coercion requires explicit formatting. Function call/apply property values use the function contract; unmodeled function metadata/bind reads and function string conversion are refused. Optional Error/RegExp reads preserve undefined. Date construction runs default-hint object coercion. Typed Date addition/concat requires explicit formatting. Typed and imported Dates share JsDate identity and numeric primitive conversion; timestamp/date storage and filters convert explicitly. Date JSON schemas must describe their serialized text/null form. Non-ISO Date syntax receives a source diagnostic for literals and an explicit runtime refusal for computed values. Default sorting of multiple object values requires an explicit comparator; singleton sorting does not coerce. Negative-zero expanded Date years are refused. Custom sorting accepts only a numeric difference between the two parameters or matching property paths, with finite primitive keys. Other comparator shapes and cross-family borrowed methods are refused. Unary minus performs ToNumber, and parsed JSON retains negative zero. Missing indexed and optional-property logical assignment operands retain undefined in runtime narrowing and serialized client types. Regex source escaping uses explicit UTF-8 regardless of ambient PHP multibyte settings. Configuration refuses extracted built-in method values, including identity comparisons; direct and computed receiver calls remain supported. JSON negative-zero preservation leaves exponent signs intact. Non-Unicode regex classes support digit/underscore control escapes. Runtime hasIndices and unicodeSets are false because d/v flags are refused. Runtime Error messages are own nonenumerable properties only when a defined message is supplied; name is inherited. Configuration refuses restricted arguments access instead of fabricating native Error descriptors. Error stack is the Name: message header without frames. Captured arrays and objects retain one identity across typed and imported JavaScript. Capturing lookbehind is refused because JavaScript matches captures backward. Quantified noncapturing groups require a provably nonempty body; nullable groups are refused because regex engines choose different empty iterations. JavaScript-invalid regex literals receive syntax diagnostics before lowering. Runtime constructors refuse unsupported quantifier chains. Legacy class identity escapes preserve subsequent members. Undefined becomes null at schema-shaped storage boundaries, while required fields still reject null. Unicode regex property escapes are refused because PCRE and JavaScript use different Unicode databases; use explicit character classes. Character-class escapes next to unescaped hyphens are refused; escape literal hyphens. Date strings accept ISO syntax without space/compact-offset extensions, and time requires a complete date. Typed flat accepts depths 0 and 1 (null selects 0; undefined defaults to 1), with depth-specific element inference; checked imported JavaScript supports computed depths. Configuration typeof classifies Math, JSON, console and globalThis as objects; host-dependent process/require/crypto detection is refused. Lexical for headers retain per-iteration bindings during configuration evaluation. Runtime closures must be created after the lexical bindings they capture are initialized; forward captures are refused instead of resolving an outer binding. Named callbacks may omit only parameters that accept undefined; null does not allow omission. Lexical reads and assignments before initialization refuse at source in configuration and handlers, including for/of/in source expressions; parameter defaults cannot consume a later uninitialized parameter. Error cause options are refused whether cause is own data or an inherited class method. Captured closures use closure-object identity rather than function syntax for helper/type/wrapper caches, preserving distinct factory environments. Reassigning a named exported binding is refused at the write, preventing stale import snapshots while retaining stable let/var export aliases. This includes export aliases and named default exports. Const object identity and default-export expression snapshots retain JavaScript behavior. Lexical declarations directly under switch cases require explicit braces; shared switch lexical environments are refused. Checked JavaScript class-method reads return one function per class and member; call/apply supply the receiver. Typed array calls require native methods: own overrides installed by JavaScript receive an explicit runtime refusal before arguments run; checked JavaScript retains override dispatch. Runtime for-in snapshots keys and skips deleted properties. For-of lexical destructuring bindings are predeclared in each iteration before defaults run; earlier initialized bindings remain available. Configuration evaluation shares the handler refusal of destructured var loops. Computed data-method calls retain their receiver and resolve the callee before arguments. Named function expressions are refused at source because their private self-binding is not modeled; use anonymous expressions or function declarations."
+    },
+    {
+      "id": "locale-collation",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-locale-compare",
+      "message": "localeCompare() isn't supported",
+      "guidance": "Locale collation depends on the host and cannot be reproduced deterministically. localeCompare is refused in configuration and typed handlers; checked imported JavaScript throws TypeError. Use < or > for deterministic UTF-16 ordering. No byte-order substitute is exposed under the localeCompare name."
+    },
+    {
+      "id": "optional-chains",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "optional_chains_refuse_unguarded_continuations_at_source",
+      "guidance": "Optional chains support guarded property/index steps and single optional method calls. A non-optional continuation after a short-circuiting link is refused at source; guard each nullable step explicitly. Parenthesized chain boundaries retain ordinary property access and call behavior."
+    },
+    {
+      "id": "parameter-default-scope",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "parameter_default_scope_limits_are_located_refusals",
+      "guidance": "Defaults may reference earlier parameters. Closure defaults require a function body without new bindings and cannot refer to the current/later parameter. Classes and nested function creation in defaults are refused. These source diagnostics also cover nested destructuring defaults, preserving parameter initialization and closure scope."
+    },
+    {
+      "id": "undefined-bindings",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "undefined_bindings_are_located_refusals_in_all_runtime_binding_forms",
+      "guidance": "undefined denotes the built-in missing value. Runtime bindings named undefined are refused at source, including function/class names, parameters, local declarations, imports, catch variables, loop variables and rest/destructuring bindings. Use a different local name."
+    },
+    {
+      "id": "wordpress-ability-unknown",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-ability-unknown",
+      "message": "unknown ability `acme/site-infos`",
+      "guidance": "abilities.call from \"php/wordpress\" names an ability the build can type: one of the app's own (collections, actions, globals) or one locked in zero/abilities.json by `zero abilities pull --site <url>`. Any other name is refused with the closest known name; pull and commit the lock to call another plugin's ability."
+    },
+    {
+      "id": "wordpress-ability-input",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-ability-input",
+      "message": "`acme/site-info` takes { field: \"name\" | \"url\" }, not { field: \"title\" }",
+      "guidance": "An ability's input is checked against the TypeScript type generated from its input JSON Schema (enums, required properties, closed objects). WordPress validates the same schema again at run time; a mismatch the build can see never ships."
+    },
+    {
+      "id": "wordpress-ability-name",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-ability-name",
+      "message": "abilities.call() needs the ability name as a string literal",
+      "guidance": "The ability name must be written in place so the build can type the input and result and record which abilities the app uses. Branch between literal calls when the ability depends on data."
+    },
+    {
+      "id": "wordpress-ability-call",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "wordpress_abilities_are_typed_from_the_lock_and_the_schema",
+      "guidance": "abilities.call(\"vendor/name\", input) compiles to Zero\\Wp\\Abilities\\Call::run, which runs core's WP_Ability::execute() for the current WordPress user. The app's own abilities are typed from the schema without a pull; others from zero/abilities.json, which build and check read without touching the network. zero.gen.ts carries the same types for the editor."
+    },
+    {
+      "id": "wordpress-hook-unknown",
+      "status": "refused",
+      "code": "Z3001",
+      "fixture": "tests/fixtures/reject-wp-hook-unknown",
+      "message": "`the_contnet` is not a WordPress hook Zero types",
+      "guidance": "A wp-hooks/ file or directory is named after a hook in the pinned catalog (src/wordpress/catalog.json, generated by scripts/wordpress-catalog.py from core's docblocks). Any other name is refused with the closest catalog hook, because an untyped hook would pass PHP values the compiler cannot check."
+    },
+    {
+      "id": "wordpress-hook-filter-return",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-wp-hook-filter-return",
+      "message": "the `the_content` filter must return string, not number",
+      "guidance": "A filter handler returns the filtered value: its first argument's type, from the catalog. Returning another type would hand WordPress a value its later callbacks do not expect."
+    },
+    {
+      "id": "wordpress-hook-no-default",
+      "status": "refused",
+      "code": "Z3001",
+      "fixture": "tests/fixtures/reject-wp-hook-no-default",
+      "message": "a wp-hooks/ file needs a default-exported handler function",
+      "guidance": "Each wp-hooks/ file default-exports one handler and may export an integer `priority`. Other exports are refused; share code through an ordinary imported module."
+    },
+    {
+      "id": "wordpress-hook-file",
+      "status": "refused",
+      "code": "Z1003",
+      "fixture": "tests/fixtures/reject-wp-hook-file",
+      "message": "not a .ts handler file",
+      "guidance": "wp-hooks/ holds only .ts handler files (directly, or one directory deep named after the hook). Anything else is refused at its path instead of being skipped, so a handler never silently fails to register."
+    },
+    {
+      "id": "wordpress-hooks",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "wp_hooks_register_in_file_order_with_their_priorities",
+      "guidance": "wp-hooks/<hook>.ts and wp-hooks/<hook>/*.ts handlers compile to PHP functions typed from the catalog and register with add_filter/add_action in the app plugin; one hook's files run in file-name order at priority 10 unless a file exports `priority`."
+    },
+    {
+      "id": "wordpress-function-unknown",
+      "status": "refused",
+      "code": "Z2001",
+      "fixture": "tests/fixtures/reject-wp-function-unknown",
+      "message": "\"php/wordpress\" has no export named `the_title`",
+      "guidance": "\"php/wordpress\" exports the catalog's WordPress functions only: each is admitted when its PHP signature maps soundly (no by-reference parameters, no echoing template tags, no reliance on request globals). Anything else is refused at the import with the list of admitted functions. Template tags such as the_title echo; use their get_ form (get_the_title, once admitted) or a wp-hooks/ filter."
+    },
+    {
+      "id": "wordpress-function-argument",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-wp-function-argument",
+      "message": "`get_post` takes `post` as number, not \"12\"",
+      "guidance": "WordPress function arguments are checked against the catalog's types, from the pinned php-stubs/wordpress-stubs signatures and phpdoc, narrowed where a PHP parameter accepts several shapes (get_post takes a post id)."
+    },
+    {
+      "id": "wordpress-functions",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "wordpress_functions_run_as_the_signed_in_user",
+      "guidance": "Allowlisted WordPress functions compile to Zero\\Wp\\Functions::call(name, [args]): a direct PHP call through the value conversions. WP_Post and WP_User results become the same read-only views hook arguments are, and a WP_Error result throws an HttpError with its own status (422 when it has none)."
+    },
+    {
+      "id": "plugin-narrowed-write",
+      "status": "refused",
+      "code": "Z4201",
+      "fixture": "tests/fixtures/reject-plugin-write",
+      "message": "plugin \"seo\" writes posts.body; zero/plugins.lock.json grants it only posts.summary",
+      "guidance": "A plugin's capabilities are inferred from its compiled code, including writes made by helpers it passes a row to. The committed zero/plugins.lock.json is the grant: when the owner narrows an entry and the package source is unchanged, code beyond the entry is refused at the call that needs it. Remove the call or add the value to the entry."
+    },
+    {
+      "id": "plugin-static-host",
+      "status": "refused",
+      "code": "Z4201",
+      "fixture": "tests/fixtures/reject-plugin-http",
+      "message": "plugin \"ping\" fetches from tracker.example.net; zero/plugins.lock.json grants it only api.example.com",
+      "guidance": "A fetch URL with a written https://host/ prefix (string, template or concatenation) is checked against the plugin's locked hosts at build time. A URL built at runtime is recorded as * and checked against the locked hosts on every request and redirect hop."
+    },
+    {
+      "id": "plugin-cross-import",
+      "status": "refused",
+      "code": "Z1201",
+      "fixture": "tests/fixtures/reject-plugin-isolation",
+      "message": "plugin \"b\" can't import \"zero-plugin-a\": it belongs to plugin \"a\"",
+      "guidance": "A plugin package imports its own modules, \"zero\" and ordinary npm packages, compiled under its own grant. It can't import the app's modules or another registered plugin's package; its compiled helpers, captured data and class state are namespaced per plugin."
+    },
+    {
+      "id": "host-globals",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "host_globals_match_node_through_generated_php",
+      "guidance": "Handlers use the standard host forms, type-checked by @types/node: the global fetch(url, { method, headers, body, redirect }) with a Response (status, statusText, ok, url, redirected, bodyUsed, headers.get/has/forEach, text(), json()), Headers and URLSearchParams; process.env.NAME and process.env[\"NAME\"] (string | undefined); crypto.randomUUID(); and from \"node:crypto\" (import or a top-level const require) createHash and createHmac chains ending in digest(\"hex\" | \"base64\" | \"base64url\"), randomBytes(n).toString(encoding), randomUUID and timingSafeEqual(Buffer.from(a), Buffer.from(b)). They lower in src/compile/host.rs onto Zero\\Fetch (HTTPS-only egress policy), Zero\\Env and Zero\\Crypto. See config-api.md."
+    },
+    {
+      "id": "fetch-signal",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-fetch-signal",
+      "message": "fetch() `signal` isn't available in Zero code",
+      "guidance": "Every call already ends after 10 s. credentials, mode, cache and the other browser options are refused because they have no effect server-side."
+    },
+    {
+      "id": "fetch-binary-body",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-fetch-body",
+      "message": "fetch() `body` can't be",
+      "guidance": "Send a string (JSON.stringify(value) for JSON) or URLSearchParams. Blob, FormData, ArrayBuffer and stream bodies are not available."
+    },
+    {
+      "id": "response-streams",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-response-stream",
+      "message": "response streams aren't available in Zero code",
+      "guidance": "The body is read in full (at most 1 MiB) before fetch() resolves. Read it with text() or json(); arrayBuffer, blob, formData and clone are refused."
+    },
+    {
+      "id": "process-env-dynamic",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-process-env-dynamic",
+      "message": "`process.env` needs a literal variable name",
+      "guidance": "Name the variable: process.env.NAME or process.env[\"NAME\"]. Computed names, iterating process.env and writes are refused, so request input cannot choose a server variable."
+    },
+    {
+      "id": "process-members",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-process-member",
+      "message": "isn't available on `process` in Zero code",
+      "guidance": "Handlers run in PHP. Only process.env.NAME is supported."
+    },
+    {
+      "id": "env-in-handlers",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-env-handler",
+      "message": "env() is a config reference for webhooks, signatures and upload credentials",
+      "guidance": "env(\"NAME\") is a deferred reference inside defineConfig (webhook URLs and secrets, action signatures, upload credentials). Handlers read runtime variables with process.env.NAME."
+    },
+    {
+      "id": "web-crypto-subtle",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-crypto-subtle",
+      "message": "`crypto.subtle` isn't available in Zero code",
+      "guidance": "SubtleCrypto needs ArrayBuffers and is not compiled. Hash and sign with createHash and createHmac from \"node:crypto\"."
+    },
+    {
+      "id": "web-crypto-random-values",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-crypto-random-values",
+      "message": "`crypto.getRandomValues` needs typed arrays",
+      "guidance": "Typed arrays are not compiled. Use randomBytes(n).toString(\"hex\") from \"node:crypto\", or crypto.randomUUID()."
+    },
+    {
+      "id": "node-crypto-members",
+      "status": "refused",
+      "code": "Z2001",
+      "fixture": "tests/fixtures/reject-node-crypto-member",
+      "message": "\"node:crypto\" has no `createCipheriv` in Zero code",
+      "guidance": "node:crypto provides createHash, createHmac, randomBytes, randomUUID and timingSafeEqual. Ciphers, keys, KDFs and streams are not compiled."
+    },
+    {
+      "id": "node-crypto-buffers",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-digest-buffer",
+      "message": "digest() without an encoding returns a Buffer",
+      "guidance": "Finish a hash in one expression with a string encoding: createHash(\"sha256\").update(text).digest(\"hex\"). Buffers exist only inside timingSafeEqual(Buffer.from(a), Buffer.from(b)) and Buffer.byteLength(text)."
+    },
+    {
+      "id": "timing-safe-equal-strings",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-timing-safe-equal",
+      "message": "timingSafeEqual() compares Buffers made from text",
+      "guidance": "Pass Buffer.from(a) and Buffer.from(b). As in Node, inputs of different byte lengths throw RangeError, so check Buffer.byteLength first."
+    },
+    {
+      "id": "node-builtins",
+      "status": "refused",
+      "code": "Z1102",
+      "fixture": "tests/fixtures/reject-node-builtin",
+      "message": "Node built-ins other than node:crypto are unavailable",
+      "guidance": "Handlers run in PHP. Use the global fetch, process.env.NAME and \"node:crypto\"."
+    },
+    {
+      "id": "require",
+      "status": "refused",
+      "code": "Z1102",
+      "fixture": "tests/fixtures/reject-require-module",
+      "message": "can't import \"node:fs\": Node built-ins other than node:crypto are unavailable",
+      "guidance": "Static CommonJS may require(\"node:crypto\") (or \"crypto\"); it resolves through the same built-in module lookup as import. Other Node built-ins are refused whether imported or required."
+    },
+    {
+      "id": "zero-fetch-import",
+      "status": "refused",
+      "code": "Z2001",
+      "fixture": "tests/fixtures/reject-zero-fetch-import",
+      "message": "\"zero\" has no export named `fetch`",
+      "guidance": "fetch and crypto are the standard globals, not \"zero\" exports. Remove them from the import."
+    },
+    {
+      "id": "build-time-namespaces",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "build_time_namespaces_resolve_members_and_refuse_whole_values",
+      "guidance": "A member chain rooted at a module-level object that holds functions (`import * as ns`, `const o = { f }`, `export default { f }`) resolves at compile time: functions compile to helpers and data to the shared captured singleton for that sub-value. Functions may carry own properties set with `f.x = v` or build-time `Object.assign(f, ...)`; they are called and their properties are read the same way. The differential cases `namespaceImport`, `namespaceLocal`, `namespaceDefault`, `functionProperties` and `functionAssign` run in Node and PHP."
+    },
+    {
+      "id": "namespace-value",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-namespace-value",
+      "message": "holds functions, so it exists only while the config is built",
+      "guidance": "An object that holds functions has no PHP form. Call or read its members directly (`ns.fn(x)`, `ns.value`) instead of passing, storing, spreading, iterating or writing the object."
+    },
+    {
+      "id": "function-properties-value",
+      "status": "refused",
+      "code": "Z4001",
+      "fixture": "tests/fixtures/reject-function-properties-value",
+      "message": "is a function with properties, which can't be used as a value in PHP",
+      "guidance": "A PHP closure can't carry properties. Call the function or read its properties directly (`f(x)`, `f.prop`, `f.method(x)`) instead of using it as a value."
+    },
+    {
+      "id": "named-function-expressions",
+      "status": "supported",
+      "evidence": "tests/compiler_contracts.rs",
+      "test": "language_constructs_match_node_through_generated_php",
+      "guidance": "`function name() {}` as an expression binds `name` only inside itself, to itself, as in JavaScript: recursion works, parameters and `var`s of the same name shadow it, and the name is not visible outside. Assigning to the name inside the function throws in strict JavaScript, so it is refused with a pointer; assign to a local variable instead. Local function declarations with a declared signature, and every function in imported JavaScript, may also call themselves."
+    }
+  ],
+  "zero08": [
+    {
+      "code": "Z08_SPACE_REQUIRED",
+      "feature": "schema tables without a table mode"
+    },
+    {
+      "code": "Z08_SOURCE_NOT_RECOVERABLE",
+      "feature": "a published 0.8 version without its authored source"
+    },
+    {
+      "code": "Z08_SOURCE_CHANGED",
+      "feature": "source edited after the publish"
+    },
+    {
+      "code": "Z08_PAGE_DOCUMENT",
+      "feature": "Markdown or HTML document page"
+    },
+    {
+      "code": "Z08_PAGE_ROUTE_PARAM",
+      "feature": "parameterized 0.8 page route"
+    },
+    {
+      "code": "Z08_PAGE_INTERACTIVE",
+      "feature": "interactive 0.8 page, layout or island"
+    },
+    {
+      "code": "Z08_ENDPOINT_METHOD",
+      "feature": "endpoint method without a v2 route (OPTIONS and others)"
+    },
+    {
+      "code": "Z08_ENDPOINT_WRITING_GET",
+      "feature": "writing GET endpoint"
+    },
+    {
+      "code": "Z08_ENDPOINT_RESERVED_PATH",
+      "feature": "endpoint path owned by WordPress or Zero"
+    },
+    {
+      "code": "Z08_ENDPOINT_PATH",
+      "feature": "endpoint path without a v2 route form"
+    },
+    {
+      "code": "Z08_ENDPOINT_REQUEST_API",
+      "feature": "endpoint request API (url, bytes, headers.entries)"
+    },
+    {
+      "code": "Z08_ENDPOINT_NAME",
+      "feature": "endpoint named like a query, mutation or action"
+    },
+    {
+      "code": "Z08_ENDPOINT_SHAPE",
+      "feature": "endpoint declaration or handler shape"
+    },
+    {
+      "code": "Z08_CTX_AUTH_PROFILE",
+      "feature": "ctx.auth profile fields and methods"
+    },
+    {
+      "code": "Z08_CTX_AUTH_USERS",
+      "feature": "ctx.auth.userId without Space Users"
+    },
+    {
+      "code": "Z08_CTX_EMAIL_READ",
+      "feature": "ctx.email in a query or read-only endpoint"
+    },
+    {
+      "code": "Z08_CTX_DYNAMIC",
+      "feature": "ctx passed on or read dynamically"
+    },
+    {
+      "code": "Z08_CTX_DB",
+      "feature": "ctx.db handle use"
+    },
+    {
+      "code": "Z08_CTX_SERVICE",
+      "feature": "ctx.{service}"
+    },
+    {
+      "code": "Z08_CTX_INVALIDATE_READ",
+      "feature": "ctx.invalidate in a read"
+    },
+    {
+      "code": "Z08_DB_WRITE_IN_READ",
+      "feature": "database write outside a mutation"
+    },
+    {
+      "code": "Z08_DB_OPTIONAL_RANGE",
+      "feature": "index range or pagination over an optional field"
+    },
+    {
+      "code": "Z08_DB_SPREAD",
+      "feature": "spread database arguments"
+    },
+    {
+      "code": "Z08_DB_ESCAPE",
+      "feature": "database handle stored or returned"
+    },
+    {
+      "code": "Z08_DB_OPERATION",
+      "feature": "database operation without a v2 mapping"
+    },
+    {
+      "code": "Z08_HANDLER_SIGNATURE",
+      "feature": "handler signature (rest, default or destructured parameters)"
+    },
+    {
+      "code": "Z08_HANDLER_TYPES",
+      "feature": "handler parameter without a concrete type"
+    },
+    {
+      "code": "Z08_HANDLER_SHAPE",
+      "feature": "query, mutation or action declaration"
+    },
+    {
+      "code": "Z08_NAME",
+      "feature": "handler, table or field name"
+    },
+    {
+      "code": "Z08_BUILD_GLOBAL",
+      "feature": "build-time global (declare const)"
+    },
+    {
+      "code": "Z08_AUTH_CALLBACK",
+      "feature": "auth callbacks and providers (onGuestUpgrade)"
+    },
+    {
+      "code": "Z08_SOCKETS",
+      "feature": "sockets"
+    },
+    {
+      "code": "Z08_COLLECTIONS",
+      "feature": "collections or sync"
+    },
+    {
+      "code": "Z08_SCHEMA",
+      "feature": "schema table or field"
+    },
+    {
+      "code": "Z08_SCHEMA_FRESH",
+      "feature": "schema table or field, for a new v2 table"
+    },
+    {
+      "code": "Z08_IMAGE_RESPONSE",
+      "feature": "ImageResponse (JSX on the server)"
+    },
+    {
+      "code": "Z08_PACKAGE",
+      "feature": "imported package"
+    },
+    {
+      "code": "Z08_LANGUAGE",
+      "feature": "JavaScript construct: {construct}"
+    },
+    {
+      "code": "Z08_HOST_API",
+      "feature": "host API without a v2 counterpart"
+    },
+    {
+      "code": "Z08_V2_COMPILE",
+      "feature": "converted code the v2 compiler refuses"
+    },
+    {
+      "code": "Z08_CAPSULE_FEATURE",
+      "feature": "capsule option without a v2 mapping"
+    },
+    {
+      "code": "Z08_OUTPUT_EXISTS",
+      "feature": "existing output directory"
+    },
+    {
+      "code": "Z08_SOURCE_SHAPE",
+      "feature": "capsule source layout"
+    }
+  ]
+}

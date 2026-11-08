@@ -7,12 +7,18 @@ $baseDir = dirname($vendorDir);
 
 return array(
     'Zero\\Vendor\\Symfony\\Polyfill\\Php83\\' => array($vendorDir . '/symfony/polyfill-php83'),
+    'Zero\\Vendor\\Symfony\\Polyfill\\Intl\\Normalizer\\' => array($vendorDir . '/symfony/polyfill-intl-normalizer'),
     'Zero\\Vendor\\Symfony\\Contracts\\Service\\' => array($vendorDir . '/symfony/service-contracts'),
     'Zero\\Vendor\\Symfony\\Contracts\\HttpClient\\' => array($vendorDir . '/symfony/http-client-contracts'),
     'Zero\\Vendor\\Symfony\\Component\\HttpClient\\' => array($vendorDir . '/symfony/http-client'),
+    'Zero\\Vendor\\Rowbot\\URL\\' => array($vendorDir . '/rowbot/url/src'),
+    'Zero\\Vendor\\Rowbot\\Punycode\\' => array($vendorDir . '/rowbot/punycode/src'),
+    'Zero\\Vendor\\Rowbot\\Idna\\Resource\\' => array($vendorDir . '/rowbot/idna/resources'),
+    'Zero\\Vendor\\Rowbot\\Idna\\' => array($vendorDir . '/rowbot/idna/src'),
     'Zero\\Vendor\\Psr\\Log\\' => array($vendorDir . '/psr/log/src'),
     'Zero\\Vendor\\Psr\\Container\\' => array($vendorDir . '/psr/container/src'),
     'Zero\\Vendor\\Psr\\Cache\\' => array($vendorDir . '/psr/cache/src'),
+    'Zero\\Vendor\\Brick\\Math\\' => array($vendorDir . '/brick/math/src'),
     'Zero\\Vendor\\AsyncAws\\S3\\' => array($vendorDir . '/async-aws/s3/src'),
     'Zero\\Vendor\\AsyncAws\\Core\\' => array($vendorDir . '/async-aws/core/src'),
 );

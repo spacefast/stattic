@@ -48,8 +48,9 @@ final class Fetch
      */
     public static function call(mixed $url, mixed $init = null, ?array $hosts = null): FetchResponse
     {
+        if ($url instanceof JsUrl) { $url = (string) $url; }
         if (!is_string($url)) {
-            throw new JsError('fetch() needs a URL string', 'TypeError');
+            throw new JsError('fetch() needs a URL string or URL', 'TypeError');
         }
         $init = $init instanceof JsObject ? $init->p : (is_array($init) ? $init : []);
         $init = array_filter($init, static fn ($v): bool => $v !== JsUndefined::Value && $v !== null);
@@ -71,7 +72,7 @@ final class Fetch
         }
         $headers = self::requestHeaders($init['headers'] ?? null);
         $body = $init['body'] ?? null;
-        if ($body instanceof SearchParams) {
+        if ($body instanceof JsUrlSearchParams) {
             $headers['content-type'] ??= 'application/x-www-form-urlencoded;charset=UTF-8';
             $body = (string) $body;
         } elseif (is_string($body)) {

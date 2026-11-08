@@ -370,6 +370,9 @@ pub struct Compiler<'a, 'p> {
     pub action_results: HashMap<String, Ty>,
     /// Set for the one callback `once()` runs in place, which may be async (lane D).
     async_callback: bool,
+    /// A named function expression passed as a callback: its inner declaration's span and the
+    /// callback's parameter types.
+    named_callback: Option<(Span, Vec<Ty>)>,
     /// Generated code queues promise jobs, so each root drains them and checks rejections at its end.
     uses_jobs: bool,
     /// Every ability `abilities.call` may name, typed (src/abilities.rs).
@@ -440,6 +443,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             annotation_steps: 0,
             resolving_json_types: HashSet::new(),
             async_callback: false,
+            named_callback: None,
             uses_jobs: false,
             helpers: HashMap::new(),
             helper_values: HashMap::new(),
@@ -1456,12 +1460,23 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 self.predeclare_lexical(pat, *kind == DeclKind::Let);
             }
         }
-        // Local function declarations are hoisted: compile them first.
+        // Local function declarations are hoisted: compile them first. A declared signature (or
+        // an imported-JavaScript function) types the binding before its body compiles, so the
+        // body may call itself; PHP sees the binding by reference, so the call finds the closure.
         for s in stmts {
             if let Stmt::Func(f) = s {
                 let name = f.name.clone().expect("named");
-                let php = self.declare_local(&name, Ty::Unknown, false, f.span);
-                let c = self.closure_expr(f)?;
+                let context = self
+                    .named_callback
+                    .take_if(|(span, _)| *span == f.span)
+                    .map(|(_, params)| params);
+                let signature = self.declared_signature(f)?;
+                let recursive = signature.is_some();
+                let php = self.declare_local(&name, signature.unwrap_or(Ty::Unknown), recursive, f.span);
+                let c = match &context {
+                    Some(params) => self.closure_with_types(f, Some(params))?,
+                    None => self.closure_expr(f)?,
+                };
                 self.set_local_ty(&name, c.ty.clone());
                 let _ = writeln!(out, "{}{php} = {};", pad(indent), c.php);
             }
@@ -1735,13 +1750,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 span,
             } => {
                 let module = self.fx().module;
-                if *is_await && !self.javascript_module(module) {
-                    return err_help(
-                        *span,
-                        "`for await` only works in imported JavaScript",
-                        "await each value inside a `for ... of` loop",
-                    );
-                }
+                // Authored TypeScript has no job queue, so `for await` is accepted only where the
+                // blocking model is exact: a sync iterable (array, tuple, string) whose elements are
+                // Zero's own promises or plain values. Each element is then already settled, and
+                // awaiting it yields its value. Async iterables, generators and values from imported
+                // JavaScript go through the job queue, which only imported JavaScript has.
+                let typed_await = *is_await && !self.javascript_module(module);
                 if *is_await && !self.fx().is_async {
                     return err_help(
                         *span,
@@ -1753,6 +1767,24 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 if *kind != DeclKind::Var {
                     self.predeclare_lexical(pat, *kind == DeclKind::Let);
                 }
+                // `for await (const v of [a(), b()])` awaits each element as the loop reaches it, after
+                // the previous iterations' bodies ran. The blocking model would settle every call
+                // before the loop starts, so a promise in the literal is refused with the exact form.
+                if typed_await && let ExprKind::Array(items) = &iter.kind {
+                    for item in items {
+                        let ArrEl::Item(e) = item else { continue };
+                        let saved = self.fx().tmp;
+                        let ty = self.expr(e).map(|v| v.ty);
+                        self.fx().tmp = saved;
+                        if matches!(ty, Ok(Ty::Promise(_))) {
+                            return err_help(
+                                e.span,
+                                "`for await` over a promise written in an array literal isn't supported",
+                                "await each call where it is written: `for (const v of [await a(), await b()])`",
+                            );
+                        }
+                    }
+                }
                 let it = self.expr(iter)?;
                 let it = self.finish_value(it, iter.span)?;
                 let (el, src) = match &it.ty.non_null() {
@@ -1760,7 +1792,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     Ty::Array(t) | Ty::NonEmptyArray(t) => ((**t).clone(), it.php.clone()),
                     Ty::Tuple(ts) | Ty::ArrayLiteral(ts) => (Ty::union(ts.clone()), it.php.clone()),
                     t if t.is_str() => (Ty::Str, format!("\\Zero\\Js::from({})", it.php)),
-                    t @ (Ty::MapOf(..) | Ty::SetOf(_) | Ty::Iter(_)) => (
+                    t @ (Ty::MapOf(..) | Ty::SetOf(_) | Ty::Iter(_) | Ty::UrlParams) => (
                         self.iterable_element(t).expect("collection element"),
                         format!("\\Zero\\Js::iter({})", it.php),
                     ),
@@ -1773,8 +1805,29 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         "check it first, or use `?? []`",
                     );
                 }
+                if typed_await {
+                    let settled = awaited_element(&el);
+                    // A class instance may be a thenable through a `then` method; `for await` would
+                    // adopt it, which only the job queue can do.
+                    if el.non_null().all(|t| matches!(t, Ty::Instance(..) | Ty::Class(_))) && !el.is_nullable() {
+                        return err_help(
+                            iter.span,
+                            "`for await` over class instances isn't supported in authored TypeScript",
+                            "use `for (const v of items)`; `for await` would adopt an instance with a `then` method as a promise",
+                        );
+                    }
+                    if it.ty == Ty::Dynamic || settled.is_none() {
+                        return err_help(
+                            *span,
+                            "`for await` only works in imported JavaScript",
+                            "await each value inside a `for ... of` loop",
+                        );
+                    }
+                }
                 // Each `for await` value is awaited, so its type is the awaited one.
-                let el = if *is_await {
+                let el = if typed_await {
+                    widen_fresh_literals(&awaited_element(&el).expect("checked above"))
+                } else if *is_await {
                     Ty::Dynamic
                 } else {
                     widen_fresh_literals(&el)
@@ -1796,7 +1849,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         it.php
                     );
                     let _ = writeln!(out, "{}{value} = {source}->value;", pad(indent + 1));
-                } else if it.ty == Ty::Dynamic || matches!(it.ty, Ty::MapOf(..) | Ty::SetOf(_) | Ty::Iter(_)) {
+                } else if it.ty == Ty::Dynamic
+                    || matches!(it.ty, Ty::MapOf(..) | Ty::SetOf(_) | Ty::Iter(_) | Ty::UrlParams)
+                {
                     let _ = writeln!(out, "{p}{source} = {src};\n{p}foreach ({source} as {value}) {{");
                 } else {
                     let _ = writeln!(
@@ -3061,7 +3116,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                                 }
                                 Ty::Array(t) | Ty::NonEmptyArray(t) => tys.push(*t),
                                 Ty::Tuple(ts) | Ty::ArrayLiteral(ts) => tys.extend(ts),
-                                t @ (Ty::MapOf(..) | Ty::SetOf(_) | Ty::Iter(_)) => {
+                                t @ (Ty::MapOf(..) | Ty::SetOf(_) | Ty::Iter(_) | Ty::UrlParams) => {
                                     if v.ty.is_nullable() {
                                         return err(
                                             x.span,
@@ -3667,6 +3722,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Resolved::Global("NaN") => Ok(Out::atom("NAN", Ty::Num)),
             Resolved::Global("Infinity") => Ok(Out::atom("INF", Ty::Num)),
             Resolved::Global("Math") => Ok(Out::atom("\\Zero\\Js::dynamicNamespace('Math')", Ty::Dynamic)),
+            Resolved::Global("AbortSignal") if self.javascript_module(self.fx.as_ref().expect("fn").module) => {
+                Ok(Out::atom("\\Zero\\Js::dynamicNamespace('AbortSignal')", Ty::Dynamic))
+            }
             Resolved::Global(g) => err_help(
                 span,
                 format!("`{g}` can't be used as a value; call one of its functions"),
@@ -4218,12 +4276,50 @@ impl<'a, 'p> Compiler<'a, 'p> {
         if let ExprKind::Func(f) = &e.kind {
             return self.closure_with_types(f, Some(params));
         }
+        // A named function expression lowers to `(() => { function name() {} return name; })()`;
+        // its inner declaration takes the callback's parameter types, as the bare function would.
+        if let Some(inner) = named_function_expression(e) {
+            let saved = self.named_callback.replace((inner.span, params.to_vec()));
+            let v = self.expr(e);
+            self.named_callback = saved;
+            return v;
+        }
         let v = self.expr(e)?;
         let Ty::Fn(declared, _) = &v.ty else {
             return err(e.span, format!("expected a function, got {}", v.ty.describe()));
         };
         check_callback_parameters(params, declared, e.span)?;
         Ok(v)
+    }
+
+    /// A function's type from its annotations alone: every parameter and the result annotated,
+    /// or a function in imported JavaScript. `None` when the body must be compiled to know it.
+    fn declared_signature(&mut self, f: &Func) -> Result<Option<Ty>> {
+        if self.javascript_module(f.module) {
+            let params = f
+                .params
+                .iter()
+                .map(|p| {
+                    if p.rest {
+                        Ty::Rest(Box::new(Ty::Array(Box::new(Ty::Dynamic))))
+                    } else {
+                        Ty::Dynamic
+                    }
+                })
+                .collect();
+            return Ok(Some(Ty::Fn(params, Box::new(Ty::Dynamic))));
+        }
+        let (Some(ret), false) = (&f.ret, f.is_async || !f.type_params.is_empty()) else {
+            return Ok(None);
+        };
+        let mut params = Vec::new();
+        for p in &f.params {
+            let Some(ann) = &p.ann else { return Ok(None) };
+            let ty = parameter_input_type(p, self.resolve_runtime_ann(ann, f.module)?);
+            params.push(if p.rest { Ty::Rest(Box::new(ty)) } else { ty });
+        }
+        let ret = self.resolve_runtime_ann(ret, f.module)?;
+        Ok(Some(Ty::Fn(params, Box::new(ret))))
     }
 
     fn closure_with_types(&mut self, f: &Rc<Func>, params: Option<&[Ty]>) -> Result<Out> {
@@ -4912,6 +5008,26 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         }),
                     });
                 }
+                // URL component setters (`u.pathname = "/x"`) run the URL Standard's setter steps in
+                // `JsUrl::set` through checked property assignment.
+                if o.ty == Ty::Url {
+                    if !URL_SETTERS.contains(&prop.as_str()) {
+                        return err_help(
+                            *prop_span,
+                            format!("URL has no writable property `{prop}`"),
+                            format!("assign one of {}", URL_SETTERS.join(", ")),
+                        );
+                    }
+                    return Ok(AssignmentPlace {
+                        read: Out::atom(format!("{}->get({})", o.wrapped(), php_str(prop)), Ty::Str),
+                        constraint: Ty::Str,
+                        target: Some(WriteTarget {
+                            receiver: o.php,
+                            key: php_str(prop),
+                            kind: WriteKind::Dynamic,
+                        }),
+                    });
+                }
                 if let Ty::Class(id) = o.ty {
                     o.ty = self.class_shape(id);
                 }
@@ -5196,6 +5312,20 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     ),
                     Ty::Dynamic,
                 )),
+                ("AbortSignal", method @ ("any" | "abort" | "timeout"))
+                    if self.javascript_module(self.fx.as_ref().expect("fn").module) =>
+                {
+                    if method == "timeout" {
+                        self.uses("timers", "AbortSignal.timeout", span);
+                    }
+                    Ok(Out::atom(
+                        format!(
+                            "\\Zero\\Js::dynamicGet(\\Zero\\Js::dynamicNamespace('AbortSignal'), {})",
+                            php_str(method)
+                        ),
+                        Ty::Dynamic,
+                    ))
+                }
                 _ => err(span, format!("`{g}.{prop}` isn't supported")),
             };
         }
@@ -5329,6 +5459,33 @@ impl<'a, 'p> Compiler<'a, 'p> {
             (Ty::Regex, "source" | "flags") => {
                 let php = guarded(self, &|x| format!("({x})->{prop}"));
                 Out::atom(php, suffix_null(Ty::Str))
+            }
+            (Ty::AbortController, "signal") => {
+                let php = guarded(self, &|x| format!("({x})->signal"));
+                Out::atom(php, suffix_null(Ty::AbortSignal))
+            }
+            (Ty::AbortSignal, "aborted") => {
+                let php = guarded(self, &|x| format!("({x})->aborted"));
+                Out::atom(php, suffix_null(Ty::Bool))
+            }
+            (Ty::AbortSignal, "reason") => {
+                let php = guarded(self, &|x| format!("({x})->reason"));
+                Out::atom(php, Ty::Unknown)
+            }
+            (Ty::Url, "searchParams") => {
+                let php = guarded(self, &|x| format!("({x})->get('searchParams')"));
+                Out::atom(php, suffix_null(Ty::UrlParams))
+            }
+            (Ty::Url, p) if URL_PROPERTIES.contains(&p) => {
+                let php = guarded(self, &|x| format!("({x})->get({})", php_str(p)));
+                Out::atom(php, suffix_null(Ty::Str))
+            }
+            (Ty::UrlParams, "size") => {
+                let php = guarded(self, &|x| format!("({x})->size()"));
+                Out::atom(php, suffix_null(Ty::Num))
+            }
+            (Ty::AbortController | Ty::AbortSignal | Ty::Url | Ty::UrlParams, _) => {
+                return err(prop_span, format!("{} has no property `{prop}`", base.describe()));
             }
             (Ty::MapOf(..) | Ty::SetOf(_), "size") => {
                 let php = guarded(self, &|x| format!("({x})->size()"));
@@ -5578,6 +5735,23 @@ impl<'a, 'p> Compiler<'a, 'p> {
             return self.typed_collection(name == "Map", args, type_args, span);
         }
         if let ExprKind::Ident(name) = &callee.kind
+            && matches!(name.as_str(), "URL" | "URLSearchParams")
+            && matches!(self.resolve(name, callee.span)?, Resolved::Global(_))
+            && !self.javascript_module(self.fx.as_ref().expect("fn").module)
+        {
+            return self.typed_url(name == "URL", args, span);
+        }
+        if let ExprKind::Ident(name) = &callee.kind
+            && name == "AbortController"
+            && matches!(self.resolve(name, callee.span)?, Resolved::Global(_))
+            && !self.javascript_module(self.fx.as_ref().expect("fn").module)
+        {
+            if !args.is_empty() {
+                return err(span, "`new AbortController()` takes no arguments");
+            }
+            return Ok(Out::atom("(new \\Zero\\JsAbortController())", Ty::AbortController));
+        }
+        if let ExprKind::Ident(name) = &callee.kind
             && name == "RegExp"
             && matches!(self.resolve(name, callee.span)?, Resolved::Global("RegExp"))
             && !self.javascript_module(self.fx.as_ref().expect("fn").module)
@@ -5605,7 +5779,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
         if self.javascript_module(self.fx.as_ref().expect("fn").module) {
             if let ExprKind::Ident(name) = &callee.kind
-                && matches!(name.as_str(), "Set" | "Map" | "WeakMap" | "WeakSet" | "Date" | "RegExp")
+                && matches!(
+                    name.as_str(),
+                    "Set"
+                        | "Map"
+                        | "WeakMap"
+                        | "WeakSet"
+                        | "Date"
+                        | "RegExp"
+                        | "URL"
+                        | "URLSearchParams"
+                        | "AbortController"
+                )
                 && matches!(self.resolve(name, callee.span)?, Resolved::Global(_))
             {
                 if name == "Date" {
@@ -5739,6 +5924,144 @@ impl<'a, 'p> Compiler<'a, 'p> {
         })
     }
 
+    fn abort_method(&mut self, recv: &Out, m: &str, args: &[ArrEl], span: Span, m_span: Span) -> Result<Out> {
+        let r = recv.wrapped();
+        Ok(match (&recv.ty.non_null(), m) {
+            (Ty::AbortController, "abort") => {
+                let reason = match args.first() {
+                    None => "\\Zero\\Js::undefined()".to_string(),
+                    Some(ArrEl::Item(x)) => {
+                        let v = self.expr(x)?;
+                        self.finish_value(v, x.span)?.php
+                    }
+                    Some(ArrEl::Spread(x)) => return err(x.span, "spread arguments aren't supported here"),
+                };
+                Out::atom(format!("{r}->abort({reason})"), Ty::Undefined)
+            }
+            (Ty::AbortSignal, "throwIfAborted") => Out::atom(format!("{r}->throwIfAborted()"), Ty::Undefined),
+            (Ty::AbortSignal, "addEventListener" | "removeEventListener") => {
+                let kind = self.arg(args, 0, span, "an event type")?;
+                if !matches!(&kind.kind, ExprKind::Str(t) if t == "abort") {
+                    return err_help(kind.span, "AbortSignal only dispatches \"abort\"", "pass \"abort\"");
+                }
+                let f = self.arg(args, 1, span, "a listener")?;
+                let cb = self.callback(f, &[Ty::Unknown])?;
+                let options = match args.get(2) {
+                    None => "\\Zero\\Js::undefined()".to_string(),
+                    Some(ArrEl::Item(x)) => {
+                        let v = self.expr(x)?;
+                        self.finish_value(v, x.span)?.php
+                    }
+                    Some(ArrEl::Spread(x)) => return err(x.span, "spread arguments aren't supported here"),
+                };
+                Out::atom(format!("{r}->{m}('abort', {}, {options})", cb.php), Ty::Undefined)
+            }
+            _ => return err(m_span, format!("{} has no method `{m}`", recv.ty.describe())),
+        })
+    }
+
+    /// `new URL(url, base?)` and `new URLSearchParams(init?)` in typed code.
+    fn typed_url(&mut self, url: bool, args: &[ArrEl], span: Span) -> Result<Out> {
+        let mut argv = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let ArrEl::Item(x) = a else {
+                return err(span, "spread arguments aren't supported here");
+            };
+            let v = self.expr(x)?;
+            let v = self.finish_value(v, x.span)?;
+            let ok = if url {
+                v.ty.is_str() || v.ty == Ty::Url || (i == 1 && v.ty == Ty::Undefined)
+            } else {
+                v.ty.is_str()
+                    || v.ty == Ty::UrlParams
+                    || match v.ty.non_null() {
+                        Ty::Obj(fields) => fields.values().all(|(t, optional)| !optional && t.is_str()),
+                        Ty::Map(t) => t.is_str(),
+                        _ => false,
+                    }
+                    || self.iterable_element(&v.ty).is_some_and(|el| {
+                        let pair = |t: &Ty| {
+                            matches!(t, Ty::Tuple(ts) | Ty::ArrayLiteral(ts) if ts.len() == 2 && ts.iter().all(Ty::is_str))
+                        };
+                        match &el {
+                            Ty::Union(parts) => parts.iter().all(pair),
+                            t => pair(t),
+                        }
+                    })
+            };
+            if !ok {
+                return err_help(
+                    x.span,
+                    format!(
+                        "`new {}` doesn't take {}",
+                        if url { "URL" } else { "URLSearchParams" },
+                        v.ty.describe()
+                    ),
+                    if url {
+                        "pass a string or URL"
+                    } else {
+                        "pass a query string, [name, value] string pairs, or a Record<string, string>"
+                    },
+                );
+            }
+            argv.push(v.php);
+        }
+        if url && !(1..=2).contains(&argv.len()) || !url && argv.len() > 1 {
+            return err(span, "wrong number of arguments");
+        }
+        let class = if url { "JsUrl" } else { "JsUrlSearchParams" };
+        Ok(Out::atom(
+            format!("\\Zero\\{class}::construct({})", argv.join(", ")),
+            if url { Ty::Url } else { Ty::UrlParams },
+        ))
+    }
+
+    fn url_method(&mut self, recv: &Out, m: &str, args: &[ArrEl], span: Span, m_span: Span) -> Result<Out> {
+        let r = recv.wrapped();
+        let mut strs = Vec::new();
+        for a in args {
+            let ArrEl::Item(x) = a else {
+                return err(span, "spread arguments aren't supported here");
+            };
+            if m == "forEach" {
+                break;
+            }
+            let v = self.expr(x)?;
+            let v = self.finish_value(v, x.span)?;
+            if !v.ty.is_str() {
+                return err_help(
+                    x.span,
+                    format!("`{m}` needs strings, not {}", v.ty.describe()),
+                    "convert with String(...)",
+                );
+            }
+            strs.push(v.php);
+        }
+        let call = |ty: Ty| Out::atom(format!("{r}->{m}({})", strs.join(", ")), ty);
+        let iter = |kind: &str, el: Ty| {
+            Out::atom(
+                format!("(new \\Zero\\JsIterator({r}->{kind}Iterator(), 'URLSearchParams Iterator'))"),
+                Ty::Iter(Box::new(el)),
+            )
+        };
+        Ok(match (&recv.ty.non_null(), m) {
+            (Ty::Url, "toString" | "toJSON") => call(Ty::Str),
+            (Ty::UrlParams, "toString") => call(Ty::Str),
+            (Ty::UrlParams, "get") => call(Ty::Str.nullable()),
+            (Ty::UrlParams, "getAll") => call(Ty::Array(Box::new(Ty::Str))),
+            (Ty::UrlParams, "has") => call(Ty::Bool),
+            (Ty::UrlParams, "append" | "set" | "delete" | "sort") => call(Ty::Undefined),
+            (Ty::UrlParams, "keys" | "values") => iter(m, Ty::Str),
+            (Ty::UrlParams, "entries") => iter("entries", Ty::Tuple(vec![Ty::Str, Ty::Str])),
+            (Ty::UrlParams, "forEach") => {
+                let f = self.arg(args, 0, span, "a function")?;
+                let cb = self.callback(f, &[Ty::Str, Ty::Str, Ty::UrlParams])?;
+                Out::atom(format!("{r}->forEach({})", cb.php), Ty::Undefined)
+            }
+            _ => return err(m_span, format!("{} has no method `{m}`", recv.ty.describe())),
+        })
+    }
+
     /// `new Map<K, V>(entries?)` / `new Set<T>(values?)` in typed code. Type arguments come from the
     /// call or are inferred from a non-empty source; an empty `new Map()` needs them.
     fn typed_collection(&mut self, map: bool, args: &[ArrEl], type_args: &[TyAnn], span: Span) -> Result<Out> {
@@ -5853,6 +6176,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             t if t.is_str() => Ty::Str,
             Ty::MapOf(k, v) => Ty::Tuple(vec![(**k).clone(), (**v).clone()]),
             Ty::SetOf(t) | Ty::Iter(t) => (**t).clone(),
+            Ty::UrlParams => Ty::Tuple(vec![Ty::Str, Ty::Str]),
             _ => return None,
         })
     }
@@ -6645,6 +6969,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
             let argv = self.javascript_args(args)?;
             return Ok(Out::atom(format!("\\Zero\\Js::dynamicRegExpCall({argv})"), Ty::Dynamic));
         }
+        if matches!(g, "setTimeout" | "clearTimeout") {
+            return self.timer_call(g, args, span);
+        }
         if g == "Symbol" {
             let argv = self.javascript_args(args)?;
             return Ok(Out::atom(format!("\\Zero\\JsSymbol::create({argv})"), Ty::Dynamic));
@@ -6706,8 +7033,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 return err_help(span, format!("`{g}` needs `new`"), format!("write `new {g}(...)`"));
             }
             (
-                "eval" | "Function" | "setTimeout" | "globalThis" | "Promise" | "URL" | "Request" | "Response"
-                | "FormData" | "Blob" | "AbortController",
+                "eval" | "Function" | "globalThis" | "Promise" | "URL" | "Request" | "Response" | "FormData" | "Blob",
                 _,
             ) => {
                 return err_help(
@@ -6717,6 +7043,131 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 );
             }
             _ => return err(span, format!("`{g}(...)` isn't supported")),
+        })
+    }
+
+    /// `setTimeout(callback, delay?, ...args)` / `clearTimeout(id)`: a `Zero\\Timers` entry that runs
+    /// only while the request waits. The site names the call in the handler-end refusal.
+    fn timer_call(&mut self, g: &str, args: &[ArrEl], span: Span) -> Result<Out> {
+        if g == "clearTimeout" {
+            let argv = self.javascript_args(args)?;
+            return Ok(Out::atom(
+                format!("\\Zero\\Timers::clear(({argv})->a[0] ?? \\Zero\\Js::undefined())"),
+                Ty::Undefined,
+            ));
+        }
+        self.uses("timers", "setTimeout", span);
+        let javascript = self.javascript_module(self.fx.as_ref().expect("fn").module);
+        let callback = self.arg(args, 0, span, "a callback")?;
+        let cb = if javascript {
+            let v = self.expr(callback)?;
+            format!("\\Zero\\Js::timerCallback({})", v.php)
+        } else {
+            self.callback(callback, &[])?.php
+        };
+        let mut rest = Vec::new();
+        for a in args.iter().skip(1) {
+            let ArrEl::Item(x) = a else {
+                return err(span, "spread arguments aren't supported here");
+            };
+            let v = self.expr(x)?;
+            rest.push(self.finish_value(v, x.span)?);
+        }
+        if !javascript {
+            if let Some(d) = rest.first()
+                && !d.ty.is_num()
+            {
+                return err_help(
+                    span,
+                    "setTimeout's delay must be a number",
+                    "pass the delay in milliseconds",
+                );
+            }
+            if rest.len() > 1 {
+                return err_help(
+                    span,
+                    "extra setTimeout arguments aren't supported in typed code",
+                    "capture them in the callback",
+                );
+            }
+        }
+        let delay = rest.first().map_or_else(|| "0".to_string(), |d| d.php.clone());
+        let extra: Vec<String> = rest.iter().skip(1).map(|v| v.php.clone()).collect();
+        let site = self.site(span);
+        let set = format!(
+            "\\Zero\\Timers::set({cb}, {delay}, [{}], {})",
+            extra.join(", "),
+            php_str(&site)
+        );
+        // Node returns a Timeout object, so typed code gets the same opaque handle: only clearTimeout uses it.
+        Ok(Out::atom(
+            format!("\\Zero\\Timers::handle({set})"),
+            if javascript { Ty::Dynamic } else { Ty::Unknown },
+        ))
+    }
+
+    fn site(&self, span: Span) -> String {
+        crate::diag::site(span)
+    }
+
+    /// `URL.parse`/`URL.canParse` and `AbortSignal.abort`/`any`/`timeout` in typed code.
+    fn typed_standard_static(&mut self, g: &str, m: &str, args: &[ArrEl], span: Span) -> Result<Out> {
+        let mut argv = Vec::new();
+        for a in args {
+            let ArrEl::Item(x) = a else {
+                return err(span, "spread arguments aren't supported here");
+            };
+            let v = self.expr(x)?;
+            argv.push((self.finish_value(v, x.span)?, x.span));
+        }
+        let need = |ok: bool, at: Span, what: &str| -> Result<()> {
+            if ok {
+                Ok(())
+            } else {
+                err_help(at, format!("`{g}.{m}` needs {what}"), format!("pass {what}"))
+            }
+        };
+        Ok(match (g, m) {
+            ("URL", "parse" | "canParse") => {
+                for (i, (v, at)) in argv.iter().enumerate() {
+                    need(
+                        v.ty.is_str() || v.ty == Ty::Url || (i == 1 && v.ty == Ty::Undefined),
+                        *at,
+                        "a string or URL",
+                    )?;
+                }
+                let list: Vec<&str> = argv.iter().map(|(v, _)| v.php.as_str()).collect();
+                let call = format!("\\Zero\\JsUrl::{}({})", m, list.join(", "));
+                if m == "parse" {
+                    Out::atom(call, Ty::Url.nullable())
+                } else {
+                    Out::atom(call, Ty::Bool)
+                }
+            }
+            ("AbortSignal", "abort") => {
+                let reason = argv
+                    .first()
+                    .map_or_else(|| "\\Zero\\Js::undefined()".into(), |(v, _)| v.php.clone());
+                Out::atom(format!("\\Zero\\JsAbortSignal::aborted({reason})"), Ty::AbortSignal)
+            }
+            ("AbortSignal", "timeout") => {
+                let (ms, at) = &argv[0];
+                need(ms.ty.is_num(), *at, "a number of milliseconds")?;
+                self.uses("timers", "AbortSignal.timeout", span);
+                Out::atom(format!("\\Zero\\JsAbortSignal::timeout({})", ms.php), Ty::AbortSignal)
+            }
+            ("AbortSignal", "any") => {
+                let (signals, at) = &argv[0];
+                let ok = self
+                    .iterable_element(&signals.ty)
+                    .is_some_and(|el| el.all(|t| *t == Ty::AbortSignal));
+                need(ok, *at, "an array of AbortSignals")?;
+                Out::atom(
+                    format!("\\Zero\\JsAbortSignal::any(\\Zero\\Js::iter({}))", signals.php),
+                    Ty::AbortSignal,
+                )
+            }
+            _ => return err(span, format!("`{g}.{m}` isn't supported")),
         })
     }
 
@@ -6744,6 +7195,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
             self.require_javascript_symbols(span)?;
         }
         self.builtin_args(g, m, args, span)?;
+        if !self.javascript_module(self.fx.as_ref().expect("fn").module) && matches!(g, "URL" | "AbortSignal") {
+            return self.typed_standard_static(g, m, args, span);
+        }
         if g == "Symbol" && matches!(m, "for" | "keyFor") {
             let argv = self.javascript_args(args)?;
             let method = if m == "for" { "for" } else { "keyFor" };
@@ -6787,8 +7241,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
         if (self.javascript_module(self.fx.as_ref().expect("fn").module)
             || args.iter().any(|a| matches!(a, ArrEl::Spread(_))))
-            && matches!(g, "Math" | "Array" | "Object" | "Number" | "JSON")
+            && matches!(
+                g,
+                "Math" | "Array" | "Object" | "Number" | "JSON" | "URL" | "AbortSignal"
+            )
         {
+            if (g, m) == ("AbortSignal", "timeout") {
+                self.uses("timers", "AbortSignal.timeout", span);
+            }
             let argv = self.javascript_args(args)?;
             return Ok(Out::atom(
                 format!("\\Zero\\Js::dynamicStaticCall({}, {}, {argv})", php_str(g), php_str(m)),
@@ -6817,7 +7277,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             let v = self.expr(src)?;
             let nonempty = array_proven_nonempty(&v.ty);
-            if let t @ (Ty::MapOf(..) | Ty::SetOf(_) | Ty::Iter(_)) = &v.ty {
+            if let t @ (Ty::MapOf(..) | Ty::SetOf(_) | Ty::Iter(_) | Ty::UrlParams) = &v.ty {
                 let el = self.iterable_element(t).expect("collection element");
                 if let Some(ArrEl::Item(f)) = args.get(1) {
                     let cb = self.callback(f, &[el, Ty::Num])?;
@@ -7118,6 +7578,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Ty::MapOf(..) => Some("map"),
             Ty::SetOf(_) => Some("set"),
             Ty::Iter(_) => Some("iterator"),
+            Ty::AbortController => Some("abortcontroller"),
+            Ty::AbortSignal => Some("abortsignal"),
+            Ty::Url => Some("url"),
+            Ty::UrlParams => Some("urlsearchparams"),
             _ => None,
         };
         if let Some(family) = family {
@@ -7216,6 +7680,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 _ => return err(m_span, format!("regular expressions have no method `{m}`")),
             },
             Ty::MapOf(..) | Ty::SetOf(_) | Ty::Iter(_) => self.collection_method(&recv, m, args, span, m_span)?,
+            Ty::AbortController | Ty::AbortSignal => self.abort_method(&recv, m, args, span, m_span)?,
+            Ty::Url | Ty::UrlParams => self.url_method(&recv, m, args, span, m_span)?,
             Ty::Map(_) | Ty::Obj(_) => {
                 // Calling a function stored in an object field.
                 let mut f = self.member_of_out(&recv, m, m_span)?;
@@ -8678,6 +9144,10 @@ fn truthiness_part(t: &Ty, truthy: bool) -> Ty {
         | Ty::MapOf(..)
         | Ty::SetOf(_)
         | Ty::Iter(_)
+        | Ty::AbortController
+        | Ty::AbortSignal
+        | Ty::Url
+        | Ty::UrlParams
         | Ty::Fn(..)
         | Ty::Rest(_)
         | Ty::Promise(_)
@@ -8843,12 +9313,73 @@ fn parameter_default_suffix(parameters: &[Param], types: &[Ty]) -> &'static str 
     }
 }
 
+/// The inner function of a lowered named function expression: an immediately called
+/// parameterless arrow whose body declares one named function and returns it.
+fn named_function_expression(e: &Expr) -> Option<&Rc<Func>> {
+    let ExprKind::Call { callee, args, .. } = &e.kind else {
+        return None;
+    };
+    let ExprKind::Func(wrapper) = &callee.kind else {
+        return None;
+    };
+    let FnBody::Block(body) = &wrapper.body else {
+        return None;
+    };
+    match (
+        args.is_empty() && wrapper.is_arrow && wrapper.params.is_empty(),
+        body.as_slice(),
+    ) {
+        (
+            true,
+            [
+                Stmt::Func(inner),
+                Stmt::Return(
+                    Some(Expr {
+                        kind: ExprKind::Ident(name),
+                        ..
+                    }),
+                    _,
+                ),
+            ],
+        ) if inner.name.as_deref() == Some(name.as_str()) => Some(inner),
+        _ => None,
+    }
+}
+
 fn parameter_input_type(parameter: &Param, ty: Ty) -> Ty {
     if parameter.optional || parameter.default.is_some() {
         Ty::union([ty, Ty::Undefined])
     } else {
         ty
     }
+}
+
+/// The type a typed `for await` element settles to under the blocking model: a Zero promise is
+/// its value, a plain value is itself. `None` for values only the job queue can settle (anything
+/// from imported JavaScript, unknown values, builders that were never awaited).
+fn awaited_element(t: &Ty) -> Option<Ty> {
+    match t {
+        Ty::Promise(inner) => awaited_element(inner),
+        Ty::Union(items) => items
+            .iter()
+            .map(awaited_element)
+            .collect::<Option<Vec<_>>>()
+            .map(Ty::union),
+        Ty::Dynamic | Ty::Unknown | Ty::Builder(_) => None,
+        // PromiseResolve adopts an object with a callable (or possibly callable) `then`, so a
+        // thenable element binds its settled value in JavaScript; only the job queue can settle it.
+        Ty::Obj(_) | Ty::Map(_) if thenable(t) => None,
+        // A class instance's `then` may be a method, which its field type doesn't show.
+        Ty::Instance(..) | Ty::Class(_) => None,
+        other => Some(other.clone()),
+    }
+}
+
+fn thenable(t: &Ty) -> bool {
+    t.field("then").is_some_and(|(then, _)| {
+        then.non_null()
+            .all(|t| matches!(t, Ty::Fn(..) | Ty::Unknown | Ty::Dynamic))
+    })
 }
 
 fn widen_fresh_literals(t: &Ty) -> Ty {
@@ -8872,7 +9403,13 @@ fn widen_fresh_literals(t: &Ty) -> Ty {
         ),
         Ty::Map(t) => Ty::Map(Box::new(widen_fresh_literals(t))),
         // Map and Set type arguments are invariant handles; they never carry fresh literals.
-        Ty::MapOf(..) | Ty::SetOf(_) | Ty::Iter(_) => t.clone(),
+        Ty::MapOf(..)
+        | Ty::SetOf(_)
+        | Ty::Iter(_)
+        | Ty::AbortController
+        | Ty::AbortSignal
+        | Ty::Url
+        | Ty::UrlParams => t.clone(),
         Ty::Fn(params, ret) => Ty::Fn(
             params.iter().map(widen_fresh_literals).collect(),
             Box::new(widen_fresh_literals(ret)),
@@ -8971,6 +9508,16 @@ pub fn assignable(a: &Ty, b: &Ty) -> bool {
         _ => false,
     }
 }
+
+/// URL's writable accessors (`origin` and `searchParams` are read-only).
+const URL_SETTERS: &[&str] = &[
+    "href", "protocol", "username", "password", "host", "hostname", "port", "pathname", "search", "hash",
+];
+
+/// URL's string-valued accessors.
+const URL_PROPERTIES: &[&str] = &[
+    "href", "origin", "protocol", "username", "password", "host", "hostname", "port", "pathname", "search", "hash",
+];
 
 fn same_type(a: &Ty, b: &Ty) -> bool {
     assignable(a, b) && assignable(b, a)

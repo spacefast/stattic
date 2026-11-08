@@ -36,12 +36,30 @@ impl Source {
 pub struct Failure {
     pointer: String,
     reason: String,
+    /// `zero migrate app` adds the diagnostic contract (`app::codes`) before it reports.
+    #[serde(flatten)]
+    contract: Option<Box<app::codes::Contract>>,
+    /// Where in the 0.8 source the refusal is: capsule-relative file, 1-based line and UTF-16 column.
+    #[serde(skip)]
+    location: Option<Box<(String, usize, usize)>>,
 }
 
 pub(super) fn fail(at: &str, reason: impl Into<String>) -> Failure {
     Failure {
         pointer: at.into(),
         reason: reason.into(),
+        contract: None,
+        location: None,
+    }
+}
+
+impl Failure {
+    /// Locates the refusal at `span` unless something more precise already did.
+    pub(super) fn spanned(mut self, span: crate::diag::Span, root: &Path) -> Failure {
+        if self.location.is_none() {
+            self.location = crate::diag::position(span, root).map(Box::new);
+        }
+        self
     }
 }
 

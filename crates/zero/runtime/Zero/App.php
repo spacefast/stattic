@@ -78,7 +78,7 @@ final class App
         }
 
         return Extensions::execute('action:' . $name, $action, $rawBody, array_change_key_case($headers, CASE_LOWER), $viewer,
-            static fn (): Response => Response::json($fn($input, $ctx)));
+            static fn (): Response => Response::json(Timers::run(static fn (): mixed => $fn($input, $ctx))));
     }
 
     /**
@@ -228,7 +228,7 @@ final class App
                     $fn = '\\ZeroApp\\' . $route['handler'];
                     // `once()` in a handler is keyed to this exact request body, as in actions.
                     $result = Jobs\Receipts::withFingerprint(hash('sha256', $body),
-                        fn (): mixed => Seam::container($fn($request, Seam::ctx($this->db->hookCtx()))));
+                        fn (): mixed => Seam::container(Timers::run(fn (): mixed => $fn($request, Seam::ctx($this->db->hookCtx())))));
                 } finally {
                     $this->db->setActor($previous);
                 }

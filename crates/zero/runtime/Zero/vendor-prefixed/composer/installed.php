@@ -38,6 +38,18 @@
       ),
       'dev_requirement' => false,
     ),
+    'brick/math' => 
+    array (
+      'pretty_version' => '1.0.0',
+      'version' => '1.0.0.0',
+      'reference' => '2effe05d2177c451b86c6a073196a4034c02f211',
+      'type' => 'library',
+      'install_path' => __DIR__ . '/../brick/math',
+      'aliases' => 
+      array (
+      ),
+      'dev_requirement' => false,
+    ),
     'psr/cache' => 
     array (
       'pretty_version' => '3.0.0',
@@ -74,6 +86,42 @@
       ),
       'dev_requirement' => false,
     ),
+    'rowbot/idna' => 
+    array (
+      'pretty_version' => '0.3.0',
+      'version' => '0.3.0.0',
+      'reference' => '504900acc8e465a17668a61ae30391d1aebbb4f2',
+      'type' => 'library',
+      'install_path' => __DIR__ . '/../rowbot/idna',
+      'aliases' => 
+      array (
+      ),
+      'dev_requirement' => false,
+    ),
+    'rowbot/punycode' => 
+    array (
+      'pretty_version' => '1.0.4',
+      'version' => '1.0.4.0',
+      'reference' => 'ec116e99cb089a25d45147813d61bfa2deb29328',
+      'type' => 'library',
+      'install_path' => __DIR__ . '/../rowbot/punycode',
+      'aliases' => 
+      array (
+      ),
+      'dev_requirement' => false,
+    ),
+    'rowbot/url' => 
+    array (
+      'pretty_version' => '4.2.1',
+      'version' => '4.2.1.0',
+      'reference' => '9b1bd1ac757672cb0682f697b53dc5aa03c76297',
+      'type' => 'library',
+      'install_path' => __DIR__ . '/../rowbot/url',
+      'aliases' => 
+      array (
+      ),
+      'dev_requirement' => false,
+    ),
     'symfony/deprecation-contracts' => 
     array (
       'pretty_version' => 'v3.7.1',
@@ -105,6 +153,18 @@
       'reference' => '35be0019e2c2c9fba80f9dc033290a5240f7b44f',
       'type' => 'library',
       'install_path' => __DIR__ . '/../symfony/http-client-contracts',
+      'aliases' => 
+      array (
+      ),
+      'dev_requirement' => false,
+    ),
+    'symfony/polyfill-intl-normalizer' => 
+    array (
+      'pretty_version' => 'v1.43.0',
+      'version' => '1.43.0.0',
+      'reference' => 'ebd57ccc7edb93d632e184efbe7693d2517bab3b',
+      'type' => 'library',
+      'install_path' => __DIR__ . '/../symfony/polyfill-intl-normalizer',
       'aliases' => 
       array (
       ),

@@ -282,13 +282,22 @@ pub fn operation(operation: &str, request: &str) -> String {
                         Err(d) => Ok(serde_json::json!({"check":diag::envelope(&[d], &project), "output":null})),
                     }
                 }
-                "migrateApp" => Ok(serde_json::to_value(crate::config_migrate::app::migrate(
-                    fs,
-                    &project,
-                    request["space"].as_str(),
-                    request["users"].as_bool().unwrap_or(false),
-                ))
-                .unwrap()),
+                "migrateApp" => {
+                    // `fresh: true` creates new v2 tables, even with a `space` named: a new Space has
+                    // no 0.8 tables to adopt. `space` alone adopts; neither refuses a schema.
+                    let tables = crate::config_migrate::app::Tables::from(
+                        request["space"].as_str(),
+                        request["fresh"].as_bool().unwrap_or(false),
+                    );
+                    let mut candidate = crate::config_migrate::app::migrate(
+                        fs,
+                        &project,
+                        tables,
+                        request["users"].as_bool().unwrap_or(false),
+                    );
+                    candidate.finish();
+                    Ok(serde_json::to_value(candidate).unwrap())
+                }
                 "migrateConfig" => {
                     let source = crate::config_migrate::Source::parse(request["source"].as_str().unwrap_or("zero"))
                         .ok_or("unknown source CMS")?;

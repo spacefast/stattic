@@ -23,6 +23,8 @@ pub const KINDS: &[(&str, &str)] = &[
     ("env", "reads the environment variable"),
     ("mail", "sends mail with"),
     ("jobs", "enqueues the job"),
+    // `setTimeout` and `AbortSignal.timeout`: request-scoped `Zero\Timers` entries that wait.
+    ("timers", "sets timers with"),
     // WordPress from TypeScript (`Compiler::use_wordpress`): `abilities.call` from "php/wordpress",
     // and handlers registered on WordPress actions and filters.
     ("abilities", "calls the ability"),

@@ -44,7 +44,7 @@ pub(super) fn parse(path: &Path, text: &str) -> Result<Vec<Stmt>, Failure> {
         erased_types: Default::default(),
     }
     .program(&parsed.program)
-    .map_err(|d| fail("", diag::render(&d, Path::new("."))))
+    .map_err(|d| fail("", diag::render(&d, Path::new("."))).spanned(d.span, Path::new("")))
 }
 
 pub(super) fn imports(body: &[Stmt]) -> Vec<&str> {
@@ -182,12 +182,13 @@ impl Field {
 }
 struct Table {
     name: String,
-    physical: String,
+    /// The 0.8 table this adopts (`sf_<space>_<table>_<hash>`), or None for a new v2 table.
+    physical: Option<String>,
     fields: Vec<Field>,
     indexes: BTreeMap<String, Vec<String>>,
 }
 
-fn table(e: &Expr, name: &str, space: Option<&str>, aliases: &BTreeMap<String, String>) -> Result<Table, Failure> {
+fn table(e: &Expr, name: &str, tables: super::Tables, aliases: &BTreeMap<String, String>) -> Result<Table, Failure> {
     let at = pointer("/schema", name);
     ident(name, &at)?;
     let mut e = e;
@@ -273,15 +274,15 @@ fn table(e: &Expr, name: &str, space: Option<&str>, aliases: &BTreeMap<String, S
                         }
                     }
                 }
-                let space = space.filter(|s| !s.is_empty()).ok_or_else(|| {
-                    fail(
-                        &at,
-                        "--space is required to bind the actual sf_<space>_<table>_<hash> table",
-                    )
-                })?;
+                // Without a table mode the table still converts as fresh, so handlers check
+                // against it; `app` reports the one SPACE_REQUIRED refusal for the schema.
+                let physical = match tables {
+                    super::Tables::Adopt(space) => Some(physical(space, name)),
+                    super::Tables::Fresh | super::Tables::Unset => None,
+                };
                 return Ok(Table {
                     name: name.into(),
-                    physical: physical(space, name),
+                    physical,
                     fields,
                     indexes,
                 });
@@ -334,6 +335,14 @@ function __z08RequireIdentity(user: __z08User | null, subject: string | null) {
 "#;
 
 /// v2 compiles `console.*` to the PHP error log; the declaration types it for editors.
+/// The 401 a writing handler answers without a caller when it (or a helper) reads the subject.
+const SUBJECT_GATE: &str =
+    "if (__z08ctx.user === null) throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n";
+/// Where a writing handler's gate goes until its helpers are converted (`/*__z08gate<id>*/`).
+const GATE_MARK: &str = "/*__z08gate";
+
+/// A helper's writing read of the caller's subject: 401 without a caller, as the handler gate does.
+const SUBJECT_REQUIRED: &str = "async function __z08SubjectRequired(user: __z08User | null): Promise<string> {\n  if (user === null) throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n  return (await __z08Subject(user)) ?? \"\";\n}\n";
 const LOG: &str = "declare const console: { debug(...values: unknown[]): void; info(...values: unknown[]): void; warn(...values: unknown[]): void; error(...values: unknown[]): void };\n";
 
 /// Index ranges keep 0.8's null rule: comparing against null is refused.
@@ -352,7 +361,7 @@ pub(super) struct Transformed {
 pub(super) fn app(
     path: &Path,
     source: &str,
-    space: Option<&str>,
+    table_mode: super::Tables,
     users: bool,
     content_posts: bool,
     entries: &mut Vec<Entry>,
@@ -487,14 +496,23 @@ pub(super) fn app(
         ));
     }
     let mut tables = BTreeMap::new();
+    if let Some(schema) = root.get("schema")
+        && table_mode == super::Tables::Unset
+        && !obj(schema, "/schema")?.is_empty()
+    {
+        errors.push(fail("/schema", super::SPACE_REQUIRED).spanned(schema.span, Path::new("")));
+    }
     if let Some(schema) = root.get("schema") {
         for (name, e) in obj(schema, "/schema")? {
-            match table(e, &name, space, &aliases) {
+            match table(e, &name, table_mode, &aliases) {
                 Ok(t) => {
-                    entries.push(entry(&pointer("/schema",&name),"mapped",format!("bind existing SQL table {}; BIGINT id, TEXT metadata/scalars and DOUBLE numbers; no rows copied",t.physical)));
+                    entries.push(entry(&pointer("/schema", &name), "mapped", match &t.physical {
+                        Some(physical) => format!("bind existing SQL table {physical}; BIGINT id, TEXT metadata/scalars and DOUBLE numbers; no rows copied"),
+                        None => "new v2 table, created by the candidate's first migration; TEXT metadata/scalars and DOUBLE numbers".into(),
+                    }));
                     tables.insert(name, t);
                 }
-                Err(e) => errors.push(e),
+                Err(err) => errors.push(err.spanned(e.span, Path::new(""))),
             }
         }
     }
@@ -528,7 +546,7 @@ pub(super) fn app(
                     connector_roles.insert(name, v);
                     entries.push(entry(&at,"review","connector role normalized for the optional host overlay; credentials and grants are not migrated; ctx connector calls require a port"));
                 }
-                Err(e) => errors.push(e),
+                Err(err) => errors.push(err.spanned(e.span, Path::new(""))),
             }
         }
     }
@@ -543,10 +561,13 @@ pub(super) fn app(
                     signed_in = b;
                     entries.push(entry("/auth/requireSignIn","mapped","carry requireSignIn to generated action gates using zero-identity; existing sessions and principal IDs require a separate identity migration"));
                 }
-                _ => errors.push(fail(
-                    &pointer("/auth", &key),
-                    "identity callbacks/providers need an explicit zero-identity migration",
-                )),
+                _ => errors.push(
+                    fail(
+                        &pointer("/auth", &key),
+                        "identity callbacks/providers need an explicit zero-identity migration",
+                    )
+                    .spanned(e.span, Path::new("")),
+                ),
             }
         }
     }
@@ -568,17 +589,23 @@ pub(super) fn app(
         {
             match obj(root[key], &pointer("", key)) {
                 Ok(items) if !items.is_empty() => {
-                    for name in items.keys() {
-                        errors.push(fail(
-                            &pointer(&pointer("", key), name),
-                            "unsupported capsule feature; port it before migrating the application",
-                        ));
+                    for (name, item) in items {
+                        errors.push(
+                            fail(
+                                &pointer(&pointer("", key), &name),
+                                "unsupported capsule feature; port it before migrating the application",
+                            )
+                            .spanned(item.span, Path::new("")),
+                        );
                     }
                 }
-                _ => errors.push(fail(
-                    &pointer("", key),
-                    "unsupported capsule feature; port it before migrating the application",
-                )),
+                _ => errors.push(
+                    fail(
+                        &pointer("", key),
+                        "unsupported capsule feature; port it before migrating the application",
+                    )
+                    .spanned(root[key].span, Path::new("")),
+                ),
             }
         }
     }
@@ -634,6 +661,24 @@ pub(super) fn app(
             .is_some_and(|auth| !matches!(literal(auth), Ok(Value::Bool(false))));
     let mut handlers = Vec::new();
     let mut names = BTreeSet::new();
+    // Helpers a handler may pass the context to: function declarations and `const f = (...) =>`.
+    let module_functions: BTreeMap<String, &Func> = body
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Func(f) => Some((f.name.clone()?, &**f)),
+            Stmt::Decl {
+                pat: Pat::Id(name, _),
+                init: Some(Expr { kind: E::Func(f), .. }),
+                kind: DeclKind::Const,
+                ..
+            } => Some((name.clone(), &**f)),
+            _ => None,
+        })
+        .collect();
+    let functions: BTreeSet<String> = module_functions.keys().cloned().collect();
+    let mut calls: Vec<CtxCall> = Vec::new();
+    // Rewritten helpers replace their copied source in the prelude.
+    let mut ctx_helpers: BTreeMap<String, String> = BTreeMap::new();
     for section in ["queries", "mutations", "actions"] {
         if let Some(group) = root.get(section) {
             for (name, e) in obj(group, &pointer("", section))? {
@@ -669,11 +714,13 @@ pub(super) fn app(
                             subjects: users,
                             sends: section != "queries",
                             route: None,
+                            functions: &functions,
                         },
                     )
                 })();
                 match result {
-                    Ok((h, generated)) => {
+                    Ok((h, generated, ctx_calls)) => {
+                        calls.extend(ctx_calls);
                         if generated.iter().any(|g| g.contains("__z08page_")) {
                             entries.push(entry(&at, "mapped", "paginate keeps 0.8's index order, numItems clamp and { page, isDone, continueCursor } result; cursors are new opaque strings, so clients restart from the first page after cutover"));
                         }
@@ -681,7 +728,7 @@ pub(super) fn app(
                         handlers.push(h);
                         entries.push(entry(&at,"mapped","v2 action with named input properties and legacy row results; REST URL/envelope and error transport follow v2"));
                     }
-                    Err(e) => errors.push(e),
+                    Err(err) => errors.push(err.spanned(e.span, Path::new(""))),
                 }
             }
         }
@@ -744,12 +791,14 @@ pub(super) fn app(
                         subjects: users,
                         sends: route.writes,
                         route: Some(&route),
+                        functions: &functions,
                     },
                 )
                 .map(|h| (h, route))
             })();
             match result {
-                Ok(((code, generated), route)) => {
+                Ok(((code, generated, ctx_calls), route)) => {
+                    calls.extend(ctx_calls);
                     let (prefixed, generated): (Vec<_>, Vec<_>) =
                         generated.into_iter().partition(|g| g.starts_with(PREFIX_MARK));
                     helpers.extend(generated);
@@ -777,9 +826,101 @@ pub(super) fn app(
                         entries.push(entry(&at, "review", "a signed-in caller of an unsafe-method route must send X-WP-Nonce; without it the request runs anonymously"));
                     }
                 }
-                Err(e) => errors.push(e),
+                Err(err) => errors.push(err.spanned(e.span, Path::new(""))),
             }
         }
+    }
+    // Helpers that receive the context are rewritten like handlers, following calls between them.
+    // A helper takes the strictest mode of its callers: writes and sends only when every caller
+    // could, so a query never reaches a write through a helper.
+    let mut helper_modes: BTreeMap<(String, usize), (bool, bool, Span)> = BTreeMap::new();
+    let mut converted_helpers: BTreeMap<(String, usize), (bool, bool)> = BTreeMap::new();
+    let mut ctx_helper_errors = Vec::new();
+    // For the 401 gates: which helpers each writing handler reaches, which helpers call which,
+    // and which read the subject themselves.
+    let mut gate_calls: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+    let mut callees: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut reads_subject: BTreeSet<String> = BTreeSet::new();
+    while !calls.is_empty() {
+        for call in std::mem::take(&mut calls) {
+            if let Some(gate) = call.gate {
+                gate_calls.entry(gate).or_default().insert(call.function.clone());
+            }
+            let mode = helper_modes.entry((call.function.clone(), call.position)).or_insert((
+                call.writes,
+                call.sends,
+                call.span,
+            ));
+            mode.0 &= call.writes;
+            mode.1 &= call.sends;
+        }
+        for ((function, position), (writes, sends, span)) in &helper_modes {
+            let key = (function.clone(), *position);
+            if converted_helpers.get(&key) == Some(&(*writes, *sends)) {
+                continue;
+            }
+            converted_helpers.insert(key, (*writes, *sends));
+            let f = module_functions[function];
+            let at = pointer("/helpers", function);
+            match ctx_helper(source, f, *position, &tables, &at, *writes, *sends, users, &functions) {
+                Ok(((code, generated, next), reads)) => {
+                    ctx_helpers.insert(function.clone(), code);
+                    helpers.extend(generated);
+                    if reads {
+                        reads_subject.insert(function.clone());
+                    }
+                    callees
+                        .entry(function.clone())
+                        .or_default()
+                        .extend(next.iter().map(|c| c.function.clone()));
+                    calls.extend(next);
+                }
+                Err(e) => ctx_helper_errors.push(e.spanned(*span, Path::new(""))),
+            }
+        }
+    }
+    errors.extend(ctx_helper_errors);
+    // A helper reads the subject if it does or any helper it calls does.
+    loop {
+        let more: Vec<String> = callees
+            .iter()
+            .filter(|(f, called)| !reads_subject.contains(*f) && called.iter().any(|c| reads_subject.contains(c)))
+            .map(|(f, _)| f.clone())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        reads_subject.extend(more);
+    }
+    // A writing handler that reaches a subject read through a helper answers 401 without a
+    // caller, as it does when it reads the subject itself; otherwise its marker goes.
+    let settle = |code: &str| -> String {
+        let mut code = code.to_string();
+        for (gate, called) in &gate_calls {
+            let text = if called.iter().any(|c| reads_subject.contains(c)) {
+                SUBJECT_GATE
+            } else {
+                ""
+            };
+            code = code.replace(&format!("{GATE_MARK}{gate}*/"), text);
+        }
+        code
+    };
+    for h in &mut handlers {
+        *h = settle(h);
+    }
+    for (_, code) in &mut routes {
+        *code = settle(code);
+    }
+    for (_, _, _, code) in &mut prefixes {
+        *code = settle(code);
+    }
+    for (function, _) in converted_helpers.keys() {
+        entries.push(entry(
+            &pointer("/helpers", function),
+            "mapped",
+            "takes the v2 context (HookCtx); its ctx services are rewritten as in the handlers that call it",
+        ));
     }
     // An exact endpoint at the prefix wins over the splat in 0.8 (exact paths are served first).
     for (method, prefix, at, code) in prefixes {
@@ -827,7 +968,7 @@ pub(super) fn app(
         ));
     }
     let mut config = String::from(
-        "import { action as __z08Action, boolean as __z08Boolean, db as __z08Db, defineConfig as __z08Config, HttpError as __z08HttpError, json as __z08Json, real as __z08Real, table as __z08Table, text as __z08Text, email as __z08Email, userProjection as __z08Users, collection as __z08Collection, richText as __z08RichText, route as __z08Route, mail as __z08Mail, type InferSelectModel } from \"zero\";\n",
+        "import { action as __z08Action, boolean as __z08Boolean, db as __z08Db, defineConfig as __z08Config, HttpError as __z08HttpError, json as __z08Json, real as __z08Real, table as __z08Table, text as __z08Text, email as __z08Email, userProjection as __z08Users, collection as __z08Collection, richText as __z08RichText, route as __z08Route, mail as __z08Mail, type InferSelectModel, type HookCtx as __z08HookCtx } from \"zero\";\n",
     );
     if uses_crypto {
         config.push_str(CRYPTO_PRELUDE);
@@ -835,6 +976,22 @@ pub(super) fn app(
     if !routes.is_empty() || !responses.is_empty() {
         config.push_str(super::endpoints::PRELUDE);
         config.push_str(&responses);
+    }
+    for (function, code) in &ctx_helpers {
+        let f = module_functions[function];
+        let original = match body.iter().find_map(|stmt| match stmt {
+            Stmt::Func(g) if std::ptr::eq(&**g, f) => Some(raw(source, g.span).to_string()),
+            Stmt::Decl { span, .. } if matches!(stmt, Stmt::Decl { init: Some(Expr { kind: E::Func(g), .. }), .. } if std::ptr::eq(&**g, f)) => {
+                Some(raw(source, *span).to_string())
+            }
+            _ => None,
+        }) {
+            Some(text) => text,
+            None => continue,
+        };
+        // The declaration keeps its binding; only the function inside it is replaced.
+        let replaced = original.replacen(raw(source, f.span), code, 1);
+        prelude = prelude.replacen(&original, &replaced, 1);
     }
     config.push_str(&prelude);
     if content_config.is_some() {
@@ -903,7 +1060,11 @@ pub(super) fn app(
         config.push_str(&format!("routes: {{\n{}\n}},", routes.join(",\n")));
     }
     config.push_str(&format!("actions: {{\n{}\n}} }});\n", handlers.join(",\n")));
-    entries.push(entry("","review","Adoption requires the original MariaDB database and --space binding. IDs above Number.MAX_SAFE_INTEGER, existing sessions, client routes, realtime and deployment activation need separate validation. No deployment is performed."));
+    entries.push(if tables.values().any(|t| t.physical.is_none()) {
+        entry("", "review", "Fresh tables: the candidate creates new, empty v2 tables and copies no 0.8 rows. Bind --space instead to adopt a published Space's tables. Sessions, client routes and deployment activation need separate validation. No deployment is performed.")
+    } else {
+        entry("","review","Adoption requires the original MariaDB database and --space binding. IDs above Number.MAX_SAFE_INTEGER, existing sessions, client routes, realtime and deployment activation need separate validation. No deployment is performed.")
+    });
     Ok(Transformed {
         config,
         content_config,
@@ -1007,7 +1168,12 @@ fn table_code(t: &Table) -> String {
     for f in &t.fields {
         out.push_str(&format!("{}: {},\n", q(&f.name), f.builder()));
     }
-    out.push_str(&format!("}}, {{ existingTable: {}, api: {{ list:false, get:false, create:false, update:false, delete:false }}, agents:false }});\n",q(&t.physical)));
+    let existing = t
+        .physical
+        .as_deref()
+        .map(|p| format!("existingTable: {}, ", q(p)))
+        .unwrap_or_default();
+    out.push_str(&format!("}}, {{ {existing}api: {{ list:false, get:false, create:false, update:false, delete:false }}, agents:false }});\n"));
     out.push_str(&format!("function __z08_{n}_row(row: InferSelectModel<typeof __z08_{n}>) {{ return {{ id: String(row.id), createdAt: row.createdAt, updatedAt: row.updatedAt,"));
     for f in &t.fields {
         out.push_str(&format!(
@@ -1172,6 +1338,9 @@ fn input_builder(ty: &TyAnn, source_ty: &str, optional: bool, at: &str) -> Resul
     ))
 }
 
+/// A converted handler: its generated code, the module helpers it needs, and its context calls.
+type Converted = (String, Vec<String>, Vec<CtxCall>);
+
 /// How a generated action runs: its write mode and identity sources.
 #[derive(Clone, Copy)]
 struct Mode<'a> {
@@ -1183,6 +1352,8 @@ struct Mode<'a> {
     sends: bool,
     /// Set for a 0.8 endpoint, which becomes a v2 route at the same method and path.
     route: Option<&'a super::endpoints::Route>,
+    /// Functions declared at the top of the module; passing the context to one is followed.
+    functions: &'a BTreeSet<String>,
 }
 
 fn handler(
@@ -1192,13 +1363,14 @@ fn handler(
     at: &str,
     name: &str,
     mode: Mode,
-) -> Result<(String, Vec<String>), Failure> {
+) -> Result<Converted, Failure> {
     let Mode {
         writes,
         signed_in,
         subjects,
         sends,
         route,
+        functions: _,
     } = mode;
     if route.is_some() {
         return endpoint(source, f, tables, at, name, mode);
@@ -1357,6 +1529,12 @@ fn handler(
         // Every return of the handler itself, through its control flow but not nested functions.
         returned: super::endpoints::returns(f),
         edits: vec![],
+        functions: mode.functions,
+        aliases: vec![],
+        services: BTreeMap::new(),
+        calls: vec![],
+        inline_subject: None,
+        reads_subject: false,
     };
     let body = match &f.body {
         FnBody::Expr(e) => {
@@ -1396,12 +1574,15 @@ fn handler(
         }
     };
     let gate = if signed_in {
-        "if (__z08ctx.user === null || String(__z08ctx.user.role) === \"guest\") throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n"
+        "if (__z08ctx.user === null || String(__z08ctx.user.role) === \"guest\") throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n".to_string()
     } else if r.uses_subject && writes {
         // 0.8 gave every visitor a guest identity; a v2 client starts a guest session on this 401.
-        "if (__z08ctx.user === null) throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n"
+        SUBJECT_GATE.to_string()
+    } else if writes && !r.calls.is_empty() {
+        // A helper may read the subject; `transform::app` settles this once helpers are converted.
+        r.gate_marker(f.span.start)
     } else {
-        ""
+        String::new()
     };
     // Writes run behind the 401 gate below, so their subject is never null.
     let subject = match (r.uses_subject, writes || signed_in) {
@@ -1417,7 +1598,78 @@ fn handler(
         q(name),
         input.join(", ")
     );
-    Ok((code, r.helpers))
+    Ok((code, r.helpers, r.calls))
+}
+
+/// A module function that a handler passes the context to, rewritten to take the v2 context at
+/// `position`: its parameter becomes `__z08ctx: HookCtx` and its body goes through the same service
+/// rewrites as a handler's. Returns the function's new source, its generated helpers and the calls
+/// it makes with the context in turn.
+#[allow(clippy::too_many_arguments)]
+fn ctx_helper(
+    source: &str,
+    f: &Func,
+    position: usize,
+    tables: &BTreeMap<String, Table>,
+    at: &str,
+    writes: bool,
+    sends: bool,
+    subjects: bool,
+    functions: &BTreeSet<String>,
+) -> Result<(Converted, bool), Failure> {
+    let param = f
+        .params
+        .get(position)
+        .ok_or_else(|| fail(&pointer(at, "ctx"), "unsupported context service, alias or dynamic use: the helper has no parameter where the context is passed"))?;
+    let Pat::Id(ctx, _) = &param.pat else {
+        return Err(fail(&pointer(at, "ctx"), DESTRUCTURE));
+    };
+    if param.rest || param.default.is_some() {
+        return Err(fail(
+            &pointer(at, "ctx"),
+            "unsupported context service, alias or dynamic use: a rest or defaulted context parameter needs a manual port",
+        ));
+    }
+    let mut r = Rewrite {
+        source,
+        ctx,
+        tables,
+        at,
+        writes,
+        subjects,
+        uses_subject: false,
+        action: f.name.as_deref().unwrap_or("helper"),
+        request: None,
+        returns: vec![],
+        params: vec![],
+        logs: false,
+        helpers: vec![],
+        sends,
+        returned: super::endpoints::returns(f),
+        edits: vec![],
+        functions,
+        aliases: vec![],
+        services: BTreeMap::new(),
+        calls: vec![],
+        inline_subject: Some(f.is_async),
+        reads_subject: false,
+    };
+    // The parameter, with its 0.8 type annotation, becomes the typed v2 context.
+    r.edits.push((param.span, "__z08ctx: __z08HookCtx".into()));
+    match &f.body {
+        FnBody::Expr(e) => r.expr(e)?,
+        FnBody::Block(stmts) => {
+            for s in stmts {
+                r.stmt(s)?;
+            }
+        }
+    }
+    if r.logs {
+        r.helpers.push(LOG.into());
+    }
+    // `ctx` itself is now `__z08ctx`; the remaining reads were rewritten as services.
+    let text = r.apply(f.span);
+    Ok(((text, r.helpers, r.calls), r.reads_subject))
 }
 
 /// A 0.8 endpoint as a v2 route: `(ctx, req)` becomes `(req, __z08ctx)` and every return goes
@@ -1429,7 +1681,7 @@ fn endpoint(
     at: &str,
     name: &str,
     mode: Mode,
-) -> Result<(String, Vec<String>), Failure> {
+) -> Result<Converted, Failure> {
     let route = mode.route.expect("route");
     let ctx = match f.params.first().map(|p| &p.pat) {
         None => "__z08unused",
@@ -1461,6 +1713,12 @@ fn endpoint(
         sends: mode.sends,
         returned: super::endpoints::returns(f),
         edits: vec![],
+        functions: mode.functions,
+        aliases: vec![],
+        services: BTreeMap::new(),
+        calls: vec![],
+        inline_subject: None,
+        reads_subject: false,
     };
     for span in super::endpoints::returns(f) {
         r.returns.push(span);
@@ -1505,12 +1763,14 @@ fn endpoint(
         }
     };
     let gate = if mode.signed_in {
-        "if (__z08ctx.user === null || String(__z08ctx.user.role) === \"guest\") throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n"
+        "if (__z08ctx.user === null || String(__z08ctx.user.role) === \"guest\") throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n".to_string()
     } else if r.uses_subject && route.writes {
         // As for actions: 0.8 gave every visitor a guest identity; a v2 client starts one on this 401.
-        "if (__z08ctx.user === null) throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n"
+        SUBJECT_GATE.to_string()
+    } else if route.writes && !r.calls.is_empty() {
+        r.gate_marker(f.span.start)
     } else {
-        ""
+        String::new()
     };
     // A writing route runs behind the gate above, so its subject is never null, as for actions.
     let subject = match (r.uses_subject, route.writes || mode.signed_in) {
@@ -1532,7 +1792,7 @@ fn endpoint(
             route_entry(&format!("{name}__z08prefix"), &route.method, prefix, &handler)
         ));
     }
-    Ok((code, r.helpers))
+    Ok((code, r.helpers, r.calls))
 }
 
 /// Marks the bare-prefix route `endpoint()` returns among its helpers.
@@ -1573,8 +1833,108 @@ struct Rewrite<'a> {
     /// Spans of values the handler returns directly (an expression body or `return <e>`).
     returned: Vec<Span>,
     edits: Vec<(Span, String)>,
+    /// Functions declared at the top of the module, which may take the context.
+    functions: &'a BTreeSet<String>,
+    /// Names bound to the context itself (`const c = ctx`).
+    aliases: Vec<String>,
+    /// Names bound to one context service (`const { db } = ctx`, `const auth = ctx.auth`).
+    services: BTreeMap<String, String>,
+    /// Calls that pass the context to a module function.
+    calls: Vec<CtxCall>,
+    /// In a helper, the Space Users subject is looked up where it is read (`Some(async)`); in a
+    /// handler it is `__z08subject`, computed once behind the handler's gate (`None`).
+    inline_subject: Option<bool>,
+    /// A helper read the caller's subject, so a writing caller needs the 401 gate.
+    reads_subject: bool,
 }
+
+/// A call that passes the context to a module function at one argument position.
+pub(super) struct CtxCall {
+    function: String,
+    position: usize,
+    writes: bool,
+    sends: bool,
+    span: Span,
+    /// The writing handler whose 401 gate depends on what this helper reads (its gate marker).
+    gate: Option<u32>,
+}
+
+const DESTRUCTURE: &str = "context destructuring needs plain service names (`const { db, auth } = ctx`); nested patterns, defaults and rest need a manual port";
+
+/// `{ db, auth: a }` as (service, binding) pairs, or None for a pattern the converter can't follow.
+fn services_pattern(pat: &Pat) -> Option<Vec<(String, String)>> {
+    let Pat::Obj { props, rest: None, .. } = pat else {
+        return None;
+    };
+    props
+        .iter()
+        .map(|(key, binding)| match binding {
+            Pat::Id(name, _) => Some((key.clone(), name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 impl Rewrite<'_> {
+    /// A placeholder for a writing handler's 401 gate, tied to the helpers it passes ctx to.
+    fn gate_marker(&mut self, id: u32) -> String {
+        for call in &mut self.calls {
+            call.gate = Some(id);
+        }
+        format!("{GATE_MARK}{id}*/")
+    }
+
+    /// The caller's 0.8 Space Users subject, as an expression.
+    fn subject(&mut self) -> Result<String, Failure> {
+        match self.inline_subject {
+            None => {
+                self.uses_subject = true;
+                Ok("__z08subject".into())
+            }
+            Some(false) => Err(fail(
+                &pointer(&pointer(self.at, "ctx"), "auth"),
+                "unsupported context service, alias or dynamic use: ctx.auth in a helper that isn't async needs a manual port; make the helper async",
+            )),
+            // A write answers 401 without a caller, as its handler would; a read sees null.
+            Some(true) if self.writes => {
+                self.reads_subject = true;
+                self.helpers.push(SUBJECT_REQUIRED.into());
+                Ok("(await __z08SubjectRequired(__z08ctx.user))".into())
+            }
+            Some(true) => {
+                self.reads_subject = true;
+                Ok("(await __z08Subject(__z08ctx.user))".into())
+            }
+        }
+    }
+
+    /// The context itself, or a name bound to it.
+    fn is_ctx(&self, name: &str) -> bool {
+        name == self.ctx || self.aliases.iter().any(|a| a == name)
+    }
+
+    /// A binding a nested function or declaration would shadow.
+    fn is_bound(&self, name: &str) -> bool {
+        self.is_ctx(name) || self.services.contains_key(name)
+    }
+
+    fn is_ctx_expr(&self, e: &Expr) -> bool {
+        matches!(&e.kind, E::Ident(n) if self.is_ctx(n))
+    }
+
+    /// The context service `e` names: `ctx.db`, `ctx["db"]`, or a name bound to it.
+    fn service_of<'e>(&'e self, e: &'e Expr) -> Option<&'e str> {
+        match &e.kind {
+            E::Member { obj, prop, .. } if self.is_ctx_expr(obj) => Some(prop.as_str()),
+            E::Index { obj, index, .. } if self.is_ctx_expr(obj) => match &index.kind {
+                E::Str(key) => Some(key.as_str()),
+                _ => None,
+            },
+            E::Ident(n) => self.services.get(n).map(String::as_str),
+            _ => None,
+        }
+    }
+
     fn apply(&self, span: Span) -> String {
         let mut out = raw(self.source, span).to_string();
         let mut edits = self
@@ -1582,7 +1942,9 @@ impl Rewrite<'_> {
             .iter()
             .filter(|(s, _)| s.start >= span.start && s.end <= span.end)
             .collect::<Vec<_>>();
-        edits.sort_by_key(|(s, _)| std::cmp::Reverse(s.start));
+        // Right to left; at one offset, a replacement before a zero-width insertion there, so the
+        // insertion lands in front of the replaced text.
+        edits.sort_by_key(|(s, _)| (std::cmp::Reverse(s.start), s.end == s.start));
         for (s, text) in edits {
             out.replace_range((s.start - span.start) as usize..(s.end - span.start) as usize, text);
         }
@@ -1647,7 +2009,12 @@ impl Rewrite<'_> {
         self.edits = old;
         Ok(text)
     }
+    /// Rewrites one expression; a refusal inside it is located at the innermost expression.
     fn expr(&mut self, e: &Expr) -> Result<(), Failure> {
+        self.expr_at(e).map_err(|f| f.spanned(e.span, Path::new("")))
+    }
+
+    fn expr_at(&mut self, e: &Expr) -> Result<(), Failure> {
         if let E::Ident(name) = &e.kind
             && name.starts_with("__z08")
         {
@@ -1661,7 +2028,7 @@ impl Rewrite<'_> {
         if let E::Call { callee, .. } = &e.kind
             && let E::Member { obj, prop, .. } = &callee.kind
             && prop == "invalidate"
-            && matches!(&obj.kind, E::Ident(n) if n == self.ctx)
+            && self.is_ctx_expr(obj)
         {
             if !self.writes {
                 return Err(fail(
@@ -1690,7 +2057,7 @@ impl Rewrite<'_> {
             ..
         } = &call.kind
             && let E::Member { obj, prop, .. } = &callee.kind
-            && matches!(&obj.kind, E::Member { obj, prop: c, .. } if c == "crypto" && matches!(&obj.kind, E::Ident(n) if n == self.ctx))
+            && self.service_of(obj) == Some("crypto")
         {
             if !["sha256", "hmacSha256", "timingSafeEqual"].contains(&prop.as_str()) {
                 return Err(fail(
@@ -1726,7 +2093,7 @@ impl Rewrite<'_> {
             ..
         } = &call.kind
             && let E::Member { obj, prop, .. } = &callee.kind
-            && matches!(&obj.kind, E::Member { obj, prop: svc, .. } if svc == "email" && matches!(&obj.kind, E::Ident(n) if n == self.ctx))
+            && self.service_of(obj) == Some("email")
         {
             let at = pointer(&pointer(self.at, "ctx"), "email");
             if prop != "send" {
@@ -1756,7 +2123,7 @@ impl Rewrite<'_> {
             return Ok(());
         }
         if let E::Member { obj, prop, .. } = &e.kind
-            && matches!(&obj.kind,E::Member{obj,prop:auth,..} if auth=="auth"&&matches!(&obj.kind,E::Ident(n) if n==self.ctx))
+            && self.service_of(obj) == Some("auth")
         {
             let text = match prop.as_str() {
                 "isSignedIn" | "isAuthenticated" => {
@@ -1766,10 +2133,7 @@ impl Rewrite<'_> {
                 "displayName" => {
                     "(__z08ctx.user === null ? \"Signed out\" : String(__z08ctx.user.role) === \"guest\" ? \"Guest\" : __z08ctx.user?.name ?? \"Signed out\")"
                 }
-                "userId" if self.subjects => {
-                    self.uses_subject = true;
-                    "__z08subject"
-                }
+                "userId" if self.subjects => &self.subject()?,
                 _ => {
                     return Err(fail(
                         &pointer(&pointer(&pointer(self.at, "ctx"), "auth"), prop),
@@ -1793,47 +2157,75 @@ impl Rewrite<'_> {
         } = &e.kind
             && args.is_empty()
             && let E::Member { obj, prop, .. } = &callee.kind
-            && matches!(&obj.kind,E::Member{obj,prop:auth,..} if auth=="auth"&&matches!(&obj.kind,E::Ident(n) if n==self.ctx))
+            && self.service_of(obj) == Some("auth")
             && (prop == "requireSignedIn" || prop == "requireIdentity")
             && self.subjects
         {
-            self.uses_subject = true;
             let helper = if prop == "requireSignedIn" {
                 "__z08RequireSignedIn"
             } else {
                 "__z08RequireIdentity"
             };
-            self.edits
-                .push((e.span, format!("{helper}(__z08ctx.user, __z08subject)")));
+            let subject = self.subject()?;
+            self.edits.push((e.span, format!("{helper}(__z08ctx.user, {subject})")));
             return Ok(());
         }
-        if let E::Member { obj, prop, .. } = &e.kind
-            && prop == "auth"
-            && matches!(&obj.kind, E::Ident(n) if n == self.ctx)
-            && self.subjects
-        {
-            self.uses_subject = true;
+        if self.service_of(e) == Some("auth") && self.subjects {
+            let subject = self.subject()?;
             self.edits
-                .push((e.span, "__z08Auth(__z08ctx.user, __z08subject)".into()));
+                .push((e.span, format!("__z08Auth(__z08ctx.user, {subject})")));
             return Ok(());
         }
         if let Some(text) = self.service(e)? {
             self.edits.push((e.span, text));
             return Ok(());
         }
-        if let E::Member { obj, prop, .. } = &e.kind
-            && matches!(&obj.kind, E::Ident(n) if n == self.ctx)
-        {
+        if let Some(service) = self.service_of(e) {
             return Err(fail(
-                &pointer(&pointer(self.at, "ctx"), prop),
+                &pointer(&pointer(self.at, "ctx"), service),
                 "unsupported context service; port its authority and behavior explicitly",
             ));
         }
+        // `helper(ctx, ...)` for a function of this module: the helper takes the v2 context and
+        // its body is rewritten like a handler's (`transform::app` follows the calls).
+        if let E::Call { callee, args, .. } = &e.kind
+            && let E::Ident(function) = &callee.kind
+            && self.functions.contains(function)
+            && args.iter().any(|a| matches!(a, ArrEl::Item(x) if self.is_ctx_expr(x)))
+        {
+            // 0.8 awaited a promise the handler returned; v2 needs the await written out.
+            if self.returned.contains(&e.span) || self.returns.contains(&e.span) {
+                self.edits.push((
+                    Span {
+                        end: e.span.start,
+                        ..e.span
+                    },
+                    "await ".into(),
+                ));
+            }
+            for (position, a) in args.iter().enumerate() {
+                match a {
+                    ArrEl::Item(x) if self.is_ctx_expr(x) => {
+                        self.calls.push(CtxCall {
+                            function: function.clone(),
+                            position,
+                            writes: self.writes,
+                            sends: self.sends,
+                            span: x.span,
+                            gate: None,
+                        });
+                        self.edits.push((x.span, "__z08ctx".into()));
+                    }
+                    a => self.arr(a)?,
+                }
+            }
+            return Ok(());
+        }
         match &e.kind {
-            E::Ident(n) if n == self.ctx => {
+            E::Ident(n) if self.is_ctx(n) => {
                 return Err(fail(
                     &pointer(self.at, "ctx"),
-                    "unsupported context service, alias or dynamic use; port its behavior explicitly",
+                    "unsupported context service, alias or dynamic use: ctx escapes into a value, a call or a key the converter can't follow; read its services directly, or pass it to a function declared in this file",
                 ));
             }
             E::Array(a) => {
@@ -1863,7 +2255,7 @@ impl Rewrite<'_> {
                 if f.params.iter().any(|p| {
                     let mut ns = vec![];
                     p.pat.bindings(&mut ns);
-                    ns.iter().any(|(n, _)| *n == self.ctx || n.starts_with("__z08"))
+                    ns.iter().any(|(n, _)| self.is_bound(n) || n.starts_with("__z08"))
                 }) {
                     return Err(fail(self.at, "shadowed context binding requires a manual port"));
                 }
@@ -1921,11 +2313,41 @@ impl Rewrite<'_> {
     }
     fn stmt(&mut self, s: &Stmt) -> Result<(), Failure> {
         match s {
-            Stmt::Decl { pat, init, .. } => {
+            Stmt::Decl { pat, init, span, .. } => {
                 let mut ns = vec![];
                 pat.bindings(&mut ns);
-                if ns.iter().any(|(n, _)| *n == self.ctx || n.starts_with("__z08")) {
+                if ns.iter().any(|(n, _)| self.is_bound(n) || n.starts_with("__z08")) {
                     return Err(fail(self.at, "reserved or shadowed binding"));
+                }
+                // `const c = ctx` and `const { db, auth } = ctx` name the context or its services;
+                // `const auth = ctx.auth` names one service.
+                if let (Some(e), Pat::Id(binding, _)) = (init, pat)
+                    && !self.is_ctx_expr(e)
+                    && let Some(service) = self.service_of(e).map(str::to_owned)
+                    && ["db", "auth", "env", "crypto", "email", "log"].contains(&service.as_str())
+                {
+                    self.services.insert(binding.clone(), service);
+                    self.edits.push((*span, format!("__z08ctxService{} = 0", span.start)));
+                    return Ok(());
+                }
+                if let Some(e) = init
+                    && self.is_ctx_expr(e)
+                {
+                    match pat {
+                        Pat::Id(alias, _) => {
+                            self.aliases.push(alias.clone());
+                            self.edits.push((e.span, "__z08ctx".into()));
+                        }
+                        _ => {
+                            for (service, binding) in
+                                services_pattern(pat).ok_or_else(|| fail(&pointer(self.at, "ctx"), DESTRUCTURE))?
+                            {
+                                self.services.insert(binding, service);
+                            }
+                            self.edits.push((*span, format!("__z08ctxService{} = 0", span.start)));
+                        }
+                    }
+                    return Ok(());
                 }
                 if let Some(e) = init {
                     self.expr(e)?;
@@ -1991,7 +2413,7 @@ impl Rewrite<'_> {
             Stmt::ForOf { pat, iter, body, .. } => {
                 let mut names = vec![];
                 pat.bindings(&mut names);
-                if names.iter().any(|(n, _)| *n == self.ctx || n.starts_with("__z08")) {
+                if names.iter().any(|(n, _)| self.is_bound(n) || n.starts_with("__z08")) {
                     return Err(fail(self.at, "shadowed context or reserved binding"));
                 }
                 self.expr(iter)?;
@@ -2021,7 +2443,7 @@ impl Rewrite<'_> {
             } => {
                 if param
                     .as_ref()
-                    .is_some_and(|(name, _)| name == self.ctx || name.starts_with("__z08"))
+                    .is_some_and(|(name, _)| self.is_bound(name) || name.starts_with("__z08"))
                 {
                     return Err(fail(self.at, "shadowed context or reserved catch binding"));
                 }
@@ -2309,8 +2731,7 @@ impl Rewrite<'_> {
     ///
     /// `ctx.invalidate` belongs to the realtime mapping.
     fn service(&mut self, e: &Expr) -> Result<Option<String>, Failure> {
-        let ctx = self.ctx;
-        let is = |e: &Expr, name: &str| matches!(&e.kind, E::Member { obj, prop, .. } if prop == name && matches!(&obj.kind, E::Ident(n) if n == ctx));
+        let is = |e: &Expr, name: &str| self.service_of(e) == Some(name);
         match &e.kind {
             E::Member { obj, prop, .. } if is(obj, "env") => {
                 ident(prop, &pointer(&pointer(self.at, "ctx"), "env"))?;
@@ -2387,7 +2808,7 @@ impl Rewrite<'_> {
         let E::Member { obj, prop: name, .. } = &cursor.kind else {
             return Ok(None);
         };
-        if !matches!(&obj.kind,E::Member{obj,prop,..} if prop=="db"&&matches!(&obj.kind,E::Ident(n) if n==self.ctx)) {
+        if self.service_of(obj) != Some("db") {
             return Ok(None);
         }
         let tables = self.tables;

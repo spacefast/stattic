@@ -62,6 +62,14 @@ pub enum Ty {
     SetOf(Box<Ty>),
     /// A built-in iterator (`map.keys()`, `array.entries()`, ...) yielding T, consumed once.
     Iter(Box<Ty>),
+    /// DOM `AbortController` (`Zero\JsAbortController`).
+    AbortController,
+    /// DOM `AbortSignal` (`Zero\JsAbortSignal`).
+    AbortSignal,
+    /// A WHATWG `URL` (`Zero\JsUrl`).
+    Url,
+    /// A WHATWG `URLSearchParams` (`Zero\JsUrlSearchParams`).
+    UrlParams,
     Union(Vec<Ty>),
     Fn(Vec<Ty>, Box<Ty>),
     /// Callable parameter metadata; inner type is the rest binding's array.
@@ -87,14 +95,13 @@ pub enum Ty {
     Builder(Box<Builder>),
 }
 
-/// Host objects with a nominal type: `Response` from `fetch`, `Headers`, `URLSearchParams`, and
+/// Host objects with a nominal type: `Response` from `fetch`, `Headers`, and
 /// the `node:crypto` hash/HMAC chains and `randomBytes` buffers, which only exist inside one
 /// recognized expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostTy {
     Response,
     Headers,
-    SearchParams,
 }
 
 impl HostTy {
@@ -102,7 +109,6 @@ impl HostTy {
         match self {
             HostTy::Response => "Response",
             HostTy::Headers => "Headers",
-            HostTy::SearchParams => "URLSearchParams",
         }
     }
 }
@@ -300,6 +306,10 @@ impl Ty {
             Ty::MapOf(k, v) => format!("Map<{}, {}>", k.describe(), v.describe()),
             Ty::SetOf(t) => format!("Set<{}>", t.describe()),
             Ty::Iter(t) => format!("IterableIterator<{}>", t.describe()),
+            Ty::AbortController => "AbortController".into(),
+            Ty::AbortSignal => "AbortSignal".into(),
+            Ty::Url => "URL".into(),
+            Ty::UrlParams => "URLSearchParams".into(),
             Ty::Union(ts) => ts.iter().map(Ty::describe).collect::<Vec<_>>().join(" | "),
             Ty::Fn(..) => "a function".into(),
             Ty::Rest(t) => format!("...{}", t.describe()),

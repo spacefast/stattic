@@ -71,7 +71,7 @@ final class Runner
                         $fn = '\\ZeroApp\\' . $spec['handler'];
                         $input = \Zero\Seam::toJs(is_array($input) ? $input : [], $spec['input'] ?? []);
                         $ctx = \Zero\Seam::ctx($ctx);
-                        $fn($input, $ctx);
+                        \Zero\Timers::run(static fn (): mixed => $fn($input, $ctx));
                     }
                     Storage::run('UPDATE {jobs} SET "state" = \'done\', "attempts" = ?, "dedupe" = NULL, "lockedAt" = NULL, "lastError" = NULL, "doneAt" = ? WHERE "id" = ?', [$attempt, Js::iso(Js::now()), $id]);
                 });

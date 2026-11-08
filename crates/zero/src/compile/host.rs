@@ -271,7 +271,8 @@ impl Compiler<'_, '_> {
         }
     }
 
-    /// `new Headers(init)` and `new URLSearchParams(init)`; other web constructors are refused.
+    /// `new Headers(init)`. `URL`, `URLSearchParams` and `AbortController` are standard objects
+    /// (`compile.rs`); other web constructors are refused.
     pub(super) fn host_new(&mut self, callee: &Expr, args: &[ArrEl], span: Span) -> Result<Option<Out>> {
         let ExprKind::Ident(n) = &callee.kind else {
             return Ok(None);
@@ -281,14 +282,6 @@ impl Compiler<'_, '_> {
         };
         let (class, ty, ok): (&str, HostTy, fn(&Ty) -> bool) = match g {
             "Headers" => ("FetchHeaders", HostTy::Headers, header_init),
-            "URLSearchParams" => ("SearchParams", HostTy::SearchParams, search_init),
-            "URL" => {
-                return err_help(
-                    span,
-                    "`new URL` isn't available in Zero code",
-                    "build the URL as a string: encodeURIComponent(part) for path segments, `new URLSearchParams(...).toString()` for the query",
-                );
-            }
             "Request" => {
                 return err_help(
                     span,
@@ -308,13 +301,6 @@ impl Compiler<'_, '_> {
                     span,
                     format!("`{g}` isn't available in Zero code"),
                     "send a string or URLSearchParams body",
-                );
-            }
-            "AbortController" => {
-                return err_help(
-                    span,
-                    "`AbortController` isn't available in Zero code",
-                    "every fetch() call already ends after 10 s",
                 );
             }
             _ => return Ok(None),
@@ -355,13 +341,19 @@ impl Compiler<'_, '_> {
         self.host_use(HostUse::Fetch(host.as_deref()), url_expr.span)?;
         let url = self.expr(url_expr)?;
         let url = self.finish_value(url, url_expr.span)?;
-        if !text(&url.ty) {
+        if !(text(&url.ty) || url.ty == Ty::Url) {
             return err_help(
                 url_expr.span,
-                format!("fetch() needs a URL string, not {}", url.ty.describe()),
-                "pass the URL as a string; URL and Request objects aren't available in Zero code",
+                format!("fetch() needs a URL string or URL, not {}", url.ty.describe()),
+                "pass the URL as a string or a URL; Request objects aren't available in Zero code",
             );
         }
+        // A WHATWG URL is fetch input as its href.
+        let url_php = if url.ty == Ty::Url {
+            format!("((string) {})", url.wrapped())
+        } else {
+            url.php.clone()
+        };
         let init = match args.get(1) {
             None => "null".to_string(),
             Some(_) => {
@@ -386,7 +378,7 @@ impl Compiler<'_, '_> {
                 if init.ty == Ty::Dynamic {
                     // Checked JavaScript: Zero\Fetch::call refuses other keys and values at runtime.
                     return Ok(Out::atom(
-                        format!("\\Zero\\Fetch::call({}, {}{})", url.php, init.php, self.fetch_hosts()),
+                        format!("\\Zero\\Fetch::call({url_php}, {}{})", init.php, self.fetch_hosts()),
                         Ty::Promise(Box::new(Ty::Host(HostTy::Response))),
                     ));
                 }
@@ -406,7 +398,7 @@ impl Compiler<'_, '_> {
             }
         };
         Ok(Out::atom(
-            format!("\\Zero\\Fetch::call({}, {init}{})", url.php, self.fetch_hosts()),
+            format!("\\Zero\\Fetch::call({url_php}, {init}{})", self.fetch_hosts()),
             Ty::Promise(Box::new(Ty::Host(HostTy::Response))),
         ))
     }
@@ -759,29 +751,21 @@ impl Compiler<'_, '_> {
                 "responses can't be cloned in Zero code",
                 "read the body once into a variable and use that",
             ),
-            (HostTy::Headers | HostTy::SearchParams, "get") => {
+            (HostTy::Headers, "get") => {
                 let argv = self.host_strings(args, 1, span, m)?;
                 call(&argv, Ty::Str.nullable())
             }
-            (HostTy::Headers | HostTy::SearchParams, "has") => {
+            (HostTy::Headers, "has") => {
                 let argv = self.host_strings(args, 1, span, m)?;
                 call(&argv, Ty::Bool)
             }
-            (HostTy::Headers | HostTy::SearchParams, "delete") => {
+            (HostTy::Headers, "delete") => {
                 let argv = self.host_strings(args, 1, span, m)?;
                 call(&argv, Ty::Null)
             }
-            (HostTy::Headers | HostTy::SearchParams, "set" | "append") => {
+            (HostTy::Headers, "set" | "append") => {
                 let argv = self.host_strings(args, 2, span, m)?;
                 call(&argv, Ty::Null)
-            }
-            (HostTy::SearchParams, "getAll") => {
-                let argv = self.host_strings(args, 1, span, m)?;
-                call(&argv, Ty::Array(Box::new(Ty::Str)))
-            }
-            (HostTy::SearchParams, "toString") => {
-                self.host_strings(args, 0, span, m)?;
-                Ok(Out::atom(format!("((string) {r})"), Ty::Str))
             }
             (HostTy::Headers, "forEach") => {
                 if args.len() != 1 {
@@ -829,7 +813,6 @@ fn host_methods(h: &HostTy) -> &'static [&'static str] {
     match h {
         HostTy::Response => &["text", "json"],
         HostTy::Headers => &["get", "has", "set", "append", "delete", "forEach"],
-        HostTy::SearchParams => &["get", "getAll", "has", "set", "append", "delete", "toString"],
     }
 }
 
@@ -879,7 +862,7 @@ fn init_value(key: &str, t: &Ty, span: Span) -> Result<()> {
     let ok = match key {
         "method" => t.all(|t| text(t) || absent(t)),
         "headers" => t.all(|t| header_init(t) || absent(t)),
-        "body" => t.all(|t| text(t) || matches!(t, Ty::Host(HostTy::SearchParams)) || absent(t)),
+        "body" => t.all(|t| text(t) || *t == Ty::UrlParams || absent(t)),
         "redirect" => t.all(|t| match t {
             Ty::StrLit(v) | Ty::FreshStrLit(v) => matches!(v.as_str(), "follow" | "manual" | "error"),
             t => text(t) || absent(t),
@@ -931,8 +914,4 @@ fn string_record(t: &Ty) -> bool {
 
 fn header_init(t: &Ty) -> bool {
     *t == Ty::Dynamic || string_record(t) || string_pairs(t) || matches!(t, Ty::Host(HostTy::Headers))
-}
-
-fn search_init(t: &Ty) -> bool {
-    text(t) || string_record(t) || string_pairs(t) || matches!(t, Ty::Host(HostTy::SearchParams))
 }

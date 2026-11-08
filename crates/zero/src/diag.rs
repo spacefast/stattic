@@ -235,6 +235,11 @@ fn location(span: Span, root: &Path) -> Option<Location> {
     })
 }
 
+/// A span's file (relative to `root`), 1-based line and UTF-16 column, as `zero check --json` reports them.
+pub fn position(span: Span, root: &Path) -> Option<(String, usize, usize)> {
+    location(span, root).map(|l| (l.file, l.line, l.column))
+}
+
 #[derive(Serialize)]
 pub struct LocatedDiagnostic<'a> {
     code: Code,

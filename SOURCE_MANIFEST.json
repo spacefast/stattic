@@ -1,7 +1,7 @@
 {
-  "revision": "11581c31c3d7d7aa8c4273a2a18a4807a6b736a6",
-  "sourceHash": "bf842b0c9a826c27a0ba731189855abf5f9672baa4ff6bda10436a4adfcab9c6",
-  "manifestSha256": "feaa386e1c8a86af4476f34564dcd609f20d18efc87d0c06296964e1a89f4637",
+  "revision": "7e6f898aff149785292ef75b59af9177e39b6ce5",
+  "sourceHash": "405864f96bb2a0c4f70c2cf1029f75ce2c6a3f306734707b41b4d3a154d7bda7",
+  "manifestSha256": "1982f57db84ba41a9a21dcb70510bc260edf29c124249d516613a4e6172b34a8",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "569f5a7a3fc2543f9172f2676ddcc6371baa8ecc97b1d2064ea9af6bcbaea158"
+      "sha256": "0aaf15d2bd476699d32a5bcdc35de31175f844540ea22622b7dfb0855d7fba75"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "9344584d2a35e4ebd7dba796f9e43be63c2a3abe1c547c92ae630cb28859bb8f"
+      "sha256": "d2eb314652667f4a76694591274daa2e7f85e4ecdf219107d4cd9c59de7d230d"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -417,7 +417,7 @@
     },
     {
       "path": "crates/zero/SOURCE.json",
-      "sha256": "af18621e75faf64ed8d45ebeced7685b1ba1cd9f44a34926e084159040c4db3a"
+      "sha256": "1bb8a7d411f1a0774c90756bf528f6fdd6c2e4ab1f1acae470a3c20c61558eb7"
     },
     {
       "path": "crates/zero/build.rs",
@@ -433,7 +433,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/App.php",
-      "sha256": "1d5da8b2708e5e5aeab33b2dccbf376c701d3a7d5238cbd654065438af0ad8d2"
+      "sha256": "0bdc564032e29e2324c8df59f7a2267405f8692676eaef69e9ecc78b6bfb1301"
     },
     {
       "path": "crates/zero/runtime/Zero/Auth.php",
@@ -449,7 +449,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Builtins.php",
-      "sha256": "9a3d21bb72e2c3e525681125a8098f2d8c389544e1581e15cd22d871e282ac9e"
+      "sha256": "e8f88f38f742f7b41ef3bea572f4442769c8e6a8d21f708d177045d6dc3f09db"
     },
     {
       "path": "crates/zero/runtime/Zero/BulkUpdate.php",
@@ -497,7 +497,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Fetch.php",
-      "sha256": "2f86a7514511f1e85e0717205dc335beeb04bf88b8ecb03005d4f35e49b15e49"
+      "sha256": "5a8be3fcfb6a4fed3f20088fe1eaaec1d2912b485481415270022c8646597f5a"
     },
     {
       "path": "crates/zero/runtime/Zero/FetchHeaders.php",
@@ -541,7 +541,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Jobs/Runner.php",
-      "sha256": "f48ff9086fc42666748600392a2f17a98b86af11f5bde08c8224d58fbef0afca"
+      "sha256": "8d19dabaeb25183613ecf558c598b14035ce0c66355cdab9067c806744c3c0ee"
     },
     {
       "path": "crates/zero/runtime/Zero/Jobs/Storage.php",
@@ -553,7 +553,15 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Js.php",
-      "sha256": "3b7dd7c420aadd264534bae286f4ec8865a70fc8947eedcb1b30eb9ae6e00fa6"
+      "sha256": "7b51417c124f9d9ebbe0ed013790619912563bf72cacfed579440bc8ec1c456b"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsAbortController.php",
+      "sha256": "90bba9c8e8e5e6ede8fd0bf193aa7af55e9b59a652c8e0bfa35cc9fecd52a36e"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsAbortSignal.php",
+      "sha256": "ee18e2b2eafd6e6be3e507234fc5c81c81b203a76556a7709e3258f0bbd17ee0"
     },
     {
       "path": "crates/zero/runtime/Zero/JsArguments.php",
@@ -585,7 +593,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/JsDynamic.php",
-      "sha256": "c7fafe181ac88ca04f351dc3c0e65fe104990018ee6a0cafb85c458ea66afafa"
+      "sha256": "dba2edaf2a7844d8b502a83498f0101baeae192a9959191d461213f88495a5b2"
     },
     {
       "path": "crates/zero/runtime/Zero/JsError.php",
@@ -644,12 +652,24 @@
       "sha256": "eaa2d6d16566a808581308bc1bb6d4db60b8951f4367f7a291e9533ad0398d96"
     },
     {
+      "path": "crates/zero/runtime/Zero/JsTimeout.php",
+      "sha256": "fd8ef3d7d0708bee1a77aeda3737b6fe22e02aa5fc019e2a0f02f3fa399719c4"
+    },
+    {
       "path": "crates/zero/runtime/Zero/JsTransformStream.php",
       "sha256": "ca9d076c02e3393686db89f376f89b4c8e45cf24ca02027f527445cef0661218"
     },
     {
       "path": "crates/zero/runtime/Zero/JsUndefined.php",
       "sha256": "c79e763d0d460d234373082c092c2e76e969e0bdb5d07fb3330ce60909b56180"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsUrl.php",
+      "sha256": "9d64592167605aa6639009b55332aacc7c22df2f4e4bac7340d721b2795521fb"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsUrlSearchParams.php",
+      "sha256": "a0e1226f7779bce0c840f66a015d2937277135b35f76e7e096c9714ea221b7ef"
     },
     {
       "path": "crates/zero/runtime/Zero/JsWeakMap.php",
@@ -752,10 +772,6 @@
       "sha256": "8952820ccc04f1422071d53ef15945f3d2a36c3191c4dbab68f2c5b789e893b3"
     },
     {
-      "path": "crates/zero/runtime/Zero/SearchParams.php",
-      "sha256": "b25d5e0e6ec2eda6f890461743bdf2b235e1fb37ef45981824ad71f481fd6db5"
-    },
-    {
       "path": "crates/zero/runtime/Zero/Services/Definition.php",
       "sha256": "9edb5eceeacca1abe84b499d4235f0a11a79dae9ab2d285342f70605e044dd18"
     },
@@ -850,6 +866,10 @@
     {
       "path": "crates/zero/runtime/Zero/SystemTables.php",
       "sha256": "898c9de32d2222b577621c518de0079c63a4d640f584cbde79bf93f83279cb38"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/Timers.php",
+      "sha256": "16405c36e71a657c5fbcc47fa90e16357823c4af3dcb2d7d56a3bfbc763ab15e"
     },
     {
       "path": "crates/zero/runtime/Zero/URI-ENCODING-NOTICE.txt",
@@ -1041,11 +1061,11 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/.manifest.json",
-      "sha256": "a20fea645eb355d24d4c98ff5bc940e8098383137bc9b5d06c9f7248f62485ed"
+      "sha256": "44011881eca3746d4da535d69768dbf10836796a8e53216bb26690b315a9bf44"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/THIRD-PARTY-LICENSES.txt",
-      "sha256": "27a93f13c67ca5b023b5fa3c923b24148aad465b72473c105c3a7cb21f74e137"
+      "sha256": "4db903cff6e56bb967ad72054cc9e0d747a132e93ddf3eea0ac23876be68b38c"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/async-aws/core/LICENSE",
@@ -2104,6 +2124,102 @@
       "sha256": "b581227510d7c82009f3833dc4225c001794213dd2713f76c7989059642997ff"
     },
     {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/LICENSE",
+      "sha256": "d2625cc652e6ffa9f16827f1dba2d83ac12b050dc8150a38720420dbb810cae3"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/BigDecimal.php",
+      "sha256": "85fe049a33a8f2f9e2166206ad52fbff8e15c388d2896540dc59b62f8f9c8acb"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/BigInteger.php",
+      "sha256": "c900b3155a2f0e7336a869ed6fc273f696d9f51994549f8df724e5d60d06846c"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/BigNumber.php",
+      "sha256": "615f017f4d9469b4e0a0a378ba8889053aea816fea6a1c01f4b15b99ff1073bd"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/BigRational.php",
+      "sha256": "36f39c74832133640255e472776431de860ab501127b0e42b160442cd09a4090"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Exception/DivisionByZeroException.php",
+      "sha256": "110c507f1eef9dee5037d3a1edc27121492ce9a7bc44f10840ea25b7fdcf4906"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Exception/IntegerOverflowException.php",
+      "sha256": "da200936476740674983c382c057674719888343f50364769cdebee8d32002cf"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Exception/InvalidArgumentException.php",
+      "sha256": "4a162394d796b9ae0f4e55fa8de3c38eb92f32d5b547c029aaf600786584e6cb"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Exception/MathException.php",
+      "sha256": "a2f18bbc70c57663b8175c6b2e0dedbfe1e8937b3578e4dd9aa6e013ac2cbf6d"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Exception/NegativeNumberException.php",
+      "sha256": "769fd1b0a778dc6fab56279b0781d998a70583293d9c2d05a2ca74fa1ba45509"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Exception/NoInverseException.php",
+      "sha256": "98818fe6f5c7f9618ff9e4b2d710d02d652565c9b0a936af541e9aa4c0632371"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Exception/NumberFormatException.php",
+      "sha256": "793064986e7e8ff6b1806a40a0ddbe850ad14ddafb63c4abc3acf3045e85c41f"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Exception/PlatformException.php",
+      "sha256": "dcc6274460899f2def0c86b1593bc2730b6b2b46d4dabc7c347838e0d032ed79"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Exception/RandomSourceException.php",
+      "sha256": "ae7502e5b608b571bf0e5fedf691f0c1742a753889013bfee0471cbb8e3b4f5c"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Exception/RoundingNecessaryException.php",
+      "sha256": "45b1321b973640a6053f668de1563cadf5fe67e57e87a8ff965b67075f037b60"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Internal/Calculator.php",
+      "sha256": "caeb3c6f4f7cc89f5b76290a8b736444c2a39966ef5c84ca7b021889214f6d3f"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Internal/Calculator/BcMathCalculator.php",
+      "sha256": "1bd5acceb42995da08fe31e084da8d0dea13c3b992038d83cdceff324669d424"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Internal/Calculator/GmpCalculator.php",
+      "sha256": "9580b4529af95ea2e9645d01fe2b6e1f70dab3ecce7a7f9e5ef60c541c37e3e9"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Internal/Calculator/NativeCalculator.php",
+      "sha256": "f6ca16966a58b46bc5f5f2679ff708eebad082a858a3d3b2543293fae1854dd7"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Internal/CalculatorRegistry.php",
+      "sha256": "1f0899c7e993f9e1f8656d58554fc6241669692c17bd28b5f40c21f5b2696fe1"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Internal/DecimalHelper.php",
+      "sha256": "214f4b0f89ac621441368208f00e4a6c5e963c92d7f1ca67faf5793054dcc8ba"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/Internal/Safe.php",
+      "sha256": "0e822fcfd4fdd644c698e4f8266bdaf97be36542e4d77e56996bf7e509b748d9"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/NumberSyntax.php",
+      "sha256": "4be1b48ae1fd386282e1dcf35cbb9b62ddb67dc964f2fbf77e110ed09001205d"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/brick/math/src/RoundingMode.php",
+      "sha256": "413b5af61cc1cba500e956252c35eea6216cf9a24461fcb1e681e81c67727f8d"
+    },
+    {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/ClassLoader.php",
       "sha256": "eb57607d5c4c03fee51189dea3dc0eac88b5c9a66263d70a0964678d1f2a4afa"
     },
@@ -2117,11 +2233,11 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/autoload_classmap.php",
-      "sha256": "6ca9b75f4cf6c9d489792cf0ab03f171f3c439b11ebbfcf65c8cba43aeb62ed4"
+      "sha256": "65d3efe01e1699ce69768cc22b33a538daa1c74afc7492e9a7a58b50aa956137"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/autoload_files.php",
-      "sha256": "eb30393ab1e02a6fb258ec1ea7c15168a6252a7522dc8a8a2c27aac090549b06"
+      "sha256": "8052c944ef339ae0bb24c22bff0b7af9e556e9bcb56930964475579782e33f30"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/autoload_namespaces.php",
@@ -2129,7 +2245,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/autoload_psr4.php",
-      "sha256": "27fd523f3da8291c47465a773fb09184327eecc32a4fdf661b0b943418304fac"
+      "sha256": "cb3ac4d3fb01761b6d4eea1446263b3bdb9bcb99e331fe62b769535e628774dd"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/autoload_real.php",
@@ -2137,15 +2253,15 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/autoload_static.php",
-      "sha256": "93e1dbb79eec7239a7f430f97e3793ae5d977a9a50bf0d92ad342a3d96bed448"
+      "sha256": "3b11e219120b6727a29dbfba735690885058582f65f6c802267a1a20d34bcb1d"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/installed.json",
-      "sha256": "9ec389e64e2c804cbb435fc4d51cb2e9152c123b5cadc3ad53ba8cec94ae45d6"
+      "sha256": "c0581b268c5a7b4669a2cca4893f1c3df7d1c556d27705c609c9f6744ba2f5b3"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/installed.php",
-      "sha256": "8c50fed1c8eb6ae9b324aa99a7604c750df715b65c80d0ce568492f3713593dc"
+      "sha256": "26a05d289020491a191b5676916389787811a42eb49b6066c9f6aff213455eff"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/platform_check.php",
@@ -2222,6 +2338,466 @@
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/psr/log/src/NullLogger.php",
       "sha256": "869200443086bd55ed3c3b0996304f4be12fc7b9ae539523ff7cfbd44119f2f0"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/LICENSE",
+      "sha256": "067e9ea6499a1f9ad033f2d5e3909c83be51d55fa416d4bab913894f19ab68d3"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/bin/Builder.php",
+      "sha256": "0dbb5bc0e22de92913828c820ad5b8088c0871720bc56fd4cf41f41343342c13"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/bin/IdnaDataBuilder.php",
+      "sha256": "ac7fdcc9d1f628c9ef93450b5259699a7206dff627ac5d95136726122b5ca1e0"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/bin/RegexBuilder.php",
+      "sha256": "6000b57dd57646affd6b1c8c6463e5665e50038d6cc7f9c33b2d6d2c35e33458"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/bin/ViramaDataBuilder.php",
+      "sha256": "dfed04487a9e92914291276222dab55ff11a68fa779811ee4065cf2735007301"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/bin/generateDataFiles.php",
+      "sha256": "41ea9b5bd6a8a08a1e3e30785c70a40cef0423aedc1ba7a94073ce30c506d0a6"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/phpstan.neon",
+      "sha256": "61ae623a25fc0ff0274468f96757a358dcc160da2bb4534d9de900d920f7ddbc"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/phpunit.xml",
+      "sha256": "6444ab9f4cbc18b52bf106f90363026ed0c3207664c4d11a3dca5a7e70d00071"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/resources/DisallowedRanges.php",
+      "sha256": "955fbd2b8dc7090eb07694c22987c4c5cf1d6cc85fea6f8eaeef7abe83647fb4"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/resources/Regex.php",
+      "sha256": "01ba5f99843706da49a5c15b10d777a561a1c6dc53f4b82eebde00f019abf068"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/resources/deviation.php",
+      "sha256": "99a5e49efead1d6ee1780af3023d1f5fef26c7febb693e1ff9531c40c9dd63a3"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/resources/disallowed.php",
+      "sha256": "3e38d0a23815f358485c567524c2c8a75af34ca5b5d67a6e70e181f1913d47a1"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/resources/ignored.php",
+      "sha256": "ff47b3407f3a7fa6be7843ae7f592204d8e487ded39d15a5b3112a4ebe0d663e"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/resources/mapped.php",
+      "sha256": "22216a81e7566c0bebbb264398a2d40c7f363081fac943810f7e5cd97b376a1a"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/resources/virama.php",
+      "sha256": "0461dc39dcaf522a07a37a1a6b5b81c9b4b44ee3f05cbbb1613684e8ed5e8154"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/src/CodePoint.php",
+      "sha256": "ce9413602a739da3155a855eae51f0333ed014819dce7fa51c1fcc0cda6f2245"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/src/CodePointStatus.php",
+      "sha256": "2e93e54e1f9a36156b869351f7d7413bbd8606dbe0e35039bf585e491dcdc43d"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/src/DomainInfo.php",
+      "sha256": "b6a64e1b497c96a886e00c8beffeeef0e20d5258c76db0db3c26f40d6eb6789d"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/src/Idna.php",
+      "sha256": "0668b4a1479c1147012ecd7ddd64d3b94856a3f118c01c1b732a6f1047d316c5"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/src/IdnaResult.php",
+      "sha256": "d3fc1ecf1f802423fedb857f4e931266c27d57ab8a69e6f24993141231fc55c6"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/idna/src/LabelValidator.php",
+      "sha256": "5a6256952faf0829e4c7b138f5c5ebf293d9adb3ab49ef498072c222d0f047f3"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/punycode/LICENSE",
+      "sha256": "067e9ea6499a1f9ad033f2d5e3909c83be51d55fa416d4bab913894f19ab68d3"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/punycode/phpstan.neon",
+      "sha256": "d3006eb78feb9b019806a834cdc894a7a6a5e6fdc73ad25c2e414ae243de5c56"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/punycode/phpunit.xml",
+      "sha256": "5a3bfd70f6a6b8fe6ecb422214ac77f08f5e2a6ea1424d8faff0308d2f1f048b"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/punycode/src/Exception/InvalidInputException.php",
+      "sha256": "8740c33bc453bde91e0a5e59bcfa3ce7f88f56f68377f301482cb0a9ce7890f8"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/punycode/src/Exception/OutputSizeExceededException.php",
+      "sha256": "71fae97360c8a94c4b3016be0c8ffad904e1727572b6a870fbd1b129d03632e6"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/punycode/src/Exception/OverflowException.php",
+      "sha256": "699f4faca2012e9e28b8e4ebbc51a68785d811f7154e5022f5009d97f79ea331"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/punycode/src/Exception/PunycodeException.php",
+      "sha256": "40dcc5908811f2412b88a9360bb7ae3f218afcaae4604fbb506346d6a53f52f4"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/punycode/src/Punycode.php",
+      "sha256": "5be8c0cc5d69e2e0bbc51228e1a8b8c0a6d8ffca09f5549528740b7fb9b9c66b"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/LICENSE",
+      "sha256": "90f958e9fde24d0278db4b49a68facf5e14d9eb8d3f5e05a4e6e58bab078da05"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/PHPStan/PregMatchParameterOutExtension.php",
+      "sha256": "5d16a8e6d44cf3c5ddbd428ebd000fd74d3f98bae43b70ab7a653912bace35ed"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/PHPStan/PregMatchTypeSpecifyingExtension.php",
+      "sha256": "88ef5a2eaaaffbef08e05cc82fb3ea72cdf2290f6ab5d6d31dde54d7e440de77"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/phpstan.neon",
+      "sha256": "5ee75ce1ae6f7904d4573ecd111533c062237cff32702df0da23b4fd3d92de36"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/phpunit.xml",
+      "sha256": "35495aa32f4b0f7a1f2bcfcec4b4ca09bb69a12b94bd7c8e8399f6351d9ca488"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/APIParserErrorType.php",
+      "sha256": "ac28c01c5076b1cac2ac214fdfa9e92b3b1622b5be450457bcb941d181037238"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/APIParserResult.php",
+      "sha256": "3bffba51886a27d20720771026ed1c3e12784da740753875e4f32bb8b63488f7"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/BasicURLParser.php",
+      "sha256": "a25bb07ec7f180391dfc91b109316e81ffa7761646e0378f6a84e0e8769f6dae"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/AbstractPath.php",
+      "sha256": "3dcf243dd983521de952407db90f29b8e99fc37884338adaa9a594b9c53e0a67"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/AbstractHost.php",
+      "sha256": "71cae65ef0d1109f035ff83973484e00c327798939110fa7c8e5bd33788c30dd"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/HostInterface.php",
+      "sha256": "4a40da6dbcf868647120e19945754d36189738a8d2b02d08d1016ef6baf88148"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/HostParser.php",
+      "sha256": "28e431fa773d04fdf170e3108f1046446f4975940a2454d59296eeb14f686981"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/IPv4Address.php",
+      "sha256": "1f7f5bc050f66c9c55834e852758a3293abdee6b395cfe3327a257b4ff7bc8ab"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/IPv4AddressParser.php",
+      "sha256": "6a4c5bdf174a2b83e244fa20d185f04979b15a74681c2855892234d9e4300c03"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/IPv6Address.php",
+      "sha256": "0dc7a4f150510e9126a8a07e152986df00fa08d83b5a76261269cbbb958ae575"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/IPv6AddressParser.php",
+      "sha256": "5e3a63644a65f8859846eca288a9ae93ef4bc54e2fe03c5b2b7287f12037e518"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/Math/BrickMathAdapter.php",
+      "sha256": "40c84234ca9fb456947c10c867ed8d4d64272e7743e3e9eafbfbe626000aa4d9"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/Math/Exception/MathException.php",
+      "sha256": "f3b12c208ef8b8ba5533632e1e324cadc8589d1a90925148a3619db7d8261ca0"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/Math/NativeIntAdapter.php",
+      "sha256": "4c0c193fc0c6501ec1d42cb0c7585cf2f06356616f529f159f09cdd0aa790b3b"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/Math/NumberFactory.php",
+      "sha256": "c494daf4b8ae4deeb2fcd974db7f84cbccb315cebae9977386b3477b63f2bf93"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/Math/NumberInterface.php",
+      "sha256": "29b1f218188c904383f3897c4d32be85d6cc48ca427863b49a1e03031336d022"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/NullHost.php",
+      "sha256": "a6de35017460b2f7e66bb534662b3daa899cb3127504d12faaf0d979c102d3e1"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/Serializer/HostSerializerInterface.php",
+      "sha256": "13c435565ac547ea6072d86daeffc6b0f16b98d6e9600a1726bc8f761486b60b"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/Serializer/IPv4AddressSerializer.php",
+      "sha256": "e0b3ab34680c6000f777dc7e3cb676c241c131360628b05a2b3efc398d952a0d"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/Serializer/IPv6AddressSerializer.php",
+      "sha256": "a743ef2c4632d23cb344a622f54359802a96c7a551c5161d583369e1afaa4712"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/Serializer/StringHostSerializer.php",
+      "sha256": "8a2b6a840a702ff027a59f88195a3f424db3590035fa3a56d964d94ef0ec3fda"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Host/StringHost.php",
+      "sha256": "cd2d77c198e788af7e7e83499a31af80bdb1bac6f1a27b376e5c755695fe6f04"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/OpaqueOrigin.php",
+      "sha256": "f9185a126b2cd0f77dfc47610eb8f8455a592e6ad71b5607ce8986eb5c86a2cf"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/OpaquePath.php",
+      "sha256": "5b7633eb4cc897b5d1413df31c31097453c725af5a1fb498b211c33021caeb81"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/PathInterface.php",
+      "sha256": "3153562b4e6e01e5922c2e275444bdbdced573244b06e4c7b6c772ca9fe4225f"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/PathList.php",
+      "sha256": "6bd240297c3aeda2d3a9c7de0c127bb7ec3a0c176021b838711654915c51ab9e"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/PathSegment.php",
+      "sha256": "1b0f62ee57f551aa273a3fada0d33e878614ef8f49ecd593c334f129a8091ff4"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/QueryList.php",
+      "sha256": "fd9f19227e78254910d2b4324e4f7177ed487eb8d3ad6c9cb14555c137131d17"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/Scheme.php",
+      "sha256": "7722ac0e61912d8c4804015782586ef2e5169cd266552c151d3eaa2f9ac2c832"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Component/TupleOrigin.php",
+      "sha256": "f27cb3bc6c19b822d3fdc0d546ac533525c65b5c2c44208802c95d0622b79144"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Exception/TypeError.php",
+      "sha256": "a19d058f83a713e3e6c34e44643bfe1cc1e7d4f4a10b04e536f2865029c5fe3b"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Exception/URLException.php",
+      "sha256": "130b12bd151b97b5eff79e21ab80bb9b70acc49aea6838fc553ff34fa0a838e9"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Exception/UnsupportedOperationException.php",
+      "sha256": "6a2e11a7cfe63fd177c2e8ec9ec298354a223f06e5c7c25f94cb3c20a7396d0d"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Origin.php",
+      "sha256": "95481bac7f86492ee9743d423d1aa849e8c0c6bc5477c45efceb31ad1e768ed7"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/ParserContext.php",
+      "sha256": "9a74015c48e91183bc63ecdebd36132414798d297fd9b8434d87182127b51c48"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/ParserState.php",
+      "sha256": "a60ca507cd190f13c562ed7a2e9c9c44ee59ae26e172dda8703dfde05ceebccd"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/AbstractHostState.php",
+      "sha256": "a64232ed37956ce5e044027eb4331e7f3c9d384e1876bab10fbc7ca492432286"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/AuthorityState.php",
+      "sha256": "582ffe76c283524730ce61c3a6035c2709e81c778db7a59a24ac7e277e7fb70e"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/FileHostState.php",
+      "sha256": "2475022098d8bff54b99b241400a228fabe98e198460b88e43a0f2a3cd6b8b67"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/FileSlashState.php",
+      "sha256": "bdf92651a620b07b59b8cfbe3378e67b049118519d436f80294829db64731456"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/FileState.php",
+      "sha256": "e99c73de4c3883922a6578c4fe6df5de31a6c21dbd645398e5f2cf66a9f1629a"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/FragmentState.php",
+      "sha256": "135a29ddd4d821ef98fbb231919e321f408276036a088b745958b906cf736c36"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/HostState.php",
+      "sha256": "d4d556b9710c1b1e2ac728376108dbe33870d3a2d77aaa6d36b5bccf9a338a2f"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/HostnameState.php",
+      "sha256": "5e9397194493e0c022f4db5b7d3d175369f67defbcd9495472664a87eeda96af"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/NoSchemeState.php",
+      "sha256": "eac72e563571afbfe7e84480ea88d3aceece7347d02c3a910f4e1878ee3b6da8"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/OpaquePathState.php",
+      "sha256": "b9c974bb18bcfdc052093eb955dfe1e930dc1937e0b0d8cb89b69c80512eff48"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/PathOrAuthorityState.php",
+      "sha256": "6042aecc1d28db756a90a957904746bcb520a9e25775682f546db0bead69091b"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/PathStartState.php",
+      "sha256": "68b9db7234c1c50176e8eab85621cf9256e826013ff7051a9b4cda2bc394c263"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/PathState.php",
+      "sha256": "5701ebb5151f621c9fe441ec00c52f11317562fa3b41b3100b3ae53119f3c84d"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/PortState.php",
+      "sha256": "7b1db678b8ef683c8f3609699bd72cc02c7e2b5bfb733d496f28c614fe3547d0"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/QueryState.php",
+      "sha256": "d8cb857deb09948eabfee7a7c2851ddd3978f54d9be9ee2f9466033b82db19f3"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/RelativeSlashState.php",
+      "sha256": "cb423c35f299ce83ab32b7a2756632855d33558f7814c0d20a69d43fc9145bb1"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/RelativeState.php",
+      "sha256": "c3ecedf80f3c87d5586be101bf7258eda2f702392592b00dbc35569ac47f097f"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/SchemeStartState.php",
+      "sha256": "5bee5a30eb7f691be6793da229393af3d6d6e8b695a63c14d8969a7552d415d6"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/SchemeState.php",
+      "sha256": "7d62fb69b41a8982dc4c86972ba99ac5b9115df58359cd21985eb44d66a31b16"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/SpecialAuthorityIgnoreSlashesState.php",
+      "sha256": "741f1d4e345f3b55c4b5e1a1a763145d37184eed567cad8a1a111de47ebcf732"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/SpecialAuthoritySlashesState.php",
+      "sha256": "16fb46bc7c50c2079c39c26c86391d2495eddaeb285383637a6cc940e37ff884"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/SpecialRelativeOrAuthorityState.php",
+      "sha256": "315683195877df991aa39a9bec4ac36493a32525b6efefbe2c92c742815cdf31"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/State.php",
+      "sha256": "09e33dfa0c7d26d18cf0542eb01dd0e34f66a9118233a8d23dd79276ac2477ae"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/State/StatusCode.php",
+      "sha256": "3cb6c16c820dcce2ea81cec1f2a99e2adb8e702bd5a60ec38a4504b0d0cee92a"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/AbstractStringBuffer.php",
+      "sha256": "a561ac7518768a3537492c5a9beee62cd08f62bc22f7f6088c84fbc6fcf4582c"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/AbstractStringList.php",
+      "sha256": "93d5372cbab13861638bc891f8e7a3b6ebbcf8c44f7db1885ec18ba22f716cb5"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/AbstractUSVString.php",
+      "sha256": "8c74e698fa4c3adc48aeccbfba9978794b30d8f1eaf350972af04cdd7f48a4f8"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/CodePoint.php",
+      "sha256": "995d976a2b3bbf7848297bcf89e9e8d9fd6ac95c856110be7cb2a7cae2a9900f"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/EncodeSet.php",
+      "sha256": "605c443ac7a849a3cf4926f0cc598f798561d67310151a86edc134c4ff4c7d6e"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/Exception/EncodingException.php",
+      "sha256": "cf4ab7bd3ac55c5f88394aefa74a23107ffd3e002760140a107346fd3304e6fa"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/Exception/RegexException.php",
+      "sha256": "e79e08635a394c0f8b905989c06ad5da331d1e8ea18541aae8dca803e3cc44b7"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/Exception/UndefinedIndexException.php",
+      "sha256": "696eaf22452467c34b33680c38ae5fe0dc8e4062a6ee9889af3a1ad549995d85"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/PercentEncoder.php",
+      "sha256": "209892a007a64082a79b5dfd66ee8c95c32b877b38b35fb4211b26cc5308032d"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/StringBuffer.php",
+      "sha256": "57ab860bfdbf95c727ae34fe0142db1dddd487c3f8242a4754c3d2ec4cdde1c9"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/StringBufferInterface.php",
+      "sha256": "6127aeeadc562a91d5f54ffbbd247aad56e18db849d706eac5d6ad211b23e630"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/StringIteratorInterface.php",
+      "sha256": "d921beb1f273be907db26ffb896120e86eb7e7294ebcf3d5a34813a28386f021"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/StringList.php",
+      "sha256": "50917d3d4c4ffd3a88e3bdfc1fc830228d1699ad86cd744b2c600bae45331da0"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/StringListInterface.php",
+      "sha256": "e9043f6ddf469eca5dd772d4238645d05a91584c334cd24cb5e347a328c844d4"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/USVStringInterface.php",
+      "sha256": "2137e35467ec3bcd31a0017e65d6ff3dbffb43ef95e6f5ca94110dc04747bf77"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/Utf8String.php",
+      "sha256": "843ec9d4ebe6aa10e3ccb404f1a180a7fb396971642e1f20288cd0d86c35d77e"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/String/Utf8StringIterator.php",
+      "sha256": "6b50309d38236a6920540b3e527aad9c16303d3693717a0a846a720d18b8561a"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/Support/EncodingHelper.php",
+      "sha256": "284e83a702a44ff59933d21a5b171c6240f851a371bfa657487261f3780e2e51"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/URL.php",
+      "sha256": "c4ae35f6380431bcf30a5d321adcf5cea25ed84dd5be6c67b37cf24b3b23a3a2"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/URLRecord.php",
+      "sha256": "18ae174946ac666003e6be1ad06a75a1c71f774d5e67a4af9e125bf5ecef7adc"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/rowbot/url/src/URLSearchParams.php",
+      "sha256": "ce01d939242d5d7991113dd408b02121946906fea33ac99ed459f3bd858e5f27"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/deprecation-contracts/LICENSE",
@@ -2598,6 +3174,50 @@
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/http-client/UriTemplateHttpClient.php",
       "sha256": "eb2e964ce4c2d9ca8f56f807be4fa4ecb656298fb8faeabf08a036d558387e94"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/LICENSE",
+      "sha256": "eaa5d6e59ff1d5322ae36d3ab9124460df72d2d0c8af60a99222e8a90dcbdf31"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/Normalizer.php",
+      "sha256": "71bb83be843b1f11f45a19336b1306bdc882ff710243525c4b4711401f62e925"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/Resources/stubs/Normalizer.php",
+      "sha256": "51d9b5e028873bac21b5325e9c26b5c951b6b9e99a668778d7a85a27094dc853"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/Resources/unidata/canonicalComposition.php",
+      "sha256": "d05e3b74aebcb4331dfed345c77d096a7036a6d7360f0ff8da288890fa7397f5"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/Resources/unidata/canonicalDecomposition.php",
+      "sha256": "1bc87057e04a900531aed8819fb59e7aa8321a9ac62a38b1672759f6464ecc62"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/Resources/unidata/combiningClass.php",
+      "sha256": "f98aaf043ea59c470359e1fef1792f95ed34a2111fd7781744df926ceea8f2d7"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/Resources/unidata/compatibilityDecomposition.php",
+      "sha256": "8fdf5cb56ec0a8021db5b090b981fff9250ced89dc2c8bfbaee0fe80b5b644a8"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/Resources/unidata/rawCanonicalDecomposition.php",
+      "sha256": "99dba12f02b63f20049aac915c50799c3e6c9f434a9548ef354d96c0857b5969"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/Resources/unidata/rawCompatibilityDecomposition.php",
+      "sha256": "42db8ebeda91d49cc757a1d0d562c8462f1ab08b4711cf837e1595679f988e3c"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/bootstrap.php",
+      "sha256": "9cbb9a65fadac0a09d91cc434ec36b54a97816c555cad7d5a613e3901369c57c"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-intl-normalizer/bootstrap80.php",
+      "sha256": "15b6e750e3b07121966a9a28c87907ea37ca1896707c0c098a979f5fda4c9e4c"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/symfony/polyfill-php83/LICENSE",
@@ -12433,7 +13053,7 @@
     },
     {
       "path": "crates/zero/src/builtins.rs",
-      "sha256": "817755d2b37ed8bb9a5e0df52d66ff1844ec15415552b5ea5f2f17bff5737dcc"
+      "sha256": "9142bbd52d78a48d3e3e400423b8650c9db79f55f84803921bad8f2560268b38"
     },
     {
       "path": "crates/zero/src/bundle.rs",
@@ -12481,11 +13101,11 @@
     },
     {
       "path": "crates/zero/src/compile.rs",
-      "sha256": "a1cf008b22d2f594975fdeed0389512f827da56a660a3360fe170b359ce1f8c7"
+      "sha256": "0f673f42cc8790a2250d980ab56ce432f2486127f8d91282b64709a6c35c937e"
     },
     {
       "path": "crates/zero/src/compile/annotations.rs",
-      "sha256": "2d75b16c6d8350989cc88d3e143d42ccde23a6f00c3d48869ac306a683c915b3"
+      "sha256": "e1ff108381d2c1e45d3d07fbb7c82a017ecd53ea6189a222d9b94203c54c4bf3"
     },
     {
       "path": "crates/zero/src/compile/classes.rs",
@@ -12497,7 +13117,7 @@
     },
     {
       "path": "crates/zero/src/compile/host.rs",
-      "sha256": "60086f3222943072b5522b37d8d2f79d22b15cf9aa3e5f7efa0bf1262578c2d3"
+      "sha256": "bb603c73bdcb39945d6037d1430cf59bca1e96bd6b37c65be1065e71a68ae97b"
     },
     {
       "path": "crates/zero/src/compile/javascript.rs",
@@ -12505,7 +13125,11 @@
     },
     {
       "path": "crates/zero/src/config_migrate/app.rs",
-      "sha256": "86e77bff35277a478aac2c32bb60962f7e97199a5f1fa63ad7e558b1b110de7b"
+      "sha256": "ddcfa4d728ac7a5b542a6c6307bca42293c323b1b594f9df95da056a185ce303"
+    },
+    {
+      "path": "crates/zero/src/config_migrate/app/codes.rs",
+      "sha256": "a6cdc5197705a22deee5ebb3944de7ab122c8a77e7f242ac92f2d67447e5793c"
     },
     {
       "path": "crates/zero/src/config_migrate/app/endpoints.rs",
@@ -12525,7 +13149,7 @@
     },
     {
       "path": "crates/zero/src/config_migrate/app/transform.rs",
-      "sha256": "a93efab755745f3cfeab8ed33d715cb83fa29b7790e471e9d15d119440520df8"
+      "sha256": "b4143006489fc626672d8ef90664fe08119ce768491056bcc6b13b69689f0c9b"
     },
     {
       "path": "crates/zero/src/config_migrate/input.rs",
@@ -12533,7 +13157,7 @@
     },
     {
       "path": "crates/zero/src/config_migrate/mod.rs",
-      "sha256": "bfa3e480563cf65e64410c0c4e422c47aec4dfe285362caf41f6552d0eea926d"
+      "sha256": "a0ca3839aaa71b01b6a738b53e9db183407f3e4fccf03085a89a365d4c3ee1c6"
     },
     {
       "path": "crates/zero/src/config_migrate/translate.rs",
@@ -12541,7 +13165,7 @@
     },
     {
       "path": "crates/zero/src/diag.rs",
-      "sha256": "c0f5975fa92de39ec157c738ae206374e4202dd9975138f6c3b66f0aa261674f"
+      "sha256": "0adca7796a8539f695cf6e6c5a71f7e75a87ecb367c9bfc0b2ba311c0b83ec45"
     },
     {
       "path": "crates/zero/src/emit.rs",
@@ -12549,7 +13173,7 @@
     },
     {
       "path": "crates/zero/src/eval.rs",
-      "sha256": "387c0562550d2b95d8beec2af704995368bd1d7b40b4cb544eadde99d4b4ad69"
+      "sha256": "3674d211f695f14f654ea9e2debcf4dc128e23629775bbacc9f73f37f71f512a"
     },
     {
       "path": "crates/zero/src/extract.rs",
@@ -12573,7 +13197,7 @@
     },
     {
       "path": "crates/zero/src/lower.rs",
-      "sha256": "2660e7872c88292500adcd1c6ac97926489e41a1ded671df3f41ffafaddd2490"
+      "sha256": "760de63efcd89a85acd6a4db32b3f5051df7db4c4e1efcfff8ae0b2525fb054b"
     },
     {
       "path": "crates/zero/src/main.rs",
@@ -12601,7 +13225,7 @@
     },
     {
       "path": "crates/zero/src/plugins.rs",
-      "sha256": "a3d1b23ffc374e5df0c9247ea67825b2b25b6feec0be04b3a50636f601b6fb86"
+      "sha256": "36ec8ef4980275ad83bc9093ab89502faca3dd352fea390ad32e1e48a7644c81"
     },
     {
       "path": "crates/zero/src/schema.rs",
@@ -12673,7 +13297,7 @@
     },
     {
       "path": "crates/zero/src/types.rs",
-      "sha256": "fd304ce056cfe52ad8624506f2d95be927928c7c075758c4adb9875bf71edcb3"
+      "sha256": "b8efc905c0da5d1949cc9a5d17f85fa04ef9af0c6289f38bd961161a271961ab"
     },
     {
       "path": "crates/zero/src/uri.rs",
@@ -12685,7 +13309,7 @@
     },
     {
       "path": "crates/zero/src/wasm.rs",
-      "sha256": "c3f260fd80b1963d8cf4dd284d56d753c30c2a69cb4a4a831bc00414e54a675a"
+      "sha256": "6c357e343f37b7a8dc41fe8b2d8f0fb0c4c8fecc29965dac707f35025f1666cb"
     },
     {
       "path": "crates/zero/src/wasm_host_fs.rs",
@@ -12730,6 +13354,10 @@
     {
       "path": "crates/zero/src/wpml_config.rs",
       "sha256": "e22f8e843e66dc206f5a0e93c3047488edfbd0c32fe014858886235207c243eb"
+    },
+    {
+      "path": "crates/zero/tests/compatibility/registry.json",
+      "sha256": "f2bdefbf99bf8435241539bcb1ee662db00146635bd70071a6488bc056d8642e"
     },
     {
       "path": "crates/zero/tests/fixtures/canon/README",

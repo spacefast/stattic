@@ -16,6 +16,7 @@ pub mod loader;
 pub mod lower;
 pub mod migrate;
 pub mod num;
+pub mod pages;
 pub mod pipeline;
 pub mod platform;
 pub mod schema;

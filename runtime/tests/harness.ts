@@ -71,7 +71,9 @@ export const RUNTIME_HTTP_API_BASE = "/__spacefast/api.php";
 export const RUNTIME_UPLOAD_API_BASE = "/__spacefast/upload.php";
 /** The blob token gate (contracts §7): GET /__stattic/blob/<jwt>. */
 export const RUNTIME_BLOB_GATE_PREFIX = "/__stattic/blob/";
-export const PHP_BINARY = process.env.PHP_BINARY ?? "php";
+// Absolute, so a suite can hide `php` from the runtime's PATH (as the box's
+// php-fpm namespace does) without stopping the fixture server itself.
+export const PHP_BINARY = process.env.PHP_BINARY ?? Bun.which("php") ?? "php";
 
 /**
  * The generated response-table contract (entry keys, lanes, cache classes,

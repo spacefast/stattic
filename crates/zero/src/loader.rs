@@ -5,7 +5,7 @@ use crate::diag::{self, Diag, Result, Span};
 use crate::ir::{ArrEl, DeclKind, Expr, ExprKind, FnBody, Func, Module, Pat, Prop, PropKey, Stmt};
 use crate::lower::Lowerer;
 use oxc_allocator::Allocator;
-use oxc_parser::Parser;
+use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -182,7 +182,12 @@ fn parse(
             "JSX files can't be part of a Zero config",
         ));
     }
-    let ret = Parser::new(&allocator, source, source_type).parse();
+    let ret = Parser::new(&allocator, source, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
     let mut syntax_failed = false;
     for err in ret.diagnostics.errors() {
         syntax_failed = true;

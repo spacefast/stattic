@@ -72,7 +72,7 @@ final class Module
         if (!is_string($key) || $key === '' || strlen($key) > 64) {
             throw HttpError::invalidInput('Send an Idempotency-Key of 1–64 bytes', '/Idempotency-Key');
         }
-        return Receipts::withFingerprint(hash('sha256', json_encode($input, JSON_THROW_ON_ERROR)),
+        return Receipts::withFingerprint(hash('sha256', \Zero\Json::encode($input, JSON_THROW_ON_ERROR)),
             static fn () => Receipts::once($scope, $key, $run));
     }
 
@@ -135,7 +135,7 @@ final class Module
             $id = Jobs::uuid();
             $job = Jobs::enqueue('zero.services.mail', ['submissionId' => $id], ['key' => $id]);
             Storage::run('INSERT INTO {submissions} (`id`, `form`, `body`, `jobId`, `createdAt`) VALUES (?, ?, ?, ?, ?)',
-                [$id, $name, json_encode($values, JSON_THROW_ON_ERROR), $job['id'], Js::iso(Js::now())]);
+                [$id, $name, \Zero\Json::encode($values, JSON_THROW_ON_ERROR), $job['id'], Js::iso(Js::now())]);
             return ['id' => $id, 'message' => 'Thanks — your message is saved.', 'delivery' => 'queued'];
         });
     }

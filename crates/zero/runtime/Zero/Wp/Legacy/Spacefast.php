@@ -10,6 +10,14 @@ use Zero\Wp\Connection;
 /** Cross-prefix copies under the host's publication fence; source rows are never changed. */
 final class Spacefast
 {
+    /** The member column migrated apps read `ctx.auth.userId` from (`zero migrate app --users`). */
+    public const SUBJECT_COLUMN = 'spacefastSubject';
+    private const SUBJECT_META = \Zero\Wp\WpUserStore::META . self::SUBJECT_COLUMN;
+    /** Receipt prefix for content fingerprints; bare 64-hex receipts predate it and use counters(). */
+    private const CONTENT = 'v2:';
+    /** Source usermeta the copier leaves behind. */
+    private const UNCOPIED_META = ['_spacefast_app_user', Users::MIGRATED_META, self::SUBJECT_META];
+
     public function __construct(private readonly Connection $db, private readonly Schema $schema) {}
 
     public function run(string $space, string $source, string $target, bool $dry, bool $verify = false): array
@@ -67,17 +75,35 @@ final class Spacefast
             $report['groups'][$group] = $this->db->transaction(function () use ($space, $source, $target, $dry, $verify, $group, $receipts, $legacy) {
                 $stored = $this->exists($receipts) ? $this->db->run("SELECT fingerprint FROM `$receipts` WHERE space_id=? AND table_group=?" . ($verify ? '' : ' FOR UPDATE'), [$space, $group]) : [];
                 [$posts, $ids, $users] = $this->scope($space, $source);
-                $current = $this->fingerprint($group, $source, $ids, $users);
+                // A users receipt written before the candidate carried subjects would otherwise hide
+                // that no subject was copied, and every ctx.auth.userId would silently read wp:<id>.
+                // Checked before the fingerprint, so a stale receipt reports what it is missing.
+                $missing = $group === 'users' && $stored !== [] ? $this->uncopiedSubjects($space, $source, $target, $users) : [];
                 if ($verify) {
                     $fingerprint = $stored[0]['fingerprint'] ?? null;
-                    return ['status' => $fingerprint === null ? 'missing' : (hash_equals($fingerprint, $current) ? 'verified' : 'drifted'), 'stored' => $fingerprint, 'current' => $current];
+                    // A receipt is compared in the format it was written in, so receipts from before
+                    // content fingerprints keep verifying while their source is unchanged.
+                    $current = $fingerprint !== null && !str_starts_with($fingerprint, self::CONTENT)
+                        ? $this->counters($group, $source, $ids, $users)
+                        : $this->fingerprint($group, $space, $source, $posts, $users);
+                    $status = match (true) {
+                        $fingerprint === null => 'missing',
+                        $missing !== [] => 'incomplete',
+                        hash_equals($fingerprint, $current) => 'verified',
+                        default => 'drifted',
+                    };
+                    return ['status' => $status, 'stored' => $fingerprint, 'current' => $current];
+                }
+                if ($missing !== []) {
+                    throw new HttpError(409, 'zero_spacefast_subjects_missing', "Users were copied before this candidate carried Space Users subjects. Restore the target's users and usermeta from the backup taken before the copy, delete the `$receipts` row for space_id '$space' and table_group 'users', and rerun.", '/users/' . $missing[0]);
                 }
                 if ($stored !== []) {
                     return ['copied' => 0, 'status' => 'already-migrated'];
                 }
+                $current = $this->fingerprint($group, $space, $source, $posts, $users);
                 $count = match ($group) {
                     'posts' => $this->posts($source, $target, $posts, $ids),
-                    'users' => $this->users($source, $target, $users),
+                    'users' => $this->users($space, $source, $target, $users),
                     'sessions' => $this->sessions($source, $target, $legacy, $users, $dry),
                 };
                 if ($dry) { throw new SpacefastDryRun(['copied' => $count, 'status' => 'dry-run']); }
@@ -102,7 +128,29 @@ final class Spacefast
         return [$posts, $ids, $users];
     }
 
-    private function fingerprint(string $group, string $source, array $posts, array $users): string
+    /**
+     * Digest of every source row a group copies, so --verify sees any change to copied data.
+     * Rows are hashed as an order-independent multiset per table, with values as stored bytes.
+     */
+    private function fingerprint(string $group, string $space, string $source, array $posts, array $users): string
+    {
+        $tables = match ($group) {
+            'posts' => $this->postRows($source, $posts),
+            'users' => $this->userRows($source, $users) + $this->subjectRows($source, $space, $users),
+            'sessions' => ['sfi_sessions' => $this->identityRows($source, 'sessions', $users)],
+        };
+        $digest = hash_init('sha256');
+        foreach ($tables as $table => $rows) {
+            // serialize() keeps binary columns (session IDs, hashes) byte-exact; drivers differ on int/string.
+            $lines = array_map(static fn (array $row) => serialize(array_map(static fn ($v) => $v === null ? null : (string) $v, $row)), $rows);
+            sort($lines, SORT_STRING);
+            hash_update($digest, $table . "\n" . count($lines) . "\n" . implode("\n", $lines) . "\n");
+        }
+        return self::CONTENT . hash_final($digest);
+    }
+
+    /** Receipts written before content fingerprints: aggregate counters only. Keep this formula unchanged. */
+    private function counters(string $group, string $source, array $posts, array $users): string
     {
         $ids = $group === 'posts' ? $posts : $users;
         $values = [];
@@ -121,13 +169,14 @@ final class Spacefast
                 'sessions' => $this->exists($source . 'sfi_sessions') ? $this->db->run("SELECT COUNT(*) AS count, MAX(id) AS id, MAX(revoked_at) AS revoked FROM `{$source}sfi_sessions` WHERE wp_user_id IN ($where)", $ids) : [],
             };
         }
-        return hash('sha256', json_encode($values, JSON_THROW_ON_ERROR));
+        return hash('sha256', \Zero\Json::encode($values, JSON_THROW_ON_ERROR));
     }
 
-    private function posts(string $source, string $target, array $posts, array $ids): int
+    /** The source rows the posts group copies, keyed by table. */
+    private function postRows(string $source, array $posts): array
     {
-        if ($ids === []) { return 0; }
-        $relationships = $this->db->run("SELECT * FROM `{$source}term_relationships` WHERE object_id IN ({$this->marks($ids)})", $ids);
+        $ids = array_column($posts, 'ID');
+        $relationships = $this->rows($source . 'term_relationships', 'object_id', $ids);
         $taxonomies = $this->rows($source . 'term_taxonomy', 'term_taxonomy_id', array_column($relationships, 'term_taxonomy_id'));
         do {
             $parents = array_values(array_diff(array_filter(array_column($taxonomies, 'parent')), array_column($taxonomies, 'term_id')));
@@ -135,7 +184,47 @@ final class Spacefast
             $taxonomies = [...$taxonomies, ...$ancestors];
         } while ($ancestors !== []);
         $terms = $this->rows($source . 'terms', 'term_id', array_column($taxonomies, 'term_id'));
-        $termmeta = $this->rows($source . 'termmeta', 'term_id', array_column($terms, 'term_id'));
+        return [
+            'posts' => $posts,
+            'postmeta' => $this->rows($source . 'postmeta', 'post_id', $ids),
+            'term_relationships' => $relationships,
+            'term_taxonomy' => $taxonomies,
+            'terms' => $terms,
+            'termmeta' => $this->rows($source . 'termmeta', 'term_id', array_column($terms, 'term_id')),
+        ];
+    }
+
+    /** The source rows the users group copies (or reads, for verified emails), keyed by table. */
+    private function userRows(string $source, array $ids): array
+    {
+        $tables = [
+            'users' => $this->rows($source . 'users', 'ID', $ids),
+            'usermeta' => array_values(array_filter($this->rows($source . 'usermeta', 'user_id', $ids), static fn ($row) => !in_array($row['meta_key'], self::UNCOPIED_META, true))),
+        ];
+        foreach (['accounts', 'emails', 'providers'] as $table) { $tables['sfi_' . $table] = $this->identityRows($source, $table, $ids); }
+        return $tables;
+    }
+
+    /**
+     * The Space Users subjects the users group copies, as a table of their own. Absent when there
+     * are none, so a Space without subjects hashes exactly as it did before subjects were copied.
+     */
+    private function subjectRows(string $source, string $space, array $ids): array
+    {
+        $rows = [];
+        foreach ($this->subjects($source, $space, $ids) as $id => $subject) { $rows[] = ['user_id' => $id, 'subject' => $subject]; }
+        return $rows === [] ? [] : ['subjects' => $rows];
+    }
+
+    private function identityRows(string $source, string $table, array $ids): array
+    {
+        return $this->exists($source . 'sfi_' . $table) ? $this->rows($source . 'sfi_' . $table, 'wp_user_id', $ids) : [];
+    }
+
+    private function posts(string $source, string $target, array $posts, array $ids): int
+    {
+        if ($ids === []) { return 0; }
+        ['postmeta' => $postmeta, 'term_relationships' => $relationships, 'term_taxonomy' => $taxonomies, 'terms' => $terms, 'termmeta' => $termmeta] = $this->postRows($source, $posts);
         $resources = [];
         foreach ($relationships as $relationship) {
             foreach ($taxonomies as $taxonomy) {
@@ -147,7 +236,6 @@ final class Spacefast
         }
         $specs = [];
         foreach ($this->schema->collections() as $storage => $spec) { $specs[$spec['key'] ?? $storage] = $spec; }
-        $meta = $this->rows($source . 'postmeta', 'post_id', $ids);
         foreach ($posts as &$post) {
             if ($post['post_type'] === 'attachment') { continue; }
             if (!in_array($post['post_type'], ['post', 'revision'], true)) {
@@ -166,7 +254,7 @@ final class Spacefast
                 $value = Schema::normalize($definition, $post[$native], $column, '/records/' . $post['ID'] . '/' . $column);
                 $values[$column] = $value;
             }
-            foreach ($meta as &$field) {
+            foreach ($postmeta as &$field) {
                 $prefix = '_zero_' . $resource . '_';
                 if ($field['post_id'] != $post['ID'] || !str_starts_with($field['meta_key'], $prefix)) { continue; }
                 $column = substr($field['meta_key'], strlen($prefix));
@@ -196,13 +284,13 @@ final class Spacefast
         }
         unset($post);
         $count = 0;
-        foreach (['terms' => $terms, 'term_taxonomy' => $taxonomies, 'termmeta' => $termmeta, 'posts' => $posts, 'postmeta' => $meta, 'term_relationships' => $relationships] as $table => $rows) {
+        foreach (['terms' => $terms, 'term_taxonomy' => $taxonomies, 'termmeta' => $termmeta, 'posts' => $posts, 'postmeta' => $postmeta, 'term_relationships' => $relationships] as $table => $rows) {
             foreach ($rows as $row) { $count += $this->insert($target . $table, $row); }
         }
         return $count;
     }
 
-    private function users(string $source, string $target, array $ids): int
+    private function users(string $space, string $source, string $target, array $ids): int
     {
         $count = 0;
         foreach ($this->rows($source . 'users', 'ID', $ids) as $row) {
@@ -220,12 +308,24 @@ final class Spacefast
         }
         foreach ($this->rows($source . 'usermeta', 'user_id', $ids) as $row) {
             if (str_starts_with($row['meta_key'], $source)) { $row['meta_key'] = $target . substr($row['meta_key'], strlen($source)); }
-            if (in_array($row['meta_key'], ['_spacefast_app_user', Users::MIGRATED_META], true)) { continue; }
+            if (in_array($row['meta_key'], self::UNCOPIED_META, true)) { continue; }
             $count += $this->insert($target . 'usermeta', $row);
         }
+        // 0.8 handlers saw a Space User as its random `usr_` subject. A migrated app reads it back from
+        // the member's hidden `spacefastSubject` column, so rows owned by that subject keep their owner.
+        if ($this->carriesSubjects()) {
+            foreach ($this->subjects($source, $space, $ids) as $id => $subject) {
+                $existing = $this->db->run("SELECT meta_value FROM `{$target}usermeta` WHERE user_id=? AND meta_key=? FOR UPDATE", [$id, self::SUBJECT_META]);
+                $stored = $existing === [] ? null : (string) $existing[0]['meta_value'];
+                if ($stored !== null && $stored !== $subject) { throw new HttpError(409, 'zero_spacefast_conflict', "Target user $id already has a different Space subject; nothing in this group was committed.", '/users/' . $id); }
+                if ($stored === null) {
+                    $this->db->run("INSERT INTO `{$target}usermeta` (user_id, meta_key, meta_value) VALUES (?, ?, ?)", [$id, self::SUBJECT_META, $subject]);
+                    $count++;
+                }
+            }
+        }
         foreach (['accounts','emails','providers'] as $table) {
-            if (!$this->exists($source . 'sfi_' . $table)) { continue; }
-            foreach ($this->rows($source . 'sfi_' . $table, 'wp_user_id', $ids) as $row) { $count += $this->insert($target . 'zero_identity_' . $table, $row); }
+            foreach ($this->identityRows($source, $table, $ids) as $row) { $count += $this->insert($target . 'zero_identity_' . $table, $row); }
         }
         return $count;
     }
@@ -259,6 +359,41 @@ final class Spacefast
         }
         $this->db->run("INSERT INTO `$table` (`" . implode('`,`', $names) . "`) VALUES ({$this->marks($names)})", array_values($row));
         return 1;
+    }
+
+    /** Space Users subjects, keyed by user ID, from the source site's options. */
+    private function subjects(string $source, string $space, array $ids): array
+    {
+        if ($ids === []) { return []; }
+        $names = array_map(static fn ($id) => 'spacefast_app_subject_' . (int) $id . '_' . $space, $ids);
+        $out = [];
+        foreach ($this->db->run("SELECT option_name, option_value FROM `{$source}options` WHERE option_name IN ({$this->marks($names)})", $names) as $row) {
+            if (preg_match('/\Ausr_[a-f0-9]{64}\z/', (string) $row['option_value']) !== 1) {
+                throw Model::refuse('/options/' . $row['option_name'], 'Space Users subject is not usr_<64 hex>');
+            }
+            $out[(int) substr($row['option_name'], strlen('spacefast_app_subject_'))] = (string) $row['option_value'];
+        }
+        ksort($out);
+        return $out;
+    }
+
+    /** User IDs whose source subject is absent from the target, when the candidate carries subjects. */
+    private function uncopiedSubjects(string $space, string $source, string $target, array $ids): array
+    {
+        if (!$this->carriesSubjects()) { return []; }
+        $missing = [];
+        foreach ($this->subjects($source, $space, $ids) as $id => $subject) {
+            $stored = $this->db->run("SELECT meta_value FROM `{$target}usermeta` WHERE user_id=? AND meta_key=?", [$id, self::SUBJECT_META]);
+            if ($stored === [] || (string) $stored[0]['meta_value'] !== $subject) { $missing[] = $id; }
+        }
+        return $missing;
+    }
+
+    /** True when the candidate's member projection declares the migrated subject column. */
+    private function carriesSubjects(): bool
+    {
+        $collection = $this->schema->auth()['collection'] ?? null;
+        return $collection !== null && isset($this->schema->collection($collection)['columns'][self::SUBJECT_COLUMN]);
     }
 
     private function marks(array $values): string { return implode(',', array_fill(0, count($values), '?')); }

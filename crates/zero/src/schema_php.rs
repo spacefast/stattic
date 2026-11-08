@@ -313,6 +313,21 @@ pub fn render(schema: &Schema) -> String {
             access_map(&bucket.access)
         );
     }
+    if !schema.routes.is_empty() {
+        out.push_str("    ],\n    'routes' => [\n");
+    }
+    for (name, route) in &schema.routes {
+        let _ = writeln!(
+            out,
+            "        {} => ['method' => {}, 'path' => {}, 'handler' => {}, 'access' => {}, 'signature' => {}],",
+            php_str(name),
+            php_str(&route.method),
+            php_str(&route.path),
+            php_str(&route.handler),
+            access(&route.access),
+            route.signature.as_ref().map(php_json).unwrap_or_else(|| "null".into())
+        );
+    }
     out.push_str("    ],\n    'jobs' => [\n");
     for (name, job) in &schema.jobs {
         let _ = writeln!(

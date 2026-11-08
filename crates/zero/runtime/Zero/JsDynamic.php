@@ -5,9 +5,6 @@ namespace Zero;
 /** Checked operations for imported JavaScript; authored TypeScript keeps its static contracts. */
 trait JsDynamic
 {
-    private const DYNAMIC_ARRAY_METHODS = ['push', 'unshift', 'concat', 'pop', 'shift', 'reverse', 'toReversed', 'flat', 'map', 'filter', 'forEach', 'some', 'every', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flatMap', 'reduce', 'sort', 'toSorted', 'slice', 'at', 'indexOf', 'lastIndexOf', 'includes', 'join', 'splice'];
-    private const DYNAMIC_STRING_METHODS = ['toUpperCase', 'toLowerCase', 'trim', 'trimStart', 'trimEnd', 'charAt', 'charCodeAt', 'slice', 'substring', 'includes', 'startsWith', 'endsWith', 'indexOf', 'lastIndexOf', 'split', 'replace', 'replaceAll', 'match', 'repeat', 'concat'];
-    private const DYNAMIC_MATH_METHODS = ['abs', 'floor', 'ceil', 'trunc', 'round', 'min', 'max', 'pow', 'sqrt', 'sign'];
     private static array $dynamicNamespaces = [];
     private static array $dynamicMethods = [];
     private static ?\WeakMap $dynamicMethodReceivers = null;
@@ -20,24 +17,35 @@ trait JsDynamic
 
     private static function dynamicMethodValue(mixed $receiver, string $name): mixed
     {
+        if ($receiver instanceof JsObject && ($receiver->class?->hasMethod($name) ?? false)) {
+            throw new JsError('Class method values are not supported by checked JavaScript', 'TypeError');
+        }
+        if ($receiver instanceof JsObject && $receiver->nullPrototype) { return JsUndefined::Value; }
         $owner = match (true) {
             $receiver instanceof JsNamespace => $receiver->name,
             $receiver instanceof JsArray => 'Array', is_string($receiver) => 'String',
             $receiver instanceof RegExp => 'RegExp', $receiver instanceof JsDate => 'Date',
+            $receiver instanceof JsError => 'Error',
             $receiver instanceof JsSet => 'Set', $receiver instanceof JsMap => 'Map',
+            $receiver instanceof \Closure => 'Function', is_bool($receiver) => 'Boolean',
             is_int($receiver), is_float($receiver) => 'Number', default => 'Object',
         };
-        $methods = match ($owner) {
-            'Math' => self::DYNAMIC_MATH_METHODS, 'Array' => self::DYNAMIC_ARRAY_METHODS, 'String' => self::DYNAMIC_STRING_METHODS,
-            'RegExp' => ['exec', 'test'], 'Date' => ['getTime', 'toISOString', 'toJSON'], 'Set' => ['add', 'has'], 'Map' => ['set', 'get', 'has'], default => [],
-        };
-        if (!in_array($name, [...$methods, 'toString', 'valueOf'], true)) { return JsUndefined::Value; }
+        if ($receiver instanceof \Closure && in_array($name, ['bind', 'length', 'name', 'prototype', 'arguments', 'caller'], true)) {
+            throw new JsError('Function metadata and binding are not supported', 'TypeError');
+        }
+        if ($name === 'valueOf' && !in_array($owner, ['Number', 'String', 'Boolean', 'Date'], true)
+            || $name === 'toString' && in_array($owner, ['Math', 'Set', 'Map'], true)) { $owner = 'Object'; }
+        $surface = match ($owner) { 'Math' => 'Math', 'RegExp' => 'regex', default => strtolower($owner) };
+        if (!Builtins::has($surface, $name) && !in_array($name, ['toString', 'valueOf'], true)) {
+            if (Builtins::has('object', $name)) { throw new JsError('Unsupported inherited method ' . $name, 'TypeError'); }
+            return JsUndefined::Value;
+        }
         $key = $owner . ':' . $name;
         if (!isset(self::$dynamicMethods[$key])) {
             $invoke = match (true) {
                 $owner === 'Array' && $name === 'slice' => self::dynamicBorrowedSlice(...),
-                $owner === 'Math' && in_array($name, $methods, true) => static fn ($thisArg, JsArray $args) => self::dynamicStaticCall($owner, $name, $args),
-                default => static fn ($thisArg, JsArray $args) => self::dynamicCallMethod($thisArg, $name, $args, true),
+                $owner === 'Math' && Builtins::has('Math', $name) => static fn ($thisArg, JsArray $args) => self::dynamicStaticCall($owner, $name, $args),
+                default => static fn ($thisArg, JsArray $args) => self::dynamicBorrowedMethod($owner, $thisArg, $name, $args),
             };
             $function = static fn (...$args) => $invoke(JsUndefined::Value, new JsArray($args));
             self::$dynamicMethods[$key] = $function;
@@ -45,6 +53,27 @@ trait JsDynamic
             self::$dynamicMethodReceivers[$function] = $invoke;
         }
         return self::$dynamicMethods[$key];
+    }
+
+    private static function dynamicBorrowedMethod(string $owner, mixed $receiver, string $name, JsArray $args): mixed
+    {
+        if ($owner === 'Object' && $name === 'toString') { return self::dynamicObjectTag($receiver); }
+        if ($owner === 'Object' && $name === 'valueOf') {
+            self::requirePresent($receiver);
+            if (!is_object($receiver)) { throw new JsError('Object valueOf boxing is not supported', 'TypeError'); }
+            return $receiver;
+        }
+        $compatible = match ($owner) {
+            'Array' => $receiver instanceof JsArray, 'String' => is_string($receiver),
+            'Number' => is_int($receiver) || is_float($receiver), 'Boolean' => is_bool($receiver),
+            'RegExp' => $receiver instanceof RegExp, 'Date' => $receiver instanceof JsDate,
+            'Error' => $receiver instanceof JsError,
+            'Set' => $receiver instanceof JsSet, 'Map' => $receiver instanceof JsMap,
+            'Function' => $receiver instanceof \Closure, 'Object' => $receiver instanceof JsObject,
+            default => false,
+        };
+        if (!$compatible) { throw new JsError('Borrowing methods across builtin families is not supported', 'TypeError'); }
+        return self::dynamicCallMethod($receiver, $name, $args, true);
     }
 
     /** Array.prototype.slice borrowed by dense arrays or ordinary arguments. */
@@ -83,12 +112,20 @@ trait JsDynamic
     {
         if (self::isNullish($value)) { throw new JsError('Cannot read properties of null or undefined', 'TypeError'); }
         $key = self::key($key);
-        if ($value instanceof JsObject) { return array_key_exists($key, $value->p) ? $value->p[$key] : self::dynamicMethodValue($value, $key); }
+        if ($value instanceof JsObject) {
+            if ($key === '__proto__' && !$value->nullPrototype && !array_key_exists($key, $value->p)) { throw new JsError('Prototype access is not supported', 'TypeError'); }
+            return array_key_exists($key, $value->p) ? $value->p[$key] : self::dynamicMethodValue($value, $key);
+        }
         if ($value instanceof JsClass) { return $value->get($key); }
         if ($value instanceof JsNamespace && $value->name === 'Math') {
-            return match ($key) { 'PI' => M_PI, 'E' => M_E, default => self::dynamicMethodValue($value, $key) };
+            return match ($key) {
+                'PI' => M_PI, 'E' => M_E,
+                default => Builtins::has('Math', $key) || in_array($key, ['toString', 'valueOf'], true)
+                    ? self::dynamicMethodValue($value, $key)
+                    : throw new JsError('Unsupported Math property ' . $key, 'TypeError'),
+            };
         }
-        if ($value instanceof JsError) { return match ($key) { 'name' => $value->jsName, 'message' => $value->getMessage(), default => self::dynamicMethodValue($value, $key) }; }
+        if ($value instanceof JsError) { return match ($key) { 'name' => $value->jsName, 'message' => $value->getMessage(), 'stack' => throw new JsError('Error stack metadata is not supported', 'TypeError'), default => self::dynamicMethodValue($value, $key) }; }
         if ($value instanceof JsArray || $value instanceof JsArguments) {
             if ($value instanceof JsArguments && $key === 'callee') { throw new JsError('Restricted arguments property', 'TypeError'); }
             if ($key === 'length') { return $value instanceof JsArguments ? $value->length : count($value->a); }
@@ -106,7 +143,7 @@ trait JsDynamic
                 'source' => $value->source, 'flags' => $value->flags, 'global' => $value->global,
                 'ignoreCase' => str_contains($value->flags, 'i'), 'multiline' => str_contains($value->flags, 'm'),
                 'unicode' => str_contains($value->flags, 'u'), 'dotAll' => str_contains($value->flags, 's'),
-                'sticky' => false, 'lastIndex' => $value->lastIndex, default => self::dynamicMethodValue($value, $key),
+                'sticky' => $value->sticky, 'lastIndex' => $value->lastIndex, 'hasIndices', 'unicodeSets' => false, default => self::dynamicMethodValue($value, $key),
             };
         }
         if ($key === 'size' && ($value instanceof JsSet || $value instanceof JsMap)) {
@@ -115,17 +152,32 @@ trait JsDynamic
         return self::dynamicMethodValue($value, $key);
     }
 
+    public static function dataGet(mixed $value, mixed $key): mixed
+    {
+        self::requirePresent($value);
+        $key = self::key($key);
+        if ($value instanceof JsObject && !$value->nullPrototype && !array_key_exists($key, $value->p) && Builtins::has('object', $key)) {
+            throw new JsError('Inherited properties are not supported by typed data reads', 'TypeError');
+        }
+        return self::dynamicGet($value, $key);
+    }
+
     public static function dynamicSet(mixed $target, mixed $key, mixed $value): mixed
     {
         if (self::isNullish($target)) { throw new JsError('Cannot set properties of null or undefined', 'TypeError'); }
         $key = self::key($key);
-        if ($target instanceof JsObject || $target instanceof JsClass) { return self::set($target, $key, $value); }
+        if ($target instanceof JsObject || $target instanceof JsClass) {
+            return self::set($target, $key, $value);
+        }
         if ($target instanceof RegExp && $key === 'lastIndex') { $target->lastIndex = $value; return $value; }
         if ($target instanceof JsArray || $target instanceof JsArguments) {
+            if ($key === '__proto__' && !array_key_exists($key, $target->p)) {
+                throw new JsError('Prototype mutation is not supported', 'TypeError');
+            }
             if ($key === 'length') {
                 if ($target instanceof JsArguments) { $target->length = $value; return $value; }
-                $length = self::toNumber($value);
-                if (!is_finite((float) $length) || floor($length) !== $length || $length < 0 || $length > 4294967295) { throw new JsError('Invalid array length', 'RangeError'); }
+                $length = self::toUint32(self::toNumber($value));
+                if ((float) $length !== (float) self::toNumber($value)) { throw new JsError('Invalid array length', 'RangeError'); }
                 if ($length > count($target->a)) { throw new JsError('Zero arrays are dense: length cannot create holes', 'RangeError'); }
                 $target->a = array_slice($target->a, 0, (int) $length);
                 return $value;
@@ -154,19 +206,36 @@ trait JsDynamic
         throw new JsError('Unsupported object enumeration', 'TypeError');
     }
 
+    public static function dynamicForIn(mixed $value): \Generator
+    {
+        foreach (self::dynamicKeys($value)->a as $key) {
+            if (($value instanceof JsArray || $value instanceof JsArguments)
+                && !array_key_exists($key, $value->a) && !array_key_exists($key, $value->p)) { continue; }
+            if ($value instanceof JsObject && !array_key_exists($key, $value->p)) { continue; }
+            yield $key;
+        }
+    }
+
     public static function dynamicIterable(mixed $value): JsArray
     {
-        if ($value instanceof JsArray) { return new JsArray($value->a); }
-        if ($value instanceof JsArguments) {
-            $result = new JsArray();
-            $length = max(0, self::toInteger(self::toNumber($value->length)));
-            for ($i = 0; $i < $length; $i++) { $result->a[] = self::dynamicGet($value, (string) $i); }
-            return $result;
+        return new JsArray(iterator_to_array(self::dynamicIterator($value), false));
+    }
+
+    public static function dynamicIterator(mixed $value): \Generator
+    {
+        if ($value instanceof JsArray) {
+            for ($i = 0; $i < count($value->a); $i++) { yield $value->a[$i]; }
+        } elseif ($value instanceof JsArguments) {
+            for ($i = 0; $i < max(0, self::toInteger(self::toNumber($value->length))); $i++) { yield self::dynamicGet($value, (string) $i); }
+        } elseif (is_string($value)) {
+            yield from self::from($value)->a;
+        } elseif ($value instanceof JsSet) {
+            for ($i = 0; $i < count($value->values); $i++) { yield $value->values[$i]; }
+        } elseif ($value instanceof JsMap) {
+            for ($i = 0; $i < count($value->entries); $i++) { yield new JsArray($value->entries[$i]); }
+        } else {
+            throw new JsError('Value is not iterable', 'TypeError');
         }
-        if (is_string($value)) { return self::from($value); }
-        if ($value instanceof JsSet) { return new JsArray($value->values); }
-        if ($value instanceof JsMap) { return new JsArray(array_map(static fn ($entry) => new JsArray($entry), $value->entries)); }
-        throw new JsError('Value is not iterable', 'TypeError');
     }
 
     public static function dynamicObjectTag(mixed $value): string
@@ -189,6 +258,20 @@ trait JsDynamic
         return $function(...$args->a);
     }
 
+    private static function dynamicInvoke(mixed $function, mixed $receiver, JsArray $args): mixed
+    {
+        if ($function instanceof \Closure && self::$dynamicMethodReceivers !== null && isset(self::$dynamicMethodReceivers[$function])) {
+            return (self::$dynamicMethodReceivers[$function])($receiver, $args);
+        }
+        return self::dynamicCall($function, $args);
+    }
+
+    public static function dataMethod(mixed $receiver, mixed $name): \Closure
+    {
+        $method = self::dataGet($receiver, $name);
+        return static fn (...$args) => self::dynamicInvoke($method, $receiver, new JsArray($args));
+    }
+
     /** Resolve the callee before evaluating arguments, including an own method override. */
     public static function dynamicMethod(mixed $receiver, mixed $name): \Closure
     {
@@ -200,7 +283,13 @@ trait JsDynamic
         };
         if (array_key_exists($name, $properties)) {
             $method = $properties[$name];
-            return static fn (...$args) => self::dynamicCall($method, new JsArray($args));
+            return static fn (...$args) => self::dynamicInvoke($method, $receiver, new JsArray($args));
+        }
+        if ($receiver instanceof JsObject && ($receiver->class?->hasMethod($name) ?? false)) {
+            throw new JsError('Class method values are not supported by checked JavaScript', 'TypeError');
+        }
+        if ($receiver instanceof JsObject && $receiver->nullPrototype) {
+            return static fn (...$args) => self::dynamicCall(JsUndefined::Value, new JsArray($args));
         }
         return static fn (...$args) => self::dynamicCallMethod($receiver, $name, new JsArray($args), true);
     }
@@ -210,25 +299,37 @@ trait JsDynamic
         if (self::isNullish($receiver)) { throw new JsError('Cannot read properties of null or undefined', 'TypeError'); }
         $a = $args->a;
         $get = static fn (int $index, mixed $default = JsUndefined::Value): mixed => array_key_exists($index, $a) ? $a[$index] : $default;
-        if (!$builtin && $receiver instanceof JsObject && array_key_exists($name, $receiver->p)) { return self::dynamicCall($receiver->p[$name], $args); }
-        if (!$builtin && ($receiver instanceof JsArray || $receiver instanceof JsArguments) && array_key_exists($name, $receiver->p)) { return self::dynamicCall($receiver->p[$name], $args); }
-        if ($receiver instanceof JsNamespace && in_array($name, self::DYNAMIC_MATH_METHODS, true)) { return self::dynamicStaticCall($receiver->name, $name, $args); }
+        if (!$builtin && $receiver instanceof JsObject && array_key_exists($name, $receiver->p)) { return self::dynamicInvoke($receiver->p[$name], $receiver, $args); }
+        if (!$builtin && $receiver instanceof JsObject && $receiver->nullPrototype) { return self::dynamicCall(JsUndefined::Value, $args); }
+        if (!$builtin && ($receiver instanceof JsArray || $receiver instanceof JsArguments) && array_key_exists($name, $receiver->p)) { return self::dynamicInvoke($receiver->p[$name], $receiver, $args); }
+        $surface = match (true) {
+            is_string($receiver) => 'string', is_int($receiver), is_float($receiver) => 'number',
+            $receiver instanceof JsArray => 'array', $receiver instanceof RegExp => 'regex',
+            $receiver instanceof JsDate => 'date', $receiver instanceof JsSet => 'set', $receiver instanceof JsMap => 'map',
+            is_bool($receiver) => 'boolean', $receiver instanceof \Closure => 'function',
+            default => 'object',
+        };
+        Builtins::check($surface, $name, count($a));
+        if ($receiver instanceof JsNamespace && Builtins::has($receiver->name, $name)) { return self::dynamicStaticCall($receiver->name, $name, $args); }
+        if ($name === 'toFixed' && (is_int($receiver) || is_float($receiver))) { return self::toFixed($receiver, $get(0, 0)); }
         if ($name === 'toString') {
             if ((is_int($receiver) || is_float($receiver)) && $get(0) !== JsUndefined::Value && self::toInteger(self::toNumber($get(0))) !== 10) { throw new JsError('Number.toString radix is not supported', 'TypeError'); }
-            if ($receiver instanceof JsArray) { return self::join($receiver, ','); }
+            if ($receiver instanceof JsArray) {
+                if (array_key_exists('join', $receiver->p) && !$receiver->p['join'] instanceof \Closure) { return self::dynamicObjectTag($receiver); }
+                return self::dynamicCallMethod($receiver, 'join', new JsArray());
+            }
             if ($receiver instanceof JsArguments || $receiver instanceof JsObject || $receiver instanceof JsSet || $receiver instanceof JsMap || $receiver instanceof JsNamespace) { return self::dynamicObjectTag($receiver); }
             return self::str($receiver);
         }
         if ($name === 'valueOf') { return $receiver instanceof JsDate ? $receiver->milliseconds : $receiver; }
         if ($receiver instanceof \Closure && ($name === 'call' || $name === 'apply')) {
-            $values = $name === 'call' ? array_slice($a, 1) : (self::isNullish($get(1)) ? [] : self::dynamicArrayFrom($get(1))->a);
-            if (self::$dynamicMethodReceivers !== null && isset(self::$dynamicMethodReceivers[$receiver])) { return (self::$dynamicMethodReceivers[$receiver])($get(0), new JsArray($values)); }
-            return self::dynamicCall($receiver, new JsArray($values));
+            $values = $name === 'call' ? array_slice($a, 1) : self::dynamicApplyArguments($get(1));
+            return self::dynamicInvoke($receiver, $get(0), new JsArray($values));
         }
         if ($receiver instanceof JsDate) {
             return match ($name) {
                 'getTime' => $receiver->milliseconds, 'toISOString' => self::iso($receiver->milliseconds),
-                'toJSON' => is_finite((float) $receiver->milliseconds) ? self::iso($receiver->milliseconds) : null,
+                'toJSON' => self::dateJSON($receiver->milliseconds),
                 default => throw new JsError($name . ' is not a function', 'TypeError'),
             };
         }
@@ -242,22 +343,23 @@ trait JsDynamic
             return match ($name) { 'exec' => self::dynamicRegExpExec($receiver, self::str($get(0))), 'test' => self::dynamicRegExpExec($receiver, self::str($get(0))) !== null, default => throw new JsError($name . ' is not a function', 'TypeError') };
         }
         if (is_string($receiver)) {
+            if ($name === 'replaceAll' && $get(0) instanceof RegExp && !$get(0)->global) { throw new JsError('replaceAll must be called with a global RegExp', 'TypeError'); }
             if (in_array($name, ['includes', 'startsWith', 'endsWith'], true) && $get(0) instanceof RegExp) { throw new JsError('Search argument must not be a regular expression', 'TypeError'); }
             return match ($name) {
                 'toUpperCase' => mb_strtoupper($receiver, 'UTF-8'), 'toLowerCase' => mb_strtolower($receiver, 'UTF-8'),
                 'trim' => self::trim($receiver), 'trimStart' => self::trimStart($receiver), 'trimEnd' => self::trimEnd($receiver),
                 'charAt' => self::charAt($receiver, self::toNumber($get(0, 0))),
+                'at' => self::strAt($receiver, self::toNumber($get(0, 0))) ?? JsUndefined::Value,
+                'padStart', 'padEnd' => self::dynamicPad($receiver, $name, $get(0), $get(1)),
                 'charCodeAt' => self::dynamicCharCodeAt($receiver, self::toNumber($get(0, 0))),
                 'slice' => self::slice($receiver, self::toNumber($get(0, 0)), $get(1) === JsUndefined::Value ? null : self::toNumber($get(1))),
                 'substring' => self::substring($receiver, self::toNumber($get(0, 0)), $get(1) === JsUndefined::Value ? null : self::toNumber($get(1))),
-                'includes' => str_contains(self::slice($receiver, max(0, self::toNumber($get(1, 0)))), self::str($get(0))),
-                'startsWith' => str_starts_with(self::slice($receiver, max(0, self::toNumber($get(1, 0)))), self::str($get(0))),
-                'endsWith' => str_ends_with($get(1) === JsUndefined::Value ? $receiver : self::slice($receiver, 0, max(0, self::toNumber($get(1)))), self::str($get(0))),
+                'includes', 'startsWith', 'endsWith' => self::dynamicStringSearch($receiver, $name, $get(0), $get(1)),
                 'indexOf' => self::indexOf($receiver, self::str($get(0)), self::toNumber($get(1, 0))),
                 'lastIndexOf' => count($a) < 2 ? self::lastIndexOf($receiver, self::str($get(0))) : self::lastIndexOf($receiver, self::str($get(0)), self::toNumber($get(1))),
                 'split' => self::dynamicSplit($receiver, $get(0), $get(1)),
-                'replace', 'replaceAll' => self::{$name}($receiver, $get(0) instanceof RegExp ? $get(0) : self::str($get(0)), $get(1) instanceof \Closure ? $get(1) : self::str($get(1)), true),
-                'match' => self::dynamicStringMatch($receiver, $get(0) instanceof RegExp ? $get(0) : new RegExp($get(0) === JsUndefined::Value ? '' : self::str($get(0)))),
+                'replace', 'replaceAll' => self::{$name}($receiver, $get(0) instanceof RegExp ? $get(0) : self::str($get(0)), $get(1) instanceof \Closure ? $get(1) : self::str($get(1))),
+                'match' => self::strMatch($receiver, $get(0) instanceof RegExp ? $get(0) : new RegExp($get(0) === JsUndefined::Value ? '' : self::str($get(0)))),
                 'repeat' => self::repeat($receiver, self::toNumber($get(0, 0))),
                 'concat' => $receiver . implode('', array_map(self::str(...), $a)),
                 default => throw new JsError($name . ' is not a function', 'TypeError'),
@@ -267,17 +369,19 @@ trait JsDynamic
             return match ($name) {
                 'push', 'unshift', 'concat' => self::{$name}($receiver, ...$a),
                 'pop', 'shift' => $receiver->a === [] ? JsUndefined::Value : self::{$name}($receiver),
-                'reverse', 'toReversed', 'flat' => self::{$name}($receiver, ...$a),
+                'reverse', 'toReversed' => self::{$name}($receiver, ...$a),
+                'flat' => self::dynamicFlat($receiver, $get(0)),
                 'find', 'findLast' => self::dynamicArrayFind($receiver, $name, self::dynamicCallback($get(0))),
-                'forEach' => self::dynamicForEach($receiver, self::dynamicCallback($get(0))),
+                'forEach' => self::forEach($receiver, self::dynamicCallback($get(0))),
                 'map', 'filter', 'some', 'every', 'findIndex', 'findLastIndex', 'flatMap' => self::{$name}($receiver, self::dynamicCallback($get(0))),
                 'reduce' => count($a) < 2 ? self::reduce($receiver, self::dynamicCallback($get(0))) : self::reduce($receiver, self::dynamicCallback($get(0)), $a[1]),
                 'sort', 'toSorted' => self::{$name}($receiver, $get(0) === JsUndefined::Value ? null : self::dynamicCallback($get(0))),
-                'slice' => self::arrSlice($receiver, self::toNumber($get(0, 0)), $get(1) === JsUndefined::Value ? null : self::toNumber($get(1))),
-                'at' => self::dynamicArrayAt($receiver, self::toNumber($get(0, 0))),
+                'fill' => self::dynamicFill($receiver, $get(0), $get(1), $get(2)),
+                'slice' => self::dynamicBorrowedSlice($receiver, $args),
+                'at' => self::dynamicArrayAt($receiver, $get(0)),
                 'indexOf', 'lastIndexOf', 'includes' => self::{$name}($receiver, $get(0), ...array_slice($a, 1, 1)),
-                'join' => self::join($receiver, $get(0) === JsUndefined::Value ? ',' : self::str($get(0))),
-                'splice' => count($a) < 2 ? self::splice($receiver, self::toNumber($get(0, 0))) : self::splice($receiver, self::toNumber($a[0]), self::toNumber($a[1]), ...array_slice($a, 2)),
+                'join' => self::join($receiver, $get(0)),
+                'splice' => self::dynamicSplice($receiver, $args),
                 default => throw new JsError($name . ' is not a function', 'TypeError'),
             };
         }
@@ -290,11 +394,47 @@ trait JsDynamic
         return $callback;
     }
 
-    private static function dynamicArrayAt(JsArray $source, int|float $index): mixed
+    private static function dynamicPad(string $source, string $method, mixed $length, mixed $fill): string
     {
-        $index = self::toInteger($index);
-        if ($index < 0) { $index += count($source->a); }
-        return $index >= 0 && $index < count($source->a) ? $source->a[(int) $index] : JsUndefined::Value;
+        $length = self::toInteger(self::toNumber($length));
+        if ($length <= self::length($source)) { return $source; }
+        return self::{$method}($source, $length, $fill === JsUndefined::Value ? ' ' : self::str($fill));
+    }
+
+    private static function dynamicArrayAt(JsArray $source, mixed $index): mixed
+    {
+        $length = count($source->a);
+        $index = self::toInteger(self::toNumber($index));
+        if ($index < 0) { $index += $length; }
+        return $index >= 0 && $index < $length ? self::dynamicGet($source, (string) $index) : JsUndefined::Value;
+    }
+
+    private static function dynamicFlat(JsArray $source, mixed $depth): JsArray
+    {
+        $length = count($source->a);
+        $depth = $depth === JsUndefined::Value ? 1 : self::toNumber($depth);
+        return self::flat(new JsArray(array_slice($source->a, 0, $length)), $depth);
+    }
+
+    private static function dynamicFill(JsArray $source, mixed $value, mixed $start, mixed $end): JsArray
+    {
+        $length = count($source->a);
+        $from = self::relIndex(self::toNumber($start), $length);
+        $to = $end === JsUndefined::Value ? $length : self::relIndex(self::toNumber($end), $length);
+        if ($from < $to && $from > count($source->a)) { throw new JsError('Fill cannot create a sparse array after coercion', 'TypeError'); }
+        for ($i = $from; $i < $to; $i++) { $source->a[$i] = $value; }
+        return $source;
+    }
+
+    private static function dynamicSplice(JsArray $source, JsArray $args): JsArray
+    {
+        $length = count($source->a);
+        if ($args->a === []) { return new JsArray(); }
+        $start = self::relIndex(self::toNumber($args->a[0]), $length);
+        $count = count($args->a) < 2 ? $length - $start : self::clampIndex(self::toNumber($args->a[1]), $length - $start);
+        if (count($source->a) < $length) { throw new JsError('Splice cannot read a sparse array after coercion', 'TypeError'); }
+        $source->a = array_slice($source->a, 0, $length);
+        return new JsArray(array_splice($source->a, $start, $count, array_slice($args->a, 2)));
     }
 
     private static function dynamicArrayFind(JsArray $source, string $method, \Closure $callback): mixed
@@ -307,12 +447,6 @@ trait JsDynamic
         };
         if ($method === 'find') { self::findIndex($source, $visit); } else { self::findLastIndex($source, $visit); }
         return $matched;
-    }
-
-    private static function dynamicForEach(JsArray $source, \Closure $callback): JsUndefined
-    {
-        self::forEach($source, $callback);
-        return JsUndefined::Value;
     }
 
     private static function dynamicArrayFrom(mixed $source, mixed $mapper = JsUndefined::Value): JsArray
@@ -340,32 +474,44 @@ trait JsDynamic
         return $result;
     }
 
+    private static function dynamicApplyArguments(mixed $source): array
+    {
+        if (self::isNullish($source)) { return []; }
+        if (!is_object($source) || $source instanceof \Closure) { throw new JsError('apply requires an array-like data object', 'TypeError'); }
+        $length = max(0, self::toInteger(self::toNumber(self::dynamicGet($source, 'length'))));
+        if ($length > 5000000) { throw new JsError('apply argument list is too large', 'RangeError'); }
+        $values = [];
+        for ($i = 0; $i < $length; $i++) { $values[] = self::dynamicGet($source, (string) $i); }
+        return $values;
+    }
+
+    private static function dynamicStringSearch(string $source, string $method, mixed $search, mixed $position): bool
+    {
+        if ($search instanceof RegExp) { throw new JsError($method . ' does not accept a RegExp', 'TypeError'); }
+        $search = self::str($search);
+        $position = $method === 'endsWith' && $position === JsUndefined::Value
+            ? self::length($source) : max(0, self::toNumber($position));
+        return match ($method) {
+            'includes' => str_contains(self::slice($source, $position), $search),
+            'startsWith' => str_starts_with(self::slice($source, $position), $search),
+            'endsWith' => str_ends_with(self::slice($source, 0, $position), $search),
+        };
+    }
+
     private static function dynamicSplit(string $source, mixed $separator, mixed $limit): JsArray
     {
-        if ($limit !== JsUndefined::Value && self::toUint32(self::toNumber($limit)) === 0) { return new JsArray(); }
+        $limit = $limit === JsUndefined::Value ? null : self::toUint32(self::toNumber($limit));
+        if (!$separator instanceof RegExp && $separator !== JsUndefined::Value) { $separator = self::str($separator); }
+        if ($limit === 0) { return new JsArray(); }
         if ($separator === JsUndefined::Value) { return new JsArray([$source]); }
-        $result = self::split($source, $separator instanceof RegExp ? $separator : self::str($separator), $limit === JsUndefined::Value ? null : self::toNumber($limit));
+        $result = self::split($source, $separator, $limit);
         $result->a = array_map(static fn ($value) => $value ?? JsUndefined::Value, $result->a);
         return $result;
     }
 
-    private static function dynamicStringMatch(string $source, RegExp $regexp): ?JsArray
-    {
-        if (!$regexp->global) { return self::dynamicRegExpExec($regexp, $source); }
-        $regexp->lastIndex = 0;
-        return self::strMatch($source, $regexp);
-    }
-
-    private static function dynamicRound(int|float $value): int|float
-    {
-        if (!is_finite((float) $value) || $value == 0) { return $value; }
-        if ($value < 0 && $value >= -0.5) { return -0.0; }
-        $floor = floor($value);
-        return self::n($value - $floor < 0.5 ? $floor : $floor + 1);
-    }
-
     public static function dynamicStaticCall(string $owner, string $method, JsArray $args): mixed
     {
+        Builtins::check($owner, $method, count($args->a));
         $a = $args->a;
         $get = static fn (int $i, mixed $default = JsUndefined::Value): mixed => array_key_exists($i, $a) ? $a[$i] : $default;
         if ($owner === 'Array') {
@@ -386,27 +532,32 @@ trait JsDynamic
             }
             if ($method === 'hasOwn') {
                 self::requirePresent($source); $key = self::key($get(1));
+                if ($source instanceof \Closure || $source instanceof JsClass) { throw new JsError('Object.hasOwn on functions is not supported', 'TypeError'); }
+                if ($source instanceof JsNamespace) {
+                    if (in_array($key, ['PI', 'E'], true) || Builtins::has($source->name, $key)) { return true; }
+                    if (in_array($key, ['toString', 'valueOf'], true)) { return false; }
+                    throw new JsError('Unsupported Math property ' . $key, 'TypeError');
+                }
+                if ($source instanceof JsError) {
+                    if ($key === 'stack') { throw new JsError('Error stack metadata is not supported', 'TypeError'); }
+                    return $key === 'message' && $source->hasMessage;
+                }
                 if ($key === 'length' && ($source instanceof JsArray || $source instanceof JsArguments || is_string($source))) { return true; }
                 if ($key === 'callee' && $source instanceof JsArguments || $key === 'lastIndex' && $source instanceof RegExp) { return true; }
                 return in_array($key, self::dynamicKeys($source)->a, true);
             }
             if ($method === 'fromEntries') {
-                $result = new JsObject();
-                foreach (self::dynamicIterable($source)->a as $entry) {
-                    if (!$entry instanceof JsArray && !$entry instanceof JsObject) { throw new JsError('Iterator value is not an entry object', 'TypeError'); }
-                    $result->p[self::key(self::dynamicGet($entry, '0'))] = self::dynamicGet($entry, '1');
-                }
-                return $result;
+                return self::fromEntries($source);
             }
         }
         if ($owner === 'Math') {
             $n = array_map(self::toNumber(...), $a);
             $x = $n[0] ?? NAN;
             return match ($method) {
-                'abs' => abs($x), 'floor' => self::n(floor($x)), 'ceil' => self::n(ceil($x)), 'trunc' => self::n($x < 0 ? ceil($x) : floor($x)),
-                'round' => self::dynamicRound($x),
+                'random' => self::random(), 'abs' => abs($x), 'floor' => self::n(floor($x)), 'ceil' => self::n(ceil($x)), 'trunc' => self::trunc($x),
+                'round' => self::round($x),
                 'min' => self::min(...$n), 'max' => self::max(...$n), 'pow' => self::pow($x, $n[1] ?? NAN),
-                'sqrt' => sqrt($x), 'sign' => is_nan((float) $x) || $x == 0 ? $x : ($x < 0 ? -1 : 1),
+                'log', 'exp' => self::mathTranscendental($method, $x), 'sqrt' => sqrt($x), 'sign' => self::sign($x),
                 default => throw new JsError('Unsupported Math method ' . $method, 'TypeError'),
             };
         }
@@ -438,15 +589,11 @@ trait JsDynamic
 
     public static function dynamicRegExpExec(RegExp $regexp, string $value): ?JsArray
     {
-        $offset = $regexp->global ? max(0, self::toInteger(self::toNumber($regexp->lastIndex))) : 0;
-        if ($offset > self::length($value)) { $regexp->lastIndex = 0; return null; }
-        $byteOffset = strlen(self::slice($value, 0, $offset));
-        $match = $regexp->matchAt($value, $byteOffset);
-        if ($match === null) { if ($regexp->global) { $regexp->lastIndex = 0; } return null; }
+        $match = $regexp->execMatch($value);
+        if ($match === null) { return null; }
         [$start, $end, $captures, $groups] = $match;
-        if ($regexp->global) { $regexp->lastIndex = self::length(substr($value, 0, $end)); }
         $result = new JsArray([substr($value, $start, $end - $start), ...array_map(static fn ($v) => $v ?? JsUndefined::Value, $captures)]);
-        $result->p = ['index' => self::length(substr($value, 0, $start)), 'input' => $value, 'groups' => $regexp->hasNamedGroups() ? new JsObject(array_map(static fn ($v) => $v ?? JsUndefined::Value, $groups)) : JsUndefined::Value];
+        $result->p = ['index' => self::length(substr($value, 0, $start)), 'input' => $value, 'groups' => $regexp->hasNamedGroups() ? new JsObject(array_map(static fn ($v) => $v ?? JsUndefined::Value, $groups), null, true) : JsUndefined::Value];
         return $result;
     }
 
@@ -454,13 +601,16 @@ trait JsDynamic
     {
         $a = $args->a;
         if ($constructor instanceof JsClass) { return $constructor->construct(...$a); }
+        if (is_string($constructor)) { Builtins::check('constructor', $constructor, count($a)); }
         if (in_array($constructor, ['Error', 'TypeError', 'RangeError'], true)) {
+            $message = array_key_exists(0, $a) ? $a[0] : JsUndefined::Value;
+            $text = $message === JsUndefined::Value ? '' : self::str($message);
             $options = $a[1] ?? JsUndefined::Value;
-            if ($options instanceof JsObject && array_key_exists('cause', $options->p)) {
+            if (($options instanceof JsObject || $options instanceof JsArray || $options instanceof JsArguments)
+                && (array_key_exists('cause', $options->p) || $options instanceof JsObject && ($options->class?->hasMethod('cause') ?? false))) {
                 throw new JsError('Error cause is not supported', 'TypeError');
             }
-            $message = array_key_exists(0, $a) ? $a[0] : JsUndefined::Value;
-            return new JsError($message === JsUndefined::Value ? '' : self::str($message), $constructor);
+            return new JsError($text, $constructor, $message !== JsUndefined::Value);
         }
         if ($constructor === 'RegExp') {
             $source = array_key_exists(0, $a) ? $a[0] : JsUndefined::Value;
@@ -477,7 +627,7 @@ trait JsDynamic
             if (!self::isNullish($a[0] ?? JsUndefined::Value)) {
                 foreach (self::dynamicIterable($a[0])->a as $value) {
                     if ($result instanceof JsSet) { $result->add($value); }
-                    elseif ($value instanceof JsArray || $value instanceof JsObject) { $result->set(self::dynamicGet($value, '0'), self::dynamicGet($value, '1')); }
+                    elseif ($value instanceof JsArray || $value instanceof JsArguments || $value instanceof JsObject) { $result->set(self::dynamicGet($value, '0'), self::dynamicGet($value, '1')); }
                     else { throw new JsError('Iterator value is not an entry object', 'TypeError'); }
                 }
             }
@@ -488,6 +638,7 @@ trait JsDynamic
 
     public static function dynamicRegExpCall(JsArray $args): RegExp
     {
+        Builtins::check('global', 'RegExp', count($args->a));
         if (($args->a[0] ?? null) instanceof RegExp && (!array_key_exists(1, $args->a) || $args->a[1] === JsUndefined::Value)) { return $args->a[0]; }
         return self::dynamicConstruct('RegExp', $args);
     }
@@ -498,12 +649,13 @@ trait JsDynamic
             if ($hint !== 'number') { throw new JsError('Date string coercion is not supported', 'TypeError'); }
             return $value->milliseconds;
         }
-        if ($value instanceof JsObject) {
+        if ($value instanceof JsObject || $value instanceof JsArray || $value instanceof JsArguments) {
             foreach ($hint === 'string' ? ['toString', 'valueOf'] : ['valueOf', 'toString'] as $method) {
                 if (array_key_exists($method, $value->p)) {
                     if (!$value->p[$method] instanceof \Closure) { continue; }
-                    $result = self::dynamicCall($value->p[$method], new JsArray());
-                } else { $result = $method === 'toString' ? '[object Object]' : $value; }
+                    $result = self::dynamicInvoke($value->p[$method], $value, new JsArray());
+                } elseif ($value instanceof JsObject && $value->nullPrototype) { continue; }
+                else { $result = self::dynamicCallMethod($value, $method, new JsArray(), true); }
                 if ($result === JsUndefined::Value || !is_object($result)) { return $result; }
             }
             throw new JsError('Cannot convert object to primitive value', 'TypeError');
@@ -521,11 +673,7 @@ trait JsDynamic
             return is_string($left) || is_string($right) ? self::str($left) . self::str($right) : self::add(self::toNumber($left), self::toNumber($right));
         }
         if (in_array($operator, ['<', '<=', '>', '>='], true) && is_string($left) && is_string($right)) {
-            // UTF-16LE byte order is not code-unit order.
-            $a = unpack('v*', self::units($left)); $b = unpack('v*', self::units($right));
-            $comparison = 0;
-            for ($i = 1, $n = min(count($a), count($b)); $i <= $n; $i++) { if ($a[$i] !== $b[$i]) { $comparison = $a[$i] <=> $b[$i]; break; } }
-            if ($comparison === 0) { $comparison = count($a) <=> count($b); }
+            $comparison = self::stringCompare($left, $right);
             return match ($operator) { '<' => $comparison < 0, '<=' => $comparison <= 0, '>' => $comparison > 0, '>=' => $comparison >= 0 };
         }
         $a = self::toNumber($left); $b = self::toNumber($right);
@@ -543,6 +691,8 @@ trait JsDynamic
         if ($ta === $tb) { return self::strictEq($a, $b); }
         if (is_bool($a)) { return self::looseEq((int) $a, $b); }
         if (is_bool($b)) { return self::looseEq($a, (int) $b); }
+        if ($ta === 'function' && ($tb === 'number' || $tb === 'string')) { return self::looseEq(self::dynamicPrimitive($a), $b); }
+        if ($tb === 'function' && ($ta === 'number' || $ta === 'string')) { return self::looseEq($a, self::dynamicPrimitive($b)); }
         if (($ta === 'number' && $tb === 'string') || ($ta === 'string' && $tb === 'number')) { return self::strictEq(self::toNumber($a), self::toNumber($b)); }
         if ($ta === 'object' && ($tb === 'string' || $tb === 'number')) { return self::looseEq(self::dynamicPrimitive($a), $b); }
         if ($tb === 'object' && ($ta === 'string' || $ta === 'number')) { return self::looseEq($a, self::dynamicPrimitive($b)); }

@@ -132,6 +132,8 @@ pub fn capture(fs: Rc<dyn Fs>, project: &Path, packages: bool) -> Result<Capture
             "hosted apps cannot install WordPress plugins; the host provides the platform",
         ));
     }
+    // TSX pages travel as their render artifact plus the inputs it was rendered from.
+    crate::pages::check(&*recording, &project, &built)?;
     let mut app = SourceBundle::default();
     let mut vendor = SourceBundle::default();
     let migration_dir = project.join("zero/migrations");
@@ -249,6 +251,10 @@ pub(crate) fn write_sources(project: &Path, destination: &Path, packages: bool) 
 
 fn is_vendor(path: &str) -> bool {
     path.split('/').any(|part| part == "node_modules")
+}
+
+pub(crate) fn check_input(path: &str) -> Result<(), Diag> {
+    safe_input(path)
 }
 
 fn safe_input(path: &str) -> Result<(), Diag> {
@@ -457,6 +463,7 @@ pub fn compile(
     if built.plugins.as_ref().is_some_and(|p| !p.plugins.is_empty()) {
         return Err(failure("hosted apps cannot install WordPress plugins"));
     }
+    let pages = crate::pages::check(&*fs, &root, &built)?;
     let mut seeds = Vec::new();
     for (name, collection) in &built.schema.collections {
         let Some(sync) = &collection.sync else { continue };
@@ -543,6 +550,9 @@ pub fn compile(
     )
     .map_err(io)?;
     crate::emit::emit_generated(assets, &migrations, &output.join("plugins"), &built).map_err(io)?;
+    if let Some(pages) = &pages {
+        crate::pages::emit(&output.join("plugins"), pages).map_err(io)?;
+    }
     let client = output.join("client");
     for (name, bytes) in &built.client_files {
         std::fs::create_dir_all(&client).map_err(io)?;
@@ -553,7 +563,7 @@ pub fn compile(
         .map(|p| (p.slug, p.version))
         .collect();
     let manifest = serde_json::json!({"format":"zero.hosted.v1", "compiler":VERSION, "app":built.schema.name,
-        "wordpress":crate::platform::WORDPRESS, "php":crate::platform::PHP, "requires":requirements, "appSourceSha256":manifest.app_sha256, "vendorSourceSha256":manifest.vendor_sha256});
+        "wordpress":crate::platform::WORDPRESS, "php":crate::platform::PHP, "requires":requirements, "pages":pages.as_ref().map(|p| format!("zero-pages-{}", p.app)), "appSourceSha256":manifest.app_sha256, "vendorSourceSha256":manifest.vendor_sha256});
     std::fs::write(
         output.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).unwrap(),

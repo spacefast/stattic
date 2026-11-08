@@ -31,10 +31,10 @@ final class Local
                 'restore' => self::restore($options),
                 default => throw new Failure('usage', 'Use inspect, publish, init, status, wp, backup or restore. See docs/deployment.md.'),
             };
-            echo json_encode(['data' => $data], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
+            echo \Zero\Json::encode(['data' => $data], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
             return 0;
         } catch (Failure $error) {
-            echo json_encode(['error' => ['code' => $error->problem, 'message' => $error->getMessage(), ...$error->context]], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
+            echo \Zero\Json::encode(['error' => ['code' => $error->problem, 'message' => $error->getMessage(), ...$error->context]], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
             return 1;
         } catch (\Throwable) {
             // Native errors can include SQL values, config contents or provider credentials.
@@ -377,7 +377,7 @@ final class Local
             $metadata = ['version' => 1, 'adapter' => self::ADAPTER, 'createdAt' => gmdate('c'), 'siteIdentity' => Files::json($root . '/owner.json')['id'],
                 'scope' => 'offline WordPress SQLite database, whole installed code/config and local uploads; process environment excluded',
                 'files' => $files, 'diagnostics' => $diagnostics, 'artifact' => is_file($root . '/artifact.json') ? Files::json($root . '/artifact.json') : null];
-            $encoded = json_encode($metadata, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+            $encoded = \Zero\Json::encode($metadata, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
             Files::require(strlen($encoded) <= 16_777_216, 'metadata_limit', 'Backup inventory exceeds the supported metadata limit.');
             $archive = $scratch . '/snapshot.zip';
             $zip = new \ZipArchive();

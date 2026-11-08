@@ -99,7 +99,7 @@ fn value_ts_with(c: &Column, mode: impl Into<Mode>, json_type: &dyn Fn(&Column) 
         ColType::Email | ColType::Url | ColType::Slug | ColType::RichText | ColType::Timestamp | ColType::Date => {
             "string".into()
         }
-        ColType::Json => ty_ts(&json_type(c), &[]),
+        ColType::Json => ty_ts(&crate::types::json_wire_type(&json_type(c)), &[]),
         ColType::MediaList => "number[]".into(),
         ColType::Select => format!(
             "({})[]",
@@ -452,7 +452,7 @@ pub fn types_ts(schema: &Schema, results: &HashMap<String, Ty>) -> String {
         }
         let out = results
             .get(&a.name)
-            .map(|t| ty_ts(t, &rows))
+            .map(|t| ty_ts(&crate::types::json_wire_type(t), &rows))
             .unwrap_or_else(|| "unknown".into());
         let _ = writeln!(s, "export type {n}Output = {out};\n");
     }

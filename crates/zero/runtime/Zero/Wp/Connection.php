@@ -361,7 +361,7 @@ final class Connection
 
                 return $context;
             },
-            static fn (?array $context, int $rows): ?string => $context === null ? null : json_encode((object) $context, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            static fn (?array $context, int $rows): ?string => $context === null ? null : \Zero\Json::encode((object) $context, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
             2,
         );
     }

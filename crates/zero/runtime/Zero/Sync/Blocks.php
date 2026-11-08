@@ -52,7 +52,7 @@ final class Blocks
 
     private static function attributes(array $attrs): string
     {
-        $json = (string) json_encode($attrs, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $json = (string) \Zero\Json::encode($attrs, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         return strtr($json, ['--' => '\\u002d\\u002d', '<' => '\\u003c', '>' => '\\u003e', '&' => '\\u0026', '\\"' => '\\u0022']);
     }

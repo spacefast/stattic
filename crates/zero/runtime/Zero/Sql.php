@@ -30,7 +30,7 @@ final class Sql
     private array $relationGuards = [];
     private bool $trusted = false;
 
-    /** @param ?\Closure(string): list<array> $guardsFor the viewer's read guards per relation target (null = trusted) */
+    /** @param ?\Closure(string): list<array|SqlPredicate> $guardsFor the viewer's read guards per relation target (null = trusted) */
     private function __construct(private readonly Schema $schema, private readonly Store $store, private readonly ?\Closure $guardsFor = null)
     {
         $this->d = $store->dialect();
@@ -48,7 +48,7 @@ final class Sql
      * the same name share one limit/offset window (a translation group's rows, Db::attach).
      *
      * @param ?array{0: string, 1: list<int|float|string|null>, 2?: list<string>} $partition
-     * @param list<array> $guards
+     * @param list<array|SqlPredicate> $guards
      * @return array{sql: string, params: list<int|float|string|null>}
      */
     public static function select(Schema $schema, Store $store, string $collection, array $opts, ?array $partition = null, string $ptr = '', array $guards = [], ?\Closure $guardsFor = null): array
@@ -492,8 +492,12 @@ final class Sql
      * An access/draft guard. Guards are the app's own rules, so relation filters inside them are
      * trusted; only the viewer's filters are confined to rows the viewer can read.
      */
-    private function guard(string $collection, array $g, string $alias): string
+    private function guard(string $collection, array|SqlPredicate $g, string $alias): string
     {
+        if ($g instanceof SqlPredicate) {
+            array_push($this->params, ...$g->params);
+            return '(' . $this->sub($g->sql, $alias, '') . ')';
+        }
         [$was, $this->trusted] = [$this->trusted, true];
         try {
             return '(' . $this->filter($collection, $g, $alias, '') . ')';

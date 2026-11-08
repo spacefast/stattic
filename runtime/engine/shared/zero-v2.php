@@ -53,6 +53,9 @@ function _stattic_zero_v2_mount(): void
     if (!is_string($name) || preg_match('/\A[a-z0-9-]+\z/D', $name) !== 1) throw new RuntimeException('Invalid compiled Zero manifest.');
     $variables = is_file($root . '/variables.json') ? _stattic_runtime_read_json_strict($root . '/variables.json') : [];
     if (!is_array($variables)) throw new RuntimeException('Invalid managed Zero variables.');
+    // mail.send without `from` uses noreply@ZERO_MAIL_SENDER_DOMAIN. Name the route's sending domain
+    // (the one the broker requires), so the default holds on every host the Space answers on.
+    $variables += _stattic_zero_v2_mail_variables();
     // Restrict lookup before feature registration, schema loading, or app boot.
     // An older version without a snapshot gets an empty scope, never host values.
     require_once $root . '/plugins/zero-runtime/zero/Env.php';
@@ -80,6 +83,60 @@ function _stattic_zero_v2_mount(): void
     _stattic_zero_v2_configure_spacefast_provider($root);
     require_once __DIR__ . '/../runtime/zero-v2-realtime.php';
     _stattic_zero_v2_register_realtime($root);
+    // A managed app's mail.send refuses until the host supplies its transport.
+    add_filter('zero_mail_transport', static fn (mixed $accepted, array $message): bool => _stattic_zero_v2_mail_send($message), 10, 2);
+}
+
+/** The Space overlay for the selected Space, or null when routing is unavailable. */
+function _stattic_zero_v2_overlay(): ?array
+{
+    require_once __DIR__ . '/artifacts.php';
+    $privateRoot = (string) ($GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? '');
+    $spaceId = (string) ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? '');
+    if ($privateRoot === '' || !_stattic_id_valid($spaceId)) return null;
+    $overlay = _stattic_v4_overlay($privateRoot, $spaceId, _stattic_runtime_read_json_strict($privateRoot . '/spaces/' . $spaceId . '/space.json'));
+    return is_array($overlay) ? $overlay : null;
+}
+
+/** Host-owned Zero variables for mail: the route's sending domain, when one is set. */
+function _stattic_zero_v2_mail_variables(): array
+{
+    $domain = _stattic_zero_v2_overlay()['email']['senderDomain'] ?? null;
+    return is_string($domain) && $domain !== '' ? ['ZERO_MAIL_SENDER_DOMAIN' => strtolower(trim($domain))] : [];
+}
+
+/**
+ * Hand one queued mail.send message to the Space's mail path: the same service
+ * broker frame sf_email() sends. The broker checks the sender's domain, and
+ * space-mail.php reserves the daily recipient allowance before wp_mail().
+ * The route's email and billing settings are read at send time, so a demoted
+ * domain or a lowered allowance applies to messages already queued.
+ */
+function _stattic_zero_v2_mail_send(array $message): bool
+{
+    require_once __DIR__ . '/native-process.php';
+    require_once __DIR__ . '/functions-wire.generated.php';
+    $overlay = _stattic_zero_v2_overlay();
+    if ($overlay === null) throw new RuntimeException('Space mail routing is unavailable.');
+    $privateRoot = (string) $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'];
+    $spaceId = (string) $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'];
+    // The broker environment names the usage and WordPress roots from this binding.
+    if (_stattic_access_private_root() === '') _stattic_access_private_root($privateRoot);
+    $env = _stattic_service_broker_env(['spaceId' => $spaceId, 'invocationId' => ''], [
+        'billing' => is_array($overlay['billing'] ?? null) ? $overlay['billing'] : [],
+        'email' => is_array($overlay['email'] ?? null) ? $overlay['email'] : null,
+    ]) + [SPACEFAST_FUNCTIONS_SERVICE_BROKER_GRANT_ENV => 'email.send'];
+    $frame = json_encode(['service' => 'email', 'operation' => 'send', 'payload' => (object) $message], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+    $result = _stattic_runtime_run_subprocess([_stattic_runtime_native_binary(), 'service-broker'], $env, $frame, null, 15000, 1048576, 65536);
+    $answer = json_decode(trim((string) $result['stdout']), true);
+    if (!$result['spawned'] || $result['timedOut'] || $result['exitCode'] !== 0 || !is_array($answer)) {
+        throw new RuntimeException('The Space mail broker did not answer.');
+    }
+    // A refusal names its code in the job's lastError; false is a transport or allowance decline.
+    if (($answer['ok'] ?? false) !== true) {
+        throw new RuntimeException('Space mail refused: ' . (is_string($answer['code'] ?? null) ? $answer['code'] : 'service_refused'));
+    }
+    return ($answer['result'] ?? null) === true;
 }
 
 /** Connector integration supplies Providers\Spacefast::configure here after mount, before handlers. */
@@ -112,11 +169,12 @@ function _stattic_zero_v2_initialize(string $privateRoot, string $spaceId, strin
     if (!class_exists(\Zero\Wp\Runtime::class, false) || !\Zero\Wp\Runtime::managed()) throw new RuntimeException('The managed Zero runtime did not load.');
     \Zero\Wp\Runtime::initialize();
     if (is_dir($root . '/seed')) {
-        $result = _stattic_zero_v2_wp_command($privateRoot, $spaceId, $versionId, ['seed', '--records=' . $root . '/seed'], true);
-        $output = json_decode($result['stdout'], true);
-        $receipt = is_array($output) ? ($output['data'] ?? null) : null;
-        if (!$result['spawned'] || $result['timedOut'] || $result['exitCode'] !== 0 || !is_array($receipt)) {
-            $error = is_array($output) && is_array($output['error'] ?? null) ? $output['error'] : [];
+        // In-process, inside the WordPress this finalize already booted. Finalize runs in a
+        // php-fpm worker on the box, whose namespace has no `wp` or `php` to spawn.
+        try {
+            $receipt = \Zero\Sync\Seed::run(\Zero\Wp\Runtime::plugin(), $root . '/seed');
+        } catch (Throwable $failure) {
+            $error = \Zero\App::problem($failure);
             _stattic_problem_response(422, 'zero_v2_seed_failed', 'The version content seed failed. Correct the source record and publish again.', ['pointer' => $error['pointer'] ?? '/seed', 'details' => $error]);
         }
         _stattic_runtime_write_json_atomic($root . '/seed-receipt.json', $receipt);
@@ -188,15 +246,7 @@ function _stattic_zero_v2_shared_client(string $versionRoot, string $path, strin
         ['Cache-Control' => 'private, no-store', 'X-Content-Type-Options' => 'nosniff', 'ETag' => '"' . hash('sha256', $body) . '"']);
 }
 
-/** Run the selected version's CLI module, never the host's Zero installation. */
-function _stattic_zero_v2_wp_command(string $privateRoot, string $spaceId, string $versionId, array $arguments, bool $initializing = false): array
-{
-    $bootstrap = _stattic_zero_v2_wp_bootstrap($privateRoot, $spaceId, $versionId, $initializing);
-    $wpLoad = realpath(dirname($privateRoot, 2) . '/wp-load.php');
-    $wpRoot = is_string($wpLoad) ? dirname($wpLoad) : dirname($privateRoot, 2);
-    return _stattic_runtime_run_subprocess(['wp', '--path=' . $wpRoot, '--exec=' . $bootstrap, 'zero', ...$arguments], null, null, dirname($privateRoot, 2), 310000, 8 * 1024 * 1024, 64 * 1024);
-}
-
+/** WP-CLI bootstrap for the scheduled worker, which runs from cron in the CLI namespace. */
 function _stattic_zero_v2_wp_bootstrap(string $privateRoot, string $spaceId, string $versionId, bool $initializing = false): string
 {
     return 'require_once ' . var_export(__DIR__ . '/context.php', true) . ';'

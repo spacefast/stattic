@@ -23,6 +23,7 @@ pub enum Slot {
     Access { owner: Owner, op: String },
     FieldAccess { at: ColPath, op: String },
     JobHandler { job: String },
+    RouteHandler { route: String },
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,7 @@ const CONFIG_KEYS: &[&str] = &[
     "hooks",
     "actions",
     "jobs",
+    "routes",
     "webhooks",
     "files",
     "media",
@@ -531,6 +533,7 @@ pub fn extract(config: &Value, ev: &mut Evaluator<'_>, config_span: Span, defaul
         }
     }
     phase2_jobs(&cfg_map, ev, config_span, &mut out)?;
+    routes(&cfg_map, config_span, &mut out)?;
     validate_phase2(&cfg_map, ev, config_span, &mut out)?;
     Ok(out)
 }
@@ -1491,6 +1494,7 @@ fn fn_name(owner: &Owner, what: &str, path: &[String]) -> String {
         Owner::Action(a) => format!("action__{a}"),
         Owner::Job(j) => format!("job__{j}"),
         Owner::FileBucket(f) => format!("files__{f}"),
+        Owner::Route(r) => format!("route__{r}"),
     };
     format!("{base}__{what}__{}", path.join("__"))
 }
@@ -2661,6 +2665,155 @@ fn phase2_jobs(cfg: &IndexMap<String, Value>, ev: &mut Evaluator<'_>, span: Span
         );
     }
     Ok(())
+}
+
+/// `routes: { name: route({ method, path, access | signature, handler }) }` (docs/config-api.md#http-routes).
+fn routes(cfg: &IndexMap<String, Value>, span: Span, out: &mut Extracted) -> Result<()> {
+    let Some(v) = cfg.get("routes").filter(|v| !matches!(v, Value::Undef)) else {
+        return Ok(());
+    };
+    let mut shapes: Vec<(String, String, String)> = Vec::new();
+    for (name, value) in object(v, span, "routes")? {
+        let Value::Route(r) = value else {
+            return Err(Diag::new(span, format!("routes.{name} must use route()"))
+                .help("write route({ method, path, access, handler })"));
+        };
+        if !valid_ident(&name) {
+            return Err(Diag::new(r.span, format!("\"{name}\" isn't a valid route name")).help("use an identifier"));
+        }
+        let o = object(&r.config, r.span, "route")?;
+        keys(
+            &o,
+            &["method", "path", "access", "signature", "handler"],
+            r.span,
+            "route",
+        )?;
+        let method = string(o.get("method"), r.span, "route method")?;
+        if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+            return Err(Diag::new(r.span, format!("route method {method} is not supported"))
+                .help("use GET, POST, PUT, PATCH or DELETE; GET also answers HEAD"));
+        }
+        let path = route_path(&string(o.get("path"), r.span, "route path")?, r.span)?;
+        let shape = path
+            .split('/')
+            .map(|s| {
+                if s.starts_with(':') {
+                    ":"
+                } else if s.starts_with('*') {
+                    "*"
+                } else {
+                    s
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        if let Some((other, ..)) = shapes.iter().find(|(_, m, s)| *m == method && *s == shape) {
+            return Err(Diag::new(
+                r.span,
+                format!("routes.{name} and routes.{other} both match {method} {path}"),
+            )
+            .help("give each method and path one route"));
+        }
+        shapes.push((name.clone(), method.clone(), shape));
+        let owner = Owner::Route(name.clone());
+        let (access, signature) = match (
+            o.get("access").filter(|v| !matches!(v, Value::Undef)),
+            o.get("signature").filter(|v| !matches!(v, Value::Undef)),
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(Diag::new(r.span, "signature cannot be combined with access")
+                    .help("remove access; signature authenticates the caller"));
+            }
+            (None, None) => {
+                return Err(Diag::new(r.span, format!("routes.{name} needs access or signature"))
+                    .help("a route is public only when it says so: access: \"anyone\""));
+            }
+            (Some(a), None) => (
+                access_rule(a, r.span, &owner, "access", format!("route__{name}__access"), out)?,
+                None,
+            ),
+            (None, Some(s)) => (Access::anyone(), Some(signature_config(s, r.span)?)),
+        };
+        let Some(Value::Closure(handler)) = o.get("handler") else {
+            return Err(Diag::new(r.span, format!("routes.{name} needs a handler function"))
+                .help("add handler(req, ctx) { return { status, headers, body }; }"));
+        };
+        out.roots.push(Root {
+            closure: handler.clone(),
+            slot: Slot::RouteHandler { route: name.clone() },
+            name: format!("route__{name}"),
+        });
+        out.schema.routes.insert(
+            name,
+            crate::schema::Route {
+                method,
+                path,
+                handler: String::new(),
+                access,
+                signature,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// First segments WordPress, Zero and the host own; a route may not shadow them.
+const RESERVED_ROUTE_FIRST: &[&str] = &[
+    ".well-known",
+    "__spacefast",
+    "__zero",
+    "identity",
+    "index.php",
+    "wp-config.php",
+];
+
+fn route_path(path: &str, span: Span) -> Result<String> {
+    let bad = |why: &str| {
+        Diag::new(span, format!("route path {path:?} {why}")).help(
+            "write an absolute path of literal segments, :name parameters and an optional last *rest, like /api/feed.json, /hooks/:provider or /files/*path",
+        )
+    };
+    let Some(rest) = path.strip_prefix('/') else {
+        return Err(bad("must start with /"));
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() {
+        return Err(bad("cannot be the site root; the root belongs to pages or the theme"));
+    }
+    let mut params = std::collections::HashSet::new();
+    let segments: Vec<&str> = rest.split('/').collect();
+    for (i, &segment) in segments.iter().enumerate() {
+        if let Some(param) = segment.strip_prefix('*') {
+            // `*name` takes the rest of the path: one or more segments, so it must come last.
+            if i + 1 != segments.len() {
+                return Err(bad("has a *catch-all that is not the last segment"));
+            }
+            if !valid_ident(param) || !params.insert(param) {
+                return Err(bad("has an invalid or repeated *catch-all name"));
+            }
+        } else if let Some(param) = segment.strip_prefix(':') {
+            if !valid_ident(param) || !params.insert(param) {
+                return Err(bad("has an invalid or repeated :parameter"));
+            }
+        } else if segment.is_empty()
+            || segment == "."
+            || segment == ".."
+            || !segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._~-".contains(&b))
+        {
+            return Err(bad("has an invalid segment"));
+        }
+    }
+    let first = rest.split('/').next().unwrap_or_default().to_ascii_lowercase();
+    if first.starts_with(':')
+        || first.starts_with('*')
+        || crate::pages::RESERVED_FIRST.contains(&first.as_str())
+        || RESERVED_ROUTE_FIRST.contains(&first.as_str())
+    {
+        return Err(bad("starts with a segment WordPress or Zero owns"));
+    }
+    Ok(format!("/{rest}"))
 }
 
 fn kebab(name: &str) -> String {

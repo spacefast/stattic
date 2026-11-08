@@ -78,10 +78,23 @@ final class WpPostStore implements Store
             return $this->visibility[$key];
         }
         $spec = $this->schema->collection($collection);
+        if ($viewer->user === null) {
+            $guard = $this->passwordGuard($collection, $viewer, $spec);
+            // Empty guards also certify unrestricted visibility to unique-write checks
+            // and the native REST controller. A predicate that cannot hide a row must
+            // retain that meaning without materializing every readable primary key.
+            $hidden = $this->db->run(
+                'SELECT 1 FROM `' . $this->db->wpdb()->posts . '` p WHERE p.post_type = ? AND NOT ('
+                . str_replace('{a}', 'p', $guard->sql) . ') LIMIT 1',
+                [$spec['wp']['postType'], ...$guard->params],
+            );
+            return $this->visibility[$key] = $hidden === [] ? [] : [$guard];
+        }
         $hidden = [];
+        $acceptedPasswords = [];
         $posts = $this->db->run(
-            'SELECT ID FROM `' . $this->db->wpdb()->posts . '` WHERE post_type = ? AND post_password NOT IN (?, ?)',
-            [$spec['wp']['postType'], '', '0'],
+            'SELECT ID FROM `' . $this->db->wpdb()->posts . '` WHERE post_type = ? AND HEX(post_password) NOT IN (?, ?)',
+            [$spec['wp']['postType'], '', '30'],
         );
         _prime_post_caches(array_map('intval', array_column($posts, 'ID')), false, false);
         foreach ($posts as $row) {
@@ -90,13 +103,40 @@ final class WpPostStore implements Store
             if (!$post instanceof \WP_Post) {
                 throw new HttpError(503, 'storage_unavailable', 'Post storage is unavailable. Please retry.');
             }
-            if (!$this->passwordAccepted($post, $collection, $viewer)
+            if (!($acceptedPasswords[$post->post_password] ??= $this->passwordAccepted($post, $collection, $viewer))
                 && ($viewer->user === null || !user_can($viewer->user['id'], 'edit_post', $id))) {
                 $hidden[] = $id;
             }
         }
 
         return $this->visibility[$key] = $hidden === [] ? [] : [[$spec['primaryKey'] => ['notIn' => $hidden]]];
+    }
+
+    private function passwordGuard(string $collection, \Zero\Viewer $viewer, array $spec): \Zero\SqlPredicate
+    {
+        // HEX preserves byte equality, including case and trailing spaces, on both MySQL
+        // and the SQLite translator. The site's text collation must not unlock a password.
+        $accepted = ['', '30']; // WordPress treats exactly '' and '0' as public.
+        $proof = $this->readPassword;
+        if ($proof !== null && $proof['collection'] === $collection && $proof['viewer']->user === $viewer->user) {
+            $accepted[] = strtoupper(bin2hex($proof['password']));
+        }
+        $cookie = $_COOKIE['wp-postpass_' . COOKIEHASH] ?? null;
+        if (is_string($cookie) && str_starts_with($hash = wp_unslash($cookie), '$P$B')) {
+            require_once ABSPATH . WPINC . '/class-phpass.php';
+            $hasher = new \PasswordHash(8, true);
+            $passwords = $this->db->run(
+                'SELECT DISTINCT HEX(post_password) AS password FROM `' . $this->db->wpdb()->posts . '` WHERE post_type = ? AND HEX(post_password) NOT IN (?, ?)',
+                [$spec['wp']['postType'], '', '30'],
+            );
+            foreach ($passwords as $row) {
+                if ($hasher->CheckPassword(hex2bin($row['password']), $hash)) {
+                    $accepted[] = $row['password'];
+                }
+            }
+        }
+        $accepted = array_values(array_unique($accepted));
+        return new \Zero\SqlPredicate('HEX({a}.post_password) IN (' . implode(', ', array_fill(0, count($accepted), '?')) . ')', $accepted);
     }
 
     /** Native REST's password proof belongs only to its collection and explicit viewer, including nested dispatches. */

@@ -40,6 +40,17 @@ impl Lowerer {
         Err(d)
     }
 
+    fn binding_name(&self, name: &str, span: oxc_span::Span) -> Result<String> {
+        if name == "undefined" {
+            return self.unsupported(
+                span,
+                "bindings named `undefined`",
+                "choose a different name; undefined is the built-in missing value",
+            );
+        }
+        Ok(name.to_string())
+    }
+
     pub fn program(&self, p: &a::Program<'_>) -> Result<Vec<Stmt>> {
         let mut out = Vec::new();
         for s in &p.body {
@@ -83,20 +94,20 @@ impl Lowerer {
                             };
                             specs.push(ImportSpec {
                                 imported,
-                                local: s.local.name.to_string(),
+                                local: self.binding_name(s.local.name.as_str(), s.local.span)?,
                                 type_only: type_only || s.import_kind == a::ImportOrExportKind::Type,
                                 span: self.sp(s.span),
                             });
                         }
                         a::ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => specs.push(ImportSpec {
                             imported: ImportName::Default,
-                            local: s.local.name.to_string(),
+                            local: self.binding_name(s.local.name.as_str(), s.local.span)?,
                             type_only,
                             span: self.sp(s.span),
                         }),
                         a::ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => specs.push(ImportSpec {
                             imported: ImportName::Namespace,
-                            local: s.local.name.to_string(),
+                            local: self.binding_name(s.local.name.as_str(), s.local.span)?,
                             type_only,
                             span: self.sp(s.span),
                         }),
@@ -450,7 +461,10 @@ impl Lowerer {
                                 "declare a key identifier",
                             );
                         };
-                        (Some(kind), self.mk(id.span, ExprKind::Ident(id.name.to_string())))
+                        (
+                            Some(kind),
+                            self.mk(id.span, ExprKind::Ident(self.binding_name(id.name.as_str(), id.span)?)),
+                        )
                     }
                     target => {
                         let Some(target) = target.as_simple_assignment_target() else {
@@ -496,7 +510,7 @@ impl Lowerer {
                             None => None,
                             Some(p) => match &p.pattern {
                                 a::BindingPattern::BindingIdentifier(id) => {
-                                    Some((id.name.to_string(), self.sp(id.span)))
+                                    Some((self.binding_name(id.name.as_str(), id.span)?, self.sp(id.span)))
                                 }
                                 _ => {
                                     return self.unsupported(
@@ -520,10 +534,18 @@ impl Lowerer {
             a::Statement::SwitchStatement(s) => {
                 let mut cases = Vec::new();
                 for c in &s.cases {
-                    cases.push((
-                        c.test.as_ref().map(|e| self.expr(e)).transpose()?,
-                        self.block(&c.consequent)?,
-                    ));
+                    let body = self.block(&c.consequent)?;
+                    if body.iter().any(|stmt| {
+                        matches!(stmt, Stmt::Decl { kind, .. } if *kind != DeclKind::Var)
+                            || matches!(stmt, Stmt::Func(_))
+                    }) {
+                        return self.unsupported(
+                            c.span,
+                            "lexical declarations directly under switch cases",
+                            "wrap the case body in braces; switch cases otherwise share one lexical scope",
+                        );
+                    }
+                    cases.push((c.test.as_ref().map(|e| self.expr(e)).transpose()?, body));
                 }
                 Stmt::Switch {
                     disc: self.expr(&s.discriminant)?,
@@ -531,7 +553,13 @@ impl Lowerer {
                     span: self.sp(s.span),
                 }
             }
-            a::Statement::LabeledStatement(l) => return self.unsupported(l.span, "labels", ""),
+            a::Statement::LabeledStatement(l) => {
+                return self.unsupported(
+                    l.span,
+                    "labels",
+                    "extract a helper and return early, or use a boolean flag to leave nested loops",
+                );
+            }
             a::Statement::WithStatement(w) => return self.unsupported(w.span, "`with`", ""),
             a::Statement::DebuggerStatement(d) => return self.unsupported(d.span, "`debugger`", ""),
             a::Statement::EmptyStatement(_) => Stmt::Block(vec![]),
@@ -566,6 +594,7 @@ impl Lowerer {
         let Some(id) = &c.id else {
             return self.unsupported(c.span, "anonymous classes", "name the class");
         };
+        self.binding_name(id.name.as_str(), id.span)?;
         let base = match &c.heritage {
             None => None,
             Some(h) => match &h.expression {
@@ -809,6 +838,9 @@ impl Lowerer {
     }
 
     fn function_inner(&self, f: &a::Function<'_>) -> Result<Rc<Func>> {
+        if let Some(id) = &f.id {
+            self.binding_name(id.name.as_str(), id.span)?;
+        }
         if f.generator {
             return self.unsupported(f.span, "generators", "return an array");
         }
@@ -821,11 +853,14 @@ impl Lowerer {
         }
         let params = self.params(&f.params, context);
         self.class_context.set(context);
+        let params = params?;
+        let body = FnBody::Block(self.block(&body.statements)?);
+        check_parameter_defaults(&params, &body)?;
         Ok(Rc::new(Func {
             name: f.id.as_ref().map(|i| i.name.to_string()),
             is_arrow: false,
-            params: params?,
-            body: FnBody::Block(self.block(&body.statements)?),
+            params,
+            body,
             is_async: f.r#async,
             ret: f
                 .return_type
@@ -843,10 +878,12 @@ impl Lowerer {
             Some(e) => FnBody::Expr(self.expr(e)?),
             None => FnBody::Block(self.block(&f.get_function_body().expect("arrow body").statements)?),
         };
+        let params = self.params(&f.params, false)?;
+        check_parameter_defaults(&params, &body)?;
         Ok(Rc::new(Func {
             name: None,
             is_arrow: true,
-            params: self.params(&f.params, false)?,
+            params,
             body,
             is_async: f.r#async,
             ret: f
@@ -898,7 +935,9 @@ impl Lowerer {
 
     fn pattern(&self, p: &a::BindingPattern<'_>) -> Result<Pat> {
         Ok(match p {
-            a::BindingPattern::BindingIdentifier(id) => Pat::Id(id.name.to_string(), self.sp(id.span)),
+            a::BindingPattern::BindingIdentifier(id) => {
+                Pat::Id(self.binding_name(id.name.as_str(), id.span)?, self.sp(id.span))
+            }
             a::BindingPattern::ObjectPattern(o) => {
                 let mut props = Vec::new();
                 for prop in &o.properties {
@@ -911,7 +950,9 @@ impl Lowerer {
                 let rest = match &o.rest {
                     None => None,
                     Some(r) => match &r.argument {
-                        a::BindingPattern::BindingIdentifier(id) => Some((id.name.to_string(), self.sp(id.span))),
+                        a::BindingPattern::BindingIdentifier(id) => {
+                            Some((self.binding_name(id.name.as_str(), id.span)?, self.sp(id.span)))
+                        }
                         _ => return self.unsupported(r.span, "nested rest patterns", ""),
                     },
                 };
@@ -929,7 +970,9 @@ impl Lowerer {
                 let rest = match &arr.rest {
                     None => None,
                     Some(r) => match &r.argument {
-                        a::BindingPattern::BindingIdentifier(id) => Some((id.name.to_string(), self.sp(id.span))),
+                        a::BindingPattern::BindingIdentifier(id) => {
+                            Some((self.binding_name(id.name.as_str(), id.span)?, self.sp(id.span)))
+                        }
                         _ => return self.unsupported(r.span, "nested rest patterns", ""),
                     },
                 };
@@ -1026,6 +1069,13 @@ impl Lowerer {
                                     "use a plain property or a function",
                                 );
                             }
+                            if !p.computed
+                                && !p.shorthand
+                                && !p.method
+                                && p.key.static_name().as_deref() == Some("__proto__")
+                            {
+                                return self.unsupported(p.span, "prototype setter syntax", "use a computed ['__proto__'] key for an own data property; custom prototypes aren't supported");
+                            }
                             let key = if p.computed {
                                 PropKey::Computed(self.expr(p.key.to_expression())?)
                             } else {
@@ -1053,7 +1103,16 @@ impl Lowerer {
                 self.mk(span, ExprKind::Object(props))
             }
             E::ArrowFunctionExpression(f) => self.mk(span, ExprKind::Func(self.arrow(f)?)),
-            E::FunctionExpression(f) => self.mk(span, ExprKind::Func(self.function(f)?)),
+            E::FunctionExpression(f) => {
+                if f.id.is_some() {
+                    return self.unsupported(
+                        f.span,
+                        "named function expressions",
+                        "use an anonymous function expression or a function declaration",
+                    );
+                }
+                self.mk(span, ExprKind::Func(self.function(f)?))
+            }
             E::ParenthesizedExpression(p) => self.expr(&p.expression)?,
             E::UnaryExpression(u) => {
                 let op = match u.operator {
@@ -1334,7 +1393,7 @@ impl Lowerer {
             T::TSNullKeyword(_) => TyAnn::Null,
             T::TSUndefinedKeyword(_) => TyAnn::Undefined,
             T::TSVoidKeyword(_) => TyAnn::Void,
-            T::TSAnyKeyword(_) => TyAnn::Any,
+            T::TSAnyKeyword(k) => TyAnn::Any(self.sp(k.span)),
             T::TSUnknownKeyword(_) => TyAnn::Unknown,
             T::TSNeverKeyword(_) => TyAnn::Never,
             T::TSTypePredicate(p) => {
@@ -1419,7 +1478,7 @@ impl Lowerer {
                         .as_ref()
                         .map(|t| self.ty(&t.type_annotation))
                         .transpose()?;
-                    params.push((ann.unwrap_or(TyAnn::Any), p.optional));
+                    params.push((ann.unwrap_or(TyAnn::Any(self.sp(p.span))), p.optional));
                 }
                 TyAnn::Fn(params, Box::new(self.ty(&f.return_type.type_annotation)?))
             }
@@ -1507,7 +1566,7 @@ impl Lowerer {
                     };
                     let ty = match &p.type_annotation {
                         Some(t) => self.ty(&t.type_annotation)?,
-                        None => TyAnn::Any,
+                        None => TyAnn::Any(self.sp(p.span)),
                     };
                     fields.push((key.to_string(), ty, p.optional));
                 }
@@ -1559,11 +1618,11 @@ impl Lowerer {
                             .as_ref()
                             .map(|t| self.ty(&t.type_annotation))
                             .transpose()?;
-                        params.push((ann.unwrap_or(TyAnn::Any), p.optional));
+                        params.push((ann.unwrap_or(TyAnn::Any(self.sp(p.span))), p.optional));
                     }
                     let ret = match &ms.return_type {
                         Some(t) => self.ty(&t.type_annotation)?,
-                        None => TyAnn::Any,
+                        None => TyAnn::Any(self.sp(ms.span)),
                     };
                     fields.push((key.to_string(), TyAnn::Fn(params, Box::new(ret)), ms.optional));
                 }
@@ -1600,4 +1659,249 @@ fn contains_constructor_return(body: &[Stmt]) -> bool {
         Stmt::Switch { cases, .. } => cases.iter().any(|(_, b)| contains_constructor_return(b)),
         _ => false,
     })
+}
+
+fn check_parameter_pattern(pattern: &Pat, uninitialized: &[(&str, Span)], allow_functions: bool) -> Result<()> {
+    match pattern {
+        Pat::Default(inner, value) => {
+            check_parameter_default(value, uninitialized, allow_functions)?;
+            check_parameter_pattern(inner, uninitialized, allow_functions)?;
+        }
+        Pat::Obj { props, .. } => {
+            for (_, value) in props {
+                check_parameter_pattern(value, uninitialized, allow_functions)?;
+            }
+        }
+        Pat::Arr { elems, .. } => {
+            for value in elems.iter().flatten() {
+                check_parameter_pattern(value, uninitialized, allow_functions)?;
+            }
+        }
+        Pat::Id(..) => {}
+    }
+    Ok(())
+}
+
+fn check_parameter_default(value: &Expr, uninitialized: &[(&str, Span)], allow_functions: bool) -> Result<()> {
+    let children: Vec<&Expr> = match &value.kind {
+        ExprKind::Func(function) if allow_functions => {
+            for parameter in &function.params {
+                if let Some(default) = &parameter.default {
+                    check_parameter_default(default, uninitialized, false)?;
+                }
+                check_parameter_pattern(&parameter.pat, uninitialized, false)?;
+            }
+            match &function.body {
+                FnBody::Expr(value) => check_parameter_default(value, uninitialized, false)?,
+                FnBody::Block(body) => check_parameter_statements(body, uninitialized)?,
+            }
+            return Ok(());
+        }
+        ExprKind::Func(_) | ExprKind::Class(_) => {
+            return Err(Diag::new(
+                value.span,
+                "parameter defaults that create functions with body bindings or classes aren't supported",
+            )
+            .help("define the function or class outside the parameter list and pass its name"));
+        }
+        ExprKind::Ident(name) if uninitialized.iter().any(|(binding, _)| *binding == name) => {
+            return Err(Diag::new(
+                value.span,
+                "parameter defaults can't reference the current or a later parameter",
+            )
+            .help("initialize that value in the function body or pass it explicitly"));
+        }
+        ExprKind::Array(values) => values
+            .iter()
+            .map(|v| match v {
+                ArrEl::Item(v) | ArrEl::Spread(v) => v,
+            })
+            .collect(),
+        ExprKind::Object(properties) => {
+            let mut children = Vec::new();
+            for property in properties {
+                match property {
+                    Prop::KV(key, value) => {
+                        if let PropKey::Computed(key) = key {
+                            children.push(key);
+                        }
+                        children.push(value);
+                    }
+                    Prop::Spread(value) => children.push(value),
+                }
+            }
+            children
+        }
+        ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => std::iter::once(callee.as_ref())
+            .chain(args.iter().map(|v| match v {
+                ArrEl::Item(v) | ArrEl::Spread(v) => v,
+            }))
+            .collect(),
+        ExprKind::Unary(_, value)
+        | ExprKind::IsNullish(value, _)
+        | ExprKind::Chain(value)
+        | ExprKind::Await(value)
+        | ExprKind::As(value, _)
+        | ExprKind::NonNull(value)
+        | ExprKind::Member { obj: value, .. }
+        | ExprKind::Update { target: value, .. } => vec![value],
+        ExprKind::Binary(_, a, b)
+        | ExprKind::Logical(_, a, b)
+        | ExprKind::Instanceof(a, b)
+        | ExprKind::Index { obj: a, index: b, .. }
+        | ExprKind::Assign {
+            target: a, value: b, ..
+        } => vec![a, b],
+        ExprKind::Cond(a, b, c) => vec![a, b, c],
+        ExprKind::Template(_, values) | ExprKind::Sequence(values) => values.iter().collect(),
+        ExprKind::Ident(_)
+        | ExprKind::Num(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Null
+        | ExprKind::Undefined
+        | ExprKind::Regex { .. } => Vec::new(),
+    };
+    for child in children {
+        check_parameter_default(child, uninitialized, allow_functions)?;
+    }
+    Ok(())
+}
+
+fn parameter_body_has_bindings(body: &FnBody) -> bool {
+    fn statements(body: &[Stmt]) -> bool {
+        body.iter().any(|statement| match statement {
+            Stmt::Decl { .. } | Stmt::Func(_) | Stmt::ForOf { .. } | Stmt::ForIn { .. } => true,
+            Stmt::Block(body) | Stmt::While(_, body) => statements(body),
+            Stmt::If(_, yes, no) => statements(yes) || no.as_ref().is_some_and(|body| statements(body)),
+            Stmt::For { init, body, .. } => {
+                init.as_ref().is_some_and(|init| statements(std::slice::from_ref(init))) || statements(body)
+            }
+            Stmt::Try {
+                block,
+                param,
+                handler,
+                finalizer,
+            } => {
+                param.is_some()
+                    || statements(block)
+                    || handler.as_ref().is_some_and(|body| statements(body))
+                    || finalizer.as_ref().is_some_and(|body| statements(body))
+            }
+            Stmt::Switch { cases, .. } => cases.iter().any(|(_, body)| statements(body)),
+            Stmt::Exported(statement) => statements(std::slice::from_ref(statement)),
+            _ => false,
+        })
+    }
+    match body {
+        FnBody::Expr(_) => false,
+        FnBody::Block(body) => statements(body),
+    }
+}
+
+fn check_parameter_statements(body: &[Stmt], uninitialized: &[(&str, Span)]) -> Result<()> {
+    for statement in body {
+        match statement {
+            Stmt::Decl { pat, init, .. } => {
+                check_parameter_pattern(pat, uninitialized, false)?;
+                if let Some(value) = init {
+                    check_parameter_default(value, uninitialized, false)?;
+                }
+            }
+            Stmt::Func(function) => {
+                return Err(Diag::new(
+                    function.span,
+                    "parameter defaults with nested functions aren't supported",
+                )
+                .help("define the function outside the parameter list and pass its name"));
+            }
+            Stmt::Expr(value) | Stmt::Throw(value) | Stmt::ExportDefault(value) | Stmt::Return(Some(value), _) => {
+                check_parameter_default(value, uninitialized, false)?
+            }
+            Stmt::Block(body) => check_parameter_statements(body, uninitialized)?,
+            Stmt::While(value, body) => {
+                check_parameter_default(value, uninitialized, false)?;
+                check_parameter_statements(body, uninitialized)?;
+            }
+            Stmt::If(value, yes, no) => {
+                check_parameter_default(value, uninitialized, false)?;
+                check_parameter_statements(yes, uninitialized)?;
+                if let Some(body) = no {
+                    check_parameter_statements(body, uninitialized)?;
+                }
+            }
+            Stmt::For {
+                init,
+                test,
+                update,
+                body,
+                ..
+            } => {
+                if let Some(init) = init {
+                    check_parameter_statements(std::slice::from_ref(init), uninitialized)?;
+                }
+                for value in [test, update].into_iter().flatten() {
+                    check_parameter_default(value, uninitialized, false)?;
+                }
+                check_parameter_statements(body, uninitialized)?;
+            }
+            Stmt::ForOf { pat, iter, body, .. } => {
+                check_parameter_pattern(pat, uninitialized, false)?;
+                check_parameter_default(iter, uninitialized, false)?;
+                check_parameter_statements(body, uninitialized)?;
+            }
+            Stmt::ForIn { target, iter, body, .. } => {
+                check_parameter_default(target, uninitialized, false)?;
+                check_parameter_default(iter, uninitialized, false)?;
+                check_parameter_statements(body, uninitialized)?;
+            }
+            Stmt::Try {
+                block,
+                handler,
+                finalizer,
+                ..
+            } => {
+                check_parameter_statements(block, uninitialized)?;
+                if let Some(body) = handler {
+                    check_parameter_statements(body, uninitialized)?;
+                }
+                if let Some(body) = finalizer {
+                    check_parameter_statements(body, uninitialized)?;
+                }
+            }
+            Stmt::Switch { disc, cases, .. } => {
+                check_parameter_default(disc, uninitialized, false)?;
+                for (test, body) in cases {
+                    if let Some(test) = test {
+                        check_parameter_default(test, uninitialized, false)?;
+                    }
+                    check_parameter_statements(body, uninitialized)?;
+                }
+            }
+            Stmt::Exported(statement) => check_parameter_statements(std::slice::from_ref(statement), uninitialized)?,
+            Stmt::Return(None, _)
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::TypeAlias { .. }
+            | Stmt::Import { .. }
+            | Stmt::ExportNames { .. }
+            | Stmt::ExportAll { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_parameter_defaults(parameters: &[Param], body: &FnBody) -> Result<()> {
+    let allow_functions = !parameter_body_has_bindings(body);
+    for (index, parameter) in parameters.iter().enumerate() {
+        let mut uninitialized = Vec::new();
+        for later in &parameters[index..] {
+            later.pat.bindings(&mut uninitialized);
+        }
+        if let Some(value) = &parameter.default {
+            check_parameter_default(value, &uninitialized, allow_functions)?;
+        }
+        check_parameter_pattern(&parameter.pat, &uninitialized, allow_functions)?;
+    }
+    Ok(())
 }

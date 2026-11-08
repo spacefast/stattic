@@ -15,6 +15,23 @@ pub(super) fn parse(path: &Path, text: &str) -> Result<Vec<Stmt>, Failure> {
     let arena = Allocator::default();
     let parsed = Parser::new(&arena, text, SourceType::ts()).parse();
     if let Some(d) = parsed.diagnostics.errors().next() {
+        // JSX in server code drew 0.8 ImageResponse elements; v2 server code is plain TypeScript.
+        if path.extension().is_some_and(|e| e == "tsx")
+            && Parser::new(&arena, text, SourceType::tsx())
+                .parse()
+                .diagnostics
+                .errors()
+                .next()
+                .is_none()
+        {
+            return Err(fail(
+                "",
+                format!(
+                    "{} uses JSX on the server (ImageResponse); render the image ahead of time or port it to a route that returns stored bytes",
+                    path.display()
+                ),
+            ));
+        }
         return Err(fail("", format!("invalid TypeScript: {}", d.message)));
     }
     let file = diag::register_file(path, text);
@@ -288,6 +305,42 @@ fn physical(space: &str, name: &str) -> String {
     format!("{}_{:.10}", &base[..base.len().min(53)], digest)
 }
 
+/// Every v2 user projects as a member whose hidden `spacefastSubject` holds the 0.8 Space
+/// subject (`usr_<64 hex>` for Space Users) copied by `wp zero migrate-spacefast`. Users created
+/// after the migration answer `wp:<id>`, which no 0.8 subject can equal.
+const IDENTITY: &str = r#"const __z08Members = __z08Users({email: __z08Email().notNull().unique().max(191), name: __z08Text().notNull(), spacefastSubject: __z08Text().max(191).access({ read: false, create: false, update: false })});
+type __z08User = { id: number; name: string; role: "guest" | "subscriber" | "author" | "editor" | "admin" };
+async function __z08Subject(user: __z08User | null): Promise<string | null> {
+  if (user === null) return null;
+  const member = await __z08Db.query.members.findFirst({ where: { id: user.id }, columns: { spacefastSubject: true } });
+  const stored = member?.spacefastSubject;
+  return stored != null && stored !== "" ? stored : "wp:" + String(user.id);
+}
+function __z08Auth(user: __z08User | null, subject: string | null) {
+  const guest = user !== null && String(user.role) === "guest";
+  return { userId: subject, displayName: user === null ? "Signed out" : guest ? "Guest" : user.name, isGuest: guest, isSignedIn: user !== null && !guest, isAuthenticated: user !== null && !guest };
+}
+function __z08RequireSignedIn(user: __z08User | null, subject: string | null) {
+  if (user === null || subject === null || String(user.role) === "guest") throw new __z08HttpError(401, "unauthorized", "Sign in to continue.");
+  return { userId: subject, displayName: user.name, isGuest: false, isSignedIn: true, isAuthenticated: true };
+}
+function __z08RequireIdentity(user: __z08User | null, subject: string | null) {
+  if (user === null || subject === null) throw new __z08HttpError(401, "unauthorized", "An identity is required.");
+  const guest = String(user.role) === "guest";
+  return { userId: subject, displayName: guest ? "Guest" : user.name, isGuest: guest, isSignedIn: !guest, isAuthenticated: !guest };
+}
+"#;
+
+/// v2 compiles `console.*` to the PHP error log; the declaration types it for editors.
+const LOG: &str = "declare const console: { debug(...values: unknown[]): void; info(...values: unknown[]): void; warn(...values: unknown[]): void; error(...values: unknown[]): void };\n";
+
+/// Index ranges keep 0.8's null rule: comparing against null is refused.
+const RANGE: &str = r#"function __z08PageOptions(options: { numItems: number; cursor?: string | null }): { numItems: number; cursor: string | null } { return { numItems: options.numItems, cursor: options.cursor ?? null }; }
+function __z08RangeText(value: string | null | undefined): string { if (value == null) throw new Error("Zero DB range filters cannot compare against null."); return value; }
+function __z08RangeReal(value: number | null | undefined): number { if (value == null) throw new Error("Zero DB range filters cannot compare against null."); return value; }
+function __z08RangeBoolean(value: boolean | null | undefined): boolean { if (value == null) throw new Error("Zero DB range filters cannot compare against null."); return value; }
+"#;
+
 pub(super) struct Transformed {
     pub config: String,
     pub content_config: Option<String>,
@@ -304,10 +357,27 @@ pub(super) fn app(
     errors: &mut Vec<Failure>,
 ) -> Result<Transformed, Failure> {
     let body = parse(path, source)?;
+    let mut responses = String::new();
     let mut aliases = BTreeMap::new();
     let mut prelude = String::new();
     let mut root = None;
-    for stmt in &body {
+    // `export` on a helper changes nothing in the generated module; the helper itself is copied.
+    let body: Vec<&Stmt> = body
+        .iter()
+        .map(|s| match s {
+            Stmt::Exported(inner) => inner.as_ref(),
+            s => s,
+        })
+        .collect();
+    if let Some(name) = ambient_globals(source).first() {
+        return Err(fail(
+            "",
+            format!(
+                "`declare const {name}` names a build-time global that 0.8 injected; replace it with env(\"{name}\") or a constant"
+            ),
+        ));
+    }
+    for &stmt in &body {
         match stmt {
             Stmt::Import {
                 source: package,
@@ -321,6 +391,13 @@ pub(super) fn app(
                     };
                     if s.local.starts_with("__z08") || s.local == "InferSelectModel" {
                         return Err(fail("", "reserved generated import binding"));
+                    }
+                    // Structural 0.8 types the migrated handlers still name.
+                    if let Some(shape) = legacy_type(name) {
+                        prelude.push_str(&format!("type {} = {shape};\n", s.local));
+                    }
+                    if let Some(helper) = super::endpoints::helper(&s.local, name) {
+                        responses.push_str(&helper);
                     }
                     aliases.insert(s.local.clone(), name.clone());
                 }
@@ -387,11 +464,19 @@ pub(super) fn app(
         return Err(fail("", "expected capsule({...})"));
     }
     let root = obj(a[0], "")?;
-    let name = root
-        .get("name")
-        .map(|e| string(e, "/name"))
-        .transpose()?
+    let title = root.get("name").map(|e| string(e, "/name")).transpose()?;
+    // 0.8 names are display titles; v2 needs the plugin slug.
+    let name = title
+        .as_deref()
+        .map(crate::extract::slugify_name)
         .unwrap_or_else(|| "migrated-app".into());
+    if let Some(title) = title.as_deref().filter(|t| *t != name) {
+        entries.push(entry(
+            "/name",
+            "mapped",
+            format!("display name {title:?} becomes the plugin slug {name:?}"),
+        ));
+    }
     let mut tables = BTreeMap::new();
     if let Some(schema) = root.get("schema") {
         for (name, e) in obj(schema, "/schema")? {
@@ -467,6 +552,7 @@ pub(super) fn app(
             "connectors",
             "auth",
             "realtime",
+            "endpoints",
         ]
         .contains(&key.as_str())
         {
@@ -522,6 +608,11 @@ pub(super) fn app(
     } else {
         None
     };
+    let mut helpers: Vec<String> = Vec::new();
+    let has_users = users
+        || root
+            .get("auth")
+            .is_some_and(|auth| !matches!(literal(auth), Ok(Value::Bool(false))));
     let mut handlers = Vec::new();
     let mut names = BTreeSet::new();
     for section in ["queries", "mutations", "actions"] {
@@ -547,10 +638,27 @@ pub(super) fn app(
                     let E::Func(f) = &a[0].kind else {
                         return Err(fail(&at, "handler must be an inline function"));
                     };
-                    handler(source, f, &tables, &at, &name, section == "mutations", signed_in)
+                    handler(
+                        source,
+                        f,
+                        &tables,
+                        &at,
+                        &name,
+                        Mode {
+                            writes: section == "mutations",
+                            signed_in,
+                            subjects: users,
+                            sends: section != "queries",
+                            route: None,
+                        },
+                    )
                 })();
                 match result {
-                    Ok(h) => {
+                    Ok((h, generated)) => {
+                        if generated.iter().any(|g| g.contains("__z08page_")) {
+                            entries.push(entry(&at, "mapped", "paginate keeps 0.8's index order, numItems clamp and { page, isDone, continueCursor } result; cursors are new opaque strings, so clients restart from the first page after cutover"));
+                        }
+                        helpers.extend(generated);
                         handlers.push(h);
                         entries.push(entry(&at,"mapped","v2 action with named input properties and legacy row results; REST URL/envelope and error transport follow v2"));
                     }
@@ -559,9 +667,161 @@ pub(super) fn app(
             }
         }
     }
+    let mut routes: Vec<(String, String)> = Vec::new();
+    let mut prefixes: Vec<(String, String, String, String)> = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Some(group) = root.get("endpoints") {
+        for (name, e) in obj(group, "/endpoints")? {
+            let at = pointer("/endpoints", &name);
+            let result = (|| {
+                ident(&name, &at)?;
+                let (c, a) = args(e).map_err(|_| fail(&at, "expected endpoint({ method, path }, handler)"))?;
+                if !matches!(&c.kind,E::Ident(n) if aliases.get(n).map(String::as_str)==Some("endpoint"))
+                    || a.len() != 2
+                {
+                    return Err(fail(&at, "expected endpoint({ method, path }, handler)"));
+                }
+                let options = obj(a[0], &at)?;
+                for key in options.keys() {
+                    if !["method", "path", "readOnly", "mode"].contains(&key.as_str()) {
+                        return Err(fail(&pointer(&at, key), "unknown endpoint option"));
+                    }
+                }
+                let method = options
+                    .get("method")
+                    .map(|e| string(e, &pointer(&at, "method")))
+                    .transpose()?
+                    .ok_or_else(|| fail(&at, "endpoint needs a literal method"))?;
+                let path = options
+                    .get("path")
+                    .map(|e| string(e, &pointer(&at, "path")))
+                    .transpose()?
+                    .ok_or_else(|| fail(&at, "endpoint needs a literal path"))?;
+                let read_only = match options.get("readOnly").map(|e| literal(e)) {
+                    None => None,
+                    Some(Ok(Value::Bool(b))) => Some(b),
+                    Some(_) => return Err(fail(&pointer(&at, "readOnly"), "readOnly must be a literal boolean")),
+                };
+                let route = super::endpoints::route(&method, &path, read_only, &at)?;
+                let shape = route_shape(&route.path);
+                if !seen.insert((route.method.clone(), shape)) {
+                    return Err(fail(&at, "two endpoints share a method and path shape"));
+                }
+                if names.contains(&name) {
+                    return Err(fail(&at, "endpoint name collides with a query, mutation or action"));
+                }
+                let E::Func(f) = &a[1].kind else {
+                    return Err(fail(&at, "handler must be an inline function"));
+                };
+                handler(
+                    source,
+                    f,
+                    &tables,
+                    &at,
+                    &name,
+                    Mode {
+                        writes: route.writes,
+                        signed_in,
+                        subjects: users,
+                        sends: route.writes,
+                        route: Some(&route),
+                    },
+                )
+                .map(|h| (h, route))
+            })();
+            match result {
+                Ok(((code, generated), route)) => {
+                    let (prefixed, generated): (Vec<_>, Vec<_>) =
+                        generated.into_iter().partition(|g| g.starts_with(PREFIX_MARK));
+                    helpers.extend(generated);
+                    if let (Some(prefix), Some(code)) = (&route.prefix, prefixed.into_iter().next()) {
+                        prefixes.push((
+                            route.method.clone(),
+                            prefix.clone(),
+                            at.clone(),
+                            code[PREFIX_MARK.len()..].to_string(),
+                        ));
+                    }
+                    routes.push((route.path.clone(), code));
+                    entries.push(entry(
+                        &at,
+                        "mapped",
+                        format!(
+                            "v2 route {} {} with 0.8's result rules; callers keep the URL",
+                            route.method, route.path
+                        ),
+                    ));
+                    let identity = routes.last().is_some_and(|(_, c): &(String, String)| {
+                        c.contains("__z08subject") || c.contains("__z08ctx.user")
+                    });
+                    if route.method != "GET" && (signed_in || identity) {
+                        entries.push(entry(&at, "review", "a signed-in caller of an unsafe-method route must send X-WP-Nonce; without it the request runs anonymously"));
+                    }
+                }
+                Err(e) => errors.push(e),
+            }
+        }
+    }
+    // An exact endpoint at the prefix wins over the splat in 0.8 (exact paths are served first).
+    for (method, prefix, at, code) in prefixes {
+        if seen.insert((method.clone(), route_shape(&prefix))) {
+            entries.push(entry(
+                &at,
+                "mapped",
+                format!("{method} {prefix} also reaches this handler with an empty splat, as in 0.8"),
+            ));
+            routes.push((prefix, code));
+        }
+    }
+    if handlers
+        .iter()
+        .chain(routes.iter().map(|(_, c)| c))
+        .any(|h| h.contains("__z08Subject("))
+    {
+        entries.push(entry(
+            "/auth",
+            "review",
+            "ctx.auth.userId reads each member's copied Space Users subject (usr_...); users created after migration answer wp:<id>. Rows owned by 0.8 guest:<id> identities keep their stored owner but no v2 user maps to them, and anonymous writes answer 401 so the v2 client can start a guest session.",
+        ));
+    }
+    if handlers
+        .iter()
+        .chain(routes.iter().map(|(_, c)| c))
+        .any(|h| h.contains("__z08Crypto."))
+    {
+        entries.push(entry(
+            "",
+            "mapped",
+            "ctx.crypto becomes crypto from \"zero\": the same lowercase-hex SHA-256 and HMAC-SHA-256 over UTF-8, and constant-time comparison; calls are synchronous",
+        ));
+    }
+    if handlers
+        .iter()
+        .chain(routes.iter().map(|(_, c)| c))
+        .any(|h| h.contains("__z08Mail.send("))
+    {
+        entries.push(entry(
+            "",
+            "review",
+            "ctx.email.send becomes mail.send from \"zero\": the message is queued in the handler's transaction and handed to the site's transport after commit. It resolves true once queued, where 0.8 resolved on transport acceptance; check the job queue for refusals. On Spacefast, from must stay on the Space's sending domain",
+        ));
+    }
     let mut config = String::from(
-        "import { action as __z08Action, boolean as __z08Boolean, db as __z08Db, defineConfig as __z08Config, HttpError as __z08HttpError, json as __z08Json, real as __z08Real, table as __z08Table, text as __z08Text, email as __z08Email, userProjection as __z08Users, collection as __z08Collection, richText as __z08RichText, type InferSelectModel } from \"zero\";\n",
+        "import { action as __z08Action, boolean as __z08Boolean, db as __z08Db, defineConfig as __z08Config, HttpError as __z08HttpError, json as __z08Json, real as __z08Real, table as __z08Table, text as __z08Text, email as __z08Email, userProjection as __z08Users, collection as __z08Collection, richText as __z08RichText, route as __z08Route, env as __z08Env, crypto as __z08Crypto, mail as __z08Mail, type InferSelectModel } from \"zero\";\n",
     );
+    if !routes.is_empty() || !responses.is_empty() {
+        config.push_str(super::endpoints::PRELUDE);
+        config.push_str(&responses);
+    }
+    // 0.8 gave every handler the global fetch(); v2 imports it from "zero" with the same egress rules.
+    if uses_global_fetch(&body, source) {
+        config.push_str("import { fetch } from \"zero\";\n");
+        entries.push(entry(
+            "",
+            "mapped",
+            "fetch() comes from \"zero\": HTTPS only, private and special-purpose addresses refused after every redirect, 10 s and 1 MiB each way, as in 0.8",
+        ));
+    }
     config.push_str(&prelude);
     if content_config.is_some() {
         config.push_str("import * as __z08Content from \"./__z08-content\";\n");
@@ -577,6 +837,16 @@ pub(super) fn app(
     }
     for t in tables.values() {
         config.push_str(&table_code(t));
+    }
+    if has_users {
+        config.push_str(IDENTITY);
+    }
+    config.push_str(RANGE);
+    let mut emitted = BTreeSet::new();
+    for h in &helpers {
+        if emitted.insert(h.as_str()) {
+            config.push_str(h);
+        }
     }
     config.push_str("function __z08Key(id: string): number {\n  const n = Number(id);\n  if (!/^[1-9][0-9]*$/.test(id) || n > 9007199254740991) throw new __z08HttpError(422, \"legacy_id_range\", \"Expected a positive safe integer ID.\");\n  return n;\n}\n");
     config.push_str(&format!(
@@ -606,17 +876,17 @@ pub(super) fn app(
     if content_config.is_none() && native_posts.is_some() {
         config.push_str("collections: {posts: __z08Posts},");
     }
-    if users
-        || root
-            .get("auth")
-            .is_some_and(|auth| !matches!(literal(auth), Ok(Value::Bool(false))))
-    {
-        config.push_str("users: {members: __z08Users({email: __z08Email().notNull().unique().max(191), name: __z08Text().notNull()})},");
+    if has_users {
+        config.push_str("users: {members: __z08Members},");
         entries.push(entry(
             "/auth",
             "mapped",
             "Project WordPress users as members; migrate Spacefast accounts and sessions before activation.",
         ));
+    }
+    if !routes.is_empty() {
+        let routes: Vec<&str> = routes.iter().map(|(_, code)| code.as_str()).collect();
+        config.push_str(&format!("routes: {{\n{}\n}},", routes.join(",\n")));
     }
     config.push_str(&format!("actions: {{\n{}\n}} }});\n", handlers.join(",\n")));
     entries.push(entry("","review","Adoption requires the original MariaDB database and --space binding. IDs above Number.MAX_SAFE_INTEGER, existing sessions, client routes, realtime and deployment activation need separate validation. No deployment is performed."));
@@ -625,6 +895,77 @@ pub(super) fn app(
         content_config,
         connector_roles: Value::Object(connector_roles),
     })
+}
+
+/// `x.json()` / `x.text()` with no arguments: a fetch body read, which returns a promise.
+fn returns_body_read(e: &Expr) -> bool {
+    matches!(&e.kind, E::Call { callee, args, .. }
+        if args.is_empty() && matches!(&callee.kind, E::Member { prop, .. } if prop == "json" || prop == "text"))
+}
+
+/// True when the module calls a global `fetch(` it does not bind itself. Lexical: a mention inside
+/// a string or comment only adds an import the module does not use, which compiles.
+fn uses_global_fetch(body: &[&Stmt], source: &str) -> bool {
+    let binds = body.iter().any(|s| match s {
+        Stmt::Import { specs, .. } => specs.iter().any(|s| s.local == "fetch"),
+        Stmt::Func(f) => f.name.as_deref() == Some("fetch"),
+        Stmt::Decl { pat, .. } => {
+            let mut names = vec![];
+            pat.bindings(&mut names);
+            names.iter().any(|(n, _)| *n == "fetch")
+        }
+        _ => false,
+    });
+    let bytes = source.as_bytes();
+    let calls = source.match_indices("fetch").any(|(at, _)| {
+        let before = at.checked_sub(1).map(|i| bytes[i]);
+        let after = source[at + 5..].trim_start();
+        !before.is_some_and(|b| b == b'.' || b == b'_' || b == b'$' || b.is_ascii_alphanumeric())
+            && after.starts_with('(')
+    });
+    calls && !binds
+}
+
+/// A route path with parameter names erased, so two routes v2 would refuse as ambiguous compare equal.
+fn route_shape(path: &str) -> String {
+    path.split('/')
+        .map(|s| {
+            if s.starts_with(':') {
+                ":"
+            } else if s.starts_with('*') {
+                "*"
+            } else {
+                s
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Names declared with `declare const|let|var` at module level.
+fn ambient_globals(source: &str) -> Vec<String> {
+    use oxc_ast::ast::{BindingPattern, Declaration, Statement};
+    let arena = Allocator::default();
+    let parsed = Parser::new(&arena, source, SourceType::ts()).parse();
+    let mut out = vec![];
+    for s in &parsed.program.body {
+        let declaration = match s {
+            Statement::VariableDeclaration(v) => Some(&**v),
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                Declaration::VariableDeclaration(v) => Some(&**v),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(v) = declaration.filter(|v| v.declare) {
+            for d in &v.declarations {
+                if let BindingPattern::BindingIdentifier(id) = &d.id {
+                    out.push(id.name.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 fn type_aliases(source: &str) -> String {
@@ -754,6 +1095,15 @@ fn table_code(t: &Table) -> String {
     out
 }
 
+/// 0.8 SDK types with a structural v2 meaning.
+fn legacy_type(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "PaginationOptions" => "{ numItems: number; cursor: string | null }",
+        "Id" => "string",
+        _ => return None,
+    })
+}
+
 fn input_builder(ty: &TyAnn, source_ty: &str, optional: bool, at: &str) -> Result<String, Failure> {
     let (base, nullable) = match ty {
         TyAnn::Str => ("__z08Text()".into(), false),
@@ -781,20 +1131,42 @@ fn input_builder(ty: &TyAnn, source_ty: &str, optional: bool, at: &str) -> Resul
     ))
 }
 
+/// How a generated action runs: its write mode and identity sources.
+#[derive(Clone, Copy)]
+struct Mode<'a> {
+    writes: bool,
+    signed_in: bool,
+    subjects: bool,
+    /// 0.8 gave every handler but a read (`query`, readOnly endpoint) `ctx.email`; reads could be
+    /// replayed, so their send rejected.
+    sends: bool,
+    /// Set for a 0.8 endpoint, which becomes a v2 route at the same method and path.
+    route: Option<&'a super::endpoints::Route>,
+}
+
 fn handler(
     source: &str,
     f: &Func,
     tables: &BTreeMap<String, Table>,
     at: &str,
     name: &str,
-    writes: bool,
-    signed_in: bool,
-) -> Result<String, Failure> {
-    let Some(first) = f.params.first() else {
-        return Err(fail(at, "handler must declare its context parameter"));
-    };
-    let Pat::Id(ctx, _) = &first.pat else {
-        return Err(fail(at, "context destructuring requires a manual port"));
+    mode: Mode,
+) -> Result<(String, Vec<String>), Failure> {
+    let Mode {
+        writes,
+        signed_in,
+        subjects,
+        sends,
+        route,
+    } = mode;
+    if route.is_some() {
+        return endpoint(source, f, tables, at, name, mode);
+    }
+    // A handler that ignores its context may omit it; no input then follows.
+    let ctx = match f.params.first().map(|p| &p.pat) {
+        None => "__z08unused",
+        Some(Pat::Id(ctx, _)) => ctx.as_str(),
+        Some(_) => return Err(fail(at, "context destructuring requires a manual port")),
     };
     let mut input = vec![];
     let mut bindings = String::new();
@@ -827,12 +1199,32 @@ fn handler(
         tables,
         at,
         writes,
+        subjects,
+        uses_subject: false,
+        action: name,
+        request: None,
+        returns: vec![],
+        params: vec![],
+        logs: false,
+        helpers: vec![],
+        sends,
+        // Every return of the handler itself, through its control flow but not nested functions.
+        returned: super::endpoints::returns(f),
         edits: vec![],
     };
     let body = match &f.body {
         FnBody::Expr(e) => {
             r.expr(e)?;
-            format!("return {};", r.apply(e.span))
+            // `async () => response.json()` returned the promise and JavaScript awaited it.
+            let text = r.apply(e.span);
+            format!(
+                "return {};",
+                if returns_body_read(e) {
+                    format!("await {text}")
+                } else {
+                    text
+                }
+            )
         }
         FnBody::Block(stmts) => {
             for s in stmts {
@@ -859,14 +1251,152 @@ fn handler(
     };
     let gate = if signed_in {
         "if (__z08ctx.user === null || String(__z08ctx.user.role) === \"guest\") throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n"
+    } else if r.uses_subject && writes {
+        // 0.8 gave every visitor a guest identity; a v2 client starts a guest session on this 401.
+        "if (__z08ctx.user === null) throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n"
     } else {
         ""
     };
-    Ok(format!(
-        "{}: __z08Action({{ input: {{ {} }}, access: \"anyone\", agents: false, async handler(__z08input, __z08ctx) {{\n{gate}{bindings}{body}\n}} }})",
+    // Writes run behind the 401 gate below, so their subject is never null.
+    let subject = match (r.uses_subject, writes || signed_in) {
+        (false, _) => "",
+        (true, false) => "const __z08subject = await __z08Subject(__z08ctx.user);\n",
+        (true, true) => "const __z08subject: string = await __z08Subject(__z08ctx.user) ?? \"\";\n",
+    };
+    if r.logs {
+        r.helpers.push(LOG.into());
+    }
+    let code = format!(
+        "{}: __z08Action({{ input: {{ {} }}, access: \"anyone\", agents: false, async handler(__z08input, __z08ctx) {{\n{gate}{subject}{bindings}{body}\n}} }})",
         q(name),
         input.join(", ")
-    ))
+    );
+    Ok((code, r.helpers))
+}
+
+/// A 0.8 endpoint as a v2 route: `(ctx, req)` becomes `(req, __z08ctx)` and every return goes
+/// through 0.8's result rules.
+fn endpoint(
+    source: &str,
+    f: &Func,
+    tables: &BTreeMap<String, Table>,
+    at: &str,
+    name: &str,
+    mode: Mode,
+) -> Result<(String, Vec<String>), Failure> {
+    let route = mode.route.expect("route");
+    let ctx = match f.params.first().map(|p| &p.pat) {
+        None => "__z08unused",
+        Some(Pat::Id(ctx, _)) => ctx.as_str(),
+        Some(_) => return Err(fail(at, "context destructuring requires a manual port")),
+    };
+    let request = super::endpoints::request_name(f, at)?;
+    if f.params.len() > 2 {
+        return Err(fail(at, "endpoint handlers take (ctx, request)"));
+    }
+    let mut r = Rewrite {
+        source,
+        ctx,
+        tables,
+        at,
+        writes: route.writes,
+        subjects: mode.subjects,
+        uses_subject: false,
+        action: name,
+        request,
+        returns: vec![],
+        params: route
+            .path
+            .split('/')
+            .filter_map(|s| s.strip_prefix(':').or_else(|| s.strip_prefix('*')).map(str::to_owned))
+            .collect(),
+        logs: false,
+        helpers: vec![],
+        sends: mode.sends,
+        returned: super::endpoints::returns(f),
+        edits: vec![],
+    };
+    for span in super::endpoints::returns(f) {
+        r.returns.push(span);
+    }
+    let body = match &f.body {
+        FnBody::Expr(e) => {
+            r.expr(e)?;
+            format!("return __z08EndpointValue({});", r.apply(e.span))
+        }
+        FnBody::Block(stmts) => {
+            for s in stmts {
+                r.stmt(s)?;
+            }
+            let arena = Allocator::default();
+            let expression = Parser::new(&arena, raw(source, f.span), SourceType::ts())
+                .parse_expression()
+                .map_err(|_| fail(at, "cannot locate handler body"))?;
+            use oxc_ast::ast::Expression;
+            let body = match &expression {
+                Expression::ArrowFunctionExpression(f) => f.get_function_body(),
+                Expression::FunctionExpression(f) => f.body.as_deref(),
+                _ => None,
+            }
+            .ok_or_else(|| fail(at, "expected handler body"))?;
+            // A block that falls off the end returned undefined: 0.8 answered 204.
+            let falls_off = !matches!(stmts.last(), Some(Stmt::Return(..) | Stmt::Throw(_)));
+            format!(
+                "{}{}",
+                r.apply(Span {
+                    start: f.span.start + body.span.start + 1,
+                    end: f.span.start + body.span.end - 1,
+                    ..f.span
+                }),
+                if falls_off {
+                    "\nreturn __z08EndpointValue(null);"
+                } else {
+                    ""
+                }
+            )
+        }
+    };
+    let gate = if mode.signed_in {
+        "if (__z08ctx.user === null || String(__z08ctx.user.role) === \"guest\") throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n"
+    } else if r.uses_subject && route.writes {
+        // As for actions: 0.8 gave every visitor a guest identity; a v2 client starts one on this 401.
+        "if (__z08ctx.user === null) throw new __z08HttpError(401, \"unauthorized\", \"Sign in to continue.\");\n"
+    } else {
+        ""
+    };
+    // A writing route runs behind the gate above, so its subject is never null, as for actions.
+    let subject = match (r.uses_subject, route.writes || mode.signed_in) {
+        (false, _) => "",
+        (true, false) => "const __z08subject = await __z08Subject(__z08ctx.user);\n",
+        (true, true) => "const __z08subject: string = await __z08Subject(__z08ctx.user) ?? \"\";\n",
+    };
+    let req = request.unwrap_or("__z08req");
+    if r.logs {
+        r.helpers.push(LOG.into());
+    }
+    let handler = format!("access: \"anyone\", async handler({req}, __z08ctx) {{\n{gate}{subject}{body}\n}}");
+    let code = route_entry(name, &route.method, &route.path, &handler);
+    // 0.8's `/a/:splat` answered `/a` too; v2's `*splat` needs a segment, so the same handler can
+    // also take the bare prefix, where `params.splat` reads "". The caller decides whether it may.
+    if let Some(prefix) = &route.prefix {
+        r.helpers.push(format!(
+            "{PREFIX_MARK}{}",
+            route_entry(&format!("{name}__z08prefix"), &route.method, prefix, &handler)
+        ));
+    }
+    Ok((code, r.helpers))
+}
+
+/// Marks the bare-prefix route `endpoint()` returns among its helpers.
+const PREFIX_MARK: &str = "\0prefix-route\0";
+
+fn route_entry(name: &str, method: &str, path: &str, handler: &str) -> String {
+    format!(
+        "{}: __z08Route({{ method: {}, path: {}, {handler} }})",
+        q(name),
+        q(method),
+        q(path)
+    )
 }
 
 struct Rewrite<'a> {
@@ -875,6 +1405,25 @@ struct Rewrite<'a> {
     tables: &'a BTreeMap<String, Table>,
     at: &'a str,
     writes: bool,
+    /// A `members` projection carries each user's 0.8 Space subject.
+    subjects: bool,
+    uses_subject: bool,
+    /// The generated action's name, which keeps helper names and cursor sites unique.
+    action: &'a str,
+    /// An endpoint handler's request parameter, rewritten to the v2 route request.
+    request: Option<&'a str>,
+    /// Return-expression spans of an endpoint body, wrapped in 0.8's result rules.
+    returns: Vec<Span>,
+    /// The endpoint path's `:name` parameters.
+    params: Vec<String>,
+    /// `ctx.log` became `console.*`, which v2 compiles to the PHP error log.
+    logs: bool,
+    /// Module-level helpers generated for this handler (one per paginated call site).
+    helpers: Vec<String>,
+    /// Whether 0.8 gave this handler `ctx.email`.
+    sends: bool,
+    /// Spans of values the handler returns directly (an expression body or `return <e>`).
+    returned: Vec<Span>,
     edits: Vec<(Span, String)>,
 }
 impl Rewrite<'_> {
@@ -904,6 +1453,9 @@ impl Rewrite<'_> {
         {
             return Err(fail(self.at, "reserved generated identifier"));
         }
+        if self.request.is_some() && self.request_use(e)? {
+            return Ok(());
+        }
         // `ctx.invalidate(...)` named the live queries a mutation refreshed. v2 announces every
         // committed write by table, so the call has no work left; it becomes a no-op.
         if let E::Call { callee, .. } = &e.kind
@@ -926,6 +1478,75 @@ impl Rewrite<'_> {
             self.edits.push((e.span, text));
             return Ok(());
         }
+        // ctx.crypto returned promises; v2's crypto is synchronous with the same output.
+        let (call, awaited) = match &e.kind {
+            E::Await(inner) => (inner.as_ref(), true),
+            _ => (e, false),
+        };
+        if let E::Call {
+            callee,
+            args,
+            optional: false,
+            ..
+        } = &call.kind
+            && let E::Member { obj, prop, .. } = &callee.kind
+            && matches!(&obj.kind, E::Member { obj, prop: c, .. } if c == "crypto" && matches!(&obj.kind, E::Ident(n) if n == self.ctx))
+        {
+            if !["sha256", "hmacSha256", "timingSafeEqual"].contains(&prop.as_str()) {
+                return Err(fail(
+                    &pointer(&pointer(self.at, "ctx"), "crypto"),
+                    format!("ctx.crypto.{prop} has no v2 counterpart"),
+                ));
+            }
+            let rendered = args
+                .iter()
+                .map(|a| match a {
+                    ArrEl::Item(e) => self.render(e),
+                    ArrEl::Spread(_) => Err(fail(self.at, "spread crypto arguments need a manual port")),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let text = format!("__z08Crypto.{prop}({})", rendered.join(", "));
+            // An unawaited call is returned or awaited later in 0.8 code; the value stands in for
+            // its promise either way. Storing it unawaited (`const p = ctx.crypto...`) and then
+            // awaiting it is refused by the v2 compiler's await check, which is the port pointer.
+            let _ = awaited;
+            self.edits.push((e.span, format!("({text})")));
+            return Ok(());
+        }
+        // ctx.email.send(message) → mail.send(message): the same EmailMessage, queued in the
+        // handler's transaction and handed to the site's transport after commit, as 0.8's outbox did.
+        if let E::Call {
+            callee,
+            args,
+            optional: false,
+            ..
+        } = &call.kind
+            && let E::Member { obj, prop, .. } = &callee.kind
+            && matches!(&obj.kind, E::Member { obj, prop: svc, .. } if svc == "email" && matches!(&obj.kind, E::Ident(n) if n == self.ctx))
+        {
+            let at = pointer(&pointer(self.at, "ctx"), "email");
+            if prop != "send" {
+                return Err(fail(&at, format!("ctx.email.{prop} has no v2 counterpart")));
+            }
+            if !self.sends {
+                return Err(fail(
+                    &at,
+                    "reads (queries, readOnly endpoints) could not send email in 0.8 either; move the send to a mutation, action or writing endpoint",
+                ));
+            }
+            let [ArrEl::Item(message)] = args.as_slice() else {
+                return Err(fail(&at, "ctx.email.send takes one message"));
+            };
+            let message = self.render(message)?;
+            // 0.8 resolved to true on transport acceptance; v2 resolves once the message is queued.
+            let send = format!("(await __z08Mail.send({message}), true)");
+            // A returned promise was awaited by the 0.8 runtime; one left floating raced the response.
+            if !awaited && !self.returned.contains(&e.span) {
+                return Err(fail(&at, "an unawaited ctx.email.send needs a manual port; await it"));
+            }
+            self.edits.push((e.span, format!("({send})")));
+            return Ok(());
+        }
         if let Some(text) = self.db(e)? {
             self.edits.push((e.span, text));
             return Ok(());
@@ -938,15 +1559,62 @@ impl Rewrite<'_> {
                     "(__z08ctx.user !== null && String(__z08ctx.user.role) !== \"guest\")"
                 }
                 "isGuest" => "(__z08ctx.user !== null && String(__z08ctx.user.role) === \"guest\")",
-                "displayName" => "(__z08ctx.user === null ? \"Signed out\" : __z08ctx.user.name)",
+                "displayName" => {
+                    "(__z08ctx.user === null ? \"Signed out\" : String(__z08ctx.user.role) === \"guest\" ? \"Guest\" : __z08ctx.user?.name ?? \"Signed out\")"
+                }
+                "userId" if self.subjects => {
+                    self.uses_subject = true;
+                    "__z08subject"
+                }
                 _ => {
                     return Err(fail(
                         &pointer(&pointer(&pointer(self.at, "ctx"), "auth"), prop),
-                        "legacy principal IDs, profiles and auth methods require an explicit identity mapping; no wp:<id> identity is invented",
+                        if prop == "userId" {
+                            "ctx.auth.userId maps only for Space Users (pass --users): its usr_ subjects are copied with each user. Spacefast account principals and guest:<id> identities have no v2 user"
+                        } else {
+                            "legacy profiles and auth methods require an explicit identity mapping"
+                        },
                     ));
                 }
             };
             self.edits.push((e.span, text.into()));
+            return Ok(());
+        }
+        // requireSignedIn() and requireIdentity() keep their 0.8 refusal and return the auth value.
+        if let E::Call {
+            callee,
+            args,
+            optional: false,
+            ..
+        } = &e.kind
+            && args.is_empty()
+            && let E::Member { obj, prop, .. } = &callee.kind
+            && matches!(&obj.kind,E::Member{obj,prop:auth,..} if auth=="auth"&&matches!(&obj.kind,E::Ident(n) if n==self.ctx))
+            && (prop == "requireSignedIn" || prop == "requireIdentity")
+            && self.subjects
+        {
+            self.uses_subject = true;
+            let helper = if prop == "requireSignedIn" {
+                "__z08RequireSignedIn"
+            } else {
+                "__z08RequireIdentity"
+            };
+            self.edits
+                .push((e.span, format!("{helper}(__z08ctx.user, __z08subject)")));
+            return Ok(());
+        }
+        if let E::Member { obj, prop, .. } = &e.kind
+            && prop == "auth"
+            && matches!(&obj.kind, E::Ident(n) if n == self.ctx)
+            && self.subjects
+        {
+            self.uses_subject = true;
+            self.edits
+                .push((e.span, "__z08Auth(__z08ctx.user, __z08subject)".into()));
+            return Ok(());
+        }
+        if let Some(text) = self.service(e)? {
+            self.edits.push((e.span, text));
             return Ok(());
         }
         if let E::Member { obj, prop, .. } = &e.kind
@@ -1059,7 +1727,29 @@ impl Rewrite<'_> {
                 }
             }
             Stmt::Expr(e) | Stmt::Throw(e) | Stmt::ExportDefault(e) => self.expr(e)?,
-            Stmt::Return(Some(e), _) => self.expr(e)?,
+            Stmt::Return(Some(e), _) => {
+                self.expr(e)?;
+                // `return response.json()` returned a promise the 0.8 runtime awaited; an endpoint's
+                // return then passes through 0.8's result rules.
+                let body_read = returns_body_read(e);
+                if body_read || self.returns.contains(&e.span) {
+                    let text = self.apply(e.span);
+                    let text = if body_read { format!("await {text}") } else { text };
+                    self.edits
+                        .retain(|(s, _)| !(s.start >= e.span.start && s.end <= e.span.end));
+                    self.edits.push((
+                        e.span,
+                        if self.returns.contains(&e.span) {
+                            format!("__z08EndpointValue({text})")
+                        } else {
+                            text
+                        },
+                    ));
+                }
+            }
+            Stmt::Return(None, span) if self.returns.contains(span) => {
+                self.edits.push((*span, "return __z08EndpointValue(null);".into()));
+            }
             Stmt::If(e, a, b) => {
                 self.expr(e)?;
                 for s in a {
@@ -1154,6 +1844,311 @@ impl Rewrite<'_> {
         }
         Ok(())
     }
+    /// `.paginate({ numItems, cursor })` keeps 0.8's keyset contract: the index order, then
+    /// `createdAt` and `id`; `numItems` clamped to 1..1000; `{ page, isDone, continueCursor }`; and
+    /// a cursor that only this call site accepts. The helper takes every range value as a
+    /// parameter, so it captures nothing from the handler.
+    #[allow(clippy::too_many_arguments)]
+    fn paginate(
+        &mut self,
+        at: &str,
+        t: &Table,
+        index: &str,
+        columns: &[String],
+        direction: &str,
+        params: &[(String, String, &str, &str, String)],
+        options: &str,
+    ) -> Result<String, Failure> {
+        let field = |c: &str| t.fields.iter().find(|f| f.name == c);
+        if let Some(c) = columns.iter().find(|c| field(c).is_some_and(|f| f.optional)) {
+            return Err(fail(
+                at,
+                format!("pagination over optional field {c} needs a manual port; 0.8 cursors order NULL keys"),
+            ));
+        }
+        let name = &t.name;
+        let helper = format!("__z08page_{}_{}", self.action, self.page_sites());
+        let site = format!("{}:{}:{name}:{index}:{direction}", self.action, self.page_sites());
+        // Cursor keys: one per ordered column, encoded as strings so the cursor stays plain text.
+        let kinds: Vec<&str> = columns
+            .iter()
+            .map(|c| match field(c).map(Field::ty) {
+                Some("number") => "number",
+                Some("boolean") => "boolean",
+                _ if c == "id" => "number",
+                _ => "string",
+            })
+            .collect();
+        let cmp = if direction == "desc" { "lt" } else { "gt" };
+        let range = params
+            .iter()
+            .enumerate()
+            .map(|(i, (f, op, kind, _, _))| {
+                if op == "eq" {
+                    format!("{{ {}: {{ eq: p{i} as {} }} }}", q(f), params[i].3)
+                } else {
+                    format!("{{ {}: {{ {op}: __z08Range{kind}(p{i}) }} }}", q(f))
+                }
+            })
+            .collect::<Vec<_>>();
+        let branches = (0..columns.len())
+            .map(|i| {
+                let mut parts = (0..i)
+                    .map(|j| format!("{{ {}: {{ eq: k{j} }} }}", q(&columns[j])))
+                    .collect::<Vec<_>>();
+                parts.push(format!("{{ {}: {{ {cmp}: k{i} }} }}", q(&columns[i])));
+                format!("{{ AND: [{}] }}", parts.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let order = columns
+            .iter()
+            .map(|c| format!("{}: {}", q(c), q(direction)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let signature = params
+            .iter()
+            .enumerate()
+            .map(|(i, (_, _, _, ty, _))| format!("p{i}: {ty} | null | undefined"))
+            .collect::<Vec<_>>();
+        let decode = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, k)| match *k {
+                "number" => format!("k{i} = Number(parts[{i}] ?? \"\"); if (!Number.isFinite(k{i})) throw new __z08HttpError(400, \"invalid_cursor\", \"Invalid Zero pagination cursor.\");"),
+                "boolean" => format!("if (parts[{i}] !== \"1\" && parts[{i}] !== \"0\") throw new __z08HttpError(400, \"invalid_cursor\", \"Invalid Zero pagination cursor.\"); k{i} = parts[{i}] === \"1\";"),
+                _ => format!("k{i} = parts[{i}] ?? \"\";"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n    ");
+        let initial = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, k)| match *k {
+                "number" => format!("let k{i} = 0;"),
+                "boolean" => format!("let k{i} = false;"),
+                _ => format!("let k{i} = \"\";"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let encode = columns
+            .iter()
+            .zip(&kinds)
+            .map(|(c, k)| match *k {
+                "boolean" => format!("(last.{c} ? \"1\" : \"0\")"),
+                "string" => format!("last.{c}"),
+                _ => format!("String(last.{c})"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let filter = |extra: Option<String>| {
+            let mut all = range.clone();
+            all.extend(extra);
+            format!("where: {{ AND: [{}] }}, ", all.join(", "))
+        };
+        let scope = (0..params.len())
+            .map(|i| format!("p{i} ?? null"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sig = vec!["options: { numItems: number; cursor: string | null }".to_string()];
+        sig.extend(signature);
+        // Columns read from the last raw row are typed by the table, so `last.<c>` is defined.
+        self.helpers.push(format!(
+            "async function {helper}({}) {{
+  const size = Math.max(1, Math.min(1000, Number(options.numItems) || 0));
+  const cursor = options.cursor;
+  // Like 0.8's query fingerprint, a cursor only continues the same filter values.
+  const scope = JSON.stringify([{scope}]) ?? \"\";
+  {initial} let after = false;
+  if (cursor !== null && cursor !== \"\") {{
+    let parsed: {{ site?: unknown; scope?: unknown; keys?: unknown }} = {{}};
+    try {{ parsed = JSON.parse(cursor) as {{ site?: unknown; scope?: unknown; keys?: unknown }}; }} catch (e) {{ throw new __z08HttpError(400, \"invalid_cursor\", \"Invalid Zero pagination cursor.\"); }}
+    const site = parsed.site;
+    const keys = parsed.keys;
+    if (site !== {} || parsed.scope !== scope || typeof keys !== \"string\") throw new __z08HttpError(400, \"invalid_cursor\", \"Invalid Zero pagination cursor.\");
+    // The key tuple is a JSON array of strings, so a key may hold any character.
+    let decoded: unknown = null;
+    try {{ decoded = JSON.parse(keys) as unknown; }} catch (e) {{ throw new __z08HttpError(400, \"invalid_cursor\", \"Invalid Zero pagination cursor.\"); }}
+    if (!Array.isArray(decoded)) throw new __z08HttpError(400, \"invalid_cursor\", \"Invalid Zero pagination cursor.\");
+    const parts: string[] = [];
+    for (const part of decoded as unknown[]) {{ if (typeof part !== \"string\") throw new __z08HttpError(400, \"invalid_cursor\", \"Invalid Zero pagination cursor.\"); parts.push(part); }}
+    if (parts.length !== {}) throw new __z08HttpError(400, \"invalid_cursor\", \"Invalid Zero pagination cursor.\");
+    {decode}
+    after = true;
+  }}
+  const rows = after
+    ? await __z08Db.query.{name}.findMany({{ {}orderBy: {{ {order} }}, limit: size + 1 }})
+    : await __z08Db.query.{name}.findMany({{ {}orderBy: {{ {order} }}, limit: size + 1 }});
+  const items = rows.slice(0, size);
+  const last = items[items.length - 1];
+  const isDone = rows.length <= size;
+  return {{ page: items.map(__z08_{name}_row), isDone, continueCursor: isDone || last == null ? null : JSON.stringify({{ site: {}, scope, keys: JSON.stringify([{encode}]) ?? \"\" }}) }};
+}}
+",
+            sig.join(", "),
+            q(&site),
+            columns.len(),
+            filter(Some(format!("{{ OR: [{branches}] }}"))),
+            filter(None),
+            q(&site),
+        ));
+        let mut call = vec![format!("__z08PageOptions({options})")];
+        call.extend(params.iter().map(|(_, _, _, _, v)| v.clone()));
+        Ok(format!("(await {helper}({}))", call.join(", ")))
+    }
+
+    /// 0.8's request API on a v2 route request (`{ method, path, params, query, headers, body }`).
+    /// Returns `true` when `e` was rewritten as a whole.
+    fn request_use(&mut self, e: &Expr) -> Result<bool, Failure> {
+        let req = self.request.expect("request");
+        let is_req = |e: &Expr| matches!(&e.kind, E::Ident(n) if n == req);
+        let at = pointer(self.at, "request");
+        let refuse = |what: &str| -> Result<bool, Failure> {
+            Err(fail(
+                &pointer(&at, what),
+                "this request API has no v2 route equivalent; port it explicitly",
+            ))
+        };
+        let (inner, awaited) = match &e.kind {
+            E::Await(inner) => (inner.as_ref(), true),
+            _ => (e, false),
+        };
+        if let E::Call {
+            callee,
+            args,
+            optional: false,
+            ..
+        } = &inner.kind
+            && let E::Member {
+                obj,
+                prop,
+                optional: false,
+                ..
+            } = &callee.kind
+        {
+            if is_req(obj) {
+                let text = match (prop.as_str(), args.is_empty(), awaited) {
+                    ("text", true, true) => format!("{req}.body"),
+                    ("json", true, true) => {
+                        format!("(JSON.parse({req}.body === \"\" ? \"null\" : {req}.body) as unknown)")
+                    }
+                    _ => return refuse(prop),
+                };
+                self.edits.push((e.span, text));
+                return Ok(true);
+            }
+            if let E::Member {
+                obj: base, prop: part, ..
+            } = &obj.kind
+                && is_req(base)
+                && (part == "headers" || part == "query")
+                && !awaited
+            {
+                // `req.query` is a URLSearchParams-like RouteQuery: 0.8's calls map one to one.
+                if part == "query" {
+                    if !["get", "getAll", "has"].contains(&prop.as_str()) {
+                        return refuse(&format!("query.{prop}"));
+                    }
+                    for a in args {
+                        self.arr(a)?;
+                    }
+                    return Ok(true);
+                }
+                let [ArrEl::Item(arg)] = args.as_slice() else {
+                    return refuse(&format!("{part}.{prop}"));
+                };
+                let key = self.render(arg)?;
+                let key = format!("String({key}).toLowerCase()");
+                let text = match prop.as_str() {
+                    "get" => format!("({req}.headers[{key}] ?? null)"),
+                    "has" => format!("({req}.headers[{key}] !== undefined)"),
+                    _ => return refuse(&format!("{part}.{prop}")),
+                };
+                self.edits.push((e.span, text));
+                return Ok(true);
+            }
+        }
+        // `req.params.<name>`: decoded on both sides, and always present once the route matched.
+        if let E::Member { obj, prop: param, .. } = &e.kind
+            && let E::Member { obj, prop, .. } = &obj.kind
+            && is_req(obj)
+            && prop == "params"
+        {
+            if !self.params.contains(param) {
+                return refuse(&format!("params.{param}"));
+            }
+            self.edits
+                .push((e.span, format!("({req}.params[{}] ?? \"\")", q(param))));
+            return Ok(true);
+        }
+        if let E::Member { obj, prop, .. } = &e.kind
+            && is_req(obj)
+        {
+            return match prop.as_str() {
+                // Uppercase on both sides.
+                "method" => Ok(true),
+                other => refuse(other),
+            };
+        }
+        if is_req(e) {
+            return refuse("value");
+        }
+        Ok(false)
+    }
+
+    /// Context services with a direct v2 counterpart:
+    /// - `ctx.env.NAME` / `ctx.env["NAME"]` → `env("NAME")`, the same process or wp-config value
+    ///   (0.8 withheld secret variables named as signing keys; v2 has no such keys to withhold);
+    /// - `ctx.log.info|warn|error|debug(...)` → `console.*`, written to the PHP error log.
+    ///
+    /// `ctx.invalidate` belongs to the realtime mapping.
+    fn service(&mut self, e: &Expr) -> Result<Option<String>, Failure> {
+        let ctx = self.ctx;
+        let is = |e: &Expr, name: &str| matches!(&e.kind, E::Member { obj, prop, .. } if prop == name && matches!(&obj.kind, E::Ident(n) if n == ctx));
+        match &e.kind {
+            E::Member { obj, prop, .. } if is(obj, "env") => {
+                ident(prop, &pointer(&pointer(self.at, "ctx"), "env"))?;
+                Ok(Some(format!("(__z08Env({}) ?? undefined)", q(prop))))
+            }
+            E::Index { obj, index, .. } if is(obj, "env") => {
+                let E::Str(name) = &index.kind else {
+                    return Err(fail(
+                        &pointer(&pointer(self.at, "ctx"), "env"),
+                        "env names must be literal",
+                    ));
+                };
+                Ok(Some(format!("(__z08Env({}) ?? undefined)", q(name))))
+            }
+            E::Call {
+                callee,
+                args,
+                optional: false,
+                ..
+            } => {
+                let E::Member { obj, prop, .. } = &callee.kind else {
+                    return Ok(None);
+                };
+                if is(obj, "log") && ["info", "warn", "error", "debug"].contains(&prop.as_str()) {
+                    let rendered = args
+                        .iter()
+                        .map(|a| match a {
+                            ArrEl::Item(e) => self.render(e),
+                            ArrEl::Spread(_) => Err(fail(self.at, "spread log arguments need a manual port")),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.logs = true;
+                    return Ok(Some(format!("console.{prop}({})", rendered.join(", "))));
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn page_sites(&self) -> usize {
+        self.helpers.len()
+    }
+
     fn db(&mut self, e: &Expr) -> Result<Option<String>, Failure> {
         let mut cursor = e;
         let mut chain = Vec::new();
@@ -1235,6 +2230,7 @@ impl Rewrite<'_> {
                     fields
                 };
                 let mut filters = Vec::new();
+                let mut params: Vec<(String, String, &str, &str, String)> = Vec::new();
                 if let Some(range) = a.get(1) {
                     let E::Func(f) = &range.kind else {
                         return Err(fail(&at, "index range must be an arrow function"));
@@ -1294,7 +2290,21 @@ impl Rewrite<'_> {
                         } else {
                             range_field = Some(field.clone());
                         }
-                        filters.push(format!("{{ {}: {{ {op}: {value} }} }}", q(&field)));
+                        // 0.8 compared a null equality as IS NULL and refused null ranges.
+                        let (kind, ty) = match t.fields.iter().find(|f| f.name == field).map(|f| f.ty()) {
+                            Some("number") => ("Real", "number"),
+                            Some("boolean") => ("Boolean", "boolean"),
+                            _ if field == "id" => ("Real", "number"),
+                            _ => ("Text", "string"),
+                        };
+                        // The runtime compares `eq: null` as IS NULL, as 0.8 did; the cast only
+                        // states that to TypeScript. Ranges refuse null like 0.8's runner.
+                        filters.push(if op == "eq" {
+                            format!("{{ {}: {{ eq: ({value}) as {ty} }} }}", q(&field))
+                        } else {
+                            format!("{{ {}: {{ {op}: __z08Range{kind}({value}) }} }}", q(&field))
+                        });
+                        params.push((field.clone(), op.to_string(), kind, ty, value));
                     }
                 }
                 let mut direction = "asc".to_string();
@@ -1316,6 +2326,7 @@ impl Rewrite<'_> {
                         }
                         "collect" | "count" | "first" if a.is_empty() => end = Some((*method, None)),
                         "take" if a.len() == 1 => end = Some(("take", Some(self.render(a[0])?))),
+                        "paginate" if a.len() == 1 => end = Some(("paginate", Some(self.render(a[0])?))),
                         _ => {
                             return Err(fail(
                                 &at,
@@ -1327,8 +2338,17 @@ impl Rewrite<'_> {
                     }
                 }
                 let Some((terminal, limit)) = end else {
-                    return Err(fail(&at, "database query must end with collect, count, first or take"));
+                    return Err(fail(
+                        &at,
+                        "database query must end with collect, count, first, take or paginate",
+                    ));
                 };
+                if terminal == "paginate" {
+                    let options = limit.expect("paginate options");
+                    return Ok(Some(
+                        self.paginate(&at, t, &index, &columns, &direction, &params, &options)?,
+                    ));
+                }
                 let order = columns
                     .iter()
                     .map(|n| format!("{}: {}", q(n), q(&direction)))

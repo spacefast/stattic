@@ -96,6 +96,7 @@ impl Prepared {
             let (zip, sha256) = acquire(plugin, pin, cache, &resource_url(&plugin.resource()))?;
             let directory = stage.path().join(&plugin.slug);
             archive::extract(&zip, &directory, plugin)?;
+            super::patches::apply(plugin, &sha256, &directory)?;
             let tree_sha256 = archive::tree_digest(&directory)?;
             let mut requires = plugin.requires.clone();
             requires.sort();

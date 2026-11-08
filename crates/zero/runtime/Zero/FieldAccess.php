@@ -89,7 +89,7 @@ final class FieldAccess
             return true;
         }
         if (Access::isShorthand($rule)) {
-            return $page[json_encode($rule)] ??= self::allows($rule, $viewer, 'read', null);
+            return $page[\Zero\Json::encode($rule)] ??= self::allows($rule, $viewer, 'read', null);
         }
 
         return self::allows($rule, $viewer, 'read', $enclosing, $shape);

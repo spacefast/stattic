@@ -835,9 +835,17 @@ test(
       rootPassword: "disposable-zero-v2-proof",
       flavor: "mariadb",
     });
+    // The box's php-fpm namespace has no `wp` or `php` to spawn: finalize gets the same.
+    // Only these names fail. The fixture server itself starts from PHP_BINARY, resolved
+    // to an absolute path at module load, so it is unaffected.
+    const fpmBin = path.join(work, "fpm-bin");
+    mkdirSync(fpmBin);
+    for (const name of ["wp", "php"]) {
+      writeFileSync(path.join(fpmBin, name), "#!/bin/sh\nexit 127\n", { mode: 0o755 });
+    }
     const rt = await startRuntime({
       env: {
-        PATH: `${path.join(work, "bin")}:${process.env.PATH ?? ""}`,
+        PATH: `${fpmBin}:${process.env.PATH ?? ""}`,
         SPACEFAST_ZERO_DATABASE_URL: db.url,
       },
     });
@@ -992,6 +1000,33 @@ test(
       assert.equal(lockedRows.length, 1);
       assert.match(lockedRows[0]?.body ?? "", /A file edit must not replace site content/);
       assert.equal((await records())[0]?.slug, "second-post");
+      // A record the app refuses fails the publish with Zero's pointer, before the version is ready.
+      const refused = {
+        ...second,
+        "content/posts/second-post.md": second["content/posts/second-post.md"].replace(
+          "status: published",
+          "status: archived",
+        ),
+      };
+      const refusedSession = await createDeclaredSession(rt, space, "ver_write_refused", refused);
+      await uploadSessionBlobs(rt, refusedSession, refused);
+      const refusal = await finalize(rt, space, "ver_write_refused", {
+        upload_id: refusedSession.uploadId,
+        zero_generation: "v2",
+      });
+      assert.equal(refusal.status, 422, await refusal.clone().text());
+      const problem = z
+        .object({ code: z.string(), pointer: z.string() })
+        .parse(await refusal.json());
+      assert.equal(problem.code, "zero_v2_seed_failed");
+      // Zero's own pointer, carried through unchanged.
+      assert.equal(problem.pointer, "/fields/status");
+      assert.equal(
+        existsSync(
+          path.join(versionRoot(rt, space, "ver_write_refused"), ".zero-compiled/ready.json"),
+        ),
+        false,
+      );
     } finally {
       rt.stop();
       db.stop();

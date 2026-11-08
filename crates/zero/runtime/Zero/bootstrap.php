@@ -2,15 +2,14 @@
 
 declare(strict_types=1);
 
-ini_set('precision', '-1');
-ini_set('serialize_precision', '-1');
-// Warnings must never leak into a JSON response; they go to the error log.
-ini_set('display_errors', '0');
-ini_set('log_errors', '1');
-
-require_once __DIR__ . '/vendor-prefixed/autoload.php';
-
 spl_autoload_register(static function (string $class): void {
+    if (str_starts_with($class, 'Zero\\Vendor\\') || str_starts_with($class, 'Zero_Vendor_')) {
+        static $vendor = null;
+        $vendor ??= require __DIR__ . '/vendor-prefixed/autoload.php';
+        $vendor->loadClass($class);
+
+        return;
+    }
     if (str_starts_with($class, 'Zero\\')) {
         $file = __DIR__ . '/' . str_replace('\\', '/', substr($class, 5)) . '.php';
         if (is_file($file)) {

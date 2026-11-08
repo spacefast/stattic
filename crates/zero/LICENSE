@@ -9,8 +9,9 @@ GPL-2.0-or-later (full text in LICENSE-GPL)
   runtime/admin/         the zero-admin plugin and its screens, emitted
                          with `admin: true`
   runtime/wp-plugin/     the zero-runtime and zero-app plugin templates
-  packages/pages/wp/     the optional pages runtime, copied into the
-                         zero-pages-<app> plugin that zero-pages build emits
+  runtime/pages/         the optional pages runtime, copied into the
+                         zero-pages-<app> plugin that zero-pages build and
+                         zero compile-sources emit
 
   and every plugin that `zero build` emits from them.
 

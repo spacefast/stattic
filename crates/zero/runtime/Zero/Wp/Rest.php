@@ -18,8 +18,8 @@ final class Rest
 {
     public const NAMESPACE = 'zero/v1';
 
-    /** @var array<int, string|\Closure> response object id → body to serve after the operation commits */
-    private static array $bodies = [];
+    /** @var \WeakMap<\WP_REST_Response, string|\Closure>|null bodies to serve after the operation commits */
+    private static ?\WeakMap $bodies = null;
 
     public static function register(callable $app): void
     {
@@ -39,7 +39,8 @@ final class Rest
             'permission_callback' => '__return_true',
             'callback' => static function () use ($detail): \WP_REST_Response {
                 $response = new \WP_REST_Response(null, 503, ['Content-Type' => 'application/problem+json', 'Retry-After' => '5']);
-                self::$bodies[spl_object_id($response)] = (string) \Zero\Js::jsonStringify([
+                self::$bodies ??= new \WeakMap();
+                self::$bodies[$response] = (string) \Zero\Js::jsonStringify([
                     'type' => 'about:blank', 'title' => 'Service unavailable', 'status' => 503, 'code' => 'unavailable', 'detail' => $detail,
                 ]);
 
@@ -77,7 +78,8 @@ final class Rest
             $form,
         );
         $response = new \WP_REST_Response(null, $status, $out);
-        self::$bodies[spl_object_id($response)] = $body;
+        self::$bodies ??= new \WeakMap();
+        self::$bodies[$response] = $body;
 
         return $response;
     }
@@ -85,11 +87,11 @@ final class Rest
     /** rest_pre_serve_request: echo Zero's own body for Zero responses. */
     public static function serve(mixed $served, mixed $result): mixed
     {
-        if ($served || !is_object($result) || !isset(self::$bodies[spl_object_id($result)])) {
+        if ($served || !is_object($result) || !isset(self::$bodies[$result])) {
             return $served;
         }
-        $body = self::$bodies[spl_object_id($result)];
-        unset(self::$bodies[spl_object_id($result)]);
+        $body = self::$bodies[$result];
+        unset(self::$bodies[$result]);
         \Zero\Response::emit($body);
 
         return true;

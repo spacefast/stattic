@@ -112,6 +112,12 @@ final class Schema
         return $this->raw['auth'] ?? ['collection' => null, 'guests' => true, 'accessTtl' => 300, 'refreshTtl' => 2592000];
     }
 
+    /** @return array<string, array{method: string, path: string, handler: string, access: array, signature: ?array}> */
+    public function routes(): array
+    {
+        return $this->raw['routes'] ?? [];
+    }
+
     public function jobs(): array
     {
         return $this->raw['jobs'] ?? [];
@@ -292,7 +298,7 @@ final class Schema
      */
     public static function normalize(array $col, mixed $v, string $name, string $pointer): mixed
     {
-        if ($v === null) {
+        if ($v === null || $v === JsUndefined::Value) {
             if ($col['notNull'] ?? false) {
                 throw HttpError::invalidInput("$name is required", $pointer);
             }

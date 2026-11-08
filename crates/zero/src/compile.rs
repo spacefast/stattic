@@ -161,13 +161,20 @@ struct AssignmentPlace {
 struct WriteTarget {
     receiver: String,
     key: String,
-    array: bool,
-    dynamic: bool,
+    kind: WriteKind,
+}
+
+enum WriteKind {
+    Object,
+    NativeObject,
+    Array,
+    Dynamic,
 }
 
 enum CapturedPlace {
     Binding(String),
     Object { receiver: String, key: String },
+    NativeObject { receiver: String, key: String },
     Array { receiver: String, key: String },
     Dynamic { receiver: String, key: String },
 }
@@ -218,6 +225,9 @@ struct Local {
     mutable: bool,
     binding: Span,
     view: Vec<effects::Step>,
+    /// A PHP JsObject parameter whose binding is never replaced, including by captures.
+    native_object: bool,
+    initialized: bool,
 }
 
 /// Binding reads may be widened by runtime effects independently of what the
@@ -249,15 +259,15 @@ struct FnCtx {
     /// The closure whose captured environment resolves free names.
     env: Rc<Scope>,
     module: usize,
-    /// Parameter names that need `&` because the function mutates them.
-    /// Locals declared so far in this PHP function (for closure `use` lists).
-    declared: Vec<String>,
+    /// PHP names reserved by locals, temporaries and enclosing capture candidates.
+    php_names: HashSet<String>,
     /// Inside a nested closure: names from the enclosing function it uses.
     captures: Option<Vec<(String, bool)>>,
     outer: Option<Box<FnCtx>>,
     tmp: usize,
     /// Switches between the current statement and the nearest loop (PHP counts them for `continue`).
     switch_depth: usize,
+    conditional_depth: usize,
     /// Access rules can't query (§1.6): `db` is rejected inside them and their closures.
     no_db: bool,
     /// Set while compiling an access rule's own body: (collection table, op). Its returns are
@@ -278,6 +288,7 @@ pub struct Compiler<'a, 'p> {
     /// Compiled module-level helpers, separated by whether database access is forbidden.
     helpers: HashMap<(usize, bool), String>,
     helper_values: HashMap<usize, String>,
+    helper_closures: HashMap<usize, Rc<Closure>>,
     helper_types: HashMap<usize, Ty>,
     data_helpers: HashMap<(u8, usize), String>,
     effects: effects::Effects,
@@ -292,7 +303,7 @@ pub struct Compiler<'a, 'p> {
 }
 
 fn closure_key(c: &Rc<Closure>) -> usize {
-    Rc::as_ptr(&c.func) as *const () as usize
+    Rc::as_ptr(c) as usize
 }
 
 impl<'a, 'p> Compiler<'a, 'p> {
@@ -320,6 +331,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             async_callback: false,
             helpers: HashMap::new(),
             helper_values: HashMap::new(),
+            helper_closures: HashMap::new(),
             helper_types: HashMap::new(),
             data_helpers: HashMap::new(),
             effects: effects::Effects::default(),
@@ -469,7 +481,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn resolve_json_column(&mut self, col: &Column) -> Result<()> {
-        let Some((ann, module)) = &col.ts_type else {
+        let Some((ann, module, span)) = &col.ts_type else {
             return Ok(());
         };
         let key = col as *const Column as usize;
@@ -477,25 +489,26 @@ impl<'a, 'p> Compiler<'a, 'p> {
             return Ok(());
         }
         if self.resolving_json_types.len() >= 96 {
-            return err(
-                annotations::annotation_span(ann),
-                "JSON model expansion exceeds Zero's 96-level limit",
-            );
+            return err(*span, "JSON model expansion exceeds Zero's 96-level limit");
         }
         if !self.resolving_json_types.insert(key) {
-            return err(
-                annotations::annotation_span(ann),
-                "recursive JSON model annotations aren't supported",
-            );
+            return err(*span, "recursive JSON model annotations aren't supported");
         }
         let result = (|| {
             let authored = self.resolve_annotation_root(ann, *module)?;
             let ty = annotations::runtime_type(authored.clone());
             if classes::wire_type(&ty) != ty {
                 return err_help(
-                    annotations::annotation_span(ann),
+                    *span,
                     "JSON schemas cannot use class instance types",
                     "describe the stored own fields with an object type; JSON does not restore methods or instanceof identity",
+                );
+            }
+            if !assignable(&types::json_wire_type(&ty), &ty) {
+                return err_help(
+                    *span,
+                    "JSON schemas must accept their serialized values",
+                    "use null for undefined array slots, and optional properties for omitted values",
                 );
             }
             JSON_TYPES.with(|m| m.borrow_mut().insert(key, types::JsonType { authored, runtime: ty }));
@@ -524,7 +537,24 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     Ty::Promise(t) => (**t).clone(),
                     t => t.clone(),
                 };
+                crate::builtins::check_json_serialization_type(&ret, root.closure.func.span)?;
                 self.action_results.insert(action.clone(), ret);
+            }
+            if let Slot::RouteHandler { route } = &root.slot {
+                let ret = match self.helper_types.get(&key) {
+                    Some(Ty::Fn(_, ret)) => match &**ret {
+                        Ty::Promise(t) => (**t).clone(),
+                        t => t.clone(),
+                    },
+                    _ => Ty::Unknown,
+                };
+                if !assignable(&ret, &types::route_response()) {
+                    return err_help(
+                        root.closure.func.span,
+                        format!("routes.{route} returns {}, not a route response", ret.describe()),
+                        "return { status?: number, headers?: Record<string, string>, body?: string }",
+                    );
+                }
             }
             self.helpers.entry((key, no_db)).or_insert_with(|| name.clone());
             out.push((root.slot.clone(), name));
@@ -558,6 +588,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 types::job_ctx(),
             ],
             Slot::FieldAccess { .. } => vec![types::field_access_ctx()],
+            Slot::RouteHandler { .. } => vec![types::route_request(), ctx],
             Slot::ActionHandler { action } => vec![
                 types::action_input(&self.schema.actions[action].input, &types::json_ty),
                 ctx,
@@ -578,7 +609,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     Owner::Global(name) => &self.schema.globals[name].fields,
                     Owner::Action(name) => &self.schema.actions[name].input,
                     Owner::Job(name) => &self.schema.jobs[name].input,
-                    Owner::FileBucket(_) => unreachable!("file buckets have no validator fields"),
+                    Owner::FileBucket(_) | Owner::Route(_) => {
+                        unreachable!("file buckets and routes have no validator fields")
+                    }
                 };
                 vec![
                     types::col_base(col, &types::json_ty, false),
@@ -597,6 +630,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
         slot: Option<&Slot>,
         no_db: bool,
     ) -> Result<()> {
+        // Keep identity keys alive while helper signatures and wrappers refer to them.
+        self.helper_closures
+            .entry(closure_key(closure))
+            .or_insert_with(|| closure.clone());
         let f = closure.func.clone();
         if matches!(slot, Some(Slot::FieldAccess { .. })) && f.is_async {
             return err_help(
@@ -616,11 +653,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
             loop_bindings: HashSet::new(),
             env: closure.env.clone(),
             module: f.module,
-            declared: Vec::new(),
+            php_names: HashSet::new(),
             captures: None,
             outer: None,
             tmp: 0,
             switch_depth: 0,
+            conditional_depth: 0,
             no_db,
             access: match slot {
                 Some(Slot::FieldAccess { .. }) => Some((None, "field".into())),
@@ -786,6 +824,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         param_tys: &[Ty],
         _slot: Option<&Slot>,
     ) -> Result<(String, String)> {
+        let arguments = self.javascript_arguments(f, 1)?;
         let mut params_php = Vec::new();
         let mut prologue = String::new();
         for (i, p) in f.params.iter().enumerate() {
@@ -795,8 +834,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     return err(p.span, "rest parameters need a plain name");
                 };
                 let php = self.declare_local(name, t, true, p.pat.span());
-                params_php.push(format!("...$__rest{i}"));
-                let _ = writeln!(prologue, "    {php} = new \\Zero\\JsArray($__rest{i});");
+                let rest = self.tmp_var();
+                params_php.push(format!("...{rest}"));
+                let _ = writeln!(prologue, "    {php} = new \\Zero\\JsArray({rest});");
                 continue;
             }
             match &p.pat {
@@ -805,14 +845,32 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     let default = if self.javascript_module(f.module) {
                         " = \\Zero\\JsUndefined::Value"
                     } else {
-                        parameter_default_suffix(p)
+                        parameter_default_suffix(&f.params[i..], &param_tys[i..f.params.len()])
                     };
                     let hint = php_hint(&t);
+                    if hint == "\\Zero\\JsObject "
+                        && matches!(t, Ty::Obj(_) | Ty::Map(_))
+                        && p.default.is_none()
+                        && !self.effects.binding_reassigned(p.pat.span())
+                    {
+                        let Pat::Id(name, _) = &p.pat else { unreachable!() };
+                        self.fx()
+                            .scopes
+                            .last_mut()
+                            .expect("scope")
+                            .get_mut(name)
+                            .expect("parameter")
+                            .native_object = true;
+                    }
                     params_php.push(format!("{hint}{php}{default}"));
                 }
                 pat => {
-                    let tmp = format!("$__arg{i}");
-                    params_php.push(format!("{}{tmp}{}", php_hint(&t), parameter_default_suffix(p)));
+                    let tmp = self.tmp_var();
+                    params_php.push(format!(
+                        "{}{tmp}{}",
+                        php_hint(&t),
+                        parameter_default_suffix(&f.params[i..], &param_tys[i..f.params.len()])
+                    ));
                     let (read, initialization) = self.initialize_parameter(p, &tmp, &t, 1)?;
                     prologue.push_str(&initialization);
                     self.bind_pattern_types(
@@ -829,7 +887,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 }
             }
         }
-        let mut body = self.javascript_prologue(f, 1)?;
+        let mut body = arguments + &self.javascript_prologue(f, 1)?;
         body.push_str(&prologue);
         match &f.body {
             FnBody::Expr(e) => {
@@ -840,9 +898,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             FnBody::Block(stmts) => {
                 body.push_str(&self.block(stmts, 1)?);
                 self.note_fallthrough(stmts, f.span)?;
-                if self.javascript_module(f.module) {
-                    body.push_str("    return \\Zero\\Js::undefined();\n");
-                }
+                body.push_str("    return \\Zero\\Js::undefined();\n");
             }
         }
         Ok((params_php.join(", "), body))
@@ -878,7 +934,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
     fn note_fallthrough(&mut self, stmts: &[Stmt], span: Span) -> Result<()> {
         let fx = self.fx();
         if block_completions(stmts, &fx.diverging, &fx.exhaustive_switches).contains(&Completion::Normal) {
-            self.note_return(&Ty::Null, span)?;
+            self.note_return(&Ty::Undefined, span)?;
         }
         Ok(())
     }
@@ -888,18 +944,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
     fn declare_local(&mut self, name: &str, ty: Ty, mutable: bool, binding: Span) -> String {
         let read_ty = self.effects.parameter_type(binding, &ty);
         let fx = self.fx();
-        let shadow = fx.scopes.iter().any(|s| s.contains_key(name)) || fx.declared.iter().any(|d| d == name);
-        let php = if shadow && !fx.scopes.last().expect("scope").contains_key(name) {
-            fx.tmp += 1;
-            format!("${}_{}", name, fx.tmp)
+        let php = if let Some(local) = fx.scopes.last().expect("scope").get(name)
+            && local.binding == binding
+        {
+            local.php.clone()
         } else {
-            if name == "this" {
-                "$__zero_this".into()
-            } else {
-                format!("${name}")
+            let base = php_local_base(name);
+            let mut candidate = base.clone();
+            while !fx.php_names.insert(candidate.clone()) {
+                fx.tmp += 1;
+                candidate = format!("{base}_{}", fx.tmp);
             }
+            format!("${candidate}")
         };
-        fx.declared.push(php.trim_start_matches('$').to_string());
         fx.scopes.last_mut().expect("scope").insert(
             name.to_string(),
             Local {
@@ -909,9 +966,36 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 mutable,
                 binding,
                 view: Vec::new(),
+                native_object: false,
+                initialized: true,
             },
         );
         php
+    }
+
+    fn predeclare_lexical(&mut self, pat: &Pat, mutable: bool) {
+        let mut bindings = Vec::new();
+        pat.bindings(&mut bindings);
+        for (name, binding) in bindings {
+            if self
+                .fx()
+                .scopes
+                .last()
+                .expect("scope")
+                .get(name)
+                .is_some_and(|local| local.binding == binding)
+            {
+                continue;
+            }
+            self.declare_local(name, Ty::Unknown, mutable, binding);
+            self.fx()
+                .scopes
+                .last_mut()
+                .expect("scope")
+                .get_mut(name)
+                .expect("binding")
+                .initialized = false;
+        }
     }
 
     fn set_local_ty(&mut self, name: &str, ty: Ty) {
@@ -928,6 +1012,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let fx = self.fx.as_mut().expect("fn");
         for s in fx.scopes.iter().rev() {
             if let Some(l) = s.get(name) {
+                require_initialized_local(name, l, span)?;
                 return Ok(Resolved::Local(l.clone()));
             }
         }
@@ -936,6 +1021,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let mut found = None;
         while let Some(o) = outer {
             if let Some(l) = o.scopes.iter().rev().find_map(|s| s.get(name)) {
+                require_initialized_local(name, l, span)?;
                 found = Some(l.clone());
                 break;
             }
@@ -956,6 +1042,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 if c.scopes.iter().any(|s| s.values().any(|x| x.php == l.php)) {
                     break;
                 }
+                c.php_names.insert(var.clone());
                 if let Some(caps) = &mut c.captures
                     && !caps.iter().any(|(n, _)| *n == var)
                 {
@@ -966,6 +1053,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
             return Ok(Resolved::Local(l));
         }
         if let Some(b) = fx.env.lookup(name) {
+            if !b.initialized {
+                return err_help(
+                    span,
+                    format!("`{name}` isn't initialized"),
+                    "initialize the lexical binding before reading or assigning it",
+                );
+            }
             return Ok(Resolved::Value(b.value.clone(), b));
         }
         if let Some(g) = GLOBALS.iter().find(|g| **g == name) {
@@ -1025,6 +1119,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
 
     fn stmts(&mut self, stmts: &[Stmt], indent: usize) -> Result<String> {
         let mut out = String::new();
+        for stmt in stmts {
+            if let Stmt::Decl { kind, pat, .. } = stmt
+                && *kind != DeclKind::Var
+            {
+                self.predeclare_lexical(pat, *kind == DeclKind::Let);
+            }
+        }
         // Local function declarations are hoisted: compile them first.
         for s in stmts {
             if let Stmt::Func(f) = s {
@@ -1047,6 +1148,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
             );
         }
         Ok(out)
+    }
+
+    fn conditional_stmts(&mut self, stmts: &[Stmt], indent: usize) -> Result<String> {
+        self.fx().conditional_depth += 1;
+        let result = self.stmts(stmts, indent);
+        self.fx().conditional_depth -= 1;
+        result
     }
 
     fn stmt(&mut self, s: &Stmt, indent: usize) -> Result<String> {
@@ -1078,11 +1186,16 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         }
                         let _ = writeln!(out, "{p}{} = {};", local.php, value.php);
                         if local.constraint != Ty::Dynamic {
-                            let ty = widen_fresh_literals(&value.ty);
+                            let value_ty = widen_fresh_literals(&value.ty);
+                            let ty = if self.fx().conditional_depth > 0 {
+                                Ty::union([local.ty.clone(), value_ty.clone()])
+                            } else {
+                                value_ty.clone()
+                            };
                             for scope in self.fx().scopes.iter_mut().rev() {
                                 if let Some(local) = scope.get_mut(name) {
                                     if local.constraint == Ty::Unknown {
-                                        local.constraint = ty.clone();
+                                        local.constraint = value_ty.clone();
                                     }
                                     local.ty = ty;
                                     break;
@@ -1092,6 +1205,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     }
                     return Ok(out);
                 }
+                self.predeclare_lexical(pat, *kind == DeclKind::Let);
                 let javascript = self.javascript_module(self.fx.as_ref().expect("fn").module);
                 let declared = match ann {
                     Some(a) => {
@@ -1118,7 +1232,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         }
                         d.clone()
                     }
-                    (Some(d), None) => d.clone().nullable(),
+                    (Some(d), None) => Ty::union([d.clone(), Ty::Undefined]),
                     (None, Some(v)) => inferred_binding_type(&v.ty, *kind == DeclKind::Let),
                     (None, None) => {
                         return err_help(
@@ -1132,9 +1246,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 match pat {
                     Pat::Id(n, _) => {
                         let php = self.declare_local(n, ty, mutable, pat.span());
-                        let v = value
-                            .map(|v| v.php)
-                            .unwrap_or_else(|| if javascript { "\\Zero\\Js::undefined()" } else { "null" }.into());
+                        let v = value.map(|v| v.php).unwrap_or_else(|| "\\Zero\\Js::undefined()".into());
                         self.fresh_binding(&php, pat.span(), &mut out, indent);
                         let _ = writeln!(out, "{p}{php} = {v};");
                     }
@@ -1178,13 +1290,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     let _ = writeln!(out, "{p}return {};", v.php);
                 }
                 None => {
-                    let javascript = self.javascript_module(self.fx.as_ref().expect("fn").module);
-                    self.note_return(&if javascript { Ty::Dynamic } else { Ty::Null }, *span)?;
-                    let _ = writeln!(
-                        out,
-                        "{p}return {};",
-                        if javascript { "\\Zero\\Js::undefined()" } else { "null" }
-                    );
+                    self.note_return(&Ty::Undefined, *span)?;
+                    let _ = writeln!(out, "{p}return \\Zero\\Js::undefined();");
                 }
             },
             Stmt::If(test, then, otherwise) => {
@@ -1193,14 +1300,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 let _ = writeln!(out, "{p}if ({t}) {{");
                 self.fx().scopes.push(HashMap::new());
                 self.apply_narrowing(&narrow, true);
-                out.push_str(&self.stmts(then, indent + 1)?);
+                out.push_str(&self.conditional_stmts(then, indent + 1)?);
                 self.fx().scopes.pop();
                 let then_exits = ends_with_exit(then);
                 if let Some(o) = otherwise {
                     let _ = writeln!(out, "{p}}} else {{");
                     self.fx().scopes.push(HashMap::new());
                     self.apply_narrowing(&narrow, false);
-                    out.push_str(&self.stmts(o, indent + 1)?);
+                    out.push_str(&self.conditional_stmts(o, indent + 1)?);
                     self.fx().scopes.pop();
                 }
                 let _ = writeln!(out, "{p}}}");
@@ -1222,6 +1329,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
             } => {
                 self.fx().scopes.push(HashMap::new());
                 if let Some(init) = init {
+                    if let Stmt::Decl { kind, pat, .. } = init.as_ref()
+                        && *kind != DeclKind::Var
+                    {
+                        self.predeclare_lexical(pat, *kind == DeclKind::Let);
+                    }
                     out.push_str(&self.stmt(init, indent)?);
                 }
                 self.invalidate_loop(*span);
@@ -1283,10 +1395,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 body,
                 span,
             } => {
+                self.fx().scopes.push(HashMap::new());
+                if *kind != DeclKind::Var {
+                    self.predeclare_lexical(pat, *kind == DeclKind::Let);
+                }
                 let it = self.expr(iter)?;
                 let it = self.finish_value(it, iter.span)?;
                 let (el, src) = match &it.ty.non_null() {
-                    Ty::Dynamic => (Ty::Dynamic, format!("\\Zero\\Js::dynamicIterable({})", it.php)),
+                    Ty::Dynamic => (Ty::Dynamic, format!("\\Zero\\Js::dynamicIterator({})", it.php)),
                     Ty::Array(t) | Ty::NonEmptyArray(t) => ((**t).clone(), it.php.clone()),
                     Ty::Tuple(ts) | Ty::ArrayLiteral(ts) => (Ty::union(ts.clone()), it.php.clone()),
                     t if t.is_str() => (Ty::Str, format!("\\Zero\\Js::from({})", it.php)),
@@ -1299,17 +1415,20 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         "check it first, or use `?? []`",
                     );
                 }
-                self.fx().scopes.push(HashMap::new());
                 let el = widen_fresh_literals(&el);
                 let mutable = *kind != DeclKind::Const;
                 let source = self.tmp_var();
                 let index = self.tmp_var();
                 let value = self.tmp_var();
-                let _ = writeln!(
-                    out,
-                    "{p}{source} = {src};\n{p}for ({index} = 0; {index} < count({source}->a); {index}++) {{"
-                );
-                let _ = writeln!(out, "{}{value} = {source}->a[{index}];", pad(indent + 1));
+                if it.ty == Ty::Dynamic {
+                    let _ = writeln!(out, "{p}{source} = {src};\n{p}foreach ({source} as {value}) {{");
+                } else {
+                    let _ = writeln!(
+                        out,
+                        "{p}{source} = {src};\n{p}for ({index} = 0; {index} < count({source}->a); {index}++) {{"
+                    );
+                    let _ = writeln!(out, "{}{value} = {source}->a[{index}];", pad(indent + 1));
+                }
                 let mut previous = None;
                 if *kind == DeclKind::Var {
                     let Pat::Id(name, _) = pat else {
@@ -1341,10 +1460,16 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 body,
                 span,
             } => {
+                self.fx().scopes.push(HashMap::new());
+                if let Some(kind) = kind.filter(|kind| *kind != DeclKind::Var) {
+                    let ExprKind::Ident(name) = &target.kind else {
+                        return err(*span, "for-in declarations need a plain name");
+                    };
+                    self.predeclare_lexical(&Pat::Id(name.clone(), target.span), kind == DeclKind::Let);
+                }
                 let value = self.expr(iter)?;
                 let source = self.tmp_var();
                 let index = self.tmp_var();
-                self.fx().scopes.push(HashMap::new());
                 let mut previous = None;
                 let php = if let Some(kind) = kind {
                     let ExprKind::Ident(name) = &target.kind else {
@@ -1378,7 +1503,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 };
                 let _ = writeln!(
                     out,
-                    "{p}{source} = \\Zero\\Js::dynamicKeys({});\n{p}foreach ({source}->a as {index}) {{",
+                    "{p}{source} = \\Zero\\Js::dynamicForIn({});\n{p}foreach ({source} as {index}) {{",
                     value.php
                 );
                 if matches!(kind, Some(DeclKind::Let | DeclKind::Const)) {
@@ -1436,16 +1561,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 finalizer,
             } => {
                 let _ = writeln!(out, "{p}try {{");
-                out.push_str(&self.block(block, indent + 1)?);
+                self.fx().conditional_depth += 1;
+                let inner = self.block(block, indent + 1);
+                self.fx().conditional_depth -= 1;
+                out.push_str(&inner?);
                 if let Some(h) = handler {
                     self.fx().scopes.push(HashMap::new());
                     let var = match param {
                         Some((n, span)) => self.declare_local(n, Ty::Error, false, *span),
-                        None => "$__e".to_string(),
+                        None => self.tmp_var(),
                     };
                     // Database and validation errors propagate: they must roll back the request.
                     let _ = writeln!(out, "{p}}} catch (\\Zero\\JsError {var}) {{");
-                    out.push_str(&self.stmts(h, indent + 1)?);
+                    out.push_str(&self.conditional_stmts(h, indent + 1)?);
                     self.fx().scopes.pop();
                 }
                 if let Some(f) = finalizer {
@@ -1484,7 +1612,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         }
                     }
                     self.fx().switch_depth += 1;
+                    self.fx().conditional_depth += 1;
                     let inner = self.block(body, indent + 2);
+                    self.fx().conditional_depth -= 1;
                     self.fx().switch_depth -= 1;
                     out.push_str(&inner?);
                 }
@@ -1527,7 +1657,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
             .flat_map(|scope| scope.values().map(|l| l.binding))
             .collect();
         self.fx().loop_bindings.extend(bindings);
+        self.fx().conditional_depth += 1;
         let r = self.block(body, indent);
+        self.fx().conditional_depth -= 1;
         self.fx().loop_bindings = saved_bindings;
         self.fx().switch_depth = saved;
         r
@@ -1535,10 +1667,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
 
     fn tmp_var(&mut self) -> String {
         let fx = self.fx();
-        fx.tmp += 1;
-        let name = format!("__t{}", fx.tmp);
-        fx.declared.push(name.clone());
-        format!("${name}")
+        loop {
+            fx.tmp += 1;
+            let name = format!("__t{}", fx.tmp);
+            if fx.php_names.insert(name.clone()) {
+                return format!("${name}");
+            }
+        }
     }
 
     /// A `return` operand. In an access rule it must be a boolean or a filter literal (§1.6).
@@ -1717,17 +1852,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 };
                 let tmp = self.tmp_var();
                 let assigned = format!("{tmp} = {src}");
-                let missing = if self.javascript_module(self.fx.as_ref().expect("fn").module) {
-                    format!("({assigned}) === \\Zero\\Js::undefined()")
-                } else {
-                    format!("\\Zero\\Js::isNullish({assigned})")
-                };
+                let missing = format!("({assigned}) === \\Zero\\Js::undefined()");
                 let _ = writeln!(out, "{p}{tmp} = ({missing} ? {} : {tmp});", d.php);
                 self.bind_pattern_types(inner, &tmp, types, mutable, out, indent)?;
             }
             Pat::Obj { props, rest, span } => {
                 let source = self.tmp_var();
-                let _ = writeln!(out, "{p}{source} = {src};");
+                let _ = writeln!(out, "{p}{source} = \\Zero\\Js::requirePresent({src});");
                 let src = &source;
                 let t = ty.non_null();
                 if ty.is_nullable() {
@@ -1743,11 +1874,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         }
                         return Err(d);
                     };
-                    let access = if optional || matches!(t, Ty::Map(_)) {
-                        format!("\\Zero\\Js::dynamicGet({src}, {})", php_str(key))
-                    } else {
-                        format!("{src}->p[{}]", php_str(key))
-                    };
+                    let access = format!("\\Zero\\Js::dataGet({src}, {})", php_str(key));
                     let read = if optional || matches!(t, Ty::Map(_)) {
                         Ty::union([ft, Ty::Undefined])
                     } else {
@@ -1756,7 +1883,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     let original = constraint.non_null();
                     let (ct, optional) = original.field(key).expect("authored field");
                     let constraint = if optional || matches!(original, Ty::Map(_)) {
-                        ct.nullable()
+                        Ty::union([ct, Ty::Undefined])
                     } else {
                         ct
                     };
@@ -1789,8 +1916,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     return err(*span, format!("can't destructure {}: it might be null", ty.describe()));
                 }
                 let element = |ty: &Ty, i: usize| match ty.non_null() {
-                    Ty::Array(t) | Ty::NonEmptyArray(t) => Some((*t).nullable()),
-                    Ty::Tuple(ts) | Ty::ArrayLiteral(ts) => Some(ts.get(i).cloned().unwrap_or(Ty::Null)),
+                    Ty::Array(t) | Ty::NonEmptyArray(t) => Some(Ty::union([*t, Ty::Undefined])),
+                    Ty::Tuple(ts) | Ty::ArrayLiteral(ts) => Some(ts.get(i).cloned().unwrap_or(Ty::Undefined)),
                     _ => None,
                 };
                 if element(&ty, 0).is_none() {
@@ -1798,22 +1925,35 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 }
                 let done = self.tmp_var();
                 let _ = writeln!(out, "{p}{done} = false;");
+                let mut changed = false;
+                let live_element = |ty: &Ty, i: usize, changed: bool| {
+                    if changed && let Ty::Tuple(items) | Ty::ArrayLiteral(items) = ty.non_null() {
+                        Some(Ty::union(items.into_iter().chain([Ty::Undefined])))
+                    } else {
+                        element(ty, i)
+                    }
+                };
                 for (i, e) in elems.iter().enumerate() {
                     let _ = writeln!(out, "{p}{done} = {done} || {i} >= count({src}->a);");
                     if let Some(e) = e {
-                        let access = format!("({done} ? null : \\Zero\\Js::get({src}, {i}))");
+                        let access = format!("({done} ? \\Zero\\Js::undefined() : \\Zero\\Js::dynamicGet({src}, {i}))");
                         let types = BindingTypes {
-                            read: element(&ty, i).expect("array read"),
-                            constraint: element(&constraint, i).expect("authored array"),
+                            read: live_element(&ty, i, changed).expect("array read"),
+                            constraint: live_element(&constraint, i, changed).expect("authored array"),
                         };
                         self.bind_pattern_types(e, &access, types, mutable, out, indent)?;
+                        changed |= pattern_default_effects(e);
                     }
                 }
                 if let Some((name, span)) = rest {
                     let tail = |ty: &Ty| match ty.non_null() {
                         Ty::Array(t) | Ty::NonEmptyArray(t) => Ty::Array(t),
                         Ty::Tuple(ts) | Ty::ArrayLiteral(ts) => {
-                            Ty::Array(Box::new(Ty::union(ts.into_iter().skip(elems.len()))))
+                            Ty::Array(Box::new(Ty::union(ts.into_iter().skip(if changed {
+                                0
+                            } else {
+                                elems.len()
+                            }))))
                         }
                         _ => unreachable!("array binding"),
                     };
@@ -1874,12 +2014,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
             ExprKind::Unary(UnOp::Not, inner) => self.collect_narrowing(inner, !negate, out),
             ExprKind::IsNullish(inner, negated) => {
                 if let Some((n, t)) = self.path_ty(inner) {
-                    // `x == null` true → null branch; false → non-null.
+                    // `x == null` retains each nullish member, including undefined.
                     let is_null_branch = *negated == negate;
                     let (yes, no) = if is_null_branch {
-                        (Ty::Null, t.non_null())
+                        (t.nullish(), t.non_null())
                     } else {
-                        (t.non_null(), Ty::Null)
+                        (t.non_null(), t.nullish())
                     };
                     out.push((n, yes, no));
                 }
@@ -2032,6 +2172,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
     }
 
+    fn native_object_receiver(&self, e: &Expr) -> bool {
+        matches!(&e.kind, ExprKind::Ident(name) if self.scope_local(name).is_some_and(|local| local.native_object))
+    }
+
     /// The type a path had before any narrowing in the current branch stack (outermost entry).
     fn declared_path_ty(&self, name: &str) -> Option<Ty> {
         self.fx
@@ -2088,6 +2232,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         mutable: false,
                         binding,
                         view,
+                        native_object: false,
+                        initialized: true,
                     },
                 );
                 continue;
@@ -2191,6 +2337,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             ExprKind::Undefined => Out::atom("\\Zero\\Js::undefined()", Ty::Undefined),
             ExprKind::Null => Out::atom("null", Ty::Null),
             ExprKind::Regex { pattern, flags } => {
+                crate::builtins::check_regex(pattern, flags, span)?;
                 let javascript = self.javascript_module(self.fx.as_ref().expect("fn").module);
                 Out::atom(
                     if javascript {
@@ -2220,7 +2367,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 if parts.is_empty() {
                     Out::atom("''", Ty::Str)
                 } else {
-                    Out::new(parts.join(" . "), Ty::Str)
+                    Out::atom(format!("implode('', [{}])", parts.join(", ")), Ty::Str)
                 }
             }
             ExprKind::Sequence(items) => {
@@ -2274,18 +2421,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
             ExprKind::Object(props) => {
                 let mut parts = Vec::new();
                 let mut fields: IndexMap<String, (Ty, bool)> = IndexMap::new();
+                let mut map_values = Vec::new();
                 let mut is_map = false;
                 for p in props {
                     match p {
                         Prop::KV(key, value) => {
-                            let v = self.expr(value)?;
-                            let v = self.finish_value(v, value.span)?;
-                            match key {
-                                PropKey::Static(k) => {
-                                    fields.shift_remove(k);
-                                    fields.insert(k.clone(), (v.ty.clone(), false));
-                                    parts.push(format!("[{} => {}]", php_str(k), v.php));
-                                }
+                            let (key_php, name) = match key {
+                                PropKey::Static(k) => (php_str(k), Some(k)),
                                 PropKey::Computed(kx) => {
                                     let k = self.expr(kx)?;
                                     if !k.ty.all(|t| t.is_str() || t.is_num() || t.is_bool() || *t == Ty::Null) {
@@ -2295,9 +2437,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
                                         );
                                     }
                                     is_map = true;
-                                    parts.push(format!("[\\Zero\\Js::key({}) => {}]", k.php, v.php));
+                                    (format!("\\Zero\\Js::key({})", k.php), None)
                                 }
+                            };
+                            let v = self.expr(value)?;
+                            let v = self.finish_value(v, value.span)?;
+                            if let Some(k) = name {
+                                fields.shift_remove(k);
+                                fields.insert(k.clone(), (v.ty.clone(), false));
+                            } else {
+                                map_values.push(v.ty.clone());
                             }
+                            parts.push(format!("[{key_php} => {}]", v.php));
                         }
                         Prop::Spread(x) => {
                             let v = self.expr(x)?;
@@ -2312,7 +2463,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
                                         fields.insert(k, t);
                                     }
                                 }
-                                Ty::Map(_) => is_map = true,
+                                Ty::Map(t) => {
+                                    is_map = true;
+                                    map_values.push(*t);
+                                }
                                 other => {
                                     return err(x.span, format!("can't spread {} into an object", other.describe()));
                                 }
@@ -2322,7 +2476,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     }
                 }
                 let ty = if is_map {
-                    Ty::Map(Box::new(Ty::union(fields.values().map(|(t, _)| t.clone()))))
+                    Ty::Map(Box::new(Ty::union(
+                        fields.values().map(|(t, _)| t.clone()).chain(map_values),
+                    )))
                 } else {
                     Ty::Obj(fields)
                 };
@@ -2357,8 +2513,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                             self.need_num(&v, x.span, "`-`")?;
                         }
                         match v.ty {
-                            Ty::NumLit(n) | Ty::FreshNumLit(n) => {
-                                Out::new(format!("-{}", v.wrapped()), Ty::FreshNumLit(-n))
+                            Ty::NumLit(n) | Ty::FreshNumLit(n) if matches!(x.kind, ExprKind::Num(_)) => {
+                                Out::atom(php_number(-n), Ty::FreshNumLit(-n))
                             }
                             // Js::neg: the operand as a JS number, like the binary operators.
                             _ => Out::atom(format!("\\Zero\\Js::neg({})", v.php), Ty::Num),
@@ -2496,7 +2652,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 prop_span,
             } => self.member(obj, prop, *optional, *prop_span, span)?,
             ExprKind::Index { obj, index, optional } => self.index(obj, index, *optional, span)?,
-            ExprKind::Chain(inner) => self.expr(inner)?,
+            ExprKind::Chain(inner) => {
+                check_optional_chain(inner)?;
+                self.expr(inner)?
+            }
             ExprKind::Await(x) => self.await_expr(x, span)?,
             ExprKind::As(x, ann) => {
                 let v = self.expr(x)?;
@@ -2519,6 +2678,20 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 Out { ty: t, ..v }
             }
         };
+        let database_receiver = match &out.ty {
+            Ty::Db | Ty::DbQuery | Ty::QueryColl(_) | Ty::DbGlobals | Ty::DbGlobal(_) => Some("\\Zero\\db()"),
+            Ty::Builder(_) => Some(""),
+            _ => None,
+        };
+        if let Some(expected) = database_receiver
+            && out.php != expected
+        {
+            return err_help(
+                span,
+                "unsupported database receiver expression",
+                "call database operations directly; evaluate side effects in a preceding statement",
+            );
+        }
         if out.ty == Ty::Never {
             self.fx().diverging.insert(span);
         }
@@ -2560,9 +2733,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
 
     /// The value as a PHP string expression, safe to join with `.`.
     fn to_string_php(&self, v: &Out, span: Span) -> Result<String> {
+        crate::builtins::check_string_coercion_type(&v.ty, span)?;
         Ok(match &v.ty {
             t if t.is_str() => v.wrapped(),
-            Ty::Num | Ty::NumLit(_) | Ty::FreshNumLit(_) | Ty::Date => format!("\\Zero\\Js::numStr({})", v.php),
+            Ty::Num | Ty::NumLit(_) | Ty::FreshNumLit(_) => format!("\\Zero\\Js::numStr({})", v.php),
             Ty::Builder(_) | Ty::Promise(_) => return err(span, "this value needs `await` first"),
             _ => format!("\\Zero\\Js::str({})", v.php),
         })
@@ -2596,6 +2770,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn binary(&mut self, op: BinOp, a: Out, b: Out, span: Span) -> Result<Out> {
+        if op == BinOp::Add {
+            crate::builtins::check_string_coercion_type(&a.ty, span)?;
+            crate::builtins::check_string_coercion_type(&b.ty, span)?;
+        }
         if a.ty == Ty::Dynamic || b.ty == Ty::Dynamic || matches!(op, BinOp::LooseEq | BinOp::LooseNe) {
             return self.javascript_binary(op, a, b, span);
         }
@@ -2605,8 +2783,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     // Js::add: operands and result as JS numbers (exact ints past ±2^53 round, as in JS).
                     Out::atom(format!("\\Zero\\Js::add({}, {})", a.php, b.php), Ty::Num)
                 } else if a.ty.is_str() || b.ty.is_str() {
-                    let (x, y) = (self.to_string_php(&a, span)?, self.to_string_php(&b, span)?);
-                    Out::new(format!("{x} . {y}"), Ty::Str)
+                    Out::atom(format!("\\Zero\\Js::dynamicBinary('+', {}, {})", a.php, b.php), Ty::Str)
                 } else {
                     return err_help(
                         span,
@@ -2625,6 +2802,15 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 };
                 self.need_num(&a, span, &format!("`{sym}`"))?;
                 self.need_num(&b, span, &format!("`{sym}`"))?;
+                if op == BinOp::Exp {
+                    let literal = |ty: &Ty| match ty {
+                        Ty::NumLit(n) | Ty::FreshNumLit(n) => Some(*n),
+                        _ => None,
+                    };
+                    if let (Some(a), Some(b)) = (literal(&a.ty), literal(&b.ty)) {
+                        crate::builtins::check_power(a, b, span)?;
+                    }
+                }
                 match op {
                     BinOp::Div => Out::atom(format!("fdiv({}, {})", a.php, b.php), Ty::Num),
                     BinOp::Rem => Out::atom(format!("fmod({}, {})", a.php, b.php), Ty::Num),
@@ -2641,11 +2827,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     _ => ">=",
                 };
                 if a.ty.is_num() && b.ty.is_num() {
-                    Out::new(format!("{} {sym} {}", a.wrapped(), b.wrapped()), Ty::Bool)
+                    self.javascript_binary(op, a, b, span)?
                 } else if a.ty.is_str() && b.ty.is_str() {
-                    // JS compares strings by UTF-16 code units; for UTF-8 that matches byte order
-                    // except across surrogate pairs, which strcmp handles consistently enough.
-                    Out::new(format!("strcmp({}, {}) {sym} 0", a.php, b.php), Ty::Bool)
+                    Out::new(
+                        format!("\\Zero\\Js::stringCompare({}, {}) {sym} 0", a.php, b.php),
+                        Ty::Bool,
+                    )
                 } else {
                     return err(
                         span,
@@ -2690,9 +2877,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Resolved::Global("NaN") => Ok(Out::atom("NAN", Ty::Num)),
             Resolved::Global("Infinity") => Ok(Out::atom("INF", Ty::Num)),
             Resolved::Global("Math") => Ok(Out::atom("\\Zero\\Js::dynamicNamespace('Math')", Ty::Dynamic)),
-            Resolved::Global(g) => err(
+            Resolved::Global(g) => err_help(
                 span,
                 format!("`{g}` can't be used as a value; call one of its functions"),
+                "use supported built-in calls or primitive values; host-global detection isn't supported",
             ),
         }
     }
@@ -2766,10 +2954,20 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 format!("\\Zero\\Env::get({})", php_str(name)),
                 Ty::Str.nullable(),
             )),
-            Value::Builtin(Builtin::Env | Builtin::Once) => err_help(
+            Value::Builtin(Builtin::Env | Builtin::Once | Builtin::Fetch) => err_help(
                 span,
                 format!("`{n}` can't be used as a value"),
                 format!("call it directly: `{n}(...)`"),
+            ),
+            Value::Builtin(Builtin::Crypto) => err_help(
+                span,
+                "`crypto` can't be used as a value",
+                "call its functions directly: `crypto.sha256(text)`",
+            ),
+            Value::Builtin(Builtin::Mail) => err_help(
+                span,
+                "`mail` can't be used as a value",
+                "call `mail.send({ to, subject, text })` directly",
             ),
             Value::Builtin(Builtin::Jobs) => err_help(
                 span,
@@ -2786,12 +2984,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
             | Value::Relation(_)
             | Value::Action(_)
             | Value::Job(_)
+            | Value::Route(_)
             | Value::FileBucket(_)
             | Value::Bound(..) => err(
                 span,
                 format!("`{n}` is {}, which only exists while the config is built", v.describe()),
             ),
-            Value::Regex(p, f) if self.javascript_module(self.fx.as_ref().expect("fn").module) => {
+            Value::Regex(p, f) => {
                 let key = (2, Rc::as_ptr(p) as *const () as usize);
                 let name = if let Some(name) = self.data_helpers.get(&key) {
                     name.clone()
@@ -2806,12 +3005,15 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     );
                     name
                 };
-                Ok(Out::atom(format!("\\ZeroApp\\{name}()"), Ty::Dynamic))
+                Ok(Out::atom(
+                    format!("\\ZeroApp\\{name}()"),
+                    if self.javascript_module(self.fx.as_ref().expect("fn").module) {
+                        Ty::Dynamic
+                    } else {
+                        Ty::Regex
+                    },
+                ))
             }
-            Value::Regex(p, f) => Ok(Out::atom(
-                format!("\\Zero\\Js::re({}, {})", php_str(p), php_str(f)),
-                Ty::Regex,
-            )),
             data => {
                 validate_captured_data(data, span, &mut HashSet::new())?;
                 let javascript = self.javascript_module(self.fx.as_ref().expect("fn").module);
@@ -2821,19 +3023,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     None => inferred_binding_type(&ty_of_data(data), false),
                 };
                 let ty = self.effects.captured_data_type(data, &ty);
-                Ok(Out::atom(self.captured_data(data, javascript)?, ty))
+                Ok(Out::atom(self.captured_data(data)?, ty))
             }
         }
     }
 
-    fn captured_data(&mut self, value: &Value, javascript: bool) -> Result<String> {
+    fn captured_data(&mut self, value: &Value) -> Result<String> {
         let (key, array) = match value {
-            Value::Array(a) => ((if javascript { 3 } else { 0 }, Rc::as_ptr(a) as usize), true),
-            Value::Object(o) => ((if javascript { 4 } else { 1 }, Rc::as_ptr(o) as usize), false),
+            Value::Array(a) => ((0, Rc::as_ptr(a) as usize), true),
+            Value::Object(o) => ((1, Rc::as_ptr(o) as usize), false),
             _ => {
                 return Ok(match value {
-                    Value::Undef if javascript => "\\Zero\\Js::undefined()".into(),
-                    Value::Null | Value::Undef => "null".into(),
+                    Value::Undef => "\\Zero\\Js::undefined()".into(),
+                    Value::Null => "null".into(),
                     Value::Bool(b) => b.to_string(),
                     Value::Num(n) => php_number(*n),
                     Value::Str(s) => php_str(s),
@@ -2862,7 +3064,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             "function {name}(): \\Zero\\{class}\n{{\n    static $value;\n    if ($value === null) {{\n        $value = new \\Zero\\{class}();\n"
         );
         for (key, value) in fields {
-            let value = self.captured_data(&value, javascript)?;
+            let value = self.captured_data(&value)?;
             let _ = writeln!(body, "        $value->{storage}[{key}] = {value};");
         }
         body.push_str("    }\n    return $value;\n}\n\n");
@@ -2902,25 +3104,17 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 ),
             );
         }
-        let present = read.non_null();
+        let present = defined_type(&read);
         let initialized = if assignable(&value.ty, &present) {
             present
         } else {
             Ty::union([present, value.ty])
         };
-        let initialization = if self.javascript_module(self.fx.as_ref().expect("fn").module) {
-            format!(
-                "{}if ({php} === \\Zero\\JsUndefined::Value) {{ {php} = {}; }}\n",
-                pad(indent),
-                value.php
-            )
-        } else {
-            format!(
-                "{}if (\\Zero\\Js::isNullish({php})) {{ {php} = {}; }}\n",
-                pad(indent),
-                value.php
-            )
-        };
+        let initialization = format!(
+            "{}if ({php} === \\Zero\\JsUndefined::Value) {{ {php} = {}; }}\n",
+            pad(indent),
+            value.php
+        );
         Ok((initialized, initialization))
     }
 
@@ -2948,6 +3142,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn closure_body(&mut self, f: &Func, param_tys: &[Ty]) -> Result<(String, String)> {
+        let arguments = self.javascript_arguments(f, 2)?;
         let mut params = Vec::new();
         let mut body = String::new();
         for (i, p) in f.params.iter().enumerate() {
@@ -2956,8 +3151,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     return err(p.span, "rest parameters need a plain name");
                 };
                 let php = self.declare_local(name, param_tys[i].clone(), true, p.pat.span());
-                params.push(format!("...$__rest{i}"));
-                let _ = writeln!(body, "        {php} = new \\Zero\\JsArray($__rest{i});");
+                let rest = self.tmp_var();
+                params.push(format!("...{rest}"));
+                let _ = writeln!(body, "        {php} = new \\Zero\\JsArray({rest});");
                 continue;
             }
             match &p.pat {
@@ -2966,13 +3162,16 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     let default = if self.javascript_module(f.module) {
                         " = \\Zero\\JsUndefined::Value"
                     } else {
-                        parameter_default_suffix(p)
+                        parameter_default_suffix(&f.params[i..], &param_tys[i..f.params.len()])
                     };
                     params.push(format!("{php}{default}"));
                 }
                 pat => {
-                    let tmp = format!("$__arg{i}");
-                    params.push(format!("{tmp}{}", parameter_default_suffix(p)));
+                    let tmp = self.tmp_var();
+                    params.push(format!(
+                        "{tmp}{}",
+                        parameter_default_suffix(&f.params[i..], &param_tys[i..f.params.len()])
+                    ));
                     let (read, initialization) = self.initialize_parameter(p, &tmp, &param_tys[i], 2)?;
                     body.push_str(&initialization);
                     self.bind_pattern_types(
@@ -2989,7 +3188,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 }
             }
         }
-        body = self.javascript_prologue(f, 2)? + &body;
+        body = arguments + &self.javascript_prologue(f, 2)? + &body;
         match &f.body {
             FnBody::Expr(e) => {
                 let v = self.expr(e)?;
@@ -3000,9 +3199,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             FnBody::Block(stmts) => {
                 body.push_str(&self.block(stmts, 2)?);
                 self.note_fallthrough(stmts, f.span)?;
-                if self.javascript_module(f.module) {
-                    body.push_str("        return \\Zero\\Js::undefined();\n");
-                }
+                body.push_str("        return \\Zero\\Js::undefined();\n");
             }
         }
         Ok((params.join(", "), body))
@@ -3030,6 +3227,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn closure_with_types(&mut self, f: &Rc<Func>, params: Option<&[Ty]>) -> Result<Out> {
+        if !f.type_params.is_empty() {
+            return err_help(
+                f.span,
+                "generic runtime functions aren't supported",
+                "use a concrete signature, for example function identity(value: string): string",
+            );
+        }
         let module = f.module;
         let mut param_tys = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
@@ -3077,11 +3281,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
             loop_bindings: HashSet::new(),
             env: self.fx().env.clone(),
             module,
-            declared: Vec::new(),
+            php_names: self.fx().php_names.clone(),
             captures: Some(Vec::new()),
             outer: None,
             tmp: 0,
             switch_depth: 0,
+            conditional_depth: 0,
             no_db: self.fx().no_db,
             access: None,
         };
@@ -3136,6 +3341,15 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             _ => format!("function ({params_php}){use_clause} {{\n{body}{}}}", pad(1)),
         };
+        let php = if let Some((keys, descending)) = crate::builtins::sort_key(f) {
+            let keys = keys.iter().map(|key| php_str(key)).collect::<Vec<_>>().join(", ");
+            format!(
+                "\\Zero\\Js::sortComparator({php}, [{keys}], {})",
+                if descending { "true" } else { "false" }
+            )
+        } else {
+            php
+        };
         Ok(Out::atom(
             php,
             Ty::Fn(callable_parameters(f, &param_tys), Box::new(ret)),
@@ -3150,10 +3364,30 @@ impl<'a, 'p> Compiler<'a, 'p> {
         span: Span,
         statement: bool,
     ) -> Result<Out> {
+        let prototype_receiver = match &target.kind {
+            ExprKind::Member { obj, prop, .. } if prop == "__proto__" => Some(obj),
+            ExprKind::Index { obj, index, .. } if matches!(&index.kind, ExprKind::Str(key) if key == "__proto__") => {
+                Some(obj)
+            }
+            _ => None,
+        };
+        if let Some(receiver) = prototype_receiver {
+            let own = self
+                .argument_constraint(receiver)
+                .is_some_and(|ty| matches!(ty.non_null(), Ty::Obj(fields) if fields.contains_key("__proto__")));
+            if !own {
+                return err_help(
+                    target.span,
+                    "prototype mutation isn't supported",
+                    "use an ordinary own data property",
+                );
+            }
+        }
         let place = self.place(target)?;
         if op.is_none()
             && !statement
-            && let Some(target) = place.target
+            && let Some(target) = place.target.as_ref()
+            && !matches!(target.kind, WriteKind::NativeObject)
         {
             let v = self.expr(value)?;
             let v = self.finish_value(v, value.span)?;
@@ -3170,12 +3404,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
             return Ok(Out::atom(
                 format!(
                     "\\Zero\\Js::{}({}, {}, {})",
-                    if target.dynamic {
-                        "dynamicSet"
-                    } else if target.array {
-                        "setAt"
-                    } else {
-                        "set"
+                    match target.kind {
+                        WriteKind::Dynamic => "dynamicSet",
+                        WriteKind::Array => "setAt",
+                        WriteKind::Object => "set",
+                        WriteKind::NativeObject => unreachable!(),
                     },
                     target.receiver,
                     target.key,
@@ -3191,7 +3424,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
             let present = if matches!(op, AssignOp::Bin(_)) {
                 match &write {
                     CapturedPlace::Binding(_) | CapturedPlace::Dynamic { .. } => None,
-                    CapturedPlace::Array { receiver, key } | CapturedPlace::Object { receiver, key } => {
+                    CapturedPlace::Array { receiver, key }
+                    | CapturedPlace::Object { receiver, key }
+                    | CapturedPlace::NativeObject { receiver, key } => {
                         let present = self.tmp_var();
                         steps.push(format!("{present} = \\Zero\\Js::has({receiver}, {key})"));
                         Some(present)
@@ -3205,11 +3440,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
             let (result, ty) = match op {
                 AssignOp::Bin(b) => {
                     let mut left = Out::atom(old.clone(), place.read.ty.clone());
-                    if let Some(present) = &present {
-                        left.ty = place.constraint.non_null();
-                        if place.constraint.non_null().is_num() {
-                            left = Out::atom(format!("({present} ? \\Zero\\Js::toNumber({old}) : NAN)"), Ty::Num);
-                        }
+                    if let Some(present) = &present
+                        && place.constraint.non_null().is_num()
+                    {
+                        left = Out::atom(format!("({present} ? \\Zero\\Js::toNumber({old}) : NAN)"), Ty::Num);
                     }
                     let right = v.php.clone();
                     let mut result = self.binary(b, left, v, span)?;
@@ -3298,19 +3532,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     format!("{receiver} = {}", target.receiver),
                     format!("{key} = {}", target.key),
                 ];
-                let read = if target.dynamic {
-                    format!("\\Zero\\Js::dynamicGet({receiver}, {key})")
-                } else if target.array {
-                    format!("\\Zero\\Js::get({receiver}, {key})")
-                } else {
-                    format!("\\Zero\\Js::prop({receiver}, {key})")
+                let read = match target.kind {
+                    WriteKind::Dynamic | WriteKind::Array => format!("\\Zero\\Js::dynamicGet({receiver}, {key})"),
+                    // Present non-null values skip the checked read; absent keys keep dataGet's semantics.
+                    WriteKind::NativeObject => {
+                        format!("({receiver}->p[{key}] ?? \\Zero\\Js::dataGet({receiver}, {key}))")
+                    }
+                    WriteKind::Object => format!("\\Zero\\Js::dataGet({receiver}, {key})"),
                 };
-                let write = if target.dynamic {
-                    CapturedPlace::Dynamic { receiver, key }
-                } else if target.array {
-                    CapturedPlace::Array { receiver, key }
-                } else {
-                    CapturedPlace::Object { receiver, key }
+                let write = match target.kind {
+                    WriteKind::Dynamic => CapturedPlace::Dynamic { receiver, key },
+                    WriteKind::Array => CapturedPlace::Array { receiver, key },
+                    WriteKind::NativeObject => CapturedPlace::NativeObject { receiver, key },
+                    WriteKind::Object => CapturedPlace::Object { receiver, key },
                 };
                 (steps, read, write)
             }
@@ -3321,6 +3555,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         match write {
             CapturedPlace::Binding(binding) => format!("({binding} = {value})"),
             CapturedPlace::Object { receiver, key } => format!("\\Zero\\Js::set({receiver}, {key}, {value})"),
+            CapturedPlace::NativeObject { receiver, key } => format!("({receiver}->p[{key}] = {value})"),
             CapturedPlace::Array { receiver, key } => format!("\\Zero\\Js::setAt({receiver}, {key}, {value})"),
             CapturedPlace::Dynamic { receiver, key } => format!("\\Zero\\Js::dynamicSet({receiver}, {key}, {value})"),
         }
@@ -3335,8 +3570,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let (mut steps, read, write) = self.capture_place(place.target, &place.read);
         let old = self.tmp_var();
         steps.push(format!("{old} = {read}"));
+        if place.read.ty == Ty::Dynamic {
+            steps.push(format!("{old} = \\Zero\\Js::toNumber({old})"));
+        }
         if property_number {
-            let (CapturedPlace::Array { receiver, key } | CapturedPlace::Object { receiver, key }) = &write else {
+            let (CapturedPlace::Array { receiver, key }
+            | CapturedPlace::Object { receiver, key }
+            | CapturedPlace::NativeObject { receiver, key }) = &write
+            else {
                 unreachable!()
             };
             steps.push(format!(
@@ -3412,21 +3653,30 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     .unwrap_or(o.ty.clone())
                     .non_null()
                     .field(prop)
-                    .map(|(t, optional)| if optional { t.nullable() } else { t })
+                    .map(|(t, optional)| if optional { Ty::union([t, Ty::Undefined]) } else { t })
                     .unwrap_or(ft.clone());
                 let read_ty = self
                     .path_of(target)
                     .and_then(|path| self.narrowed_path(&path))
-                    .unwrap_or_else(|| if optional { ft.nullable() } else { ft });
-                let read = Out::atom(format!("({}->p[{}] ?? null)", o.wrapped(), php_str(prop)), read_ty);
+                    .unwrap_or_else(|| {
+                        if optional || matches!(o.ty.non_null(), Ty::Map(_)) {
+                            Ty::union([ft, Ty::Undefined])
+                        } else {
+                            ft
+                        }
+                    });
+                let read = Out::atom(format!("\\Zero\\Js::dataGet({}, {})", o.php, php_str(prop)), read_ty);
                 Ok(AssignmentPlace {
                     constraint,
                     read,
                     target: Some(WriteTarget {
                         receiver: o.php,
                         key: php_str(prop),
-                        array: false,
-                        dynamic: false,
+                        kind: if self.native_object_receiver(obj) {
+                            WriteKind::NativeObject
+                        } else {
+                            WriteKind::Object
+                        },
                     }),
                 })
             }
@@ -3461,14 +3711,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         );
                     }
                 };
+                let getter = if array { "dynamicGet" } else { "dataGet" };
                 let read = Out::atom(
-                    format!(
-                        "\\Zero\\Js::{}({}, {})",
-                        if array { "get" } else { "prop" },
-                        o.php,
-                        i.php
-                    ),
-                    ty.nullable(),
+                    format!("\\Zero\\Js::{getter}({}, {})", o.php, i.php),
+                    Ty::union([ty, Ty::Undefined]),
                 );
                 let key = if array {
                     i.php
@@ -3481,8 +3727,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     target: Some(WriteTarget {
                         receiver: o.php,
                         key,
-                        array,
-                        dynamic: false,
+                        kind: if array {
+                            WriteKind::Array
+                        } else if self.native_object_receiver(obj) {
+                            WriteKind::NativeObject
+                        } else {
+                            WriteKind::Object
+                        },
                     }),
                 })
             }
@@ -3507,6 +3758,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn member(&mut self, obj: &Expr, prop: &str, optional: bool, prop_span: Span, span: Span) -> Result<Out> {
+        let native_object = self.native_object_receiver(obj);
         // Namespaces: Math.PI etc.
         if let ExprKind::Ident(n) = &obj.kind
             && let Ok(Resolved::Global(g)) = self.resolve(n, obj.span)
@@ -3614,7 +3866,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 t
             }
         };
-        // `x?.length` on a nullable value: evaluate once, short-circuit to null.
+        // `x?.length` on a nullable value: evaluate once, short-circuit to undefined.
         let guarded = |c: &mut Self, f: &dyn Fn(&str) -> String| {
             if optional && o.ty.is_nullable() {
                 let tmp = c.tmp_var();
@@ -3636,9 +3888,20 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 let php = guarded(self, &|x| format!("count(({x})->a)"));
                 Out::atom(php, suffix_null(Ty::Num))
             }
-            (Ty::Error, "message") => Out::atom(format!("{}->getMessage()", o.wrapped()), Ty::Str),
-            (Ty::Error, "name") => Out::atom(format!("{}->jsName", o.wrapped()), Ty::Str),
-            (Ty::Regex, "source" | "flags") => Out::atom(format!("{}->{prop}", o.wrapped()), Ty::Str),
+            (Ty::Error, "message" | "name") => {
+                let php = guarded(self, &|x| {
+                    if prop == "message" {
+                        format!("({x})->getMessage()")
+                    } else {
+                        format!("({x})->jsName")
+                    }
+                });
+                Out::atom(php, suffix_null(Ty::Str))
+            }
+            (Ty::Regex, "source" | "flags") => {
+                let php = guarded(self, &|x| format!("({x})->{prop}"));
+                Out::atom(php, suffix_null(Ty::Str))
+            }
             (Ty::Obj(_) | Ty::Map(_) | Ty::Union(_), _) => {
                 let Some((ft, opt_field)) = base.field(prop) else {
                     if matches!(base, Ty::Union(_)) {
@@ -3647,17 +3910,27 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     return Err(self.no_field(&o.ty, prop, prop_span));
                 };
                 let map = matches!(base, Ty::Map(_));
-                let method = if map || opt_field { "dynamicGet" } else { "prop" };
-                let php = guarded(self, &|x| format!("\\Zero\\Js::{method}({x}, {})", php_str(prop)));
+                let php = guarded(self, &|x| {
+                    if native_object && !map && !opt_field {
+                        // Present non-null values skip the checked read; absent keys keep dataGet's semantics.
+                        format!("({x}->p[{0}] ?? \\Zero\\Js::dataGet({x}, {0}))", php_str(prop))
+                    } else {
+                        format!("\\Zero\\Js::dataGet({x}, {})", php_str(prop))
+                    }
+                });
                 let ft = if map || opt_field {
                     Ty::union([ft, Ty::Undefined])
                 } else {
                     ft
                 };
                 let place = o.place.as_ref().map(|p| format!("{p}->p[{}]", php_str(prop)));
+                let ty = self
+                    .path_of(obj)
+                    .and_then(|path| self.narrowed_path(&format!("{path}.{prop}")))
+                    .unwrap_or_else(|| suffix_null(ft));
                 Out {
                     php,
-                    ty: suffix_null(ft),
+                    ty,
                     place,
                     atomic: true,
                     helper: None,
@@ -3688,7 +3961,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             && matches!(index.kind, ExprKind::Num(n) if n == 0.0)
         {
             return Ok(Out::atom(
-                format!("\\Zero\\Js::get({}, {})", o.php, i.php),
+                format!("\\Zero\\Js::dynamicGet({}, {})", o.php, i.php),
                 (**element).clone(),
             ));
         }
@@ -3718,29 +3991,29 @@ impl<'a, 'p> Compiler<'a, 'p> {
         };
         let mut out = match (&base, &i.ty) {
             (Ty::Array(t) | Ty::NonEmptyArray(t), it) if it.is_num() => Out::atom(
-                format!("\\Zero\\Js::get({}, {})", o.php, i.php),
-                wrap((**t).clone().nullable()),
+                format!("\\Zero\\Js::dynamicGet({}, {})", o.php, i.php),
+                wrap(Ty::union([(**t).clone(), Ty::Undefined])),
             ),
             (Ty::Tuple(ts) | Ty::ArrayLiteral(ts), _) => match &index.kind {
                 ExprKind::Num(n) if n.fract() == 0.0 && *n >= 0.0 => {
-                    let t = ts.get(*n as usize).cloned().unwrap_or(Ty::Null);
+                    let t = ts.get(*n as usize).cloned().unwrap_or(Ty::Undefined);
                     let place = o.place.as_ref().map(|p| format!("{p}->a[{}]", *n as usize));
                     Out {
-                        php: format!("\\Zero\\Js::get({}, {})", o.php, *n as usize),
-                        ty: wrap(t.nullable()),
+                        php: format!("\\Zero\\Js::dynamicGet({}, {})", o.php, *n as usize),
+                        ty: wrap(Ty::union([t, Ty::Undefined])),
                         place,
                         atomic: true,
                         helper: None,
                     }
                 }
                 _ if i.ty.is_num() => Out::atom(
-                    format!("\\Zero\\Js::get({}, {})", o.php, i.php),
-                    wrap(Ty::union(ts.clone()).nullable()),
+                    format!("\\Zero\\Js::dynamicGet({}, {})", o.php, i.php),
+                    wrap(Ty::union(ts.iter().cloned().chain([Ty::Undefined]))),
                 ),
                 _ => return err(index.span, "tuples are indexed by number"),
             },
             (Ty::Map(t), key_ty) if key_ty.is_str() => Out::atom(
-                format!("\\Zero\\Js::dynamicGet({}, {})", o.php, i.php),
+                format!("\\Zero\\Js::dataGet({}, {})", o.php, i.php),
                 wrap(Ty::union([(**t).clone(), Ty::Undefined])),
             ),
             (Ty::Obj(fields), key_ty) if key_ty.is_str() => {
@@ -3773,13 +4046,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     });
                 }
                 Out::atom(
-                    format!("\\Zero\\Js::dynamicGet({}, {})", o.php, i.php),
+                    format!("\\Zero\\Js::dataGet({}, {})", o.php, i.php),
                     wrap(Ty::union(values)),
                 )
             }
             (s, it) if s.is_str() && it.is_num() => Out::atom(
                 format!("\\Zero\\Js::strIndex({}, {})", o.php, i.php),
-                wrap(Ty::Str.nullable()),
+                wrap(Ty::union([Ty::Str, Ty::Undefined])),
             ),
             _ => {
                 return err(
@@ -3822,20 +4095,30 @@ impl<'a, 'p> Compiler<'a, 'p> {
 
     fn new_expr(&mut self, callee: &Expr, args: &[ArrEl], span: Span) -> Result<Out> {
         if let ExprKind::Ident(name) = &callee.kind
+            && matches!(self.resolve(name, callee.span)?, Resolved::Global(_))
+            && (name != "Map" && name != "Set" || self.javascript_module(self.fx.as_ref().expect("fn").module))
+        {
+            self.builtin_args("constructor", name, args, span)?;
+        }
+        if let ExprKind::Ident(name) = &callee.kind
             && name == "RegExp"
             && matches!(self.resolve(name, callee.span)?, Resolved::Global("RegExp"))
             && !self.javascript_module(self.fx.as_ref().expect("fn").module)
         {
-            let argv = self.plain_args(args)?;
-            let pattern = argv.first().map(|v| v.php.clone()).unwrap_or_else(|| "''".into());
-            let flags = argv.get(1).map(|v| v.php.clone()).unwrap_or_else(|| "''".into());
-            return Ok(Out::atom(format!("\\Zero\\Js::re({pattern}, {flags})"), Ty::Regex));
+            let argv = self.javascript_args(args)?;
+            return Ok(Out::atom(
+                format!("\\Zero\\Js::dynamicConstruct('RegExp', {argv})"),
+                Ty::Regex,
+            ));
         }
         if self.javascript_module(self.fx.as_ref().expect("fn").module) {
             if let ExprKind::Ident(name) = &callee.kind
                 && matches!(name.as_str(), "Set" | "Map" | "Date" | "RegExp")
                 && matches!(self.resolve(name, callee.span)?, Resolved::Global(_))
             {
+                if name == "Date" {
+                    crate::builtins::check_date_literal(args, span)?;
+                }
                 let argv = self.javascript_args(args)?;
                 return Ok(Out::atom(
                     format!("\\Zero\\Js::dynamicConstruct({}, {argv})", php_str(name)),
@@ -3863,10 +4146,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
         };
         match self.resolve(n, callee.span)? {
             Resolved::Global("Date") => {
+                crate::builtins::check_date_literal(args, span)?;
                 let argv = self.plain_args(args)?;
                 Ok(match argv.as_slice() {
-                    [] => Out::atom("\\Zero\\Js::now()", Ty::Date),
-                    [a] => Out::atom(format!("\\Zero\\Js::date({})", a.php), Ty::Date),
+                    [] => Out::atom("new \\Zero\\JsDate(\\Zero\\Js::now())", Ty::Date),
+                    [a] => Out::atom(format!("new \\Zero\\JsDate(\\Zero\\Js::date({}))", a.php), Ty::Date),
                     _ => {
                         return err(
                             span,
@@ -3880,7 +4164,15 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 span,
                 "create HttpError directly in a `throw`: `throw new HttpError(404, \"not_found\", \"...\")`",
             ),
-            _ => err(span, format!("`new {n}` isn't supported")),
+            _ => err_help(
+                span,
+                format!("`new {n}` isn't supported"),
+                if n == "Map" {
+                    "use Record<string, T> for string keys, or an array for simple membership; these do not provide Map key identity"
+                } else {
+                    "use plain objects and arrays, or a supported named class"
+                },
+            ),
         }
     }
 
@@ -3940,25 +4232,45 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 Resolved::Local(local) => Some(local.constraint),
                 _ => None,
             },
-            ExprKind::Member { obj, prop, .. } => self
-                .argument_constraint(obj)?
-                .non_null()
-                .field(prop)
-                .map(|(ty, optional)| if optional { ty.nullable() } else { ty }),
-            ExprKind::Index { obj, index, .. } => match self.argument_constraint(obj)?.non_null() {
-                Ty::Array(ty) | Ty::NonEmptyArray(ty) | Ty::Map(ty) => Some((*ty).nullable()),
-                Ty::Tuple(ts) | Ty::ArrayLiteral(ts) => match &index.kind {
-                    ExprKind::Num(n) if *n >= 0.0 && n.fract() == 0.0 => {
-                        Some(ts.get(*n as usize).cloned().unwrap_or(Ty::Null).nullable())
+            ExprKind::Member {
+                obj, prop, optional, ..
+            } => {
+                let receiver = self.argument_constraint(obj)?;
+                let missing = *optional && receiver.is_nullable();
+                let shape = receiver.non_null();
+                shape.field(prop).map(|(ty, optional)| {
+                    if optional || missing || matches!(shape, Ty::Map(_)) {
+                        Ty::union([ty, Ty::Undefined])
+                    } else {
+                        ty
                     }
-                    _ => Some(Ty::union(ts).nullable()),
-                },
-                Ty::Obj(fields) => match &index.kind {
-                    ExprKind::Str(key) => fields.get(key).map(|(t, _)| t.clone()),
+                })
+            }
+            ExprKind::Index { obj, index, optional } => {
+                let receiver = self.argument_constraint(obj)?;
+                let missing = *optional && receiver.is_nullable();
+                match receiver.non_null() {
+                    Ty::Array(ty) | Ty::NonEmptyArray(ty) | Ty::Map(ty) => Some(Ty::union([*ty, Ty::Undefined])),
+                    Ty::Tuple(ts) | Ty::ArrayLiteral(ts) => match &index.kind {
+                        ExprKind::Num(n) if *n >= 0.0 && n.fract() == 0.0 => Some(Ty::union([
+                            ts.get(*n as usize).cloned().unwrap_or(Ty::Undefined),
+                            Ty::Undefined,
+                        ])),
+                        _ => Some(Ty::union(ts.into_iter().chain([Ty::Undefined]))),
+                    },
+                    Ty::Obj(fields) => match &index.kind {
+                        ExprKind::Str(key) => fields.get(key).map(|(t, optional)| {
+                            if *optional || missing {
+                                Ty::union([t.clone(), Ty::Undefined])
+                            } else {
+                                t.clone()
+                            }
+                        }),
+                        _ => None,
+                    },
                     _ => None,
-                },
-                _ => None,
-            },
+                }
+            }
             ExprKind::NonNull(e) => self.argument_constraint(e).map(|ty| ty.non_null()),
             _ => None,
         }
@@ -3973,10 +4285,15 @@ impl<'a, 'p> Compiler<'a, 'p> {
             && prop == "toString"
             && matches!(&prototype.kind, ExprKind::Object(props) if props.is_empty())
         {
-            let value = self.arg(args, 0, span, "a receiver")?;
-            let value = self.expr(value)?;
+            self.arg(args, 0, span, "a receiver")?;
+            let argv = self.plain_args(args)?;
+            let values = argv
+                .iter()
+                .map(|value| value.php.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Ok(Out::atom(
-                format!("\\Zero\\Js::dynamicObjectTag({})", value.php),
+                format!("\\Zero\\Js::dynamicObjectTag([{values}][0])"),
                 Ty::Str,
             ));
         }
@@ -4034,8 +4351,25 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         Ty::Dynamic,
                     ));
                 }
-                let f = self.expr(callee)?;
-                self.call_value(f, args, span, callee.span)
+                let mut f = self.expr(callee)?;
+                let key = self.expr(index)?;
+                let receiver = if *opt && recv.ty.is_nullable() {
+                    self.tmp_var()
+                } else {
+                    recv.php.clone()
+                };
+                // Retain the indexed callee's type checks, but bind its receiver before
+                // evaluating arguments, just as for a direct data-property call.
+                f.php = format!("\\Zero\\Js::dataMethod({receiver}, {})", key.php);
+                f.helper = None;
+                let mut out = self.call_value(f, args, span, callee.span)?;
+                if *opt && recv.ty.is_nullable() {
+                    out.php = format!(
+                        "(\\Zero\\Js::isNullish({receiver} = {}) ? \\Zero\\Js::undefined() : {})",
+                        recv.php, out.php
+                    );
+                }
+                Ok(out)
             }
             ExprKind::Ident(n) => {
                 if let Resolved::Global(g) = self.resolve(n, callee.span)? {
@@ -4058,13 +4392,24 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let builtin = |this: &mut Self, e: &Expr| -> Result<Option<Builtin>> {
             let ExprKind::Ident(n) = &e.kind else { return Ok(None) };
             Ok(match this.resolve(n, e.span)? {
-                Resolved::Value(Value::Builtin(b @ (Builtin::Once | Builtin::Jobs | Builtin::Env)), _) => Some(b),
+                Resolved::Value(
+                    Value::Builtin(
+                        b @ (Builtin::Once
+                        | Builtin::Jobs
+                        | Builtin::Env
+                        | Builtin::Fetch
+                        | Builtin::Crypto
+                        | Builtin::Mail),
+                    ),
+                    _,
+                ) => Some(b),
                 _ => None,
             })
         };
         match &callee.kind {
             ExprKind::Ident(_) => match builtin(self, callee)? {
                 Some(Builtin::Once) => self.once_call(args, span).map(Some),
+                Some(Builtin::Fetch) => self.fetch_call(args, span).map(Some),
                 Some(Builtin::Env) => {
                     let name = self.arg(args, 0, span, "an environment variable name")?;
                     match &name.kind {
@@ -4081,6 +4426,20 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 }
                 _ => Ok(None),
             },
+            // Only a name that resolves to the imported `crypto` is ours; `super`, unbound and
+            // shadowed names fall through to ordinary member calls.
+            ExprKind::Member { obj, prop, .. }
+                if matches!(&obj.kind, ExprKind::Ident(n) if n != "super")
+                    && builtin(self, obj).ok().flatten() == Some(Builtin::Crypto) =>
+            {
+                self.crypto_call(prop, args, span).map(Some)
+            }
+            ExprKind::Member { obj, prop, .. }
+                if matches!(&obj.kind, ExprKind::Ident(n) if n != "super")
+                    && builtin(self, obj).ok().flatten() == Some(Builtin::Mail) =>
+            {
+                self.mail_call(prop, args, span).map(Some)
+            }
             ExprKind::Member { obj, prop, .. } if prop == "enqueue" => match &obj.kind {
                 ExprKind::Member {
                     obj: root, prop: job, ..
@@ -4091,6 +4450,208 @@ impl<'a, 'p> Compiler<'a, 'p> {
             },
             _ => Ok(None),
         }
+    }
+
+    /// `fetch(url, { method?, headers?, body? })` → `Promise<FetchResponse>`, see `types::fetch_response`.
+    fn fetch_call(&mut self, args: &[ArrEl], span: Span) -> Result<Out> {
+        if self.fx().no_db {
+            return err_help(
+                span,
+                "access rules can't use fetch()",
+                "move it into a hook, action or route",
+            );
+        }
+        if args.is_empty() || args.len() > 2 {
+            return err_help(
+                span,
+                "fetch() takes a URL and optional init",
+                "write fetch(url, { method, headers, body })",
+            );
+        }
+        let url_expr = self.arg(args, 0, span, "a URL")?;
+        let url = self.expr(url_expr)?;
+        let url = self.finish_value(url, url_expr.span)?;
+        if !url.ty.is_str() || url.ty.is_nullable() {
+            return err_help(url_expr.span, "fetch() needs a URL string", "pass the URL as a string");
+        }
+        let init = match args.get(1) {
+            None => "null".to_string(),
+            Some(_) => {
+                let init_expr = self.arg(args, 1, span, "init")?;
+                let init = self.expr(init_expr)?;
+                let init = self.finish_value(init, init_expr.span)?;
+                let ok = match &init.ty {
+                    Ty::Obj(fields) => fields.iter().all(|(k, (t, _))| match k.as_str() {
+                        "method" | "body" => t.all(|t| t.is_str() || matches!(t, Ty::Null | Ty::Undefined)),
+                        "headers" => t.all(|t| matches!(t, Ty::Obj(_) | Ty::Map(_) | Ty::Null | Ty::Undefined)),
+                        _ => false,
+                    }),
+                    _ => false,
+                };
+                if !ok {
+                    return err_help(
+                        init_expr.span,
+                        format!(
+                            "fetch() init must be {{ method?, headers?, body? }} with strings, not {}",
+                            init.ty.describe()
+                        ),
+                        "stringify JSON bodies with JSON.stringify(...)",
+                    );
+                }
+                init.php
+            }
+        };
+        Ok(Out::atom(
+            format!("\\Zero\\Fetch::call({}, {init})", url.php),
+            Ty::Promise(Box::new(types::fetch_response())),
+        ))
+    }
+
+    /// `crypto.<fn>(...)`: synchronous digests and comparisons over `Zero\Crypto`. Every result is
+    /// lowercase hex (or a boolean / UUID), matching the original runtime's `ctx.crypto`.
+    fn crypto_call(&mut self, name: &str, args: &[ArrEl], span: Span) -> Result<Out> {
+        let (arity, ret, php) = match name {
+            "sha256" | "sha1" | "sha512" | "md5" => (1, Ty::Str, name),
+            "hmacSha256" => (1, Ty::Str, "hmacSha256"),
+            "timingSafeEqual" => (2, Ty::Bool, "timingSafeEqual"),
+            "randomHex" => (1, Ty::Str, "randomHex"),
+            "randomUUID" => (0, Ty::Str, "randomUUID"),
+            _ => {
+                let mut d = Diag::new(span, format!("`crypto` has no function `{name}`"));
+                let names = [
+                    "sha256",
+                    "sha1",
+                    "sha512",
+                    "md5",
+                    "hmacSha256",
+                    "timingSafeEqual",
+                    "randomHex",
+                    "randomUUID",
+                ];
+                if let Some(s) = suggest(name, names.iter().copied()) {
+                    d = d.help(format!("did you mean `crypto.{s}`?"));
+                }
+                return Err(d);
+            }
+        };
+        if args.len() != arity {
+            return err(
+                span,
+                format!(
+                    "crypto.{name}() takes {arity} argument{}",
+                    if arity == 1 { "" } else { "s" }
+                ),
+            );
+        }
+        let mut argv = Vec::new();
+        for i in 0..arity {
+            let e = self.arg(args, i, span, "an argument")?;
+            let v = self.expr(e)?;
+            let v = self.finish_value(v, e.span)?;
+            let ok = match (name, i) {
+                ("randomHex", _) => v.ty.is_num() && !v.ty.is_nullable(),
+                ("hmacSha256", _) => match &v.ty {
+                    Ty::Obj(f) => {
+                        f.keys().all(|k| k == "key" || k == "data")
+                            && f.get("data").is_some_and(|(t, opt)| !opt && t.is_str() && !t.is_nullable())
+                            && f.get("key").is_some_and(|(t, opt)| {
+                                !opt && (t.is_str() && !t.is_nullable()
+                                    || matches!(t, Ty::Obj(k) if k.len() == 1 && k.get("value").is_some_and(|(t, o)| !o && t.is_str() && !t.is_nullable())))
+                            })
+                    }
+                    _ => false,
+                },
+                _ => v.ty.is_str() && !v.ty.is_nullable(),
+            };
+            if !ok {
+                return err_help(
+                    e.span,
+                    format!("crypto.{name}() can't take {}", v.ty.describe()),
+                    match name {
+                        "hmacSha256" => "pass { key: \"VAR_NAME\" | { value }, data: string }",
+                        "randomHex" => "pass a number of bytes",
+                        _ => "pass a string",
+                    },
+                );
+            }
+            argv.push(v.php);
+        }
+        Ok(Out::atom(format!("\\Zero\\Crypto::{php}({})", argv.join(", ")), ret))
+    }
+
+    /// `mail.send(message)`: queues inside the handler's transaction, hands off after commit.
+    fn mail_call(&mut self, name: &str, args: &[ArrEl], span: Span) -> Result<Out> {
+        if name != "send" {
+            return err_help(
+                span,
+                format!("`mail` has no function `{name}`"),
+                "use `mail.send(message)`",
+            );
+        }
+        if self.fx().no_db {
+            return err_help(
+                span,
+                "access rules can't send mail",
+                "move it into a hook, action, route or job",
+            );
+        }
+        if args.len() != 1 {
+            return err_help(
+                span,
+                "mail.send() takes one message",
+                "write mail.send({ to, subject, text })",
+            );
+        }
+        let e = self.arg(args, 0, span, "a message")?;
+        let v = self.expr(e)?;
+        let v = self.finish_value(v, e.span)?;
+        let address = |t: &Ty| {
+            t.is_str() && !t.is_nullable()
+                || matches!(t, Ty::Obj(f) if f.keys().all(|k| k == "email" || k == "name")
+                    && f.get("email").is_some_and(|(t, o)| !o && t.is_str() && !t.is_nullable()))
+        };
+        let list = |t: &Ty| {
+            address(t)
+                || matches!(t, Ty::Array(x) | Ty::NonEmptyArray(x) if address(x))
+                || matches!(t, Ty::ArrayLiteral(xs) | Ty::Tuple(xs) if xs.iter().all(address))
+        };
+        let optional = |t: &Ty, ok: &dyn Fn(&Ty) -> bool| t.all(|t| matches!(t, Ty::Null | Ty::Undefined) || ok(t));
+        let ok = match &v.ty {
+            Ty::Obj(f) => {
+                f.keys().all(|k| {
+                    [
+                        "from", "to", "subject", "text", "html", "cc", "bcc", "replyTo", "headers",
+                    ]
+                    .contains(&k.as_str())
+                }) && f.get("to").is_some_and(|(t, o)| !o && list(t))
+                    && f.get("subject")
+                        .is_some_and(|(t, o)| !o && t.is_str() && !t.is_nullable())
+                    && (f.contains_key("text") || f.contains_key("html"))
+                    && f.iter().all(|(k, (t, _))| match k.as_str() {
+                        "to" | "subject" => true,
+                        "text" | "html" => optional(t, &|t| t.is_str()),
+                        "from" | "replyTo" => optional(t, &address),
+                        "cc" | "bcc" => optional(t, &list),
+                        "headers" => optional(t, &|t| matches!(t, Ty::Obj(_) | Ty::Map(_))),
+                        _ => false,
+                    })
+            }
+            _ => false,
+        };
+        if !ok {
+            return err_help(
+                e.span,
+                format!(
+                    "mail.send() needs {{ to, subject, text or html }}, not {}",
+                    v.ty.describe()
+                ),
+                "addresses are strings or { email, name? }; to/cc/bcc may be lists",
+            );
+        }
+        Ok(Out::atom(
+            format!("\\Zero\\Mail::send({})", v.php),
+            Ty::Promise(Box::new(types::obj_pub(&[("id", Ty::Str)]))),
+        ))
     }
 
     fn once_call(&mut self, args: &[ArrEl], span: Span) -> Result<Out> {
@@ -4209,6 +4770,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let Ty::Fn(params, ret) = f.ty.clone() else {
             return err(callee_span, format!("{} isn't a function", f.ty.describe()));
         };
+        if params.iter().skip(args.len()).any(|ty| !accepts_omission(ty)) {
+            return err_help(
+                span,
+                "missing required function arguments",
+                "pass every required argument, or declare the parameter optional",
+            );
+        }
         let mut argv = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let ArrEl::Item(x) = a else {
@@ -4255,7 +4823,33 @@ impl<'a, 'p> Compiler<'a, 'p> {
         ))
     }
 
+    fn builtin_args(&self, surface: &str, name: &str, args: &[ArrEl], span: Span) -> Result<()> {
+        if matches!(surface, "global" | "constructor") && name == "RegExp" {
+            crate::builtins::check_regex_literals(args, span)?;
+        }
+        if args.iter().any(|arg| matches!(arg, ArrEl::Spread(_))) {
+            if matches!(surface, "string" | "number" | "array" | "date" | "regex") {
+                return err_help(
+                    span,
+                    "spread arguments aren't supported in this call",
+                    "pass the supported arguments directly",
+                );
+            }
+            return Ok(());
+        }
+        let phase = if self.javascript_module(self.fx.as_ref().expect("fn").module) {
+            crate::builtins::Phase::Runtime
+        } else {
+            crate::builtins::Phase::Emitter
+        };
+        crate::builtins::check(surface, name, args.len(), phase, span)
+    }
+
     fn global_call(&mut self, g: &str, args: &[ArrEl], span: Span) -> Result<Out> {
+        self.builtin_args("global", g, args, span)?;
+        if g == "parseInt" {
+            crate::builtins::check_parse_int_literals(args, span)?;
+        }
         if matches!(g, "Error" | "TypeError" | "RangeError") {
             return self.error_constructor(g, args);
         }
@@ -4271,14 +4865,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
             return Ok(Out::atom(format!("\\Zero\\Js::dynamicRegExpCall({argv})"), Ty::Dynamic));
         }
         let argv = self.plain_args(args)?;
-        if matches!(g, "encodeURI" | "encodeURIComponent") && argv.len() != 1 {
-            return err(span, format!("`{g}` needs exactly one string argument"));
-        }
-        if g == "isFinite" && argv.len() > 1 {
-            return err(span, "isFinite() accepts at most one argument in Zero code");
-        }
         let a0 = argv.first();
         Ok(match (g, a0) {
+            ("String", None) => Out::atom("''", Ty::Str),
+            ("Number", None) => Out::atom("0", Ty::Num),
+            ("Boolean", None) | ("isFinite", None) => Out::atom("false", Ty::Bool),
+            ("isNaN", None) => Out::atom("true", Ty::Bool),
             ("String", Some(v)) => Out::new(self.to_string_php(v, span)?, Ty::Str),
             ("structuredClone", Some(v)) => {
                 Out::atom(format!("\\Zero\\Js::clone({})", v.php), classes::wire_type(&v.ty))
@@ -4294,14 +4886,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
             ("encodeURI" | "encodeURIComponent", Some(v)) => {
                 Out::atom(format!("\\Zero\\Js::{g}({})", v.php), Ty::Str).checked_str(v, span)?
             }
-            ("parseInt", Some(v)) => Out::atom(
-                format!(
-                    "\\Zero\\Js::parseInt({})",
-                    argv.iter().map(|a| a.php.clone()).collect::<Vec<_>>().join(", ")
-                ),
-                Ty::Num,
-            )
-            .checked_str(v, span)?,
+            ("parseInt", Some(v)) => {
+                let radix = argv
+                    .get(1)
+                    .map(|a| format!(", \\Zero\\Js::toNumber({})", a.php))
+                    .unwrap_or_default();
+                Out::atom(format!("\\Zero\\Js::parseInt({}{radix})", v.php), Ty::Num).checked_str(v, span)?
+            }
             ("parseFloat", Some(v)) => {
                 Out::atom(format!("\\Zero\\Js::parseFloat({})", v.php), Ty::Num).checked_str(v, span)?
             }
@@ -4310,19 +4901,36 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 format!("\\Zero\\Js::isFinite(\\Zero\\Js::toNumber({}))", v.php),
                 Ty::Bool,
             ),
-            ("isFinite", None) => Out::atom("false", Ty::Bool),
             (
                 "fetch" | "process" | "require" | "eval" | "Function" | "setTimeout" | "crypto" | "globalThis"
                 | "Promise",
                 _,
             ) => {
-                return err(span, format!("`{g}` isn't available in Zero code"));
+                return err_help(
+                    span,
+                    format!("`{g}` isn't available in Zero code"),
+                    if g == "fetch" {
+                        "use a job or webhook for network effects; fetch is not a supported HTTP capability"
+                    } else {
+                        "use supported server capabilities in a hook or action"
+                    },
+                );
             }
             _ => return err(span, format!("`{g}(...)` isn't supported")),
         })
     }
 
     fn static_call(&mut self, g: &str, m: &str, args: &[ArrEl], span: Span) -> Result<Out> {
+        self.builtin_args(g, m, args, span)?;
+        if (g, m) == ("Math", "pow") {
+            crate::builtins::check_power_literals(args, span)?;
+        }
+        if g == "Math" && matches!(m, "log" | "exp") {
+            crate::builtins::check_transcendental_literals(m, args, span)?;
+        }
+        if (g, m) == ("Number", "parseInt") {
+            crate::builtins::check_parse_int_literals(args, span)?;
+        }
         if (self.javascript_module(self.fx.as_ref().expect("fn").module)
             || args.iter().any(|a| matches!(a, ArrEl::Spread(_))))
             && matches!(g, "Math" | "Array" | "Object" | "Number" | "JSON")
@@ -4333,6 +4941,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 Ty::Dynamic,
             ));
         }
+        if g == "Number" && matches!(m, "parseInt" | "parseFloat") {
+            return self.global_call(m, args, span);
+        }
         if (g, m) == ("Array", "from") {
             let src = self.arg(args, 0, span, "an argument")?;
             if let ExprKind::Object(props) = &src.kind
@@ -4342,11 +4953,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 let n = self.expr(len)?;
                 self.need_num(&n, len.span, "`length`")?;
                 let f = self.arg(args, 1, span, "a function")?;
-                let cb = self.callback(f, &[Ty::Null, Ty::Num])?;
+                let cb = self.callback(f, &[Ty::Undefined, Ty::Num])?;
                 let Ty::Fn(_, ret) = &cb.ty else { unreachable!() };
                 let ret = (**ret).clone();
                 return Ok(Out::atom(
-                    format!("\\Zero\\Js::range((int) {}, {})", n.wrapped(), cb.php),
+                    format!("\\Zero\\Js::range({}, {})", n.php, cb.php),
                     Ty::Array(Box::new(ret)),
                 ));
             }
@@ -4458,16 +5069,16 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     "ceil" => format!("ceil({x})"),
                     "abs" => format!("abs({x})"),
                     "sqrt" => format!("sqrt({x})"),
-                    "trunc" => format!("(({x}) < 0 ? ceil({x}) : floor({x}))"),
-                    "round" => format!("floor(({x}) + 0.5)"),
-                    "sign" => format!("(({x}) <=> 0)"),
+                    "trunc" => format!("\\Zero\\Js::trunc({x})"),
+                    "round" => format!("\\Zero\\Js::round({x})"),
+                    "sign" => format!("\\Zero\\Js::sign({x})"),
                     "pow" => format!(
                         "\\Zero\\Js::pow({}, {})",
                         argv[0].php,
                         argv.get(1).map(|a| a.php.as_str()).unwrap_or("NAN")
                     ),
-                    "log" => format!("log({x})"),
-                    _ => format!("exp({x})"),
+                    "log" | "exp" => format!("\\Zero\\Js::mathTranscendental('{}', {x})", m),
+                    _ => unreachable!(),
                 };
                 Out::atom(php, Ty::Num)
             }
@@ -4501,7 +5112,22 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 };
                 Out::atom(format!("\\Zero\\Js::fromEntries({})", php_args()), Ty::Map(Box::new(t)))
             }
-            ("Object", "hasOwn") => Out::atom(format!("\\Zero\\Js::hasOwn({})", php_args()), Ty::Bool),
+            ("Object", "hasOwn") => {
+                if a0.is_some_and(|value| value.ty.all(|ty| matches!(ty, Ty::Fn(..) | Ty::Class(_)))) {
+                    return err_help(
+                        span,
+                        "Object.hasOwn on functions isn't supported",
+                        "inspect a plain object, array or primitive value",
+                    );
+                }
+                Out::atom(
+                    format!(
+                        "\\Zero\\Js::dynamicStaticCall('Object', 'hasOwn', new \\Zero\\JsArray([{}]))",
+                        php_args()
+                    ),
+                    Ty::Bool,
+                )
+            }
             ("Array", "isArray") => Out::atom(
                 format!(
                     "({0} instanceof \\Zero\\JsArray)",
@@ -4514,19 +5140,31 @@ impl<'a, 'p> Compiler<'a, 'p> {
             ("Number", "parseInt") => Out::atom(format!("\\Zero\\Js::parseInt({})", php_args()), Ty::Num),
             ("Number", "parseFloat") => Out::atom(format!("\\Zero\\Js::parseFloat({})", php_args()), Ty::Num),
             ("JSON", "stringify") => {
-                let t = Ty::Str;
+                if let Some(value) = a0 {
+                    crate::builtins::check_json_serialization_type(&value.ty, span)?;
+                }
+                let t = if a0.is_some_and(|value| {
+                    value
+                        .ty
+                        .all(|ty| !matches!(ty, Ty::Undefined | Ty::Unknown | Ty::Dynamic | Ty::Fn(..)))
+                }) {
+                    Ty::Str
+                } else {
+                    Ty::union([Ty::Str, Ty::Undefined])
+                };
                 if argv
                     .get(1)
                     .is_some_and(|value| !matches!(value.ty, Ty::Null | Ty::Undefined))
                 {
                     return err(span, "JSON.stringify replacers aren't supported");
                 }
-                if argv.len() > 1 {
-                    let indent = argv.get(2).map(|a| a.php.clone()).unwrap_or_else(|| "null".into());
-                    Out::atom(format!("\\Zero\\Js::jsonStringify({}, {indent})", argv[0].php), t)
-                } else {
-                    Out::atom(format!("\\Zero\\Js::jsonStringify({})", php_args()), t)
-                }
+                Out::atom(
+                    format!(
+                        "\\Zero\\Js::dynamicStaticCall('JSON', 'stringify', new \\Zero\\JsArray([{}]))",
+                        php_args()
+                    ),
+                    t,
+                )
             }
             ("JSON", "parse") => {
                 if argv
@@ -4535,14 +5173,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 {
                     return err(span, "JSON.parse revivers aren't supported");
                 }
-                let input = a0
-                    .map(|value| value.php.as_str())
-                    .unwrap_or("\\Zero\\JsUndefined::Value");
-                Out::atom(format!("\\Zero\\Js::jsonParse({input})"), Ty::Unknown)
+                Out::atom(
+                    format!(
+                        "\\Zero\\Js::dynamicStaticCall('JSON', 'parse', new \\Zero\\JsArray([{}]))",
+                        php_args()
+                    ),
+                    Ty::Unknown,
+                )
             }
-            ("console", "log" | "info" | "warn" | "error" | "debug") => {
-                Out::atom(format!("\\Zero\\Js::log({}, {})", php_str(m), php_args()), Ty::Null)
-            }
+            ("console", "log" | "info" | "warn" | "error" | "debug") => Out::atom(
+                format!("\\Zero\\Js::log({}, {})", php_str(m), php_args()),
+                Ty::Undefined,
+            ),
             _ => return err(span, format!("`{g}.{m}` isn't supported in Zero code")),
         })
     }
@@ -4584,11 +5226,23 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Ty::DbGlobal(name) => return self.db_global_call(&name, m, args, m_span),
             _ => {}
         }
+        let family = match recv.ty.non_null() {
+            Ty::Date => Some("date"),
+            t if t.is_num() => Some("number"),
+            t if t.is_str() => Some("string"),
+            Ty::Array(_) | Ty::NonEmptyArray(_) | Ty::Tuple(_) | Ty::ArrayLiteral(_) => Some("array"),
+            Ty::Regex => Some("regex"),
+            _ => None,
+        };
+        if let Some(family) = family {
+            self.builtin_args(family, m, args, span)?;
+        }
+        if (family == Some("array") || recv.ty == Ty::Dynamic) && matches!(m, "sort" | "toSorted") {
+            crate::builtins::check_sort_callback(args)?;
+        }
         let mut recv = self.finish_value(recv, recv_span)?;
-        let javascript_string_replace = self.javascript_module(self.fx.as_ref().expect("fn").module)
-            && recv.ty.non_null().is_str()
-            && matches!(m, "replace" | "replaceAll");
-        if recv.ty == Ty::Dynamic || javascript_string_replace {
+        let javascript_instance = self.javascript_module(self.fx.as_ref().expect("fn").module) && family.is_some();
+        if recv.ty == Ty::Dynamic || javascript_instance {
             let argv = self.javascript_args(args)?;
             let receiver = if optional { self.tmp_var() } else { recv.php.clone() };
             let call = format!(
@@ -4604,15 +5258,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 } else {
                     call
                 },
-                if javascript_string_replace {
-                    if optional && recv.ty.is_nullable() {
-                        Ty::Str.nullable()
-                    } else {
-                        Ty::Str
-                    }
-                } else {
-                    Ty::Dynamic
-                },
+                Ty::Dynamic,
             ));
         }
         if recv.ty.is_nullable() && !optional {
@@ -4632,6 +5278,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 );
             }
         }
+        let nullish_guard = if optional && recv.ty.is_nullable() {
+            let receiver = self.tmp_var();
+            let source = std::mem::replace(&mut recv.php, receiver.clone());
+            recv.atomic = true;
+            Some((receiver, source))
+        } else {
+            None
+        };
         let base = recv.ty.non_null();
         let r = match &base {
             t if t.is_str() => self.string_method(&recv, m, args, span, m_span)?,
@@ -4642,21 +5296,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
             t if t.all(|t| matches!(t, Ty::Num | Ty::NumLit(_) | Ty::FreshNumLit(_))) => match m {
                 "toFixed" => {
                     let argv = self.plain_args(args)?;
-                    let d = argv
-                        .first()
-                        .map(|a| format!("(int) {}", a.wrapped()))
-                        .unwrap_or_else(|| "0".into());
+                    let d = argv.first().map(|a| a.php.clone()).unwrap_or_else(|| "0".into());
                     Out::atom(format!("\\Zero\\Js::toFixed({}, {d})", recv.php), Ty::Str)
                 }
                 "toString" => Out::atom(format!("\\Zero\\Js::numStr({})", recv.php), Ty::Str),
                 _ => return err(m_span, format!("numbers have no method `{m}`")),
             },
             Ty::Date => match m {
-                "toISOString" | "toJSON" => Out::atom(format!("\\Zero\\Js::iso({})", recv.php), Ty::Str),
-                "getTime" | "valueOf" => Out {
-                    ty: Ty::Num,
-                    ..recv.clone()
-                },
+                "toISOString" => Out::atom(format!("\\Zero\\Js::iso(({})->milliseconds)", recv.php), Ty::Str),
+                "toJSON" => Out::atom(
+                    format!("\\Zero\\Js::dateJSON(({})->milliseconds)", recv.php),
+                    Ty::Str.nullable(),
+                ),
+                "getTime" | "valueOf" => Out::atom(format!("({})->milliseconds", recv.php), Ty::Num),
                 _ => {
                     return err_help(
                         m_span,
@@ -4678,20 +5330,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
             },
             Ty::Map(_) | Ty::Obj(_) => {
                 // Calling a function stored in an object field.
-                let f = self.member_of_out(&recv, m, m_span)?;
-                return self.call_value(f, args, span, m_span);
+                let mut f = self.member_of_out(&recv, m, m_span)?;
+                f.php = format!("\\Zero\\Js::dataMethod({}, {})", recv.php, php_str(m));
+                self.call_value(f, args, span, m_span)?
             }
             other => return err(m_span, format!("{} has no method `{m}`", other.describe())),
         };
-        if optional && recv.ty.is_nullable() {
-            let tmp = self.tmp_var();
-            let php = r.php.replacen(&recv.php, &tmp, 1);
+        if let Some((receiver, source)) = nullish_guard {
             return Ok(Out::new(
                 format!(
-                    "(\\Zero\\Js::isNullish({tmp} = {}) ? \\Zero\\Js::undefined() : {php})",
-                    recv.php
+                    "(\\Zero\\Js::isNullish({receiver} = {source}) ? \\Zero\\Js::undefined() : {})",
+                    r.php
                 ),
-                r.ty.nullable(),
+                Ty::union([r.ty, Ty::Undefined]),
             ));
         }
         Ok(r)
@@ -4702,14 +5353,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
             return Err(self.no_field(&o.ty, prop, span));
         };
         let t = if optional || matches!(o.ty.non_null(), Ty::Map(_)) {
-            t.nullable()
+            Ty::union([t, Ty::Undefined])
         } else {
             t
         };
-        Ok(Out::atom(format!("\\Zero\\Js::prop({}, {})", o.php, php_str(prop)), t))
+        Ok(Out::atom(
+            format!("\\Zero\\Js::dataGet({}, {})", o.php, php_str(prop)),
+            t,
+        ))
     }
 
     fn string_method(&mut self, s: &Out, m: &str, args: &[ArrEl], span: Span, m_span: Span) -> Result<Out> {
+        self.builtin_args("string", m, args, span)?;
         if matches!(m, "replace" | "replaceAll") {
             let pat_e = self.arg(args, 0, span, "a pattern")?;
             let pat = self.expr(pat_e)?;
@@ -4769,15 +5424,31 @@ impl<'a, 'p> Compiler<'a, 'p> {
             parts.extend(extra.iter().flatten().cloned());
             Out::atom(format!("\\Zero\\Js::{f}({})", parts.join(", ")), Ty::Str)
         };
+        let dispatch = || {
+            format!(
+                "\\Zero\\Js::dynamicCallMethod({}, {}, new \\Zero\\JsArray([{}]))",
+                s.php,
+                php_str(m),
+                argv.iter()
+                    .map(|value| value.php.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         Ok(match m {
-            "concat" => Out::atom(
-                format!(
-                    "\\Zero\\Js::dynamicCallMethod({}, 'concat', new \\Zero\\JsArray([{}]))",
-                    s.php,
-                    argv.iter().map(|v| v.php.clone()).collect::<Vec<_>>().join(", ")
-                ),
-                Ty::Str,
-            ),
+            "concat" => {
+                for value in &argv {
+                    crate::builtins::check_string_coercion_type(&value.ty, span)?;
+                }
+                Out::atom(
+                    format!(
+                        "\\Zero\\Js::dynamicCallMethod({}, 'concat', new \\Zero\\JsArray([{}]))",
+                        s.php,
+                        argv.iter().map(|v| v.php.clone()).collect::<Vec<_>>().join(", ")
+                    ),
+                    Ty::Str,
+                )
+            }
             "toLowerCase" => Out::atom(format!("mb_strtolower({}, 'UTF-8')", s.php), Ty::Str),
             "toUpperCase" => Out::atom(format!("mb_strtoupper({}, 'UTF-8')", s.php), Ty::Str),
             "trim" | "trimStart" | "trimEnd" => js(m, &[]),
@@ -4788,9 +5459,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     "slice the string first, for example `s.slice(start).startsWith(x)`",
                 );
             }
-            "includes" => Out::atom(format!("str_contains({}, {})", s.php, need_str(0, self)?), Ty::Bool),
-            "startsWith" => Out::atom(format!("str_starts_with({}, {})", s.php, need_str(0, self)?), Ty::Bool),
-            "endsWith" => Out::atom(format!("str_ends_with({}, {})", s.php, need_str(0, self)?), Ty::Bool),
+            "includes" | "startsWith" | "endsWith" => {
+                need_str(0, self)?;
+                Out::atom(dispatch(), Ty::Bool)
+            }
             "indexOf" | "lastIndexOf" => {
                 need_str(0, self)?;
                 Out {
@@ -4798,25 +5470,54 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     ..js(m, &[a(0), a(1)])
                 }
             }
-            "slice" | "substring" | "padStart" | "padEnd" | "repeat" | "charAt" => js(m, &[a(0), a(1)]),
-            "at" => Out {
-                ty: Ty::Str.nullable(),
-                ..js("strAt", &[a(0)])
-            },
-            "split" => Out {
-                ty: Ty::Array(Box::new(Ty::Str)),
-                ..js("split", &[a(0), a(1)])
-            },
-            "localeCompare" => Out {
-                ty: Ty::Num,
-                ..js("localeCompare", &[Some(need_str(0, self)?)])
-            },
+            "slice" | "substring" | "padStart" | "padEnd" | "repeat" | "charAt" => Out::atom(dispatch(), Ty::Str),
+            "at" => Out::atom(
+                format!(
+                    "\\Zero\\Js::strAt({}, \\Zero\\Js::toNumber({}))",
+                    s.php,
+                    a(0).unwrap_or("0".into())
+                ),
+                Ty::union([Ty::Str, Ty::Undefined]),
+            ),
+            "split" => {
+                if let Some(separator) = argv.first()
+                    && !(separator.ty.is_str() || separator.ty == Ty::Regex)
+                {
+                    return err_help(
+                        span,
+                        "split() needs a string or regex separator",
+                        "omit the separator for a one-element array, or pass a string",
+                    );
+                }
+                if argv.is_empty() {
+                    Out::atom(
+                        format!("new \\Zero\\JsArray([{}])", s.php),
+                        Ty::Array(Box::new(Ty::Str)),
+                    )
+                } else {
+                    Out::atom(
+                        dispatch(),
+                        Ty::Array(Box::new(if argv.first().is_some_and(|v| v.ty == Ty::Regex) {
+                            Ty::union([Ty::Str, Ty::Undefined])
+                        } else {
+                            Ty::Str
+                        })),
+                    )
+                }
+            }
+            "localeCompare" => {
+                return err_help(
+                    span,
+                    "localeCompare() isn't supported",
+                    "use < or > for deterministic UTF-16 ordering; locale collation depends on the host",
+                );
+            }
             "match" => {
                 if argv.first().map(|x| &x.ty) != Some(&Ty::Regex) {
                     return err(span, "match() needs a regular expression");
                 }
                 Out {
-                    ty: Ty::Array(Box::new(Ty::Str.nullable())).nullable(),
+                    ty: Ty::Array(Box::new(Ty::union([Ty::Str, Ty::Undefined]))).nullable(),
                     ..js("strMatch", &[a(0)])
                 }
             }
@@ -4835,6 +5536,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
         span: Span,
         m_span: Span,
     ) -> Result<Out> {
+        self.builtin_args("array", m, args, span)?;
+        let a = Out {
+            php: format!("\\Zero\\Js::nativeArrayReceiver({}, {})", a.php, php_str(m)),
+            ..a.clone()
+        };
         let el = match a.ty.non_null() {
             Ty::Array(t) | Ty::NonEmptyArray(t) => *t,
             Ty::Tuple(ts) | Ty::ArrayLiteral(ts) => Ty::union(ts),
@@ -4871,7 +5577,6 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Ty::Fn(_, r) => (**r).clone(),
             _ => Ty::Unknown,
         };
-        // In-place mutators need an assignable variable.
         Ok(match m {
             "map" => {
                 let f = cb(self, &[])?;
@@ -4912,7 +5617,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     }
                     _ => el,
                 };
-                Out::atom(format!("\\Zero\\Js::{m}({}, {})", a.php, f.php), narrowed.nullable())
+                Out::atom(
+                    format!("\\Zero\\Js::{m}({}, {})", a.php, f.php),
+                    Ty::union([narrowed, Ty::Undefined]),
+                )
             }
             "findIndex" | "findLastIndex" => {
                 let f = cb(self, &[])?;
@@ -4940,7 +5648,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             "forEach" => {
                 let f = cb(self, &[])?;
-                Out::atom(format!("\\Zero\\Js::forEach({}, {})", a.php, f.php), Ty::Null)
+                Out::atom(format!("\\Zero\\Js::forEach({}, {})", a.php, f.php), Ty::Undefined)
             }
             "reduce" => {
                 let init = match args.get(1) {
@@ -4998,15 +5706,15 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     Ty::Num,
                 )
             }
-            "pop" => Out::atom(format!("\\Zero\\Js::pop({})", a.php), el.nullable()),
-            "shift" => Out::atom(format!("\\Zero\\Js::shift({})", a.php), el.nullable()),
+            "pop" => Out::atom(format!("\\Zero\\Js::pop({})", a.php), Ty::union([el, Ty::Undefined])),
+            "shift" => Out::atom(format!("\\Zero\\Js::shift({})", a.php), Ty::union([el, Ty::Undefined])),
             "reverse" | "toReversed" => Out::atom(format!("\\Zero\\Js::{m}({})", a.php), Ty::Array(Box::new(el))),
             "splice" => {
                 let argv = self.plain_args(args)?;
                 check_insert(&argv[argv.len().min(2)..])?;
                 let extra: Vec<String> = argv.iter().map(|x| x.php.clone()).collect();
                 Out::atom(
-                    format!("\\Zero\\Js::splice({}, {})", a.php, extra.join(", ")),
+                    format!("(\\Zero\\Js::dynamicMethod({}, 'splice'))({})", a.php, extra.join(", ")),
                     Ty::Array(Box::new(el)),
                 )
             }
@@ -5017,10 +5725,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     .chain(extra.iter().cloned())
                     .collect::<Vec<_>>()
                     .join(", ");
+                let dispatch = || {
+                    format!(
+                        "(\\Zero\\Js::dynamicMethod({}, {}))({})",
+                        a.php,
+                        php_str(m),
+                        extra.join(", ")
+                    )
+                };
                 match m {
                     "includes" => Out::atom(format!("\\Zero\\Js::includes({all})"), Ty::Bool),
                     "indexOf" | "lastIndexOf" => Out::atom(format!("\\Zero\\Js::{m}({all})"), Ty::Num),
                     "join" => {
+                        crate::builtins::check_string_coercion_type(&a.ty, span)?;
                         if let Some(sep) = argv.first()
                             && !sep.ty.is_str()
                         {
@@ -5028,20 +5745,21 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         }
                         Out::atom(format!("\\Zero\\Js::join({all})"), Ty::Str)
                     }
-                    "slice" => Out::atom(format!("\\Zero\\Js::arrSlice({all})"), Ty::Array(Box::new(el))),
-                    "at" => Out::atom(format!("\\Zero\\Js::arrAt({all})"), el.nullable()),
+                    "slice" => Out::atom(dispatch(), Ty::Array(Box::new(el))),
+                    "at" => Out::atom(format!("\\Zero\\Js::arrAt({all})"), Ty::union([el, Ty::Undefined])),
                     "concat" => {
                         let mut t = vec![el];
                         let mut parts = vec![a.php.clone()];
                         for x in &argv {
-                            match x.ty.non_null() {
-                                Ty::Array(e) | Ty::NonEmptyArray(e) => t.push(*e),
-                                other => {
-                                    t.push(other);
-                                    parts.push(x.php.clone());
-                                    continue;
-                                }
-                            }
+                            let flatten = |ty| match ty {
+                                Ty::Array(e) | Ty::NonEmptyArray(e) => *e,
+                                Ty::Tuple(items) | Ty::ArrayLiteral(items) => Ty::union(items),
+                                other => other,
+                            };
+                            t.push(match x.ty.clone() {
+                                Ty::Union(items) => Ty::union(items.into_iter().map(flatten)),
+                                ty => flatten(ty),
+                            });
                             parts.push(x.php.clone());
                         }
                         Out::atom(
@@ -5050,19 +5768,37 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         )
                     }
                     "flat" => {
-                        let inner = match el {
+                        let depth = match argv.first().map(|v| &v.ty) {
+                            None | Some(Ty::Undefined) => 1,
+                            Some(Ty::Null) => 0,
+                            Some(Ty::NumLit(n) | Ty::FreshNumLit(n)) if *n == 0.0 => 0,
+                            Some(Ty::NumLit(n) | Ty::FreshNumLit(n)) if *n == 1.0 => 1,
+                            _ => {
+                                return err_help(
+                                    span,
+                                    "typed flat() supports only depths 0 and 1",
+                                    "use a literal depth of 0 or 1, or flatten explicitly",
+                                );
+                            }
+                        };
+                        let flatten = |t| match t {
                             Ty::Array(t) | Ty::NonEmptyArray(t) => *t,
+                            Ty::Tuple(ts) | Ty::ArrayLiteral(ts) => Ty::union(ts),
                             t => t,
                         };
-                        Out::atom(format!("\\Zero\\Js::flat({all})"), Ty::Array(Box::new(inner)))
+                        let inner = if depth == 0 {
+                            el
+                        } else {
+                            match el {
+                                Ty::Union(ts) => Ty::union(ts.into_iter().map(flatten)),
+                                t => flatten(t),
+                            }
+                        };
+                        Out::atom(dispatch(), Ty::Array(Box::new(inner)))
                     }
                     _ => {
                         check_insert(&argv[..argv.len().min(1)])?;
-                        let p = &a.php;
-                        Out::atom(
-                            format!("\\Zero\\Js::fill({p}, {})", extra.join(", ")),
-                            Ty::Array(Box::new(el)),
-                        )
+                        Out::atom(dispatch(), Ty::Array(Box::new(el)))
                     }
                 }
             }
@@ -5078,6 +5814,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 m_span,
                 format!("`db.query.<collection>` has no method `{m}`"),
                 "use findMany or findFirst",
+            );
+        }
+        if args.len() > 1 {
+            return err_help(
+                span,
+                format!("db.query.{table}.{m} accepts at most one options argument"),
+                "pass filters and ordering inside one options object",
             );
         }
         let (opts, row_ty) = match args.first() {
@@ -5541,10 +6284,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
     /// Filter values for timestamp/date columns accept Dates (epoch ms): convert to the stored form.
     fn filter_value(&self, col: &crate::schema::Column, v: &Out) -> String {
         match (col.ty, &v.ty) {
-            (ColType::Timestamp, Ty::Date | Ty::Num | Ty::NumLit(_) | Ty::FreshNumLit(_)) => {
+            (ColType::Timestamp, Ty::Date) => format!("\\Zero\\Js::iso(({})->milliseconds)", v.php),
+            (ColType::Date, Ty::Date) => format!("substr(\\Zero\\Js::iso(({})->milliseconds), 0, 10)", v.php),
+            (ColType::Timestamp, Ty::Num | Ty::NumLit(_) | Ty::FreshNumLit(_)) => {
                 format!("\\Zero\\Js::iso({})", v.php)
             }
-            (ColType::Date, Ty::Date | Ty::Num | Ty::NumLit(_) | Ty::FreshNumLit(_)) => {
+            (ColType::Date, Ty::Num | Ty::NumLit(_) | Ty::FreshNumLit(_)) => {
                 format!("substr(\\Zero\\Js::iso({}), 0, 10)", v.php)
             }
             _ => v.php.clone(),
@@ -5560,7 +6305,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             ("update", [ArrEl::Item(patch)]) => {
                 let v = self.expr(patch)?;
                 let v = self.finish_value(v, patch.span)?;
-                let want = types::partial(row.clone());
+                let want = types::storage_input(types::partial(row.clone()));
                 if !assignable(&v.ty, &want) {
                     if let (Ty::Obj(have), Ty::Obj(need)) = (&v.ty, &want) {
                         for (k, (t, _)) in have {
@@ -5619,11 +6364,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 );
             }
         };
+        crate::builtins::check("db", m, args.len(), crate::builtins::Phase::Emitter, span)?;
         let t = self.arg(args, 0, span, "a collection")?;
         let v = self.expr(t)?;
         let Ty::Collection(table) = v.ty else {
             return err(t.span, format!("db.{m}() needs a collection, not {}", v.ty.describe()));
         };
+        if v.php != php_str(&table) {
+            return err_help(
+                t.span,
+                "unsupported database collection expression",
+                "pass a static collection reference; evaluate side effects in a preceding statement",
+            );
+        }
         Ok(Out::atom(
             "",
             Ty::Builder(Box::new(Builder {
@@ -5638,6 +6391,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn builder_call(&mut self, mut b: Builder, m: &str, args: &[ArrEl], span: Span, m_span: Span) -> Result<Out> {
+        crate::builtins::check("db.builder", m, args.len(), crate::builtins::Phase::Emitter, span)?;
         match (b.kind.clone(), m) {
             (BuilderKind::Insert, "values") if b.values.is_none() => {
                 let x = self.arg(args, 0, span, "values")?;
@@ -5648,6 +6402,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 b.set = Some(self.write_values(&b.table, x, false)?);
             }
             (BuilderKind::Update | BuilderKind::Delete, "where") if b.filter.is_none() => {
+                if b.kind == BuilderKind::Update && b.set.is_none() {
+                    return err_help(
+                        span,
+                        "unsupported update builder order",
+                        "call set(...) before where(...) so argument effects retain their order",
+                    );
+                }
                 let x = self.arg(args, 0, span, "a filter")?;
                 b.filter = Some(self.filter(&b.table, x, false)?);
             }
@@ -5692,6 +6453,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         } else {
             types::partial(types::insert(self.schema, table))
         };
+        let want = types::storage_input(want);
         let ok = match (&v.ty, insert) {
             (Ty::Array(el) | Ty::NonEmptyArray(el), true) => assignable(el, &want),
             (t, _) => assignable(t, &want),
@@ -5764,6 +6526,36 @@ fn pad(n: usize) -> String {
     "    ".repeat(n)
 }
 
+fn require_initialized_local(name: &str, local: &Local, span: Span) -> Result<()> {
+    if !local.initialized {
+        return err_help(
+            span,
+            format!("`{name}` is referenced before its lexical declaration"),
+            "initialize the lexical binding before reading it or creating a closure that captures it",
+        );
+    }
+    Ok(())
+}
+
+fn php_local_base(name: &str) -> String {
+    if name == "this" {
+        return "__zero_this".into();
+    }
+    let reserved = matches!(
+        name,
+        "GLOBALS" | "_SERVER" | "_GET" | "_POST" | "_FILES" | "_COOKIE" | "_SESSION" | "_REQUEST" | "_ENV"
+    );
+    let valid_start = name
+        .bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_');
+    if !reserved && valid_start && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return name.to_string();
+    }
+    let encoded: String = name.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("__zero_local_{encoded}")
+}
+
 fn php_hint(t: &Ty) -> &'static str {
     match t {
         Ty::Instance(..) => "\\Zero\\JsObject ",
@@ -5790,7 +6582,8 @@ fn php_hint(t: &Ty) -> &'static str {
 
 fn ty_of_data(value: &Value) -> Ty {
     match value {
-        Value::Null | Value::Undef => Ty::Null,
+        Value::Null => Ty::Null,
+        Value::Undef => Ty::Undefined,
         Value::Bool(b) => Ty::FreshBoolLit(*b),
         Value::Num(n) => Ty::FreshNumLit(*n),
         Value::Str(s) => Ty::FreshStrLit(s.to_string()),
@@ -5904,8 +6697,21 @@ fn truthiness_part(t: &Ty, truthy: bool) -> Ty {
     }
 }
 
+fn defined_type(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Union(items) => Ty::union(
+            items
+                .iter()
+                .filter(|item| !matches!(item, Ty::Undefined | Ty::Void))
+                .cloned(),
+        ),
+        Ty::Undefined | Ty::Void => Ty::Never,
+        _ => ty.clone(),
+    }
+}
+
 fn default_binding_type(ty: &Ty, default: &Ty, mutable: bool) -> Ty {
-    let present = ty.non_null();
+    let present = defined_type(ty);
     if assignable(default, &present) {
         present
     } else {
@@ -5935,7 +6741,7 @@ fn replacement_parameters(ty: &Ty, pattern: Option<&str>, count: usize) -> Vec<T
                     let captures = tail.next() != Some('?')
                         || (tail.next() == Some('<') && !matches!(tail.next(), Some('=' | '!')));
                     if captures {
-                        params.push(Ty::Str.nullable());
+                        params.push(Ty::union([Ty::Str, Ty::Undefined]));
                     }
                 }
                 _ => {}
@@ -5973,7 +6779,14 @@ fn check_callback_parameters(given: &[Ty], declared: &[Ty], span: Span) -> Resul
             }
             break;
         }
-        check_parameter_argument(given.get(i).unwrap_or(&Ty::Null), declared, span)?;
+        if given.get(i).is_none() && !accepts_omission(declared) {
+            return err_help(
+                span,
+                format!("this callback never supplies required parameter {}", i + 1),
+                "remove the parameter, make it optional, or accept undefined",
+            );
+        }
+        check_parameter_argument(given.get(i).unwrap_or(&Ty::Undefined), declared, span)?;
     }
     Ok(())
 }
@@ -6006,9 +6819,21 @@ fn callable_argument(parameters: &[Ty], index: usize) -> Option<Ty> {
     parameters.get(index).cloned()
 }
 
-fn parameter_default_suffix(parameter: &Param) -> &'static str {
-    if parameter.optional || parameter.default.is_some() {
-        " = null"
+fn accepts_omission(ty: &Ty) -> bool {
+    match ty {
+        Ty::Unknown | Ty::Dynamic | Ty::Undefined | Ty::Void | Ty::Rest(_) => true,
+        Ty::Union(items) => items.iter().any(accepts_omission),
+        _ => false,
+    }
+}
+
+fn parameter_default_suffix(parameters: &[Param], types: &[Ty]) -> &'static str {
+    if parameters
+        .iter()
+        .zip(types)
+        .all(|(parameter, ty)| parameter.rest || accepts_omission(ty))
+    {
+        " = \\Zero\\JsUndefined::Value"
     } else {
         ""
     }
@@ -6016,7 +6841,7 @@ fn parameter_default_suffix(parameter: &Param) -> &'static str {
 
 fn parameter_input_type(parameter: &Param, ty: Ty) -> Ty {
     if parameter.optional || parameter.default.is_some() {
-        Ty::union([ty.nullable(), Ty::Undefined])
+        Ty::union([ty, Ty::Undefined])
     } else {
         ty
     }
@@ -6098,8 +6923,6 @@ pub fn assignable(a: &Ty, b: &Ty) -> bool {
         (Ty::StrLit(x), Ty::FreshStrLit(y)) | (Ty::FreshStrLit(x), Ty::StrLit(y)) => x == y,
         (Ty::Union(xs), _) => xs.iter().all(|x| assignable(x, b)),
         (_, Ty::Union(ys)) => ys.iter().any(|y| assignable(a, y)),
-        (Ty::Date, Ty::Num) => true,
-        (Ty::Undefined, Ty::Null) => true,
         (Ty::Array(x), Ty::Array(y)) => **x == Ty::Never || assignable(x, y),
         (Ty::NonEmptyArray(x), Ty::Array(y) | Ty::NonEmptyArray(y)) => assignable(x, y),
         (Ty::Tuple(xs) | Ty::ArrayLiteral(xs), Ty::NonEmptyArray(y)) => {
@@ -6113,7 +6936,14 @@ pub fn assignable(a: &Ty, b: &Ty) -> bool {
             need.iter().all(|(k, (t, optional))| match have.get(k) {
                 Some((ht, have_optional)) => {
                     (!have_optional || *optional)
-                        && assignable(ht, &if *optional { t.clone().nullable() } else { t.clone() })
+                        && assignable(
+                            ht,
+                            &if *optional {
+                                Ty::union([t.clone(), Ty::Undefined])
+                            } else {
+                                t.clone()
+                            },
+                        )
                 }
                 None => *optional,
             }) && have.keys().all(|k| need.contains_key(k))
@@ -6314,6 +7144,36 @@ fn collect_aliases(
 
 fn paren(s: &str) -> String {
     format!("({s})")
+}
+
+fn check_optional_chain(e: &Expr) -> Result<bool> {
+    let (receiver, optional) = match &e.kind {
+        ExprKind::Member { obj, optional, .. } | ExprKind::Index { obj, optional, .. } => (obj, *optional),
+        ExprKind::Call { callee, optional, .. } => match &callee.kind {
+            ExprKind::Member { .. } | ExprKind::Index { .. } => return check_optional_chain(callee),
+            _ => (callee, *optional),
+        },
+        ExprKind::As(inner, _) | ExprKind::NonNull(inner) => return check_optional_chain(inner),
+        _ => return Ok(false),
+    };
+    let short = check_optional_chain(receiver)?;
+    if short && !optional {
+        return err_help(
+            e.span,
+            "non-optional continuation of an optional chain isn't supported",
+            "guard each nullable step explicitly before continuing the access or call",
+        );
+    }
+    Ok(short || optional)
+}
+
+fn pattern_default_effects(pat: &Pat) -> bool {
+    match pat {
+        Pat::Default(inner, value) => !pure_read(value) || pattern_default_effects(inner),
+        Pat::Obj { props, .. } => props.iter().any(|(_, pat)| pattern_default_effects(pat)),
+        Pat::Arr { elems, .. } => elems.iter().flatten().any(pattern_default_effects),
+        Pat::Id(..) => false,
+    }
 }
 
 /// Direct PHP comparisons are safe only when evaluating the right side cannot replace the left.

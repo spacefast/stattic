@@ -72,7 +72,11 @@ final class Jobs
     {
         return db()->schema()->jobs()[$name]
             ?? \Zero\Services\Definition::jobs()[$name]
-            ?? ($name === Webhooks::JOB ? Webhooks::spec() : throw new \LogicException("Unknown job '$name'"));
+            ?? match ($name) {
+                Webhooks::JOB => Webhooks::spec(),
+                \Zero\Mail::JOB => \Zero\Mail::spec(),
+                default => throw new \LogicException("Unknown job '$name'"),
+            };
     }
 
     public static function uuid(): string

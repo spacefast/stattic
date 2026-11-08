@@ -75,7 +75,7 @@ interface Store
      */
     public function source(string $collection): Source;
 
-    /** @return list<array> Storage-native visibility filters for this explicit viewer, applied before pagination and relation matching. */
+    /** @return list<array|SqlPredicate> Storage-native visibility filters for this explicit viewer, applied before pagination and relation matching. */
     public function readGuards(string $collection, Viewer $viewer): array;
 
     /** Encoded values keyed by field, null if never written. */

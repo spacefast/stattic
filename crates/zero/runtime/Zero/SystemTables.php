@@ -34,7 +34,7 @@ final class SystemTables
         }
         ksort($parts);
 
-        return substr(hash('sha256', (string) json_encode($parts)), 0, 16);
+        return substr(hash('sha256', (string) \Zero\Json::encode($parts)), 0, 16);
     }
 
     /** Apply outside request transactions: MySQL DDL commits implicitly. */

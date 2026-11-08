@@ -88,8 +88,7 @@ impl Compiler<'_, '_> {
             target: Some(WriteTarget {
                 receiver: receiver.php,
                 key: key.php,
-                array: false,
-                dynamic: true,
+                kind: WriteKind::Dynamic,
             }),
         }
     }
@@ -116,9 +115,16 @@ impl Compiler<'_, '_> {
         Ok(format!("new \\Zero\\JsArray([{}])", parts.join(", ")))
     }
 
-    pub(super) fn javascript_prologue(&mut self, f: &Func, indent: usize) -> Result<String> {
+    pub(super) fn javascript_arguments(&mut self, f: &Func, indent: usize) -> Result<String> {
         let mut source = String::new();
-        if !f.is_arrow && !self.fx().scopes[0].contains_key("arguments") {
+        let mut bindings = Vec::new();
+        for parameter in &f.params {
+            parameter.pat.bindings(&mut bindings);
+        }
+        if !f.is_arrow
+            && !bindings.iter().any(|(name, _)| *name == "arguments")
+            && !self.fx().scopes[0].contains_key("arguments")
+        {
             let ty = if self.javascript_module(f.module) {
                 Ty::Dynamic
             } else {
@@ -136,6 +142,11 @@ impl Compiler<'_, '_> {
             };
             let _ = writeln!(source, "{}{php} = \\Zero\\Js::arguments({args});", pad(indent));
         }
+        Ok(source)
+    }
+
+    pub(super) fn javascript_prologue(&mut self, f: &Func, indent: usize) -> Result<String> {
+        let mut source = self.javascript_arguments(f, indent)?;
         if let FnBody::Block(body) = &f.body {
             let mut declarations = Vec::new();
             collect_var_declarations(body, &mut declarations);

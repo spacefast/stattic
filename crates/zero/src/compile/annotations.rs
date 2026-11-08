@@ -88,9 +88,9 @@ impl Compiler<'_, '_> {
             TyAnn::Void => Ty::Void,
             TyAnn::Unknown => Ty::Unknown,
             TyAnn::Never => Ty::Never,
-            TyAnn::Any => {
+            TyAnn::Any(span) => {
                 return err_help(
-                    Span::NONE,
+                    *span,
                     "`any` isn't allowed in Zero code",
                     "use a precise type, or `unknown` and narrow it",
                 );
@@ -548,7 +548,8 @@ impl Compiler<'_, '_> {
 
 pub(super) fn annotation_span(a: &TyAnn) -> Span {
     match a {
-        TyAnn::Ref(_, _, s)
+        TyAnn::Any(s)
+        | TyAnn::Ref(_, _, s)
         | TyAnn::Query(_, s)
         | TyAnn::KeyOf(_, s)
         | TyAnn::Indexed(_, _, s)
@@ -963,11 +964,10 @@ fn without_undefined(t: Ty) -> Ty {
     Ty::union(union_parts(t).into_iter().filter(|t| *t != Ty::Undefined))
 }
 
-/// Annotation-only distinctions end here. PHP's null/undefined representation is
-/// unchanged, including nested array elements, properties and callback results.
+/// Normalize runtime shapes while retaining JavaScript undefined identity.
 pub(super) fn runtime_type(t: Ty) -> Ty {
     match t {
-        Ty::Undefined | Ty::Void => Ty::Null,
+        Ty::Void => Ty::Undefined,
         Ty::Array(t) => Ty::Array(Box::new(runtime_type(*t))),
         Ty::NonEmptyArray(t) => Ty::NonEmptyArray(Box::new(runtime_type(*t))),
         Ty::Rest(t) => Ty::Rest(Box::new(runtime_type(*t))),

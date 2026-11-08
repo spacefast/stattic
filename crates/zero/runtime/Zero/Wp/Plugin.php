@@ -23,7 +23,6 @@ final class Plugin
     private static ?self $instance = null;
     private static ?bool $keyed = null;
 
-    public readonly Schema $schema;
     private ?App $app = null;
     private string $mainFile;
     private ?Connection $connection = null;
@@ -38,10 +37,9 @@ final class Plugin
     /** @var array<int, list<string>> post id → columns fillEditorDefaults generated in this save */
     private array $filled = [];
 
-    public function __construct(public readonly string $dir, string $mainFile)
+    public function __construct(public readonly string $dir, string $mainFile, public readonly Schema $schema)
     {
         self::$instance = $this;
-        $this->schema = Schema::load($dir . '/zero/app/schema.php');
         $this->mainFile = $mainFile;
         add_action('init', [$this, 'registerPostTypes'], 0);
         add_action('acf/init', [$this, 'registerFields'], 5);
@@ -98,6 +96,7 @@ final class Plugin
             }
         });
         Rest::boot();
+        HttpRoutes::register($this);
         add_action('admin_menu', [$this, 'adminMenu'], 9);
         // A plugin updated by copying files in has no activation; the first request of any kind
         // (REST, front end, cron, CLI, admin) applies its pending migrations before Zero serves it.
@@ -242,7 +241,7 @@ final class Plugin
         if ($this->app === null) {
             $db = $this->connection();
             $store = CompositeStore::create($this->schema, $db);
-            $this->app = App::boot($this->dir, $store, new WpAuth(), new WpMedia($db, $store->dialect()));
+            $this->app = App::boot($this->dir, $this->schema, $store, new WpAuth(), new WpMedia($db, $store->dialect()));
             \Zero\Auth\Module::use(IdentityBridge::available() ? new IdentityBridge($db) : null);
         }
 

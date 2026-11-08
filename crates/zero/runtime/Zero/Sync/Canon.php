@@ -19,7 +19,7 @@ final class Canon
     public static function json(mixed $value): string
     {
         return match (true) {
-            $value === null || is_bool($value) || is_int($value) || is_string($value) => json_encode($value, self::FLAGS),
+            $value === null || is_bool($value) || is_int($value) || is_string($value) => \Zero\Json::encode($value, self::FLAGS),
             is_float($value) => is_finite($value) ? Js::numStr($value) : throw new \InvalidArgumentException('Non-finite numbers have no JSON form'),
             $value instanceof \Zero\JsObject => self::object($value->p),
             $value instanceof \Zero\JsArray => '[' . implode(',', array_map(self::json(...), $value->a)) . ']',
@@ -41,7 +41,7 @@ final class Canon
         sort($keys, SORT_STRING);
         $out = [];
         foreach ($keys as $key) {
-            $out[] = json_encode($key, self::FLAGS) . ':' . self::json($members[$key]);
+            $out[] = \Zero\Json::encode($key, self::FLAGS) . ':' . self::json($members[$key]);
         }
 
         return '{' . implode(',', $out) . '}';

@@ -177,8 +177,8 @@ pub struct Column {
     pub bucket: Option<String>,
     pub derived: bool,
     pub hidden: bool,
-    /// `json().$type<T>()` annotation and the module it was written in.
-    pub ts_type: Option<(crate::ir::TyAnn, usize)>,
+    /// `json().$type<T>()` annotation, module and call position.
+    pub ts_type: Option<(crate::ir::TyAnn, usize, crate::diag::Span)>,
 }
 
 impl Column {
@@ -388,6 +388,17 @@ pub struct Action {
     pub signature: Option<Json>,
 }
 
+/// `routes.<name>`: one HTTP method and path served outside the REST namespace.
+#[derive(Debug, Clone)]
+pub struct Route {
+    pub method: String,
+    /// Normalized: leading `/`, no trailing slash except `/`, `:name` parameter segments.
+    pub path: String,
+    pub handler: String,
+    pub access: Access,
+    pub signature: Option<Json>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Job {
     pub input: IndexMap<String, Column>,
@@ -421,6 +432,7 @@ pub enum Owner {
     Action(String),
     Job(String),
     FileBucket(String),
+    Route(String),
 }
 
 /// A column (or a sub-field of one): `[col]`, `[col, sub]`, `[col, layout, sub]`, ...
@@ -438,6 +450,7 @@ pub struct Schema {
     pub globals: IndexMap<String, Global>,
     pub actions: IndexMap<String, Action>,
     pub jobs: IndexMap<String, Job>,
+    pub routes: IndexMap<String, Route>,
     pub files: IndexMap<String, FileBucket>,
     pub webhooks: Vec<Json>,
     pub media: Json,
@@ -455,6 +468,7 @@ impl Default for Schema {
             globals: IndexMap::new(),
             actions: IndexMap::new(),
             jobs: IndexMap::new(),
+            routes: IndexMap::new(),
             files: IndexMap::new(),
             webhooks: Vec::new(),
             media: serde_json::json!({"sizes": {}}),
@@ -477,7 +491,7 @@ impl Schema {
             Owner::Global(g) => &self.globals[g].fields,
             Owner::Action(a) => &self.actions[a].input,
             Owner::Job(j) => &self.jobs[j].input,
-            Owner::FileBucket(_) => unreachable!("buckets have no columns"),
+            Owner::FileBucket(_) | Owner::Route(_) => unreachable!("buckets and routes have no columns"),
         };
         let mut col = &top[&at.path[0]];
         let mut rest = &at.path[1..];
@@ -499,7 +513,7 @@ impl Schema {
             Owner::Global(g) => &mut self.globals.get_mut(g).expect("global").fields,
             Owner::Action(a) => &mut self.actions.get_mut(a).expect("action").input,
             Owner::Job(j) => &mut self.jobs.get_mut(j).expect("job").input,
-            Owner::FileBucket(_) => unreachable!("buckets have no columns"),
+            Owner::FileBucket(_) | Owner::Route(_) => unreachable!("buckets and routes have no columns"),
         };
         let mut col = top.get_mut(&at.path[0]).expect("column");
         let mut rest = &at.path[1..];

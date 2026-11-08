@@ -33,6 +33,58 @@ impl From<Diag> for Ctl {
 
 type R<T> = std::result::Result<T, Ctl>;
 
+struct ValueIterator {
+    source: Value,
+    index: usize,
+    done: bool,
+}
+
+impl ValueIterator {
+    fn new(source: Value, span: Span) -> R<Self> {
+        let source = match source {
+            Value::Array(_) | Value::Arguments(_) => source,
+            Value::Str(s) => Value::array(s.chars().map(|c| Value::str(&c.to_string())).collect()),
+            other => return err(span, format!("can't iterate {}", other.describe())),
+        };
+        Ok(Self {
+            source,
+            index: 0,
+            done: false,
+        })
+    }
+
+    fn next(&mut self, span: Span) -> R<Option<Value>> {
+        if self.done {
+            return Ok(None);
+        }
+        let item = match &self.source {
+            Value::Array(array) => array.borrow().get(self.index).cloned(),
+            Value::Arguments(object) => {
+                if self.index < array_like_length(object, span)? {
+                    Some(
+                        object
+                            .borrow()
+                            .get(&self.index.to_string())
+                            .cloned()
+                            .unwrap_or(Value::Undef),
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => unreachable!("iterator source"),
+        };
+        self.done = item.is_none();
+        self.index += 1;
+        Ok(item)
+    }
+}
+
+enum ValuePlace {
+    Binding(String),
+    Property(Value, Value),
+}
+
 enum Flow {
     Normal,
     Return(Value),
@@ -46,6 +98,35 @@ fn err<T>(span: Span, msg: impl Into<String>) -> R<T> {
 
 fn err_help<T>(span: Span, msg: impl Into<String>, help: impl Into<String>) -> R<T> {
     Err(Ctl::Err(Diag::new(span, msg).help(help)))
+}
+
+fn supported_power(a: f64, b: f64, span: Span) -> R<f64> {
+    crate::num::pow(a, b).ok_or_else(|| Ctl::Err(crate::builtins::power_diagnostic(span)))
+}
+
+fn require_callable(value: &Value, span: Span) -> R<()> {
+    let accepted = |surface, name| crate::builtins::contract(surface, name).is_some_and(|c| c.evaluator.is_some());
+    let callable = match value {
+        Value::Closure(_) => true,
+        Value::Builtin(Builtin::Global(name)) => accepted("global", name),
+        Value::Builtin(Builtin::Static(surface, name)) => accepted(surface, name),
+        Value::Bound(receiver, name) => match receiver.as_ref() {
+            Value::Array(_) => accepted("array", name),
+            Value::Str(_) => accepted("string", name),
+            Value::Num(_) => accepted("number", name),
+            _ => false,
+        },
+        _ => false,
+    };
+    if callable {
+        Ok(())
+    } else {
+        err_help(
+            span,
+            "callback must be a function",
+            "pass a callable callback, including for empty inputs",
+        )
+    }
 }
 
 /// Runtime tokens may be carried through config composition, but never consumed as build-time data.
@@ -71,6 +152,39 @@ fn require_static_data(value: &Value, span: Span) -> R<()> {
             }
             _ => Ok(()),
         }
+    }
+    visit(value, span, &mut HashSet::new())
+}
+
+/// Pure conversions do not execute user-defined ToPrimitive hooks.
+fn require_static_coercion(value: &Value, span: Span) -> R<()> {
+    require_static_data(value, span)?;
+    fn visit(value: &Value, span: Span, seen: &mut HashSet<usize>) -> R<()> {
+        match value {
+            Value::Array(a) if seen.insert(Rc::as_ptr(a) as usize) => {
+                for value in a.borrow().iter() {
+                    visit(value, span, seen)?;
+                }
+            }
+            Value::Object(o) | Value::Arguments(o)
+                if o.borrow().contains_key("valueOf") || o.borrow().contains_key("toString") =>
+            {
+                return err_help(
+                    span,
+                    "custom object coercion isn't supported during configuration evaluation",
+                    "pass a primitive value, or perform the conversion inside a handler",
+                );
+            }
+            Value::Closure(_) | Value::Builtin(_) | Value::Bound(..) | Value::Class(_) => {
+                return err_help(
+                    span,
+                    "function coercion isn't supported during configuration evaluation",
+                    "pass a primitive value, or perform the conversion inside a handler",
+                );
+            }
+            _ => {}
+        }
+        Ok(())
     }
     visit(value, span, &mut HashSet::new())
 }
@@ -106,9 +220,13 @@ pub const ZERO_EXPORTS: &[&str] = &[
     "file",
     "files",
     "job",
+    "route",
     "env",
     "once",
     "jobs",
+    "fetch",
+    "crypto",
+    "mail",
 ];
 /// Type-only exports of `"zero"`: importable, erased.
 const ZERO_TYPES: &[&str] = &[
@@ -138,6 +256,9 @@ const ZERO_TYPES: &[&str] = &[
     "JobCtx",
     "JobsApi",
     "JobHandle",
+    "Route",
+    "RouteRequest",
+    "RouteResponse",
     "EnqueueOptions",
     "EnvValue",
     "Webhook",
@@ -284,11 +405,19 @@ impl<'p> Evaluator<'p> {
 
     fn set_key(&mut self, obj: &Value, key: &str, value: Value, span: Span) -> R<()> {
         match obj {
-            Value::Arguments(_) if key == "callee" => Err(Ctl::Throw(
-                error_object("TypeError", &[Value::str("restricted arguments property")]),
+            Value::Arguments(_) if key == "callee" => err_help(
                 span,
-            )),
+                "restricted arguments properties aren't supported during configuration evaluation",
+                "access arguments.callee inside a runtime handler; native Error descriptors aren't modeled while building",
+            ),
             Value::Object(map) | Value::Arguments(map) => {
+                if key == "__proto__" && !map.borrow().contains_key(key) {
+                    return err_help(
+                        span,
+                        "prototype mutation isn't supported",
+                        "use an ordinary own data property",
+                    );
+                }
                 if map.borrow_mut().insert(key.to_string(), value).is_some() {
                     self.record_duplicates(obj, vec![(key.to_string(), span)]);
                 }
@@ -349,6 +478,7 @@ impl<'p> Evaluator<'p> {
                         _ => {}
                     }
                     for (n, _) in names {
+                        scope.exported.borrow_mut().insert(n.to_string());
                         let v = scope.lookup(n).map(|b| b.value).unwrap_or(Value::Undef);
                         self.exports[id].insert(n.to_string(), v);
                     }
@@ -357,11 +487,15 @@ impl<'p> Evaluator<'p> {
                     for (local, exported) in names {
                         let v = match from {
                             None => match scope.lookup(local) {
-                                Some(b) => b.value,
+                                Some(b) if b.initialized => b.value,
+                                Some(_) => return err(*span, format!("`{local}` isn't initialized")),
                                 None => return err(*span, format!("can't export `{local}`: it isn't defined")),
                             },
                             Some(src) => self.import_value(id, src, local, *span)?,
                         };
+                        if from.is_none() {
+                            scope.exported.borrow_mut().insert(local.clone());
+                        }
                         self.exports[id].insert(exported.clone(), v);
                     }
                 }
@@ -441,6 +575,7 @@ impl<'p> Evaluator<'p> {
             scope.vars.borrow_mut().insert(
                 spec.local.clone(),
                 Binding {
+                    initialized: true,
                     value,
                     mutable: false,
                     module_level: true,
@@ -480,7 +615,7 @@ impl<'p> Evaluator<'p> {
                     return err(*span, format!("can't destructure {} as an object", value.describe()));
                 };
                 for (key, p) in props {
-                    let v = obj.borrow().get(key).cloned().unwrap_or(Value::Undef);
+                    let v = self.get_prop(&value, key, p.span())?;
                     self.initialize_pattern(p, v, scope, declaration)?;
                 }
                 if let Some((name, _)) = rest {
@@ -493,18 +628,19 @@ impl<'p> Evaluator<'p> {
                 Ok(())
             }
             Pat::Arr { elems, rest, span } => {
-                let items = match &value {
-                    Value::Array(arr) => arr.borrow().clone(),
-                    Value::Arguments(object) => arguments_items(object, *span)?,
-                    other => return err(*span, format!("can't destructure {} as an array", other.describe())),
-                };
-                for (i, p) in elems.iter().enumerate() {
+                let mut items = ValueIterator::new(value, *span)?;
+                for p in elems {
+                    let item = items.next(*span)?.unwrap_or(Value::Undef);
                     if let Some(p) = p {
-                        self.initialize_pattern(p, items.get(i).cloned().unwrap_or(Value::Undef), scope, declaration)?;
+                        self.initialize_pattern(p, item, scope, declaration)?;
                     }
                 }
                 if let Some((name, _)) = rest {
-                    let tail = items.get(elems.len()..).map(<[Value]>::to_vec).unwrap_or_default();
+                    let mut tail = Vec::new();
+                    while let Some(item) = items.next(*span)? {
+                        self.tick(*span)?;
+                        tail.push(item);
+                    }
                     self.initialize_pattern(&Pat::Id(name.clone(), *span), Value::array(tail), scope, declaration)?;
                 }
                 Ok(())
@@ -583,9 +719,20 @@ impl<'p> Evaluator<'p> {
                 body,
                 span,
             } => {
-                let loop_scope = Scope::new(Some(scope.clone()), scope.module);
+                let mut loop_scope = Scope::new(Some(scope.clone()), scope.module);
+                let per_iteration = matches!(
+                    init.as_deref(),
+                    Some(Stmt::Decl {
+                        kind: DeclKind::Let,
+                        ..
+                    })
+                );
                 if let Some(init) = init {
+                    hoist(std::slice::from_ref(init), &loop_scope);
                     self.exec(init, &loop_scope)?;
+                }
+                if per_iteration {
+                    loop_scope = loop_scope.fork_bindings();
                 }
                 loop {
                     self.tick(*span)?;
@@ -599,6 +746,9 @@ impl<'p> Evaluator<'p> {
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                         _ => {}
                     }
+                    if per_iteration {
+                        loop_scope = loop_scope.fork_bindings();
+                    }
                     if let Some(u) = update {
                         self.eval(u, &loop_scope)?;
                     }
@@ -611,15 +761,24 @@ impl<'p> Evaluator<'p> {
                 body,
                 span,
             } => {
-                let items = match self.eval(iter, scope)? {
-                    Value::Array(a) => a.borrow().clone(),
-                    Value::Arguments(object) => arguments_items(&object, iter.span)?,
-                    Value::Str(s) => s.chars().map(|c| Value::str(&c.to_string())).collect(),
-                    other => return err(iter.span, format!("can't loop over {}", other.describe())),
-                };
-                for item in items {
+                if *kind == DeclKind::Var && !matches!(pat, Pat::Id(..)) {
+                    return err_help(
+                        *span,
+                        "destructured var loops aren't supported yet",
+                        "use const or let for loop destructuring",
+                    );
+                }
+                let head = Scope::new(Some(scope.clone()), scope.module);
+                if *kind != DeclKind::Var {
+                    predeclare(pat, &head, *kind == DeclKind::Let);
+                }
+                let mut items = ValueIterator::new(self.eval(iter, &head)?, iter.span)?;
+                while let Some(item) = items.next(iter.span)? {
                     self.tick(*span)?;
                     let iter_scope = Scope::new(Some(scope.clone()), scope.module);
+                    if *kind != DeclKind::Var {
+                        predeclare(pat, &iter_scope, *kind == DeclKind::Let);
+                    }
                     self.initialize_pattern(
                         pat,
                         item,
@@ -640,7 +799,14 @@ impl<'p> Evaluator<'p> {
                 body,
                 span,
             } => {
-                let source = self.eval(iter, scope)?;
+                let head = Scope::new(Some(scope.clone()), scope.module);
+                if let Some(kind) = kind.filter(|kind| *kind != DeclKind::Var) {
+                    let ExprKind::Ident(name) = &target.kind else {
+                        unreachable!("declared for-in identifier")
+                    };
+                    predeclare(&Pat::Id(name.clone(), target.span), &head, kind == DeclKind::Let);
+                }
+                let source = self.eval(iter, &head)?;
                 let keys = enumerable_keys(&source, iter.span)?;
                 for key in keys {
                     self.tick(*span)?;
@@ -734,6 +900,13 @@ impl<'p> Evaluator<'p> {
 
     fn lookup(&self, name: &str, scope: &Rc<Scope>, span: Span) -> R<Value> {
         if let Some(b) = scope.lookup(name) {
+            if !b.initialized {
+                return err_help(
+                    span,
+                    format!("`{name}` isn't initialized"),
+                    "initialize the lexical binding before reading or assigning it",
+                );
+            }
             return Ok(b.value);
         }
         if let Some(g) = GLOBALS.iter().find(|g| **g == name) {
@@ -762,8 +935,22 @@ impl<'p> Evaluator<'p> {
         let mut s = Some(scope.clone());
         while let Some(sc) = s {
             if let Some(b) = sc.vars.borrow_mut().get_mut(name) {
+                if !b.initialized {
+                    return err_help(
+                        span,
+                        format!("`{name}` isn't initialized"),
+                        "initialize the lexical binding before reading or assigning it",
+                    );
+                }
                 if !b.mutable {
                     return err(span, format!("can't assign to `{name}`: it's a constant"));
+                }
+                if sc.exported.borrow().contains(name) {
+                    return err_help(
+                        span,
+                        "reassigning named exports isn't supported",
+                        "finish composing the value before exporting it, or export a const object; live import bindings aren't modeled",
+                    );
                 }
                 b.value = value;
                 return Ok(());
@@ -815,11 +1002,15 @@ impl<'p> Evaluator<'p> {
             ExprKind::Bool(b) => Value::Bool(*b),
             ExprKind::Null => Value::Null,
             ExprKind::Undefined => Value::Undef,
-            ExprKind::Regex { pattern, flags } => Value::Regex(Rc::from(pattern.as_str()), Rc::from(flags.as_str())),
+            ExprKind::Regex { pattern, flags } => {
+                crate::builtins::check_regex(pattern, flags, e.span).map_err(Ctl::Err)?;
+                Value::Regex(Rc::from(pattern.as_str()), Rc::from(flags.as_str()))
+            }
             ExprKind::Template(quasis, exprs) => {
                 let mut out = quasis[0].clone();
                 for (i, x) in exprs.iter().enumerate() {
                     let v = self.eval_static_data(x, scope)?;
+                    require_static_coercion(&v, x.span)?;
                     match v.to_js_string() {
                         Some(s) => out.push_str(&s),
                         None => return err(x.span, format!("can't put {} into a string", v.describe())),
@@ -859,7 +1050,7 @@ impl<'p> Evaluator<'p> {
                                 },
                             };
                             let v = self.eval(value, scope)?;
-                            if map.shift_remove(&k).is_some() {
+                            if map.contains_key(&k) {
                                 duplicates.push((k.clone(), value.span));
                             }
                             spans.push((k.clone(), value.span));
@@ -872,7 +1063,7 @@ impl<'p> Evaluator<'p> {
                                     duplicates.extend(inherited.iter().cloned());
                                 }
                                 for (k, v) in o.borrow().iter() {
-                                    if map.shift_remove(k).is_some() {
+                                    if map.contains_key(k) {
                                         duplicates.push((k.clone(), x.span));
                                     }
                                     map.insert(k.clone(), v.clone());
@@ -883,7 +1074,7 @@ impl<'p> Evaluator<'p> {
                                 let source = Value::Arguments(object.clone());
                                 for key in enumerable_keys(&source, x.span)? {
                                     let value = object.borrow().get(&key).cloned().unwrap_or(Value::Undef);
-                                    if map.shift_remove(&key).is_some() {
+                                    if map.contains_key(&key) {
                                         duplicates.push((key.clone(), x.span));
                                     }
                                     spans.push((key.clone(), x.span));
@@ -909,11 +1100,26 @@ impl<'p> Evaluator<'p> {
             })),
             ExprKind::Unary(op, x) => {
                 let v = self.eval_static_data(x, scope)?;
+                if matches!(op, UnOp::Neg | UnOp::Plus) {
+                    require_static_coercion(&v, e.span)?;
+                }
                 match op {
                     UnOp::Not => Value::Bool(!v.truthy()),
                     UnOp::Neg => Value::Num(-to_number(&v)),
                     UnOp::Plus => Value::Num(to_number(&v)),
-                    UnOp::TypeOf => Value::str(v.type_of()),
+                    UnOp::TypeOf => {
+                        if let Value::Builtin(Builtin::Global(
+                            name @ ("process" | "require" | "globalThis" | "crypto"),
+                        )) = &v
+                        {
+                            return err_help(
+                                x.span,
+                                format!("typeof `{name}` depends on the host and isn't supported"),
+                                "use supported JavaScript values instead of host-global detection",
+                            );
+                        }
+                        Value::str(v.type_of())
+                    }
                 }
             }
             ExprKind::Binary(op, l, r) => {
@@ -949,15 +1155,17 @@ impl<'p> Evaluator<'p> {
                 value
             }
             ExprKind::Assign { op, target, value } => {
+                let place = self.capture_place(target, scope)?;
                 let new = match op {
                     None => self.eval(value, scope)?,
                     Some(AssignOp::Bin(b)) => {
-                        let cur = self.eval(target, scope)?;
+                        let cur = self.read_place(&place, scope, target.span)?;
                         let rhs = self.eval(value, scope)?;
                         binary(*b, &cur, &rhs, e.span)?
                     }
                     Some(AssignOp::Log(l)) => {
-                        let cur = self.eval_static_data(target, scope)?;
+                        let cur = self.read_place(&place, scope, target.span)?;
+                        require_static_data(&cur, target.span)?;
                         let keep = match l {
                             LogOp::And => !cur.truthy(),
                             LogOp::Or => cur.truthy(),
@@ -969,13 +1177,17 @@ impl<'p> Evaluator<'p> {
                         self.eval(value, scope)?
                     }
                 };
-                self.assign(target, new.clone(), scope)?;
+                self.write_place(place, new.clone(), scope, target.span)?;
                 new
             }
             ExprKind::Update { inc, prefix, target } => {
-                let old = to_number(&self.eval_static_data(target, scope)?);
+                let place = self.capture_place(target, scope)?;
+                let value = self.read_place(&place, scope, target.span)?;
+                require_static_data(&value, target.span)?;
+                require_static_coercion(&value, e.span)?;
+                let old = to_number(&value);
                 let new = if *inc { old + 1.0 } else { old - 1.0 };
-                self.assign(target, Value::Num(new), scope)?;
+                self.write_place(place, Value::Num(new), scope, target.span)?;
                 Value::Num(if *prefix { new } else { old })
             }
             ExprKind::Call {
@@ -1005,6 +1217,18 @@ impl<'p> Evaluator<'p> {
                         }
                         self.get_prop(&recv, prop, *prop_span)?
                     }
+                    ExprKind::Index {
+                        obj,
+                        index,
+                        optional: o,
+                    } => {
+                        let recv = self.eval(obj, scope)?;
+                        if *o && matches!(recv, Value::Null | Value::Undef) {
+                            return Err(Ctl::Short);
+                        }
+                        let index = self.eval(index, scope)?;
+                        self.get_index(&recv, &index, callee.span)?
+                    }
                     _ => self.eval(callee, scope)?,
                 };
                 if *optional && matches!(f, Value::Null | Value::Undef) {
@@ -1015,40 +1239,60 @@ impl<'p> Evaluator<'p> {
                     && &**m == "$type"
                     && let Value::Column(c) = recv.as_ref()
                 {
+                    crate::builtins::check(
+                        "column",
+                        "$type",
+                        argv.len(),
+                        crate::builtins::Phase::Evaluator,
+                        call_span,
+                    )
+                    .map_err(Ctl::Err)?;
                     let Some(t) = type_args.first() else {
                         return err(e.span, "`$type` needs a type argument: `json().$type<string[]>()`");
                     };
+                    if type_args.len() != 1 {
+                        return err_help(
+                            e.span,
+                            "$type takes exactly one type argument",
+                            "pass one type and no runtime arguments",
+                        );
+                    }
                     let mut c = (**c).clone();
-                    c.ts_type = Some((t.clone(), scope.module));
+                    c.ts_type = Some((t.clone(), scope.module, call_span));
                     return Ok(Value::Column(Rc::new(c)));
                 }
-                self.call(&f, argv, call_span)?
+                if let Value::Bound(receiver, method) = &f
+                    && matches!(callee.kind, ExprKind::Member { .. } | ExprKind::Index { .. })
+                {
+                    self.call_method(receiver, method, argv, call_span)?
+                } else {
+                    self.call(&f, argv, call_span)?
+                }
             }
             ExprKind::New { callee, args } => {
                 let f = self.eval(callee, scope)?;
                 let argv = self.eval_args(args, scope)?;
+                let constructor = match &f {
+                    Value::Builtin(Builtin::Global(g)) if *g != "Date" => Some(*g),
+                    Value::Builtin(Builtin::HttpError) => Some("HttpError"),
+                    _ => None,
+                };
+                if let Some(name) = constructor {
+                    crate::builtins::check(
+                        "constructor",
+                        name,
+                        argv.len(),
+                        crate::builtins::Phase::Evaluator,
+                        e.span,
+                    )
+                    .map_err(Ctl::Err)?;
+                }
                 match f {
                     Value::Class(_) => {
                         return err(
                             e.span,
                             "class instances are only constructed inside compiled callbacks; configuration stays plain data",
                         );
-                    }
-                    Value::Builtin(Builtin::Global(g @ ("Error" | "TypeError" | "RangeError"))) => {
-                        for value in &argv {
-                            require_static_data(value, e.span)?;
-                        }
-                        error_object(g, &argv)
-                    }
-                    Value::Builtin(Builtin::HttpError) => {
-                        let o = error_object("HttpError", argv.get(2..).unwrap_or(&[]));
-                        if let Value::Object(map) = &o {
-                            map.borrow_mut()
-                                .insert("status".into(), argv.first().cloned().unwrap_or(Value::Undef));
-                            map.borrow_mut()
-                                .insert("code".into(), argv.get(1).cloned().unwrap_or(Value::Undef));
-                        }
-                        o
                     }
                     Value::Builtin(Builtin::Global("Date")) => {
                         return err_help(
@@ -1070,7 +1314,7 @@ impl<'p> Evaluator<'p> {
                 if *optional && matches!(v, Value::Null | Value::Undef) {
                     return Err(Ctl::Short);
                 }
-                self.get_prop(&v, prop, *prop_span)?
+                self.stored_property(self.get_prop(&v, prop, *prop_span)?, e.span)?
             }
             ExprKind::Index { obj, index, optional } => {
                 let v = self.eval(obj, scope)?;
@@ -1078,7 +1322,7 @@ impl<'p> Evaluator<'p> {
                     return Err(Ctl::Short);
                 }
                 let i = self.eval(index, scope)?;
-                self.get_index(&v, &i, e.span)?
+                self.stored_property(self.get_index(&v, &i, e.span)?, e.span)?
             }
             ExprKind::Chain(inner) => match self.eval(inner, scope) {
                 Err(Ctl::Short) => Value::Undef,
@@ -1116,48 +1360,78 @@ impl<'p> Evaluator<'p> {
         Ok(out)
     }
 
-    fn assign(&mut self, target: &Expr, value: Value, scope: &Rc<Scope>) -> R<()> {
+    fn capture_place(&mut self, target: &Expr, scope: &Rc<Scope>) -> R<ValuePlace> {
         match &target.kind {
-            ExprKind::Ident(name) => self.assign_ident(name, value, scope, target.span),
-            ExprKind::Member { obj, prop, .. } => {
-                let o = self.eval(obj, scope)?;
-                self.set_key(&o, prop, value, target.span)
-            }
+            ExprKind::Ident(name) => Ok(ValuePlace::Binding(name.clone())),
+            ExprKind::Member { obj, prop, .. } => Ok(ValuePlace::Property(self.eval(obj, scope)?, Value::str(prop))),
             ExprKind::Index { obj, index, .. } => {
-                let o = self.eval(obj, scope)?;
-                let i = self.eval(index, scope)?;
-                match (&o, &i) {
-                    (Value::Array(a), Value::Num(n)) => {
-                        let n = *n;
-                        let mut a = a.borrow_mut();
-                        if n < 0.0 || n.fract() != 0.0 || n as usize > a.len() {
-                            return err(target.span, "array writes must be at an existing index or the end");
-                        }
-                        let n = n as usize;
-                        if n == a.len() {
-                            a.push(value)
-                        } else {
-                            a[n] = value
-                        }
-                        Ok(())
-                    }
-                    (_, Value::Str(k)) => self.set_key(&o, k, value, target.span),
-                    (_, Value::Num(n)) => self.set_key(&o, &js_number_to_string(*n), value, target.span),
-                    _ => err(target.span, format!("can't assign into {}", o.describe())),
-                }
+                let object = self.eval(obj, scope)?;
+                let index = self.eval(index, scope)?;
+                require_static_coercion(&index, target.span)?;
+                Ok(ValuePlace::Property(object, index))
             }
             _ => err(target.span, "can't assign to this"),
         }
     }
 
+    fn read_place(&self, place: &ValuePlace, scope: &Rc<Scope>, span: Span) -> R<Value> {
+        match place {
+            ValuePlace::Binding(name) => self.lookup(name, scope, span),
+            ValuePlace::Property(object, index) => self.get_index(object, index, span),
+        }
+    }
+
+    fn write_place(&mut self, place: ValuePlace, value: Value, scope: &Rc<Scope>, span: Span) -> R<()> {
+        match place {
+            ValuePlace::Binding(name) => self.assign_ident(&name, value, scope, span),
+            ValuePlace::Property(object, index) => match (&object, &index) {
+                (Value::Array(array), Value::Num(n)) => {
+                    let mut array = array.borrow_mut();
+                    if *n < 0.0 || n.fract() != 0.0 || *n as usize > array.len() {
+                        return err(span, "array writes must be at an existing index or the end");
+                    }
+                    let n = *n as usize;
+                    if n == array.len() {
+                        array.push(value);
+                    } else {
+                        array[n] = value;
+                    }
+                    Ok(())
+                }
+                (_, Value::Str(key)) => self.set_key(&object, key, value, span),
+                (_, Value::Num(n)) => self.set_key(&object, &js_number_to_string(*n), value, span),
+                _ => err(span, format!("can't assign into {}", object.describe())),
+            },
+        }
+    }
+
+    fn assign(&mut self, target: &Expr, value: Value, scope: &Rc<Scope>) -> R<()> {
+        let place = self.capture_place(target, scope)?;
+        self.write_place(place, value, scope, target.span)
+    }
+
+    fn stored_property(&self, value: Value, span: Span) -> R<Value> {
+        if matches!(value, Value::Bound(..)) {
+            return err_help(
+                span,
+                "reading extracted methods isn't supported during configuration evaluation",
+                "call the method on its receiver, or wrap that call in an arrow function",
+            );
+        }
+        Ok(value)
+    }
+
     fn get_index(&self, v: &Value, i: &Value, span: Span) -> R<Value> {
         require_static_data(i, span)?;
         match (v, i) {
-            (Value::Array(a), Value::Num(n)) => Ok(if *n >= 0.0 && n.fract() == 0.0 {
-                a.borrow().get(*n as usize).cloned().unwrap_or(Value::Undef)
-            } else {
-                Value::Undef
-            }),
+            (Value::Array(a), Value::Num(n)) => self.stored_property(
+                if *n >= 0.0 && n.fract() == 0.0 {
+                    a.borrow().get(*n as usize).cloned().unwrap_or(Value::Undef)
+                } else {
+                    Value::Undef
+                },
+                span,
+            ),
             (Value::Str(s), Value::Num(n)) => {
                 if *n >= 0.0 && n.fract() == 0.0 {
                     match s.encode_utf16().nth(*n as usize) {
@@ -1175,26 +1449,56 @@ impl<'p> Evaluator<'p> {
     }
 
     fn get_prop(&self, v: &Value, prop: &str, span: Span) -> R<Value> {
-        let bound = || Ok(Value::Bound(Rc::new(v.clone()), Rc::from(prop)));
+        let bound = || {
+            let surface = match v {
+                Value::Array(_) => "array",
+                Value::Str(_) => "string",
+                Value::Num(_) => "number",
+                Value::Column(_) => "column",
+                Value::Regex(..) => "regex",
+                _ => unreachable!(),
+            };
+            if crate::builtins::contract(surface, prop).is_none() {
+                return err_help(
+                    span,
+                    format!("unsupported built-in property `{surface}.{prop}`"),
+                    "use a property listed in the supported built-in contract",
+                );
+            }
+            Ok(Value::Bound(Rc::new(v.clone()), Rc::from(prop)))
+        };
         match v {
             Value::Undef | Value::Null => err(span, format!("can't read `{prop}` of {}", v.describe())),
-            Value::Arguments(_) if prop == "callee" => Err(Ctl::Throw(
-                error_object("TypeError", &[Value::str("restricted arguments property")]),
+            Value::Arguments(_) if prop == "callee" => err_help(
                 span,
-            )),
-            Value::Object(o) | Value::Arguments(o) => Ok(o.borrow().get(prop).cloned().unwrap_or(Value::Undef)),
+                "restricted arguments properties aren't supported during configuration evaluation",
+                "access arguments.callee inside a runtime handler; native Error descriptors aren't modeled while building",
+            ),
+            Value::Object(o) | Value::Arguments(o) => match o.borrow().get(prop) {
+                Some(value) => self.stored_property(value.clone(), span),
+                None if crate::builtins::contract("object", prop).is_some() => err_help(
+                    span,
+                    "reading inherited configuration properties isn't supported",
+                    "use Object.hasOwn before reading a property, or store an own property",
+                ),
+                None => Ok(Value::Undef),
+            },
             Value::Array(a) => match prop {
                 "length" => Ok(Value::Num(a.borrow().len() as f64)),
-                _ => match prop.parse::<usize>() {
-                    Ok(i) => Ok(a.borrow().get(i).cloned().unwrap_or(Value::Undef)),
-                    Err(_) => bound(),
+                _ => match prop
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|i| *i < u32::MAX && i.to_string() == prop)
+                {
+                    Some(i) => self.stored_property(a.borrow().get(i as usize).cloned().unwrap_or(Value::Undef), span),
+                    None => bound(),
                 },
             },
             Value::Str(s) => match prop {
                 "length" => Ok(Value::Num(s.encode_utf16().count() as f64)),
                 _ => bound(),
             },
-            Value::Regex(p, _) if prop == "source" => Ok(Value::str(p)),
+            Value::Regex(p, _) if prop == "source" => Ok(Value::str(&crate::builtins::regex_source(p))),
             Value::Regex(_, f) if prop == "flags" => Ok(Value::str(f)),
             Value::Num(_) | Value::Column(_) | Value::Regex(..) => bound(),
             Value::Collection(c) => {
@@ -1221,7 +1525,14 @@ impl<'p> Evaluator<'p> {
                 ("Number", "MAX_SAFE_INTEGER") => Ok(Value::Num(9_007_199_254_740_991.0)),
                 ("Number", "MIN_SAFE_INTEGER") => Ok(Value::Num(-9_007_199_254_740_991.0)),
                 ("Number", "EPSILON") => Ok(Value::Num(f64::EPSILON)),
-                _ => Ok(Value::Builtin(Builtin::Static(g, Rc::from(prop)))),
+                _ if crate::builtins::contract(g, prop).is_some() => {
+                    Ok(Value::Builtin(Builtin::Static(g, Rc::from(prop))))
+                }
+                _ => err_help(
+                    span,
+                    format!("unsupported built-in property `{g}.{prop}`"),
+                    "use a property listed in the supported built-in contract",
+                ),
             },
             other => err(span, format!("can't read `{prop}` of {}", other.describe())),
         }
@@ -1264,6 +1575,9 @@ impl<'p> Evaluator<'p> {
             };
             declare(&scope, "arguments", Value::Arguments(arguments), true);
         }
+        for p in &f.func.params {
+            predeclare(&p.pat, &scope, true);
+        }
         let mut args = args.into_iter();
         for p in &f.func.params {
             if p.rest {
@@ -1296,18 +1610,36 @@ impl<'p> Evaluator<'p> {
         match f {
             Value::Closure(c) => self.call_closure(c, args, span),
             Value::Builtin(b) => self.call_builtin(b, args, span),
-            Value::Bound(recv, m) => self.call_method(recv, m, args, span),
+            Value::Bound(..) => err_help(
+                span,
+                "reading extracted methods isn't supported during configuration evaluation",
+                "call the method on its receiver, or wrap that call in an arrow function",
+            ),
             other => err(span, format!("{} isn't a function", other.describe())),
         }
     }
 
     fn call_builtin(&mut self, b: &Builtin, args: Vec<Value>, span: Span) -> R<Value> {
+        let name = match b {
+            Builtin::Collection(kind) => Some(kind.builder()),
+            Builtin::Id => Some("id"),
+            Builtin::DefineGlobal => Some("global"),
+            Builtin::DefineRelations => Some("defineRelations"),
+            Builtin::DefineConfig => Some("defineConfig"),
+            Builtin::Env => Some("env"),
+            Builtin::Files => Some("files"),
+            Builtin::Action => Some("action"),
+            Builtin::Job => Some("job"),
+            Builtin::RelFn(..) => Some("relation"),
+            _ => None,
+        };
+        if let Some(name) = name {
+            crate::builtins::check("zero", name, args.len(), crate::builtins::Phase::Evaluator, span)
+                .map_err(Ctl::Err)?;
+        }
         let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undef);
         match b {
             Builtin::Collection(kind) => {
-                if args.len() > 2 {
-                    return err(span, format!("{}() takes fields and optional options", kind.builder()));
-                }
                 let cols_val = arg(0);
                 let Value::Object(cols) = &cols_val else {
                     return err(span, format!("{}() needs an object of fields first", kind.builder()));
@@ -1454,21 +1786,28 @@ impl<'p> Evaluator<'p> {
                     span,
                 })))
             }
-            Builtin::Once | Builtin::Jobs => err_help(
+            Builtin::Once | Builtin::Jobs | Builtin::Fetch | Builtin::Crypto | Builtin::Mail => err_help(
                 span,
-                "once() and jobs only work inside hooks, actions and jobs, which run in PHP at request time",
+                "once(), jobs, fetch(), crypto and mail only work inside hooks, actions, routes and jobs, which run in PHP at request time",
                 "move the call into a handler",
             ),
-            Builtin::Action | Builtin::Job => {
+            Builtin::Action | Builtin::Job | Builtin::Route => {
                 let cfg = arg(0);
                 if !matches!(cfg, Value::Object(_)) {
-                    return err(span, "action() needs `{ input, handler }`");
+                    return err(
+                        span,
+                        if *b == Builtin::Route {
+                            "route() needs `{ method, path, handler }`"
+                        } else {
+                            "action() needs `{ input, handler }`"
+                        },
+                    );
                 }
                 let value = Rc::new(ActionVal { config: cfg, span });
-                Ok(if *b == Builtin::Job {
-                    Value::Job(value)
-                } else {
-                    Value::Action(value)
+                Ok(match b {
+                    Builtin::Job => Value::Job(value),
+                    Builtin::Route => Value::Route(value),
+                    _ => Value::Action(value),
                 })
             }
             Builtin::RelFn(kind, target) => {
@@ -1523,6 +1862,8 @@ impl<'p> Evaluator<'p> {
 
     /// `text()`, `email()`, `select({ options })`, `group({ fields })`, ...
     fn make_column(&self, builder: &'static str, args: &[Value], span: Span) -> R<Value> {
+        crate::builtins::check("field", builder, args.len(), crate::builtins::Phase::Evaluator, span)
+            .map_err(Ctl::Err)?;
         let ty = match builder {
             "integer" => ColType::Integer,
             "real" => ColType::Real,
@@ -1689,22 +2030,24 @@ impl<'p> Evaluator<'p> {
                 require_static_data(key, span)?;
             }
         }
+        crate::builtins::check(g, m, args.len(), crate::builtins::Phase::Evaluator, span).map_err(Ctl::Err)?;
+        if g == "Math" {
+            for value in &args {
+                require_static_coercion(value, span)?;
+            }
+        }
         let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undef);
         let num = |i: usize| to_number(&args.get(i).cloned().unwrap_or(Value::Undef));
         Ok(match (g, m) {
-            ("Math", "max") => Value::Num(args.iter().map(to_number).fold(f64::NEG_INFINITY, |a, b| {
-                if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) }
-            })),
-            ("Math", "min") => Value::Num(args.iter().map(to_number).fold(f64::INFINITY, |a, b| {
-                if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) }
-            })),
+            ("Math", "max") => Value::Num(args.iter().map(to_number).fold(f64::NEG_INFINITY, crate::num::max)),
+            ("Math", "min") => Value::Num(args.iter().map(to_number).fold(f64::INFINITY, crate::num::min)),
             ("Math", "floor") => Value::Num(num(0).floor()),
             ("Math", "ceil") => Value::Num(num(0).ceil()),
-            ("Math", "round") => Value::Num((num(0) + 0.5).floor()),
+            ("Math", "round") => Value::Num(crate::num::round(num(0))),
             ("Math", "trunc") => Value::Num(num(0).trunc()),
             ("Math", "abs") => Value::Num(num(0).abs()),
             ("Math", "sqrt") => Value::Num(num(0).sqrt()),
-            ("Math", "pow") => Value::Num(num(0).powf(num(1))),
+            ("Math", "pow") => Value::Num(supported_power(num(0), num(1), span)?),
             ("Math", "random") => {
                 return err(
                     span,
@@ -1739,10 +2082,14 @@ impl<'p> Evaluator<'p> {
                             return err(span, "Object.fromEntries needs [key, value] pairs");
                         };
                         let pair = pair.borrow();
-                        if let Some(key) = pair.first() {
-                            require_static_data(key, span)?;
-                        }
-                        let k = pair.first().and_then(Value::to_js_string).unwrap_or_default();
+                        let key = pair.first().cloned().unwrap_or(Value::Undef);
+                        require_static_coercion(&key, span)?;
+                        let Some(k) = key.to_js_string() else {
+                            return err(
+                                span,
+                                "Object.fromEntries cannot convert this property key at build time",
+                            );
+                        };
                         if map
                             .insert(k.clone(), pair.get(1).cloned().unwrap_or(Value::Undef))
                             .is_some()
@@ -1761,25 +2108,47 @@ impl<'p> Evaluator<'p> {
                     );
                 }
             },
-            ("Object", "freeze") => arg(0),
-            ("Object", "hasOwn") => match (arg(0), arg(1)) {
-                (Value::Arguments(_), Value::Str(k)) if k.as_ref() == "callee" => Value::Bool(true),
-                (Value::Object(o) | Value::Arguments(o), Value::Str(k)) => Value::Bool(o.borrow().contains_key(&*k)),
-                _ => Value::Bool(false),
-            },
+            ("Object", "hasOwn") => {
+                let key = arg(1);
+                if !matches!(
+                    key,
+                    Value::Str(_) | Value::Num(_) | Value::Bool(_) | Value::Null | Value::Undef
+                ) {
+                    return err(span, "Object.hasOwn at build time needs a primitive property key");
+                }
+                let key = key.to_js_string().unwrap();
+                let index_in = |length| {
+                    key.parse::<usize>()
+                        .ok()
+                        .is_some_and(|i| i.to_string() == key && i < length)
+                };
+                Value::Bool(match arg(0) {
+                    Value::Arguments(_) if key == "callee" => true,
+                    Value::Object(o) | Value::Arguments(o) => o.borrow().contains_key(&key),
+                    Value::Array(a) => key == "length" || index_in(a.borrow().len()),
+                    Value::Str(s) => key == "length" || index_in(s.encode_utf16().count()),
+                    Value::Regex(..) => key == "lastIndex",
+                    Value::Bool(_) | Value::Num(_) => false,
+                    Value::Null | Value::Undef => return err(span, "Object.hasOwn cannot inspect null or undefined"),
+                    _ => {
+                        return err_help(
+                            span,
+                            "Object.hasOwn does not support this receiver at build time",
+                            "inspect a plain object, array or primitive value",
+                        );
+                    }
+                })
+            }
             ("Array", "isArray") => Value::Bool(matches!(arg(0), Value::Array(_))),
             ("Array", "from") => {
                 let f = arg(1);
-                let items: Vec<Value> = match arg(0) {
-                    Value::Array(a) => a.borrow().clone(),
-                    Value::Arguments(object) => arguments_items(&object, span)?,
-                    Value::Object(o) => {
-                        if let Some(length) = o.borrow().get("length") {
-                            require_static_data(length, span)?;
-                        }
-                        let len = o.borrow().get("length").map(to_number).unwrap_or(0.0);
-                        vec![Value::Undef; len.max(0.0) as usize]
-                    }
+                if !matches!(f, Value::Undef) {
+                    require_callable(&f, span)?;
+                }
+                let source = arg(0);
+                let fixed_length = match &source {
+                    Value::Array(_) | Value::Arguments(_) => None,
+                    Value::Object(o) => Some(array_like_length(o, span)?),
                     other => {
                         return err(
                             span,
@@ -1787,24 +2156,38 @@ impl<'p> Evaluator<'p> {
                         );
                     }
                 };
-                if matches!(f, Value::Undef) {
-                    Value::array(items)
-                } else {
-                    let mut out = Vec::new();
-                    for (i, x) in items.into_iter().enumerate() {
-                        out.push(self.call(&f, vec![x, Value::Num(i as f64)], span)?);
+                let mut out = Vec::new();
+                let mut i = 0;
+                loop {
+                    let length = match (&source, fixed_length) {
+                        (_, Some(length)) => length,
+                        (Value::Array(a), None) => a.borrow().len(),
+                        (Value::Arguments(o), None) => array_like_length(o, span)?,
+                        _ => unreachable!(),
+                    };
+                    if i >= length {
+                        break;
                     }
-                    Value::array(out)
+                    let value = match &source {
+                        Value::Array(a) => a.borrow().get(i).cloned().unwrap_or(Value::Undef),
+                        Value::Object(o) | Value::Arguments(o) => {
+                            o.borrow().get(&i.to_string()).cloned().unwrap_or(Value::Undef)
+                        }
+                        _ => unreachable!(),
+                    };
+                    out.push(if matches!(f, Value::Undef) {
+                        value
+                    } else {
+                        self.call(&f, vec![value, Value::Num(i as f64)], span)?
+                    });
+                    i += 1;
                 }
+                Value::array(out)
             }
             ("Number", "isInteger") => {
                 Value::Bool(matches!(arg(0), Value::Num(n) if n.is_finite() && n.fract() == 0.0))
             }
             ("Number", "isFinite") => Value::Bool(matches!(arg(0), Value::Num(n) if n.is_finite())),
-            ("JSON", "stringify") => match to_json(&arg(0)) {
-                Some(j) => Value::str(&j.to_string()),
-                None => Value::Undef,
-            },
             ("Date", "now") => {
                 return Err(Ctl::Err(
                     Diag::new(
@@ -1829,16 +2212,21 @@ impl<'p> Evaluator<'p> {
         match recv {
             Value::Column(c) => column_method(c, m, &args, span),
             Value::Str(s) => string_method(s, m, &args, span),
-            Value::Num(n) => match m {
-                "toString" => Ok(Value::str(&js_number_to_string(*n))),
-                _ => err(span, format!("numbers have no method `{m}` at build time")),
-            },
+            Value::Num(n) => {
+                crate::builtins::check("number", m, args.len(), crate::builtins::Phase::Evaluator, span)
+                    .map_err(Ctl::Err)?;
+                match m {
+                    "toString" => Ok(Value::str(&js_number_to_string(*n))),
+                    _ => err(span, format!("numbers have no method `{m}` at build time")),
+                }
+            }
             Value::Array(a) => self.array_method(a, m, args, span),
             other => err(span, format!("{} has no method `{m}`", other.describe())),
         }
     }
 
     fn array_method(&mut self, a: &Arr, m: &str, args: Vec<Value>, span: Span) -> R<Value> {
+        crate::builtins::check("array", m, args.len(), crate::builtins::Phase::Evaluator, span).map_err(Ctl::Err)?;
         if matches!(m, "join" | "includes" | "indexOf") {
             require_static_data(&Value::Array(a.clone()), span)?;
         }
@@ -1847,13 +2235,35 @@ impl<'p> Evaluator<'p> {
                 require_static_data(value, span)?;
             }
         }
+        if m == "join" {
+            require_static_coercion(&Value::Array(a.clone()), span)?;
+        }
+        let numeric_start = if matches!(m, "includes" | "indexOf") { 1 } else { 0 };
+        if matches!(m, "slice" | "join" | "includes" | "indexOf") {
+            for value in args.iter().skip(numeric_start) {
+                require_static_coercion(value, span)?;
+            }
+        }
         let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undef);
         let items = a.borrow().clone();
         let f = arg(0);
+        if matches!(
+            m,
+            "map" | "filter" | "find" | "findIndex" | "some" | "every" | "flatMap" | "forEach" | "reduce"
+        ) {
+            require_callable(&f, span)?;
+        }
         Ok(match m {
             "map" | "filter" | "find" | "findIndex" | "some" | "every" | "flatMap" | "forEach" => {
                 let mut out = Vec::new();
-                for (i, x) in items.iter().enumerate() {
+                for i in 0..items.len() {
+                    let x = a.borrow().get(i).cloned();
+                    let Some(x) = x.or_else(|| matches!(m, "find" | "findIndex").then_some(Value::Undef)) else {
+                        if m == "map" {
+                            return err(span, "map() cannot produce a sparse array at build time");
+                        }
+                        continue;
+                    };
                     let r = self.call(&f, vec![x.clone(), Value::Num(i as f64), Value::Array(a.clone())], span)?;
                     if matches!(m, "filter" | "find" | "findIndex" | "some" | "every") {
                         require_static_data(&r, span)?;
@@ -1890,8 +2300,11 @@ impl<'p> Evaluator<'p> {
                         None => return err(span, "reduce of an empty array with no initial value"),
                     }
                 };
-                for (i, x) in iter {
-                    acc = self.call(&f, vec![acc, x, Value::Num(i as f64), Value::Array(a.clone())], span)?;
+                for (i, _) in iter {
+                    let x = a.borrow().get(i).cloned();
+                    if let Some(x) = x {
+                        acc = self.call(&f, vec![acc, x, Value::Num(i as f64), Value::Array(a.clone())], span)?;
+                    }
                 }
                 acc
             }
@@ -1915,17 +2328,7 @@ impl<'p> Evaluator<'p> {
                     Value::Undef => ",".to_string(),
                     v => v.to_js_string().unwrap_or_default(),
                 };
-                let parts: Vec<String> = items
-                    .iter()
-                    .map(|x| {
-                        if matches!(x, Value::Undef | Value::Null) {
-                            String::new()
-                        } else {
-                            x.to_js_string().unwrap_or_default()
-                        }
-                    })
-                    .collect();
-                Value::str(&parts.join(&sep))
+                Value::str(&Value::array_join(a, &sep).unwrap_or_default())
             }
             "slice" => {
                 let (s, e) = slice_bounds(items.len() as f64, &arg(0), &arg(1));
@@ -1989,8 +2392,12 @@ fn zero_export(name: &str, span: Span) -> R<Value> {
         "file" => Builtin::Field("file"),
         "files" => Builtin::Files,
         "job" => Builtin::Job,
+        "route" => Builtin::Route,
         "jobs" => Builtin::Jobs,
         "once" => Builtin::Once,
+        "fetch" => Builtin::Fetch,
+        "crypto" => Builtin::Crypto,
+        "mail" => Builtin::Mail,
         "env" => Builtin::Env,
         "select" => Builtin::Field("select"),
         "group" => Builtin::Field("group"),
@@ -2013,18 +2420,20 @@ fn zero_export(name: &str, span: Span) -> R<Value> {
     }))
 }
 
-/// Function declarations are visible in their whole block.
+/// Functions are ready immediately; lexical names are reserved until initialized.
 fn hoist(body: &[Stmt], scope: &Rc<Scope>) {
     let module_level = scope.is_module_scope();
     for stmt in body {
-        let f = match stmt {
-            Stmt::Func(f) => f,
-            Stmt::Exported(inner) => match inner.as_ref() {
-                Stmt::Func(f) => f,
-                _ => continue,
-            },
-            _ => continue,
+        let stmt = match stmt {
+            Stmt::Exported(inner) => inner.as_ref(),
+            other => other,
         };
+        if let Stmt::Decl { kind, pat, .. } = stmt
+            && *kind != DeclKind::Var
+        {
+            predeclare(pat, scope, *kind == DeclKind::Let);
+        }
+        let Stmt::Func(f) = stmt else { continue };
         let closure = Value::Closure(Rc::new(Closure {
             func: f.clone(),
             env: scope.clone(),
@@ -2033,6 +2442,7 @@ fn hoist(body: &[Stmt], scope: &Rc<Scope>) {
         scope.vars.borrow_mut().insert(
             name,
             Binding {
+                initialized: true,
                 value: closure,
                 mutable: false,
                 module_level,
@@ -2051,6 +2461,7 @@ fn hoist_vars(body: &[Stmt], scope: &Rc<Scope>) {
         for (name, _) in names {
             let mut vars = scope.vars.borrow_mut();
             let b = vars.entry(name.to_string()).or_insert_with(|| Binding {
+                initialized: true,
                 value: Value::Undef,
                 mutable: true,
                 module_level: scope.is_module_scope(),
@@ -2124,15 +2535,20 @@ fn hoist_vars(body: &[Stmt], scope: &Rc<Scope>) {
     }
 }
 
-fn arguments_items(object: &Obj, span: Span) -> R<Vec<Value>> {
-    let object = object.borrow();
-    let length = object.get("length").cloned().unwrap_or(Value::Undef);
-    require_static_data(&length, span)?;
+fn array_like_length(object: &Obj, span: Span) -> R<usize> {
+    let length = object.borrow().get("length").cloned().unwrap_or(Value::Undef);
+    require_static_coercion(&length, span)?;
     let length = to_number(&length).max(0.0).floor();
     if length > STEP_BUDGET as f64 {
         return err(span, "the arguments object is too large to evaluate at build time");
     }
-    Ok((0..length as usize)
+    Ok(length as usize)
+}
+
+fn arguments_items(object: &Obj, span: Span) -> R<Vec<Value>> {
+    let length = array_like_length(object, span)?;
+    let object = object.borrow();
+    Ok((0..length)
         .map(|index| object.get(&index.to_string()).cloned().unwrap_or(Value::Undef))
         .collect())
 }
@@ -2171,11 +2587,21 @@ fn enumerable_keys(value: &Value, span: Span) -> R<Vec<String>> {
     })
 }
 
+fn predeclare(pat: &Pat, scope: &Rc<Scope>, mutable: bool) {
+    let mut names = Vec::new();
+    pat.bindings(&mut names);
+    for (name, _) in names {
+        declare(scope, name, Value::Undef, mutable);
+        scope.vars.borrow_mut().get_mut(name).expect("declared").initialized = false;
+    }
+}
+
 fn declare(scope: &Rc<Scope>, name: &str, value: Value, mutable: bool) {
     let module_level = scope.is_module_scope();
     scope.vars.borrow_mut().insert(
         name.to_string(),
         Binding {
+            initialized: true,
             value,
             mutable,
             module_level,
@@ -2185,17 +2611,22 @@ fn declare(scope: &Rc<Scope>, name: &str, value: Value, mutable: bool) {
 }
 
 fn call_global(g: &str, args: &[Value], span: Span) -> R<Value> {
-    if matches!(g, "encodeURI" | "encodeURIComponent") && args.len() != 1 {
-        return err(span, format!("`{g}` needs exactly one string argument"));
-    }
-    if g == "isFinite" && args.len() > 1 {
-        return err(span, "isFinite() accepts at most one argument in Zero code");
-    }
+    crate::builtins::check("global", g, args.len(), crate::builtins::Phase::Evaluator, span).map_err(Ctl::Err)?;
     for value in args {
         require_static_data(value, span)?;
     }
+    if matches!(
+        g,
+        "String" | "Number" | "parseInt" | "parseFloat" | "isNaN" | "isFinite"
+    ) {
+        for value in args {
+            require_static_coercion(value, span)?;
+        }
+    }
     let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undef);
     Ok(match g {
+        "String" if args.is_empty() => Value::str(""),
+        "Number" if args.is_empty() => Value::Num(0.0),
         "String" => Value::str(&arg(0).to_js_string().unwrap_or_else(|| "[object]".into())),
         "Number" => Value::Num(to_number(&arg(0))),
         "Boolean" => Value::Bool(arg(0).truthy()),
@@ -2203,11 +2634,23 @@ fn call_global(g: &str, args: &[Value], span: Span) -> R<Value> {
             Value::Str(value) => Value::str(&crate::uri::encode(&value, g == "encodeURIComponent")),
             _ => return err(span, format!("`{g}` needs a string")),
         },
-        "parseInt" => Value::Num(parse_int(&arg(0).to_js_string().unwrap_or_default(), &arg(1))),
+        "parseInt" => {
+            let value = crate::num::parse_int(
+                &arg(0).to_js_string().unwrap_or_default(),
+                crate::num::to_int32(to_number(&arg(1))),
+            );
+            let Some(value) = value else {
+                return err_help(
+                    span,
+                    crate::builtins::UNSAFE_RADIX,
+                    "use base 10, a power-of-two base, or a safe integer result",
+                );
+            };
+            Value::Num(value)
+        }
         "parseFloat" => Value::Num(parse_float(&arg(0).to_js_string().unwrap_or_default())),
         "isNaN" => Value::Bool(to_number(&arg(0)).is_nan()),
         "isFinite" => Value::Bool(to_number(&arg(0)).is_finite()),
-        "Error" | "TypeError" | "RangeError" => error_object(g, args),
         "Date" => return err(span, "dates aren't available while the config is evaluated"),
         "console" => return err(span, "`console` isn't available while the config is evaluated"),
         _ => return err(span, format!("`{g}` isn't available in Zero code")),
@@ -2215,6 +2658,7 @@ fn call_global(g: &str, args: &[Value], span: Span) -> R<Value> {
 }
 
 fn column_method(c: &Rc<ColBuilder>, m: &str, args: &[Value], span: Span) -> R<Value> {
+    crate::builtins::check("column", m, args.len(), crate::builtins::Phase::Evaluator, span).map_err(Ctl::Err)?;
     let mut c = (**c).clone();
     let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undef);
     let closure_arg = || match arg(0) {
@@ -2470,16 +2914,6 @@ fn returns_new_date(f: &Func) -> bool {
         if args.is_empty() && matches!(&callee.kind, ExprKind::Ident(n) if n == "Date"))
 }
 
-fn error_object(name: &str, args: &[Value]) -> Value {
-    let mut map = IndexMap::new();
-    map.insert("name".into(), Value::str(name));
-    map.insert(
-        "message".into(),
-        Value::str(&args.first().and_then(Value::to_js_string).unwrap_or_default()),
-    );
-    Value::object(map)
-}
-
 pub fn to_number(v: &Value) -> f64 {
     // Arrays convert through their comma-joined string, rather than by
     // recursively coercing the element (Number([false]) is NaN, not zero).
@@ -2511,11 +2945,26 @@ pub fn to_number(v: &Value) -> f64 {
         Value::Null => 0.0,
         Value::Array(a) => array_number(a, &mut HashSet::new()),
         Value::Str(s) => {
-            let t = s.trim();
+            let t = s.trim_matches(crate::num::is_js_whitespace);
             if t.is_empty() {
                 0.0
-            } else if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                i64::from_str_radix(h, 16).map(|n| n as f64).unwrap_or(f64::NAN)
+            } else if let Some((radix, digits)) =
+                [("0x", "0X", 16), ("0o", "0O", 8), ("0b", "0B", 2)]
+                    .iter()
+                    .find_map(|(lower, upper, radix)| {
+                        t.strip_prefix(lower)
+                            .or_else(|| t.strip_prefix(upper))
+                            .map(|digits| (*radix, digits))
+                    })
+            {
+                if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+                    f64::NAN
+                } else {
+                    crate::num::radix_number(
+                        &digits.chars().map(|c| c.to_digit(radix).unwrap()).collect::<Vec<_>>(),
+                        radix,
+                    )
+                }
             } else if t == "Infinity" || t == "+Infinity" {
                 f64::INFINITY
             } else if t == "-Infinity" {
@@ -2531,7 +2980,7 @@ pub fn to_number(v: &Value) -> f64 {
 }
 
 fn parse_float(s: &str) -> f64 {
-    let t = s.trim_start();
+    let t = s.trim_start_matches(crate::num::is_js_whitespace);
     if t.starts_with("Infinity") || t.starts_with("+Infinity") {
         return f64::INFINITY;
     }
@@ -2549,36 +2998,6 @@ fn parse_float(s: &str) -> f64 {
         candidate.pop();
     }
     f64::NAN
-}
-
-fn parse_int(s: &str, radix: &Value) -> f64 {
-    let mut t = s.trim();
-    let mut sign = 1.0;
-    if let Some(r) = t.strip_prefix('-') {
-        sign = -1.0;
-        t = r;
-    } else if let Some(r) = t.strip_prefix('+') {
-        t = r;
-    }
-    let mut radix = match radix {
-        Value::Undef => 0,
-        v => to_number(v) as u32,
-    };
-    if (radix == 0 || radix == 16) && (t.starts_with("0x") || t.starts_with("0X")) {
-        t = &t[2..];
-        radix = 16;
-    }
-    if radix == 0 {
-        radix = 10;
-    }
-    if !(2..=36).contains(&radix) {
-        return f64::NAN;
-    }
-    let digits: Vec<u32> = t.chars().map_while(|c| c.to_digit(radix)).collect();
-    if digits.is_empty() {
-        return f64::NAN;
-    }
-    sign * digits.iter().fold(0.0, |n, d| n * radix as f64 + *d as f64)
 }
 
 fn slice_bounds(len: f64, start: &Value, end: &Value) -> (usize, usize) {
@@ -2627,15 +3046,89 @@ fn utf16_value(units: &[u16], span: Span) -> R<Value> {
     })
 }
 
+/// ECMAScript GetSubstitution. Captures are 1-based; $0 stays literal.
+fn get_substitution(
+    template: &str,
+    input: &str,
+    start: usize,
+    end: usize,
+    groups: &[Option<&str>],
+    names: Option<&IndexMap<&str, Option<&str>>>,
+) -> String {
+    let mut out = String::new();
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('$') => {
+                chars.next();
+                out.push('$');
+            }
+            Some('&') => {
+                chars.next();
+                out.push_str(&input[start..end]);
+            }
+            Some('`') => {
+                chars.next();
+                out.push_str(&input[..start]);
+            }
+            Some('\'') => {
+                chars.next();
+                out.push_str(&input[end..]);
+            }
+            Some('0'..='9') => {
+                let first = chars.next().unwrap();
+                let one = first.to_digit(10).unwrap() as usize;
+                let two = chars.peek().and_then(|c| c.to_digit(10)).map(|n| one * 10 + n as usize);
+                if let Some(n) = two.filter(|n| *n > 0 && *n <= groups.len()) {
+                    chars.next();
+                    out.push_str(groups[n - 1].unwrap_or(""));
+                } else if one > 0 && one <= groups.len() {
+                    out.push_str(groups[one - 1].unwrap_or(""));
+                } else {
+                    out.push('$');
+                    out.push(first);
+                }
+            }
+            Some('<') if names.is_some() => {
+                let rest: String = chars.clone().collect();
+                if let Some(close) = rest.find('>') {
+                    let name = &rest[1..close];
+                    out.push_str(names.unwrap().get(name).copied().flatten().unwrap_or(""));
+                    for _ in 0..rest[..=close].chars().count() {
+                        chars.next();
+                    }
+                } else {
+                    out.push('$');
+                }
+            }
+            _ => out.push('$'),
+        }
+    }
+    out
+}
+
 fn string_method(s: &str, m: &str, args: &[Value], span: Span) -> R<Value> {
+    crate::builtins::check("string", m, args.len(), crate::builtins::Phase::Evaluator, span).map_err(Ctl::Err)?;
     let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Undef);
     let str_arg = |i: usize| arg(i).to_js_string().unwrap_or_default();
+    if matches!(m, "slice" | "split" | "repeat" | "includes" | "startsWith" | "endsWith") {
+        for value in args {
+            require_static_coercion(value, span)?;
+        }
+    }
+    if matches!(m, "includes" | "startsWith" | "endsWith") && matches!(arg(0), Value::Regex(..)) {
+        return err(span, "string search needs a string, not a regular expression");
+    }
     Ok(match m {
         "toLowerCase" => Value::str(&s.to_lowercase()),
         "toUpperCase" => Value::str(&s.to_uppercase()),
-        "trim" => Value::str(s.trim()),
-        "trimStart" => Value::str(s.trim_start()),
-        "trimEnd" => Value::str(s.trim_end()),
+        "trim" => Value::str(s.trim_matches(crate::num::is_js_whitespace)),
+        "trimStart" => Value::str(s.trim_start_matches(crate::num::is_js_whitespace)),
+        "trimEnd" => Value::str(s.trim_end_matches(crate::num::is_js_whitespace)),
         "startsWith" => Value::Bool(s.starts_with(&str_arg(0))),
         "endsWith" => Value::Bool(s.ends_with(&str_arg(0))),
         "includes" => Value::Bool(s.contains(&str_arg(0))),
@@ -2647,14 +3140,7 @@ fn string_method(s: &str, m: &str, args: &[Value], span: Span) -> R<Value> {
         "split" => {
             let limit = match arg(1) {
                 Value::Undef => u32::MAX as usize,
-                v => {
-                    let n = to_number(&v);
-                    if n.is_finite() {
-                        n.trunc().rem_euclid(4294967296.0) as usize
-                    } else {
-                        0
-                    }
-                }
+                v => crate::num::to_uint32(to_number(&v)) as usize,
             };
             match arg(0) {
                 Value::Str(sep) if sep.is_empty() => Value::array(
@@ -2675,25 +3161,111 @@ fn string_method(s: &str, m: &str, args: &[Value], span: Span) -> R<Value> {
                 }
             }
         }
-        "repeat" => Value::str(&s.repeat(to_number(&arg(0)).max(0.0) as usize)),
+        "repeat" => {
+            let count = to_number(&arg(0));
+            let count = if count.is_nan() { 0.0 } else { count.trunc() };
+            if !(0.0..=536870888.0).contains(&count) || count * s.len() as f64 > 536870888.0 {
+                return err(span, "repeat() count or result length is out of range");
+            }
+            Value::str(&s.repeat(count as usize))
+        }
         "replace" | "replaceAll" => {
             let Value::Str(rep) = arg(1) else {
                 return err(span, format!("{m}() at build time needs a string replacement"));
             };
             match arg(0) {
-                Value::Str(p) => Value::str(&if m == "replace" {
-                    s.replacen(&*p, &rep, 1)
-                } else {
-                    s.replace(&*p, &rep)
-                }),
+                Value::Str(p) => {
+                    let mut out = String::new();
+                    let mut last = 0;
+                    // Empty string patterns match at every UTF-16 boundary. Inserting inside
+                    // an astral pair cannot be represented; refuse that case explicitly.
+                    if p.is_empty() && m == "replaceAll" && s.chars().any(|c| c.len_utf16() == 2) {
+                        return err(span, "empty replaceAll on astral text isn't supported at build time");
+                    }
+                    for (start, matched) in s.match_indices(&*p) {
+                        let end = start + matched.len();
+                        out.push_str(&s[last..start]);
+                        out.push_str(&get_substitution(&rep, s, start, end, &[], None));
+                        last = end;
+                        if m == "replace" {
+                            break;
+                        }
+                    }
+                    out.push_str(&s[last..]);
+                    Value::str(&out)
+                }
                 Value::Regex(p, f) => {
+                    if m == "replaceAll" && !f.contains('g') {
+                        return err(span, "replaceAll() needs a global regular expression");
+                    }
+                    if !s.is_ascii()
+                        || !p.is_ascii()
+                        || p.contains('\\')
+                        || f.contains('m')
+                        || s.contains(['\r', '\n'])
+                        || ["&&", "~~", "||", "--"].iter().any(|token| p.contains(token))
+                    {
+                        return err_help(
+                            span,
+                            "build-time regex replacement supports ASCII text and patterns without escapes, set operations, multiline mode or line terminators",
+                            "move this replacement into a handler",
+                        );
+                    }
+                    let mut in_class = false;
+                    for c in p.chars() {
+                        if c == '[' {
+                            if in_class {
+                                return err_help(
+                                    span,
+                                    "nested regex character classes aren't supported at build time",
+                                    "move this replacement into a handler",
+                                );
+                            }
+                            in_class = true;
+                        } else if c == ']' {
+                            if !in_class {
+                                return err_help(
+                                    span,
+                                    "unmatched regex class delimiters aren't supported at build time",
+                                    "move this replacement into a handler",
+                                );
+                            }
+                            in_class = false;
+                        }
+                    }
                     let re = build_regex(&p, &f, span)?;
-                    let rep = rep.replace("$&", "${0}");
-                    Value::str(&if f.contains('g') {
-                        re.replace_all(s, rep.as_str())
-                    } else {
-                        re.replace(s, rep.as_str())
-                    })
+                    let mut out = String::new();
+                    let mut last = 0;
+                    let mut offset = 0;
+                    while offset <= s.len() {
+                        let Some(caps) = re.captures_at(s, offset) else {
+                            break;
+                        };
+                        let matched = caps.get(0).expect("complete match");
+                        let (start, end) = (matched.start(), matched.end());
+                        let groups: Vec<_> = caps.iter().skip(1).map(|m| m.map(|m| m.as_str())).collect();
+                        let names: IndexMap<_, _> = re
+                            .capture_names()
+                            .flatten()
+                            .map(|name| (name, caps.name(name).map(|m| m.as_str())))
+                            .collect();
+                        out.push_str(&s[last..start]);
+                        out.push_str(&get_substitution(
+                            &rep,
+                            s,
+                            start,
+                            end,
+                            &groups,
+                            if names.is_empty() { None } else { Some(&names) },
+                        ));
+                        last = end;
+                        if !f.contains('g') {
+                            break;
+                        }
+                        offset = if end > start { end } else { end + 1 };
+                    }
+                    out.push_str(&s[last..]);
+                    Value::str(&out)
                 }
                 other => return err(span, format!("can't replace {}", other.describe())),
             }
@@ -2732,6 +3304,10 @@ fn loose_eq(a: &Value, b: &Value, span: Span) -> R<bool> {
 fn binary(op: BinOp, a: &Value, b: &Value, span: Span) -> R<Value> {
     require_static_data(a, span)?;
     require_static_data(b, span)?;
+    if !matches!(op, BinOp::Eq | BinOp::Ne) {
+        require_static_coercion(a, span)?;
+        require_static_coercion(b, span)?;
+    }
     let prim = |v: &Value| -> R<Value> {
         match v {
             Value::Array(_) | Value::Object(_) | Value::Arguments(_) | Value::Regex(..) => {
@@ -2758,7 +3334,7 @@ fn binary(op: BinOp, a: &Value, b: &Value, span: Span) -> R<Value> {
         BinOp::Mul => Value::Num(to_number(a) * to_number(b)),
         BinOp::Div => Value::Num(to_number(a) / to_number(b)),
         BinOp::Rem => Value::Num(to_number(a) % to_number(b)),
-        BinOp::Exp => Value::Num(to_number(a).powf(to_number(b))),
+        BinOp::Exp => Value::Num(supported_power(to_number(a), to_number(b), span)?),
         BinOp::Eq => Value::Bool(a.strict_eq(b)),
         BinOp::Ne => Value::Bool(!a.strict_eq(b)),
         BinOp::LooseEq => Value::Bool(loose_eq(a, b, span)?),
@@ -2799,7 +3375,9 @@ pub fn to_json(v: &Value) -> Option<serde_json::Value> {
         Value::Object(o) => {
             let mut map = serde_json::Map::new();
             for (k, x) in o.borrow().iter() {
-                map.insert(k.clone(), to_json(x)?);
+                if !matches!(x, Value::Undef) {
+                    map.insert(k.clone(), to_json(x)?);
+                }
             }
             J::Object(map)
         }

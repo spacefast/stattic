@@ -96,7 +96,7 @@ final class Files
         self::require($file !== false, 'write_failed', 'Could not create private metadata.');
         try {
             chmod($temp, 0600);
-            fwrite($file, json_encode($value, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+            fwrite($file, \Zero\Json::encode($value, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
             fflush($file);
             fsync($file);
         } finally {
@@ -178,11 +178,11 @@ final class Artifact
                 && is_array($metadata['destructiveChanges'] ?? null), 'invalid_metadata', 'Unsupported compiler deployment metadata.');
         }
         return ['app' => $app, 'runtime' => $manifest['runtime'], 'plugins' => array_keys($manifest['plugins']),
-            'digest' => hash('sha256', json_encode($files, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)),
+            'digest' => hash('sha256', \Zero\Json::encode($files, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)),
             'fileCount' => count($files), 'bytes' => array_sum(array_column($files, 'size')),
             'environment' => array_values($env), 'environmentCoverage' => 'generated literal Zero Env references; host wp-config constants are not inspected',
             'migrations' => $migrations, 'compilerMetadata' => $metadata === null ? 'unavailable; rebuild with deployment metadata support' : 'present',
-            'schemaDigest' => $metadata === null ? null : hash('sha256', json_encode($metadata['snapshot'], JSON_THROW_ON_ERROR)),
+            'schemaDigest' => $metadata === null ? null : hash('sha256', \Zero\Json::encode($metadata['snapshot'], JSON_THROW_ON_ERROR)),
             'compilerDestructiveChanges' => $metadata['destructiveChanges'] ?? [], 'publisherAuthenticated' => false, 'publishReady' => false,
             'missingCapabilities' => ['authenticated_site_app_ownership', 'enrolled_publisher_signature', 'durable_stage_activate_finalize',
                 'early_admission_barrier', 'host_acknowledged_process_and_database_session_drain', 'installed_digest_attestation']];

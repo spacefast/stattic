@@ -7,7 +7,7 @@ use crate::num::js_number_to_string;
 use crate::schema::{ColType, RefAction, RelKind};
 use indexmap::IndexMap;
 use std::cell::{OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub type Obj = Rc<RefCell<IndexMap<String, Value>>>;
@@ -37,6 +37,7 @@ pub enum Value {
     Relation(Rc<RelVal>),
     Action(Rc<ActionVal>),
     Job(Rc<ActionVal>),
+    Route(Rc<ActionVal>),
     FileBucket(Rc<FileBucketVal>),
     Env(Rc<str>),
     Global(Rc<GlobalVal>),
@@ -71,10 +72,17 @@ pub enum Builtin {
     DefineConfig,
     Action,
     Job,
+    Route,
     Files,
     Env,
     Once,
     Jobs,
+    /// `fetch(url, init?)`: outbound HTTPS, compiled to `Zero\Fetch::call`.
+    Fetch,
+    /// `crypto.sha256(...)` and friends from "zero", compiled to `Zero\Crypto`.
+    Crypto,
+    /// `mail.send(message)` from "zero", compiled to `Zero\Mail::send`.
+    Mail,
     /// Runtime-only values: usable in compiled code, an error at build time.
     Db,
     HttpError,
@@ -108,7 +116,7 @@ pub struct ColBuilder {
     pub default: Option<DefaultVal>,
     pub on_update: Option<DefaultVal>,
     pub references: Option<RefBuilder>,
-    pub ts_type: Option<(TyAnn, usize)>,
+    pub ts_type: Option<(TyAnn, usize, Span)>,
     pub access: Option<Value>,
     pub show_if: Option<Value>,
     pub ui: Option<Value>,
@@ -221,6 +229,7 @@ pub struct ActionVal {
 /// compiler can resolve what a hook captured (constants, helpers, collections).
 #[derive(Debug)]
 pub struct Scope {
+    pub exported: RefCell<HashSet<String>>,
     pub vars: RefCell<HashMap<String, Binding>>,
     pub parent: Option<Rc<Scope>>,
     pub module: usize,
@@ -228,6 +237,7 @@ pub struct Scope {
 
 #[derive(Debug, Clone)]
 pub struct Binding {
+    pub initialized: bool,
     pub value: Value,
     pub mutable: bool,
     /// Declared at module top level (vs. inside a build-time function call).
@@ -239,9 +249,19 @@ pub struct Binding {
 impl Scope {
     pub fn new(parent: Option<Rc<Scope>>, module: usize) -> Rc<Scope> {
         Rc::new(Scope {
+            exported: RefCell::new(HashSet::new()),
             vars: RefCell::new(HashMap::new()),
             parent,
             module,
+        })
+    }
+
+    pub fn fork_bindings(&self) -> Rc<Scope> {
+        Rc::new(Self {
+            exported: RefCell::new(self.exported.borrow().clone()),
+            vars: RefCell::new(self.vars.borrow().clone()),
+            parent: self.parent.clone(),
+            module: self.module,
         })
     }
 
@@ -287,6 +307,7 @@ impl Value {
             Value::Bool(_) => "boolean",
             Value::Num(_) => "number",
             Value::Str(_) => "string",
+            Value::Builtin(Builtin::Db | Builtin::Jobs | Builtin::Global("Math" | "JSON" | "console")) => "object",
             Value::Class(_) | Value::Closure(_) | Value::Builtin(_) | Value::Bound(..) => "function",
             _ => "object",
         }
@@ -312,40 +333,56 @@ impl Value {
             Value::Relation(_) => "a relation".into(),
             Value::Action(_) => "an action".into(),
             Value::Job(_) => "a job".into(),
+            Value::Route(_) => "a route".into(),
             Value::FileBucket(_) => "a file bucket".into(),
             Value::Env(n) => format!("env({n:?})"),
             Value::Global(g) => format!("global \"{}\"", g.name),
-            Value::Regex(p, f) => format!("/{p}/{f}"),
+            Value::Regex(p, f) => format!("/{}/{f}", crate::builtins::regex_source(p)),
         }
     }
 
-    /// `String(v)` for primitives.
+    /// JavaScript string conversion of supported configuration data.
     pub fn to_js_string(&self) -> Option<String> {
+        self.string_with_arrays(&mut HashSet::new())
+    }
+
+    fn string_with_arrays(&self, active: &mut HashSet<usize>) -> Option<String> {
         Some(match self {
             Value::Undef => "undefined".into(),
             Value::Null => "null".into(),
             Value::Bool(b) => b.to_string(),
             Value::Num(n) => js_number_to_string(*n),
             Value::Str(s) => s.to_string(),
-            Value::Array(a) => {
-                let parts: Option<Vec<String>> = a
-                    .borrow()
-                    .iter()
-                    .map(|v| {
-                        if matches!(v, Value::Undef | Value::Null) {
-                            Some(String::new())
-                        } else {
-                            v.to_js_string()
-                        }
-                    })
-                    .collect();
-                parts?.join(",")
-            }
+            Value::Array(a) => Self::join_array(a, ",", active)?,
             Value::Object(_) => "[object Object]".into(),
             Value::Arguments(_) => "[object Arguments]".into(),
-            Value::Regex(p, f) => format!("/{p}/{f}"),
+            Value::Regex(p, f) => format!("/{}/{f}", crate::builtins::regex_source(p)),
             _ => return None,
         })
+    }
+
+    pub fn array_join(a: &Arr, separator: &str) -> Option<String> {
+        Self::join_array(a, separator, &mut HashSet::new())
+    }
+
+    fn join_array(a: &Arr, separator: &str, active: &mut HashSet<usize>) -> Option<String> {
+        let key = Rc::as_ptr(a) as usize;
+        if !active.insert(key) {
+            return Some(String::new());
+        }
+        let parts: Option<Vec<String>> = a
+            .borrow()
+            .iter()
+            .map(|value| {
+                if matches!(value, Value::Undef | Value::Null) {
+                    Some(String::new())
+                } else {
+                    value.string_with_arrays(active)
+                }
+            })
+            .collect();
+        active.remove(&key);
+        Some(parts?.join(separator))
     }
 
     pub fn strict_eq(&self, other: &Value) -> bool {

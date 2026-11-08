@@ -25,7 +25,11 @@ import { installWordpress } from "./zero-wordpress.ts";
 
 const resultSchema = z.union([
   runtimeZeroWorkerStatusSchema,
-  z.object({ space_id: z.string(), status: z.literal("busy"), processed: z.literal(0) }),
+  z.object({
+    space_id: z.string(),
+    status: z.literal("busy"),
+    processed: z.literal(0),
+  }),
 ]);
 const hookSchema = z.object({
   event: z.string(),
@@ -85,14 +89,20 @@ test(
         path.join(rt.root, "wp-content/mu-plugins/worker-proof.php"),
         `<?php if (defined('WP_CLI') && WP_CLI && isset($GLOBALS['SPACEFAST_ZERO_V2_ENVIRONMENT'])) file_put_contents(${JSON.stringify(marker)}, $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']."\\n", FILE_APPEND); add_action('worker_core_proof', static function () { update_option('worker_core_proof', $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']); }); add_action('worker_as_proof', static function () { update_option('worker_as_proof', $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']); });`,
       );
+      // The Space's real mail path ends in wp_mail(); capture it there, on the sender domain Atomic names.
+      const mailCapture = path.join(work, "mail-capture.jsonl");
+      writeFileSync(
+        path.join(rt.root, "wp-content/mu-plugins/mail-capture.php"),
+        `<?php if (!defined('DOMAIN_NAME')) define('DOMAIN_NAME', 'worker-a.test'); add_filter('pre_wp_mail', static function ($short, array $atts) { file_put_contents(${JSON.stringify(mailCapture)}, json_encode(['to' => $atts['to'], 'subject' => $atts['subject'], 'headers' => $atts['headers'], 'host' => $_SERVER['HTTP_HOST'] ?? null]) . "\\n", FILE_APPEND); return true; }, 10, 2);`,
+      );
       const files = {
         "zero.config.ts": `
-import { defineConfig, table, text, action, job, jobs, db, env, userProjection, email } from 'zero';
+import { defineConfig, table, text, action, job, jobs, db, env, userProjection, email, mail } from 'zero';
 const records = table({ label: text().notNull(), scope: text().notNull() }, { access: { read: 'anyone' } });
 export default defineConfig({ name: 'worker-proof', tables: { records }, users: { members: userProjection({ email: email().notNull().unique().max(191), name: text().notNull().default('') }) },
   webhooks: [{ url: env('HOOK_URL'), secret: env('HOOK_SECRET'), events: ['records.created'] }],
   jobs: { crash: job({ input: {}, retries: 3, handler: () => { throw new Error('Expected worker failure'); } }), stamp: job({ input: { label: text().notNull() }, handler: async (input) => { await db.insert(records).values({ label: input.label, scope: (env('SCOPE') ?? 'missing') }); } }) },
-  actions: { failEnqueue: action({ access: 'anyone', handler: async () => { return await jobs.crash.enqueue({}); } }), enqueue: action({ access: 'anyone', handler: async () => {
+  actions: { notify: action({ input: { from: text(), to: text().notNull(), cc: text() }, access: 'anyone', handler: async ({ from, to, cc }) => { if (from === null) return (await mail.send({ to, cc, subject: 'Welcome', text: 'Hi' })).id; return (await mail.send({ from, to, cc, subject: 'Welcome', text: 'Hi' })).id; } }), failEnqueue: action({ access: 'anyone', handler: async () => { return await jobs.crash.enqueue({}); } }), enqueue: action({ access: 'anyone', handler: async () => {
     await db.insert(records).values({ label: 'immediate', scope: (env('SCOPE') ?? 'missing') });
     return await jobs.stamp.enqueue({ label: 'scheduled' }, { delay: 3600 });
   } }) }
@@ -131,7 +141,10 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         });
         const queued = await fetch(`${rt.baseUrl}/wp-json/zero/v1/actions/enqueue`, {
           method: "POST",
-          headers: { host: `worker-${scope}.test`, "content-type": "application/json" },
+          headers: {
+            host: `worker-${scope}.test`,
+            "content-type": "application/json",
+          },
           body: "{}",
         });
         assert.equal(queued.status, 200, await queued.clone().text());
@@ -324,7 +337,10 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
       );
       const failQueue = await fetch(`${rt.baseUrl}/wp-json/zero/v1/actions/failEnqueue`, {
         method: "POST",
-        headers: { host: "worker-a.test", "content-type": "application/json" },
+        headers: {
+          host: "worker-a.test",
+          "content-type": "application/json",
+        },
         body: "{}",
       });
       assert.equal(failQueue.status, 200, await failQueue.clone().text());
@@ -379,6 +395,107 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
           `SELECT option_value FROM ${prefix(a)}options WHERE option_name='worker_core_proof'`,
         ),
         a,
+      );
+      // mail.send leaves through the Space's mail path: the broker's sender-domain check, then
+      // space-mail.php's daily recipient allowance and wp_mail(). No second transport exists.
+      await putRoute(rt, a, "production", {
+        version_id: "ver_worker_live",
+        // The Space also answers on a second hostname that is not its sending domain.
+        hostnames: ["worker-a.test", "alias-a.test"],
+        production_hostnames: ["worker-a.test", "alias-a.test"],
+        config: publicAccessConfig({
+          zero_generation: "v2",
+          billing: { emailRecipientsDaily: 2 },
+          email: { senderDomain: "worker-a.test" },
+        }),
+      });
+      const notify = async (
+        input: { from?: string; to: string; cc?: string },
+        host = "worker-a.test",
+      ) => {
+        const response = await fetch(`${rt.baseUrl}/wp-json/zero/v1/actions/notify`, {
+          method: "POST",
+          headers: { host, "content-type": "application/json" },
+          body: JSON.stringify(input),
+        });
+        assert.equal(response.status, 200, await response.clone().text());
+        return z.object({ data: z.string() }).parse(await response.json()).data;
+      };
+      const sent = await notify({
+        from: "hello@worker-a.test",
+        to: "visitor@example.test",
+      });
+      const foreign = await notify({
+        from: "hello@other.test",
+        to: "visitor@example.test",
+      });
+      // Queued with the action's write; nothing reaches the transport before the worker runs.
+      assert.equal(existsSync(mailCapture), false);
+      const mailJob = (id: string) =>
+        db.exec(
+          `SELECT CONCAT(state,':',COALESCE(lastError,'')) FROM ${prefix(a)}zero__jobs WHERE job='zero.mail' AND id='${id}'`,
+        );
+      assert.equal((await worker(a, [], 1).result())[0]?.status, "failed");
+      assert.equal(mailJob(sent), "done:");
+      assert.match(mailJob(foreign), /^failed:.*email_sender_unverified/);
+      // One recipient is spent today; two more exceed the allowance of two, so nothing is sent.
+      const overAllowance = await notify({
+        from: "hello@worker-a.test",
+        to: "second@example.test",
+        cc: "third@example.test",
+      });
+      assert.equal((await worker(a, [], 1).result())[0]?.status, "failed");
+      assert.match(mailJob(overAllowance), /^failed:.*did not accept/);
+      // Without `from`, the default sender is noreply@ the route's sending domain, not the host the
+      // request came in on, so a message queued on the alias still passes the broker's domain check.
+      await putRoute(rt, a, "production", {
+        version_id: "ver_worker_live",
+        hostnames: ["worker-a.test", "alias-a.test"],
+        production_hostnames: ["worker-a.test", "alias-a.test"],
+        config: publicAccessConfig({
+          zero_generation: "v2",
+          billing: { emailRecipientsDaily: 4 },
+          email: { senderDomain: "worker-a.test" },
+        }),
+      });
+      const defaulted = await notify({ to: "fourth@example.test" }, "alias-a.test");
+      assert.equal((await worker(a).result())[0]?.status, "ran");
+      assert.equal(mailJob(defaulted), "done:");
+      const captured = readFileSync(mailCapture, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) =>
+          z
+            .object({
+              to: z.array(z.string()),
+              headers: z.array(z.string()),
+              host: z.string(),
+            })
+            .parse(JSON.parse(line)),
+        );
+      assert.deepEqual(
+        captured.map(({ to, headers, host }) => ({
+          to,
+          from: headers[0],
+          host,
+        })),
+        [
+          {
+            to: ["visitor@example.test"],
+            from: "From: hello@worker-a.test",
+            host: "worker-a.test",
+          },
+          {
+            to: ["fourth@example.test"],
+            from: "From: noreply@worker-a.test",
+            host: "worker-a.test",
+          },
+        ],
+      );
+      assert.equal(
+        JSON.parse(readFileSync(path.join(rt.storageRoot, "spaces", a, "email-usage.json"), "utf8"))
+          .recipients,
+        2,
       );
       // Generation authority closes the worker before any legacy WordPress boot, even with due work.
       await putRoute(rt, b, "production", {

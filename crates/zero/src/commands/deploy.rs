@@ -17,6 +17,7 @@ pub(crate) fn cli(args: &[String]) -> ExitCode {
         let directory = tempfile::tempdir()?;
         for (name, bytes) in [
             ("local.php", include_bytes!("../../scripts/deploy/local.php").as_slice()),
+            ("Json.php", include_bytes!("../../runtime/Zero/Json.php").as_slice()),
             (
                 "Artifact.php",
                 include_bytes!("../../runtime/Zero/Deployment/Artifact.php").as_slice(),

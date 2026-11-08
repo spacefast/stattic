@@ -394,7 +394,7 @@ pub enum TyAnn {
     Null,
     Undefined,
     Void,
-    Any,
+    Any(Span),
     Unknown,
     Never,
     Array(P<TyAnn>),

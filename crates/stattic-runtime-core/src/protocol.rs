@@ -17,8 +17,11 @@ pub const CONFIG_TEMPLATE_LIMIT: usize = 100;
 /// `spaces.name` column so a config-declared name is always storable.
 pub const CONFIG_SPACE_NAME_MAX_CHARS: usize = 255;
 pub const CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT: usize = 100;
-/// Max `crons` entries. Scheduled work is a provider crontab slot per entry,
-/// so the cap is deliberately small and hard.
+/// Max `crons` entries a config may declare. Every engine in production
+/// validates this same number again at box finalize, so it rises only after
+/// the engine that accepts more has rolled out to every box; until then a
+/// larger declaration would pass the API and fail on the box. Plan allowances
+/// above it (`CRON_PLAN_ALLOWANCES`) take effect once it rises.
 pub const CONFIG_CRON_LIMIT: usize = 8;
 pub const CONFIG_CRON_PATH_MAX_CHARS: usize = 512;
 /// Generated runtime file the serving engine reads to answer a scheduled

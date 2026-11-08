@@ -148,6 +148,10 @@ if (($envelope['endpointId'] ?? null) === 'GET /api/spoofed-headers') {
     $headers['x-app-ok'] = 'yes';
 }
 $body = json_encode($bodyPayload, JSON_UNESCAPED_SLASHES);
+if (($envelope['endpointId'] ?? null) === 'GET /api/page') {
+    $headers['content-type'] = 'text/html; charset=utf-8';
+    $body = '<html><head><title>Zero</title></head><body>page</body></html>';
+}
 echo json_encode([
     'status' => ($envelope['request']['query'] ?? '') === 'redirect=1' ? 303 : 201,
     'headers' => $headers,
@@ -183,6 +187,12 @@ echo json_encode([
       "index.html": "<h1>zero runtime</h1>\n",
     },
     serving: {
+      // Every finalize with platform injection on records the baked SDK tag.
+      config: {
+        inject: {
+          bodyEnd: ['<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>'],
+        },
+      },
       zero_endpoints: [
         {
           execution_mode: "write",
@@ -221,6 +231,14 @@ echo json_encode([
         {
           execution_mode: "read",
           method: "GET",
+          path: "/api/page",
+          source: "globalThis.__statticZeroResult = '{}';",
+          endpoint_id: "GET /api/page",
+          capabilities: { db: false },
+        },
+        {
+          execution_mode: "read",
+          method: "GET",
           path: "/foo...bar/:id",
           source: "globalThis.__statticZeroResult = '{}';",
           endpoint_id: "GET /foo...bar/:id",
@@ -230,7 +248,10 @@ echo json_encode([
     },
     activate: {
       route_name: "production",
-      config: publicAccessConfig({ mode: "website", site_title: "Zero Runtime" }),
+      config: {
+        ...publicAccessConfig({ mode: "website", site_title: "Zero Runtime" }),
+        sdk: { revision: "sdk-1", config: {} },
+      },
       production_hostnames: [HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
@@ -299,6 +320,14 @@ test("invokes a finalized Zero lookup action through a fresh runner process", as
   const cpu = receipts.find((event) => event.meter === "runtime_cpu_microseconds");
   expect(cpu?.space_id).toBe("spc_zero_runtime");
   expect(BigInt(String(cpu?.quantity))).toBeGreaterThan(0n);
+});
+
+test("an HTML endpoint response carries the one SDK tag, first in <head>", async () => {
+  const response = await get(rt, HOST, "/api/page");
+  expect(response.status).toBe(201);
+  expect(await response.text()).toBe(
+    '<html><head><script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script><title>Zero</title></head><body>page</body></html>',
+  );
 });
 
 test("finalizes an NFC Unicode Zero endpoint route", async () => {
@@ -1787,6 +1816,7 @@ test("does not spawn the Zero runner for static or not-found requests", async ()
   const missing = await get(rt, HOST, "/missing");
 
   expect(response.status).toBe(200);
+  // A fragment with no head or html keeps its bytes, as on main.
   expect(await response.text()).toBe("<h1>zero runtime</h1>\n");
   expect(missing.status).toBe(404);
   expect(existsSync(capturePath)).toBe(false);

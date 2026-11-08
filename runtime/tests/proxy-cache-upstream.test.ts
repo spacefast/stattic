@@ -63,6 +63,7 @@ let upstream: Server;
 let upstreamBaseUrl: string;
 let rt: Runtime;
 const revalidationHeaders: Array<string | undefined> = [];
+const htmlValidators: Array<[string | undefined, string | undefined]> = [];
 const upstreamMethods: string[] = [];
 
 function visitorToken(host: string): string {
@@ -226,6 +227,22 @@ beforeAll(async () => {
       return;
     }
 
+    if (requestPath === "/html") {
+      htmlValidators.push([request.headers["if-none-match"], request.headers["if-modified-since"]]);
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.setHeader("ETag", ETAG);
+      response.setHeader("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT");
+      if (request.headers["if-none-match"] === ETAG) {
+        response.statusCode = 304;
+        response.end();
+        return;
+      }
+      response.end(
+        `<html><head><title>Upstream</title></head><body>accept-encoding=${request.headers["accept-encoding"] ?? "none"}</body></html>`,
+      );
+      return;
+    }
+
     if (requestPath === "/relay/content-encoding") {
       // curl is never given CURLOPT_ENCODING, so these bytes reach the visitor
       // still compressed. Content-Encoding is what makes them readable.
@@ -351,6 +368,18 @@ beforeAll(async () => {
   await deploy(rt, {
     spaceId: "spc_proxy_upstream",
     versionId: "ver_proxy_upstream_1",
+    serving: {
+      config: {
+        inject: {
+          head: ['<meta name="version-inject" content="saved">'],
+          bodyStart: ['<div id="start">start</div>'],
+          bodyEnd: [
+            '<div id="end">end</div>',
+            '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>',
+          ],
+        },
+      },
+    },
     files: {
       "index.html": "proxy upstream fixture\n",
       _redirects: [
@@ -359,18 +388,21 @@ beforeAll(async () => {
         proxyRule("/uncacheable", `${upstreamBaseUrl}/upstream/public`, null),
         proxyRule("/visitor/shared", `${upstreamBaseUrl}/visitor-ip`),
         proxyRule("/visitor/unshared", `${upstreamBaseUrl}/visitor-ip`, null),
+        // Unshared, so the route forwards the visitor's own headers.
+        proxyRule("/html", `${upstreamBaseUrl}/html`, null),
         "",
       ].join("\n"),
     },
     activate: {
       route_name: "production",
-      config: accessProjection(),
+      config: { ...accessProjection(), sdk: { revision: "sdk-1", config: {} } },
       production_hostnames: [PUBLIC_HOST],
       version_hostnames: [],
       proxy_host_routes: [
         { hostname: PUBLIC_HOST_ROUTE, upstream: upstreamBaseUrl },
         { hostname: "machine-proxy.test", upstream: `${upstreamBaseUrl}/machine` },
         { hostname: PUBLIC_HOST, path_prefix: "/proxy", upstream: `${upstreamBaseUrl}/api` },
+        { hostname: PUBLIC_HOST, path_prefix: "/host-html", upstream: `${upstreamBaseUrl}/html` },
       ],
     },
   });
@@ -847,7 +879,9 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
 
     // The runtime relays the upstream's bytes without decoding them, so a readable body
     // here is the proof Content-Encoding survived the relay.
-    const compressed = await get(rt, PUBLIC_HOST, "/relay/content-encoding");
+    const compressed = await get(rt, PUBLIC_HOST, "/relay/content-encoding", {
+      headers: { "accept-encoding": "gzip" },
+    });
     expect(compressed.status).toBe(200);
     expect(await compressed.text()).toBe(GZIP_RELAY_BODY);
 
@@ -859,6 +893,38 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     const rejected = await get(rt, PUBLIC_HOST, "/relay/allow");
     expect(rejected.status).toBe(405);
     expect(rejected.headers.get("allow")).toBe("GET, HEAD");
+  });
+
+  test("proxied HTML arrives uncompressed and carries the one SDK tag", async () => {
+    // The visitor's Accept-Encoding never reaches the origin, so its HTML is
+    // readable here and the engine's tag lands first in <head>.
+    for (const path of ["/html", "/host-html"]) {
+      const html = await get(rt, PUBLIC_HOST, path, {
+        headers: { "accept-encoding": "gzip, br" },
+      });
+      expect(html.status).toBe(200);
+      expect(html.headers.get("content-encoding")).toBeNull();
+      expect(await html.text()).toBe(
+        '<html><head><script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script><meta name="version-inject" content="saved"><title>Upstream</title></head><body><div id="start">start</div>accept-encoding=none<div id="end">end</div></body></html>',
+      );
+      // The upstream's validators describe bytes the runtime changed, so they
+      // never reach the visitor, and a revalidating page load is never sent
+      // to the upstream as one: a 304 there would reuse markup another
+      // version injected.
+      expect(html.headers.get("etag")).toBeNull();
+      expect(html.headers.get("last-modified")).toBeNull();
+      htmlValidators.length = 0;
+      const revalidated = await get(rt, PUBLIC_HOST, path, {
+        headers: {
+          accept: "text/html",
+          "if-none-match": ETAG,
+          "if-modified-since": "Wed, 01 Jan 2025 00:00:00 GMT",
+        },
+      });
+      expect(revalidated.status).toBe(200);
+      expect(await revalidated.text()).toContain('content="saved"');
+      expect(htmlValidators).toEqual([[undefined, undefined]]);
+    }
   });
 
   test("a truncated cache candidate is withheld and converted to an uncacheable error", async () => {

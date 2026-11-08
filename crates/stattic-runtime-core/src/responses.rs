@@ -1132,6 +1132,7 @@ pub(crate) fn publish_response_tables(
     entries: &BTreeMap<String, ResponseEntry>,
     route_entries: &BTreeMap<String, BTreeMap<String, ResponseEntry>>,
     compiler_version: &str,
+    injections: Option<&Value>,
 ) -> Result<PublishedTables> {
     create_dir_all(stage_root)?;
     let tables = write_response_table_set(stage_root, entries)?;
@@ -1150,6 +1151,9 @@ pub(crate) fn publish_response_tables(
     ]);
     if !route_tables.is_empty() {
         root.insert("route_tables".into(), json!(route_tables));
+    }
+    if let Some(injections) = injections {
+        root.insert("inject".into(), injections.clone());
     }
     let root = Value::Object(root);
     let root_bytes = format!(
@@ -1898,7 +1902,8 @@ mod tests {
         let mut entries = BTreeMap::from([("/big.mp4".to_string(), servable.clone())]);
         // A survivor-only header set is fine at any size: the accel lane sends
         // it whole.
-        publish_response_tables(temp.path(), &entries, &BTreeMap::new(), "0.0.0-test").unwrap();
+        publish_response_tables(temp.path(), &entries, &BTreeMap::new(), "0.0.0-test", None)
+            .unwrap();
 
         entries.insert(
             "/guarded.mp4".to_string(),
@@ -1907,7 +1912,7 @@ mod tests {
                 ..servable
             },
         );
-        match publish_response_tables(temp.path(), &entries, &BTreeMap::new(), "0.0.0-test") {
+        match publish_response_tables(temp.path(), &entries, &BTreeMap::new(), "0.0.0-test", None) {
             Err(crate::finalize::FinalizeError::Invalid { code, details, .. }) => {
                 assert_eq!(code, "response_headers_unservable");
                 let details = details.expect("the publisher needs the paths");
@@ -1963,7 +1968,7 @@ mod tests {
         assert_eq!(table.len(), 4);
 
         let temp = tempfile::tempdir().unwrap();
-        publish_response_tables(temp.path(), &table, &BTreeMap::new(), "0.0.0-test").unwrap();
+        publish_response_tables(temp.path(), &table, &BTreeMap::new(), "0.0.0-test", None).unwrap();
         // Only the exact map's data is split: every fragment is a plain literal
         // OPcache can keep immutable, and its small ancestors stay inline
         // instead of costing another include on every request.
@@ -2051,7 +2056,7 @@ mod tests {
             ResponseEntry::bodyless(200, BTreeMap::new()),
         )]);
         let published =
-            publish_response_tables(stage, &small, &BTreeMap::new(), "0.0.0-test").unwrap();
+            publish_response_tables(stage, &small, &BTreeMap::new(), "0.0.0-test", None).unwrap();
         assert_eq!(published.tables.len(), 1);
         assert!(published.tables.contains_key(RESPONSE_TABLE_SINGLE_KEY));
         let root: Value =
@@ -2073,7 +2078,7 @@ mod tests {
             );
         }
         let sharded =
-            publish_response_tables(stage, &large, &BTreeMap::new(), "0.0.0-test").unwrap();
+            publish_response_tables(stage, &large, &BTreeMap::new(), "0.0.0-test", None).unwrap();
         assert!(sharded.tables.len() > 1);
         assert!(!sharded.tables.contains_key(RESPONSE_TABLE_SINGLE_KEY));
         for (shard, name) in &sharded.tables {
@@ -2097,7 +2102,8 @@ mod tests {
         // many keys instead would only prove that 256 shards divide the bytes.
         headers.insert("x-padding".into(), "p".repeat(RESPONSE_TABLE_MAX_BYTES + 1));
         let entries = BTreeMap::from([("/pad".to_string(), ResponseEntry::bodyless(200, headers))]);
-        let error = publish_response_tables(temp.path(), &entries, &BTreeMap::new(), "0.0.0-test");
+        let error =
+            publish_response_tables(temp.path(), &entries, &BTreeMap::new(), "0.0.0-test", None);
         match error {
             Err(crate::finalize::FinalizeError::Invalid { code, .. }) => {
                 assert_eq!(code, "response_table_too_large")
@@ -2136,7 +2142,7 @@ mod tests {
         );
 
         let published =
-            publish_response_tables(temp.path(), &table, &BTreeMap::new(), "0.0.0-test")
+            publish_response_tables(temp.path(), &table, &BTreeMap::new(), "0.0.0-test", None)
                 .expect("a valid large routing catalog publishes");
 
         for name in published.tables.values() {

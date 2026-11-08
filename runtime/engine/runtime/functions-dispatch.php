@@ -274,7 +274,8 @@ function _stattic_functions_dispatch_headers(
     string $requestId,
     string $dispatchToken,
     string $originBaseUrl,
-    string $egressScope
+    string $egressScope,
+    ?string $assetsNonce = null
 ): array {
     $host = $config['host'];
     $artifact = $config['artifact'];
@@ -339,6 +340,9 @@ function _stattic_functions_dispatch_headers(
     $assetsBinding = is_array($artifact['assets'] ?? null) ? ($artifact['assets']['binding'] ?? null) : null;
     if (is_string($assetsBinding) && $assetsBinding !== '') {
         $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['assets']] = $assetsBinding;
+    }
+    if ($assetsNonce !== null) {
+        $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['assetsNonce']] = $assetsNonce;
     }
     // A needed relay is a usable one: when it is not, the filter above leaves
     // only relay-free capabilities behind.
@@ -554,8 +558,8 @@ function _stattic_functions_dispatch(
         return;
     }
     // D44: the worker's HTML leaves the runtime through this relay, so the
-    // insert applies here exactly as it does to a proxy route or Zero.
-    $insertSnippets = _stattic_html_insert_snippets($serving);
+    // SDK tag goes in here exactly as it does for a proxy route or Zero.
+    $insertPayload = _stattic_html_insert_payload($serving);
     // serve.php reaches here only for a version the compile step wrote a functions
     // config for, so this request IS a function path. From here it either reaches
     // the execution edge or answers 503. It never degrades to static and never
@@ -582,6 +586,8 @@ function _stattic_functions_dispatch(
     }
 
     $requestId = _stattic_functions_request_id();
+    // Never derived from the request: the id above may be one the caller chose.
+    $assetsNonce = _stattic_html_insert_dispatch_nonce();
     // Same rule the publisher-upstream proxy follows: the visitor's link secret
     // stops at this runtime. The edge sees the request line, and so does every
     // log it keeps.
@@ -589,7 +595,11 @@ function _stattic_functions_dispatch(
     $target = 'https://' . $config['host']['hostname'] . $requestPath . ($query !== '' ? '?' . $query : '');
 
     $headers = [];
-    foreach (_stattic_relay_request_headers(_stattic_functions_relay_request_lane()) as [$name, $value]) {
+    $lane = _stattic_functions_relay_request_lane();
+    if (_stattic_html_insert_withholds_validators($insertPayload)) {
+        $lane['deny'] = [...$lane['deny'], ...STATTIC_HTML_INSERT_WITHHELD_REQUEST_HEADERS];
+    }
+    foreach (_stattic_relay_request_headers($lane) as [$name, $value]) {
         $headers[strtolower($name)] = $value;
     }
     $headers['x-forwarded-host'] = $requestHost;
@@ -601,7 +611,8 @@ function _stattic_functions_dispatch(
         $requestId,
         $dispatchToken,
         'https://' . $requestHost,
-        _stattic_egress_scope($serving)
+        _stattic_egress_scope($serving),
+        $assetsNonce
     ) as $name => $value) {
         $headers[$name] = $value;
     }
@@ -615,7 +626,7 @@ function _stattic_functions_dispatch(
         'connect_timeout' => STATTIC_FUNCTIONS_DISPATCH_CONNECT_TIMEOUT_SECONDS,
         'timeout' => STATTIC_FUNCTIONS_DISPATCH_TIMEOUT_SECONDS,
         'sink' => 'output',
-        'on_headers' => static function (int $responseStatus, array $headerPairs) use (&$status, &$headersSent, $privateCache, $insertSnippets, $requestHost): void {
+        'on_headers' => static function (int $responseStatus, array $headerPairs) use (&$status, &$headersSent, $privateCache, $insertPayload, $requestHost, $assetsNonce, $spaceId, $versionId): void {
             $status = $responseStatus;
             http_response_code($responseStatus);
             $headersSent = true;
@@ -637,7 +648,16 @@ function _stattic_functions_dispatch(
             // After the response headers, before the first body byte: the
             // filter reads the declared content type and never sees a platform
             // page (a failure past this point truncates instead, by design).
-            _stattic_html_insert_stream_begin($insertSnippets);
+            // A static page the worker relayed from its assets binding carries
+            // finalize's snippets already, and gets only the SDK tag.
+            _stattic_html_insert_stream_begin(_stattic_html_insert_payload_for_response(
+                $insertPayload,
+                $headerPairs,
+                _stattic_access_private_root(),
+                $assetsNonce,
+                $spaceId,
+                $versionId
+            ));
         },
     ];
     $input = null;

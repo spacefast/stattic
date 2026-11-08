@@ -16,8 +16,10 @@ const STATTIC_PROXY_SHARED_CACHE_POLICY = STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
 const STATTIC_PROXY_SHARED_CACHE_STATUSES = [200, 203, 300, 301, 304, 404, 410];
 
 // The visitor's credential opens THIS space, so a publisher's origin never sees
-// it; the rest is the shared inbound denylist.
-const STATTIC_PROXY_DENIED_REQUEST_HEADERS = ['authorization'];
+// it; the rest is the shared inbound denylist. Accept-Encoding goes so HTML
+// arrives uncompressed and the SDK tag can be inserted; an origin that
+// compresses anyway is relayed untouched, Content-Encoding included.
+const STATTIC_PROXY_DENIED_REQUEST_HEADERS = ['authorization', 'accept-encoding'];
 
 function _stattic_proxy_cache_request_eligible(
     mixed $cacheMode,
@@ -71,11 +73,11 @@ function _stattic_proxy_response_header_lines(array $originHeaders, array $platf
     return _stattic_cache_policy_apply_lines($cachePolicy, $lines);
 }
 
-// $serving is the version's resolved runtime config; this lane reads only the
-// head-insert snippets from it.
+// $serving is the version's resolved runtime config: its egress scope and the
+// SDK tag for an HTML response come from it.
 function _stattic_proxy_request(array $route, string $remainder, array $serving = []): void
 {
-    $insertSnippets = _stattic_html_insert_snippets($serving);
+    $insertPayload = _stattic_html_insert_payload($serving);
     if (($route['action'] ?? null) !== 'proxy') {
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy route metadata is malformed.\n");
     }
@@ -129,7 +131,8 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
     $headers = _stattic_collect_proxy_request_headers(
         $route['headers'],
         $route['forwardHeaders'],
-        $sharedCacheRequest
+        $sharedCacheRequest,
+        _stattic_html_insert_withholds_validators($insertPayload)
     );
     $bodyLimit = $route['bodySizeLimitBytes'];
     $body = null;
@@ -183,7 +186,7 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
     $bufferSharedResponse = null;
     // false is the unlatched sentinel: null is a legitimate declared length.
     $declaredLength = false;
-    $relayChunk = static function (string $chunk) use ($sendProxyResponseHeaders, $proxyCachePolicy, &$headersSent, &$responseHeaders, &$relayedBodyBytes, &$bufferedBody, &$bufferSharedResponse, &$declaredLength, $bodyLimit, $insertSnippets): bool {
+    $relayChunk = static function (string $chunk) use ($sendProxyResponseHeaders, $proxyCachePolicy, &$headersSent, &$responseHeaders, &$relayedBodyBytes, &$bufferedBody, &$bufferSharedResponse, &$declaredLength, $bodyLimit, $insertPayload): bool {
         if ($bufferSharedResponse === null) {
             $bufferSharedResponse = $proxyCachePolicy()['cache_control'] === STATTIC_PROXY_SHARED_CACHE_POLICY;
         }
@@ -216,7 +219,7 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
             $headersSent = true;
             // Installed here and no earlier: past this point every byte is
             // upstream body, so a platform error page is never filtered.
-            _stattic_html_insert_stream_begin($insertSnippets);
+            _stattic_html_insert_stream_begin($insertPayload);
         }
 
         echo $chunk;
@@ -257,7 +260,7 @@ function _stattic_proxy_request(array $route, string $remainder, array $serving 
     if (!$headersSent) {
         $sendProxyResponseHeaders();
         if ($bufferedBody !== '') {
-            _stattic_html_insert_stream_begin($insertSnippets);
+            _stattic_html_insert_stream_begin($insertPayload);
             echo $bufferedBody;
             flush();
         }
@@ -368,7 +371,8 @@ function _stattic_proxy_upstream_pins(array $parts): array
 function _stattic_collect_proxy_request_headers(
     array $routeHeaders,
     array $forwardHeaderNames,
-    bool $sharedCacheRequest = false
+    bool $sharedCacheRequest = false,
+    bool $withholdValidators = false
 ): array
 {
     $forwarded = [];
@@ -381,12 +385,16 @@ function _stattic_collect_proxy_request_headers(
 
     // An anonymous shared-cache request forwards no visitor-controlled header
     // beyond the 304 validators, and withholds REMOTE_ADDR so it cannot become
-    // a variant the origin forgets to declare with Vary.
+    // a variant the origin forgets to declare with Vary. A document request
+    // whose HTML gets platform markup forwards no validators at all.
     $inbound = _stattic_relay_request_headers([
         'allow' => $sharedCacheRequest
             ? array_values(array_diff(['if-none-match', 'if-modified-since'], $allowed))
             : $allowed,
-        'deny' => STATTIC_PROXY_DENIED_REQUEST_HEADERS,
+        'deny' => [
+            ...STATTIC_PROXY_DENIED_REQUEST_HEADERS,
+            ...($withholdValidators ? STATTIC_HTML_INSERT_WITHHELD_REQUEST_HEADERS : []),
+        ],
     ]);
     if ($sharedCacheRequest) {
         // A shared-cache candidate must not vary by the client's

@@ -15,6 +15,7 @@ require_once __DIR__ . '/../shared/artifacts.php';
 require_once __DIR__ . '/../shared/server-file.php';
 require_once __DIR__ . '/../shared/cache-policy.php';
 require_once __DIR__ . '/../shared/byte-range.php';
+require_once __DIR__ . '/../shared/html-insert.php';
 
 // The visitor lane's entry, called by init.php and cli-invoke.php.
 function _sf_serve_fast(
@@ -251,6 +252,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     }
 
     $versionId = _stattic_v4_version_for_host($hostEntry, $overlay);
+    $hostVersionId = $versionId;
     $serving = _stattic_v4_legacy_serving($spaceId, $versionId, $hostEntry, $overlay);
     $GLOBALS['SPACEFAST_PAGE_SERVING'] = $serving;
 
@@ -267,6 +269,26 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         header('X-Robots-Tag: noindex, nofollow', false);
     }
     $tagPreviewToken = _stattic_spacefast_tag_preview_token($requestMethod);
+
+    // A page's share image resolves exactly as that page would: the request
+    // continues as the page `?path=` names (host mounts, the version they pin,
+    // residue rewrites, the page's own access check), and answers with the
+    // image of the document a visitor at that URL gets
+    // (_stattic_og_image_serve, below the access check).
+    $ogImageRoute = null;
+    if (_stattic_og_image_route_requested($requestPath) && $originalRequestPath === $requestPath) {
+        require_once __DIR__ . '/../shared/og-image.php';
+        if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
+            _stattic_render_method_not_allowed_lazy();
+        }
+        $ogImageRoute = $requestPath;
+        $requestPath = _stattic_og_image_page_path() ?? _stattic_og_image_not_found();
+        // Platform and machine paths are no page anyone shares.
+        if (_stattic_control_path_row($requestPath) !== null) {
+            _stattic_og_image_not_found();
+        }
+        $originalRequestPath = $requestPath;
+    }
 
     // The Allow union of every lane that declined this request for its METHOD
     // alone (a static entry, a Zero pattern, a Functions route at other verbs).
@@ -285,6 +307,10 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         : _stattic_v4_match_host_route($hostRoutes, $requestPath, $requestMethod);
     if (is_array($matchedRoute)) {
         $action = _stattic_matched_host_route_action($matchedRoute);
+        // Only a mount serves a document of this Space.
+        if ($ogImageRoute !== null && ($action['action'] ?? null) !== 'serve') {
+            _stattic_og_image_not_found();
+        }
         if (!_stattic_action_allows_method($action, $requestMethod)) {
             _stattic_render_method_not_allowed_lazy();
         }
@@ -307,19 +333,21 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         }
         if ($kind === 'proxy') {
             _stattic_enforce_access_for_proxy($serving, $requestHost, $originalRequestPath, $originalRequestUri);
+            if ($versionId !== null) {
+                $proxyRoot = _stattic_v4_version_root_artifact(
+                    _stattic_version_root($privateRoot, $spaceId, $versionId)
+                );
+                $serving['inject'] = is_array($proxyRoot['inject'] ?? null) ? $proxyRoot['inject'] : null;
+            }
             require_once __DIR__ . '/proxy.php';
             _stattic_proxy_request($action, (string) ($matchedRoute['_remainder'] ?? '/'), $serving);
         }
         if ($kind === 'serve') {
-            // Targets an explicit version through a mount prefix.
-            if (is_string($action['version_id'] ?? null) && $action['version_id'] !== '') {
-                $versionId = $action['version_id'];
-            }
-            $targetPrefix = _stattic_canonical_request_path((string) ($action['target_prefix'] ?? '/'));
-            if ($targetPrefix === null) {
+            $mounted = _stattic_v4_mount_target($matchedRoute, $action, $versionId);
+            if ($mounted === null) {
                 _stattic_v4_render_forbidden('invalid-path', 'invalid_path', "Access path is invalid.\n");
             }
-            $requestPath = _stattic_join_request_path($targetPrefix, (string) ($matchedRoute['_remainder'] ?? '/'));
+            ['version_id' => $versionId, 'path' => $requestPath] = $mounted;
         }
     }
 
@@ -412,6 +440,12 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         _stattic_render_platform_action(_stattic_version_pending_action());
     }
 
+    // Null for a root compiled before it recorded the version's injection,
+    // whose static pages all carry the baked SDK tag
+    // (_stattic_static_page_sdk_tag).
+    $serving['inject'] = is_array($root['inject'] ?? null) ? $root['inject'] : null;
+    $GLOBALS['SPACEFAST_PAGE_SERVING'] = $serving;
+
     // ---- dynamic residue rules ------------------------------------------
     // Rule ordering is the entry's to declare: an entry marked rules-first can be
     // preempted by a pattern redirect that sorts ahead of it, so its rules run
@@ -464,22 +498,22 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         || _stattic_path_is_reserved($originalRequestPath)
         || ($storageRequest && !$storageContentEntry);
     if ($rulesFirst && $redirectRules !== null && !$reservedRoute) {
-        require_once __DIR__ . '/redirects.php';
-        $result = _stattic_apply_redirects(
+        $result = _stattic_v4_apply_residue_rules(
             $redirectRules,
             $serving,
-            // Already resolved above; reuse it instead of re-hashing the same
-            // table key per matching rule.
-            static fn (string $candidate): bool => $candidate === $requestPath
-                ? $entry !== null || ($hasPages && _stattic_page_resolve($versionDir, $candidate) !== null)
-                : _stattic_v4_entry($versionDir, $root, $candidate) !== null
-                    || ($hasPages && _stattic_page_resolve($versionDir, $candidate) !== null),
+            $versionDir,
+            $root,
+            $entry,
             $requestHost,
             $requestPath,
             $requestMethod,
             $edgeOwnsPlacedRules,
-            200
+            $ogImageRoute !== null
         );
+        if (!empty($result['terminal'])) {
+            // A redirect or a proxy answers this page: no document, no image.
+            _stattic_og_image_not_found();
+        }
         $next = (string) $result['path'];
         if ($next !== $requestPath) {
             $canonical = _stattic_canonical_request_path($next);
@@ -512,19 +546,13 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // loads no access code at all. BOTH paths are passed: a rewrite must not
     // launder a URL whose own Grants are narrower than the effective path's.
     //
-    // The one entry a claimed protected Space answers without it is the version's
-    // declared share-preview image (see _stattic_v4_public_preview_image), and
-    // never while a platform fence holds the Space.
-    $publicPreviewImage = false;
-    if (
-        !$open
-        && _stattic_v4_public_preview_image($serving, $entry, $requestMethod, $requestPath, $originalRequestPath, $requestHost, $privateRoot, $routes, $spaceId)
-    ) {
-        require_once __DIR__ . '/access-rules.php';
-        $publicPreviewImage = _stattic_access_unfenced($serving, $requestHost, $requestPath)
-            && !_stattic_access_anonymous_admits($serving, $requestHost, $requestPath);
-    }
-    if (!$open && !$publicPreviewImage) {
+    // The one request a claimed protected Space answers without it is its
+    // share-image route on the live hostname, and only with a page's declared,
+    // validated image (_stattic_og_image_private_preview); anything else that
+    // route would answer goes back through this gate inside it.
+    $ogImagePrivatePreview = $ogImageRoute !== null && !$open && $routeStatus === 200
+        && _stattic_og_image_private_preview($serving, $requestHost, $originalRequestPath, $requestPath);
+    if (!$open && !$ogImagePrivatePreview) {
         require_once __DIR__ . '/access-rules.php';
         // The SDK, the collaboration manifest, its theme and the tracker the SDK
         // loads are subresources of the page that embedded them and own no
@@ -634,6 +662,10 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         'root' => $root,
         'host' => $requestHost,
         'host_entry' => $hostEntry,
+        // What another URL on this host resolves to before any mount applies,
+        // so a page's share image resolves the way a request for it would.
+        'host_routes' => $hostRoutes,
+        'host_version_id' => $hostVersionId,
         'method' => $requestMethod,
         'serving' => $serving,
         'private_cache' => $privateCache,
@@ -647,8 +679,8 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         'route_status' => $routeStatus,
         'private_file_alias' => $privateFileAlias,
         'icon_file_alias' => is_string($iconFileAliasSource),
-        'public_preview_image' => $publicPreviewImage,
         'share_preview_public' => $sharePreviewPublic,
+        'private_preview' => $ogImagePrivatePreview,
         'request_uri' => $requestUri,
         // The URL the VISITOR asked for, never the rewritten one: the provider's
         // asset rewrite (C21/D146) keys on it, and a mount or a residue rewrite
@@ -656,6 +688,13 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         'client_path' => $originalRequestPath,
         'functions_assets_request' => $assetsRequest !== null,
     ];
+
+    if ($ogImageRoute !== null) {
+        if ($routeStatus !== 200) {
+            _stattic_og_image_not_found($privateCache);
+        }
+        _stattic_og_image_serve($sendContext, $ogImageRoute, $requestPath, $requestMethod, $sharePreviewPublic, $privateCache);
+    }
 
     // `?spacefast_view=1` selects the finalized preview document for this
     // committed path. The pointer is version-scoped in the Space overlay and
@@ -954,6 +993,122 @@ function _stattic_v4_entry(string $versionDir, array $root, string $key): ?array
     return is_array($entry) ? $entry : null;
 }
 
+/**
+ * Runs a version's residue redirect/rewrite rules for one path. A rewrite
+ * yields to a published response or page at the path unless forced; `$entry`
+ * is that path's table entry, already resolved by the caller. `$resolveOnly`
+ * returns a redirect or proxy as `['terminal' => true]` instead of sending it.
+ */
+function _stattic_v4_apply_residue_rules(
+    array $redirectRules,
+    array $serving,
+    string $versionDir,
+    array $root,
+    ?array $entry,
+    string $requestHost,
+    string $requestPath,
+    string $requestMethod,
+    bool $edgeOwnsPlacedRules,
+    bool $resolveOnly
+): array {
+    require_once __DIR__ . '/redirects.php';
+    $hasPages = is_file($versionDir . '/pages.php');
+    if ($hasPages) {
+        require_once __DIR__ . '/../shared/page-routes.php';
+    }
+    return _stattic_apply_redirects(
+        $redirectRules,
+        $serving,
+        static fn (string $candidate): bool => ($candidate === $requestPath
+            ? $entry !== null
+            : _stattic_v4_entry($versionDir, $root, $candidate) !== null)
+            || ($hasPages && _stattic_page_resolve($versionDir, $candidate) !== null),
+        $requestHost,
+        $requestPath,
+        $requestMethod,
+        $edgeOwnsPlacedRules,
+        200,
+        $resolveOnly
+    );
+}
+
+/**
+ * The table entry a GET for `$path` on this request's host is served from,
+ * resolved the way serve.php resolves that request: the host's mounts and the
+ * version a mount pins, then that version's residue rewrites, then its
+ * response table. Null when a redirect, proxy or platform answer owns the
+ * path, a rewrite ends in a non-200 status, or nothing is published there.
+ *
+ * `$effectivePath` is set to the path the entry is served under inside its
+ * version (after the mount and the rewrite), the second path an access check
+ * for this URL must admit, as for a page.
+ */
+function _stattic_v4_resolve_served_entry(array $context, string $path, ?string &$effectivePath = null): ?array
+{
+    $effectivePath = null;
+    if (_stattic_control_path_row($path) !== null) {
+        return null;
+    }
+    $clientPath = $path;
+    $versionId = is_string($context['host_version_id'] ?? null) ? $context['host_version_id'] : null;
+    $matched = _stattic_v4_match_host_route(is_array($context['host_routes'] ?? null) ? $context['host_routes'] : [], $path, 'GET');
+    if (is_array($matched)) {
+        $action = $matched['route_action'] ?? null;
+        $mounted = is_array($action) && ($action['action'] ?? null) === 'serve'
+            ? _stattic_v4_mount_target($matched, $action, $versionId)
+            : null;
+        if ($mounted === null) {
+            return null;
+        }
+        ['version_id' => $versionId, 'path' => $path] = $mounted;
+    }
+    if ($versionId === null || $versionId === '') {
+        return null;
+    }
+    $versionDir = _stattic_version_root((string) $context['private_root'], (string) $context['space_id'], $versionId);
+    $routeName = $context['host_entry']['route_name'] ?? null;
+    $root = $versionDir === $context['version_dir']
+        ? $context['root']
+        : _stattic_v4_version_root_artifact($versionDir, is_string($routeName) ? $routeName : null);
+    if (!is_array($root)) {
+        return null;
+    }
+    $entry = _stattic_v4_entry($versionDir, $root, $path);
+    $rulesEntry = _stattic_v4_entry($versionDir, $root, STATTIC_RUNTIME_RESPONSE_KEY_RULES);
+    $redirectRules = _stattic_v4_rule_section($rulesEntry, 'redirects');
+    $rulesFirst = $entry === null || !empty($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_RULES_FIRST]);
+    if ($rulesFirst && $redirectRules !== null
+        && !_stattic_path_is_reserved($path) && !_stattic_path_is_reserved($clientPath)) {
+        $serving = is_array($context['serving'] ?? null) ? $context['serving'] : [];
+        $host = (string) $context['host'];
+        $result = _stattic_v4_apply_residue_rules(
+            $redirectRules,
+            $serving,
+            $versionDir,
+            $root,
+            $entry,
+            $host,
+            $path,
+            'GET',
+            _stattic_edge_owns_placed_rules($serving, _stattic_v4_rule_placed_hostnames($rulesEntry), $host),
+            true
+        );
+        if (!empty($result['terminal']) || (int) $result['status'] !== 200) {
+            return null;
+        }
+        $next = _stattic_canonical_request_path((string) $result['path']);
+        if ($next === null) {
+            return null;
+        }
+        if ($next !== $path) {
+            $entry = _stattic_v4_entry($versionDir, $root, $next);
+            $path = $next;
+        }
+    }
+    $effectivePath = $path;
+    return $entry;
+}
+
 // The directory in a `\0404:<dir>` key is the published path with `404.html`
 // stripped and every slash trimmed, `docs` or `docs/api`, so the probe carries
 // NO leading slash, and the root's chain member is the bare `\0404` key.
@@ -1127,11 +1282,6 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
     }
     $headers = _stattic_v4_platform_response_headers($context, $headers, $privateCache);
-    // Public so a link previewer can fetch it, never indexed: the path is still
-    // private to everyone else (an image a Public Grant admits is not flagged).
-    if (!empty($context['public_preview_image'])) {
-        $headers['x-robots-tag'] = 'noindex, nofollow';
-    }
 
     // The same validator identifies full and partial PHP representations.
     //
@@ -1156,11 +1306,9 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     }
     $length = is_int($rawLength) ? $rawLength : 0;
     $lane = (int) ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_LANE] ?? STATTIC_RUNTIME_RESPONSE_LANE_PHP);
-    // nginx drops X-Robots-Tag on the accel lane, and the noindex above is the
-    // reason this image may be public at all.
-    // Documents override retained artifacts too, without requiring a republish.
-    if (!empty($context['public_preview_image'])
-        || _stattic_server_file_is_document((string) ($headers['content-type'] ?? ''))) {
+    // Documents need the isolation headers nginx drops on the accel lane, and
+    // that covers retained artifacts too, without requiring a republish.
+    if (_stattic_server_file_is_document((string) ($headers['content-type'] ?? ''))) {
         $lane = STATTIC_RUNTIME_RESPONSE_LANE_PHP;
     }
     // Only an access verdict can authorize the reserved alias. A token merely
@@ -1201,55 +1349,65 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     }
     $absolutePath = (string) $context['private_root'] . '/' . $blobRelativePath;
 
-    // Needs the complete body, so it precedes every offload below.
-    if (
-        $tagPreviewToken !== null
-        && $status === 200
-        && str_starts_with(strtolower($headers['content-type'] ?? ''), 'text/html')
-        && $length <= 2097152
-    ) {
-        _stattic_acquire_static_stream_admission($context, $length);
-        $body = _stattic_v4_read_blob($absolutePath, $length);
-        require_once __DIR__ . '/../shared/preview-images.php';
-        $body = _stattic_normalize_preview_images($body, $context);
-        $body = _stattic_apply_spacefast_sdk_preview_to_html($body, $tagPreviewToken);
-        unset($headers['etag']);
-        $headers['cache-control'] = $privateCache || $noStore
-            ? STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE
-            : STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
-        $headers['content-length'] = (string) strlen($body);
-        _stattic_v4_enforce_preconditions($headers);
-        _stattic_send_response_headers($headers);
-        http_response_code(200);
-        if ($method === 'GET') {
-            echo $body;
-        }
-        exit;
-    }
-
     $normalizedHead = null;
     $sourceHeadLength = 0;
 
-    // Preview metadata is host-dependent. Read only the same bounded head
-    // window the compiler scans, then keep the rest of the document streaming.
+    // Every HTML response carries the platform SDK tag, and its link preview
+    // points at this host's share-image route. Both edit only the bounded head
+    // window the compiler scans; the rest of the document keeps streaming from
+    // the blob.
     if (str_starts_with(strtolower($headers['content-type'] ?? ''), 'text/html')) {
-        require_once __DIR__ . '/../shared/preview-images.php';
         $stream = _stattic_v4_open_blob($absolutePath);
         $head = stream_get_contents($stream, min($length, 65536));
         if (!is_string($head)) {
             fclose($stream);
             _stattic_render_runtime_invariant_error_lazy('file-missing', 'Runtime response blob could not be read.');
         }
-        $normalized = _stattic_normalize_preview_images($head, $context);
         fclose($stream);
+        $serving = is_array($context['serving']) ? $context['serving'] : [];
+        $previewHead = $head;
+        if ($status === 200) {
+            require_once __DIR__ . '/../shared/og-image.php';
+            // Named by the URL the visitor loaded, which the route resolves
+            // back through mounts and rewrites to this same document.
+            $previewHead = _stattic_og_image_rewrite_head($head, $context, (string) $context['client_path'], !empty($context['share_image']));
+        }
+        $sdkTag = _stattic_static_page_sdk_tag($serving, $tagPreviewToken, (string) $blobSha);
+        // A page with no `<head` or `<html` is a fragment (an htmx or Turbo
+        // partial, an include): it passes through unchanged, as on main, so a
+        // swap never runs the SDK again or breaks a table or select context.
+        $normalized = _stattic_splice_head_markup($previewHead, $sdkTag);
         if ($normalized !== $head) {
             $normalizedHead = $normalized;
             $sourceHeadLength = strlen($head);
             $length += strlen($normalized) - $sourceHeadLength;
             $lane = STATTIC_RUNTIME_RESPONSE_LANE_PHP;
+            // The edited head is part of the validator, so a tag-preview page
+            // (its token is on the tag) never revalidates against the live
+            // page, and every replica derives the same value.
             if ($status === 200) {
                 $headers['etag'] = '"' . hash('sha256', $etag . "\0" . $normalized) . '"';
             }
+        }
+        // A worker reading a page finalize decorated through its assets
+        // binding: the dispatch filter must not add the snippets again.
+        $assetsNonce = (string) ($GLOBALS['SPACEFAST_FUNCTIONS_ASSETS_REQUEST']['nonce'] ?? '');
+        if ($assetsNonce !== '' && _stattic_html_insert_blob_decorated($serving, (string) $blobSha)) {
+            $stamp = _stattic_html_insert_decorated_stamp(
+                (string) $context['private_root'],
+                $assetsNonce,
+                (string) $context['space_id'],
+                (string) $context['version_id'],
+                (string) $blobSha
+            );
+            if ($stamp !== null) {
+                $headers[STATTIC_HTML_INSERT_DECORATED_HEADER] = $stamp;
+            }
+        }
+        // A tag-preview page belongs to a short-lived draft session: never
+        // stored past the default edge lifetime, whatever the entry declared.
+        if ($tagPreviewToken !== null && !str_contains($headers['cache-control'] ?? '', 'no-store')) {
+            $headers['cache-control'] = STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
         }
     }
 
@@ -1320,93 +1478,6 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     _stattic_stream_file($stream, $length);
     fclose($stream);
     exit;
-}
-
-// A claimed protected Space's declared share-preview image (`meta.image`, flagged
-// `pi` at compile time) is the one thing it serves without a session. WhatsApp,
-// Signal and Slack build a link preview by fetching the page and then its
-// og:image in a separate request that carries no cookie, so behind the gate a
-// shared link shows no picture. Whoever holds the link already sees the page;
-// the owner chose this image to be what the link looks like.
-//
-// Narrow on purpose: a GET or HEAD for that entry at its own URL (no rewrite or
-// alias reaches it), a 200 with a body, and a raster image type. The compiler
-// decides the same things; this re-checks them so the exemption can never
-// widen past an image.
-//
-// An unclaimed Space has no owner to consent to sharing the image. It uses the
-// same credential checks as every other artifact until the Space is claimed.
-//
-// Never on an immutable per-version hostname. The response there is shared-
-// cacheable for a year, and a fence's route write purges only the route's own
-// hostnames, so a later hold could not take the image back. Shared links use
-// the Space's live hostname, where a purge reaches.
-function _stattic_v4_public_preview_image(
-    array $serving,
-    ?array $entry,
-    string $requestMethod,
-    string $requestPath,
-    string $originalRequestPath,
-    string $requestHost,
-    string $privateRoot,
-    array $routes,
-    string $spaceId
-): bool {
-    if (
-        !empty($serving['immutable'])
-        || ($serving['authorization']['spaceClaimed'] ?? false) !== true
-        || $entry === null
-        || (empty($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_PREVIEW_IMAGE])
-            && !_stattic_v4_preview_host_matches(
-                $entry[STATTIC_RUNTIME_RESPONSE_ENTRY_PREVIEW_IMAGE_HOSTS] ?? [],
-                $requestHost, $privateRoot, $routes, $spaceId, $requestPath, $requestMethod))
-        || !in_array($requestMethod, ['GET', 'HEAD'], true)
-        || $requestPath !== $originalRequestPath
-        || (int) ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_STATUS] ?? 0) !== 200
-        || !is_string($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_BLOB] ?? null)
-        || isset($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_ACTION])
-    ) {
-        return false;
-    }
-    $headers = is_array($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_HEADERS] ?? null)
-        ? $entry[STATTIC_RUNTIME_RESPONSE_ENTRY_HEADERS]
-        : [];
-    $contentType = strtolower(trim(explode(';', (string) ($headers['content-type'] ?? ''), 2)[0]));
-    return in_array($contentType, ['image/png', 'image/jpeg', 'image/webp', 'image/gif'], true);
-}
-
-function _stattic_v4_preview_host_matches(
-    array $advertisedHosts,
-    string $requestHost,
-    string $privateRoot,
-    array $routes,
-    string $spaceId,
-    string $requestPath,
-    string $requestMethod
-): bool {
-    if (in_array($requestHost, $advertisedHosts, true)) return true;
-    // Follow only the router's same-Space, path-preserving host redirect.
-    // Host spelling alone cannot establish ownership of an apex/www pair.
-    foreach ($advertisedHosts as $advertisedHost) {
-        if (!is_string($advertisedHost)) continue;
-        $advertised = _stattic_v4_host_lookup($privateRoot, $routes, $advertisedHost);
-        if (!is_array($advertised) || ($advertised['entry']['space_id'] ?? null) !== $spaceId) continue;
-        $route = _stattic_v4_match_host_route($advertised['routes'], $requestPath, $requestMethod);
-        if (!is_array($route) || ($route['space_id'] ?? null) !== $spaceId || ($route['location'] ?? null) !== '/') continue;
-        $action = $route['route_action'] ?? null;
-        if (!is_array($action) || ($action['action'] ?? null) !== 'redirect') continue;
-        $destination = parse_url((string) ($action['destination'] ?? ''));
-        if (is_array($destination)
-            && in_array($destination['scheme'] ?? null, ['http', 'https'], true)
-            && strtolower((string) ($destination['host'] ?? '')) === $requestHost
-            && in_array($destination['path'] ?? '', ['', '/'], true)
-            && !isset($destination['user'])
-            && !isset($destination['pass'])
-            && !isset($destination['port'])
-            && !isset($destination['query'])
-            && !isset($destination['fragment'])) return true;
-    }
-    return false;
 }
 
 // The platform's own header ownership over one table response: the
@@ -1481,17 +1552,6 @@ function _stattic_v4_open_blob(string $absolutePath)
         _stattic_render_runtime_invariant_error_lazy('file-missing', 'Runtime response entry points to a missing blob.');
     }
     return $stream;
-}
-
-function _stattic_v4_read_blob(string $absolutePath, int $length): string
-{
-    $stream = _stattic_v4_open_blob($absolutePath);
-    $body = stream_get_contents($stream, $length);
-    fclose($stream);
-    if (!is_string($body)) {
-        _stattic_render_runtime_invariant_error_lazy('file-missing', 'Runtime response blob could not be read.');
-    }
-    return $body;
 }
 
 // ---- action entries --------------------------------------------------------
@@ -1933,6 +1993,26 @@ function _stattic_v4_match_host_route(array $routes, string $requestPath, string
     return null;
 }
 
+/**
+ * Where a matched `serve` mount sends a request: the version it pins (else
+ * `$versionId`, the host's own) and the path inside that version. Null when
+ * the mount's target prefix is no valid path.
+ *
+ * @return array{version_id: ?string, path: string}|null
+ */
+function _stattic_v4_mount_target(array $matchedRoute, array $action, ?string $versionId): ?array
+{
+    $targetPrefix = _stattic_canonical_request_path((string) ($action['target_prefix'] ?? '/'));
+    if ($targetPrefix === null) {
+        return null;
+    }
+    $pinned = $action['version_id'] ?? null;
+    return [
+        'version_id' => is_string($pinned) && $pinned !== '' ? $pinned : $versionId,
+        'path' => _stattic_join_request_path($targetPrefix, (string) ($matchedRoute['_remainder'] ?? '/')),
+    ];
+}
+
 function _stattic_v4_match_path_prefix(string $prefix, string $requestPath): ?string
 {
     $normalized = rtrim($prefix, '/');
@@ -2205,39 +2285,6 @@ function _stattic_render_content_type_blocked(array $policy): never
         'Cache-Control' => 'no-store',
         'X-Robots-Tag' => 'noindex, nofollow',
     ]);
-}
-
-function _stattic_spacefast_tag_preview_token(string $requestMethod): ?string
-{
-    if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
-        return null;
-    }
-    $raw = $_GET[STATTIC_TAG_PREVIEW_QUERY_NAME] ?? null;
-    return is_string($raw) && trim($raw) !== '' ? trim($raw) : null;
-}
-
-function _stattic_apply_spacefast_sdk_preview_to_html(string $body, string $token): string
-{
-    $path = preg_quote(STATTIC_SPACEFAST_SDK_PATH, '~');
-    return (string) preg_replace_callback(
-        '~(<script\b[^>]*\bsrc=)(["\'])([^"\']*' . $path . '(?:\?[^"\']*)?)(\2[^>]*>)~i',
-        static function (array $matches) use ($token): string {
-            return $matches[1] . $matches[2] . _stattic_url_with_query_param($matches[3], 'preview', $token) . $matches[4];
-        },
-        $body
-    );
-}
-
-function _stattic_url_with_query_param(string $url, string $name, string $value): string
-{
-    $fragment = '';
-    $hashPos = strpos($url, '#');
-    if ($hashPos !== false) {
-        $fragment = substr($url, $hashPos);
-        $url = substr($url, 0, $hashPos);
-    }
-    $separator = str_contains($url, '?') ? '&' : '?';
-    return $url . $separator . rawurlencode($name) . '=' . rawurlencode($value) . $fragment;
 }
 
 function _stattic_acquire_static_stream_admission(array $context, int $bytes): void

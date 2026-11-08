@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { startPhpServer } from "./harness.ts";
 
-test("the document shell applies platform head inserts once without changing CSP or HEAD", async () => {
+test("the document shell carries the one SDK tag without changing CSP or HEAD", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "sf-document-head-"));
   const privateRoot = path.join(root, ".stattic/storage");
   const versionRoot = path.join(privateRoot, "spaces/spc_document/versions/ver_document");
@@ -36,7 +36,9 @@ flush();
 exit;
 `,
   );
-  const snippet = '<meta name="platform-head" content="present">';
+  const snippet = '<script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>';
+  // What finalize records for a version with platform injection on.
+  const baked = '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>';
   writeFileSync(
     path.join(root, "wp-load.php"),
     `<?php
@@ -63,7 +65,7 @@ function wp_footer() { echo '<footer>WordPress footer</footer>'; }
 require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/storage.php"))};
 require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/runtime/content-page.php"))};
 $snapshotBytes = ${JSON.stringify(seed)};
-$context = ['private_root' => ${JSON.stringify(privateRoot)}, 'space_id' => 'spc_document', 'version_id' => 'ver_document', 'serving' => ['immutable' => isset($_GET['immutable']), 'inject' => ['head' => isset($_GET['disabled']) ? [] : [${JSON.stringify(snippet)}]]]];
+$context = ['private_root' => ${JSON.stringify(privateRoot)}, 'space_id' => 'spc_document', 'version_id' => 'ver_document', 'serving' => ['immutable' => isset($_GET['immutable']), 'sdk' => isset($_GET['disabled']) ? null : ['config' => []], 'inject' => ['bodyEnd' => [${JSON.stringify(baked)}]]]];
 $context['version_dir'] = '/version'; $context['root'] = [];
 $route = ['id' => '${pageId}', 'bindingId' => '${bindingId}', 'path' => '/', 'render' => 'document', 'params' => []];
 file_put_contents(_stattic_version_root($context['private_root'], 'spc_document', 'ver_document') . '/metadata.json', json_encode(['catalog' => ['format' => STATTIC_RUNTIME_VERSION_CATALOG_FORMAT, 'spaceId' => 'spc_document', 'versionId' => 'ver_document', 'paths' => ['_spacefast/pages/documents/${pageId}.json' => ['source' => ['sha256' => hash('sha256', $snapshotBytes), 'size' => strlen($snapshotBytes), 'contentType' => 'application/json']]], 'variants' => []]]));
@@ -96,6 +98,7 @@ echo 'Document route declined';
         const html = await response.text();
         expect(html.split(snippet)).toHaveLength(2);
         expect(html).toContain(`<head>${snippet}<meta charset="utf-8">`);
+        expect(html).toContain("WordPress footer</footer></body></html>");
         expect(html).toContain('<meta name="wordpress-head" content="present">');
         const wordpressHead = html.indexOf('<meta name="wordpress-head"');
         const utilities = html.indexOf('<link rel="stylesheet" href="/zero.css">');
@@ -104,7 +107,7 @@ echo 'Document route declined';
         );
         expect(utilities).toBeGreaterThan(wordpressHead);
         expect(theme).toBeGreaterThan(utilities);
-        expect(html).toContain("WordPress footer</footer></body></html>");
+
         expect(html).toContain(query === "" ? "Live document." : "Published document.");
       }
       const head = await fetch(`${server.baseUrl}/`, { method: "HEAD" });

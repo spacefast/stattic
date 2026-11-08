@@ -1091,8 +1091,42 @@ fn run_finalize_pipeline(
         assigned_hostnames: &assigned_hostnames,
         exact_response_paths: &exact_response_paths,
     })?;
+    // Always recorded, empty included: the engine reads a root without it as
+    // one compiled before the record existed, whose static pages all carry the
+    // baked SDK tag. `undecorated` lists the served blobs of HTML pages body
+    // decoration skipped (no `<body>`), across every channel's table: the one
+    // static case the engine adds its own SDK tag to. Keyed by blob so every
+    // URL that serves the page (clean URL, SPA shell, 404 document) matches.
+    let mut injections = config
+        .get("inject")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let base_files: &BTreeMap<String, FileMeta> = files;
+    let undecorated_blobs: BTreeSet<&str> = std::iter::once((base_files, &pipeline.undecorated))
+        .chain(
+            variant_files
+                .iter()
+                .map(|(route_name, files)| (files, &variant_pipelines[route_name].undecorated)),
+        )
+        .flat_map(|(files, undecorated)| {
+            undecorated
+                .iter()
+                .filter_map(|path| files.get(path).map(|meta| meta.sha256.as_str()))
+        })
+        .collect();
+    if !undecorated_blobs.is_empty() {
+        injections.insert("undecorated".into(), json!(undecorated_blobs));
+    }
+    let injections = Value::Object(injections);
     let published = timed(&mut telemetry.response_tables_ms, || {
-        publish_response_tables(stage_root, &table, &route_tables, env!("CARGO_PKG_VERSION"))
+        publish_response_tables(
+            stage_root,
+            &table,
+            &route_tables,
+            env!("CARGO_PKG_VERSION"),
+            Some(&injections),
+        )
     })?;
 
     let diagnostics = runtime_diagnostics(diagnostics);

@@ -2717,44 +2717,6 @@ if (is_string($previousBrandDocument)) {
     putenv('SPACEFAST_BRAND_JSON');
 }
 
-// The finalizer writes the default brand's share-image fallback into the page,
-// so a default-brand site serves the stored bytes untouched. A brand document
-// naming another image gets it substituted at serve time. Each case runs in its
-// own process because the brand document resolves once per process.
-$previewImagesProbe = <<<'PHP'
-require $argv[1];
-echo _stattic_normalize_preview_images($argv[2], ['host' => 'share.example.test', 'client_path' => '/']);
-PHP;
-$fallbackPlaceholder = '<html><head><meta data-spacefast-auto-image="og:image" property="og:image" content="https://my.spacefast.com/app-icon-512x512.png">'
-    . '<meta name="twitter:card" content="summary" data-spacefast-auto-image="twitter:card"></head><body></body></html>';
-$runPreviewImages = static function (string $brandDocument) use ($previewImagesProbe, $fallbackPlaceholder): string {
-    $output = [];
-    exec(
-        ($brandDocument === '' ? 'env -u SPACEFAST_BRAND_JSON ' : 'SPACEFAST_BRAND_JSON=' . escapeshellarg($brandDocument) . ' ')
-            . escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($previewImagesProbe) . ' '
-            . escapeshellarg(__DIR__ . '/../engine/shared/preview-images.php') . ' '
-            . escapeshellarg($fallbackPlaceholder) . ' 2>&1',
-        $output
-    );
-    return implode("\n", $output);
-};
-check(
-    $runPreviewImages('') === $fallbackPlaceholder,
-    'share image: the default brand keeps the finalizer\'s fallback bytes'
-);
-check(
-    $runPreviewImages('{"name":"Partner Cloud"}') === $fallbackPlaceholder,
-    'share image: a brand document that names no share image keeps the default fallback'
-);
-check(
-    $runPreviewImages('{"shareImageUrl":"https://partner.example/share.png"}') === str_replace(
-        'https://my.spacefast.com/app-icon-512x512.png',
-        'https://partner.example/share.png',
-        $fallbackPlaceholder
-    ),
-    'share image: a brand document naming a share image replaces the fallback and leaves the card a summary'
-);
-
 $trustedProviderEnv = _stattic_zero_runner_base_env([
     'variableValues' => ['DATABASE_URL' => 'mysql://provider.internal/app'],
     'databaseUrlSource' => 'provider',
@@ -3957,6 +3919,47 @@ check(_stattic_functions_response_cache_policy(false, $publicWorker)['cache_cont
 _stattic_cache_policy_request_varying(true);
 check(_stattic_functions_response_cache_policy(false, $publicWorker)['cache_control'] === STATTIC_CACHE_CONTROL_NO_STORE, 'navigation fallback: a worker answer that varies by Sec-Fetch-Mode is no-store');
 
+// Streaming insertion keeps lexical state across writes and never targets markup in raw text.
+require_once __DIR__ . '/../engine/shared/html-insert.php';
+$streamThrough = static function (string $html, array $payload) {
+    $state = ['mode' => 'body', 'held' => '', 'raw' => null];
+    $payload += ['head' => '', 'bodyStart' => '', 'bodyEnd' => '', 'sdk' => ''];
+    $output = '';
+    foreach (str_split($html, 3) as $chunk) {
+        $state['held'] .= $chunk;
+        $output .= _stattic_html_insert_body($state, $payload, false);
+    }
+    return $output . _stattic_html_insert_body($state, $payload, true);
+};
+$bodyPayload = ['bodyStart' => '<b>start</b>', 'bodyEnd' => '<b>end</b>'];
+$streamHtml = '<!--<body>fake</body>--><html><head><script>const fake="<body></body>";</script></head><body data-value=">">real</body></html>';
+check(
+    $streamThrough($streamHtml, $bodyPayload) === str_replace('>real</body>', '><b>start</b>real<b>end</b></body>', $streamHtml),
+    'dynamic injections target real body tags across chunk boundaries'
+);
+// `<!-->` ends a comment at once, as browsers parse it: the body after it is real.
+$abrupt = '<!--><body>real</body>';
+check($streamThrough($abrupt, $bodyPayload) === '<!--><body><b>start</b>real<b>end</b></body>', 'an abruptly closed comment does not hide the body that follows');
+// A token too long to hold ends the anchor search, never the response: the
+// bytes pass through unchanged and the SDK tag still lands at the end.
+$sdkTag = '<script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>';
+$huge = '<html><body><!--' . str_repeat('x', STATTIC_HTML_INSERT_TOKEN_LIMIT_BYTES + 10) . '--></body></html>';
+$relayed = $streamThrough($huge, $bodyPayload + ['sdk' => $sdkTag]);
+check(str_ends_with($relayed, '</body></html>' . $sdkTag) && substr_count($relayed, $sdkTag) === 1, 'an oversized token still leaves the response with one engine SDK tag');
+$headProbe = '<!--<head>fake--><script>"<head>"</script><html><head data-value=">">';
+check(_stattic_splice_head_markup($headProbe, '<meta name="insert">') === $headProbe . '<meta name="insert">', 'head insertion skips comments, raw text, and quoted angle brackets');
+// The static lane decides from the version's record alone: a page it lists as
+// undecorated gets the engine's tag, any other page and any version without
+// the record get none, and nothing is read to find out.
+$recorded = ['sdk' => ['config' => []], 'inject' => ['undecorated' => [str_repeat('a', 64)]]];
+check(_stattic_static_page_sdk_tag($recorded, null, str_repeat('a', 64)) === $sdkTag, 'a page finalize could not decorate gets the engine SDK tag');
+check(_stattic_static_page_sdk_tag($recorded, null, str_repeat('b', 64)) === '', 'a decorated page gets no engine SDK tag');
+check(_stattic_static_page_sdk_tag(['sdk' => ['config' => []], 'inject' => null], null, str_repeat('a', 64)) === '', 'a version from before the record gets no engine SDK tag');
+// A dynamic response always gets the engine's tag; the version's own baked
+// SDK snippet never rides along beside it.
+$_SERVER['REQUEST_METHOD'] = 'GET';
+$dynamicPayload = _stattic_html_insert_payload(['sdk' => ['config' => []], 'inject' => ['bodyEnd' => ['<div id="end"></div>', '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>']]]);
+check($dynamicPayload['sdk'] === $sdkTag && $dynamicPayload['bodyEnd'] === '<div id="end"></div>', 'a dynamic response carries the engine SDK tag, not the baked one');
 
 // Space Users parts: each sign-in method answers only while its part is on, in
 // every combination the two-part shape can store; the flat shape keeps both.

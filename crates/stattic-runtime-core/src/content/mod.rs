@@ -83,6 +83,9 @@ pub struct HtmlPipelineOutcome {
     /// checked against the files this version ships.
     pub preview_images: BTreeSet<String>,
     pub preview_image_hosts: BTreeMap<String, BTreeSet<String>>,
+    /// The HTML paths body decoration skipped (no `<body>`), so the baked
+    /// bodyEnd snippets, the SDK tag among them, are not in their bytes.
+    pub undecorated: BTreeSet<String>,
 }
 
 /// Bound content keeps its source bytes for synchronization, but a resource's
@@ -413,6 +416,7 @@ pub fn materialize_html_pipeline(
     let mut adopted = BTreeSet::new();
     let mut preview_images = BTreeSet::new();
     let mut preview_image_hosts = BTreeMap::new();
+    let mut undecorated = BTreeSet::new();
     for path in targets {
         // A rendered page's decoration also reads frontmatter that never
         // reaches the rendered bytes (description, image), so byte equality
@@ -444,6 +448,14 @@ pub fn materialize_html_pipeline(
                         assigned_hostnames,
                         &mut preview_image_hosts,
                     ));
+                    // Same source, same context: decoration skipped its body
+                    // exactly when it has none.
+                    if !inject_snippets(config, "bodyEnd").is_empty()
+                        && pipeline_text(files_root, &path, diagnostics)?
+                            .is_some_and(|source| !html_has_body(&source))
+                    {
+                        undecorated.insert(path.clone());
+                    }
                     adopted.insert(path);
                     continue;
                 }
@@ -452,7 +464,7 @@ pub fn materialize_html_pipeline(
         let Some(source) = pipeline_text(files_root, &path, diagnostics)? else {
             continue;
         };
-        let document = decorate_html(
+        let (document, body_decorated) = decorate_html(
             &source,
             HtmlDecorationContext {
                 page: page_by_output.get(&path).copied(),
@@ -465,6 +477,9 @@ pub fn materialize_html_pipeline(
             },
             diagnostics,
         )?;
+        if !body_decorated {
+            undecorated.insert(path.clone());
+        }
         let document = anchor_preview_image_urls(&document, &path);
         let document = provider_safe_icon_urls(&document, &path);
         preview_images.extend(advertised_image_files(
@@ -492,6 +507,7 @@ pub fn materialize_html_pipeline(
         adopted,
         preview_images,
         preview_image_hosts,
+        undecorated,
     })
 }
 
@@ -1032,11 +1048,28 @@ fn generated_favicon(title: &str) -> String {
     format!("data:image/svg+xml,{encoded}")
 }
 
+/// Whether lol_html finds a `<body>` element, the anchor decoration places the
+/// bodyEnd snippets against.
+fn html_has_body(source: &str) -> bool {
+    let found = Rc::new(Cell::new(false));
+    let sink = Rc::clone(&found);
+    let _ = rewrite_str(
+        source,
+        RewriteStrSettings::new().append_element_content_handler(element!("body", move |_| {
+            sink.set(true);
+            Ok(())
+        })),
+    );
+    found.get()
+}
+
+/// The decorated document, and whether it carries the bodyEnd snippets (false
+/// only for a document with no `<body>` while there were some to place).
 fn decorate_html(
     source: &str,
     context: HtmlDecorationContext<'_>,
     diagnostics: &mut Vec<Value>,
-) -> Result<String> {
+) -> Result<(String, bool)> {
     let HtmlDecorationContext {
         page,
         config,
@@ -1173,7 +1206,10 @@ fn decorate_html(
     );
     if analysis.is_err() {
         diagnostics.push(json!({"code":"html_parse_failed","severity":"warning","message":"An HTML file could not be parsed; decoration was skipped.","path":path}));
-        return Ok(source.to_string());
+        return Ok((
+            source.to_string(),
+            inject_snippets(config, "bodyEnd").is_empty(),
+        ));
     }
     let existing_title = has_title
         .get()
@@ -1328,6 +1364,7 @@ fn decorate_html(
     } else {
         marked_block("body-end", &end)
     };
+    let body_decorated = body_end.is_empty() || body_end_offset.get().is_some();
     if (!body_start.is_empty() || !body_end.is_empty()) && !has_body.get() {
         diagnostics.push(json!({"code":"html_no_body","severity":"warning","message":"An HTML file has no body element; body decoration was skipped.","path":path}));
     }
@@ -1357,7 +1394,7 @@ fn decorate_html(
     for (offset, block) in insertions {
         output.insert_str(offset, &block);
     }
-    Ok(output)
+    Ok((output, body_decorated))
 }
 
 fn strip_generated_html_blocks(source: &str) -> String {

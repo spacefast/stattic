@@ -17,6 +17,8 @@ let runtime: Runtime;
 let wordpressCoreRoot: string;
 
 const OPEN_HOST = "wp-api-open.test";
+// The one SDK tag the runtime adds to every HTML page.
+const SDK_TAG = '<script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>';
 const OPEN_SPACE = "spc_wp_api_open";
 const CLOSED_HOST = "wp-api-closed.test";
 const CLOSED_SPACE = "spc_wp_api_closed";
@@ -292,13 +294,18 @@ beforeAll(async () => {
     },
     serving: {
       pages: documentPages,
-      config: {},
+      // Every finalize with platform injection on records the baked SDK tag.
+      config: {
+        inject: {
+          bodyEnd: ['<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>'],
+        },
+      },
       theme_css:
         ":root{--sf-accent:#6d28d9;--sf-bg:#faf7ff;--sf-fg:#20182b;--sf-font:Inter,sans-serif}",
     },
     activate: {
       route_name: "production",
-      config: accessConfig(true),
+      config: { ...accessConfig(true), sdk: { revision: "sdk-1", config: {} } },
       production_hostnames: [OPEN_HOST],
       version_hostnames: [],
     },
@@ -859,7 +866,8 @@ test("canonical WordPress documents share Customization styles", async () => {
   expect(page.status).toBe(200);
   expect(pageBody).toContain("WordPress about");
   expect(pageBody).toContain("/__spacefast_generated/theme.css");
-  expect(pageBody).toContain('<script id="spacefast-sdk-js" src="/__spacefast/sdk.js"></script>');
+  expect(pageBody.split(SDK_TAG)).toHaveLength(2);
+  expect(pageBody.indexOf(SDK_TAG)).toBeLessThan(pageBody.indexOf("</head>"));
 
   const collision = await get(runtime, OPEN_HOST, "/collision/");
   const collisionBody = await collision.text();
@@ -892,7 +900,7 @@ test("canonical root and nested documents preserve templates and islands", async
   expect(post.status).toBe(200);
   expect(postBody).toContain("WordPress hello");
 
-  expect(postBody).toContain('<script id="spacefast-sdk-js" src="/__spacefast/sdk.js"></script>');
+  expect(postBody.split(SDK_TAG)).toHaveLength(2);
   expect(postBody).toContain('<div class="sf-space-template">');
 
   // Ownership is checked before the method gate, so a co-hosted Space's post is
@@ -937,5 +945,5 @@ test("canonical root and nested documents preserve templates and islands", async
   );
   expect(itemBody).toContain("Prerendered");
   expect(itemBody).not.toContain("<!-- wp:html");
-  expect(itemBody).toContain('<script id="spacefast-sdk-js" src="/__spacefast/sdk.js"></script>');
+  expect(itemBody.split(SDK_TAG)).toHaveLength(2);
 });

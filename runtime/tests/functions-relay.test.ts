@@ -14,6 +14,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
+import { Window } from "happy-dom";
+
 import {
   enableSpaceMailEndpoint,
   apiJson,
@@ -938,12 +940,43 @@ test("a reachable edge receives the dispatch: the origin forwards to exactly the
   }
 });
 
-test("a multipart form reaches the worker whole, and one PHP cut short never reaches it", async () => {
+test("a worker's HTML carries the SDK tag; a multipart form reaches it whole, and one PHP cut short never does", async () => {
   // PHP parses a multipart POST into $_POST/$_FILES and leaves php://input
   // empty, so a straight stream of the input forwards nothing. A TLS edge that
   // reads the body with formData() is the worker's own view of the request.
   const { certificate, key } = selfSignedCertificate(rt.root, "fx-multipart");
   let received = 0;
+  const workerValidators: Array<string | null> = [];
+  // `env.ASSETS.fetch(path)` as the host performs it: a POST back to the
+  // origin relay that carries the dispatch's assets nonce, its answer
+  // returned as the worker's own response, headers and all.
+  const assetsFetch = async (request: Request, assetPath: string) => {
+    const read = await fetch(`${edgeRt.baseUrl}/__spacefast/functions/relay`, {
+      method: "POST",
+      headers: {
+        Connection: "close",
+        Host: "fx-multipart.test",
+        "content-type": "application/json",
+        authorization: `Bearer ${signToken({
+          aud: "spacefast-functions-relay",
+          runtime_instance_id: RUNTIME_INSTANCE_ID,
+          space_id: "spc_fx_multipart",
+          version_id: "ver_fx_multipart_1",
+          ownership_revision: null,
+          capabilities: ["storage.read"],
+        })}`,
+        "sf-fx-broker": "assets",
+      },
+      body: JSON.stringify({
+        method: "GET",
+        path: assetPath,
+        host: "fx-multipart.test",
+        headers: {},
+        nonce: request.headers.get("sf-fx-assets-nonce"),
+      }),
+    });
+    return new Response(read.body, { status: read.status, headers: read.headers });
+  };
   const edge = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -958,6 +991,67 @@ test("a multipart form reaches the worker whole, and one PHP cut short never rea
           },
         });
       }
+      const pathname = new URL(request.url).pathname;
+      if (request.method === "GET" && pathname === "/api/asset") {
+        return await assetsFetch(request, "/asset");
+      }
+      if (request.method === "GET" && pathname === "/api/asset-forged") {
+        // A worker that copies a stamp it received for one dispatch onto the
+        // response to another gains nothing: the stamp names its dispatch.
+        const read = await assetsFetch(
+          new Request(request.url, { headers: { "sf-fx-assets-nonce": "0".repeat(32) } }),
+          "/asset",
+        );
+        return new Response(
+          "<html><head><title>Forged</title></head><body><script>window.__customer = (window.__customer ?? 0) + 1;</script></body></html>",
+          {
+            headers: {
+              "content-type": "text/html; charset=utf-8",
+              "sf-fx-decorated": read.headers.get("sf-fx-decorated") ?? "",
+            },
+          },
+        );
+      }
+      if (request.method === "GET" && pathname === "/api/asset-replay") {
+        // A stamp captured under an earlier dispatch, sent back on a later one.
+        return new Response(
+          "<html><head><title>Replayed</title></head><body>Replayed</body></html>",
+          {
+            headers: {
+              "content-type": "text/html; charset=utf-8",
+              "sf-fx-decorated": new URL(request.url).searchParams.get("stamp") ?? "",
+            },
+          },
+        );
+      }
+      if (request.method === "GET" && pathname === "/api/partial") {
+        // An htmx-style partial: a body but no head or html element.
+        return new Response("<body><main>Fragment</main></body>", {
+          headers: { "content-type": "text/html; charset=utf-8", etag: '"partial-v1"' },
+        });
+      }
+      if (request.method === "GET" && pathname === "/api/asset-stamp") {
+        // The stamp never reaches a visitor; this exposes what the origin sent.
+        const read = await assetsFetch(request, "/asset");
+        return Response.json({ stamp: read.headers.get("sf-fx-decorated") });
+      }
+      if (request.method === "GET") {
+        const etag = '"worker-v1"';
+        workerValidators.push(request.headers.get("if-none-match"));
+        if (request.headers.get("if-none-match") === etag) {
+          return new Response(null, { status: 304, headers: { etag } });
+        }
+        return new Response(
+          `<html><head><title>Worker</title></head><body>accept-encoding=${request.headers.get("accept-encoding") ?? "none"}</body></html>`,
+          {
+            headers: {
+              "content-type": "text/html; charset=utf-8",
+              etag,
+              "last-modified": "Wed, 01 Jan 2025 00:00:00 GMT",
+            },
+          },
+        );
+      }
       received += 1;
       const entries = [];
       for (const [name, value] of await request.formData()) {
@@ -971,7 +1065,12 @@ test("a multipart form reaches the worker whole, and one PHP cut short never rea
     },
   });
   const edgeRt = await startRuntime({
-    env: { SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "fx-dispatch-secret" },
+    env: {
+      SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "fx-dispatch-secret",
+      // A worker's assets read reaches this origin while the dispatch that
+      // asked for it is still open.
+      PHP_CLI_SERVER_WORKERS: "4",
+    },
     phpIni: {
       "curl.cainfo": certificate,
       upload_max_filesize: "1K",
@@ -981,6 +1080,7 @@ test("a multipart form reaches the worker whole, and one PHP cut short never rea
       // Startup upload-limit warnings belong in the log, not before JSON.
       display_errors: "0",
       log_errors: "1",
+      display_errors: "0",
       error_log: runtimeLogPath,
     },
   });
@@ -995,11 +1095,34 @@ test("a multipart form reaches the worker whole, and one PHP cut short never rea
       spaceId: "spc_fx_multipart",
       versionId: "ver_fx_multipart_1",
       metadata: { mode: "website", title: "multipart" },
-      files: { "index.html": "<h1>static shell</h1>\n" },
+      files: {
+        "index.html": "<h1>static shell</h1>\n",
+        // A page finalize decorates, which the worker relays through its
+        // assets binding.
+        "asset.html": "<html><head><title>Asset</title></head><body>Asset</body></html>",
+      },
+      serving: {
+        config: {
+          inject: {
+            head: ['<meta name="version-inject" content="saved">'],
+            bodyStart: ['<div id="start">start</div>'],
+            // Finalize bakes the SDK tag here; a dynamic response gets the
+            // engine's own instead. The customer script counts its runs.
+            bodyEnd: [
+              '<div id="end">end</div>',
+              "<script>window.__customer = (window.__customer ?? 0) + 1;</script>",
+              '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>',
+            ],
+          },
+        },
+      },
       functions: functionsFinalize(`127.0.0.1:${edge.port}`),
       activate: {
         route_name: "production",
-        config: publicAccessConfig({ mode: "website", site_title: "multipart" }),
+        config: {
+          ...publicAccessConfig({ mode: "website", site_title: "multipart" }),
+          sdk: { revision: "sdk-1", config: {} },
+        },
         production_hostnames: ["fx-multipart.test"],
         noindex_production_hostnames: [],
         version_hostnames: [],
@@ -1011,6 +1134,114 @@ test("a multipart form reaches the worker whole, and one PHP cut short never rea
     expect(document.headers.get("origin-agent-cluster")).toBe("?1");
     expect(document.headers.get("permissions-policy")).toBe("document-domain=(), camera=()");
     expect(await document.text()).toBe("<h1>Worker document</h1>");
+    // A worker's HTML page leaves through the relay with the engine's SDK tag
+    // first in <head>; the visitor's Accept-Encoding never reaches the worker.
+    const page = await fetch(`${edgeRt.baseUrl}/api/page`, {
+      headers: { Connection: "close", Host: "fx-multipart.test", "accept-encoding": "gzip" },
+    });
+    expect(page.status).toBe(200);
+    const pageHtml = await page.text();
+    expect(pageHtml).toBe(
+      '<html><head><script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script><meta name="version-inject" content="saved"><title>Worker</title></head><body><div id="start">start</div>accept-encoding=none<div id="end">end</div><script>window.__customer = (window.__customer ?? 0) + 1;</script></body></html>',
+    );
+    // Every visit sends the same X-Spacefast-Request-Id, as a caller may: the
+    // stamp is bound to the dispatch the origin made, never to that id.
+    const visit = (assetPath: string) =>
+      fetch(`${edgeRt.baseUrl}${assetPath}`, {
+        headers: {
+          Connection: "close",
+          Host: "fx-multipart.test",
+          "x-spacefast-request-id": "req_reused_visit_01",
+        },
+      });
+    // A static page it relays through its assets binding already carries
+    // finalize's snippets and tag. The engine adds only its own SDK tag, which
+    // boots once beside the baked one (spacefast-sdk.test.ts runs the
+    // bootstrap twice); the customer's snippets are not added again.
+    const baked = await (await get(edgeRt, "fx-multipart.test", "/asset")).text();
+    expect(baked).toContain('<meta name="version-inject" content="saved">');
+    const assetResponse = await visit("/api/asset");
+    const asset = await assetResponse.text();
+    expect(asset).toBe(
+      baked.replace(
+        "<head>",
+        '<head><script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>',
+      ),
+    );
+    expect(assetResponse.headers.get("sf-fx-decorated")).toBeNull();
+    // Every inline customer script runs once, on a relayed page and on the
+    // worker's own.
+    const customerRuns = (html: string) => {
+      const view = new Window({
+        settings: {
+          enableJavaScriptEvaluation: true,
+          suppressInsecureJavaScriptEnvironmentWarning: true,
+        },
+      });
+      try {
+        view.document.write(html.replace(/<script[^>]*data-spacefast-sdk[^>]*><\/script>/g, ""));
+        return view.eval("window.__customer ?? 0");
+      } finally {
+        void view.happyDOM.close();
+      }
+    };
+    expect(customerRuns(asset)).toBe(1);
+    expect(customerRuns(pageHtml)).toBe(1);
+    // The origin stamps the read for the visitor request it answers, and a
+    // stamp moved onto another response is refused: that page keeps its own
+    // snippets.
+    // SAFETY: the fixture worker answers this route with `{ stamp }`, and the
+    // regex expectation below fails loudly on any other shape.
+    const { stamp } = (await (await visit("/api/asset-stamp")).json()) as { stamp: string | null };
+    expect(stamp).toMatch(/^[a-f0-9]{64}\.[a-f0-9]{64}$/);
+    const forged = await (await visit("/api/asset-forged")).text();
+    expect(forged).toContain('<meta name="version-inject" content="saved">');
+    expect(forged).toContain('<div id="end">end</div>');
+    const replayed = await (
+      await visit(`/api/asset-replay?stamp=${encodeURIComponent(String(stamp))}`)
+    ).text();
+    expect(replayed).toContain('<meta name="version-inject" content="saved">');
+    expect(replayed).toContain('<div id="end">end</div>');
+    // A partial with a body but no head or html keeps every byte, as on main:
+    // neither the SDK tag nor the version's snippets go into it.
+    const partial = await visit("/api/partial");
+    expect(await partial.text()).toBe("<body><main>Fragment</main></body>");
+    // Its bytes are the worker's, so its validator is too.
+    expect(partial.headers.get("etag")).toBe('"partial-v1"');
+    // The worker's validators describe its bytes, not the page with the SDK
+    // in it, and a revalidating page load never reaches the worker as one.
+    expect(page.headers.get("etag")).toBeNull();
+    expect(page.headers.get("last-modified")).toBeNull();
+    const revalidated = await fetch(`${edgeRt.baseUrl}/api/page`, {
+      headers: {
+        Connection: "close",
+        Host: "fx-multipart.test",
+        accept: "text/html",
+        "if-none-match": '"worker-v1"',
+      },
+    });
+    expect(revalidated.status).toBe(200);
+    expect(await revalidated.text()).toContain("data-spacefast-sdk");
+    expect(workerValidators).toEqual([null, null]);
+    // A Space that set `disable_all_injection` gets an SDK section saying so,
+    // and its worker's page leaves the relay with no platform tag: only the
+    // author's own snippets, as its static pages carry them.
+    const route = (sdk: { revision: string; injection?: boolean; config: object }) =>
+      putRoute(edgeRt, "spc_fx_multipart", "production", {
+        version_id: "ver_fx_multipart_1",
+        config: { ...publicAccessConfig({ mode: "website", site_title: "multipart" }), sdk },
+        production_hostnames: ["fx-multipart.test"],
+        noindex_production_hostnames: [],
+        version_hostnames: [],
+      });
+    await route({ revision: "sdk-1", injection: false, config: {} });
+    expect(await (await visit("/api/page")).text()).toBe(
+      pageHtml.replace(
+        '<script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>',
+        "",
+      ),
+    );
+    await route({ revision: "sdk-1", config: {} });
 
     // Exactly max_input_vars fields and max_file_uploads files: at a limit is
     // not over it. An empty file input counts only once the limit is reached
@@ -1068,9 +1299,14 @@ test("a multipart form reaches the worker whole, and one PHP cut short never rea
     }
     tooManyFields.append("photo", new File(["png bytes"], "photo.png", { type: "image/png" }));
     const before = received;
-    for (const truncatedForm of [oversized, tooMany, emptyAfterLimit, tooManyFields]) {
+    for (const [limit, truncatedForm] of Object.entries({
+      oversized,
+      tooMany,
+      emptyAfterLimit,
+      tooManyFields,
+    })) {
       const refused = await post(truncatedForm);
-      expect(refused.status).toBe(413);
+      expect(refused.status, limit).toBe(413);
       expect(await refused.json()).toMatchObject({ status: 413, code: "request_too_large" });
     }
     // Past max_multipart_body_parts with plenty still unread: php://input then

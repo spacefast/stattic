@@ -352,9 +352,13 @@ function _stattic_functions_assets_serve(string $privateRoot, string $spaceId, a
         }
     }
 
+    // The nonce of the dispatch the worker is answering, which the binding
+    // hands back so a decorated page is stamped for exactly that dispatch.
+    $nonce = is_array($frame) ? ($frame['nonce'] ?? null) : null;
     $GLOBALS['SPACEFAST_FUNCTIONS_ASSETS_REQUEST'] = [
         'space_id' => $spaceId,
         'version_id' => (string) $claims['version_id'],
+        'nonce' => is_string($nonce) && preg_match('/^[a-f0-9]{32}$/', $nonce) === 1 ? $nonce : '',
     ];
     require_once __DIR__ . '/serve.php';
     _stattic_serve_request($privateRoot, $method, $target, $path, $requestHost);

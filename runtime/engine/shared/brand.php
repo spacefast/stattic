@@ -38,10 +38,10 @@ const STATTIC_BRAND_CONFIG_KEY = 'SPACEFAST_BRAND_JSON';
  * - `problem_docs_base_url`  Base for RFC 9457 `type` URIs: `{base}/{code}`.
  * - `wordmark_url`  Image replacing the compiled-in SVG wordmark. Empty keeps
  *               the built-in mark, which is why the default path is byte-stable.
- * - `share_image_url`  The link-preview image a page gets when it declares
- *               none and has no screenshot ready. The finalizer writes the
- *               default into the page; any other value is substituted at serve
- *               time (shared/preview-images.php).
+ * - `share_image_url`  The fallback the finalizer writes into a page's
+ *               share-image placeholder. Serving never advertises it: the
+ *               placeholder becomes the page's own screenshot or nothing
+ *               (shared/og-image.php).
  * - `fonts`     Faces the built-in pages embed and preload, in CSS order. Empty
  *               is legitimate: a host whose pages use system stacks downloads
  *               nothing.

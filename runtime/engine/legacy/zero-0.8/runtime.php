@@ -113,7 +113,7 @@ function _stattic_invoke_zero(
         $runnerBody,
         $responseHeaders,
         $requestMethod,
-        _stattic_html_insert_snippets($serving)
+        _stattic_html_insert_payload($serving)
     );
 }
 function _stattic_zero_execute_envelope(array $envelope, array $config, string $encodeFailureMessage, int $timeoutMs = STATTIC_ZERO_RUNNER_TIMEOUT_MS): array
@@ -229,7 +229,7 @@ function _stattic_zero_send_runner_response(
     string $body,
     array $baseHeaders,
     string $requestMethod,
-    array $insertSnippets = []
+    array $insertPayload = []
 ): void
 {
     $status = (int) ($runnerResponse['status'] ?? 0);
@@ -260,7 +260,7 @@ function _stattic_zero_send_runner_response(
     // D44. Every header the response carries is set above, so the filter can
     // read the content type it matches on, and only the endpoint's own body
     // passes through it.
-    _stattic_html_insert_stream_begin($insertSnippets);
+    _stattic_html_insert_stream_begin($insertPayload);
     echo $body;
     _stattic_html_insert_stream_end();
     exit;

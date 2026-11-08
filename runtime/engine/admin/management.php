@@ -1638,6 +1638,11 @@ function _stattic_runtime_put_tombstones(string $privateRoot, string $spaceId, a
     ]);
 }
 
+// Kept unchanged from before the share-image route for control planes that
+// still call it after every publish. This engine serves share images from
+// `/__spacefast/og-image.<ext>` and never reads the record it writes. Delete
+// this handler, its route row in admin/api.php and shared/preview-images.php
+// once no control plane older than the og-image route is deployed.
 // Records which share-image screenshots the control plane has seen render for
 // the live version, replacing the previous record. Serving advertises only
 // these (_stattic_auto_share_image_ready). Only the live version's hosts can
@@ -1966,7 +1971,7 @@ function _stattic_runtime_route_config(mixed $raw): array
                 'revision' => is_string($sdk['revision'] ?? null) ? $sdk['revision'] : null,
                 'config' => $sdk['config'],
                 'body' => is_string($body) ? $body : null,
-            ]
+            ] + (is_bool($sdk['injection'] ?? null) ? ['injection' => $sdk['injection']] : [])
             : null;
     }
     return $config;

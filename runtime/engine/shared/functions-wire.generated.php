@@ -34,6 +34,7 @@ const SPACEFAST_FUNCTIONS_DISPATCH_HEADERS = [
     'spaceId' => 'sf-fx-space',
     'versionId' => 'sf-fx-version',
     'requestId' => 'sf-fx-request',
+    'assetsNonce' => 'sf-fx-assets-nonce',
     'dispatchToken' => 'sf-fx-dispatch-token',
 ];
 

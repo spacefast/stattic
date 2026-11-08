@@ -141,9 +141,6 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
     if (!function_exists('spacefast_content_model_sync_binding') || !function_exists('spacefast_content_sync_find_post')) {
         return false;
     }
-    if (function_exists('add_action')) {
-        add_action('wp_enqueue_scripts', '_stattic_wordpress_page_enqueue_assets');
-    }
     $binding = spacefast_content_model_sync_binding($route['bindingId']);
     if (!is_array($binding) || !in_array($binding['post_type'] ?? null, ['page', 'post'], true)) {
         return false;
@@ -232,7 +229,7 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
     _stattic_enforce_document_isolation();
     if ($requestMethod !== 'HEAD') {
         require_once __DIR__ . '/../shared/html-insert.php';
-        _stattic_html_insert_stream_begin(_stattic_html_insert_snippets($serving));
+        _stattic_html_insert_stream_begin(_stattic_html_insert_payload($serving));
         echo $document;
         _stattic_html_insert_stream_end();
     }
@@ -269,21 +266,6 @@ function _stattic_wordpress_page_template_markup(object $post): ?string
         }
     }
     return null;
-}
-
-/** Register the public Space SDK through WordPress's normal frontend asset hook. */
-function _stattic_wordpress_page_enqueue_assets(): void
-{
-    if (!function_exists('wp_enqueue_script')) {
-        return;
-    }
-    wp_enqueue_script(
-        'spacefast-sdk',
-        STATTIC_SPACEFAST_SDK_PATH,
-        [],
-        null,
-        ['strategy' => 'async', 'in_footer' => true]
-    );
 }
 
 function _stattic_wordpress_page_capture_hook(string $hook): string

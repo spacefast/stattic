@@ -1433,7 +1433,7 @@ function _stattic_runtime_overlay_sdk_section(string $privateRoot, string $space
             ? $sdk['revision']
             : null,
         'config' => $sdk['config'],
-    ];
+    ] + (is_bool($sdk['injection'] ?? null) ? ['injection' => $sdk['injection']] : []);
     $body = is_string($sdk['body'] ?? null) && $sdk['body'] !== '' ? $sdk['body'] : null;
     if ($body === null) {
         return $section;

@@ -37,6 +37,9 @@ const SPACEFAST_CONTROL_PATHS = [
     // Answered after the access check, beside sdk.js: whether a Space has
     // analytics is not for a visitor who may not view it.
     ['path' => STATTIC_SPACEFAST_TRACKER_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'tracker'],
+    // Answered after the access check for the page it names, so a private
+    // Space's share image is as private as the page.
+    ['path' => STATTIC_OG_IMAGE_PATH_PREFIX, 'match' => 'prefix', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'og_image'],
     // Each is authorized by its own signed token rather than by being a known path.
     ['path' => '/' . STATTIC_FUNCTIONS_BUNDLE_PREFIX, 'match' => 'prefix', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_artifact'],
     ['path' => '/' . STATTIC_FUNCTIONS_RELAY_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_relay'],

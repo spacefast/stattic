@@ -48,8 +48,15 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     authOAuthClientResources,
     authTeams,
   } = await import("../../apps/control-plane/src/db/schema/auth.js");
-  const { channels, runtimeBoxes, spaceHostnames, spaces } =
-    await import("../../apps/control-plane/src/db/schema/core.js");
+  const {
+    channels,
+    runtimeBoxes,
+    spaceHostnames,
+    spaces,
+    spacefastTagSets,
+    spacefastTagRevisions,
+    spacefastTagReleases,
+  } = await import("../../apps/control-plane/src/db/schema/core.js");
   const { createId } = await import("../../apps/control-plane/src/lib/ids.js");
   const { runtimeJwks } = await import("../../apps/control-plane/src/runtime/auth.js");
   const { createPoppyTestAgent } = await import("../../apps/control-plane/src/test/poppy-agent.js");
@@ -61,6 +68,12 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     cleanupSessionUser,
     cleanupTeam,
   } = await import("../../apps/control-plane/src/test/seed.js");
+  const { setFeatureFlagEnv } = await import("../../apps/control-plane/src/test/feature-flags.js");
+  const { tagGraphFromTemplateSelection } =
+    await import("../../packages/common/src/contracts/tags.js");
+  const { runOperationNow } = await import("../../apps/control-plane/src/operations/claimant.js");
+  const restoreTags = setFeatureFlagEnv("SPACEFAST_FLAG_TAGS", "enabled");
+  cleanup.defer(restoreTags);
   const app = createApp();
   const agent = await createPoppyTestAgent(
     app,
@@ -170,6 +183,52 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
       },
       { preconnect: originalFetch.preconnect },
     );
+    const tagSetId = createId("tgs");
+    const tagRevisionId = createId("tgv");
+    const graphFor = (value: string) =>
+      tagGraphFromTemplateSelection({
+        templateId: "custom-html",
+        id: "baked.demo",
+        delivery: "static",
+        placement: "head",
+        config: {
+          html: `<meta name="baked-demo" content="${value}"><script>window.__baked = "${value}";</script>`,
+        },
+      });
+    const space = await db.query.spaces.findFirst({ where: eq(spaces.id, spaceId) });
+    if (!space) throw new Error("Created Space is missing");
+    await db.insert(spacefastTagSets).values({
+      id: tagSetId,
+      tenantId: space.tenantId,
+      teamId,
+      scopeType: "space",
+      scopeId: spaceId,
+      name: "Baked demo",
+    });
+    await db.insert(spacefastTagRevisions).values({
+      id: tagRevisionId,
+      tagSetId,
+      revisionNumber: 1,
+      status: "published",
+      title: "Baked demo",
+      createdByActorJson: {},
+      validationJson: { valid: true, diagnostics: [], requiredApprovals: [], graphRevision: 1 },
+      graphJson: graphFor("saved"),
+      graphRevision: 1,
+      effectiveInputDigest: "effective:saved",
+      staticDigest: "static:saved",
+      dynamicDigest: "dynamic:saved",
+      sdkRevision: "sdk:saved",
+    });
+    await db.insert(spacefastTagReleases).values({
+      id: createId("tgr"),
+      tagSetId,
+      environment: "production",
+      revisionId: tagRevisionId,
+      sdkRevision: "sdk:saved",
+      staticDigest: "static:saved",
+      releasedByActorJson: {},
+    });
     const marker = `poppy-published-${randomUUID()}`;
     const html = `<!doctype html><html><head><title>Poppy publishing demo</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f5f8;color:#17213a;font:18px system-ui}main{max-width:700px;padding:64px;background:white;border-radius:20px;box-shadow:0 12px 50px #17213a12}small{color:#6752d5;font-weight:700}h1{font-size:48px;line-height:1.1;letter-spacing:-2px}p{line-height:1.7;color:#586277}code{font-size:12px;overflow-wrap:anywhere}</style></head><body><main><small>SPACEFAST × POPPY</small><h1>Published by a personal agent.</h1><p>Discovery → Sign in → Create a Space → Publish → Serve</p><p>This page was uploaded through the Spacefast API with a DPoP session token, finalized by the runtime worker, and served by the real PHP runtime.</p><code>${marker}</code></main></body></html>`;
     const form = new FormData();
@@ -202,6 +261,7 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     expect(served.status, await served.clone().text()).toBe(200);
     const servedHtml = await served.text();
     expect(servedHtml).toContain(marker);
+    expect(servedHtml).toContain('<meta name="baked-demo" content="saved">');
     const view = new Window({
       url: `https://${hostname.hostname}/`,
       settings: {
@@ -234,6 +294,80 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     } finally {
       await view.happyDOM.close();
     }
+    // Roll back original source bytes after both the live content and tag settings move.
+    const newer = new FormData();
+    newer.set("spaceId", spaceId);
+    newer.append(
+      "files",
+      new File([html.replaceAll(marker, "newer-content")], "index.html", { type: "text/html" }),
+    );
+    const humanHeaders = {
+      cookie: await sessionCookie(user.sessionToken),
+      origin: "https://my.sf.localhost",
+    };
+    const second = await app.request(publishUrl, {
+      method: "POST",
+      headers: humanHeaders,
+      body: newer,
+    });
+    expect(second.status, await second.clone().text()).toBe(201);
+    await db
+      .update(spacefastTagRevisions)
+      .set({ graphJson: graphFor("current"), graphRevision: 2 })
+      .where(eq(spacefastTagRevisions.id, tagRevisionId));
+    const rollbackUrl = `${API}/v1/spaces/${spaceId}/versions/${receipt.data.version.id}/promote?async=1`;
+    const restore = async (body: { refreshRewrites?: boolean }) => {
+      const response = await app.request(rollbackUrl, {
+        method: "POST",
+        headers: { ...humanHeaders, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      const result = z
+        .object({ data: z.object({ id: z.string() }), operation: z.object({ id: z.string() }) })
+        .parse(await response.json());
+      const outcome = await runOperationNow({ operationId: result.operation.id });
+      const pending = await db.query.operations.findFirst({
+        where: (row, { eq }) => eq(row.id, result.operation.id),
+      });
+      expect(outcome, JSON.stringify(pending)).toBe("succeeded");
+      const live = await db.query.channels.findFirst({ where: eq(channels.spaceId, spaceId) });
+      expect(live?.versionId).toBe(result.data.id);
+      const responseHtml = await (
+        await fetch(runtime.baseUrl, { headers: { host: hostname.hostname } })
+      ).text();
+      expect(responseHtml).toContain(marker);
+      expect(responseHtml).not.toContain("newer-content");
+      expect(responseHtml.match(/data-spacefast-sdk="v1"/g)).toHaveLength(1);
+      return { id: result.data.id, html: responseHtml };
+    };
+    const refreshed = await restore({});
+    expect(refreshed.id).not.toBe(receipt.data.version.id);
+    expect(refreshed.html.match(/name="baked-demo"/g)).toHaveLength(1);
+    expect(refreshed.html).toContain('name="baked-demo" content="current"');
+    expect(refreshed.html).not.toContain('content="saved"');
+    // Exact restoration uses the existing pointer-promotion job, without recompiling the saved version.
+    const exact = await app.request(rollbackUrl, {
+      method: "POST",
+      headers: { ...humanHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ refreshRewrites: false }),
+    });
+    expect(exact.status, await exact.clone().text()).toBe(200);
+    const exactReceipt = z
+      .object({
+        data: z.object({ id: z.string() }),
+        operation: z.object({
+          kind: z.string(),
+          resources: z.array(z.object({ type: z.string(), id: z.string() })),
+        }),
+      })
+      .parse(await exact.json());
+    expect(exactReceipt.data.id).toBe(receipt.data.version.id);
+    expect(exactReceipt.operation.kind).toBe("version_promote_live");
+    expect(exactReceipt.operation.resources).toContainEqual({
+      type: "version",
+      id: receipt.data.version.id,
+    });
   } finally {
     globalThis.fetch = originalFetch;
     runtime?.stop();
@@ -246,6 +380,14 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
       .where(eq(authOAuthClientResources.clientId, agent.clientId));
     await db.delete(authOAuthClients).where(eq(authOAuthClients.clientId, agent.clientId));
     if (spaceId) {
+      const tagSet = await db.query.spacefastTagSets.findFirst({
+        where: eq(spacefastTagSets.scopeId, spaceId),
+      });
+      if (tagSet) {
+        await db.delete(spacefastTagReleases).where(eq(spacefastTagReleases.tagSetId, tagSet.id));
+        await db.delete(spacefastTagRevisions).where(eq(spacefastTagRevisions.tagSetId, tagSet.id));
+        await db.delete(spacefastTagSets).where(eq(spacefastTagSets.id, tagSet.id));
+      }
       await db.delete(runtimeBoxes).where(eq(runtimeBoxes.spaceId, spaceId));
       await db.delete(spaceHostnames).where(eq(spaceHostnames.spaceId, spaceId));
       await db.delete(spaces).where(eq(spaces.id, spaceId));

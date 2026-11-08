@@ -372,6 +372,9 @@ function _stattic_spacefast_sdk_bootstrap(
     );
     // `window.Spacefast` is a private latch, not an API: it holds the
     // "already loading" flags so a page carrying two SDK tags boots once. The
+    // engine relies on this: it adds its tag to every dynamic response without
+    // looking for one the page already has (shared/html-insert.php). Every
+    // side effect below is latched or idempotent; a new one must be too. The
     // tracker goes before Comments, whose latch returns early, and whether or
     // not Comments is on.
     require_once __DIR__ . '/../shared/brand.php';
@@ -400,9 +403,21 @@ function _stattic_spacefast_sdk_bootstrap(
         // No proof is exposed to publisher JavaScript. Only the verified bridge identity travels.
         $reviewJson = json_encode($review, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
         $reviewUrl = json_encode(rtrim($collabBase, '/') . '/sdk/v1/review.js', JSON_UNESCAPED_SLASHES);
-        $loader .= ';(function(){var c=document.createElement("script");c.type="application/json";c.id="sf-visual-review";c.textContent=' . json_encode($reviewJson) . ';document.head.appendChild(c);var s=document.createElement("script");s.type="module";s.src=' . $reviewUrl . ';document.head.appendChild(s);})();';
+        $loader .= ';(function(){var root=window.Spacefast=window.Spacefast||{};if(root.reviewModule)return;root.reviewModule=true;var c=document.createElement("script");c.type="application/json";c.id="sf-visual-review";c.textContent=' . json_encode($reviewJson) . ';document.head.appendChild(c);var s=document.createElement("script");s.type="module";s.src=' . $reviewUrl . ';document.head.appendChild(s);})();';
     }
-    return $loader . ($embeddedTagBody !== '' ? "\n" . $embeddedTagBody : '');
+    // Old outputs can carry their own async SDK tag. Select a draft before
+    // either copy boots, even when the unqualified SDK came from an edge cache.
+    $previewRedirect = $previewToken !== null ? '' : (
+        'var p=(new URLSearchParams(window.location&&window.location.search||"").get(' .
+        json_encode(STATTIC_TAG_PREVIEW_QUERY_NAME) . ')||"").trim();' .
+        'if(p){if(!root.tagPreviewLoader){root.tagPreviewLoader=true;var s=document.createElement("script");s.src=' .
+        json_encode(STATTIC_SPACEFAST_SDK_PATH) . '+"?preview="+encodeURIComponent(p);document.head.appendChild(s);}return;}'
+    );
+    return '(function(){var root=window.Spacefast=window.Spacefast||{};' .
+        $previewRedirect . $loader .
+        ($embeddedTagBody !== '' ?
+            'if(!root.tagBodyStarted){root.tagBodyStarted=true;' . "\n" . $embeddedTagBody . "\n}" : '') .
+        '})();';
 }
 
 // Beacon's own lifetime for t.js, so a new tracker reaches pages as fast

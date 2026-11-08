@@ -267,12 +267,22 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
         consent: "wait",
       },
     },
-    body: "window.__embeddedTagLoaded=true;",
+    body: "window.__embeddedTagLoaded=true;window.__embeddedTagRuns=(window.__embeddedTagRuns||0)+1;",
   };
   await deploy(runtime, {
     spaceId: "spc_sdk",
     versionId: "ver_sdk_1",
-    files: { "index.html": '<h1>SDK</h1><script src="/__spacefast/sdk.js"></script>\n' },
+    // A page with no body element, which the compiler cannot bake the tag
+    // into: the runtime fills the gap, and on a tag-preview request its tag
+    // names the draft release.
+    files: { "index.html": "<html><head><title>SDK</title></head><h1>SDK</h1></html>\n" },
+    serving: {
+      config: {
+        inject: {
+          bodyEnd: ['<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>'],
+        },
+      },
+    },
     activate: {
       route_name: "production",
       config: accessConfig,
@@ -332,6 +342,7 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
     body +
       ";window.Spacefast.users.signInWithGoogle();window.Spacefast.users.signInWithGravatar();window.Spacefast.users.signInWithSpacefast();",
   )(fakeWindow, fakeDocument, browser);
+  expect(fakeWindow.__embeddedTagRuns).toBe(1);
   expect(assigned.map((url) => new URL(url).searchParams.get("provider"))).toEqual([
     "google",
     "gravatar",
@@ -414,6 +425,24 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   expect(previewSdk).toContain("preview=preview-token");
   // A draft is not a visit: a preview token loads no tracker.
   expect(previewSdk).not.toContain(RUNTIME_TRACKER_SCRIPT_PATH);
+  const whitespaceWindow = { location: { search: "?spacefast_tag_preview=%20" } };
+  Function("window", "document", body)(whitespaceWindow, fakeDocument);
+  expect(Object.hasOwn(whitespaceWindow, "__embeddedTagRuns")).toBe(true);
+  const draftWindow = { location: { search: "?spacefast_tag_preview=preview-token" } };
+  const draftScripts: Array<{ src: string }> = [];
+  const draftDocument = {
+    createElement: () => ({ src: "", dataset: {} }),
+    head: { appendChild: (script: { src: string }) => draftScripts.push(script) },
+  };
+  Function("window", "document", body)(draftWindow, draftDocument);
+  Function("window", "document", body)(draftWindow, draftDocument);
+  expect(Object.hasOwn(draftWindow, "__embeddedTagRuns")).toBe(false);
+  expect(draftScripts.map((script) => script.src)).toEqual([
+    "/__spacefast/sdk.js?preview=preview-token",
+  ]);
+  Function("window", "document", previewSdk)(draftWindow, draftDocument);
+  expect(Object.hasOwn(draftWindow, "__embeddedTagRuns")).toBe(false);
+  expect(draftScripts.filter((script) => script.src.includes("/tags/sdk.js")).length).toBe(1);
   for (const url of [
     `${RUNTIME_COLLAB_MANIFEST_PATH}?preview=preview-token`,
     RUNTIME_COLLAB_MANIFEST_PATH,
@@ -444,8 +473,21 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   expect(previewPage.headers.get("surrogate-control")).toBeNull();
   expect(previewPage.headers.get("set-cookie") ?? "").not.toContain("spacefast_tag_preview");
   const previewBody = await previewPage.text();
-  expect(previewBody).toContain("/__spacefast/sdk.js?preview=preview-token");
+  // The page carries no tag of its own: the runtime adds the one tag, first in
+  // <head>.
+  expect(previewBody).toContain(
+    '<head><script defer src="/__spacefast/sdk.js?preview=preview-token" data-spacefast-sdk="v1"></script>',
+  );
+  expect(previewBody.match(/data-spacefast-sdk/g)?.length).toBe(1);
+  // The link preview is the public live page's, never the draft session's.
+  expect(previewBody).toContain(
+    `<meta property="og:image" content="http://${SITE}/__spacefast/og-image.jpg?path=%2F">`,
+  );
   expect(previewPage.headers.get("content-length")).toBe(String(Buffer.byteLength(previewBody)));
+  // A preview page never revalidates against the live page's validator.
+  const livePage = await get(runtime, SITE, "/");
+  expect(await livePage.text()).not.toContain("preview=");
+  expect(previewPage.headers.get("etag")).not.toBe(livePage.headers.get("etag"));
 
   const previewHead = await get(runtime, SITE, "/?spacefast_tag_preview=preview-token", {
     method: "HEAD",
@@ -534,17 +576,16 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   expect(reviewedSdk.status).toBe(200);
   expect(reviewedSdk.headers.get("cache-control")).toBe("private, no-store");
   const reviewNodes: Array<{ id?: string; type?: string; src?: string; textContent?: string }> = [];
-  Function(
-    "window",
-    "document",
-    await reviewedSdk.text(),
-  )(
-    {},
-    {
-      createElement: () => ({}),
-      head: { appendChild: (node: (typeof reviewNodes)[number]) => reviewNodes.push(node) },
-    },
-  );
+  // The engine adds its SDK tag without looking for the page's own, so a page
+  // can load the bootstrap twice: the review module still loads once.
+  const reviewWindow = {};
+  const reviewDocument = {
+    createElement: () => ({}),
+    head: { appendChild: (node: (typeof reviewNodes)[number]) => reviewNodes.push(node) },
+  };
+  const reviewedBody = await reviewedSdk.text();
+  Function("window", "document", reviewedBody)(reviewWindow, reviewDocument);
+  Function("window", "document", reviewedBody)(reviewWindow, reviewDocument);
   // Neither is a review on a version host: the review script and no tracker.
   expect(reviewNodes.map((node) => node.src).filter(Boolean)).toEqual([
     "https://cast.example.test/sdk/v1/review.js",

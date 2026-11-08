@@ -1790,3 +1790,22 @@ export function journalRecords(rt: Runtime): Array<Record<string, unknown>> {
     .filter((line) => line.trim() !== "")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
+
+/**
+ * Space mail calls back into this runtime while the handler's request is still
+ * open, so the suite's `php -S` needs PHP_CLI_SERVER_WORKERS set at start. This
+ * points the broker at that server, where a box would use its own hostname.
+ */
+export function enableSpaceMailEndpoint(rt: { baseUrl: string; storageRoot: string }): void {
+  const configPath = path.join(rt.storageRoot, "config.php");
+  const existing = existsSync(configPath)
+    ? readFileSync(configPath, "utf8")
+    : "<?php\nreturn [\n];\n";
+  writeFileSync(
+    configPath,
+    existing.replace(
+      "return [",
+      `return [\n    'SPACEFAST_SERVICE_EMAIL_URL' => '${rt.baseUrl}/__spacefast/mail.php',`,
+    ),
+  );
+}

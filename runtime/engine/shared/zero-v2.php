@@ -145,7 +145,7 @@ function _stattic_zero_v2_mail_variables(): array
 /**
  * Hand one queued mail.send message to the Space's mail path: the same service
  * broker frame sf_email() sends. The broker checks the sender's domain, and
- * space-mail.php reserves the daily recipient allowance before wp_mail().
+ * the mail endpoint reserves the daily recipient allowance before wp_mail().
  * The route's email and billing settings are read at send time, so a demoted
  * domain or a lowered allowance applies to messages already queued.
  */
@@ -157,7 +157,7 @@ function _stattic_zero_v2_mail_send(array $message): bool
     if ($overlay === null) throw new RuntimeException('Space mail routing is unavailable.');
     $privateRoot = (string) $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'];
     $spaceId = (string) $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'];
-    // The broker environment names the usage and WordPress roots from this binding.
+    // The broker's mail grant is signed with this binding's private-root key.
     if (_stattic_access_private_root() === '') _stattic_access_private_root($privateRoot);
     $env = _stattic_service_broker_env(['spaceId' => $spaceId, 'invocationId' => ''], [
         'billing' => is_array($overlay['billing'] ?? null) ? $overlay['billing'] : [],

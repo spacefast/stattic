@@ -63,6 +63,7 @@ const SPACEFAST_RUNTIME_ENTRYPOINT_PATHS = [
     STATTIC_RUNTIME_NAMESPACE_PATH . '/content-admin.php' => true,
     STATTIC_RUNTIME_NAMESPACE_PATH . '/content.php' => true,
     STATTIC_RUNTIME_NAMESPACE_PATH . '/health.php' => true,
+    STATTIC_RUNTIME_NAMESPACE_PATH . '/mail.php' => true,
     STATTIC_RUNTIME_NAMESPACE_PATH . '/upload.php' => true,
 ];
 // END GENERATED runtime entrypoints

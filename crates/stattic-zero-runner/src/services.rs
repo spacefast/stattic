@@ -23,7 +23,7 @@
 //! has no such key gets a refusal, not a key belonging to somebody else.
 
 use std::cell::RefCell;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -61,6 +61,10 @@ const SITE_AKISMET_KEY_ENV: &str = "WPCOM_API_KEY";
 /// this space shares. A slow upstream must surface as a refusal quickly rather
 /// than hold the slot until the request itself times out.
 const SERVICE_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+const EMAIL_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// Each send holds two FPM workers: the waiting handler and the mail endpoint.
+/// A box has 10 by default, so this leaves room for the endpoint and visitors.
+const EMAIL_IN_FLIGHT_MAX: usize = 4;
 
 /// Upstream bodies are small — a profile document or the literal `true`. A
 /// larger response means something other than the service we asked for.
@@ -201,9 +205,9 @@ struct ServiceConfig {
     /// The primary sending domain from this Space's trusted route config.
     email_domain: Option<String>,
     invocation_id: String,
-    email_php: Option<String>,
-    email_script: Option<String>,
-    email_root: Option<String>,
+    email_url: Option<String>,
+    email_grant: Option<String>,
+    email_slots_root: Option<String>,
     content_url: Option<String>,
     content_cookie: Option<String>,
     content_authorization: Option<String>,
@@ -234,9 +238,9 @@ impl ServiceConfig {
             email_domain: value("SPACEFAST_SERVICE_EMAIL_DOMAIN")
                 .map(|domain| domain.to_ascii_lowercase()),
             invocation_id: value("SPACEFAST_SERVICE_INVOCATION_ID").unwrap_or_default(),
-            email_php: value("SPACEFAST_SERVICE_EMAIL_PHP"),
-            email_script: value("SPACEFAST_SERVICE_EMAIL_SCRIPT"),
-            email_root: value("SPACEFAST_SERVICE_EMAIL_ROOT"),
+            email_url: value("SPACEFAST_SERVICE_EMAIL_URL"),
+            email_grant: value("SPACEFAST_SERVICE_EMAIL_GRANT"),
+            email_slots_root: value("SPACEFAST_SERVICE_USAGE_ROOT"),
             content_url: value("SPACEFAST_SERVICE_CONTENT_URL"),
             content_cookie: value("SPACEFAST_SERVICE_CONTENT_COOKIE"),
             content_authorization: value("SPACEFAST_SERVICE_CONTENT_AUTHORIZATION"),
@@ -800,46 +804,113 @@ fn email_send(
             format!("The From address must use this Space's primary domain: {domain}."),
         ));
     }
-    let (Some(php), Some(script), Some(root)) = (
-        config.email_php.as_deref(),
-        config.email_script.as_deref(),
-        config.email_root.as_deref(),
+    let (Some(url), Some(grant), Some(slots_root)) = (
+        config.email_url.as_deref(),
+        config.email_grant.as_deref(),
+        config.email_slots_root.as_deref(),
     ) else {
         return Err(BrokerRefusal::new(
             "service_not_configured",
             "The site mail transport is not configured.",
         ));
     };
-    let unavailable = || {
+    if !email_url_valid(url) {
+        return Err(BrokerRefusal::new(
+            "service_not_configured",
+            "The site mail transport is not configured.",
+        ));
+    }
+    // Held until this function returns; the OS releases it if the runner dies.
+    let _slot = email_slot(slots_root).ok_or_else(|| {
         BrokerRefusal::new(
             "service_upstream_unavailable",
-            "The mail transport could not be invoked.",
+            "The mail transport is busy. Try again shortly.",
         )
+    })?;
+    let encoded = Value::Object(payload.clone()).to_string();
+    let response = email_agent()
+        .post(url)
+        .header("content-type", "application/json")
+        .header("x-sf-mail-grant", grant)
+        .send(encoded.as_bytes())
+        .map_err(|error| {
+            match error {
+                ureq::Error::StatusCode(status) => {
+                    eprintln!("space mail endpoint answered status={status}");
+                }
+                _ => eprintln!("space mail endpoint could not be reached"),
+            }
+            email_transport_unavailable()
+        })?;
+    let body = read_body(response).map_err(|_| {
+        eprintln!("space mail endpoint body could not be read");
+        email_transport_unavailable()
+    })?;
+    let receipt: EmailReceipt = serde_json::from_str(&body).map_err(|_| {
+        eprintln!("space mail endpoint body was not a receipt");
+        email_transport_unavailable()
+    })?;
+    Ok(Value::Bool(receipt.accepted))
+}
+
+/// One of the box's send slots, or None when none can be held. Lock files because
+/// each handler runs in its own runner process. The mail endpoint writes quota to
+/// this same storage, so a box that cannot open a slot could not send anyway.
+fn email_slot(root: &str) -> Option<std::fs::File> {
+    let directory = std::path::Path::new(root).join("runtime");
+    std::fs::create_dir_all(&directory).ok()?;
+    (0..EMAIL_IN_FLIGHT_MAX).find_map(|slot| {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join(format!("space-mail-slot-{slot}.lock")))
+            .ok()?;
+        file.try_lock().ok()?;
+        Some(file)
+    })
+}
+
+#[derive(Deserialize)]
+struct EmailReceipt {
+    accepted: bool,
+}
+
+fn email_transport_unavailable() -> BrokerRefusal {
+    BrokerRefusal::new(
+        "service_upstream_unavailable",
+        "The mail transport could not be invoked.",
+    )
+}
+
+/// Longer than the platform services because a send boots WordPress, and no
+/// redirects because the grant must not follow one.
+fn email_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(EMAIL_HTTP_TIMEOUT))
+                .max_redirects(0)
+                .build(),
+        )
+    })
+}
+
+/// HTTPS everywhere; plain HTTP only to loopback, where the runtime tests serve.
+fn email_url_valid(url: &str) -> bool {
+    let path = "/__spacefast/mail.php";
+    let authority = match (
+        url.strip_prefix("https://"),
+        url.strip_prefix("http://127.0.0.1:"),
+    ) {
+        (Some(rest), _) => rest.strip_suffix(path),
+        (_, Some(rest)) => rest
+            .strip_suffix(path)
+            .filter(|port| port.chars().all(|c| c.is_ascii_digit())),
+        _ => None,
     };
-    let mut child = Command::new(php)
-        .args(["-d", "auto_prepend_file=", script, root])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|_| unavailable())?;
-    let input = serde_json::to_vec(payload).map_err(|_| unavailable())?;
-    let write_result = child
-        .stdin
-        .take()
-        .ok_or_else(unavailable)?
-        .write_all(&input);
-    if write_result.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(unavailable());
-    }
-    let output = child.wait_with_output().map_err(|_| unavailable())?;
-    if !output.status.success() {
-        return Err(unavailable());
-    }
-    let accepted: bool = serde_json::from_slice(&output.stdout).map_err(|_| unavailable())?;
-    Ok(Value::Bool(accepted))
+    authority.is_some_and(|value| !value.is_empty() && !value.contains(['@', '\\', '/', '?', '#']))
 }
 
 fn email_sender_matches(address: &str, expected_domain: &str) -> bool {
@@ -991,6 +1062,144 @@ mod tests {
         // is checked first — so it never reaches the operation table at all.
         let (code, _) = refusal(&frame("sms", "send", json!({})));
         assert_eq!(code, "service_capability_denied");
+    }
+
+    /// Answers one request with `response` and hands back what it received.
+    fn email_endpoint(response: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!(
+            "http://127.0.0.1:{}/__spacefast/mail.php",
+            listener.local_addr().expect("address").port()
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut received = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).expect("read");
+                assert_ne!(
+                    read, 0,
+                    "the broker closed before sending the whole request"
+                );
+                received.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&received);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(|value| value.parse::<usize>().expect("length"))
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= length {
+                        break;
+                    }
+                }
+            }
+            stream.write_all(response.as_bytes()).expect("write");
+            String::from_utf8_lossy(&received).into_owned()
+        });
+        (url, handle)
+    }
+
+    fn email_attempt(url: String) -> Result<Value, BrokerRefusal> {
+        let config = ServiceConfig {
+            email_domain: Some("example.com".to_string()),
+            email_url: Some(url),
+            email_grant: Some("signed-grant".to_string()),
+            email_slots_root: Some(
+                tempfile::tempdir()
+                    .expect("temp dir")
+                    .keep()
+                    .to_str()
+                    .expect("utf-8")
+                    .to_string(),
+            ),
+            ..ServiceConfig::from_env()
+        };
+        let payload = json!({ "from": { "email": "hello@example.com" }, "subject": "Hi" });
+        email_send(&config, payload.as_object().expect("object"))
+    }
+
+    #[test]
+    fn email_sends_the_grant_and_returns_the_transport_result() {
+        let (url, endpoint) = email_endpoint(
+            "HTTP/1.1 200 OK\r\ncontent-length: 18\r\nconnection: close\r\n\r\n{\"accepted\":false} ",
+        );
+        assert_eq!(email_attempt(url).expect("receipt"), Value::Bool(false));
+        let received = endpoint.join().expect("endpoint");
+        assert!(received.starts_with("POST /__spacefast/mail.php "));
+        assert!(received
+            .to_ascii_lowercase()
+            .contains("x-sf-mail-grant: signed-grant"));
+        assert!(received.contains("\"subject\":\"Hi\""));
+    }
+
+    #[test]
+    fn email_reports_a_failed_or_unreadable_endpoint_as_unavailable() {
+        for response in [
+            "HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\ncontent-length: 15\r\nconnection: close\r\n\r\n<h1>Error</h1> \n",
+            "HTTP/1.1 302 Found\r\nlocation: https://elsewhere.example/\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        ] {
+            let (url, endpoint) = email_endpoint(response);
+            let refusal = email_attempt(url).expect_err("refused");
+            let (code, _) = super::tests::refusal(&refusal.refusal_json());
+            assert_eq!(code, "service_upstream_unavailable", "{response}");
+            endpoint.join().expect("endpoint");
+        }
+        let refused = email_attempt("http://127.0.0.1:1/__spacefast/mail.php".to_string())
+            .expect_err("unreachable");
+        let (code, _) = super::tests::refusal(&refused.refusal_json());
+        assert_eq!(code, "service_upstream_unavailable");
+    }
+
+    #[test]
+    fn email_refuses_without_calling_the_endpoint_when_every_slot_is_busy() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let root_path = root.path().to_str().expect("utf-8").to_string();
+        let held: Vec<_> = (0..EMAIL_IN_FLIGHT_MAX)
+            .map(|_| email_slot(&root_path).expect("free slot"))
+            .collect();
+        assert!(email_slot(&root_path).is_none());
+        let config = ServiceConfig {
+            email_domain: Some("example.com".to_string()),
+            // Nothing listens here, so reaching it would report a different message.
+            email_url: Some("http://127.0.0.1:1/__spacefast/mail.php".to_string()),
+            email_grant: Some("signed-grant".to_string()),
+            email_slots_root: Some(root_path.clone()),
+            ..ServiceConfig::from_env()
+        };
+        let payload = json!({ "from": { "email": "hello@example.com" }, "subject": "Hi" });
+        let refusal = email_send(&config, payload.as_object().expect("object")).expect_err("busy");
+        let (code, message) = super::tests::refusal(&refusal.refusal_json());
+        assert_eq!(code, "service_upstream_unavailable");
+        assert!(message.contains("busy"), "{message}");
+        drop(held);
+        assert!(email_slot(&root_path).is_some());
+        assert!(email_slot("/dev/null/not-a-directory").is_none());
+    }
+
+    #[test]
+    fn email_only_posts_to_the_mail_endpoint_over_a_safe_transport() {
+        assert!(email_url_valid("https://box.example/__spacefast/mail.php"));
+        assert!(email_url_valid(
+            "http://127.0.0.1:8080/__spacefast/mail.php"
+        ));
+        for url in [
+            "http://box.example/__spacefast/mail.php",
+            "https://box.example/elsewhere.php",
+            "https://user@box.example/__spacefast/mail.php",
+            "https:///__spacefast/mail.php",
+            "http://127.0.0.1:80/x/__spacefast/mail.php",
+        ] {
+            assert!(!email_url_valid(url), "{url}");
+        }
     }
 
     #[test]
@@ -1316,9 +1525,9 @@ mod tests {
             blog_url: None,
             email_domain: None,
             invocation_id: String::new(),
-            email_php: None,
-            email_script: None,
-            email_root: None,
+            email_url: None,
+            email_grant: None,
+            email_slots_root: None,
             content_url: None,
             content_cookie: Some("__Host-spacefast_session=session".to_string()),
             content_authorization: Some("Bearer sfa_access_token".to_string()),

@@ -82,12 +82,35 @@ $mailPayload['headers'] = [];
 $mailBootstrapRoot = realpath(sys_get_temp_dir()) . '/sf-mail-grant-' . bin2hex(random_bytes(6));
 mkdir($mailBootstrapRoot);
 file_put_contents($mailBootstrapRoot . '/wp-load.php', '<?php throw new RuntimeException("mail_bootstrap_without_grant");');
-$mailUsageRoot = getenv('SPACEFAST_SERVICE_USAGE_ROOT');
-putenv('SPACEFAST_SERVICE_USAGE_ROOT');
+$mailPrivateRoot = $mailBootstrapRoot . '/.stattic/storage';
+mkdir($mailPrivateRoot . '/runtime', 0777, true);
+$mailPreviousPrivateRoot = _stattic_access_private_root();
+_stattic_access_private_root($mailPrivateRoot);
 try {
-    check(!_stattic_space_mail_send($mailPayload, $mailBootstrapRoot), 'Space mail requires a metered grant before WordPress bootstrap');
+    check(
+        !_stattic_space_mail_send($mailPayload, $mailBootstrapRoot, $mailPrivateRoot, ['space_id' => 'spc_mail', 'sender_domain' => 'another.example', 'limit' => 5, 'exp' => time() + 60]),
+        'Space mail refuses a sender outside its grant before WordPress bootstrap'
+    );
+    $mailGrant = _stattic_space_mail_mint_grant($mailPrivateRoot, 'spc_mail', 'example.com', 5);
+    check(is_string($mailGrant), 'the runtime mints a mail grant');
+    $mailClaims = _stattic_space_mail_verify_grant($mailPrivateRoot, (string) $mailGrant);
+    check(($mailClaims['space_id'] ?? null) === 'spc_mail' && ($mailClaims['sender_domain'] ?? null) === 'example.com' && ($mailClaims['limit'] ?? null) === 5, 'a mail grant carries its allowance');
+    [$mailGrantClaims, $mailGrantSignature] = explode('.', (string) $mailGrant);
+    $forgedClaims = _stattic_base64url_encode((string) json_encode(['space_id' => 'spc_mail', 'sender_domain' => 'example.com', 'limit' => 5000, 'exp' => time() + 60]));
+    check(_stattic_space_mail_verify_grant($mailPrivateRoot, $forgedClaims . '.' . $mailGrantSignature) === null, 'a mail grant cannot be edited');
+    $mailKey = _stattic_lazy_minted_secret($mailPrivateRoot, 'space-mail-key', 32);
+    $expiredClaims = _stattic_base64url_encode((string) json_encode(['space_id' => 'spc_mail', 'sender_domain' => 'example.com', 'limit' => 5, 'exp' => time() - 1]));
+    check(_stattic_space_mail_verify_grant($mailPrivateRoot, $expiredClaims . '.' . hash_hmac('sha256', $expiredClaims, (string) $mailKey)) === null, 'an expired mail grant is refused');
+    check(_stattic_space_mail_mint_grant($mailPrivateRoot, 'spc_mail', 'example.com', 0) === null, 'no allowance mints no mail grant');
 } finally {
-    putenv($mailUsageRoot === false ? 'SPACEFAST_SERVICE_USAGE_ROOT' : 'SPACEFAST_SERVICE_USAGE_ROOT=' . $mailUsageRoot);
+    _stattic_access_private_root($mailPreviousPrivateRoot);
+    @unlink($mailPrivateRoot . '/runtime/space-mail-key.json');
+    foreach ((array) glob($mailPrivateRoot . '/runtime/*') as $mailLeftover) {
+        @unlink((string) $mailLeftover);
+    }
+    @rmdir($mailPrivateRoot . '/runtime');
+    @rmdir($mailPrivateRoot);
+    @rmdir($mailBootstrapRoot . '/.stattic');
     unlink($mailBootstrapRoot . '/wp-load.php');
     rmdir($mailBootstrapRoot);
 }

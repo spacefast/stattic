@@ -27,7 +27,7 @@
     "engine/entrypoints/content-media.php",
     "engine/entrypoints/health.php",
     "engine/entrypoints/invoke.php",
-    "engine/runtime/space-mail.php",
+    "engine/entrypoints/mail.php",
     "engine/entrypoints/management.php",
     "engine/entrypoints/upload.php",
     "engine/init.php",
@@ -188,6 +188,10 @@
     {
       "source": "custom-redirects.php",
       "path": "__spacefast/health.php"
+    },
+    {
+      "source": "custom-redirects.php",
+      "path": "__spacefast/mail.php"
     },
     {
       "source": "custom-redirects.php",

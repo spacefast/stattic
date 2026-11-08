@@ -184,7 +184,6 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
     $env = [
         'SPACEFAST_SERVICE_USAGE_ROOT' => $privateRoot,
         'SPACEFAST_SERVICE_SPACE_ID' => $spaceId,
-        'SPACEFAST_SERVICE_EMAIL_DAILY_LIMIT' => isset($config['billing']['emailRecipientsDaily']) ? (string) $config['billing']['emailRecipientsDaily'] : '',
         'SPACEFAST_SERVICE_USAGE_PHP' => _stattic_runtime_php_cli_binary(),
         'SPACEFAST_SERVICE_USAGE_SCRIPT' => dirname(__DIR__) . '/runtime/usage.php',
     ];
@@ -219,18 +218,26 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
     $emailDomain = is_string($config['email']['senderDomain'] ?? null)
         ? strtolower(trim($config['email']['senderDomain']))
         : '';
-    if ((int) ($config['billing']['emailRecipientsDaily'] ?? 0) > 0 && $emailDomain !== '') {
+    $emailLimit = (int) ($config['billing']['emailRecipientsDaily'] ?? 0);
+    if ($emailLimit > 0 && $emailDomain !== '') {
         $env['SPACEFAST_SERVICE_EMAIL_DOMAIN'] = $emailDomain;
-        $env['SPACEFAST_SERVICE_EMAIL_PHP'] = _stattic_runtime_php_cli_binary();
-        $env['SPACEFAST_SERVICE_EMAIL_SCRIPT'] = dirname(__DIR__) . '/runtime/space-mail.php';
-        if ($privateRoot !== '') {
-            $env['SPACEFAST_SERVICE_EMAIL_ROOT'] = dirname($privateRoot, 2);
+        require_once __DIR__ . '/space-mail.php';
+        // The box's own hostname: it always reaches this site, whichever host
+        // the visitor used, and a stale sender domain could name someone else's.
+        $mailUrl = _stattic_config_value('SPACEFAST_SERVICE_EMAIL_URL');
+        if ($mailUrl === '') {
+            $boxHostname = _stattic_config_value('SPACEFAST_MANAGEMENT_HOSTNAME');
+            $mailUrl = $boxHostname === '' ? '' : 'https://' . $boxHostname . STATTIC_SPACE_MAIL_ENDPOINT_PATH;
         }
-        foreach (['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD'] as $name) {
-            $value = _stattic_config_value($name);
-            if ($value !== '') {
-                $env[$name] = $value;
-            }
+        $mailGrant = _stattic_space_mail_mint_grant(
+            $privateRoot,
+            $spaceId,
+            $emailDomain,
+            $emailLimit
+        );
+        if ($mailUrl !== '' && $mailGrant !== null) {
+            $env['SPACEFAST_SERVICE_EMAIL_URL'] = $mailUrl;
+            $env['SPACEFAST_SERVICE_EMAIL_GRANT'] = $mailGrant;
         }
     }
     return $env;

@@ -75,6 +75,20 @@ export const ENTRYPOINT_PROBES = entrypointProbeCatalog({
       }),
     verify: (response) => expectErrorCode(response, 401, "runtime_unauthorized"),
   },
+  "/__spacefast/mail.php": {
+    request: (rt) =>
+      fetch(`${rt.baseUrl}/__spacefast/mail.php`, {
+        method: "POST",
+        headers: { "x-sf-mail-grant": "forged.grant" },
+        body: "{}",
+      }),
+    verify: async (response) => {
+      const body = await response.text();
+      if (response.status !== 401 || !body.includes("space_mail_grant_invalid")) {
+        throw new Error(`expected the grant refusal, got ${response.status}: ${body}`);
+      }
+    },
+  },
   "/__spacefast/health.php": {
     request: (rt) => fetch(`${rt.baseUrl}/__spacefast/health.php`, { redirect: "manual" }),
     verify: async (response) => {

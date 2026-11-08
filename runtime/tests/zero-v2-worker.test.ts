@@ -14,6 +14,7 @@ import {
 import {
   api,
   createDeclaredSession,
+  enableSpaceMailEndpoint,
   finalize,
   publicAccessConfig,
   putRoute,
@@ -52,6 +53,7 @@ test(
         SPACEFAST_ZERO_DATABASE_URL: db.url,
       },
     });
+    enableSpaceMailEndpoint(rt);
     const { promise: enteredSink, resolve: entered } = Promise.withResolvers<void>();
     const { promise: releaseSink, resolve: release } = Promise.withResolvers<void>();
     let hold = true;
@@ -89,11 +91,11 @@ test(
         path.join(rt.root, "wp-content/mu-plugins/worker-proof.php"),
         `<?php if (defined('WP_CLI') && WP_CLI && isset($GLOBALS['SPACEFAST_ZERO_V2_ENVIRONMENT'])) file_put_contents(${JSON.stringify(marker)}, $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']."\\n", FILE_APPEND); add_action('worker_core_proof', static function () { update_option('worker_core_proof', $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']); }); add_action('worker_as_proof', static function () { update_option('worker_as_proof', $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']); });`,
       );
-      // The Space's real mail path ends in wp_mail(); capture it there, on the sender domain Atomic names.
+      // The Space's real mail path ends in wp_mail() inside the mail endpoint; capture it there.
       const mailCapture = path.join(work, "mail-capture.jsonl");
       writeFileSync(
         path.join(rt.root, "wp-content/mu-plugins/mail-capture.php"),
-        `<?php if (!defined('DOMAIN_NAME')) define('DOMAIN_NAME', 'worker-a.test'); add_filter('pre_wp_mail', static function ($short, array $atts) { file_put_contents(${JSON.stringify(mailCapture)}, json_encode(['to' => $atts['to'], 'subject' => $atts['subject'], 'headers' => $atts['headers'], 'host' => $_SERVER['HTTP_HOST'] ?? null]) . "\\n", FILE_APPEND); return true; }, 10, 2);`,
+        `<?php add_filter('pre_wp_mail', static function ($short, array $atts) { file_put_contents(${JSON.stringify(mailCapture)}, json_encode(['to' => $atts['to'], 'subject' => $atts['subject'], 'headers' => $atts['headers'], 'host' => $_SERVER['HTTP_HOST'] ?? null]) . "\\n", FILE_APPEND); return true; }, 10, 2);`,
       );
       const files = {
         "zero.config.ts": `
@@ -396,8 +398,8 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         ),
         a,
       );
-      // mail.send leaves through the Space's mail path: the broker's sender-domain check, then
-      // space-mail.php's daily recipient allowance and wp_mail(). No second transport exists.
+      // mail.send leaves through the Space's mail path: the broker's sender-domain check, then the
+      // mail endpoint's daily recipient allowance and wp_mail(). No second transport exists.
       await putRoute(rt, a, "production", {
         version_id: "ver_worker_live",
         // The Space also answers on a second hostname that is not its sending domain.

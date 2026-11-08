@@ -43,9 +43,9 @@ Space mail is sent once through the site's `wp_mail` transport. The runtime
 returns whether the transport accepted the message. A positive daily allowance
 and the primary domain in the route config grant email to a Space.
 Any valid mailbox at that exact domain can send. Aliases and subdomains cannot.
-The transport refuses mail until Atomic's current primary matches the Space's
-intended primary domain. It checks that identity after WordPress bootstrap on
-every send, so either order of domain promotion and route updates is safe.
+The route's sender domain, carried in a signed grant, authorizes each send. The
+runtime cannot recheck Atomic's current primary under FPM, so a stale route can
+send from a demoted domain until its refresh lands.
 Mail needs no application database or control-plane mailbox, queue or drainer.
 
 Functions and Zero require `from`; the PHP helper defaults to
@@ -56,8 +56,8 @@ See [RUNNING.md](../RUNNING.md#space-mail-on-wp-cloud) for DNS and provider limi
 The direct-mail cutover discards pending messages in the old Space mail outbox.
 It does not replay them through the new transport. Platform account and
 notification email belongs to the control plane and is never routed through this transport.
-The host-owned `space-mail.php` entrypoint requires a metered Space grant;
-there is no unmetered production entrypoint.
+The host-owned `/__spacefast/mail.php` entrypoint requires a signed, metered
+Space grant; there is no unmetered production entrypoint.
 
 ## Shared HTML source
 

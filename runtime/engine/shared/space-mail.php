@@ -1,6 +1,15 @@
 <?php
 declare(strict_types=1);
 
+const STATTIC_SPACE_MAIL_ENDPOINT_PATH = '/__spacefast/mail.php';
+const STATTIC_SPACE_MAIL_GRANT_SERVER_VAR = 'HTTP_X_SF_MAIL_GRANT';
+const STATTIC_SPACE_MAIL_GRANT_TTL_SECONDS = 300;
+const STATTIC_SPACE_MAIL_REQUEST_MAX_BYTES = 1048576;
+// Caps each SMTP wait, not the whole send, below the broker's 15s timeout. Once
+// the broker gives up it frees its send slot, so a hung relay must not keep
+// this FPM worker for PHPMailer's default 300s per wait.
+const STATTIC_SPACE_MAIL_SMTP_TIMEOUT_SECONDS = 10;
+
 function _stattic_space_mail_address(mixed $value): ?string
 {
     if (!is_array($value) || !is_string($value['email'] ?? null)) {
@@ -123,64 +132,133 @@ function _stattic_space_mail_arguments(array $payload): ?array
         'headers' => $headers,
         'alt_body' => $altBody,
         'recipients' => count($to) + count($cc) + count($bcc),
+        'from_named' => is_array($payload['from'] ?? null) && array_key_exists('name', $payload['from']),
     ];
 }
 
-function _stattic_space_mail_transport(array $mail, string $publicRoot): bool
+/**
+ * A grant lets the service broker send for one Space. Only the runtime can mint
+ * one: the key never leaves this box's private root, and tenant code never sees
+ * the broker's environment. The claims are the allowance the route granted when
+ * the handler started.
+ */
+function _stattic_space_mail_mint_grant(string $privateRoot, string $spaceId, string $senderDomain, int $limit): ?string
+{
+    require_once __DIR__ . '/storage.php';
+    $key = _stattic_lazy_minted_secret($privateRoot, 'space-mail-key', 32);
+    if (!is_string($key) || $spaceId === '' || $senderDomain === '' || $limit <= 0) {
+        return null;
+    }
+    $encoded = _stattic_base64url_encode((string) json_encode([
+        'space_id' => $spaceId,
+        'sender_domain' => $senderDomain,
+        'limit' => $limit,
+        'exp' => time() + STATTIC_SPACE_MAIL_GRANT_TTL_SECONDS,
+    ]));
+    return $encoded . '.' . hash_hmac('sha256', $encoded, $key);
+}
+
+/** @return array{space_id:string,sender_domain:string,limit:int,exp:int}|null */
+function _stattic_space_mail_verify_grant(string $privateRoot, string $grant): ?array
+{
+    require_once __DIR__ . '/storage.php';
+    $parts = explode('.', $grant);
+    if (count($parts) !== 2) {
+        return null;
+    }
+    $key = _stattic_lazy_minted_secret($privateRoot, 'space-mail-key', 32);
+    if (!is_string($key) || !hash_equals(hash_hmac('sha256', $parts[0], $key), $parts[1])) {
+        return null;
+    }
+    $claims = json_decode(_stattic_base64url_decode($parts[0]), true);
+    if (
+        !is_array($claims)
+        || !is_string($claims['space_id'] ?? null) || $claims['space_id'] === ''
+        || !is_string($claims['sender_domain'] ?? null) || $claims['sender_domain'] === ''
+        || !is_int($claims['limit'] ?? null) || $claims['limit'] <= 0
+        || !is_int($claims['exp'] ?? null) || $claims['exp'] < time()
+    ) {
+        return null;
+    }
+    return $claims;
+}
+
+/**
+ * Atomic's mail plugin authenticates with the request Host, so set it to the
+ * sending identity whichever hostname carried this request.
+ */
+function _stattic_space_mail_bootstrap(string $publicRoot, string $senderDomain): bool
 {
     if (!is_file($publicRoot . '/wp-load.php')) {
         return false;
     }
-    $senderDomain = strtolower(trim((string) getenv('SPACEFAST_SERVICE_EMAIL_DOMAIN')));
-    if ($senderDomain === '') {
-        return false;
-    }
-    // Atomic's mail plugin authenticates with the request Host. The child
-    // has no visitor request; use only the host-owned sending identity.
     $_SERVER['HTTP_HOST'] = $senderDomain;
     $_SERVER['SERVER_NAME'] = $senderDomain;
     $_SERVER['HTTPS'] = 'on';
     require_once $publicRoot . '/wp-load.php';
-    // Read the provider's current identity after bootstrap, so a stale route
-    // cannot keep sending from the domain Atomic has just demoted to an alias.
-    if (!defined('DOMAIN_NAME') || strtolower((string) DOMAIN_NAME) !== $senderDomain) {
-        return false;
-    }
-    if (!function_exists('wp_mail')) {
-        return false;
-    }
-    $configure = static function (mixed $mailer) use ($mail): void {
-        if (is_string($mail['alt_body']) && is_object($mailer)) {
+    return function_exists('wp_mail');
+}
+
+function _stattic_space_mail_transport(array $mail, string $senderDomain): bool
+{
+    $configure = static function (mixed $mailer) use ($mail, $senderDomain): void {
+        if (!is_object($mailer)) {
+            return;
+        }
+        if (is_string($mail['alt_body'])) {
             $mailer->AltBody = $mail['alt_body'];
         }
+        // WordPress would otherwise sign an unnamed message as "WordPress".
+        if (!$mail['from_named']) {
+            $mailer->FromName = $senderDomain;
+        }
+        // Timeout bounds the connect and each reply; Timelimit each multi-line read.
+        $timeout = (int) ($mailer->Timeout ?? 0);
+        if ($timeout <= 0 || $timeout > STATTIC_SPACE_MAIL_SMTP_TIMEOUT_SECONDS) {
+            $mailer->Timeout = STATTIC_SPACE_MAIL_SMTP_TIMEOUT_SECONDS;
+        }
+        $smtp = class_exists('PHPMailer\\PHPMailer\\SMTP', false) && method_exists($mailer, 'getSMTPInstance')
+            ? $mailer->getSMTPInstance()
+            : null;
+        if (is_object($smtp) && ((int) $smtp->Timelimit <= 0 || (int) $smtp->Timelimit > STATTIC_SPACE_MAIL_SMTP_TIMEOUT_SECONDS)) {
+            $smtp->Timelimit = STATTIC_SPACE_MAIL_SMTP_TIMEOUT_SECONDS;
+        }
     };
-    add_action('phpmailer_init', $configure);
+    // Late, so the provider's own transport settings are already in place.
+    add_action('phpmailer_init', $configure, PHP_INT_MAX - 1);
     try {
         return wp_mail($mail['to'], $mail['subject'], $mail['message'], $mail['headers']);
     } finally {
-        remove_action('phpmailer_init', $configure);
+        remove_action('phpmailer_init', $configure, PHP_INT_MAX - 1);
     }
 }
 
-function _stattic_space_mail_send(array $payload, string $publicRoot): bool
+/** @param array{space_id:string,sender_domain:string,limit:int,exp:int} $grant */
+function _stattic_space_mail_send(array $payload, string $publicRoot, string $privateRoot, array $grant): bool
 {
     $mail = _stattic_space_mail_arguments($payload);
     if ($mail === null) {
         return false;
     }
-    $privateRoot = (string) getenv('SPACEFAST_SERVICE_USAGE_ROOT');
-    $spaceId = (string) getenv('SPACEFAST_SERVICE_SPACE_ID');
-    $limit = (int) getenv('SPACEFAST_SERVICE_EMAIL_DAILY_LIMIT');
-    if ($privateRoot === '' || $spaceId === '' || $limit <= 0) {
+    $from = is_string($payload['from']['email'] ?? null) ? $payload['from']['email'] : '';
+    $senderDomain = strtolower($grant['sender_domain']);
+    if (strtolower(substr((string) strrchr($from, '@'), 1)) !== $senderDomain) {
+        return false;
+    }
+    // Load WordPress first: a bootstrap that exits has reserved nothing, and no
+    // lock is held while it runs.
+    if (!_stattic_space_mail_bootstrap($publicRoot, $senderDomain)) {
         return false;
     }
     require_once __DIR__ . '/retail-usage.php';
     require_once __DIR__ . '/context.php';
+    $spaceId = $grant['space_id'];
+    $limit = $grant['limit'];
     $recipients = $mail['recipients'];
     $root = _stattic_space_root($privateRoot, $spaceId);
     _stattic_runtime_mkdir($root);
     return _stattic_lock_with($root . '/email-usage.lock', STATTIC_LOCK_WAIT, static fn (): bool => false,
-        static function () use ($privateRoot, $spaceId, $root, $limit, $recipients, $mail, $publicRoot): bool {
+        static function () use ($privateRoot, $spaceId, $root, $limit, $recipients, $mail, $senderDomain): bool {
             $path = $root . '/email-usage.json';
             $day = gmdate('Y-m-d');
             $previous = is_file($path) ? json_decode((string) file_get_contents($path), true) : null;
@@ -191,7 +269,7 @@ function _stattic_space_mail_send(array $payload, string $publicRoot): bool
             // Reserve before transport acceptance. An interrupted ambiguous
             // send consumes allowance but never becomes a usage charge.
             _stattic_runtime_write_json_atomic($path, ['day' => $day, 'recipients' => $used + $recipients]);
-            $accepted = _stattic_space_mail_transport($mail, $publicRoot);
+            $accepted = _stattic_space_mail_transport($mail, $senderDomain);
             if ($accepted) {
                 _stattic_record_retail_usage($privateRoot, $spaceId, 'email_recipients', $recipients);
             } else {

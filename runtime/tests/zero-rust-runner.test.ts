@@ -11,6 +11,7 @@ import path from "node:path";
 
 import { verifyPartnerToken } from "../../apps/control-plane/src/auth/partner-token.ts";
 import {
+  enableSpaceMailEndpoint,
   blobPath,
   deploy,
   finalizeRaw,
@@ -224,12 +225,13 @@ globalThis.__statticZeroResult = JSON.stringify({
       SPACEFAST_ZERO_RUNNER_CAPTURE: runtimeCapturePath,
       SPACEFAST_ZERO_RUNNER_DEBUG: "1",
       SPACEFAST_ZERO_DATABASE_URL: mysql.url,
+      PHP_CLI_SERVER_WORKERS: "4",
     },
   });
+  enableSpaceMailEndpoint(rt);
   writeFileSync(
     path.join(rt.root, "wp-load.php"),
     `<?php
-define('DOMAIN_NAME', 'example.com');
 function add_action(string $name, callable $callback): void {}
 function remove_action(string $name, callable $callback): void {}
 function wp_mail(array $to, string $subject, string $message, array $headers): bool {
@@ -449,6 +451,10 @@ const capsule = {
         return {
           committedRow: await ctx.db.todos.get(row.id),
           committed,
+          // The broker holds a mail grant in this process's environment.
+          envNames: Object.keys(ctx.env),
+          globalEnvNames: Object.keys(globalThis.__statticEnv ?? {}),
+          processType: typeof globalThis.process,
         };
       },
     },
@@ -456,7 +462,7 @@ const capsule = {
 };
 await globalThis.__statticRunZeroEndpoint(capsule, route);`,
           schema_hash: "sha256:mysql",
-          capabilities: { db: true, email: true },
+          capabilities: { db: true, email: true, env: true },
           db: MYSQL_TODOS_DB,
         },
         {
@@ -1721,6 +1727,9 @@ test("primary-domain senders reach PHP immediately, foreign senders do not, and 
   expect(await response.json()).toMatchObject({
     committed: true,
     committedRow: { title: "committed-mail" },
+    envNames: ["APP_NAME", "PARTNER_SIGNING_KEY"],
+    globalEnvNames: ["APP_NAME", "PARTNER_SIGNING_KEY"],
+    processType: "undefined",
   });
   expect(
     mysql.exec("SELECT todo_title FROM zero_items WHERE todo_title = 'rolled-back-mail';"),

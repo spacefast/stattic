@@ -221,6 +221,7 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             '/__spacefast/content-admin.php' => true,
             '/__spacefast/content.php' => true,
             '/__spacefast/health.php' => true,
+            '/__spacefast/mail.php' => true,
             '/__spacefast/upload.php' => true,
         ];
         // END GENERATED runtime entrypoints
@@ -579,6 +580,7 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
         'content-admin.php' => 'entrypoints/content-admin.php',
         'content.php' => 'entrypoints/content.php',
         'health.php' => 'entrypoints/health.php',
+        'mail.php' => 'entrypoints/mail.php',
         'upload.php' => 'entrypoints/upload.php',
         default => 'init.php',
     };

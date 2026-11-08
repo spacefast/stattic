@@ -25,13 +25,11 @@ function _stattic_runtime_native_binary(): string
     return dirname(__DIR__, 2) . '/bin/stattic-runtime';
 }
 
-// The CLI php for subprocess work. Under FPM only a PATH search resolves it:
-// the pool's mount namespace does not contain the host php prefix, so every
-// absolute host path (PHP_BINDIR included) fails execve with ENOENT. Measured
-// on live boxes, where the identical spawn works via execvp and fails via
-// execve. That constrains the whole recipe: spawn with env inheritance
-// (proc_open env=null → execvp → PATH search) and shape the child environment
-// with _stattic_runtime_with_subprocess_env, never with an env array.
+// The CLI php for subprocess work. It exists only outside FPM: the pool's mount
+// namespace has no PHP CLI at any path (measured 2026-11-06 on dev, staging and
+// production boxes, where every spawn fails with ENOENT), so request-time work
+// under FPM cannot rely on this. Shape a child's environment with
+// _stattic_runtime_with_subprocess_env so it inherits PATH.
 function _stattic_runtime_php_cli_binary(): string
 {
     $configured = _stattic_config_value('SPACEFAST_RUNTIME_PHP_CLI_BIN');

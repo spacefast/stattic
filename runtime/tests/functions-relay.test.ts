@@ -9,12 +9,13 @@
 // run the real `service-broker` subprocess) against a real MySQL 8.4 container.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { once } from "node:events";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
 import {
+  enableSpaceMailEndpoint,
   apiJson,
   deploy,
   finalizeRaw,
@@ -208,14 +209,16 @@ beforeAll(async () => {
     env: {
       ...providerDatabaseEnv(),
       SPACEFAST_TEST_WP_MAIL_CAPTURE: wpMailCapturePath,
+      PHP_CLI_SERVER_WORKERS: "4",
     },
   });
+  enableSpaceMailEndpoint(rt);
   writeFileSync(wpMailCapturePath, "");
   writeFileSync(
     path.join(rt.root, "wp-load.php"),
     [
       "<?php",
-      "define('DOMAIN_NAME', 'example.com');",
+      "if (is_file(getenv('SPACEFAST_TEST_WP_MAIL_CAPTURE') . '.dead')) { echo '<h1>Error establishing a database connection</h1>'; exit; }",
       "function add_action(string $name, callable $callback): void { $GLOBALS['sf_mail_hook'] = $callback; }",
       "function remove_action(string $name, callable $callback): void { unset($GLOBALS['sf_mail_hook']); }",
       "function wp_mail(array $to, string $subject, string $message, array $headers): bool {",
@@ -624,20 +627,17 @@ test("mail needs a daily allowance, then sends through wp_mail and returns its a
   });
   expect(wpMailCaptures()).toHaveLength(before);
 
-  await routeWithAllowance(4, "previous.example");
-  expect(
-    await (
-      await relay(
-        { ...message, payload: { ...message.payload, from: { email: "hello@previous.example" } } },
-        token,
-        "services",
-        "inv_mail_stale_domain",
-      )
-    ).json(),
-  ).toEqual({ ok: true, result: false });
+  await routeWithAllowance(4);
+  // WordPress prints a page and exits on a failed bootstrap. That page must not
+  // read as a result, and it must not spend allowance: the sends below use all 4.
+  writeFileSync(`${wpMailCapturePath}.dead`, "");
+  expect(await (await relay(message, token, "services", "inv_mail_dead")).json()).toMatchObject({
+    ok: false,
+    code: "service_upstream_unavailable",
+  });
+  rmSync(`${wpMailCapturePath}.dead`);
   expect(wpMailCaptures()).toHaveLength(before);
 
-  await routeWithAllowance(4);
   const first = await relay(message, token, "services", "inv_mail_1");
   expect(first.status).toBe(200);
   expect(await first.json(), rt.diagnostics()).toEqual({ ok: true, result: true });

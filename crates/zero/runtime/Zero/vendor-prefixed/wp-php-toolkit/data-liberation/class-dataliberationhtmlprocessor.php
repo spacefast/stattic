@@ -2,8 +2,8 @@
 
 namespace Zero\Vendor\WordPress\DataLiberation;
 
-use Zero_Vendor_WP_HTML_Processor as WP_HTML_Processor;
-use Zero_Vendor_WP_HTML_Tag_Processor as WP_HTML_Tag_Processor;
+use WP_HTML_Processor;
+use WP_HTML_Tag_Processor;
 
 class DataLiberationHTMLProcessor extends WP_HTML_Processor {
 

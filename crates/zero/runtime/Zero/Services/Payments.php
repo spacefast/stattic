@@ -30,7 +30,7 @@ final class Payments
         Module::secret('ZERO_SERVICES_STRIPE_WEBHOOK_SECRET');
         $return = Module::config()['checkoutReturnUrl'] ?? home_url('/');
         if (!is_string($return) || !filter_var($return, FILTER_VALIDATE_URL)
-            || !in_array(parse_url($return, PHP_URL_SCHEME), ['https', 'http'], true)) {
+            || !in_array(wp_parse_url($return, PHP_URL_SCHEME), ['https', 'http'], true)) {
             throw new \LogicException('Configure a server-owned checkoutReturnUrl');
         }
         return Module::once('services:checkout', $input, $headers, static function () use ($input, $product, $return): array {
@@ -103,8 +103,8 @@ final class Payments
             throw new \RuntimeException('Stripe returned invalid JSON');
         }
         if (!is_array($session) || !is_string($session['id'] ?? null) || !str_starts_with($session['id'], 'cs_')
-            || !is_string($session['url'] ?? null) || parse_url($session['url'], PHP_URL_SCHEME) !== 'https'
-            || parse_url($session['url'], PHP_URL_HOST) !== 'checkout.stripe.com') {
+            || !is_string($session['url'] ?? null) || wp_parse_url($session['url'], PHP_URL_SCHEME) !== 'https'
+            || wp_parse_url($session['url'], PHP_URL_HOST) !== 'checkout.stripe.com') {
             throw new \RuntimeException('Stripe returned an invalid checkout session');
         }
         db()->transaction(static function () use ($row, $session): void {

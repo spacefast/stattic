@@ -1,7 +1,7 @@
 {
-  "revision": "724b7eb6784a0f8aa3742584333e32271f683a78",
-  "sourceHash": "f61c0d9b7819d7685b45f65118c12b361703cafa6dec4ba4668fa21bf26d5f11",
-  "manifestSha256": "c5b8c400582a3977622812aad01d693381379d0148192123046a4d010999a693",
+  "revision": "535d18d5a66f76bc1562cfeb91f4c57ec557ff54",
+  "sourceHash": "6e9b320343c1cb9fb5dd5ae50e1f2d65029a69936e3882489c4e304937b7b46c",
+  "manifestSha256": "fbd8d05279137e32915d4e5bda68597da66e8c29f6856baf0c22e5b2077fcd60",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "cc145f301ef657323de74cf72018dca823f30732f4609e592dbbe764a780ce89"
+      "sha256": "f4a3fc5120682ce4733e8362d7dab94eea7c657e19e3cb24578d4a445979e08c"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "d1db24e63d010caca0bec625f682f78e8e4be38fd2ff1b75af80e45e6b239ffb"
+      "sha256": "e97dd8d07677160129415dbdc8cada8e378e85ef26bfa9af5bd2251df77828f6"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -417,7 +417,7 @@
     },
     {
       "path": "crates/zero/SOURCE.json",
-      "sha256": "7882938364f6ec13068d1a956586f09d26eab21a073171efac70aa0abdb1148f"
+      "sha256": "af18621e75faf64ed8d45ebeced7685b1ba1cd9f44a34926e084159040c4db3a"
     },
     {
       "path": "crates/zero/build.rs",
@@ -449,11 +449,15 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Builtins.php",
-      "sha256": "a6325b8704590add84460c4f5057e3811dddf6ff37a7a0259b42d6a24d771500"
+      "sha256": "9a3d21bb72e2c3e525681125a8098f2d8c389544e1581e15cd22d871e282ac9e"
     },
     {
       "path": "crates/zero/runtime/Zero/BulkUpdate.php",
       "sha256": "da14f13fdbf115faf6afaa25464b46aefd1545bb6188782fcbfa0a90032fee69"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/Cli/commands.json",
+      "sha256": "2cc358a5607694e25b601ceae909b0c2f0621771adad83b573e194a358ae7040"
     },
     {
       "path": "crates/zero/runtime/Zero/ColumnRef.php",
@@ -461,7 +465,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Crypto.php",
-      "sha256": "4d3fb3299599f7bb1c31e513d07b2c659ce9aac1d268c8798bfe5be2e5c64f0b"
+      "sha256": "30231e4116ab73b5b5a0e98d36a1ca06dd9622d2f217d3d3d23402c404d775b7"
     },
     {
       "path": "crates/zero/runtime/Zero/Db.php",
@@ -493,7 +497,15 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Fetch.php",
-      "sha256": "58f257d146047ecbca254ceff0363485f051676cbfd592187a219d1fa04dbd4b"
+      "sha256": "2f86a7514511f1e85e0717205dc335beeb04bf88b8ecb03005d4f35e49b15e49"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/FetchHeaders.php",
+      "sha256": "3a9570752b7630f1573ee86360f47325db630e1522d0cde0f57eda271bb53106"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/FetchResponse.php",
+      "sha256": "a18b69e37945c3c72c51872f57c600a24e1da6cd9b8584da019cf0b80d39cb05"
     },
     {
       "path": "crates/zero/runtime/Zero/FieldAccess.php",
@@ -501,7 +513,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Http.php",
-      "sha256": "89b2496c859b5f5db8776b42cd06486f88cb3fd3b42fadb8675fa1fdc23796be"
+      "sha256": "9dae85c4b58d53059ca324c39af653f7be8f80e76076cf558e27d0a2e90de02d"
     },
     {
       "path": "crates/zero/runtime/Zero/HttpError.php",
@@ -541,19 +553,31 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Js.php",
-      "sha256": "335d2368465eebd031bb3a618303218b8028ec414a8721136da622facff0c25d"
+      "sha256": "3b7dd7c420aadd264534bae286f4ec8865a70fc8947eedcb1b30eb9ae6e00fa6"
     },
     {
       "path": "crates/zero/runtime/Zero/JsArguments.php",
-      "sha256": "3db794d26bcaff998f6f8cb349ed469bbf93f033c171b47db89b6486dd39ca62"
+      "sha256": "2aa38dad2117a5ed9d2ca4aaebd634f72347367da7006d1ca008e249d5663f11"
     },
     {
       "path": "crates/zero/runtime/Zero/JsArray.php",
-      "sha256": "e7eb9fad038d75b358e095c3aaa381bafe46037c183e5269d285bdf99484afae"
+      "sha256": "32cbda1180959b0fb81739665c1b97c38e0b3029e6b9335700a2ba5ab3b1116e"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsAsync.php",
+      "sha256": "a97cc80dca5e488d67dd9d0c6c2118bf13b30af212e3958f0d0d524903a0c832"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsAsyncGenerator.php",
+      "sha256": "f2526d446e7471d76a493977423bca3e4d2c6b605261e6dfe4dab99c1f2dd872"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsBigInt.php",
+      "sha256": "419f56c378021e63dae8a6b15fbdd90de0150e2637b2f4b553d881b0ced79e20"
     },
     {
       "path": "crates/zero/runtime/Zero/JsClass.php",
-      "sha256": "af0523585063301f0984036ddc506ed6514484213c5aa4f5acb18b78c22714b4"
+      "sha256": "f267d496e6d0653ab8e64f6c2607312f64c114ac87c02640f98bf6c1df25194b"
     },
     {
       "path": "crates/zero/runtime/Zero/JsDate.php",
@@ -561,15 +585,35 @@
     },
     {
       "path": "crates/zero/runtime/Zero/JsDynamic.php",
-      "sha256": "b607530e7c74c1532720399f624bd964f163945ca4d2d65dfb27f9466287e036"
+      "sha256": "c7fafe181ac88ca04f351dc3c0e65fe104990018ee6a0cafb85c458ea66afafa"
     },
     {
       "path": "crates/zero/runtime/Zero/JsError.php",
-      "sha256": "994e61ca03e5d43c3aedc830e260ebaac75bed4c7c8cd914ff1aef82006db1be"
+      "sha256": "b7e861b2ac025e0a3c9be8fc06d77192c91e943d57aa91bd8edc05ac04828a25"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsGenerator.php",
+      "sha256": "0d952a12389600a640c43c75c397f6d6bb408451424c293d5005289d22ca330d"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsGeneratorReturn.php",
+      "sha256": "1d431cbd91e9c05d5cda35caaec58a112ba90af8f478f07164a349e5c2274f08"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsIter.php",
+      "sha256": "e36fb9610f60aa070ecce8597418898c1f6594ce9bd68e7f82b643068c9ed564"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsIterator.php",
+      "sha256": "86e2df9b27f04c32ad1e566d1f0f594cf455bfce18e7b136992f9f681d4f81f4"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsJobs.php",
+      "sha256": "1e355ef10c3fe01998bad6353ecd93f1c2950b3b30820b0e5909c0adc4903b0c"
     },
     {
       "path": "crates/zero/runtime/Zero/JsMap.php",
-      "sha256": "03a9ca93838802bd26fbf7830ea4a5b33f344a972f50f80376b1ca64ab5ee68b"
+      "sha256": "0cd410cf021aca9ff928ea4b65c7a183d157914a2b79dac82365db7a9f1ef94d"
     },
     {
       "path": "crates/zero/runtime/Zero/JsNamespace.php",
@@ -577,15 +621,47 @@
     },
     {
       "path": "crates/zero/runtime/Zero/JsObject.php",
-      "sha256": "5ebdb92aab507b1822da06fc1d0c348c7ef8b2047df695013a4b121ce324a960"
+      "sha256": "e349448136d1ee42a5c7bdf820067c49a82b88be6875d53a065231206ff93493"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsPromise.php",
+      "sha256": "c2a235fd08c64c12b53775211edd755dceb48b237f6715811c05101dc13849cb"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsReadableStream.php",
+      "sha256": "bc7239ece095b8591ff67a4a0f8b4006bad31a04582cd98eafc63c9bf31efa26"
     },
     {
       "path": "crates/zero/runtime/Zero/JsSet.php",
-      "sha256": "6f3180d76bd024209640119bb8f100a82516d11524d327bc3a3135ac222dbc32"
+      "sha256": "74b61104142867c6ebc586405a42f0b77e7357af1b5ecde7fdb7ec92edc0570a"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsSymbol.php",
+      "sha256": "12ff3d9fedc90d26519e41594bffc950d2f40dacf676dd0d560746032645dec8"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsThrow.php",
+      "sha256": "eaa2d6d16566a808581308bc1bb6d4db60b8951f4367f7a291e9533ad0398d96"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsTransformStream.php",
+      "sha256": "ca9d076c02e3393686db89f376f89b4c8e45cf24ca02027f527445cef0661218"
     },
     {
       "path": "crates/zero/runtime/Zero/JsUndefined.php",
       "sha256": "c79e763d0d460d234373082c092c2e76e969e0bdb5d07fb3330ce60909b56180"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsWeakMap.php",
+      "sha256": "25646e7a7fabc891cc40e6029dedead5d0131452d1a5f965c044ff1b0ef7a40d"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsWeakSet.php",
+      "sha256": "12687227ddd43e0e251f78f4d22bd6a967bd079d041bf625b16ef765caaa9d78"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/JsWritableStream.php",
+      "sha256": "05563ab3550bcd30c73ac4b38653c7a62bb4fcd33cf4fc54ccb5bd8fbc11ccef"
     },
     {
       "path": "crates/zero/runtime/Zero/Json.php",
@@ -633,7 +709,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Media/Files.php",
-      "sha256": "2c2051c54a5119ea5de1465e500e594dc232a12de7660cf2ef2386686b49a78e"
+      "sha256": "ccc9c4373ab6f918e2a9357e559d823322e66694d7157c5800c746ef1c0aa083"
     },
     {
       "path": "crates/zero/runtime/Zero/Media/Images.php",
@@ -669,11 +745,15 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Schema.php",
-      "sha256": "8b11b55c395e6c30f6f0c4cee77358d2e439a62051459254c7193433e165897f"
+      "sha256": "f37d496ae5072f34bbb6d8da280537a370f9b8e73b2658b270efc4ab0a3923fc"
     },
     {
       "path": "crates/zero/runtime/Zero/Seam.php",
       "sha256": "8952820ccc04f1422071d53ef15945f3d2a36c3191c4dbab68f2c5b789e893b3"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/SearchParams.php",
+      "sha256": "b25d5e0e6ec2eda6f890461743bdf2b235e1fb37ef45981824ad71f481fd6db5"
     },
     {
       "path": "crates/zero/runtime/Zero/Services/Definition.php",
@@ -689,7 +769,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Services/Payments.php",
-      "sha256": "dd13dc57d4ab8903f60b2c615f84931846c37473ab0764188679727f394b092f"
+      "sha256": "4ed570e39e8c21a3f4b9dd437098ac53c2ae85c8372988af6a2d7f87223bdaf7"
     },
     {
       "path": "crates/zero/runtime/Zero/Services/Search.php",
@@ -721,7 +801,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Sync/Blocks.php",
-      "sha256": "981d1671ec956b9d0e9b82cf6872048e7b1495b1f150a384515d9cba04e4d7cd"
+      "sha256": "8dd5bb5c282fb4f8fbc2392c06036e0f17fdded44b4423ede396d92e0b2f38a2"
     },
     {
       "path": "crates/zero/runtime/Zero/Sync/Canon.php",
@@ -737,7 +817,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Sync/Markdown.php",
-      "sha256": "4705f8f9b5e00d9d9856d5b940424ed3d89201906c0d2e4a6743820de6ff65cc"
+      "sha256": "98f8b688c139c4ef670a15516f04e85037579f32a25086d70eb2259e22c963ad"
     },
     {
       "path": "crates/zero/runtime/Zero/Sync/Merge.php",
@@ -745,7 +825,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Sync/Module.php",
-      "sha256": "de9b84acddf3be0db1fc095e09288dfb0f5bd4cbc2f5027f6251a7ff1b647580"
+      "sha256": "3c525b95012d078c63a59e82d14d84778fb08230eb8cffe63ddfed19fa979fdd"
     },
     {
       "path": "crates/zero/runtime/Zero/Sync/Routes.php",
@@ -778,6 +858,10 @@
     {
       "path": "crates/zero/runtime/Zero/Viewer.php",
       "sha256": "6b439d6c125190ac72d4c14a1007060f1b3a9458fa332fde65a686c80f9c79a1"
+    },
+    {
+      "path": "crates/zero/runtime/Zero/Wp/Abilities/Call.php",
+      "sha256": "0cf10a11cde783daad0492632aff26c3612cbaa6c12116bcefc6d5313506e677"
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/Abilities/Invoke.php",
@@ -816,16 +900,24 @@
       "sha256": "61da89852304b765be10353c188f2bbe61fa887ae8a2fd68f5af02bf243c3676"
     },
     {
+      "path": "crates/zero/runtime/Zero/Wp/Functions.php",
+      "sha256": "44a1ef66ac96f92f51c4eeb54836cad832ee77488de092732acb667804771b88"
+    },
+    {
       "path": "crates/zero/runtime/Zero/Wp/Guests.php",
       "sha256": "113a0e60a41815181fff5299a2c5171578d4ff2496c93f5b0d358a92c2680797"
     },
     {
+      "path": "crates/zero/runtime/Zero/Wp/Hooks.php",
+      "sha256": "0e9b5d628bd736178956a0afcae5c2ad8c6d8d969c1598289acd08485b47d62b"
+    },
+    {
       "path": "crates/zero/runtime/Zero/Wp/HttpRoutes.php",
-      "sha256": "c6509ebddd8daabb47741cf90ba0f921e9fb5a79fb3d447b00fd97b74d7c1c0a"
+      "sha256": "4a4b2d2885206606533847ba3eb583a385c60b027583edebd674c1bc43ae653e"
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/IdentityBridge.php",
-      "sha256": "f3d632e87d25bb33ea0838884013f3235294f57255e435d2f0076416860f85bd"
+      "sha256": "a763544b86562d759d491b0d862f82aa0a71be035db874fa3fbfbf3929d73532"
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/Jobs/ActionSchedulerQueue.php",
@@ -845,7 +937,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/Legacy/Module.php",
-      "sha256": "008785d3be1b86d34f63d700f52394515068ef55e0a888876f07b700d7c85e8e"
+      "sha256": "7b46c7647e0c9738006bad0a6d62b4f17e2045ff8456e9de0cfa538b64f4ca2d"
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/Legacy/Spacefast.php",
@@ -881,7 +973,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/Plugin.php",
-      "sha256": "35340954bb46e636db6c7da236de83f18107dfa0b7df287cb89219f95eb5bb28"
+      "sha256": "89a84b20f2bd7f7e4df25ee4f9095f25134a16a90f6c4b258196544d1c159de3"
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/Polylang.php",
@@ -905,7 +997,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/Runtime.php",
-      "sha256": "626d12446dc19deaa24b089b3e635ef5c301cdfb722833406fec8fa0f557aa62"
+      "sha256": "47b268efe4c8e74f4d43c4230c63152f6a3c6d33ee3154328e8c5c6902e63c29"
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/Scf.php",
@@ -917,7 +1009,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/Uploads.php",
-      "sha256": "150428b6ee2bba7b043973c8102ef4a44f467cceb0f929a78652e92bc8bc5a50"
+      "sha256": "89a7516a759d8ff88cea153124127ce43a90af3e8eac5980e339fe127c7f6765"
     },
     {
       "path": "crates/zero/runtime/Zero/Wp/WpAuth.php",
@@ -949,11 +1041,11 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/.manifest.json",
-      "sha256": "11b2d4961221f52a1905bbaef6a92626ae6af783d465b29fb94325088b7ce125"
+      "sha256": "a20fea645eb355d24d4c98ff5bc940e8098383137bc9b5d06c9f7248f62485ed"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/THIRD-PARTY-LICENSES.txt",
-      "sha256": "35042a2eadc4f0e40bb3897a82b9c31e23188065c2f9b66ca1675f373dfdf745"
+      "sha256": "27a93f13c67ca5b023b5fa3c923b24148aad465b72473c105c3a7cb21f74e137"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/async-aws/core/LICENSE",
@@ -2025,11 +2117,11 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/autoload_classmap.php",
-      "sha256": "24d0278e143088ee983ed6d48f45265d48586bb2a32889eabc47e2ad47fd3655"
+      "sha256": "6ca9b75f4cf6c9d489792cf0ab03f171f3c439b11ebbfcf65c8cba43aeb62ed4"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/autoload_files.php",
-      "sha256": "2d35c5bb5c6f3e773a5a70c79d7f59933802f23b68ae9d571be0d52e538dd1d5"
+      "sha256": "eb30393ab1e02a6fb258ec1ea7c15168a6252a7522dc8a8a2c27aac090549b06"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/autoload_namespaces.php",
@@ -2045,15 +2137,15 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/autoload_static.php",
-      "sha256": "dc16d1d753bef2f9edd0185915fa1e0831c6d2d567d2a49b4eab014d83962a87"
+      "sha256": "93e1dbb79eec7239a7f430f97e3793ae5d977a9a50bf0d92ad342a3d96bed448"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/installed.json",
-      "sha256": "7bdefac475d586164ff4a833b319a506331eb47708428850e5065e9de09cfa68"
+      "sha256": "9ec389e64e2c804cbb435fc4d51cb2e9152c123b5cadc3ad53ba8cec94ae45d6"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/installed.php",
-      "sha256": "a80d96a0f8b9845bc90a6bb920e4a6a3cc4b840c3114872e8ec319dd72d6eb75"
+      "sha256": "8c50fed1c8eb6ae9b324aa99a7604c750df715b65c80d0ce568492f3713593dc"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/composer/platform_check.php",
@@ -2628,120 +2720,20 @@
       "sha256": "f61f8c920dbef9ad0d16a5fac450ff1b9202c38b6a8fe10d1dbc41d77cb9dc87"
     },
     {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/blockparser/class-wp-block-parser-block.php",
-      "sha256": "018233ff0de3d2f47ea39c591f1f6588c28e366ba5d2ca8712d7ab0664a9951a"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/blockparser/class-wp-block-parser-frame.php",
-      "sha256": "64bf48b7693ffdd503d5b7ad1f52633e6bbe0d63423019739c517c2394f64ccf"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/blockparser/class-wp-block-parser.php",
-      "sha256": "5090e26053a00168fc633dcbced18773a03883d82e0d378db30842b57193ff57"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ByteTransformer/class-bytetransformer.php",
-      "sha256": "54d85f0e22fefc6b9da4323b5a8e2821044da56cf8cec2d9d357684733f1de9f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ByteTransformer/class-checksumtransformer.php",
-      "sha256": "e1b1d319f0cce8bb7a861d91779ba897cd00dcb9d60d44f485a31e4f50d837fb"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ByteTransformer/class-deflatetransformer.php",
-      "sha256": "6066ebf47530456a6ed8aa69353cf70ef8985e15577e62d63b999df6c54b698c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ByteTransformer/class-inflatetransformer.php",
-      "sha256": "b8f4910b9370e151f9ab082d85c12f6aa7711bc5da301e8ccb3c4d9e8e9f09d9"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ReadStream/class-basebytereadstream.php",
-      "sha256": "a91b2a8ce8fb43577bdd453222b2816a7288e060b3f19e9a62ead7dcdf5f9c16"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ReadStream/class-deflatereadstream.php",
-      "sha256": "f949708a651a4b88e7cff51deba08f3689ddf50496f0fcffd6efc58092a205e8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ReadStream/class-filereadstream.php",
-      "sha256": "b721055a36b65815f372c1c0147a0dc0ed16e700227d276c3863acd9170b1aed"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ReadStream/class-inflatereadstream.php",
-      "sha256": "3b98dd4d5709e64a930747741fc50e704b42175694d7112216194c442c9623ee"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ReadStream/class-limitedbytereadstream.php",
-      "sha256": "3d869a6c912a1ca059ad175e24342cd5ef06dbaabe41a5f2a310a48b9fea8632"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ReadStream/class-transformedreadstream.php",
-      "sha256": "09a8a38825790a59f166daf5005f048f230d4160a9caa0fe6dc9f0eb5c92b343"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/ReadStream/interface-bytereadstream.php",
-      "sha256": "8bfcb88cc4b7f7d0aa5068d116c8fabbd89f7a8e9840325ac119274997c3a2fb"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/WriteStream/class-bytewritestream.php",
-      "sha256": "d5261ce75ce976aaea9bb677a8fc93db41190d174874cd5dae6bfb4b4e669ddd"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/WriteStream/class-filewritestream.php",
-      "sha256": "511bacbea3a96c7e264ab18730c0498e1505761101db99395a3302c86181c05e"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/WriteStream/class-transformedwritestream.php",
-      "sha256": "b3b10decb8ee83255219728ca4bb80764d51917fdac2ab6e266a44f07436a86b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/class-bytepipe.php",
-      "sha256": "e15de68b65fa3fab0a4dc50ff31c31487cdc8b83102715c69a22ab8673047793"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/class-bytestreamexception.php",
-      "sha256": "eea4ee973eb9c553c93da49426714ead04b15083ec8f843e7394eed2731765ef"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/class-filereadwritestream.php",
-      "sha256": "2f58c74e9b460530eac56bab12c52bc4c6c5b7a101bfe1026c1fa9cefe6160be"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/class-memorypipe.php",
-      "sha256": "36a38f1cef96b3659a0cfe7572ba575574e9de13b7c3242d3be708bb808699f8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/bytestream/class-notenoughdataexception.php",
-      "sha256": "487cc12a3b9c0db31058f916ea4987eb50915c8eb34ff3e3ed90c14a92f1d841"
-    },
-    {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/BlockMarkup/class-blockmarkupprocessor.php",
-      "sha256": "a6bf5dca9d97be6962d81044028e622d440e9bdec3a19870ad06987e776efa6d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/BlockMarkup/class-blockmarkupurlprocessor.php",
-      "sha256": "d13773ae46815f42697c35cbc7167a5c144cc8bda9096776afa213016d601930"
+      "sha256": "3e0c1f0dd32c6c32bf8a28e85dc5dd5cdb8618854ddf36360b017b98973509b5"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/BlockMarkup/class-blockobject.php",
       "sha256": "94305ad42882701aea903e733d3a429dae9fb1ffb643d6e7b3e0fe31fe7cc006"
     },
     {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/CSS/class-cssprocessor.php",
-      "sha256": "a2c66d8120b623ab84c37b68a84613df0df1766d1071f34fc02a3f282cc5db9c"
-    },
-    {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/DataFormatConsumer/class-annotatedblockmarkupconsumer.php",
-      "sha256": "195a184c0d31dda6bebf6d54d331d3c32ea9b3b15904ee8dba08e2c9ce47d6d5"
+      "sha256": "6cc4788f7f826c034128176b1bd6d5235f6a01d2a6a45355a3c295f6bfadd431"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/DataFormatConsumer/class-blockswithmetadata.php",
       "sha256": "bfb5dfd0e5b63d33d6d5b2c6329a1d94b7f07e8de972a3781a3a07c3d8ab1662"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/DataFormatConsumer/class-markupprocessorconsumer.php",
-      "sha256": "2821f15f9048010df7b31542e8427f7342944cdc96445952cbded99defa5472d"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/DataFormatConsumer/interface-data-format-consumer.php",
@@ -2749,151 +2741,15 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/DataFormatProducer/class-annotatedblockmarkupproducer.php",
-      "sha256": "8324c346279f26d76b0d7e31e6035223e6863f124f08f98518344a8266adad6b"
+      "sha256": "6344c3149e9285739b1696fa2623f2aa445eb60530633aead046d49af356fcb7"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/DataFormatProducer/interface-data-format-producer.php",
       "sha256": "69d6fb0944306c2dc9669d5ed08f16e135ff75a23a345e0aea2e1e5d40080210"
     },
     {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityReader/class-blockswithmetadataentityreader.php",
-      "sha256": "8280a96ef530409b75a5726f5cadb7c5fd5eff6086661161d6d67a02e2cb2685"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityReader/class-databasecontententityreader.php",
-      "sha256": "65320d663b7fd4b23e9c3f6c1c79677a7c3ec64fcd62888a015cc656aea47ab9"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityReader/class-databaserowsentityreader.php",
-      "sha256": "49ed70bcab21ca1d82d3dc29596fbbf223f9a1c99b5df470e3ea4634b32f4be8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityReader/class-entityreaderiterator.php",
-      "sha256": "eeec91cc7a10c619ce4a52e40c7f682f961fa70d65d7507d458d2945e37dae66"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityReader/class-epubentityreader.php",
-      "sha256": "edda3ad08e74459a4139dda484aebb2f3beb8c7e444f5ef9c8729a3f5ed74d36"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityReader/class-filesystementityreader.php",
-      "sha256": "6787dc2c699bfb6d301548641dbfc2cbde549a4a333b9887084176b198a55604"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityReader/class-htmlentityreader.php",
-      "sha256": "8bfab7b86c8002c1a4ca3283197321e875fcf067f220aa7fd3d855700b990ee4"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityReader/class-wxrentityreader.php",
-      "sha256": "f1b11f12732f2284629f6f7e5e678f6d80f331a3595c8f273c12ba9b0fe4bf10"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityReader/interface-entity-reader.php",
-      "sha256": "6cbc1b0ea2e3577b1ee940ae2f6860c0a8c10f740f021e61e66b028fab3726d2"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityWriter/class-mysqldumpwriter.php",
-      "sha256": "9d7a46ebced87b1348ff2376b55e0fae129b02651e749e9b77515f3554c254b1"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityWriter/class-staticpostfileswriter.php",
-      "sha256": "5f423421fa06341f8a9b8868ee207cfe28d7601126b4c880d9acc7a7c0558602"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityWriter/class-wxrwriter.php",
-      "sha256": "bb54ac32acb4402b50e6bc8ac1d97c20e0b8acf3a6bdae2b9a0e49eac9eecb3b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/EntityWriter/interface-entity-writer.php",
-      "sha256": "a15a6859002eccc710fafb276be712074e64c49ba5a1f802fc0a0bb5add21f70"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/Importer/class-attachmentdownloader.php",
-      "sha256": "c8b1d024d0cdd8227b3d0d716112585ad999d0314f98d1fd9b0ce2cb36a90498"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/Importer/class-attachmentdownloaderevent.php",
-      "sha256": "9ba163ddf13d52159f507221e0aa843b17339b0bae0c97dce0b8cefa12fb8b9d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/Importer/class-entityimporter.php",
-      "sha256": "30580f6e060e373e90fdcf4ebf98fd91a69a7fc2e49b0a770c52994551ce0ded"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/Importer/class-entityiteratorchain.php",
-      "sha256": "c6f5e6d2ebe9fa41e76c2fbb587d15f7eb2add0f582d8ea8d255e5e1f3f027c8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/Importer/class-filevisitorevent.php",
-      "sha256": "9e2699a26c252ad94422a07e3a63d703ad40ebeaf5a7a7ffea2c866998614c7d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/Importer/class-importsession.php",
-      "sha256": "6b136ac5ff6b66e5f785a170d3e9c3b81385916fec25403695d190d2bbafda4c"
-    },
-    {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/Importer/class-importutils.php",
       "sha256": "cafca91d355842467b81dec882112f82cdbc32e6a4c63bbac7012150d975e686"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/Importer/class-retryfrontloadingiterator.php",
-      "sha256": "d4ac3d11402ab3771452f9aae6d3690ba2d9b0bec236ff173d8f590c496ea928"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/Importer/class-streamimporter.php",
-      "sha256": "bd964b82fd708ec2b5f82f7b1d4f568f969d9346aaa7dedcab3e508234d05290"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/URL/class-convertedurl.php",
-      "sha256": "f8061d23490947d9c3dc8d6928b4019479bc185d9c6d0cea5ad331c87c7753f2"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/URL/class-cssurlprocessor.php",
-      "sha256": "f68ba3854b9b6661dde5505e0b9e037018add9c517b5dbfb2f9c31fa6f22e9dc"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/URL/class-urlintextprocessor.php",
-      "sha256": "35cfbdac1106146d1563ebafc2a2e118f2c01c74fe8828d1866fe7100f4f73fc"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/URL/class-urlrewritecache.php",
-      "sha256": "f8b288079a4f2720a72a0b1c7d7a7930f227ce06e31c55b0a0add1b318e66f9d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/URL/class-wpurl.php",
-      "sha256": "858c247eee12293fbace3931365bdf762bd110c96123569c619339d754e7a841"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/URL/class-wpwhatwgurl.php",
-      "sha256": "dcd3bd2742cf25078e424dd2ff6b26fcb4dcf774eb1efe659eebc8f62701383a"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/URL/class-wpwhatwgurlsearchparams.php",
-      "sha256": "363a680a72d4f090f2e7252dc4406156b0ea8eb00a47124c43c2a7740284bc87"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/URL/functions.php",
-      "sha256": "120f9aa1586bb6cd131f525b3eac3c6275e57f578c4fb510635a33dff8b893d6"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/URL/public-suffix-list.php",
-      "sha256": "bdf73e81f46f842136396b4a006da91d15e6fa826cab53865b3789b0f69ab1bd"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/bin/import/blueprint-import-wxr.json",
-      "sha256": "b30e5e6dc5445e8e051b5d72eeac0e8f77726375c0885db9687c6d6efd7d8e97"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/bin/import/import-wxr.sh",
-      "sha256": "45b12affc12cf14a19ae001be546e0cf5783656de465343ba7c2bcacd117dd08"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/bin/regenerate-public-suffix-list.php",
-      "sha256": "b79baa719b1778779fee5064afee3eff3ee6efdb066eec0a5aa61d80e7e93480"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/bin/rewrite-urls.php",
-      "sha256": "f887d509047abddafdc20c407d31cebd0fa5c5ec4e417c9eac0ceb33d45a9aa5"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/class-dataliberationexception.php",
@@ -2901,11 +2757,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/class-dataliberationhtmlprocessor.php",
-      "sha256": "ec54e9257e2f8248198d9dfce644449d94307f81571bc6eb3b1bf335953f7cc4"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/class-importentity.php",
-      "sha256": "7e47aa9a3f7e238898793fd585b468cb9e61499899477a8a926f6f85c3c1b874"
+      "sha256": "d363d545ef3a395e0a730f97cb889d7c5e535eacf80a470258eb4f49a4e481ba"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/plugin-build.sh",
@@ -2914,922 +2766,6 @@
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/rector.php",
       "sha256": "71d7b9911de11e94b1185bcf1725f3e3a3bde147fc75eede92cfce21396866e8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/LICENSE",
-      "sha256": "d2625cc652e6ffa9f16827f1dba2d83ac12b050dc8150a38720420dbb810cae3"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/BigDecimal.php",
-      "sha256": "9c0439507844e551d04af7fb1bd1fceb5d6c5472a29c5bfe05b7b6c40b6968ba"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/BigInteger.php",
-      "sha256": "11e43c97bb9a1b2b885e2411740b7e906ad204db6fef1346ce080cf803ed5d4c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/BigNumber.php",
-      "sha256": "68b5df9fcbf8c248517dd4f6696d0b2c3304c59d3b29fd0dcd15dcd8ca5de692"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/BigRational.php",
-      "sha256": "f47c639cb00e999c77a5e221778d6f91a9caa22b3d7940010ac3818cb8ca0ae8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/Exception/DivisionByZeroException.php",
-      "sha256": "d608a22ece05287ced2d6c809df98b8f1e835fd88309f3aa7e3a0b560e981a05"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/Exception/IntegerOverflowException.php",
-      "sha256": "c2047f58877450cd59dbeda6cec90454bc4072e4629c02dd804976ef0b2c11c0"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/Exception/MathException.php",
-      "sha256": "ebbaab5cab5e063f5d645ca7d4a4e647e32cfcb78da1fe43d1103fa73144a5c3"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/Exception/NegativeNumberException.php",
-      "sha256": "663f3bb17a8a3d38d27251e1fa97df6b861e83e4930e1abe661399f376b0c1bc"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/Exception/NumberFormatException.php",
-      "sha256": "700f819afd3983ec6f0d73e0449029fc08227bc8f3be797cc709931c11b89517"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/Exception/RoundingNecessaryException.php",
-      "sha256": "91932b85de958277f75a52bd9df750876e35704c8cdf243ef251852e2980457f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/Internal/Calculator.php",
-      "sha256": "fb27b262443812995477ea5914062b496f2143a9d14da191fd39968d2e5d42e2"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/Internal/Calculator/BcMathCalculator.php",
-      "sha256": "7ec7152cd285380ccfbc9bab67dc5a0c47a03d85119e8fd31eb4c568e7cdd6ec"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/Internal/Calculator/GmpCalculator.php",
-      "sha256": "70f360dc80009a8d78db47458bb0fe05e05eb8aeacd90de56488d30f49b37fe0"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/Internal/Calculator/NativeCalculator.php",
-      "sha256": "3cf5d6b3b8303abdd3660d70a1853efbad61903808b42567ae4710cd12fca3d9"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/brick/math/src/RoundingMode.php",
-      "sha256": "d14b27d63ca8619536df233be709bfd3fd29885be71862cb95056f3e7407b6fa"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/event-dispatcher/LICENSE",
-      "sha256": "d2e70341a9667b93ad542e4842b0b7022d302aa7c2d2a909b156b8f1e3c4cca8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/event-dispatcher/src/EventDispatcherInterface.php",
-      "sha256": "d3738c19ea6b8333727eb57cc430c3d5f1b661c30d0dee15c0f35a15090c3895"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/event-dispatcher/src/ListenerProviderInterface.php",
-      "sha256": "6c0275813c05d9c9750eaca5211801a9f6f37fdd7a4f23202ae834559dd4a50d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/event-dispatcher/src/StoppableEventInterface.php",
-      "sha256": "d0640f45c9d7fd10af480d224b7db3cc2a7cb9315f49aaebf06a9011596003b0"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/log/LICENSE",
-      "sha256": "6e944907067bae93c00a9f2ad51032243820b22df34b77c77690d46cb2e98e24"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/log/src/AbstractLogger.php",
-      "sha256": "f7ea03fb6fdeac74502b4119e35419b43afc6c72e7214df3deeca013f2c4fc63"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/log/src/InvalidArgumentException.php",
-      "sha256": "1e95f966cc854bcbe74702a2f3578d6aa3d134e25dc55590d8f88dec33f46af8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/log/src/LogLevel.php",
-      "sha256": "e8530b9ee661dbada6afa5618f71369bde4e580a81e7041f43d75cbf4372c0d8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/log/src/LoggerAwareInterface.php",
-      "sha256": "d0709c8eed063f0453572cea1a8b0c4954cddedee5892089a29fecb0afc5fe90"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/log/src/LoggerAwareTrait.php",
-      "sha256": "8b51f19e25e88c25c5677c3244274daadcc97489d6280656f19487f539ee448b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/log/src/LoggerInterface.php",
-      "sha256": "d3e9b8ba5887a692e2e07de85be7869d34bb2dcd3c14bb65d664e03fc967f42d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/log/src/LoggerTrait.php",
-      "sha256": "5493ada4b7b8ff834ba05d4dc5a2150bcef41f17a5a8639f4c14f799c2b007a7"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/psr/log/src/NullLogger.php",
-      "sha256": "13ea514fd63997e89e22743ad07691c636c4d3187dbb68a0e6f91cf4ff05b469"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/LICENSE",
-      "sha256": "067e9ea6499a1f9ad033f2d5e3909c83be51d55fa416d4bab913894f19ab68d3"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/bin/Builder.php",
-      "sha256": "68914866a13e425be81019bb5db946750de218c54304b876109478df82028f00"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/bin/IdnaDataBuilder.php",
-      "sha256": "f94078e98f78cf55fde2c86806e2af489e0760ac2294b299078ec21a9f273b8d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/bin/RegexBuilder.php",
-      "sha256": "66f16e9e252c2a6b6b761e6c8e7c654f2598ae0f71ac9b3f2e141fdcb73be28d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/bin/ViramaDataBuilder.php",
-      "sha256": "0933fbeb115d231331277b1a804f325aa13d689a10db4f8c823ef2686991aa61"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/bin/generateDataFiles.php",
-      "sha256": "1789f42f0303db7b24cd8d7a505780b38718576215b1c3ada747ddbe69fdc14a"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/phpstan.neon",
-      "sha256": "e7abb74956eb90750aea12673b7e05c7a8d7150a02f500142816cf1daa8d1980"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/resources/DisallowedRanges.php",
-      "sha256": "16ab5510cd7fb69c72c1fd63963c40b1218f1c358a13450e2a17a9e364031911"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/resources/Regex.php",
-      "sha256": "d613e96dd309eadb696ec01e4536d9a1e83f35e20a12070f3c02883030730ecd"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/resources/deviation.php",
-      "sha256": "4ac9cff6fb6cc86549b24e870d4b6a274282311d01a0e877ccf901a56ae7a799"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/resources/disallowed.php",
-      "sha256": "d8d23940143922181ac345d0bbc31f41623d6fd380d462f2d8bae502e528eaaf"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/resources/disallowed_STD3_mapped.php",
-      "sha256": "0ec49ad35bfd8f70e029f99dbc175bfd81d9b2ca59b97f98c63039cc74afafe8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/resources/disallowed_STD3_valid.php",
-      "sha256": "e32c2efc961c7b859b519de48efadef75660e32921978b46796fbf93fbce19ba"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/resources/ignored.php",
-      "sha256": "b6cb646db2171cdc97152b44be1a3b91d9faa19f129073cd101889e4f6a9beec"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/resources/mapped.php",
-      "sha256": "8de2adb9ffdbece9c39567327c1e34c3a668965a5969b375e7f9eb00c4ae086e"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/resources/virama.php",
-      "sha256": "7fbd844345d1584b8a5ee02911b85b424c3bc70caea69ebf88053705dff07159"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/src/CodePoint.php",
-      "sha256": "4d3ab6dba7394c5e6ad421b3e94db5bbf0a26e8370e0aa59619e363621cd5638"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/src/CodePointStatus.php",
-      "sha256": "0524e8118008943d2f3678bd5c297c853383b12b7f8dc5dabe2a67811d12b290"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/src/DomainInfo.php",
-      "sha256": "51beef785da95927bcc8c19c24c4f99ea5eb498557761d81afccca3c609fd031"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/src/Idna.php",
-      "sha256": "1d7b9f5bc734d71fb46476127eee809255efd7fe9e1ab979100185b3dfbed693"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/src/IdnaResult.php",
-      "sha256": "d52cafc509198f3e48eed99d9072cd7c3101921289558de30e9361e4bd322da9"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/idna/src/LabelValidator.php",
-      "sha256": "c0ac511a8b86f725ca275d8c45f037dda70b3ab9b13845626dc1ebd7c40a77cc"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/punycode/LICENSE",
-      "sha256": "067e9ea6499a1f9ad033f2d5e3909c83be51d55fa416d4bab913894f19ab68d3"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/punycode/phpstan.neon",
-      "sha256": "d3006eb78feb9b019806a834cdc894a7a6a5e6fdc73ad25c2e414ae243de5c56"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/punycode/src/Exception/InvalidInputException.php",
-      "sha256": "7552e68953bfbd2255e1f1a9828ad062b602d2c933c6ce369dce31f4df749db0"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/punycode/src/Exception/OutputSizeExceededException.php",
-      "sha256": "19a7c0a6beda8db87a7aa8d99e0bdb173e9b8fe9ed1b831b66473c269545c08e"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/punycode/src/Exception/OverflowException.php",
-      "sha256": "17007fac56d761587df1fd775bfc92aae317bcfc4ea2f37fed05d059e736d1bc"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/punycode/src/Exception/PunycodeException.php",
-      "sha256": "8b15dd38718c603486a25e5df4497258222f9ae5197fa1a9977614b492c81286"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/punycode/src/Punycode.php",
-      "sha256": "c4ff7d34b917bb5650cee0bee5d808594401144c9736a2287a0768565cde4150"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/LICENSE",
-      "sha256": "90f958e9fde24d0278db4b49a68facf5e14d9eb8d3f5e05a4e6e58bab078da05"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/phpstan.neon",
-      "sha256": "e878f21e57762103f9c258869cc03cbfd719937fedc4f18818eea48966414fa0"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/APIParserErrorType.php",
-      "sha256": "588874123c1523f1929af2ac5f7d0bc9ad08268c730a7b4b21ad62e68b7b4901"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/APIParserResult.php",
-      "sha256": "f69031b686d6bc3d3849e1d020f5dbdb9b75ceedf20e9af75b0e9680f7fb9a09"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/BasicURLParser.php",
-      "sha256": "503eb213386858f27f7c9403ba3ca8152617100ff57d465bd80f8c3fc1111875"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/AbstractPath.php",
-      "sha256": "ef77a3328b355f490a78b7b52146914b6114fbc328c3cfe9b102c2b661f8205b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/AbstractHost.php",
-      "sha256": "a2eb8b87f030102299571e2410238c033f39b2f802e5673e8e74c7eac6708b53"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/HostInterface.php",
-      "sha256": "b138cf6fb096cd74b7306922680fd64262a43ce3b139fdb6dff6f27c9352ccf8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/HostParser.php",
-      "sha256": "9a5acc8dd3a122ff1a062dd7b656adf95408e39411b15568e11546d0d2ed2b4f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/IPv4Address.php",
-      "sha256": "44401c73e6ba52a1fa5c9b9594149933624fab20f757e8d465fafd454b69073b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/IPv4AddressParser.php",
-      "sha256": "30090f186ebc1a7f915f74c1b406b3fa1bb67fd00387bd0510c2bcb61246a128"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/IPv6Address.php",
-      "sha256": "3e69cdc3c003b076ad6fadf1c7115eedbed28d5785533eb7586ac3c38f5c7454"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/IPv6AddressParser.php",
-      "sha256": "7909b351affa21f145faf3287b036c548ff8d686d8af09f904c86137eb887307"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/Math/BrickMathAdapter.php",
-      "sha256": "7a53c4528a0b0d73639dc584c253b9fd198630d56d138da25f3bf026a58a5bc9"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/Math/Exception/MathException.php",
-      "sha256": "8cf1adaabdcb484bd4456153972a3a03357303846bbece82c6dd44f63c2c1bcf"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/Math/NativeIntAdapter.php",
-      "sha256": "d75f0f2f3652529eeed53835f56099803efec314d475fe347673d28637b1b689"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/Math/NumberFactory.php",
-      "sha256": "e5628e9f6cd5a98aafc1641f530e45c5a49d143845a9d7f912d163f5e50069f8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/Math/NumberInterface.php",
-      "sha256": "b86b2ce73066a995a5246068554cc5dfdbd790f96f040dee36f6906d884307df"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/NullHost.php",
-      "sha256": "26573a0257f784f129993e94f0134cdea74f818b0e33e7951d67b4937dde4737"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/Serializer/HostSerializerInterface.php",
-      "sha256": "96bbfe8c4fe9c617bc82ab1b6bb0090d69b3e8d1e2b77384ddbc178dc9094713"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/Serializer/IPv4AddressSerializer.php",
-      "sha256": "123ba647c5528cd8a806b26c5e57d7a955f3c3ac8d9f68457c3becf7a0ec5331"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/Serializer/IPv6AddressSerializer.php",
-      "sha256": "d1b9944b6c9d15210dc9d8de15efc3298dfa0439c1cbf7504621e0c0d982d2a3"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/Serializer/StringHostSerializer.php",
-      "sha256": "93bb999ffa63096d93feb7018b58799472bbe52a9a368a580e2418aee121a78c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Host/StringHost.php",
-      "sha256": "199aee5a8feec2af334a17ff763265bb3a6d399c76cfddc8301020c7e3b17ac4"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/OpaqueOrigin.php",
-      "sha256": "4187d019f1a96bea672ee3f17e926cbe862745f9f66e7211c0b656f5f63c16c9"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/OpaquePath.php",
-      "sha256": "9e4e33e53cf6dc39b5e1f45ab9ea9e542d38cce00c4a380a5471452134173d30"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/PathInterface.php",
-      "sha256": "45fc42b075e217943925f7ac2149f7bc743f61dbe8f4257a6cfd1df3b6204112"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/PathList.php",
-      "sha256": "6190d054f61426e0b30947e9013d8d44f5962323cdb424e0e68ffb06725f8d50"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/PathSegment.php",
-      "sha256": "a361367f015b7f0655c3c7c4ffad556ce2ee139110a4c4735b301385ae039ec9"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/QueryList.php",
-      "sha256": "4a5c200847f4a1a1da43ba92cc38f93f2d9eac33353cf3d0b9f60e5454e40d59"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/Scheme.php",
-      "sha256": "b5d9152cf6263f296328d88fc0669fa38593dedd750b76c580236079ff101cfe"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Component/TupleOrigin.php",
-      "sha256": "1faef8e9a993eac48339ac4112d8ec3129e811bdaa6bb0ad2750de249e35b7c3"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Exception/TypeError.php",
-      "sha256": "da6f479f6e66c81959c8427d4c48c32bc78977eb333ca700da14f6f85dcf1746"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Exception/URLException.php",
-      "sha256": "916964c76b9f96c143b005aa26cb597c13cb05c063389560189fd74a09187b16"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Exception/UnsupportedOperationException.php",
-      "sha256": "c0edd2fb98ffc6b9b35752ca91eef5d151b4cf2080fbfae6e356d5dc4584847c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Origin.php",
-      "sha256": "40bbf38563f12482eeadab41dcbd5758a7223f09142933f2904ad3ee1fde79e7"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/ParserContext.php",
-      "sha256": "f06f324ea50ee992a9b679e4835f27fbeff104557357fe5c316e5798ab2044f1"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/ParserState.php",
-      "sha256": "b41ef60366895609253d3b08a5b316950dcfb0a5b01fea6d99e4ccd583bd9487"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/AbstractHostState.php",
-      "sha256": "5c1565bce36b6a2637dee8bbd77303e8f0b6b0e4d911074a719bd660ea969827"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/AuthorityState.php",
-      "sha256": "f0ea58437f1a3fd01823b79253c6c42ec11c8195a7b409a9541af2de510c2d6a"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/FileHostState.php",
-      "sha256": "c622d2192326534ddaa52b15c4ffcf4204ef8d3db33c169372e536357c3cb5b7"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/FileSlashState.php",
-      "sha256": "6c2717968ddc039c21234ca26d04d833e740a07110ce322d9f0582ddeb150fbf"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/FileState.php",
-      "sha256": "c7186bc646fe41f7b246af477dc0a2d3d603f44dcabafcd7c0121f5597224594"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/FragmentState.php",
-      "sha256": "86e0853c8f8d1cf443862891e6958c04874b5cf0d72a7eefb1880f5f8bb5e4b0"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/HostState.php",
-      "sha256": "1658f143b3c4d3dcf3792d318c18b8ed8d64145edc6222c868bf0cb5fb46dcb7"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/HostnameState.php",
-      "sha256": "b8cc65014fd84b459912f2e9cf39d58ef95ba23d188437f9e1bfc04acfbaf855"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/NoSchemeState.php",
-      "sha256": "f0240bf4b47bfa82f599309196d2a1034688675ed1ad548d7e3752c61c07174b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/OpaquePathState.php",
-      "sha256": "a753f6bf1d01f7227a861982411b52d15f3f61a8e99978a42b96cae3e23b2d8f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/PathOrAuthorityState.php",
-      "sha256": "dd4daf8df3b9537ee228574a7ebda36eee64bc5d2717ef9f7e840b7e8b357b62"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/PathStartState.php",
-      "sha256": "a3a17d2eec6e824b73beb0a50d22f36bc8ceb11eadb7a9a6e456b91570784623"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/PathState.php",
-      "sha256": "dfb0ef4d62270d7f70816be38812615cc32883490716f930f63449021912f9b8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/PortState.php",
-      "sha256": "68189ba5db19aa11ec81ca5281a05e0d3046009689e64d9d0f8c2e99ebd7f65d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/QueryState.php",
-      "sha256": "2d7314b4a8dc3d7db23a026567ca4ac94de7ed824258fc9bf20e38b5df94f1c8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/RelativeSlashState.php",
-      "sha256": "46776757f6b58b077e437b361a1bb45c81a772c241d67029a1379efa207f4ea7"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/RelativeState.php",
-      "sha256": "214f3b1e3b6175d093569aabf7fb6f011bb50b1a3b4bea4e574ed22faba6e189"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/SchemeStartState.php",
-      "sha256": "2f85edde4498f8fab2fee85d06e51bd47f5a90f47c27cf9472abaac1125591be"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/SchemeState.php",
-      "sha256": "e2793ee0302b7ca8ca75b15fc553163ec18858a5af8de942bdd9c14ee71b7bbc"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/SpecialAuthorityIgnoreSlashesState.php",
-      "sha256": "a29e6d88dcd91ba3b1d613526393e5f052b03644ed4053164f08d6d6620a39cb"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/SpecialAuthoritySlashesState.php",
-      "sha256": "73d4b25aaf28e1451942005895bbdfb0192f61279434ce106d2a5bd57aadcca0"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/SpecialRelativeOrAuthorityState.php",
-      "sha256": "7bb45319cf2de99cc869b86dcb89d7d152d123bf3f1cd85a63f2381d890c750c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/State.php",
-      "sha256": "6709934542f32d0ebef066c05a20a6bd317ac19d9ed9a63f91b1b4edbc591c8a"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/State/StatusCode.php",
-      "sha256": "5ad687c78ee41a57721dfaa425f77eb539683a9145773e965758a2f413e5cc7b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/AbstractStringBuffer.php",
-      "sha256": "cb85605c4b5dce92164daef827240dac0c6e5b65120c1ef9f8d1fe163c0abeb3"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/AbstractStringList.php",
-      "sha256": "aa930bc3edad4b74cdb26caf2280888df9e2576410acb302013972dcc26903ca"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/AbstractUSVString.php",
-      "sha256": "934a77b1a1257fae4775f3644dcaf02bf38edd6d980d9b69f21ca6a00c0be194"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/CodePoint.php",
-      "sha256": "cdaba84a6c22337a545b4fda49b32e76e2e199b8afd55326a32568627361b491"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/EncodeSet.php",
-      "sha256": "63278c54893cf2e87f856cf084ccc1489e2334889521c376b70a952671bd7e13"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/Exception/EncodingException.php",
-      "sha256": "10a4e95d70b9ba8ed6988eb1bdde600a70956bea0d6d8ede2ac0b6b5c73609ea"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/Exception/RegexException.php",
-      "sha256": "973a68323e977a24855fb0f69969218eaf1ecfc3cd82484b5803dbec9589e7f8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/Exception/UndefinedIndexException.php",
-      "sha256": "5e5d955332c2990b5a03ba4ce781c6aa46bb1ab1bd049716e081aeb9c8a0f6c3"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/PercentEncoder.php",
-      "sha256": "21a69d3f6f6d8f4de02bc5644b305e71fac5321a557cb60f542bdcfc6800de24"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/StringBuffer.php",
-      "sha256": "aa41172a484cfc03f99405a9699fca6ab36f37f0099a6fc68ab303ddc3c28c8d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/StringBufferInterface.php",
-      "sha256": "4e90beacb21ed8aa9fbc63c13c0b398bd322d00d93b0cbdfce28dfa45dc1d483"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/StringIteratorInterface.php",
-      "sha256": "9fe8c67e2e2ef92c60d20daf84fa5950cdf4aabc9c93ff2b4c039b5948d1f701"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/StringList.php",
-      "sha256": "2636f65d7ed1a22b04a9a2ba23c584cddd3687664495f187cc94053a3667ea78"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/StringListInterface.php",
-      "sha256": "d3850ceea3755be2deea38aafd26970487369c7be02170cf04cf42e188c54b6b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/USVStringInterface.php",
-      "sha256": "4a14db8c2c565108dfb90c0d72a70f423fe57ff39c792e11165017f958bef63f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/Utf8String.php",
-      "sha256": "09dcdda96953f49a6b2d98754a9862f5a2b832ab4bdcd9a5664fc4891e209aeb"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/String/Utf8StringIterator.php",
-      "sha256": "73d3321289eba0474567db17b198ef34845a9a52e0d8d1af8876a5f7ac280c5c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/Support/EncodingHelper.php",
-      "sha256": "5bfe6340dd36857350e7a61780994ccc3692dfb41abfe75aa42784a5beb48d89"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/URL.php",
-      "sha256": "77bf8335f29e595d0434957528d7fe4ba5bab1ee852104ad91fd7782a6832017"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/URLRecord.php",
-      "sha256": "f51885f98af09b4ddd13db55f67f4a6e3464bd9c620ae0c962a2ecce381db890"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/rowbot/url/src/URLSearchParams.php",
-      "sha256": "8e292cde760cf1c9065ce2e6e7da928f0540bcc742037c2bd1d24127e3d83a3f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/deprecation-contracts/LICENSE",
-      "sha256": "b92809182501f0fa422167ea44484b41877e1736e8283d0377fdc9664bb9a02d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/deprecation-contracts/function.php",
-      "sha256": "3521941eff4b007ca6b478e4bce2c705ec64a9e8720fbe200c768bcc34600592"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-ctype/Ctype.php",
-      "sha256": "1a32c783da1bd408d4bfc70dc8a741f27b56785b67d7ca73adc280c54a3b7cf5"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-ctype/LICENSE",
-      "sha256": "375396ec5755e9c27dd9c513c0eb4c2923881aba98b941f156e92ed6ec1cfa19"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-ctype/bootstrap.php",
-      "sha256": "cfb4ca1f6e7df5a3edcbeb58a617d7693a7225c07128cdbd829c3e1aa28751c4"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-ctype/bootstrap80.php",
-      "sha256": "808f7e69cfd57a730df02be187d7a1e0f6e327659c5c32c4f780b01f8d3eb10f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-intl-normalizer/LICENSE",
-      "sha256": "eaa5d6e59ff1d5322ae36d3ab9124460df72d2d0c8af60a99222e8a90dcbdf31"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-intl-normalizer/Normalizer.php",
-      "sha256": "358254e45c08d2eb5ff80356b299e47b2c593db28bba423bda850f50faeb516e"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-intl-normalizer/Resources/stubs/Normalizer.php",
-      "sha256": "fac7dc3a28baf062f896bdb2e4ba890da6e95407fda7e0dc76c9e2f3ea0c1bdb"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-intl-normalizer/Resources/unidata/canonicalComposition.php",
-      "sha256": "a347e6548735ea80c25af0fa6e69500fe06471224b233be84b996aedda129dff"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-intl-normalizer/Resources/unidata/canonicalDecomposition.php",
-      "sha256": "0313c6f1d1c67548feef846de84c106e58b517c47917956b4738f66cae91ff73"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-intl-normalizer/Resources/unidata/combiningClass.php",
-      "sha256": "007590e5ecc48cdd6255136452f0809fc7b7226359b2d02a38813f2cd0be30ad"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-intl-normalizer/Resources/unidata/compatibilityDecomposition.php",
-      "sha256": "4f0fe96d0d8aeb1edc5957369455fecc9308e09cf796463094bdb5ea5ae5ca4c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-intl-normalizer/bootstrap.php",
-      "sha256": "03b1c383b87aa05b9c834c665c7b05b10072d3517904ae43380e194df159d867"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-intl-normalizer/bootstrap80.php",
-      "sha256": "878e8028040d87bf33e86c756be41cd3ccfe1d5abf8b14dfa38990e526d2c84e"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-php80/LICENSE",
-      "sha256": "b92809182501f0fa422167ea44484b41877e1736e8283d0377fdc9664bb9a02d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-php80/Php80.php",
-      "sha256": "191cd6666009a43e7227be78be5535eb4144407755e9bb66ca2e44e853924380"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-php80/PhpToken.php",
-      "sha256": "98cee3f55618692c97fd7fff3947c9c85f01d1503d95e38cc1d97c7d34ea642f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-php80/Resources/stubs/Attribute.php",
-      "sha256": "1db41e045c1878853c88b94eb3edb43c0a86633513fd31b616de44d2dc523ff6"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-php80/Resources/stubs/PhpToken.php",
-      "sha256": "3ec09b837f12a4f42648c01cfa5e241246266ea0d260720387c783324677c87c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-php80/Resources/stubs/Stringable.php",
-      "sha256": "80d9f916cafe2288580184e46feee1f23a28b6f87500a2999502aff472748c8f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-php80/Resources/stubs/UnhandledMatchError.php",
-      "sha256": "5a1041f5fb0ff6d4d9952b9c5dddfcf8715efb098b9dd4f0d09733b8daba1c0f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-php80/Resources/stubs/ValueError.php",
-      "sha256": "92f5a9160abf51635a284fa95372b8e8760bc483ade23d68fc38179d43667199"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/data-liberation/vendor-patched/symfony/polyfill-php80/bootstrap.php",
-      "sha256": "62e6a0b2a404171de8a5350dbee960fe4dde88d6a83f18d0f63b3e3f8e7d7f57"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/encoding/compat-utf8.php",
-      "sha256": "0d04ce3073fd77ea55f3a97760b322b1880d0d5c052681bfae8ba0ef53608754"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/encoding/utf8-encoder.php",
-      "sha256": "033c6c2636f90ac28d6e9f47a26436d9a4200ce2d6651504f329660a8fc2bb99"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/encoding/utf8.php",
-      "sha256": "05187b5baeed8a05422df47e9b585e0f91c6c0d980251bb1dfdff60f2ac8962c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/ByteStream/class-filesystemwritestream.php",
-      "sha256": "4f6739af42fdb45042435189661b3c6391a27af6714af01545a607ded6991fdf"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Layer/class-chrootlayer.php",
-      "sha256": "723fc170e9f8ff4868b90a755ca7346090b4b52a41b7ee832b920f55a14b30b2"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Layer/class-layer.php",
-      "sha256": "f769f5f09203031b101d94af78ddbb7ae363a2c6a1ade1bccd37124fb685a062"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/Interfaces/interface-internalizedwritestream.php",
-      "sha256": "e3f087e271d1cd68a77a0f776a4e253879127a4ac793de77211652685ac2be82"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-bufferedwritestreamviaputcontents.php",
-      "sha256": "648526e2bb98843c6bc9315d386efe00a185078e8142a9fa2316f25879c004ce"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-copydirectoryrecursive.php",
-      "sha256": "1c542fb4e4d30121d30ef24cf30a7928178aeac0ccff500034bb7af76bfd77fa"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-copyfileviastreaming.php",
-      "sha256": "f6814aa87764573f02a964ec519c440d4d09f6b1ac129bbb1caa1472176a1100"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-copyrecursiveviastreaming.php",
-      "sha256": "b3b1e22a53ba8daa2713a4e8ec98269dd7db8e57d7a08163da88141c5bd36ce0"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-getcontentsviareadstream.php",
-      "sha256": "bc19f41dd0b2c41f604f334c032d333d593ac0dd2d43b3fe199478fa30c60b06"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-internalizewritestream.php",
-      "sha256": "f00a276ce8a7a60ed39d9b4d48266b020fd4373260d09db89f395533bf0c8e4e"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-mkdirrecursive.php",
-      "sha256": "b6b17da6b33fba41630cca9bf88540eee386e7b1d0d27618498388329792c028"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-putcontentsviawritestream.php",
-      "sha256": "2cf4248a165e12332856822d347cfb3563e7b24cbc9f6f23b8103dec053fc5b0"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-readonlyfilesystem.php",
-      "sha256": "eef960eedfdcb9820f44e50e4d460815e2eb41fdfc88d4e75eb49ae3b522e073"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-renamefileviacopyandrm.php",
-      "sha256": "db4d0cdfe9b2466201b76e3c85284188af55a3911123094012af77f76c314375"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Mixin/trait-rmdirrecursive.php",
-      "sha256": "83872b44bc80a99dffbba44a9cfbcf95c53e026d5cdb6ceb9970cd9ad40fa65b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Path/class-windowspath.php",
-      "sha256": "0bfaf79ef6baea6a2de99c0d9c53e700928c25e4251438c1edff5c418bad5cfb"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Visitor/class-filesystemvisitor.php",
-      "sha256": "a3386b832bd28ba23aecb7c02828f6f7fd6841eb5051e578354df595e27f1e4a"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/Visitor/class-filevisitorevent.php",
-      "sha256": "c16e2c8c33fdcc05e9058ade1fecebcbd87a1d3fc01fbdca753ed0932137bff7"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/class-filesystemexception.php",
-      "sha256": "ed71c2ed25a0d15babbbec2649a283cceb1e9a4a71c4d8f81cf10a77b36314f4"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/class-inmemoryfilesystem.php",
-      "sha256": "e38e9a880e152174e74a35237847e090151111d7e687a1a292f90c7e5a92af52"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/class-localfilesystem.php",
-      "sha256": "45df2eefb1e26cd48d452a976c754619f196e5728d1e958ed4996b76664a4ab7"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/class-sqlitefilesystem.php",
-      "sha256": "c55831bc6ba4d85945a467595633e9d75aeadf65b473cf4fbdf83d25feb4ef5c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/class-uploadedfilesystem.php",
-      "sha256": "2af3db3d193a232c6bfcaf8ba0eb1a3b0abe0e501b9a022929b02c96d9d4b51f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/functions.php",
-      "sha256": "7aa06177bb54041857ea037189900301a36f8a74249c305bdac6eef428770420"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/filesystem/interface-filesystem.php",
-      "sha256": "48a7e249e66528b4134c7e1870d3ce4f1c24c463f5d3138ef93de83b9571dfcb"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-active-formatting-elements.php",
-      "sha256": "5079fc7e877cd89d2aa3adf8e12eb3ba6caa3d2306c0ced1913b928503111858"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-attribute-token.php",
-      "sha256": "f1e64fb07b8dd13fc769b2ed392ee2dceca3b7bf04ec53bdf5682987fa30092d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-decoder.php",
-      "sha256": "98b3b89e194086d9399715a6bdb1b2efbbeed0daffa8f268664236a02096b6e7"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-doctype-info.php",
-      "sha256": "ccb2b8179b7a36934e670a155027a10828aad65b6edb79812bc7ed92e22604a7"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-open-elements.php",
-      "sha256": "a1454eb6ffdef4cbb22a2ee0090b6a47554d75530c063f62062bc05404ca4c1b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-processor-state.php",
-      "sha256": "e4f213e904fa8be9b8c8d236333911da1330c70ebeb2722966c5f432cd1ae7e6"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-processor.php",
-      "sha256": "3a7085ca19d5dbc7cb2ec948734b8cd88eaf2c1da2e488e461c8ee526098dc4a"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-span.php",
-      "sha256": "143ab126af994a1e102362631783318ee2170108de6abee4d7c8feec53c18c24"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-stack-event.php",
-      "sha256": "348a95b18ae5c48705064e0b332281e28ad8b2fef771fc2f1c3cbdbdfbb6dded"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-tag-processor.php",
-      "sha256": "17846d15576da8a9d2b52de522bfc68aeaa5e5715772169072d3926a17a396f6"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-text-replacement.php",
-      "sha256": "213ce5fd6479b528a34274b691a05f3d916eab1224e100a3361c26c2dabd388a"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-token.php",
-      "sha256": "26e27595e04d1c432168a146162bfac849ab7158167f8a8221ac142acc625c3d"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-html-unsupported-exception.php",
-      "sha256": "677698992e4c9c7be0c0481032c71a8e5af79e9726cfc48cb801cf62c7b5924f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/class-wp-token-map.php",
-      "sha256": "aa4fe8118e21d597d85b858ad9d04dc1cc95d75b37afd80c9206be47f4adbc1b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/html/html5-named-character-references.php",
-      "sha256": "cf274507504cb35a8f2ceded9accc25eb63efea062cfbcd2d6ead4c5c83f7cee"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/ByteStream/class-chunkeddecoderreadstream.php",
-      "sha256": "572c2df341fac82553401533314750ea5c1f40f17ff8c50709a512136e17ff58"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/ByteStream/class-chunkedencoderbytetransformer.php",
-      "sha256": "f28d257803c0886a974aa14b0a1ea4ef9e7956da3e3e5275aea91c1b9efc9b3b"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/ByteStream/class-requestreadstream.php",
-      "sha256": "fb4f7807fbfee9e272e90ddead3ac893da6bfb51eea489828fbb99ebfe707c35"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/ByteStream/class-seekablerequestreadstream.php",
-      "sha256": "efb3d63593355076112ade153da32d10fe8bf5160d09bc76d79b23df9599dd00"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/Middleware/class-cachemiddleware.php",
-      "sha256": "3d03b0c4697151b6a54cf50ca696d1d24d3d45ce1718bdbdc16d161dd6d7ed58"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/Middleware/class-httpmiddleware.php",
-      "sha256": "76fdc4c9cfaa590b87fd21844424750135d48f3e7d2bef441f333a215a5ca099"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/Middleware/class-redirectionmiddleware.php",
-      "sha256": "25f6069ed199bfdf543e3abd4c2d8da582962dc58aec82b5eab87677871512e8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/Middleware/middleware-interface.php",
-      "sha256": "464e3283b672e7d9b816065c6a418711ddcbe0efa460f0f408849afe35e2b908"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/Transport/class-curltransport.php",
-      "sha256": "cf61c03d6d6b94c94ef53d6d7d01edee583a2149f1e94405860ca47ca8d76d01"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/Transport/class-sockettransport.php",
-      "sha256": "be71b7deff9d57c0c5e37addea676207afa27e1a4c84cdfb69785ef63f675eea"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/Transport/interface-transportinterface.php",
-      "sha256": "a4efae6116f4c060b2c6d20143fd4df5252a24c98748e078ccc06b43eb0b37c1"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/class-client.php",
-      "sha256": "194f75e07c2b7bcadf2e1bc963fe95b2012ff6bd9616500836594008ce93da8f"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/class-clientstate.php",
-      "sha256": "9dd49c52313f558abfa43d59429a91ccb9a2a3380017b9170a6c25c522ad6054"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/class-connection.php",
-      "sha256": "56c4507264f5875e1a6c719fafeb40ca04f238dab0ab48860c2f3b15f25dd8d9"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/class-crawler.php",
-      "sha256": "486f424c402028b4b79e02cee84f77d91ece8b82144a123ae961ed4898421f4c"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/class-httpclientexception.php",
-      "sha256": "da5b65d85624309a1a06a911e3ae0fecdcbefece244d01898fbb00e78a043dc5"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/class-httperror.php",
-      "sha256": "1d5f0836f74cfd8fa79887e8df27c4966e42943981f16a850044cb5432c021a5"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/class-request.php",
-      "sha256": "3ddfaaa81181a5f3ac0b439c9ef85ec412a1f397d1eaaaef48df82b402b95c91"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/class-response.php",
-      "sha256": "bc0e6c5ed3caf26e1893195db4a5f5af9e28ff100f4045ac6333ed433a096897"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/examples/concurrent-downloads.php",
-      "sha256": "fa01eb257ffd13a4ada293637e7924942c1e5cc6dd65b0ca1b8d01011a059e99"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/http-client/examples/http-proxy.php",
-      "sha256": "ef9beab6a8a17df0f3be0a1f8483e416f29a38e39714cf225342e8675946cc62"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/markdown/bin/build/DataLiberationBoxCompactor.php",
@@ -3861,11 +2797,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/markdown/class-markdownconsumer.php",
-      "sha256": "7c10b9b85618be92a0b2d15287d8b70ecc318559484649a4232970bfb7c5b734"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/markdown/class-markdownimporter.php",
-      "sha256": "2b2baaeb4bba616d36e916a26ae6e0930881ab571831fc80cbeb0963ab57c277"
+      "sha256": "60942a74e39e6d75a5d767ed2edbca8a3b0800e27e828a4c950a8117b1efbab3"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/markdown/class-markdownproducer.php",
@@ -5629,7 +4561,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/merge/Validate/class-blockmarkupmergevalidator.php",
-      "sha256": "78489fb8e87abdd34a400eb547e6eb370ab0eb75fdca4f2b00d427eac2ab51a8"
+      "sha256": "39df4be7bdb0222dd3dbbe725252606bdcb266a7d562c8082e551805192b216a"
     },
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/merge/Validate/class-invalidmergeexception.php",
@@ -5690,26 +4622,6 @@
     {
       "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/merge/vendor-patched/yetanotherape/diff-match-patch/src/Utils.php",
       "sha256": "8fc1ae58f886dcc9b08d530b974c383cd55c3c875b867dda04e8be99b47651f6"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/xml/class-xmlattributetoken.php",
-      "sha256": "67c1b544129da7b84809a65acb7b5344983dd47c77152cc64b259f7c5d4232e8"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/xml/class-xmldecoder.php",
-      "sha256": "0dd857af29f5e2716d30fc66ab021e2ecc47374307c72a9f9b2b5f08fa37dcbc"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/xml/class-xmlelement.php",
-      "sha256": "da3542b09d3e103e6fd4cf0b619b7761a379ca5901883bd99e7f0d6dfe8524ae"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/xml/class-xmlprocessor.php",
-      "sha256": "953010f1a7010587dc9ff8ec98cbf9577f1f7bd953fd14665b1ba5ef2d7e88eb"
-    },
-    {
-      "path": "crates/zero/runtime/Zero/vendor-prefixed/wp-php-toolkit/xml/class-xmlunsupportedexception.php",
-      "sha256": "9c1d594ea3551bf1aca3d83b200cec7220c6a1569952b21f221e486b9e9bce9f"
     },
     {
       "path": "crates/zero/runtime/admin/LICENSE",
@@ -7797,15 +6709,11 @@
     },
     {
       "path": "crates/zero/runtime/identity/src/Accounts.php",
-      "sha256": "14d97aed1695cb5f256f035226abb78b85f11b7dadfa6b7b8e5452d700f8af0b"
+      "sha256": "60a6661ffa1b5dd925851e097028eee93865458623d3befddbe319a2d942a28c"
     },
     {
       "path": "crates/zero/runtime/identity/src/Api.php",
-      "sha256": "443d3b50ad8bd631993f1624ffdf441d71510440018a24182f7ddbd69f21f8e8"
-    },
-    {
-      "path": "crates/zero/runtime/identity/src/AppCli.php",
-      "sha256": "3186b0d05f71a0942c0d71eb0a1eb9b48ec0ab8041ee348986ad531de185b86a"
+      "sha256": "0a7a83355496e47152ce4519e63a83d278472c8ff86c0dcad593aacbbed85424"
     },
     {
       "path": "crates/zero/runtime/identity/src/Applications.php",
@@ -7817,7 +6725,7 @@
     },
     {
       "path": "crates/zero/runtime/identity/src/Cli.php",
-      "sha256": "38f62b96969c1370a16eda541cfef8e49cecd67a4c35ff9762e4bce8cf5f5f9f"
+      "sha256": "74797b00a77112f8b88e20594029fa8a9c7e693e51097b548143a639fcfaec4c"
     },
     {
       "path": "crates/zero/runtime/identity/src/DB.php",
@@ -7853,11 +6761,11 @@
     },
     {
       "path": "crates/zero/runtime/identity/src/Passkeys.php",
-      "sha256": "97defd74d0ec5e5409a290dc6357b346ccc2a19f0042c1e9c49cec9f54b24cde"
+      "sha256": "907e8383b7ab497a976a3f7e31cd7534b9320f39ea4db529f91710c1ef8b1eeb"
     },
     {
       "path": "crates/zero/runtime/identity/src/Plugin.php",
-      "sha256": "12c4eac716f9332e44d72f7df0234dac9af917856e9bdb0827e652181b2a5bbc"
+      "sha256": "2db8e2a9eab0c0aa6e8534c2340f8e9f1eee7af60db6af165e43ec9a561ca0fc"
     },
     {
       "path": "crates/zero/runtime/identity/src/Privacy.php",
@@ -7873,11 +6781,11 @@
     },
     {
       "path": "crates/zero/runtime/identity/src/Providers.php",
-      "sha256": "4e1384181e148a63cf68cf1fbd809d266b89b3e7890cb598bf353a62ae539120"
+      "sha256": "61cf7c73972aad79d7b4faa3dcc031bff3cb3b2b1f083afdaa5fb6395c359228"
     },
     {
       "path": "crates/zero/runtime/identity/src/Providers/OidcClient.php",
-      "sha256": "3006efa4dcfa3cafa688daf97729d75a6a826e5fad5a28f1a88a35d8f7f27fbb"
+      "sha256": "bc87ee6f863955bb3b514c140cc007b531f830c37c4766680c016acbfa67cec7"
     },
     {
       "path": "crates/zero/runtime/identity/src/Schema.php",
@@ -7885,11 +6793,11 @@
     },
     {
       "path": "crates/zero/runtime/identity/src/Security.php",
-      "sha256": "9b4087b66df095df6058deccfb2f5bd524b23bda135e64155f8f63367f379a19"
+      "sha256": "e4b8ed5d7d3fe09029e124128f642a8b28c01867dafce8b10dcf6690752c2c9d"
     },
     {
       "path": "crates/zero/runtime/identity/src/Sessions.php",
-      "sha256": "179e4156f0b89f653e2dfe419f893baa0c1748a4e5b3d7778c25328f8df01170"
+      "sha256": "969c71017acd254693f0c9d79f0dd653b5ace903380927eb5a406c02938e63ca"
     },
     {
       "path": "crates/zero/runtime/identity/src/Webhooks.php",
@@ -13469,7 +12377,7 @@
     },
     {
       "path": "crates/zero/runtime/pages/Renderer.php",
-      "sha256": "5652f0051dcd537216a6a04903e00dccccd044b6a6437b7a29fb19b784b06997"
+      "sha256": "9dacec63b2bc22df377b66ac3bbf7042a804504800e2f37e9eb37cfe57fd1b87"
     },
     {
       "path": "crates/zero/runtime/pages/Request.php",
@@ -13496,6 +12404,10 @@
       "sha256": "d811d699eb5927120f7ab634cb3dfcaed60dd0523e1295c92046e49283096f3d"
     },
     {
+      "path": "crates/zero/runtime/wp-plugin/zero-loader.php",
+      "sha256": "e808de36b7a18a81b01cddcd0c4b720c5eaed22a955e40e256c89dc7192a1ed9"
+    },
+    {
       "path": "crates/zero/runtime/wp-plugin/zero-runtime-uninstall.php",
       "sha256": "5d355709252a0edf745bc0cb618ccb79df11800c9559363e342ee2956d2b4474"
     },
@@ -13517,83 +12429,91 @@
     },
     {
       "path": "crates/zero/scripts/dev/studio.mjs",
-      "sha256": "f81410612f57d27c7d2a88b4d7e68893ba2157d529470c75947962582fc1b6fd"
+      "sha256": "75f87de5c57f6956e502312915629d9170d271650a9bc96ac5d875fb9336ff3f"
     },
     {
       "path": "crates/zero/src/builtins.rs",
-      "sha256": "b6c9f111a44264d693a238e82b7b90e8c313f5b689fc4245089905dc90e43cb3"
+      "sha256": "817755d2b37ed8bb9a5e0df52d66ff1844ec15415552b5ea5f2f17bff5737dcc"
     },
     {
       "path": "crates/zero/src/bundle.rs",
-      "sha256": "cc39691cce32d2fb577b0fba174016d56e97316271b189448e59f2b38694a50d"
+      "sha256": "b08d93956267174a153bf5b4aac74ed391ffee8367b8fbf68ae4b887c58d86a1"
     },
     {
       "path": "crates/zero/src/cli.rs",
-      "sha256": "3ec2e6186731fc7806fddbe03921dc388e01b7bfd9002e93184c54f7d8e22adf"
+      "sha256": "73e18b01713b24e28813b5f21bd60c718135d38f771f24c44c3267b6bee2fe28"
     },
     {
       "path": "crates/zero/src/client.rs",
-      "sha256": "8b00884957969eacbdc37a8c78ba3fc8472ba72c7e757a7dfc2107f0b235ab12"
+      "sha256": "a99f1533c7244c43f4ad11a0a4beb2ebba693435b7ec318aeeb30987e032b13a"
+    },
+    {
+      "path": "crates/zero/src/commands/abilities.rs",
+      "sha256": "dcb499dceb7be2d4f96e45e4afecbb1922c464404a387d5ece75f0bd846040e0"
     },
     {
       "path": "crates/zero/src/commands/build.rs",
-      "sha256": "3700636bc288346e030832c248508ed905b2da07457eb309aa636f7fd08fad9d"
+      "sha256": "f17295c48163f2225a0f554aa56d89f9854a48cf3a39e24224fd1d361054353e"
     },
     {
       "path": "crates/zero/src/commands/deploy.rs",
-      "sha256": "35cb5378c628e571a47efc2a3ae44aeca4bc46f98dadbbd3651e62197363d3ec"
+      "sha256": "a97a58820fd5025ceb2d829970a9ec5fc97e1bc8507b5a4f48961dfbd757a20e"
     },
     {
       "path": "crates/zero/src/commands/dev.rs",
-      "sha256": "7253410a9c72c5545dab99a35f8fd38bf2139c1102e0c0629d2c76836dd560d9"
+      "sha256": "1c7b85269511a63b17481bb968d1301767f0a9315a74426ee550e1520f16487d"
     },
     {
       "path": "crates/zero/src/commands/doctor.rs",
-      "sha256": "8f5202910af8751b789c561a46a50ee125a4562ed82433cff134f2f3416df51c"
-    },
-    {
-      "path": "crates/zero/src/commands/migrate_site.rs",
-      "sha256": "1f1a2fe804bc74c9bf7f0e574a1816943aac8d073cb48a964df9bc8906c5b5b5"
+      "sha256": "46a6e28d62535125203a8312a5c0295f04f16c88c65d96b42585d7a3fca16402"
     },
     {
       "path": "crates/zero/src/commands/mod.rs",
-      "sha256": "81ddc1ad0d1580b230dd80dcef3fb7db0ec2d1a93184f82f84ec83e5038c9757"
+      "sha256": "db0675cf64b079bf55de18658b6b120f597b86b75b7f73bfdb12778518b9596b"
+    },
+    {
+      "path": "crates/zero/src/commands/site.rs",
+      "sha256": "13355b701a782c25a8daddda7c4563887d85a551690af0ba56fb392a58d03d8c"
     },
     {
       "path": "crates/zero/src/commands/sync.rs",
-      "sha256": "77501ea8949aac4dfbe15e99c4b2857eaffc153d6e00a70ef1981ad2d1a0a1a8"
+      "sha256": "1493b10cbe01fc1760c04d42d17661fb9f7350f3ee6ee776b6cef666fcd39cc3"
     },
     {
       "path": "crates/zero/src/compile.rs",
-      "sha256": "86054001871f0646b79291f4040935c6a7aa4dd3c99fab4fc1034db76ad93887"
+      "sha256": "a1cf008b22d2f594975fdeed0389512f827da56a660a3360fe170b359ce1f8c7"
     },
     {
       "path": "crates/zero/src/compile/annotations.rs",
-      "sha256": "5fce675e2ead8c122d4ddf8bcec47b13b304583a70b2811fdd6c14efcd7682c6"
+      "sha256": "2d75b16c6d8350989cc88d3e143d42ccde23a6f00c3d48869ac306a683c915b3"
     },
     {
       "path": "crates/zero/src/compile/classes.rs",
-      "sha256": "93dba95dcd49eb9bb36f25fa3dc2b6e410616315a10be9cfbef3fab43a29b1fb"
+      "sha256": "c96e6bd9fc8d3713480953abed77fcb76c607ea465f27fc06f02fca4c6ea22f6"
     },
     {
       "path": "crates/zero/src/compile/effects.rs",
-      "sha256": "f8621a742918b4e81b35c94003928dd274bbc4e3689cd8ed72d319cf07d1c759"
+      "sha256": "161251737df8667d84ca081c6e77791a212c7f220b9baea1612c00fb4b4c68e4"
+    },
+    {
+      "path": "crates/zero/src/compile/host.rs",
+      "sha256": "60086f3222943072b5522b37d8d2f79d22b15cf9aa3e5f7efa0bf1262578c2d3"
     },
     {
       "path": "crates/zero/src/compile/javascript.rs",
-      "sha256": "0aef741ce49d173daac6a1278b41bc745db48c19a1d6a67120a1d0d0672db6ef"
+      "sha256": "78b96bf5ea20910c7eccf3ad13fe39849423758c94efdedf0fc8fab894b5d790"
     },
     {
       "path": "crates/zero/src/config_migrate/app.rs",
-      "sha256": "adb911d43a75086d9d8892639870fc5f5feecba273ce43334552664a5954681f"
+      "sha256": "86e77bff35277a478aac2c32bb60962f7e97199a5f1fa63ad7e558b1b110de7b"
     },
     {
       "path": "crates/zero/src/config_migrate/app/endpoints.rs",
-      "sha256": "a8580d44cadaa3261e8f886f2b17f534d066e1920fbaee5309606e0b5e716bc5"
+      "sha256": "a595aad57c2e87cead035771fef6f09950848b82d73fd52cb47221b5f89d107e"
     },
     {
       "path": "crates/zero/src/config_migrate/app/manifest.rs",
-      "sha256": "07009147ba6a9632c23dce14be20b8a72777c4822773261be88057c8d8e4a892"
+      "sha256": "d2679c4906ed726879505dc5f4aa29848f5b9299ed5eca5d827061d85d1d4cb2"
     },
     {
       "path": "crates/zero/src/config_migrate/app/pages.rs",
@@ -13605,11 +12525,11 @@
     },
     {
       "path": "crates/zero/src/config_migrate/app/transform.rs",
-      "sha256": "a12b1fad411eb8f108128523029611b9ee5e1c8eb5f9a64abbd823da7140d145"
+      "sha256": "a93efab755745f3cfeab8ed33d715cb83fa29b7790e471e9d15d119440520df8"
     },
     {
       "path": "crates/zero/src/config_migrate/input.rs",
-      "sha256": "67cb3e0ab2d99100e1a30ba813647b9d56055490e8ab0ee1ce7a2ad1fb2b0d45"
+      "sha256": "8f8af6cc7b681dfe96b7ef9c6eeb2a16a5cf7283e2123afacd5d177764b17a13"
     },
     {
       "path": "crates/zero/src/config_migrate/mod.rs",
@@ -13621,39 +12541,39 @@
     },
     {
       "path": "crates/zero/src/diag.rs",
-      "sha256": "5b76adf831131cf51844499850aa3e77cd4b3a90ae7d5148ed41c208d9b4d6cf"
+      "sha256": "c0f5975fa92de39ec157c738ae206374e4202dd9975138f6c3b66f0aa261674f"
     },
     {
       "path": "crates/zero/src/emit.rs",
-      "sha256": "3517323836cd988cf1a20e279d374b3f9fac3974461bd8e2e562ecced8d3e6c9"
+      "sha256": "d4b2a7f8bdc38b079cf10aa2086c5451a7b5db161ddcc13cb3e6988cdc50d93d"
     },
     {
       "path": "crates/zero/src/eval.rs",
-      "sha256": "33a34051b1f2553a343d344b25999d716300c09a6a4be10286278d2188886d7d"
+      "sha256": "387c0562550d2b95d8beec2af704995368bd1d7b40b4cb544eadde99d4b4ad69"
     },
     {
       "path": "crates/zero/src/extract.rs",
-      "sha256": "a68fe7b8214e4400f883952eb3520174deeb60962653d194a4a07d0ce5d16e8d"
+      "sha256": "7f20283f63683b5688b93ab7359f446a4eb54a389648efd2cd5f13d3277c264f"
     },
     {
       "path": "crates/zero/src/host.rs",
-      "sha256": "42ef7f0a1328f5387098faaff521e909155024039007ef75b511c1acbcc7d9b3"
+      "sha256": "3f81362a0a2f4bf85799a3a6928558e3f302aae43b8fe53f483791f027103a54"
     },
     {
       "path": "crates/zero/src/ir.rs",
-      "sha256": "2092c234b01cf6135442f0f26eea16f6f05198efd85309a3109e0330e27ee4bc"
+      "sha256": "da1429196f9f008df20b864bc7d23355a71009d200e0d399901902905fe978bb"
     },
     {
       "path": "crates/zero/src/lib.rs",
-      "sha256": "8951210927ace11e4e4e0a5f50258134b92da1217d753b0579ed20efce5b9d98"
+      "sha256": "95cfd4b7df471e547195010f9273473dbf04a87b747f6b97bd92f223ec9cea32"
     },
     {
       "path": "crates/zero/src/loader.rs",
-      "sha256": "34acc86a30eefd3c97ba906bef7135ec6ff5c760837396b0ea05a8f1e13606b5"
+      "sha256": "dfc20965405bb81c5702b4205203b6b55de95f55397bb4cc9368922dc5cdd9e8"
     },
     {
       "path": "crates/zero/src/lower.rs",
-      "sha256": "e1b7d44c0b792684e4d950f268b43e2ef8217148e859bc8d2f0069bf7e03acee"
+      "sha256": "2660e7872c88292500adcd1c6ac97926489e41a1ded671df3f41ffafaddd2490"
     },
     {
       "path": "crates/zero/src/main.rs",
@@ -13665,7 +12585,7 @@
     },
     {
       "path": "crates/zero/src/num.rs",
-      "sha256": "b572ba37717597f49382a015b44cc6ee6a5e392c6d8519a4f37f518eafb711d2"
+      "sha256": "9def6121b5b5dbfbf461f53e501090d094e799951fbcacdd99aa53ed93d69ea3"
     },
     {
       "path": "crates/zero/src/pages.rs",
@@ -13673,23 +12593,31 @@
     },
     {
       "path": "crates/zero/src/pipeline.rs",
-      "sha256": "cd247a7ae1d4ef1e8efc5041ae9ab3c4c3e400545353304119688cfeaab7d119"
+      "sha256": "5a21e1cde738b8622247efd6024a702be429c2c33955215a63a13ca2b364281b"
     },
     {
       "path": "crates/zero/src/platform.rs",
       "sha256": "abd9e91b7453505f755f391d98b508a3eae342e6a4434c7109e0c375a7b23396"
     },
     {
+      "path": "crates/zero/src/plugins.rs",
+      "sha256": "a3d1b23ffc374e5df0c9247ea67825b2b25b6feec0be04b3a50636f601b6fb86"
+    },
+    {
       "path": "crates/zero/src/schema.rs",
-      "sha256": "87d231c33f4a954036b929eda25e1ede8344c10d0602f03343409c16dc8571b1"
+      "sha256": "cb084d1a34a9df5102493cae7f9e56978588025efecf9ef3ee85681adda77831"
     },
     {
       "path": "crates/zero/src/schema_php.rs",
-      "sha256": "02cfc5df975360ca8289c2d63f5816dbc1970b5dcb983372f8c5314837f2acbe"
+      "sha256": "24454850d8d8e1a0be5ec92dddbc34ee61f8a9d26f071f12ac120aabae40ed5d"
     },
     {
       "path": "crates/zero/src/services_config.rs",
       "sha256": "1bcf7746f4a2c2f5a0fd8fea81dc85f355279d30feb3dd8fba94b93bf6e361f0"
+    },
+    {
+      "path": "crates/zero/src/store.rs",
+      "sha256": "0d6d87c26a24333488b119c783412b9da4b51dc27829d0dec5832228a0ac1215"
     },
     {
       "path": "crates/zero/src/sync/apply.rs",
@@ -13705,7 +12633,7 @@
     },
     {
       "path": "crates/zero/src/sync/client.rs",
-      "sha256": "5357a1fe67f7ee2ad6e09a041595caafad37fd9e77151ce2b6eeb49ec41515cc"
+      "sha256": "0fd9f336ed94a9917b560dc49b087df81d1e499601a0e6413894fc793ff268e2"
     },
     {
       "path": "crates/zero/src/sync/conflict.rs",
@@ -13745,7 +12673,7 @@
     },
     {
       "path": "crates/zero/src/types.rs",
-      "sha256": "72fe03f5491ce501b4f6f5899438b32059ad33066130178130e447c068e43b72"
+      "sha256": "fd304ce056cfe52ad8624506f2d95be927928c7c075758c4adb9875bf71edcb3"
     },
     {
       "path": "crates/zero/src/uri.rs",
@@ -13753,15 +12681,27 @@
     },
     {
       "path": "crates/zero/src/value.rs",
-      "sha256": "2ad63cd924d3060d228cabe6846ca32c5bce00a6d09a4bb6690b2f886067db0b"
+      "sha256": "0464465d1e74143fe7b181830815ae7e535048d8f1b0406021207871ef137814"
     },
     {
       "path": "crates/zero/src/wasm.rs",
-      "sha256": "6cdf623b73df8fe910d7d75bbbcb1c648a1c56a687cbf7e0f789d841fd73ffa5"
+      "sha256": "c3f260fd80b1963d8cf4dd284d56d753c30c2a69cb4a4a831bc00414e54a675a"
     },
     {
       "path": "crates/zero/src/wasm_host_fs.rs",
       "sha256": "8bfe4643b463c7913ee2c25757118609647cd0ef5b8ac77b3e8a4b0891ee355e"
+    },
+    {
+      "path": "crates/zero/src/wordpress/abilities.rs",
+      "sha256": "00566406399f8f9bb00e47367af28783326ad5d1dabdedbbaf25e078c6cabae2"
+    },
+    {
+      "path": "crates/zero/src/wordpress/catalog.json",
+      "sha256": "0bdbe3c7193118b341c90c1cadb0e0aed3dadddede92e629ccf74c0965c4afe4"
+    },
+    {
+      "path": "crates/zero/src/wordpress/mod.rs",
+      "sha256": "3fd796ee7d0b69e084e0500c5b9f3959e85c776bbf0e91c1b6281b849ebd1d8b"
     },
     {
       "path": "crates/zero/src/wp_plugins/archive.rs",
@@ -13773,11 +12713,15 @@
     },
     {
       "path": "crates/zero/src/wp_plugins/mod.rs",
-      "sha256": "f92878f1a38a9d8e5b3304cce87003746e6a26ffb43fa722f85b291df36a1fbf"
+      "sha256": "e5a4df2167dd90e132e74a22dc5315fc1f0f0c92bc91faf7c0159747280d2363"
     },
     {
       "path": "crates/zero/src/wp_plugins/patches.rs",
       "sha256": "c03046d886bd2da902b29007e29898813a1e9197c821fcff6362f805e7f80f1e"
+    },
+    {
+      "path": "crates/zero/src/wp_plugins/supported.json",
+      "sha256": "3f3a9ed09b89a0bd181fd90dd6b2c364affa6eceab255dbb03edc472a2173851"
     },
     {
       "path": "crates/zero/src/wp_plugins/version.rs",
@@ -13921,11 +12865,11 @@
     },
     {
       "path": "runtime/custom-redirects.php",
-      "sha256": "0d0d129857434f1ceb472567a3dbecf56b041f1dde77bddde05cb97cdd39f752"
+      "sha256": "4ff7ebd5d0976af84cb15a7179ca8d24b17351335b0dc3f433d435cfdb948dc3"
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "d03147037289268c1f90968574e9006c62c0f6ad4fda59eda0bbe2a8d60f6640"
+      "sha256": "79116486483823a055f597758171d81441f810ebfd2a8e3d0ef916cae79969f3"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -14013,7 +12957,7 @@
     },
     {
       "path": "runtime/engine/entrypoints/content.php",
-      "sha256": "d8a124ca455550696ab6ea904f9b7d05847e3e9c9ac2c0bc49d678d3257e366b"
+      "sha256": "f4745fb5f5da1b1ba6da1abc4366fa03d56e8c228efc3e0ee9528edac09f0d7c"
     },
     {
       "path": "runtime/engine/entrypoints/cron.php",
@@ -14121,7 +13065,7 @@
     },
     {
       "path": "runtime/engine/runtime/identity-context.php",
-      "sha256": "87ec0968d8b5b92fbec78eee5d32b2ddf56a9d7beea48841ff48bd629c5d340e"
+      "sha256": "3f64a0c062616c8ae1e780ba175d246de393f65bb5157307e1b98e74feac7abb"
     },
     {
       "path": "runtime/engine/runtime/legacy-zero.php",
@@ -14161,7 +13105,7 @@
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
-      "sha256": "1fd68e2ba4a5e75777b5b7e60018631c25c43802101293b7d5beee5729fc8534"
+      "sha256": "bb766d6df9f817852089c0e99bf33af6794ce735eec5bfc8b93eff9a43304086"
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
@@ -14392,6 +13336,10 @@
       "sha256": "6b5901f6ab3859ea689ed83401293ce49b4b970e2cce05e16704248aa425e8ab"
     },
     {
+      "path": "runtime/engine/shared/space-users-site.php",
+      "sha256": "6013d445c8e02f00ac80b0e0ad5e962ed3e2c10d4db5325d16d30ddc798d8e3d"
+    },
+    {
       "path": "runtime/engine/shared/storage-policy.generated.php",
       "sha256": "be172be426273c68a4003d17965b0b333b53bcbc9518ba1820812efcffa1f4b9"
     },
@@ -14409,7 +13357,7 @@
     },
     {
       "path": "runtime/engine/shared/wordpress-scope.php",
-      "sha256": "b52e6bb5559ff2d3b6491757202eb906c43ba91656ec3b52bf1e545f6d3440ad"
+      "sha256": "e40dfec2f0f6a7a28caf52147a65eab429b04e39f67cdc15f598da82f43bd7a0"
     },
     {
       "path": "runtime/engine/shared/zero-db-scope.php",
@@ -14417,15 +13365,15 @@
     },
     {
       "path": "runtime/engine/shared/zero-v2-scope.php",
-      "sha256": "efa8cc26f522503d077a8c50858b2e7d29c015bc584f0e86e0f0245069e41ac1"
+      "sha256": "931400dd828beff39f3959702d2c95aeab51567848295ef4194d039ebd1abb54"
     },
     {
       "path": "runtime/engine/shared/zero-v2.php",
-      "sha256": "0ec329e891e9e2e2e80a069587b6cb258ac6a5b954826e2840ee5945d146121a"
+      "sha256": "8b84c7616f1b3579def04a9bd026fe6f05bf53bbb7ecc59c514b460a11576c42"
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "72138d4d3e75b12ab3a7fc44f0f0e9042f3f437ee38b01e9e241902c3759d61d"
+      "sha256": "2b61c8cd97e6d7e479d393d5c0f200b0d3213787769380b422b95b76df7a12ab"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -14436,12 +13384,16 @@
       "sha256": "d99848a7419555f0c258e660890808dab3124710404e71d0e96da8d55b6cc9d4"
     },
     {
+      "path": "runtime/engine/wordpress/content-error.php",
+      "sha256": "57561954bf726d906dd57add61df3ff5cef204c9bf881d7fefc0a589502f74ab"
+    },
+    {
       "path": "runtime/engine/wordpress/content-html.php",
       "sha256": "1589e22bc6beaa71cf93487d5b77d6b983dadcc9a8baaef4868bfb440164835b"
     },
     {
       "path": "runtime/engine/wordpress/content-kernel.php",
-      "sha256": "c33a6ea260b0458a05f8b27055666ec61590f162bf691cac81e76f3203c4aafc"
+      "sha256": "8d1b4440d0c02c447e96a68e40035dead7b62a41d09da1828a4ec084b7ca1433"
     },
     {
       "path": "runtime/engine/wordpress/content-markdown.php",
@@ -14477,7 +13429,7 @@
     },
     {
       "path": "runtime/engine/wordpress/content-users.php",
-      "sha256": "0f3e0a028f4a957091f06c30e2b4de4f60d5273cf1db732a69f4669c3ae8ab77"
+      "sha256": "ea878f6f771770eeb80b13cf65ca48c1b68f70c8096ae4564e45caea46360565"
     },
     {
       "path": "runtime/engine/wordpress/knowledge-rest-controller.php",
@@ -14489,7 +13441,7 @@
     },
     {
       "path": "runtime/engine/wordpress/space-users.php",
-      "sha256": "6e23f6fbd808b8d23c4c674984059a8c9298a26c1579e86b1343b43ea8abbd3b"
+      "sha256": "14799b999bfe62f5b70b79f2d2c17e0c7206603b64c44a3da2309e12c88b83f9"
     },
     {
       "path": "runtime/engine/wordpress/team-design-system.php",
@@ -14841,7 +13793,7 @@
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "566c52571eae5767d901e54056d214b76dfdd7aa03ad2d1f63b785cc30b99d68"
+      "sha256": "8a13f3b2e80ab63521a131f9f0b6cfbcd67d92a4ba179ab0d01465f04dd90dc2"
     },
     {
       "path": "runtime/tests/headers.test.ts",
@@ -15057,7 +14009,7 @@
     },
     {
       "path": "runtime/tests/zero-v2-hosted.test.ts",
-      "sha256": "552cb9faedbea4bebc6c97adadd525363f3b5758ce70a87daaf6e350b623e3e1"
+      "sha256": "80ca955030bfee16b78fbc1d6ee220684c83b2c65cd376226c7d8db80c443b3e"
     },
     {
       "path": "runtime/tests/zero-v2-realtime.test.ts",
@@ -15069,7 +14021,7 @@
     },
     {
       "path": "runtime/tests/zero-v2-worker.test.ts",
-      "sha256": "02b671983a89f840cbb9d40af1e5582e66b068c83bc3e031cbb7ce5f3e53b5b7"
+      "sha256": "de9a241dbfce5ff3d96630419677772c1fef7e161007f64e5c48e2b0542d35d2"
     },
     {
       "path": "runtime/tests/zero-wordpress.ts",
@@ -15077,7 +14029,7 @@
     },
     {
       "path": "runtime/wordpress-content-loader.php",
-      "sha256": "1b159bceb51828071c8df79467060d27e2c7d42afc703f4b3ee8703532b0fed1"
+      "sha256": "a3efdf282f008930c03d2ccf7ca99f7fe994ddd92480987fab98e13890b76585"
     },
     {
       "path": "runtime/wordpress/managed-theme/style.css",

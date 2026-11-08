@@ -4,7 +4,7 @@ namespace Zero\Vendor\WordPress\Merge\Validate;
 
 use ReflectionClass;
 use Zero\Vendor\WordPress\DataLiberation\BlockMarkup\BlockMarkupProcessor;
-use Zero_Vendor_WP_HTML_Processor as WP_HTML_Processor;
+use WP_HTML_Processor;
 
 class BlockMarkupMergeValidator implements MergeValidator {
 

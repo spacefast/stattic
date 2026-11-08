@@ -122,7 +122,7 @@ final class Module
         return $report;
     }
 
-    /** The original release: a path, or `-` for stdin (so `zero migrate site` can send a local file). */
+    /** The original release: a path, or `-` for stdin (`zero migrate-legacy - < file` sends a local file). */
     private static function release(string $file): array
     {
         $tmp = null;

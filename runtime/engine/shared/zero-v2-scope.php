@@ -108,6 +108,11 @@ function _stattic_zero_v2_bind_wordpress(): void
         if ($wpdb->last_error !== '') throw new RuntimeException('Cannot create the Space WordPress tables: ' . $wpdb->last_error);
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         populate_options();
+        // populate_options() guesses home and siteurl from this request, the
+        // finalize API URL. The request-origin filters supply the host; the
+        // stored value must be the root path or every home_url() keeps that path.
+        update_option('home', 'http://localhost');
+        update_option('siteurl', 'http://localhost');
         update_option('blog_public', 0);
         update_option('permalink_structure', '/%postname%/');
         populate_roles();

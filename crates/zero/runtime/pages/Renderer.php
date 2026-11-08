@@ -35,6 +35,10 @@ final class Renderer
     private static ?self $current = null;
     /** Region nesting depth, a guard against runaway recursion. */
     private int $depth = 0;
+    /** Rendered rich-text chunks by key; only keys this renderer issued are ever spliced back. */
+    private array $raw = [];
+    /** Unguessable per renderer, so a stored value can never name a chunk. */
+    private ?string $rawNonce = null;
 
     public function __construct(private readonly Request $request, private readonly Plugin $plugin)
     {
@@ -176,7 +180,12 @@ final class Renderer
         } finally {
             self::$current = $this;
         }
-        return self::START . 'raw' . self::END . base64_encode($html) . self::START . '/raw' . self::END;
+        // Keep the HTML here and leave only a key in the output: whatever a block prints from stored
+        // text, it cannot become raw HTML, because only keys in $this->raw are ever spliced.
+        $this->rawNonce ??= bin2hex(random_bytes(16));
+        $key = $this->rawNonce . '-' . count($this->raw);
+        $this->raw[$key] = $html;
+        return self::START . 'raw' . self::END . $key . self::START . '/raw' . self::END;
     }
 
     public static function truthy(mixed $value): bool
@@ -246,8 +255,12 @@ final class Renderer
         $raw = [];
         // A fresh name per call: stored content can never spell the placeholder of another chunk.
         $slot = 'zero-pages-raw-' . bin2hex(random_bytes(8));
-        $html = (string) preg_replace_callback('/\x{E000}raw\x{E001}([A-Za-z0-9+\/=]*)\x{E000}\/raw\x{E001}/u', static function (array $m) use (&$raw, $slot): string {
-            $raw[] = base64_decode($m[1], true) ?: '';
+        $html = (string) preg_replace_callback('/\x{E000}raw\x{E001}([a-f0-9]+-[0-9]+)\x{E000}\/raw\x{E001}/u', function (array $m) use (&$raw, $slot): string {
+            // A key this renderer did not issue (spelled by stored content) is dropped, not decoded.
+            if (!array_key_exists($m[1], $this->raw)) {
+                return '';
+            }
+            $raw[] = $this->raw[$m[1]];
             return '<' . $slot . ' data-i="' . (count($raw) - 1) . '"></' . $slot . '>';
         }, $html);
         $processor = new \WP_HTML_Tag_Processor($html);

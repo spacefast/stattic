@@ -8,17 +8,22 @@
 //! Request:
 //! ```json
 //! { "name": "pantry",
-//!   "files": { "zero.config.ts": "…", "lib/fields.ts": "…" },
-//!   "previous": null, "migrationFiles": [] }
+//!   "files": { "zero.config.ts": "…", "lib/fields.ts": "…", "zero/abilities.json": "…",
+//!              "zero/plugins.lock.json": "…" },,
+//!   "previous": null, "migrationFiles": [], "frozen": false }
 //! ```
 //! `previous` is the last build's `zero/migrations/snapshot.json` (null for a first build) and
 //! `migrationFiles` the names beside it, which number the next migration like `zero build` does.
+//! `files` carries every compiler input, including the committed `zero/abilities.json` lock that
+//! types `abilities.call` from "php/wordpress".
+//! `zero/plugins.lock.json` grants plugin packages, and `frozen` refuses grants beyond it, as
+//! `zero check --frozen` (or `CI`) does.
 //! Directories exist as the parents of files: a project in memory has no empty directory, and git
 //! cannot hold one either, so that is the one shape of project the disk can have and this cannot.
 //!
 //! Response: `{ "check": <zero-diagnostics envelope>, "output": null }` on a diagnostic, otherwise
 //! `output` carries `schemaPhp`, `functionsPhp`, `migrations` (`[name, sql]` pairs), `snapshot`,
-//! `client` (`types.ts` and `schema.ts`), `genTs`, `warnings` and `hints`.
+//! `client` (`types.ts` and `schema.ts`), `genTs`, `warnings`, `unsupportedPlugins` and `hints`.
 
 use crate::loader::{self, Fs};
 use crate::{diag, pipeline};
@@ -36,6 +41,8 @@ struct Request {
     previous: Option<serde_json::Value>,
     #[serde(default)]
     migration_files: Vec<String>,
+    #[serde(default)]
+    frozen: bool,
 }
 
 #[derive(Serialize)]
@@ -48,6 +55,7 @@ struct Output {
     client: BTreeMap<String, String>,
     gen_ts: String,
     warnings: Vec<String>,
+    unsupported_plugins: Vec<String>,
     hints: Vec<String>,
 }
 
@@ -192,8 +200,13 @@ fn compile_request(request: Request) -> String {
         .into_iter()
         .map(|(rel, source)| (Memory::key(&project.join(rel)), source))
         .collect();
-    let previous =
-        || pipeline::Previous::from_project(request.previous, request.migration_files.iter().map(String::as_str));
+    let frozen = request.frozen;
+    let previous = || {
+        let mut previous =
+            pipeline::Previous::from_project(request.previous, request.migration_files.iter().map(String::as_str))?;
+        previous.frozen = frozen;
+        Ok(previous)
+    };
     let entry = project.join("zero.config.ts");
     let built = match loader::load_from(Rc::new(Memory::new(files)), &entry) {
         Err(diagnostics) => Err(diagnostics),
@@ -215,6 +228,7 @@ fn compile_request(request: Request) -> String {
                 client,
                 gen_ts: built.gen_ts,
                 warnings: built.warnings,
+                unsupported_plugins: built.unsupported_plugins,
                 hints: built.hints,
             };
             (Vec::new(), Some(output))
@@ -322,7 +336,10 @@ pub fn operation(operation: &str, request: &str) -> String {
                                     .iter()
                                     .map(|p| p.file_name().unwrap_or_default().to_string_lossy())
                                     .collect();
-                                pipeline::Previous::from_project(snapshot, names.iter().map(|s| s.as_ref()))
+                                let mut previous =
+                                    pipeline::Previous::from_project(snapshot, names.iter().map(|s| s.as_ref()))?;
+                                previous.frozen = request["frozen"].as_bool().unwrap_or(false);
+                                Ok(previous)
                             },
                             |_| None,
                         )
@@ -480,5 +497,31 @@ mod tests {
         let expected = rendered();
         compile(r#"{"name":"p","files":{"zero.config.ts":"export default 1;"}}"#);
         assert_eq!(rendered(), expected);
+    }
+
+    /// The browser types `abilities.call` from the lock it is sent, exactly as the command line does.
+    #[test]
+    fn a_locked_ability_in_the_request_types_its_call() {
+        let config = r#"import { action, defineConfig } from "zero";
+import { abilities } from "php/wordpress";
+export default defineConfig({ actions: { a: action({ input: {}, access: "anyone", handler: () => abilities.call("acme/info", { field: "title" }) }) } });"#;
+        let lock = serde_json::json!({"version": 1, "abilities": [{"name": "acme/info",
+            "input_schema": {"type": "object", "properties": {"field": {"enum": ["name"]}}, "required": ["field"]}, "output_schema": {}}]});
+        let message = |files: serde_json::Value| {
+            let response: serde_json::Value =
+                serde_json::from_str(&compile(&serde_json::json!({"name": "p", "files": files}).to_string())).unwrap();
+            response["check"]["diagnostics"][0]["message"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            message(serde_json::json!({"zero.config.ts": config, "zero/abilities.json": lock.to_string()})),
+            "`acme/info` takes { field: \"name\" }, not { field: \"title\" }"
+        );
+        assert_eq!(
+            message(serde_json::json!({"zero.config.ts": config})),
+            "unknown ability `acme/info`"
+        );
     }
 }

@@ -55,6 +55,12 @@ pub enum Code {
     Compile,
     #[serde(rename = "Z4101")]
     AccessQuery,
+    /// A plugin package imports the app's modules or another plugin's package.
+    #[serde(rename = "Z1201")]
+    PluginIsolation,
+    /// A plugin's compiled code uses a capability its `zero/plugins.lock.json` entry doesn't grant.
+    #[serde(rename = "Z4201")]
+    PluginCapability,
 }
 
 impl Code {
@@ -128,6 +134,22 @@ pub fn register_file(path: &Path, source: &str) -> u32 {
         let mut files = files.borrow_mut();
         files.push((path.to_path_buf(), source.to_string()));
         (files.len() - 1) as u32
+    })
+}
+
+/// `file:line:column` of a span's start, relative to the file name only, for runtime messages.
+pub fn site(span: Span) -> String {
+    FILES.with(|files| {
+        let files = files.borrow();
+        let Some((path, src)) = files.get(span.file as usize) else {
+            return String::new();
+        };
+        let (line, col) = line_col(src, span.start as usize);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        format!("{name}:{line}:{col}")
     })
 }
 

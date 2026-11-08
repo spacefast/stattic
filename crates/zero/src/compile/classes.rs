@@ -12,10 +12,21 @@ pub(super) struct CompiledClass {
     methods: HashMap<(bool, String), (String, Ty)>,
     fields: String,
     _static_data: Value,
+    /// Kept alive with the class: captured-data helpers are cached by allocation address.
+    _private_static_data: Option<Value>,
+    /// Private field types by (static, `#name`); private state never joins the instance shape.
+    privates: HashMap<(bool, String), Ty>,
+    /// Classes from imported JavaScript use checked dynamic receivers, arguments and fields.
+    pub(super) javascript: bool,
+    /// Prototype accessors by (static, name), including inherited ones, with their value type.
+    accessors: HashMap<(bool, String), Accessor>,
 }
 
-fn key(class: &Rc<ClassValue>) -> usize {
-    Rc::as_ptr(class) as usize
+#[derive(Clone)]
+struct Accessor {
+    ty: Ty,
+    getter: bool,
+    setter: bool,
 }
 
 impl<'a, 'p> Compiler<'a, 'p> {
@@ -50,15 +61,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
     pub(super) fn class_value(&mut self, class: &Rc<ClassValue>) -> Result<Out> {
         let id = self.ensure_class(class)?;
-        Ok(Out::atom(
-            format!("\\ZeroApp\\{}()", self.classes[&id].name),
-            Ty::Class(id),
-        ))
+        let ty = if self.classes[&id].javascript {
+            Ty::Dynamic
+        } else {
+            Ty::Class(id)
+        };
+        Ok(Out::atom(format!("\\ZeroApp\\{}()", self.classes[&id].name), ty))
     }
 
     fn class_parameter(&mut self, p: &Param, module: usize) -> Result<Ty> {
         let ty = match &p.ann {
             Some(a) => self.resolve_runtime_ann(a, module)?,
+            None if self.javascript_module(module) => Ty::Dynamic,
             None => match p.default.as_ref().map(|e| &e.kind) {
                 Some(ExprKind::Num(_)) => Ty::Num,
                 Some(ExprKind::Str(_)) => Ty::Str,
@@ -87,6 +101,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             .collect::<Result<Vec<_>>>()?;
         let ret = match &f.ret {
             Some(a) => self.resolve_runtime_ann(a, f.module)?,
+            None if self.javascript_module(f.module) => Ty::Dynamic,
             None => Ty::Unknown,
         };
         Ok(Ty::Fn(
@@ -111,12 +126,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     pub(super) fn ensure_class(&mut self, class: &Rc<ClassValue>) -> Result<usize> {
-        let id = key(class);
+        // Classes carry static state, so each plugin compiles its own copy: the id is interned
+        // per (owner, class), never derived from the pointer's bits.
+        let next = self.class_ids.len();
+        let id = *self
+            .class_ids
+            .entry((self.owner(), Rc::as_ptr(class) as usize))
+            .or_insert(next);
         if self.classes.contains_key(&id) {
             return Ok(id);
         }
         let parent = class.base.as_ref().map(|c| self.ensure_class(c)).transpose()?;
         let c = &class.class;
+        let javascript = self.javascript_module(class.env.module);
         let name = self.unique_name(&format!("{}_class", c.name));
         let fields_name = self.unique_name(&format!("{}_fields", c.name));
         let mut fields = match parent.map(|id| self.classes[&id].instance.clone()) {
@@ -131,7 +153,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
             _ => IndexMap::new(),
         };
         // Insert the identity before resolving annotations, including references to this class.
-        let static_data = Value::object(class.statics.clone());
+        // Private statics live on the descriptor, never in the public statics object.
+        let (private_static_data, public_static_data): (IndexMap<_, _>, IndexMap<_, _>) = class
+            .statics
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .partition(|(k, _)| k.starts_with('#'));
+        let static_data = if private_static_data.is_empty() {
+            Value::object(class.statics.clone())
+        } else {
+            Value::object(public_static_data)
+        };
+        let private_static_data = (!private_static_data.is_empty()).then(|| Value::object(private_static_data));
         let ancestors = match parent.map(|id| self.classes[&id].instance.clone()) {
             Some(Ty::Instance(identity, _)) => std::iter::once(identity.id).chain(identity.ancestors).collect(),
             _ => Vec::new(),
@@ -149,8 +182,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 methods: HashMap::new(),
                 fields: fields_name.clone(),
                 _static_data: static_data.clone(),
+                _private_static_data: private_static_data.clone(),
+                privates: HashMap::new(),
+                javascript,
+                accessors: HashMap::new(),
             },
         );
+        let mut privates = HashMap::new();
         for field in &c.fields {
             if parent.is_some_and(|p| {
                 self.classes[&p]
@@ -161,6 +199,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             let ty = match &field.ann {
                 Some(a) => self.resolve_runtime_ann(a, class.env.module)?,
+                None if javascript => Ty::Dynamic,
                 None => {
                     let Some(init) = &field.init else {
                         return err(field.span, "uninitialized class fields need a type");
@@ -189,7 +228,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 .constructor
                 .as_ref()
                 .is_some_and(|f| f.params.iter().skip(1).any(|p| p.span == field.span));
-            let ty = if field.init.is_none() && !parameter_property {
+            let ty = if field.init.is_none() && !parameter_property && ty != Ty::Dynamic {
                 Ty::union([ty, Ty::Undefined])
             } else {
                 ty
@@ -201,8 +240,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     return err(field.span, "static field initializer does not match its declared type");
                 }
             }
+            if field.name.starts_with('#') {
+                privates.insert((field.is_static, field.name.clone()), ty);
+                continue;
+            }
             let target = if field.is_static { &mut statics } else { &mut fields };
             if let Some((previous, _)) = target.get(&field.name)
+                && !javascript
                 && (!assignable(&ty, previous) || !assignable(previous, &ty))
             {
                 return err(field.span, "an overridden field must retain its inherited type");
@@ -214,6 +258,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         self.classes.get_mut(&id).unwrap().instance = instance.clone();
         self.classes.get_mut(&id).unwrap().fields_ready = true;
         self.classes.get_mut(&id).unwrap().statics = statics.clone();
+        self.classes.get_mut(&id).unwrap().privates = privates;
         let constructor = if let Some(f) = &c.constructor {
             self.class_signature(f)?
         } else if let Some(parent) = parent {
@@ -222,14 +267,21 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Ty::Fn(vec![], Box::new(Ty::Null))
         };
         self.classes.get_mut(&id).unwrap().constructor = constructor;
-        let mut methods = parent.map(|id| self.classes[&id].methods.clone()).unwrap_or_default();
+        // Private names are lexical to their declaring class, so subclasses never inherit them.
+        let mut methods: HashMap<_, _> = parent
+            .map(|id| self.classes[&id].methods.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|((_, name), _)| !name.starts_with('#'))
+            .collect();
         for (member, is_static, f) in &c.methods {
             let shape = if *is_static { &statics } else { &instance };
-            if shape.field(member).is_some() {
+            if !member.starts_with('#') && shape.field(member).is_some() {
                 return err(f.span, "methods cannot shadow inherited fields");
             }
             let signature = self.class_signature(f)?;
             if let Some((_, previous)) = methods.get(&(*is_static, member.clone()))
+                && !javascript
                 && !assignable(&signature, previous)
             {
                 return err(
@@ -237,10 +289,66 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     "an overridden method must retain its inherited signature; annotate return types",
                 );
             }
-            let helper = self.unique_name(&format!("{}_{member}", c.name));
+            let helper = self.unique_name(&format!("{}_{}", c.name, member.replace('#', "private_")));
             methods.insert((*is_static, member.clone()), (helper, signature));
         }
         self.classes.get_mut(&id).unwrap().methods = methods;
+        let mut accessors = parent.map(|id| self.classes[&id].accessors.clone()).unwrap_or_default();
+        for accessor in &c.accessors {
+            if accessor.name.starts_with('#') {
+                return err_help(
+                    accessor.func.span,
+                    "private accessors aren't supported",
+                    "use a private field with a private method",
+                );
+            }
+            let key = (accessor.is_static, accessor.name.clone());
+            let shape = if accessor.is_static { &statics } else { &instance };
+            if shape.field(&accessor.name).is_some() || self.classes[&id].methods.contains_key(&key) {
+                return err(
+                    accessor.func.span,
+                    "accessors cannot shadow inherited fields or methods",
+                );
+            }
+        }
+        let mut own_keys: Vec<(bool, String)> = c.accessors.iter().map(|a| (a.is_static, a.name.clone())).collect();
+        own_keys.dedup();
+        for key in own_keys {
+            let pair: Vec<_> = c
+                .accessors
+                .iter()
+                .filter(|a| (a.is_static, a.name.clone()) == key)
+                .collect();
+            let getter = pair.iter().find(|a| !a.setter);
+            let setter = pair.iter().find(|a| a.setter);
+            let annotated = getter
+                .and_then(|g| g.func.ret.as_ref())
+                .or_else(|| setter.and_then(|s| s.func.params.get(1).and_then(|p| p.ann.as_ref())));
+            let ty = match (annotated, accessors.get(&key)) {
+                (Some(a), _) => self.resolve_runtime_ann(a, class.env.module)?,
+                (None, Some(inherited)) => inherited.ty.clone(),
+                (None, None) if javascript => Ty::Dynamic,
+                // Inferred from the getter body when it compiles, before any method reads it.
+                (None, None) if getter.is_some() => Ty::Unknown,
+                (None, None) => {
+                    return err_help(
+                        pair[0].func.span,
+                        "setters without a getter need a parameter type",
+                        "annotate set value(v: T)",
+                    );
+                }
+            };
+            // Redefining either half replaces the whole inherited pair, as in JavaScript.
+            accessors.insert(
+                key,
+                Accessor {
+                    ty,
+                    getter: getter.is_some(),
+                    setter: setter.is_some(),
+                },
+            );
+        }
+        self.classes.get_mut(&id).unwrap().accessors = accessors;
         let env = self.class_environment(class);
         // Helpers are shared across callers; class_access_guard rejects execution in access rules.
         let no_db = false;
@@ -257,21 +365,33 @@ impl<'a, 'p> Compiler<'a, 'p> {
         );
         // Access rules may encounter a class compiled earlier by an action. Validate each use below too.
         let mut field_body = String::new();
+        if c.fields.iter().any(|f| !f.is_static && f.name.starts_with('#'))
+            || c.methods
+                .iter()
+                .any(|(name, is_static, _)| !is_static && name.starts_with('#'))
+        {
+            field_body.push_str("    $__zero_class->brand($__zero_this);\n");
+        }
+        let receiver_ty = |instance: &Ty| if javascript { Ty::Dynamic } else { instance.clone() };
         for field in c.fields.iter().filter(|f| !f.is_static) {
             let value = match &field.init {
                 Some(_) => {
                     let helper = self.unique_name(&format!("{}_init_{}", c.name, field.name));
                     let f = field.initializer(class.env.module).expect("initialized field");
-                    let closure = Rc::new(Closure {
-                        func: f,
-                        env: constructing_env.clone(),
-                    });
-                    let initializing = initializing_instance(&instance);
+                    let closure = Rc::new(Closure::new(f, constructing_env.clone()));
+                    let initializing = if javascript {
+                        Ty::Dynamic
+                    } else {
+                        initializing_instance(&instance)
+                    };
                     self.compile_function(&closure, &helper, Some(vec![initializing]), None, no_db)?;
                     let Ty::Fn(_, result) = &self.helper_types[&closure_key(&closure)] else {
                         unreachable!()
                     };
-                    let (want, _) = instance.field(&field.name).expect("class field");
+                    let want = match self.classes[&id].privates.get(&(false, field.name.clone())) {
+                        Some(ty) => ty.clone(),
+                        None => instance.field(&field.name).expect("class field").0,
+                    };
                     if !assignable(result, &want) {
                         return err(
                             field.span,
@@ -282,11 +402,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 }
                 None => "\\Zero\\Js::undefined()".into(),
             };
-            field_body.push_str(&format!("    $__zero_this->p[{}] = {value};\n", php_str(&field.name)));
+            if field.name.starts_with('#') {
+                field_body.push_str(&format!(
+                    "    $__zero_class->privateDefine($__zero_this, {}, {value});\n",
+                    php_str(&field.name)
+                ));
+            } else {
+                field_body.push_str(&format!("    $__zero_this->p[{}] = {value};\n", php_str(&field.name)));
+            }
         }
         writeln!(
             self.output,
-            "function {fields_name}(\\Zero\\JsObject $__zero_this)\n{{\n{field_body}}}\n"
+            "function {fields_name}(\\Zero\\JsObject $__zero_this, \\Zero\\JsClass $__zero_class)\n{{\n{field_body}}}\n"
         )
         .unwrap();
         let ctor = if let Some(f) = &c.constructor {
@@ -294,14 +421,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
             let Ty::Fn(params, _) = self.classes[&id].constructor.clone() else {
                 unreachable!()
             };
-            let closure = Rc::new(Closure {
-                func: f.clone(),
-                env: constructing_env.clone(),
-            });
+            let closure = Rc::new(Closure::new(f.clone(), constructing_env.clone()));
             self.compile_function(
                 &closure,
                 &helper,
-                Some(std::iter::once(instance.clone()).chain(params).collect()),
+                Some(std::iter::once(receiver_ty(&instance)).chain(params).collect()),
                 None,
                 no_db,
             )?;
@@ -309,16 +433,85 @@ impl<'a, 'p> Compiler<'a, 'p> {
         } else {
             "null".into()
         };
+        let mut accessor_entries: [IndexMap<String, (String, String)>; 2] = [IndexMap::new(), IndexMap::new()];
+        let mut ordered: Vec<_> = c.accessors.iter().collect();
+        ordered.sort_by_key(|a| a.setter);
+        for accessor in ordered {
+            let helper = self.unique_name(&format!(
+                "{}_{}_{}",
+                c.name,
+                if accessor.setter { "set" } else { "get" },
+                accessor.name
+            ));
+            let receiver = if javascript {
+                Ty::Dynamic
+            } else if accessor.is_static {
+                Ty::Class(id)
+            } else {
+                instance.clone()
+            };
+            let ty = self.classes[&id].accessors[&(accessor.is_static, accessor.name.clone())]
+                .ty
+                .clone();
+            let params = if accessor.setter {
+                vec![receiver, ty.clone()]
+            } else {
+                vec![receiver]
+            };
+            let closure = Rc::new(Closure::new(accessor.func.clone(), env.clone()));
+            self.compile_function(&closure, &helper, Some(params), None, no_db)?;
+            if !accessor.setter && !javascript {
+                let Ty::Fn(_, ret) = self.helper_types[&closure_key(&closure)].clone() else {
+                    unreachable!()
+                };
+                let ret = widen_fresh_literals(&ret);
+                if ty == Ty::Unknown {
+                    self.classes
+                        .get_mut(&id)
+                        .unwrap()
+                        .accessors
+                        .get_mut(&(accessor.is_static, accessor.name.clone()))
+                        .unwrap()
+                        .ty = ret.clone();
+                } else if !assignable(&ret, &ty) {
+                    return err(
+                        accessor.func.span,
+                        format!("getter returns {}, expected {}", ret.describe(), ty.describe()),
+                    );
+                }
+            }
+            let callable = format!("\\Closure::fromCallable({})", php_str(&format!("\\ZeroApp\\{helper}")));
+            let slot = accessor_entries[accessor.is_static as usize]
+                .entry(accessor.name.clone())
+                .or_insert(("null".into(), "null".into()));
+            if accessor.setter {
+                slot.1 = callable;
+            } else {
+                slot.0 = callable;
+            }
+        }
+        let [instance_accessors, static_accessors] = accessor_entries.map(|entries| {
+            entries
+                .iter()
+                .map(|(name, (get, set))| format!("{} => [{get}, {set}]", php_str(name)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
         let mut own_methods = Vec::new();
         let mut static_methods = Vec::new();
+        let mut private_methods = Vec::new();
+        let mut static_private_methods = Vec::new();
         for (member, is_static, f) in &c.methods {
             let (helper, signature) = self.classes[&id].methods[&(*is_static, member.clone())].clone();
             let Ty::Fn(params, _) = signature else { unreachable!() };
-            let receiver = if *is_static { Ty::Class(id) } else { instance.clone() };
-            let closure = Rc::new(Closure {
-                func: f.clone(),
-                env: env.clone(),
-            });
+            let receiver = if javascript {
+                Ty::Dynamic
+            } else if *is_static {
+                Ty::Class(id)
+            } else {
+                instance.clone()
+            };
+            let closure = Rc::new(Closure::new(f.clone(), env.clone()));
             self.compile_function(
                 &closure,
                 &helper,
@@ -340,24 +533,42 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 php_str(member),
                 php_str(&format!("\\ZeroApp\\{helper}"))
             );
-            if *is_static {
-                static_methods.push(entry);
-            } else {
-                own_methods.push(entry);
+            match (*is_static, member.starts_with('#')) {
+                (true, false) => static_methods.push(entry),
+                (false, false) => own_methods.push(entry),
+                (true, true) => static_private_methods.push(entry),
+                (false, true) => private_methods.push(entry),
             }
         }
         validate_captured_data(&static_data, c.span, &mut HashSet::new())?;
         let data = self.captured_data(&static_data)?;
-        let parent_php = parent
-            .map(|id| format!("\\ZeroApp\\{}()", self.classes[&id].name))
-            .unwrap_or("null".into());
-        writeln!(self.output, "function {name}(): \\Zero\\JsClass\n{{\n    static $class;\n    return $class ??= new \\Zero\\JsClass({parent_php}, {ctor}, \\Closure::fromCallable({}), [{}], [{}], {data});\n}}\n", php_str(&format!("\\ZeroApp\\{fields_name}")), own_methods.join(", "), static_methods.join(", ")).unwrap();
+        let private_statics = match &private_static_data {
+            None => "null".to_string(),
+            Some(value) => {
+                validate_captured_data(value, c.span, &mut HashSet::new())?;
+                self.captured_data(value)?
+            }
+        };
+        let parent_php = match (parent, class.builtin_base) {
+            (Some(id), _) => format!("\\ZeroApp\\{}()", self.classes[&id].name),
+            (None, Some(builtin)) => format!("\\Zero\\JsClass::builtin({})", php_str(builtin)),
+            (None, None) => "null".into(),
+        };
+        writeln!(self.output, "function {name}(): \\Zero\\JsClass\n{{\n    static $class;\n    return $class ??= new \\Zero\\JsClass({parent_php}, {ctor}, \\Closure::fromCallable({}), [{}], [{}], {data}, [{}], [{}], {private_statics}, [{instance_accessors}], [{static_accessors}]);\n}}\n", php_str(&format!("\\ZeroApp\\{fields_name}")), own_methods.join(", "), static_methods.join(", "), private_methods.join(", "), static_private_methods.join(", ")).unwrap();
         Ok(id)
     }
 
     pub(super) fn construct_class(&mut self, class: &Rc<ClassValue>, args: &[ArrEl], span: Span) -> Result<Out> {
         let id = self.ensure_class(class)?;
         let info = self.classes[&id].clone();
+        if info.javascript {
+            self.class_access_guard(span)?;
+            let argv = self.javascript_args(args)?;
+            return Ok(Out::atom(
+                format!("\\ZeroApp\\{}()->construct(...({argv})->a)", info.name),
+                Ty::Dynamic,
+            ));
+        }
         let arguments = self.checked_class_args(&info.constructor, args, span)?;
         self.class_access_guard(span)?;
         Ok(Out::atom(
@@ -414,6 +625,28 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 "extracting class methods is unsupported",
                 "call instance.method(...) directly, or wrap it in an arrow to capture the receiver",
             );
+        }
+        if let Some(accessor) = info.accessors.get(&(is_static, prop.to_string())) {
+            if !accessor.getter {
+                return err(
+                    span,
+                    format!("`{prop}` has only a setter; reading it returns undefined"),
+                );
+            }
+            return Ok(Out::atom(
+                if is_static {
+                    format!("{}->get({})", receiver.wrapped(), php_str(prop))
+                } else {
+                    format!("\\Zero\\Js::dynamicGet({}, {})", receiver.php, php_str(prop))
+                },
+                accessor.ty.clone(),
+            ));
+        }
+        if !is_static && let Some(ty) = self.error_member(&receiver.ty, prop) {
+            return Ok(Out::atom(
+                format!("\\Zero\\Js::dynamicGet({}, {})", receiver.php, php_str(prop)),
+                ty,
+            ));
         }
         let shape = if is_static {
             info.statics
@@ -480,6 +713,20 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     pub(super) fn class_internal_call(&mut self, name: &str, args: &[ArrEl], span: Span) -> Result<Option<Out>> {
+        if name == ":private_in" {
+            let [ArrEl::Item(key), ArrEl::Item(value)] = args else {
+                unreachable!("lowered private brand check")
+            };
+            let ExprKind::Str(key) = &key.kind else {
+                unreachable!("lowered private name")
+            };
+            let (class, _) = self.private_member(key, span)?;
+            let value = self.private_receiver(value)?;
+            return Ok(Some(Out::atom(
+                format!("{class}->privateIn({}, {})", value.php, php_str(key)),
+                Ty::Bool,
+            )));
+        }
         if !matches!(name, "super" | ":fields") {
             return Ok(None);
         }
@@ -490,7 +737,21 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let receiver = self.ident("this", span)?;
         if name == ":fields" {
             return Ok(Some(Out::atom(
-                format!("\\ZeroApp\\{}({})", self.classes[&id].fields, receiver.php),
+                format!(
+                    "\\ZeroApp\\{}({}, \\ZeroApp\\{}())",
+                    self.classes[&id].fields, receiver.php, self.classes[&id].name
+                ),
+                Ty::Null,
+            )));
+        }
+        if let Some(builtin) = class.builtin_base {
+            let argv = self.javascript_args(args)?;
+            return Ok(Some(Out::atom(
+                format!(
+                    "\\Zero\\JsClass::builtin({})->initialize({}, ({argv})->a)",
+                    php_str(builtin),
+                    receiver.php
+                ),
                 Ty::Null,
             )));
         }
@@ -499,6 +760,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
         };
         let base_id = self.ensure_class(base)?;
         let info = self.classes[&base_id].clone();
+        if self.classes[&id].javascript {
+            let argv = self.javascript_args(args)?;
+            return Ok(Some(Out::atom(
+                format!("\\ZeroApp\\{}()->initialize({}, ({argv})->a)", info.name, receiver.php),
+                Ty::Null,
+            )));
+        }
         let argv = self.checked_class_args(&info.constructor, args, span)?;
         Ok(Some(Out::atom(
             format!(
@@ -526,7 +794,26 @@ impl<'a, 'p> Compiler<'a, 'p> {
         };
         let id = self.ensure_class(base)?;
         let recv = self.ident("this", span)?;
-        let is_static = matches!(recv.ty, Ty::Class(_));
+        let is_static = matches!(recv.ty, Ty::Class(_))
+            || recv.ty == Ty::Dynamic
+                && class
+                    .class
+                    .methods
+                    .iter()
+                    .any(|(_, is_static, f)| *is_static && f.span == self.fx().function);
+        if self.classes[&id].javascript {
+            let argv = self.javascript_args(args)?;
+            return Ok(Out::atom(
+                format!(
+                    "\\ZeroApp\\{}()->invokeOn({}, {}, ({argv})->a, {})",
+                    self.classes[&id].name,
+                    recv.php,
+                    php_str(member),
+                    is_static
+                ),
+                Ty::Dynamic,
+            ));
+        }
         let Some((_, signature)) = self.classes[&id].methods.get(&(is_static, member.into())).cloned() else {
             return err(span, "unknown super method");
         };
@@ -545,10 +832,253 @@ impl<'a, 'p> Compiler<'a, 'p> {
         ))
     }
 
+    /// The innermost lexical class declaring `#name`, as its descriptor expression and value type.
+    pub(super) fn private_member(&mut self, name: &str, span: Span) -> Result<(String, Ty)> {
+        self.private_owner(name, span).map(|(class, ty, _)| (class, ty))
+    }
+
+    fn private_owner(&mut self, name: &str, span: Span) -> Result<(String, Ty, usize)> {
+        let mut scope = Some(self.fx().env.clone());
+        while let Some(current) = scope {
+            if let Some(Value::Class(class)) = current.vars.borrow().get(":class").map(|b| b.value.clone()) {
+                let declares = class.class.fields.iter().any(|f| f.name == name)
+                    || class.class.methods.iter().any(|(m, _, _)| m == name);
+                if declares {
+                    let id = self.ensure_class(&class)?;
+                    let info = &self.classes[&id];
+                    let ty = [false, true]
+                        .iter()
+                        .find_map(|s| info.privates.get(&(*s, name.to_string())).cloned())
+                        .unwrap_or(Ty::Dynamic);
+                    return Ok((format!("\\ZeroApp\\{}()", info.name), ty, id));
+                }
+            }
+            scope = current.parent.clone();
+        }
+        err(
+            span,
+            format!("private name `{name}` must be declared in an enclosing class"),
+        )
+    }
+
+    pub(super) fn private_read(&mut self, obj: &Expr, name: &str, optional: bool, span: Span) -> Result<Out> {
+        let (class, ty) = self.private_member(name, span)?;
+        let receiver = self.private_receiver(obj)?;
+        let is_method = self.private_is_method(name);
+        let read = |r: &str| {
+            if is_method {
+                format!(
+                    "(static fn (...$a) => {class}->privateCall({r}, {}, $a))",
+                    php_str(name)
+                )
+            } else {
+                format!("{class}->privateGet({r}, {})", php_str(name))
+            }
+        };
+        if optional {
+            let tmp = self.tmp_var();
+            return Ok(Out::atom(
+                format!(
+                    "(\\Zero\\Js::isNullish({tmp} = {}) ? \\Zero\\Js::undefined() : {})",
+                    receiver.php,
+                    read(&tmp)
+                ),
+                Ty::union([ty, Ty::Undefined]),
+            ));
+        }
+        Ok(Out::atom(read(&receiver.php), if is_method { Ty::Dynamic } else { ty }))
+    }
+
+    /// Class values are valid private receivers (static private members).
+    pub(super) fn private_receiver(&mut self, obj: &Expr) -> Result<Out> {
+        let receiver = self.expr(obj)?;
+        if matches!(receiver.ty, Ty::Class(_)) {
+            return Ok(receiver);
+        }
+        self.finish_value(receiver, obj.span)
+    }
+
+    fn private_is_method(&self, name: &str) -> bool {
+        let mut scope = self.fx.as_ref().map(|f| f.env.clone());
+        while let Some(current) = scope {
+            if let Some(Value::Class(class)) = current.vars.borrow().get(":class").map(|b| b.value.clone()) {
+                if class.class.fields.iter().any(|f| f.name == name) {
+                    return false;
+                }
+                if class.class.methods.iter().any(|(m, _, _)| m == name) {
+                    return true;
+                }
+            }
+            scope = current.parent.clone();
+        }
+        false
+    }
+
+    pub(super) fn private_call(
+        &mut self,
+        obj: &Expr,
+        name: &str,
+        optional: bool,
+        span: Span,
+        args: &[ArrEl],
+        whole: Span,
+    ) -> Result<Out> {
+        let (class, _, id) = self.private_owner(name, span)?;
+        let javascript = self.classes[&id].javascript;
+        if self.constructing_class() && !javascript {
+            return err(
+                whole,
+                "class method calls during construction are unsupported; call methods after new returns",
+            );
+        }
+        let receiver = self.private_receiver(obj)?;
+        let is_static = matches!(receiver.ty.non_null(), Ty::Class(_));
+        let typed = (!javascript)
+            .then(|| self.classes[&id].methods.get(&(is_static, name.to_string())).cloned())
+            .flatten();
+        let (argv, ret) = match &typed {
+            Some((_, signature)) => {
+                let argv = self.checked_class_args(signature, args, whole)?;
+                self.class_access_guard(whole)?;
+                let Ty::Fn(_, ret) = signature else { unreachable!() };
+                (format!("[{}]", argv.join(", ")), (**ret).clone())
+            }
+            None => (format!("({})->a", self.javascript_args(args)?), Ty::Dynamic),
+        };
+        let call = |r: &str| format!("{class}->privateCall({r}, {}, {argv})", php_str(name));
+        if optional {
+            let tmp = self.tmp_var();
+            return Ok(Out::atom(
+                format!(
+                    "(\\Zero\\Js::isNullish({tmp} = {}) ? \\Zero\\Js::undefined() : {})",
+                    receiver.php,
+                    call(&tmp)
+                ),
+                Ty::union([ret, Ty::Undefined]),
+            ));
+        }
+        Ok(Out::atom(call(&receiver.php), ret))
+    }
+
+    /// `super.name` reads: the parent's accessor runs with the current receiver; methods become values.
+    pub(super) fn super_member(&mut self, member: &str, span: Span) -> Result<Out> {
+        let Some(Value::Class(class)) = self.fx().env.lookup(":class").map(|b| b.value) else {
+            return err(span, "super requires a class method");
+        };
+        let Some(base) = &class.base else {
+            return err(span, "super requires a base class");
+        };
+        let id = self.ensure_class(base)?;
+        let recv = self.ident("this", span)?;
+        let is_static = matches!(recv.ty, Ty::Class(_))
+            || class
+                .class
+                .methods
+                .iter()
+                .map(|(_, s, f)| (*s, f.span))
+                .chain(class.class.accessors.iter().map(|a| (a.is_static, a.func.span)))
+                .any(|(s, f)| s && f == self.fx().function);
+        let info = self.classes[&id].clone();
+        let ty = match info.accessors.get(&(is_static, member.to_string())) {
+            Some(accessor) if accessor.getter => accessor.ty.clone(),
+            Some(_) => Ty::Undefined,
+            None if info.javascript => Ty::Dynamic,
+            None => {
+                return err_help(
+                    span,
+                    "super property reads are limited to getters",
+                    "call super.method(...) directly",
+                );
+            }
+        };
+        let found = format!(
+            "{}()->readInherited({}, {}, {is_static})",
+            info.name,
+            recv.php,
+            php_str(member)
+        );
+        let tmp = self.tmp_var();
+        Ok(Out::atom(
+            format!("(({tmp} = \\ZeroApp\\{found}) === \\Zero\\JsClass::absent() ? \\Zero\\Js::undefined() : {tmp})"),
+            ty,
+        ))
+    }
+
+    /// Error members inherited from the built-in root: read and written through JavaScript lookup.
+    pub(super) fn error_member(&self, ty: &Ty, prop: &str) -> Option<Ty> {
+        if !self.error_instance(ty) || ty.non_null().field(prop).is_some() {
+            return None;
+        }
+        match prop {
+            "name" | "message" | "stack" => Some(Ty::Str),
+            "cause" => Some(Ty::Unknown),
+            _ => None,
+        }
+    }
+
+    /// Instances of classes whose chain reaches `extends Error` (or TypeError/RangeError).
+    pub(super) fn error_instance(&self, ty: &Ty) -> bool {
+        let Ty::Instance(identity, _) = ty.non_null() else {
+            return false;
+        };
+        std::iter::once(identity.id)
+            .chain(identity.ancestors.iter().copied())
+            .any(|id| self.classes[&id]._value.builtin_base.is_some())
+    }
+
+    /// An accessor write target: `Some(value type)` for a setter, an error for a getter-only accessor.
+    pub(super) fn class_accessor_write(&self, receiver: &Ty, prop: &str, span: Span) -> Result<Option<Ty>> {
+        if let Some(ty) = self.error_member(receiver, prop) {
+            return Ok(Some(ty));
+        }
+        let (id, is_static) = match receiver.non_null() {
+            Ty::Instance(identity, _) => (identity.id, false),
+            Ty::Class(id) => (id, true),
+            _ => return Ok(None),
+        };
+        let Some(accessor) = self.classes[&id].accessors.get(&(is_static, prop.to_string())) else {
+            return Ok(None);
+        };
+        if !accessor.setter {
+            return err(
+                span,
+                format!("`{prop}` is a getter without a setter; assigning it throws TypeError"),
+            );
+        }
+        Ok(Some(accessor.ty.clone()))
+    }
+
     pub(super) fn constructing_class(&self) -> bool {
         self.fx
             .as_ref()
             .is_some_and(|f| f.env.lookup(":constructing").is_some())
+    }
+}
+
+impl Compiler<'_, '_> {
+    /// Generated clients describe instances by their own fields; toJSON or getters would change that shape.
+    pub(super) fn check_class_wire_type(&self, ty: &Ty, span: Span) -> Result<()> {
+        fn custom(classes: &HashMap<usize, CompiledClass>, ty: &Ty) -> bool {
+            match ty {
+                Ty::Instance(identity, fields) => {
+                    classes[&identity.id].methods.contains_key(&(false, "toJSON".into())) || custom(classes, fields)
+                }
+                Ty::Obj(fields) => fields.values().any(|(t, _)| custom(classes, t)),
+                Ty::Array(t) | Ty::NonEmptyArray(t) | Ty::Map(t) => custom(classes, t),
+                Ty::Tuple(items) | Ty::ArrayLiteral(items) | Ty::Union(items) => {
+                    items.iter().any(|t| custom(classes, t))
+                }
+                _ => false,
+            }
+        }
+        if custom(&self.classes, ty) {
+            return err_help(
+                span,
+                "actions can't return class instances with a toJSON method; their JSON differs from their fields",
+                "return the toJSON() result, or build the response object explicitly",
+            );
+        }
+        Ok(())
     }
 }
 

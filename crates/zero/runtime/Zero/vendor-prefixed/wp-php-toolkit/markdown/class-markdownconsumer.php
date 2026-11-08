@@ -19,7 +19,7 @@ use Zero\Vendor\WordPress\DataLiberation\BlockMarkup\BlockObject;
 use Zero\Vendor\WordPress\DataLiberation\DataFormatConsumer\BlocksWithMetadata;
 use Zero\Vendor\WordPress\DataLiberation\DataFormatConsumer\DataFormatConsumer;
 use Zero\Vendor\WordPress\DataLiberation\Importer\ImportUtils;
-use Zero_Vendor_WP_HTML_Tag_Processor as WP_HTML_Tag_Processor;
+use WP_HTML_Tag_Processor;
 
 /**
  * Transforms markdown with frontmatter into a block markup and metadata pair.

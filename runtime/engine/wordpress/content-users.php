@@ -291,6 +291,9 @@ function spacefast_content_users_projection_schema(): array
  */
 function spacefast_content_users_abilities(): array
 {
+    // A Zero v2 Space's own tables hold only its Space Users and the app's
+    // members; the principal-user abilities below belong to the site tables.
+    if (spacefast_space_users_scoped()) return spacefast_space_users_abilities();
     $user = spacefast_content_users_projection_schema();
     return [
         'zero/wp-users-list' => [

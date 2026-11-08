@@ -579,7 +579,30 @@ fn convert_pages(
         }
         match pages::page(&relative, &text, &at) {
             Ok(page) => {
-                // Data modules a page imports are copied like the server's helpers.
+                // Data modules a page imports are copied like the server's helpers. A component
+                // module (.tsx) has no data-module counterpart: it is the page's to port.
+                let mut component = None;
+                for import in &page.imports {
+                    // Root-relative, with `.ts` appended (`shared/Widget.ts`, `shared/Widget.tsx.ts`).
+                    let stem = import.strip_suffix(".ts").unwrap_or(import);
+                    let explicit = stem.ends_with(".tsx");
+                    let only_tsx = !fs.is_file(&root.join(import)) && fs.is_file(&root.join(format!("{stem}.tsx")));
+                    if explicit || only_tsx {
+                        component = Some(if explicit {
+                            stem.to_string()
+                        } else {
+                            format!("{stem}.tsx")
+                        });
+                        break;
+                    }
+                }
+                if let Some(import) = component {
+                    report.errors.push(fail(
+                        &at,
+                        format!("the page imports the component module {import}; port it with the page to a TSX page component"),
+                    ));
+                    continue;
+                }
                 for import in &page.imports {
                     collect_sources(fs, root, Path::new(import), sources, &mut BTreeSet::new())?;
                 }

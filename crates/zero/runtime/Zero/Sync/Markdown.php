@@ -8,10 +8,11 @@ use Zero\HttpError;
 use Zero\Vendor\WordPress\DataLiberation\DataFormatConsumer\BlocksWithMetadata;
 use Zero\Vendor\WordPress\Markdown\MarkdownConsumer;
 use Zero\Vendor\WordPress\Markdown\MarkdownProducer;
-use Zero_Vendor_WP_HTML_Tag_Processor as Tags;
+use WP_HTML_Tag_Processor as Tags;
 
 /**
- * Markdown ⇄ Gutenberg blocks on the bundled WordPress php-toolkit (§5.2). Nothing here parses Markdown.
+ * Markdown ⇄ Gutenberg blocks on the bundled WordPress php-toolkit (§5.2), whose HTML processing is core's
+ * HTML API. Nothing here parses Markdown.
  *
  * Two measured properties shape it:
  *

@@ -1,0 +1,33 @@
+{
+  "build": [
+    { "name": "dev", "args": "[dir] [--port n] [--no-watch] [--allow-destructive]", "summary": "start the local WordPress site and rebuild on change" },
+    { "name": "dev stop", "args": "[dir]", "summary": "stop the local site, keeping its data" },
+    { "name": "dev status", "args": "[dir]", "summary": "report the local site" },
+    { "name": "build", "args": "[dir] [--out dir] [--quiet] [--preserve-data snapshot.json] [--frozen]", "summary": "write the WordPress plugins to .zero/wp-content" },
+    { "name": "check", "args": "[dir] [--json] [--frozen]", "summary": "compile and report problems; write nothing" },
+    { "name": "doctor", "args": "[dir] [--out dir] [--site url] [--json]", "summary": "check a build, and a running site (ZERO_TOKEN)" },
+    { "name": "sync", "args": "[status | resolve <uid>] [dir] [--site url] [--only c1,c2] [--check] [--no-commit] [--json]", "summary": "content files <-> site records (ZERO_APP_PASSWORD or ZERO_TOKEN)" },
+    { "name": "abilities pull", "args": "[dir] --site url [--only vendor/*]", "summary": "lock a site's abilities into zero/abilities.json (ZERO_APP_PASSWORD)" },
+    { "name": "migrate app", "args": "--from zero-0.8 <capsule-dir> --out <new-dir> [--space id] [--dry-run] [--json]", "summary": "convert a Zero 0.8 app" },
+    { "name": "migrate config", "args": "--from emdash|payload|sanity|zero <input> --out <new/zero.config.ts>", "summary": "import another CMS's schema" },
+    { "name": "deploy", "args": "<inspect|publish|init|status|backup|restore> <options>", "summary": "artifact preflight and offline workspaces (docs/deployment.md)" }
+  ],
+  "site": [
+    { "name": "wp", "args": "<WP-CLI arguments>", "summary": "any WP-CLI command (zero wp plugin list)", "via": "wp" },
+    { "name": "migrate", "args": "[--mark-applied=<id>]", "summary": "apply pending database migrations" },
+    { "name": "seed", "args": "--records=<dir> [--dry-run]", "summary": "first-sync content from compiled records" },
+    { "name": "jobs", "args": "list [--state=s] | run <id> | retry <id> | cancel <id> | maintain", "summary": "inspect and drive background jobs" },
+    { "name": "abilities", "args": "", "summary": "list the app's abilities" },
+    { "name": "run", "args": "<ability> [--input=<json>]", "summary": "run an ability" },
+    { "name": "action", "args": "<name> [json]", "summary": "call an action as the trusted CLI" },
+    { "name": "find", "args": "<collection> [json options]", "summary": "read records" },
+    { "name": "insert", "args": "<collection> <json>", "summary": "insert records" },
+    { "name": "update", "args": "<collection> <where json> <set json>", "summary": "update records" },
+    { "name": "delete", "args": "<collection> <where json>", "summary": "delete records" },
+    { "name": "publish-due", "args": "", "summary": "publish scheduled records that are due" },
+    { "name": "identity", "args": "account|suspend|restore|revoke|erase <user-id> | app add --name=n --redirect=uri --origin=o [--id=app_id] | webhook-add <url> | webhook-remove <id> | webhooks | maintenance | rotate-keys", "summary": "Zero Identity accounts, applications, webhooks and keys" },
+    { "name": "migrate-legacy", "args": "<content-model.php | -> [--dry-run] [--space=id]", "summary": "move content from an original Zero site" },
+    { "name": "migrate-legacy-users", "args": "--space=id [--dry-run]", "summary": "move an original Zero site's users" },
+    { "name": "migrate-spacefast", "args": "--space=id --source-prefix=p --target-prefix=p [--dry-run | --verify]", "summary": "move a Spacefast-hosted Space's tables" }
+  ]
+}

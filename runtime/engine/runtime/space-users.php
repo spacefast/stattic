@@ -3,18 +3,20 @@ declare(strict_types=1);
 
 // Read before WordPress loads, so it cannot ask the identity plugin for the name.
 // In production the plugin only runs over HTTPS and always sets the __Host- name;
-// the bare name is plain-HTTP local development only.
-function _stattic_space_users_session_cookie(): ?string
+// the bare name is plain-HTTP local development only. A Zero v2 Space's accounts
+// live in its own tables under zero-identity's cookie.
+function _stattic_space_users_session_cookie(array $serving = []): ?string
 {
-    $cookie = $_COOKIE['__Host-sfi_session']
-        ?? (_stattic_cookies_secure() ? null : ($_COOKIE['sfi_session'] ?? null));
+    $name = ($serving['zero_generation'] ?? null) === 'v2' ? 'zi_session' : 'sfi_session';
+    $cookie = $_COOKIE['__Host-' . $name]
+        ?? (_stattic_cookies_secure() ? null : ($_COOKIE[$name] ?? null));
     return is_string($cookie) ? $cookie : null;
 }
 
 // Named by the identity plugin's rule so every sfi_* cookie shares one prefix.
 function _stattic_space_users_set_cookie(string $name, string $value, int $expires): void
 {
-    $cookieName = \Spacefast\Identity\Sessions::cookieName($name);
+    $cookieName = spacefast_space_users_cookie_name($name);
     setcookie($cookieName, $value, [
         'expires' => $expires, 'path' => '/',
         'secure' => _stattic_cookies_secure() || str_starts_with($cookieName, '__Host-'),
@@ -24,7 +26,7 @@ function _stattic_space_users_set_cookie(string $name, string $value, int $expir
 
 function _stattic_space_users_cookie(string $name): string
 {
-    return (string) ($_COOKIE[\Spacefast\Identity\Sessions::cookieName($name)] ?? '');
+    return (string) ($_COOKIE[spacefast_space_users_cookie_name($name)] ?? '');
 }
 
 function _stattic_space_users_route(string $path): bool
@@ -41,7 +43,8 @@ function _stattic_space_users_prepare(
     $control = STATTIC_ZERO_CONTROL_ROUTES[trim($path, '/')] ?? null;
     $start = is_array($control) && in_array($control['operation'], ['auth_start', 'auth_sign_out'], true);
     if (!$route && !$start) return false;
-    $hasSession = _stattic_space_users_session_cookie() !== null;
+    require_once __DIR__ . '/../shared/zero-v2.php';
+    $hasSession = _stattic_space_users_session_cookie($serving) !== null;
     if (($serving['users']['enabled'] ?? false) !== true) {
         if ($route) _stattic_problem_refused(404, 'space_users_disabled', 'Users is not enabled for this Space.');
         return false;
@@ -60,6 +63,12 @@ function _stattic_space_users_prepare(
     require_once __DIR__ . '/content-page.php';
     require_once __DIR__ . '/identity-context.php';
     $spaceId = (string) ($serving['space_id'] ?? '');
+    // A Zero v2 Space keeps its users in its own tables, under the identity code
+    // of its current initialized version. That is not the version this host
+    // serves: a preview or a plain static version can be served while the
+    // Space is on v2, and an older version may predate the identity code.
+    $zeroVersion = _stattic_zero_generation($serving) === 'v2'
+        ? _stattic_space_users_zero_version($privateRoot, $spaceId, $serving) : null;
     $wpLoad = dirname(dirname($privateRoot)) . '/wp-load.php';
     if ($spaceId === '' || !is_file($wpLoad)) {
         _stattic_problem_refused(503, 'space_users_unavailable', 'Users is not ready on this Space.');
@@ -95,6 +104,37 @@ function _stattic_space_users_prepare(
     }
     if ($route) _stattic_space_users_dispatch($path, $method, $host);
     return false;
+}
+
+/**
+ * Select the Space's current initialized Zero v2 version for Users, or refuse
+ * with a problem document. Versions built before Spacefast Access have no
+ * `runtime.users.access-shape.v1`-era identity code, so they are refused with a
+ * republish instruction rather than crashing.
+ */
+function _stattic_space_users_zero_version(string $privateRoot, string $spaceId, array $serving): string
+{
+    $current = $spaceId === '' ? null : _stattic_runtime_read_json($privateRoot . '/spaces/' . $spaceId . '/zero-v2-current.json');
+    $versionId = is_array($current) ? ($current['version_id'] ?? null) : null;
+    if (!is_string($versionId) || !_stattic_id_valid($versionId)) {
+        _stattic_problem_refused(503, 'space_users_zero_version_required', 'Users sign-in needs this Space\'s Zero app. Publish a version with zero.config.ts.');
+    }
+    $identity = _stattic_version_root($privateRoot, $spaceId, $versionId) . '/.zero-compiled/plugins/zero-identity/src/Sessions.php';
+    $source = is_file($identity) ? file_get_contents($identity) : false;
+    if (!is_string($source) || !str_contains($source, 'function cookieName(')) {
+        _stattic_problem_refused(409, 'space_users_zero_version_outdated', 'This Space\'s Zero app was built before app sign-in could use it. Publish the Space again.');
+    }
+    require_once __DIR__ . '/../shared/space-users-site.php';
+    _stattic_space_users_refuse_site_accounts($privateRoot, $spaceId);
+    try {
+        $selected = _stattic_zero_v2_select($privateRoot, $spaceId, $versionId, $serving);
+    } catch (RuntimeException) {
+        $selected = false;
+    }
+    if (!$selected) {
+        _stattic_problem_refused(503, 'space_users_zero_version_unavailable', 'Users is not ready on this Space. Try again shortly.');
+    }
+    return $versionId;
 }
 
 /**
@@ -139,8 +179,8 @@ function _stattic_space_users_dispatch(string $path, string $method, string $hos
         if (spacefast_space_users_auth() === null) _stattic_problem_refused(401, 'space_users_sign_in_required', 'Finish signing in to continue.');
         [$id, $binding] = array_pad(explode('.', _stattic_space_users_cookie('sfi_app_return'), 2), 2, '');
         try {
-            $challenge = \Spacefast\Identity\Plugin::$security->consume($id, 'space_app_return', $binding);
-        } catch (\Spacefast\Identity\Failure $error) {
+            $challenge = spacefast_space_users_identity('Plugin')::$security->consume($id, 'space_app_return', $binding);
+        } catch (\Spacefast\Identity\Failure|\Zero\Identity\Failure $error) {
             _stattic_problem_refused($error->status, $error->kind, $error->getMessage());
         }
         _stattic_space_users_set_cookie('sfi_app_return', '', time() - 3600);
@@ -158,7 +198,9 @@ function _stattic_space_users_dispatch(string $path, string $method, string $hos
         if (str_starts_with($operation, 'admin/')) {
             _stattic_problem_refused(403, 'space_users_management_forbidden', 'Manage Users from your Space dashboard.');
         }
-        $request = new WP_REST_Request($method === 'HEAD' ? 'GET' : $method, '/spacefast-identity/v1/' . $operation);
+        // The content kernel's REST serializer; a Zero v2 binding loads no kernel.
+        require_once __DIR__ . '/../wordpress/content-admin-api.php';
+        $request = new WP_REST_Request($method === 'HEAD' ? 'GET' : $method, '/' . spacefast_space_users_rest_namespace() . '/' . $operation);
         $request->set_query_params($_GET);
         $request->set_header('origin', (string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
         $request->set_header('x-identity-csrf', (string) ($_SERVER['HTTP_X_IDENTITY_CSRF'] ?? ''));
@@ -181,7 +223,9 @@ function _stattic_space_users_dispatch(string $path, string $method, string $hos
             _stattic_problem_refused(404, 'space_users_asset_not_found', 'This asset is not available.');
         }
         if (!in_array($method, ['GET', 'HEAD'], true)) _stattic_method_not_allowed('GET, HEAD');
-        $file = dirname(__DIR__, 2) . '/wordpress/spacefast-identity/' . $asset;
+        $file = spacefast_space_users_scoped()
+            ? $GLOBALS['SPACEFAST_ZERO_V2_ROOT'] . '/plugins/zero-identity/' . $asset
+            : dirname(__DIR__, 2) . '/wordpress/spacefast-identity/' . $asset;
         header('Content-Type: ' . (str_ends_with($asset, '.js') ? 'text/javascript' : 'text/css') . '; charset=utf-8');
         if ($method !== 'HEAD') readfile($file);
         exit;
@@ -205,15 +249,15 @@ function _stattic_space_users_native_begin(string $returnPath): string
     if (($GLOBALS['SPACEFAST_SPACE_USERS_NATIVE_LINK'] ?? false) === true) {
         _stattic_space_users_admit_origin('GET', (string) $_SERVER['HTTP_HOST']);
         try {
-            $session = \Spacefast\Identity\Plugin::$sessions->require();
-            \Spacefast\Identity\Plugin::$sessions->recent($session);
-        } catch (\Spacefast\Identity\Failure $error) {
+            $session = spacefast_space_users_identity('Plugin')::$sessions->require();
+            spacefast_space_users_identity('Plugin')::$sessions->recent($session);
+        } catch (\Spacefast\Identity\Failure|\Zero\Identity\Failure $error) {
             _stattic_problem_refused($error->status, $error->kind, $error->getMessage());
         }
         $payload = ['path' => '/identity/account', 'kind' => 'link', 'userId' => (int) $session['wp_user_id'], 'sessionId' => $session['id']];
     }
-    $binding = \Spacefast\Identity\Security::token();
-    $id = \Spacefast\Identity\Plugin::$security->challenge('space_native', 0, '', $payload, $binding, 300);
+    $binding = spacefast_space_users_identity('Security')::token();
+    $id = spacefast_space_users_identity('Plugin')::$security->challenge('space_native', 0, '', $payload, $binding, 300);
     _stattic_space_users_set_cookie('sfi_native_start', $id . '.' . $binding, time() + 300);
     return '/__zero/auth/native';
 }
@@ -230,10 +274,10 @@ function _stattic_space_users_native_complete(string $host, string $method): nev
     if ($account === null) _stattic_problem_refused(401, 'space_users_native_identity_missing', 'Start Spacefast sign-in again.');
     [$id, $binding] = array_pad(explode('.', _stattic_space_users_cookie('sfi_native_start'), 2), 2, '');
     try {
-        $challenge = \Spacefast\Identity\Plugin::$security->consume($id, 'space_native', $binding);
+        $challenge = spacefast_space_users_identity('Plugin')::$security->consume($id, 'space_native', $binding);
         $name = (string) ($verified['profile']['name'] ?? 'Spacefast user');
         if (($challenge['payload']['kind'] ?? '') === 'link') {
-            $session = \Spacefast\Identity\Plugin::$sessions->require();
+            $session = spacefast_space_users_identity('Plugin')::$sessions->require();
             if ((int) $session['wp_user_id'] !== ($challenge['payload']['userId'] ?? null)
                 || $session['id'] !== ($challenge['payload']['sessionId'] ?? null)) {
                 _stattic_problem_refused(403, 'link_session_invalid', 'Sign in to the account that started linking and try again.');
@@ -241,19 +285,9 @@ function _stattic_space_users_native_complete(string $host, string $method): nev
             spacefast_space_users_link_native($account['issuer'], $account['subject'], $name, $session);
             $result = ['kind' => 'linked'];
         } else {
-            $result = spacefast_space_users_identity_lock($account['issuer'], $account['subject'], static function () use ($account, $name): array {
-            $userId = spacefast_content_principal_ensure_user([
-                'kind' => 'user', 'issuer' => $account['issuer'], 'subject' => $account['subject'],
-                'principal_id' => spacefast_content_principal_authority($account['issuer'], $account['subject']),
-                'profile' => ['display_name' => $name],
-            ]);
-            if ($userId < 1) _stattic_problem_refused(503, 'space_users_account_unavailable', 'The app account is unavailable.');
-            $resolved = \Spacefast\Identity\Plugin::$accounts->provider($account['issuer'], $account['subject'], null, $name);
-            if ($resolved !== $userId) _stattic_problem_refused(409, 'space_users_identity_conflict', 'This identity belongs to a different account.');
-            return \Spacefast\Identity\Plugin::$api->providerLogin($userId);
-            });
+            $result = spacefast_space_users_native_sign_in($account['issuer'], $account['subject'], $name);
         }
-    } catch (\Spacefast\Identity\Failure $error) {
+    } catch (\Spacefast\Identity\Failure|\Zero\Identity\Failure $error) {
         _stattic_problem_refused($error->status, $error->kind, $error->getMessage());
     }
     _stattic_space_users_set_cookie('sfi_native_start', '', time() - 3600);
@@ -287,12 +321,11 @@ function _stattic_space_users_start(string $selected, string $returnPath): never
 {
     $provider = _stattic_space_users_provider($selected);
     _stattic_space_users_return_begin($returnPath);
+    $plugin = spacefast_space_users_identity('Plugin');
+    $providers = spacefast_space_users_identity('Providers');
     try {
-        $destination = (new \Spacefast\Identity\Providers(
-            \Spacefast\Identity\Plugin::$security, \Spacefast\Identity\Plugin::$accounts,
-            \Spacefast\Identity\Plugin::$sessions
-        ))->start($provider);
-    } catch (\Spacefast\Identity\Failure $error) {
+        $destination = (new $providers($plugin::$security, $plugin::$accounts, $plugin::$sessions))->start($provider);
+    } catch (\Spacefast\Identity\Failure|\Zero\Identity\Failure $error) {
         _stattic_problem_refused($error->status, $error->kind, $error->getMessage());
     }
     header('Cache-Control: private, no-store');
@@ -327,13 +360,15 @@ function _stattic_space_users_admit_origin(string $method, string $host): void
  * Same verdict as spacefast_space_users_auth(): a live, unrevoked session on an
  * active account whose WordPress user is this Space's app user, answering the
  * Space-scoped opaque subject. wordpress/space-users.php owns the WordPress
- * side; a change to either side changes both.
+ * side; a change to either side changes both. Only the Zero 0.8 lanes ask; a
+ * Zero v2 Space answers identity from WordPress (zero-identity on its tables).
  */
 function _stattic_space_users_verify_session(string $privateRoot, string $spaceId, string $host, array $settings, string $cookie): ?array
 {
     if ($cookie === '' || strlen($cookie) > 512 || $spaceId === '') return null;
     require_once __DIR__ . '/../shared/artifacts.php';
     require_once __DIR__ . '/../shared/db-broker.php';
+    require_once __DIR__ . '/../shared/space-users-site.php';
     $site = _stattic_space_users_site_config(dirname(dirname($privateRoot)));
     $url = _stattic_zero_runner_base_env()['SPACEFAST_ZERO_DATABASE_URL'] ?? '';
     if ($site === null || !is_string($url) || $url === '') {
@@ -355,26 +390,6 @@ function _stattic_space_users_verify_session(string $privateRoot, string $spaceI
         _stattic_problem_refused(503, 'space_users_verifier_invalid', 'Account verification is temporarily unavailable.');
     }
     return $auth;
-}
-
-/**
- * The table prefix and the `auth` salt halves from the site's wp-config.php,
- * read without executing it (it ends by booting WordPress). Null when the file
- * is unreadable; empty salt halves fall back to the options table, the way
- * wp_salt() does. The prefix is a SQL identifier fragment, so it is allowlisted.
- *
- * @return array{prefix:string,key:string,salt:string}|null
- */
-function _stattic_space_users_site_config(string $publicRoot): ?array
-{
-    $source = is_file($publicRoot . '/wp-config.php') ? file_get_contents($publicRoot . '/wp-config.php') : false;
-    if (!is_string($source)) return null;
-    $define = static function (string $name) use ($source): string {
-        if (preg_match('/define\s*\(\s*([\'"])' . $name . '\1\s*,\s*([\'"])((?:\\\\.|(?!\2).)*)\2\s*\)/s', $source, $match) !== 1) return '';
-        return stripslashes($match[3]);
-    };
-    $prefix = preg_match('/\$table_prefix\s*=\s*([\'"])([A-Za-z0-9_]+)\1\s*;/', $source, $match) === 1 ? $match[2] : 'wp_';
-    return ['prefix' => $prefix, 'key' => $define('AUTH_KEY'), 'salt' => $define('AUTH_SALT')];
 }
 
 /**
@@ -442,15 +457,15 @@ function _stattic_space_users_lookup_session(mysqli $link, array $site, string $
 
 function _stattic_space_users_return_begin(string $returnPath): void
 {
-    $binding = \Spacefast\Identity\Security::token();
-    $challenge = \Spacefast\Identity\Plugin::$security->challenge('space_app_return', 0, '', ['path' => $returnPath], $binding, 300);
+    $binding = spacefast_space_users_identity('Security')::token();
+    $challenge = spacefast_space_users_identity('Plugin')::$security->challenge('space_app_return', 0, '', ['path' => $returnPath], $binding, 300);
     _stattic_space_users_set_cookie('sfi_app_return', $challenge . '.' . $binding, time() + 300);
 }
 
 function _stattic_space_users_request_auth(array $serving, string $host): ?array
 {
     if (array_key_exists('SPACEFAST_SPACE_USERS_AUTH', $GLOBALS)) return $GLOBALS['SPACEFAST_SPACE_USERS_AUTH'];
-    $cookie = _stattic_space_users_session_cookie();
+    $cookie = _stattic_space_users_session_cookie($serving);
     if ($cookie === null || strlen($cookie) > 512) return null;
     $privateRoot = _stattic_access_private_root();
     require_once __DIR__ . '/../shared/admission.php';

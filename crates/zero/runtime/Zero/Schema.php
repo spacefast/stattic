@@ -118,6 +118,18 @@ final class Schema
         return $this->raw['routes'] ?? [];
     }
 
+    /** @return list<array{hook: string, filter: bool, priority: int, args: int, handler: string}> */
+    public function wpHooks(): array
+    {
+        return $this->raw['wpHooks'] ?? [];
+    }
+
+    /** @return array<string, list<string>> class => the public properties its hook view exposes */
+    public function wpViews(): array
+    {
+        return $this->raw['wpViews'] ?? [];
+    }
+
     public function jobs(): array
     {
         return $this->raw['jobs'] ?? [];

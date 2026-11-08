@@ -3,23 +3,23 @@
 namespace Zero\Vendor\WordPress\DataLiberation\BlockMarkup;
 
 use WP_Error;
-use Zero_Vendor_WP_HTML_Tag_Processor as WP_HTML_Tag_Processor;
+use WP_HTML_Tag_Processor;
 
 /**
  * A processor class capable of reading and rewriting block markup.
  *
  * This class provides functionality to parse, traverse and modify WordPress block markup.
- * It extends Zero_Vendor_WP_HTML_Tag_Processor to add block-specific capabilities like:
+ * It extends WP_HTML_Tag_Processor to add block-specific capabilities like:
  * - Parsing block comments into name and attributes
  * - Tracking block nesting depth
  * - Modifying block attributes
  * - Validating block structure
  *
- * Contrary to Zero_Vendor_WP_HTML_Tag_Processor, this class does not support streaming.
+ * Contrary to WP_HTML_Tag_Processor, this class does not support streaming.
  * It assumes block markup blobs are small enough to fit into memory, otherwise
  * WordPress won't be able to render them anyway.
  *
- * @see Zero_Vendor_WP_HTML_Tag_Processor
+ * @see WP_HTML_Tag_Processor
  */
 class BlockMarkupProcessor extends WP_HTML_Tag_Processor {
 

@@ -29,6 +29,8 @@ pub(super) fn parse(path: &Path, text: &str, source: Source) -> Result<Value, Fa
         module: 0,
         class_context: std::cell::Cell::new(false),
         super_call: std::cell::Cell::new(false),
+        erase_types: false,
+        erased_types: Default::default(),
     }
     .program(&parsed.program)
     .map_err(|d| fail("", diag::render(&d, path.parent().unwrap_or(Path::new(".")))))?;

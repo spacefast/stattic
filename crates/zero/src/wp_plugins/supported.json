@@ -1,0 +1,10 @@
+{
+  "$comment": "WordPress plugins the Zero team supports, by WordPress.org slug. `min` is inclusive, `below` is exclusive, both compared with PHP version_compare. Builds warn for any other plugin or version. To request one, open an issue: https://github.com/spacefast/zero/issues",
+  "plugins": {
+    "action-scheduler": { "min": "4.2.0", "below": "5" },
+    "classic-editor": { "min": "1.6.7", "below": "2" },
+    "mcp-adapter": { "min": "0.7.1", "below": "0.8" },
+    "polylang": { "min": "3.9", "below": "4" },
+    "secure-custom-fields": { "min": "6.9.7", "below": "7" }
+  }
+}

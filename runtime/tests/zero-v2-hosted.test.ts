@@ -78,10 +78,9 @@ test(
     writeFileSync(
       path.join(project, "zero.config.ts"),
       `
-import { defineConfig, table, text, integer, boolean, timestamp, action, env, db } from 'zero';
+import { defineConfig, table, text, integer, boolean, timestamp, action, db } from 'zero';
 import { version } from './src/version';
 import { suffix } from 'shared';
-const bootValue = env('APP_VALUE');
 const customers = table({ name: text().notNull(), email: text().notNull().max(191).unique(), active: boolean().default(true), created: timestamp().defaultNow() });
 const products = table({ title: text().notNull(), sku: text().max(191).unique(), price: integer().notNull(), stock: integer().default(0), published: boolean().default(false), ...(version === "v2" ? { category: text() } : {}) });
 const orders = table({ customerId: integer().notNull(), status: text().notNull(), total: integer().notNull(), created: timestamp().defaultNow() });
@@ -89,7 +88,7 @@ const items = table({ orderId: integer().notNull(), productId: integer().notNull
 const comments = table({ customerId: integer(), body: text().notNull(), approved: boolean().default(false), created: timestamp().defaultNow() });
 export default defineConfig({ tables: { customers, products, orders, items, comments }, actions: {
   version: action({ access: 'anyone', handler() { return suffix(version); } }),
-  environment: action({ access: 'anyone', handler() { return { value: env('APP_VALUE'), bootValue, empty: env('ZERO_PROOF_EMPTY'), hostDatabaseHidden: env('DB_PASSWORD') === null, hostProcessHidden: env('ZERO_PROOF_HOST_ONLY') === null }; } }),
+  environment: action({ access: 'anyone', handler() { return { value: process.env.APP_VALUE ?? null, empty: process.env.ZERO_PROOF_EMPTY ?? null, hostDatabaseHidden: process.env.DB_PASSWORD === undefined, hostProcessHidden: process.env.ZERO_PROOF_HOST_ONLY === undefined }; } }),
   shipping: action({ input: { amount: integer().notNull() }, access: 'anyone', handler({ amount }) { return amount > 5000 ? 0 : 599; } }),
   addCustomer: action({ input: { name: text().notNull(), email: text().notNull() }, access: 'anyone', async handler({ name, email }) { const rows = await db.insert(customers).values({ name, email }).returning(); return { id: rows[0]?.id ?? null }; } }),
   ...(version === "v2" ? { discount: action({ access: "anyone", handler() { return 10; } }) } : {})
@@ -118,9 +117,16 @@ export default defineConfig({ tables: { customers, products, orders, items, comm
         return Response.json({ ok: true });
       },
     });
+    // The box's php-fpm namespace has no `wp` or `php` to spawn; finalize and the
+    // Users lane get the same, so the users copy below is proven in-process.
+    const fpmBin = path.join(work, "fpm-bin");
+    mkdirSync(fpmBin);
+    for (const name of ["wp", "php"]) {
+      writeFileSync(path.join(fpmBin, name), "#!/bin/sh\nexit 127\n", { mode: 0o755 });
+    }
     const rt = await startRuntime({
       env: {
-        PATH: `${path.join(work, "bin")}:${process.env.PATH ?? ""}`,
+        PATH: `${fpmBin}:${process.env.PATH ?? ""}`,
         ZERO_PROOF_HOST_ONLY: "host-process-canary",
         SPACEFAST_ZERO_DATABASE_URL: db.url,
         ZERO_PROOF_EMPTY: "host-nonempty-canary",
@@ -239,9 +245,18 @@ export default defineConfig({ tables: { customers, products, orders, items, comm
         }
       };
       const fixture = path.join(rt.root, "wp-content/mu-plugins/zero-scope-proof.php");
+      const mailbox = path.join(work, "mail");
+      mkdirSync(mailbox);
       writeFileSync(
         fixture,
         `<?php
+// This disposable stack serves plain HTTP; production identity pages require HTTPS.
+define('ZERO_IDENTITY_DEV_HTTP', true);
+// Outgoing mail stays on disk, one file per recipient, so the suite reads sign-in codes.
+add_filter('pre_wp_mail', static function ($short, array $atts) {
+  file_put_contents(${JSON.stringify(mailbox)} . '/' . basename((string) $atts['to']), (string) $atts['message']);
+  return true;
+}, 10, 2);
 add_action('rest_api_init', static function () {
   register_rest_route('zero-proof/v1', '/state', [
     'methods' => ['GET', 'POST'], 'permission_callback' => '__return_true',
@@ -426,7 +441,6 @@ add_action('rest_api_init', static function () {
         string,
         {
           value: string | null;
-          bootValue: string | null;
           empty: string | null;
           hostDatabaseHidden: boolean;
           hostProcessHidden: boolean;
@@ -442,7 +456,6 @@ add_action('rest_api_init', static function () {
         assert.equal(response.status, 200, JSON.stringify(body));
         assert.deepEqual(body.data, {
           value: expected,
-          bootValue: expected,
           empty: expected === null ? null : "",
           hostDatabaseHidden: true,
           hostProcessHidden: true,
@@ -556,6 +569,381 @@ add_action('rest_api_init', static function () {
         db.exec(`SHOW COLUMNS FROM ${own.prefix}zero_products LIKE 'category'`),
         /category/,
       );
+      // Space Users on v2: the app declares no user collection, yet the Space's
+      // users sign in on /identity and are the same user on /wp-json/zero/v1.
+      const users = (managed: boolean) => ({
+        users: {
+          enabled: true,
+          providers: {
+            google: { mode: managed ? "managed" : "disabled" },
+            gravatar: { enabled: false },
+            spacefast: { enabled: false },
+          },
+        },
+        usersProviderConfig: {
+          issuer: "https://api.spacefast.com/v1/auth",
+          clientId: "space-users-client",
+          googleStartUrl:
+            "https://api.spacefast.com/v1/auth/space-users/spc_zero_v2_proof/google/start",
+          gravatarStartUrl:
+            "https://api.spacefast.com/v1/auth/space-users/spc_zero_v2_proof/gravatar/start",
+          directGoogle: null,
+          availability: { google: { managed, direct: false }, gravatar: false, spacefast: false },
+          revision: "users-test",
+        },
+      });
+      const usersOn = async (spaceId: string, hostname: string, version: string) =>
+        putRoute(rt, spaceId, "production", {
+          version_id: version,
+          hostnames: [hostname],
+          production_hostnames: [hostname],
+          config: publicAccessConfig(
+            { zero_generation: "v2", ...users(spaceId === space) },
+            "live_and_all_versions",
+          ),
+        });
+      await usersOn(space, host, "ver_zero_v2_second");
+      await usersOn(otherSpace, otherHost, "ver_zero_v2_other");
+      const origin = (hostname: string) => `http://${hostname}`;
+      const signIn = async (hostname: string, email: string) => {
+        const identity = (operation: string, body: Record<string, string>) =>
+          get(rt, hostname, `/__zero/auth/api/${operation}`, {
+            method: "POST",
+            headers: { "content-type": "application/json", origin: origin(hostname) },
+            body: JSON.stringify(body),
+          });
+        const started = await identity("sign-in/email", { email });
+        assert.equal(started.status, 200, await started.clone().text());
+        const startedBody = z
+          .object({ data: z.object({ challenge_id: z.string() }) })
+          .parse(await started.json());
+        const code = /Your code is (\d{6})/.exec(
+          readFileSync(path.join(mailbox, email), "utf8"),
+        )?.[1];
+        assert.ok(code, "the sign-in code was mailed");
+        const verified = await identity("sign-in/verify", {
+          challenge_id: startedBody.data.challenge_id,
+          code,
+        });
+        assert.deepEqual(await verified.json(), { data: { kind: "signed_in" } });
+        const cookie = verified.headers
+          .getSetCookie()
+          .find((value) => value.startsWith("zi_session="))
+          ?.split(";")[0];
+        assert.ok(cookie, "sign-in sets the Space's session cookie");
+        return cookie;
+      };
+      const ana = await signIn(host, `ana-${space}@example.test`);
+      const me = async (hostname: string, cookie: string) => {
+        const response = await get(rt, hostname, "/wp-json/zero/v1/me", {
+          headers: { cookie, origin: origin(hostname) },
+        });
+        assert.equal(response.status, 200, await response.clone().text());
+        return z
+          .object({ data: z.object({ id: z.number(), name: z.string() }).nullable() })
+          .parse(await response.json()).data;
+      };
+      const anaOnZero = await me(host, ana);
+      assert.ok(anaOnZero, "the /identity session is a signed-in user on /wp-json/zero/v1");
+      assert.equal(
+        db.exec(`SELECT user_email FROM ${own.prefix}users WHERE ID=${anaOnZero.id}`),
+        `ana-${space}@example.test`,
+        "the user lives in the Space's own tables",
+      );
+      assert.equal(db.exec(`SELECT COUNT(*) FROM wp_users WHERE user_email LIKE 'ana-%'`), "0");
+      const appUser = await get(rt, host, "/__zero/auth/user", {
+        headers: { cookie: ana, origin: origin(host) },
+      });
+      const appUserBody = await appUser.json();
+      assert.equal(appUser.status, 200, JSON.stringify(appUserBody));
+      assert.equal(appUserBody.data.provider, "space-users");
+      assert.equal(appUserBody.data.displayName, anaOnZero.name);
+      assert.equal(
+        appUserBody.data.userId,
+        db.exec(
+          `SELECT option_value FROM ${own.prefix}options WHERE option_name='spacefast_app_subject_${anaOnZero.id}_${space}'`,
+        ),
+        "/__zero/auth/user answers the same account's Space-scoped id",
+      );
+      assert.equal((await me(host, "")) ?? null, null, "no cookie, no user");
+      assert.equal(await me(otherHost, ana), null, "Space A's session is nobody on Space B");
+      const bob = await signIn(otherHost, `bob-${otherSpace}@example.test`);
+      assert.ok(await me(otherHost, bob));
+      assert.equal(await me(host, bob), null, "Space B's session is nobody on Space A");
+      const sibling = await get(rt, host, "/wp-json/zero/v1/me", {
+        headers: { cookie: ana, origin: "http://sibling.zero-v2-proof.test" },
+      });
+      assert.equal((await sibling.json()).data, null, "another origin borrows no identity");
+      // Finding 2: Users binds the Space's current initialized version, not the one
+      // a host serves. An immutable host for an older version answers the same user.
+      await putRoute(rt, space, "production", {
+        version_id: "ver_zero_v2_second",
+        hostnames: [host],
+        production_hostnames: [host],
+        version_hostnames: [
+          { hostname: "zero-v2-proof--v1.test", version_id: "ver_zero_v2_first" },
+        ],
+        config: publicAccessConfig(
+          { zero_generation: "v2", ...users(true) },
+          "live_and_all_versions",
+        ),
+      });
+      const olderHost = await get(rt, "zero-v2-proof--v1.test", "/__zero/auth/user", {
+        headers: { cookie: ana, origin: "http://zero-v2-proof--v1.test" },
+      });
+      assert.equal(olderHost.status, 200, await olderHost.clone().text());
+      // Finding 3: a current version whose identity code predates Users is refused
+      // with a republish instruction, never a crash.
+      const currentPointer = path.join(rt.storageRoot, "spaces", space, "zero-v2-current.json");
+      const currentBefore = readFileSync(currentPointer, "utf8");
+      const currentVersion = z
+        .object({ version_id: z.string() })
+        .parse(JSON.parse(currentBefore)).version_id;
+      const sessionsFile = path.join(
+        versionRoot(rt, space, currentVersion),
+        ".zero-compiled/plugins/zero-identity/src/Sessions.php",
+      );
+      const sessionsBefore = readFileSync(sessionsFile, "utf8");
+      writeFileSync(
+        sessionsFile,
+        sessionsBefore.replace("function cookieName(", "function cookieNameBefore("),
+      );
+      try {
+        const outdated = await get(rt, host, "/__zero/auth/user", {
+          headers: { cookie: ana, origin: origin(host) },
+        });
+        assert.equal(outdated.status, 409, await outdated.clone().text());
+        assert.equal((await outdated.json()).code, "space_users_zero_version_outdated");
+      } finally {
+        writeFileSync(sessionsFile, sessionsBefore);
+      }
+      assert.equal(readFileSync(currentPointer, "utf8"), currentBefore);
+      // Managed Google: the Space's own start goes to the platform's start URL
+      // with the Space's registered callback.
+      const google = await get(rt, host, "/identity/provider/start?provider=google", {
+        headers: { cookie: ana },
+      });
+      assert.equal(google.status, 302, await google.clone().text());
+      const googleStart = new URL(google.headers.get("location") ?? "");
+      assert.equal(
+        googleStart.origin + googleStart.pathname,
+        "https://api.spacefast.com/v1/auth/space-users/spc_zero_v2_proof/google/start",
+      );
+      assert.equal(googleStart.searchParams.get("client_id"), "space-users-client");
+      assert.equal(
+        googleStart.searchParams.get("redirect_uri"),
+        `http://${host}/identity/provider/callback?provider=spacefast`,
+      );
+      assert.equal(googleStart.searchParams.get("code_challenge_method"), "S256");
+      const config = await get(rt, host, "/__zero/auth/api/config", {
+        headers: { origin: origin(host) },
+      });
+      assert.deepEqual((await config.json()).data.providers, ["google"]);
+      // Native Spacefast sign-in, inside the Space's binding: the platform
+      // identity gets one account in the Space's tables and keeps it.
+      // The native user also carries `_spacefast_principal_id`, as a site Sign in
+      // with Spacefast user does (content-principals.php writes it). It is still a
+      // Space User: membership is having an identity account.
+      const native = JSON.parse(
+        wp(
+          `--exec=require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/context.php"))};require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/storage.php"))};require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/zero-v2.php"))};_stattic_zero_v2_select(${JSON.stringify(rt.storageRoot)},${JSON.stringify(space)},"ver_zero_v2_second",["zero_generation"=>"v2","users"=>["enabled"=>true]]);`,
+          "eval",
+          "ob_start(); $first = spacefast_space_users_native_sign_in('https://api.spacefast.com/v1/auth', 'native-subject', 'Native Person');" +
+            " $again = spacefast_space_users_native_sign_in('https://api.spacefast.com/v1/auth', 'native-subject', 'Native Person'); ob_end_clean();" +
+            " $row = \\Zero\\Identity\\Plugin::$db->row('SELECT wp_user_id FROM ' . \\Zero\\Identity\\Plugin::$db->prefix . 'providers WHERE subject=%s', 'native-subject');" +
+            " update_user_meta((int) $row['wp_user_id'], '_spacefast_principal_id', 'prn_native_person');" +
+            " echo json_encode([$first, $again, (int) $row['wp_user_id'], get_userdata((int) $row['wp_user_id'])->display_name, $GLOBALS['wpdb']->prefix, \\Zero\\Identity\\Plugin::$sessions->create((int) $row['wp_user_id'])['secret']]);",
+        ),
+      );
+      assert.deepEqual(
+        native.slice(0, 2).map((result: { kind: string }) => result.kind),
+        ["signed_in", "signed_in"],
+      );
+      assert.equal(native[3], "Native Person");
+      assert.equal(native[4], own.prefix);
+      assert.equal(
+        db.exec(
+          `SELECT COUNT(*) FROM ${own.prefix}zero_identity_providers WHERE subject='native-subject'`,
+        ),
+        "1",
+        "a second sign-in reuses the account",
+      );
+      // Finding 1: the native user, principal meta and all, is a Space User.
+      const nativeCookie = `zi_session=${native[5]}`;
+      const nativeUser = await get(rt, host, "/__zero/auth/user", {
+        headers: { cookie: nativeCookie, origin: origin(host) },
+      });
+      assert.equal((await nativeUser.json()).data?.displayName, "Native Person");
+      const nativeComplete = await get(rt, host, "/__zero/auth/complete", {
+        headers: { cookie: nativeCookie },
+      });
+      assert.notEqual(
+        nativeComplete.status === 401 ? (await nativeComplete.json()).code : nativeComplete.status,
+        "space_users_sign_in_required",
+        "a native Spacefast user completes sign-in",
+      );
+      // Dashboard management: the content entrypoint's ability lane, the same
+      // request the control plane sends, answers from the Space's own tables.
+      const runtimeOrigin = new URL(rt.baseUrl).origin;
+      const manageRaw = async (
+        name: string,
+        input: Record<string, string | number | boolean>,
+        method = "GET",
+        target = space,
+      ) => {
+        const query = new URLSearchParams(
+          Object.entries(input).map(([key, value]) => [`input[${key}]`, String(value)]),
+        );
+        const now = Math.floor(Date.now() / 1000);
+        const response = await api(
+          rt,
+          "POST",
+          "/__spacefast/content.php",
+          "content.rest.request",
+          { space_id: target },
+          {
+            operation: "rest.request",
+            method,
+            path: `/wp-abilities/v1/abilities/zero/wp-users-${name}/run?${query}`,
+            publicOrigin: origin(host),
+            principal: {
+              format: "spacefast.principal",
+              version: 1,
+              audience: { spaceId: target, runtimeInstanceId: "rti_test", host: runtimeOrigin },
+              sessionVersion: now,
+              accessGeneration: 1,
+              nonce: crypto.randomUUID(),
+              issuedAt: now,
+              expiresAt: now + 60,
+              wordpressRole: "administrator",
+              actor: { kind: "user", id: "usr_dashboard_owner" },
+              subject: { issuer: "https://api.spacefast.com/v1/auth", subject: "dashboard-owner" },
+            },
+          },
+        );
+        return response;
+      };
+      const manage = async (
+        name: string,
+        input: Record<string, string | number | boolean>,
+        method = "GET",
+      ) => {
+        const response = await manageRaw(name, input, method);
+        assert.equal(response.status, 200, await response.clone().text());
+        return z.object({ status: z.number(), body: z.unknown() }).parse(await response.json());
+      };
+      const account = z.object({
+        id: z.number(),
+        subject: z.string(),
+        status: z.string(),
+        emails: z.array(z.object({ email: z.string() })),
+      });
+      const listed = await manage("account-list", { page: 1, perPage: 20 });
+      assert.equal(listed.status, 200, JSON.stringify(listed.body));
+      const directory = z.object({ users: z.array(account) }).parse(listed.body).users;
+      assert.deepEqual(
+        directory
+          .map((user) => user.emails.map((email) => email.email))
+          .flat()
+          .toSorted(),
+        [`ana-${space}@example.test`],
+        "lists the Space's account, not the dashboard principal, guests or Space B",
+      );
+      assert.ok(
+        directory.some((user) => user.id === native[2]),
+        "the native Spacefast user is listed",
+      );
+      // The dashboard principal the ability lane acted as has no identity account:
+      // a session for it is nobody at /__zero/auth/complete.
+      const principalId = Number(
+        db.exec(
+          `SELECT user_id FROM ${own.prefix}usermeta WHERE meta_key='_spacefast_principal_subject' AND meta_value='dashboard-owner'`,
+        ),
+      );
+      assert.ok(principalId > 0, "the dashboard principal exists in the Space's tables");
+      assert.ok(!directory.some((user) => user.id === principalId), "the principal is not listed");
+      // zero-identity issues no session to a user without an identity account; a
+      // session row for the principal, as if one existed, still finds nobody.
+      const principalSecret = crypto.randomUUID().replaceAll("-", "");
+      const principalNow = Math.floor(Date.now() / 1000);
+      db.exec(
+        `INSERT INTO ${own.prefix}zero_identity_sessions (id, wp_user_id, secret_hash, csrf, created_at, expires_at, verified_at, label) VALUES ('${crypto.randomUUID().replaceAll("-", "")}', ${principalId}, SHA2(CONCAT('zero-identity-session-v1', CHAR(0), '${principalSecret}'), 256), '${"c".repeat(64)}', ${principalNow}, ${principalNow + 3600}, ${principalNow}, 'test')`,
+      );
+      const principalComplete = await get(rt, host, "/__zero/auth/complete", {
+        headers: { cookie: `zi_session=${principalSecret}` },
+      });
+      assert.equal(principalComplete.status, 401);
+      assert.equal((await principalComplete.json()).code, "space_users_sign_in_required");
+      const anaAccount = account.parse((await manage("account-get", { id: anaOnZero.id })).body);
+      assert.equal(anaAccount.subject, appUserBody.data.userId);
+      const fresh = await signIn(host, `fresh-${space}@example.test`);
+      const freshUser = await me(host, fresh);
+      assert.ok(freshUser);
+      const sessions = z
+        .object({ sessions: z.array(z.object({ revokedAt: z.number().nullable() })) })
+        .parse((await manage("sessions-list", { id: freshUser.id })).body).sessions;
+      assert.equal(sessions.filter((session) => session.revokedAt === null).length, 1);
+      assert.deepEqual((await manage("sessions-revoke", { id: freshUser.id }, "DELETE")).body, {
+        revoked: true,
+      });
+      assert.equal(await me(host, fresh), null, "a revoked session stops working on the app");
+      const suspended = await manage("suspend", { id: anaOnZero.id, suspended: true }, "DELETE");
+      assert.equal(account.parse(suspended.body).status, "suspended");
+      assert.equal(await me(host, ana), null, "a suspended account is nobody on the app");
+      const refusedSignIn = await get(rt, host, "/__zero/auth/api/sign-in/email", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: origin(host) },
+        body: JSON.stringify({ email: `ana-${space}@example.test` }),
+      });
+      const refusedCode = /Your code is (\d{6})/.exec(
+        readFileSync(path.join(mailbox, `ana-${space}@example.test`), "utf8"),
+      )?.[1];
+      const refusedVerify = await get(rt, host, "/__zero/auth/api/sign-in/verify", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: origin(host) },
+        body: JSON.stringify({
+          challenge_id: z
+            .object({ data: z.object({ challenge_id: z.string() }) })
+            .parse(await refusedSignIn.json()).data.challenge_id,
+          code: refusedCode,
+        }),
+      });
+      assert.notEqual(refusedVerify.status, 200, "a suspended account cannot sign in");
+      await manage("suspend", { id: anaOnZero.id, suspended: false }, "DELETE");
+      // Deletion is user-requested first, then completed from the dashboard.
+      const deleting = await signIn(host, `fresh-${space}@example.test`);
+      const csrf = z.object({ data: z.object({ csrf: z.string() }) }).parse(
+        await (
+          await get(rt, host, "/__zero/auth/api/account", {
+            headers: { cookie: deleting, origin: origin(host) },
+          })
+        ).json(),
+      ).data.csrf;
+      const requested = await get(rt, host, "/__zero/auth/api/account/delete", {
+        method: "POST",
+        headers: {
+          cookie: deleting,
+          origin: origin(host),
+          "content-type": "application/json",
+          "x-identity-csrf": csrf,
+        },
+        body: JSON.stringify({ confirmation: "DELETE" }),
+      });
+      assert.equal(requested.status, 200, await requested.clone().text());
+      assert.deepEqual((await manage("deletion-complete", { id: freshUser.id }, "DELETE")).body, {
+        deleted: true,
+      });
+      assert.equal(
+        account.parse((await manage("account-get", { id: freshUser.id })).body).status,
+        "deleted",
+      );
+      // A real conflict keeps its status: an active account cannot complete deletion.
+      assert.equal((await manage("deletion-complete", { id: anaOnZero.id }, "DELETE")).status, 409);
+      // No content principal on the app's REST door: identity is the visitor's alone.
+      const anonymous = await get(rt, host, "/wp-json/zero/v1/me", {
+        headers: { origin: origin(host) },
+      });
+      assert.deepEqual(await anonymous.json(), { data: null });
       const optionsBefore = db.exec(
         `SELECT option_name,option_value FROM ${own.prefix}options WHERE option_name LIKE 'zero%schema' OR option_name='zero_runtime_tables' ORDER BY option_name`,
       );
@@ -699,10 +1087,32 @@ add_action('rest_api_init', static function () {
       const rawSpace = "spc_zero_v2_raw";
       const rawVersion = "ver_zero_v2_raw";
       const rawFiles = {
-        "zero.config.ts": `import { defineConfig } from 'zero'; import { ping } from './actions'; export default defineConfig({ name: 'raw-hosted', actions: { ping } });`,
+        // The app declares its own users: its sign-in is the app's, not Space Users'.
+        "zero.config.ts": `import { defineConfig, text, email, userProjection } from 'zero'; import { ping } from './actions'; export default defineConfig({ name: 'raw-hosted', users: { members: userProjection({ email: email().notNull().unique().max(191), name: text().notNull().default('') }) }, actions: { ping } });`,
         "actions.ts": `import { action } from 'zero'; export const ping = action({ access: 'anyone', handler() { return 'raw-hosted-action'; } });`,
         "public/index.html": "<!doctype html><title>Raw hosted source</title>",
       };
+      // This Space had Users before its first v2 version: its account sits in
+      // the site tables, made by spacefast-identity exactly as sign-in makes it.
+      await deploy(rt, {
+        spaceId: rawSpace,
+        versionId: "ver_zero_v2_raw_static",
+        files: { "index.html": "<!doctype html><title>Before Zero</title>" },
+        activate: {
+          route_name: "production",
+          production_hostnames: ["zero-raw.test"],
+          config: publicAccessConfig(users(false)),
+        },
+      });
+      const spaceUser = JSON.parse(
+        wp(
+          `--exec=$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = ${JSON.stringify(rawSpace)}; $GLOBALS['SPACEFAST_PAGE_SERVING'] = ['users' => ['enabled' => true]];`,
+          "eval",
+          "ob_start(); $plugin = \\Spacefast\\Identity\\Plugin::class; $uid = $plugin::$accounts->emailLogin('existing@example.test');" +
+            " spacefast_space_users_join($uid); $session = $plugin::$sessions->create($uid); ob_end_clean();" +
+            " echo json_encode(['id' => $uid, 'secret' => $session['secret']]);",
+        ),
+      );
       const rawSession = await createDeclaredSession(rt, rawSpace, rawVersion, rawFiles);
       await uploadSessionBlobs(rt, rawSession, rawFiles);
       const rawLock = Bun.spawn({
@@ -755,6 +1165,129 @@ add_action('rest_api_init', static function () {
         const client = await get(rt, hostname, "/__spacefast/client.js");
         assert.equal(client.status, 200, await client.text());
       }
+      // No users are copied, so a v2 Space whose accounts are still on the site
+      // tables would orphan them. While any remain, the Space's Zero app runs
+      // without Users: visitor sign-in pauses on every door, and the owner
+      // keeps managing those accounts where they are. Every site row stays.
+      const rawPrefix = `sfz_${new Bun.CryptoHasher("sha256").update(rawSpace).digest("hex").slice(0, 24)}_`;
+      await putRoute(rt, rawSpace, "production", {
+        version_id: rawVersion,
+        hostnames: ["zero-raw.test"],
+        production_hostnames: ["zero-raw.test"],
+        config: publicAccessConfig(
+          { zero_generation: "v2", ...users(false) },
+          "live_and_all_versions",
+        ),
+      });
+      assert.equal(
+        db.exec(`SELECT COUNT(*) FROM ${rawPrefix}users WHERE user_email='existing@example.test'`),
+        "0",
+        "no site user is copied",
+      );
+      const paused = await get(rt, "zero-raw.test", "/__zero/auth/api/sign-in/email", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: origin("zero-raw.test") },
+        body: JSON.stringify({ email: "existing@example.test" }),
+      });
+      assert.equal(paused.status, 409, await paused.clone().text());
+      assert.equal((await paused.json()).code, "space_users_site_accounts_present");
+      // The app's own user collection keeps its sign-in on the paused Space:
+      // zero-identity mounts for it as before, without Space Users routed onto it.
+      const appAuth = await get(rt, "zero-raw.test", "/wp-json/zero/v1/auth/config");
+      assert.equal(appAuth.status, 200, await appAuth.clone().text());
+      assert.notEqual(
+        z
+          .object({ data: z.object({ issuer: z.string().nullable() }).loose() })
+          .parse(await appAuth.json()).data.issuer,
+        null,
+        "the app's /auth is served by zero-identity",
+      );
+      // But Space Users does not bind to it: the Space's /identity sign-in is paused.
+      const spaceUsersSession = await get(rt, "zero-raw.test", "/__zero/auth/user", {
+        headers: { origin: origin("zero-raw.test") },
+      });
+      assert.equal(spaceUsersSession.status, 409, await spaceUsersSession.clone().text());
+      // The app itself still serves, without Users.
+      const pausedAction = await get(rt, "zero-raw.test", "/wp-json/zero/v1/actions/ping", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      assert.equal(pausedAction.status, 200, await pausedAction.clone().text());
+      // The owner manages the site accounts as before Zero v2, and completes a
+      // pending erasure there.
+      const pausedList = await manageRaw("account-list", { page: 1, perPage: 20 }, "GET", rawSpace);
+      assert.equal(pausedList.status, 200, await pausedList.clone().text());
+      const listedSite = z
+        .object({ body: z.object({ users: z.array(z.object({ id: z.number() }).loose()) }) })
+        .parse(await pausedList.json()).body.users;
+      assert.ok(
+        listedSite.some((user) => user.id === spaceUser.id),
+        "the owner lists the site account",
+      );
+      db.exec(
+        `UPDATE wp_sfi_accounts SET status='deletion_requested' WHERE wp_user_id=${spaceUser.id}`,
+      );
+      const erased = await manageRaw("deletion-complete", { id: spaceUser.id }, "DELETE", rawSpace);
+      assert.equal(erased.status, 200, await erased.clone().text());
+      assert.deepEqual(z.object({ body: z.unknown() }).parse(await erased.json()).body, {
+        deleted: true,
+      });
+      assert.equal(
+        db.exec(`SELECT status FROM wp_sfi_accounts WHERE wp_user_id=${spaceUser.id}`),
+        "deleted",
+        "the erasure completes on the site tables",
+      );
+      assert.equal(
+        db.exec(
+          `SELECT COUNT(*) FROM wp_usermeta WHERE user_id=${spaceUser.id} AND meta_key='_spacefast_app_user' AND meta_value='${rawSpace}'`,
+        ),
+        "1",
+        "the site account row stays where it is",
+      );
+      // With Users off, the accounts are still on the site tables: the owner
+      // keeps managing them there, wherever Users is switched.
+      const secondUser = Number(
+        wp(
+          `--exec=$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = ${JSON.stringify(rawSpace)}; $GLOBALS['SPACEFAST_PAGE_SERVING'] = ['users' => ['enabled' => true]];`,
+          "eval",
+          "ob_start(); $plugin = \\Spacefast\\Identity\\Plugin::class; $uid = $plugin::$accounts->emailLogin('second@example.test');" +
+            " spacefast_space_users_join($uid); ob_end_clean(); echo $uid;",
+        )
+          .trim()
+          .split("\n")
+          .at(-1),
+      );
+      await putRoute(rt, rawSpace, "production", {
+        version_id: rawVersion,
+        hostnames: ["zero-raw.test"],
+        production_hostnames: ["zero-raw.test"],
+        config: publicAccessConfig({ zero_generation: "v2" }, "live_and_all_versions"),
+      });
+      const offList = await manageRaw("account-list", { page: 1, perPage: 20 }, "GET", rawSpace);
+      assert.equal(offList.status, 200, await offList.clone().text());
+      assert.ok(
+        z
+          .object({ body: z.object({ users: z.array(z.object({ id: z.number() }).loose()) }) })
+          .parse(await offList.json())
+          .body.users.some((user) => user.id === secondUser),
+        "with Users off, the owner lists the site account",
+      );
+      db.exec(
+        `UPDATE wp_sfi_accounts SET status='deletion_requested' WHERE wp_user_id=${secondUser}`,
+      );
+      const offErased = await manageRaw(
+        "deletion-complete",
+        { id: secondUser },
+        "DELETE",
+        rawSpace,
+      );
+      assert.equal(offErased.status, 200, await offErased.clone().text());
+      assert.equal(
+        db.exec(`SELECT status FROM wp_sfi_accounts WHERE wp_user_id=${secondUser}`),
+        "deleted",
+        "with Users off, the pending erasure completes on the site tables",
+      );
       // The WordPress REST door must enforce the same generation as static delivery.
       for (const generation of [undefined, "legacy_0_8"]) {
         await putRoute(rt, rawSpace, "production", {

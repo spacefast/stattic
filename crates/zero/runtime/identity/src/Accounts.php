@@ -548,7 +548,9 @@ final class Accounts
                 $this->db->lock($uid);
                 return $uid;
             }
-            $uid = $linkUid;
+            // A host that already keeps a WordPress user for this identity (its own verified
+            // platform accounts) names it here; the identity then signs in to that account.
+            $uid = $linkUid ?: ((int) apply_filters("zero_identity_provider_account", 0, $issuer, $subject, $name) ?: null);
             if (!$uid) {
                 if (!$email) {
                     throw new Failure(

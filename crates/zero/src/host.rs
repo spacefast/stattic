@@ -2,6 +2,7 @@
 use crate::{bundle, diag::Diag};
 use std::path::Path;
 
+pub use crate::store::{BuildManifest, StoredBuild, compile_to_store, store_gc};
 pub use bundle::compile as compile_sources;
 
 /// Capture relative TypeScript sources on a host without an npm installation.

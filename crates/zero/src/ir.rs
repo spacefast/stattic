@@ -15,6 +15,25 @@ pub struct Module {
     pub file: u32,
     pub path: std::path::PathBuf,
     pub body: Vec<Stmt>,
+    /// Set for CommonJS sources: the evaluator binds `module`, `exports` and `require`, and
+    /// exports the final `module.exports` as `default` plus these statically assigned names.
+    pub commonjs: Option<Vec<String>>,
+    /// Compiled in the checked-dynamic domain: raw JavaScript, and installed
+    /// package TypeScript, whose annotations are erased while lowering.
+    pub dynamic: bool,
+    /// Type declarations erased from a dynamic module. Imports and re-exports
+    /// of these names are elided, as TypeScript elides them.
+    pub type_names: std::collections::HashSet<String>,
+}
+
+/// Raw JavaScript and installed package TypeScript (not declarations) share
+/// the checked-dynamic domain. Authored TypeScript keeps static checking.
+pub fn dynamic_source(path: &std::path::Path) -> bool {
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    if matches!(extension, Some("js" | "mjs" | "cjs")) {
+        return true;
+    }
+    matches!(extension, Some("ts" | "mts" | "cts")) && path.components().any(|part| part.as_os_str() == "node_modules")
 }
 
 #[derive(Debug)]
@@ -25,6 +44,8 @@ pub struct Func {
     pub params: Vec<Param>,
     pub body: FnBody,
     pub is_async: bool,
+    /// `function*`: the body compiles to a PHP Generator behind the JavaScript iterator protocol.
+    pub is_generator: bool,
     pub ret: Option<TyAnn>,
     pub type_params: Vec<String>,
     pub span: Span,
@@ -55,7 +76,17 @@ pub struct Class {
     pub fields: Vec<ClassField>,
     pub methods: Vec<(String, bool, Rc<Func>)>,
     pub constructor: Option<Rc<Func>>,
+    /// `get`/`set` members in declaration order; they live on the prototype, never as own fields.
+    pub accessors: Vec<ClassAccessor>,
     pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct ClassAccessor {
+    pub name: String,
+    pub is_static: bool,
+    pub setter: bool,
+    pub func: Rc<Func>,
 }
 
 #[derive(Debug)]
@@ -88,6 +119,7 @@ impl ClassField {
             }],
             body: FnBody::Expr(self.init.as_ref()?.clone()),
             is_async: false,
+            is_generator: false,
             ret: self.ann.clone(),
             type_params: vec![],
             span: self.span,
@@ -188,6 +220,8 @@ pub enum Stmt {
         span: Span,
     },
     ForOf {
+        /// `for await (... of ...)`.
+        is_await: bool,
         kind: DeclKind,
         pat: Pat,
         iter: Expr,
@@ -203,8 +237,14 @@ pub enum Stmt {
         span: Span,
     },
     While(Expr, Vec<Stmt>),
-    Break(Span),
-    Continue(Span),
+    /// `do { body } while (test)`: the body runs before the first test.
+    DoWhile(Vec<Stmt>, Expr),
+    /// `label: statement`. `break label` leaves it; `continue label` needs a loop body.
+    Labeled(String, P<Stmt>, Span),
+    /// An unlabeled `break` leaves the innermost loop or switch.
+    Break(Option<String>, Span),
+    /// An unlabeled `continue` continues the innermost loop.
+    Continue(Option<String>, Span),
     Throw(Expr),
     Try {
         block: Vec<Stmt>,
@@ -257,6 +297,8 @@ pub enum UnOp {
     Plus,
     Not,
     TypeOf,
+    /// `~x`: ToInt32, then bitwise complement.
+    BitNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +318,30 @@ pub enum BinOp {
     Ne,
     LooseEq,
     LooseNe,
+    /// `&`, `|`, `^`: both operands through ToInt32; the result is a signed 32-bit integer.
+    BitAnd,
+    BitOr,
+    BitXor,
+    /// `<<`, `>>`: the left operand through ToInt32, the count through ToUint32 masked to 5 bits.
+    Shl,
+    Shr,
+    /// `>>>`: the left operand through ToUint32; the result is unsigned.
+    UShr,
+}
+
+impl BinOp {
+    /// The JavaScript spelling of a bitwise operator.
+    pub fn bitwise_symbol(self) -> Option<&'static str> {
+        Some(match self {
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+            BinOp::UShr => ">>>",
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,7 +373,21 @@ pub enum Prop {
 pub enum ExprKind {
     Class(Rc<Class>),
     Instanceof(P<Expr>, P<Expr>),
+    /// The strings array of a tagged template call site: `cooked` strings (None where an escape is
+    /// invalid, which JavaScript passes as undefined) with a `raw` property. One array per site.
+    TemplateStrings {
+        cooked: Vec<Option<String>>,
+        raw: Vec<String>,
+    },
+    /// `pattern = value` with an array or object pattern on the left. The value is the result.
+    AssignPattern(P<AssignPat>, P<Expr>),
+    /// `delete target`, where the target is a member or index read, possibly `?.` at its last step.
+    Delete(P<Expr>),
+    /// `key in object`: own or inherited property presence. The key is evaluated first.
+    In(P<Expr>, P<Expr>),
     Num(f64),
+    /// A BigInt literal as its decimal digits, with an optional leading `-` never present here.
+    BigInt(String),
     Str(String),
     Bool(bool),
     Null,
@@ -348,6 +428,7 @@ pub enum ExprKind {
     New {
         callee: P<Expr>,
         args: Vec<ArrEl>,
+        type_args: Vec<TyAnn>,
     },
     Member {
         obj: P<Expr>,
@@ -363,9 +444,98 @@ pub enum ExprKind {
     /// Optional-chain boundary: a nullish `?.` inside short-circuits to undefined here.
     Chain(P<Expr>),
     Await(P<Expr>),
+    /// `yield arg` / `yield* arg` (delegate) inside a generator.
+    Yield {
+        arg: Option<P<Expr>>,
+        delegate: bool,
+    },
     /// `e as T` / `<T>e` / `e satisfies T`. `as const` is dropped during lowering.
     As(P<Expr>, TyAnn),
     NonNull(P<Expr>),
+}
+
+/// The left side of a destructuring assignment. Leaves are ordinary assignment targets
+/// (identifiers, member and index expressions), assigned in source order.
+#[derive(Debug, Clone)]
+pub enum AssignPat {
+    Target(Expr),
+    /// `target = default`: the default runs only when the value is undefined.
+    Default(P<AssignPat>, Expr),
+    Obj {
+        props: Vec<(PropKey, AssignPat)>,
+        rest: Option<P<AssignPat>>,
+        span: Span,
+    },
+    Arr {
+        /// `None` is an elision (`[, b] = …`).
+        elems: Vec<Option<AssignPat>>,
+        rest: Option<P<AssignPat>>,
+        span: Span,
+    },
+}
+
+impl AssignPat {
+    pub fn span(&self) -> Span {
+        match self {
+            AssignPat::Target(e) | AssignPat::Default(_, e) => e.span,
+            AssignPat::Obj { span, .. } | AssignPat::Arr { span, .. } => *span,
+        }
+    }
+
+    /// Every expression inside the pattern, in source order: targets, computed keys, defaults.
+    pub fn exprs(&self) -> Vec<&Expr> {
+        let mut out = Vec::new();
+        self.collect(&mut out);
+        out
+    }
+
+    fn collect<'a>(&'a self, out: &mut Vec<&'a Expr>) {
+        match self {
+            AssignPat::Target(e) => out.push(e),
+            AssignPat::Default(p, d) => {
+                p.collect(out);
+                out.push(d);
+            }
+            AssignPat::Obj { props, rest, .. } => {
+                for (key, p) in props {
+                    if let PropKey::Computed(k) = key {
+                        out.push(k);
+                    }
+                    p.collect(out);
+                }
+                if let Some(r) = rest {
+                    r.collect(out);
+                }
+            }
+            AssignPat::Arr { elems, rest, .. } => {
+                for p in elems.iter().flatten() {
+                    p.collect(out);
+                }
+                if let Some(r) = rest {
+                    r.collect(out);
+                }
+            }
+        }
+    }
+
+    /// The leaf assignment targets, in source order.
+    pub fn targets(&self) -> Vec<&Expr> {
+        match self {
+            AssignPat::Target(e) => vec![e],
+            AssignPat::Default(p, _) => p.targets(),
+            AssignPat::Obj { props, rest, .. } => props
+                .iter()
+                .flat_map(|(_, p)| p.targets())
+                .chain(rest.iter().flat_map(|r| r.targets()))
+                .collect(),
+            AssignPat::Arr { elems, rest, .. } => elems
+                .iter()
+                .flatten()
+                .flat_map(|p| p.targets())
+                .chain(rest.iter().flat_map(|r| r.targets()))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,6 +556,7 @@ pub struct TypeParam {
 #[derive(Debug, Clone)]
 pub enum TyAnn {
     Num,
+    BigInt,
     NumLit(f64),
     Str,
     StrLit(String),

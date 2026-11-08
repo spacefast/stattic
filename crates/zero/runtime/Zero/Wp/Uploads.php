@@ -226,7 +226,7 @@ final class Uploads
             if (self::active() && is_array($sources)) {
                 $rel = get_post_meta($id, '_wp_attached_file', true);
                 foreach ($sources as &$source) {
-                    $path = dirname($rel) . '/' . wp_basename(parse_url($source['url'], PHP_URL_PATH) ?: '');
+                    $path = dirname($rel) . '/' . wp_basename(wp_parse_url($source['url'], PHP_URL_PATH) ?: '');
                     if (isset(self::manifest($id)[$path])) {
                         $source['url'] = self::url($id, $path);
                     } else {

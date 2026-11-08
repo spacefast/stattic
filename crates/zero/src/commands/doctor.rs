@@ -53,9 +53,30 @@ pub(super) fn run(args: &Args) -> ExitCode {
         }
     }
     if let Some(site) = &args.site
-        && let Err(error) = remote(site, args.token.as_deref(), &manifest, &mut checks)
+        && let Err(error) = remote(site, token().as_deref(), &manifest, &mut checks)
     {
         check(&mut checks, "site", false, error);
+    }
+    if let Some(site) = &args.site
+        && project.join(crate::wordpress::abilities::LOCK).is_file()
+    {
+        // Abilities are listed with the application password `zero abilities pull` uses.
+        let credential = std::env::var("ZERO_APP_PASSWORD").ok().filter(|s| !s.is_empty());
+        match super::abilities::list(site, credential.as_deref())
+            .and_then(|listed| super::abilities::drift(&project, &listed))
+        {
+            Ok(drift) => check(
+                &mut checks,
+                "locked abilities",
+                drift.is_empty(),
+                if drift.is_empty() {
+                    "all present and unchanged".into()
+                } else {
+                    drift.join("; ")
+                },
+            ),
+            Err(error) => check(&mut checks, "locked abilities", false, error),
+        }
     }
     let ok = checks.iter().all(|check| check["ok"] == true);
     if args.json {
@@ -74,6 +95,11 @@ pub(super) fn run(args: &Args) -> ExitCode {
         }
     }
     if ok { ExitCode::SUCCESS } else { ExitCode::from(1) }
+}
+
+/// A bearer token for the site's schema, from the environment (never a flag value).
+fn token() -> Option<String> {
+    std::env::var("ZERO_TOKEN").ok().filter(|t| !t.is_empty())
 }
 
 fn remote(site: &str, token: Option<&str>, manifest: &Value, checks: &mut Vec<Value>) -> Result<(), String> {

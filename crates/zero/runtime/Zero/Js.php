@@ -13,6 +13,7 @@ namespace Zero;
 final class Js
 {
     use JsDynamic;
+    use JsAsync;
     /** JS WhiteSpace + LineTerminator, as a PCRE class body. */
     public const WS = '\x{9}-\x{D}\x{20}\x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}';
 
@@ -31,8 +32,10 @@ final class Js
             $v === null => 'null',
             is_bool($v) => $v ? 'true' : 'false',
             is_int($v), is_float($v) => self::numStr($v),
+            $v instanceof JsBigInt => (string) $v,
             $v instanceof JsArray, $v instanceof JsArguments, $v instanceof JsObject => self::str(self::dynamicPrimitive($v, 'string')),
-            $v instanceof JsSet, $v instanceof JsMap, $v instanceof JsNamespace => self::dynamicObjectTag($v),
+            $v instanceof JsSet, $v instanceof JsMap, $v instanceof JsNamespace, $v instanceof JsWeakMap, $v instanceof JsWeakSet => self::dynamicObjectTag($v),
+            $v instanceof JsSymbol => throw new JsError('Cannot convert a Symbol value to a string', 'TypeError'),
             $v instanceof JsDate => throw new JsError('Date string coercion is not supported', 'TypeError'),
             $v instanceof JsError => $v->jsName . ($v->getMessage() === '' ? '' : ': ' . $v->getMessage()),
             $v instanceof RegExp => (string) $v,
@@ -117,9 +120,18 @@ final class Js
         throw new \LogicException('Finite double has no round-tripping decimal');
     }
 
+    /** `Number(value)`: like ToNumber, except a BigInt converts to its nearest double. */
+    public static function number(mixed $v): int|float
+    {
+        $v = $v instanceof JsObject || $v instanceof JsArray || $v instanceof JsArguments ? self::dynamicPrimitive($v, 'number') : $v;
+        return $v instanceof JsBigInt ? $v->toNumber() : self::toNumber($v);
+    }
+
     public static function toNumber(mixed $v): int|float
     {
         if ($v instanceof JsDate) { return $v->milliseconds; }
+        if ($v instanceof JsSymbol) { throw new JsError('Cannot convert a Symbol value to a number', 'TypeError'); }
+        if ($v instanceof JsBigInt) { throw new JsError('Cannot convert a BigInt value to a number', 'TypeError'); }
         if ($v instanceof JsObject || $v instanceof JsArray || $v instanceof JsArguments) { return self::toNumber(self::dynamicPrimitive($v, 'number')); }
         if (is_int($v)) {
             return self::n($v);
@@ -288,23 +300,29 @@ final class Js
      * result through n(). So arithmetic matches JS on every operand, while the operands themselves,
      * and any id compiled code passes on, keep their exact stored value.
      */
-    public static function add(int|float $a, int|float $b): int|float
+    public static function add(int|float|JsBigInt $a, int|float|JsBigInt $b): int|float|JsBigInt
     {
+        if ($a instanceof JsBigInt || $b instanceof JsBigInt) { return self::dynamicBinary('+', $a, $b); }
         return self::n(self::n($a) + self::n($b));
     }
 
-    public static function sub(int|float $a, int|float $b): int|float
+    public static function sub(int|float|JsBigInt $a, int|float|JsBigInt $b): int|float|JsBigInt
     {
+        if ($a instanceof JsBigInt || $b instanceof JsBigInt) { return self::dynamicBinary('-', $a, $b); }
         return self::n(self::n($a) - self::n($b));
     }
 
-    public static function mul(int|float $a, int|float $b): int|float
+    public static function mul(int|float|JsBigInt $a, int|float|JsBigInt $b): int|float|JsBigInt
     {
+        if ($a instanceof JsBigInt || $b instanceof JsBigInt) { return self::dynamicBinary('*', $a, $b); }
         return self::num((float) self::n($a) * (float) self::n($b));
     }
 
-    public static function neg(mixed $a): int|float
+    public static function neg(mixed $a): int|float|JsBigInt
     {
+        if ($a instanceof JsBigInt) { return $a->neg(); }
+        $a = self::dynamicPrimitive($a, 'number');
+        if ($a instanceof JsBigInt) { return $a->neg(); }
         return -(float) self::toNumber($a);
     }
 
@@ -340,8 +358,9 @@ final class Js
     }
 
     /** Exact powers, square roots and IEEE special values; refuse engine-dependent rounding. */
-    public static function pow(int|float $a, int|float $b): int|float
+    public static function pow(int|float|JsBigInt $a, int|float|JsBigInt $b): int|float|JsBigInt
     {
+        if ($a instanceof JsBigInt || $b instanceof JsBigInt) { return self::dynamicBinary('**', $a, $b); }
         [$a, $b] = [(float) self::n($a), (float) self::n($b)];
         if ($b == 0) { return 1; }
         if (is_nan($a) || is_nan($b) || (abs($a) == 1 && is_infinite($b))) { return NAN; }
@@ -402,6 +421,36 @@ final class Js
         return $f < 0 ? ceil($f) : floor($f);
     }
 
+    /**
+     * Compiled `a & b`, `a | b`, `a ^ b`, `a << b`, `a >> b` and `a >>> b` (ECMAScript 13.9, 13.12).
+     * Each operand is ToNumber'd (objects with the number hint), then ToInt32 (`>>>` reads its left
+     * side through ToUint32). Shift counts are ToUint32 masked to 5 bits, so `x << 32` is `x` and a
+     * negative count wraps. Results stay inside 32 bits: signed, except `>>>`, which is unsigned.
+     */
+    public static function bitwise(string $operator, mixed $a, mixed $b): int
+    {
+        $a = self::toNumber($a);
+        $b = self::toNumber($b);
+        if ($operator === '>>>') { return self::toUint32($a) >> (self::toUint32($b) & 31); }
+        $x = self::toInt32($a);
+        return match ($operator) {
+            '&' => $x & self::toInt32($b),
+            '|' => $x | self::toInt32($b),
+            '^' => $x ^ self::toInt32($b),
+            '<<' => self::toInt32($x << (self::toUint32($b) & 31)),
+            '>>' => $x >> (self::toUint32($b) & 31),
+            default => throw new JsError('Unsupported bitwise operator ' . $operator, 'TypeError'),
+        };
+    }
+
+    /** Compiled `~a`: ToInt32, then the complement, a signed 32-bit result. */
+    public static function bitNot(mixed $a): int|JsBigInt
+    {
+        $a = self::dynamicPrimitive($a, 'number');
+        if ($a instanceof JsBigInt) { return $a->not(); }
+        return ~self::toInt32(self::toNumber($a));
+    }
+
     private static function toInt32(int|float $n): int
     {
         if (is_float($n)) {
@@ -458,6 +507,7 @@ final class Js
         return match (true) {
             $v === JsUndefined::Value, $v === null, $v === false, $v === '', $v === 0 => false,
             is_float($v) => !($v == 0.0 || is_nan($v)),
+            $v instanceof JsBigInt => !$v->isZero(),
             default => true,
         };
     }
@@ -469,15 +519,26 @@ final class Js
             is_string($v) => 'string',
             is_int($v), is_float($v) => 'number',
             is_bool($v) => 'boolean',
+            $v instanceof JsBigInt => 'bigint',
             $v instanceof \Closure, $v instanceof JsClass => 'function',
+            $v instanceof JsSymbol => 'symbol',
             default => 'object',
         };
+    }
+
+    /** Explicit `String(value)`: unlike implicit conversion, a symbol has a string form. */
+    public static function stringOf(mixed $v): string
+    {
+        return $v instanceof JsSymbol ? $v->descriptiveString() : self::str($v);
     }
 
     public static function strictEq(mixed $a, mixed $b): bool
     {
         if ((is_int($a) || is_float($a)) && (is_int($b) || is_float($b))) {
             return is_int($a) && is_int($b) ? $a === $b : (float) $a == (float) $b;
+        }
+        if ($a instanceof JsBigInt || $b instanceof JsBigInt) {
+            return $a instanceof JsBigInt && $b instanceof JsBigInt && $a->equals($b);
         }
 
         return $a === $b;
@@ -1097,6 +1158,7 @@ final class Js
         if (self::isNullish($a)) {
             throw new JsError('Cannot set properties of null or undefined', 'TypeError');
         }
+        self::writable($a);
         $index = self::index($i);
         if ($index === null || $index > count($a->a)) {
             throw new JsError('Zero arrays are dense: index ' . self::numStr($i) . ' is past length ' . count($a->a), 'RangeError');
@@ -1131,6 +1193,9 @@ final class Js
         if ($key === '__proto__' && !$o->nullPrototype && !array_key_exists($key, $o->p)) {
             throw new JsError('Prototype mutation is not supported', 'TypeError');
         }
+        if ($o->class !== null && !array_key_exists($key, $o->p) && $o->class->writeInherited($o, $key, $value, false)) {
+            return $value;
+        }
         $o->p[$key] = $value;
         return $value;
     }
@@ -1144,6 +1209,225 @@ final class Js
         }
         if ($o instanceof JsClass) { return $o->has(self::key($key)); }
         return array_key_exists(self::key($key), $o->p);
+    }
+
+    /** Own string property names of the built-in prototypes (ECMAScript 2025, as Node reports them). */
+    private const PROTOTYPE_NAMES = [
+        'Object' => ['constructor', '__defineGetter__', '__defineSetter__', 'hasOwnProperty', '__lookupGetter__', '__lookupSetter__', 'isPrototypeOf', 'propertyIsEnumerable', 'toString', 'valueOf', '__proto__', 'toLocaleString'],
+        'Array' => ['length', 'constructor', 'at', 'concat', 'copyWithin', 'fill', 'find', 'findIndex', 'findLast', 'findLastIndex', 'lastIndexOf', 'pop', 'push', 'reverse', 'shift', 'unshift', 'slice', 'sort', 'splice', 'includes', 'indexOf', 'join', 'keys', 'entries', 'values', 'forEach', 'filter', 'flat', 'flatMap', 'map', 'every', 'some', 'reduce', 'reduceRight', 'toReversed', 'toSorted', 'toSpliced', 'with', 'toLocaleString', 'toString'],
+        'Function' => ['length', 'name', 'arguments', 'caller', 'constructor', 'apply', 'bind', 'call', 'toString'],
+        'Map' => ['constructor', 'get', 'set', 'has', 'delete', 'clear', 'entries', 'forEach', 'keys', 'size', 'values'],
+        'Set' => ['constructor', 'has', 'add', 'delete', 'clear', 'entries', 'forEach', 'size', 'values', 'keys', 'union', 'intersection', 'difference', 'symmetricDifference', 'isSubsetOf', 'isSupersetOf', 'isDisjointFrom'],
+        'Date' => ['constructor', 'toString', 'toDateString', 'toTimeString', 'toISOString', 'toUTCString', 'toGMTString', 'getDate', 'setDate', 'getDay', 'getFullYear', 'setFullYear', 'getHours', 'setHours', 'getMilliseconds', 'setMilliseconds', 'getMinutes', 'setMinutes', 'getMonth', 'setMonth', 'getSeconds', 'setSeconds', 'getTime', 'setTime', 'getTimezoneOffset', 'getUTCDate', 'setUTCDate', 'getUTCDay', 'getUTCFullYear', 'setUTCFullYear', 'getUTCHours', 'setUTCHours', 'getUTCMilliseconds', 'setUTCMilliseconds', 'getUTCMinutes', 'setUTCMinutes', 'getUTCMonth', 'setUTCMonth', 'getUTCSeconds', 'setUTCSeconds', 'valueOf', 'getYear', 'setYear', 'toJSON', 'toLocaleString', 'toLocaleDateString', 'toLocaleTimeString'],
+        'RegExp' => ['constructor', 'exec', 'dotAll', 'flags', 'global', 'hasIndices', 'ignoreCase', 'multiline', 'source', 'sticky', 'unicode', 'compile', 'toString', 'test', 'unicodeSets'],
+        'Error' => ['constructor', 'name', 'message', 'toString'],
+        'Math' => ['abs', 'acos', 'acosh', 'asin', 'asinh', 'atan', 'atanh', 'atan2', 'ceil', 'cbrt', 'expm1', 'clz32', 'cos', 'cosh', 'exp', 'floor', 'fround', 'hypot', 'imul', 'log', 'log1p', 'log2', 'log10', 'max', 'min', 'pow', 'random', 'round', 'sign', 'sin', 'sinh', 'sqrt', 'tan', 'tanh', 'trunc', 'E', 'LN10', 'LN2', 'LOG10E', 'LOG2E', 'PI', 'SQRT1_2', 'SQRT2'],
+    ];
+
+    private static function prototypeHas(string $prototype, string $key): bool
+    {
+        return in_array($key, self::PROTOTYPE_NAMES[$prototype], true)
+            || ($prototype !== 'Object' && in_array($key, self::PROTOTYPE_NAMES['Object'], true));
+    }
+
+    /**
+     * Compiled `key in object` (ECMAScript 13.10.1): the object must not be a primitive, then the
+     * key goes through ToPropertyKey and own properties are checked before the fixed prototype
+     * chain of each runtime value (class methods, the built-in prototype, Object.prototype). A
+     * null-prototype object has only its own properties. Arrays are dense, so an index is present
+     * exactly when it is below the length.
+     */
+    /**
+     * Whether an own-slot lookup decides a symbol key on $object exactly. Plain objects inherit
+     * no symbol keys, and built-in prototypes carry only well-known symbols
+     * (Array.prototype[Symbol.iterator], Function.prototype[Symbol.hasInstance], ...), which
+     * Zero doesn't model. A class instance without that own symbol is undecided: its
+     * prototype could define the symbol method.
+     */
+    public static function symbolAbsentInherited(mixed $object, JsSymbol $key): bool
+    {
+        if ($object instanceof JsObject) { return $object->class === null || $object->hasSymbol($key); }
+        return !$key->isWellKnown && !$object instanceof JsClass;
+    }
+
+    public static function hasProperty(mixed $key, mixed $object): bool
+    {
+        if (!is_object($object) || $object instanceof JsUndefined) {
+            $search = is_object($key) ? '[object Object]' : self::str($key);
+            $in = is_string($object) ? $object : self::str($object);
+            throw new JsError("Cannot use 'in' operator to search for '$search' in $in", 'TypeError');
+        }
+        if ($key instanceof JsSymbol) {
+            if (self::symbolAbsentInherited($object, $key)) { return $object instanceof JsObject && $object->hasSymbol($key); }
+            throw new JsError('Symbol-keyed properties are only supported on plain objects', 'TypeError');
+        }
+        $key = self::key($key);
+        $index = static fn (int $length): bool => preg_match('/^(?:0|[1-9][0-9]*)$/D', $key) === 1 && (float) $key < 4294967295 && (int) $key < $length;
+        if ($object instanceof JsObject) {
+            if (array_key_exists($key, $object->p) || array_key_exists($key, $object->hidden)) { return true; }
+            if ($object->nullPrototype) { return false; }
+            return ($object->class?->hasMember($key) ?? false) || self::prototypeHas('Object', $key);
+        }
+        if ($object instanceof JsArray) {
+            return array_key_exists($key, $object->p) || $index(count($object->a)) || self::prototypeHas('Array', $key);
+        }
+        if ($object instanceof JsArguments) {
+            // Arguments indexes can be deleted, so presence is the slot itself, not the length.
+            $own = preg_match('/^(?:0|[1-9][0-9]*)$/D', $key) === 1 && array_key_exists((int) $key, $object->a);
+            return array_key_exists($key, $object->p) || $own || $key === 'callee' || ($key === 'length' && !$object->lengthDeleted) || self::prototypeHas('Object', $key);
+        }
+        if ($object instanceof JsClass) {
+            if ($object->has($key) || $object->hasStaticMethod($key) || in_array($key, ['length', 'name', 'prototype'], true)) { return true; }
+            return self::prototypeHas('Function', $key);
+        }
+        if ($object instanceof \Closure) {
+            // Ordinary functions own `prototype`, arrows don't; a PHP closure doesn't record which.
+            if ($key === 'prototype') { throw new JsError('Function prototype presence is not supported', 'TypeError'); }
+            return self::prototypeHas('Function', $key);
+        }
+        if ($object instanceof JsError) {
+            if ($key === 'stack') { return true; }
+            return self::prototypeHas('Error', $key);
+        }
+        if ($object instanceof RegExp) { return $key === 'lastIndex' || self::prototypeHas('RegExp', $key); }
+        $prototype = match (true) {
+            $object instanceof JsMap => 'Map', $object instanceof JsSet => 'Set', $object instanceof JsDate => 'Date',
+            $object instanceof JsNamespace => $object->name, default => 'Object',
+        };
+        return self::prototypeHas($prototype, $key);
+    }
+
+    /**
+     * Compiled `delete object[key]` in strict mode (ECMAScript 13.5.1). Configurable properties
+     * are removed and the result is true, also when the property is absent. Removing an own
+     * object key keeps the order of the others. Deleting an array element would leave a hole and
+     * keep `length`; Zero arrays are dense, so an in-range index throws RangeError instead of
+     * silently changing `length` (use `splice`). Out-of-range indexes and named array properties
+     * are removed like object keys. Non-configurable properties (array and string `length` and
+     * string indexes, regex `lastIndex`, class and function `prototype`, arguments `callee`, Math
+     * constants) throw JavaScript's TypeError.
+     */
+    public static function delete(mixed $object, mixed $key): bool
+    {
+        if (self::isNullish($object)) { throw new JsError('Cannot convert undefined or null to object', 'TypeError'); }
+        if ($key instanceof JsSymbol) {
+            if (!$object instanceof JsObject) { throw new JsError('Symbol-keyed properties are only supported on plain objects', 'TypeError'); }
+            $slot = $object->symbols[spl_object_id($key)] ?? null;
+            if ($slot !== null && !$slot[4]) { throw new JsError('Cannot delete property ' . $key->descriptiveString() . ' of #<Object>', 'TypeError'); }
+            unset($object->symbols[spl_object_id($key)]);
+            return true;
+        }
+        $key = self::key($key);
+        $refuse = static function (string $where) use ($key): never {
+            throw new JsError("Cannot delete property '$key' of $where", 'TypeError');
+        };
+        $canonicalIndex = preg_match('/^(?:0|[1-9][0-9]*)$/D', $key) === 1 && (float) $key < 4294967295;
+        if ($object instanceof JsObject) {
+            if ($key === '__proto__' && !$object->nullPrototype && !array_key_exists($key, $object->p)) { return true; }
+            unset($object->p[$key]);
+            return true;
+        }
+        if ($object instanceof JsArray) {
+            if ($key === 'length') { $refuse('[object Array]'); }
+            if ($object->frozen && (array_key_exists($key, $object->p) || $canonicalIndex && (int) $key < count($object->a))) { $refuse('[object Array]'); }
+            if ($canonicalIndex) {
+                if ((int) $key < count($object->a)) {
+                    throw new JsError('Zero arrays are dense: delete cannot leave a hole; use splice to remove elements', 'RangeError');
+                }
+                return true;
+            }
+            unset($object->p[$key]);
+            return true;
+        }
+        if ($object instanceof JsArguments) {
+            if ($key === 'callee') { $refuse('#<Object>'); }
+            if ($key === 'length') { $object->length = JsUndefined::Value; $object->lengthDeleted = true; return true; }
+            if ($canonicalIndex) { unset($object->a[(int) $key]); return true; }
+            unset($object->p[$key]);
+            return true;
+        }
+        if (is_string($object)) {
+            if ($key === 'length' || $canonicalIndex && (int) $key < self::length($object)) { $refuse('[object String]'); }
+            return true;
+        }
+        if ($object instanceof JsClass) {
+            if ($key === 'prototype') { $refuse('class'); }
+            if (array_key_exists($key, $object->statics->p)) { unset($object->statics->p[$key]); return true; }
+            if ($object->hasStaticMethod($key)) { throw new JsError('Deleting class methods is not supported', 'TypeError'); }
+            return true;
+        }
+        if ($object instanceof RegExp && $key === 'lastIndex') { $refuse('[object RegExp]'); }
+        if ($object instanceof JsNamespace && in_array($key, ['E', 'LN10', 'LN2', 'LOG10E', 'LOG2E', 'PI', 'SQRT1_2', 'SQRT2'], true)) { $refuse('#<Object>'); }
+        if ($object instanceof \Closure && $key === 'prototype') { $refuse('function'); }
+        if ($object instanceof JsError && $key === 'message') {
+            $object->deleteMessage();
+            return true;
+        }
+        // Other own properties of built-in values are not modeled as deletable; inherited ones are
+        // absent, so deleting them is a successful no-op as in JavaScript.
+        if (is_object($object) && !$object instanceof JsUndefined && Js::hasProperty($key, $object) && !self::prototypeProperty($object, $key)) {
+            throw new JsError('Deleting built-in properties is not supported', 'TypeError');
+        }
+        return true;
+    }
+
+    /** Whether a present key of a built-in value is inherited (so `delete` is a no-op). */
+    private static function prototypeProperty(object $object, string $key): bool
+    {
+        if ($object instanceof JsMap || $object instanceof JsSet || $object instanceof JsDate || $object instanceof \Closure && !in_array($key, ['length', 'name'], true)) { return true; }
+        if ($object instanceof JsNamespace) { return false; }
+        if ($object instanceof JsError) { return $key !== 'message'; }
+        if ($object instanceof RegExp) { return $key !== 'lastIndex'; }
+        return true;
+    }
+
+    /**
+     * A tagged template's first argument (ECMAScript 13.2.8.4): the cooked strings, undefined
+     * where an escape is invalid, with a `raw` property holding the source text of each part.
+     * One array per call site (`$site` names it), so repeated calls see the same array.
+     */
+    public static function templateStrings(string $site, array $cooked, array $raw): JsArray
+    {
+        static $sites = [];
+        if (!isset($sites[$site])) {
+            // ECMAScript freezes both arrays; the cache depends on it.
+            $strings = new JsArray($cooked);
+            $strings->p['raw'] = new JsArray($raw);
+            $strings->p['raw']->frozen = true;
+            $strings->frozen = true;
+            $sites[$site] = $strings;
+        }
+        return $sites[$site];
+    }
+
+    /** `strings.raw` on a TemplateStringsArray; any other string array has no `raw`. */
+    public static function templateRaw(JsArray $strings): JsArray
+    {
+        $raw = $strings->p['raw'] ?? null;
+        if (!$raw instanceof JsArray) { throw new JsError('This string array is not a tagged template\'s strings', 'TypeError'); }
+        return $raw;
+    }
+
+    /**
+     * `String.raw(template, ...substitutions)`: the template's `raw` strings interleaved with the
+     * substitutions converted to strings; only as many substitutions as there are gaps are read.
+     */
+    public static function stringRaw(mixed $template, mixed ...$substitutions): string
+    {
+        $raw = self::dynamicGet(self::requirePresent($template), 'raw');
+        $length = self::toLength(self::dynamicGet(self::requirePresent($raw), 'length'));
+        $out = '';
+        for ($i = 0; $i < $length; $i++) {
+            $out .= self::str(self::dynamicGet($raw, (string) $i));
+            if ($i + 1 < $length && array_key_exists($i, $substitutions)) { $out .= self::str($substitutions[$i]); }
+        }
+        return $out;
+    }
+
+    private static function toLength(mixed $value): int
+    {
+        $n = self::toInteger(self::toNumber($value));
+        return $n <= 0 ? 0 : (int) min($n, 9007199254740991);
     }
 
     /** += needs the actual primitive types, including an absent old property. */
@@ -1288,20 +1572,29 @@ final class Js
         return $i >= 0 && $i < $len && array_key_exists((int) $i, $a->a) ? $a->a[(int) $i] : JsUndefined::Value;
     }
 
+    /** Strict-mode writes to a frozen array throw. */
+    public static function writable(JsArray $a): JsArray
+    {
+        if ($a->frozen) { throw new JsError('Cannot assign to read only property of a frozen array', 'TypeError'); }
+        return $a;
+    }
+
     public static function push(JsArray $a, mixed ...$values): int
     {
+        self::writable($a);
         foreach ($values as $value) { $a->a[] = $value; }
         return count($a->a);
     }
 
     public static function unshift(JsArray $a, mixed ...$values): int
     {
+        self::writable($a);
         $a->a = [...$values, ...$a->a];
         return count($a->a);
     }
 
-    public static function pop(JsArray $a): mixed { return $a->a === [] ? JsUndefined::Value : array_pop($a->a); }
-    public static function shift(JsArray $a): mixed { return $a->a === [] ? JsUndefined::Value : array_shift($a->a); }
+    public static function pop(JsArray $a): mixed { self::writable($a); return $a->a === [] ? JsUndefined::Value : array_pop($a->a); }
+    public static function shift(JsArray $a): mixed { self::writable($a); return $a->a === [] ? JsUndefined::Value : array_shift($a->a); }
 
     public static function concat(JsArray $a, mixed ...$items): JsArray
     {
@@ -1334,6 +1627,7 @@ final class Js
 
     public static function splice(JsArray $a, int|float $start, int|float|null $deleteCount = null, mixed ...$items): JsArray
     {
+        self::writable($a);
         $len = count($a->a);
         $start = self::relIndex($start, $len);
         $count = $deleteCount === null ? $len - $start : self::clampIndex($deleteCount, $len - $start);
@@ -1342,6 +1636,8 @@ final class Js
 
     public static function reverse(JsArray $a): JsArray
     {
+        // Reversing or sorting fewer than two elements sets nothing, so it succeeds on a frozen array.
+        if (count($a->a) > 1) { self::writable($a); }
         $a->a = array_reverse($a->a);
         return $a;
     }
@@ -1350,6 +1646,7 @@ final class Js
 
     public static function sort(JsArray $a, ?callable $cmp = null): JsArray
     {
+        if (count($a->a) > 1) { self::writable($a); }
         $len = count($a->a);
         $sorted = self::sorted($a, $cmp);
         $a->a = [...$sorted->a, ...array_slice($a->a, $len)];
@@ -1458,6 +1755,7 @@ final class Js
 
     public static function fill(JsArray $a, mixed $value, int|float $start = 0, int|float|null $end = null): JsArray
     {
+        self::writable($a);
         $len = count($a->a);
         $from = self::relIndex($start, $len);
         $to = $end === null ? $len : self::relIndex($end, $len);
@@ -1589,6 +1887,10 @@ final class Js
         }
         if ($value instanceof RegExp && !$structured) { return $value; }
         if ($value instanceof JsArguments && $structured) { throw new JsError('Arguments could not be cloned', 'DataCloneError'); }
+        if ($value instanceof JsSymbol || $value instanceof JsWeakMap || $value instanceof JsWeakSet) {
+            if ($structured) { throw new JsError(($value instanceof JsSymbol ? $value->descriptiveString() : self::dynamicObjectTag($value)) . ' could not be cloned', 'DataCloneError'); }
+            return $value;
+        }
         if ($value instanceof JsNamespace) {
             if (!$structured) { return $value; }
             if ($seen->offsetExists($value)) { return $seen[$value]; }
@@ -1606,9 +1908,9 @@ final class Js
             };
             $seen[$value] = $copy;
             if ($value instanceof JsSet) {
-                foreach ($value->values as $item) { $copy->add(self::copyGraph($item, $seen, $structured)); }
+                foreach ($value->values() as $item) { $copy->add(self::copyGraph($item, $seen, $structured)); }
             } elseif ($value instanceof JsMap) {
-                foreach ($value->entries as [$key, $item]) { $copy->set(self::copyGraph($key, $seen, $structured), self::copyGraph($item, $seen, $structured)); }
+                foreach ($value->entries() as [$key, $item]) { $copy->set(self::copyGraph($key, $seen, $structured), self::copyGraph($item, $seen, $structured)); }
             } elseif ($value instanceof JsArguments) {
                 foreach ($value->a as $key => $item) { $copy->a[$key] = self::copyGraph($item, $seen, $structured); }
                 foreach ($value->p as $key => $item) { $copy->p[$key] = self::copyGraph($item, $seen, $structured); }
@@ -1647,20 +1949,30 @@ final class Js
     /** The JSON value tree shared by Zero's encoder and foreign encoders. */
     public static function jsonTree(mixed $value): mixed
     {
-        return self::jsonValueTree($value, new \SplObjectStorage());
+        return self::jsonValueTree(self::jsonClassValue($value, ''), new \SplObjectStorage());
+    }
+
+    /** SerializeJSONProperty step 2: a class `toJSON` method replaces the value, receiving the key. */
+    private static function jsonClassValue(mixed $value, string $key): mixed
+    {
+        if ($value instanceof JsObject && !array_key_exists('toJSON', $value->p) && $value->class !== null
+            && ($method = $value->class->readInherited($value, 'toJSON', false)) instanceof \Closure) {
+            return self::dynamicMethod($value, 'toJSON')($key);
+        }
+        return $value;
     }
 
     private static function jsonValueTree(mixed $value, \SplObjectStorage $stack): mixed
     {
-        if ($value instanceof JsObject || $value instanceof JsArray || $value instanceof JsArguments) {
-            $custom = array_key_exists('toJSON', $value->p)
-                ? $value->p['toJSON'] instanceof \Closure
-                : $value instanceof JsObject && ($value->class?->hasMethod('toJSON') ?? false);
-            if ($custom) { throw new JsError('Custom toJSON callbacks are not supported', 'TypeError'); }
+        if (($value instanceof JsObject || $value instanceof JsArray || $value instanceof JsArguments)
+            && array_key_exists('toJSON', $value->p) && $value->p['toJSON'] instanceof \Closure) {
+            throw new JsError('Custom toJSON callbacks are not supported', 'TypeError');
         }
         if ($value === JsUndefined::Value) { return null; }
+        if ($value instanceof JsBigInt) { throw new JsError('Do not know how to serialize a BigInt', 'TypeError'); }
         if ($value instanceof JsDate) { return is_finite((float) $value->milliseconds) ? self::iso($value->milliseconds) : null; }
-        if ($value instanceof JsSet || $value instanceof JsMap || $value instanceof JsNamespace || $value instanceof JsError) { return new \stdClass(); }
+        if ($value instanceof JsSet || $value instanceof JsMap || $value instanceof JsNamespace || $value instanceof JsError || $value instanceof JsWeakMap || $value instanceof JsWeakSet) { return new \stdClass(); }
+        if ($value instanceof JsSymbol) { return null; }
         if (is_float($value)) { return !is_finite($value) ? null : ($value == 0.0 ? 0 : $value); }
         if ($value instanceof \Closure) { return null; }
         if ($value instanceof RegExp) { return new \stdClass(); }
@@ -1682,15 +1994,16 @@ final class Js
             };
             if ($list) {
                 $out = [];
-                foreach ($items as $item) { $out[] = self::jsonValueTree($item, $stack); }
+                foreach ($items as $index => $item) { $out[] = self::jsonValueTree(self::jsonClassValue($item, (string) $index), $stack); }
                 return $out;
             }
             $out = [];
             $nulKey = false;
             foreach (self::ownKeys($items) as $key) {
-                if ($items[$key] instanceof \Closure || $items[$key] === JsUndefined::Value) { continue; }
+                $item = self::jsonClassValue($items[$key], (string) $key);
+                if ($item instanceof \Closure || $item === JsUndefined::Value || $item instanceof JsSymbol) { continue; }
                 $nulKey = $nulKey || str_starts_with((string) $key, "\0");
-                $out[$key] = self::jsonValueTree($items[$key], $stack);
+                $out[$key] = self::jsonValueTree($item, $stack);
             }
             if ($nulKey) { return $out; }
             $result = new \stdClass();
@@ -1747,10 +2060,11 @@ final class Js
 
     public static function jsonStringify(mixed $v, int|float|string|null $indent = null): ?string
     {
-        if ($v instanceof \Closure || $v === JsUndefined::Value) {
+        $v = self::jsonClassValue($v, '');
+        if ($v instanceof \Closure || $v === JsUndefined::Value || $v instanceof JsSymbol) {
             return null;
         }
-        $v = self::jsonTree($v);
+        $v = self::jsonValueTree($v, new \SplObjectStorage());
         if (is_string($indent)) {
             // The first 10 units. Cutting a surrogate pair there only matters if the gap is
             // written (a non-empty array or object): a scalar or empty result never uses it.
@@ -1823,13 +2137,49 @@ final class Js
     }
 
     /**
+     * `-0` → `-0.0` outside strings, so json_decode keeps the sign. A linear scan: a regex over a long
+     * string literal can exceed PCRE's backtrack limit, and preg_replace then returns null.
+     */
+    private static function markNegativeZero(string $s): string
+    {
+        if (!str_contains($s, '-0')) {
+            return $s;
+        }
+        $out = '';
+        $length = strlen($s);
+        $from = 0;
+        for ($i = 0; $i < $length; $i++) {
+            $c = $s[$i];
+            if ($c === '"') {
+                // Skip the string literal, honoring escapes.
+                for ($i++; $i < $length && $s[$i] !== '"'; $i++) {
+                    if ($s[$i] === '\\') {
+                        $i++;
+                    }
+                }
+                continue;
+            }
+            if ($c === '-' && ($s[$i + 1] ?? '') === '0' && ($i === 0 || ($s[$i - 1] !== 'e' && $s[$i - 1] !== 'E'))) {
+                $next = $s[$i + 2] ?? '';
+                if ($next === '' || str_contains(" \t\r\n,]}", $next)) {
+                    $out .= substr($s, $from, $i - $from) . '-0.0';
+                    $from = $i + 2;
+                    $i++;
+                }
+            }
+        }
+
+        return $from === 0 ? $s : $out . substr($s, $from);
+    }
+
+    /**
      * JSON text → handles, preserving object/list shape at every depth.
      * Integers stay exact: request bodies and stored json() values
      * may carry ids. Throws \JsonException.
      */
     public static function decodeJson(string $s, int $depth = 512): mixed
     {
-        $s = preg_replace('~"(?:[^"\\\\]|\\\\.)*"(*SKIP)(*F)|(?<![eE])-0(?=[\s,\]}]|$)~', '-0.0', $s);
+        $s = self::markNegativeZero($s);
         try {
             return self::fromJson(json_decode($s, false, $depth, JSON_THROW_ON_ERROR));
         } catch (\JsonException $e) {
@@ -1925,6 +2275,45 @@ final class Js
      * every read advances the pinned clock by that step: a test-only seam that makes "two reads see two
      * instants" deterministic. Inside atInstant() it is that one instant.
      */
+    /** Typed `new Map(entries?)`: entries are [key, value] arrays already checked by the compiler. */
+    public static function newMap(mixed $entries = JsUndefined::Value): JsMap
+    {
+        return self::dynamicConstruct('Map', new JsArray($entries === JsUndefined::Value ? [] : [$entries]));
+    }
+
+    /** Typed `new Set(values?)`. */
+    public static function newSet(mixed $values = JsUndefined::Value): JsSet
+    {
+        return self::dynamicConstruct('Set', new JsArray($values === JsUndefined::Value ? [] : [$values]));
+    }
+
+    public static function clearCollection(JsMap|JsSet $collection): JsUndefined
+    {
+        $collection->clear();
+        return JsUndefined::Value;
+    }
+
+    public static function collectionForEach(JsMap|JsSet $collection, \Closure $callback): JsUndefined
+    {
+        $collection->forEach($callback);
+        return JsUndefined::Value;
+    }
+
+    /** Typed iteration over Map, Set, iterators, arrays and strings, live as in JavaScript. */
+    public static function iter(mixed $value): \Generator
+    {
+        return self::dynamicIterator($value);
+    }
+
+    /** Typed spread / Array.from of a Map, Set or iterator. */
+    public static function iterArray(mixed $value, ?\Closure $mapper = null): JsArray
+    {
+        $out = new JsArray();
+        $i = 0;
+        foreach (self::dynamicIterator($value) as $item) { $out->a[] = $mapper === null ? $item : $mapper($item, $i); $i++; }
+        return $out;
+    }
+
     public static function now(): int
     {
         if (self::$instant !== null) {
@@ -2054,15 +2443,6 @@ final class Js
             $year, $m, $d,
             intdiv($rem, 3600000), intdiv($rem, 60000) % 60, intdiv($rem, 1000) % 60, $rem % 1000,
         );
-    }
-
-    public static function uuid(): string
-    {
-        $b = random_bytes(16);
-        $b[6] = chr(ord($b[6]) & 0x0F | 0x40);
-        $b[8] = chr(ord($b[8]) & 0x3F | 0x80);
-
-        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($b), 4));
     }
 
     public static function random(): float

@@ -12,6 +12,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 pub const ZERO_MODULE: &str = "zero";
+/// WordPress core from TypeScript: abilities, hook types and functions (docs/decisions/2026-11-07-wordpress-from-typescript.md).
+pub const WORDPRESS_MODULE: &str = "php/wordpress";
+
+/// Modules the compiler provides itself; nothing is loaded for them. Node built-ins come from the
+/// one lookup, `builtins::module`.
+pub fn builtin_module(spec: &str) -> bool {
+    spec == ZERO_MODULE || spec == WORDPRESS_MODULE || crate::builtins::module(spec).is_some()
+}
 
 /// Where sources come from: the project directory for the CLI, memory for the browser build. Paths
 /// are absolute either way, so diagnostics and module identity work the same.
@@ -67,6 +75,17 @@ pub struct Program {
     pub entry: usize,
     /// The source of these modules; later passes that look beside them (sync directories) ask it.
     pub fs: Rc<dyn Fs>,
+    /// `wp-hooks/` handler files beside the entry, in registration order (see [`wp_hook_files`]).
+    pub wp_hooks: Vec<WpHookFile>,
+}
+
+/// One `wp-hooks/` file: `wp-hooks/<hook>.ts`, or `wp-hooks/<hook>/<file>.ts`.
+#[derive(Debug, Clone)]
+pub struct WpHookFile {
+    pub hook: String,
+    pub module: usize,
+    /// Position among the files of its hook, from 0 in alphabetical order.
+    pub order: usize,
 }
 
 pub fn load(entry: &Path) -> Result<Program> {
@@ -83,6 +102,7 @@ pub fn load_from(fs: Rc<dyn Fs>, entry: &Path) -> std::result::Result<Program, V
         resolved: HashMap::new(),
         entry: 0,
         fs: fs.clone(),
+        wp_hooks: Vec::new(),
     };
     let mut by_path: HashMap<PathBuf, usize> = HashMap::new();
     let entry = fs
@@ -93,11 +113,79 @@ pub fn load_from(fs: Rc<dyn Fs>, entry: &Path) -> std::result::Result<Program, V
         Ok(id) => program.entry = id,
         Err(d) => diagnostics.push(d.phase(diag::Code::Import)),
     }
+    let dir = entry.parent().expect("entry has a directory").join(WP_HOOKS_DIR);
+    match wp_hook_files(&*fs, &dir) {
+        Ok(files) => {
+            for (hook, order, path) in files {
+                match load_module(&*fs, &path, &mut program, &mut by_path, &mut diagnostics) {
+                    Ok(module) => program.wp_hooks.push(WpHookFile { hook, module, order }),
+                    Err(d) => diagnostics.push(d.phase(diag::Code::Import)),
+                }
+            }
+        }
+        Err(d) => diagnostics.push(d.phase(diag::Code::Import)),
+    }
     if diagnostics.is_empty() {
         Ok(program)
     } else {
         Err(diagnostics)
     }
+}
+
+/// The WordPress hooks directory beside `zero.config.ts`.
+pub const WP_HOOKS_DIR: &str = "wp-hooks";
+
+/// `wp-hooks/<hook>.ts` and `wp-hooks/<hook>/*.ts`, as `(hook, order, path)` sorted by hook, then by
+/// file name. Anything else in the directory is an error that names it: a non-`.ts` file would
+/// otherwise be silently skipped, and the author would wonder why their handler never runs.
+pub fn wp_hook_files(fs: &dyn Fs, dir: &Path) -> Result<Vec<(String, usize, PathBuf)>> {
+    if !fs.exists(dir) {
+        return Ok(Vec::new());
+    }
+    let listing = |d: &Path| -> Result<Vec<PathBuf>> {
+        let mut entries = fs
+            .read_dir(d)
+            .map_err(|e| Diag::new(Span::NONE, format!("can't read {}: {e}", d.display())))?;
+        entries.sort();
+        Ok(entries)
+    };
+    // Located at the offending path (registered with no source), so `check --json` names the file.
+    let refuse = |path: &Path, why: &str| {
+        let file = diag::register_file(path, "");
+        Diag::new(Span { file, start: 0, end: 0 }, why.to_string()).help(
+            "wp-hooks/ holds <hook_name>.ts files, or <hook_name>/ directories of .ts files, each default-exporting its handler",
+        )
+    };
+    let ts =
+        |p: &Path| p.extension().is_some_and(|e| e == "ts") && !p.to_string_lossy().ends_with(".d.ts") && fs.is_file(p);
+    let mut out = Vec::new();
+    for path in listing(dir)? {
+        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        if fs.is_dir(&path) {
+            for (order, file) in listing(&path)?.into_iter().enumerate() {
+                if !ts(&file) {
+                    return Err(refuse(&file, "not a .ts handler file"));
+                }
+                out.push((name.clone(), order, file));
+            }
+        } else if ts(&path) {
+            out.push((name.trim_end_matches(".ts").to_string(), 0, path));
+        } else {
+            return Err(refuse(&path, "not a .ts handler file"));
+        }
+    }
+    // A hook both as a file and as a directory would have two independent orders.
+    let mut seen: HashMap<&str, &Path> = HashMap::new();
+    for (hook, _, path) in &out {
+        let parent = path.parent().expect("listed under wp-hooks/");
+        if seen.insert(hook, parent).is_some_and(|p| p != parent) {
+            return Err(refuse(
+                path,
+                &format!("`{hook}` is both a file and a directory; keep one"),
+            ));
+        }
+    }
+    Ok(out)
 }
 
 fn load_module(
@@ -116,20 +204,45 @@ fn load_module(
     let file = diag::register_file(path, &source);
     let id = program.modules.len();
     by_path.insert(path.to_path_buf(), id);
-    let body = parse(fs, &source, path, file, id, diagnostics)?;
-    let imports: Vec<(String, Span)> = body.iter().filter_map(import_source).collect();
+    let Parsed {
+        body,
+        commonjs,
+        type_names,
+    } = parse(fs, &source, path, file, id, diagnostics)?;
+    let mut imports: Vec<(String, Span)> = body.iter().filter_map(import_source).collect();
+    let first_require = imports.len();
+    let commonjs = commonjs.map(|CommonJs { names, requires }| {
+        imports.extend(requires);
+        names
+    });
     program.modules.push(Rc::new(Module {
         id,
         file,
         path: path.to_path_buf(),
         body,
+        commonjs,
+        dynamic: crate::ir::dynamic_source(path),
+        type_names,
     }));
-    for (spec, span) in imports {
-        if spec == ZERO_MODULE {
+    for (index, (spec, span)) in imports.into_iter().enumerate() {
+        if builtin_module(&spec) {
             continue;
         }
-        match resolve(fs, path, &spec, span).and_then(|target| load_module(fs, &target, program, by_path, diagnostics))
-        {
+        if spec == "php" || spec.starts_with("php/") {
+            diagnostics.push(
+                Diag::new(span, format!("\"{spec}\" isn't available"))
+                    .help("WordPress core is \"php/wordpress\"; plugin modules (\"php/<plugin>\") and PHP built-ins (\"php\") are not available yet")
+                    .code(diag::Code::Import),
+            );
+            continue;
+        }
+        let required = index >= first_require;
+        let target = if required {
+            resolve_require(fs, path, &spec, span)
+        } else {
+            resolve(fs, path, &spec, span)
+        };
+        match target.and_then(|target| load_module(fs, &target, program, by_path, diagnostics)) {
             Ok(target_id) => {
                 program.resolved.insert((id, spec), target_id);
             }
@@ -173,7 +286,7 @@ fn parse(
     file: u32,
     module: usize,
     diagnostics: &mut Vec<Diag>,
-) -> Result<Vec<Stmt>> {
+) -> Result<Parsed> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::ts());
     if source_type.is_jsx() {
@@ -203,43 +316,114 @@ fn parse(
         diagnostics.push(Diag::new(span, format!("syntax error: {}", err.message)).code(diag::Code::Syntax));
     }
     if syntax_failed {
-        return Ok(Vec::new());
+        return Ok(Parsed::default());
     }
-    let (mut body, errors) = Lowerer {
+    let lowerer = Lowerer {
         file,
         module,
         class_context: std::cell::Cell::new(false),
         super_call: std::cell::Cell::new(false),
-    }
-    .program_diagnostics(&ret.program);
+        erase_types: source_type.is_typescript() && crate::ir::dynamic_source(path),
+        erased_types: Default::default(),
+    };
+    let (body, errors) = lowerer.program_diagnostics(&ret.program);
+    let mut commonjs = None;
     if errors.is_empty() {
-        normalize_commonjs(fs, path, &mut body)?;
+        commonjs = commonjs_module(fs, path, &body)?;
     }
     diagnostics.extend(errors);
-    Ok(body)
+    Ok(Parsed {
+        body,
+        commonjs,
+        type_names: lowerer.erased_types.into_inner(),
+    })
 }
 
 fn commonjs_error(span: Span, reason: &str) -> Diag {
     Diag::new(span, format!("unsupported CommonJS source: {reason}"))
         .code(diag::Code::NpmImport)
-        .help("use one top-level `module.exports = function (...) { ... }` or export a local function; require(), named exports, and Node wrapper globals are unavailable")
+        .help("use static CommonJS: top-level `require(\"<literal>\")`, and `module.exports = …` or `exports.name = …` outside functions; Node wrapper globals and dynamic require() are unavailable")
 }
 
-fn commonjs_export(statement: &Stmt) -> Option<&Expr> {
-    let Stmt::Expr(Expr {
-        kind: ExprKind::Assign {
-            op: None,
-            target,
-            value,
-        },
-        ..
-    }) = statement
-    else {
-        return None;
-    };
-    matches!(&target.kind, ExprKind::Member { obj, prop, optional: false, .. }
-        if prop == "exports" && matches!(&obj.kind, ExprKind::Ident(name) if name == "module"))
-    .then_some(value)
+#[derive(Default)]
+struct Parsed {
+    body: Vec<Stmt>,
+    commonjs: Option<CommonJs>,
+    type_names: std::collections::HashSet<String>,
+}
+
+/// What the loader learned about a CommonJS source.
+struct CommonJs {
+    /// Named exports for ESM importers, like Node's cjs-module-lexer finds them.
+    names: Vec<String>,
+    /// Every `require("<literal>")`, resolved and loaded like an import.
+    requires: Vec<(String, Span)>,
+}
+
+fn is_ident(expression: &Expr, name: &str) -> bool {
+    matches!(&expression.kind, ExprKind::Ident(found) if found == name)
+}
+
+/// `module.exports`, without optional chaining.
+fn is_module_exports(expression: &Expr) -> bool {
+    matches!(&expression.kind, ExprKind::Member { obj, prop, optional: false, .. }
+        if prop == "exports" && is_ident(obj, "module"))
+}
+
+/// The object a write lands on when its root is `module` or `exports`.
+fn wrapper_root(expression: &Expr) -> Option<&'static str> {
+    match &expression.kind {
+        ExprKind::Ident(name) if name == "module" => Some("module"),
+        ExprKind::Ident(name) if name == "exports" => Some("exports"),
+        ExprKind::Member { obj, .. } | ExprKind::Index { obj, .. } => wrapper_root(obj),
+        _ => None,
+    }
+}
+
+/// Top-level `exports.name = …`, `module.exports.name = …` and the keys of
+/// `module.exports = { … }`. Names are kept only while `module.exports` stays that object:
+/// after `module.exports = f`, a function, Node's named exports are its own properties.
+fn commonjs_names(body: &[Stmt]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut replaced = false;
+    for statement in body {
+        let Stmt::Expr(Expr {
+            kind:
+                ExprKind::Assign {
+                    op: None,
+                    target,
+                    value,
+                },
+            ..
+        }) = statement
+        else {
+            continue;
+        };
+        if is_module_exports(target) {
+            match &value.kind {
+                ExprKind::Object(properties) => {
+                    names.clear();
+                    for property in properties {
+                        match property {
+                            Prop::KV(PropKey::Static(key), _) => names.push(key.clone()),
+                            _ => replaced = true,
+                        }
+                    }
+                }
+                _ => replaced = true,
+            }
+        } else if let ExprKind::Member { obj, prop, .. } = &target.kind
+            && (is_ident(obj, "exports") || is_module_exports(obj))
+        {
+            names.push(prop.clone());
+        }
+    }
+    if replaced {
+        return Vec::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    names.retain(|name| name != "default" && name != "__esModule" && seen.insert(name.clone()));
+    names
 }
 
 fn esm_package_source(fs: &dyn Fs, path: &Path, span: Span) -> Result<bool> {
@@ -263,9 +447,11 @@ fn esm_package_source(fs: &dyn Fs, path: &Path, span: Span) -> Result<bool> {
     Ok(false)
 }
 
-/// A static function export needs no Node module wrapper. Normalize only that assignment, retaining
-/// its evaluation position and the original function's source spans and lexical environment.
-fn normalize_commonjs(fs: &dyn Fs, path: &Path, body: &mut [Stmt]) -> Result<()> {
+/// A `.cjs` source, or a `.js` source with no ESM syntax outside an ESM package, is CommonJS.
+/// Its body is kept as written: the evaluator supplies the module wrapper bindings and runs each
+/// static `require` at its call, as Node does. This checks that nothing needs the wrapper at
+/// request time and collects the `require` specifiers to load.
+fn commonjs_module(fs: &dyn Fs, path: &Path, body: &[Stmt]) -> Result<Option<CommonJs>> {
     let has_esm = body.iter().any(|statement| {
         matches!(
             statement,
@@ -276,26 +462,19 @@ fn normalize_commonjs(fs: &dyn Fs, path: &Path, body: &mut [Stmt]) -> Result<()>
                 | Stmt::ExportDefault(_)
         )
     });
-    let exports: Vec<_> = body
-        .iter()
-        .enumerate()
-        .filter_map(|(index, statement)| commonjs_export(statement).map(|value| (index, value.span)))
-        .collect();
+    let first_export = body.iter().find_map(|statement| match statement {
+        Stmt::Expr(Expr {
+            kind: ExprKind::Assign { target, .. },
+            span,
+        }) if is_module_exports(target) => Some(*span),
+        _ => None,
+    });
     let extension = path.extension().and_then(|extension| extension.to_str());
     let esm_package = extension == Some("js")
-        && (!exports.is_empty() || !has_esm)
-        && esm_package_source(fs, path, exports.first().map_or(Span::NONE, |(_, span)| *span))?;
-    if let Some(&(index, span)) = exports.first() {
-        if exports.len() != 1 {
-            return Err(commonjs_error(
-                exports[1].1,
-                "module.exports must be assigned exactly once",
-            ));
-        }
-        if !matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some("js" | "cjs")
-        ) {
+        && (first_export.is_some() || !has_esm)
+        && esm_package_source(fs, path, first_export.unwrap_or(Span::NONE))?;
+    if let Some(span) = first_export {
+        if !matches!(extension, Some("js" | "cjs")) {
             return Err(commonjs_error(
                 span,
                 "module.exports is only supported in .js or .cjs sources",
@@ -310,45 +489,28 @@ fn normalize_commonjs(fs: &dyn Fs, path: &Path, body: &mut [Stmt]) -> Result<()>
         if has_esm {
             return Err(commonjs_error(span, "CommonJS and ESM declarations cannot be mixed"));
         }
-        let value = commonjs_export(&body[index]).expect("export was found above");
-        let local_function = match &value.kind {
-            ExprKind::Func(_) => true,
-            ExprKind::Ident(name) => body.iter().enumerate().any(|(declaration_index, statement)| {
-                matches!(statement, Stmt::Func(function) if function.name.as_ref() == Some(name))
-                    || (declaration_index < index
-                        && matches!(statement, Stmt::Decl {
-                        pat: Pat::Id(local, _), init: Some(Expr { kind: ExprKind::Func(_), .. }), ..
-                    } if local == name))
-            }),
-            _ => false,
-        };
-        if !local_function {
-            return Err(commonjs_error(
-                span,
-                "module.exports must directly name a local function or contain a function expression",
-            ));
-        }
-        let statement = std::mem::replace(&mut body[index], Stmt::Block(Vec::new()));
-        let Stmt::Expr(Expr {
-            kind: ExprKind::Assign { value, .. },
-            ..
-        }) = statement
-        else {
-            unreachable!("export was found above");
-        };
-        body[index] = Stmt::ExportDefault(*value);
     }
-    if !exports.is_empty() || (!has_esm && !esm_package && matches!(extension, Some("js" | "cjs"))) {
-        CommonJsScope { arguments_bound: false }.block(body)?;
+    if has_esm || esm_package || !matches!(extension, Some("js" | "cjs")) {
+        return Ok(None);
     }
-    Ok(())
+    let requires = std::cell::RefCell::new(Vec::new());
+    CommonJsScope {
+        arguments_bound: false,
+        in_function: false,
+        requires: &requires,
+    }
+    .block(body)?;
+    Ok(Some(CommonJs {
+        names: commonjs_names(body),
+        requires: requires.into_inner(),
+    }))
 }
 
 fn validate_commonjs_name(name: &str, span: Span) -> Result<()> {
     if matches!(name, "module" | "exports" | "require" | "__filename" | "__dirname") {
         return Err(commonjs_error(
             span,
-            &format!("Node wrapper name `{name}` is unavailable outside the static export assignment"),
+            &format!("Node wrapper name `{name}` can't be declared"),
         ));
     }
     Ok(())
@@ -371,14 +533,18 @@ fn declares_lexical_arguments(statement: &Stmt) -> bool {
 /// Sloppy CommonJS `arguments` can alias parameters. Until strictness is represented in IR, only
 /// explicit lexical/parameter bindings named `arguments` are accepted in static CommonJS sources.
 #[derive(Clone, Copy)]
-struct CommonJsScope {
+struct CommonJsScope<'a> {
     arguments_bound: bool,
+    /// Inside a function body, which runs in PHP at request time.
+    in_function: bool,
+    requires: &'a std::cell::RefCell<Vec<(String, Span)>>,
 }
 
-impl CommonJsScope {
+impl CommonJsScope<'_> {
     fn block(self, body: &[Stmt]) -> Result<()> {
         let scope = Self {
             arguments_bound: self.arguments_bound || body.iter().any(declares_lexical_arguments),
+            ..self
         };
         for statement in body {
             scope.statement(statement)?;
@@ -421,6 +587,8 @@ impl CommonJsScope {
         let scope = Self {
             arguments_bound: (function.is_arrow && self.arguments_bound)
                 || function.params.iter().any(|parameter| binds_arguments(&parameter.pat)),
+            in_function: true,
+            ..self
         };
         for parameter in &function.params {
             scope.pattern(&parameter.pat)?;
@@ -467,6 +635,7 @@ impl CommonJsScope {
             } => {
                 let scope = Self {
                     arguments_bound: self.arguments_bound || init.as_deref().is_some_and(declares_lexical_arguments),
+                    ..self
                 };
                 if let Some(init) = init {
                     scope.statement(init)?;
@@ -481,6 +650,7 @@ impl CommonJsScope {
             } => {
                 let scope = Self {
                     arguments_bound: self.arguments_bound || (*kind != DeclKind::Var && binds_arguments(pat)),
+                    ..self
                 };
                 scope.pattern(pat)?;
                 scope.expression(iter)?;
@@ -497,15 +667,17 @@ impl CommonJsScope {
                     arguments_bound: self.arguments_bound
                         || (matches!(kind, Some(DeclKind::Let | DeclKind::Const))
                             && matches!(&target.kind, ExprKind::Ident(name) if name == "arguments")),
+                    ..self
                 };
                 scope.expression(target)?;
                 scope.expression(iter)?;
                 scope.block(body)?;
             }
-            Stmt::While(test, body) => {
+            Stmt::While(test, body) | Stmt::DoWhile(body, test) => {
                 self.expression(test)?;
                 self.block(body)?;
             }
+            Stmt::Labeled(_, body, _) => self.block(std::slice::from_ref(body))?,
             Stmt::Try {
                 block,
                 param,
@@ -520,6 +692,7 @@ impl CommonJsScope {
                     Self {
                         arguments_bound: self.arguments_bound
                             || param.as_ref().is_some_and(|(name, _)| name == "arguments"),
+                        ..self
                     }
                     .block(handler)?;
                 }
@@ -534,6 +707,7 @@ impl CommonJsScope {
                         || cases
                             .iter()
                             .any(|(_, body)| body.iter().any(declares_lexical_arguments)),
+                    ..self
                 };
                 for (test, body) in cases {
                     if let Some(test) = test {
@@ -548,8 +722,8 @@ impl CommonJsScope {
             | Stmt::ExportNames { .. }
             | Stmt::ExportAll { .. }
             | Stmt::TypeAlias { .. }
-            | Stmt::Break(_)
-            | Stmt::Continue(_) => {}
+            | Stmt::Break(..)
+            | Stmt::Continue(..) => {}
         }
         Ok(())
     }
@@ -557,12 +731,84 @@ impl CommonJsScope {
     fn expression(self, expression: &Expr) -> Result<()> {
         match &expression.kind {
             ExprKind::Ident(name) => {
-                validate_commonjs_name(name, expression.span)?;
+                match name.as_str() {
+                    // `module.exports` is matched by its member expression below.
+                    "module" => {
+                        return Err(commonjs_error(
+                            expression.span,
+                            "`module` is only available as `module.exports`",
+                        ));
+                    }
+                    "exports" => {}
+                    "require" => {
+                        return Err(commonjs_error(
+                            expression.span,
+                            "`require` must be called with one string literal",
+                        ));
+                    }
+                    "__filename" | "__dirname" => {
+                        return Err(commonjs_error(
+                            expression.span,
+                            &format!("Node wrapper name `{name}` is unavailable"),
+                        ));
+                    }
+                    _ => {}
+                }
                 if name == "arguments" && !self.arguments_bound {
                     return Err(commonjs_error(
                         expression.span,
                         "implicit arguments can alias parameters in CommonJS; only explicit bindings named arguments are supported",
                     ));
+                }
+            }
+            ExprKind::Member { obj, .. } if is_ident(obj, "module") => {
+                if !is_module_exports(expression) {
+                    return Err(commonjs_error(
+                        expression.span,
+                        "`module` is only available as `module.exports`",
+                    ));
+                }
+            }
+            ExprKind::Call { callee, args, .. } if is_ident(callee, "require") => {
+                let [
+                    ArrEl::Item(Expr {
+                        kind: ExprKind::Str(spec),
+                        ..
+                    }),
+                ] = args.as_slice()
+                else {
+                    return Err(commonjs_error(
+                        expression.span,
+                        "dynamic require() is unavailable; require one string literal",
+                    ));
+                };
+                if self.in_function {
+                    return Err(commonjs_error(
+                        expression.span,
+                        "require() inside a function would load at request time; move it to the top level",
+                    ));
+                }
+                self.requires.borrow_mut().push((spec.clone(), expression.span));
+            }
+            ExprKind::Assign { target, .. } | ExprKind::Update { target, .. } if wrapper_root(target).is_some() => {
+                let root = wrapper_root(target).expect("matched above");
+                if self.in_function {
+                    return Err(commonjs_error(
+                        expression.span,
+                        &format!(
+                            "writing to `{root}` inside a function would change a build-time value at request time"
+                        ),
+                    ));
+                }
+                if is_ident(target, root) {
+                    return Err(commonjs_error(
+                        expression.span,
+                        &format!("`{root}` can't be reassigned; assign `module.exports` instead"),
+                    ));
+                }
+                self.expression(target)?;
+                if let ExprKind::Assign { value, .. } = &expression.kind {
+                    self.expression(value)?;
                 }
             }
             ExprKind::Func(function) => self.function(function)?,
@@ -581,6 +827,9 @@ impl CommonJsScope {
                 }
                 if let Some(constructor) = &class.constructor {
                     self.function(constructor)?;
+                }
+                for accessor in &class.accessors {
+                    self.function(&accessor.func)?;
                 }
             }
             ExprKind::Array(items) => {
@@ -607,14 +856,18 @@ impl CommonJsScope {
                 }
             }
             ExprKind::Unary(_, value)
+            | ExprKind::Delete(value)
             | ExprKind::IsNullish(value, _)
             | ExprKind::Update { target: value, .. }
             | ExprKind::Member { obj: value, .. }
             | ExprKind::Chain(value)
             | ExprKind::Await(value)
+            | ExprKind::Yield { arg: Some(value), .. }
             | ExprKind::As(value, _)
             | ExprKind::NonNull(value) => self.expression(value)?,
+            ExprKind::Yield { arg: None, .. } => {}
             ExprKind::Instanceof(left, right)
+            | ExprKind::In(left, right)
             | ExprKind::Binary(_, left, right)
             | ExprKind::Logical(_, left, right)
             | ExprKind::Assign {
@@ -635,7 +888,13 @@ impl CommonJsScope {
                     self.expression(expression)?;
                 }
             }
-            ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => {
+            ExprKind::AssignPattern(pattern, value) => {
+                for expression in pattern.exprs() {
+                    self.expression(expression)?;
+                }
+                self.expression(value)?;
+            }
+            ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => {
                 self.expression(callee)?;
                 for ArrEl::Item(value) | ArrEl::Spread(value) in args {
                     self.expression(value)?;
@@ -646,13 +905,46 @@ impl CommonJsScope {
             | ExprKind::Bool(_)
             | ExprKind::Null
             | ExprKind::Undefined
-            | ExprKind::Regex { .. } => {}
+            | ExprKind::Regex { .. }
+            | ExprKind::BigInt(_)
+            | ExprKind::TemplateStrings { .. } => {}
         }
         Ok(())
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Conditions {
+    /// `import`, then `default`; a `module` entry is used before `main`.
+    Import,
+    /// `require`, then `default`; `module` entries are ignored, as Node does.
+    Require,
+}
+
 fn resolve(fs: &dyn Fs, from: &Path, spec: &str, span: Span) -> Result<PathBuf> {
+    resolve_with(fs, from, spec, span, Conditions::Import)
+}
+
+/// `require("<spec>")` from a CommonJS source. The target must be CommonJS too: `require(esm)`
+/// returns a namespace object, which Zero doesn't model.
+fn resolve_require(fs: &dyn Fs, from: &Path, spec: &str, span: Span) -> Result<PathBuf> {
+    let target = resolve_with(fs, from, spec, span, Conditions::Require)?;
+    let extension = target.extension().and_then(|extension| extension.to_str());
+    let esm = match extension {
+        Some("cjs") => false,
+        Some("js") => esm_package_source(fs, &target, span)?,
+        _ => true,
+    };
+    if esm {
+        return Err(commonjs_error(
+            span,
+            &format!("require(\"{spec}\") resolves to an ES module; import it from an ES module instead"),
+        ));
+    }
+    Ok(target)
+}
+
+fn resolve_with(fs: &dyn Fs, from: &Path, spec: &str, span: Span, conditions: Conditions) -> Result<PathBuf> {
     if !spec.starts_with('.') && !fs.allow_packages() {
         return Err(
             Diag::new(span, format!("npm import {spec:?} needs local source capture"))
@@ -661,7 +953,7 @@ fn resolve(fs: &dyn Fs, from: &Path, spec: &str, span: Span) -> Result<PathBuf> 
         );
     }
     if !spec.starts_with("./") && !spec.starts_with("../") {
-        return resolve_package(fs, from, spec, span);
+        return resolve_package(fs, from, spec, span, conditions);
     }
     let base = from.parent().expect("file has a directory").join(spec);
     resolve_source(fs, &base, spec, span)
@@ -711,10 +1003,14 @@ fn resolve_source(fs: &dyn Fs, base: &Path, spec: &str, span: Span) -> Result<Pa
 fn package_error(spec: &str, span: Span, reason: &str) -> Diag {
     Diag::new(span, format!("can't import \"{spec}\": {reason}"))
         .code(diag::Code::NpmImport)
-        .help("install a source package locally; its TypeScript, ESM, or static CommonJS source must fit Zero's PHP compiler subset")
+        .help(if spec.starts_with("node:") {
+            "handlers run in PHP: use the global fetch, process.env.NAME and \"node:crypto\""
+        } else {
+            "install a source package locally; its TypeScript, ESM, or static CommonJS source must fit Zero's PHP compiler subset"
+        })
 }
 
-fn resolve_package(fs: &dyn Fs, from: &Path, spec: &str, span: Span) -> Result<PathBuf> {
+fn resolve_package(fs: &dyn Fs, from: &Path, spec: &str, span: Span, conditions: Conditions) -> Result<PathBuf> {
     let parts: Vec<_> = spec.split('/').collect();
     let count = if spec.starts_with('@') { 2 } else { 1 };
     if parts.len() < count
@@ -725,7 +1021,11 @@ fn resolve_package(fs: &dyn Fs, from: &Path, spec: &str, span: Span) -> Result<P
         return Err(package_error(
             spec,
             span,
-            "unsupported package specifier (Node built-ins and package aliases are unavailable)",
+            if spec.starts_with("node:") {
+                "Node built-ins other than node:crypto are unavailable"
+            } else {
+                "unsupported package specifier (package aliases are unavailable)"
+            },
         ));
     }
     let name = parts[..count].join("/");
@@ -747,42 +1047,52 @@ fn resolve_package(fs: &dyn Fs, from: &Path, spec: &str, span: Span) -> Result<P
         .map_err(|e| package_error(spec, span, &format!("can't read package.json: {e}")))?;
     let manifest: serde_json::Value =
         serde_json::from_str(&source).map_err(|e| package_error(spec, span, &format!("invalid package.json: {e}")))?;
+    let module_entry = manifest
+        .get("module")
+        .and_then(|value| value.as_str())
+        .filter(|_| conditions == Conditions::Import);
+    // Without an export map, `require("pkg/sub")` probes like Node's CommonJS resolver.
     let legacy_main = manifest.get("exports").is_none()
-        && subpath == "."
-        && manifest.get("module").and_then(|value| value.as_str()).is_none();
-    let target = if let Some(exports) = manifest.get("exports") {
-        let entry = if exports
-            .as_object()
-            .is_some_and(|map| map.keys().any(|key| key.starts_with('.')))
-        {
-            exports.get(&subpath)
-        } else if subpath == "." {
-            Some(exports)
-        } else {
-            None
-        };
-        let target = entry.and_then(package_export).ok_or_else(|| {
+        && ((subpath == "." && module_entry.is_none()) || conditions == Conditions::Require);
+    let target =
+        if let Some(exports) = manifest.get("exports") {
+            let entry = if exports
+                .as_object()
+                .is_some_and(|map| map.keys().any(|key| key.starts_with('.')))
+            {
+                exports.get(&subpath)
+            } else if subpath == "." {
+                Some(exports)
+            } else {
+                None
+            };
+            let target = entry.and_then(|entry| package_export(entry, conditions)).ok_or_else(|| {
             package_error(
                 spec,
                 span,
-                "no exact import/default source export (patterns and require-only exports are unsupported)",
+                match conditions {
+                    Conditions::Import => {
+                        "no exact import/default source export (patterns and require-only exports are unsupported)"
+                    }
+                    Conditions::Require => "no exact require/default source export (patterns are unsupported)",
+                },
             )
         })?;
-        if !target.starts_with("./") {
-            return Err(package_error(spec, span, "package export targets must start with ./"));
-        }
-        target.to_string()
-    } else if subpath != "." {
-        subpath
-    } else if let Some(module) = manifest.get("module").and_then(|v| v.as_str()) {
-        module.to_string()
-    } else {
-        manifest
-            .get("main")
-            .and_then(|v| v.as_str())
-            .unwrap_or("./index.js")
-            .to_string()
-    };
+            if !target.starts_with("./") {
+                return Err(package_error(spec, span, "package export targets must start with ./"));
+            }
+            target.to_string()
+        } else if subpath != "." {
+            subpath
+        } else if let Some(module) = module_entry {
+            module.to_string()
+        } else {
+            manifest
+                .get("main")
+                .and_then(|v| v.as_str())
+                .unwrap_or("./index.js")
+                .to_string()
+        };
     if target.starts_with('/')
         || target.contains(['\\', '%', '#', '?', '*'])
         || target.split('/').any(|part| part == ".." || part == "node_modules")
@@ -794,8 +1104,9 @@ fn resolve_package(fs: &dyn Fs, from: &Path, spec: &str, span: Span) -> Result<P
         ));
     }
     let path = package.join(&target);
-    // Node's legacy `main` field can omit .js or name a directory. Explicit exports and source
-    // `module` targets stay exact; no probing may bypass an export map's selected target.
+    // Node's legacy `main` field, and CommonJS subpaths of a package without an export map, can
+    // omit .js or name a directory. Explicit exports and source `module` targets stay exact; no
+    // probing may bypass an export map's selected target.
     let path = if legacy_main && !fs.is_file(&path) {
         let mut with_js = path.clone().into_os_string();
         with_js.push(".js");
@@ -832,15 +1143,19 @@ fn resolve_package(fs: &dyn Fs, from: &Path, spec: &str, span: Span) -> Result<P
     Ok(resolved)
 }
 
-fn package_export(value: &serde_json::Value) -> Option<&str> {
+fn package_export(value: &serde_json::Value, conditions: Conditions) -> Option<&str> {
     if let Some(target) = value.as_str() {
         return Some(target);
     }
+    let wanted = match conditions {
+        Conditions::Import => "import",
+        Conditions::Require => "require",
+    };
     let (_, target) = value
         .as_object()?
         .iter()
-        .find(|(condition, _)| *condition == "import" || *condition == "default")?;
-    package_export(target)
+        .find(|(condition, _)| *condition == wanted || *condition == "default")?;
+    package_export(target, conditions)
 }
 
 #[cfg(test)]
@@ -945,7 +1260,7 @@ mod tests {
             (
                 r#"{"exports":"./source.ts"}"#,
                 "node:fs",
-                "unsupported package specifier",
+                "Node built-ins other than node:crypto are unavailable",
             ),
         ] {
             let fs = memory(&[
@@ -1000,15 +1315,143 @@ mod tests {
         assert_eq!(actual, [7.0, 10.0, 5.0]);
     }
 
+    fn evaluate(files: &[(&str, &str)]) -> crate::value::Value {
+        let program =
+            load_from(Rc::new(memory(files)), Path::new("/p/zero.config.ts")).unwrap_or_else(|ds| panic!("{ds:?}"));
+        crate::eval::Evaluator::new(&program)
+            .run()
+            .unwrap_or_else(|d| panic!("{d:?}"))
+    }
+
+    fn json(value: &crate::value::Value) -> String {
+        use crate::value::Value;
+        match value {
+            Value::Num(n) => n.to_string(),
+            Value::Str(s) => format!("{s:?}"),
+            Value::Bool(b) => b.to_string(),
+            Value::Undef => "undefined".into(),
+            Value::Null => "null".into(),
+            Value::Array(items) => format!("[{}]", items.borrow().iter().map(json).collect::<Vec<_>>().join(",")),
+            Value::Object(fields) => format!(
+                "{{{}}}",
+                fields
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| format!("{k}:{}", json(v)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            other => other.describe(),
+        }
+    }
+
+    #[test]
+    fn static_commonjs_requires_run_in_node_order_and_share_one_module_exports() {
+        // Mirrors picomatch: relative require, destructured require, `exports.x =` that reads
+        // `exports` later, `module.exports = { … }`, and a module required twice.
+        let result = evaluate(&[
+            (
+                "/p/zero.config.ts",
+                "import esm from 'pm'; import pm from './entry.cjs'; import { log } from 'pm/log'; export default [esm, pm.answer, pm.isMatch, log.join(','), pm.same];",
+            ),
+            (
+                "/p/node_modules/pm/package.json",
+                r#"{"exports":{".":{"import":"./esm.mjs","require":"./index.js"},"./log":"./log.js"}}"#,
+            ),
+            ("/p/node_modules/pm/esm.mjs", "export default 'esm entry';"),
+            ("/p/entry.cjs", "module.exports = require('pm');"),
+            ("/p/node_modules/pm/log.js", "exports.log = [];"),
+            (
+                "/p/node_modules/pm/index.js",
+                "'use strict'; const { log } = require('./log'); log.push('index'); const utils = require('./lib/utils'); const again = require('./lib/utils'); log.push('after'); module.exports = { answer: utils.double(21), isMatch: utils.isMatch, same: utils === again };",
+            ),
+            (
+                "/p/node_modules/pm/lib/utils.js",
+                "const { log } = require('../log'); log.push('utils'); const { TWO } = require('./constants'); exports.double = n => n * TWO; exports.isMatch = exports.double(1) === TWO; module.exports.extra = 1;",
+            ),
+            (
+                "/p/node_modules/pm/lib/constants.js",
+                "module.exports = { TWO: 2, __proto_safe: true };",
+            ),
+        ]);
+        assert_eq!(json(&result), r#"["esm entry",42,true,"index,utils,after",true]"#);
+    }
+
+    #[test]
+    fn commonjs_named_exports_follow_static_assignments_like_node() {
+        let result = evaluate(&[
+            (
+                "/p/zero.config.ts",
+                "import a, { x } from './a.cjs'; import b, { y } from './b.cjs'; import * as c from './c.cjs'; export default [a, x, b, y, c.default.z];",
+            ),
+            ("/p/a.cjs", "exports.x = 1; exports.default = 'ignored'; exports.x = 2;"),
+            ("/p/b.cjs", "module.exports = { y: 3 }; module.exports.y = 4;"),
+            ("/p/c.cjs", "if (true) { module.exports.z = 5; }"),
+        ]);
+        assert_eq!(json(&result), r#"[{x:2,default:"ignored"},2,{y:4},4,5]"#);
+    }
+
+    #[test]
+    fn installed_typescript_erases_types_and_elides_type_only_imports_and_re_exports() {
+        let fs = memory(&[
+            (
+                "/p/zero.config.ts",
+                "import { scale, Factor } from 'typed'; import { typeOnly } from './local'; export default [scale(2), typeOnly];",
+            ),
+            (
+                "/p/local.ts",
+                "export type Local = { n: number }; export const typeOnly = 1;",
+            ),
+            (
+                "/p/node_modules/typed/package.json",
+                r#"{"exports":{".":"./src/index.ts"}}"#,
+            ),
+            (
+                "/p/node_modules/typed/src/index.ts",
+                "export { scale } from './scale.js'; export type { Factor } from './types.js'; export { Shape } from './types.js'; export * from './types.js';",
+            ),
+            (
+                "/p/node_modules/typed/src/types.ts",
+                "export interface Shape { (n: number): number; new (n: number): object } export type Factor = <T>(value: T, ...rest: unknown[]) => T;",
+            ),
+            (
+                "/p/node_modules/typed/src/scale.ts",
+                "import { Shape } from './types.js'; declare const brand: unique symbol; export function scale<T extends number>(this: void, value: T, by?: number): number { assert(value); return (value as number) * (by ?? 3)!; } function assert(value: unknown): asserts value is number {}",
+            ),
+        ]);
+        let program = load_from(Rc::new(fs), Path::new("/p/zero.config.ts")).unwrap_or_else(|ds| panic!("{ds:?}"));
+        let package: Vec<_> = program.modules.iter().filter(|m| m.dynamic).collect();
+        assert_eq!(package.len(), 3);
+        assert!(package.iter().any(|m| m.type_names.contains("Factor")));
+        assert!(!program.modules[program.entry].dynamic);
+        // Authored modules keep their static type layer; only the app's lookup of a package type fails.
+        let error = crate::eval::Evaluator::new(&program).run().unwrap_err();
+        assert!(
+            error.message.contains("`Factor` comes from an installed package"),
+            "{error:?}"
+        );
+        let fs = memory(&[
+            (
+                "/p/zero.config.ts",
+                "import { scale } from 'typed'; export default scale(2);",
+            ),
+            (
+                "/p/node_modules/typed/package.json",
+                r#"{"exports":{".":"./index.ts"}}"#,
+            ),
+            (
+                "/p/node_modules/typed/index.ts",
+                "export function scale<T>(value: T & number, by?: number): number { return value * (by ?? 3); }",
+            ),
+        ]);
+        let program = load_from(Rc::new(fs), Path::new("/p/zero.config.ts")).unwrap_or_else(|ds| panic!("{ds:?}"));
+        let result = crate::eval::Evaluator::new(&program).run().unwrap();
+        assert!(matches!(result, crate::value::Value::Num(n) if n == 6.0), "{result:?}");
+    }
+
     #[test]
     fn commonjs_refuses_dynamic_exports_wrapper_access_and_esm_mixing() {
         for (source, target, manifest, reason) in [
-            (
-                "exports.value = function() {};",
-                "source.js",
-                r#"{"main":"./source.js"}"#,
-                "`exports`",
-            ),
             (
                 "module['exports'] = function() {};",
                 "source.cjs",
@@ -1019,19 +1462,49 @@ mod tests {
                 "module.exports = function() { if (false) { return require('fs'); } };",
                 "source.js",
                 r#"{"main":"./source.js"}"#,
-                "`require`",
+                "inside a function",
             ),
             (
-                "module.exports = function() {}; module.exports = function() {};",
+                "const name = './x'; module.exports = require(name);",
                 "source.js",
                 r#"{"main":"./source.js"}"#,
-                "exactly once",
+                "dynamic require()",
+            ),
+            (
+                "module.exports = require.resolve('./x');",
+                "source.js",
+                r#"{"main":"./source.js"}"#,
+                "`require` must be called",
+            ),
+            (
+                "module.exports = require('esm-only');",
+                "source.js",
+                r#"{"main":"./source.js"}"#,
+                "resolves to an ES module",
             ),
             (
                 "module.exports = function() {}; function mutate() { module.exports = function() {}; }",
                 "source.js",
                 r#"{"main":"./source.js"}"#,
-                "`module`",
+                "inside a function",
+            ),
+            (
+                "module.exports = function() { exports.count = 1; };",
+                "source.js",
+                r#"{"main":"./source.js"}"#,
+                "inside a function",
+            ),
+            (
+                "exports = { value: 1 };",
+                "source.js",
+                r#"{"main":"./source.js"}"#,
+                "can't be reassigned",
+            ),
+            (
+                "module.exports = module.id;",
+                "source.js",
+                r#"{"main":"./source.js"}"#,
+                "only available as `module.exports`",
             ),
             (
                 "const module = {}; module.exports = function() {};",
@@ -1064,24 +1537,6 @@ mod tests {
                 ".js or .cjs",
             ),
             (
-                "module.exports = 1;",
-                "source.js",
-                r#"{"main":"./source.js"}"#,
-                "local function",
-            ),
-            (
-                "module.exports = factory(); function factory() { return function() {}; }",
-                "source.js",
-                r#"{"main":"./source.js"}"#,
-                "local function",
-            ),
-            (
-                "module.exports = missing;",
-                "source.js",
-                r#"{"main":"./source.js"}"#,
-                "local function",
-            ),
-            (
                 "module.exports = function() { return __dirname; };",
                 "source.js",
                 r#"{"main":"./source.js"}"#,
@@ -1105,6 +1560,12 @@ mod tests {
                 ("/p/zero.config.ts", "import fn from 'pkg'; export default fn;"),
                 ("/p/node_modules/pkg/package.json", manifest),
                 (&target_path, source),
+                ("/p/node_modules/pkg/x.js", "module.exports = 1;"),
+                (
+                    "/p/node_modules/esm-only/package.json",
+                    r#"{"type":"module","exports":"./index.js"}"#,
+                ),
+                ("/p/node_modules/esm-only/index.js", "export default 1;"),
             ]);
             let diagnostics = load_from(Rc::new(fs), Path::new("/p/zero.config.ts"))
                 .err()

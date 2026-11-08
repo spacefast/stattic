@@ -7,10 +7,5 @@ $baseDir = dirname($vendorDir);
 
 return array(
     '694084d7d5e2d4a983a07e04d53ad181' => $vendorDir . '/symfony/deprecation-contracts/function.php',
-    '2776ca4154942faec655a07eb038bfe2' => $vendorDir . '/wp-php-toolkit/filesystem/functions.php',
-    'd5bfbe78fd9c94e3934a9ccbf46decdd' => $vendorDir . '/wp-php-toolkit/encoding/utf8.php',
-    '4539899b43d40d5bcb576d0d30d7dd67' => $vendorDir . '/wp-php-toolkit/encoding/compat-utf8.php',
-    'a8f34f30961072669e3ddcfb5b01cac9' => $vendorDir . '/wp-php-toolkit/encoding/utf8-encoder.php',
-    '49c1104ebcb9400902a5d984baba3854' => $vendorDir . '/wp-php-toolkit/data-liberation/URL/functions.php',
     '7c2fae6e0c17ae0abf05d63006b330e4' => $vendorDir . '/symfony/polyfill-php83/bootstrap.php',
 );

@@ -14,6 +14,21 @@ pub fn to_int32(x: f64) -> i32 {
     to_uint32(x) as i32
 }
 
+/// The binary bitwise and shift operators on two JS numbers (ECMAScript 13.9, 13.12).
+pub fn bitwise(op: crate::ir::BinOp, a: f64, b: f64) -> f64 {
+    use crate::ir::BinOp;
+    let count = to_uint32(b) & 31;
+    match op {
+        BinOp::BitAnd => f64::from(to_int32(a) & to_int32(b)),
+        BinOp::BitOr => f64::from(to_int32(a) | to_int32(b)),
+        BinOp::BitXor => f64::from(to_int32(a) ^ to_int32(b)),
+        BinOp::Shl => f64::from(to_int32(a).wrapping_shl(count)),
+        BinOp::Shr => f64::from(to_int32(a) >> count),
+        BinOp::UShr => f64::from(to_uint32(a) >> count),
+        _ => unreachable!("not a bitwise operator"),
+    }
+}
+
 pub fn round(x: f64) -> f64 {
     if !x.is_finite() || x == 0.0 {
         return x;

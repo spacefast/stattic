@@ -19,6 +19,7 @@ pub mod num;
 pub mod pages;
 pub mod pipeline;
 pub mod platform;
+pub mod plugins;
 pub mod schema;
 pub mod schema_php;
 pub mod services_config;
@@ -26,6 +27,7 @@ pub mod types;
 pub mod uri;
 pub mod value;
 pub mod wasm;
+pub mod wordpress;
 pub mod wp_plugins;
 pub mod wpml_config;
 
@@ -38,6 +40,8 @@ pub mod config_migrate;
 mod emit;
 #[cfg(feature = "host")]
 pub mod host;
+#[cfg(feature = "host")]
+pub mod store;
 #[cfg(any(feature = "cli", feature = "host"))]
 pub mod sync;
 #[cfg(target_arch = "wasm32")]

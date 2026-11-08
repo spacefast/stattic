@@ -101,9 +101,9 @@ import { defineConfig, table, text, action, job, jobs, db, env, userProjection, 
 const records = table({ label: text().notNull(), scope: text().notNull() }, { access: { read: 'anyone' } });
 export default defineConfig({ name: 'worker-proof', tables: { records }, users: { members: userProjection({ email: email().notNull().unique().max(191), name: text().notNull().default('') }) },
   webhooks: [{ url: env('HOOK_URL'), secret: env('HOOK_SECRET'), events: ['records.created'] }],
-  jobs: { crash: job({ input: {}, retries: 3, handler: () => { throw new Error('Expected worker failure'); } }), stamp: job({ input: { label: text().notNull() }, handler: async (input) => { await db.insert(records).values({ label: input.label, scope: (env('SCOPE') ?? 'missing') }); } }) },
+  jobs: { crash: job({ input: {}, retries: 3, handler: () => { throw new Error('Expected worker failure'); } }), stamp: job({ input: { label: text().notNull() }, handler: async (input) => { await db.insert(records).values({ label: input.label, scope: (process.env.SCOPE ?? 'missing') }); } }) },
   actions: { notify: action({ input: { from: text(), to: text().notNull(), cc: text() }, access: 'anyone', handler: async ({ from, to, cc }) => { if (from === null) return (await mail.send({ to, cc, subject: 'Welcome', text: 'Hi' })).id; return (await mail.send({ from, to, cc, subject: 'Welcome', text: 'Hi' })).id; } }), failEnqueue: action({ access: 'anyone', handler: async () => { return await jobs.crash.enqueue({}); } }), enqueue: action({ access: 'anyone', handler: async () => {
-    await db.insert(records).values({ label: 'immediate', scope: (env('SCOPE') ?? 'missing') });
+    await db.insert(records).values({ label: 'immediate', scope: (process.env.SCOPE ?? 'missing') });
     return await jobs.stamp.enqueue({ label: 'scheduled' }, { delay: 3600 });
   } }) }
 });

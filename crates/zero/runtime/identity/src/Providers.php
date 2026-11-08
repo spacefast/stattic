@@ -13,7 +13,11 @@ final class Providers
         private Accounts $accounts,
         private Sessions $sessions,
     ) {}
-    /** Google is the one built-in provider; sites add others through `zero_identity_providers`. */
+    /**
+     * Google is the one built-in provider; sites add others through `zero_identity_providers`:
+     * `issuer`, `client_id`, `secret` (empty for a public client), optional `discovery` entries
+     * that override the issuer's discovery document, and `alg` (`RS256` default, or `EdDSA`).
+     */
     public static function config(): array
     {
         $providers = [];
@@ -42,6 +46,7 @@ final class Providers
             $config["secret"],
             home_url("/identity/provider/callback?provider=" . rawurlencode($name)),
             $config["discovery"] ?? null,
+            $config["alg"] ?? "RS256",
         );
     }
     /** Where the hosted screen may continue after sign-in (issuer-relative): a pending authorization, nothing else. */
@@ -66,9 +71,10 @@ final class Providers
             $binding,
             300,
         );
-        setcookie("zi_oidc", $id . "." . $binding, [
+        // Path=/ so the __Host- prefix applies over HTTPS: a sibling host cannot plant it.
+        setcookie(Sessions::cookieName("zi_oidc"), $id . "." . $binding, [
             "expires" => time() + 300,
-            "path" => Plugin::path() . "/provider/callback",
+            "path" => "/",
             "secure" => is_ssl(),
             "httponly" => true,
             "samesite" => "Lax",
@@ -79,7 +85,7 @@ final class Providers
     public function callback(string $name): array
     {
         [$id, $binding] = array_pad(
-            explode(".", (string) ($_COOKIE["zi_oidc"] ?? ""), 2),
+            explode(".", (string) ($_COOKIE[Sessions::cookieName("zi_oidc")] ?? ""), 2),
             2,
             "",
         );

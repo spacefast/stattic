@@ -1,16 +1,16 @@
+pub(crate) mod abilities;
 pub(crate) mod build;
 pub(crate) mod deploy;
 mod dev;
 mod doctor;
-mod migrate_site;
+pub(crate) mod site;
 mod sync;
 
-pub(crate) use migrate_site::cli as migrate_site;
+pub(crate) use sync::run as sync;
 
 pub(crate) fn run(args: &crate::cli::Args) -> std::process::ExitCode {
     match args.command.as_str() {
         "doctor" => doctor::run(args),
-        "sync" => sync::run(&args.rest),
         "dev" => dev::run(args),
         _ => build::run(args),
     }

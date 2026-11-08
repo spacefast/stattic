@@ -5,92 +5,76 @@ declare(strict_types=1);
 namespace Zero;
 
 /**
- * `crypto` from "zero": digests, MACs, constant-time comparison and random values, over PHP's
- * `hash`, `hash_hmac`, `hash_equals` and `random_bytes`.
+ * The `node:crypto` subset and Web Crypto's `randomUUID`: digests, MACs, constant-time comparison
+ * and random values, over PHP's `hash`, `hash_hmac`, `hash_equals` and `random_bytes`.
  *
- * Output is byte-for-byte what the original Zero runtime's `ctx.crypto` returned: lowercase hex
- * over the UTF-8 bytes of the input string, with keys used as given. A named HMAC key reads the
- * environment value trimmed, as the original keyring did. Inputs are capped at 1 MiB.
+ * Strings are hashed as their UTF-8 bytes, as Node's `update(string)` does. A MAC key read from
+ * `process.env.NAME` is trimmed, and a missing or blank one is refused, as the original Zero
+ * runtime's keyring did; any other key is used as given. Inputs are capped at 1 MiB.
  */
 final class Crypto
 {
     public const MAX_DATA = 1048576;
+    public const ALGORITHMS = ['md5', 'sha1', 'sha256', 'sha384', 'sha512'];
+    public const ENCODINGS = ['hex', 'base64', 'base64url'];
 
-    public static function sha256(mixed $data): string
+    /** `createHash(algorithm).update(...parts).digest(encoding)`. */
+    public static function hash(string $algorithm, array $parts, string $encoding): string
     {
-        return hash('sha256', self::bounded($data, 'crypto.sha256'));
+        return self::encode(hash(self::algorithm($algorithm), self::joined($parts, 'Hash'), true), $encoding);
     }
 
-    public static function sha1(mixed $data): string
+    /** `createHmac(algorithm, key).update(...parts).digest(encoding)` with a key used as given. */
+    public static function hmac(string $algorithm, mixed $key, array $parts, string $encoding): string
     {
-        return hash('sha1', self::bounded($data, 'crypto.sha1'));
+        if (!is_string($key)) {
+            throw new JsError('The "key" argument must be a string', 'TypeError');
+        }
+        // A key can come from request input, so it gets the same cap as the data.
+        $key = self::bounded($key, "$algorithm key");
+
+        return self::encode(hash_hmac(self::algorithm($algorithm), self::joined($parts, 'Hmac'), $key, true), $encoding);
     }
 
-    public static function sha512(mixed $data): string
+    /** `createHmac(algorithm, process.env.NAME)...`: the variable is read trimmed and must be set. */
+    public static function hmacEnv(string $algorithm, string $name, array $parts, string $encoding): string
     {
-        return hash('sha512', self::bounded($data, 'crypto.sha512'));
-    }
+        $value = Env::get($name);
+        $secret = $value === null ? '' : self::trim($value);
+        if ($secret === '') {
+            throw new HttpError(500, 'crypto_key_unavailable', "Set the secret variable $name for this site, then retry.");
+        }
 
-    public static function md5(mixed $data): string
-    {
-        return hash('md5', self::bounded($data, 'crypto.md5'));
+        return self::hmac($algorithm, $secret, $parts, $encoding);
     }
 
     /**
-     * `hmacSha256({ key, data })`: `key` is an environment variable name, or `{ value }` for a key
-     * that is not a secret.
+     * `timingSafeEqual(Buffer.from(a), Buffer.from(b))`: constant time over the UTF-8 bytes; inputs of
+     * different byte lengths throw, as Node does.
      */
-    public static function hmacSha256(mixed $options): string
-    {
-        $options = $options instanceof JsObject ? $options->p : (is_array($options) ? $options : null);
-        if ($options === null || array_diff(array_keys($options), ['key', 'data']) !== []) {
-            throw new JsError('crypto.hmacSha256 takes { key, data }', 'TypeError');
-        }
-        $data = self::bounded($options['data'] ?? null, 'crypto.hmacSha256');
-        $key = $options['key'] ?? null;
-        if ($key instanceof JsObject) {
-            $key = $key->p;
-        }
-        if (is_array($key)) {
-            if (array_keys($key) !== ['value'] || !is_string($key['value'])) {
-                throw new JsError('crypto.hmacSha256 key must be a variable name or { value }', 'TypeError');
-            }
-            // An inline key can come from request input, so it gets the same cap as the data.
-            $secret = self::bounded($key['value'], 'crypto.hmacSha256');
-        } elseif (is_string($key) && $key !== '') {
-            $value = Env::get($key);
-            $secret = $value === null ? '' : self::trim($value);
-            if ($secret === '') {
-                throw new HttpError(500, 'crypto_key_unavailable', "Set the secret variable $key for this site, then retry.");
-            }
-        } else {
-            throw new JsError('crypto.hmacSha256 key must be a variable name or { value }', 'TypeError');
-        }
-
-        return hash_hmac('sha256', $data, $secret);
-    }
-
-    /** Constant time over equal lengths; different lengths are unequal. */
     public static function timingSafeEqual(mixed $a, mixed $b): bool
     {
-        $a = self::bounded($a, 'crypto.timingSafeEqual');
-        $b = self::bounded($b, 'crypto.timingSafeEqual');
+        $a = self::bounded($a, 'timingSafeEqual');
+        $b = self::bounded($b, 'timingSafeEqual');
+        if (strlen($a) !== strlen($b)) {
+            throw new JsError('Input buffers must have the same byte length', 'RangeError');
+        }
 
-        return strlen($a) === strlen($b) && hash_equals($a, $b);
+        return hash_equals($a, $b);
     }
 
-    /** `randomBytes(n)` as lowercase hex, n from 1 to 1024. */
-    public static function randomHex(mixed $bytes): string
+    /** `randomBytes(n).toString(encoding)`, n from 0 to 1024. */
+    public static function randomBytes(mixed $bytes, string $encoding): string
     {
         if (!is_int($bytes) && !(is_float($bytes) && floor($bytes) === $bytes)) {
-            throw new JsError('crypto.randomHex needs a whole number of bytes', 'RangeError');
+            throw new JsError('The "size" argument must be a whole number', 'RangeError');
         }
         $bytes = (int) $bytes;
-        if ($bytes < 1 || $bytes > 1024) {
-            throw new JsError('crypto.randomHex takes 1 to 1024 bytes', 'RangeError');
+        if ($bytes < 0 || $bytes > 1024) {
+            throw new JsError('randomBytes takes 0 to 1024 bytes in Zero code', 'RangeError');
         }
 
-        return bin2hex(random_bytes($bytes));
+        return self::encode($bytes === 0 ? '' : random_bytes($bytes), $encoding);
     }
 
     /** A random RFC 4122 version 4 UUID, as `crypto.randomUUID()` returns. */
@@ -111,6 +95,40 @@ final class Crypto
         $trimmed = preg_replace("/\\A$space+|$space+\\z/u", '', $value);
 
         return is_string($trimmed) ? $trimmed : trim($value, " \t\n\r\x0B\f");
+    }
+
+    private static function algorithm(string $algorithm): string
+    {
+        $name = strtolower($algorithm);
+        if (!in_array($name, self::ALGORITHMS, true)) {
+            throw new JsError('Digest method not supported', 'Error');
+        }
+
+        return $name;
+    }
+
+    /** @param list<mixed> $parts */
+    private static function joined(array $parts, string $what): string
+    {
+        $data = '';
+        foreach ($parts as $part) {
+            $data .= self::bounded($part, "$what.update");
+            if (strlen($data) > self::MAX_DATA) {
+                throw new HttpError(413, 'crypto_input_too_large', 'The crypto input is too large.');
+            }
+        }
+
+        return $data;
+    }
+
+    private static function encode(string $bytes, string $encoding): string
+    {
+        return match ($encoding) {
+            'hex' => bin2hex($bytes),
+            'base64' => base64_encode($bytes),
+            'base64url' => rtrim(strtr(base64_encode($bytes), '+/', '-_'), '='),
+            default => throw new JsError("Unknown encoding: $encoding", 'TypeError'),
+        };
     }
 
     private static function bounded(mixed $value, string $call): string

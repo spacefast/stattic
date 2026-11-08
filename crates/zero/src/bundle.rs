@@ -382,6 +382,30 @@ pub fn compile(
     assets: &Path,
     previous: Option<&Path>,
 ) -> Result<serde_json::Value, Diag> {
+    compile_tree(source, output, assets, previous, true).map(|compiled| compiled.manifest)
+}
+
+/// What a build store records beside the compiled tree.
+#[cfg(feature = "host")]
+pub(crate) struct Compiled {
+    pub manifest: serde_json::Value,
+    pub name: String,
+    /// The app has an auth collection, so it mounts `zero-identity`.
+    pub identity: bool,
+    pub admin: bool,
+    pub pages: Option<String>,
+}
+
+/// `compile`, optionally without the schema-independent runtime plugins (a build store keeps
+/// those once per revision).
+#[cfg(feature = "host")]
+pub(crate) fn compile_tree(
+    source: &Path,
+    output: &Path,
+    assets: &Path,
+    previous: Option<&Path>,
+    runtime: bool,
+) -> Result<Compiled, Diag> {
     let bytes = std::fs::read(source.join(MANIFEST_FILE)).map_err(io)?;
     let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| failure(e.to_string()))?;
     if manifest.format != "zero.source-bundle.v1"
@@ -549,7 +573,7 @@ pub fn compile(
         serde_json::to_vec(&built.snapshot).map_err(|e| failure(e.to_string()))?,
     )
     .map_err(io)?;
-    crate::emit::emit_generated(assets, &migrations, &output.join("plugins"), &built).map_err(io)?;
+    crate::emit::emit_generated(assets, &migrations, &output.join("plugins"), &built, runtime).map_err(io)?;
     if let Some(pages) = &pages {
         crate::pages::emit(&output.join("plugins"), pages).map_err(io)?;
     }
@@ -569,7 +593,13 @@ pub fn compile(
         serde_json::to_vec_pretty(&manifest).unwrap(),
     )
     .map_err(io)?;
-    Ok(manifest)
+    Ok(Compiled {
+        manifest,
+        identity: built.schema.collections.values().any(|c| c.auth),
+        admin: built.schema.admin,
+        pages: pages.as_ref().map(|p| format!("zero-pages-{}", p.app)),
+        name: built.schema.name,
+    })
 }
 
 #[cfg(feature = "cli")]
@@ -580,6 +610,35 @@ pub(crate) fn sources_cli(args: &[String]) -> std::process::ExitCode {
     };
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{}", crate::diag::render(&e, Path::new(".")));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// `zero compile-to-store <sources> <store> <assets> [previous-build]`: prints the build receipt.
+#[cfg(feature = "cli")]
+pub(crate) fn compile_to_store_cli(args: &[String]) -> std::process::ExitCode {
+    let result = match args {
+        [source, root, assets] => {
+            crate::store::compile_to_store(Path::new(source), Path::new(root), Path::new(assets), None)
+        }
+        [source, root, assets, previous] => {
+            crate::store::compile_to_store(Path::new(source), Path::new(root), Path::new(assets), Some(previous))
+        }
+        _ => Err(failure(
+            "usage: zero compile-to-store <sources> <store> <assets> [previous-build]",
+        )),
+    };
+    match result {
+        Ok(build) => {
+            println!(
+                "{}",
+                serde_json::json!({"build": build.build_id, "runtime": build.runtime_revision, "app": build.app_hash})
+            );
+            std::process::ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("{}", crate::diag::render(&e, Path::new(".")));
             std::process::ExitCode::FAILURE

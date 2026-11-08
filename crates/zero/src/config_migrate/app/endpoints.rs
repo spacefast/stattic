@@ -154,7 +154,8 @@ pub(super) fn returns(f: &Func) -> Vec<Span> {
                         walk(b, out);
                     }
                 }
-                Stmt::Block(ss) | Stmt::While(_, ss) => walk(ss, out),
+                Stmt::Block(ss) | Stmt::While(_, ss) | Stmt::DoWhile(ss, _) => walk(ss, out),
+                Stmt::Labeled(_, s, _) => walk(std::slice::from_ref(s), out),
                 Stmt::For { body, .. } | Stmt::ForOf { body, .. } | Stmt::ForIn { body, .. } => walk(body, out),
                 Stmt::Try {
                     block,

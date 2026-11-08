@@ -1,0 +1,563 @@
+{
+  "version": 1,
+  "sources": {
+    "hooks": "https://registry.npmjs.org/@wp-hooks/wordpress-core/-/wordpress-core-1.13.0.tgz",
+    "stubs": "https://github.com/php-stubs/wordpress-stubs/archive/refs/tags/v7.1.2.zip"
+  },
+  "classes": {
+    "WP_Post": {
+      "ID": "number",
+      "post_author": "string",
+      "post_date": "string",
+      "post_date_gmt": "string",
+      "post_content": "string",
+      "post_title": "string",
+      "post_excerpt": "string",
+      "post_status": "string",
+      "comment_status": "string",
+      "post_name": "string",
+      "post_modified": "string",
+      "post_modified_gmt": "string",
+      "post_parent": "number",
+      "guid": "string",
+      "menu_order": "number",
+      "post_type": "string",
+      "post_mime_type": "string",
+      "comment_count": "string"
+    },
+    "WP_User": {
+      "ID": "number",
+      "user_login": "string",
+      "user_email": "string",
+      "user_url": "string",
+      "user_registered": "string",
+      "display_name": "string",
+      "user_nicename": "string",
+      "first_name": "string",
+      "last_name": "string",
+      "roles": "string[]"
+    },
+    "WP_Query": {
+      "$methods": {
+        "get": {
+          "params": [
+            {
+              "name": "query_var",
+              "type": "string"
+            }
+          ],
+          "returns": "unknown"
+        },
+        "set": {
+          "params": [
+            {
+              "name": "query_var",
+              "type": "string"
+            },
+            {
+              "name": "value",
+              "type": "string | number | boolean | string[] | number[]"
+            }
+          ],
+          "returns": "void"
+        },
+        "is_main_query": {
+          "params": [],
+          "returns": "boolean"
+        }
+      }
+    }
+  },
+  "hooks": {
+    "init": {
+      "kind": "action",
+      "params": [],
+      "description": "Fires after WordPress has finished loading but before any headers are sent.",
+      "source": "wp-settings.php",
+      "byReference": false
+    },
+    "wp_head": {
+      "kind": "action",
+      "params": [],
+      "description": "Prints scripts or data in the head tag on the front end.",
+      "source": "wp-includes/general-template.php",
+      "byReference": false
+    },
+    "wp_footer": {
+      "kind": "action",
+      "params": [],
+      "description": "Prints scripts or data before the closing body tag on the front end.",
+      "source": "wp-includes/general-template.php",
+      "byReference": false
+    },
+    "wp_body_open": {
+      "kind": "action",
+      "params": [],
+      "description": "Triggered after the opening body tag.",
+      "source": "wp-includes/general-template.php",
+      "byReference": false
+    },
+    "wp_enqueue_scripts": {
+      "kind": "action",
+      "params": [],
+      "description": "Fires when scripts and styles are enqueued.",
+      "source": "wp-includes/script-loader.php",
+      "byReference": false
+    },
+    "template_redirect": {
+      "kind": "action",
+      "params": [],
+      "description": "Fires before determining which template to load.",
+      "source": "wp-includes/template-loader.php",
+      "byReference": false
+    },
+    "the_content": {
+      "kind": "filter",
+      "params": [
+        {
+          "name": "content",
+          "type": "string"
+        }
+      ],
+      "description": "Filters the post content.",
+      "source": "wp-includes/post-template.php",
+      "byReference": false
+    },
+    "the_title": {
+      "kind": "filter",
+      "params": [
+        {
+          "name": "post_title",
+          "type": "string"
+        },
+        {
+          "name": "post_id",
+          "type": "number"
+        }
+      ],
+      "description": "Filters the post title.",
+      "source": "wp-includes/post-template.php",
+      "byReference": false
+    },
+    "the_excerpt": {
+      "kind": "filter",
+      "params": [
+        {
+          "name": "post_excerpt",
+          "type": "string"
+        }
+      ],
+      "description": "Filters the displayed post excerpt.",
+      "source": "wp-includes/post-template.php",
+      "byReference": false
+    },
+    "excerpt_length": {
+      "kind": "filter",
+      "params": [
+        {
+          "name": "number",
+          "type": "number"
+        }
+      ],
+      "description": "Filters the maximum number of words in a post excerpt.",
+      "source": "wp-includes/formatting.php",
+      "byReference": false
+    },
+    "excerpt_more": {
+      "kind": "filter",
+      "params": [
+        {
+          "name": "more_string",
+          "type": "string"
+        }
+      ],
+      "description": "Filters the string in the \"more\" link displayed after a trimmed excerpt.",
+      "source": "wp-includes/formatting.php",
+      "byReference": false
+    },
+    "body_class": {
+      "kind": "filter",
+      "params": [
+        {
+          "name": "classes",
+          "type": "string[]"
+        },
+        {
+          "name": "css_class",
+          "type": "string[]"
+        }
+      ],
+      "description": "Filters the list of CSS body class names for the current post or page.",
+      "source": "wp-includes/post-template.php",
+      "byReference": false
+    },
+    "post_class": {
+      "kind": "filter",
+      "params": [
+        {
+          "name": "classes",
+          "type": "string[]"
+        },
+        {
+          "name": "css_class",
+          "type": "string[]"
+        },
+        {
+          "name": "post_id",
+          "type": "number"
+        }
+      ],
+      "description": "Filters the list of CSS class names for the current post.",
+      "source": "wp-includes/post-template.php",
+      "byReference": false
+    },
+    "save_post": {
+      "kind": "action",
+      "params": [
+        {
+          "name": "post_id",
+          "type": "number"
+        },
+        {
+          "name": "post",
+          "type": "WP_Post"
+        },
+        {
+          "name": "update",
+          "type": "boolean"
+        }
+      ],
+      "description": "Fires once a post has been saved.",
+      "source": "wp-includes/post.php",
+      "byReference": false
+    },
+    "wp_insert_post": {
+      "kind": "action",
+      "params": [
+        {
+          "name": "post_id",
+          "type": "number"
+        },
+        {
+          "name": "post",
+          "type": "WP_Post"
+        },
+        {
+          "name": "update",
+          "type": "boolean"
+        }
+      ],
+      "description": "Fires once a post has been saved.",
+      "source": "wp-includes/post.php",
+      "byReference": false
+    },
+    "deleted_post": {
+      "kind": "action",
+      "params": [
+        {
+          "name": "post_id",
+          "type": "number"
+        },
+        {
+          "name": "post",
+          "type": "WP_Post"
+        }
+      ],
+      "description": "Fires immediately after a post is deleted from the database.",
+      "source": "wp-includes/post.php",
+      "byReference": false
+    },
+    "transition_post_status": {
+      "kind": "action",
+      "params": [
+        {
+          "name": "new_status",
+          "type": "string"
+        },
+        {
+          "name": "old_status",
+          "type": "string"
+        },
+        {
+          "name": "post",
+          "type": "WP_Post"
+        }
+      ],
+      "description": "Fires when a post is transitioned from one status to another.",
+      "source": "wp-includes/post.php",
+      "byReference": false
+    },
+    "user_register": {
+      "kind": "action",
+      "params": [
+        {
+          "name": "user_id",
+          "type": "number"
+        },
+        {
+          "name": "userdata",
+          "type": "Record<string, unknown>"
+        }
+      ],
+      "description": "Fires immediately after a new user is registered.",
+      "source": "wp-includes/user.php",
+      "byReference": false
+    },
+    "wp_login": {
+      "kind": "action",
+      "params": [
+        {
+          "name": "user_login",
+          "type": "string"
+        },
+        {
+          "name": "user",
+          "type": "WP_User"
+        }
+      ],
+      "description": "Fires after the user has successfully logged in.",
+      "source": "wp-includes/user.php",
+      "byReference": false
+    },
+    "wp_logout": {
+      "kind": "action",
+      "params": [
+        {
+          "name": "user_id",
+          "type": "number"
+        }
+      ],
+      "description": "Fires after a user is logged out.",
+      "source": "wp-includes/pluggable.php",
+      "byReference": false
+    },
+    "rest_api_init": {
+      "kind": "action",
+      "params": [],
+      "description": "Fires when preparing to serve a REST API request.",
+      "source": "wp-includes/rest-api.php",
+      "byReference": false
+    },
+    "wp_mail": {
+      "kind": "filter",
+      "params": [
+        {
+          "name": "args",
+          "type": "{ to: string | string[]; subject: string; message: string; headers: string | string[]; attachments: string | string[] }"
+        }
+      ],
+      "description": "Filters the wp_mail() arguments.",
+      "source": "wp-includes/pluggable.php",
+      "byReference": false
+    },
+    "pre_get_posts": {
+      "kind": "action",
+      "params": [
+        {
+          "name": "query",
+          "type": "WP_Query"
+        }
+      ],
+      "description": "Fires after the query variable object is created, but before the actual query is run.",
+      "source": "wp-includes/class-wp-query.php",
+      "byReference": true
+    },
+    "login_message": {
+      "kind": "filter",
+      "params": [
+        {
+          "name": "message",
+          "type": "string"
+        }
+      ],
+      "description": "Filters the message to display above the login form.",
+      "source": "wp-login.php",
+      "byReference": false
+    }
+  },
+  "functions": {
+    "get_option": {
+      "params": [
+        {
+          "name": "option",
+          "type": "string"
+        }
+      ],
+      "returns": "unknown",
+      "fixed": {},
+      "wpError": false
+    },
+    "update_option": {
+      "params": [
+        {
+          "name": "option",
+          "type": "string"
+        },
+        {
+          "name": "value",
+          "type": "unknown"
+        }
+      ],
+      "returns": "boolean",
+      "fixed": {},
+      "wpError": false
+    },
+    "delete_option": {
+      "params": [
+        {
+          "name": "option",
+          "type": "string"
+        }
+      ],
+      "returns": "boolean",
+      "fixed": {},
+      "wpError": false
+    },
+    "get_post": {
+      "params": [
+        {
+          "name": "post",
+          "type": "number"
+        }
+      ],
+      "returns": "WP_Post | null",
+      "fixed": {},
+      "wpError": false
+    },
+    "wp_insert_post": {
+      "params": [
+        {
+          "name": "postarr",
+          "type": "{ post_title?: string; post_content?: string; post_excerpt?: string; post_status?: string; post_type?: string; post_name?: string; post_author?: number; post_parent?: number; menu_order?: number }"
+        }
+      ],
+      "returns": "number",
+      "fixed": {
+        "wp_error": true
+      },
+      "wpError": true
+    },
+    "current_user_can": {
+      "params": [
+        {
+          "name": "capability",
+          "type": "string"
+        }
+      ],
+      "returns": "boolean",
+      "fixed": {},
+      "wpError": false
+    },
+    "is_user_logged_in": {
+      "params": [],
+      "returns": "boolean",
+      "fixed": {},
+      "wpError": false
+    },
+    "get_current_user_id": {
+      "params": [],
+      "returns": "number",
+      "fixed": {},
+      "wpError": false
+    },
+    "get_userdata": {
+      "params": [
+        {
+          "name": "user_id",
+          "type": "number"
+        }
+      ],
+      "returns": "WP_User | false",
+      "fixed": {},
+      "wpError": false
+    },
+    "get_permalink": {
+      "params": [
+        {
+          "name": "post",
+          "type": "number"
+        }
+      ],
+      "returns": "string | false",
+      "fixed": {},
+      "wpError": false
+    },
+    "home_url": {
+      "params": [
+        {
+          "name": "path",
+          "type": "string"
+        }
+      ],
+      "returns": "string",
+      "fixed": {},
+      "wpError": false
+    },
+    "sanitize_text_field": {
+      "params": [
+        {
+          "name": "str",
+          "type": "string"
+        }
+      ],
+      "returns": "string",
+      "fixed": {},
+      "wpError": false
+    },
+    "sanitize_title": {
+      "params": [
+        {
+          "name": "title",
+          "type": "string"
+        }
+      ],
+      "returns": "string",
+      "fixed": {},
+      "wpError": false
+    },
+    "esc_html": {
+      "params": [
+        {
+          "name": "text",
+          "type": "string"
+        }
+      ],
+      "returns": "string",
+      "fixed": {},
+      "wpError": false
+    },
+    "esc_attr": {
+      "params": [
+        {
+          "name": "text",
+          "type": "string"
+        }
+      ],
+      "returns": "string",
+      "fixed": {},
+      "wpError": false
+    },
+    "esc_url": {
+      "params": [
+        {
+          "name": "url",
+          "type": "string"
+        }
+      ],
+      "returns": "string",
+      "fixed": {},
+      "wpError": false
+    },
+    "wp_strip_all_tags": {
+      "params": [
+        {
+          "name": "text",
+          "type": "string"
+        }
+      ],
+      "returns": "string",
+      "fixed": {},
+      "wpError": false
+    }
+  }
+}

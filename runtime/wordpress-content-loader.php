@@ -52,6 +52,16 @@ declare(strict_types=1);
         require_once $releaseReal . '/engine/shared/zero-v2-scope.php';
         _stattic_zero_v2_bind_wordpress();
         add_action('plugins_loaded', '_stattic_zero_v2_mount', 1);
+        // Space Users on v2 is the version's zero-identity on the Space's tables;
+        // the mount loads it, then installs the same host hooks.
+        require_once $releaseReal . '/engine/wordpress/space-users.php';
+        // Only the content entrypoint's Users management lane acts for a
+        // dashboard principal; no other v2 request projects a Space role.
+        if (($GLOBALS['SPACEFAST_ZERO_V2_USERS_MANAGEMENT'] ?? false) === true) {
+            require_once $releaseReal . '/engine/shared/wordpress-scope.php';
+            require_once $releaseReal . '/engine/wordpress/content-principals.php';
+            require_once $releaseReal . '/engine/wordpress/content-users.php';
+        }
         return;
     }
     $kernel = $releaseReal . '/engine/wordpress/content-kernel.php';

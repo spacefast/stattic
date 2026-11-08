@@ -11,6 +11,8 @@ final class Runtime
     private static ?string $appFile = null;
     private static bool $booted = false;
     private static bool $managed = false;
+    /** @var array<string, callable> `wp zero` commands other Zero plugins register (identity) */
+    private static array $commands = [];
     /** Why the shared system tables are behind this runtime (failed or contended upgrade), else null. */
     private static ?string $unavailable = null;
 
@@ -40,6 +42,16 @@ final class Runtime
         }, 1);
         if (defined('WP_CLI') && WP_CLI) {
             \WP_CLI::add_command('zero', static function (array $args, array $flags): void {
+                if (in_array($args[0] ?? 'help', ['help', '--help'], true)) {
+                    \WP_CLI::line(self::help());
+                    return;
+                }
+                // Commands of other Zero plugins (identity) don't need an app.
+                if (isset(self::$commands[$args[0]])) {
+                    $code = (self::$commands[$args[0]])(array_slice($args, 1), $flags);
+                    $code === 0 || \WP_CLI::halt($code);
+                    return;
+                }
                 if (self::$plugin === null) {
                     \WP_CLI::error('No compatible Zero app is active.');
                 }
@@ -63,6 +75,33 @@ final class Runtime
             });
         }
         do_action('zero_runtime_loaded');
+    }
+
+    /**
+     * A `wp zero <name>` command owned by another Zero plugin; it runs without an app transaction.
+     *
+     * @param callable(list<string> $args, array<string, string|true> $flags): int $fn prints its own JSON; returns the exit code
+     */
+    public static function command(string $name, callable $fn): void
+    {
+        if ($name === '' || isset(self::$commands[$name])) {
+            throw new \LogicException("Invalid or duplicate wp zero command '$name'");
+        }
+        self::$commands[$name] = $fn;
+    }
+
+    /** `wp zero help`: the site commands of the table `zero help` prints (Cli/commands.json). */
+    private static function help(): string
+    {
+        $table = json_decode((string) file_get_contents(dirname(__DIR__) . '/Cli/commands.json'), true, 8, JSON_THROW_ON_ERROR);
+        $rows = array_values(array_filter($table['site'], static fn (array $row): bool => ($row['via'] ?? null) !== 'wp'));
+        $width = max(array_map(static fn (array $row): int => strlen($row['name']), $rows));
+        $lines = ['usage: wp zero <command> (or zero <command> from a project)', ''];
+        foreach ($rows as $row) {
+            $lines[] = '  ' . str_pad($row['name'], $width) . '  ' . $row['summary'];
+        }
+
+        return implode("\n", $lines);
     }
 
     /** Mount exactly one version after platform plugins load. Visitors never migrate managed apps. */

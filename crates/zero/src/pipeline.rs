@@ -8,6 +8,8 @@ use crate::schema::{Access, DefaultKind, Owner};
 use crate::{client, compile, diag, eval, extract, loader, migrate, schema, schema_php, wp_plugins};
 use std::path::Path;
 
+type HookFunctions = indexmap::IndexMap<(String, schema::HookKind), Vec<(Option<usize>, String)>>;
+
 pub struct Built {
     pub plugins: Option<wp_plugins::Config>,
     /// Every file under `zero/client/`.
@@ -20,7 +22,17 @@ pub struct Built {
     pub gen_ts: String,
     /// Destructive steps in the new migrations.
     pub warnings: Vec<String>,
+    /// Declared WordPress plugins outside `wp_plugins/supported.json`; they still install.
+    pub unsupported_plugins: Vec<String>,
     pub hints: Vec<String>,
+    /// `zero/plugins.lock.json` as this build settled it (None without plugins or a lock).
+    pub plugin_lock: Option<serde_json::Value>,
+    /// What changed in the lock, one line each, for the command line.
+    pub plugin_changes: Vec<String>,
+    /// Each plugin's locked and inferred grant and read→send flows, for `zero check --json`.
+    pub plugin_report: serde_json::Value,
+    /// Abilities (and later hooks and functions) the compiled code uses from WordPress.
+    pub wordpress_uses: Vec<compile::WordPressUse>,
 }
 
 /// The last build, as the next one needs it: its snapshot and the number the next migration file gets.
@@ -28,6 +40,8 @@ pub struct Built {
 pub struct Previous {
     pub snapshot: serde_json::Value,
     pub next_migration: u32,
+    /// Refuse any plugin grant `zero/plugins.lock.json` doesn't already hold (CI, `--frozen`).
+    pub frozen: bool,
 }
 
 impl Previous {
@@ -81,6 +95,7 @@ impl Previous {
         Ok(Previous {
             snapshot,
             next_migration,
+            frozen: false,
         })
     }
 }
@@ -108,26 +123,86 @@ pub fn build(
         .unwrap_or_else(|| "app".into());
     let mut ext =
         extract::extract(&config, &mut ev, config_span, &dir_name).map_err(|d| d.phase(diag::Code::Schema))?;
+    wp_hooks(program, &mut ev, &mut ext).map_err(|d| d.phase(diag::Code::Schema))?;
     let mut schema = ext.schema.clone();
     let roots = std::mem::take(&mut ext.roots);
     let action_results;
-    let (functions, slots) = {
+    let wordpress_uses;
+    let catalog = crate::wordpress::abilities::Catalog::new(&schema, &read_lock(program)?);
+    // Each collection hook kind: its compiled functions, by owning plugin (None: the app).
+    let mut hooks: HookFunctions = indexmap::IndexMap::new();
+    let plugin_lock = read_plugin_lock(program, &project.join(crate::plugins::LOCK_PATH))?;
+    let previous_value;
+    let (functions, slots, settled) = {
         let mut c = compile::Compiler::new(&schema, &mut ev, &ext, program);
+        c.abilities = catalog.clone();
         c.resolve_json_types().map_err(|d| d.phase(diag::Code::Compile))?;
         let slots = c.compile_roots(&roots).map_err(|d| d.phase(diag::Code::Compile))?;
         action_results = std::mem::take(&mut c.action_results);
-        (std::mem::take(&mut c.output), slots)
+        wordpress_uses = std::mem::take(&mut c.wordpress_uses);
+        for ((slot, name), root) in slots.iter().zip(&roots) {
+            if let Slot::Hook { table, kind } = slot {
+                hooks
+                    .entry((table.clone(), *kind))
+                    .or_default()
+                    .push((root.plugin, name.clone()));
+            }
+        }
+        // Plugins first, in `use` order, then the app's own hook.
+        for ((table, kind), list) in &mut hooks {
+            list.sort_by_key(|(plugin, _)| plugin.unwrap_or(usize::MAX));
+            if list.len() > 1 {
+                let names: Vec<String> = list.iter().map(|(_, n)| n.clone()).collect();
+                let chain = c.chain(table, *kind, &names);
+                *list = vec![(None, chain)];
+            }
+        }
+        // The lock settles before anything is emitted, so a refused plugin generates nothing.
+        let mut handlers = Vec::new();
+        for ((_, name), root) in slots.iter().zip(&roots) {
+            if let Some(plugin) = root.plugin {
+                let mut reached = std::collections::BTreeSet::from([name.clone()]);
+                let mut stack = vec![name.clone()];
+                while let Some(f) = stack.pop() {
+                    for callee in c.calls.get(&f).into_iter().flatten() {
+                        if reached.insert(callee.clone()) {
+                            stack.push(callee.clone());
+                        }
+                    }
+                }
+                handlers.push((plugin, name.clone(), reached));
+            }
+        }
+        let prev = previous()?;
+        let settled = crate::plugins::settle(&ext.uses, &c.uses, &handlers, plugin_lock.as_ref(), prev.frozen)
+            .map_err(|d| d.phase(diag::Code::Compile))?;
+        previous_value = prev;
+        for ((_, hosts), function) in settled.hosts.iter().zip(&c.host_functions) {
+            let value = match hosts {
+                None => "null".to_string(),
+                Some(hosts) => format!(
+                    "[{}]",
+                    hosts.iter().map(|h| compile::php_str(h)).collect::<Vec<_>>().join(", ")
+                ),
+            };
+            c.output.push_str(&format!(
+                "function {function}(): ?array\n{{\n    return {value};\n}}\n\n"
+            ));
+        }
+        (std::mem::take(&mut c.output), slots, settled)
     };
+    for ((table, kind), list) in hooks {
+        let (_, name) = list.into_iter().next().expect("one hook per kind");
+        schema
+            .collections
+            .get_mut(&table)
+            .expect("collection")
+            .hooks
+            .insert(kind, name);
+    }
     for (slot, name) in slots {
         match slot {
-            Slot::Hook { table, kind } => {
-                schema
-                    .collections
-                    .get_mut(&table)
-                    .expect("collection")
-                    .hooks
-                    .insert(kind, name);
-            }
+            Slot::Hook { .. } => {}
             Slot::Default { at } => schema.column_mut(&at).default = Some(DefaultKind::Fn(name)),
             Slot::OnUpdate { at } => schema.column_mut(&at).on_update = Some(DefaultKind::Fn(name)),
             Slot::Validate { at } => schema.column_mut(&at).rules.validate = Some(name),
@@ -136,6 +211,7 @@ pub fn build(
             }
             Slot::JobHandler { job } => schema.jobs.get_mut(&job).expect("job").handler = name,
             Slot::RouteHandler { route } => schema.routes.get_mut(&route).expect("route").handler = name,
+            Slot::WpHook { index } => schema.wp_hooks[index].handler = name,
             Slot::ActionHandler { action } => schema.actions.get_mut(&action).expect("action").handler = name,
             Slot::Access { owner, op } => {
                 let rule = Access::Fn(name);
@@ -161,6 +237,8 @@ pub fn build(
             }
         }
     }
+    schema.wp_views =
+        !wordpress_uses.is_empty() && wordpress_uses.iter().any(|u| u.kind != compile::WordPressKind::Ability);
     // Hooks run in a fixed order per collection; sort for stable output.
     for c in schema.collections.values_mut() {
         c.hooks
@@ -174,7 +252,7 @@ pub fn build(
         functions + &services_php
     );
     let snapshot = migrate::snapshot(&schema);
-    let previous = previous()?;
+    let previous = previous_value;
     if let Some(tables) = previous.snapshot.get("tables").and_then(serde_json::Value::as_object) {
         for stored in tables.keys() {
             if let Some(next) = snapshot["tables"].get(stored)
@@ -214,9 +292,20 @@ pub fn build(
         migrations.push((format!("{n:04}_{name}.sql"), migrate::render(&statements)));
     }
     let client_files = client::files(&schema, &action_results, runtime);
-    let gen_ts = schema_php::gen_ts(&schema);
+    let unsupported_plugins = ext.plugins.as_ref().map(wp_plugins::unsupported).unwrap_or_default();
+    // Only a project that imports "php/wordpress" maps it in tsconfig, so only then is it augmented.
+    let uses_wordpress = program.modules.iter().any(|m| {
+        m.body
+            .iter()
+            .any(|s| matches!(s, crate::ir::Stmt::Import { source, .. } if source == loader::WORDPRESS_MODULE))
+    });
+    let mut gen_ts = schema_php::gen_ts(&schema);
+    if uses_wordpress {
+        gen_ts += &crate::wordpress::abilities::gen_ts(&catalog);
+    }
     Ok(Built {
         plugins: ext.plugins,
+        unsupported_plugins,
         client_files,
         schema,
         functions_php,
@@ -225,7 +314,118 @@ pub fn build(
         gen_ts,
         warnings,
         hints: ext.hints,
+        plugin_lock: settled.lock,
+        plugin_changes: settled.changes,
+        plugin_report: settled.report,
+        wordpress_uses,
     })
+}
+
+/// Each `wp-hooks/` file becomes a root: its default export is the handler, an optional
+/// `export const priority = <integer>` its priority (default 10, so a hook's files run in file order).
+/// The hook must be in the catalog; the handler is typed from it when it compiles.
+fn wp_hooks(program: &loader::Program, ev: &mut eval::Evaluator, ext: &mut extract::Extracted) -> Result<(), Diag> {
+    use crate::value::Value;
+    for file in &program.wp_hooks {
+        let module = &program.modules[file.module];
+        let span = Span {
+            file: module.file,
+            start: 0,
+            end: 0,
+        };
+        let Some(hook) = crate::wordpress::hook(&file.hook) else {
+            let mut d = Diag::new(span, format!("`{}` is not a WordPress hook Zero types", file.hook));
+            d = match diag::suggest(&file.hook, crate::wordpress::hook_names()) {
+                Some(s) => d.help(format!(
+                    "did you mean `{s}`? Rename the file or directory under wp-hooks/"
+                )),
+                None => d.help(format!(
+                    "wp-hooks/ supports: {}",
+                    crate::wordpress::hook_names().collect::<Vec<_>>().join(", ")
+                )),
+            };
+            return Err(d);
+        };
+        let exports = ev.run_module(file.module)?;
+        let Some(Value::Closure(closure)) = exports.get("default") else {
+            return Err(
+                Diag::new(span, "a wp-hooks/ file needs a default-exported handler function").help(format!(
+                    "write `export default function ({}) {{ ... }}`",
+                    hook.params
+                        .iter()
+                        .map(|(n, _)| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            );
+        };
+        let priority = match exports.get("priority") {
+            None => 10,
+            Some(Value::Num(n)) if n.fract() == 0.0 && n.abs() < 1e9 => *n as i64,
+            Some(_) => {
+                return Err(Diag::new(span, "`priority` must be an integer")
+                    .help("WordPress runs lower priorities first; the default is 10"));
+            }
+        };
+        for name in exports.keys() {
+            if name != "default" && name != "priority" {
+                return Err(Diag::new(
+                    span,
+                    format!("a wp-hooks/ file exports only `default` and `priority`, not `{name}`"),
+                )
+                .help("move shared code into a module both files import"));
+            }
+        }
+        let index = ext.schema.wp_hooks.len();
+        ext.schema.wp_hooks.push(crate::schema::WpHook {
+            hook: file.hook.clone(),
+            filter: hook.filter,
+            priority,
+            args: hook.params.len(),
+            handler: String::new(),
+        });
+        ext.roots.push(extract::Root {
+            closure: closure.clone(),
+            slot: Slot::WpHook { index },
+            name: format!("wp_hook__{}_{}", file.hook, file.order),
+            plugin: None,
+        });
+    }
+    Ok(())
+}
+
+/// The committed plugin grant, read like the other compiler inputs; absent until the first build.
+fn read_plugin_lock(program: &loader::Program, path: &Path) -> Result<Option<serde_json::Value>, Diag> {
+    if !program.fs.exists(path) {
+        return Ok(None);
+    }
+    let bad = |e: String| {
+        Diag::new(Span::NONE, format!("{}: {e}", crate::plugins::LOCK_PATH)).code(diag::Code::PluginCapability)
+    };
+    let text = program.fs.read_to_string(path).map_err(|e| bad(e.to_string()))?;
+    serde_json::from_str(&text).map(Some).map_err(|e| bad(e.to_string()))
+}
+
+/// `zero/abilities.json` beside the program's `zero.config.ts`, through the program's file system,
+/// so a hosted source bundle (rooted at its own module directory, whatever `project` names) and the
+/// browser read the same lock the command line does. Absent means no locked abilities.
+fn read_lock(program: &loader::Program) -> Result<Vec<crate::wordpress::abilities::Locked>, Diag> {
+    let entry = &program.modules[program.entry].path;
+    let path = entry
+        .parent()
+        .expect("the entry has a directory")
+        .join(crate::wordpress::abilities::LOCK);
+    let path = path.as_path();
+    if !program.fs.exists(path) {
+        return Ok(Vec::new());
+    }
+    let text = program.fs.read_to_string(path).map_err(|e| {
+        Diag::new(
+            Span::NONE,
+            format!("can't read {}: {e}", crate::wordpress::abilities::LOCK),
+        )
+    })?;
+    crate::wordpress::abilities::parse_lock(&text).map_err(|m| Diag::new(Span::NONE, m).phase(diag::Code::Import))
 }
 
 impl Built {

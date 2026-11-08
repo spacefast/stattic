@@ -63,10 +63,10 @@ function _stattic_zero_send_auth_redirect(
         if (!$usersEnabled || !function_exists('spacefast_space_users_live_session')) {
             _stattic_problem_refused(404, 'space_users_disabled', 'Users is not enabled for this Space.');
         }
-        \Spacefast\Identity\Api::checkOrigin((string) ($_SERVER['HTTP_ORIGIN'] ?? ''), true);
+        spacefast_space_users_identity('Api')::checkOrigin((string) ($_SERVER['HTTP_ORIGIN'] ?? ''), true);
         $session = spacefast_space_users_live_session();
-        if ($session !== null) \Spacefast\Identity\Plugin::$sessions->revoke((int) $session['wp_user_id'], $session['id']);
-        \Spacefast\Identity\Sessions::cookie('', time() - 3600);
+        if ($session !== null) spacefast_space_users_identity('Plugin')::$sessions->revoke((int) $session['wp_user_id'], $session['id']);
+        spacefast_space_users_identity('Sessions')::cookie('', time() - 3600);
         _stattic_zero_json_response(200, ['data' => ['signedOut' => true]]);
     }
     if ($operation === 'auth_sign_out') {

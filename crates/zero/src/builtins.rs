@@ -4,6 +4,37 @@
 use crate::diag::Diag;
 use crate::diag::Span;
 
+/// A Node built-in module the compiler supplies itself. Nothing is loaded for it; its functions
+/// lower in compile/host.rs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinModule {
+    /// `"node:crypto"` / `"crypto"`, lowered onto `Zero\Crypto`.
+    NodeCrypto,
+}
+
+impl BuiltinModule {
+    /// The functions the module exports in Zero code.
+    pub const fn exports(self) -> &'static [&'static str] {
+        match self {
+            BuiltinModule::NodeCrypto => &[
+                "createHash",
+                "createHmac",
+                "randomBytes",
+                "randomUUID",
+                "timingSafeEqual",
+            ],
+        }
+    }
+}
+
+/// The one lookup for Node built-in modules, shared by `import ... from` and `require(...)`.
+pub fn module(spec: &str) -> Option<BuiltinModule> {
+    match spec {
+        "node:crypto" | "crypto" => Some(BuiltinModule::NodeCrypto),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum Phase {
     Evaluator,
@@ -67,6 +98,11 @@ pub const CONTRACTS: &[(&str, &[&str], Contract)] = &[
     ("db.builder", &["where"], overload("one filter object; updates require set(...) first", None, arity(1, 1), None)),
     ("db.builder", &["returning"], overload("no arguments", None, arity(0, 0), None)),
     ("global", &["String", "Number", "Boolean"], overload("value?: unknown", arity(0, 1), arity(0, 1), arity(0, 1))),
+    ("global", &["BigInt"], overload("value: bigint|number|string|boolean (runtime only)", None, arity(1, 1), arity(1, 1))),
+    ("BigInt", &["asIntN", "asUintN"], overload("bits: number, value: bigint (runtime only)", None, arity(2, 2), arity(2, 2))),
+    ("bigint", &["toString"], overload("radix?: number (2..36)", None, arity(0, 1), arity(0, 1))),
+    ("bigint", &["valueOf"], overload("no arguments", None, arity(0, 0), arity(0, 0))),
+    ("bigint", &["toLocaleString"], overload("refused: locale formatting depends on the host", None, None, None)),
     ("global", &["parseInt"], overload("text: string, radix?: number; other than base 10/powers of two: safe integers only", arity(1, 2), arity(1, 2), arity(0, 2))),
     ("global", &["parseFloat"], overload("text: string", arity(1, 1), arity(1, 1), arity(0, 1))),
     ("global", &["isFinite", "isNaN"], overload("value?: unknown", arity(0, 1), arity(0, 1), arity(0, 1))),
@@ -83,10 +119,13 @@ pub const CONTRACTS: &[(&str, &[&str], Contract)] = &[
     ("Object", &["keys", "values", "entries"], overload("value: object", arity(1, 1), arity(1, 1), arity(1, 1))),
     ("Object", &["fromEntries"], overload("entries: [key, value][]", arity(1, 1), arity(1, 1), arity(1, 1))),
     ("Object", &["hasOwn"], overload("receiver: data, key: propertyKey (evaluator: primitive)", arity(2, 2), arity(2, 2), arity(2, 2))),
+    ("Object", &["defineProperty"], overload("runtime-only target: plain object, key: symbol | string, descriptor: data descriptor", None, None, arity(3, 3))),
     ("Object", &["freeze"], overload("refused: object freezing is not modeled", None, None, None)),
+    ("Object", &["assign"], overload("target: object | function, ...sources: object (build time only)", arity(1, VARIADIC), None, None)),
     ("Array", &["isArray"], overload("value?: unknown", arity(0, 1), arity(1, 1), arity(0, 1))),
     ("Array", &["from"], overload("source: iterable | {length: number}, mapper?: function", arity(1, 2), arity(1, 2), arity(1, 2))),
     ("Array", &["of"], overload("...values: unknown[]", None, None, arity(0, VARIADIC))),
+    ("String", &["raw"], overload("template: { raw: string[] }, ...substitutions: unknown[]", arity(1, VARIADIC), arity(1, VARIADIC), arity(1, VARIADIC))),
     ("Number", &["isInteger", "isFinite"], overload("value?: unknown", arity(0, 1), arity(0, 1), arity(0, 1))),
     ("Number", &["isNaN"], overload("value?: unknown", None, None, arity(0, 1))),
     ("Number", &["parseInt"], overload("text: string, radix?: number; other than base 10/powers of two: safe integers only", None, arity(1, 2), arity(0, 2))),
@@ -114,7 +153,25 @@ pub const CONTRACTS: &[(&str, &[&str], Contract)] = &[
     ("constructor", &["RegExp"], overload("pattern?: string|RegExp, flags?: string", None, arity(0, 2), arity(0, 2))),
     ("constructor", &["Date"], overload("value?: unknown; primitive conversion, ISO date strings only", None, arity(0, 1), arity(0, 1))),
     ("constructor", &["Error", "TypeError", "RangeError"], overload("runtime-only message?: string; options without cause", None, arity(0, 2), arity(0, 2))),
-    ("constructor", &["Map", "Set"], overload("entries?: iterable", None, None, arity(0, 1))),
+    ("constructor", &["Map", "Set"], overload("entries?: iterable (evaluator: array of static data; read-only)", arity(0, 1), arity(0, 1), arity(0, 1))),
+    ("constructor", &["WeakMap", "WeakSet"], overload("entries?: iterable of object keys (evaluator: none)", arity(0, 0), None, arity(0, 1))),
+    ("constructor", &["Symbol"], overload("refused: Symbol is not a constructor; call Symbol(description)", None, None, None)),
+    ("global", &["Symbol"], overload("description?: unknown", arity(0, 1), None, arity(0, 1))),
+    ("Symbol", &["for"], overload("key: string", arity(1, 1), None, arity(0, 1))),
+    ("Symbol", &["keyFor"], overload("symbol: symbol", arity(1, 1), None, arity(0, 1))),
+    ("symbol", &["toString", "valueOf"], overload("no semantic arguments", None, None, arity(0, VARIADIC))),
+    ("weakmap", &["get", "has", "delete"], overload("key: object", None, None, arity(0, 1))),
+    ("weakmap", &["set"], overload("key: object, value: unknown", None, None, arity(0, 2))),
+    ("weakset", &["add", "has", "delete"], overload("value: object", None, None, arity(0, 1))),
+    ("constructor", &["Promise"], overload("executor: (resolve, reject) => void; imported JavaScript only", None, None, arity(1, 1))),
+    ("constructor", &["ReadableStream", "WritableStream"], overload("source?: object, strategy?: { highWaterMark }; imported JavaScript only", None, None, arity(0, 2))),
+    ("constructor", &["TransformStream"], overload("transformer?: object; imported JavaScript only", None, None, arity(0, 1))),
+    ("Promise", &["resolve", "reject"], overload("value?: unknown; imported JavaScript only", None, None, arity(0, 1))),
+    ("Promise", &["all", "allSettled", "any", "race"], overload("values: iterable; imported JavaScript only", None, None, arity(1, 1))),
+    ("Promise", &["withResolvers"], overload("no arguments; imported JavaScript only", None, None, arity(0, 0))),
+    ("promise", &["then"], overload("onFulfilled?: function, onRejected?: function", None, None, arity(0, 2))),
+    ("promise", &["catch", "finally"], overload("callback?: function", None, None, arity(0, 1))),
+    ("generator", &["next", "return", "throw"], overload("value?: unknown", None, None, arity(0, 1))),
     ("number", &["toString"], overload("decimal only", arity(0, 0), arity(0, 0), arity(0, 0))),
     ("array", &["map", "filter", "find", "findIndex", "some", "every", "flatMap", "forEach"], overload("callback: function (thisArg refused)", arity(1, 1), arity(1, 1), arity(1, 1))),
     ("array", &["findLast", "findLastIndex"], overload("callback: function (thisArg refused)", None, arity(1, 1), arity(1, 1))),
@@ -134,9 +191,17 @@ pub const CONTRACTS: &[(&str, &[&str], Contract)] = &[
     ("date", &["toISOString", "toJSON", "getTime", "valueOf"], overload("no arguments", None, arity(0, 0), arity(0, 0))),
     ("regex", &["test"], overload("text: string", None, arity(1, 1), arity(0, 1))),
     ("regex", &["exec"], overload("text: string", None, None, arity(0, 1))),
-    ("set", &["add", "has"], overload("value: unknown", None, None, arity(0, 1))),
-    ("map", &["get", "has"], overload("key: unknown", None, None, arity(0, 1))),
-    ("map", &["set"], overload("key: unknown, value: unknown", None, None, arity(0, 2))),
+    ("set", &["has"], overload("value: unknown", arity(1, 1), arity(1, 1), arity(0, 1))),
+    ("set", &["add", "delete"], overload("value: unknown", None, arity(1, 1), arity(0, 1))),
+    ("map", &["get", "has"], overload("key: unknown", arity(1, 1), arity(1, 1), arity(0, 1))),
+    ("map", &["delete"], overload("key: unknown", None, arity(1, 1), arity(0, 1))),
+    ("map", &["set"], overload("key: unknown, value: unknown", None, arity(2, 2), arity(0, 2))),
+    ("set", &["clear", "keys", "values", "entries"], overload("no arguments", None, arity(0, 0), arity(0, VARIADIC))),
+    ("map", &["clear", "keys", "values", "entries"], overload("no arguments", None, arity(0, 0), arity(0, VARIADIC))),
+    ("set", &["forEach"], overload("callback: function (thisArg refused)", None, arity(1, 1), arity(1, 2))),
+    ("map", &["forEach"], overload("callback: function (thisArg refused)", None, arity(1, 1), arity(1, 2))),
+    ("array", &["keys", "values", "entries"], overload("no arguments", None, arity(0, 0), arity(0, VARIADIC))),
+    ("iterator", &["next"], overload("no arguments", None, None, arity(0, VARIADIC))),
     ("string", &["valueOf"], overload("no semantic arguments", None, None, arity(0, VARIADIC))),
     ("number", &["valueOf"], overload("no semantic arguments", None, None, arity(0, VARIADIC))),
     ("array", &["toString", "valueOf"], overload("no semantic arguments", None, None, arity(0, VARIADIC))),
@@ -150,13 +215,13 @@ pub const CONTRACTS: &[(&str, &[&str], Contract)] = &[
     ("function", &["apply"], overload("thisArg?: unknown, arguments?: array-like", None, None, arity(0, 2))),
     ("function", &["valueOf"], overload("no semantic arguments", None, None, arity(0, VARIADIC))),
 
-    ("array", &["copyWithin", "keys", "entries", "values", "reduceRight", "toSpliced", "with", "toLocaleString"], overload("unimplemented native methods are refused", None, None, None)),
+    ("array", &["copyWithin", "reduceRight", "toSpliced", "with", "toLocaleString"], overload("unimplemented native methods are refused", None, None, None)),
     ("string", &["anchor", "big", "blink", "bold", "codePointAt", "fontcolor", "fontsize", "fixed", "isWellFormed", "italics", "link", "matchAll", "normalize", "search", "small", "strike", "sub", "substr", "sup", "toWellFormed", "trimLeft", "trimRight", "toLocaleLowerCase", "toLocaleUpperCase"], overload("unimplemented native methods are refused", None, None, None)),
     ("number", &["toExponential", "toPrecision", "toLocaleString"], overload("unimplemented native methods are refused", None, None, None)),
     ("regex", &["compile"], overload("unimplemented native methods are refused", None, None, None)),
     ("date", &["toString", "toDateString", "toTimeString", "toUTCString", "toGMTString", "getDate", "setDate", "getDay", "getFullYear", "setFullYear", "getHours", "setHours", "getMilliseconds", "setMilliseconds", "getMinutes", "setMinutes", "getMonth", "setMonth", "getSeconds", "setSeconds", "setTime", "getTimezoneOffset", "getUTCDate", "setUTCDate", "getUTCDay", "getUTCFullYear", "setUTCFullYear", "getUTCHours", "setUTCHours", "getUTCMilliseconds", "setUTCMilliseconds", "getUTCMinutes", "setUTCMinutes", "getUTCMonth", "setUTCMonth", "getUTCSeconds", "setUTCSeconds", "getYear", "setYear", "toLocaleString", "toLocaleDateString", "toLocaleTimeString", "toTemporalInstant"], overload("unimplemented native methods are refused", None, None, None)),
-    ("set", &["delete", "difference", "clear", "entries", "forEach", "intersection", "isSubsetOf", "isSupersetOf", "isDisjointFrom", "symmetricDifference", "union", "values", "keys"], overload("unimplemented native methods are refused", None, None, None)),
-    ("map", &["delete", "clear", "entries", "forEach", "keys", "values", "getOrInsert", "getOrInsertComputed"], overload("unimplemented native methods are refused", None, None, None)),
+    ("set", &["difference", "intersection", "isSubsetOf", "isSupersetOf", "isDisjointFrom", "symmetricDifference", "union"], overload("unimplemented native methods are refused", None, None, None)),
+    ("map", &["getOrInsert", "getOrInsertComputed"], overload("unimplemented native methods are refused", None, None, None)),
     ("function", &["bind", "toString"], overload("unimplemented native methods are refused", None, None, None)),
     ("Math", &["acos", "acosh", "asin", "asinh", "atan", "atanh", "atan2", "cbrt", "expm1", "clz32", "cos", "cosh", "fround", "hypot", "imul", "log1p", "log2", "log10", "sin", "sinh", "tan", "tanh", "f16round"], overload("unimplemented native methods are refused", None, None, None)),
 ];

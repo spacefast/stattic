@@ -43,9 +43,25 @@ fn command(project: &Path, mode: &str) -> Result<Command, String> {
     Ok(command)
 }
 
-/// Used by legacy migration too, so its default target is the same local site as `zero dev`.
+/// WP-CLI on the project's dev site (`zero wp`, and the site commands without `--site`).
 pub(super) fn wp_command(project: &Path) -> Result<Command, String> {
     command(project, "wp")
+}
+
+/// The dev site's URL, for the commands that speak HTTP (`sync`) when `--site` is absent.
+pub(super) fn url(project: &Path) -> Result<String, String> {
+    let project = project
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", project.display()))?;
+    let out = command(&project, "status")?
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(|e| format!("zero needs Node.js 22+ and npm (npx) for the dev site: {e}"))?;
+    let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    match status["siteUrl"].as_str() {
+        Some(url) if out.status.success() && status["isOnline"] == true => Ok(url.trim_end_matches('/').to_string()),
+        _ => Err("the dev site is not running; start it with zero dev, or pass --site <url>".into()),
+    }
 }
 
 pub(super) fn run(args: &crate::cli::Args) -> ExitCode {
@@ -67,8 +83,6 @@ pub(super) fn run(args: &crate::cli::Args) -> ExitCode {
             if args.allow_destructive {
                 command.arg("--allow-destructive");
             }
-        } else if mode == "wp" {
-            command.args(args.rest.iter().skip(1));
         }
         let status = command
             .status()

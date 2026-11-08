@@ -277,6 +277,57 @@ pub fn resolve(config: &Config, required: &[Plugin]) -> Result<Plan> {
     Ok(plan)
 }
 
+/// `supported.json`: the plugins and version ranges the Zero team tests.
+#[derive(Deserialize)]
+struct Supported {
+    plugins: BTreeMap<String, Range>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Range {
+    min: String,
+    below: Option<String>,
+}
+
+fn supported() -> Supported {
+    serde_json::from_str(include_str!("supported.json")).expect("src/wp_plugins/supported.json is valid")
+}
+
+const ISSUES: &str = "https://github.com/spacefast/zero/issues";
+
+/// One warning per declared plugin outside `supported.json`. Zero still installs it: this is advice,
+/// not a refusal, because Zero does not support every WordPress plugin.
+pub fn unsupported(config: &Config) -> Vec<String> {
+    let supported = supported();
+    config
+        .plugins
+        .iter()
+        .filter_map(|p| {
+            let reason = match supported.plugins.get(&p.slug) {
+                None => format!("plugin {} {} is not supported by the Zero team", p.slug, p.version),
+                Some(r)
+                    if !version::at_least(&p.version, &r.min)
+                        || r.below.as_ref().is_some_and(|below| version::at_least(&p.version, below)) =>
+                {
+                    let range = match &r.below {
+                        Some(below) => format!(">= {}, < {below}", r.min),
+                        None => format!(">= {}", r.min),
+                    };
+                    format!(
+                        "plugin {} {} is outside the version range the Zero team supports ({range})",
+                        p.slug, p.version
+                    )
+                }
+                Some(_) => return None,
+            };
+            Some(format!(
+                "{reason}. Zero installs it, but doesn't test it; Zero doesn't support every WordPress plugin. To ask for support, open an issue: {ISSUES}"
+            ))
+        })
+        .collect()
+}
+
 pub fn digest(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
@@ -328,4 +379,36 @@ fn acquire(plugin: &Plugin, pin: Option<&str>, cache: &Path, url: &str) -> Resul
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_warns_outside_the_manifest_and_its_ranges() {
+        let config = parse(serde_json::json!({
+            "classic-editor": "1.6.7",
+            "polylang": "4.0",
+            "secure-custom-fields": "6.9.6",
+            "hello-dolly": "1.7.2",
+        }))
+        .unwrap();
+        let warnings = unsupported(&config);
+        assert_eq!(warnings.len(), 3, "{warnings:#?}");
+        assert!(warnings[0].starts_with("plugin hello-dolly 1.7.2 is not supported by the Zero team."));
+        assert!(
+            warnings[1]
+                .starts_with("plugin polylang 4.0 is outside the version range the Zero team supports (>= 3.9, < 4).")
+        );
+        assert!(warnings[2].starts_with("plugin secure-custom-fields 6.9.6 is outside"));
+        assert!(warnings.iter().all(|w| w.ends_with(ISSUES)));
+    }
+
+    /// Zero installs its platform pins itself, so they must sit inside the ranges it claims to support.
+    #[test]
+    fn platform_pins_are_supported() {
+        let plugins = crate::platform::plugins(true);
+        assert_eq!(unsupported(&Config { plugins }), Vec::<String>::new());
+    }
 }

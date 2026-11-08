@@ -12,7 +12,8 @@ pub(crate) fn write_metadata(stage: &std::path::Path, built: &crate::pipeline::B
     std::fs::write(stage.join("zero-deployment.json"), serde_json::to_vec_pretty(&value)?)
 }
 
-pub(crate) fn cli(args: &[String]) -> ExitCode {
+/// `zero deploy <mode> …`: the offline adapter (runtime/Zero/Deployment/Local.php) on its own PHP.
+pub(crate) fn adapter(args: &[String]) -> ExitCode {
     let result = (|| -> std::io::Result<ExitCode> {
         let directory = tempfile::tempdir()?;
         for (name, bytes) in [

@@ -1,10 +1,13 @@
 //! `zero sync` (design §5.4).
 //!
 //! ```text
-//! zero sync [dir] --site <url> (--app-password <user:pass> | --bearer <jwt>) [--only c1,c2] [--check] [--no-commit] [--json]
+//! zero sync [dir] [--site <url>] [--only c1,c2] [--check] [--no-commit] [--json]
 //! zero sync status [dir] --site …     what a sync would do; writes nothing
 //! zero sync resolve <uid> [dir] --site …
 //! ```
+//!
+//! Without `--site`, the project's running dev site. The credential comes from the environment: `ZERO_APP_PASSWORD` (`user:application-password`) or
+//! `ZERO_TOKEN` (a bearer token from the identity plugin).
 //!
 //! Exit codes: 0 ok, 1 failed, 2 changes pending or conflicts (`--check`), 3 usage, 4 auth.
 
@@ -15,7 +18,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: zero sync [status | resolve <uid>] [dir] --site <url> (--app-password <user:pass> | --bearer <jwt>) [--only c1,c2] [--check] [--no-commit] [--json]";
+const USAGE: &str = "usage: zero sync [status | resolve <uid>] [dir] [--site <url>] [--only c1,c2] [--check] [--no-commit] [--json]\n       credential: ZERO_APP_PASSWORD=<user:application-password> or ZERO_TOKEN=<bearer token>";
 
 struct Flags {
     mode: Mode,
@@ -51,8 +54,6 @@ fn parse(args: &[String]) -> Result<Flags, String> {
         let mut value = |name: &str| it.next().cloned().ok_or(format!("{name} needs a value"));
         match a.as_str() {
             "--site" => flags.site = Some(value("--site")?),
-            "--app-password" => flags.credential = Some(Credential::AppPassword(value("--app-password")?)),
-            "--bearer" => flags.credential = Some(Credential::Bearer(value("--bearer")?)),
             "--only" => {
                 flags.only = Some(
                     value("--only")?
@@ -88,15 +89,13 @@ fn parse(args: &[String]) -> Result<Flags, String> {
     if flags.check && matches!(flags.mode, Mode::Resolve(_)) {
         return Err("resolve writes both sides; it has no --check (zero sync --check shows the conflict)".into());
     }
-    flags.site = flags
-        .site
-        .or_else(|| std::env::var("ZERO_SITE").ok().filter(|s| !s.is_empty()));
-    if flags.credential.is_none() {
-        flags.credential = std::env::var("ZERO_APP_PASSWORD")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(Credential::AppPassword);
-    }
+    let env = |name: &str| std::env::var(name).ok().filter(|s| !s.is_empty());
+    flags.credential = match (env("ZERO_APP_PASSWORD"), env("ZERO_TOKEN")) {
+        (Some(_), Some(_)) => return Err("set ZERO_APP_PASSWORD or ZERO_TOKEN, not both".into()),
+        (Some(password), None) => Some(Credential::AppPassword(password)),
+        (None, Some(token)) => Some(Credential::Bearer(token)),
+        (None, None) => None,
+    };
     Ok(flags)
 }
 
@@ -108,10 +107,18 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    let (Some(site), Some(credential)) = (flags.site.clone(), flags.credential) else {
-        eprintln!(
-            "zero sync needs --site (or ZERO_SITE) and a credential: --app-password or --bearer (or ZERO_APP_PASSWORD)\n{USAGE}"
-        );
+    let site = match flags.site.clone() {
+        Some(site) => Some(site),
+        None => match super::dev::url(&flags.project) {
+            Ok(url) => Some(url),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(3);
+            }
+        },
+    };
+    let (Some(site), Some(credential)) = (site, flags.credential) else {
+        eprintln!("zero sync needs a credential in ZERO_APP_PASSWORD or ZERO_TOKEN\n{USAGE}");
         return ExitCode::from(3);
     };
     let project = flags.project.canonicalize().unwrap_or(flags.project.clone());

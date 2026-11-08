@@ -38,16 +38,61 @@ pub enum Value {
     Action(Rc<ActionVal>),
     Job(Rc<ActionVal>),
     Route(Rc<ActionVal>),
+    /// `definePlugin({ name, hooks, actions, jobs, routes })`, registered in `defineConfig({ use })`.
+    Plugin(Rc<ActionVal>),
     FileBucket(Rc<FileBucketVal>),
     Env(Rc<str>),
     Global(Rc<GlobalVal>),
     Regex(Rc<str>, Rc<str>),
+    /// A module-level `new Map(entries)` / `new Set(values)`: build-time contents in insertion
+    /// order. Configuration reads them; compiled code captures one shared runtime collection.
+    Coll(Rc<CollVal>),
+    /// A JavaScript symbol created while the config is evaluated.
+    Symbol(Rc<SymbolVal>),
+    /// An empty `WeakMap` (`set == false`) or `WeakSet` created at module level.
+    /// Each request gets its own; entries can only be added in compiled code.
+    Weak(Rc<WeakVal>),
+}
+
+#[derive(Debug)]
+pub struct CollVal {
+    pub set: bool,
+    /// (key, value); a Set stores each value as its key.
+    pub entries: Vec<(Value, Value)>,
+}
+
+/// Registered and well-known symbols are identified by name; others by allocation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SymbolVal {
+    Registered(Rc<str>),
+    WellKnown(&'static str),
+    Unique(Option<Rc<str>>),
+}
+
+/// The well-known symbols compiled code can read from `Symbol`.
+pub const WELL_KNOWN_SYMBOLS: &[&str] = &["asyncIterator", "hasInstance", "iterator", "toStringTag"];
+
+impl SymbolVal {
+    pub fn description(&self) -> Option<String> {
+        match self {
+            SymbolVal::Registered(key) => Some(key.to_string()),
+            SymbolVal::WellKnown(name) => Some(format!("Symbol.{name}")),
+            SymbolVal::Unique(description) => description.as_ref().map(|d| d.to_string()),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WeakVal {
+    pub set: bool,
 }
 
 #[derive(Debug)]
 pub struct ClassValue {
     pub class: Rc<crate::ir::Class>,
     pub base: Option<Rc<ClassValue>>,
+    /// `extends Error` (or TypeError/RangeError): the built-in root when there is no class base.
+    pub builtin_base: Option<&'static str>,
     pub env: Rc<Scope>,
     pub statics: IndexMap<String, Value>,
 }
@@ -56,7 +101,39 @@ pub struct ClassValue {
 pub struct Closure {
     pub func: Rc<Func>,
     pub env: Rc<Scope>,
+    /// Own properties written at build time (`f.x = 1`, `Object.assign(f, ...)`).
+    /// Compiled code reads them through static member chains; PHP closures can't carry them.
+    pub props: RefCell<IndexMap<String, Value>>,
 }
+
+impl Closure {
+    pub fn new(func: Rc<Func>, env: Rc<Scope>) -> Closure {
+        Closure {
+            func,
+            env,
+            props: RefCell::default(),
+        }
+    }
+
+    pub fn has_props(&self) -> bool {
+        !self.props.borrow().is_empty()
+    }
+}
+
+/// Function properties Zero doesn't model: built-in own properties and `Function.prototype`.
+pub const FUNCTION_BUILTIN_PROPERTIES: &[&str] = &[
+    "name",
+    "length",
+    "prototype",
+    "arguments",
+    "caller",
+    "call",
+    "apply",
+    "bind",
+    "toString",
+    "valueOf",
+    "__proto__",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Builtin {
@@ -70,6 +147,7 @@ pub enum Builtin {
     DefineGlobal,
     DefineRelations,
     DefineConfig,
+    DefinePlugin,
     Action,
     Job,
     Route,
@@ -77,12 +155,14 @@ pub enum Builtin {
     Env,
     Once,
     Jobs,
-    /// `fetch(url, init?)`: outbound HTTPS, compiled to `Zero\Fetch::call`.
-    Fetch,
-    /// `crypto.sha256(...)` and friends from "zero", compiled to `Zero\Crypto`.
-    Crypto,
+    /// `"node:crypto"`: the module namespace (`None`) or one of its supported functions.
+    NodeCrypto(Option<&'static str>),
     /// `mail.send(message)` from "zero", compiled to `Zero\Mail::send`.
     Mail,
+    /// `abilities.call(name, input)` from "php/wordpress", compiled to `Zero\Wp\Abilities\Call::run`.
+    Abilities,
+    /// A catalog WordPress function from "php/wordpress", compiled to `Zero\Wp\Functions::call`.
+    WpFunction(Rc<str>),
     /// Runtime-only values: usable in compiled code, an error at build time.
     Db,
     HttpError,
@@ -92,6 +172,8 @@ pub enum Builtin {
     Global(&'static str),
     /// A static function on a global, e.g. `Math.max`.
     Static(&'static str, Rc<str>),
+    /// `require` in the CommonJS module with this id; it only runs while the config is built.
+    Require(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -307,7 +389,10 @@ impl Value {
             Value::Bool(_) => "boolean",
             Value::Num(_) => "number",
             Value::Str(_) => "string",
-            Value::Builtin(Builtin::Db | Builtin::Jobs | Builtin::Global("Math" | "JSON" | "console")) => "object",
+            Value::Builtin(
+                Builtin::Db | Builtin::Jobs | Builtin::Global("Math" | "JSON" | "console" | "globalThis"),
+            ) => "object",
+            Value::Symbol(_) => "symbol",
             Value::Class(_) | Value::Closure(_) | Value::Builtin(_) | Value::Bound(..) => "function",
             _ => "object",
         }
@@ -334,10 +419,14 @@ impl Value {
             Value::Action(_) => "an action".into(),
             Value::Job(_) => "a job".into(),
             Value::Route(_) => "a route".into(),
+            Value::Plugin(_) => "a plugin".into(),
             Value::FileBucket(_) => "a file bucket".into(),
             Value::Env(n) => format!("env({n:?})"),
             Value::Global(g) => format!("global \"{}\"", g.name),
             Value::Regex(p, f) => format!("/{}/{f}", crate::builtins::regex_source(p)),
+            Value::Coll(c) => (if c.set { "a Set" } else { "a Map" }).into(),
+            Value::Symbol(s) => format!("Symbol({})", s.description().unwrap_or_default()),
+            Value::Weak(w) => if w.set { "a WeakSet" } else { "a WeakMap" }.into(),
         }
     }
 
@@ -397,7 +486,13 @@ impl Value {
             (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
             (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
             (Value::Regex(a, af), Value::Regex(b, bf)) => Rc::ptr_eq(a, b) && Rc::ptr_eq(af, bf),
+            (Value::Symbol(a), Value::Symbol(b)) => match (&**a, &**b) {
+                (SymbolVal::Unique(_), SymbolVal::Unique(_)) => Rc::ptr_eq(a, b),
+                (a, b) => a == b,
+            },
+            (Value::Weak(a), Value::Weak(b)) => Rc::ptr_eq(a, b),
             (Value::Collection(a), Value::Collection(b)) => Rc::ptr_eq(a, b),
+            (Value::Coll(a), Value::Coll(b)) => Rc::ptr_eq(a, b),
             (Value::Builtin(a), Value::Builtin(b)) => a == b,
             _ => false,
         }

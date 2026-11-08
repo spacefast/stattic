@@ -16,7 +16,7 @@ final class Security
     }
     public static function hash(string $value): string
     {
-        return hash_hmac("sha256", $value, wp_salt("auth"));
+        return wp_hash($value, "auth", "sha256");
     }
     public static function seal(string $value): string
     {

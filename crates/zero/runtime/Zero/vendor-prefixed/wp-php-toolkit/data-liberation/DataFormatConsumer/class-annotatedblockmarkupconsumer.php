@@ -2,7 +2,7 @@
 
 namespace Zero\Vendor\WordPress\DataLiberation\DataFormatConsumer;
 
-use Zero_Vendor_WP_HTML_Processor as WP_HTML_Processor;
+use WP_HTML_Processor;
 
 /**
  * Converts a metadata-annotated block markup into block markup+metadata pair.

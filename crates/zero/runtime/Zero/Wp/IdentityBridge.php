@@ -27,7 +27,7 @@ final class IdentityBridge implements Issuer
         return Runtime::identity() && did_action('zero_runtime_loaded') > 0;
     }
 
-    /** zero-identity hooks: shared transactions on $wpdb, the guest role, `wp zero-identity` suspension. */
+    /** zero-identity hooks: shared transactions on $wpdb, the guest role, `wp zero identity` suspension. */
     public static function hook(Connection $db): void
     {
         if (self::$hooked) {

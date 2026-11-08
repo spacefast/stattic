@@ -6,7 +6,6 @@ namespace Zero\Sync;
 
 use Zero\Extensions;
 use Zero\HttpError;
-use Zero\Js;
 use Zero\Viewer;
 use Zero\Wp\Plugin;
 
@@ -121,7 +120,7 @@ final class Module
         // add_option() overwrites on a concurrent first boot; the first id written must win.
         $connection = Plugin::instance()->connection();
         $options = $connection->wpdb()->options;
-        $connection->run("INSERT IGNORE INTO `$options` (option_name, option_value, autoload) VALUES (?, ?, 'off')", [self::SITE_OPTION, Js::uuid()]);
+        $connection->run("INSERT IGNORE INTO `$options` (option_name, option_value, autoload) VALUES (?, ?, 'off')", [self::SITE_OPTION, wp_generate_uuid4()]);
         $connection->touchOption(self::SITE_OPTION);
 
         return (string) $connection->run("SELECT option_value FROM `$options` WHERE option_name = ?", [self::SITE_OPTION])[0]['option_value'];

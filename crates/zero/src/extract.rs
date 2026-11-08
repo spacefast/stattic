@@ -15,15 +15,40 @@ use std::rc::Rc;
 /// Where a compiled function's PHP name goes once it's known.
 #[derive(Debug, Clone)]
 pub enum Slot {
-    Hook { table: String, kind: HookKind },
-    Default { at: ColPath },
-    OnUpdate { at: ColPath },
-    Validate { at: ColPath },
-    ActionHandler { action: String },
-    Access { owner: Owner, op: String },
-    FieldAccess { at: ColPath, op: String },
-    JobHandler { job: String },
-    RouteHandler { route: String },
+    Hook {
+        table: String,
+        kind: HookKind,
+    },
+    Default {
+        at: ColPath,
+    },
+    OnUpdate {
+        at: ColPath,
+    },
+    Validate {
+        at: ColPath,
+    },
+    ActionHandler {
+        action: String,
+    },
+    Access {
+        owner: Owner,
+        op: String,
+    },
+    FieldAccess {
+        at: ColPath,
+        op: String,
+    },
+    JobHandler {
+        job: String,
+    },
+    RouteHandler {
+        route: String,
+    },
+    /// A `wp-hooks/` handler; `index` is its place in `Schema::wp_hooks`.
+    WpHook {
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +57,8 @@ pub struct Root {
     pub slot: Slot,
     /// Suggested PHP function name.
     pub name: String,
+    /// Index into `Extracted::plugins` when a plugin registered this function.
+    pub plugin: Option<usize>,
 }
 
 pub struct Extracted {
@@ -42,6 +69,8 @@ pub struct Extracted {
     /// Non-fatal advice printed by `zero build` (§3.5.1 postmeta hint).
     pub hints: Vec<String>,
     pub plugins: Option<crate::wp_plugins::Config>,
+    /// `defineConfig({ use })`: plugin packages, in registration order.
+    pub uses: Vec<crate::plugins::Plugin>,
 }
 
 const CONFIG_KEYS: &[&str] = &[
@@ -63,6 +92,7 @@ const CONFIG_KEYS: &[&str] = &[
     "plugins",
     "admin",
     "services",
+    "use",
 ];
 const COLLECTION_OPTIONS: &[&str] = &[
     "storageName",
@@ -149,6 +179,7 @@ pub fn extract(config: &Value, ev: &mut Evaluator<'_>, config_span: Span, defaul
         collections: Vec::new(),
         hints: Vec::new(),
         plugins: None,
+        uses: Vec::new(),
     };
 
     out.schema.name = match cfg_map.get("name") {
@@ -378,164 +409,264 @@ pub fn extract(config: &Value, ev: &mut Evaluator<'_>, config_span: Span, defaul
         }
     }
 
-    // Hooks
     if let Some(hooks_val) = cfg_map.get("hooks") {
-        let hspan = span_of(ev, config, "hooks", config_span);
-        let Value::Object(hooks) = hooks_val else {
-            return Err(Diag::new(hspan, "`hooks` must be an object keyed by collection"));
+        hooks(hooks_val, span_of(ev, config, "hooks", config_span), ev, &mut out, None)?;
+    }
+    if let Some(actions_val) = cfg_map.get("actions") {
+        actions(
+            actions_val,
+            span_of(ev, config, "actions", config_span),
+            ev,
+            &mut out,
+            None,
+        )?;
+    }
+    phase2_jobs(&cfg_map, ev, config_span, &mut out)?;
+    routes(&cfg_map, config_span, &mut out)?;
+    if let Some(v) = cfg_map.get("use").filter(|v| !matches!(v, Value::Undef)) {
+        uses(v, span_of(ev, config, "use", config_span), ev, &mut out)?;
+    }
+    validate_phase2(&cfg_map, ev, config_span, &mut out)?;
+    Ok(out)
+}
+
+/// `hooks.<collectionKey>.<hook>`, from the app or from a plugin (`plugin`: index and name).
+fn hooks(
+    hooks_val: &Value,
+    hspan: Span,
+    ev: &mut Evaluator<'_>,
+    out: &mut Extracted,
+    plugin: Option<(usize, &str)>,
+) -> Result<()> {
+    let Value::Object(hooks) = hooks_val else {
+        return Err(Diag::new(hspan, "`hooks` must be an object keyed by collection"));
+    };
+    for (key, per) in hooks.borrow().iter() {
+        let kspan = ev.key_span(hooks_val, key).unwrap_or(hspan);
+        let Some(coll) = out.schema.by_key(key) else {
+            let mut d = Diag::new(
+                kspan,
+                format!("`hooks.{key}` doesn't match a registered collection, table, or user projection"),
+            );
+            let keys: Vec<&str> = out.schema.collections.values().map(|c| c.key.as_str()).collect();
+            if let Some(s) = suggest(key, keys) {
+                d = d.help(format!("did you mean `{s}`?"));
+            }
+            return Err(d);
         };
-        for (key, per) in hooks.borrow().iter() {
-            let kspan = span_of(ev, hooks_val, key, hspan);
-            let Some(coll) = out.schema.by_key(key) else {
-                let mut d = Diag::new(
-                    kspan,
-                    format!("`hooks.{key}` doesn't match a registered collection, table, or user projection"),
-                );
-                let keys: Vec<&str> = out.schema.collections.values().map(|c| c.key.as_str()).collect();
-                if let Some(s) = suggest(key, keys) {
+        let table = coll.table.clone();
+        let Value::Object(per_map) = per else {
+            return Err(Diag::new(
+                kspan,
+                format!("`hooks.{key}` must be an object of hook functions"),
+            ));
+        };
+        for (hname, f) in per_map.borrow().iter() {
+            let fspan = ev.key_span(per, hname).unwrap_or(kspan);
+            let Some(kind) = HookKind::parse(hname) else {
+                let mut d = Diag::new(fspan, format!("there's no hook called `{hname}`"));
+                if let Some(s) = suggest(hname, HookKind::ALL.iter().map(|h| h.name())) {
                     d = d.help(format!("did you mean `{s}`?"));
                 }
                 return Err(d);
             };
-            let table = coll.table.clone();
-            let Value::Object(per_map) = per else {
+            let Value::Closure(f) = f else {
                 return Err(Diag::new(
-                    kspan,
-                    format!("`hooks.{key}` must be an object of hook functions"),
+                    fspan,
+                    format!("`{hname}` must be a function, not {}", f.describe()),
                 ));
             };
-            for (hname, f) in per_map.borrow().iter() {
-                let fspan = span_of(ev, per, hname, kspan);
-                let Some(kind) = HookKind::parse(hname) else {
-                    let mut d = Diag::new(fspan, format!("there's no hook called `{hname}`"));
-                    if let Some(s) = suggest(hname, HookKind::ALL.iter().map(|h| h.name())) {
-                        d = d.help(format!("did you mean `{s}`?"));
+            if kind == HookKind::BeforeCreate {
+                let coll = out.schema.collections.get_mut(&table).expect("collection");
+                // Plugin hooks run before the app's; any of them may fill a required column.
+                for k in assigned_keys(f) {
+                    if !coll.before_create_fills.contains(&k)
+                        && coll
+                            .columns
+                            .get(&k)
+                            .is_some_and(|c| c.not_null && c.default.is_none() && !c.auto_increment)
+                    {
+                        coll.before_create_fills.push(k);
                     }
-                    return Err(d);
-                };
-                let Value::Closure(f) = f else {
-                    return Err(Diag::new(
-                        fspan,
-                        format!("`{hname}` must be a function, not {}", f.describe()),
-                    ));
-                };
-                if kind == HookKind::BeforeCreate {
-                    let coll = out.schema.collections.get_mut(&table).expect("collection");
-                    coll.before_create_fills = assigned_keys(f)
-                        .into_iter()
-                        .filter(|k| {
-                            coll.columns
-                                .get(k)
-                                .is_some_and(|c| c.not_null && c.default.is_none() && !c.auto_increment)
-                        })
-                        .collect();
                 }
-                out.roots.push(Root {
-                    closure: f.clone(),
-                    slot: Slot::Hook {
-                        table: table.clone(),
-                        kind,
-                    },
-                    name: format!("{table}__{hname}"),
-                });
             }
+            out.roots.push(Root {
+                closure: f.clone(),
+                slot: Slot::Hook {
+                    table: table.clone(),
+                    kind,
+                },
+                name: format!("{table}__{hname}"),
+                plugin: plugin.map(|(i, _)| i),
+            });
         }
     }
+    Ok(())
+}
 
-    // Actions
-    if let Some(actions_val) = cfg_map.get("actions") {
-        let aspan = span_of(ev, config, "actions", config_span);
-        let Value::Object(actions) = actions_val else {
-            return Err(Diag::new(aspan, "`actions` must be an object of action(...) values"));
+/// `actions.<name>`; a plugin's are registered as `<plugin>_<name>`.
+fn actions(
+    actions_val: &Value,
+    aspan: Span,
+    ev: &mut Evaluator<'_>,
+    out: &mut Extracted,
+    plugin: Option<(usize, &str)>,
+) -> Result<()> {
+    let Value::Object(actions) = actions_val else {
+        return Err(Diag::new(aspan, "`actions` must be an object of action(...) values"));
+    };
+    for (name, a) in actions.borrow().iter() {
+        let nspan = ev.key_span(actions_val, name).unwrap_or(aspan);
+        if !valid_ident(name) {
+            return Err(Diag::new(nspan, format!("\"{name}\" isn't a valid action name")));
+        }
+        let name = &registered(plugin, name);
+        if out.schema.actions.contains_key(name) {
+            return Err(Diag::new(nspan, format!("two actions are both registered as `{name}`"))
+                .help("rename one; plugin actions are registered as <plugin>_<name>"));
+        }
+        let Value::Action(a) = a else {
+            return Err(Diag::new(
+                nspan,
+                format!("action `{name}` must be wrapped in action({{ input, handler }})"),
+            ));
         };
-        for (name, a) in actions.borrow().iter() {
-            let nspan = span_of(ev, actions_val, name, aspan);
-            if !valid_ident(name) {
-                return Err(Diag::new(nspan, format!("\"{name}\" isn't a valid action name")));
-            }
-            let Value::Action(a) = a else {
+        let Value::Object(cfg) = &a.config else { unreachable!() };
+        let cfg = cfg.borrow().clone();
+        for k in cfg.keys() {
+            if !matches!(
+                k.as_str(),
+                "input" | "handler" | "access" | "agents" | "idempotent" | "signature"
+            ) {
                 return Err(Diag::new(
-                    nspan,
-                    format!("action `{name}` must be wrapped in action({{ input, handler }})"),
-                ));
-            };
-            let Value::Object(cfg) = &a.config else { unreachable!() };
-            let cfg = cfg.borrow().clone();
-            for k in cfg.keys() {
-                if !matches!(
-                    k.as_str(),
-                    "input" | "handler" | "access" | "agents" | "idempotent" | "signature"
-                ) {
-                    return Err(Diag::new(
-                        ev.key_span(&a.config, k).unwrap_or(a.span),
-                        format!("action() has no option `{k}`"),
-                    )
-                    .help("use input, handler, access"));
-                }
+                    ev.key_span(&a.config, k).unwrap_or(a.span),
+                    format!("action() has no option `{k}`"),
+                )
+                .help("use input, handler, access"));
             }
-            let owner = Owner::Action(name.clone());
-            let mut input = IndexMap::new();
-            if let Some(iv) = cfg.get("input") {
-                let Value::Object(fields) = iv else {
-                    return Err(Diag::new(a.span, "`input` must be an object of columns"));
+        }
+        let owner = Owner::Action(name.clone());
+        let mut input = IndexMap::new();
+        if let Some(iv) = cfg.get("input") {
+            let Value::Object(fields) = iv else {
+                return Err(Diag::new(a.span, "`input` must be an object of columns"));
+            };
+            for (field, fv) in fields.borrow().iter() {
+                let fspan = ev.key_span(iv, field).unwrap_or(a.span);
+                let Value::Column(b) = fv else {
+                    return Err(
+                        Diag::new(fspan, format!("input `{field}` is {}, not a column", fv.describe()))
+                            .help("describe inputs with integer(), text(), ..."),
+                    );
                 };
-                for (field, fv) in fields.borrow().iter() {
-                    let fspan = ev.key_span(iv, field).unwrap_or(a.span);
-                    let Value::Column(b) = fv else {
-                        return Err(
-                            Diag::new(fspan, format!("input `{field}` is {}, not a column", fv.describe()))
-                                .help("describe inputs with integer(), text(), ..."),
-                        );
-                    };
-                    let col = column(field, b, &owner, &[], Place::Input, ev, &mut out)?;
-                    input.insert(field.clone(), col);
-                }
+                let col = column(field, b, &owner, &[], Place::Input, ev, out)?;
+                input.insert(field.clone(), col);
             }
-            let Some(Value::Closure(handler)) = cfg.get("handler") else {
-                return Err(Diag::new(a.span, format!("action `{name}` needs a `handler` function")));
-            };
-            let agents = bool_option(&cfg, "agents", true, a.span)?;
-            let idempotent = bool_option(&cfg, "idempotent", false, a.span)?;
-            let signature = match cfg.get("signature") {
-                None | Some(Value::Undef) => None,
-                Some(v) => {
-                    if cfg.contains_key("access") {
-                        return Err(Diag::new(a.span, "signature cannot be combined with access")
-                            .help("remove access; signature authenticates the caller"));
-                    }
-                    Some(signature_config(v, a.span)?)
+        }
+        let Some(Value::Closure(handler)) = cfg.get("handler") else {
+            return Err(Diag::new(a.span, format!("action `{name}` needs a `handler` function")));
+        };
+        let agents = bool_option(&cfg, "agents", true, a.span)?;
+        let idempotent = bool_option(&cfg, "idempotent", false, a.span)?;
+        let signature = match cfg.get("signature") {
+            None | Some(Value::Undef) => None,
+            Some(v) => {
+                if cfg.contains_key("access") {
+                    return Err(Diag::new(a.span, "signature cannot be combined with access")
+                        .help("remove access; signature authenticates the caller"));
                 }
-            };
-            let access = match cfg.get("access") {
-                None | Some(Value::Undef) => Access::editor(),
-                Some(v) => {
-                    let sp = ev.key_span(&a.config, "access").unwrap_or(a.span);
-                    access_rule(v, sp, &owner, "access", format!("action__{name}__access"), &mut out)?
-                }
-            };
-            out.roots.push(Root {
-                closure: handler.clone(),
-                slot: Slot::ActionHandler { action: name.clone() },
-                name: format!("action__{name}"),
-            });
-            out.schema.actions.insert(
-                name.clone(),
-                Action {
-                    name: name.clone(),
-                    input,
-                    handler: String::new(),
-                    access,
-                    agents,
-                    idempotent,
-                    signature,
-                },
+                Some(signature_config(v, a.span)?)
+            }
+        };
+        let access = match cfg.get("access") {
+            None | Some(Value::Undef) => Access::editor(),
+            Some(v) => {
+                let sp = ev.key_span(&a.config, "access").unwrap_or(a.span);
+                access_rule(v, sp, &owner, "access", format!("action__{name}__access"), out)?
+            }
+        };
+        out.roots.push(Root {
+            closure: handler.clone(),
+            slot: Slot::ActionHandler { action: name.clone() },
+            name: format!("action__{name}"),
+            plugin: plugin.map(|(i, _)| i),
+        });
+        out.schema.actions.insert(
+            name.clone(),
+            Action {
+                name: name.clone(),
+                input,
+                handler: String::new(),
+                access,
+                agents,
+                idempotent,
+                signature,
+            },
+        );
+    }
+    Ok(())
+}
+/// The registered name of a plugin's action, job or route.
+fn registered(plugin: Option<(usize, &str)>, name: &str) -> String {
+    plugin.map_or_else(|| name.to_string(), |(_, p)| format!("{p}_{name}"))
+}
+
+/// `defineConfig({ use: [plugin(), ...] })`: each `definePlugin` value, its package, and everything
+/// it registers. Every root extracted for a plugin (access rules and input defaults included)
+/// belongs to it.
+fn uses(v: &Value, span: Span, ev: &mut Evaluator<'_>, out: &mut Extracted) -> Result<()> {
+    let Value::Array(items) = v else {
+        return Err(Diag::new(span, "`use` must be a list of plugins").help("write use: [seo(), forms()]"));
+    };
+    for item in items.borrow().iter() {
+        let Value::Plugin(p) = item else {
+            return Err(Diag::new(span, format!("`use` lists plugins, not {}", item.describe()))
+                .help("call the package's export: use: [seo({ ... })]"));
+        };
+        let o = object(&p.config, p.span, "definePlugin")?;
+        keys(
+            &o,
+            &["name", "hooks", "actions", "jobs", "routes"],
+            p.span,
+            "definePlugin",
+        )?;
+        let name = string(o.get("name"), p.span, "plugin name")?;
+        if !(valid_ident(&name)
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+        {
+            return Err(
+                Diag::new(p.span, format!("plugin name \"{name}\" must be a lowercase identifier"))
+                    .help("use letters, digits and underscores, like \"seo\""),
             );
         }
+        if out.uses.iter().any(|u| u.name == name) {
+            return Err(Diag::new(p.span, format!("two plugins are both named \"{name}\""))
+                .help("each plugin is registered once"));
+        }
+        let plugin = crate::plugins::identify(ev.program(), &name, p.span)?;
+        let index = out.uses.len();
+        out.uses.push(plugin);
+        let first = out.roots.len();
+        let owner = Some((index, name.as_str()));
+        if let Some(h) = o.get("hooks").filter(|v| !matches!(v, Value::Undef)) {
+            hooks(h, ev.key_span(&p.config, "hooks").unwrap_or(p.span), ev, out, owner)?;
+        }
+        if let Some(a) = o.get("actions").filter(|v| !matches!(v, Value::Undef)) {
+            actions(a, ev.key_span(&p.config, "actions").unwrap_or(p.span), ev, out, owner)?;
+        }
+        if let Some(j) = o.get("jobs").filter(|v| !matches!(v, Value::Undef)) {
+            jobs(j, ev, p.span, out, owner)?;
+        }
+        if let Some(r) = o.get("routes").filter(|v| !matches!(v, Value::Undef)) {
+            plugin_routes(r, p.span, out, owner)?;
+        }
+        for root in &mut out.roots[first..] {
+            root.plugin = Some(index);
+        }
     }
-    phase2_jobs(&cfg_map, ev, config_span, &mut out)?;
-    routes(&cfg_map, config_span, &mut out)?;
-    validate_phase2(&cfg_map, ev, config_span, &mut out)?;
-    Ok(out)
+    crate::plugins::isolate(ev.program(), &mut out.uses)
 }
 
 /// Package pins cannot inherit JavaScript's last-property-wins behavior.
@@ -1004,6 +1135,7 @@ fn access_rule(v: &Value, span: Span, owner: &Owner, op: &str, fn_name: String, 
                     op: op.to_string(),
                 },
                 name: fn_name,
+                plugin: None,
             });
             Access::Fn(String::new())
         }
@@ -1304,6 +1436,7 @@ fn column(
                 closure: f.clone(),
                 slot: Slot::Default { at: at.clone() },
                 name: fn_name(owner, "default", &path),
+                plugin: None,
             });
             Some(DefaultKind::Fn(String::new()))
         }
@@ -1317,6 +1450,7 @@ fn column(
                 closure: f.clone(),
                 slot: Slot::OnUpdate { at: at.clone() },
                 name: fn_name(owner, "onUpdate", &path),
+                plugin: None,
             });
             Some(DefaultKind::Fn(String::new()))
         }
@@ -1387,6 +1521,7 @@ fn column(
                 closure: f.clone(),
                 slot: Slot::Validate { at: at.clone() },
                 name: fn_name(owner, "validate", &path),
+                plugin: None,
             });
             Some(String::new())
         }
@@ -1935,7 +2070,8 @@ fn scan_stmts(stmts: &[Stmt], param: &str, out: &mut Vec<String>) {
                     scan_stmts(b, param, out);
                 }
             }
-            Stmt::Block(b) | Stmt::While(_, b) => scan_stmts(b, param, out),
+            Stmt::Block(b) | Stmt::While(_, b) | Stmt::DoWhile(b, _) => scan_stmts(b, param, out),
+            Stmt::Labeled(_, s, _) => scan_stmts(std::slice::from_ref(s), param, out),
             Stmt::For { body, .. } | Stmt::ForOf { body, .. } | Stmt::ForIn { body, .. } => {
                 scan_stmts(body, param, out)
             }
@@ -1994,7 +2130,7 @@ fn reads_key(e: &crate::ir::Expr, param: &str, key: &str) -> bool {
             _ => r(obj),
         },
         ExprKind::Ident(n) => n == param,
-        ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => {
+        ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => {
             r(callee)
                 || args
                     .iter()
@@ -2004,6 +2140,7 @@ fn reads_key(e: &crate::ir::Expr, param: &str, key: &str) -> bool {
         ExprKind::Cond(a, b, c) => r(a) || r(b) || r(c),
         ExprKind::Unary(_, x)
         | ExprKind::Await(x)
+        | ExprKind::Yield { arg: Some(x), .. }
         | ExprKind::Chain(x)
         | ExprKind::As(x, _)
         | ExprKind::NonNull(x)
@@ -2611,15 +2748,31 @@ fn phase2_collections(ev: &Evaluator<'_>, out: &mut Extracted) -> Result<()> {
 }
 
 fn phase2_jobs(cfg: &IndexMap<String, Value>, ev: &mut Evaluator<'_>, span: Span, out: &mut Extracted) -> Result<()> {
-    let Some(v) = cfg.get("jobs").filter(|v| !matches!(v, Value::Undef)) else {
-        return Ok(());
-    };
+    match cfg.get("jobs").filter(|v| !matches!(v, Value::Undef)) {
+        Some(v) => jobs(v, ev, span, out, None),
+        None => Ok(()),
+    }
+}
+
+/// `jobs.<name>`; a plugin's are registered as `<plugin>_<name>`.
+fn jobs(
+    v: &Value,
+    ev: &mut Evaluator<'_>,
+    span: Span,
+    out: &mut Extracted,
+    plugin: Option<(usize, &str)>,
+) -> Result<()> {
     for (name, value) in object(v, span, "jobs")? {
         let Value::Job(j) = value else {
             return Err(Diag::new(span, "jobs entries must use job()").help("write job({ input, handler })"));
         };
         if !valid_ident(&name) {
             return Err(Diag::new(j.span, "invalid job name").help("use an identifier"));
+        }
+        let name = registered(plugin, &name);
+        if out.schema.jobs.contains_key(&name) {
+            return Err(Diag::new(j.span, format!("two jobs are both registered as `{name}`"))
+                .help("rename one; plugin jobs are registered as <plugin>_<name>"));
         }
         let o = object(&j.config, j.span, "job")?;
         keys(&o, &["input", "handler", "retries", "agents"], j.span, "job")?;
@@ -2653,6 +2806,7 @@ fn phase2_jobs(cfg: &IndexMap<String, Value>, ev: &mut Evaluator<'_>, span: Span
             closure: handler.clone(),
             slot: Slot::JobHandler { job: name.clone() },
             name: format!("job__{name}"),
+            plugin: plugin.map(|(i, _)| i),
         });
         out.schema.jobs.insert(
             name,
@@ -2669,10 +2823,14 @@ fn phase2_jobs(cfg: &IndexMap<String, Value>, ev: &mut Evaluator<'_>, span: Span
 
 /// `routes: { name: route({ method, path, access | signature, handler }) }` (docs/config-api.md#http-routes).
 fn routes(cfg: &IndexMap<String, Value>, span: Span, out: &mut Extracted) -> Result<()> {
-    let Some(v) = cfg.get("routes").filter(|v| !matches!(v, Value::Undef)) else {
-        return Ok(());
-    };
-    let mut shapes: Vec<(String, String, String)> = Vec::new();
+    match cfg.get("routes").filter(|v| !matches!(v, Value::Undef)) {
+        Some(v) => plugin_routes(v, span, out, None),
+        None => Ok(()),
+    }
+}
+
+/// `routes.<name>`; a plugin's are registered as `<plugin>_<name>` and share the app's path rules.
+fn plugin_routes(v: &Value, span: Span, out: &mut Extracted, plugin: Option<(usize, &str)>) -> Result<()> {
     for (name, value) in object(v, span, "routes")? {
         let Value::Route(r) = value else {
             return Err(Diag::new(span, format!("routes.{name} must use route()"))
@@ -2694,27 +2852,20 @@ fn routes(cfg: &IndexMap<String, Value>, span: Span, out: &mut Extracted) -> Res
                 .help("use GET, POST, PUT, PATCH or DELETE; GET also answers HEAD"));
         }
         let path = route_path(&string(o.get("path"), r.span, "route path")?, r.span)?;
-        let shape = path
-            .split('/')
-            .map(|s| {
-                if s.starts_with(':') {
-                    ":"
-                } else if s.starts_with('*') {
-                    "*"
-                } else {
-                    s
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("/");
-        if let Some((other, ..)) = shapes.iter().find(|(_, m, s)| *m == method && *s == shape) {
+        let shape = route_shape(&path);
+        let name = registered(plugin, &name);
+        if let Some((other, _)) = out
+            .schema
+            .routes
+            .iter()
+            .find(|(_, r)| r.method == method && route_shape(&r.path) == shape)
+        {
             return Err(Diag::new(
                 r.span,
                 format!("routes.{name} and routes.{other} both match {method} {path}"),
             )
             .help("give each method and path one route"));
         }
-        shapes.push((name.clone(), method.clone(), shape));
         let owner = Owner::Route(name.clone());
         let (access, signature) = match (
             o.get("access").filter(|v| !matches!(v, Value::Undef)),
@@ -2742,6 +2893,7 @@ fn routes(cfg: &IndexMap<String, Value>, span: Span, out: &mut Extracted) -> Res
             closure: handler.clone(),
             slot: Slot::RouteHandler { route: name.clone() },
             name: format!("route__{name}"),
+            plugin: plugin.map(|(i, _)| i),
         });
         out.schema.routes.insert(
             name,
@@ -2755,6 +2907,21 @@ fn routes(cfg: &IndexMap<String, Value>, span: Span, out: &mut Extracted) -> Res
         );
     }
     Ok(())
+}
+
+fn route_shape(path: &str) -> String {
+    path.split('/')
+        .map(|s| {
+            if s.starts_with(':') {
+                ":"
+            } else if s.starts_with('*') {
+                "*"
+            } else {
+                s
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// First segments WordPress, Zero and the host own; a route may not shadow them.
@@ -2816,29 +2983,7 @@ fn route_path(path: &str, span: Span) -> Result<String> {
     Ok(format!("/{rest}"))
 }
 
-fn kebab(name: &str) -> String {
-    let mut s = String::new();
-    let chars: Vec<char> = name.chars().collect();
-    for (i, c) in chars.iter().enumerate() {
-        if *c == '_' || *c == '-' {
-            if !s.ends_with('-') {
-                s.push('-');
-            }
-        } else {
-            if c.is_uppercase()
-                && i > 0
-                && !s.ends_with('-')
-                && (chars[i - 1].is_lowercase()
-                    || chars[i - 1].is_ascii_digit()
-                    || chars.get(i + 1).is_some_and(|c| c.is_lowercase()))
-            {
-                s.push('-');
-            }
-            s.extend(c.to_lowercase());
-        }
-    }
-    s
-}
+use crate::wordpress::abilities::kebab;
 
 fn validate_phase2(cfg: &IndexMap<String, Value>, ev: &Evaluator<'_>, span: Span, out: &mut Extracted) -> Result<()> {
     if let Some(v) = cfg.get("globals") {

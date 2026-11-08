@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Zero;
 
 /**
- * `fetch(url, init?)` from "zero": outbound HTTPS from handlers through the WordPress HTTP API.
+ * The global `fetch(url, init?)`: outbound HTTPS from handlers through the WordPress HTTP API.
  *
  * The policy matches the original Zero runtime's tenant fetch: HTTPS only, no URL credentials, no
  * `localhost` names, and no address in a private, loopback, link-local, CGNAT, documentation,
@@ -43,25 +43,41 @@ final class Fetch
     public static ?\Closure $resolver = null;
 
     /**
-     * @param array{method?: mixed, headers?: mixed, body?: mixed}|JsObject|JsUndefined|null $init
+     * @param JsObject|array{method?: mixed, headers?: mixed, body?: mixed, redirect?: mixed}|JsUndefined|null $init
+     * @param list<string>|null $hosts a plugin's locked hosts: every hop must reach one of them
      */
-    public static function call(mixed $url, mixed $init = null): JsObject
+    public static function call(mixed $url, mixed $init = null, ?array $hosts = null): FetchResponse
     {
         if (!is_string($url)) {
             throw new JsError('fetch() needs a URL string', 'TypeError');
         }
         $init = $init instanceof JsObject ? $init->p : (is_array($init) ? $init : []);
-        $method = strtoupper(is_string($init['method'] ?? null) ? $init['method'] : 'GET');
+        $init = array_filter($init, static fn ($v): bool => $v !== JsUndefined::Value && $v !== null);
+        // The compiler refuses other keys in written-out init objects; a computed init is checked here.
+        $unknown = array_diff(array_keys($init), ['method', 'headers', 'body', 'redirect']);
+        if ($unknown !== []) {
+            throw new JsError('fetch() init option ' . reset($unknown) . ' isn\'t available in Zero code', 'TypeError');
+        }
+        if (isset($init['method']) && !is_string($init['method'])) {
+            throw new JsError('fetch() method must be a string', 'TypeError');
+        }
+        $method = strtoupper($init['method'] ?? 'GET');
         if (!in_array($method, self::METHODS, true)) {
             throw self::refuse('zero_fetch_method_denied', 'The fetch method is not permitted.');
         }
+        $redirect = $init['redirect'] ?? 'follow';
+        if (!in_array($redirect, ['follow', 'manual', 'error'], true)) {
+            throw new JsError("fetch() redirect must be 'follow', 'manual' or 'error'", 'TypeError');
+        }
         $headers = self::requestHeaders($init['headers'] ?? null);
         $body = $init['body'] ?? null;
-        if ($body === JsUndefined::Value) {
-            $body = null;
-        }
-        if ($body !== null && !is_string($body)) {
-            throw new JsError('fetch() body must be a string', 'TypeError');
+        if ($body instanceof SearchParams) {
+            $headers['content-type'] ??= 'application/x-www-form-urlencoded;charset=UTF-8';
+            $body = (string) $body;
+        } elseif (is_string($body)) {
+            $headers['content-type'] ??= 'text/plain;charset=UTF-8';
+        } elseif ($body !== null) {
+            throw new JsError('fetch() body must be a string or URLSearchParams', 'TypeError');
         }
         if ($body !== null && strlen($body) > self::MAX_BODY) {
             throw self::refuse('zero_fetch_payload_too_large', 'The fetch request body is too large.');
@@ -71,7 +87,7 @@ final class Fetch
         }
         $deadline = microtime(true) + self::TIMEOUT;
         for ($hop = 0; ; $hop++) {
-            [$host, $port, $address] = self::target($url);
+            [$host, $port, $address] = self::target($url, $hosts);
             $remaining = $deadline - microtime(true);
             if ($remaining <= 0) {
                 throw self::refuse('zero_fetch_timeout', 'The fetch target did not answer in time.');
@@ -79,7 +95,10 @@ final class Fetch
             $response = self::send($url, $host, $port, $address, $method, $headers, $body, $remaining);
             $status = $response['status'];
             $location = $response['headers']['location'] ?? null;
-            if (in_array($status, [301, 302, 303, 307, 308], true) && is_string($location)) {
+            if ($redirect !== 'manual' && in_array($status, [301, 302, 303, 307, 308], true) && is_string($location)) {
+                if ($redirect === 'error') {
+                    throw self::refuse('zero_fetch_redirect_denied', 'The fetch target redirected and redirect is "error".');
+                }
                 if ($hop >= self::MAX_REDIRECTS) {
                     throw self::refuse('zero_fetch_too_many_redirects', 'The fetch target redirected too many times.');
                 }
@@ -98,26 +117,20 @@ final class Fetch
                 }
                 continue;
             }
-            return self::response($url, $response, $hop > 0);
+            return new FetchResponse($status, $response['statusText'], $url, $hop > 0,
+                FetchHeaders::received($response['headers']), $method === 'HEAD' ? '' : $response['body']);
         }
     }
 
-    /** @return array<string, string> lowercase names */
+    /**
+     * `headers` as an object, an array of pairs or a Headers, validated as Headers does.
+     *
+     * @return array<string, string> lowercase names
+     */
     private static function requestHeaders(mixed $headers): array
     {
-        if ($headers === null || $headers === JsUndefined::Value) {
-            return [];
-        }
-        $headers = $headers instanceof JsObject ? $headers->p : $headers;
-        if (!is_array($headers)) {
-            throw new JsError('fetch() headers must be an object of strings', 'TypeError');
-        }
         $out = [];
-        foreach ($headers as $name => $value) {
-            $name = strtolower((string) $name);
-            if (!is_string($value) || preg_match('/\A[!#$%&\'*+.^_`|~0-9a-z-]+\z/', $name) !== 1 || strpbrk($value, "\r\n\0") !== false) {
-                throw new JsError('fetch() header names and values must be valid strings', 'TypeError');
-            }
+        foreach ((new FetchHeaders($headers))->sorted() as $name => $value) {
             if (!in_array($name, self::DROP_REQUEST, true)) {
                 $out[$name] = $value;
             }
@@ -127,7 +140,7 @@ final class Fetch
     }
 
     /** @return array{string, int, string} host, port and the checked address to connect to */
-    public static function target(string $url): array
+    public static function target(string $url, ?array $hosts = null): array
     {
         $parts = parse_url($url);
         if (!is_array($parts) || strtolower($parts['scheme'] ?? '') !== 'https' || !isset($parts['host'])) {
@@ -136,9 +149,12 @@ final class Fetch
         if (isset($parts['user']) || isset($parts['pass'])) {
             throw self::refuse('zero_fetch_credentials_denied', 'fetch() URLs cannot carry credentials.');
         }
-        $host = strtolower(trim($parts['host'], "[]. \t\n\r\0\x0B"));
+        $host = self::host($parts['host']);
         if ($host === '' || $host === 'localhost' || str_ends_with($host, '.localhost')) {
             throw self::refuse('zero_fetch_host_denied', 'The fetch host is not permitted.');
+        }
+        if ($hosts !== null && !in_array($host, $hosts, true)) {
+            throw self::refuse('zero_fetch_host_denied', 'The fetch host is outside this plugin\'s grant.');
         }
         foreach (self::INTERNAL as $internal) {
             if ($host === $internal || str_ends_with($host, '.' . $internal)) {
@@ -228,21 +244,32 @@ final class Fetch
         return (ord($address[$bytes]) & $mask) === (ord($network[$bytes]) & $mask);
     }
 
-    /** @return array{status: int, headers: array<string, string>, body: string} */
+    /** @return array{status: int, statusText: string, headers: array<string, string>, body: string} */
     private static function send(string $url, string $host, int $port, string $address, string $method, array $headers, ?string $body, float $timeout): array
     {
         if (!function_exists('wp_remote_request')) {
             throw new \LogicException('fetch() needs WordPress loaded (wp_remote_request)');
         }
         // Pin the connection to the address checked above. Only the cURL transport can pin: any
-        // other transport would resolve the name again, and could connect to a rebound address.
+        // other transport would resolve the name again, and could connect to a rebound address. So
+        // the request is sent with cURL or not at all, and the pin runs before cURL connects.
+        if (!class_exists(\WpOrg\Requests\Transport\Curl::class) || !\WpOrg\Requests\Transport\Curl::test(['ssl' => true])) {
+            throw self::refuse('zero_fetch_upstream_unavailable', 'Outbound fetch needs the cURL transport to pin the checked address.');
+        }
+        // The URL cURL sees names exactly the host the pin covers: `example.com.` and `EXAMPLE.com`
+        // would otherwise miss the CURLOPT_RESOLVE entry and let cURL resolve the name itself.
+        $url = self::withHost($url, $host);
         $pinned = false;
-        $pin = static function ($handle) use ($host, $port, $address, &$pinned): void {
-            $ip = str_contains($address, ':') ? '[' . $address . ']' : $address;
-            $pinned = curl_setopt($handle, CURLOPT_RESOLVE, ["$host:$port:$ip"])
-                && curl_setopt($handle, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+        $handle = null;
+        $pin = static function ($curl) use ($host, $port, $address, &$pinned, &$handle): void {
+            $handle = $curl;
+            $pinned = self::pin($curl, $host, $port, $address);
+        };
+        $force = static function (&$url, &$headers, &$data, &$type, &$options): void {
+            $options['transport'] = \WpOrg\Requests\Transport\Curl::class;
         };
         add_action('http_api_curl', $pin, PHP_INT_MAX);
+        add_action('requests-requests.before_request', $force, PHP_INT_MAX, 5);
         try {
             $response = wp_remote_request($url, [
                 'method' => $method,
@@ -258,10 +285,11 @@ final class Fetch
             ]);
         } finally {
             remove_action('http_api_curl', $pin, PHP_INT_MAX);
+            remove_action('requests-requests.before_request', $force, PHP_INT_MAX);
         }
-        // Fail closed: a request the pin did not reach went out over another transport, unpinned,
-        // so nothing it returned is used.
-        if (!$pinned) {
+        // Fail closed: a request the pin did not reach, or that connected anywhere but the checked
+        // address (a later `http_api_curl` hook rewrote the handle), returns nothing to the handler.
+        if (!$pinned || !$handle instanceof \CurlHandle || !self::sameAddress((string) curl_getinfo($handle, CURLINFO_PRIMARY_IP), $address)) {
             throw self::refuse('zero_fetch_upstream_unavailable', 'Outbound fetch needs the cURL transport to pin the checked address.');
         }
         if (is_wp_error($response)) {
@@ -279,7 +307,70 @@ final class Fetch
             }
         }
 
-        return ['status' => (int) wp_remote_retrieve_response_code($response), 'headers' => $out, 'body' => $raw];
+        return [
+            'status' => (int) wp_remote_retrieve_response_code($response),
+            'statusText' => self::statusText($response),
+            'headers' => $out,
+            'body' => $raw,
+        ];
+    }
+
+    /**
+     * The reason phrase the server sent, as fetch's `statusText`. WordPress replaces it with its own
+     * text for the code, so read the status line of the raw response when Requests kept it.
+     */
+    private static function statusText(array $response): string
+    {
+        $object = $response['http_response'] ?? null;
+        $raw = is_object($object) && method_exists($object, 'get_response_object') ? $object->get_response_object()->raw ?? null : null;
+        if (is_string($raw) && preg_match('#\AHTTP/\S+ \d{3}(?: ([^\r\n]*))?\r?\n#', $raw, $m) === 1) {
+            return $m[1] ?? '';
+        }
+
+        return (string) wp_remote_retrieve_response_message($response);
+    }
+
+    /** The URL with its host replaced by the normalized one the address check and pin used. */
+    private static function withHost(string $url, string $host): string
+    {
+        $parts = parse_url($url);
+        $authority = (str_contains($host, ':') ? '[' . $host . ']' : $host) . (isset($parts['port']) ? ':' . $parts['port'] : '');
+
+        return 'https://' . $authority . ($parts['path'] ?? '') . (isset($parts['query']) ? '?' . $parts['query'] : '');
+    }
+
+    /**
+     * Pins `$curl` to the checked address before it connects. When an option can't be set, the
+     * handle is pointed at an address nothing listens on and limited to connecting, so no request
+     * byte leaves. Where cURL offers a pre-request hook (PHP 8.4+), the connected address is
+     * checked again there, after every other `http_api_curl` hook has run, and a mismatch aborts
+     * before the request is sent.
+     *
+     * @param null|callable(\CurlHandle, int, mixed): bool $setopt `curl_setopt` unless a test replaces it
+     */
+    public static function pin(\CurlHandle $curl, string $host, int $port, string $address, ?callable $setopt = null): bool
+    {
+        $setopt ??= curl_setopt(...);
+        $ip = str_contains($address, ':') ? '[' . $address . ']' : $address;
+        $pinned = $setopt($curl, CURLOPT_RESOLVE, ["$host:$port:$ip"])
+            && $setopt($curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+        if ($pinned && defined('CURLOPT_PREREQFUNCTION')) {
+            $pinned = $setopt($curl, CURLOPT_PREREQFUNCTION, static fn ($h, string $connected): int => self::sameAddress($connected, $address) ? CURL_PREREQFUNC_OK : CURL_PREREQFUNC_ABORT);
+        }
+        if (!$pinned) {
+            curl_setopt($curl, CURLOPT_URL, 'https://0.0.0.0:0/');
+            curl_setopt($curl, CURLOPT_CONNECT_ONLY, true);
+        }
+
+        return $pinned;
+    }
+
+    private static function sameAddress(string $a, string $b): bool
+    {
+        $a = @inet_pton(trim($a, '[]'));
+        $b = @inet_pton(trim($b, '[]'));
+
+        return $a !== false && $a === $b;
     }
 
     /** @return array{string, int} lowercase host and effective port of an https URL */
@@ -287,7 +378,19 @@ final class Fetch
     {
         $parts = parse_url($url);
 
-        return [strtolower((string) ($parts['host'] ?? '')), (int) ($parts['port'] ?? 443)];
+        return [self::host((string) ($parts['host'] ?? '')), (int) ($parts['port'] ?? 443)];
+    }
+
+    /**
+     * The one spelling of a URL's host that the policy, the pin and the redirect origin check all
+     * use: lowercase, brackets off, and a trailing root dot dropped (`Example.COM.` is
+     * `example.com`). A name with an empty label (`.a.com`, `a..com`) normalizes to '' and is refused.
+     */
+    private static function host(string $host): string
+    {
+        $host = strtolower(rtrim(trim($host, "[] \t\n\r\0\x0B"), '.'));
+
+        return str_starts_with($host, '.') || str_contains($host, '..') ? '' : $host;
     }
 
     /** A Location header resolved against the request URL as RFC 3986 §5.2 does; fragments drop. */
@@ -335,27 +438,6 @@ final class Fetch
         $result = implode('/', $out);
 
         return str_starts_with($result, '/') ? $result : '/' . $result;
-    }
-
-    /** The Response a handler sees: status, ok, url, redirected, headers.get/has, text(), json(). */
-    private static function response(string $url, array $response, bool $redirected): JsObject
-    {
-        $headers = $response['headers'];
-        $body = $response['body'];
-        $status = $response['status'];
-
-        return new JsObject([
-            'status' => $status,
-            'ok' => $status >= 200 && $status <= 299,
-            'url' => $url,
-            'redirected' => $redirected,
-            'headers' => new JsObject([
-                'get' => static fn ($name): ?string => $headers[strtolower((string) $name)] ?? null,
-                'has' => static fn ($name): bool => isset($headers[strtolower((string) $name)]),
-            ]),
-            'text' => static fn (): string => $body,
-            'json' => static fn (): mixed => Js::jsonParse($body),
-        ]);
     }
 
     private static function refuse(string $code, string $message): HttpError

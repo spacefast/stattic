@@ -44,6 +44,8 @@ import {
 import os from "node:os";
 import path from "node:path";
 
+import { z } from "zod";
+
 import { errorDocsUrl, errorTitle } from "../../packages/common/src/contracts/error-codes.ts";
 import type {
   RuntimeDrainedEvent,
@@ -285,10 +287,21 @@ export function signToken(
   });
 }
 
+// A control-plane test that also signs for its runtime names its own box id here.
+let tokenRuntimeInstanceId = RUNTIME_INSTANCE_ID;
+export function setRuntimeInstanceId(instanceId: string): void {
+  tokenRuntimeInstanceId = instanceId;
+}
+
+/** The public keys this harness signs with, for a runtime that also trusts another signer. */
+export function runtimeJwks() {
+  return z.object({ keys: z.array(z.record(z.string(), z.unknown())) }).parse(JSON.parse(JWKS));
+}
+
 export function managementToken(action: string, scope: Record<string, unknown> = {}): string {
   return signToken({
     aud: "stattic-runtime-management",
-    runtime_instance_id: RUNTIME_INSTANCE_ID,
+    runtime_instance_id: tokenRuntimeInstanceId,
     operation_id: `op_${action}`,
     action,
     jti: `jti_${randomUUID()}`,
@@ -304,7 +317,7 @@ export function uploadToken(
 ): string {
   return signToken({
     aud: "stattic-runtime-upload",
-    runtime_instance_id: RUNTIME_INSTANCE_ID,
+    runtime_instance_id: tokenRuntimeInstanceId,
     space_id: spaceId,
     deploy_session_id: uploadId,
     version_id: versionId,

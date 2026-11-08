@@ -79,9 +79,24 @@ pub(super) struct Effects {
     write_events: HashMap<Span, HashSet<Place>>,
     expression_writes: HashMap<Span, HashSet<Place>>,
     loop_writes: HashMap<Span, HashSet<Place>>,
+    /// Every reachable write, by the binding it starts from.
+    binding_writes: HashMap<Span, HashSet<Vec<Step>>>,
 }
 
 impl Effects {
+    /// Paths written below `binding` anywhere reachable. Calls carry a helper's writes back to
+    /// the argument it was given, and copies carry them across aliases, so this covers writes
+    /// through helpers, closures and other names for the same value. Every callee in compiled
+    /// code is itself compiled, so an argument passed to a call has no unseen writer.
+    pub fn writes_below(&self, binding: Span) -> Vec<Vec<Step>> {
+        self.binding_writes
+            .get(&binding)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
     pub fn binding_reassigned(&self, binding: Span) -> bool {
         self.reassigned.contains(&binding)
     }
@@ -93,13 +108,7 @@ impl Effects {
         let javascript_modules = program
             .modules
             .iter()
-            .filter(|module| {
-                module
-                    .path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| matches!(extension, "js" | "mjs" | "cjs"))
-            })
+            .filter(|module| module.dynamic)
             .map(|module| module.id)
             .collect();
         let mut graph = Graph {
@@ -612,6 +621,75 @@ impl Graph {
         }
     }
 
+    fn assign_pattern(
+        &mut self,
+        pattern: &AssignPat,
+        src: Option<Place>,
+        names: &mut Names,
+        env: &Rc<Scope>,
+        owner: Span,
+        event: Span,
+    ) {
+        match pattern {
+            AssignPat::Target(target) => {
+                if let Some(p) = self.expr(target, names, env, owner) {
+                    self.write_events.entry(event).or_default().insert(p.clone());
+                    self.function_writes.entry(owner).or_default().insert(p.clone());
+                    self.events.entry(event).or_default().insert(p.clone());
+                    // As for `=`: a JavaScript function may store any value into a member.
+                    if self.javascript_functions.contains(&owner) && !p.path.is_empty() {
+                        let dynamic = p.at(Step::DynamicValue);
+                        self.write_events.entry(event).or_default().insert(dynamic.clone());
+                        self.function_writes.entry(owner).or_default().insert(dynamic.clone());
+                        self.events.entry(event).or_default().insert(dynamic.clone());
+                        self.function_numeric.entry(owner).or_default().insert(dynamic);
+                    }
+                    self.copy(src, Some(p), owner);
+                }
+            }
+            AssignPat::Default(inner, default) => {
+                let d = self.expr(default, names, env, owner);
+                self.assign_pattern(inner, src, names, env, owner, event);
+                if let Some(d) = d {
+                    for target in inner.targets() {
+                        if let Some(p) = self.expr(target, names, env, owner) {
+                            self.copy(Some(d.clone()), Some(p), owner);
+                        }
+                    }
+                }
+            }
+            AssignPat::Obj { props, rest, .. } => {
+                for (key, p) in props {
+                    let step = match key {
+                        PropKey::Static(k) => Some(Step::Field(k.clone())),
+                        PropKey::Computed(k) => {
+                            self.expr(k, names, env, owner);
+                            match &k.kind {
+                                ExprKind::Str(k) => Some(Step::Field(k.clone())),
+                                // A computed key reads an unknown field: the value is a copy of
+                                // some part of the source, which the target sees as its own.
+                                _ => None,
+                            }
+                        }
+                    };
+                    let part = step.and_then(|step| src.as_ref().map(|s| s.at(step)));
+                    self.assign_pattern(p, part, names, env, owner, event);
+                }
+                if let Some(r) = rest {
+                    self.assign_pattern(r, src.clone(), names, env, owner, event);
+                }
+            }
+            AssignPat::Arr { elems, rest, .. } => {
+                for p in elems.iter().flatten() {
+                    self.assign_pattern(p, src.as_ref().map(|s| s.at(Step::Index)), names, env, owner, event);
+                }
+                if let Some(r) = rest {
+                    self.assign_pattern(r, src.clone(), names, env, owner, event);
+                }
+            }
+        }
+    }
+
     fn bind_value(&mut self, pat: &Pat, src: Option<Place>, owner: Span) {
         match pat {
             Pat::Id(_, span) => self.copy(src, Some(Place::new(*span)), owner),
@@ -706,6 +784,43 @@ impl Graph {
         Some(place)
     }
 
+    fn value_place(&mut self, value: &Value) -> Option<Place> {
+        match value {
+            Value::Class(c) => Some(self.class_place(c)),
+            Value::Closure(c) => Some(self.function(&c.func, &[], &c.env)),
+            Value::Array(_) | Value::Object(_) => self.data_place(value),
+            _ => None,
+        }
+    }
+
+    /// The build-time value a static member chain (`ns.a.b`) reads, as the compiler resolves it:
+    /// the root is a captured binding and every step is an object holding code or a function
+    /// with own properties. Such namespaces never exist in PHP, so their members are constant.
+    fn static_member(&self, e: &Expr, names: &Names, env: &Rc<Scope>) -> Option<Value> {
+        fn walk(e: &Expr, names: &Names, env: &Rc<Scope>) -> Option<Value> {
+            match &e.kind {
+                ExprKind::Ident(name) if names.iter().all(|s| !s.contains_key(name)) => {
+                    env.lookup(name).map(|b| b.value)
+                }
+                ExprKind::Member { obj, prop, .. } => {
+                    let receiver = walk(obj, names, env)?;
+                    if !super::is_static_namespace(&receiver) {
+                        return None;
+                    }
+                    match &receiver {
+                        Value::Object(o) => o.borrow().get(prop).cloned(),
+                        Value::Closure(c) => c.props.borrow().get(prop).cloned(),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        matches!(e.kind, ExprKind::Member { .. })
+            .then(|| walk(e, names, env))
+            .flatten()
+    }
+
     fn ident(&mut self, name: &str, names: &Names, env: &Rc<Scope>) -> Option<Place> {
         if let Some(p) = names.iter().rev().find_map(|s| s.get(name)) {
             if name == "arguments" {
@@ -713,12 +828,7 @@ impl Graph {
             }
             return Some(p.clone());
         }
-        match env.lookup(name)?.value {
-            Value::Class(c) => Some(self.class_place(&c)),
-            Value::Closure(c) => Some(self.function(&c.func, &[], &c.env)),
-            value @ (Value::Array(_) | Value::Object(_)) => self.data_place(&value),
-            _ => None,
-        }
+        self.value_place(&env.lookup(name)?.value)
     }
 
     fn class_place(&mut self, class: &Rc<ClassValue>) -> Place {
@@ -845,6 +955,9 @@ impl Graph {
                 return Some(self.function(f, names, env));
             }
             ExprKind::Member { obj, prop, .. } => {
+                if let Some(value) = self.static_member(e, names, env) {
+                    return self.value_place(&value);
+                }
                 if matches!(&obj.kind, ExprKind::Ident(n) if n == "super")
                     && let Some(Value::Class(class)) = env.lookup(":class").map(|b| b.value)
                     && let Some(base) = &class.base
@@ -885,9 +998,14 @@ impl Graph {
                 }
                 return member;
             }
-            ExprKind::NonNull(e) | ExprKind::As(e, _) | ExprKind::Chain(e) | ExprKind::Await(e) => {
+            ExprKind::NonNull(e)
+            | ExprKind::As(e, _)
+            | ExprKind::Chain(e)
+            | ExprKind::Await(e)
+            | ExprKind::Yield { arg: Some(e), .. } => {
                 return self.expr(e, names, env, owner);
             }
+            ExprKind::Yield { arg: None, .. } => {}
             ExprKind::Update { target, .. } => {
                 if let Some(p) = self.expr(target, names, env, owner) {
                     self.write_events.entry(e.span).or_default().insert(p.clone());
@@ -921,7 +1039,24 @@ impl Graph {
                 self.history.entry(owner).or_default().insert(e.span);
                 return target;
             }
-            ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => {
+            // A destructuring assignment writes each leaf target from part of the value.
+            ExprKind::AssignPattern(pattern, value) => {
+                let src = self.expr(value, names, env, owner);
+                self.assign_pattern(pattern, src.clone(), names, env, owner, e.span);
+                self.history.entry(owner).or_default().insert(e.span);
+                return src;
+            }
+            // `delete` writes its target place: the property becomes absent.
+            ExprKind::Delete(target) => {
+                if let Some(p) = self.expr(target, names, env, owner) {
+                    self.write_events.entry(e.span).or_default().insert(p.clone());
+                    self.function_writes.entry(owner).or_default().insert(p.clone());
+                    self.events.entry(e.span).or_default().insert(p);
+                }
+                self.history.entry(owner).or_default().insert(e.span);
+                return None;
+            }
+            ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => {
                 let callee_value = self.expr(callee, names, env, owner);
                 let argv: Vec<_> = args
                     .iter()
@@ -1295,7 +1430,7 @@ impl Graph {
                     self.copy(src, Some(value.clone()), owner);
                 }
             }
-            ExprKind::Binary(_, a, b) | ExprKind::Instanceof(a, b) => {
+            ExprKind::Binary(_, a, b) | ExprKind::Instanceof(a, b) | ExprKind::In(a, b) => {
                 self.expr(a, names, env, owner);
                 self.expr(b, names, env, owner);
                 return None;
@@ -1310,10 +1445,15 @@ impl Graph {
                 }
                 return None;
             }
-            ExprKind::Num(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Null | ExprKind::Undefined => {
+            ExprKind::Num(_)
+            | ExprKind::BigInt(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Null
+            | ExprKind::Undefined => {
                 return None;
             }
-            ExprKind::Class(_) | ExprKind::Regex { .. } => {}
+            ExprKind::Class(_) | ExprKind::Regex { .. } | ExprKind::TemplateStrings { .. } => {}
         }
         Some(value)
     }
@@ -1392,6 +1532,14 @@ impl Graph {
                 self.block(b, names, env, owner);
                 self.loop_history(owner, first_call, &before, e.span);
             }
+            Stmt::DoWhile(b, e) => {
+                let first_call = self.calls.len();
+                let before = self.history.get(&owner).cloned().unwrap_or_default();
+                self.block(b, names, env, owner);
+                self.expr(e, names, env, owner);
+                self.loop_history(owner, first_call, &before, e.span);
+            }
+            Stmt::Labeled(_, s, _) => self.stmt(s, names, env, owner),
             Stmt::For {
                 init,
                 test,
@@ -1503,8 +1651,8 @@ impl Graph {
             }
             Stmt::Exported(s) => self.stmt(s, names, env, owner),
             Stmt::Return(None, _)
-            | Stmt::Break(_)
-            | Stmt::Continue(_)
+            | Stmt::Break(..)
+            | Stmt::Continue(..)
             | Stmt::TypeAlias { .. }
             | Stmt::Import { .. }
             | Stmt::ExportNames { .. }
@@ -1979,7 +2127,16 @@ impl Graph {
         };
         let expression_writes = summaries(&self.expression_events);
         let loop_writes = summaries(&self.loop_events);
+        let mut binding_writes: HashMap<Span, HashSet<Vec<Step>>> = HashMap::new();
+        for (owner, paths) in &self.function_writes {
+            if self.reachable.contains(owner) {
+                for p in paths {
+                    binding_writes.entry(p.binding).or_default().insert(p.path.clone());
+                }
+            }
+        }
         let mut effects = Effects {
+            binding_writes,
             reassigned: self
                 .write_events
                 .values()

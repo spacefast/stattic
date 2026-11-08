@@ -388,6 +388,16 @@ pub struct Action {
     pub signature: Option<Json>,
 }
 
+/// One `wp-hooks/` handler, registered with `add_filter`/`add_action`.
+#[derive(Debug, Clone)]
+pub struct WpHook {
+    pub hook: String,
+    pub filter: bool,
+    pub priority: i64,
+    pub args: usize,
+    pub handler: String,
+}
+
 /// `routes.<name>`: one HTTP method and path served outside the REST namespace.
 #[derive(Debug, Clone)]
 pub struct Route {
@@ -451,6 +461,10 @@ pub struct Schema {
     pub actions: IndexMap<String, Action>,
     pub jobs: IndexMap<String, Job>,
     pub routes: IndexMap<String, Route>,
+    /// `wp-hooks/` handlers, in registration order.
+    pub wp_hooks: Vec<WpHook>,
+    /// Hooks or WordPress functions hand `WP_Post`/`WP_User` views to compiled code.
+    pub wp_views: bool,
     pub files: IndexMap<String, FileBucket>,
     pub webhooks: Vec<Json>,
     pub media: Json,
@@ -469,6 +483,8 @@ impl Default for Schema {
             actions: IndexMap::new(),
             jobs: IndexMap::new(),
             routes: IndexMap::new(),
+            wp_hooks: Vec::new(),
+            wp_views: false,
             files: IndexMap::new(),
             webhooks: Vec::new(),
             media: serde_json::json!({"sizes": {}}),

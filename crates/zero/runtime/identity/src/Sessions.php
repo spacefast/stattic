@@ -7,27 +7,63 @@ namespace Zero\Identity;
 final class Sessions
 {
     public const COOKIE = "zi_session";
+    /**
+     * Sibling hosts under a shared parent domain can plant Domain-scoped cookies; the __Host-
+     * prefix makes the browser refuse any such cookie under this name. The prefix requires
+     * Secure and Path=/, so plain-HTTP development keeps the bare name.
+     */
+    public static function cookieName(string $name = self::COOKIE): string
+    {
+        return is_ssl() ? "__Host-" . $name : $name;
+    }
     public function __construct(private DB $db, private Security $security) {
-        // A migrated host explicitly opts its scoped REST surface into identity cookies.
+        // Session cookies on the scoped REST surface are opt-in: a host serving its own frontend
+        // (`zero_identity_rest_cookie_auth`) or a migrated host with legacy cookie aliases.
         add_filter('rest_authentication_errors', function ($result) {
             if (is_wp_error($result) || is_user_logged_in() || ($result !== null && $result !== true)
-                || apply_filters('zero_identity_session_cookie_aliases', []) === []) { return $result; }
+                || !self::restCookieAuth()) { return $result; }
             $route = (string) ($GLOBALS['wp']->query_vars['rest_route'] ?? '');
             if (!str_starts_with($route, '/zero/v1/')) { return $result; }
-            $secret = (string) ($_COOKIE[self::COOKIE] ?? '');
+            // The cookie is ambient: it lends no identity to another origin's request (a sibling
+            // host under the same site), a cross-site fetch, or a JSONP script include.
+            $origin = (string) ($_SERVER['HTTP_ORIGIN'] ?? '');
+            if (($origin !== '' && $origin !== self::siteOrigin()) || isset($_GET['_jsonp'])
+                || !in_array((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? ''), ['', 'same-origin', 'none'], true)) {
+                return $result;
+            }
+            $secret = (string) ($_COOKIE[self::cookieName()] ?? '');
             try {
                 $session = $this->find($secret);
             } catch (Failure $e) {
                 return new \WP_Error($e->kind, $e->getMessage(), ['status' => $e->status]);
             }
             if (!$session) { return $result; }
-            $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-            if (!in_array($method, ['GET', 'HEAD', 'OPTIONS'], true) && !hash_equals((string) $session['csrf'], (string) ($_SERVER['HTTP_X_IDENTITY_CSRF'] ?? ''))) {
+            // A write proves intent by coming from the site's own pages or by the session's CSRF token.
+            // WordPress applies `?_method=` and X-HTTP-Method-Override after authentication, so the
+            // method that decides is the one the request will dispatch as.
+            $method = strtoupper((string) ($_SERVER['HTTP_X_HTTP_METHOD_OVERRIDE'] ?? $_GET['_method'] ?? $_SERVER['REQUEST_METHOD'] ?? 'GET'));
+            if (!in_array($method, ['GET', 'HEAD', 'OPTIONS'], true) && $origin === ''
+                && !hash_equals((string) $session['csrf'], (string) ($_SERVER['HTTP_X_IDENTITY_CSRF'] ?? ''))) {
                 return new \WP_Error('invalid_csrf', 'Refresh the page and try again.', ['status' => 403]);
             }
             wp_set_current_user((int) $session['wp_user_id']);
+            // A page cache keyed only on the URL (Batcache) must never store this user's answer.
+            if (function_exists('batcache_cancel')) { batcache_cancel(); }
             return true;
         }, 110);
+        // A response to a request carrying the session cookie is that user's: never a shared copy.
+        add_filter('rest_send_nocache_headers', static fn ($send) => $send
+            || (self::restCookieAuth() && (string) ($_COOKIE[self::cookieName()] ?? '') !== ''));
+    }
+    private static function restCookieAuth(): bool
+    {
+        return (bool) apply_filters('zero_identity_rest_cookie_auth', false)
+            || apply_filters('zero_identity_session_cookie_aliases', []) !== [];
+    }
+    private static function siteOrigin(): string
+    {
+        $home = wp_parse_url(home_url());
+        return $home['scheme'] . '://' . $home['host'] . (isset($home['port']) ? ':' . $home['port'] : '');
     }
     public function create(int $uid): array
     {
@@ -88,13 +124,13 @@ final class Sessions
         $session ??= Legacy\SessionUpgrade::find($this->db, $secret);
         if ($alias && $session) {
             self::cookie($secret, (int) $session['expires_at']);
-            $_COOKIE[self::COOKIE] = $secret;
+            $_COOKIE[self::cookieName()] = $secret;
         }
         return $session;
     }
     public function require(?string $csrf = null): array
     {
-        $session = $this->find((string) ($_COOKIE[self::COOKIE] ?? ""));
+        $session = $this->find((string) ($_COOKIE[self::cookieName()] ?? ""));
         if (!$session) {
             throw new Failure("unauthenticated", "Sign in to continue.", 401);
         }
@@ -175,7 +211,7 @@ final class Sessions
     }
     public static function cookie(string $secret, int $expires): void
     {
-        setcookie(self::COOKIE, $secret, [
+        setcookie(self::cookieName(), $secret, [
             "expires" => $expires,
             "path" => "/",
             "secure" => is_ssl(),

@@ -198,13 +198,47 @@ if (!defined('DISALLOW_FILE_MODS')) {
     define('DISALLOW_FILE_MODS', true);
 }
 
+// Space Users management on a Zero v2 Space reads and writes the Space's own
+// tables: bind its current version first, as the REST door and the worker do.
+// Every other content operation keeps the content kernel on the site tables.
+require_once $engineRoot . '/shared/zero-v2.php';
+$zeroUsers = ($request['operation'] ?? null) === 'rest.request' && is_string($request['path'] ?? null)
+    && preg_match('#\A/wp-abilities/v1/abilities/zero/wp-users-(?:account-list|account-get|sessions-list|sessions-revoke|suspend|deletion-complete)/run(?:\?|\z)#', $request['path']) === 1;
+$zeroOverlay = $zeroUsers ? _stattic_zero_v2_space_overlay($privateRoot, $spaceId) : [];
+$zeroUsers = $zeroUsers && _stattic_zero_generation($zeroOverlay) === 'v2';
+if ($zeroUsers) {
+    // Wherever the accounts are: while this Space still has any on the site
+    // tables, its owner manages them there, on the content kernel's path, as
+    // before Zero v2, with Users on or off.
+    require_once $engineRoot . '/shared/space-users-site.php';
+    $siteAccounts = _stattic_space_users_site_accounts($privateRoot, $spaceId);
+    if ($siteAccounts === null) {
+        _stattic_problem_response(503, 'content_zero_version_unavailable', 'The Space content service is not ready.');
+    }
+    $zeroUsers = !$siteAccounts;
+}
+if ($zeroUsers) {
+    $zeroCurrent = _stattic_runtime_read_json($privateRoot . '/spaces/' . $spaceId . '/zero-v2-current.json');
+    $zeroVersion = is_array($zeroCurrent) ? ($zeroCurrent['version_id'] ?? null) : null;
+    if (!is_string($zeroVersion) || !_stattic_id_valid($zeroVersion)
+        || !_stattic_zero_v2_select($privateRoot, $spaceId, $zeroVersion, $zeroOverlay)) {
+        _stattic_problem_response(503, 'content_zero_version_unavailable', 'The Space content service is not ready.');
+    }
+    $GLOBALS['SPACEFAST_ZERO_V2_USERS_MANAGEMENT'] = true;
+}
 require $wpLoad;
-if (!function_exists('spacefast_content_handle_request')) {
+if ($zeroUsers) {
+    // The content kernel's REST serializer and its error type; a v2 binding loads no kernel.
+    require_once $engineRoot . '/wordpress/content-error.php';
+    require_once $engineRoot . '/wordpress/content-admin-api.php';
+}
+$handle = $zeroUsers ? 'spacefast_content_rest_dispatch' : 'spacefast_content_handle_request';
+if (!function_exists($handle)) {
     _stattic_problem_response(503, 'content_kernel_unavailable', 'The Space content kernel is not ready.');
 }
 
 try {
-    $result = spacefast_content_handle_request($request);
+    $result = $handle($request);
 } catch (Spacefast_Content_Error $error) {
     _stattic_problem_response($error->status, $error->codeName, $error->getMessage());
 } catch (Spacefast_Content_Conflict $conflict) {

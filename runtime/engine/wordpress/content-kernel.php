@@ -37,19 +37,9 @@ require_once __DIR__ . '/knowledge.php';
 require_once __DIR__ . '/team-knowledge.php';
 require_once __DIR__ . '/team-design-system.php';
 const SPACEFAST_CONTENT_EXTERNAL_ID_META = '_spacefast_external_id';
-const SPACEFAST_CONTENT_SPACE_META = '_spacefast_space_id';
 /** The Gutenberg plugin's per-room real-time editing storage. */
 const SPACEFAST_CONTENT_SYNC_ROOM_POST_TYPE = 'wp_sync_storage';
-final class Spacefast_Content_Error extends RuntimeException
-{
-    public function __construct(
-        public readonly int $status,
-        public readonly string $codeName,
-        string $message,
-    ) {
-        parent::__construct($message);
-    }
-}
+require_once __DIR__ . '/content-error.php';
 if (function_exists('add_action')) {
     if (function_exists('_stattic_runtime_bootstrap_config')) {
         add_action('plugins_loaded', '_stattic_runtime_bootstrap_config', 0);

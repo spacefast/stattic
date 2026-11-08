@@ -41,7 +41,36 @@ function _stattic_zero_v2_select(string $privateRoot, string $spaceId, string $v
     $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
     $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
     $GLOBALS['SPACEFAST_ZERO_V2_INITIALIZING'] = $initializing;
+    // Space Users is part of the binding: while the Space still has accounts on
+    // the site tables it stays off, so no second store of them starts here.
+    // A failed lookup pauses Space Users too; it never touches an app's own users.
+    $users = ($authority['users']['enabled'] ?? false) === true;
+    if ($users) {
+        require_once __DIR__ . '/space-users-site.php';
+        $users = _stattic_space_users_site_accounts($privateRoot, $spaceId) === false;
+    }
+    $GLOBALS['SPACEFAST_ZERO_V2_USERS'] = $users;
     return true;
+}
+
+/** The Space's current route configuration, for lanes that serve no request. */
+function _stattic_zero_v2_space_overlay(string $privateRoot, string $spaceId): array
+{
+    require_once __DIR__ . '/storage.php';
+    require_once __DIR__ . '/artifacts.php';
+    $pointer = _stattic_runtime_read_json($privateRoot . '/spaces/' . $spaceId . '/space.json');
+    $overlay = is_array($pointer) ? _stattic_v4_overlay($privateRoot, $spaceId, $pointer) : null;
+    return is_array($overlay) ? $overlay : [];
+}
+
+function _stattic_zero_v2_users_enabled(string $privateRoot, string $spaceId): bool
+{
+    return (_stattic_zero_v2_space_overlay($privateRoot, $spaceId)['users']['enabled'] ?? false) === true;
+}
+
+function _stattic_zero_v2_space_generation(string $privateRoot, string $spaceId): string
+{
+    return _stattic_zero_generation(_stattic_zero_v2_space_overlay($privateRoot, $spaceId));
 }
 
 function _stattic_zero_v2_mount(): void
@@ -70,7 +99,15 @@ function _stattic_zero_v2_mount(): void
             throw new RuntimeException('A migrated Zero table must belong to this Space and collection.');
         }
     }
-    if (($schema->auth()['collection'] ?? null) !== null) {
+    // Space Users on a v2 Space is this version's zero-identity on the Space's
+    // tables: the same accounts whether or not the app declares a user collection.
+    // Space Users binds onto zero-identity only while it isn't paused (paused:
+    // the Space still has accounts on the site tables). An app's own user
+    // collection is the app's sign-in, not Space Users: it mounts identity
+    // either way, as before, but without the Space Users hooks routing onto it.
+    $users = ($GLOBALS['SPACEFAST_ZERO_V2_USERS'] ?? false) === true;
+    if ($users || ($schema->auth()['collection'] ?? null) !== null) {
+        if ($users) spacefast_space_users_install_hooks();
         require_once $root . '/plugins/zero-identity/zero-identity.php';
         // Managed apps mount without WordPress activation hooks. Keep identity's
         // normal maintenance schedule in this Space's scoped cron option.
@@ -159,6 +196,7 @@ function _stattic_zero_v2_write_variables(string $privateRoot, string $spaceId, 
 
 function _stattic_zero_v2_initialize(string $privateRoot, string $spaceId, string $versionId, array $authority): void
 {
+    $authority['users'] = ['enabled' => _stattic_zero_v2_users_enabled($privateRoot, $spaceId)];
     if (!_stattic_zero_v2_select($privateRoot, $spaceId, $versionId, $authority, true)) return;
     $root = $GLOBALS['SPACEFAST_ZERO_V2_ROOT'];
     if (is_file($root . '/ready.json')) return;
@@ -249,10 +287,11 @@ function _stattic_zero_v2_shared_client(string $versionRoot, string $path, strin
 /** WP-CLI bootstrap for the scheduled worker, which runs from cron in the CLI namespace. */
 function _stattic_zero_v2_wp_bootstrap(string $privateRoot, string $spaceId, string $versionId, bool $initializing = false): string
 {
+    $authority = ['zero_generation' => 'v2', 'users' => ['enabled' => _stattic_zero_v2_users_enabled($privateRoot, $spaceId)]];
     return 'require_once ' . var_export(__DIR__ . '/context.php', true) . ';'
         . 'require_once ' . var_export(__DIR__ . '/storage.php', true) . ';'
         . 'require_once ' . var_export(__FILE__, true) . ';'
-        . '_stattic_zero_v2_select(' . var_export($privateRoot, true) . ',' . var_export($spaceId, true) . ',' . var_export($versionId, true) . ',["zero_generation"=>"v2"],' . ($initializing ? 'true' : 'false') . ');';
+        . '_stattic_zero_v2_select(' . var_export($privateRoot, true) . ',' . var_export($spaceId, true) . ',' . var_export($versionId, true) . ',' . var_export($authority, true) . ',' . ($initializing ? 'true' : 'false') . ');';
 }
 
 function _stattic_zero_v2_seed_receipt(string $versionRoot): ?array

@@ -100,7 +100,7 @@ final class Passkeys
             ["options" => $json],
             $binding,
         );
-        setcookie("zi_passkey", $binding, [
+        setcookie(Sessions::cookieName("zi_passkey"), $binding, [
             "expires" => time() + 300,
             "path" => "/",
             "secure" => is_ssl(),
@@ -114,7 +114,7 @@ final class Passkeys
         $c = $this->security->consume(
             $id,
             $session ? "passkey_register" : "passkey_login",
-            (string) ($_COOKIE["zi_passkey"] ?? ""),
+            (string) ($_COOKIE[Sessions::cookieName("zi_passkey")] ?? ""),
             $session ? $session["id"] : null,
         );
         try {

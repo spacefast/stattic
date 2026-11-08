@@ -21,8 +21,8 @@ final class Http
         // The URL comes from the app's config/environment, not from a request, so its own host and
         // port pass WordPress's private-address and safe-port checks for this one call; redirects
         // stay off, so nothing else gets through.
-        $host = strtolower((string) parse_url($url, PHP_URL_HOST));
-        $port = (int) (parse_url($url, PHP_URL_PORT) ?? 0);
+        $host = strtolower((string) wp_parse_url($url, PHP_URL_HOST));
+        $port = (int) (wp_parse_url($url, PHP_URL_PORT) ?? 0);
         $external = static fn (bool $is, string $h): bool => $is || strtolower($h) === $host;
         $ports = static fn (array $allowed): array => $port === 0 ? $allowed : [...$allowed, $port];
         add_filter('http_request_host_is_external', $external, 10, 2);

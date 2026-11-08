@@ -40,6 +40,8 @@ pub(super) fn parse(path: &Path, text: &str) -> Result<Vec<Stmt>, Failure> {
         module: 0,
         class_context: std::cell::Cell::new(false),
         super_call: std::cell::Cell::new(false),
+        erase_types: false,
+        erased_types: Default::default(),
     }
     .program(&parsed.program)
     .map_err(|d| fail("", diag::render(&d, Path::new("."))))
@@ -394,7 +396,14 @@ pub(super) fn app(
                     }
                     // Structural 0.8 types the migrated handlers still name.
                     if let Some(shape) = legacy_type(name) {
-                        prelude.push_str(&format!("type {} = {shape};\n", s.local));
+                        // 0.8's `Id<"table">` names its table; v2 ids are strings, and the parameter
+                        // stays so every `Id<...>` in the source still type-checks.
+                        let params = if name == "Id" {
+                            "<_Table extends string = string>"
+                        } else {
+                            ""
+                        };
+                        prelude.push_str(&format!("type {}{params} = {shape};\n", s.local));
                     }
                     if let Some(helper) = super::endpoints::helper(&s.local, name) {
                         responses.push_str(&helper);
@@ -553,6 +562,7 @@ pub(super) fn app(
             "auth",
             "realtime",
             "endpoints",
+            "favicon",
         ]
         .contains(&key.as_str())
         {
@@ -571,6 +581,15 @@ pub(super) fn app(
                 )),
             }
         }
+    }
+    // 0.8 type-checked `favicon` and nothing else: no 0.8 compiler, engine or runner revision read
+    // it, so a 0.8 Space's browser icon was always its published `/favicon.ico` (or the shell's).
+    if root.contains_key("favicon") {
+        entries.push(entry(
+            "/favicon",
+            "review",
+            "0.8 never served the favicon option, so dropping it changes nothing; the icon a visitor sees is still the published /favicon.ico. To keep shipping one, put it in the candidate's public/ directory",
+        ));
     }
     if root.contains_key("realtime") {
         entries.push(entry("/realtime", "mapped", "v2 announces every committed write as a change notice, so the declaration is no longer needed; Spacefast delivers notices over Cast. Replace client useQuery subscriptions with watch(client, [\"<table>\"], read, onResult) from the generated client."));
@@ -784,15 +803,16 @@ pub(super) fn app(
             "ctx.auth.userId reads each member's copied Space Users subject (usr_...); users created after migration answer wp:<id>. Rows owned by 0.8 guest:<id> identities keep their stored owner but no v2 user maps to them, and anonymous writes answer 401 so the v2 client can start a guest session.",
         ));
     }
-    if handlers
-        .iter()
-        .chain(routes.iter().map(|(_, c)| c))
-        .any(|h| h.contains("__z08Crypto."))
-    {
+    let uses_crypto = handlers.iter().chain(routes.iter().map(|(_, c)| c)).any(|h| {
+        ["__z08Sha256(", "__z08Hmac(", "__z08TimingSafeEqual("]
+            .iter()
+            .any(|f| h.contains(f))
+    });
+    if uses_crypto {
         entries.push(entry(
             "",
             "mapped",
-            "ctx.crypto becomes crypto from \"zero\": the same lowercase-hex SHA-256 and HMAC-SHA-256 over UTF-8, and constant-time comparison; calls are synchronous",
+            "ctx.crypto becomes node:crypto: createHash and createHmac give the same lowercase-hex SHA-256 and HMAC-SHA-256 over UTF-8, a key named by a variable is read from process.env (trimmed, refused when unset), and timingSafeEqual compares in constant time; calls are synchronous",
         ));
     }
     if handlers
@@ -807,20 +827,14 @@ pub(super) fn app(
         ));
     }
     let mut config = String::from(
-        "import { action as __z08Action, boolean as __z08Boolean, db as __z08Db, defineConfig as __z08Config, HttpError as __z08HttpError, json as __z08Json, real as __z08Real, table as __z08Table, text as __z08Text, email as __z08Email, userProjection as __z08Users, collection as __z08Collection, richText as __z08RichText, route as __z08Route, env as __z08Env, crypto as __z08Crypto, mail as __z08Mail, type InferSelectModel } from \"zero\";\n",
+        "import { action as __z08Action, boolean as __z08Boolean, db as __z08Db, defineConfig as __z08Config, HttpError as __z08HttpError, json as __z08Json, real as __z08Real, table as __z08Table, text as __z08Text, email as __z08Email, userProjection as __z08Users, collection as __z08Collection, richText as __z08RichText, route as __z08Route, mail as __z08Mail, type InferSelectModel } from \"zero\";\n",
     );
+    if uses_crypto {
+        config.push_str(CRYPTO_PRELUDE);
+    }
     if !routes.is_empty() || !responses.is_empty() {
         config.push_str(super::endpoints::PRELUDE);
         config.push_str(&responses);
-    }
-    // 0.8 gave every handler the global fetch(); v2 imports it from "zero" with the same egress rules.
-    if uses_global_fetch(&body, source) {
-        config.push_str("import { fetch } from \"zero\";\n");
-        entries.push(entry(
-            "",
-            "mapped",
-            "fetch() comes from \"zero\": HTTPS only, private and special-purpose addresses refused after every redirect, 10 s and 1 MiB each way, as in 0.8",
-        ));
     }
     config.push_str(&prelude);
     if content_config.is_some() {
@@ -903,28 +917,23 @@ fn returns_body_read(e: &Expr) -> bool {
         if args.is_empty() && matches!(&callee.kind, E::Member { prop, .. } if prop == "json" || prop == "text"))
 }
 
-/// True when the module calls a global `fetch(` it does not bind itself. Lexical: a mention inside
-/// a string or comment only adds an import the module does not use, which compiles.
-fn uses_global_fetch(body: &[&Stmt], source: &str) -> bool {
-    let binds = body.iter().any(|s| match s {
-        Stmt::Import { specs, .. } => specs.iter().any(|s| s.local == "fetch"),
-        Stmt::Func(f) => f.name.as_deref() == Some("fetch"),
-        Stmt::Decl { pat, .. } => {
-            let mut names = vec![];
-            pat.bindings(&mut names);
-            names.iter().any(|(n, _)| *n == "fetch")
-        }
-        _ => false,
-    });
-    let bytes = source.as_bytes();
-    let calls = source.match_indices("fetch").any(|(at, _)| {
-        let before = at.checked_sub(1).map(|i| bytes[i]);
-        let after = source[at + 5..].trim_start();
-        !before.is_some_and(|b| b == b'.' || b == b'_' || b == b'$' || b.is_ascii_alphanumeric())
-            && after.starts_with('(')
-    });
-    calls && !binds
+/// ctx.crypto's three functions over node:crypto, with 0.8's results: SHA-256 and HMAC-SHA-256 as
+/// lowercase hex over UTF-8, a named key read from the environment (trimmed, refused when unset;
+/// the compiler lowers `createHmac(alg, process.env.NAME)` that way) or `{ value }` used as given
+/// (also when the value is `ctx.env.X`),
+/// and a comparison that answers false for inputs of different byte lengths, where Node throws.
+const CRYPTO_PRELUDE: &str = r#"import { createHash as __z08Hash, createHmac as __z08Hmac, timingSafeEqual as __z08Equal } from "node:crypto";
+function __z08Sha256(data: string): string {
+  return __z08Hash("sha256").update(data).digest("hex");
 }
+function __z08InlineKey(key: string | undefined): string {
+  if (key === undefined) throw new TypeError("crypto.hmacSha256 key must be a variable name or { value }");
+  return key;
+}
+function __z08TimingSafeEqual(a: string, b: string): boolean {
+  return Buffer.byteLength(a) === Buffer.byteLength(b) && __z08Equal(Buffer.from(a), Buffer.from(b));
+}
+"#;
 
 /// A route path with parameter names erased, so two routes v2 would refuse as ambiguous compare equal.
 fn route_shape(path: &str) -> String {
@@ -1104,6 +1113,38 @@ fn legacy_type(name: &str) -> Option<&'static str> {
     })
 }
 
+/// The default expressions inside a binding pattern (`{ a = x }`, `[b = y]`).
+fn pattern_defaults<'a>(pattern: &'a Pat, out: &mut Vec<&'a Expr>) {
+    match pattern {
+        Pat::Id(..) => {}
+        Pat::Default(inner, value) => {
+            out.push(value);
+            pattern_defaults(inner, out);
+        }
+        Pat::Obj { props, .. } => props.iter().for_each(|(_, p)| pattern_defaults(p, out)),
+        Pat::Arr { elems, .. } => elems.iter().flatten().for_each(|p| pattern_defaults(p, out)),
+    }
+}
+
+/// A destructured parameter's source text split into its pattern and its type annotation,
+/// without a `= default`. Uses the parser, so object types and nested patterns are read exactly.
+fn destructured_parameter(text: &str) -> Option<(String, String)> {
+    use oxc_span::GetSpan;
+    let arena = Allocator::default();
+    let wrapped = format!("({text}) => 0");
+    let parsed = Parser::new(&arena, &wrapped, SourceType::ts())
+        .parse_expression()
+        .ok()?;
+    let oxc_ast::ast::Expression::ArrowFunctionExpression(arrow) = &parsed else {
+        return None;
+    };
+    let item = arrow.params.items.first()?;
+    let annotation = item.type_annotation.as_ref()?;
+    let pattern = &wrapped[item.pattern.span().start as usize..item.pattern.span().end as usize];
+    let ty = &wrapped[annotation.type_annotation.span().start as usize..annotation.type_annotation.span().end as usize];
+    Some((pattern.to_string(), ty.to_string()))
+}
+
 fn input_builder(ty: &TyAnn, source_ty: &str, optional: bool, at: &str) -> Result<String, Failure> {
     let (base, nullable) = match ty {
         TyAnn::Str => ("__z08Text()".into(), false),
@@ -1170,28 +1211,133 @@ fn handler(
     };
     let mut input = vec![];
     let mut bindings = String::new();
-    for p in f.params.iter().skip(1) {
-        let Pat::Id(n, _) = &p.pat else {
-            return Err(fail(at, "destructured input parameters require a manual port"));
-        };
-        ident(n, at)?;
-        if p.rest || p.default.is_some() {
-            return Err(fail(at, "rest and default parameters need a manual input schema"));
+    for (position, p) in f.params.iter().skip(1).enumerate() {
+        // A default runs in the handler's bindings, where the 0.8 context parameter no longer
+        // exists (it became `__z08ctx`); a default that reads it needs a manual port.
+        let mut defaults: Vec<&Expr> = p.default.iter().collect();
+        pattern_defaults(&p.pat, &mut defaults);
+        if ctx != "__z08unused" && defaults.iter().any(|d| crate::lower::reads_identifier(d, ctx)) {
+            return Err(fail(
+                at,
+                "rest and default parameters need a manual input schema when a default reads the context",
+            ));
         }
+        // 0.8 called `handler(ctx, ...args)` with the client's positional arguments; each
+        // parameter becomes one named v2 input. A destructured parameter becomes one JSON input
+        // named after its position, destructured in the handler exactly as 0.8 did.
+        let destructured = match &p.pat {
+            Pat::Obj { .. } | Pat::Arr { .. } => true,
+            Pat::Default(inner, _) => matches!(&**inner, Pat::Obj { .. } | Pat::Arr { .. }),
+            Pat::Id(..) => false,
+        };
+        if destructured {
+            if p.rest {
+                return Err(fail(
+                    at,
+                    "destructured input parameters require a manual port when they collect rest arguments",
+                ));
+            }
+            let ann = p
+                .ann
+                .as_ref()
+                .ok_or_else(|| fail(at, "handler parameters require explicit types"))?;
+            if !matches!(ann, TyAnn::Obj(_) | TyAnn::Ref(..) | TyAnn::Array(_) | TyAnn::Tuple(_)) {
+                return Err(fail(
+                    at,
+                    "destructured input parameters require a manual port unless typed as an object or array",
+                ));
+            }
+            let text = raw(source, p.span);
+            let (pattern, ty) =
+                destructured_parameter(text).ok_or_else(|| fail(at, "cannot read the destructured parameter"))?;
+            let n = format!("arg{}", position + 1);
+            if f.params
+                .iter()
+                .skip(1)
+                .any(|other| matches!(&other.pat, Pat::Id(id, _) if *id == n))
+            {
+                return Err(fail(at, "destructured input parameters require a manual port"));
+            }
+            let optional = p.optional || p.default.is_some();
+            input.push(format!(
+                "{}: __z08Json().$type<{ty}>(){}",
+                q(&n),
+                if optional { "" } else { ".notNull()" }
+            ));
+            let value = match &p.default {
+                Some(default) => format!("__z08input.{n} ?? ({})", raw(source, default.span)),
+                None if p.optional => format!("__z08input.{n} ?? undefined"),
+                None => format!("__z08input.{n}"),
+            };
+            bindings.push_str(&format!("const {pattern}: {ty} = {value};\n"));
+            continue;
+        }
+        let n = match &p.pat {
+            Pat::Id(n, _) => n.clone(),
+            Pat::Default(inner, _) => {
+                let Pat::Id(n, _) = &**inner else {
+                    unreachable!("destructured above")
+                };
+                n.clone()
+            }
+            _ => unreachable!("destructured above"),
+        };
+        ident(&n, at)?;
         let ann = p
             .ann
             .as_ref()
             .ok_or_else(|| fail(at, "handler parameters require explicit types"))?;
         let text = raw(source, p.span);
+        // The annotation text, without a `...` or a `= default` around it.
         let ty = text
             .split_once(':')
             .map(|(_, s)| s.trim())
             .ok_or_else(|| fail(at, "missing parameter type"))?;
-        input.push(format!("{}: {}", q(n), input_builder(ann, ty, p.optional, at)?));
-        bindings.push_str(&format!(
-            "const {n} = __z08input.{n}{};\n",
-            if p.optional { " ?? undefined" } else { "" }
-        ));
+        let ty = match &p.default {
+            Some(default) => ty
+                .strip_suffix(raw(source, default.span))
+                .map(|t| t.trim_end().trim_end_matches('=').trim_end())
+                .ok_or_else(|| fail(at, "cannot read the parameter type"))?,
+            None => ty,
+        };
+        if p.rest {
+            // `...xs: T[]` received the trailing positional arguments: one JSON array input.
+            if !matches!(ann, TyAnn::Array(_)) && !ty.ends_with("[]") {
+                return Err(fail(
+                    at,
+                    "rest and default parameters need a manual input schema unless the rest type is an array",
+                ));
+            }
+            input.push(format!("{}: __z08Json().$type<{ty}>()", q(&n)));
+            bindings.push_str(&format!("const {n}: {ty} = __z08input.{n} ?? [];\n"));
+            continue;
+        }
+        let optional = p.optional || p.default.is_some();
+        input.push(format!("{}: {}", q(&n), input_builder(ann, ty, optional, at)?));
+        match &p.default {
+            // 0.8 applied a default only to a missing argument. A v2 optional input reads a missing
+            // value as null, so `??` is exact when the declared type excludes null; when it admits
+            // null, an explicit null and a missing argument can no longer be told apart.
+            Some(default) => {
+                // A named type may alias a nullable one; without resolving it, refuse.
+                if matches!(ann, TyAnn::Null | TyAnn::Unknown | TyAnn::Any(_) | TyAnn::Ref(..))
+                    || matches!(ann, TyAnn::Union(xs) if xs.iter().any(|x| matches!(x, TyAnn::Null | TyAnn::Ref(..))))
+                {
+                    return Err(fail(
+                        at,
+                        "rest and default parameters need a manual input schema when the type allows null: v2 inputs read a missing argument as null",
+                    ));
+                }
+                bindings.push_str(&format!(
+                    "const {n}: {ty} = __z08input.{n} ?? ({});\n",
+                    raw(source, default.span)
+                ))
+            }
+            None => bindings.push_str(&format!(
+                "const {n} = __z08input.{n}{};\n",
+                if p.optional { " ?? undefined" } else { "" }
+            )),
+        }
     }
     let mut r = Rewrite {
         source,
@@ -1322,7 +1468,9 @@ fn endpoint(
     let body = match &f.body {
         FnBody::Expr(e) => {
             r.expr(e)?;
-            format!("return __z08EndpointValue({});", r.apply(e.span))
+            // `async () => response.json()` returned the promise and 0.8 awaited it, as handlers do.
+            let await_body = if returns_body_read(e) { "await " } else { "" };
+            format!("return __z08EndpointValue({await_body}{});", r.apply(e.span))
         }
         FnBody::Block(stmts) => {
             for s in stmts {
@@ -1440,6 +1588,58 @@ impl Rewrite<'_> {
         }
         out
     }
+    /// `ctx.crypto.hmacSha256({ key, data })`: a literal variable name becomes
+    /// `process.env["NAME"]`, so the compiler applies 0.8's trimmed, required key; `{ value }`
+    /// is the key as given.
+    fn hmac(&mut self, args: &[ArrEl]) -> Result<String, Failure> {
+        let at = pointer(&pointer(self.at, "ctx"), "crypto");
+        let manual = || {
+            fail(
+                &at,
+                "hmacSha256 needs a literal { key, data } object for the automatic port",
+            )
+        };
+        let [
+            ArrEl::Item(Expr {
+                kind: E::Object(props), ..
+            }),
+        ] = args
+        else {
+            return Err(manual());
+        };
+        let (mut key, mut data) = (None, None);
+        for p in props {
+            match p {
+                Prop::KV(PropKey::Static(k), v) if k == "key" => key = Some(v),
+                Prop::KV(PropKey::Static(k), v) if k == "data" => data = Some(v),
+                _ => return Err(manual()),
+            }
+        }
+        let (Some(key), Some(data)) = (key, data) else {
+            return Err(manual());
+        };
+        let key = match &key.kind {
+            E::Str(name)
+                if !name.is_empty()
+                    && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+                    && !name.starts_with(|c: char| c.is_ascii_digit()) =>
+            {
+                format!("process.env[{}]!", q(name))
+            }
+            E::Object(kv) => match kv.as_slice() {
+                // Used exactly as given, as 0.8 did: the helper keeps a `ctx.env.X` value off the
+                // compiler's trimmed, required `createHmac(alg, process.env.X)` path.
+                [Prop::KV(PropKey::Static(k), value)] if k == "value" => {
+                    format!("__z08InlineKey({})", self.render(value)?)
+                }
+                _ => return Err(manual()),
+            },
+            _ => return Err(manual()),
+        };
+        let data = self.render(data)?;
+        Ok(format!("__z08Hmac(\"sha256\", {key}).update({data}).digest(\"hex\")"))
+    }
+
     fn render(&mut self, e: &Expr) -> Result<String, Failure> {
         let old = std::mem::take(&mut self.edits);
         self.expr(e)?;
@@ -1505,7 +1705,11 @@ impl Rewrite<'_> {
                     ArrEl::Spread(_) => Err(fail(self.at, "spread crypto arguments need a manual port")),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let text = format!("__z08Crypto.{prop}({})", rendered.join(", "));
+            let text = match prop.as_str() {
+                "hmacSha256" => self.hmac(args)?,
+                "sha256" => format!("__z08Sha256({})", rendered.join(", ")),
+                _ => format!("__z08TimingSafeEqual({})", rendered.join(", ")),
+            };
             // An unawaited call is returned or awaited later in 0.8 code; the value stands in for
             // its promise either way. Storing it unawaited (`const p = ctx.crypto...`) and then
             // awaiting it is refused by the v2 compiler's await check, which is the port pointer.
@@ -1682,6 +1886,7 @@ impl Rewrite<'_> {
             E::Binary(_, a, b)
             | E::Logical(_, a, b)
             | E::Instanceof(a, b)
+            | E::In(a, b)
             | E::Assign {
                 target: a, value: b, ..
             } => {
@@ -1693,7 +1898,7 @@ impl Rewrite<'_> {
                 self.expr(b)?;
                 self.expr(c)?;
             }
-            E::Call { callee, args, .. } | E::New { callee, args } => {
+            E::Call { callee, args, .. } | E::New { callee, args, .. } => {
                 self.expr(callee)?;
                 for a in args {
                     self.arr(a)?;
@@ -1801,12 +2006,13 @@ impl Rewrite<'_> {
                     self.stmt(s)?;
                 }
             }
-            Stmt::While(iter, body) => {
+            Stmt::While(iter, body) | Stmt::DoWhile(body, iter) => {
                 self.expr(iter)?;
                 for s in body {
                     self.stmt(s)?;
                 }
             }
+            Stmt::Labeled(_, body, _) => self.stmt(body)?,
             Stmt::Try {
                 block,
                 handler,
@@ -2097,7 +2303,7 @@ impl Rewrite<'_> {
     }
 
     /// Context services with a direct v2 counterpart:
-    /// - `ctx.env.NAME` / `ctx.env["NAME"]` → `env("NAME")`, the same process or wp-config value
+    /// - `ctx.env.NAME` / `ctx.env["NAME"]` → `process.env["NAME"]`, the same process or wp-config value
     ///   (0.8 withheld secret variables named as signing keys; v2 has no such keys to withhold);
     /// - `ctx.log.info|warn|error|debug(...)` → `console.*`, written to the PHP error log.
     ///
@@ -2108,7 +2314,7 @@ impl Rewrite<'_> {
         match &e.kind {
             E::Member { obj, prop, .. } if is(obj, "env") => {
                 ident(prop, &pointer(&pointer(self.at, "ctx"), "env"))?;
-                Ok(Some(format!("(__z08Env({}) ?? undefined)", q(prop))))
+                Ok(Some(format!("process.env[{}]", q(prop))))
             }
             E::Index { obj, index, .. } if is(obj, "env") => {
                 let E::Str(name) = &index.kind else {
@@ -2117,7 +2323,7 @@ impl Rewrite<'_> {
                         "env names must be literal",
                     ));
                 };
-                Ok(Some(format!("(__z08Env({}) ?? undefined)", q(name))))
+                Ok(Some(format!("process.env[{}]", q(name))))
             }
             E::Call {
                 callee,

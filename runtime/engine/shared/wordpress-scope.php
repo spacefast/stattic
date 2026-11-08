@@ -1,6 +1,9 @@
 <?php
 declare(strict_types=1);
 
+/** The meta key a Space's posts, terms and users carry: this Space owns that row. */
+const SPACEFAST_CONTENT_SPACE_META = '_spacefast_space_id';
+
 function spacefast_content_space_id(): string
 {
     $spaceId = $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? null;

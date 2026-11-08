@@ -10,22 +10,28 @@ use Zero\Identity\Vendor\Firebase\JWT\JWT;
 
 /**
  * An OpenID Connect relying party for one external provider: discovery, an authorization request
- * with state, nonce and S256 PKCE, the code exchange, RS256 ID token verification against the
- * provider's JWKS (issuer, audience/azp, nonce, expiry, at_hash), and UserInfo. Transport is
- * WordPress HTTP; nothing is kept in a PHP session (the caller stores `start()`'s state).
+ * with state, nonce and S256 PKCE, the code exchange, ID token verification (RS256, or EdDSA over
+ * Ed25519) against the provider's JWKS (issuer, audience/azp, nonce, expiry, at_hash), and
+ * UserInfo. `$discovery` overrides single metadata entries; the rest come from the issuer's
+ * discovery document, fetched only when an entry is needed. An empty secret is a public client:
+ * the code exchange sends no client_secret. Transport is WordPress HTTP; nothing is kept in a PHP
+ * session (the caller stores `start()`'s state).
  */
 final class OidcClient
 {
-    private ?array $metadata;
+    private ?array $metadata = null;
 
     public function __construct(
         private string $issuer,
         private string $clientId,
         private string $secret,
         private string $redirect,
-        ?array $discovery = null,
+        private ?array $discovery = null,
+        private string $algorithm = "RS256",
     ) {
-        $this->metadata = $discovery;
+        if (!in_array($algorithm, ["RS256", "EdDSA"], true)) {
+            throw new Failure("provider_not_configured", "This sign-in provider uses an unsupported algorithm.", 503);
+        }
     }
 
     /** @return array{url: string, store: array{state: string, nonce: string, verifier: string}} */
@@ -76,9 +82,8 @@ final class OidcClient
                 "code" => $query["code"],
                 "redirect_uri" => $this->redirect,
                 "client_id" => $this->clientId,
-                "client_secret" => $this->secret,
                 "code_verifier" => $store["verifier"],
-            ],
+            ] + ($this->secret === "" ? [] : ["client_secret" => $this->secret]),
         ]));
         if (!is_string($tokens["id_token"] ?? null) || !is_string($tokens["access_token"] ?? null)) {
             throw new \RuntimeException("token response without tokens");
@@ -101,7 +106,7 @@ final class OidcClient
         $header = count($parts) === 3 ? json_decode(JWT::urlsafeB64Decode($parts[0]), true) : null;
         if (
             !is_array($header) ||
-            ($header["alg"] ?? null) !== "RS256" ||
+            ($header["alg"] ?? null) !== $this->algorithm ||
             !is_string($header["kid"] ?? null) ||
             isset($header["jwk"]) || isset($header["jku"]) || isset($header["x5u"])
         ) {
@@ -110,15 +115,16 @@ final class OidcClient
         $jwks = $this->json(wp_safe_remote_get($this->config("jwks_uri"), ["timeout" => 10, "redirection" => 0]));
         $keys = array_values(array_filter(
             is_array($jwks["keys"] ?? null) ? $jwks["keys"] : [],
-            static fn($k) => is_array($k) && ($k["kid"] ?? null) === $header["kid"] && ($k["kty"] ?? null) === "RSA"
-                && ($k["alg"] ?? "RS256") === "RS256" && ($k["use"] ?? "sig") === "sig",
+            fn($k) => is_array($k) && ($k["kid"] ?? null) === $header["kid"]
+                && ($this->algorithm === "EdDSA" ? ($k["kty"] ?? null) === "OKP" && ($k["crv"] ?? null) === "Ed25519" : ($k["kty"] ?? null) === "RSA")
+                && ($k["alg"] ?? $this->algorithm) === $this->algorithm && ($k["use"] ?? "sig") === "sig",
         ));
         if (count($keys) !== 1) {
             throw new \RuntimeException("no unique signing key");
         }
         JWT::$leeway = 30;
         try {
-            $claims = (array) JWT::decode($jwt, JWK::parseKeySet(["keys" => $keys], "RS256"));
+            $claims = (array) JWT::decode($jwt, JWK::parseKeySet(["keys" => $keys], $this->algorithm));
         } finally {
             JWT::$leeway = 0;
         }
@@ -136,8 +142,9 @@ final class OidcClient
             throw new \RuntimeException("ID token claims rejected");
         }
         if (isset($claims["at_hash"])) {
-            $hash = hash("sha256", $accessToken, true);
-            if (!is_string($claims["at_hash"]) || !hash_equals(JWT::urlsafeB64Encode(substr($hash, 0, 16)), $claims["at_hash"])) {
+            // The left half of the hash the signature algorithm uses: SHA-256 for RS256, SHA-512 for Ed25519.
+            $hash = hash($this->algorithm === "EdDSA" ? "sha512" : "sha256", $accessToken, true);
+            if (!is_string($claims["at_hash"]) || !hash_equals(JWT::urlsafeB64Encode(substr($hash, 0, intdiv(strlen($hash), 2))), $claims["at_hash"])) {
                 throw new \RuntimeException("at_hash mismatch");
             }
         }
@@ -145,6 +152,19 @@ final class OidcClient
     }
 
     private function config(string $key): string
+    {
+        if (isset($this->discovery[$key])) {
+            $value = $this->discovery[$key];
+        } else {
+            $value = $this->metadata()[$key] ?? null;
+        }
+        if (!is_string($value) || !wp_http_validate_url($value)) {
+            throw new Failure("discovery_invalid", "Provider discovery is missing $key.", 502);
+        }
+        return $value;
+    }
+
+    private function metadata(): array
     {
         if ($this->metadata === null) {
             $metadata = $this->json(wp_safe_remote_get(
@@ -156,11 +176,7 @@ final class OidcClient
             }
             $this->metadata = $metadata;
         }
-        $value = $this->metadata[$key] ?? null;
-        if (!is_string($value) || !wp_http_validate_url($value)) {
-            throw new Failure("discovery_invalid", "Provider discovery is missing $key.", 502);
-        }
-        return $value;
+        return $this->metadata;
     }
 
     private function json(mixed $response): array

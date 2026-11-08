@@ -345,6 +345,11 @@ fn names(schema: &Schema) -> ClientNames {
     out
 }
 
+/// A compiler type as TypeScript, without row names (generated ability types).
+pub(crate) fn ty_ts_plain(t: &Ty) -> String {
+    ty_ts(t, &[])
+}
+
 /// A compiler type as TypeScript, for action results. Row-shaped results are named when they match.
 fn ty_ts(t: &Ty, rows: &[(String, Ty)]) -> String {
     if let Some((name, _)) = rows.iter().find(|(_, r)| r == t) {

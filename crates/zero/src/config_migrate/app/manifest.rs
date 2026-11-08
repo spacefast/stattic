@@ -206,7 +206,15 @@ impl Manifest {
                     verified.insert(path.clone(), text);
                 }
                 Ok(_) => differing.push(format!("{path} (changed)")),
-                Err(_) => differing.push(format!("{path} (missing)")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => differing.push(format!("{path} (missing)")),
+                // A recorded binary asset (an image under public/) is not text, and the converter
+                // never reads it: compare its bytes and leave it out of the converted files.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => match std::fs::read(root.join(relative)) {
+                    Ok(bytes) if hex(&Sha256::digest(&bytes)) == *expected => {}
+                    Ok(_) => differing.push(format!("{path} (changed)")),
+                    Err(e) => differing.push(format!("{path} (unreadable: {e})")),
+                },
+                Err(e) => differing.push(format!("{path} (unreadable: {e})")),
             }
         }
         if differing.is_empty() {

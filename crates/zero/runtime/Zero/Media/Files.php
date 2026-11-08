@@ -124,7 +124,7 @@ final class Files
         if (!self::accepts($bucket['accept'], $mime)) {
             throw HttpError::invalidInput("$name accepts " . implode(', ', $bucket['accept']) . "; this file is $mime", '/file');
         }
-        $rel = $name . '/' . Js::uuid();
+        $rel = $name . '/' . wp_generate_uuid4();
         $storage->store($tmpPath, $rel);
         $row = [
             'bucket' => $name,

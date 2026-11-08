@@ -117,7 +117,7 @@ final class Api
             return [["kind" => "signed_in"], [Sessions::COOKIE, $created["secret"], $created["session"]["expires_at"]]];
         });
         if ($cookie[0] === "zi_factor") {
-            setcookie("zi_factor", $cookie[1], [
+            setcookie(Sessions::cookieName("zi_factor"), $cookie[1], [
                 "expires" => time() + 300,
                 "path" => "/",
                 "secure" => is_ssl(),
@@ -193,7 +193,7 @@ final class Api
                 $this->field($r, "code", 12),
             );
             $current = $this->sessions->find(
-                (string) ($_COOKIE[Sessions::COOKIE] ?? ""),
+                (string) ($_COOKIE[Sessions::cookieName()] ?? ""),
             );
             return $this->login(
                 $this->accounts->verifiedSignIn($c["payload"]["email"], $current),
@@ -208,7 +208,7 @@ final class Api
             $c = $this->security->consume(
                 $this->field($r, "challenge_id"),
                 "mfa",
-                (string) ($_COOKIE["zi_factor"] ?? ""),
+                (string) ($_COOKIE[Sessions::cookieName("zi_factor")] ?? ""),
             );
             [$result, $cookie] = $this->db->transaction(function () use ($c, $code) {
                 $uid = (int) $c["wp_user_id"];

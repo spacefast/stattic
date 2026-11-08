@@ -358,8 +358,29 @@ final class Plugin
             }
         });
         if (defined("WP_CLI") && WP_CLI) {
-            \WP_CLI::add_command("zero-identity", new Cli());
-            \WP_CLI::add_command("zero-identity app", new AppCli());
+            // `wp zero identity …`: one `zero` namespace, owned by the runtime's dispatcher.
+            $register = static fn() => \Zero\Wp\Runtime::command(
+                "identity",
+                Cli::run(...),
+            );
+            did_action("zero_runtime_loaded")
+                ? $register()
+                : add_action("zero_runtime_loaded", $register);
+            // Without the runtime (identity on its own), `wp zero` serves `identity` only.
+            add_action("plugins_loaded", static function () {
+                if (did_action("zero_runtime_loaded")) {
+                    return;
+                }
+                \WP_CLI::add_command("zero", static function (array $args, array $flags) {
+                    if (($args[0] ?? "") !== "identity") {
+                        \WP_CLI::error(
+                            "Only wp zero identity is available without the zero-runtime plugin.",
+                        );
+                    }
+                    $code = Cli::run(array_slice($args, 1), $flags);
+                    $code === 0 || \WP_CLI::halt($code);
+                });
+            });
         }
     }
     /** The issuer's URL path (`/identity`, or `/blog/identity` under a subdirectory install). */
@@ -524,7 +545,7 @@ final class Plugin
                     [$resumeId, $resumeSecret] = array_pad(
                         explode(
                             ".",
-                            (string) ($_COOKIE["zi_reauth"] ?? ""),
+                            (string) ($_COOKIE[Sessions::cookieName("zi_reauth")] ?? ""),
                             2,
                         ),
                         2,
@@ -570,7 +591,7 @@ final class Plugin
                     exit();
                 }
                 $session = self::$sessions->find(
-                    (string) ($_COOKIE[Sessions::COOKIE] ?? ""),
+                    (string) ($_COOKIE[Sessions::cookieName()] ?? ""),
                 );
                 if (
                     $_SERVER["REQUEST_METHOD"] === "GET" &&
@@ -592,9 +613,9 @@ final class Plugin
                         ],
                         $binding,
                     );
-                    setcookie("zi_reauth", $resumeId . "." . $binding, [
+                    setcookie(Sessions::cookieName("zi_reauth"), $resumeId . "." . $binding, [
                         "expires" => time() + 300,
-                        "path" => self::path(),
+                        "path" => "/",
                         "secure" => is_ssl(),
                         "httponly" => true,
                         "samesite" => "Lax",

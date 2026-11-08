@@ -464,7 +464,11 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 if (is_file($zeroHost)) {
                     require_once $zeroHost;
                     _stattic_zero_generation_serve(_stattic_version_root($privateRoot, $zeroTarget['space_id'], $zeroTarget['version_id']), $zeroTarget['serving']);
-                    _stattic_zero_v2_select($privateRoot, $zeroTarget['space_id'], $zeroTarget['version_id'], $zeroTarget['serving']);
+                    // A content-admin session has no page serving yet; the binding's
+                    // Users settings come from the same route entry.
+                    if (_stattic_zero_v2_select($privateRoot, $zeroTarget['space_id'], $zeroTarget['version_id'], $zeroTarget['serving'])) {
+                        $GLOBALS['SPACEFAST_PAGE_SERVING'] ??= $zeroTarget['serving'];
+                    }
                 }
             }
             // Both REST doors end here. /wp-admin needs none of it: those are

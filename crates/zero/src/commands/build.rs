@@ -1,4 +1,3 @@
-use crate::cli::USAGE;
 use crate::diag::{Diag, Span};
 use crate::emit::{emit_generated, plugin_vars, runtime_file, write};
 use crate::pipeline::{self, Built};
@@ -7,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// Runs the whole pipeline in memory.
-fn build(project: &Path) -> Result<Built, Diag> {
+fn build(project: &Path, frozen: bool) -> Result<Built, Diag> {
     let entry = project.join("zero.config.ts");
     if !entry.is_file() {
         return Err(Diag::new(
@@ -16,12 +15,21 @@ fn build(project: &Path) -> Result<Built, Diag> {
         ));
     }
     let program = loader::load(&entry)?;
-    build_program(project, &program)
+    build_program(project, &program, frozen)
 }
 
-/// The in-memory pipeline over this project's last snapshot and migration numbering.
-fn build_program(project: &Path, program: &loader::Program) -> Result<Built, Diag> {
-    pipeline::build(project, program, || read_previous(project), runtime_file)
+/// The in-memory pipeline over this project's last snapshot, migration numbering and plugin lock.
+fn build_program(project: &Path, program: &loader::Program, frozen: bool) -> Result<Built, Diag> {
+    pipeline::build(
+        project,
+        program,
+        || {
+            let mut previous = read_previous(project)?;
+            previous.frozen = frozen;
+            Ok(previous)
+        },
+        runtime_file,
+    )
 }
 
 fn migrations_dir(project: &Path) -> PathBuf {
@@ -108,6 +116,12 @@ fn emit_project(project: &Path, built: &Built) -> std::io::Result<()> {
         )?;
     }
     write(&project.join("zero.gen.ts"), &built.gen_ts)?;
+    if let Some(lock) = &built.plugin_lock {
+        write(
+            &project.join(crate::plugins::LOCK_PATH),
+            serde_json::to_string_pretty(lock)? + "\n",
+        )?;
+    }
     let client_dir = project.join("zero").join("client");
     for (name, content) in &built.client_files {
         write(&client_dir.join(name), content)?;
@@ -229,7 +243,7 @@ fn emit_wp_content(project: &Path, root: &Path, built: &Built) -> std::io::Resul
             std::fs::remove_file(archive)?;
         }
     }
-    emit_generated(project, &migrations_dir(project), &plugins, built)?;
+    emit_generated(project, &migrations_dir(project), &plugins, built, true)?;
     let mut versions = serde_json::Map::new();
     for slug in generated {
         let directory = plugins.join(&slug);
@@ -311,15 +325,21 @@ fn php_lint(files: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
-fn check_json(project: &Path) -> ExitCode {
-    let diagnostics = match loader::load_all(&project.join("zero.config.ts")) {
-        Err(diagnostics) => diagnostics,
-        Ok(program) => build_program(project, &program).err().into_iter().collect(),
+fn check_json(project: &Path, frozen: bool) -> ExitCode {
+    let (diagnostics, plugins) = match loader::load_all(&project.join("zero.config.ts")) {
+        Err(diagnostics) => (diagnostics, None),
+        Ok(program) => match build_program(project, &program, frozen) {
+            Ok(built) => (Vec::new(), Some(built.plugin_report)),
+            Err(d) => (vec![d], None),
+        },
     };
-    println!(
-        "{}",
-        serde_json::to_string(&diag::envelope(&diagnostics, project)).expect("diagnostic envelope serializes")
-    );
+    let mut envelope =
+        serde_json::to_value(diag::envelope(&diagnostics, project)).expect("diagnostic envelope serializes");
+    // Each plugin's package, source integrity, locked and inferred grant, and read→send flows.
+    if let Some(plugins) = plugins.filter(|p| p.as_array().is_some_and(|p| !p.is_empty())) {
+        envelope["plugins"] = plugins;
+    }
+    println!("{envelope}");
     if diagnostics.is_empty() {
         ExitCode::SUCCESS
     } else {
@@ -330,20 +350,28 @@ fn check_json(project: &Path) -> ExitCode {
 pub(super) fn run(args: &crate::cli::Args) -> ExitCode {
     let project = args.project.canonicalize().unwrap_or(args.project.clone());
     if !matches!(args.command.as_str(), "build" | "check") {
-        eprintln!("unknown command {}\n{USAGE}", args.command);
+        eprintln!("no command {}\n{}", args.command, crate::cli::help());
         return ExitCode::from(2);
     }
+    // CI never approves a grant: the committed lock is the only one.
+    let frozen = args.frozen || std::env::var_os("CI").is_some_and(|v| !v.is_empty() && v != "false");
     if args.command == "check" && args.json {
-        return check_json(&project);
+        return check_json(&project, frozen);
     }
     let started = std::time::Instant::now();
-    let built = match build(&project) {
+    let built = match build(&project, frozen) {
         Ok(b) => b,
         Err(d) => {
             eprint!("{}", diag::render(&d, &project));
             return ExitCode::from(1);
         }
     };
+    for line in &built.plugin_changes {
+        eprintln!("{line}");
+    }
+    for w in &built.unsupported_plugins {
+        eprintln!("warning: {w}");
+    }
     if args.command == "check" {
         if !args.quiet {
             for h in &built.hints {

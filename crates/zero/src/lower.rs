@@ -15,6 +15,11 @@ pub struct Lowerer {
     pub module: usize,
     pub class_context: std::cell::Cell<bool>,
     pub super_call: std::cell::Cell<bool>,
+    /// Installed package TypeScript compiles like JavaScript: types are erased,
+    /// not modelled. Syntax with runtime semantics is still lowered or refused.
+    pub erase_types: bool,
+    /// Names of the type declarations erased so far.
+    pub erased_types: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl Lowerer {
@@ -38,6 +43,14 @@ impl Lowerer {
             d = d.help(help);
         }
         Err(d)
+    }
+
+    /// A source annotation, or nothing when this module's types are erased.
+    fn annotation(&self, t: Option<&oxc_allocator::Box<'_, a::TSTypeAnnotation<'_>>>) -> Result<Option<TyAnn>> {
+        if self.erase_types {
+            return Ok(None);
+        }
+        t.map(|t| self.ty(&t.type_annotation)).transpose()
     }
 
     fn binding_name(&self, name: &str, span: oxc_span::Span) -> Result<String> {
@@ -227,6 +240,14 @@ impl Lowerer {
                 });
                 Ok(())
             }
+            a::Declaration::TSTypeAliasDeclaration(t) if self.erase_types => {
+                self.erased_types.borrow_mut().insert(t.id.name.to_string());
+                Ok(())
+            }
+            a::Declaration::TSInterfaceDeclaration(i) if self.erase_types => {
+                self.erased_types.borrow_mut().insert(i.id.name.to_string());
+                Ok(())
+            }
             a::Declaration::TSTypeAliasDeclaration(t) => {
                 out.push(Stmt::TypeAlias {
                     name: t.id.name.to_string(),
@@ -292,11 +313,7 @@ impl Lowerer {
             out.push(Stmt::Decl {
                 kind,
                 pat: self.pattern(&d.id)?,
-                ann: d
-                    .type_annotation
-                    .as_ref()
-                    .map(|t| self.ty(&t.type_annotation))
-                    .transpose()?,
+                ann: self.annotation(d.type_annotation.as_ref())?,
                 init: d.init.as_ref().map(|e| self.expr(e)).transpose()?,
                 span: self.sp(d.span),
             });
@@ -329,6 +346,9 @@ impl Lowerer {
     }
 
     fn type_params(&self, t: Option<&a::TSTypeParameterDeclaration<'_>>) -> Vec<String> {
+        if self.erase_types {
+            return Vec::new();
+        }
         t.map(|t| t.params.iter().map(|p| p.name.name.to_string()).collect())
             .unwrap_or_default()
     }
@@ -417,13 +437,6 @@ impl Lowerer {
                 }
             }
             a::Statement::ForOfStatement(f) => {
-                if f.r#await {
-                    return self.unsupported(
-                        f.span,
-                        "`for await`",
-                        "Zero's async calls already block; use `for ... of`",
-                    );
-                }
                 let a::ForStatementLeft::VariableDeclaration(v) = &f.left else {
                     return self.unsupported(
                         f.span,
@@ -438,6 +451,7 @@ impl Lowerer {
                     _ => return self.unsupported(v.span, "this loop declaration", "use `const`"),
                 };
                 Stmt::ForOf {
+                    is_await: f.r#await,
                     kind,
                     pat: self.pattern(&v.declarations[0].id)?,
                     iter: self.expr(&f.right)?,
@@ -486,20 +500,12 @@ impl Lowerer {
                 }
             }
             a::Statement::WhileStatement(w) => Stmt::While(self.expr(&w.test)?, self.body_of(&w.body)?),
-            a::Statement::DoWhileStatement(d) => {
-                return self.unsupported(d.span, "`do ... while`", "use `while`");
-            }
+            a::Statement::DoWhileStatement(d) => Stmt::DoWhile(self.body_of(&d.body)?, self.expr(&d.test)?),
             a::Statement::BreakStatement(b) => {
-                if b.label.is_some() {
-                    return self.unsupported(b.span, "labeled `break`", "");
-                }
-                Stmt::Break(self.sp(b.span))
+                Stmt::Break(b.label.as_ref().map(|l| l.name.to_string()), self.sp(b.span))
             }
             a::Statement::ContinueStatement(c) => {
-                if c.label.is_some() {
-                    return self.unsupported(c.span, "labeled `continue`", "");
-                }
-                Stmt::Continue(self.sp(c.span))
+                Stmt::Continue(c.label.as_ref().map(|l| l.name.to_string()), self.sp(c.span))
             }
             a::Statement::ThrowStatement(t) => Stmt::Throw(self.expr(&t.argument)?),
             a::Statement::TryStatement(t) => {
@@ -554,11 +560,17 @@ impl Lowerer {
                 }
             }
             a::Statement::LabeledStatement(l) => {
-                return self.unsupported(
-                    l.span,
-                    "labels",
-                    "extract a helper and return early, or use a boolean flag to leave nested loops",
-                );
+                if matches!(l.body, a::Statement::FunctionDeclaration(_)) {
+                    return self.unsupported(l.span, "labeled function declarations", "remove the label");
+                }
+                let mut body = Vec::new();
+                self.inner_stmt(&l.body, &mut body)?;
+                let body = if body.len() == 1 {
+                    body.pop().expect("one statement")
+                } else {
+                    Stmt::Block(body)
+                };
+                Stmt::Labeled(l.label.name.to_string(), Box::new(body), self.sp(l.span))
             }
             a::Statement::WithStatement(w) => return self.unsupported(w.span, "`with`", ""),
             a::Statement::DebuggerStatement(d) => return self.unsupported(d.span, "`debugger`", ""),
@@ -584,7 +596,8 @@ impl Lowerer {
     }
 
     fn class(&self, c: &a::Class<'_>) -> Result<Rc<Class>> {
-        if !c.decorators.is_empty() || c.r#abstract || c.declare || c.type_parameters.is_some() {
+        let type_only = |present: bool| present && !self.erase_types;
+        if !c.decorators.is_empty() || type_only(c.r#abstract) || c.declare || type_only(c.type_parameters.is_some()) {
             return self.unsupported(
                 c.span,
                 "decorated, abstract, ambient or generic classes",
@@ -598,7 +611,7 @@ impl Lowerer {
         let base = match &c.heritage {
             None => None,
             Some(h) => match &h.expression {
-                a::Expression::Identifier(i) if h.type_arguments.is_none() => Some(i.name.to_string()),
+                a::Expression::Identifier(i) if !type_only(h.type_arguments.is_some()) => Some(i.name.to_string()),
                 _ => return self.unsupported(c.span, "dynamic class inheritance", "extend a named concrete class"),
             },
         };
@@ -608,16 +621,35 @@ impl Lowerer {
             let mut methods = Vec::new();
             let mut constructor = None;
             let mut names = std::collections::HashSet::new();
+            let mut accessors = Vec::new();
+            let mut accessor_names = std::collections::HashSet::new();
             for element in &c.body.body {
                 match element {
+                    // Erased members have no runtime form: abstract members,
+                    // ambient fields, overload signatures and index signatures.
+                    a::ClassElement::PropertyDefinition(p)
+                        if self.erase_types
+                            && (p.declare || p.r#type == a::PropertyDefinitionType::TSAbstractPropertyDefinition) => {}
+                    a::ClassElement::MethodDefinition(m)
+                        if self.erase_types
+                            && (m.value.body.is_none()
+                                || m.r#type == a::MethodDefinitionType::TSAbstractMethodDefinition) => {}
+                    a::ClassElement::TSIndexSignature(_) if self.erase_types => {}
                     a::ClassElement::PropertyDefinition(p) => {
-                        let Some(name) = p.key.static_name() else {
-                            return self.unsupported(p.span, "private class fields", "use public fields");
+                        let Some(name) = class_member_name(&p.key) else {
+                            return self.unsupported(p.span, "computed class fields", "use named fields");
                         };
+                        if name.starts_with('#') != p.key.is_private_identifier() {
+                            return self.unsupported(
+                                p.span,
+                                "quoted class member names starting with #",
+                                "rename the member",
+                            );
+                        }
                         if p.computed
                             || !p.decorators.is_empty()
                             || p.declare
-                            || p.accessibility.is_some_and(|a| a != a::TSAccessibility::Public)
+                            || type_only(p.accessibility.is_some_and(|a| a != a::TSAccessibility::Public))
                         {
                             return self.unsupported(
                                 p.span,
@@ -626,9 +658,12 @@ impl Lowerer {
                             );
                         }
                         if matches!(
-                            name.as_ref(),
+                            name.as_str(),
                             "__proto__" | "prototype" | "constructor" | "toJSON" | "toString" | "valueOf"
-                        ) || !names.insert((p.r#static, name.to_string()))
+                        ) || accessor_names
+                            .iter()
+                            .any(|(s, _, n): &(bool, bool, String)| *s == p.r#static && *n == name)
+                            || !names.insert((p.r#static, name.to_string()))
                         {
                             return self.unsupported(
                                 p.span,
@@ -639,31 +674,34 @@ impl Lowerer {
                         fields.push(ClassField {
                             name: name.to_string(),
                             is_static: p.r#static,
-                            ann: p
-                                .type_annotation
-                                .as_ref()
-                                .map(|t| self.ty(&t.type_annotation))
-                                .transpose()?,
+                            ann: self.annotation(p.type_annotation.as_ref())?,
                             init: p.value.as_ref().map(|e| self.expr(e)).transpose()?,
                             span: self.sp(p.span),
                         });
                     }
                     a::ClassElement::MethodDefinition(m) => {
-                        let Some(name) = m.key.static_name() else {
-                            return self.unsupported(m.span, "private class methods", "use public methods");
+                        let Some(name) = class_member_name(&m.key) else {
+                            return self.unsupported(m.span, "computed class methods", "use named methods");
                         };
+                        if name.starts_with('#') != m.key.is_private_identifier() {
+                            return self.unsupported(
+                                m.span,
+                                "quoted class member names starting with #",
+                                "rename the member",
+                            );
+                        }
                         if m.computed
                             || !m.decorators.is_empty()
-                            || m.accessibility.is_some_and(|a| a != a::TSAccessibility::Public)
-                            || matches!(m.kind, a::MethodDefinitionKind::Get | a::MethodDefinitionKind::Set)
+                            || type_only(m.accessibility.is_some_and(|a| a != a::TSAccessibility::Public))
                         {
                             return self.unsupported(
                                 m.span,
-                                "computed, decorated, private or accessor class methods",
+                                "computed, decorated or private class methods",
                                 "use public named methods",
                             );
                         }
-                        if m.value.type_parameters.is_some() || m.value.params.rest.is_some() {
+                        let accessor = matches!(m.kind, a::MethodDefinitionKind::Get | a::MethodDefinitionKind::Set);
+                        if type_only(m.value.type_parameters.is_some()) || m.value.params.rest.is_some() {
                             return self.unsupported(
                                 m.span,
                                 "generic or rest class methods",
@@ -678,7 +716,7 @@ impl Lowerer {
                         let is_ctor = m.kind == a::MethodDefinitionKind::Constructor;
                         for p in &m.value.params.items {
                             if !p.decorators.is_empty()
-                                || p.accessibility.is_some_and(|a| a != a::TSAccessibility::Public)
+                                || type_only(p.accessibility.is_some_and(|a| a != a::TSAccessibility::Public))
                             {
                                 return self.unsupported(
                                     p.span,
@@ -711,11 +749,7 @@ impl Lowerer {
                                 fields.push(ClassField {
                                     name: i.name.to_string(),
                                     is_static: false,
-                                    ann: p
-                                        .type_annotation
-                                        .as_ref()
-                                        .map(|t| self.ty(&t.type_annotation))
-                                        .transpose()?,
+                                    ann: self.annotation(p.type_annotation.as_ref())?,
                                     init: None,
                                     span: self.sp(p.span),
                                 });
@@ -795,10 +829,35 @@ impl Lowerer {
                                 }
                             }
                             constructor = Some(f);
+                        } else if accessor {
+                            let setter = m.kind == a::MethodDefinitionKind::Set;
+                            if matches!(name.as_str(), "__proto__" | "prototype" | "constructor")
+                                || names.contains(&(m.r#static, name.clone()))
+                                || !accessor_names.insert((m.r#static, setter, name.clone()))
+                            {
+                                return self.unsupported(
+                                    m.span,
+                                    "duplicate or protocol class members",
+                                    "use distinct ordinary member names",
+                                );
+                            }
+                            accessors.push(ClassAccessor {
+                                name: name.clone(),
+                                is_static: m.r#static,
+                                setter,
+                                func: f,
+                            });
                         } else {
+                            if accessor_names.iter().any(|(s, _, n)| *s == m.r#static && *n == name) {
+                                return self.unsupported(
+                                    m.span,
+                                    "duplicate or protocol class members",
+                                    "use distinct ordinary member names",
+                                );
+                            }
                             if matches!(
-                                name.as_ref(),
-                                "__proto__" | "prototype" | "constructor" | "toJSON" | "toString" | "valueOf"
+                                name.as_str(),
+                                "__proto__" | "prototype" | "constructor" | "toString" | "valueOf"
                             ) || !names.insert((m.r#static, name.to_string()))
                             {
                                 return self.unsupported(
@@ -830,6 +889,7 @@ impl Lowerer {
                 fields,
                 methods,
                 constructor,
+                accessors,
                 span: self.sp(c.span),
             }))
         })();
@@ -840,9 +900,6 @@ impl Lowerer {
     fn function_inner(&self, f: &a::Function<'_>) -> Result<Rc<Func>> {
         if let Some(id) = &f.id {
             self.binding_name(id.name.as_str(), id.span)?;
-        }
-        if f.generator {
-            return self.unsupported(f.span, "generators", "return an array");
         }
         let Some(body) = &f.body else {
             return self.unsupported(f.span, "a function without a body", "");
@@ -862,11 +919,8 @@ impl Lowerer {
             params,
             body,
             is_async: f.r#async,
-            ret: f
-                .return_type
-                .as_ref()
-                .map(|t| self.ty(&t.type_annotation))
-                .transpose()?,
+            is_generator: f.generator,
+            ret: self.annotation(f.return_type.as_ref())?,
             type_params: self.type_params(f.type_parameters.as_deref()),
             span: self.sp(f.span),
             module: self.module,
@@ -886,11 +940,8 @@ impl Lowerer {
             params,
             body,
             is_async: f.r#async,
-            ret: f
-                .return_type
-                .as_ref()
-                .map(|t| self.ty(&t.type_annotation))
-                .transpose()?,
+            is_generator: false,
+            ret: self.annotation(f.return_type.as_ref())?,
             type_params: self.type_params(f.type_parameters.as_deref()),
             span: self.sp(f.span),
             module: self.module,
@@ -905,11 +956,7 @@ impl Lowerer {
             }
             out.push(Param {
                 pat: self.pattern(&item.pattern)?,
-                ann: item
-                    .type_annotation
-                    .as_ref()
-                    .map(|t| self.ty(&t.type_annotation))
-                    .transpose()?,
+                ann: self.annotation(item.type_annotation.as_ref())?,
                 default: item.initializer.as_ref().map(|e| self.expr(e)).transpose()?,
                 optional: item.optional,
                 rest: false,
@@ -919,11 +966,7 @@ impl Lowerer {
         if let Some(r) = &p.rest {
             out.push(Param {
                 pat: self.pattern(&r.rest.argument)?,
-                ann: r
-                    .type_annotation
-                    .as_ref()
-                    .map(|t| self.ty(&t.type_annotation))
-                    .transpose()?,
+                ann: self.annotation(r.type_annotation.as_ref())?,
                 default: None,
                 optional: false,
                 rest: true,
@@ -1014,7 +1057,7 @@ impl Lowerer {
             }
             E::BooleanLiteral(b) => self.mk(span, ExprKind::Bool(b.value)),
             E::NullLiteral(_) => self.mk(span, ExprKind::Null),
-            E::BigIntLiteral(b) => return self.unsupported(b.span, "BigInt", "use numbers"),
+            E::BigIntLiteral(b) => self.mk(span, ExprKind::BigInt(b.value.to_string())),
             E::RegExpLiteral(r) => self.mk(
                 span,
                 ExprKind::Regex {
@@ -1034,7 +1077,37 @@ impl Lowerer {
                 self.mk(span, ExprKind::Template(quasis, exprs))
             }
             E::TaggedTemplateExpression(t) => {
-                return self.unsupported(t.span, "tagged templates", "call a function with a template literal");
+                // tag`a${x}b` calls tag(strings, x), where strings is the site's array of cooked
+                // strings with a `raw` property (ECMAScript 13.3.11).
+                let strings = self.mk(
+                    t.quasi.span,
+                    ExprKind::TemplateStrings {
+                        cooked: t
+                            .quasi
+                            .quasis
+                            .iter()
+                            .map(|q| q.value.cooked.map(|c| c.to_string()))
+                            .collect(),
+                        raw: t.quasi.quasis.iter().map(|q| q.value.raw.to_string()).collect(),
+                    },
+                );
+                let mut args = vec![ArrEl::Item(strings)];
+                for e in &t.quasi.expressions {
+                    args.push(ArrEl::Item(self.expr(e)?));
+                }
+                let type_args = match &t.type_arguments {
+                    Some(ta) => ta.params.iter().map(|t| self.ty(t)).collect::<Result<_>>()?,
+                    None => vec![],
+                };
+                self.mk(
+                    span,
+                    ExprKind::Call {
+                        callee: Box::new(self.expr(&t.tag)?),
+                        args,
+                        optional: false,
+                        type_args,
+                    },
+                )
             }
             E::Identifier(id) => {
                 if id.name == "undefined" {
@@ -1127,13 +1200,44 @@ impl Lowerer {
                         ));
                     }
                     UO::Delete => {
-                        return self.unsupported(
-                            u.span,
-                            "`delete`",
-                            "build a new object without the key: `const { key, ...rest } = obj`",
-                        );
+                        let mut target = u.argument.get_inner_expression();
+                        while let a::Expression::TSNonNullExpression(x) = target {
+                            target = x.expression.get_inner_expression();
+                        }
+                        let target = match target {
+                            a::Expression::StaticMemberExpression(_) | a::Expression::ComputedMemberExpression(_) => {
+                                self.member(target.as_member_expression().expect("member"))?
+                            }
+                            a::Expression::ChainExpression(c) => match &c.expression {
+                                a::ChainElement::StaticMemberExpression(_)
+                                | a::ChainElement::ComputedMemberExpression(_) => self.mk(
+                                    c.span,
+                                    ExprKind::Chain(Box::new(
+                                        self.member(c.expression.as_member_expression().expect("member"))?,
+                                    )),
+                                ),
+                                _ => {
+                                    return self.unsupported(
+                                        u.span,
+                                        "`delete` of a call result",
+                                        "delete an object property",
+                                    );
+                                }
+                            },
+                            a::Expression::PrivateFieldExpression(_) => {
+                                return self.unsupported(u.span, "private fields", "");
+                            }
+                            _ => {
+                                return self.unsupported(
+                                    u.span,
+                                    "`delete` of a variable or value",
+                                    "`delete` removes an object property: `delete obj.key`",
+                                );
+                            }
+                        };
+                        return Ok(self.mk(u.span, ExprKind::Delete(Box::new(target))));
                     }
-                    UO::BitwiseNot => return self.unsupported(u.span, "bitwise operators", ""),
+                    UO::BitwiseNot => UnOp::BitNot,
                 };
                 self.mk(span, ExprKind::Unary(op, Box::new(self.expr(&u.argument)?)))
             }
@@ -1169,14 +1273,27 @@ impl Lowerer {
                         }
                         if negated { BinOp::LooseNe } else { BinOp::LooseEq }
                     }
-                    BO::In => return self.unsupported(b.span, "`in`", "use `Object.hasOwn(obj, key)`"),
+                    BO::In => {
+                        if matches!(b.left, a::Expression::PrivateInExpression(_)) {
+                            return self.unsupported(b.span, "`#field in`", "use public fields");
+                        }
+                        return Ok(self.mk(
+                            b.span,
+                            ExprKind::In(Box::new(self.expr(&b.left)?), Box::new(self.expr(&b.right)?)),
+                        ));
+                    }
                     BO::Instanceof => {
                         return Ok(self.mk(
                             b.span,
                             ExprKind::Instanceof(Box::new(self.expr(&b.left)?), Box::new(self.expr(&b.right)?)),
                         ));
                     }
-                    _ => return self.unsupported(b.span, "bitwise operators", ""),
+                    BO::BitwiseAnd => BinOp::BitAnd,
+                    BO::BitwiseOR => BinOp::BitOr,
+                    BO::BitwiseXOR => BinOp::BitXor,
+                    BO::ShiftLeft => BinOp::Shl,
+                    BO::ShiftRight => BinOp::Shr,
+                    BO::ShiftRightZeroFill => BinOp::UShr,
                 };
                 self.mk(
                     span,
@@ -1214,16 +1331,24 @@ impl Lowerer {
                     AO::LogicalOr => Some(AssignOp::Log(LogOp::Or)),
                     AO::LogicalAnd => Some(AssignOp::Log(LogOp::And)),
                     AO::LogicalNullish => Some(AssignOp::Log(LogOp::Nullish)),
-                    _ => return self.unsupported(asg.span, "bitwise assignment", ""),
+                    AO::BitwiseAnd => Some(AssignOp::Bin(BinOp::BitAnd)),
+                    AO::BitwiseOR => Some(AssignOp::Bin(BinOp::BitOr)),
+                    AO::BitwiseXOR => Some(AssignOp::Bin(BinOp::BitXor)),
+                    AO::ShiftLeft => Some(AssignOp::Bin(BinOp::Shl)),
+                    AO::ShiftRight => Some(AssignOp::Bin(BinOp::Shr)),
+                    AO::ShiftRightZeroFill => Some(AssignOp::Bin(BinOp::UShr)),
                 };
                 let target = match asg.left.as_simple_assignment_target() {
                     Some(t) => self.simple_target(t)?,
                     None => {
-                        return self.unsupported(
-                            asg.span,
-                            "destructuring assignment",
-                            "declare new variables: `const [a, b] = ...`",
-                        );
+                        if op.is_some() {
+                            return self.unsupported(asg.span, "compound destructuring assignment", "");
+                        }
+                        let pattern = self.assign_pattern(&asg.left)?;
+                        return Ok(self.mk(
+                            span,
+                            ExprKind::AssignPattern(Box::new(pattern), Box::new(self.expr(&asg.right)?)),
+                        ));
                     }
                 };
                 self.mk(
@@ -1249,6 +1374,10 @@ impl Lowerer {
                 ExprKind::New {
                     callee: Box::new(self.expr(&n.callee)?),
                     args: self.args(&n.arguments)?,
+                    type_args: match &n.type_arguments {
+                        Some(t) => t.params.iter().map(|t| self.ty(t)).collect::<Result<_>>()?,
+                        None => vec![],
+                    },
                 },
             ),
             E::ChainExpression(c) => {
@@ -1287,7 +1416,25 @@ impl Lowerer {
                     "use a named module-level class declaration",
                 );
             }
-            E::YieldExpression(y) => return self.unsupported(y.span, "generators", ""),
+            E::PrivateInExpression(p) => self.mk(
+                p.span,
+                ExprKind::Call {
+                    callee: Box::new(self.mk(p.span, ExprKind::Ident(":private_in".into()))),
+                    args: vec![
+                        ArrEl::Item(self.mk(p.left.span, ExprKind::Str(format!("#{}", p.left.name)))),
+                        ArrEl::Item(self.expr(&p.right)?),
+                    ],
+                    optional: false,
+                    type_args: vec![],
+                },
+            ),
+            E::YieldExpression(y) => self.mk(
+                span,
+                ExprKind::Yield {
+                    arg: y.argument.as_ref().map(|a| self.expr(a).map(Box::new)).transpose()?,
+                    delegate: y.delegate,
+                },
+            ),
             E::ImportExpression(i) => return self.unsupported(i.span, "dynamic `import()`", "use a static import"),
             E::Super(s) if self.class_context.get() => self.mk(s.span, ExprKind::Ident("super".into())),
             E::Super(s) => return self.unsupported(s.span, "`super` outside a class", ""),
@@ -1298,6 +1445,9 @@ impl Lowerer {
     }
 
     fn cast(&self, span: oxc_span::Span, e: &a::Expression<'_>, ty: &a::TSType<'_>) -> Result<Expr> {
+        if self.erase_types {
+            return self.expr(e);
+        }
         if let a::TSType::TSTypeReference(r) = ty
             && let a::TSTypeName::IdentifierReference(id) = &r.type_name
             && id.name == "const"
@@ -1330,8 +1480,8 @@ impl Lowerer {
             ));
         }
         let type_args = match &c.type_arguments {
-            Some(t) => t.params.iter().map(|t| self.ty(t)).collect::<Result<_>>()?,
-            None => vec![],
+            Some(t) if !self.erase_types => t.params.iter().map(|t| self.ty(t)).collect::<Result<_>>()?,
+            _ => vec![],
         };
         Ok(self.mk(
             c.span,
@@ -1363,10 +1513,84 @@ impl Lowerer {
                     optional: c.optional,
                 },
             ),
-            a::MemberExpression::PrivateFieldExpression(p) => {
-                return self.unsupported(p.span, "private fields", "");
-            }
+            a::MemberExpression::PrivateFieldExpression(p) => self.mk(
+                p.span,
+                ExprKind::Member {
+                    obj: Box::new(self.expr(&p.object)?),
+                    prop: format!("#{}", p.field.name),
+                    optional: p.optional,
+                    prop_span: self.sp(p.field.span),
+                },
+            ),
         })
+    }
+
+    fn assign_pattern(&self, t: &a::AssignmentTarget<'_>) -> Result<AssignPat> {
+        if let Some(simple) = t.as_simple_assignment_target() {
+            return Ok(AssignPat::Target(self.simple_target(simple)?));
+        }
+        let rest = |r: &Option<oxc_allocator::Box<'_, a::AssignmentTargetRest<'_>>>| -> Result<Option<Box<AssignPat>>> {
+            r.as_ref()
+                .map(|r| self.assign_pattern(&r.target).map(Box::new))
+                .transpose()
+        };
+        match t.as_assignment_target_pattern().expect("pattern") {
+            a::AssignmentTargetPattern::ArrayAssignmentTarget(arr) => {
+                let mut elems = Vec::new();
+                for e in &arr.elements {
+                    elems.push(e.as_ref().map(|e| self.assign_maybe_default(e)).transpose()?);
+                }
+                Ok(AssignPat::Arr {
+                    elems,
+                    rest: rest(&arr.rest)?,
+                    span: self.sp(arr.span),
+                })
+            }
+            a::AssignmentTargetPattern::ObjectAssignmentTarget(obj) => {
+                let mut props = Vec::new();
+                for p in &obj.properties {
+                    match p {
+                        a::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id) => {
+                            let target = AssignPat::Target(self.mk(
+                                id.binding.span,
+                                ExprKind::Ident(self.binding_name(id.binding.name.as_str(), id.binding.span)?),
+                            ));
+                            let pattern = match &id.init {
+                                Some(init) => AssignPat::Default(Box::new(target), self.expr(init)?),
+                                None => target,
+                            };
+                            props.push((PropKey::Static(id.binding.name.to_string()), pattern));
+                        }
+                        a::AssignmentTargetProperty::AssignmentTargetPropertyProperty(pp) => {
+                            let key = if pp.computed {
+                                PropKey::Computed(self.expr(pp.name.to_expression())?)
+                            } else {
+                                match pp.name.static_name() {
+                                    Some(n) => PropKey::Static(n.to_string()),
+                                    None => return self.unsupported(pp.span, "this property key", ""),
+                                }
+                            };
+                            props.push((key, self.assign_maybe_default(&pp.binding)?));
+                        }
+                    }
+                }
+                Ok(AssignPat::Obj {
+                    props,
+                    rest: rest(&obj.rest)?,
+                    span: self.sp(obj.span),
+                })
+            }
+        }
+    }
+
+    fn assign_maybe_default(&self, t: &a::AssignmentTargetMaybeDefault<'_>) -> Result<AssignPat> {
+        match t {
+            a::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d) => Ok(AssignPat::Default(
+                Box::new(self.assign_pattern(&d.binding)?),
+                self.expr(&d.init)?,
+            )),
+            other => self.assign_pattern(other.to_assignment_target()),
+        }
     }
 
     fn simple_target(&self, t: &a::SimpleAssignmentTarget<'_>) -> Result<Expr> {
@@ -1388,6 +1612,7 @@ impl Lowerer {
         use a::TSType as T;
         Ok(match t {
             T::TSNumberKeyword(_) => TyAnn::Num,
+            T::TSBigIntKeyword(_) => TyAnn::BigInt,
             T::TSStringKeyword(_) => TyAnn::Str,
             T::TSBooleanKeyword(_) => TyAnn::Bool,
             T::TSNullKeyword(_) => TyAnn::Null,
@@ -1473,11 +1698,7 @@ impl Lowerer {
                 }
                 let mut params = Vec::new();
                 for p in &f.params.items {
-                    let ann = p
-                        .type_annotation
-                        .as_ref()
-                        .map(|t| self.ty(&t.type_annotation))
-                        .transpose()?;
+                    let ann = self.annotation(p.type_annotation.as_ref())?;
                     params.push((ann.unwrap_or(TyAnn::Any(self.sp(p.span))), p.optional));
                 }
                 TyAnn::Fn(params, Box::new(self.ty(&f.return_type.type_annotation)?))
@@ -1613,11 +1834,7 @@ impl Lowerer {
                     };
                     let mut params = Vec::new();
                     for p in &ms.params.items {
-                        let ann = p
-                            .type_annotation
-                            .as_ref()
-                            .map(|t| self.ty(&t.type_annotation))
-                            .transpose()?;
+                        let ann = self.annotation(p.type_annotation.as_ref())?;
                         params.push((ann.unwrap_or(TyAnn::Any(self.sp(p.span))), p.optional));
                     }
                     let ret = match &ms.return_type {
@@ -1640,6 +1857,7 @@ fn contains_constructor_return(body: &[Stmt]) -> bool {
         Stmt::Return(Some(_), _) => true,
         Stmt::Block(b)
         | Stmt::While(_, b)
+        | Stmt::DoWhile(b, _)
         | Stmt::For { body: b, .. }
         | Stmt::ForOf { body: b, .. }
         | Stmt::ForIn { body: b, .. } => contains_constructor_return(b),
@@ -1657,6 +1875,7 @@ fn contains_constructor_return(body: &[Stmt]) -> bool {
                 || finalizer.as_ref().is_some_and(|b| contains_constructor_return(b))
         }
         Stmt::Switch { cases, .. } => cases.iter().any(|(_, b)| contains_constructor_return(b)),
+        Stmt::Labeled(_, body, _) => contains_constructor_return(std::slice::from_ref(body)),
         _ => false,
     })
 }
@@ -1667,19 +1886,37 @@ fn check_parameter_pattern(pattern: &Pat, uninitialized: &[(&str, Span)], allow_
             check_parameter_default(value, uninitialized, allow_functions)?;
             check_parameter_pattern(inner, uninitialized, allow_functions)?;
         }
+        // Elements bind left to right, so a later element's default may read an earlier sibling:
+        // `({ a, b = a })` and `([a, b = a])` are valid JavaScript.
         Pat::Obj { props, .. } => {
+            let mut pending = uninitialized.to_vec();
             for (_, value) in props {
-                check_parameter_pattern(value, uninitialized, allow_functions)?;
+                check_parameter_pattern(value, &pending, allow_functions)?;
+                initialized(value, &mut pending);
             }
         }
         Pat::Arr { elems, .. } => {
+            let mut pending = uninitialized.to_vec();
             for value in elems.iter().flatten() {
-                check_parameter_pattern(value, uninitialized, allow_functions)?;
+                check_parameter_pattern(value, &pending, allow_functions)?;
+                initialized(value, &mut pending);
             }
         }
         Pat::Id(..) => {}
     }
     Ok(())
+}
+
+/// Removes a visited pattern element's bindings from the not-yet-initialized set.
+fn initialized(pattern: &Pat, pending: &mut Vec<(&str, Span)>) {
+    let mut bound = Vec::new();
+    pattern.bindings(&mut bound);
+    pending.retain(|(name, span)| !bound.iter().any(|(b, s)| b == name && s == span));
+}
+
+/// Whether `value` reads the identifier `name` (not a string or a property key with that text).
+pub fn reads_identifier(value: &Expr, name: &str) -> bool {
+    check_parameter_default(value, &[(name, value.span)], true).is_err_and(|d| d.message.contains("current or a later"))
 }
 
 fn check_parameter_default(value: &Expr, uninitialized: &[(&str, Span)], allow_functions: bool) -> Result<()> {
@@ -1732,12 +1969,15 @@ fn check_parameter_default(value: &Expr, uninitialized: &[(&str, Span)], allow_f
             }
             children
         }
-        ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args } => std::iter::once(callee.as_ref())
+        ExprKind::Call { callee, args, .. } | ExprKind::New { callee, args, .. } => std::iter::once(callee.as_ref())
             .chain(args.iter().map(|v| match v {
                 ArrEl::Item(v) | ArrEl::Spread(v) => v,
             }))
             .collect(),
-        ExprKind::Unary(_, value)
+        ExprKind::Yield { arg: None, .. } => vec![],
+        ExprKind::Yield { arg: Some(value), .. }
+        | ExprKind::Unary(_, value)
+        | ExprKind::Delete(value)
         | ExprKind::IsNullish(value, _)
         | ExprKind::Chain(value)
         | ExprKind::Await(value)
@@ -1748,11 +1988,13 @@ fn check_parameter_default(value: &Expr, uninitialized: &[(&str, Span)], allow_f
         ExprKind::Binary(_, a, b)
         | ExprKind::Logical(_, a, b)
         | ExprKind::Instanceof(a, b)
+        | ExprKind::In(a, b)
         | ExprKind::Index { obj: a, index: b, .. }
         | ExprKind::Assign {
             target: a, value: b, ..
         } => vec![a, b],
         ExprKind::Cond(a, b, c) => vec![a, b, c],
+        ExprKind::AssignPattern(pattern, value) => pattern.exprs().into_iter().chain([&**value]).collect(),
         ExprKind::Template(_, values) | ExprKind::Sequence(values) => values.iter().collect(),
         ExprKind::Ident(_)
         | ExprKind::Num(_)
@@ -1760,7 +2002,9 @@ fn check_parameter_default(value: &Expr, uninitialized: &[(&str, Span)], allow_f
         | ExprKind::Bool(_)
         | ExprKind::Null
         | ExprKind::Undefined
-        | ExprKind::Regex { .. } => Vec::new(),
+        | ExprKind::Regex { .. }
+        | ExprKind::BigInt(_)
+        | ExprKind::TemplateStrings { .. } => Vec::new(),
     };
     for child in children {
         check_parameter_default(child, uninitialized, allow_functions)?;
@@ -1772,7 +2016,8 @@ fn parameter_body_has_bindings(body: &FnBody) -> bool {
     fn statements(body: &[Stmt]) -> bool {
         body.iter().any(|statement| match statement {
             Stmt::Decl { .. } | Stmt::Func(_) | Stmt::ForOf { .. } | Stmt::ForIn { .. } => true,
-            Stmt::Block(body) | Stmt::While(_, body) => statements(body),
+            Stmt::Block(body) | Stmt::While(_, body) | Stmt::DoWhile(body, _) => statements(body),
+            Stmt::Labeled(_, body, _) => statements(std::slice::from_ref(body)),
             Stmt::If(_, yes, no) => statements(yes) || no.as_ref().is_some_and(|body| statements(body)),
             Stmt::For { init, body, .. } => {
                 init.as_ref().is_some_and(|init| statements(std::slice::from_ref(init))) || statements(body)
@@ -1819,10 +2064,11 @@ fn check_parameter_statements(body: &[Stmt], uninitialized: &[(&str, Span)]) -> 
                 check_parameter_default(value, uninitialized, false)?
             }
             Stmt::Block(body) => check_parameter_statements(body, uninitialized)?,
-            Stmt::While(value, body) => {
+            Stmt::While(value, body) | Stmt::DoWhile(body, value) => {
                 check_parameter_default(value, uninitialized, false)?;
                 check_parameter_statements(body, uninitialized)?;
             }
+            Stmt::Labeled(_, body, _) => check_parameter_statements(std::slice::from_ref(body), uninitialized)?,
             Stmt::If(value, yes, no) => {
                 check_parameter_default(value, uninitialized, false)?;
                 check_parameter_statements(yes, uninitialized)?;
@@ -1880,8 +2126,8 @@ fn check_parameter_statements(body: &[Stmt], uninitialized: &[(&str, Span)]) -> 
             }
             Stmt::Exported(statement) => check_parameter_statements(std::slice::from_ref(statement), uninitialized)?,
             Stmt::Return(None, _)
-            | Stmt::Break(_)
-            | Stmt::Continue(_)
+            | Stmt::Break(..)
+            | Stmt::Continue(..)
             | Stmt::TypeAlias { .. }
             | Stmt::Import { .. }
             | Stmt::ExportNames { .. }
@@ -1904,4 +2150,12 @@ fn check_parameter_defaults(parameters: &[Param], body: &FnBody) -> Result<()> {
         check_parameter_pattern(&parameter.pat, &uninitialized, allow_functions)?;
     }
     Ok(())
+}
+
+/// Class member names; private names keep their `#` so they can never collide with public keys.
+fn class_member_name(key: &a::PropertyKey<'_>) -> Option<String> {
+    match key {
+        a::PropertyKey::PrivateIdentifier(p) => Some(format!("#{}", p.name)),
+        other => other.static_name().map(|n| n.to_string()),
+    }
 }

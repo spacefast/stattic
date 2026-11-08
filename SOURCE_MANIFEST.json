@@ -1,7 +1,7 @@
 {
-  "revision": "0738b2b08e17c85629722a6f44f724994a781ba3",
-  "sourceHash": "0a575bfa3a364785f278b59f9d79ed23877a167ee1ab9f1f01b466fd5b03e498",
-  "manifestSha256": "eedbb0113c78e5896496c970816048184cdafeb108fcd76786870594917ec53c",
+  "revision": "73e07be524a155d02f76a8dc70a6b71546ffa76e",
+  "sourceHash": "5338d7419921dcf5c70c09c7273fa421291d52e7df0f2942ec19ee1364b27920",
+  "manifestSha256": "b9a92858eeed40da029eecdef36fe459c64c506ea68b029ac43059deee95c85e",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "9fd31f19efb720b778745b582e29944459f69a0b22166a66654afc2ad6fefd3f"
+      "sha256": "2a720883fdbd450d227f5b66cbcfa532733e573b2e75c10fcc1a72bb8350180c"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "8ca769a08da32e2beee8ae09a2d1ec12e43a5af720ac100381dfe408c9393188"
+      "sha256": "42fb327a6894ccfbd93c2edad3a8c4b072d4e8732f0e078512f54967efbc394e"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13757,7 +13757,7 @@
     },
     {
       "path": "runtime/engine/runtime/space-client/client.js",
-      "sha256": "d6540ed58959a35545fb123c145cc319658c6418cb17e486632977ec7587db08"
+      "sha256": "855f55ab2eea1927f62cb0b6eb75db1f1b87abfd64b8080c7016dfc409bbe3a9"
     },
     {
       "path": "runtime/engine/runtime/space-mail.php",

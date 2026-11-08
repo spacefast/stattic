@@ -3016,6 +3016,25 @@ $serverFileRoot = sys_get_temp_dir() . '/stattic-server-file-' . getmypid();
 @mkdir($serverFileRoot . '/runtime', 0700, true);
 file_put_contents($serverFileRoot . '/spaces/space one/files/a b.bin', 'x');
 file_put_contents($serverFileRoot . '/runtime/index.php', '<?php');
+$serverFile = $serverFileRoot . '/spaces/space one/files/a b.bin';
+// Nginx drops Origin-Agent-Cluster and Permissions-Policy across X-Accel, so a
+// scriptable document must never be handed off, whatever its compiled lane.
+foreach (['text/html; charset=utf-8', 'TEXT/HTML', 'image/svg+xml', 'application/xhtml+xml', 'text/xml', 'application/xml'] as $documentType) {
+    check(
+        _stattic_server_file_handoff_uri($serverFile, $serverFileRoot, ['Content-Type' => $documentType], 'fpm-fcgi') === null,
+        'server file: documents stay on the PHP lane: ' . $documentType
+    );
+}
+foreach (['image/png', 'text/css', 'application/javascript', 'application/json'] as $assetType) {
+    check(
+        _stattic_server_file_handoff_uri($serverFile, $serverFileRoot, ['content-type' => $assetType], 'fpm-fcgi') !== null,
+        'server file: assets keep X-Accel: ' . $assetType
+    );
+}
+check(
+    _stattic_server_file_handoff_uri($serverFile, $serverFileRoot, ['content-type' => 'image/png'], 'cli-server') === null,
+    'server file: only FPM hands off to Nginx'
+);
 check(
     _stattic_server_file_uri($serverFileRoot . '/spaces/space one/files/a b.bin', $serverFileRoot)
         === '/.stattic/storage/spaces/space%20one/files/a%20b.bin',

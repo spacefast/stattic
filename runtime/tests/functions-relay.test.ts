@@ -949,6 +949,15 @@ test("a multipart form reaches the worker whole, and one PHP cut short never rea
     port: 0,
     tls: { cert: Bun.file(certificate), key: Bun.file(key) },
     async fetch(request) {
+      if (new URL(request.url).pathname === "/api/document") {
+        return new Response("<h1>Worker document</h1>", {
+          headers: {
+            "content-type": "text/html",
+            "origin-agent-cluster": "?0",
+            "permissions-policy": "camera=(), document-domain=*",
+          },
+        });
+      }
       received += 1;
       const entries = [];
       for (const [name, value] of await request.formData()) {
@@ -996,6 +1005,12 @@ test("a multipart form reaches the worker whole, and one PHP cut short never rea
         version_hostnames: [],
       },
     });
+
+    const document = await get(edgeRt, "fx-multipart.test", "/api/document");
+    expect(document.status).toBe(200);
+    expect(document.headers.get("origin-agent-cluster")).toBe("?1");
+    expect(document.headers.get("permissions-policy")).toBe("document-domain=(), camera=()");
+    expect(await document.text()).toBe("<h1>Worker document</h1>");
 
     // Exactly max_input_vars fields and max_file_uploads files: at a limit is
     // not over it. An empty file input counts only once the limit is reached

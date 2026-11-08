@@ -1055,6 +1055,7 @@ function _stattic_send_response_headers(array $headers): void
         header_remove($name);
         header($name . ': ' . (string) $value);
     }
+    _stattic_enforce_document_isolation();
 }
 
 /**

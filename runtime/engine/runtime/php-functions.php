@@ -174,6 +174,7 @@ function _stattic_php_functions_enforce_platform_headers(): void
     if ($state['noindex']) {
         header('x-robots-tag: noindex, nofollow', true);
     }
+    _stattic_enforce_document_isolation();
 }
 
 /**

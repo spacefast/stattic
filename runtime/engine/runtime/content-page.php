@@ -19,6 +19,7 @@ function _stattic_wordpress_page_resume_deferred_request(): void
         $deferred['path'],
         $deferred['host']
     );
+    _stattic_enforce_document_isolation();
     exit;
 }
 
@@ -228,6 +229,7 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
     header('Content-Type: text/html; charset=UTF-8', true);
     header('Cache-Control: private, no-store', true);
     header('X-Content-Type-Options: nosniff', true);
+    _stattic_enforce_document_isolation();
     if ($requestMethod !== 'HEAD') {
         require_once __DIR__ . '/../shared/html-insert.php';
         _stattic_html_insert_stream_begin(_stattic_html_insert_snippets($serving));
@@ -459,6 +461,11 @@ function _stattic_wordpress_fallback_try_serve(array $context, string $requestPa
         http_response_code(200);
         return false;
     }
+    // A plugin may replace PHP's sole header callback. Enforce before template
+    // output as well, including templates that flush or exit during rendering.
+    _stattic_document_isolation_stream_begin();
     require ABSPATH . WPINC . '/template-loader.php';
+    _stattic_enforce_document_isolation();
+    ob_end_flush();
     exit;
 }

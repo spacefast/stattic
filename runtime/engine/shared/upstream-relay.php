@@ -531,6 +531,7 @@ function _stattic_relay_send_response_headers(array $lines, array $cachePolicy):
         // Cache-Control replaces any host-level default, never appends to it.
         header($name . ': ' . $value, strtolower((string) $name) === 'cache-control');
     }
+    _stattic_enforce_document_isolation();
 }
 
 // Mid-stream failure: the status and some bytes are already on the wire, so

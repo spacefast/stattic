@@ -209,6 +209,12 @@ beforeAll(async () => {
     if (requestPath.startsWith("/sendfile/")) {
       const name = requestPath.slice("/sendfile/".length);
       response.setHeader(name, INTERNAL_REDIRECT_HEADERS[name] ?? "");
+      response.setHeader("Content-Type", "text/html");
+      response.setHeader("Origin-Agent-Cluster", "?0");
+      response.setHeader("Permissions-Policy", [
+        "camera=(), document-domain=*",
+        "microphone=(self)",
+      ]);
       response.end(`${name}\n`);
       return;
     }
@@ -823,6 +829,10 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
         const response = await get(rt, PUBLIC_HOST, `/sendfile/${name}`);
         expect(response.status, name).toBe(200);
         expect(response.headers.get(name), name).toBeNull();
+        expect(response.headers.get("origin-agent-cluster")).toBe("?1");
+        expect(response.headers.get("permissions-policy")).toBe(
+          "document-domain=(), camera=(), microphone=(self)",
+        );
         const body = await response.text();
         expect(body, name).toBe(`${name}\n`);
         expect(body, name).not.toContain(CROSS_SPACE_PRIVATE_BODY);

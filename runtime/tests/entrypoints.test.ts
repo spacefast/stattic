@@ -241,6 +241,7 @@ function _stattic_content_access_target(string $root, string $host): array {
         "if (is_string($restRoute) && $restRoute !== '') { $_GET['rest_route'] = $restRoute; }",
         "$_COOKIE[_stattic_content_admin_cookie_name()] = getenv('SPACEFAST_TEST_NO_COOKIE') ? '' : $session['token'];",
         `require ${JSON.stringify(path.join(root, "custom-redirects.php"))};`,
+        "if (isset($GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER'])) require __DIR__ . '/index.php';",
         "define('WP_AUTO_UPDATE_CORE', false);",
         "echo json_encode([",
         "  'user_id' => $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? null,",
@@ -358,7 +359,25 @@ function _stattic_content_access_target(string $root, string $host): array {
     expect(
       run({ SPACEFAST_TEST_URI: "/wp-json/wp/v2/types", SPACEFAST_TEST_SCRIPT: "index.php" }),
     ).toEqual(handedOff);
-    // A platform hold still outranks a live session on an older engine.
+    // The docroot survives engine rollback. A missing response module and an
+    // older module without isolation helpers must both serve, on each pass.
+    const indexPath = path.join(root, "index.php");
+    copyFileSync(path.join(root, "custom-redirects.php"), indexPath);
+    const restRequest = {
+      SPACEFAST_TEST_URI: "/wp-json/wp/v2/types",
+      SPACEFAST_TEST_SCRIPT: "index.php",
+    };
+    expect(run(restRequest)).toEqual(handedOff);
+    writeFileSync(
+      path.join(sharedRoot, "response.php"),
+      "<?php // Previous engine, no isolation helpers.\n",
+    );
+    expect(run({})).toEqual(admitted);
+    expect(run(restRequest)).toEqual(handedOff);
+    rmSync(indexPath);
+    expect(run(restRequest)).toEqual(handedOff);
+    // A platform hold outranks a live session: the host answers the platform's
+    // page to every visitor, so it must not stay editable for a session TTL.
     expect(run({ SPACEFAST_TEST_HOLD: "tombstone" })).toEqual({
       refused: [404, "content_admin_space_not_found"],
     });

@@ -393,6 +393,18 @@ function _stattic_storage_handle(
     };
     $admitted = $authenticated || $anonymousCommenter || $developmentGuest;
 
+    if (
+        ($authenticated || $anonymousCommenter)
+        && in_array($requestMethod, ['POST', 'DELETE'], true)
+        && !isset($GLOBALS['SPACEFAST_STORAGE_FUNCTION_AUTH'])
+        && empty($GLOBALS['SPACEFAST_STORAGE_ACCESS_TOKEN'])
+        && !(($auth['credentialSource'] ?? null) === 'platform-bearer'
+            && _stattic_visitor_cookie_from_request() === '')
+        && !_stattic_access_same_origin_post($requestHost)
+    ) {
+        _stattic_problem_refused(403, 'storage_origin_forbidden', 'Storage writes must come from this Space.');
+    }
+
     if ($requestPath === '/storage' || $requestPath === '/storage/private') {
         if ($requestMethod !== 'POST') {
             _stattic_method_not_allowed('POST');
@@ -712,6 +724,13 @@ function _stattic_storage_auth_context(array $serving, string $requestHost): arr
     _stattic_storage_apply_access_token();
     $verified = _stattic_current_session_identity($serving, $requestHost);
     $principal = _stattic_access_identity_principal($verified);
+    // Machine credentials carry authority without a browser principal. Keep
+    // upload ownership on the verified machine subject, not an ambient cookie.
+    if (($verified['credentialSource'] ?? null) === 'platform-bearer'
+        && str_starts_with($verified['sub'], 'machine:')) {
+        $principal = $verified['sub'];
+    }
+
     if (!_stattic_access_principal_is_identified($principal)) {
         // Not identified, but possibly still a session: the comments pseudonym
         // rides the same record, and the upload lane admits on it, never on
@@ -725,6 +744,7 @@ function _stattic_storage_auth_context(array $serving, string $requestHost): arr
     }
     return [
         'isAuthenticated' => true,
+        'credentialSource' => $verified['credentialSource'] ?? 'cookie',
         'userId' => $principal,
         'email' => is_string($verified['claims']['email'] ?? null)
             ? $verified['claims']['email']
@@ -741,6 +761,7 @@ function _stattic_storage_apply_access_token(): void
     require_once __DIR__ . '/access-rules.php';
     $cookieName = _stattic_session_cookie_name();
     if (is_string($_COOKIE[$cookieName] ?? null) && $_COOKIE[$cookieName] !== '') {
+        // A query parameter cannot exempt the ambient cookie used for auth.
         return;
     }
     $token = $_GET['sf_token'] ?? null;
@@ -750,6 +771,7 @@ function _stattic_storage_apply_access_token(): void
         && preg_match('/[\x00-\x20\x7f]/', $token) !== 1
     ) {
         $_COOKIE[$cookieName] = $token;
+        $GLOBALS['SPACEFAST_STORAGE_ACCESS_TOKEN'] = true;
     }
 }
 

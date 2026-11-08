@@ -1158,7 +1158,9 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
     $lane = (int) ($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_LANE] ?? STATTIC_RUNTIME_RESPONSE_LANE_PHP);
     // nginx drops X-Robots-Tag on the accel lane, and the noindex above is the
     // reason this image may be public at all.
-    if (!empty($context['public_preview_image'])) {
+    // Documents override retained artifacts too, without requiring a republish.
+    if (!empty($context['public_preview_image'])
+        || _stattic_server_file_is_document((string) ($headers['content-type'] ?? ''))) {
         $lane = STATTIC_RUNTIME_RESPONSE_LANE_PHP;
     }
     // Only an access verdict can authorize the reserved alias. A token merely

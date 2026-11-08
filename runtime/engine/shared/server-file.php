@@ -6,6 +6,15 @@ require_once __DIR__ . '/response.php';
 
 const STATTIC_SERVER_FILE_PREFIX = '/.stattic/storage/';
 
+// Nginx drops document-isolation headers across X-Accel-Redirect, and HTML and
+// XML documents (SVG and XHTML included) can run scripts, so they stay on PHP.
+function _stattic_server_file_is_document(string $contentType): bool
+{
+    $mediaType = strtolower(trim(explode(';', $contentType)[0]));
+    return in_array($mediaType, ['text/html', 'application/xml', 'text/xml'], true)
+        || str_ends_with($mediaType, '+xml');
+}
+
 function _stattic_server_file_uri(string $absolutePath, string $privateRoot): ?string
 {
     // The resolved private root cannot change within a worker: memoize the
@@ -44,6 +53,26 @@ function _stattic_server_file_uri(string $absolutePath, string $privateRoot): ?s
         . implode('/', array_map('rawurlencode', $segments));
 }
 
+// X-Accel-Redirect is a FastCGI response contract. CLI and php -S have no
+// upstream server to consume it, so they keep the ordinary PHP body path.
+function _stattic_server_file_handoff_uri(
+    string $absolutePath,
+    string $privateRoot,
+    array $headers,
+    string $sapi
+): ?string {
+    if ($sapi !== 'fpm-fcgi') {
+        return null;
+    }
+    foreach ($headers as $name => $value) {
+        if (is_string($name) && strtolower($name) === 'content-type' && is_scalar($value)
+            && _stattic_server_file_is_document((string) $value)) {
+            return null;
+        }
+    }
+    return _stattic_server_file_uri($absolutePath, $privateRoot);
+}
+
 // False means the caller must use its PHP body fallback. A successful handoff
 // terminates after Nginx takes ownership of bytes, validators, Range and HEAD.
 function _stattic_send_server_file(
@@ -52,13 +81,7 @@ function _stattic_send_server_file(
     array $headers,
     int $status = 200
 ): bool {
-    // X-Accel-Redirect is a FastCGI response contract. CLI and php -S have no
-    // upstream server to consume it, so they keep the ordinary PHP body path.
-    if (PHP_SAPI !== 'fpm-fcgi') {
-        return false;
-    }
-
-    $uri = _stattic_server_file_uri($absolutePath, $privateRoot);
+    $uri = _stattic_server_file_handoff_uri($absolutePath, $privateRoot, $headers, PHP_SAPI);
     if ($uri === null) {
         return false;
     }

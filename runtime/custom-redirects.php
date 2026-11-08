@@ -196,6 +196,13 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
         $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseRoot;
     }
 
+    // Install the header dispatcher before WordPress or plugins can register
+    // deferred headers. Older engines may not have the response module.
+    $response = $releaseRoot . '/engine/shared/response.php';
+    if (is_file($response)) {
+        require_once $response;
+    }
+
     $script = basename(__FILE__);
     // Which pass this is, for the one lane that cannot run inside the
     // provider's auto_prepend: WordPress. /scripts/env.php requires THIS copy
@@ -531,7 +538,17 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 if (!defined('WP_USE_THEMES') && !($path === '/zero-admin' || str_starts_with($path, '/zero-admin/'))) {
                     define('WP_USE_THEMES', false);
                 }
+                $isolationStream = function_exists('_stattic_document_isolation_stream_begin');
+                if ($isolationStream) {
+                    _stattic_document_isolation_stream_begin();
+                }
                 require $restFrontController;
+                if (function_exists('_stattic_enforce_document_isolation')) {
+                    _stattic_enforce_document_isolation();
+                }
+                if ($isolationStream) {
+                    ob_end_flush();
+                }
                 exit;
             }
         }
@@ -559,7 +576,17 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
         if (!defined('WP_USE_THEMES')) {
             define('WP_USE_THEMES', $deferredRest['use_themes']);
         }
+        $isolationStream = function_exists('_stattic_document_isolation_stream_begin');
+        if ($isolationStream) {
+            _stattic_document_isolation_stream_begin();
+        }
         require $deferredRest['path'];
+        if (function_exists('_stattic_enforce_document_isolation')) {
+            _stattic_enforce_document_isolation();
+        }
+        if ($isolationStream) {
+            ob_end_flush();
+        }
         exit;
     }
 

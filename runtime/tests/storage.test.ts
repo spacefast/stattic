@@ -4,11 +4,12 @@
 // box secret, so rotating it invalidates every handed-out URL at once.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { createHmac } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, createHmac, generateKeyPairSync, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import "../../apps/control-plane/src/test-env.js";
+import { runtimeAuthorizationProjectionSchema } from "@spacefast/common/contracts/runtime-api";
 import { runtimeStorageObjectSchema } from "@spacefast/common/contracts/runtime-storage";
 
 import { runtimeJwks } from "../../apps/control-plane/src/runtime/auth.ts";
@@ -34,6 +35,9 @@ import {
   RUNTIME_HTTP_API_BASE,
   RUNTIME_INSTANCE_ID,
   PHP_BINARY,
+  signEd25519Jwt,
+  signToken,
+  visitorIssuer,
 } from "./harness.ts";
 
 const HOST = "storage-lane.site.test";
@@ -725,7 +729,7 @@ test("an anonymous commenter session is the upload grant — budgeted, and only 
 
   const uploaded = await get(strict, ANON_HOST, "/storage", {
     method: "POST",
-    headers: { "content-type": "text/plain", cookie },
+    headers: { "content-type": "text/plain", cookie, origin: `https://${ANON_HOST}` },
     body: "anon bytes",
   });
   expect(uploaded.status).toBe(201);
@@ -754,7 +758,7 @@ test("an anonymous commenter session is the upload grant — budgeted, and only 
     (
       await get(strict, ANON_HOST, `/storage/${object.id}`, {
         method: "DELETE",
-        headers: { cookie },
+        headers: { cookie, origin: `https://${ANON_HOST}` },
       })
     ).status,
   ).toBe(204);
@@ -766,7 +770,7 @@ test("an anonymous commenter session is the upload grant — budgeted, and only 
   );
   const refused = await get(strict, ANON_HOST, "/storage", {
     method: "POST",
-    headers: { "content-type": "text/plain", cookie },
+    headers: { "content-type": "text/plain", cookie, origin: `https://${ANON_HOST}` },
     body: "over the top",
   });
   expect(refused.status).toBe(429);
@@ -787,11 +791,236 @@ test("an anonymous commenter session is the upload grant — budgeted, and only 
   });
   const closed = await get(strict, ANON_HOST, "/storage", {
     method: "POST",
-    headers: { "content-type": "text/plain", cookie },
+    headers: { "content-type": "text/plain", cookie, origin: `https://${ANON_HOST}` },
     body: "no surface",
   });
   expect(closed.status).toBe(401);
   expect(await errorCode(closed)).toBe("storage_auth_required");
+});
+
+test("visitor cookies require exact-origin writes while explicit storage credentials keep working", async () => {
+  const host = "storage-victim.site.test";
+  const spaceId = "spc_storage_origin";
+  const versionId = "ver_storage_origin";
+  const keys = generateKeyPairSync("ed25519");
+  const issuer = visitorIssuer(keys.publicKey);
+  const config = anonCommentsConfig(true);
+  const authorization = runtimeAuthorizationProjectionSchema
+    .pick({ grants: true })
+    .passthrough()
+    .parse(config.authorization);
+  config.authorization = authorization;
+  authorization.grants.push({
+    id: "grt_storage_member",
+    generation: 1,
+    audience: { kind: "external", issuer: "spacefast-membership", subject: "storage" },
+    resources: { include: ["/**"], exclude: [] },
+    capabilities: ["page.view"],
+    constraints: {},
+    target: { kind: "live" },
+    source: { kind: "managed", reference: "test:storage" },
+  });
+  authorization.grants.push({
+    id: "grt_storage_machine",
+    generation: 1,
+    audience: { kind: "machine", machineId: "mac_storage_agent" },
+    resources: { include: ["/**"], exclude: [] },
+    capabilities: ["page.view"],
+    constraints: {},
+    target: { kind: "live" },
+    source: { kind: "managed", reference: "test:storage-machine" },
+  });
+  Object.assign(config, {
+    visitor_issuer: "spacefast-api",
+    visitor_jwks: {
+      keys: [
+        { ...keys.publicKey.export({ format: "jwk" }), kid: issuer.kid, alg: "EdDSA", use: "sig" },
+      ],
+    },
+  });
+  await deploy(strict, {
+    spaceId,
+    versionId,
+    files: { "index.html": "<h1>storage origin</h1>" },
+    functions: {
+      artifact: {
+        appName: "storage-origin",
+        entry: "worker.js",
+        mainModule: "index.js",
+        compatibilityDate: "2026-07-01",
+        compatibilityFlags: [],
+        routes: [],
+      },
+      host: { hostname: "functions.invalid", bundleUrl: "https://example.test/bundle.json" },
+      grantedCapabilities: ["storage.read", "storage.write"],
+    },
+    activate: {
+      route_name: "production",
+      config,
+      production_hostnames: [host],
+      version_hostnames: [],
+    },
+  });
+  const now = Math.floor(Date.now() / 1000);
+  const token = signEd25519Jwt(keys.privateKey, issuer.kid, {
+    sub: "member:storage",
+    purpose: "handoff",
+    authorities: ["member:storage"],
+    principal: "account:storage",
+    identity: { issuer: "https://api.spacefast.com/v1/auth", subject: "storage" },
+    iss: "spacefast-api",
+    aud: spaceId,
+    host,
+    spaceId,
+    generation: 1,
+    sid: createHash("sha256").update(randomUUID()).digest("hex"),
+    iat: now,
+    nbf: now,
+    exp: now + 300,
+    jti: randomUUID(),
+  });
+  const callback = await get(strict, host, "/__sf/redeem", {
+    method: "POST",
+    headers: { origin: `https://${host}`, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ token, return: "/" }),
+  });
+  expect(callback.status, await callback.clone().text()).toBe(303);
+  const cookie = callback.headers.get("set-cookie")?.split(";")[0] ?? "";
+  expect(cookie).toStartWith("__Host-spacefast_session=sfv2_");
+  const sessionToken = cookie.slice(cookie.indexOf("=") + 1);
+  const machineToken = signEd25519Jwt(keys.privateKey, issuer.kid, {
+    sub: "machine:mac_storage_agent",
+    purpose: "runtime-bearer",
+    authorities: ["machine:mac_storage_agent"],
+    sid: createHash("sha256").update(randomUUID()).digest("hex"),
+    iss: "spacefast-api",
+    aud: spaceId,
+    host,
+    spaceId,
+    generation: 1,
+    iat: now - 120,
+    nbf: now - 120,
+    exp: now + 300,
+    jti: randomUUID(),
+  });
+  const machineHeaders = { "x-sf-authorization": `Bearer ${machineToken}` };
+
+  const objects = storagePath(strict, "spaces", spaceId, "uploads", "objects");
+  const records = () =>
+    existsSync(objects) ? readdirSync(objects).filter((name) => name.endsWith(".json")) : [];
+
+  const rejectedBody = "sibling bytes";
+  const rejectedHash = createHash("sha256").update(rejectedBody).digest("hex");
+  for (const request of [
+    { path: "/storage?public=true", headers: { origin: "https://attacker.site.test" } },
+    { path: "/storage/private", headers: { "sec-fetch-site": "same-site" } },
+    {
+      path: "/storage",
+      headers: machineHeaders,
+    },
+    // A query parameter must not exempt the ambient cookie used for authentication.
+    {
+      path: "/storage?sf_token=forged",
+      headers: { origin: `https://${host}`, "sec-fetch-site": "same-site" },
+    },
+  ]) {
+    const before = records();
+    const refused = await get(strict, host, request.path, {
+      method: "POST",
+      headers: { cookie, "content-type": "text/plain", ...request.headers },
+      body: rejectedBody,
+    });
+    expect(refused.status).toBe(403);
+    expect(await errorCode(refused)).toBe("storage_origin_forbidden");
+    expect(records()).toEqual(before);
+    expect(
+      existsSync(
+        storagePath(strict, "spaces", spaceId, "blobs", rejectedHash.slice(0, 2), rejectedHash),
+      ),
+    ).toBe(false);
+  }
+  const beforeSibling = records();
+  const siblingWithBearer = await get(strict, host, "/storage", {
+    method: "POST",
+    headers: { cookie, ...machineHeaders, origin: "https://attacker.site.test" },
+    body: rejectedBody,
+  });
+  expect(siblingWithBearer.status).toBe(403);
+  expect(records()).toEqual(beforeSibling);
+  const uploaded = await get(strict, host, "/storage", {
+    method: "POST",
+    headers: { cookie, origin: `https://${host}`, "content-type": "text/plain" },
+    body: "visitor bytes",
+  });
+  expect(uploaded.status).toBe(201);
+  const object = runtimeStorageObjectSchema
+    .pick({ id: true })
+    .strip()
+    .parse(await uploaded.json());
+  const refusedDelete = await get(strict, host, `/storage/${object.id}`, {
+    method: "DELETE",
+    headers: { cookie, "sec-fetch-site": "same-site" },
+  });
+  expect(refusedDelete.status).toBe(403);
+  const cookieAndBearerDelete = await get(strict, host, `/storage/${object.id}`, {
+    method: "DELETE",
+    headers: { cookie, ...machineHeaders },
+  });
+  expect(cookieAndBearerDelete.status).toBe(403);
+  expect(await errorCode(cookieAndBearerDelete)).toBe("storage_origin_forbidden");
+  const retained = await get(strict, host, `/storage/${object.id}`, { headers: { cookie } });
+  expect(await retained.text()).toBe("visitor bytes");
+  expect(
+    (
+      await get(strict, host, `/storage/${object.id}`, {
+        method: "DELETE",
+        headers: { cookie, origin: `https://${host}` },
+      })
+    ).status,
+  ).toBe(204);
+
+  const siblingBrowserHeaders = {
+    origin: "https://attacker.site.test",
+    "sec-fetch-site": "same-site",
+  };
+  for (const credential of [
+    { query: `?sf_token=${encodeURIComponent(sessionToken)}`, headers: siblingBrowserHeaders },
+    { query: "", headers: machineHeaders },
+    {
+      query: "",
+      headers: {
+        ...siblingBrowserHeaders,
+        authorization: `Bearer ${signToken({ aud: "spacefast-functions-relay", runtime_instance_id: RUNTIME_INSTANCE_ID, space_id: spaceId, version_id: versionId, ownership_revision: null, capabilities: ["storage.read", "storage.write"] })}`,
+        "sf-fx-broker": "storage",
+      },
+    },
+  ]) {
+    const explicit = await get(strict, host, `/storage${credential.query}`, {
+      method: "POST",
+      headers: {
+        ...credential.headers,
+        "content-type": "text/plain",
+      },
+      body: "explicit bytes",
+    });
+    expect(explicit.status).toBe(201);
+    const stored = runtimeStorageObjectSchema
+      .pick({ id: true })
+      .strip()
+      .parse(await explicit.json());
+    const read = await get(strict, host, `/storage/${stored.id}${credential.query}`, {
+      headers: credential.headers,
+    });
+    expect(await read.text()).toBe("explicit bytes");
+    expect(
+      (
+        await get(strict, host, `/storage/${stored.id}${credential.query}`, {
+          method: "DELETE",
+          headers: credential.headers,
+        })
+      ).status,
+    ).toBe(204);
+  }
 });
 
 test("a delete leaves the CAS body for the GC; only the record dies", async () => {

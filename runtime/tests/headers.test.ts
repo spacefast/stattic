@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { get as httpGet } from "node:http";
+import os from "node:os";
+import path from "node:path";
 // The v4 header contract (contracts §5, §15, §16):
 //
 //  * every request-independent `_headers` rule is baked into the response entry
@@ -24,6 +28,7 @@ import {
   responseEntry,
   type Runtime,
   startRuntime,
+  startPhpServer,
   visitorIssuer,
   versionRoot,
 } from "./harness.ts";
@@ -135,6 +140,8 @@ beforeAll(async () => {
       "index.html": "<h1>headers</h1>\n",
       "about.html": "<h1>about</h1>\n",
       "owned.html": "<h1>provider headers</h1>\n",
+      "scriptable.svg":
+        '<svg xmlns="http://www.w3.org/2000/svg"><script>document.domain="site.test"</script></svg>',
       "framed.html": "<h1>framed</h1>\n",
       "café.html": "<h1>café</h1>\n",
       "café-agent": "agent redirect source\n",
@@ -180,10 +187,14 @@ beforeAll(async () => {
         // The file's clickjacking policy, which the Space's own rule below
         // replaces rather than folds with.
         "/framed.html",
+        "  ! Origin-Agent-Cluster",
+        "  ! Permissions-Policy",
         "  X-Frame-Options: DENY",
         "  ! X-Content-Policy",
         "  X-Removed-Policy: file",
         "/owned.html",
+        "  Origin-Agent-Cluster: ?0",
+        "  Permissions-Policy: camera=(), document-domain=*",
         "  A8C-Edge-Cache: no-cache",
         "  X-AC: hit",
       ].join("\n"),
@@ -319,6 +330,8 @@ test("exact header rules apply only to their path, in declaration order", async 
 test("the Space's own header rule replaces the file's on the wire", async () => {
   const framed = await get(rt, HOST, "/framed.html");
   expect(framed.status).toBe(200);
+  expect(framed.headers.get("origin-agent-cluster")).toBe("?1");
+  expect(framed.headers.get("permissions-policy")).toBe("document-domain=()");
   expect(framed.headers.get("x-frame-options")).toBe("SAMEORIGIN");
   expect(framed.headers.get("x-content-policy")).toBe("dashboard");
   expect(framed.headers.get("x-removed-policy")).toBeNull();
@@ -385,6 +398,11 @@ test("a publisher Cache-Control rule is served verbatim and steers the edge opt-
 // is a sticky reason to keep no bytes at all, which is why a revocation binds on
 // the very next request.
 test("a tokened URL is private: never immutable, never edge-stored", async () => {
+  const document = await get(rt, HOST, `/owned.html${SHARE_TOKEN}`);
+  expect(document.status).toBe(200);
+  expect(cachePolicy(document)).toEqual([TOKENED, "no-cache"]);
+  expect(document.headers.get("origin-agent-cluster")).toBe("?1");
+  expect(document.headers.get("permissions-policy")).toBe("document-domain=(), camera=()");
   const asset = await get(rt, HOST, `/${HASHED_JS}${SHARE_TOKEN}`);
   expect(asset.status).toBe(200);
   expect(cachePolicy(asset)).toEqual([TOKENED, "no-cache"]);
@@ -402,9 +420,19 @@ test("a tokened URL is private: never immutable, never edge-stored", async () =>
 // platform's: a tenant naming it, the provider's x-ac/x-sc/x-nc diagnostics, and
 // HSTS never reach the wire.
 test("the engine owns the edge-cache channel and the provider headers next to it", async () => {
-  const response = await get(rt, HOST, "/owned");
+  const response = await get(rt, HOST, "/owned.html");
   expect(response.status).toBe(200);
   expect(cachePolicy(response)).toEqual([HTML_OPEN, "cache"]);
+  expect(response.headers.get("origin-agent-cluster")).toBe("?1");
+  expect(response.headers.get("permissions-policy")).toBe("document-domain=(), camera=()");
+  const svg = await get(rt, HOST, "/scriptable.svg");
+  expect(svg.status).toBe(200);
+  expect(svg.headers.get("content-type")).toContain("image/svg+xml");
+  expect(svg.headers.get("origin-agent-cluster")).toBe("?1");
+  expect(svg.headers.get("permissions-policy")).toBe("document-domain=()");
+  expect(await svg.text()).toBe(
+    '<svg xmlns="http://www.w3.org/2000/svg"><script>document.domain="site.test"</script></svg>',
+  );
   expect(response.headers.get("x-ac")).toBeNull();
   expect(response.headers.get("strict-transport-security")).toBeNull();
 });
@@ -474,6 +502,9 @@ test("managed header rules are rejected and retained browser state controls are 
       "  $table = include $dir . '/' . $file;",
       "  if (!isset($table['/'])) { continue; }",
       "  $table['/'][$argv[3]]['cLeAr-SiTe-DaTa'] = '\"cookies\"';",
+      "  $table['/'][$argv[3]]['origin-agent-cluster'] = '?0';",
+      "  $table['/'][$argv[3]]['permissions-policy'] = 'geolocation=(), document-domain=*';",
+      "  $table['/'][$argv[4]] = 0;",
       "  $table['/'][$argv[3]]['x-retained-artifact'] = 'yes';",
       "  $root['tables'][$shard] = _sf_php_artifact_write($dir, 'responses', _sf_php_artifact_source($table));",
       "}",
@@ -483,12 +514,15 @@ test("managed header rules are rejected and retained browser state controls are 
     `${rt.engineRoot}/shared/pointers.php`,
     versionRoot(rt, spaceId, versionId),
     RESPONSES.entryKeys.headers,
+    RESPONSES.entryKeys.lane,
   ]);
   expect(retained.exitCode, retained.stderr.toString()).toBe(0);
   const legacy = await get(rt, REJECTED_NAMES_HOST, "/");
   expect(legacy.status).toBe(200);
   expect(legacy.headers.get("x-retained-artifact")).toBe("yes");
   expect(legacy.headers.get("clear-site-data")).toBeNull();
+  expect(legacy.headers.get("origin-agent-cluster")).toBe("?1");
+  expect(legacy.headers.get("permissions-policy")).toBe("document-domain=(), geolocation=()");
   expect(await legacy.text()).toBe("<h1>bad</h1>\n");
 });
 
@@ -614,4 +648,147 @@ test("noindex hosts own X-Robots-Tag, and robots.txt is only crawl control", asy
   // An indexable host publishes its own crawl policy and must keep it.
   const publisherRobots = await get(rt, "indexable.test", "/robots.txt");
   expect(await publisherRobots.text()).toBe("User-agent: *\nAllow: /\n");
+});
+
+// Tenant PHP dispatch is disabled. Exercise its response writer over HTTP
+// without enabling tenant execution.
+test("PHP response writers enforce document isolation over publisher headers", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "sf-document-isolation-"));
+  const router = path.join(root, "router.php");
+  for (const file of [
+    "response.php",
+    "problem.php",
+    "brand.php",
+    "context.php",
+    "finalizer-protocol.generated.php",
+  ]) {
+    copyFileSync(path.resolve(import.meta.dir, "../engine/shared", file), path.join(root, file));
+  }
+  writeFileSync(
+    router,
+    `<?php
+if (isset($_GET['missing-parser'])) {
+    require __DIR__ . '/response.php';
+    header('Permissions-Policy: camera=(), document-domain=*');
+    _stattic_response_send(200, '<h1>Mixed version</h1>', 'text/html');
+}
+require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/context.php"))};
+require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/runtime/php-functions.php"))};
+require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/upstream-relay.php"))};
+if (isset($_GET['stream'])) _stattic_document_isolation_stream_begin();
+if (isset($_GET['replace'])) header_register_callback(static function () {
+    header('Origin-Agent-Cluster: ?0');
+    header('Permissions-Policy: document-domain=*');
+});
+header_remove();
+header('Origin-Agent-Cluster: ?0');
+header('Permissions-Policy: camera=(), document-domain=*, DOCUMENT-DOMAIN, document-domain;x');
+header('Permissions-Policy: microphone=(self), geolocation=("https://location.example/a,b")', false);
+if (isset($_GET['policy'])) header('Permissions-Policy: ' . $_GET['policy'], false);
+if (isset($_GET['relay'])) _stattic_relay_send_response_headers([], []);
+if (isset($_GET['writer'])) {
+    $state = &_stattic_php_functions_state();
+    $state['active'] = true;
+    _stattic_php_functions_send(200, ['content-type' => 'text/html'], '<h1>PHP writer</h1>');
+} else {
+    // No explicit Content-Type, as with an ordinary PHP or WordPress page.
+    echo '<h1>PHP output</h1>';
+    flush();
+}
+`,
+  );
+  try {
+    const server = await startPhpServer({ args: [], router, cwd: root, env: process.env });
+    try {
+      const mixedVersion = await fetch(`${server.baseUrl}/?missing-parser=1`);
+      const mixedBody = await mixedVersion.text();
+      expect(mixedVersion.status, server.diagnostics()).toBe(200);
+      expect(mixedVersion.headers.get("origin-agent-cluster"), server.diagnostics()).toBe("?1");
+      expect(mixedVersion.headers.get("permissions-policy")).toBe("document-domain=()");
+      expect(mixedBody).toBe("<h1>Mixed version</h1>");
+      const publisherPolicy = "camera=(self none), microphone=()";
+      for (const { query: requestQuery, retained: expectedPolicy } of [
+        ...["", "?writer=1&replace=1", "?relay=1&replace=1", "?stream=1&replace=1"].map(
+          (query) => ({ query, retained: "" }),
+        ),
+        ...[
+          { policy: "Camera=()", retained: "" },
+          { policy: 'geolocation=("https://unterminated.example)', retained: "" },
+          { policy: "geolocation 'none'", retained: "" },
+          { policy: "camera=:A:", retained: "" },
+          { policy: "camera=();report=:A:", retained: "" },
+          { policy: "camera=:YQ:", retained: "camera=:YQ==:" },
+          { policy: "camera=:YQ===:", retained: "" },
+          {
+            policy: "camera=(999999999999999 -999999999999999 999999999999.999 -999999999999.999)",
+            retained:
+              "camera=(999999999999999 -999999999999999 999999999999.999 -999999999999.999)",
+          },
+          { policy: "camera=(1000000000000000)", retained: "" },
+          { policy: "camera=(1000000000000.0)", retained: "" },
+          { policy: "camera=(0.0001)", retained: "" },
+          { policy: "camera=(@1.0)", retained: "" },
+          { policy: "camera=(?2)", retained: "" },
+          { policy: "camera=((self))", retained: "" },
+          { policy: "camera=(self\tmicrophone)", retained: "" },
+          { policy: 'camera=%"%FF"', retained: "" },
+          { policy: 'camera=%"%ff"', retained: "" },
+          { policy: 'camera=%"%c3%bc%22%25"', retained: 'camera=%"%c3%bc%22%25"' },
+          { policy: 'camera=%"%ed%a0%80"', retained: "" },
+          { policy: 'camera=();report=%"%ff"', retained: "" },
+          { policy: "camera=?1;report=?1;report=?0", retained: "camera;report=?0" },
+          { policy: "camera=(0001 -0.0);report=@0001", retained: "camera=(1 0.0);report=@1" },
+          {
+            policy: 'camera=("escaped\\\\value" "escaped\\\"quote")',
+            retained: 'camera=("escaped\\\\value" "escaped\\\"quote")',
+          },
+          { policy: "camera=(), geolocation=(self) garbage", retained: "camera=()" },
+          { policy: publisherPolicy, retained: publisherPolicy },
+          {
+            policy: 'camera=(self none ?1 42 -1.5 :YWJj: @123 %"hi%20there");report=?0',
+            retained: 'camera=(self none ?1 42 -1.5 :YWJj: @123 %"hi there");report=?0',
+          },
+          {
+            policy: 'camera=(), geolocation=("unterminated, microphone=(), document-domain=*',
+            retained: "camera=(), microphone=()",
+          },
+        ].map(({ policy, retained }) => ({
+          query: `?policy=${encodeURIComponent(policy)}`,
+          retained,
+        })),
+      ]) {
+        const response = await fetch(`${server.baseUrl}/${requestQuery}`);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("content-type")).toContain("text/html");
+        expect(response.headers.get("origin-agent-cluster")).toBe("?1");
+        expect(response.headers.get("permissions-policy")).toBe(
+          'document-domain=(), camera=(), microphone=(self), geolocation=("https://location.example/a,b")' +
+            (expectedPolicy ? `, ${expectedPolicy}` : ""),
+        );
+        expect(await response.text()).toContain("<h1>");
+      }
+      const policyFields = await new Promise<string[]>((resolve, reject) => {
+        httpGet(`${server.baseUrl}/?policy=${encodeURIComponent(publisherPolicy)}`, (response) => {
+          response.resume();
+          resolve(
+            response.rawHeaders.flatMap((name, index, headers) =>
+              index % 2 === 0 && name.toLowerCase() === "permissions-policy"
+                ? headers.slice(index + 1, index + 2)
+                : [],
+            ),
+          );
+        }).on("error", reject);
+      });
+      expect(policyFields).toEqual([
+        "document-domain=()",
+        "camera=()",
+        'microphone=(self), geolocation=("https://location.example/a,b")',
+        publisherPolicy,
+      ]);
+    } finally {
+      server.stop();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

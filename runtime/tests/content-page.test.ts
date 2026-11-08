@@ -20,6 +20,22 @@ test("the document shell applies platform head inserts once without changing CSP
     text,
     sha256: `sha256:${new Bun.CryptoHasher("sha256").update(text).digest("hex")}`,
   });
+  writeFileSync(
+    path.join(privateRoot, "spaces/spc_document/wordpress-routes.json"),
+    JSON.stringify({ "/template": { postId: 1, postType: "page" } }),
+  );
+  mkdirSync(path.join(root, "wp-includes"));
+  writeFileSync(
+    path.join(root, "wp-includes/template-loader.php"),
+    `<?php
+header_register_callback(static function () {});
+header('Origin-Agent-Cluster: ?0');
+header('Permissions-Policy: camera=(), document-domain=*');
+echo '<h1>Template output</h1>';
+flush();
+exit;
+`,
+  );
   const snippet = '<meta name="platform-head" content="present">';
   writeFileSync(
     path.join(root, "wp-load.php"),
@@ -29,6 +45,13 @@ function spacefast_content_sync_find_post($id, $binding, $adopt) {
     return (object) ['ID' => 1, 'post_status' => 'publish', 'post_title' => 'Document', 'post_content' => '<p>Live document.</p>'];
 }
 function get_post_meta($id, $key, $single) { return 'spc_document'; }
+header_register_callback(static function () {});
+define('ABSPATH', __DIR__ . '/');
+define('WPINC', 'wp-includes');
+function wp() {}
+function is_404() { return false; }
+function add_filter($name, $callback, $priority) {}
+function remove_filter($name, $callback, $priority) {}
 function wp_head() { echo '<meta name="wordpress-head" content="present">'; }
 function wp_footer() { echo '<footer>WordPress footer</footer>'; }
 `,
@@ -46,8 +69,14 @@ $route = ['id' => '${pageId}', 'bindingId' => '${bindingId}', 'path' => '/', 're
 file_put_contents(_stattic_version_root($context['private_root'], 'spc_document', 'ver_document') . '/metadata.json', json_encode(['catalog' => ['format' => STATTIC_RUNTIME_VERSION_CATALOG_FORMAT, 'spaceId' => 'spc_document', 'versionId' => 'ver_document', 'paths' => ['_spacefast/pages/documents/${pageId}.json' => ['source' => ['sha256' => hash('sha256', $snapshotBytes), 'size' => strlen($snapshotBytes), 'contentType' => 'application/json']]], 'variants' => []]]));
 function _stattic_v4_blob_contents($context, $sha) { return $GLOBALS['snapshotBytes']; }
 function _stattic_v4_entry($dir, $root, $key) { return in_array($key, ['/zero.css', STATTIC_RUNTIME_THEME_STYLESHEET_URL], true) ? ['sha256' => str_repeat('a', 64)] : null; }
+header_remove('Origin-Agent-Cluster');
+header('Origin-Agent-Cluster: ?0');
+header('Permissions-Policy: camera=(), document-domain=*');
 header("Content-Security-Policy: frame-ancestors 'none'");
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['immutable'])) header('Content-Length: 1');
+if (isset($_GET['template'])) {
+    _stattic_wordpress_fallback_try_serve($context, '/template', $_SERVER['REQUEST_METHOD']);
+}
 _stattic_wordpress_page_try_serve($context, '/', $_SERVER['REQUEST_METHOD'], $route);
 http_response_code(500);
 echo 'Document route declined';
@@ -59,6 +88,8 @@ echo 'Document route declined';
       for (const query of ["", "?immutable=1"]) {
         const response = await fetch(`${server.baseUrl}/${query}`);
         expect(response.status).toBe(200);
+        expect(response.headers.get("origin-agent-cluster")).toBe("?1");
+        expect(response.headers.get("permissions-policy")).toBe("document-domain=(), camera=()");
         expect(response.headers.get("cache-control")).toBe("private, no-store");
         expect(response.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
         expect(response.headers.get("content-length")).toBeNull();
@@ -78,9 +109,16 @@ echo 'Document route declined';
       }
       const head = await fetch(`${server.baseUrl}/`, { method: "HEAD" });
       expect(head.status).toBe(200);
+      expect(head.headers.get("origin-agent-cluster")).toBe("?1");
+      expect(head.headers.get("permissions-policy")).toBe("document-domain=(), camera=()");
       expect(head.headers.get("cache-control")).toBe("private, no-store");
       expect(head.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
       expect(await head.text()).toBe("");
+      const template = await fetch(`${server.baseUrl}/?template=1`);
+      expect(template.status).toBe(200);
+      expect(template.headers.get("origin-agent-cluster")).toBe("?1");
+      expect(template.headers.get("permissions-policy")).toBe("document-domain=(), camera=()");
+      expect(await template.text()).toBe("<h1>Template output</h1>");
       const disabled = await fetch(`${server.baseUrl}/?disabled=1`);
       expect(disabled.status).toBe(200);
       expect(await disabled.text()).not.toContain(snippet);

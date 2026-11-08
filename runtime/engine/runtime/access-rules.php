@@ -2514,6 +2514,7 @@ function _stattic_current_session_identity_uncached(
             return null;
         }
         return [
+            'credentialSource' => 'platform-bearer',
             'sub' => $verified['sub'],
             'authorities' => $authorities,
             'emailVerifiedAuthorities' =>

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
-import { readFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { deploy, get, type Runtime, startRuntime } from "./harness.ts";
@@ -236,6 +236,7 @@ async function wpContext(host: string, requestPath: string, headers: Record<stri
     status: response.status,
     body,
     context: response.status === 200 ? JSON.parse(body) : null,
+    headers: response.headers,
   };
 }
 
@@ -384,6 +385,9 @@ beforeAll(async () => {
     path.join(wordpressCoreRoot, "wp-blog-header.php"),
     [
       "<?php",
+      "header_register_callback(static function () {});",
+      "header('Origin-Agent-Cluster: ?0');",
+      "header('Permissions-Policy: camera=(), document-domain=*');",
       "header('Content-Type: application/json', true);",
       "$principal = $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] ?? null;",
       "echo json_encode([",
@@ -565,6 +569,8 @@ test("a Space credential reaches WordPress REST as the principal its Grants earn
   });
 
   expect(admitted.status, admitted.body).toBe(200);
+  expect(admitted.headers.get("origin-agent-cluster")).toBe("?1");
+  expect(admitted.headers.get("permissions-policy")).toBe("document-domain=(), camera=()");
   expect(admitted.context).toEqual({
     served_by: "wordpress",
     space_id: OPEN_SPACE,
@@ -633,6 +639,23 @@ test("a Space credential reaches WordPress REST as the principal its Grants earn
     actor_id: MACHINE,
     role: "editor",
   });
+
+  // Without a docroot front controller the gate boots WordPress immediately.
+  // That pass must load response.php too, before WordPress flushes its body.
+  const indexPath = path.join(runtime.root, "index.php");
+  const savedIndexPath = path.join(runtime.root, "index.php.saved");
+  renameSync(indexPath, savedIndexPath);
+  try {
+    const immediate = await wpContext(OPEN_HOST, "/wp-json/wp/v2/posts", {
+      "x-sf-authorization": `Bearer ${token}`,
+    });
+    expect(immediate.status).toBe(200);
+    expect(immediate.context).toEqual(admitted.context);
+    expect(immediate.headers.get("origin-agent-cluster")).toBe("?1");
+    expect(immediate.headers.get("permissions-policy")).toBe("document-domain=(), camera=()");
+  } finally {
+    renameSync(savedIndexPath, indexPath);
+  }
 });
 
 test("REST without a Spacefast credential is WordPress's own unauthenticated answer", async () => {

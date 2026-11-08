@@ -3,6 +3,84 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/problem.php';
 
+// Every HTTP lane loads this module, including the WordPress front controller.
+// Apply the policy when headers leave PHP, after publisher headers and removals.
+if (PHP_SAPI !== 'cli') {
+    header_register_callback('_stattic_send_document_isolation_headers');
+}
+
+// Browsers combine Permissions-Policy fields before Structured Fields parsing.
+// Keep valid publisher members, excluding the platform-owned document-domain.
+function _stattic_document_publisher_policies(array $policies): array
+{
+    $fields = [];
+    foreach ($policies as $policy) {
+        if ($policy === 'document-domain=()') {
+            continue;
+        }
+        $parser = __DIR__ . '/structured-fields.php';
+        if (!is_file($parser)) {
+            return [];
+        }
+        require_once $parser;
+        $members = (new StatticStructuredFields($policy))->dictionaryMembers();
+        unset($members['document-domain']);
+        if ($members !== []) {
+            $fields[] = implode(', ', $members);
+        }
+    }
+    return $fields;
+}
+
+// WordPress can flush or exit inside a front controller or template. This
+// streaming output handler reclaims PHP's sole header callback at output.
+// A flush before output or a later outer buffer can bypass PHP enforcement.
+function _stattic_document_isolation_stream_begin(): void
+{
+    if (PHP_SAPI !== 'cli' && !headers_sent()) {
+        header_register_callback('_stattic_send_document_isolation_headers');
+    }
+    ob_start(static function (string $bytes, int $phase): string {
+        if (($phase & PHP_OUTPUT_HANDLER_CLEAN) === 0) {
+            _stattic_enforce_document_isolation();
+        }
+        return $bytes;
+    }, 1);
+}
+
+function _stattic_enforce_document_isolation(): void
+{
+    if (headers_sent()) {
+        return;
+    }
+    // Reclaim PHP's sole header callback so a later exit() still lands on it.
+    if (PHP_SAPI !== 'cli') {
+        header_register_callback('_stattic_send_document_isolation_headers');
+    }
+    _stattic_send_document_isolation_headers();
+}
+
+function _stattic_send_document_isolation_headers(): void
+{
+    if (headers_sent()) {
+        return;
+    }
+    $policies = [];
+    foreach (headers_list() as $line) {
+        $separator = strpos($line, ':');
+        if ($separator !== false && strtolower(trim(substr($line, 0, $separator))) === 'permissions-policy') {
+            $policies[] = trim(substr($line, $separator + 1));
+        }
+    }
+    // These controls have no effect on non-document responses. Stating them on
+    // every response also covers HTML produced with PHP's default media type.
+    header('Origin-Agent-Cluster: ?1', true);
+    header('Permissions-Policy: document-domain=()', true);
+    foreach (_stattic_document_publisher_policies($policies) as $policy) {
+        header('Permissions-Policy: ' . $policy, false);
+    }
+}
+
 // The ONE response writer for every runtime lane that answers with a body it
 // built itself: it owns HEAD suppression, replace-semantics on Content-Type and
 // header casing. File bodies go out through the two emitters below instead.
@@ -17,6 +95,7 @@ function _stattic_response_send(int $status, string $body, string $mediaType = '
             header($name . ': ' . (string) $value, true);
         }
     }
+    _stattic_enforce_document_isolation();
     if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'HEAD') {
         echo $body;
     }

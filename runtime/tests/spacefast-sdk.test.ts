@@ -2428,15 +2428,15 @@ test("a routing rule cannot rewrite the reserved SDK route onto tenant bytes", a
   expect(moved.headers.get("location")).toBe("/index.html");
 });
 
-/** A two-part body whose Spacefast Access names no providers, which the engine refuses. */
+/** A two-part body whose Sign in with Spacefast names no providers, which the engine refuses. */
 type MalformedUsersConfig = {
   zeroUsers: { enabled: boolean; providers: { google: { mode: "disabled" } } };
-  spacefastAccess: { enabled: boolean; providers: Partial<Record<"spacefast", boolean>> };
+  signInWithSpacefast: { enabled: boolean; providers: Partial<Record<"spacefast", boolean>> };
 };
 
-// An engine with runtime.users.access-shape.v1 reads either Users shape a
+// An engine with runtime.users.sign-in-shape.v1 reads either Users shape a
 // control plane sends: the flat shape from a control plane that predates it,
-// and the two-part shape, including Spacefast Access without Zero Users, which
+// and the two-part shape, including Sign in with Spacefast without Zero Users, which
 // the flat shape can't hold. Every reader sees one form, plus the parts.
 test("the engine reads Space Users settings in either stored shape and gates each part", async () => {
   const rt = await startRuntime();
@@ -2465,7 +2465,7 @@ test("the engine reads Space Users settings in either stored shape and gates eac
     expect(spaceOverlay(rt, "spc_users_shape")?.users).toEqual(flat);
     const accessOnly: StoredSpaceUsersConfig = {
       zeroUsers: { enabled: false, providers: { google: { mode: "disabled" } } },
-      spacefastAccess: {
+      signInWithSpacefast: {
         enabled: true,
         providers: { spacefast: true, managedGoogle: true, wpcom: false },
       },
@@ -2481,7 +2481,7 @@ test("the engine reads Space Users settings in either stored shape and gates eac
         gravatar: { enabled: false },
         spacefast: { enabled: true },
       },
-      parts: { zeroUsers: false, spacefastAccess: true },
+      parts: { zeroUsers: false, signInWithSpacefast: true },
     });
     // Each part refuses its own sign-in methods before WordPress loads.
     const refused = async (path: string, method = "GET") => {
@@ -2497,12 +2497,12 @@ test("the engine reads Space Users settings in either stored shape and gates eac
       expect(await refused(`/__zero/auth/api/${operation}`, "POST")).toBe(
         "space_users_provider_disabled",
       );
-    // Spacefast Access on: its starts are not refused by the part gate.
+    // Sign in with Spacefast on: its starts are not refused by the part gate.
     expect(await refused("/__zero/auth/start?provider=spacefast")).not.toBe(
       "space_users_provider_disabled",
     );
     // The hosted sign-in page offers only Zero Users' email codes and passkeys,
-    // so a signed-out visit starts Spacefast Access instead, keeping the OAuth
+    // so a signed-out visit starts Sign in with Spacefast instead, keeping the OAuth
     // authorize resume it was sent to finish.
     const identity = async (path: string) =>
       (await get(rt, "users-shape.site.test", path)).headers.get("location");
@@ -2523,7 +2523,7 @@ test("the engine reads Space Users settings in either stored shape and gates eac
         enabled: true,
         providers: { google: { mode: "direct", clientId: "space.apps.googleusercontent.com" } },
       },
-      spacefastAccess: {
+      signInWithSpacefast: {
         enabled: false,
         providers: { spacefast: true, managedGoogle: false, wpcom: true },
       },
@@ -2539,11 +2539,11 @@ test("the engine reads Space Users settings in either stored shape and gates eac
         gravatar: { enabled: false },
         spacefast: { enabled: false },
       },
-      parts: { zeroUsers: true, spacefastAccess: false },
+      parts: { zeroUsers: true, signInWithSpacefast: false },
     });
     // Zero Users on: the hosted sign-in page is its own.
     expect(await identity("/identity")).toBeNull();
-    // Spacefast Access off: its starts are refused; Zero Users' email codes are not.
+    // Sign in with Spacefast off: its starts are refused; Zero Users' email codes are not.
     for (const provider of ["spacefast", "gravatar"])
       expect(await refused(`/__zero/auth/start?provider=${provider}`)).toBe(
         "space_users_provider_disabled",
@@ -2557,7 +2557,7 @@ test("the engine reads Space Users settings in either stored shape and gates eac
       ...route({
         ...direct,
         zeroUsers: { ...direct.zeroUsers, enabled: false },
-        spacefastAccess: { ...direct.spacefastAccess, enabled: true },
+        signInWithSpacefast: { ...direct.signInWithSpacefast, enabled: true },
       }),
     });
     expect(spaceOverlay(rt, "spc_users_shape")?.users?.providers?.google).toEqual({
@@ -2573,7 +2573,7 @@ test("the engine reads Space Users settings in either stored shape and gates eac
         version_id: "ver_users_shape",
         ...route({
           zeroUsers: { enabled: false, providers: { google: { mode: "disabled" } } },
-          spacefastAccess: { enabled: true, providers: {} },
+          signInWithSpacefast: { enabled: true, providers: {} },
         }),
       },
       422,

@@ -6,38 +6,38 @@ declare(strict_types=1);
  * (`_stattic_runtime_users_config`). Every Users gate asks this, never
  * `enabled` alone:
  * - Zero Users: email codes, passkeys and Google through the Space's own client.
- * - Spacefast Access: Sign in with Spacefast, Google through Spacefast's client
+ * - Sign in with Spacefast: a Spacefast account, Google through Spacefast's client
  *   and WordPress.com.
  * Settings stored in the flat shape say only `enabled`, which turns both parts
  * on, exactly as before the two-part shape.
  *
- * @return array{zeroUsers: bool, spacefastAccess: bool}
+ * @return array{zeroUsers: bool, signInWithSpacefast: bool}
  */
 function _stattic_space_users_parts(mixed $users): array
 {
     if (!is_array($users) || ($users['enabled'] ?? false) !== true) {
-        return ['zeroUsers' => false, 'spacefastAccess' => false];
+        return ['zeroUsers' => false, 'signInWithSpacefast' => false];
     }
     $parts = $users['parts'] ?? null;
-    if (!is_array($parts)) return ['zeroUsers' => true, 'spacefastAccess' => true];
+    if (!is_array($parts)) return ['zeroUsers' => true, 'signInWithSpacefast' => true];
     return [
         'zeroUsers' => ($parts['zeroUsers'] ?? false) === true,
-        'spacefastAccess' => ($parts['spacefastAccess'] ?? false) === true,
+        'signInWithSpacefast' => ($parts['signInWithSpacefast'] ?? false) === true,
     ];
 }
 
 /**
  * The sign-in method a Users request asks for, or null when it asks for none.
- * `zeroUsers` methods need Zero Users on; `spacefastAccess` methods need
- * Spacefast Access on. Direct Google is a Zero Users method even when the
+ * `zeroUsers` methods need Zero Users on; `signInWithSpacefast` methods need
+ * Sign in with Spacefast on. Direct Google is a Zero Users method even when the
  * selector says "google": the stored Google mode decides which part owns it.
  */
 function _stattic_space_users_method_part(array $users, string $method): ?string
 {
     return match ($method) {
         'email', 'passkey', 'password' => 'zeroUsers',
-        'google' => (($users['providers']['google']['mode'] ?? 'disabled') === 'direct') ? 'zeroUsers' : 'spacefastAccess',
-        'spacefast', 'gravatar', 'wpcom' => 'spacefastAccess',
+        'google' => (($users['providers']['google']['mode'] ?? 'disabled') === 'direct') ? 'zeroUsers' : 'signInWithSpacefast',
+        'spacefast', 'gravatar', 'wpcom' => 'signInWithSpacefast',
         default => null,
     };
 }

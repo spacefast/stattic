@@ -1699,7 +1699,7 @@ function _stattic_runtime_repair_space(string $privateRoot, string $spaceId, arr
 /**
  * Space Users settings in the one form every engine reader uses: the original
  * flat shape. The control plane sends either that shape or the two-part
- * `zeroUsers` / `spacefastAccess` shape (runtime.users.access-shape.v1); the
+ * `zeroUsers` / `signInWithSpacefast` shape (runtime.users.sign-in-shape.v1); the
  * two-part shape also keeps whether each part is on, which the flat shape
  * cannot say, under `parts`. Null for anything malformed.
  */
@@ -1714,7 +1714,7 @@ function _stattic_runtime_users_config(mixed $users): ?array
     if (!is_array($users)) return null;
     if (array_key_exists('zeroUsers', $users)) {
         $zero = $users['zeroUsers'] ?? null;
-        $access = $users['spacefastAccess'] ?? null;
+        $access = $users['signInWithSpacefast'] ?? null;
         $direct = is_array($zero) ? $google($zero['providers']['google'] ?? null, ['disabled', 'direct']) : null;
         $providers = is_array($access) ? ($access['providers'] ?? null) : null;
         if (!is_array($zero) || !$isBool($zero['enabled'] ?? null) || $direct === null || !is_array($access)
@@ -1731,7 +1731,7 @@ function _stattic_runtime_users_config(mixed $users): ?array
                 'gravatar' => ['enabled' => $on && $providers['wpcom']],
                 'spacefast' => ['enabled' => $on && $providers['spacefast']],
             ],
-            'parts' => ['zeroUsers' => $zero['enabled'], 'spacefastAccess' => $on],
+            'parts' => ['zeroUsers' => $zero['enabled'], 'signInWithSpacefast' => $on],
         ];
     }
     $providers = $users['providers'] ?? null;

@@ -108,7 +108,7 @@ function _stattic_space_users_prepare(
 
 /**
  * Select the Space's current initialized Zero v2 version for Users, or refuse
- * with a problem document. Versions built before Spacefast Access have no
+ * with a problem document. Versions built before Sign in with Spacefast have no
  * `runtime.users.access-shape.v1`-era identity code, so they are refused with a
  * republish instruction rather than crashing.
  */
@@ -139,8 +139,8 @@ function _stattic_space_users_zero_version(string $privateRoot, string $spaceId,
 
 /**
  * The hosted `/identity` sign-in page offers email codes and passkeys, which
- * are Zero Users' methods. With only Spacefast Access on, a signed-out visitor
- * starts a Spacefast Access sign-in instead, returning where the page would
+ * are Zero Users' methods. With only Sign in with Spacefast on, a signed-out visitor
+ * starts Sign in with Spacefast instead, returning where the page would
  * have (an OAuth authorize resume, or the account page). The multifactor step
  * (`?factor=`) still renders the page, and so does a signed-in visit to the
  * account page.
@@ -159,11 +159,11 @@ function _stattic_space_users_access_only_entry(array $users, string $path, stri
     exit;
 }
 
-/** The Spacefast Access method a signed-out `/identity` visit starts, or null while Zero Users serves the page. */
+/** The Sign in with Spacefast method a signed-out `/identity` visit starts, or null while Zero Users serves the page. */
 function _stattic_space_users_access_only_provider(array $users, ?array $providerConfiguration): ?string
 {
     $parts = _stattic_space_users_parts($users);
-    if ($parts['zeroUsers'] || !$parts['spacefastAccess']) return null;
+    if ($parts['zeroUsers'] || !$parts['signInWithSpacefast']) return null;
     $available = is_array($providerConfiguration['availability'] ?? null) ? $providerConfiguration['availability'] : [];
     if (($users['providers']['spacefast']['enabled'] ?? false) === true) return 'spacefast';
     if (($users['providers']['google']['mode'] ?? '') === 'managed' && ($available['google']['managed'] ?? false) === true) return 'google';

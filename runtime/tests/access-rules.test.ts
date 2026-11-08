@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import path from "node:path";
 
 import { runtimeSecurityTelemetrySchema } from "../../packages/common/src/contracts/security-telemetry.ts";
+import { RUNTIME_ACCESS_SESSION_PATH } from "../../packages/common/src/utils/runtime-paths.ts";
 import {
   api,
   deploy,
@@ -1383,8 +1384,16 @@ test("retained idle session records cannot renew a stale cookie", async () => {
 });
 
 test("a globally retired session version denies every cookie minted before it", async () => {
-  const cookie = await openAuthorities(SESSION_HOST, ["member:mem_session"]);
+  const cookie = await openAuthorities(SESSION_HOST, ["member:mem_session"], {
+    principal: "person:per_session",
+  });
   expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie } })).status).toBe(200);
+  const identified = await get(runtime, SESSION_HOST, RUNTIME_ACCESS_SESSION_PATH, {
+    headers: { cookie },
+  });
+  expect(await identified.json()).toEqual({
+    data: { state: "authenticated", principal: "person:per_session", displayName: null },
+  });
   try {
     await putRoute(runtime, SESSION_SPACE, "production", {
       version_id: SESSION_VERSION,
@@ -1397,6 +1406,11 @@ test("a globally retired session version denies every cookie minted before it", 
     const loggedOutEverywhere = await get(runtime, SESSION_HOST, "/", { headers: { cookie } });
     expect(loggedOutEverywhere.status).toBe(403);
     expect(loggedOutEverywhere.headers.get("cache-control")).toBe("private, no-store");
+    const session = await get(runtime, SESSION_HOST, RUNTIME_ACCESS_SESSION_PATH, {
+      headers: { cookie },
+    });
+    expect(session.status).toBe(200);
+    expect(await session.json()).toEqual({ data: { state: "anonymous" } });
     // The record is not what denied this: session_ver is a tuple member the
     // cookie carries, checked before any file is consulted.
     expect(existsSync(sessionRecordPath(SESSION_SPACE, cookie))).toBe(true);

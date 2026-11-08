@@ -3,6 +3,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::config::current::CONNECTOR_ROLES_MAX;
 use crate::serving_paths::{carries_hex_digest, is_private_serving_path, precompressed_source};
 
 /// Overlay-writable keys the effective config takes by REPLACEMENT: whatever
@@ -38,6 +39,12 @@ const CONFIG_KEYS: &[&str] = &[
 /// entries followed by the file's, and a `sf.jsonc` rule the overlay says
 /// nothing about still runs.
 const LIST_PREPEND_CONFIG_KEYS: &[&str] = &["redirects", "rewrites", "headers"];
+
+/// Overlay-writable maps that merge ENTRY BY ENTRY: an overlay entry replaces
+/// the file's entry of the same name, an overlay `null` removes it, and an
+/// entry the overlay is silent about keeps the file's. `connectors` is keyed by
+/// role, so a dashboard override of one role leaves the committed others alone.
+const MAP_MERGE_CONFIG_KEYS: &[&str] = &["connectors"];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,6 +189,46 @@ pub fn resolve_effective_config(input: ResolveEffectiveInput) -> ResolveEffectiv
     }
 
     let mut issues = Vec::new();
+    for key in MAP_MERGE_CONFIG_KEYS {
+        let file = input
+            .file_config
+            .as_ref()
+            .and_then(|layer| layer.get(*key))
+            .and_then(Value::as_object);
+        let overlay = input
+            .overlay
+            .as_ref()
+            .and_then(|layer| layer.get(*key))
+            .and_then(Value::as_object);
+        if file.is_none() && overlay.is_none() {
+            continue;
+        }
+        let mut merged = file.cloned().unwrap_or_default();
+        for (name, entry) in overlay.into_iter().flatten() {
+            if entry.is_null() {
+                merged.remove(name);
+            } else {
+                merged.insert(name.clone(), entry.clone());
+            }
+        }
+        // The file and the overlay are each capped, but disjoint role sets can
+        // add up past the cap. Report it here and freeze no roles.
+        if merged.len() > CONNECTOR_ROLES_MAX {
+            issues.push(EffectiveIssue {
+                severity: "error",
+                code: "config_invalid",
+                message: format!(
+                    "connectors supports up to {CONNECTOR_ROLES_MAX} roles; the config file and the Space's overrides declare {} together.",
+                    merged.len()
+                ),
+                path: "connectors",
+                details: Some(json!({ "count": merged.len(), "max": CONNECTOR_ROLES_MAX })),
+            });
+            continue;
+        }
+        config.insert((*key).into(), Value::Object(merged));
+    }
+
     // Earlier CLIs saved their SPA guess into Space settings. A saved path
     // this version does not ship is stale, not a decision: drop it, say so,
     // and let inference decide. A fallback in `sf.jsonc` stays binding.
@@ -914,6 +961,65 @@ mod tests {
             output.config.get("headers"),
             Some(&json!([header("/file")]))
         );
+    }
+
+    /// Connector roles merge per role: the overlay replaces the one role it
+    /// names, removes a role it sets to null, adds a role the file lacks, and
+    /// leaves every other committed role alone.
+    #[test]
+    fn the_overlay_merges_connector_roles_one_role_at_a_time() {
+        let role = |connector: &str| json!({ "connector": connector, "tools": "*" });
+        let output = resolve_effective_config(ResolveEffectiveInput {
+            manifest_paths: vec!["index.html".into()],
+            file_config: Some(Map::from_iter([(
+                "connectors".into(),
+                json!({ "issues": role("github"), "board": role("linear"), "kept": role("notion") }),
+            )])),
+            overlay: Some(Map::from_iter([(
+                "connectors".into(),
+                json!({ "issues": role("gitlab"), "board": null, "added": role("slack") }),
+            )])),
+            template_entries: Vec::new(),
+            has_worker: false,
+        });
+        assert_eq!(
+            output.config.get("connectors"),
+            Some(
+                &json!({ "issues": role("gitlab"), "kept": role("notion"), "added": role("slack") })
+            )
+        );
+        let overlay_only = resolve_effective_config(ResolveEffectiveInput {
+            manifest_paths: vec!["index.html".into()],
+            file_config: None,
+            overlay: Some(Map::from_iter([(
+                "connectors".into(),
+                json!({ "gone": null, "added": role("slack") }),
+            )])),
+            template_entries: Vec::new(),
+            has_worker: false,
+        });
+        assert_eq!(
+            overlay_only.config.get("connectors"),
+            Some(&json!({ "added": role("slack") }))
+        );
+        // Each layer is under the cap; together they are over it.
+        let roles = |prefix: &str| {
+            Value::Object(Map::from_iter(
+                (0..20).map(|index| (format!("{prefix}{index}"), role("github"))),
+            ))
+        };
+        let over_cap = resolve_effective_config(ResolveEffectiveInput {
+            manifest_paths: vec!["index.html".into()],
+            file_config: Some(Map::from_iter([("connectors".into(), roles("file"))])),
+            overlay: Some(Map::from_iter([("connectors".into(), roles("set"))])),
+            template_entries: Vec::new(),
+            has_worker: false,
+        });
+        assert_eq!(over_cap.config.get("connectors"), None);
+        assert!(over_cap
+            .issues
+            .iter()
+            .any(|issue| issue.severity == "error" && issue.path == "connectors"));
     }
 
     #[test]

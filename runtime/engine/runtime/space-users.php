@@ -462,14 +462,16 @@ function _stattic_space_users_return_begin(string $returnPath): void
     _stattic_space_users_set_cookie('sfi_app_return', $challenge . '.' . $binding, time() + 300);
 }
 
-function _stattic_space_users_request_auth(array $serving, string $host): ?array
+// `$admitOrigin` false only for a top-level navigation whose own request is
+// bound to this viewer some other way (a connector OAuth callback's sealed state).
+function _stattic_space_users_request_auth(array $serving, string $host, bool $admitOrigin = true): ?array
 {
     if (array_key_exists('SPACEFAST_SPACE_USERS_AUTH', $GLOBALS)) return $GLOBALS['SPACEFAST_SPACE_USERS_AUTH'];
     $cookie = _stattic_space_users_session_cookie($serving);
     if ($cookie === null || strlen($cookie) > 512) return null;
     $privateRoot = _stattic_access_private_root();
     require_once __DIR__ . '/../shared/admission.php';
-    _stattic_space_users_admit_origin(_stattic_runtime_request_method(), $host);
+    if ($admitOrigin) _stattic_space_users_admit_origin(_stattic_runtime_request_method(), $host);
     _stattic_admission_acquire_once($privateRoot, $serving, 'space_users_verify');
     _stattic_access_private_cache_flag(true);
     return $GLOBALS['SPACEFAST_SPACE_USERS_AUTH'] = _stattic_space_users_verify_session(

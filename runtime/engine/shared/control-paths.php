@@ -4,8 +4,6 @@ declare(strict_types=1);
 require_once __DIR__ . '/legacy-zero.php';
 
 const SPACEFAST_CONTROL_PATHS = [
-    ['path' => STATTIC_SPACEFAST_CLIENT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'spacefast_client'],
-    ['path' => STATTIC_SPACEFAST_CLIENT_TYPES_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'spacefast_client'],
     ['path' => STATTIC_ZERO_V2_CLIENT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'zero_v2_client'],
     ['path' => STATTIC_ZERO_V2_CLIENT_TYPES_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'zero_v2_client'],
     ['path' => STATTIC_ZERO_V2_REALTIME_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'zero_v2_client'],
@@ -20,6 +18,7 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH . '/redeem', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_callback'],
     ['path' => STATTIC_ACCESS_CLIENT_SCRIPT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_client_script'],
     ['path' => STATTIC_ACCESS_ACCOUNT_START_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_account_start'],
+    ['path' => STATTIC_ACCESS_SESSION_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_session'],
     ['path' => STATTIC_ACCESS_LOGOUT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_logout'],
     ['path' => STATTIC_ACCESS_PASSWORD_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_password'],
     ['path' => STATTIC_ACCESS_EMAIL_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_email'],
@@ -43,6 +42,14 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => '/' . STATTIC_FUNCTIONS_RELAY_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_relay'],
     ['path' => '/' . STATTIC_FUNCTIONS_LOGS_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_logs'],
     ['path' => '/' . STATTIC_FUNCTIONS_PURGE_PATH, 'match' => 'exact', 'fold' => true, 'visitor' => true, 'tenant' => false, 'stage' => 'functions', 'handler' => 'functions_purge'],
+    // Like uploads below: admitted at the front door, dispatched by serve.php
+    // AFTER the Space access check, so a page's data is exactly as private as
+    // the page. Must precede the '/__spacefast' catch-all below.
+    ['path' => STATTIC_SPACE_CLIENT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'space_client'],
+    ['path' => STATTIC_SPACE_CLIENT_CHUNKS_PREFIX, 'match' => 'prefix', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'space_client'],
+    ['path' => STATTIC_SPACE_CLIENT_TYPES_URL_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'connectors'],
+    ['path' => STATTIC_CONNECTORS_PATH_PREFIX, 'match' => 'prefix', 'admit' => '_stattic_connectors_route', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'connectors'],
+    ...STATTIC_LEGACY_ZERO_CONNECTOR_PATHS,
     ...STATTIC_LEGACY_ZERO_CONTROL_PATHS,
     // Unknown `/__zero/*` paths refuse exactly like unknown `/__spacefast/*`:
     // the namespace is private-by-default on both spellings.

@@ -5464,6 +5464,45 @@ function _stattic_access_logout_request_allowed(string $method, string $requestH
     return $allowed;
 }
 
+function _stattic_access_handle_session(array $serving, string $requestHost): never
+{
+    $method = _stattic_runtime_request_method();
+    $headers = _stattic_private_content_response_headers([
+        'Cache-Control' => 'private, no-store',
+    ]);
+    if ($method === 'OPTIONS') {
+        _stattic_response_send(204, '', '', [...$headers, 'Allow' => 'GET, HEAD, OPTIONS']);
+    }
+    if ($method !== 'GET' && $method !== 'HEAD') {
+        _stattic_method_not_allowed('GET, HEAD, OPTIONS', [
+            'code' => 'method_not_allowed',
+            'message' => 'Access sessions support GET and HEAD.',
+            'headers' => $headers,
+        ]);
+    }
+
+    $identity = _stattic_current_session_identity($serving, $requestHost);
+    $principal = _stattic_access_identity_principal($identity);
+    $session = ['state' => 'anonymous'];
+    // Passwords, share links and collaboration pseudonyms can authorize a
+    // visitor without identifying a person. Only the verified Access principal
+    // supplies identity, independently of whichever grants still admit it.
+    if (_stattic_access_principal_is_identified($principal)) {
+        $profile = _stattic_access_public_profile($identity['profile'] ?? null);
+        $session = [
+            'state' => 'authenticated',
+            'principal' => $principal,
+            'displayName' => $profile['name'] ?? null,
+        ];
+    }
+    _stattic_json_response(
+        200,
+        ['data' => $session],
+        'application/json',
+        $headers
+    );
+}
+
 function _stattic_access_logout_unavailable(): never
 {
     _stattic_response_send(

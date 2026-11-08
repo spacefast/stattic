@@ -4,7 +4,10 @@ import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 
 import { collabManifestSchema } from "../../packages/common/src/contracts/collab-manifest.ts";
-import { RUNTIME_COLLAB_MANIFEST_PATH } from "../../packages/common/src/utils/runtime-paths.ts";
+import {
+  RUNTIME_ACCESS_SESSION_PATH,
+  RUNTIME_COLLAB_MANIFEST_PATH,
+} from "../../packages/common/src/utils/runtime-paths.ts";
 import {
   DASHBOARD_ORIGIN,
   deploy,
@@ -779,6 +782,37 @@ afterAll(async () => {
   exchange?.stop(true);
 });
 
+test("the Access session endpoint reports anonymous visitors before private-page gating", async () => {
+  const response = await get(runtime, LANES_HOST, RUNTIME_ACCESS_SESSION_PATH);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+  expect(response.headers.get("vary")).toContain("Cookie");
+  expect(await response.json()).toEqual({ data: { state: "anonymous" } });
+  expect(sessionCookie(response)).toBe("");
+
+  const head = await get(runtime, LANES_HOST, RUNTIME_ACCESS_SESSION_PATH, { method: "HEAD" });
+  expect(head.status).toBe(200);
+  expect(head.headers.get("cache-control")).toBe("private, no-store");
+  expect(await head.text()).toBe("");
+
+  const options = await get(runtime, LANES_HOST, RUNTIME_ACCESS_SESSION_PATH, {
+    method: "OPTIONS",
+  });
+  expect(options.status).toBe(204);
+  expect(options.headers.get("allow")).toBe("GET, HEAD, OPTIONS");
+  expect(await options.text()).toBe("");
+
+  const post = await get(runtime, LANES_HOST, RUNTIME_ACCESS_SESSION_PATH, { method: "POST" });
+  expect(post.status).toBe(405);
+  expect(post.headers.get("allow")).toBe("GET, HEAD, OPTIONS");
+  expect(post.headers.get("cache-control")).toBe("private, no-store");
+  expect(await post.json()).toEqual(
+    problemDocument(405, "method_not_allowed", "Access sessions support GET and HEAD."),
+  );
+});
+
 test("the deny surface renders the access page with every configured lane", async () => {
   const response = await get(runtime, LANES_HOST, "/docs/");
   expect(response.status).toBe(403);
@@ -905,6 +939,10 @@ test("the password lane verifies centrally and admits with zero visible redirect
   const admitted = await get(runtime, LANES_HOST, "/docs/", { headers: { cookie } });
   expect(admitted.status).toBe(200);
   expect(await admitted.text()).toContain("docs of spc_access_page_lanes");
+  const session = await get(runtime, LANES_HOST, RUNTIME_ACCESS_SESSION_PATH, {
+    headers: { cookie },
+  });
+  expect(await session.json()).toEqual({ data: { state: "anonymous" } });
 
   const call = exchangeRequests.findLast(
     (request) => request.pathname === "/acquire/runtime-page/password",
@@ -1476,9 +1514,10 @@ test("the account lane redeems by GET, in the page or in a popup", async () => {
   );
   expect(otherBrowserStart.status).toBe(302);
   expect(otherBrowserStart.headers.get("location")).not.toContain("addAccount");
-  expect(new URL(otherBrowserStart.headers.get("location") ?? "").searchParams.has("display")).toBe(
-    false,
-  );
+  const accountLocation = new URL(otherBrowserStart.headers.get("location") ?? "");
+  expect(accountLocation.origin + accountLocation.pathname).toBe(ACCOUNT_URL);
+  expect(accountLocation.searchParams.get("return")).toBe("/docs/");
+  expect(accountLocation.searchParams.has("display")).toBe(false);
   const otherBrowserCookie = browserStateCookie(otherBrowserStart);
   expect(otherBrowserCookie).toMatch(/^__Host-spacefast_access_state_[a-f0-9]{16}=[a-f0-9]{64}$/);
   expect(otherBrowserCookie).not.toBe(stateCookie);
@@ -1607,6 +1646,26 @@ test("a public Grant retains a signed-in account identity without team membershi
   });
   expect(sessionRecords(PUBLIC_SPACE)).toHaveLength(1);
   expect((await get(runtime, PUBLIC_HOST, "/", { headers: { cookie } })).status).toBe(200);
+  const session = await get(runtime, PUBLIC_HOST, RUNTIME_ACCESS_SESSION_PATH, {
+    headers: { cookie },
+  });
+  expect(session.status).toBe(200);
+  expect(session.headers.get("cache-control")).toBe("private, no-store");
+  expect(await session.json()).toEqual({
+    data: {
+      state: "authenticated",
+      principal: "account:usr_public_voter",
+      displayName: "Public Voter",
+    },
+  });
+  const tampered = await get(runtime, PUBLIC_HOST, RUNTIME_ACCESS_SESSION_PATH, {
+    headers: { cookie: `${cookie}x` },
+  });
+  expect(await tampered.json()).toEqual({ data: { state: "anonymous" } });
+  const anotherHost = await get(runtime, LANES_HOST, RUNTIME_ACCESS_SESSION_PATH, {
+    headers: { cookie },
+  });
+  expect(await anotherHost.json()).toEqual({ data: { state: "anonymous" } });
 
   // The account leaves one bit behind for the visit after this session: no id,
   // host-only, and readable by the overlay that renews it, which looks for the

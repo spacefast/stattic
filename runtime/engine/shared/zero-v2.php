@@ -235,9 +235,10 @@ function _stattic_zero_v2_client(string $versionRoot, string $path, string $meth
     }
     $body = file_get_contents($file);
     if (!is_string($body)) throw new RuntimeException('Cannot read the generated Zero client.');
-    $body .= $types
-        ? "\n" . 'export declare function loadSpacefastClient(): Promise<typeof import("../client")>;' . "\n"
-        : "\n" . 'export function loadSpacefastClient() { return import("/__spacefast/client.js"); }' . "\n";
+    if (!$types) {
+        // Live updates: the Cast transport registers with every Zero client on the page.
+        $body .= "\n" . 'if (typeof document !== "undefined") import(' . json_encode(STATTIC_ZERO_V2_REALTIME_PATH, JSON_UNESCAPED_SLASHES) . ').catch(() => {});' . "\n";
+    }
     _stattic_response_send(200, $body,
         $types ? 'application/typescript; charset=utf-8' : 'text/javascript; charset=utf-8',
         ['Cache-Control' => 'private, no-store', 'X-Content-Type-Options' => 'nosniff', 'ETag' => '"' . hash('sha256', $body) . '"']);
@@ -263,25 +264,6 @@ function _stattic_zero_v2_lock(string $privateRoot, string $spaceId): mixed
         _stattic_problem_response(409, 'zero_v2_finalize_busy', 'Another Zero publication is initializing this Space. Retry after it completes.');
     }
     return $handle;
-}
-
-/** Engine-owned host APIs and the exact selected app's exports share one ESM entry. */
-function _stattic_zero_v2_shared_client(string $versionRoot, string $path, string $method): never
-{
-    if (!in_array($method, ['GET', 'HEAD'], true)) _stattic_method_not_allowed('GET, HEAD');
-    $types = $path === STATTIC_SPACEFAST_CLIENT_TYPES_PATH;
-    $body = file_get_contents(__DIR__ . '/../runtime/client.' . ($types ? 'd.ts' : 'js'));
-    if (!is_string($body)) throw new RuntimeException('The engine client is unavailable.');
-    if (is_file($versionRoot . '/.zero-compiled/ready.json')) {
-        $body .= $types
-            ? "\n" . 'export * from "./zero/client";' . "\n"
-            : "\n" . 'export * from "/__spacefast/zero/client.js";' . "\n"
-                // Live updates: the Cast transport registers with every Zero client on the page.
-                . 'if (typeof document !== "undefined") import("/__spacefast/zero/realtime.js").catch(() => {});' . "\n";
-    }
-    _stattic_response_send(200, $body,
-        $types ? 'application/typescript; charset=utf-8' : 'text/javascript; charset=utf-8',
-        ['Cache-Control' => 'private, no-store', 'X-Content-Type-Options' => 'nosniff', 'ETag' => '"' . hash('sha256', $body) . '"']);
 }
 
 /** WP-CLI bootstrap for the scheduled worker, which runs from cron in the CLI namespace. */

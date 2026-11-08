@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { z } from "zod";
 
 import { castRoomTopic } from "../../packages/common/src/utils/cast-transport.ts";
-import { buildSpacefastClient } from "../../scripts/build-spacefast-client.mjs";
+import { buildZeroRealtime } from "../../scripts/build-zero-realtime.mjs";
 
 const BUNDLE = new URL("../engine/runtime/zero-realtime.js", import.meta.url);
 
@@ -155,7 +155,7 @@ function load(origin: string) {
 
 test("the checked-in transport bundle is freshly generated", async () => {
   const before = readFileSync(BUNDLE);
-  await buildSpacefastClient();
+  await buildZeroRealtime();
   expect(readFileSync(BUNDLE)).toEqual(before);
 }, 60_000);
 

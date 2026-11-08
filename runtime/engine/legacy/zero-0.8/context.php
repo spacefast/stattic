@@ -28,7 +28,7 @@ const STATTIC_ZERO_CONTROL_ROUTES = [
 
 function _stattic_control_path_is_zero_route(string $path): bool
 {
-    return isset(STATTIC_ZERO_CONTROL_ROUTES[trim(strtolower($path), '/')]) || _stattic_zero_connector_route($path) !== null;
+    return isset(STATTIC_ZERO_CONTROL_ROUTES[trim(strtolower($path), '/')]);
 }
 
 // Response tables compiled before the /__zero cutover carry only the legacy
@@ -60,9 +60,3 @@ const STATTIC_LEGACY_ZERO_CONTROL_PATHS = [
 const STATTIC_LEGACY_ZERO_PRIVATE_PATHS = [
     ['path' => STATTIC_ZERO_CANONICAL_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
 ];
-
-function _stattic_zero_connector_route(string $path): ?array
-{
-    if (preg_match('~^/__spacefast/zero/connectors/([a-z][a-zA-Z0-9]{0,63})(?:/(connect|callback|disconnect))?$~D', $path, $matches) !== 1) return null;
-    return ['role' => $matches[1], 'operation' => $matches[2] ?? 'disconnect'];
-}

@@ -6,3 +6,5 @@ declare(strict_types=1);
 require_once __DIR__ . '/../legacy/zero-0.8/context.php';
 
 require_once __DIR__ . '/../legacy/zero-0.8/artifacts.php';
+
+require_once __DIR__ . '/../legacy/zero-0.8/connectors.php';

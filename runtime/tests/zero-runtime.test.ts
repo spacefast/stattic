@@ -595,28 +595,6 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       expect(signIn.headers.get("set-cookie")).toContain("spacefast_access_state_dev_");
     }
 
-    const visitorConnect = await get(
-      idRuntime,
-      host,
-      "/__spacefast/zero/connectors/tracker/connect?return_to=%2Faccount",
-    );
-    expect(visitorConnect.status).toBe(302);
-    const visitorSignIn = new URL(visitorConnect.headers.get("location") ?? "");
-    expect(visitorSignIn.origin).toBe("https://api.spacefast.test");
-    expect(visitorSignIn.searchParams.get("return")).toBe(
-      "/__spacefast/zero/connectors/tracker/connect?return_to=%2Faccount",
-    );
-    expect(visitorConnect.headers.get("cache-control")).toContain("no-store");
-    const expiredCallback = await get(
-      idRuntime,
-      host,
-      "/__spacefast/zero/connectors/tracker/callback?code=private-code&state=private-state",
-    );
-    expect(expiredCallback.status).toBe(302);
-    expect(new URL(expiredCallback.headers.get("location") ?? "").searchParams.get("return")).toBe(
-      "/__spacefast/zero/connectors/tracker/connect",
-    );
-
     // The DOCUMENT settles the guest session, before the page can open a single
     // XHR. A Zero client's first render fires auth.get, query.subscribe and
     // mutation.run together; if each cookie-less request minted its own session

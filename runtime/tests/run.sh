@@ -122,8 +122,15 @@ for ((; running > 0; running--)); do
   fi
 done
 if [[ "${#reports[@]}" -gt 0 ]]; then
-  for report in "${reports[@]}"; do test -s "$report" || status=1; done
-  cat "${reports[@]}" > "$SPACEFAST_BUN_COVERAGE_DIR/lcov.info"
-  rm -- "${reports[@]}"
+  # Bun writes no report for a shard whose files load no instrumented source
+  # (they only drive PHP). Test failures already fail through the exit status,
+  # so only an empty merged report fails here.
+  written=()
+  for report in "${reports[@]}"; do
+    [[ -s "$report" ]] && written+=("$report")
+  done
+  [[ "${#written[@]}" -gt 0 ]] || status=1
+  [[ "${#written[@]}" -eq 0 ]] || cat "${written[@]}" > "$SPACEFAST_BUN_COVERAGE_DIR/lcov.info"
+  rm -f -- "${reports[@]}"
 fi
 exit "$status"

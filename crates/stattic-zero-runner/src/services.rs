@@ -329,6 +329,20 @@ fn connector_body(config: &ServiceConfig, payload: &Map<String, Value>, read_onl
         "requestId".into(),
         Value::String(config.invocation_id.clone()),
     );
+    // The caller surface is the broker's to state, never the frame's: inside a
+    // Zero invocation it is a Zero handler, and the one-shot broker the
+    // Functions relay spawns serves a worker.
+    body.insert(
+        "surface".into(),
+        Value::String(
+            if execution_mode().is_some() {
+                "zero"
+            } else {
+                "function"
+            }
+            .into(),
+        ),
+    );
     let name = payload
         .get("handler")
         .and_then(|handler| handler.get("name"))
@@ -1200,7 +1214,7 @@ mod tests {
             invocation_id: "request_test".into(),
             ..Default::default()
         };
-        let payload = json!({"role":"tracker", "tool":"issues.create", "args":{"title":"New"}, "visitor":{"subject":"forged"}, "requestId":"forged", "handler":{"name":"issues", "mode":"write"}});
+        let payload = json!({"role":"tracker", "tool":"issues.create", "args":{"title":"New"}, "visitor":{"subject":"forged"}, "requestId":"forged", "surface":"page", "handler":{"name":"issues", "mode":"write"}});
         let answer = connectors_call(&config, payload.as_object().unwrap(), true).unwrap();
         assert_eq!(answer["state"]["code"], "approval_pending");
         let request = server.join().unwrap();
@@ -1210,7 +1224,7 @@ mod tests {
         let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(
             body,
-            json!({"role":"tracker", "tool":"issues.create", "args":{"title":"New"}, "visitor":{"subject":"visitor:alice"}, "requestId":"request_test", "handler":{"name":"issues", "mode":"read", "callIndex":0}})
+            json!({"role":"tracker", "tool":"issues.create", "args":{"title":"New"}, "visitor":{"subject":"visitor:alice"}, "requestId":"request_test", "surface":"function", "handler":{"name":"issues", "mode":"read", "callIndex":0}})
         );
     }
 

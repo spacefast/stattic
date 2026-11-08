@@ -147,6 +147,7 @@ const STATTIC_ACCESS_QUERY_TOKEN_SYSTEM_VIEW_PREFIX = 'sfv_';
 // FRAME_SESSION_TOKEN_PREFIX in apps/control-plane/src/access/frame-session-token.ts.
 const STATTIC_ACCESS_QUERY_TOKEN_FRAME_SESSION_PREFIX = 'sff_';
 const STATTIC_ACCESS_LOGOUT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/logout';
+const STATTIC_ACCESS_SESSION_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/session';
 const STATTIC_ACCESS_PASSWORD_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/password';
 const STATTIC_ACCESS_EMAIL_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/email';
 const STATTIC_ACCESS_REQUEST_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/request';
@@ -164,16 +165,27 @@ const STATTIC_FUNCTIONS_RELAY_PATH = '__spacefast/functions/relay';
 const STATTIC_FUNCTIONS_LOGS_PATH = '__spacefast/functions/logs';
 const STATTIC_FUNCTIONS_PURGE_PATH = '__spacefast/functions/purge';
 
-// The version's generated app module composes with the shared engine client.
-const STATTIC_SPACEFAST_CLIENT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/client.js';
-const STATTIC_SPACEFAST_CLIENT_TYPES_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/client.d.ts';
-const STATTIC_ZERO_V2_CLIENT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/client.js';
-const STATTIC_ZERO_V2_CLIENT_TYPES_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/client.d.ts';
+// A Zero v2 version's generated app client and its declarations. Zero lives
+// under `/__zero/*`; `/__spacefast/client.js` is the engine client alone.
+const STATTIC_ZERO_V2_CLIENT_PATH = '/__zero/client.js';
+const STATTIC_ZERO_V2_CLIENT_TYPES_PATH = '/__zero/client.d.ts';
 // The Zero v2 Cast transport; it registers itself with every Zero client on the page.
-const STATTIC_ZERO_V2_REALTIME_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/realtime.js';
+const STATTIC_ZERO_V2_REALTIME_PATH = '/__zero/realtime.js';
 
 // The ONE stable visitor URL of a public uploads-store object.
 const STATTIC_UPLOADS_PUBLIC_URL_PREFIX = '/__stattic/u/';
+
+// A version's connector roles, served to its own pages:
+// `<prefix><role>/<tool>` calls a tool, and `<prefix><role>/{connect,callback,
+// disconnect}` manages the viewer's own account for a visitor role. The three
+// operation names are therefore never tool names on this route.
+const STATTIC_CONNECTORS_PATH_PREFIX = STATTIC_RUNTIME_NAMESPACE_PATH . '/connectors/';
+const STATTIC_CONNECTORS_VISITOR_OPERATIONS = ['connect', 'callback', 'disconnect'];
+// The public browser client and its lazy collaboration modules contain no
+// Space data. Generated declarations belong to the published version.
+const STATTIC_SPACE_CLIENT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/client.js';
+const STATTIC_SPACE_CLIENT_CHUNKS_PREFIX = STATTIC_RUNTIME_NAMESPACE_PATH . '/chunks/';
+const STATTIC_SPACE_CLIENT_TYPES_URL_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/client.d.ts';
 
 // Runtime-owned files keep their existing physical layout inside a version.
 // They are implementation state, regardless of any catalog visibility bit.
@@ -200,6 +212,24 @@ function _stattic_control_path_rows(): array
 {
     require_once __DIR__ . '/control-paths.php';
     return SPACEFAST_CONTROL_PATHS;
+}
+
+/**
+ * `/__spacefast/connectors/<role>/<tool>` as `['role', 'tool']`, or the visitor
+ * account routes as `['role', 'operation']`; null for anything else. The role
+ * grammar is the config's (`connectorRoleNameSchema`); the tool grammar and the
+ * reserved operations are the config's too (`connectorToolPageRoutable`).
+ *
+ * @return array{role: string, tool?: string, operation?: string}|null
+ */
+function _stattic_connectors_route(string $path): ?array
+{
+    if (preg_match('~\A' . preg_quote(STATTIC_CONNECTORS_PATH_PREFIX, '~') . '([a-z][a-zA-Z0-9]{0,63})/([A-Za-z0-9_.:-]{1,512})\z~D', $path, $matches) !== 1) {
+        return null;
+    }
+    return in_array($matches[2], STATTIC_CONNECTORS_VISITOR_OPERATIONS, true)
+        ? ['role' => $matches[1], 'operation' => $matches[2]]
+        : ['role' => $matches[1], 'tool' => $matches[2]];
 }
 
 function _stattic_control_path_row(string $path): ?array

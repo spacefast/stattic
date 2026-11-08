@@ -230,10 +230,9 @@ beforeAll(async () => {
     spaceId: SPACE_ID,
     versionId: VERSION_ID,
     metadata: { mode: "website", title: "Functions relay" },
-    functions: {
-      ...functionsFinalize("functions.test"),
-      connectors: { token: "version-connectors-token" },
-    },
+    functions: functionsFinalize("functions.test"),
+    // The version's one connector credential, which the worker's broker reads.
+    finalize: { connectors_token: "version-connectors-token" },
     files: { "index.html": "<h1>static</h1>\n" },
     activate: {
       route_name: "production",
@@ -535,7 +534,12 @@ test("connector frames use the version token and ignore a forged visitor", async
     {
       authorization: "Bearer version-connectors-token",
       path: "/v1/runtime/connectors/calls",
-      body: { ...frame.payload, visitor: null, requestId: "inv_worker_connectors" },
+      body: {
+        ...frame.payload,
+        surface: "function",
+        visitor: null,
+        requestId: "inv_worker_connectors",
+      },
     },
   ]);
 });

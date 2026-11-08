@@ -1,6 +1,6 @@
 // The Cast transport for Zero v2 live updates on Spacefast. The engine serves
-// this bundle at /__spacefast/zero/realtime.js with the Space's config appended,
-// and loads it on every v2 page. It registers itself in the page-wide Zero
+// this bundle at /__zero/realtime.js with the Space's config appended, and
+// loads it on every v2 page. It registers itself in the page-wide Zero
 // realtime registry, so every generated client on the page (the host copy or an
 // app's own bundle) receives change notices without any author setup.
 //

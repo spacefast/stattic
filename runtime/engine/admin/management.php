@@ -374,6 +374,20 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     if ($functionsFinalize !== null) {
         _stattic_runtime_write_functions_config_artifact($versionRoot, $functionsFinalize);
     }
+    // A control plane from before the shared credential sends it inside the
+    // Zero or Functions config instead; both name the same one credential.
+    $connectorsToken = $body['connectors_token']
+        ?? $body['zero']['connectors']['token']
+        ?? $body['functions']['connectors']['token']
+        ?? null;
+    if (is_string($connectorsToken) && $connectorsToken !== '') {
+        _stattic_runtime_write_private_string($versionRoot . '/' . STATTIC_CONNECTORS_TOKEN_PATH, $connectorsToken);
+    }
+    // Every version's no-build client has types, with or without roles.
+    $connectorsTypes = $body['connectors_types'] ?? null;
+    if (is_string($connectorsTypes) && $connectorsTypes !== '') {
+        _stattic_runtime_write_private_string($versionRoot . '/' . STATTIC_SPACE_CLIENT_TYPES_PATH, $connectorsTypes);
+    }
     _stattic_runtime_apply_zero_migrations($versionRoot);
     $finalizedEvent = [
         'event' => 'version_finalized',
@@ -1011,7 +1025,6 @@ function _stattic_runtime_functions_config_artifact(array $functions): array
         // Fail closed at the relay: a grant the control plane did not send is no
         // grant, so a malformed or truncated config must default to empty.
         'grantedCapabilities' => _stattic_runtime_functions_capabilities($functions['grantedCapabilities'] ?? null),
-        'connectors' => is_array($functions['connectors'] ?? null) ? $functions['connectors'] : null,
         'relay' => is_array($functions['relay'] ?? null) ? $functions['relay'] : null,
         // Where invocation counts go, which is the control plane and not this
         // origin. Absent means uncounted, never unserved.

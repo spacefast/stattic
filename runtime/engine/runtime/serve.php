@@ -540,10 +540,6 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             $accessPath === $requestPath ? $originalRequestPath : $accessPath
         );
     }
-    if (in_array($requestPath, [STATTIC_SPACEFAST_CLIENT_PATH, STATTIC_SPACEFAST_CLIENT_TYPES_PATH], true)) {
-        require_once __DIR__ . '/../shared/zero-v2.php';
-        _stattic_zero_v2_shared_client($versionDir, $requestPath, $requestMethod);
-    }
     if ($requestPath === STATTIC_ZERO_V2_REALTIME_PATH) {
         require_once __DIR__ . '/zero-v2-realtime.php';
         _stattic_zero_v2_realtime_script($versionDir, $requestMethod);
@@ -588,6 +584,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         require_once __DIR__ . '/storage.php';
         _stattic_uploads_serve($privateRoot, $spaceId, $originalRequestPath);
         exit;
+    }
+    // A page's connector data, after the same check its HTML passed.
+    if (_stattic_control_path_entry_handler($originalRequestPath) === 'connectors') {
+        require_once __DIR__ . '/connectors.php';
+        _stattic_connectors_serve($privateRoot, $versionDir, $serving, $requestHost, $originalRequestPath, $requestMethod);
     }
 
     // The SDK, the collaboration manifest and its theme tokens all vary by
@@ -1710,14 +1711,6 @@ function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath
 {
     $versionDir = (string) $context['version_dir'];
     $lookup = ltrim($requestPath, '/');
-    $connectorRoute = _stattic_zero_connector_route($requestPath);
-    if ($connectorRoute !== null && _stattic_v4_version_has_zero_runtime($versionDir)) {
-        require_once __DIR__ . '/zero.php';
-        _stattic_zero_send_connector_response(
-            _stattic_zero_runtime_config($versionDir), $context['serving'],
-            (string) $context['host'], $requestPath, $requestMethod, $connectorRoute
-        );
-    }
 
     // The gate is the pattern artifact, not `zero/config.json`: the latter only
     // exists when the finalize body also carried a `zero` block.
@@ -1782,9 +1775,9 @@ function _stattic_v4_render_forbidden(string $pageId, string $code, string $mess
 function _stattic_dispatch_control_path(array $serving, string $requestPath, string $requestHost, string $privateRoot): void
 {
     $handler = _stattic_control_path_entry_handler($requestPath);
-    // uploads_object dispatches further down, after the access check: its bytes
-    // are Space content.
-    if ($handler === null || $handler === 'uploads_object') {
+    // uploads_object and connectors dispatch further down, after the access
+    // check: their bytes are Space content.
+    if ($handler === null || $handler === 'uploads_object' || $handler === 'connectors') {
         return;
     }
     require_once __DIR__ . '/access-rules.php';
@@ -1794,10 +1787,14 @@ function _stattic_dispatch_control_path(array $serving, string $requestPath, str
     if ($handler === 'sell_exchange' || $handler === 'sell_client' || $handler === 'sell_status') {
         require_once __DIR__ . '/sell.php';
     }
+    if ($handler === 'space_client') {
+        require_once __DIR__ . '/connectors.php';
+    }
     match ($handler) {
         'access_callback' => _stattic_access_handle_callback($serving, $requestHost, $privateRoot),
         'access_client_script' => _stattic_access_handle_client_script(),
         'access_account_start' => _stattic_access_handle_account_start($serving, $requestHost),
+        'access_session' => _stattic_access_handle_session($serving, $requestHost),
         'access_logout' => _stattic_access_handle_logout($requestHost),
         'access_password' => _stattic_access_handle_password($serving, $requestHost, $privateRoot),
         'access_email' => _stattic_access_handle_email_verification($serving, $requestHost, $privateRoot),
@@ -1805,6 +1802,7 @@ function _stattic_dispatch_control_path(array $serving, string $requestPath, str
         'comments_exchange' => _stattic_comments_handle_exchange($privateRoot, $serving, $requestHost, $requestPath),
         'sell_exchange' => _stattic_sell_handle_exchange($privateRoot, $serving, $requestHost, $requestPath),
         'sell_client' => _stattic_sell_handle_client(),
+        'space_client' => _stattic_space_client_serve($requestPath),
         'sell_status' => _stattic_sell_handle_status($serving),
         'access_link_entry' => _stattic_access_handle_link_entry($serving, $requestPath, $requestHost),
     };

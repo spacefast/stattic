@@ -30,6 +30,9 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "build",
     "cache",
     "cleanUrls",
+    // Connector roles the Space's pages call. Validated here so a bad role
+    // blocks the publish with a diagnostic; the control plane freezes them.
+    "connectors",
     "crons",
     "fallback",
     "firewall",
@@ -359,6 +362,7 @@ fn validate_config_shape(
     validate_traffic_rules_config(object, diagnostics);
     validate_runtime_config(object, diagnostics);
     validate_sell_config(object, diagnostics);
+    validate_connectors_config(object, diagnostics);
     validate_build_config(object, diagnostics);
     validate_access_config(object, diagnostics);
     validate_placement_config(object, diagnostics);
@@ -367,6 +371,138 @@ fn validate_config_shape(
     if let Some(inject) = object.get_mut("inject").and_then(Value::as_object_mut) {
         inject
             .retain(|key, _| matches!(key.as_str(), "head" | "bodyStart" | "bodyEnd" | "noscript"));
+    }
+}
+
+pub(crate) const CONNECTOR_ROLES_MAX: usize = 32;
+const CONNECTOR_ROLE_TOOLS_MAX: usize = 200;
+
+/// Connector roles, keyed by role name. Mirrors `connectorRoleEntrySchema` in
+/// packages/common/src/contracts/connector-roles.ts. Blocking: a role that
+/// cannot be frozen would publish a page whose data calls never resolve.
+fn validate_connectors_config(
+    object: &Map<String, Value>,
+    diagnostics: &mut Vec<PrepareDiagnostic>,
+) {
+    let Some(value) = object.get("connectors") else {
+        return;
+    };
+    let Some(roles) = value.as_object() else {
+        config_invalid(diagnostics, "connectors", "an object of connector roles");
+        return;
+    };
+    if roles.len() > CONNECTOR_ROLES_MAX {
+        diagnostics.push(diagnostic(
+            DiagnosticSeverity::Error,
+            "config_invalid",
+            format!("connectors supports up to {CONNECTOR_ROLES_MAX} roles."),
+            Some("connectors".into()),
+        ));
+    }
+    static ROLE: OnceLock<Regex> = OnceLock::new();
+    static CACHE: OnceLock<Regex> = OnceLock::new();
+    let role_pattern =
+        ROLE.get_or_init(|| Regex::new("^[a-z][a-zA-Z0-9]*$").expect("role regex compiles"));
+    let cache_pattern =
+        CACHE.get_or_init(|| Regex::new("^(0|[0-9]+(s|m))$").expect("cache regex compiles"));
+    for (name, entry) in roles {
+        let path = format!("connectors.{name}");
+        if name.len() > 64 || !role_pattern.is_match(name) {
+            config_invalid(
+                diagnostics,
+                &path,
+                "a role name in camelCase that starts with a lowercase letter",
+            );
+        }
+        let Some(entry) = entry.as_object() else {
+            config_invalid(diagnostics, &path, "an object");
+            continue;
+        };
+        for key in entry.keys() {
+            if !matches!(
+                key.as_str(),
+                "connector" | "as" | "tools" | "args" | "cache"
+            ) {
+                config_invalid(
+                    diagnostics,
+                    &format!("{path}.{key}"),
+                    "one of connector, as, tools, args, cache",
+                );
+            }
+        }
+        if !entry
+            .get("connector")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| {
+                (1..=128).contains(&js_len(slug))
+                    && slug.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    && slug
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            })
+        {
+            config_invalid(
+                diagnostics,
+                &format!("{path}.connector"),
+                "a connector slug",
+            );
+        }
+        if entry
+            .get("as")
+            .is_some_and(|kind| !matches!(kind.as_str(), Some("team" | "personal" | "visitor")))
+        {
+            config_invalid(
+                diagnostics,
+                &format!("{path}.as"),
+                "\"team\", \"personal\", or \"visitor\"",
+            );
+        }
+        let tools_valid = match entry.get("tools") {
+            Some(Value::String(all)) => all == "*",
+            Some(Value::Array(tools)) => {
+                (1..=CONNECTOR_ROLE_TOOLS_MAX).contains(&tools.len())
+                    && tools.iter().all(|tool| {
+                        tool.as_str()
+                            .is_some_and(|tool| (1..=512).contains(&js_len(tool)))
+                    })
+            }
+            _ => false,
+        };
+        if !tools_valid {
+            config_invalid(
+                diagnostics,
+                &format!("{path}.tools"),
+                &format!("\"*\" or a list of 1 to {CONNECTOR_ROLE_TOOLS_MAX} tool names"),
+            );
+        }
+        if let Some(args) = entry.get("args") {
+            let valid = args.as_object().is_some_and(|tools| {
+                tools.iter().all(|(tool, pinned)| {
+                    (1..=512).contains(&js_len(tool))
+                        && pinned.as_object().is_some_and(|values| {
+                            values.keys().all(|key| (1..=256).contains(&js_len(key)))
+                        })
+                })
+            });
+            if !valid {
+                config_invalid(
+                    diagnostics,
+                    &format!("{path}.args"),
+                    "an object of tool name to pinned argument values, with names of 1 to 512 and argument names of 1 to 256 characters",
+                );
+            }
+        }
+        if entry.get("cache").is_some_and(|cache| {
+            !cache
+                .as_str()
+                .is_some_and(|cache| cache_pattern.is_match(cache))
+        }) {
+            config_invalid(
+                diagnostics,
+                &format!("{path}.cache"),
+                "a duration such as \"30s\" or \"5m\", or \"0\"",
+            );
+        }
     }
 }
 
@@ -1527,6 +1663,7 @@ mod tests {
                 "runtime": { "kind": "zero", "server": " server/index.ts " },
                 "sell": { "mode": "test", "products": "./sell/products.json" },
                 "meta": { "title": "Guestbook", "favicon": "/favicon.svg" },
+                "connectors": { "issues": { "connector": "github", "tools": ["issues.list"], "args": { "issues.list": { "repo": "a/b" } }, "cache": "5m" } },
                 "listing": true
             }"#,
             "sf.jsonc",
@@ -1545,8 +1682,36 @@ mod tests {
                     "client": "client/index.tsx"
                 },
                 "meta": { "title": "Guestbook", "favicon": "/favicon.svg" },
+                "connectors": { "issues": { "connector": "github", "tools": ["issues.list"], "args": { "issues.list": { "repo": "a/b" } }, "cache": "5m" } },
                 "listing": true
             }))
+        );
+    }
+
+    #[test]
+    fn a_connector_role_that_cannot_be_frozen_blocks_the_publish() {
+        let mut diagnostics = Vec::new();
+        let config = parse_config(
+            r#"{"connectors":{"Bad":{"connector":"github","as":"owner","tools":[],"cache":"1h"},"marker":{"connector":"(unspecified)","tools":"*"},"pinned":{"connector":"github","tools":"*","args":{"issues.list":{"":1}}}}}"#,
+            "sf.jsonc",
+            &mut diagnostics,
+        );
+        assert_eq!(config, None);
+        let paths: Vec<_> = diagnostics
+            .iter()
+            .filter(|item| item.severity == DiagnosticSeverity::Error)
+            .map(|item| item.path.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "connectors.Bad",
+                "connectors.Bad.as",
+                "connectors.Bad.tools",
+                "connectors.Bad.cache",
+                "connectors.marker.connector",
+                "connectors.pinned.args"
+            ]
         );
     }
 

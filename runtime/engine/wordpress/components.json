@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:7f4c37bb2554d1c8c07969770d5d350f3aba06fe1a68345a348053d746d6ec50",
+  "digest": "sha256:ff821e069f5acebc148f3e0c70ac3d194c65d2846b93c26c08415cca9d01c2c8",
   "components": [
     {
       "id": "spacefast-identity",
@@ -51,6 +51,7 @@
         "runtime.zero.app-contract.v2",
         "runtime.zero.pages.v1",
         "runtime.zero.crypto.v1",
+        "runtime.connectors.v1",
         "runtime.zero.connectors.v1",
         "runtime.zero.source.v1",
         "runtime.users.access-shape.v1"

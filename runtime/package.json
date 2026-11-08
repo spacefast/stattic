@@ -8,6 +8,7 @@
   },
   "devDependencies": {
     "@spacefast/common": "workspace:*",
+    "@spacefast/client": "workspace:*",
     "@spacefast/control-plane": "workspace:*",
     "@spacefast/domain-services": "workspace:*",
     "@spacefast/image": "workspace:*",

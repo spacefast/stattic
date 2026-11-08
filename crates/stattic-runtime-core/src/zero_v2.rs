@@ -184,6 +184,6 @@ fn app_summary(compiled: &Path, manifest: &Value) -> Value {
         "collections": collections,
         "tables": tables.keys().collect::<Vec<_>>(),
         "actions": actions,
-        "clientPath": "/__spacefast/client.js",
+        "clientPath": "/__zero/client.js",
     })
 }

@@ -379,23 +379,12 @@ add_action('rest_api_init', static function () {
         return pathToFileURL(file).href;
       };
       const loadGeneratedClient = async (hostname: string) => {
-        const response = await get(rt, hostname, "/__spacefast/zero/client.js");
+        const response = await get(rt, hostname, "/__zero/client.js");
         const javascript = await response.text();
         assert.equal(response.status, 200, javascript);
-        const appUrl = moduleUrl(javascript);
-        const shared = await get(rt, hostname, "/__spacefast/client.js");
-        const sharedJavascript = await shared.text();
-        assert.equal(shared.status, 200, sharedJavascript.slice(0, 1000));
-        // Resolve the served module's absolute browser import for this local module runner.
-        const module = await import(
-          moduleUrl(
-            sharedJavascript.replace('"/__spacefast/zero/client.js"', JSON.stringify(appUrl)),
-          )
-        );
-        assert.deepEqual(module.getIdentity(), { userId: null });
-        assert.equal(module.readConnectorRoleState("proof"), null);
-        assert.equal(module.canonicalPagePath("/a/../proof/"), "/proof");
-        assert.ok(Object.hasOwn(module, "createCollab"));
+        // The generated client starts the live-update transport itself.
+        assert.ok(javascript.includes('import("/__zero/realtime.js")'));
+        const module = await import(moduleUrl(javascript));
         const client = module.createClient({
           url: `http://${hostname}/wp-json/zero/v1`,
           auth: { guests: false },
@@ -416,7 +405,7 @@ add_action('rest_api_init', static function () {
         const { client, module, javascript } = await loadGeneratedClient(hostname);
         assert.equal(module.SCHEMA.collections.products !== undefined, true);
         assert.equal(await client.actions.version(), expected);
-        const types = await get(rt, hostname, "/__spacefast/zero/client.d.ts");
+        const types = await get(rt, hostname, "/__zero/client.d.ts");
         assert.equal(types.status, 200);
         const declarations = await types.text();
         // These are generated declarations, not implementation-source assertions.
@@ -489,7 +478,7 @@ add_action('rest_api_init', static function () {
         { collection: "customers", ops: ["create"], ids: [JSON.parse(writtenBody).data.id] },
       ]);
       assert.equal(JSON.stringify(posted[0].body).includes("Realtime Ada"), false, "no row values");
-      const transport = await get(rt, host, "/__spacefast/zero/realtime.js");
+      const transport = await get(rt, host, "/__zero/realtime.js");
       const transportScript = await transport.text();
       assert.equal(transport.status, 200, transportScript.slice(0, 500));
       assert.ok(transportScript.includes(`"resourceKey":"res_${space}"`));
@@ -502,7 +491,7 @@ add_action('rest_api_init', static function () {
       const sdk = await get(rt, host, "/__spacefast/sdk.js");
       const sdkBody = await sdk.text();
       assert.ok(
-        sdkBody.includes(JSON.stringify("/__spacefast/zero/realtime.js").replaceAll("/", "\\/")),
+        sdkBody.includes(JSON.stringify("/__zero/realtime.js").replaceAll("/", "\\/")),
         `v2 pages load the transport: ${sdk.status} ${sdkBody.slice(0, 600)}`,
       );
       await checkEnvironment(host, `${space}/v2`);
@@ -1162,7 +1151,7 @@ add_action('rest_api_init', static function () {
         });
         assert.equal(action.status, 200, await action.clone().text());
         assert.deepEqual(await action.json(), { data: "raw-hosted-action" });
-        const client = await get(rt, hostname, "/__spacefast/client.js");
+        const client = await get(rt, hostname, "/__zero/client.js");
         assert.equal(client.status, 200, await client.text());
       }
       // No users are copied, so a v2 Space whose accounts are still on the site
@@ -1296,11 +1285,7 @@ add_action('rest_api_init', static function () {
           production_hostnames: ["zero-raw.test"],
           config: publicAccessConfig(generation ? { zero_generation: generation } : {}),
         });
-        for (const requestPath of [
-          "/",
-          "/__spacefast/client.js",
-          "/wp-json/zero/v1/actions/ping",
-        ]) {
+        for (const requestPath of ["/", "/__zero/client.js", "/wp-json/zero/v1/actions/ping"]) {
           const headers = { accept: "application/json", "content-type": "application/json" };
           const request = requestPath.includes("/actions/")
             ? { headers, method: "POST", body: "{}" }

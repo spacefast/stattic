@@ -33,6 +33,8 @@
     "engine/init.php",
     "engine/runtime/access-rules.php",
     "engine/runtime/cli-invoke.php",
+    "engine/runtime/connectors.php",
+    "engine/runtime/space-client/client.js",
     "engine/runtime/content-page.php",
     "engine/runtime/crons.php",
     "engine/runtime/functions-artifacts.php",
@@ -129,6 +131,7 @@
     "config-data.php",
     "engine/admin/legacy-zero.php",
     "engine/legacy/zero-0.8/artifacts.php",
+    "engine/legacy/zero-0.8/connectors.php",
     "engine/legacy/zero-0.8/context.php",
     "engine/legacy/zero-0.8/database-admin.php",
     "engine/legacy/zero-0.8/generate.php",
@@ -145,8 +148,6 @@
     "engine/shared/space-users-site.php",
     "engine/shared/zero-v2.php",
     "engine/shared/zero-v2-scope.php",
-    "engine/runtime/client.js",
-    "engine/runtime/client.d.ts",
     "engine/shared/wordpress-scope.php",
     "engine/shared/zero-db-scope.php",
     "engine/entrypoints/zero-worker.php",
@@ -158,6 +159,10 @@
   ],
   "executables": ["bin/stattic-runtime"],
   "trees": [
+    {
+      "source": "engine/runtime/space-client/chunks",
+      "path": "__spacefast/chunks"
+    },
     {
       "source": "wordpress/spacefast-identity",
       "path": "wp-content/mu-plugins/spacefast-identity"

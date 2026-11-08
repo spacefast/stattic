@@ -139,6 +139,26 @@ function _stattic_service_invocation_id(mixed $raw): string
     return is_string($raw) && preg_match('/^[A-Za-z0-9_-]{1,96}$/', $raw) === 1 ? $raw : '';
 }
 
+// A version's connector credential, from the finalize request's
+// `connectors_token`. It sits beside the version, never inside its file tree, so
+// no publish can forge or read it; pages, workers and capsules all call
+// connectors with this one value.
+const STATTIC_CONNECTORS_TOKEN_PATH = 'connectors/token';
+// The declaration file for the no-build client, from finalize's
+// `connectors_types`, served at `/__spacefast/client.d.ts`.
+const STATTIC_SPACE_CLIENT_TYPES_PATH = 'space-client.d.ts';
+
+/** The one reader of a version's connectors credential; '' when it has none. */
+function _stattic_connectors_token(string $versionRoot): string
+{
+    $path = $versionRoot . '/' . STATTIC_CONNECTORS_TOKEN_PATH;
+    if (!is_file($path)) {
+        return _stattic_legacy_zero_connectors_token($versionRoot);
+    }
+    $token = file_get_contents($path);
+    return is_string($token) ? trim($token) : '';
+}
+
 /**
  * The environment the platform-service broker runs with.
  *
@@ -159,19 +179,23 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
 {
     require_once __DIR__ . '/context.php';
     require_once __DIR__ . '/native-process.php';
+    $privateRoot = _stattic_access_private_root();
+    $spaceId = (string) ($identity['spaceId'] ?? '');
     $env = [
-        'SPACEFAST_SERVICE_USAGE_ROOT' => _stattic_access_private_root(),
-        'SPACEFAST_SERVICE_SPACE_ID' => (string) ($identity['spaceId'] ?? ''),
+        'SPACEFAST_SERVICE_USAGE_ROOT' => $privateRoot,
+        'SPACEFAST_SERVICE_SPACE_ID' => $spaceId,
         'SPACEFAST_SERVICE_EMAIL_DAILY_LIMIT' => isset($config['billing']['emailRecipientsDaily']) ? (string) $config['billing']['emailRecipientsDaily'] : '',
         'SPACEFAST_SERVICE_USAGE_PHP' => _stattic_runtime_php_cli_binary(),
         'SPACEFAST_SERVICE_USAGE_SCRIPT' => dirname(__DIR__) . '/runtime/usage.php',
     ];
-    $token = $config['connectors']['token'] ?? '';
+    $versionId = (string) ($identity['versionId'] ?? '');
+    $token = $spaceId !== '' && $versionId !== '' && $privateRoot !== ''
+        ? _stattic_connectors_token(_stattic_version_root($privateRoot, $spaceId, $versionId))
+        : '';
     $apiUrl = rtrim(_stattic_config_value('SPACEFAST_API_BASE_URL'), '/');
-    if (is_string($token) && $token !== '' && $apiUrl !== '') {
+    if ($token !== '' && $apiUrl !== '') {
         $env['SPACEFAST_SERVICE_CONNECTORS_URL'] = $apiUrl . '/v1/runtime/connectors/calls';
-        $env['SPACEFAST_ZERO_CONNECTORS_TOKEN'] = $token;
-        $env['SPACEFAST_SERVICE_CONNECTORS_TOKEN'] = $env['SPACEFAST_ZERO_CONNECTORS_TOKEN'];
+        $env['SPACEFAST_SERVICE_CONNECTORS_TOKEN'] = $token;
         $env['SPACEFAST_SERVICE_CONNECTORS_VISITOR'] = json_encode($identity['visitor'] ?? null, JSON_UNESCAPED_SLASHES);
     }
     $names = ['WPCOM_API_KEY', 'SPACEFAST_SERVICE_BLOG_URL'];
@@ -199,7 +223,6 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
         $env['SPACEFAST_SERVICE_EMAIL_DOMAIN'] = $emailDomain;
         $env['SPACEFAST_SERVICE_EMAIL_PHP'] = _stattic_runtime_php_cli_binary();
         $env['SPACEFAST_SERVICE_EMAIL_SCRIPT'] = dirname(__DIR__) . '/runtime/space-mail.php';
-        $privateRoot = _stattic_access_private_root();
         if ($privateRoot !== '') {
             $env['SPACEFAST_SERVICE_EMAIL_ROOT'] = dirname($privateRoot, 2);
         }

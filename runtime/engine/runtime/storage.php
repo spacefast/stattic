@@ -4,7 +4,8 @@ declare(strict_types=1);
 // Per-space storage: a record store at spaces/<s>/uploads/objects/<id>.json,
 // bodies in the shared CAS. The record is the authority. Deleting it stops
 // access even when an edge copy names the same bytes. Public objects require
-// the runtime-wide read key (`?k=`), whose rotation revokes their shared URLs.
+// their Space's read key (`?k=`). Each Space's key is derived from one box
+// secret, so rotating that secret revokes every shared URL on the box at once.
 // Private objects require an identified session and never enter the public lane.
 require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/storage.php';
@@ -139,11 +140,16 @@ function _stattic_uploads_request_filename(): ?string
     return null;
 }
 
-// The one revocable secret behind every public object URL. Lazily minted under
-// the site write lock, and rotation takes that same lock, so a mint cannot race
-// a rotation. Rotation swaps the pointer, purges the edge, and makes every
-// previously handed-out URL answer 404.
-function _stattic_storage_read_key(string $privateRoot): string
+// The one revocable box secret behind every public object URL. Lazily minted
+// under the site write lock, and rotation takes that same lock, so a mint
+// cannot race a rotation. Rotation swaps the pointer, purges the edge, and makes
+// every previously handed-out URL answer 404.
+//
+// No visitor, page, or URL ever carries it; they carry a Space's derived key
+// below. The collaboration manifest hands that key to anonymous visitors of an
+// open Space, so a box-wide key there would open every other Space's uploads on
+// the same box.
+function _stattic_storage_box_read_secret(string $privateRoot): string
 {
     $key = _stattic_lazy_minted_secret($privateRoot, 'storage-read-key', 16);
     if ($key === null) {
@@ -152,11 +158,22 @@ function _stattic_storage_read_key(string $privateRoot): string
     return $key;
 }
 
+// The read key for one Space's public objects: 32 hex characters, the same
+// shape the box secret had, so URL and contract shapes are unchanged.
+function _stattic_storage_read_key(string $privateRoot, string $spaceId): string
+{
+    return substr(hash_hmac(
+        'sha256',
+        'storage-read-key:v1:' . _stattic_runtime_id($spaceId, 'space_id'),
+        _stattic_storage_box_read_secret($privateRoot)
+    ), 0, 32);
+}
+
 // The only spelling of an object's URL: origin + public prefix + id + read key.
-function _stattic_uploads_public_url(string $privateRoot, string $origin, string $id): string
+function _stattic_uploads_public_url(string $privateRoot, string $spaceId, string $origin, string $id): string
 {
     return $origin . STATTIC_UPLOADS_PUBLIC_URL_PREFIX . $id
-        . '?k=' . _stattic_storage_read_key($privateRoot);
+        . '?k=' . _stattic_storage_read_key($privateRoot, $spaceId);
 }
 
 function _stattic_uploads_get(string $privateRoot, string $spaceId, string $id): ?array
@@ -234,7 +251,22 @@ function _stattic_uploads_serve(string $privateRoot, string $spaceId, string $re
         exit;
     }
     $presentedKey = $_GET['k'] ?? null;
-    if (!is_string($presentedKey) || !hash_equals(_stattic_storage_read_key($privateRoot), $presentedKey)) {
+    // New URLs carry this Space's derived key. URLs issued before the derivation
+    // carry the box secret itself; a box hosts exactly one Space, so that secret
+    // reads only this Space's own objects and accepting it keeps already-shared
+    // URLs working without crossing a tenant boundary. A key rotation revokes
+    // both at once, and the manifest now hands out only the derived key, so no
+    // new URL exposes the box secret.
+    //
+    // This legacy acceptance relies on the one-Space-per-box invariant. If a box
+    // ever hosts more than one Space, rotate the box secret and drop this
+    // fallback: a shared secret in an old URL would otherwise derive a
+    // co-located Space's key.
+    $keyValid = is_string($presentedKey) && (
+        hash_equals(_stattic_storage_read_key($privateRoot, $spaceId), $presentedKey)
+        || hash_equals(_stattic_storage_box_read_secret($privateRoot), $presentedKey)
+    );
+    if (!$keyValid) {
         _stattic_render_not_found();
         exit;
     }
@@ -537,7 +569,7 @@ function _stattic_uploads_upload(
         // Composed from the current read key at response time, stable until it
         // rotates, whatever route the upload arrived on.
         'url' => $public
-            ? _stattic_uploads_public_url($privateRoot, 'https://' . $requestHost, $id)
+            ? _stattic_uploads_public_url($privateRoot, $spaceId, 'https://' . $requestHost, $id)
             : 'https://' . $requestHost . '/storage/' . $id,
     ]);
 }

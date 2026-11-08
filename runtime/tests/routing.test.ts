@@ -151,6 +151,13 @@ beforeAll(async () => {
       _HEADERS: "ordinary uppercase file\n",
       "SF.JSONC": '{ "private": true }\n',
       "SF.JSONC.gz": gzipSync(Buffer.from('{ "private": true }\n')),
+      // Config, sidecars and server/function source below the root are
+      // compile inputs too, while a folder's own pages still serve.
+      "public/sf.jsonc": '{ "private": "nested" }\n',
+      "docs/_headers": "/*\n  X-Nested: private\n",
+      "server/index.ts": "export const secret = 'server source';\n",
+      "functions/hello.ts": "export const secret = 'function source';\n",
+      "server/about.html": "<h1>server page</h1>\n",
       ".well-known/security.txt": "Contact: mailto:security@site.test\n",
       // The fixture's only redirect input: native finalize parses it and lowers
       // it into the canonical ordered `\0rules` map.
@@ -337,16 +344,25 @@ test("private source files and their companions are never served", async () => {
     "/SF.JSONC",
     "/SF.JSONC.gz",
     "/draft.md.gz",
+    "/public/sf.jsonc",
+    "/docs/_headers",
+    "/server/index.ts",
+    "/functions/hello.ts",
   ]) {
     const response = await get(rt, SITE, requestPath);
     expect(response.status, requestPath).toBe(404);
     expect(await response.text(), requestPath).toBe(ROOT_404);
   }
 
-  // An uppercase near-miss is ordinary content, not a convention file.
+  // An uppercase near-miss is ordinary content, not a convention file, and so
+  // is a page that happens to live in a source directory or beside a config.
   const uppercase = await get(rt, SITE, "/_HEADERS");
   expect(uppercase.status).toBe(200);
   expect(await uppercase.text()).toBe("ordinary uppercase file\n");
+  const serverPage = await get(rt, SITE, "/server/about");
+  expect(serverPage.status).toBe(200);
+  expect(await serverPage.text()).toBe("<h1>server page</h1>\n");
+  expect((await get(rt, SITE, "/docs/")).status).toBe(200);
 });
 
 test("dot paths are forbidden except /.well-known", async () => {
@@ -443,14 +459,10 @@ test("literal consecutive dots in a file name survive finalization", async () =>
   expect(await response.text()).toBe(contents);
 });
 
-test("php-like uploads are inert text, never executed", async () => {
+test("php-like uploads are neither executed nor served as source", async () => {
   const response = await get(rt, SITE, "/inert.php");
-  expect(response.status).toBe(200);
-  expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
-  // D135: the header that survives X-Accel-Redirect and still stops a browser
-  // treating tenant bytes as a page, since nginx drops nosniff.
-  expect(response.headers.get("content-disposition")).toBe("attachment");
-  expect(await response.text()).toBe("<?php echo 'never executed';\n");
+  expect(response.status).toBe(404);
+  expect(await response.text()).not.toContain("never executed");
 });
 
 test("large exact redirect catalogs preserve normalized ordered matching", async () => {

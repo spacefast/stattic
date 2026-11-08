@@ -236,7 +236,7 @@ function _stattic_runtime_admin_management_routes(): array
         ['HEAD', '#^/spaces/([^/]+)/storage/commerce/([a-f0-9]{32})$#', 'storage_read_commerce', ['space_id' => 1, 'storage_object_id' => 2], 'none', false, '_stattic_storage_object_read'],
         ['GET', '#^/spaces/([^/]+)/storage/([a-f0-9]{32})$#', 'storage_read', ['space_id' => 1, 'storage_object_id' => 2], 'none', false, '_stattic_storage_object_read'],
         ['DELETE', '#^/spaces/([^/]+)/storage/([a-f0-9]{32})$#', 'storage_delete', ['space_id' => 1, 'storage_object_id' => 2], 'space', false, '_stattic_storage_object_delete'],
-        ['GET', '#^/storage/read-key$#', 'storage_read_key', [], 'none', false, '_stattic_storage_read_key_get'],
+        ['GET', '#^/spaces/([^/]+)/storage/read-key$#', 'storage_read_key', ['space_id' => 1], 'none', false, '_stattic_storage_read_key_get'],
         ['POST', '#^/storage/read-key/rotate$#', 'rotate_storage_read_key', [], 'site', false, '_stattic_storage_read_key_rotate'],
         ['PUT', '#^/spaces/([^/]+)/build-sources/([^/]+)$#', 'build_source_put', ['space_id' => 1, 'build_id' => 2], 'space', true, '_stattic_build_source_put'],
         ['POST', '#^/spaces/([^/]+)/static-zip$#', 'ingest_static_zip', ['space_id' => 1], 'space', true, '_stattic_runtime_static_zip_ingest'],

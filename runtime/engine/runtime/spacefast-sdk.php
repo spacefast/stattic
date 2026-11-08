@@ -1063,7 +1063,9 @@ function _stattic_comments_local_config(string $privateRoot, array $serving, str
         'endpoints' => $endpoints,
         'uploads' => [
             'base' => $origin . STATTIC_UPLOADS_PUBLIC_URL_PREFIX,
-            'key' => _stattic_storage_read_key($privateRoot),
+            // This Space's key only: an open Space hands this manifest to
+            // anonymous visitors, and it must not open a neighbour's uploads.
+            'key' => _stattic_storage_read_key($privateRoot, $spaceId),
         ],
         'features' => ['notices' => ($features['notices'] ?? null) === true],
     ];

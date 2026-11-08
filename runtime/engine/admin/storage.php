@@ -22,7 +22,7 @@ function _stattic_storage_list(string $privateRoot, string $spaceId): void
     $limit = _stattic_uploads_owner_limit();
     $after = _stattic_uploads_owner_cursor();
     $store = _stattic_uploads_store($privateRoot, $spaceId);
-    $readKey = _stattic_storage_read_key($privateRoot);
+    $readKey = _stattic_storage_read_key($privateRoot, $spaceId);
 
     // Ids come back in ascending order, which is the cursor's ordering.
     $objects = [];
@@ -141,7 +141,7 @@ function _stattic_storage_object_create(string $privateRoot, string $spaceId, ar
     // The read key composes the URL in the response, and minting it can fail.
     // Resolve it BEFORE the commit so that failure refuses the upload instead
     // of storing an object the caller was told did not happen.
-    $readKey = _stattic_storage_read_key($privateRoot);
+    $readKey = _stattic_storage_read_key($privateRoot, $spaceId);
     // An authorized management upload can be the Space's first write: paid
     // assets arrive before its first Version. The API's per-Space write lock
     // serializes this initialization with other management mutations. Visitor
@@ -211,15 +211,16 @@ function _stattic_storage_retain_commerce(string $privateRoot, string $spaceId, 
     _stattic_json_response(200, ['id' => $objectId, 'sha256' => $record['sha256'], 'retained' => true]);
 }
 
-function _stattic_storage_read_key_get(string $privateRoot): void
+// One Space's read key, never the box secret it derives from.
+function _stattic_storage_read_key_get(string $privateRoot, string $spaceId): void
 {
-    _stattic_json_response(200, ['key' => _stattic_storage_read_key($privateRoot)]);
+    _stattic_json_response(200, ['key' => _stattic_storage_read_key($privateRoot, $spaceId)]);
 }
 
-// The emergency lever: mint a new runtime-wide read key and purge every
-// hostname on the box, so no edge copy keeps serving under an old-key URL.
-// Every URL handed out before this answers 404 afterwards; clients sync by
-// re-reading served config.
+// The emergency lever: mint a new box secret, which changes every Space's read
+// key, and purge every hostname on the box, so no edge copy keeps serving under
+// an old-key URL. Every URL handed out before this answers 404 afterwards;
+// clients sync by re-reading served config.
 function _stattic_storage_read_key_rotate(string $privateRoot): void
 {
     require_once __DIR__ . '/../shared/purge.php';

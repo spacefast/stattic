@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -42,6 +42,7 @@ import {
   signEd25519Jwt,
   spaceRoot,
   startRuntime,
+  storagePath,
   type Runtime,
   visitorIssuer,
 } from "./harness.ts";
@@ -972,7 +973,7 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
     returningAccountCookie: "spacefast_returning_dev",
     features: { picker: true, drawing: true, capture: false, attachments: true },
     // The revocable read key rides the manifest: that IS the fresh-URL
-    // mechanism, so its exact value is asserted against the box's key file.
+    // mechanism. Its exact value is asserted below.
     uploads: {
       base: "http://local-sdk.site.test/__stattic/u/",
       key: expect.stringMatching(/^[a-f0-9]{32}$/),
@@ -980,6 +981,25 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
     ui: "default",
     theme: LOCAL_COMMENTS.theme,
   });
+  // An open Space hands this manifest to anonymous visitors, so its key is
+  // this Space's own, derived from the box secret. The box secret itself, which
+  // would open every Space's uploads on the box, never appears.
+  // SAFETY: the runtime writes storage-read-key.json in this test harness with a
+  // fixed `{ key: string }` shape; we read back the value this test just caused
+  // to be written.
+  const boxSecret = (
+    JSON.parse(readFileSync(storagePath(runtime, "runtime", "storage-read-key.json"), "utf8")) as {
+      key: string;
+    }
+  ).key;
+  const manifestKey = collabManifestSchema.parse(manifest).uploads?.key;
+  expect(manifestKey).toBe(
+    createHmac("sha256", boxSecret)
+      .update("storage-read-key:v1:spc_sdk_local")
+      .digest("hex")
+      .slice(0, 32),
+  );
+  expect(manifestKey).not.toBe(boxSecret);
   // The room key is the one thing NOT here: it is per page and this document is
   // shared across every page of the Space. The client derives it.
   expect(manifest).not.toHaveProperty("room_key");

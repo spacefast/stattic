@@ -73,11 +73,10 @@ test("PHP source stays hidden while adjacent static content remains available", 
   expect(source.status).toBe(404);
   const compressedSource = await get(rt, HOST, "/functions/hello.php.gz");
   expect(compressedSource.status).toBe(404);
-  const inert = await get(rt, HOST, "/functions/%5Bid%5D.php");
-  expect(inert.status).toBe(200);
-  expect(inert.headers.get("content-type")).toBe("text/plain; charset=utf-8");
-  expect(inert.headers.get("content-disposition")).toBe("attachment");
-  expect(await inert.text()).toBe("<?php echo 'never executed';\n");
+  // A PHP file that is not a routable handler is source too: 404, no bytes.
+  const unrouted = await get(rt, HOST, "/functions/%5Bid%5D.php");
+  expect(unrouted.status).toBe(404);
+  expect(await unrouted.text()).not.toContain("never executed");
   const home = await get(rt, HOST, "/");
   expect(home.status).toBe(200);
   expect(await home.text()).toBe("<h1>static home</h1>\n");

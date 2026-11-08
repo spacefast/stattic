@@ -667,27 +667,7 @@ fn request_key(path: &str) -> String {
 /// segment (`[id]`, `[...rest]`) cannot be a table key and is NOT routed in
 /// this slice, so such a file keeps the inert-attachment entry like any other
 /// stray `.php`.
-pub(crate) fn php_function_route(path: &str) -> Option<String> {
-    let stem = path.strip_prefix("functions/")?.strip_suffix(".php")?;
-    let mut segments: Vec<&str> = stem.split('/').collect();
-    if segments.last() == Some(&"index") {
-        segments.pop();
-    }
-    if segments.iter().any(|segment| {
-        segment.is_empty()
-            || segment.contains('[')
-            || segment.contains(']')
-            || segment.starts_with(':')
-            || segment.starts_with('.')
-    }) {
-        return None;
-    }
-    Some(if segments.is_empty() {
-        "/".into()
-    } else {
-        format!("/{}", segments.join("/"))
-    })
-}
+pub(crate) use crate::serving_paths::php_function_route;
 
 fn listing_key(directory: &str) -> String {
     if directory.is_empty() {
@@ -1571,10 +1551,10 @@ mod tests {
         assert_eq!(table["/styles.css"].status, 200);
     }
 
-    /// The whole functions-route reversal of the inert-`.php` rule, at the
-    /// compile seam: a routable `functions/<name>.php` becomes a `t=php` action
-    /// at its derived key with its source hidden, while a pattern-named file
-    /// and a stray upload keep the inert attachment entry.
+    /// PHP never serves as text, at the compile seam: a routable
+    /// `functions/<name>.php` becomes a `t=php` action at its derived key with
+    /// its source hidden, and every other PHP-like file — a pattern-named
+    /// handler, a stray upload — answers 404 instead of a source download.
     #[test]
     fn functions_route_php_compiles_to_a_php_action_and_hides_its_source() {
         let handler: &[u8] = b"<?php sf_json(['ok' => true]);\n";
@@ -1617,17 +1597,14 @@ mod tests {
             json!(RESPONSE_ACTION_NOT_FOUND)
         );
 
-        // Everything that is NOT a routable handler keeps the inert attachment.
+        // Everything that is NOT a routable handler is hidden the same way.
         for key in ["/functions/[id].php", "/uploaded.php"] {
-            let inert = &table[key];
-            assert!(inert.action.is_none(), "{key} must stay inert");
+            let hidden = &table[key];
+            assert_eq!(hidden.status, 404, "{key} must not serve its source");
+            assert_eq!(hidden.blob, None, "{key} must carry no bytes");
             assert_eq!(
-                inert.headers.get("content-type").map(String::as_str),
-                Some("text/plain; charset=utf-8")
-            );
-            assert_eq!(
-                inert.headers.get("content-disposition").map(String::as_str),
-                Some("attachment")
+                hidden.action.as_ref().expect("hidden source")["t"],
+                json!(RESPONSE_ACTION_NOT_FOUND)
             );
         }
     }

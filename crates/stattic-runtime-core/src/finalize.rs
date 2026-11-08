@@ -515,17 +515,7 @@ pub(crate) fn mime_for_path(path: &str, declared: Option<&str>) -> String {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
-pub(crate) fn php_like(path: &str) -> bool {
-    matches!(
-        path.rsplit('.')
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .as_str(),
-        "php" | "phtml" | "phar" | "php3" | "php4" | "php5" | "php7" | "php8"
-    )
-}
+pub(crate) use crate::serving_paths::php_like;
 
 /// Build outputs whose URL already carries the version, so a year-long
 /// `immutable` is honest and re-publishing never has to invalidate them.

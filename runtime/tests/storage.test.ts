@@ -1,9 +1,10 @@
 // The object lane v2: one per-space record store behind two read lanes, the
-// keyed public visitor URL (`/__stattic/u/<id>?k=<runtime read key>`) and the
-// authenticated `/storage/<id>` surface. The read key is the single revocable
-// secret, so rotation invalidates every handed-out URL at once.
+// keyed public visitor URL (`/__stattic/u/<id>?k=<Space read key>`) and the
+// authenticated `/storage/<id>` surface. Each Space's read key derives from one
+// box secret, so rotating it invalidates every handed-out URL at once.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createHmac } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -172,11 +173,20 @@ async function managementUpload(
   });
 }
 
-function keyOnDisk(runtime: Runtime): string {
+function boxSecretOnDisk(runtime: Runtime): string {
   const record = JSON.parse(
     readFileSync(storagePath(runtime, "runtime", "storage-read-key.json"), "utf8"),
   ) as { key: string };
   return record.key;
+}
+
+// The Space's read key, recomputed from the box secret on disk: what every
+// keyed URL for that Space must carry.
+function keyOnDisk(runtime: Runtime, spaceId = SPACE): string {
+  return createHmac("sha256", boxSecretOnDisk(runtime))
+    .update(`storage-read-key:v1:${spaceId}`)
+    .digest("hex")
+    .slice(0, 32);
 }
 
 test("the keyed visitor URL is the only public read, and a wrong key answers exactly like a missing id", async () => {
@@ -244,15 +254,37 @@ test("without a session, a surface without Comments refuses uploads", async () =
   expect(await errorCode(refused)).toBe("storage_auth_required");
 });
 
-test("the admin surface lists keyed URLs and serves the read key", async () => {
+test("the admin surface lists keyed URLs and serves the Space's own read key", async () => {
   const object = await upload("listed bytes");
   const keyResponse = await apiJson<{ key: string }>(
     rt,
     "GET",
-    `${RUNTIME_HTTP_API_BASE}/storage/read-key`,
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/storage/read-key`,
     "storage_read_key",
+    { space_id: SPACE },
   );
   expect(keyResponse.key).toBe(keyOnDisk(rt));
+  // The key is this Space's alone. The collaboration manifest hands it to
+  // anonymous visitors of an open Space, so it must not be the box secret, and
+  // it must not open another Space's uploads on the same box.
+  expect(keyResponse.key).not.toBe(boxSecretOnDisk(rt));
+  const neighbourKey = await apiJson<{ key: string }>(
+    rt,
+    "GET",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${ANON_SPACE}/storage/read-key`,
+    "storage_read_key",
+    { space_id: ANON_SPACE },
+  );
+  expect(neighbourKey.key).not.toBe(keyResponse.key);
+  const ownUrl = `/__stattic/u/${object.id}?k=${keyResponse.key}`;
+  expect((await get(rt, HOST, ownUrl)).status).toBe(200);
+  expect((await get(rt, HOST, `/__stattic/u/${object.id}?k=${neighbourKey.key}`)).status).toBe(404);
+  // A box hosts exactly one Space, so the legacy box secret reads only this
+  // Space's own objects: URLs issued before per-Space derivation keep working,
+  // while the manifest and new URLs carry the derived key.
+  expect((await get(rt, HOST, `/__stattic/u/${object.id}?k=${boxSecretOnDisk(rt)}`)).status).toBe(
+    200,
+  );
 
   const listed = await apiJson<{ objects: Array<{ id: string; url: string; sha256: string }> }>(
     rt,
@@ -607,15 +639,17 @@ test("rotation mints a new key, kills every old URL, and answers with a purge re
   expect(Date.parse(rotated.rotatedAt)).toBeGreaterThan(0);
   // The dev harness has no provider edge, so only the purge receipt is checked.
   expect(typeof rotated.purge.status).toBe("string");
-  expect(keyOnDisk(rt)).toBe(rotated.key);
+  expect(boxSecretOnDisk(rt)).toBe(rotated.key);
 
   expect((await get(rt, HOST, `${oldUrl.pathname}${oldUrl.search}`)).status).toBe(404);
-  // The same id still serves under the new key: only the key was revoked.
-  expect((await get(rt, HOST, `${oldUrl.pathname}?k=${rotated.key}`)).status).toBe(200);
+  // The same id still serves under the Space's new key: only the key was revoked.
+  const newKey = keyOnDisk(rt);
+  expect(newKey).not.toBe(oldKey);
+  expect((await get(rt, HOST, `${oldUrl.pathname}?k=${newKey}`)).status).toBe(200);
 
   // The next upload composes against the new key.
   const next = await upload("post-rotation bytes");
-  expect(new URL(next.url).searchParams.get("k")).toBe(rotated.key);
+  expect(new URL(next.url).searchParams.get("k")).toBe(newKey);
 });
 
 const ANON_HOST = "anon-storage.site.test";
@@ -701,13 +735,8 @@ test("an anonymous commenter session is the upload grant — budgeted, and only 
     (await get(strict, ANON_HOST, `/storage/${object.id}`, { headers: { cookie } })).status,
   ).toBe(404);
   expect(
-    (
-      await get(
-        strict,
-        ANON_HOST,
-        `/__stattic/u/${object.id}?k=${(await apiJson<{ key: string }>(strict, "GET", `${RUNTIME_HTTP_API_BASE}/storage/read-key`, "storage_read_key")).key}`,
-      )
-    ).status,
+    (await get(strict, ANON_HOST, `/__stattic/u/${object.id}?k=${keyOnDisk(strict, ANON_SPACE)}`))
+      .status,
   ).toBe(404);
   const record = JSON.parse(
     readFileSync(

@@ -7,9 +7,6 @@ error_reporting(E_ALL);
 ini_set('log_errors', '1');
 ini_set('display_errors', '0');
 
-// Release together with the engine and control-plane evidence holds.
-const SPACEFAST_INSTALLER_EVIDENCE_RETENTION_HOLD = true;
-
 // CLI only, run by the SSH bootstrap and the /engine/update route. Refuse
 // providers that direct-execute arbitrary PHP files before inspecting input.
 if (PHP_SAPI !== 'cli') {
@@ -1228,6 +1225,10 @@ function trusted_release_roots(string $releasesRoot, ?string $excludeRoot = null
         return [];
     }
     $excluded = is_string($excludeRoot) ? realpath($excludeRoot) : false;
+    // A committed release is immutable and the installer lock is held for the
+    // whole run, so one proof per release per run is enough. Without this every
+    // install hashed every kept release once per ownership scan.
+    static $proven = [];
     $trusted = [];
     foreach (glob($releasesRoot . '/release-*', GLOB_ONLYDIR) ?: [] as $candidate) {
         $resolved = realpath($candidate);
@@ -1236,11 +1237,18 @@ function trusted_release_roots(string $releasesRoot, ?string $excludeRoot = null
             || !is_string($resolved)
             || $resolved === $excluded
             || !str_starts_with($resolved, $resolvedRoot . '/')
-            || !installed_release_payload_matches($resolved)
-            || !is_array(installed_engine_manifest($resolved))
-            || release_authority(dirname($releasesRoot), $resolved) === null
         ) {
             continue;
+        }
+        if (!isset($proven[$resolved])) {
+            if (
+                !installed_release_payload_matches($resolved)
+                || !is_array(installed_engine_manifest($resolved))
+                || release_authority(dirname($releasesRoot), $resolved) === null
+            ) {
+                continue;
+            }
+            $proven[$resolved] = true;
         }
         $trusted[] = $resolved;
     }
@@ -2560,6 +2568,9 @@ function publish_manifest_alias(array $prepared, string $suffix): void
 // skips fail()'s cleanup.
 function sweep_stale_install_artifacts(string $privateRoot, string $installRoot): void
 {
+    if (installer_qualification_mode()) {
+        return;
+    }
     $cutoff = time() - 3600;
     $staleDirs = array_merge(
         glob($privateRoot . '/runtime-install-*') ?: [],
@@ -2568,10 +2579,6 @@ function sweep_stale_install_artifacts(string $privateRoot, string $installRoot)
     );
     foreach ($staleDirs as $dir) {
         if (is_dir($dir) && !is_link($dir) && (filemtime($dir) ?: 0) < $cutoff) {
-            if (SPACEFAST_INSTALLER_EVIDENCE_RETENTION_HOLD) {
-                error_log('{"event":"evidence.deletion_held","owner":"installer.staging","blockedCount":1}');
-                continue;
-            }
             rrmdir($dir);
         }
     }
@@ -2581,18 +2588,25 @@ function sweep_stale_install_artifacts(string $privateRoot, string $installRoot)
     );
     foreach ($staleFiles as $file) {
         if (is_file($file) && (filemtime($file) ?: 0) < $cutoff) {
-            if (SPACEFAST_INSTALLER_EVIDENCE_RETENTION_HOLD) {
-                error_log('{"event":"evidence.deletion_held","owner":"installer.bundle","blockedCount":1}');
-                continue;
-            }
             unlink_if_present($file);
         }
     }
 }
 
+// Qualification is an engine-only install: it proves the box changed only by
+// the new release, so it leaves every other release, bundle and staging tree
+// exactly as it found them. The next ordinary install prunes them.
+function installer_qualification_mode(): bool
+{
+    return installer_config_value('SPACEFAST_RUNTIME_QUALIFICATION_CONFIG_SHA256') !== '';
+}
+
 /** @param list<string> $keep */
 function prune_old_releases(string $releasesRoot, array $keep): void
 {
+    if (installer_qualification_mode()) {
+        return;
+    }
     $installRoot = dirname($releasesRoot);
     $cutoff = time() - 3600;
     foreach (glob($releasesRoot . '/release-*', GLOB_ONLYDIR) ?: [] as $release) {
@@ -2603,10 +2617,6 @@ function prune_old_releases(string $releasesRoot, array $keep): void
             || release_authority($installRoot, $release) === null
             || (filemtime($release) ?: 0) >= $cutoff
         ) {
-            continue;
-        }
-        if (SPACEFAST_INSTALLER_EVIDENCE_RETENTION_HOLD) {
-            error_log('{"event":"evidence.deletion_held","owner":"installer.release","blockedCount":1}');
             continue;
         }
         rrmdir($release);
@@ -2767,8 +2777,8 @@ function assert_engine_publication_instance(string $publicRoot, string $expected
         && ($opcacheRestriction === '' || ($callingScript !== '' && str_starts_with($callingScript, $opcacheRestriction)))) {
         opcache_invalidate($configPath, true);
     }
-    $qualificationHash = installer_config_value('SPACEFAST_RUNTIME_QUALIFICATION_CONFIG_SHA256');
-    if ($qualificationHash !== '') {
+    if (installer_qualification_mode()) {
+        $qualificationHash = installer_config_value('SPACEFAST_RUNTIME_QUALIFICATION_CONFIG_SHA256');
         // Qualification never executes config PHP, even when its hash was reviewed.
         $bytes = is_file($configPath) ? file_get_contents($configPath) : false;
         if (!is_string($bytes) || !hash_equals($qualificationHash, hash('sha256', $bytes))) fail('qualification_config_changed');

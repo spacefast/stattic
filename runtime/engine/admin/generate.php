@@ -1281,9 +1281,8 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
     );
 
     // Content-addressed names make this a content comparison: an identical
-    // index skips the whole write. Gen stays put, previous.json keeps its
-    // true predecessor, and the unlink clock never starts for shards that
-    // never retired. (Same rule the overlay writer already follows.)
+    // index skips the whole write. Gen stays put and previous.json keeps its
+    // true predecessor. (Same rule the overlay writer already follows.)
     if (
         is_array($previous)
         && ($previous['schema'] ?? null) === STATTIC_RUNTIME_ARTIFACT_SCHEMA
@@ -1304,33 +1303,19 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
         'owners' => $ownersFile,
     ];
 
-    // The pointer this write retires. Read BEFORE previous.json is overwritten,
-    // because the shards it names, and nothing else, are the ones whose grace
-    // period starts with THIS write.
-    $retired = _stattic_runtime_read_json($routesRoot . '/previous.json');
-
     // Replays can repair a stale projection. Persist their invalidation before
     // either pointer changes; an identical index leaves warm caches alone.
     if ($beforePublish !== null) {
         $beforePublish(_stattic_runtime_index_changed_hostnames($privateRoot, $previous, $pointer));
     }
 
-    // previous.json is written BEFORE the swap, not after: it is what keeps the
-    // superseded shards alive for requests already mid-flight, and a GC racing
-    // the swap must never see a window where they are named by neither pointer.
+    // previous.json is written BEFORE the swap, not after: it names the
+    // superseded shards that requests already mid-flight are still reading.
+    // Superseded shards are never deleted.
     if (is_array($previous)) {
         _sf_json_write($routesRoot . '/previous.json', $previous);
     }
     _sf_json_write($routesRoot . '/current.json', $pointer);
-
-    // D71/D93: the unlink-candidacy stamp. A shard that just fell out of both
-    // pointers gets its mtime set here, which is when its grace period starts.
-    // The maintenance tick only deletes, it never marks.
-    _stattic_runtime_mark_unreferenced_route_shards(
-        $privateRoot,
-        [$pointer, $previous],
-        is_array($retired) ? $retired : null
-    );
 }
 
 function _stattic_runtime_write_route_shard(string $base, string $shardsRoot, array $hostnames, array $hostRoutes): string
@@ -1345,135 +1330,6 @@ function _stattic_runtime_write_route_shard(string $base, string $shardsRoot, ar
     return _sf_php_artifact_write($shardsRoot, $base, _sf_php_artifact_source($payload));
 }
 
-/**
- * @param list<?array> $pointers
- */
-function _stattic_runtime_referenced_route_shards(array $pointers): array
-{
-    $named = [];
-    foreach ($pointers as $pointer) {
-        if (!is_array($pointer)) {
-            continue;
-        }
-        foreach (is_array($pointer['shards'] ?? null) ? $pointer['shards'] : [] as $shardFile) {
-            if (is_string($shardFile)) {
-                $named[basename($shardFile)] = true;
-            }
-        }
-        foreach (['wildcards', 'owners'] as $key) {
-            if (is_string($pointer[$key] ?? null)) {
-                $named[basename($pointer[$key])] = true;
-            }
-        }
-    }
-    return $named;
-}
-
-// Marks only what THIS write retired: the shards named by the pointer that just
-// fell off the end (`$retired`) and are named by neither surviving pointer.
-//
-// The alternative, touching every unreferenced shard in the whole directory on
-// every write, restarts the grace period of shards that stopped being
-// referenced long ago, so on a busy host nothing ever ages out and the GC
-// deletes nothing. A shard that is already marked keeps the mtime it was marked
-// with; an orphan no pointer ever named keeps its write mtime, which is the
-// same clock, so it ages out too.
-function _stattic_runtime_mark_unreferenced_route_shards(string $privateRoot, array $pointers, ?array $retired = null): void
-{
-    if ($retired === null) {
-        return;
-    }
-    $named = _stattic_runtime_referenced_route_shards($pointers);
-    foreach (array_keys(_stattic_runtime_referenced_route_shards([$retired])) as $name) {
-        if (isset($named[$name])) {
-            continue;
-        }
-        $path = $privateRoot . '/routes/shards/' . $name;
-        if (is_file($path)) {
-            touch($path);
-        }
-    }
-}
-
-// Grace window for requests already mid-flight against a superseded pointer.
-const STATTIC_RUNTIME_ROUTE_SHARD_GRACE_SECONDS = 300;
-
-// D93, run by the maintenance tick. Deletes only; the writer above is what marks
-// a shard as an unlink candidate, so the grace period measures how long ago the
-// shard stopped being referenced rather than how long ago it was written.
-//
-// The referenced set must be PROVEN, never inferred from a failed read: a
-// transient failure on current.json would read as "nothing is referenced" and
-// unlink every live shard: every host answers the undeployed page until the
-// next route write. So: no valid current pointer (including never-provisioned),
-// no pass; previous.json may be genuinely absent, but not unreadable. The index lock
-// (try, skip on miss: the pass is idempotent and reruns every tick) closes
-// the stat-then-unlink race against a concurrent writer's is_file+touch reuse.
-// Null is that lock miss: no shard was examined. Reporting it as zero deletions
-// made a skipped pass indistinguishable from one that found nothing to reclaim,
-// and the maintenance pass carrying it counted the step as run either way.
-//
-// A pointer this pass could not read is the SAME answer, not a successful zero.
-// Skipping the unlink is right; calling that a completed hook is not — the
-// control plane then banks a successful housekeeping receipt for work nobody
-// did, and retrying its durable operation hands back a job that already
-// finished. Unavailable is retryable; zero is a promise the tree was examined.
-//
-// A box with no shard tree is the other thing null must NOT mean. There the lock
-// file cannot even be opened, which _stattic_lock_acquire cannot tell apart from
-// a lock held elsewhere — and a box that has never published would report this
-// step skipped on every pass, forever, so its maintenance could never complete.
-// Nothing to examine is a finished pass that reclaimed nothing.
-//
-// $budgetDeadline is the tick's, consulted between shards. A walk it cut short
-// is the third thing null covers: the tree was only partly examined, so the next
-// tick owes the rest.
-function _stattic_runtime_route_shard_gc(string $privateRoot, ?float $budgetDeadline = null): ?int
-{
-    $shards = _stattic_runtime_directory_entries($privateRoot . '/routes/shards');
-    if ($shards === null) {
-        return null;
-    }
-    if ($shards === []) {
-        return 0;
-    }
-    $deleted = _stattic_lock_with(
-        $privateRoot . '/routes/index.lock',
-        STATTIC_LOCK_TRY,
-        null,
-        static function () use ($privateRoot, $budgetDeadline): ?int {
-            $current = _stattic_runtime_read_route_pointer($privateRoot);
-            if (!is_array($current)) {
-                return null;
-            }
-            $previous = _stattic_runtime_read_json($privateRoot . '/routes/previous.json');
-            if ($previous === false) {
-                return null;
-            }
-            $named = _stattic_runtime_referenced_route_shards([
-                $current,
-                is_array($previous) ? $previous : null,
-            ]);
-            $unreferencedBefore = time() - STATTIC_RUNTIME_ROUTE_SHARD_GRACE_SECONDS;
-            $deleted = 0;
-            foreach (glob($privateRoot . '/routes/shards/*.php') ?: [] as $path) {
-                if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
-                    return null;
-                }
-                if (!is_string($path) || isset($named[basename($path)])) {
-                    continue;
-                }
-                $mtime = filemtime($path);
-                if (is_int($mtime) && $mtime < $unreferencedBefore
-                    && !_stattic_evidence_deletion_held('runtime.route_shards', 1) && unlink($path)) {
-                    $deleted += 1;
-                }
-            }
-            return $deleted;
-        },
-    );
-    return is_int($deleted) ? $deleted : null;
-}
 
 // ---------------------------------------------------------------------------
 // Space overlay (contracts §4)

@@ -254,9 +254,8 @@ function _stattic_runtime_upload_session_not_found(): never
 
 function _stattic_runtime_get_upload_session(string $privateRoot, string $spaceId, string $versionId): void
 {
-    // A lock='none' read: expired records are skipped, never released. Reclaiming
-    // a record drops its GC pin too, and that write belongs to the retention
-    // sweep, which holds the per-space lock the GC and finalize also take.
+    // A lock='none' read: expired records are skipped, never released, because
+    // releasing one is a write under the per-space lock finalize also takes.
     $found = _stattic_runtime_upload_session_for_version($privateRoot, $spaceId, $versionId);
     if ($found === null) {
         _stattic_runtime_upload_session_not_found();
@@ -1600,7 +1599,6 @@ function _stattic_runtime_put_share_images(string $privateRoot, string $spaceId,
 
 function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, array $claims): void
 {
-    _stattic_assert_evidence_deletion_allowed('runtime.space');
     require_once __DIR__ . '/storage.php';
     $retained = _stattic_storage_has_commerce_retention($privateRoot, $spaceId);
     if ($retained === null) _stattic_problem_response(503, 'storage_unavailable', 'Paid asset retention could not be checked.');
@@ -1629,36 +1627,6 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
         'space_id' => $spaceId,
         'status' => 'deleted',
         'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_deleted', $hostnames),
-    ]);
-}
-
-function _stattic_runtime_delete_version(string $privateRoot, string $spaceId, string $versionId, array $claims): void
-{
-    _stattic_assert_evidence_deletion_allowed('runtime.version');
-    $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
-    if (!is_dir($versionRoot)) {
-        _stattic_problem_response(404, 'version_not_found', 'Version not found.');
-    }
-    // The intent is purge state, so prove it before making deletion irreversible.
-    $hostnames = _stattic_runtime_affected_intent_hostnames($privateRoot, $spaceId, null, $versionId);
-    // Removing the directory IS the cache retirement: the catalog and gate
-    // sidecars live inside it, and their readers stat before including, so a
-    // link minted a moment ago stops resolving on its next request even though
-    // the bytes stay in the space's shared CAS until the collector runs.
-    _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'version_deleted');
-    _stattic_runtime_rm_recursive($versionRoot);
-    _stattic_runtime_update_route_index($privateRoot, $spaceId);
-    _stattic_runtime_record_management_event($privateRoot, $claims, [
-        'event' => 'version_deleted',
-        'space_id' => $spaceId,
-        'version_id' => $versionId,
-        'hostnames' => $hostnames,
-    ]);
-    _stattic_json_response(200, [
-        'space_id' => $spaceId,
-        'version_id' => $versionId,
-        'status' => 'deleted',
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'version_deleted', $hostnames),
     ]);
 }
 

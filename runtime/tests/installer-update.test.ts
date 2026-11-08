@@ -1311,21 +1311,34 @@ test("a killed preparation leaves only private scratch under the staging owner",
   for (const name of scratch) utimesSync(path.join(incoming, name), 0, 0);
   const retried = await runInstaller(next);
   expect(retried.exitCode, retried.stderr).toBe(0);
-  const held = retried.stderr
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(held).toContainEqual({
-    event: "evidence.deletion_held",
-    owner: "installer.staging",
-    blockedCount: 1,
-  });
-  expect(held).toContainEqual({
-    event: "evidence.deletion_held",
-    owner: "installer.bundle",
-    blockedCount: 1,
-  });
+  // Stale scratch from the killed run is build output, so the retry removes it.
+  for (const name of scratch) expect(existsSync(path.join(incoming, name))).toBe(false);
   expect(readVisitor(old.publicRoot)).toEqual({ context: next.revision, module: next.revision });
+});
+
+test("an install keeps the active and previous releases and prunes older ones", async () => {
+  const first = await startUpdateFixture({ revision: "prune-first" });
+  expect((await runInstaller(first)).exitCode).toBe(0);
+  const installNext = async (revision: string) => {
+    const fixture = await startUpdateFixture({ revision, publicRoot: first.publicRoot });
+    const result = await runInstaller(fixture);
+    expect(result.exitCode, result.stderr).toBe(0);
+    return activeReleaseRoot(first.publicRoot);
+  };
+  const oldest = activeReleaseRoot(first.publicRoot);
+  const middle = await installNext("prune-middle");
+  const previous = await installNext("prune-previous");
+  // Releases younger than an hour are kept; age the ones this test expects gone.
+  for (const release of [oldest, middle, previous]) utimesSync(release, 0, 0);
+
+  const active = await installNext("prune-active");
+
+  const installRoot = installRootOf(first.publicRoot);
+  const kept = readdirSync(path.join(installRoot, "releases")).toSorted();
+  expect(kept).toEqual([path.basename(active), path.basename(previous)].toSorted());
+  expect(readdirSync(path.join(installRoot, "release-authorities")).toSorted()).toEqual(
+    kept.map((name) => `${name}.json`),
+  );
 });
 
 test("keeps serving a committed release if cleanup is interrupted", async () => {

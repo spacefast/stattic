@@ -106,7 +106,6 @@ const STATTIC_ACCESS_SESSION_CLAIM_TTL_SECONDS = 900;
 const STATTIC_ACCESS_SESSION_TOUCH_INTERVAL_SECONDS = 21600;
 // Must match the visitor-token verifier's clock leeway.
 const STATTIC_ACCESS_SESSION_CLOCK_SKEW_SECONDS = 300;
-const STATTIC_ACCESS_SESSION_SWEEP_THROTTLE_SECONDS = 3600;
 const STATTIC_ACCESS_BROWSER_STATE_COOKIE_PREFIX = '__Host-spacefast_access_state_';
 const STATTIC_ACCESS_BROWSER_STATE_DEV_COOKIE_PREFIX = 'spacefast_access_state_dev_';
 const STATTIC_ACCESS_BROWSER_STATE_SECONDS = 600;
@@ -295,15 +294,9 @@ function _stattic_access_session_store(string $privateRoot): ?array
         return null;
     }
     $root = _stattic_access_session_dir($privateRoot);
-    return _stattic_record_store($root, [
-        // Retaining an idle record does not extend its admission lifetime.
-        'evidence_retention' => true,
-        'retention' => [
-            'mtime_seconds' => STATTIC_ACCESS_SESSION_IDLE_SECONDS,
-            'throttle_seconds' => STATTIC_ACCESS_SESSION_SWEEP_THROTTLE_SECONDS,
-            'marker' => $root . '/.last-cleanup',
-        ],
-    ]);
+    // Idle records are kept. Keeping one does not extend its admission
+    // lifetime: the idle check reads lastSeenAt, not the file.
+    return _stattic_record_store($root);
 }
 
 function _stattic_access_session_dir(string $privateRoot): string
@@ -696,9 +689,6 @@ function _stattic_access_session_record_write(string $privateRoot, string $sessi
     }
     _stattic_record_store_ensure($store);
     _stattic_record_store_put($store, $sessionId, $record);
-    _stattic_defer(static function () use ($store): void {
-        _stattic_record_store_sweep($store);
-    }, beforeTenant: true);
     return true;
 }
 

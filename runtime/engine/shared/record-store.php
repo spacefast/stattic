@@ -19,7 +19,6 @@ function _stattic_record_store(string $root, array $descriptor = []): array
     return $descriptor + [
         'root' => rtrim($root, '/'),
         'retention' => null,
-        'evidence_retention' => false,
     ];
 }
 
@@ -184,7 +183,6 @@ function _stattic_record_store_sweep(array $store, ?int $now = null, ?float $bud
         _stattic_marker_stamp($retention['marker'], $now);
     }
     $swept = 0;
-    $held = 0;
     $complete = true;
     foreach (_stattic_record_store_ids($store) as $id) {
         if ($budgetDeadline !== null && microtime(true) >= $budgetDeadline) {
@@ -193,10 +191,6 @@ function _stattic_record_store_sweep(array $store, ?int $now = null, ?float $bud
         }
         $expiresAt = _stattic_record_store_expires_at($store, $id, $retention);
         if ($expiresAt !== null && $expiresAt < $now) {
-            if ($store['evidence_retention'] && STATTIC_EVIDENCE_RETENTION_HOLD) {
-                $held++;
-                continue;
-            }
             _stattic_record_store_delete($store, $id);
             $swept += 1;
         }
@@ -204,7 +198,6 @@ function _stattic_record_store_sweep(array $store, ?int $now = null, ?float $bud
     if ($throttled && $budgetDeadline !== null && $complete) {
         _stattic_marker_stamp($retention['marker'], $now);
     }
-    _stattic_evidence_deletion_held("runtime.records", $held);
     return $swept;
 }
 

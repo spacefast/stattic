@@ -304,9 +304,8 @@ for 30 days after their last update. Immutable gap rows contain only a minimum
 at marker creation. Local storage failure cannot retain an exact count: it emits
 `security.telemetry_storage_failed` without exception text and lets serving continue.
 Security observations are excluded from the default customer activity feed;
-an explicit security event code filter retrieves them. Runtime journal
-rotation/retention can also remove undrained evidence during a
-long outage; delivery is durable within the existing journal's retention limits.
+an explicit security event code filter retrieves them. Rotated runtime journal
+generations are kept, so undrained evidence survives a long outage.
 
 Drain and acknowledgement requests must declare `security_telemetry: true`.
 An older reader receives `409 runtime_event_reader_incompatible` before events

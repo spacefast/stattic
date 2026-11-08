@@ -59,8 +59,7 @@ function _stattic_runtime_native_body_payload(array $body): array
 // retained files from the CAS only and never touches the network.
 //
 // Runs under finalize_version's space lock, which makes reading the reusable
-// version's catalog safe against a concurrent finalize or GC sweep of that
-// space.
+// version's catalog safe against a concurrent finalize of that space.
 function _stattic_runtime_prepare_retained_blobs(string $privateRoot, string $spaceId, array $session): array
 {
     $entries = is_array($session['retained_files'] ?? null) ? $session['retained_files'] : [];

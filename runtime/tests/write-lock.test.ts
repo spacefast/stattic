@@ -2,7 +2,7 @@
 // _stattic_runtime_with_space_write_lock).
 //
 // The Config-shaped routes (update_route, update_hostname_intent,
-// update_tombstones) plus finalize_version and delete_version take a per-space
+// update_tombstones) plus finalize_version take a per-space
 // lock file, so unrelated spaces do not
 // contend: their writes are space-confined (version trees, per-space blob CAS,
 // pointer flip) or independently serialized (journal append, the
@@ -397,17 +397,6 @@ function finalizeDispatch(spaceId: string, versionId: string, uploadId: string) 
   );
 }
 
-function deleteVersionDispatch(spaceId: string, versionId: string) {
-  return dispatchTimed(
-    dispatchEnvelope(
-      "POST",
-      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/versions/${versionId}/delete`,
-      "delete_version",
-      { space_id: spaceId, version_id: versionId },
-    ),
-  );
-}
-
 test("finalize_version takes the per-space lock: free of the site lock, serialized on its own space", async () => {
   // Every finalize write is version-tree/space-confined or independently
   // serialized (management.php classification comment), so a long site-locked
@@ -447,31 +436,6 @@ test("concurrent finalizes on different spaces do not serialize", async () => {
 
   expectDispatchStatus(blocked, 200);
   expectDispatchStatus(free, 200);
-});
-
-test("delete_version takes the per-space lock: free of the site lock, serialized on its own space", async () => {
-  const spaceId = "spc_lock_del_scope";
-  await deploy(rt, {
-    spaceId,
-    versionId: "ver_lock_del_site",
-    files: { "index.html": "delete under site lock" },
-  });
-  await deploy(rt, {
-    spaceId,
-    versionId: "ver_lock_del_own",
-    files: { "index.html": "delete under own lock" },
-  });
-
-  const releaseSiteLock = await holdFlockUntilReleased(siteLockPath());
-  const underSiteLock = await deleteVersionDispatch(spaceId, "ver_lock_del_site").finally(
-    releaseSiteLock,
-  );
-  expectDispatchStatus(underSiteLock, 503);
-
-  await holdFlockExternally(spaceLockPath(spaceId), HOLD_MS);
-  const underOwnSpaceLock = await deleteVersionDispatch(spaceId, "ver_lock_del_own");
-  expectDispatchStatus(underOwnSpaceLock, 503);
-  expect(underOwnSpaceLock.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
 });
 
 test("repair alone serializes on the site-wide write lock; space delete and the event drain do not", async () => {
@@ -526,13 +490,13 @@ test("repair alone serializes on the site-wide write lock; space delete and the 
   ]);
 
   expectDispatchStatus(repair, 200);
-  expectDispatchStatus(deleted, 503);
+  expectDispatchStatus(deleted, 200);
   expectDispatchStatus(drained, 200);
   expect(repair?.elapsedMs).toBeGreaterThanOrEqual(BLOCKED_FLOOR_MS);
   expect(deleted?.elapsedMs).toBeLessThan(BLOCKED_FLOOR_MS);
   expect(drained?.elapsedMs).toBeLessThan(BLOCKED_FLOOR_MS);
   expect(repair?.body).toMatchObject({ space_id: SPACE_A, status: "repaired" });
-  expect(deleted?.body).toMatchObject({ code: "evidence_retention_hold" });
+  expect(deleted?.body).toMatchObject({ space_id: deleteSpace, status: "deleted" });
   // The drain really read the journal instead of short-circuiting: it hands
   // back a page-end cursor over runtime/journal.jsonl.
   expect(drained?.body.cursor).toMatchObject({ offset: expect.any(Number) });

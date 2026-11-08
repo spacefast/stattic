@@ -25,7 +25,7 @@ require_once __DIR__ . '/../engine/runtime/access-rules.php'; // unified Rule ma
 require_once __DIR__ . '/../engine/shared/artifacts.php'; // route pattern + artifact path guards
 require_once __DIR__ . '/../engine/shared/storage.php';
 require_once __DIR__ . '/../engine/shared/purge.php';
-require_once __DIR__ . '/../engine/admin/retention.php'; // THE retention registry + the sweepers it drives
+require_once __DIR__ . '/../engine/admin/retention.php'; // the record stores the bulk tick expires
 require_once __DIR__ . '/../engine/admin/generate.php'; // hostname-intent scope derivation (pure with an injected intent)
 require_once __DIR__ . '/../engine/admin/jobs.php'; // job runner policy (§22), pure functions only here
 require_once __DIR__ . '/../engine/runtime/functions-artifacts.php'; // signed build-artifact reads
@@ -1372,176 +1372,6 @@ check(
     !_stattic_runtime_blob_has($jobsPrivateRoot, 'spc_other_space', $blobSha),
     'blob store: the CAS is per-space, so the same sha is not addressable elsewhere'
 );
-
-// GC grace (§15/§17): blob mtime is never written, so the window comes from the
-// publish timestamps in pin/publish-session records, not the file. A zero default
-// would let a mark-then-delete pass collect within its own tick.
-require_once __DIR__ . '/../engine/admin/cas.php';
-check(getenv('SPACEFAST_LOCAL_BLOB_GC_GRACE_SECONDS') === false, 'gc grace: unit env leaves the knob unset');
-check(_stattic_cas_gc_grace_seconds() >= 1, 'gc grace: default grace window is non-zero seconds');
-
-// GC at CAS scale (2026-08-15: the GC OOM'd the 512MB request limit scanning a
-// 431k-blob space): the scan streams one 2-hex prefix directory at a time and
-// never materializes a per-blob map. Per-blob stat arrays for this fixture would
-// cost tens of MB; the streamed pass stays an order of magnitude under that.
-$gcPrivateRoot = _stattic_job_runner_unit_temp_private_root();
-$gcBlobsRoot = $gcPrivateRoot . '/spaces/spc_gc_scale/blobs';
-$gcBlobCount = 0;
-for ($p = 0; $p < 64; $p++) {
-    $gcPrefix = sprintf('%02x', $p);
-    _stattic_runtime_mkdir($gcBlobsRoot . '/' . $gcPrefix);
-    for ($j = 0; $j < 190; $j++) {
-        touch($gcBlobsRoot . '/' . $gcPrefix . '/' . $gcPrefix . sprintf('%062x', $p * 1000 + $j));
-        $gcBlobCount += 1;
-    }
-}
-// Same-tick collection: no version declares these blobs and both grace floors
-// are pinned to zero.
-putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS=0');
-$gcMemBefore = memory_get_usage(false);
-memory_reset_peak_usage();
-$gcResult = _stattic_cas_space_blob_gc($gcPrivateRoot, 'spc_gc_scale', time(), 0);
-$gcPeakDelta = memory_get_peak_usage(false) - $gcMemBefore;
-putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS');
-check(
-    $gcResult === ['complete' => true, 'deleted' => 0, 'bytes' => 0],
-    "blob gc at scale: one grace-0 pass retains all {$gcBlobCount} garbage blobs"
-);
-check(
-    is_file($gcBlobsRoot . '/00/00' . sprintf('%062x', 0)),
-    'blob gc at scale: the held bytes remain on disk'
-);
-check(
-    $gcPeakDelta < 12 * 1048576,
-    'blob gc at scale: the scan streams prefix directories, so peak memory stays bounded (used ' . $gcPeakDelta . ' bytes)'
-);
-
-// A deadline still truncates the scan while the hold prevents deletion. Its
-// cursor and merged marks must survive so later sweeps can resume observations.
-putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS=0');
-$gcMarksPath = _stattic_cas_gc_marks_path($gcPrivateRoot, 'spc_gc_scale');
-$gcNow = time();
-$gcWitnessSha = '00' . sprintf('%062x', 1);
-_stattic_runtime_write_json_atomic($gcMarksPath, []);
-$gcFirstMarks = [];
-$gcMarksAfterSecond = [];
-$gcCursors = [];
-for ($gcPassNumber = 0; $gcPassNumber < 2; $gcPassNumber++) {
-    // No versions or pins precede the prefix scan in this fixture. Expire the
-    // supplied monotonic clock at its second boundary, independent of disk speed.
-    $gcClockCalls = 0;
-    $gcBudgetClock = static function () use (&$gcClockCalls): float {
-        return ++$gcClockCalls > 1 ? 1.0 : 0.0;
-    };
-    $gcPass = _stattic_cas_space_blob_gc(
-        $gcPrivateRoot, 'spc_gc_scale', $gcNow + $gcPassNumber * 2, 1, 1.0, $gcBudgetClock
-    );
-    check(
-        $gcPass === ['complete' => false, 'deleted' => 0, 'bytes' => 0],
-        'blob gc across ticks: a held budget-truncated pass never reports erased bytes'
-    );
-    $gcObservedMarks = _stattic_runtime_read_json($gcMarksPath);
-    if ($gcPassNumber === 0) {
-        $gcFirstMarks = $gcObservedMarks;
-    } else {
-        $gcMarksAfterSecond = $gcObservedMarks;
-    }
-    $gcCursors[] = _stattic_cas_read_cursor(_stattic_cas_gc_cursor_path($gcPrivateRoot, 'spc_gc_scale'));
-}
-putenv('SPACEFAST_LOCAL_BLOB_GC_UNDECLARED_MIN_GRACE_SECONDS');
-check(
-    count($gcFirstMarks) === 190 && count($gcMarksAfterSecond) === 380
-        && ($gcFirstMarks[$gcWitnessSha] ?? null) === $gcNow
-        && ($gcMarksAfterSecond[$gcWitnessSha] ?? null) === $gcNow
-        && $gcCursors === ['01', '02'],
-    'blob gc across ticks: held scans advance the cursor and preserve first-seen marks across partial passes'
-);
-
-// Exhaust the box-wide budget after the first Space persists its observations.
-// A fixed 5 ms budget let fast CI runners reach both Spaces before it expired.
-_stattic_job_runner_unit_rm_recursive($gcPrivateRoot . '/spaces/spc_gc_scale');
-foreach (['spc_gc_first', 'spc_gc_second'] as $gcSpace) {
-    $gcPrefixRoot = $gcPrivateRoot . '/spaces/' . $gcSpace . '/blobs/00';
-    _stattic_runtime_mkdir($gcPrefixRoot);
-    touch($gcPrefixRoot . '/' . str_repeat('0', 64));
-}
-$gcSpaceCursorPath = $gcPrivateRoot . '/runtime/blob-gc-cursor.json';
-$gcObservedMarksPath = _stattic_cas_gc_marks_path($gcPrivateRoot, 'spc_gc_first');
-$gcSpaceClock = static function () use (&$gcObservedMarksPath): float {
-    return is_file($gcObservedMarksPath) ? PHP_FLOAT_MAX : 0.0;
-};
-check(
-    !_stattic_cas_local_blob_gc_run($gcPrivateRoot, time(), 1, 0, null, PHP_FLOAT_MAX, $gcSpaceClock),
-    'blob gc across ticks: a budget-truncated box-wide pass reports incomplete'
-);
-check(
-    _stattic_cas_read_cursor($gcSpaceCursorPath) === 'spc_gc_second',
-    'blob gc across ticks: a truncated box-wide pass resumes at the Space it did not reach'
-);
-$gcSecondMarks = _stattic_runtime_read_json(_stattic_cas_gc_marks_path($gcPrivateRoot, 'spc_gc_second'));
-check(
-    !is_array($gcSecondMarks),
-    'blob gc across ticks: the Space the pass never reached is left entirely untouched'
-);
-$gcObservedMarksPath = _stattic_cas_gc_marks_path($gcPrivateRoot, 'spc_gc_second');
-_stattic_cas_local_blob_gc_run($gcPrivateRoot, time() + 2, 1, 0, null, PHP_FLOAT_MAX, $gcSpaceClock);
-$gcSecondMarks = _stattic_runtime_read_json(_stattic_cas_gc_marks_path($gcPrivateRoot, 'spc_gc_second'));
-check(
-    is_array($gcSecondMarks) && $gcSecondMarks !== [],
-    'blob gc across ticks: the next pass at the same budget observes that Space rather than re-walking the first'
-);
-// A later unreadable prefix must preserve the work already completed.
-$gcFaultSpace = 'spc_gc_unreadable';
-$gcFaultRoot = _stattic_cas_space_blobs_root($gcPrivateRoot, $gcFaultSpace);
-$gcEarlySha = '00' . str_repeat('a', 62);
-$gcLateSha = 'ff' . str_repeat('b', 62);
-foreach ([$gcEarlySha, $gcLateSha] as $gcFaultSha) {
-    $gcFaultPath = _stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcFaultSha);
-    _stattic_runtime_mkdir(dirname($gcFaultPath));
-    file_put_contents($gcFaultPath, 'garbage');
-}
-$gcFaultMarksPath = _stattic_cas_gc_marks_path($gcPrivateRoot, $gcFaultSpace);
-_stattic_runtime_write_json_atomic($gcFaultMarksPath, [$gcEarlySha => $gcNow - 86400, $gcLateSha => $gcNow - 86400]);
-chmod($gcFaultRoot . '/ff', 0o000);
-set_error_handler(static fn (): bool => true, E_WARNING);
-try {
-    $gcFaultPass = _stattic_cas_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
-} finally {
-    restore_error_handler();
-}
-// A null cursor is what keeps a persistent failure from stalling the Space:
-// the next pass starts at the readable prefixes again.
-check(
-    $gcFaultPass === ['complete' => false, 'deleted' => 0, 'bytes' => 0]
-        && is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcEarlySha))
-        && _stattic_runtime_read_json($gcFaultMarksPath) === [$gcEarlySha => $gcNow - 86400, $gcLateSha => $gcNow - 86400]
-        && _stattic_cas_read_cursor(_stattic_cas_gc_cursor_path($gcPrivateRoot, $gcFaultSpace)) === null,
-    'blob gc: an unreadable prefix retains held bytes and marks without pinning the cursor'
-);
-file_put_contents(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcEarlySha), 'garbage');
-_stattic_runtime_write_json_atomic($gcFaultMarksPath, [$gcEarlySha => $gcNow - 86400, $gcLateSha => $gcNow - 86400]);
-set_error_handler(static fn (): bool => true, E_WARNING);
-try {
-    $gcRepeatedPass = _stattic_cas_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
-} finally {
-    restore_error_handler();
-    chmod($gcFaultRoot . '/ff', 0o777);
-}
-check(
-    $gcRepeatedPass === ['complete' => false, 'deleted' => 0, 'bytes' => 0]
-        && is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcEarlySha))
-        && is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcLateSha))
-        && _stattic_runtime_read_json($gcFaultMarksPath) === [$gcEarlySha => $gcNow - 86400, $gcLateSha => $gcNow - 86400]
-        && _stattic_cas_read_cursor(_stattic_cas_gc_cursor_path($gcPrivateRoot, $gcFaultSpace)) === null,
-    'blob gc: a persistently unreadable prefix leaves both readable and unreadable evidence intact'
-);
-$gcRecoveredPass = _stattic_cas_space_blob_gc($gcPrivateRoot, $gcFaultSpace, $gcNow, 1);
-check(
-    $gcRecoveredPass === ['complete' => true, 'deleted' => 0, 'bytes' => 0]
-        && is_file(_stattic_runtime_blob_path($gcPrivateRoot, $gcFaultSpace, $gcLateSha)),
-    'blob gc: the recovered prefix completes its scan while retaining evidence'
-);
-_stattic_job_runner_unit_rm_recursive(dirname(dirname($gcPrivateRoot)));
 
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($jobsPrivateRoot)));
 
@@ -3639,10 +3469,11 @@ check(getenv('SPACEFAST_TEST_EXPORTED') === false, 'subprocess env scope: extras
 putenv('SPACEFAST_TEST_UNSET_ME');
 putenv('SPACEEFAST_UNRELATED');
 
-// --- Compiled content release retention (admin/retention.php) -----------------------
+// --- Maintenance retention (admin/retention.php) -------------------------------------
 //
-// Every schema.compile writes a new revision tree and repoints active-release.
-// The hold retains old revisions even beyond the normal kept window.
+// The bulk tick expires only bookkeeping that holds no customer data: security
+// gap markers and expired publish pins. Compiled content releases, scratch
+// trees and interrupted writes stay; nothing in the engine reclaims them.
 $contentRetentionRoot = realpath(sys_get_temp_dir()) . '/sf-content-retention-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
 $contentSpaceRoot = $contentRetentionRoot . '/spaces/spc_retain/content';
 mkdir($contentSpaceRoot . '/releases', 0o777, true);
@@ -3651,11 +3482,10 @@ foreach (range(0, 5) as $index) {
     $revision = str_repeat(dechex($index), 64);
     $contentRevisions[] = $revision;
     mkdir($contentSpaceRoot . '/releases/' . $revision, 0o777, true);
-    // Oldest first, all well past the retention window.
     touch($contentSpaceRoot . '/releases/' . $revision, time() - (30 * 86400) + $index);
 }
-// A crashed compile's stage root is registered too, and is not a release.
 mkdir($contentSpaceRoot . '/compile-' . str_repeat('c', 24), 0o777, true);
+touch($contentSpaceRoot . '/compile-' . str_repeat('c', 24), time() - 30 * 86400);
 check(
     _stattic_private_tree_write_pointer($contentSpaceRoot . '/active-release', $contentRevisions[5]),
     'the compiled release pointer publishes through the shared verified write'
@@ -3664,71 +3494,37 @@ check(
     _stattic_private_tree_read_pointer($contentSpaceRoot . '/active-release', 128) === $contentRevisions[5],
     'the published pointer reads back as the revision that was written'
 );
+$scratchRoot = $contentRetentionRoot . '/spaces/spc_scratch/tmp';
+mkdir($scratchRoot . '/php-fx-stale/nested', 0o777, true);
+file_put_contents($scratchRoot . '/php-fx-stale/nested/file', 'scratch');
+touch($scratchRoot . '/php-fx-stale', time() - 30 * 86400);
+$tempPath = _sf_atomic_temp_path($contentSpaceRoot . '/pointer.json');
+file_put_contents($tempPath, 'interrupted write');
+touch($tempPath, 1);
+$gapStore = _stattic_security_gap_store($contentRetentionRoot);
+_stattic_record_store_ensure($gapStore);
+_stattic_record_store_claim($gapStore, 'expired-gap', ['reported' => false], time() - 86401);
+_stattic_record_store_claim($gapStore, 'recent-gap', ['reported' => true], time());
 check(
-    _stattic_runtime_reclaim_content_releases($contentRetentionRoot) === 0,
-    'content retention holds releases past the kept window'
+    _stattic_runtime_job_housekeeping_retention($contentRetentionRoot, [], microtime(true) + 30),
+    'a retention pass inside its budget finishes'
+);
+check(
+    _stattic_record_store_read($gapStore, 'expired-gap')['state'] === 'absent'
+        && _stattic_record_store_read($gapStore, 'recent-gap')['state'] === 'present',
+    'maintenance bounds contention markers even when their journal delivery is unavailable'
 );
 $survivors = array_map('basename', glob($contentSpaceRoot . '/releases/*') ?: []);
 sort($survivors);
 $expectedSurvivors = $contentRevisions;
 sort($expectedSurvivors);
 check(
-    $survivors === $expectedSurvivors,
-    'content retention keeps every release under the hold'
+    $survivors === $expectedSurvivors
+        && is_dir($contentSpaceRoot . '/compile-' . str_repeat('c', 24))
+        && is_file($scratchRoot . '/php-fx-stale/nested/file')
+        && is_file($tempPath),
+    'retention keeps every compiled release, stale compile stage, scratch tree and interrupted write'
 );
-// An old active release is exempt even when it sorts after every predecessor.
-touch($contentSpaceRoot . '/releases/' . $contentRevisions[0], time() - (30 * 86400));
-_stattic_private_tree_write_pointer($contentSpaceRoot . '/active-release', $contentRevisions[0]);
-check(
-    _stattic_runtime_reclaim_content_releases($contentRetentionRoot) === 0
-        && is_dir($contentSpaceRoot . '/releases/' . $contentRevisions[0])
-        && is_dir($contentSpaceRoot . '/releases/' . $contentRevisions[2]),
-    'content retention preserves both an old active release and its superseded neighbors'
-);
-check(
-    in_array(
-        [$contentRetentionRoot . '/spaces/*/content/compile-*', STATTIC_RUNTIME_CONTENT_STAGE_RETENTION_SECONDS],
-        _stattic_runtime_retention_roots($contentRetentionRoot),
-        true
-    ),
-    'a crashed compile stage root is a registered retention root'
-);
-// The unrestricted retention lane handles scratch entries PHP's jail cannot
-// inspect: outside and dangling links. Their targets must never be followed.
-$gapStore = _stattic_security_gap_store($contentRetentionRoot);
-_stattic_record_store_ensure($gapStore);
-_stattic_record_store_claim($gapStore, 'expired-gap', ['reported' => false], time() - 86401);
-_stattic_record_store_claim($gapStore, 'recent-gap', ['reported' => true], time());
-foreach (_stattic_runtime_retention_stores($contentRetentionRoot) as $retainedStore) {
-    _stattic_record_store_sweep($retainedStore);
-}
-check(
-    _stattic_record_store_read($gapStore, 'expired-gap')['state'] === 'absent'
-        && _stattic_record_store_read($gapStore, 'recent-gap')['state'] === 'present',
-    'maintenance bounds contention markers even when their journal delivery is unavailable'
-);
-$scratchRoot = $contentRetentionRoot . '/spaces/spc_scratch/tmp';
-mkdir($scratchRoot . '/php-fx-stale/nested', 0o777, true);
-mkdir($scratchRoot . '/php-fx-live', 0o777, true);
-$scratchOutside = dirname($contentRetentionRoot) . '/scratch-outside';
-file_put_contents($scratchOutside, 'keep');
-file_put_contents($scratchRoot . '/php-fx-stale/.hidden', 'scratch');
-file_put_contents($scratchRoot . '/php-fx-stale/nested/file', 'scratch');
-symlink($scratchOutside, $scratchRoot . '/php-fx-stale/outside');
-symlink($scratchOutside . '-absent', $scratchRoot . '/php-fx-stale/dangling');
-touch($scratchRoot . '/php-fx-stale', time() - STATTIC_RUNTIME_STAGING_RETENTION_SECONDS - 1);
-$scratchReclaimed = 0;
-foreach (_stattic_runtime_retention_roots($contentRetentionRoot) as [$pattern, $age]) {
-    $scratchReclaimed += _stattic_reclaim_stale_paths($pattern, $age);
-}
-check(
-    $scratchReclaimed === 0
-        && is_dir($scratchRoot . '/php-fx-stale')
-        && is_dir($scratchRoot . '/php-fx-live')
-        && file_get_contents($scratchOutside) === 'keep',
-    'scratch retention holds stale trees without touching link targets or live requests'
-);
-unlink($scratchOutside);
 $blockedAtomicRoot = realpath(sys_get_temp_dir()) . '/sf-atomic-blocked-' . bin2hex(random_bytes(6)) . '/.stattic/storage';
 mkdir($blockedAtomicRoot, 0777, true);
 file_put_contents($blockedAtomicRoot . '/runtime', 'not a directory');
@@ -3765,20 +3561,6 @@ check(
     'private moves preserve the problem response and staged upload when atomic staging cannot be created'
 );
 _stattic_job_runner_unit_rm_recursive(dirname($blockedAtomicRoot, 2));
-$tempPath = _sf_atomic_temp_path($contentSpaceRoot . '/pointer.json');
-file_put_contents($tempPath, 'interrupted write');
-touch($tempPath, 1);
-$finalPath = $contentSpaceRoot . '/pointer.json';
-file_put_contents($finalPath, 'committed write');
-check(
-    _stattic_runtime_reclaim_atomic_temps($contentRetentionRoot) === 0 && is_file($tempPath),
-    'atomic temp retention ignores a live pending blob with content-derived mtime'
-);
-check(
-    _stattic_runtime_reclaim_atomic_temps($contentRetentionRoot, time() + STATTIC_RUNTIME_STAGING_RETENTION_SECONDS + 1) === 0
-        && file_exists($tempPath) && file_get_contents($finalPath) === 'committed write',
-    'atomic temp retention holds an interrupted write while preserving committed files'
-);
 // The guard the kernel gained: nothing outside private storage is removable,
 // and the private root itself is not inside itself.
 check(

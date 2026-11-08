@@ -74,7 +74,8 @@ test_args+=(--timeout 30000)
 # Start the 300-table capacity probe before WordPress fixtures contend for DDL.
 # The access-page suite imports the API test environment; its process must exit
 # before another fixture can inherit that environment's Postgres DATABASE_URL.
-long_files=(tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/access-page.test.ts)
+# The version-delete tombstone suite drives the API against PHP the same way.
+long_files=(tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/access-page.test.ts tests/version-delete-tombstones.test.ts)
 reports=()
 running=0
 status=0

@@ -21,8 +21,7 @@ const STATTIC_RUNTIME_BULK_CAS_MAX_BLOBS = 2000;
 function _stattic_runtime_publish_pins_store(string $privateRoot, string $spaceId): array
 {
     $spaceId = _stattic_runtime_id($spaceId, 'space_id');
-    // Every pin carries an `expires_at` and the GC treats an expired one as
-    // absent, so pins/ reclaims on the same clock instead of growing forever.
+    // Every pin carries an `expires_at`; the retention pass drops expired pins.
     return _stattic_record_store(
         _stattic_space_root($privateRoot, $spaceId) . '/pins',
         ['retention' => ['field' => 'expires_at']],
@@ -65,10 +64,8 @@ function _stattic_runtime_publish_session_declared_sizes(array $session): array
     return $sizes;
 }
 
-// A pin is the only thing that stops the GC collecting bytes; `expires_at`
-// bounds it. Fail-closed both ways: this writer refuses an unbounded pin, and
-// the GC (`_stattic_cas_space_pinned_shas`) treats an unparseable one as
-// expired.
+// A pin names the bytes a publish session holds, bounded by `expires_at`. This
+// writer refuses an unbounded pin.
 function _stattic_runtime_publish_session_write_pin(string $privateRoot, string $spaceId, string $uploadId, array $session): void
 {
     $expiresAt = _stattic_record_store_timestamp($session['expires_at'] ?? null);
@@ -84,8 +81,8 @@ function _stattic_runtime_publish_session_write_pin(string $privateRoot, string 
         _stattic_runtime_publish_pin_id($uploadId),
         [
             'shas' => _stattic_runtime_publish_session_shas($session),
-            // Normalized: the GC parses this, so store the form that always
-            // parses rather than whatever the session carried.
+            // Normalized, so the stored form always parses rather than
+            // whatever the session carried.
             'expires_at' => gmdate('c', $expiresAt),
         ],
     );
@@ -97,7 +94,6 @@ function _stattic_runtime_publish_session_create(string $privateRoot, string $sp
     $uploadId = _stattic_runtime_id($uploadId, 'upload_id');
     $store = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
     _stattic_record_store_ensure($store);
-    _stattic_record_store_sweep($store);
     if (!_stattic_record_store_claim($store, $uploadId, $record, (int) (strtotime((string) ($record['expires_at'] ?? '')) ?: time()))) {
         $existing = _stattic_record_store_get($store, $uploadId);
         if ($existing === null) {
@@ -125,27 +121,20 @@ function _stattic_runtime_publish_session_load(string $privateRoot, string $spac
     return $session;
 }
 
-// Releasing drops the session and its pin. An unavailable stripe lock means the
-// critical section never ran: retry once, then journal for retention to finish.
+// Releasing ends the session's upload authority and drops its pin. The session
+// record itself is kept, expired, with its accepted hashes. An unavailable stripe
+// lock means the critical section never ran: retry once, then journal it.
 function _stattic_runtime_publish_session_release(string $privateRoot, string $spaceId, string $uploadId): void
 {
     $spaceId = _stattic_runtime_id($spaceId, 'space_id');
     $uploadId = _stattic_runtime_id($uploadId, 'upload_id');
     $sessions = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
     $release = static function () use ($privateRoot, $spaceId, $uploadId, $sessions): bool {
-        return _stattic_record_store_mutate($sessions, $uploadId, static function (?array $_session) use ($privateRoot, $spaceId, $uploadId, $sessions): bool {
-            // Releasing authority still happens. Keep the terminal declaration
-            // and accepted hashes without leaving a live upload capability.
-            if ($_session !== null && _stattic_evidence_deletion_held('runtime.publish_session', 1)) {
-                $_session['expires_at'] = gmdate('c', time() - 1);
-                _stattic_record_store_put($sessions, $uploadId, $_session);
-                _stattic_record_store_delete(
-                    _stattic_runtime_publish_pins_store($privateRoot, $spaceId),
-                    _stattic_runtime_publish_pin_id($uploadId),
-                );
-                return true;
+        return _stattic_record_store_mutate($sessions, $uploadId, static function (?array $session) use ($privateRoot, $spaceId, $uploadId, $sessions): bool {
+            if ($session !== null) {
+                $session['expires_at'] = gmdate('c', time() - 1);
+                _stattic_record_store_put($sessions, $uploadId, $session);
             }
-            _stattic_record_store_delete($sessions, $uploadId);
             _stattic_record_store_delete(
                 _stattic_runtime_publish_pins_store($privateRoot, $spaceId),
                 _stattic_runtime_publish_pin_id($uploadId),

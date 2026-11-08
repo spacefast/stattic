@@ -626,7 +626,7 @@ function _stattic_storage_stage_upload(string $privateRoot): array
 }
 
 // Callers hold the space write lock. The record lands after the CAS commit, so
-// a crash can leave only an unreferenced blob (GC-safe), never a record whose
+// a crash can leave only an unreferenced blob, never a record whose
 // bytes were not installed.
 function _stattic_storage_commit_record(
     string $privateRoot,
@@ -666,8 +666,7 @@ function _stattic_uploads_delete(string $privateRoot, string $spaceId, string $i
 
 // Returns whether a record was there to delete, and hands back the hostnames
 // whose purge it prepared so the caller sends exactly those. The CAS body is
-// NOT unlinked: the blob may back another record or a version, and the GC's
-// live set, which reads these records, is what releases it.
+// NOT unlinked: the blob may back another record or a version.
 function _stattic_uploads_delete_record(
     string $privateRoot,
     string $spaceId,

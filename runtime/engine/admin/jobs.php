@@ -12,9 +12,6 @@ const STATTIC_RUNTIME_JOB_TIME_STOP_SECONDS = 8 * 3600;
 const STATTIC_RUNTIME_JOB_BACKOFF_MIN_SECONDS = 10;
 const STATTIC_RUNTIME_JOB_BACKOFF_MULTIPLIER = 1.5;
 const STATTIC_RUNTIME_JOB_BACKOFF_MAX_SECONDS = 15 * 60;
-const STATTIC_RUNTIME_JOB_DEAD_LETTER_RETENTION_SECONDS = 14 * 86400;
-// How long a finished job stays readable and holds its idempotency key.
-const STATTIC_RUNTIME_JOB_COMPLETE_RETENTION_SECONDS = 86400;
 const STATTIC_RUNTIME_JOB_DEFAULT_BUDGET_MS = 50000;
 const STATTIC_RUNTIME_JOB_MAX_BUDGET_MS = 600000;
 const STATTIC_RUNTIME_JOB_EXECUTION_TIMEOUT_MARGIN_SECONDS = 30;
@@ -79,21 +76,14 @@ function _stattic_runtime_jobs_ensure_root(string $privateRoot): void
 
 function _stattic_runtime_jobs_queue_store(string $privateRoot): array
 {
-    return _stattic_record_store(_stattic_runtime_jobs_queue_dir($privateRoot), [
-        'evidence_retention' => true,
-        'retention' => [
-            'mtime_seconds' => STATTIC_RUNTIME_JOB_COMPLETE_RETENTION_SECONDS,
-            'statuses' => ['complete'],
-        ],
-    ]);
+    // Finished jobs stay: admission and idempotency keep reading them, and
+    // nothing ages them out.
+    return _stattic_record_store(_stattic_runtime_jobs_queue_dir($privateRoot));
 }
 
 function _stattic_runtime_jobs_dead_store(string $privateRoot): array
 {
-    return _stattic_record_store(_stattic_runtime_jobs_dead_dir($privateRoot), [
-        'evidence_retention' => true,
-        'retention' => ['mtime_seconds' => STATTIC_RUNTIME_JOB_DEAD_LETTER_RETENTION_SECONDS],
-    ]);
+    return _stattic_record_store(_stattic_runtime_jobs_dead_dir($privateRoot));
 }
 
 function _stattic_runtime_job_path(string $privateRoot, string $jobId): string
@@ -295,8 +285,8 @@ function _stattic_runtime_job_transition(
         }
         $next['generation'] = (int) ($current['generation'] ?? 0) + 1;
         $next['updated_at'] = gmdate('c');
-        // Only a failure leaves the queue. `complete` stays where admission and
-        // the retention window can still read it.
+        // Only a failure leaves the queue, for the dead-letter store. `complete`
+        // stays where admission can still read it.
         if (($next['status'] ?? null) === 'failed') {
             _stattic_record_store_put(_stattic_runtime_jobs_dead_store($privateRoot), $jobId, $next);
             if (is_file(_stattic_runtime_job_path($privateRoot, $jobId))) {
@@ -775,10 +765,10 @@ function _stattic_runtime_job_run_claimed(string $privateRoot, array $job, float
 }
 
 /**
- * THE maintenance pass. The ORDER is load-bearing: reaping returns abandoned
- * runs to the queue before anything walks it, retention shrinks the set later
- * steps walk, blob GC collects bytes no remaining declaration names, and the
- * disk report runs last so it measures what the pass left.
+ * THE maintenance pass. The ORDER matters: reaping returns abandoned runs to the
+ * queue before anything walks it, and the disk report runs last so it measures
+ * what the pass left. No step deletes customer data or history; bytes leave the
+ * box only through an explicit delete the control plane asks for.
  */
 function _stattic_runtime_job_housekeeping_edge_purge(string $privateRoot, array $_claims, float $deadline): bool
 {
@@ -792,8 +782,6 @@ function _stattic_runtime_job_maintenance_steps(): array
         'job_reap' => '_stattic_runtime_job_housekeeping_reap',
         'edge_purge' => '_stattic_runtime_job_housekeeping_edge_purge',
         'retention' => '_stattic_runtime_job_housekeeping_retention',
-        'blob_gc' => '_stattic_runtime_job_housekeeping_local_blob_gc',
-        'route_shard_gc' => '_stattic_runtime_job_housekeeping_route_shard_gc',
         'disk_report' => '_stattic_runtime_job_housekeeping_disk_report',
     ];
 }
@@ -824,11 +812,10 @@ function _stattic_runtime_job_maintenance_steps(): array
  */
 function _stattic_runtime_job_maintenance_tick(string $privateRoot, array $claims, float $deadline, array $completedSteps = []): array
 {
-    // Loaded here, not at the top: retention.php requires this file back, and
-    // the cron/CLI entry into the tick does not go through management.php.
+    // Loaded here: the cron/CLI entry into the tick does not go through
+    // management.php, which loads them for the API lane.
     require_once __DIR__ . '/retention.php';
     require_once __DIR__ . '/cas.php';
-    require_once __DIR__ . '/generate.php';
 
     $ran = [];
     $skipped = [];
@@ -935,24 +922,6 @@ function _stattic_runtime_job_housekeeping_reap(string $privateRoot, array $clai
         }
     }
     return $complete;
-}
-
-function _stattic_runtime_job_housekeeping_route_shard_gc(string $privateRoot, array $claims, float $deadline): bool
-{
-    // Null is a pass that examined nothing — the index lock held elsewhere, or
-    // a reference pointer it could not read — so this is a skipped step rather
-    // than "nothing was reclaimable".
-    $deleted = _stattic_runtime_route_shard_gc($privateRoot, $deadline);
-    if ($deleted === null) {
-        return false;
-    }
-    if ($deleted > 0) {
-        _stattic_runtime_append_journal($privateRoot, [
-            'event' => 'route_shards_reclaimed',
-            'deleted' => $deleted,
-        ]);
-    }
-    return true;
 }
 
 /**

@@ -89,7 +89,6 @@ function _stattic_build_source_delete(
     array $_claims
 ): void {
     $path = _stattic_build_source_path($privateRoot, $spaceId, $buildId);
-    _stattic_assert_evidence_deletion_allowed('runtime.build_source');
     $deleted = is_file($path);
     _stattic_runtime_rm_recursive(dirname($path));
     _stattic_json_response(200, ['build_id' => $buildId, 'deleted' => $deleted]);

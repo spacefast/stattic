@@ -8,7 +8,7 @@
 //
 // A tick is a capability for ONE job: the engine takes its target from the
 // verified token, so every tick here signs the job id and the job's Space.
-// Box-wide work (reaping other lanes' abandoned runs, retention, GC) is the
+// Box-wide work (reaping other lanes' abandoned runs, retention) is the
 // maintenance job's, never a targeted tick's.
 //
 // Delivery is pull-only (D53): the journal is the only sink, so lifecycle events
@@ -23,15 +23,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { api, apiJson, journalRecords, startRuntime, storagePath, type Runtime } from "./harness";
@@ -487,7 +479,8 @@ test("a contended abandoned job costs the lane neither its budget nor the orphan
   // no-wait now, so the walk carries on to the orphans behind it in the SAME
   // pass.
   const stale = Math.floor(Date.now() / 1000) - 200; // past the 120s timeout
-  const pass = await createJob({ type: "maintenance_tick" });
+  const idempotencyKey = nextKey("reap-contended");
+  const pass = await createJob({ type: "maintenance_tick", idempotencyKey });
   // Distinct lock stripes: a holder on the pass job's own stripe would measure
   // its claim instead, and two holders on one stripe file would serialize.
   const stripes = new Set([jobLockPath(pass.id)]);
@@ -522,7 +515,20 @@ test("a contended abandoned job costs the lane neither its budget nor the orphan
   expect(contended.tick_status).toBe("yielded");
   expect(contended.job?.status).toBe("pending");
   // SAFETY: the maintenance stepper persists its pass report on every step.
-  expect((contended.job?.result as { complete: boolean }).complete).toBe(false);
+  const report = contended.job?.result as {
+    steps: string[];
+    skipped: Array<{ step: string; reason: string }>;
+    complete: boolean;
+  };
+  expect(report.complete).toBe(false);
+  expect(report.steps).not.toContain("job_reap");
+  expect(report.skipped.map((entry) => entry.step)).toContain("job_reap");
+  // The control plane retries under the same operation-derived idempotency key.
+  // It has to get a job it can still drive: a completed one whose reap never
+  // finished is handed back forever, so the retry could never succeed.
+  const readmitted = await createJob({ type: "maintenance_tick", idempotencyKey });
+  expect(readmitted.id).toBe(pass.id);
+  expect(readmitted.status).toBe("pending");
   // The orphan behind it is unlocked and just as abandoned: waiting on somebody
   // else's lock is what used to deny it any recovery at all.
   expect(readJob(behind.id).status).toBe("pending");
@@ -773,15 +779,17 @@ test("the jobs surface rejects an unknown type and an unknown lane as 422 proble
   expect(((await badLane.json()) as { code?: string }).code).toBe("invalid_lane");
 });
 
-test("maintenance recovers abandoned work while retaining completed and dead job evidence", async () => {
-  // Dead letters keep a two-week window; a finished queue record keeps a day.
-  // Without that, queue/ is append-only and every claim and idempotency lookup
-  // re-reads every job the site has ever run. Unfinished work is never aged
-  // out, however long it has waited for its backoff.
+test("maintenance recovers abandoned work and deletes nothing, however old", async () => {
+  // Nothing the engine writes ages out: job records, dead letters, staging and
+  // finalizer trees all stay until an operator removes them. Unfinished work is
+  // recovered, never dropped.
+  //
+  // This is also the first pass after an upgrade from an engine that ran
+  // behind the evidence hold: everything the hold parked is on disk, months
+  // old, and the pass must leave every byte where it is.
+  const day = 24 * 60 * 60;
   const staleDead = await seedJob({ type: "maintenance_tick", terminal: true });
-  const freshDead = await seedJob({ type: "maintenance_tick", terminal: true });
   const staleComplete = await seedJob({ type: "maintenance_tick", state: { status: "complete" } });
-  const freshComplete = await seedJob({ type: "maintenance_tick", state: { status: "complete" } });
   const waitingPending = await seedJob({
     type: "maintenance_tick",
     state: { not_before: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
@@ -791,15 +799,43 @@ test("maintenance recovers abandoned work while retaining completed and dead job
     type: "maintenance_tick",
     state: { status: "running", heartbeat: Math.floor(Date.now() / 1000) - 200 },
   });
+  backdate(deadPath(staleDead.id), 60 * day);
+  backdate(jobPath(staleComplete.id), 60 * day);
+  backdate(jobPath(waitingPending.id), 60 * day);
+
+  const stage = (relative: string): string => {
+    const target = storagePath(rt, relative);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, "staged");
+    backdate(target, 60 * day);
+    return target;
+  };
+  const kept = [
+    stage("runtime/blob-staging/blob-abandoned.tmp"),
+    stage("runtime/finalizer-inputs/abandoned.json"),
+    stage("runtime/journal-20260101T000000Z-abcd1234.jsonl"),
+    stage("spaces/spc_gc/tmp/php-fx-abandoned/scratch"),
+    stage("spaces/spc_gc/versions/.ver_gc.rust-failed-ab12/marker"),
+    stage("spaces/spc_gc/versions/.ver_gc.rust-finalizing/files/index.html"),
+    stage("spaces/spc_gc/content/compile-abandoned/schema.json"),
+    // Held by the old engine: a CAS blob no version names (blob GC), a route
+    // shard no pointer names (route-shard GC), an atomic-write temp, a
+    // compiled content release behind the active one, an expired publish
+    // session (publish-session expiry) and an idle visitor session.
+    stage(`spaces/spc_gc/blobs/ab/ab${"0".repeat(62)}`),
+    stage(`routes/shards/${"c".repeat(64)}.php`),
+    stage("runtime/atomic-staging/.tmp-0123456789ab"),
+    stage("spaces/spc_gc/content/releases/rev-old-1/schema.json"),
+    stage("spaces/spc_gc/publish-sessions/upl_expired.json"),
+    stage(`spaces/spc_gc/sessions/${"d".repeat(64)}.json`),
+  ];
+  writeFileSync(
+    storagePath(rt, "spaces/spc_gc/publish-sessions/upl_expired.json"),
+    JSON.stringify({ expires_at: new Date(Date.now() - 90 * day * 1000).toISOString() }),
+  );
+  backdate(storagePath(rt, "spaces/spc_gc/publish-sessions/upl_expired.json"), 90 * day);
+
   const pass = await createJob({ type: "maintenance_tick" });
-
-  const day = 24 * 60 * 60;
-  backdate(deadPath(staleDead.id), 15 * day);
-  backdate(deadPath(freshDead.id), 60);
-  backdate(jobPath(staleComplete.id), 25 * 60 * 60);
-  backdate(jobPath(freshComplete.id), 60 * 60);
-  backdate(jobPath(waitingPending.id), 25 * 60 * 60);
-
   const result = await tick(pass, 5000);
   expect(result.tick_status).toBe("complete");
   // SAFETY: the tick above completed, so the record carries the pass result.
@@ -809,97 +845,22 @@ test("maintenance recovers abandoned work while retaining completed and dead job
   expect(recovered.status).toBe("pending");
   expect(recovered.error?.code).toBe("heartbeat_timeout");
 
-  expect(existsSync(deadPath(staleDead.id))).toBe(true);
-  expect(existsSync(deadPath(freshDead.id))).toBe(true);
-  expect(existsSync(jobPath(staleComplete.id))).toBe(true);
-  expect(existsSync(jobPath(freshComplete.id))).toBe(true);
-  expect(existsSync(jobPath(waitingPending.id))).toBe(true);
+  for (const file of [
+    deadPath(staleDead.id),
+    jobPath(staleComplete.id),
+    jobPath(waitingPending.id),
+    ...kept,
+  ]) {
+    expect(existsSync(file)).toBe(true);
+  }
 });
 
-/**
- * Seeds a reclaimable staging backlog in one PHP process: 20k entries through
- * bun's fs would cost more wall clock than the tick under test.
- */
-function stageBacklog(relativeRoot: string, count: number, ageSeconds: number): void {
-  const root = storagePath(rt, relativeRoot);
-  const script = `
-$root = $argv[1];
-$at = time() - (int) $argv[3];
-@mkdir($root, 0775, true);
-for ($i = 0; $i < (int) $argv[2]; $i++) {
-    $path = $root . '/backlog-' . $i . '.tmp';
-    file_put_contents($path, 'x');
-    touch($path, $at);
-}
-`;
-  const seeded = spawnSync("php", ["-r", script, root, String(count), String(ageSeconds)], {
-    encoding: "utf8",
-  });
-  if (seeded.status !== 0) {
-    throw new Error(`stageBacklog failed: ${seeded.stdout}${seeded.stderr}`);
-  }
-}
-
-function stagedCount(relativeRoot: string): number {
-  const root = storagePath(rt, relativeRoot);
-  return existsSync(root) ? readdirSync(root).length : 0;
-}
-
-test("a maintenance hook that could not finish leaves the pass incomplete and the job resumable", async () => {
-  const idempotencyKey = nextKey("gc-skipped");
-  const pass = await createJob({ type: "maintenance_tick", idempotencyKey });
-  // The blob GC takes a try-lock of its own and does nothing when another
-  // process holds it. Counting that as a completed step is what let the control
-  // plane record a successful sweep — and impose its cooldown — for a pass that
-  // collected nothing.
-  const release = await holdLock(storagePath(rt, "runtime", "blob-gc.lock"), 1500);
-
-  const skipped = await tick(pass, 2500);
-  expect(skipped.tick_status).toBe("yielded");
-  expect(skipped.job?.status).toBe("pending");
-  // SAFETY: the maintenance stepper persists its pass report on every step.
-  const report = skipped.job?.result as {
-    steps: string[];
-    skipped: Array<{ step: string; reason: string }>;
-    failed: unknown[];
-    complete: boolean;
-  };
-  expect(report.complete).toBe(false);
-  expect(report.steps).not.toContain("blob_gc");
-  expect(report.steps).toContain("retention");
-  expect(report.skipped.map((entry) => entry.step)).toContain("blob_gc");
-
-  // The control plane retries under the same operation-derived idempotency key.
-  // It has to get a job it can still drive: a completed one whose GC never ran
-  // is handed back forever, so the retry can never succeed.
-  const readmitted = await createJob({ type: "maintenance_tick", idempotencyKey });
-  expect(readmitted.id).toBe(pass.id);
-  expect(readmitted.status).toBe("pending");
-
-  await release();
-
-  // A resumed pass must not spend its budget repeating completed hooks.
-  // Newly due retention work belongs to the next pass.
-  const laterBacklog = "runtime/blob-staging/completed-hook";
-  stageBacklog(laterBacklog, 1, 2 * 24 * 60 * 60);
-  rmSync(storagePath(rt, "runtime", "reclaim.marker"), { force: true });
-
-  const clean = await tick(pass, 2500);
-  expect(clean.tick_status).toBe("complete");
-  // SAFETY: the maintenance stepper persists its pass report on every step.
-  expect((clean.job?.result as { complete: boolean }).complete).toBe(true);
-  expect(stagedCount(laterBacklog)).toBe(1);
-  rmSync(storagePath(rt, laterBacklog), { recursive: true, force: true });
-
-  // An exhausted deadline must leave the cadence marker due. Exercise the
-  // retention owner directly so this proof does not depend on machine speed.
-  const backlogRoot = "runtime/blob-staging";
-  stageBacklog(backlogRoot, 1, 2 * 24 * 60 * 60);
-  const marker = storagePath(rt, "runtime", "reclaim.marker");
-  rmSync(marker, { force: true });
-  const probe = Bun.spawn(
+test("a maintenance hook past its deadline reports itself unfinished", () => {
+  // Exercise the retention owner directly so this proof does not depend on
+  // machine speed: a hook the budget stopped must not read as a clean sweep.
+  const probe = spawnSync(
+    "php",
     [
-      "php",
       "-r",
       `
     require $argv[1] . '/admin/retention.php';
@@ -908,20 +869,10 @@ test("a maintenance hook that could not finish leaves the pass incomplete and th
       rt.engineRoot,
       rt.storageRoot,
     ],
-    { stdout: "pipe", stderr: "pipe" },
+    { encoding: "utf8" },
   );
-  expect(await new Response(probe.stdout).text()).toBe("pending");
-  expect(await probe.exited).toBe(0);
-  expect(existsSync(marker)).toBe(false);
-  expect(stagedCount(backlogRoot)).toBe(1);
-
-  const resumed = await createJob({
-    type: "maintenance_tick",
-    idempotencyKey: nextKey("gc-budget"),
-  });
-  expect((await tick(resumed, 5000)).tick_status).toBe("complete");
-  expect(stagedCount(backlogRoot)).toBe(1);
-  rmSync(storagePath(rt, backlogRoot), { recursive: true, force: true });
+  expect(probe.status, probe.stderr).toBe(0);
+  expect(probe.stdout).toBe("pending");
 });
 
 test("a maintenance hook that throws keeps its job resumable, never complete", async () => {
@@ -956,59 +907,4 @@ test("a maintenance hook that throws keeps its job resumable, never complete", a
   expect(recovered.tick_status).toBe("complete");
   // SAFETY: the maintenance stepper persists its pass report on every step.
   expect((recovered.job?.result as { complete: boolean }).complete).toBe(true);
-});
-
-// The other half of the same registry (engine/admin/retention.php). Staging
-// roots are trees, not records, so their window lives in the table rather than
-// in a store descriptor.
-test("housekeeping retains abandoned staging and failed-finalizer evidence", async () => {
-  const stage = (relative: string, ageSeconds: number): string => {
-    const target = storagePath(rt, relative);
-    mkdirSync(path.dirname(target), { recursive: true });
-    writeFileSync(target, "staged");
-    backdate(target, ageSeconds);
-    return target;
-  };
-  const day = 24 * 60 * 60;
-
-  // Staging debris is no recovery source, so its window is only a margin
-  // against a worker slower than the sweep.
-  const abandonedBlob = stage("runtime/blob-staging/blob-abandoned.tmp", 2 * day);
-  const liveBlob = stage("runtime/blob-staging/blob-live.tmp", 60);
-
-  // .rust-failed-* is the sole surviving artifact of a failed native finalize,
-  // so it gets the long abandonment window. Its sibling .rust-previous is what
-  // an interrupted finalize is restored FROM and is not registered at all.
-  const quarantine = storagePath(rt, "spaces/spc_gc/versions/.ver_gc.rust-failed-ab12");
-  stage("spaces/spc_gc/versions/.ver_gc.rust-failed-ab12/marker", 20 * day);
-  backdate(quarantine, 20 * day);
-  const previous = storagePath(rt, "spaces/spc_gc/versions/.ver_gc.rust-previous");
-  stage("spaces/spc_gc/versions/.ver_gc.rust-previous/marker", 20 * day);
-  backdate(previous, 20 * day);
-
-  // .rust-finalizing is the mirror case: Rust deletes it on every path it
-  // survives, so a surviving stage is a killed process's debris and takes the
-  // short staging window. A stage from a finalize still in flight stays.
-  const abandonedStage = storagePath(rt, "spaces/spc_stage/versions/.ver_stage.rust-finalizing");
-  stage("spaces/spc_stage/versions/.ver_stage.rust-finalizing/files/index.html", 2 * day);
-  backdate(abandonedStage, 2 * day);
-  const liveStage = storagePath(rt, "spaces/spc_stage/versions/.ver_live.rust-finalizing");
-  stage("spaces/spc_stage/versions/.ver_live.rust-finalizing/files/index.html", 60);
-  backdate(liveStage, 60);
-
-  // The glob pass runs on its own hourly cadence; drop the marker to force it.
-  rmSync(storagePath(rt, "runtime", "reclaim.marker"), { force: true });
-  const pass = await createJob({ type: "maintenance_tick" });
-  await tick(pass, 5000);
-
-  expect(existsSync(abandonedBlob)).toBe(true);
-  expect(existsSync(liveBlob)).toBe(true);
-  expect(existsSync(quarantine)).toBe(true);
-  expect(existsSync(previous)).toBe(true);
-  expect(existsSync(abandonedStage)).toBe(true);
-  expect(existsSync(liveStage)).toBe(true);
-
-  expect(journalRecords(rt).filter((entry) => entry.event === "runtime_staging_reclaimed")).toEqual(
-    [],
-  );
 });

@@ -481,7 +481,7 @@ test("cross-space hostname collisions stay correct through incremental pointer s
         "delete_space",
         { space_id: "spc_idx_t" },
       );
-      expect(failedDelete.status).toBe(503);
+      expect(failedDelete.status).toBe(500);
       expect(existsSync(storagePath(rt, "spaces", "spc_idx_t"))).toBe(true);
       expect((await get(rt, sharedHost, "/")).status).toBe(404);
     } finally {
@@ -987,16 +987,11 @@ test("an invalid fresh shard leaves the active route pointer and served version 
 const GC_HOST_1 = "shard-gc.test";
 const SHARD_GC = shardFor(GC_HOST_1);
 // All three in ONE shard, so every hostname change rewrites the same shard and
-// leaves its predecessor behind as a GC candidate.
+// leaves its predecessor superseded.
 const GC_HOST_2 = hostInShard("shard-gc-b", SHARD_GC);
 const GC_HOST_3 = hostInShard("shard-gc-c", SHARD_GC);
 
-async function maintenanceTick(
-  rt: Runtime,
-  spaceId: string,
-  run = "1",
-  expected = "complete",
-): Promise<void> {
+async function maintenanceTick(rt: Runtime, spaceId: string): Promise<void> {
   const created = await apiJson<{ job: { id: string } }>(
     rt,
     "POST",
@@ -1007,7 +1002,7 @@ async function maintenanceTick(
       operation_id: "op_shard_gc",
       job_scope: {
         type: "maintenance_tick",
-        idempotency_key: `idem-shard-gc-${run}`,
+        idempotency_key: "idem-shard-gc-1",
         payload: "{}",
       },
     },
@@ -1024,12 +1019,10 @@ async function maintenanceTick(
     { job_id: created.job.id, space_id: spaceId, operation_id: "op_shard_gc" },
     {},
   );
-  // `complete` is a finished pass; `pending` is one that yielded because a hook
-  // could not finish, which leaves the same job claimable under the same key.
-  expect(ran.job?.status).toBe(expected);
+  expect(ran.job?.status).toBe("complete");
 }
 
-test("the maintenance tick retains aged route shards during the hold", async () => {
+test("the maintenance tick keeps superseded route shards however old they are", async () => {
   const rt = await startRuntime();
   const spaceId = "spc_idx_gc";
   try {
@@ -1041,8 +1034,7 @@ test("the maintenance tick retains aged route shards during the hold", async () 
     });
     const first = readPointer(rt);
     // Two more hostname changes: after the second, `first`'s artifacts are named
-    // by neither current.json nor previous.json, which is when the writer stamps
-    // them as unlink candidates (D71/D93; the tick deletes, it never marks).
+    // by neither current.json nor previous.json.
     await putRoute(
       rt,
       spaceId,
@@ -1060,64 +1052,23 @@ test("the maintenance tick retains aged route shards during the hold", async () 
       ...pointerFiles(readPointer(rt)),
       ...pointerFiles(readPreviousPointer(rt)),
     ]);
-    // The retired host shard and owners map: enough to hold one inside the
-    // grace window while the other ages out.
-    const [withinGrace, ...aged] = pointerFiles(first).filter((name) => !referenced.has(name));
-    expect(withinGrace).toBeDefined();
-    expect(aged.length).toBeGreaterThanOrEqual(1);
+    const superseded = pointerFiles(first).filter((name) => !referenced.has(name));
+    expect(superseded.length).toBeGreaterThanOrEqual(1);
 
-    const staleAt = new Date(Date.now() - 900_000);
-    for (const name of aged) {
+    const staleAt = new Date(Date.now() - 30 * 86_400_000);
+    for (const name of superseded) {
       utimesSync(storagePath(rt, "routes", name), staleAt, staleAt);
     }
 
     await maintenanceTick(rt, spaceId);
 
-    for (const name of aged) {
+    for (const name of [...superseded, ...referenced]) {
       expect(existsSync(storagePath(rt, "routes", name))).toBe(true);
     }
-    // Unreferenced but freshly marked: still inside the 300 s grace, so a
-    // request mid-flight over the swap can still include it.
-    expect(existsSync(storagePath(rt, "routes", String(withinGrace)))).toBe(true);
-    for (const name of referenced) {
-      expect(existsSync(storagePath(rt, "routes", name))).toBe(true);
-    }
-
     for (const host of [GC_HOST_1, GC_HOST_2, GC_HOST_3]) {
       const served = await get(rt, host, "/");
       expect(served.status).toBe(200);
       expect(await served.text()).toBe("gc");
-    }
-
-    // The referenced set must be PROVEN. With current.json unreadable the GC
-    // treats the live set as unknown and deletes nothing; reading the failed
-    // read as "nothing is referenced" would unlink every live shard and 503 the
-    // site until the next route write.
-    //
-    // Skipping the unlink is only half of it. An examination the pass could not
-    // make is UNAVAILABLE, not a completed zero-work pass: reporting it complete
-    // hands the control plane a successful housekeeping receipt for work nobody
-    // did, and its retry then gets a finished job that can never perform the
-    // omitted sweep.
-    chmodSync(storagePath(rt, "routes", "current.json"), 0o000);
-    try {
-      utimesSync(storagePath(rt, "routes", String(withinGrace)), staleAt, staleAt);
-      await maintenanceTick(rt, spaceId, "unreadable-pointer", "pending");
-      expect(existsSync(storagePath(rt, "routes", String(withinGrace)))).toBe(true);
-      for (const name of referenced) {
-        expect(existsSync(storagePath(rt, "routes", name))).toBe(true);
-      }
-    } finally {
-      chmodSync(storagePath(rt, "routes", "current.json"), 0o644);
-    }
-
-    // The SAME job, resumed under the same idempotency key once the pointer
-    // reads again: the retry is what performs the examination the incomplete
-    // pass skipped. The hold still retains the unreferenced shard.
-    await maintenanceTick(rt, spaceId, "unreadable-pointer");
-    expect(existsSync(storagePath(rt, "routes", String(withinGrace)))).toBe(true);
-    for (const name of referenced) {
-      expect(existsSync(storagePath(rt, "routes", name))).toBe(true);
     }
   } finally {
     rt.stop();

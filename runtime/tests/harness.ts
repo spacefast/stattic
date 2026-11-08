@@ -429,6 +429,8 @@ export type Runtime = {
 };
 
 export type RuntimeOptions = {
+  /** An unpacked published engine, including its own native binary and loaders. */
+  releaseDirectory?: string;
   env?: Record<string, string>;
   atomicData?: Record<string, string>;
   /** Native visitor scheme supplied by the fixture's provider prepend, over loopback HTTP. */
@@ -540,18 +542,20 @@ function engineReleaseIdentity(releaseRoot: string): string {
   return digest.digest("hex");
 }
 
-function installEngine(root: string): void {
+function installEngine(root: string, sourceRoot = RUNTIME_DIR): void {
   // SAFETY: runtime/installer.php validates this file's shape at install time; the harness reads the same fields.
   const manifest = JSON.parse(
-    readFileSync(path.join(RUNTIME_DIR, "engine-manifest.json"), "utf8"),
+    readFileSync(path.join(sourceRoot, "engine-manifest.json"), "utf8"),
   ) as {
     files: string[];
     aliases: Array<{ source: string; path: string }>;
     trees: Array<{ source: string; path: string }>;
     executables: string[];
   };
-  ensureZeroDashboardPlugin();
-  ensureIdentityPlugin();
+  if (sourceRoot === RUNTIME_DIR) {
+    ensureZeroDashboardPlugin();
+    ensureIdentityPlugin();
+  }
   // The manifest is the single authority for what ships, and it is edited by
   // the orchestrator at commit time rather than by the streams that add or
   // delete engine files. A drifted manifest therefore fails here first — report
@@ -560,7 +564,7 @@ function installEngine(root: string): void {
     (file) =>
       !["bin/stattic-runtime", "bin/zero", "bin/zero.SOURCE.json", "bin/zero.LICENSES"].includes(
         file,
-      ) && !existsSync(path.join(RUNTIME_DIR, file)),
+      ) && !existsSync(path.join(sourceRoot, file)),
   );
   if (missing.length > 0) {
     throw new Error(
@@ -573,24 +577,26 @@ function installEngine(root: string): void {
   for (const file of manifest.files) {
     // Generic runtime cases need no compiler. The source-hosting proof supplies
     // the real compiler explicitly, and release builds require verified assets.
-    if (file.startsWith("bin/zero") && !existsSync(path.join(RUNTIME_DIR, file))) continue;
+    if (file.startsWith("bin/zero") && !existsSync(path.join(sourceRoot, file))) continue;
     const target = path.join(releaseRoot, file);
     mkdirSync(path.dirname(target), { recursive: true });
     const source =
-      file === "bin/stattic-runtime" ? runtimeBinaryPath() : path.join(RUNTIME_DIR, file);
+      file === "bin/stattic-runtime" && sourceRoot === RUNTIME_DIR
+        ? runtimeBinaryPath()
+        : path.join(sourceRoot, file);
     cpSync(source, target);
     chmodSync(target, manifest.executables.includes(file) ? 0o755 : 0o644);
   }
   // Install the same built plugin trees that the release installer ships.
   for (const tree of manifest.trees ?? []) {
-    const source = path.join(RUNTIME_DIR, tree.source);
+    const source = path.join(sourceRoot, tree.source);
     if (!existsSync(source)) continue;
     const releaseTree = path.join(releaseRoot, tree.source);
     cpSync(source, releaseTree, { recursive: true });
     for (const file of walkFiles(releaseTree)) chmodSync(path.join(releaseTree, file), 0o644);
   }
   for (const alias of manifest.aliases) {
-    const source = path.join(RUNTIME_DIR, alias.source);
+    const source = path.join(sourceRoot, alias.source);
     if (!existsSync(source)) continue;
     const target = path.join(root, alias.path);
     mkdirSync(path.dirname(target), { recursive: true });
@@ -763,6 +769,7 @@ export async function startPhpServer(input: {
 }
 
 export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtime> {
+  const releaseDirectory = options.releaseDirectory ?? process.env.SPACEFAST_TEST_RELEASE_DIRECTORY;
   // realpathSync: macOS tmpdirs live behind the /var -> /private/var symlink.
   // The engine compares textually-normalized candidate paths against
   // realpath'd roots (shared/storage.php private-path asserts) and
@@ -771,7 +778,7 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
   // in-server requests get this for free because getcwd() resolves symlinks.
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "stattic-runtime-test-")));
   await fetchToolkitPhar();
-  installEngine(root);
+  installEngine(root, releaseDirectory);
   const atomicData = { ...RUNTIME_ATOMIC_DATA, ...options.atomicData };
   writeFileSync(path.join(root, ".atomic-persistent-data.json"), `${JSON.stringify(atomicData)}\n`);
   writeGeneratedConfig(root);
@@ -815,7 +822,11 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
       env: {
         ...process.env,
         ...DEFAULT_ENV,
-        SPACEFAST_RUNTIME_BIN: options.env?.SPACEFAST_RUNTIME_BIN ?? runtimeBinaryPath(),
+        SPACEFAST_RUNTIME_BIN:
+          options.env?.SPACEFAST_RUNTIME_BIN ??
+          (releaseDirectory
+            ? path.join(releaseDirectory, "bin/stattic-runtime")
+            : runtimeBinaryPath()),
         ...edgeCaptureEnv,
         ...options.env,
         SPACEFAST_TEST_VISITOR_SCHEME: options.visitorScheme ?? "http",

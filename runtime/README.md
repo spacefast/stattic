@@ -18,8 +18,11 @@ targets remain available. Their request maps
 remove `X-SF-Authorization` and platform cookies while preserving application
 `Authorization` and Users app cookies.
 
-> Pre-1.0 notice: contracts are unstable. Management/upload API shapes, artifact schemas,
-> and storage layout can change without compatibility shims until 1.0.
+Released runtimes must keep serving existing artifacts while the control plane
+and CLI advance. Management/upload protocols, stored artifacts, and credentials
+must remain readable during rollout. New features may require an engine capability;
+that does not invalidate an existing publication. See the
+[release compatibility check](../RUNNING.md#release-compatibility).
 
 ## How It Serves
 

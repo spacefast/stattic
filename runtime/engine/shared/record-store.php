@@ -80,19 +80,6 @@ function _stattic_record_store_get(array $store, string $id): ?array
     return _stattic_record_store_read($store, $id)['record'];
 }
 
-/** @return array<string,array> readable records keyed by id. */
-function _stattic_record_store_records(array $store): array
-{
-    $records = [];
-    foreach (_stattic_record_store_ids($store) as $id) {
-        $record = _stattic_record_store_get($store, $id);
-        if ($record !== null) {
-            $records[$id] = $record;
-        }
-    }
-    return $records;
-}
-
 function _stattic_record_store_put(array $store, string $id, array $record): void
 {
     _stattic_runtime_write_json_atomic(_stattic_record_store_path($store, $id), $record, $store['throw_on_failure'] ?? false);

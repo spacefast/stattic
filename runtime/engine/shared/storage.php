@@ -864,6 +864,31 @@ function _stattic_runtime_publish_sessions_store(string $privateRoot, string $sp
 }
 
 /**
+ * Which open session declares a version: one small record per version id,
+ * `{upload_id, expires_at}`, beside the session store. Sessions are keyed by
+ * upload id, and answering "the session for this version" by decoding every
+ * record grew with the records held: on the dashboard Space, some 600 of them
+ * exhausted PHP's memory on every create-version call. A pointer is written
+ * with its session, dropped with it, and swept on the session's own clock.
+ */
+function _stattic_runtime_publish_session_index_store(string $privateRoot, string $spaceId): array
+{
+    $spaceId = _stattic_runtime_id($spaceId, 'space_id');
+    return _stattic_record_store(
+        _stattic_space_root($privateRoot, $spaceId) . '/publish-session-index',
+        ['retention' => ['field' => 'expires_at']],
+    );
+}
+
+// Stamped once every session that predates the index has been indexed. After
+// that, a version without a pointer has no open session, and nothing walks
+// the session store again.
+function _stattic_runtime_publish_session_index_marker(string $privateRoot, string $spaceId): string
+{
+    return _stattic_runtime_publish_session_index_store($privateRoot, $spaceId)['root'] . '/.indexed';
+}
+
+/**
  * The blob a capability minted against an OPEN publish session may read.
  *
  * A version being finalized has no catalog yet, so the version-sha and path

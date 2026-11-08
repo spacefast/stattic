@@ -139,19 +139,121 @@ function _stattic_runtime_acquire_write_lock(string $lockPath, callable $callbac
     _stattic_lock_with($lockPath, STATTIC_LOCK_WAIT, _stattic_runtime_write_lock_unavailable(...), $callback);
 }
 
-function _stattic_runtime_upload_session_for_version(string $privateRoot, string $spaceId, string $versionId): ?array
+/**
+ * The open session declaring a version, by its pointer in the session index.
+ * A pointer at a session that was released, swept or expired since is stale;
+ * $repair drops it, and only a caller holding the space write lock may ask
+ * for that (a lock-free reader could otherwise drop the pointer a concurrent
+ * create just wrote). Sessions that predate the index are indexed by one walk
+ * of the store, one record at a time, after which the marker says a version
+ * without a pointer has no open session. The marker only answers once the
+ * pointer path settled: a pointer or session that could not be read is not
+ * proof the version has no session, so that lookup walks instead. A walk that
+ * could not read every record indexes what it read and leaves the marker for a
+ * later walk; a record that reads but does not decode is skipped, since no
+ * session can be loaded from it either.
+ */
+function _stattic_runtime_upload_session_for_version(string $privateRoot, string $spaceId, string $versionId, bool $repair = false): ?array
 {
-    foreach (_stattic_record_store_records(_stattic_runtime_publish_sessions_store($privateRoot, $spaceId)) as $candidateId => $candidate) {
-        if (
-            ($candidate['space_id'] ?? null) !== $spaceId
-            || ($candidate['version_id'] ?? null) !== $versionId
-            || _stattic_runtime_publish_session_expired($candidate)
-        ) {
+    $sessions = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
+    $index = _stattic_runtime_publish_session_index_store($privateRoot, $spaceId);
+    $pointerRead = _stattic_runtime_publish_session_index_read_settled($index, $versionId);
+    $settled = $pointerRead['state'] !== 'unavailable';
+    $pointer = $pointerRead['record'];
+    if (is_array($pointer)) {
+        $uploadId = is_string($pointer['upload_id'] ?? null) && _stattic_runtime_id_valid($pointer['upload_id'])
+            ? $pointer['upload_id']
+            : null;
+        $sessionRead = $uploadId === null
+            ? ['state' => 'absent', 'record' => null]
+            : _stattic_runtime_publish_session_index_read_settled($sessions, $uploadId);
+        $session = $sessionRead['record'];
+        if (is_array($session) && _stattic_runtime_upload_session_declares($session, $spaceId, $versionId)) {
+            return ['upload_id' => $uploadId, 'session' => $session];
+        }
+        if ($sessionRead['state'] === 'unavailable') {
+            // An unreadable session is not a stale pointer: keep it.
+            $settled = false;
+        } elseif ($repair) {
+            _stattic_record_store_delete($index, $versionId);
+        }
+    }
+    $marker = _stattic_runtime_publish_session_index_marker($privateRoot, $spaceId);
+    clearstatcache(true, $marker);
+    if ($settled && is_file($marker)) {
+        return null;
+    }
+    $found = null;
+    $complete = true;
+    $ids = _stattic_record_store_ids($sessions);
+    foreach ($ids as $candidateId) {
+        // Absence must be proven: a record this walk could not read is not one
+        // the marker may declare gone. A record it read but could not decode is
+        // different: nothing can load that session either, and it stays on disk
+        // under evidence retention, so it must not hold the marker back forever.
+        $read = _stattic_runtime_publish_session_index_read_settled($sessions, $candidateId);
+        if ($read['state'] === 'unavailable') {
+            $complete = false;
             continue;
         }
-        return ['upload_id' => $candidateId, 'session' => $candidate];
+        $candidate = $read['record'];
+        if (!is_array($candidate) || ($candidate['space_id'] ?? null) !== $spaceId || _stattic_runtime_publish_session_expired($candidate)) {
+            continue;
+        }
+        $candidateVersion = $candidate['version_id'] ?? null;
+        if (!is_string($candidateVersion) || !_stattic_runtime_id_valid($candidateVersion)) {
+            continue;
+        }
+        if (_stattic_record_store_get($index, $candidateVersion) === null) {
+            _stattic_runtime_publish_session_index_put($privateRoot, $spaceId, $candidateId, $candidate);
+        }
+        if ($found === null && $candidateVersion === $versionId) {
+            $found = ['upload_id' => $candidateId, 'session' => $candidate];
+        }
     }
-    return null;
+    if ($complete) {
+        _stattic_record_store_ensure($index);
+        _stattic_runtime_write_private_string($marker, gmdate('c') . "\n");
+    }
+    _stattic_runtime_append_journal($privateRoot, [
+        'event' => 'publish_session_index_built',
+        'space_id' => $spaceId,
+        'sessions' => count($ids),
+        'complete' => $complete,
+    ]);
+    return $found;
+}
+
+/**
+ * A record read that tells "could not read" apart from "not there". A read can
+ * fail once and succeed next, so a failed read is retried: what the retry
+ * yields is the record. Bytes that still do not decode are damage, and read as
+ * `damaged` with no record, since nothing can load them either. Only a read
+ * that produced no bytes at all is `unavailable`.
+ *
+ * @return array{state: string, record: ?array}
+ */
+function _stattic_runtime_publish_session_index_read_settled(array $store, string $id): array
+{
+    $read = _stattic_record_store_read($store, $id);
+    if ($read['state'] !== 'unavailable') {
+        return $read;
+    }
+    $raw = _sf_read_racing(_stattic_record_store_path($store, $id));
+    if (!is_string($raw)) {
+        return ['state' => 'unavailable', 'record' => null];
+    }
+    $decoded = json_decode($raw, true);
+    return is_array($decoded)
+        ? ['state' => 'present', 'record' => $decoded]
+        : ['state' => 'damaged', 'record' => null];
+}
+
+function _stattic_runtime_upload_session_declares(array $session, string $spaceId, string $versionId): bool
+{
+    return ($session['space_id'] ?? null) === $spaceId
+        && ($session['version_id'] ?? null) === $versionId
+        && !_stattic_runtime_publish_session_expired($session);
 }
 
 function _stattic_runtime_create_version(string $privateRoot, string $spaceId, array $claims): void
@@ -188,7 +290,7 @@ function _stattic_runtime_create_version(string $privateRoot, string $spaceId, a
         'expires_at' => $requestedExpiresAt,
         'metadata' => $metadata,
     ]);
-    $existing = _stattic_runtime_upload_session_for_version($privateRoot, $spaceId, $versionId);
+    $existing = _stattic_runtime_upload_session_for_version($privateRoot, $spaceId, $versionId, true);
     if ($existing !== null) {
         $session = $existing['session'];
         if (($session['create_request_digest'] ?? null) !== $requestDigest) {

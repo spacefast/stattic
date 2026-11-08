@@ -1,7 +1,7 @@
 {
-  "revision": "7cde47e8beb40f11289882d7ab0ed0bf1c9d9eb3",
-  "sourceHash": "852de1c85265a377f0ddfbe7e86b4fba0f7ad60486ef7faf914a5b01214bfa88",
-  "manifestSha256": "511809f41a47cc3d14a5de6af62dfe919bf69756c21c28e10b497681817f48d0",
+  "revision": "0738b2b08e17c85629722a6f44f724994a781ba3",
+  "sourceHash": "0a575bfa3a364785f278b59f9d79ed23877a167ee1ab9f1f01b466fd5b03e498",
+  "manifestSha256": "eedbb0113c78e5896496c970816048184cdafeb108fcd76786870594917ec53c",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "8c3c8e4b17f6b1b0de5abad600b0bcc2c0207b5174b5ca2eea4ff4b19b222ed7"
+      "sha256": "9fd31f19efb720b778745b582e29944459f69a0b22166a66654afc2ad6fefd3f"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "2f72752215466d14d5cef784b89d85479b52513afaee86c3c2c71923a45f4eb2"
+      "sha256": "8ca769a08da32e2beee8ae09a2d1ec12e43a5af720ac100381dfe408c9393188"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13565,11 +13565,11 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "14fda8f534c5a7271da4ba76f240cbb10f420d4b6b594793dac33c2987c7a5e2"
+      "sha256": "cc69b7d2f2c62bf52638707a7bab0de8cebadaa4c1e65591a3b1b78c2ba337d7"
     },
     {
       "path": "runtime/engine/admin/retention.php",
-      "sha256": "6db6d4295034da884a3c9448eccafe267379eb8c3198340de0a069988d198aa2"
+      "sha256": "329b9ea7af596cdefb9a2c7f19f7de53b3aef022b60809eff4d399ae307c4844"
     },
     {
       "path": "runtime/engine/admin/static-zip.php",
@@ -13585,7 +13585,7 @@
     },
     {
       "path": "runtime/engine/admin/upload.php",
-      "sha256": "6fddbe0926b6c5446d40e6641a5544064e434c7f432a901e881bd6a0842bb300"
+      "sha256": "4b93df2c230290a86f6a17158afa96319f2bff0f57805cb58fe569568a7d27fa"
     },
     {
       "path": "runtime/engine/admin/zero-db.php",
@@ -13961,7 +13961,7 @@
     },
     {
       "path": "runtime/engine/shared/record-store.php",
-      "sha256": "39051b672a8fe9162471efb268d0fbe9ba1ef911f31ba39eaf544de4a1691331"
+      "sha256": "0ae33bc5a009fbb3d9ffe6d58c151cdb5298a0dfd71cac3974c5ec62464e00c2"
     },
     {
       "path": "runtime/engine/shared/response.php",
@@ -14005,7 +14005,7 @@
     },
     {
       "path": "runtime/engine/shared/storage.php",
-      "sha256": "03320518a719b25ad0d181a927f667991d7e209f86da2d78706b75da146f04f5"
+      "sha256": "8c1a3474152d96f89c1f5ca5e149da8139a446910171d4fd52529c42fa7b97e3"
     },
     {
       "path": "runtime/engine/shared/streaming.php",
@@ -14621,7 +14621,7 @@
     },
     {
       "path": "runtime/tests/uploads.test.ts",
-      "sha256": "4603f293fb612514a8f1bd6095d4d9487a87700d1fed106392f7d59654ebb4d4"
+      "sha256": "f568804f2099f16db325467f6d3a8a3c47cdc3b46d0ee7a18d2f5ddd052b08e2"
     },
     {
       "path": "runtime/tests/version-delete-tombstones.test.ts",

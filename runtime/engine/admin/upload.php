@@ -94,6 +94,12 @@ function _stattic_runtime_publish_session_create(string $privateRoot, string $sp
     $uploadId = _stattic_runtime_id($uploadId, 'upload_id');
     $store = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
     _stattic_record_store_ensure($store);
+    // The pointer goes first: a pointer at a session that never got claimed is
+    // stale and repaired by the next create, but a session without a pointer
+    // would be unfindable for as long as it lived once the index is marked
+    // complete. A failed pointer write refuses the create before anything is
+    // claimed.
+    _stattic_runtime_publish_session_index_put($privateRoot, $spaceId, $uploadId, $record);
     if (!_stattic_record_store_claim($store, $uploadId, $record, (int) (strtotime((string) ($record['expires_at'] ?? '')) ?: time()))) {
         $existing = _stattic_record_store_get($store, $uploadId);
         if ($existing === null) {
@@ -103,6 +109,42 @@ function _stattic_runtime_publish_session_create(string $privateRoot, string $sp
     }
     _stattic_runtime_publish_session_write_pin($privateRoot, $spaceId, $uploadId, $record);
     return $record;
+}
+
+// The version's pointer at its session; expiry mirrors the session's so the
+// sweep drops both on one clock.
+function _stattic_runtime_publish_session_index_put(string $privateRoot, string $spaceId, string $uploadId, array $session): void
+{
+    $versionId = $session['version_id'] ?? null;
+    if (!is_string($versionId) || !_stattic_runtime_id_valid($versionId)) {
+        return;
+    }
+    $expiresAt = _stattic_record_store_timestamp($session['expires_at'] ?? null)
+        ?? time() + STATTIC_RUNTIME_UPLOAD_SESSION_DEFAULT_TTL_SECONDS;
+    _stattic_record_store_put(
+        _stattic_runtime_publish_session_index_store($privateRoot, $spaceId),
+        $versionId,
+        ['upload_id' => $uploadId, 'expires_at' => gmdate('c', $expiresAt)],
+    );
+}
+
+// Drop the version's pointer only while it still names this session: another
+// session for the same version may have been created since. An expired
+// session keeps its pointer: the lookup already treats that pointer as stale
+// and create repairs it under the space lock, whereas this release runs
+// lock-free from the upload lanes and could otherwise drop the pointer a
+// concurrent create had just written for its replacement.
+function _stattic_runtime_publish_session_index_drop(string $privateRoot, string $spaceId, string $uploadId, ?array $session): void
+{
+    $versionId = $session['version_id'] ?? null;
+    if (!is_string($versionId) || !_stattic_runtime_id_valid($versionId) || _stattic_runtime_publish_session_expired($session)) {
+        return;
+    }
+    $index = _stattic_runtime_publish_session_index_store($privateRoot, $spaceId);
+    $pointer = _stattic_record_store_get($index, $versionId);
+    if (is_array($pointer) && ($pointer['upload_id'] ?? null) === $uploadId) {
+        _stattic_record_store_delete($index, $versionId);
+    }
 }
 
 function _stattic_runtime_publish_session_load(string $privateRoot, string $spaceId, string $uploadId): ?array
@@ -131,6 +173,7 @@ function _stattic_runtime_publish_session_release(string $privateRoot, string $s
     $sessions = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
     $release = static function () use ($privateRoot, $spaceId, $uploadId, $sessions): bool {
         return _stattic_record_store_mutate($sessions, $uploadId, static function (?array $session) use ($privateRoot, $spaceId, $uploadId, $sessions): bool {
+            _stattic_runtime_publish_session_index_drop($privateRoot, $spaceId, $uploadId, $session);
             if ($session !== null) {
                 $session['expires_at'] = gmdate('c', time() - 1);
                 _stattic_record_store_put($sessions, $uploadId, $session);

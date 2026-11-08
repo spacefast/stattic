@@ -7,10 +7,19 @@
 // its new seam (manifest declaration, D26), and finalize consuming the
 // publish session.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 
 import { strToU8, zipSync } from "fflate";
+import { z } from "zod";
 
 import { MAX_VERSION_TOTAL_BYTES } from "@spacefast/common/utils/publish-policy";
 import { runtimeUploadFileUrl } from "@spacefast/common/utils/runtime-upload";
@@ -41,6 +50,7 @@ import {
   selfSignedCertificate,
   sha256,
   startRuntime,
+  storagePath,
   uploadSessionBlobs,
   uploadToken,
   versionRoot,
@@ -249,6 +259,228 @@ test("create version replays return the original upload session and reject chang
   });
   expect(conflict.status).toBe(409);
   expect(await errorCode(conflict)).toBe("version_create_conflict");
+});
+
+test("a version's session is found through its pointer, and sessions from before the index are indexed once", async () => {
+  // The session store is keyed by upload id. Answering "the session for this
+  // version" used to decode every record in the store, which grew with the
+  // records held and exhausted PHP's memory on the dashboard Space. A pointer
+  // per version now answers it; the store is walked once, to index what
+  // predates the pointers, and never again.
+  const versionId = "ver_indexed";
+  const files = { "index.html": "indexed\n" };
+  const indexRoot = storagePath(rt, "spaces", SPACE, "publish-session-index");
+  const pointerPath = path.join(indexRoot, `${versionId}.json`);
+  const markerPath = path.join(indexRoot, ".indexed");
+  const pointerSchema = z.object({ upload_id: z.string() });
+  const readPointer = () => pointerSchema.parse(JSON.parse(readFileSync(pointerPath, "utf8")));
+  const getUploads = () =>
+    api(
+      rt,
+      "GET",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions/${versionId}/uploads`,
+      "get_upload_session",
+      { space_id: SPACE, version_id: versionId },
+    );
+  const indexBuilds = () =>
+    journalRecords(rt).filter(
+      (event) => event.event === "publish_session_index_built" && event.space_id === SPACE,
+    ).length;
+
+  const first = await createDeclaredSession(rt, SPACE, versionId, files);
+  expect(readPointer().upload_id).toBe(first.uploadId);
+
+  // A store from before the index: no pointers, no marker. The first lookup
+  // walks it, finds the session, indexes it and stamps the marker.
+  rmSync(indexRoot, { recursive: true, force: true });
+  const buildsBefore = indexBuilds();
+  const found = await getUploads();
+  expect(found.status).toBe(200);
+  expect(pointerSchema.parse(await found.json()).upload_id).toBe(first.uploadId);
+  expect(readPointer().upload_id).toBe(first.uploadId);
+  expect(existsSync(markerPath)).toBe(true);
+  expect(indexBuilds()).toBe(buildsBefore + 1);
+
+  // With the marker in place a version without a pointer has no session, and
+  // the store is not walked again to say so.
+  const unknown = await api(
+    rt,
+    "GET",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions/ver_never_declared/uploads`,
+    "get_upload_session",
+    { space_id: SPACE, version_id: "ver_never_declared" },
+  );
+  expect(unknown.status).toBe(404);
+  expect(await errorCode(unknown)).toBe("version_upload_not_found");
+  expect(indexBuilds()).toBe(buildsBefore + 1);
+
+  // A pointer at a session that is gone (swept, say) is stale: a lock-free read
+  // reports no session and leaves it; create, under the space lock, repairs it
+  // and the replacement session gets the pointer.
+  rmSync(storagePath(rt, "spaces", SPACE, "publish-sessions", `${first.uploadId}.json`));
+  const gone = await getUploads();
+  expect(gone.status).toBe(404);
+  expect(readPointer().upload_id).toBe(first.uploadId);
+  const second = await createDeclaredSession(rt, SPACE, versionId, files);
+  expect(second.uploadId).not.toBe(first.uploadId);
+  expect(readPointer().upload_id).toBe(second.uploadId);
+  expect(indexBuilds()).toBe(buildsBefore + 1);
+
+  // Finalize releases the session, and the pointer goes with it.
+  await uploadSessionBlobs(rt, second, files);
+  const finalized = await finalize(rt, SPACE, versionId, { upload_id: second.uploadId });
+  expect(finalized.status).toBe(200);
+  expect(existsSync(pointerPath)).toBe(false);
+  const released = await getUploads();
+  expect(released.status).toBe(404);
+});
+
+test("a session is never written without its pointer, and a legacy walk that could not read a record leaves the marker", async () => {
+  const indexRoot = storagePath(rt, "spaces", SPACE, "publish-session-index");
+  const sessionsRoot = storagePath(rt, "spaces", SPACE, "publish-sessions");
+  const markerPath = path.join(indexRoot, ".indexed");
+  const walks = () =>
+    journalRecords(rt).filter(
+      (event) => event.event === "publish_session_index_built" && event.space_id === SPACE,
+    );
+
+  // The pointer is written before the session is claimed, so a pointer write
+  // that fails refuses the create and leaves no orphan session behind. A file
+  // where the index directory should be makes every pointer write fail.
+  rmSync(indexRoot, { recursive: true, force: true });
+  writeFileSync(indexRoot, "");
+  const sessionsBefore = readdirSync(sessionsRoot).length;
+  try {
+    const refused = await api(
+      rt,
+      "POST",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions`,
+      "create_version",
+      { space_id: SPACE },
+      { version_id: "ver_unpointed", files: manifestFor({ "index.html": "no pointer\n" }) },
+    );
+    expect(refused.status).toBe(500);
+  } finally {
+    rmSync(indexRoot, { force: true });
+  }
+  expect(readdirSync(sessionsRoot).length).toBe(sessionsBefore);
+
+  // A legacy walk that cannot read one record indexes the rest and does not
+  // stamp the marker, so the unreadable session is still found once it reads.
+  const readable = await createDeclaredSession(rt, SPACE, "ver_legacy_readable", {
+    "index.html": "readable\n",
+  });
+  const blocked = await createDeclaredSession(rt, SPACE, "ver_legacy_blocked", {
+    "index.html": "blocked\n",
+  });
+  rmSync(indexRoot, { recursive: true, force: true });
+  const blockedRecord = path.join(sessionsRoot, `${blocked.uploadId}.json`);
+  chmodSync(blockedRecord, 0o000);
+  try {
+    const found = await api(
+      rt,
+      "GET",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions/ver_legacy_readable/uploads`,
+      "get_upload_session",
+      { space_id: SPACE, version_id: "ver_legacy_readable" },
+    );
+    expect(found.status).toBe(200);
+    expect(z.object({ upload_id: z.string() }).parse(await found.json()).upload_id).toBe(
+      readable.uploadId,
+    );
+    expect(walks().at(-1)).toMatchObject({ complete: false });
+    expect(existsSync(markerPath)).toBe(false);
+  } finally {
+    chmodSync(blockedRecord, 0o644);
+  }
+  // A record that reads but does not decode can never be a live session, and
+  // under evidence retention it stays on disk: it must not hold the marker back.
+  writeFileSync(path.join(sessionsRoot, "upl_malformed_legacy.json"), "{not json");
+  const unblocked = await api(
+    rt,
+    "GET",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions/ver_legacy_blocked/uploads`,
+    "get_upload_session",
+    { space_id: SPACE, version_id: "ver_legacy_blocked" },
+  );
+  expect(unblocked.status).toBe(200);
+  expect(z.object({ upload_id: z.string() }).parse(await unblocked.json()).upload_id).toBe(
+    blocked.uploadId,
+  );
+  expect(walks().at(-1)).toMatchObject({ complete: true });
+  expect(existsSync(markerPath)).toBe(true);
+
+  // Once the marker exists, a pointer that cannot be read is not proof the
+  // version has no session: the lookup walks the store and finds it, and the
+  // walk rewrites the pointer.
+  const pointerPath = path.join(indexRoot, "ver_legacy_readable.json");
+  const walksBefore = walks().length;
+  chmodSync(pointerPath, 0o000);
+  try {
+    const unreadablePointer = await api(
+      rt,
+      "GET",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions/ver_legacy_readable/uploads`,
+      "get_upload_session",
+      { space_id: SPACE, version_id: "ver_legacy_readable" },
+    );
+    expect(unreadablePointer.status).toBe(200);
+    expect(
+      z.object({ upload_id: z.string() }).parse(await unreadablePointer.json()).upload_id,
+    ).toBe(readable.uploadId);
+  } finally {
+    if (existsSync(pointerPath)) {
+      chmodSync(pointerPath, 0o644);
+    }
+  }
+  expect(walks().length).toBe(walksBefore + 1);
+  expect(JSON.parse(readFileSync(pointerPath, "utf8"))).toMatchObject({
+    upload_id: readable.uploadId,
+  });
+});
+
+test("releasing an expired session leaves the version's pointer to create-version", async () => {
+  // Release runs lock-free from the upload lanes when a load finds the session
+  // expired. Dropping the pointer there could remove the one a concurrent
+  // create had just written for the replacement session; the lookup already
+  // ignores a pointer at an expired session, and create repairs it under lock.
+  const versionId = "ver_expired_release";
+  const files = { "index.html": "expired\n" };
+  const content = files["index.html"];
+  const expired = await createDeclaredSession(rt, SPACE, versionId, files, {
+    expiresAt: new Date(Date.now() - 60_000).toISOString(),
+  });
+  const pointerPath = storagePath(
+    rt,
+    "spaces",
+    SPACE,
+    "publish-session-index",
+    `${versionId}.json`,
+  );
+  // The pointer a replacement session would have left.
+  writeFileSync(
+    pointerPath,
+    JSON.stringify({
+      upload_id: "upl_replacement",
+      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    }),
+  );
+  const put = await putBlob(rt, SPACE, expired.token, sha256(content), content);
+  expect(put.status).toBe(404);
+  // The load released the expired session (gone, or kept expired under the
+  // evidence hold); the pointer it would have dropped is still the replacement's.
+  const record = storagePath(rt, "spaces", SPACE, "publish-sessions", `${expired.uploadId}.json`);
+  if (existsSync(record)) {
+    const kept = z
+      .object({ expires_at: z.string() })
+      .parse(JSON.parse(readFileSync(record, "utf8")));
+    expect(Date.parse(kept.expires_at)).toBeLessThan(Date.now());
+  }
+  expect(
+    z.object({ upload_id: z.string() }).parse(JSON.parse(readFileSync(pointerPath, "utf8")))
+      .upload_id,
+  ).toBe("upl_replacement");
+  rmSync(pointerPath);
 });
 
 test("build source archives persist, stream, scope, and delete on the provider runtime", async () => {

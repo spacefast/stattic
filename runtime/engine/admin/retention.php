@@ -8,10 +8,11 @@ require_once __DIR__ . '/../shared/security-telemetry.php';
 require_once __DIR__ . '/upload.php';
 
 // The record stores the bulk tick expires. Only bookkeeping that holds no
-// customer data or history is listed here: security-telemetry gap markers and
-// publish pins. Everything else the engine writes (versions, blobs, staging
-// trees, compiled releases, rolled journals, job records, publish sessions,
-// route shards) is kept until the control plane asks for an explicit delete.
+// customer data or history is listed here: security-telemetry gap markers,
+// publish pins and the version-to-session pointers. Everything else the engine
+// writes (versions, blobs, staging trees, compiled releases, rolled journals,
+// job records, publish sessions, route shards) is kept until the control plane
+// asks for an explicit delete.
 
 /** @return list<array> record stores the bulk tick sweeps. */
 function _stattic_runtime_retention_stores(string $privateRoot): array
@@ -26,7 +27,9 @@ function _stattic_runtime_retention_stores(string $privateRoot): array
         throw new RuntimeException('runtime document enumeration failed: ' . $privateRoot . '/spaces');
     }
     foreach ($spaceRoots as $spaceRoot) {
-        $stores[] = _stattic_runtime_publish_pins_store($privateRoot, basename($spaceRoot));
+        $spaceId = basename($spaceRoot);
+        $stores[] = _stattic_runtime_publish_session_index_store($privateRoot, $spaceId);
+        $stores[] = _stattic_runtime_publish_pins_store($privateRoot, $spaceId);
     }
     return $stores;
 }

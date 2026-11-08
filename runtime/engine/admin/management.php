@@ -1715,6 +1715,60 @@ function _stattic_runtime_repair_space(string $privateRoot, string $spaceId, arr
     ]);
 }
 
+/**
+ * Space Users settings in the one form every engine reader uses: the original
+ * flat shape. The control plane sends either that shape or the two-part
+ * `zeroUsers` / `spacefastAccess` shape (runtime.users.access-shape.v1); the
+ * two-part shape also keeps whether each part is on, which the flat shape
+ * cannot say, under `parts`. Null for anything malformed.
+ */
+function _stattic_runtime_users_config(mixed $users): ?array
+{
+    $isBool = static fn (mixed $value): bool => is_bool($value);
+    $google = static function (mixed $google, array $modes): ?array {
+        if (!is_array($google) || !in_array($google['mode'] ?? null, $modes, true)) return null;
+        if ($google['mode'] !== 'direct') return ['mode' => $google['mode']];
+        return is_string($google['clientId'] ?? null) && $google['clientId'] !== '' ? ['mode' => 'direct', 'clientId' => $google['clientId']] : null;
+    };
+    if (!is_array($users)) return null;
+    if (array_key_exists('zeroUsers', $users)) {
+        $zero = $users['zeroUsers'] ?? null;
+        $access = $users['spacefastAccess'] ?? null;
+        $direct = is_array($zero) ? $google($zero['providers']['google'] ?? null, ['disabled', 'direct']) : null;
+        $providers = is_array($access) ? ($access['providers'] ?? null) : null;
+        if (!is_array($zero) || !$isBool($zero['enabled'] ?? null) || $direct === null || !is_array($access)
+            || !$isBool($access['enabled'] ?? null) || !is_array($providers)
+            || !$isBool($providers['spacefast'] ?? null) || !$isBool($providers['managedGoogle'] ?? null) || !$isBool($providers['wpcom'] ?? null)) {
+            return null;
+        }
+        $on = $access['enabled'];
+        return [
+            'enabled' => $zero['enabled'] || $on,
+            'providers' => [
+                // Direct Google is Zero Users': it is off with Zero Users, whatever is stored.
+                'google' => $direct['mode'] === 'direct' && $zero['enabled'] ? $direct : ['mode' => $on && $providers['managedGoogle'] ? 'managed' : 'disabled'],
+                'gravatar' => ['enabled' => $on && $providers['wpcom']],
+                'spacefast' => ['enabled' => $on && $providers['spacefast']],
+            ],
+            'parts' => ['zeroUsers' => $zero['enabled'], 'spacefastAccess' => $on],
+        ];
+    }
+    $providers = $users['providers'] ?? null;
+    $flatGoogle = is_array($providers) ? $google($providers['google'] ?? null, ['disabled', 'managed', 'direct']) : null;
+    if (!$isBool($users['enabled'] ?? null) || $flatGoogle === null
+        || !$isBool($providers['gravatar']['enabled'] ?? null) || !$isBool($providers['spacefast']['enabled'] ?? null)) {
+        return null;
+    }
+    return [
+        'enabled' => $users['enabled'],
+        'providers' => [
+            'google' => $flatGoogle,
+            'gravatar' => ['enabled' => $providers['gravatar']['enabled']],
+            'spacefast' => ['enabled' => $providers['spacefast']['enabled']],
+        ],
+    ];
+}
+
 function _stattic_runtime_route_config(mixed $raw): array
 {
     if (!is_array($raw)) {
@@ -1722,23 +1776,9 @@ function _stattic_runtime_route_config(mixed $raw): array
     }
     $config = [];
     if (array_key_exists('users', $raw)) {
-        $users = $raw['users'];
-        $providers = is_array($users) ? ($users['providers'] ?? null) : null;
-        $google = is_array($providers) ? ($providers['google'] ?? null) : null;
-        if (!is_array($users) || !is_bool($users['enabled'] ?? null) || !is_array($providers)
-            || !is_array($google) || !in_array($google['mode'] ?? null, ['disabled', 'managed', 'direct'], true)
-            || (($google['mode'] ?? null) === 'direct' && (!is_string($google['clientId'] ?? null) || $google['clientId'] === ''))
-            || !is_bool($providers['gravatar']['enabled'] ?? null) || !is_bool($providers['spacefast']['enabled'] ?? null)) {
-            _stattic_problem_response(422, 'space_users_config_invalid', 'Users settings are invalid.');
-        }
-        $config['users'] = [
-            'enabled' => $users['enabled'],
-            'providers' => [
-                'google' => $google['mode'] === 'direct' ? ['mode' => 'direct', 'clientId' => $google['clientId']] : ['mode' => $google['mode']],
-                'gravatar' => ['enabled' => $providers['gravatar']['enabled']],
-                'spacefast' => ['enabled' => $providers['spacefast']['enabled']],
-            ],
-        ];
+        $users = _stattic_runtime_users_config($raw['users']);
+        if ($users === null) _stattic_problem_response(422, 'space_users_config_invalid', 'Users settings are invalid.');
+        $config['users'] = $users;
     }
     if (array_key_exists('usersProviderConfig', $raw)) {
         $private = $raw['usersProviderConfig'];

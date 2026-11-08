@@ -1,7 +1,7 @@
 {
-  "revision": "c3cb49029591483dd2fdd401964e428a4620ed23",
-  "sourceHash": "21753bf2d5ed80d6646b82a624dabb3bfa5590835dd0757409bc6e5943d3b992",
-  "manifestSha256": "72dd604d790218da3e68882be5301f0bd170c29437d0ae0bcfd5a1e1c5e783fa",
+  "revision": "85d93ee29c81a9063d9bc8367ea230194613b3d7",
+  "sourceHash": "d492045105e8745fec183516d2f77db4c3b4f83332d32fcf7e7d229dbf9d480d",
+  "manifestSha256": "e8e3a55e87cacba696fb69ef74fe887d4565e040aeb87484df132b3e4d5799d5",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "3a607557944ad74ff66747b8d0f0fdf788a82db0bbf1f3524885ff5d3c724cf3"
+      "sha256": "c94c69828bc56003c198a90bee26c7403b1f535ddaaa3de8bd55abe462436bb8"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "fcb192f6542b0f9ccbb896bd1341c8798d95298f7bd43d80f957617cc844ec2f"
+      "sha256": "67d4b113791778ef903c97b71e96e45913f6f20f06e0dd67cd64f69e6cef814c"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13873,7 +13873,7 @@
     },
     {
       "path": "runtime/browser-specs/control-plane-access-fixture.ts",
-      "sha256": "738aca248e22344d7d1daad1435ba72e6aef3073a9cec46dd49f52e2f936a8d3"
+      "sha256": "17f7b255c237e949465ba4083f8300dbb30e7ed7f0773975b898fa65cb44297e"
     },
     {
       "path": "runtime/browser-specs/origin-null-access.test.ts",
@@ -13925,7 +13925,7 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "9ad24db0ac66b7fb940ff14f7bdcbe9d4a74caeb1511949e934f2586ced8f5b8"
+      "sha256": "1478ae094f0b7fae3206892ba7f306a0d7f95494a4482808044a370ac95c0696"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -13973,7 +13973,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "3515bcb2d87dce6ce8a403ffa77851d7f98d1594bbbed7efe1ea9bac24727d55"
+      "sha256": "56e5d7712d225f87b79d24d747ef69647e81f51d9f378715f5e3c7e13fbbc7fd"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -14161,7 +14161,7 @@
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
-      "sha256": "ed7bd9b98518c4b89c2a22f02677669e219adf1b81e22678eb50fa90c11ff5e2"
+      "sha256": "1fd68e2ba4a5e75777b5b7e60018631c25c43802101293b7d5beee5729fc8534"
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
@@ -14392,6 +14392,10 @@
       "sha256": "955229fe0e7604b3385005170ab154d499f7de921c500671fd2fcfdd2671e36c"
     },
     {
+      "path": "runtime/engine/shared/space-users-parts.php",
+      "sha256": "6b5901f6ab3859ea689ed83401293ce49b4b970e2cce05e16704248aa425e8ab"
+    },
+    {
       "path": "runtime/engine/shared/storage-policy.generated.php",
       "sha256": "be172be426273c68a4003d17965b0b333b53bcbc9518ba1820812efcffa1f4b9"
     },
@@ -14425,7 +14429,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "3e3035ca16489f277441914ddb00c240a1be4de28e44b51df1657cd413152042"
+      "sha256": "72138d4d3e75b12ab3a7fc44f0f0e9042f3f437ee38b01e9e241902c3759d61d"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -14489,7 +14493,7 @@
     },
     {
       "path": "runtime/engine/wordpress/space-users.php",
-      "sha256": "791aaeddf68704d17b9a24a207c5f2c1cbbac4ff9685c6b141ce1bd560f5ac83"
+      "sha256": "6e23f6fbd808b8d23c4c674984059a8c9298a26c1579e86b1343b43ea8abbd3b"
     },
     {
       "path": "runtime/engine/wordpress/team-design-system.php",
@@ -14973,7 +14977,7 @@
     },
     {
       "path": "runtime/tests/spacefast-sdk.test.ts",
-      "sha256": "b0541ff5d2486f0727bc1f54d0f17937568778749e2daf3b1e8898d017eeb829"
+      "sha256": "6537f87cdbec1c0aab552be8b0f8b1c54ccfd7d11f9b75c0b34e1ae09846871a"
     },
     {
       "path": "runtime/tests/static-zip.test.ts",
@@ -14997,7 +15001,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "279e643488cd3552dfb8d410a9dae0bae2e9ac375cce5f33cb3053905d67fc94"
+      "sha256": "6fed2af8d7646a415601e9b34616d9de8d4af9a7108cd5fb9419fc586495fcda"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

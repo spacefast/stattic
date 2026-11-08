@@ -141,6 +141,7 @@
     "engine/shared/legacy-zero.php",
     "engine/shared/page-routes.php",
     "engine/shared/control-paths.php",
+    "engine/shared/space-users-parts.php",
     "engine/shared/zero-v2.php",
     "engine/shared/zero-v2-scope.php",
     "engine/runtime/client.js",

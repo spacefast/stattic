@@ -4,6 +4,8 @@ declare(strict_types=1);
 use Spacefast\Identity\Plugin as SpacefastIdentity;
 use Spacefast\Identity\Sessions as SpacefastIdentitySessions;
 
+require_once __DIR__ . '/../shared/space-users-parts.php';
+
 function spacefast_space_users_settings(): array
 {
     $value = $GLOBALS['SPACEFAST_PAGE_SERVING']['users'] ?? [];
@@ -62,9 +64,15 @@ function spacefast_space_users_install_hooks(): void
         return $url;
     }, 10, 2);
     add_filter('rest_pre_dispatch', static function (mixed $result, mixed $server, mixed $request): mixed {
-        if (str_starts_with($request->get_route(), '/spacefast-identity/v1/')
-            && spacefast_space_users_settings()['enabled'] !== true) {
+        $route = $request->get_route();
+        if (!str_starts_with($route, '/spacefast-identity/v1/')) return $result;
+        $settings = spacefast_space_users_settings();
+        if ($settings['enabled'] !== true) {
             return spacefast_content_users_error(404, 'space_users_disabled', 'Users is not enabled for this Space.');
+        }
+        $method = _stattic_space_users_operation_method(substr($route, strlen('/spacefast-identity/v1/')));
+        if ($method !== null && !_stattic_space_users_method_allowed($settings, $method)) {
+            return spacefast_content_users_error(403, 'space_users_provider_disabled', 'This sign-in method is not enabled for this Space.');
         }
         return $result;
     }, 1, 3);

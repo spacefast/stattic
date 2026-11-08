@@ -1,7 +1,7 @@
 {
-  "revision": "2256dc8609f2c41bb6c0d61bb34206dbdbfcdead",
+  "revision": "c7479431738226eddbfd271c60284587f387896e",
   "sourceHash": "9d8fb66243d13617c6fc2df23fe796ea6b61f48fc92c783522b9a144e81c1bd6",
-  "manifestSha256": "ea4f98fd55f9cdbdc6461ae1784f7a4e311dca6e189e2c5eeedb603efb586f8d",
+  "manifestSha256": "b4df6afee1f204816559e36e7744eca165d3c5517e555a1d73ca5989fc493c36",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "c3eabacbb818ad2a22a1dfcc3fab6e14a581450ba56e9110d8e6a44829b2dd39"
+      "sha256": "bce67506559d1b2571382b042fd2acd29b32e2e8483fceca083514a8f8b1cb0a"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "dc150f082fdddc104f00e8e3739d1e1a0a8da17c224bd38d3a24d9cd476a2422"
+      "sha256": "569ecc98f5becb03a6eca58a80d862914f5524f37a2abf8fc33c53b97806b0cc"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -14533,7 +14533,7 @@
     },
     {
       "path": "runtime/tests/poppy-publish.test.ts",
-      "sha256": "7221c7343e6732a74ff587c7298129fe8bad18781372d3d239619b2bc3c3dcb7"
+      "sha256": "d003b17336a29d4060cfa1823abbbc5fc794fe3dd162442840e814c76e9104d4"
     },
     {
       "path": "runtime/tests/prepare-ci.sh",

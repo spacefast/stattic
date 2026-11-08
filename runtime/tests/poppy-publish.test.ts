@@ -72,6 +72,19 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
   const { tagGraphFromTemplateSelection } =
     await import("../../packages/common/src/contracts/tags.js");
   const { runOperationNow } = await import("../../apps/control-plane/src/operations/claimant.js");
+  const { platformWpCloudContext } =
+    await import("../../apps/control-plane/src/wp-cloud/tenant-client.js");
+  const { simulatedWpCloudContext } =
+    await import("../../apps/control-plane/src/wp-cloud/simulated-driver.js");
+  // Exact promotion reads provider edge state; serving still uses the real PHP runtime.
+  const providerClient = platformWpCloudContext().client;
+  const providerFetch = providerClient.getConfig().fetch;
+  providerClient.setConfig({
+    fetch: simulatedWpCloudContext("poppy-publish").client.getConfig().fetch,
+  });
+  cleanup.defer(() => {
+    providerClient.setConfig({ fetch: providerFetch });
+  });
   const restoreTags = setFeatureFlagEnv("SPACEFAST_FLAG_TAGS", "enabled");
   cleanup.defer(restoreTags);
   const app = createApp();
@@ -324,7 +337,14 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
       });
       expect(response.status, await response.clone().text()).toBe(200);
       const result = z
-        .object({ data: z.object({ id: z.string() }), operation: z.object({ id: z.string() }) })
+        .object({
+          data: z.object({ id: z.string() }),
+          operation: z.object({
+            id: z.string(),
+            kind: z.string(),
+            resources: z.array(z.object({ type: z.string(), id: z.string() })),
+          }),
+        })
         .parse(await response.json());
       const outcome = await runOperationNow({ operationId: result.operation.id });
       const pending = await db.query.operations.findFirst({
@@ -339,35 +359,24 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
       expect(responseHtml).toContain(marker);
       expect(responseHtml).not.toContain("newer-content");
       expect(responseHtml.match(/data-spacefast-sdk="v1"/g)).toHaveLength(1);
-      return { id: result.data.id, html: responseHtml };
+      return { id: result.data.id, operation: result.operation, html: responseHtml };
     };
-    const refreshed = await restore({});
+    const refreshed = await restore({ refreshRewrites: true });
     expect(refreshed.id).not.toBe(receipt.data.version.id);
     expect(refreshed.html.match(/name="baked-demo"/g)).toHaveLength(1);
     expect(refreshed.html).toContain('name="baked-demo" content="current"');
     expect(refreshed.html).not.toContain('content="saved"');
     // Exact restoration uses the existing pointer-promotion job, without recompiling the saved version.
-    const exact = await app.request(rollbackUrl, {
-      method: "POST",
-      headers: { ...humanHeaders, "content-type": "application/json" },
-      body: JSON.stringify({ refreshRewrites: false }),
-    });
-    expect(exact.status, await exact.clone().text()).toBe(200);
-    const exactReceipt = z
-      .object({
-        data: z.object({ id: z.string() }),
-        operation: z.object({
-          kind: z.string(),
-          resources: z.array(z.object({ type: z.string(), id: z.string() })),
-        }),
-      })
-      .parse(await exact.json());
-    expect(exactReceipt.data.id).toBe(receipt.data.version.id);
-    expect(exactReceipt.operation.kind).toBe("version_promote_live");
-    expect(exactReceipt.operation.resources).toContainEqual({
+    const exact = await restore({});
+    expect(exact.id).toBe(receipt.data.version.id);
+    expect(exact.operation.kind).toBe("version_promote_live");
+    expect(exact.operation.resources).toContainEqual({
       type: "version",
       id: receipt.data.version.id,
     });
+    expect(exact.html).toContain('<meta name="baked-demo" content="saved">');
+    expect(exact.html).not.toContain('name="baked-demo" content="current"');
+    expect(exact.html).toBe(servedHtml);
   } finally {
     globalThis.fetch = originalFetch;
     runtime?.stop();

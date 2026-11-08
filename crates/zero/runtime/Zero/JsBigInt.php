@@ -332,8 +332,8 @@ final class JsBigInt implements \Stringable
 
     public function pow(self $exponent): self
     {
-        // V8's exact message.
-        if ($exponent->negative) { throw new JsError('undefined must be positive', 'RangeError'); }
+        // Current V8's message (Node 22.23.4+; older builds said "undefined must be positive").
+        if ($exponent->negative) { throw new JsError('Exponent must be positive', 'RangeError'); }
         $result = self::fromInt(1);
         $base = $this;
         $e = $exponent;

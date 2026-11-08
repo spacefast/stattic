@@ -686,6 +686,70 @@
   ],
   "zero08": [
     {
+      "code": "Z08_CLIENT_STORAGE",
+      "feature": "0.8 client storage uploads"
+    },
+    {
+      "code": "Z08_CLIENT_FETCH",
+      "feature": "0.8 authenticatedFetch"
+    },
+    {
+      "code": "Z08_CLIENT_CONNECTORS",
+      "feature": "0.8 client connector state"
+    },
+    {
+      "code": "Z08_CLIENT_CONTENT",
+      "feature": "0.8 content reads from the client"
+    },
+    {
+      "code": "Z08_CLIENT_SIGN_IN",
+      "feature": "0.8 client sign-in"
+    },
+    {
+      "code": "Z08_CLIENT_API",
+      "feature": "0.8 client API without a v2 bridge"
+    },
+    {
+      "code": "Z08_CLIENT_KIT",
+      "feature": "0.8 kit components in a client app"
+    },
+    {
+      "code": "Z08_CLIENT_CHARTS",
+      "feature": "0.8 charts in a client app"
+    },
+    {
+      "code": "Z08_CLIENT_PACKAGE",
+      "feature": "npm package in a client app"
+    },
+    {
+      "code": "Z08_CLIENT_IMPORT",
+      "feature": "client import outside the capsule"
+    },
+    {
+      "code": "Z08_CLIENT_DYNAMIC_IMPORT",
+      "feature": "dynamic import() in a client app"
+    },
+    {
+      "code": "Z08_CLIENT_ASSET",
+      "feature": "client import of a non-script file"
+    },
+    {
+      "code": "Z08_CLIENT_SYNTAX",
+      "feature": "client source the browser build cannot compile"
+    },
+    {
+      "code": "Z08_CLIENT_NATIVE",
+      "feature": "client app converted by the browser compiler"
+    },
+    {
+      "code": "Z08_CLIENT_PUBLIC",
+      "feature": "client app with its own public/ directory"
+    },
+    {
+      "code": "Z08_CLIENT_UNREADABLE",
+      "feature": "client module that cannot be read"
+    },
+    {
       "code": "Z08_SPACE_REQUIRED",
       "feature": "schema tables without a table mode"
     },

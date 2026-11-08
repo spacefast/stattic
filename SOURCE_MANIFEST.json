@@ -1,7 +1,7 @@
 {
-  "revision": "7e6f898aff149785292ef75b59af9177e39b6ce5",
-  "sourceHash": "405864f96bb2a0c4f70c2cf1029f75ce2c6a3f306734707b41b4d3a154d7bda7",
-  "manifestSha256": "1982f57db84ba41a9a21dcb70510bc260edf29c124249d516613a4e6172b34a8",
+  "revision": "7cde47e8beb40f11289882d7ab0ed0bf1c9d9eb3",
+  "sourceHash": "852de1c85265a377f0ddfbe7e86b4fba0f7ad60486ef7faf914a5b01214bfa88",
+  "manifestSha256": "511809f41a47cc3d14a5de6af62dfe919bf69756c21c28e10b497681817f48d0",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "0aaf15d2bd476699d32a5bcdc35de31175f844540ea22622b7dfb0855d7fba75"
+      "sha256": "8c3c8e4b17f6b1b0de5abad600b0bcc2c0207b5174b5ca2eea4ff4b19b222ed7"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "d2eb314652667f4a76694591274daa2e7f85e4ecdf219107d4cd9c59de7d230d"
+      "sha256": "2f72752215466d14d5cef784b89d85479b52513afaee86c3c2c71923a45f4eb2"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -417,7 +417,7 @@
     },
     {
       "path": "crates/zero/SOURCE.json",
-      "sha256": "1bb8a7d411f1a0774c90756bf528f6fdd6c2e4ab1f1acae470a3c20c61558eb7"
+      "sha256": "38bea1b154d9c8e626d337c5989b9d0b3c3760d8e29d3854f3bfa99923daccf2"
     },
     {
       "path": "crates/zero/build.rs",
@@ -581,7 +581,7 @@
     },
     {
       "path": "crates/zero/runtime/Zero/JsBigInt.php",
-      "sha256": "419f56c378021e63dae8a6b15fbdd90de0150e2637b2f4b553d881b0ced79e20"
+      "sha256": "557c143629aa81c8d593f055fc0d330bcd0e96b2a928b15cd7759c903dac7acd"
     },
     {
       "path": "crates/zero/runtime/Zero/JsClass.php",
@@ -13125,11 +13125,43 @@
     },
     {
       "path": "crates/zero/src/config_migrate/app.rs",
-      "sha256": "ddcfa4d728ac7a5b542a6c6307bca42293c323b1b594f9df95da056a185ce303"
+      "sha256": "726350eaa27f2ee97c53f48d08997f2b412fe6bc62f2cd32fd80541c49181e73"
+    },
+    {
+      "path": "crates/zero/src/config_migrate/app/client.rs",
+      "sha256": "e11509f69dc3fd379d387a0f2f7b72a118ef9b2862c33915f7ba85d41170d82c"
+    },
+    {
+      "path": "crates/zero/src/config_migrate/app/client08/preact/LICENSE",
+      "sha256": "1fe6958409c8c257a70c587a18b6f7f412b179b456630790d30b2ec9a8e4b7d4"
+    },
+    {
+      "path": "crates/zero/src/config_migrate/app/client08/preact/compat-client.js",
+      "sha256": "67896c6fd07da726120a63ddd862030418f96121fa81a01b606f8e0133d2c31f"
+    },
+    {
+      "path": "crates/zero/src/config_migrate/app/client08/preact/compat.js",
+      "sha256": "6ea5d08227ee2c279f451fa9c0116837ff004507597da75856895669e63ab87c"
+    },
+    {
+      "path": "crates/zero/src/config_migrate/app/client08/preact/hooks.js",
+      "sha256": "ae6ec58592683ca64fa4d65b20d40b103df62a673bcc4712515cf165950b07f3"
+    },
+    {
+      "path": "crates/zero/src/config_migrate/app/client08/preact/jsx-runtime.js",
+      "sha256": "89e3d19112015c7de7c923608754a8051ad34785f8d690789e0e88fca0cb8632"
+    },
+    {
+      "path": "crates/zero/src/config_migrate/app/client08/preact/preact.js",
+      "sha256": "712517dd2a42c3c22b5ab0264ad7e9a2b1e8be6cf97fa00dbedd98203617e616"
+    },
+    {
+      "path": "crates/zero/src/config_migrate/app/client08/zero-client.js",
+      "sha256": "1a50dc362dd1df94e9510c4c8bfbd39fd9fda1251d0d684236def0ee00c3dce4"
     },
     {
       "path": "crates/zero/src/config_migrate/app/codes.rs",
-      "sha256": "a6cdc5197705a22deee5ebb3944de7ab122c8a77e7f242ac92f2d67447e5793c"
+      "sha256": "54a1796a41bafa87ec2110f93909bbb97251a75dfd4ae7e1a25852f29d143438"
     },
     {
       "path": "crates/zero/src/config_migrate/app/endpoints.rs",
@@ -13149,7 +13181,7 @@
     },
     {
       "path": "crates/zero/src/config_migrate/app/transform.rs",
-      "sha256": "b4143006489fc626672d8ef90664fe08119ce768491056bcc6b13b69689f0c9b"
+      "sha256": "b34390855d45cd2ad3913bd5b472bd44393e79376b0f2587eb207600c7429479"
     },
     {
       "path": "crates/zero/src/config_migrate/input.rs",
@@ -13157,7 +13189,7 @@
     },
     {
       "path": "crates/zero/src/config_migrate/mod.rs",
-      "sha256": "a0ca3839aaa71b01b6a738b53e9db183407f3e4fccf03085a89a365d4c3ee1c6"
+      "sha256": "db63baa9a503b881061d577489876eb540fb3f1ec6becf01db13b80501ece3d1"
     },
     {
       "path": "crates/zero/src/config_migrate/translate.rs",
@@ -13357,7 +13389,7 @@
     },
     {
       "path": "crates/zero/tests/compatibility/registry.json",
-      "sha256": "f2bdefbf99bf8435241539bcb1ee662db00146635bd70071a6488bc056d8642e"
+      "sha256": "b0c58cc4e68b06699672979972f0de7a8b2437071367531c5f7ce286c844474d"
     },
     {
       "path": "crates/zero/tests/fixtures/canon/README",

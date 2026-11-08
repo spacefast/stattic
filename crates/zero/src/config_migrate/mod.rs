@@ -54,6 +54,12 @@ pub(super) fn fail(at: &str, reason: impl Into<String>) -> Failure {
 }
 
 impl Failure {
+    /// Locates the refusal at a capsule-relative file, 1-based line and UTF-16 column.
+    pub(super) fn located(mut self, file: String, line: usize, column: usize) -> Failure {
+        self.location = Some(Box::new((file, line, column)));
+        self
+    }
+
     /// Locates the refusal at `span` unless something more precise already did.
     pub(super) fn spanned(mut self, span: crate::diag::Span, root: &Path) -> Failure {
         if self.location.is_none() {

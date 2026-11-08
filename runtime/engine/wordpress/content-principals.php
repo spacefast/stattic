@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/../shared/wordpress-rest.php';
+
 if (function_exists('add_filter')) {
     add_filter('determine_current_user', 'spacefast_content_principal_current_user', 1);
     add_filter('user_has_cap', 'spacefast_content_principal_capabilities', 10, 4);
@@ -88,7 +90,7 @@ function spacefast_content_principal_current_user(mixed $currentUser): mixed
     }
     $sessionUserId = $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] ?? null;
     if (is_int($sessionUserId) && $sessionUserId > 0) {
-        return $sessionUserId;
+        return _stattic_wordpress_cookie_allowed() ? $sessionUserId : $currentUser;
     }
     $identity = spacefast_content_principal_identity();
     if ($identity === null || $identity['kind'] === 'anonymous') {

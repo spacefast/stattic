@@ -30,6 +30,8 @@ import {
   finalize,
   get,
   publicAccessConfig,
+  runtimeJwks,
+  signToken,
   putRoute,
   putBlob,
   uploadSessionBlobs,
@@ -660,9 +662,148 @@ add_action('rest_api_init', static function () {
       assert.ok(await me(otherHost, bob));
       assert.equal(await me(host, bob), null, "Space B's session is nobody on Space A");
       const sibling = await get(rt, host, "/wp-json/zero/v1/me", {
-        headers: { cookie: ana, origin: "http://sibling.zero-v2-proof.test" },
+        headers: {
+          cookie: ana,
+          origin: "http://sibling.zero-v2-proof.test",
+          "sec-fetch-site": "same-site",
+          authorization: "Bearer junk",
+        },
       });
-      assert.equal((await sibling.json()).data, null, "another origin borrows no identity");
+      assert.equal(sibling.status, 403, await sibling.clone().text());
+      assert.equal((await sibling.json()).code, "rest_origin_denied");
+      const siblingMetadata = { cookie: ana, "sec-fetch-site": "same-site" };
+      for (const namespace of ["spacefast-identity", "zero-identity"]) {
+        const identityDenied = await get(rt, host, `/wp-json/${namespace}/v1/account`, {
+          headers: { "sec-fetch-site": "same-site" },
+        });
+        assert.equal(identityDenied.status, 403, await identityDenied.clone().text());
+        const jsonp = await get(rt, host, `/wp-json/${namespace}/v1/config?_jsonp=cb`);
+        assert.equal(jsonp.status, 400, await jsonp.clone().text());
+        assert.equal(jsonp.headers.get("content-type")?.includes("application/json"), true);
+        assert.equal((await jsonp.json()).code, "rest_callback_disabled");
+      }
+      const appIdentityDenied = await get(rt, host, "/__zero/auth/user", {
+        headers: siblingMetadata,
+      });
+      assert.equal(appIdentityDenied.status, 403, await appIdentityDenied.clone().text());
+      const cors = await get(rt, host, "/wp-json/", {
+        method: "OPTIONS",
+        headers: { origin: "http://evil.zero-v2-proof.test" },
+      });
+      assert.equal(
+        cors.headers.get("access-control-allow-origin"),
+        "http://evil.zero-v2-proof.test",
+      );
+      assert.equal(cors.headers.get("access-control-allow-credentials"), null);
+      const publicRead = await get(rt, host, "/wp-json/zero/v1/me", {
+        headers: { origin: "http://sibling.zero-v2-proof.test", "sec-fetch-site": "same-site" },
+      });
+      assert.equal(publicRead.status, 200, await publicRead.clone().text());
+      assert.equal(
+        publicRead.headers.get("access-control-allow-origin"),
+        "http://sibling.zero-v2-proof.test",
+      );
+      assert.equal(publicRead.headers.get("access-control-allow-credentials"), null);
+      assert.equal((await publicRead.json()).data, null);
+      const appOrigin = "http://registered.example.test";
+      db.exec(
+        `INSERT INTO ${own.prefix}zero_identity_applications (id, name, redirects, origins, enabled) VALUES ('origin-proof', 'Origin proof', '[]', '["${appOrigin}"]', 1)`,
+      );
+      for (const identityPath of [
+        "/wp-json/zero-identity/v1/account",
+        "/?rest_route=/zero-identity/v1/account",
+        "/__zero/auth/api/account",
+      ]) {
+        const registered = await get(rt, host, identityPath, {
+          headers: { cookie: ana, origin: appOrigin, "sec-fetch-site": "cross-site" },
+        });
+        assert.equal(registered.status, 200, await registered.clone().text());
+        assert.equal(registered.headers.get("access-control-allow-origin"), appOrigin);
+        assert.equal(registered.headers.get("access-control-allow-credentials"), "true");
+        const account = await registered.json();
+        assert.equal(account.data.account.wp_user_id, anaOnZero.id);
+        if (identityPath === "/__zero/auth/api/account") {
+          const preflight = await get(rt, host, identityPath, {
+            method: "OPTIONS",
+            headers: {
+              origin: appOrigin,
+              "access-control-request-headers": "content-type,x-identity-csrf",
+            },
+          });
+          assert.equal(preflight.status, 200, await preflight.clone().text());
+          assert.equal(preflight.headers.get("access-control-allow-origin"), appOrigin);
+          assert.equal(preflight.headers.get("access-control-allow-credentials"), "true");
+          assert.equal(
+            preflight.headers
+              .get("access-control-allow-headers")
+              ?.toLowerCase()
+              .includes("x-identity-csrf"),
+            true,
+          );
+          const updated = await get(rt, host, identityPath, {
+            method: "PATCH",
+            headers: {
+              cookie: ana,
+              origin: appOrigin,
+              "sec-fetch-site": "cross-site",
+              "content-type": "application/json",
+              "x-identity-csrf": account.data.csrf,
+            },
+            body: JSON.stringify({ name: "Registered Ana" }),
+          });
+          assert.equal(updated.status, 200, await updated.clone().text());
+          assert.equal(
+            db.exec(`SELECT display_name FROM ${own.prefix}users WHERE ID=${anaOnZero.id}`),
+            "Registered Ana",
+          );
+        }
+        const unregistered = await get(rt, host, identityPath, {
+          headers: {
+            cookie: ana,
+            origin: "http://sibling.zero-v2-proof.test",
+            "sec-fetch-site": "same-site",
+          },
+        });
+        assert.equal(unregistered.status, 403, await unregistered.clone().text());
+        assert.equal(unregistered.headers.get("access-control-allow-credentials"), null);
+      }
+      const appAdmin = await get(rt, host, "/wp-json/zero-identity/v1/admin/applications", {
+        headers: { cookie: ana, origin: appOrigin },
+      });
+      assert.equal(appAdmin.status, 403, await appAdmin.clone().text());
+      assert.equal(appAdmin.headers.get("access-control-allow-credentials"), null);
+      const appJsonp = await get(rt, host, "/wp-json/zero-identity/v1/account?_jsonp=cb", {
+        headers: { cookie: ana, origin: appOrigin },
+      });
+      assert.equal(appJsonp.status, 400, await appJsonp.clone().text());
+      assert.equal((await appJsonp.json()).code, "rest_callback_disabled");
+      const tokenCors = await get(rt, host, "/wp-json/", {
+        method: "OPTIONS",
+        headers: {
+          origin: "http://app.example.test",
+          "access-control-request-headers": "authorization, content-type",
+        },
+      });
+      assert.equal(tokenCors.headers.get("access-control-allow-origin"), "http://app.example.test");
+      assert.equal(tokenCors.headers.get("access-control-allow-credentials"), null);
+      const ownCors = await get(rt, host, "/wp-json/", {
+        method: "OPTIONS",
+        headers: { origin: origin(host) },
+      });
+      assert.equal(ownCors.headers.get("access-control-allow-origin"), origin(host));
+      assert.equal(ownCors.headers.get("access-control-allow-credentials"), "true");
+      const customerCount = db.exec(`SELECT COUNT(*) FROM ${own.prefix}zero_customers`);
+      const siblingWrite = await get(rt, host, "/?rest_route=/zero/v1/actions/addCustomer", {
+        method: "POST",
+        headers: {
+          ...siblingMetadata,
+          origin: "http://evil.zero-v2-proof.test",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name: "Sibling", email: "sibling@example.test" }),
+      });
+      assert.equal(siblingWrite.status, 403, await siblingWrite.clone().text());
+      assert.equal(db.exec(`SELECT COUNT(*) FROM ${own.prefix}zero_customers`), customerCount);
       // Finding 2: Users binds the Space's current initialized version, not the one
       // a host serves. An immutable host for an older version answers the same user.
       await putRoute(rt, space, "production", {
@@ -1083,6 +1224,12 @@ add_action('rest_api_init', static function () {
       };
       // This Space had Users before its first v2 version: its account sits in
       // the site tables, made by spacefast-identity exactly as sign-in makes it.
+      const machineId = "mac_bundled_identity_proof";
+      const rawConfig = publicAccessConfig(users(false));
+      const rawAuthorization = z
+        .object({ grants: z.array(z.unknown()) })
+        .passthrough()
+        .parse(rawConfig.authorization);
       await deploy(rt, {
         spaceId: rawSpace,
         versionId: "ver_zero_v2_raw_static",
@@ -1090,9 +1237,66 @@ add_action('rest_api_init', static function () {
         activate: {
           route_name: "production",
           production_hostnames: ["zero-raw.test"],
-          config: publicAccessConfig(users(false)),
+          config: {
+            ...rawConfig,
+            visitor_issuer: "spacefast-api",
+            visitor_jwks: runtimeJwks(),
+            authorization: {
+              ...rawAuthorization,
+              accessPage: {
+                displayName: "Cookie proof",
+                exchange: {
+                  passwordUrl: "https://access.spacefast.test/proof/password",
+                  tokenUrl: "https://access.spacefast.test/proof/token",
+                  requestUrl: "https://access.spacefast.test/proof/request",
+                  credential: "bundled-identity-exchange-credential-0123456789",
+                },
+              },
+              grants: [
+                ...rawAuthorization.grants,
+                {
+                  id: "grt_bundled_identity_machine",
+                  generation: 1,
+                  audience: { kind: "machine", machineId },
+                  resources: { include: ["/**"], exclude: [] },
+                  capabilities: ["page.view", "content.publish"],
+                  constraints: {},
+                  target: { kind: "live" },
+                  source: { kind: "managed", reference: "test:bundled-identity" },
+                },
+                {
+                  id: "grt_bundled_identity_member",
+                  generation: 1,
+                  audience: {
+                    kind: "external",
+                    issuer: "spacefast-membership",
+                    subject: "mem_cookie_proof",
+                  },
+                  resources: { include: ["/**"], exclude: [] },
+                  capabilities: ["page.view", "content.publish"],
+                  constraints: {},
+                  target: { kind: "live" },
+                  source: { kind: "managed", reference: "test:bundled-identity" },
+                },
+              ],
+            },
+          },
         },
       });
+      // This static Space still uses the bundled spacefast-identity, not v2's plugin.
+      for (const identityPath of [
+        "/wp-json/spacefast-identity/v1/config",
+        "/__zero/auth/api/config",
+      ]) {
+        const legacyConfig = await get(rt, "zero-raw.test", identityPath);
+        assert.equal(legacyConfig.status, 200, await legacyConfig.clone().text());
+        assert.equal((await legacyConfig.json()).data.issuer, "http://zero-raw.test/identity");
+        const legacySibling = await get(rt, "zero-raw.test", identityPath, {
+          headers: { origin: "http://sibling.zero-raw.test", "sec-fetch-site": "same-site" },
+        });
+        assert.equal(legacySibling.status, 403, await legacySibling.clone().text());
+        assert.equal(legacySibling.headers.get("access-control-allow-credentials"), null);
+      }
       const spaceUser = JSON.parse(
         wp(
           `--exec=$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = ${JSON.stringify(rawSpace)}; $GLOBALS['SPACEFAST_PAGE_SERVING'] = ['users' => ['enabled' => true]];`,
@@ -1102,6 +1306,135 @@ add_action('rest_api_init', static function () {
             " echo json_encode(['id' => $uid, 'secret' => $session['secret']]);",
         ),
       );
+      // Exercise the bundled session reader and the actual WordPress user hook,
+      // even if a caller bypasses the docroot's earlier REST refusal.
+      const bundledUsers = JSON.parse(
+        wp(
+          `--exec=$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = ${JSON.stringify(rawSpace)}; $GLOBALS['SPACEFAST_PAGE_SERVING'] = ['users' => ['enabled' => true]];`,
+          "eval",
+          `require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/context.php"))};
+         $_SERVER['HTTPS'] = 'on'; $_SERVER['HTTP_HOST'] = 'zero-raw.test';
+         $_SERVER['REQUEST_URI'] = '/wp-json/wp/v2/users/me'; $_SERVER['REQUEST_METHOD'] = 'GET';
+         $_COOKIE['__Host-sfi_session'] = ${JSON.stringify(spaceUser.secret)};
+         $users = [];
+         foreach (['own', 'sibling', 'bogus', 'own'] as $scenario) {
+           unset($_SERVER['HTTP_AUTHORIZATION'], $GLOBALS['SPACEFAST_SPACE_USERS_WP_SESSION_USER']);
+           $_SERVER['HTTP_ORIGIN'] = _stattic_request_scheme() . '://' . ($scenario !== 'sibling' ? 'zero-raw.test' : 'sibling.zero-raw.test');
+           $_SERVER['HTTP_SEC_FETCH_SITE'] = $scenario !== 'sibling' ? 'same-origin' : 'same-site';
+           if ($scenario === 'bogus') $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer junk';
+           unset($GLOBALS['current_user']);
+           $users[] = get_current_user_id();
+         }
+         echo json_encode($users);`,
+        ),
+      );
+      assert.deepEqual(bundledUsers, [spaceUser.id, 0, 0, spaceUser.id]);
+      writeFileSync(
+        path.join(rt.root, "wp-content/mu-plugins/current-user-proof.php"),
+        `<?php
+add_action('rest_api_init', static function (): void {
+  register_rest_route('runtime-proof/v1', '/current-user', [
+    'methods' => 'GET', 'permission_callback' => '__return_true',
+    'callback' => static function (): array {
+      $id = get_current_user_id();
+      return ['id' => $id, 'authority' => spacefast_content_principal_user_authority($id)];
+    },
+  ]);
+});`,
+      );
+      const userPath = "/wp-json/runtime-proof/v1/current-user";
+      const cookie = `sfi_session=${spaceUser.secret}`;
+      const ownHeaders = {
+        cookie,
+        origin: "http://zero-raw.test",
+        "sec-fetch-site": "same-origin",
+      };
+      const cookieUser = await get(rt, "zero-raw.test", userPath, { headers: ownHeaders });
+      assert.equal(cookieUser.status, 200, await cookieUser.clone().text());
+      assert.equal((await cookieUser.json()).id, spaceUser.id);
+      const bogus = await get(rt, "zero-raw.test", userPath, {
+        headers: { ...ownHeaders, authorization: "Bearer junk" },
+      });
+      assert.equal(bogus.status, 200, await bogus.clone().text());
+      assert.deepEqual(await bogus.json(), { id: 0, authority: null });
+      const machineToken = signToken({
+        v: 1,
+        purpose: "runtime-bearer",
+        iss: "spacefast-api",
+        aud: rawSpace,
+        sub: `machine:${machineId}`,
+        authorities: [`machine:${machineId}`],
+        host: "zero-raw.test",
+        spaceId: rawSpace,
+        generation: 1,
+        sid: "a".repeat(64),
+        jti: "bundled-identity-machine",
+        emailVerified: false,
+        iat: Math.floor(Date.now() / 1000),
+      });
+      const mintCookies = Bun.spawnSync([
+        "php",
+        "-r",
+        `putenv('SPACEFAST_INSECURE_COOKIES=1');
+         require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/context.php"))};
+         require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/content-admin.php"))};
+         require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/content-access.php"))};
+         require_once ${JSON.stringify(path.join(rt.engineRoot, "runtime/serve.php"))};
+         require_once ${JSON.stringify(path.join(rt.engineRoot, "runtime/access-rules.php"))};
+         $root = ${JSON.stringify(rt.storageRoot)}; $space = ${JSON.stringify(rawSpace)};
+         _stattic_access_private_root($root); _sf_load_generated_config($root);
+         $serving = _stattic_content_access_target($root, 'zero-raw.test')['serving'];
+         $GLOBALS['SPACEFAST_PAGE_SERVING'] = $serving;
+         $authorization = ['space_id' => $space, 'access_generation' => 1];
+         _stattic_content_admin_apply_authorization($root, $authorization);
+         $admin = _stattic_content_admin_mint_session($root, 'zero-raw.test', ${spaceUser.id},
+           ['kind' => 'user', 'issuer' => 'spacefast', 'subject' => 'cookie-editor'],
+           $authorization, 'administrator', 'https://my.spacefast.com',
+           ['surface' => 'wordpress'], 'http://zero-raw.test');
+         $access = _stattic_access_session_create($serving, [
+           'sub' => 'cookie-member', 'exp' => time() + 3600,
+           'claims' => ['spaceId' => $space, 'sid' => hash('sha256', 'cookie-member'),
+             'principal' => 'account:cookie-member',
+             'identity' => ['issuer' => 'https://api.spacefast.com/v1/auth', 'subject' => 'cookie-member'],
+             'authorities' => ['member:mem_cookie_proof']],
+         ], 'zero-raw.test', 0, $serving['authorization']);
+         if ($admin === null) throw new RuntimeException('Admin cookie mint failed');
+         if ($access === null) throw new RuntimeException('Access cookie mint failed');
+         echo json_encode([_stattic_content_admin_cookie_name() . '=' . $admin['token'],
+           _stattic_session_cookie_name() . '=' . $access]);`,
+      ]);
+      assert.equal(mintCookies.exitCode, 0, mintCookies.stderr.toString());
+      const platformCookies = z.array(z.string()).parse(JSON.parse(mintCookies.stdout.toString()));
+      for (const ambientCookie of [cookie, ...platformCookies]) {
+        const ambient = await get(rt, "zero-raw.test", userPath, {
+          headers: { ...ownHeaders, cookie: ambientCookie },
+        });
+        assert.equal(ambient.status, 200, await ambient.clone().text());
+        const ambientUser = (await ambient.json()).id;
+        assert.ok(ambientUser > 0);
+        for (const [requestOrigin, site] of [
+          ["http://zero-raw.test", "same-origin"],
+          ["http://sibling.zero-raw.test", "same-site"],
+        ]) {
+          const machine = await get(rt, "zero-raw.test", userPath, {
+            headers: {
+              cookie: ambientCookie,
+              origin: requestOrigin,
+              "sec-fetch-site": site,
+              "x-sf-authorization": `Bearer ${machineToken}`,
+            },
+          });
+          assert.equal(machine.status, 200, await machine.clone().text());
+          const current = await machine.json();
+          assert.ok(current.id > 0);
+          assert.notEqual(current.id, ambientUser);
+          assert.deepEqual(current.authority, {
+            kind: "service",
+            issuer: "spacefast-service",
+            subject: machineId,
+          });
+        }
+      }
       const rawSession = await createDeclaredSession(rt, rawSpace, rawVersion, rawFiles);
       await uploadSessionBlobs(rt, rawSession, rawFiles);
       const rawLock = Bun.spawn({

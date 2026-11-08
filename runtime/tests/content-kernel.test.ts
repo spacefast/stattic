@@ -23,6 +23,14 @@ test("the MU loader follows the engine pointer and selects one Space's immutable
   for (const release of ["release-a", "release-b"]) {
     const releaseRoot = path.join(publicRoot, ".stattic/releases", release);
     mkdirSync(path.join(releaseRoot, "engine/wordpress"), { recursive: true });
+    mkdirSync(path.join(releaseRoot, "engine/shared"), { recursive: true });
+    // release-a predates REST hooks. The newest docroot loader must still load it.
+    if (release === "release-b") {
+      writeFileSync(
+        path.join(releaseRoot, "engine/shared/wordpress-rest.php"),
+        "<?php // Older helper file without the hook installer.\n",
+      );
+    }
     // The real kernel owns the Space-scope check the loader defers to; the
     // marker records which release's copy was loaded.
     writeFileSync(
@@ -393,6 +401,13 @@ $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = [
   'subject' => 'shared-subject',
   'profile' => ['display_name' => 'Ada'],
 ];
+$_SERVER['REQUEST_URI'] = '/wp-json/wp/v2/posts';
+$_SERVER['HTTP_ORIGIN'] = 'https://sibling.test';
+$_SERVER['HTTP_SEC_FETCH_SITE'] = 'same-site';
+$_SERVER['HTTP_AUTHORIZATION'] = 'Bearer junk';
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = 57;
+$crossOriginEditor = spacefast_content_principal_current_user(0);
+unset($GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'], $_SERVER['REQUEST_URI'], $_SERVER['HTTP_ORIGIN'], $_SERVER['HTTP_SEC_FETCH_SITE'], $_SERVER['HTTP_AUTHORIZATION']);
 $apiUser = spacefast_content_principal_current_user(0);
 $authoredPost = ['post_author' => $apiUser];
 $adminUser = spacefast_content_principal_establish_user();
@@ -464,6 +479,7 @@ echo json_encode([
     'other_space_can_edit' => $otherSpace['edit_posts'] ?? false,
     'other_space_can_manage' => $otherSpace['spacefast_manage_content'],
   ],
+  'cross_origin_editor' => $crossOriginEditor,
   'api_user' => $apiUser,
   'admin_user' => $adminUser,
   'repeat_user' => $repeatUser,
@@ -519,6 +535,7 @@ echo json_encode([
   // SAFETY: the shape is the echo statement at the end of the PHP script above;
   // the expectations below fail loudly if the script ever stops emitting it.
   const result = JSON.parse(stdout) as {
+    cross_origin_editor: number;
     api_user: number;
     admin_user: number;
     repeat_user: number;
@@ -551,6 +568,7 @@ echo json_encode([
     other_space_can_edit: false,
     other_space_can_manage: false,
   });
+  expect(result.cross_origin_editor).toBe(0);
   expect(result.api_user).toBe(57);
   expect(result.admin_user).toBe(57);
   expect(result.repeat_user).toBe(57);

@@ -12,6 +12,7 @@ declare(strict_types=1);
 // arguments, read-only kinds, policy, approvals). This file only proves who is
 // asking and from where, and relays the verdict.
 
+require_once __DIR__ . '/../shared/request-origin.php';
 require_once __DIR__ . '/../shared/artifacts.php';
 require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/response.php';
@@ -86,18 +87,6 @@ function _stattic_connectors_sign_in_url(array $serving, string $return): string
         default => 'spacefast',
     };
     return STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/auth/start?provider=' . $provider . '&returnTo=' . rawurlencode($return);
-}
-
-// Same-origin or nothing. Browsers send Origin on every POST fetch; a request
-// proving neither Origin nor same-origin fetch metadata is refused.
-function _stattic_connectors_same_origin(string $host): bool
-{
-    $origin = strtolower(trim((string) ($_SERVER['HTTP_ORIGIN'] ?? '')));
-    $site = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));
-    if ($origin !== '' && $origin !== 'null') {
-        return hash_equals(strtolower(_stattic_runtime_request_origin($host)), $origin);
-    }
-    return $site === 'same-origin';
 }
 
 /**
@@ -247,7 +236,7 @@ function _stattic_connectors_serve(string $privateRoot, string $versionRoot, arr
     }
     // Cookies reach a role only from the Space's own pages: a write proves its
     // origin, and a read must not come from another site.
-    if ($method === 'POST' ? !_stattic_connectors_same_origin($host) : !_stattic_connectors_not_cross_site($host)) {
+    if ($method === 'POST' ? !_stattic_access_same_origin_post($host) : !_stattic_connectors_not_cross_site($host)) {
         _stattic_connectors_refuse(403, 'browser_origin_not_allowed', 'Call this Space\'s connectors from its own pages. Elsewhere, use the Spacefast API.');
     }
     $call = [
@@ -355,7 +344,7 @@ function _stattic_connectors_serve_visitor(array $serving, string $host, string 
     if (!in_array($method, $methods, true)) {
         _stattic_method_not_allowed(implode(', ', $methods), ['code' => 'method_not_allowed', 'message' => '', 'headers' => STATTIC_CONNECTORS_RESPONSE_HEADERS]);
     }
-    if ($operation === 'disconnect' && !_stattic_connectors_same_origin($host)) {
+    if ($operation === 'disconnect' && !_stattic_access_same_origin_post($host)) {
         _stattic_connectors_refuse(403, 'browser_origin_not_allowed', 'Disconnect from this Space.');
     }
     $origin = _stattic_runtime_request_origin($host);

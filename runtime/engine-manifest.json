@@ -65,6 +65,8 @@
     "engine/shared/canonical-json.php",
     "engine/shared/content-access.php",
     "engine/shared/content-admin.php",
+    "engine/shared/wordpress-rest.php",
+    "engine/shared/request-origin.php",
     "engine/shared/content-principal.php",
     "engine/shared/content-request.php",
     "engine/shared/context.php",

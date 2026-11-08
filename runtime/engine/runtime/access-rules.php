@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . "/../shared/request-origin.php";
+
 require_once __DIR__ . "/../shared/security-telemetry.php";
 
 require_once __DIR__ . '/../shared/jwt.php';
@@ -50,18 +52,6 @@ function _stattic_access_context(
 function _stattic_canonicalize_host(string $host): string
 {
     return _stattic_normalize_hostname($host);
-}
-
-function _stattic_runtime_request_origin(string $requestHost): string
-{
-    $authority = strtolower(trim((string) ($_SERVER['HTTP_HOST'] ?? '')));
-    if (
-        preg_match('/\A[a-z0-9.-]+(?::[0-9]{1,5})?\z/D', $authority) !== 1
-        || _stattic_normalize_host_authority($authority) !== _stattic_normalize_hostname($requestHost)
-    ) {
-        $authority = _stattic_canonicalize_host($requestHost);
-    }
-    return _stattic_request_scheme() . '://' . $authority;
 }
 
 function _stattic_request_is_fetch(): bool
@@ -2257,7 +2247,8 @@ function _stattic_access_anonymous_admits(array $serving, string $requestHost, s
 function _stattic_access_enforce_v4(
     string $requestHost,
     string $requestPath,
-    string $originalRequestPath
+    string $originalRequestPath,
+    bool $allowCrossOriginPlatformCredential = false
 ): void {
     $serving = _stattic_page_serving();
     $GLOBALS['SPACEFAST_ACCESS_ENFORCED'] = true;
@@ -2277,7 +2268,11 @@ function _stattic_access_enforce_v4(
             false
         ) || $protected;
     }
-    if ($protected && _stattic_private_cross_host_subresource($requestHost)) {
+    // A verified platform credential owns its identity; browser cookies do not.
+    $verifiedPlatform = $allowCrossOriginPlatformCredential
+        && _stattic_platform_bearer_token_from_request() !== null
+        && _stattic_current_session_identity($serving, $requestHost) !== null;
+    if ($protected && !$verifiedPlatform && _stattic_private_cross_host_subresource($requestHost)) {
         header('X-Spacefast-Access-Diagnostic: cross-host-private-subresource', true);
         _stattic_render_scoped_deny($serving);
     }
@@ -3908,29 +3903,6 @@ function _stattic_access_exchange_headers(array $exchange, array $context, strin
         $headers[] = 'Spacefast-Visitor-User-Agent: ' . $agent;
     }
     return $headers;
-}
-
-// Every browser that can reach these forms sends Origin on a form POST, so a
-// submission proving nothing is refused rather than trusted: no Origin, no
-// same-origin fetch metadata.
-function _stattic_access_same_origin_post(string $requestHost): bool
-{
-    $origin = trim((string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
-    $site = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));
-    if ($site === 'cross-site' || $site === 'same-site') {
-        return false;
-    }
-    // Chromium sends the opaque Origin "null" for same-origin form posts from a
-    // no-referrer document. Safe only alongside same-origin fetch metadata:
-    // same-site is not enough, another origin on the site can produce it.
-    if ($origin === 'null') {
-        return $site === 'same-origin';
-    }
-    if ($origin !== '') {
-        $expectedOrigin = _stattic_runtime_request_origin($requestHost);
-        return hash_equals(strtolower($expectedOrigin), strtolower($origin));
-    }
-    return $site === 'same-origin';
 }
 
 // Kept in a same-origin external resource so a normal `script-src 'self'`

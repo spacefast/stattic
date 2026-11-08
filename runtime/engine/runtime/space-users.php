@@ -195,12 +195,19 @@ function _stattic_space_users_dispatch(string $path, string $method, string $hos
     }
     if (str_starts_with($path, '/__zero/auth/api/')) {
         $operation = substr($path, strlen('/__zero/auth/api/'));
+        $route = '/' . spacefast_space_users_rest_namespace() . '/' . $operation;
+        _stattic_space_users_admit_origin($method, $host, $route);
         if (str_starts_with($operation, 'admin/')) {
             _stattic_problem_refused(403, 'space_users_management_forbidden', 'Manage Users from your Space dashboard.');
         }
         // The content kernel's REST serializer; a Zero v2 binding loads no kernel.
         require_once __DIR__ . '/../wordpress/content-admin-api.php';
-        $request = new WP_REST_Request($method === 'HEAD' ? 'GET' : $method, '/' . spacefast_space_users_rest_namespace() . '/' . $operation);
+        $request = new WP_REST_Request($method === 'HEAD' ? 'GET' : $method, $route);
+        _stattic_wordpress_rest_cors(false, null, $request);
+        if ($method === 'OPTIONS') {
+            header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Identity-CSRF');
+            _stattic_zero_json_response(200, ['data' => null]);
+        }
         $request->set_query_params($_GET);
         $request->set_header('origin', (string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
         $request->set_header('x-identity-csrf', (string) ($_SERVER['HTTP_X_IDENTITY_CSRF'] ?? ''));
@@ -333,14 +340,12 @@ function _stattic_space_users_start(string $selected, string $returnPath): never
     exit;
 }
 
-/** Cookie-authenticated app writes require the exact app origin, including its port. */
-function _stattic_space_users_admit_origin(string $method, string $host): void
+/** Native identity operations share REST's exact origin and registered app rules. */
+function _stattic_space_users_admit_origin(string $method, string $host, string $route = ''): void
 {
-    $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-    $expected = _stattic_runtime_request_origin($host);
-    if (($origin !== '' && $origin !== $expected)
-        || (!in_array($method, ['GET', 'HEAD', 'OPTIONS'], true) && $origin !== $expected)
-        || ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '') === 'cross-site') {
+    require_once __DIR__ . '/../shared/wordpress-rest.php';
+    if (!_stattic_wordpress_rest_origin_allowed($host, $method)
+        && !_stattic_wordpress_identity_app_origin_allowed($route)) {
         _stattic_problem_refused(403, 'space_users_origin_denied', 'Use this app from its own origin.');
     }
 }

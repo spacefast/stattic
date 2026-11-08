@@ -106,8 +106,8 @@ export async function acceptSpaceUsersHttp(input: {
   });
   assert.equal(forged.status, 403);
   assert.equal(
-    z.object({ error: z.object({ code: z.string() }) }).parse(await forged.json()).error.code,
-    "invalid_origin",
+    z.object({ code: z.string() }).parse(await forged.json()).code,
+    "space_users_origin_denied",
   );
   assert.equal(
     spaceUserAccountSchema.parse(await owner("account-get", { id: carol.id })).status,

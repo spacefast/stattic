@@ -65,7 +65,11 @@ test("wp.cloud config is decryptable before a clean route enters the runtime", (
         "putenv('DB_PASSWORD=encrypted-data-key');",
         `$_SERVER['DOCUMENT_ROOT'] = ${JSON.stringify(root)};`,
         "$_SERVER['SCRIPT_FILENAME'] = '/scripts/wordpress.php';",
-        "$_SERVER['REQUEST_METHOD'] = 'GET';",
+        "$_SERVER['REQUEST_METHOD'] = getenv('SPACEFAST_TEST_METHOD') ?: 'GET';",
+        "$_SERVER['HTTP_ORIGIN'] = getenv('SPACEFAST_TEST_ORIGIN') ?: '';",
+        "$_SERVER['HTTP_AUTHORIZATION'] = getenv('SPACEFAST_TEST_AUTHORIZATION') ?: '';",
+        "$_SERVER['HTTP_SEC_FETCH_SITE'] = getenv('SPACEFAST_TEST_FETCH_SITE') ?: '';",
+        "$_SERVER['HTTP_X_HTTP_METHOD_OVERRIDE'] = getenv('SPACEFAST_TEST_OVERRIDE') ?: $_SERVER['REQUEST_METHOD'];",
         "$_SERVER['REQUEST_URI'] = '/api/echo';",
         "$_SERVER['HTTP_HOST'] = 'example.test';",
         `require ${JSON.stringify(path.join(root, "custom-redirects.php"))};`,
@@ -115,6 +119,8 @@ require ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/bootstr
 function _stattic_dashboard_origin(): string {
   return defined('SPACEFAST_DASHBOARD_ORIGIN') ? SPACEFAST_DASHBOARD_ORIGIN : '';
 }
+function _stattic_request_scheme(): string { return 'https'; }
+function _stattic_platform_bearer_token_from_request(): ?string { return null; }
 function _stattic_normalize_hostname(string $host): string { return strtolower($host); }
 function _stattic_normalize_host_authority(string $host): string { return strtolower($host); }
 function _stattic_base64url_encode(string $value): string {
@@ -171,6 +177,10 @@ function _stattic_content_access_target(string $root, string $host): array {
       path.resolve(import.meta.dir, "../engine/shared/content-admin.php"),
       path.join(sharedRoot, "content-admin.php"),
     );
+    writeFileSync(
+      path.join(sharedRoot, "wordpress-rest.php"),
+      `<?php require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/wordpress-rest.php"))};`,
+    );
     mkdirSync(path.join(root, ".stattic"), { recursive: true });
     writeFileSync(path.join(root, ".stattic/publication.lock"), "");
     writeActiveReleasePointer(path.join(root, ".stattic"), "releases/test");
@@ -218,9 +228,15 @@ function _stattic_content_access_target(string $root, string $host): array {
         `$session = _stattic_content_admin_mint_session(${JSON.stringify(path.join(root, ".stattic/storage"))}, 'space.example', 57, ['kind' => 'user', 'issuer' => 'spacefast', 'subject' => 'sub_entrypoints_test'], ['space_id' => 'spc_test', 'access_generation' => 7], 'editor', 'https://launch.sf.localhost', ['surface' => 'wordpress'], 'https://public.example');`,
         `$_SERVER['DOCUMENT_ROOT'] = ${JSON.stringify(root)};`,
         `$_SERVER['SCRIPT_FILENAME'] = ${JSON.stringify(root)} . '/' . (getenv('SPACEFAST_TEST_SCRIPT') ?: 'wp-admin/edit.php');`,
-        "$_SERVER['REQUEST_METHOD'] = 'GET';",
+        "$_SERVER['REQUEST_METHOD'] = getenv('SPACEFAST_TEST_METHOD') ?: 'GET';",
+        "$_SERVER['HTTP_ORIGIN'] = getenv('SPACEFAST_TEST_ORIGIN') ?: '';",
+        "$_SERVER['HTTP_AUTHORIZATION'] = getenv('SPACEFAST_TEST_AUTHORIZATION') ?: '';",
+        "$_SERVER['HTTP_SEC_FETCH_SITE'] = getenv('SPACEFAST_TEST_FETCH_SITE') ?: '';",
+        "$_SERVER['HTTP_X_HTTP_METHOD_OVERRIDE'] = getenv('SPACEFAST_TEST_OVERRIDE') ?: $_SERVER['REQUEST_METHOD'];",
         "$_SERVER['REQUEST_URI'] = getenv('SPACEFAST_TEST_URI') ?: '/wp-admin/edit.php';",
         "$_SERVER['HTTP_HOST'] = 'space.example';",
+        "$queryMethod = getenv('SPACEFAST_TEST_QUERY_METHOD');",
+        "if (is_string($queryMethod) && $queryMethod !== '') $_GET['_method'] = $queryMethod;",
         "$restRoute = getenv('SPACEFAST_TEST_REST_ROUTE');",
         "if (is_string($restRoute) && $restRoute !== '') { $_GET['rest_route'] = $restRoute; }",
         "$_COOKIE[_stattic_content_admin_cookie_name()] = getenv('SPACEFAST_TEST_NO_COOKIE') ? '' : $session['token'];",
@@ -280,8 +296,69 @@ function _stattic_content_access_target(string $root, string $host): array {
         SPACEFAST_TEST_REST_ROUTE: "/wp/v2/types",
       }),
     ).toEqual(handedOff);
-    // A platform hold outranks a live session: the host answers the platform's
-    // page to every visitor, so it must not stay editable for a session TTL.
+    // A valid host-bound editor session never reaches WordPress from a sibling.
+    for (const spelling of [
+      { SPACEFAST_TEST_URI: "/wp-json/wp/v2/types" },
+      {
+        SPACEFAST_TEST_URI: "/?rest_route=/wp/v2/types",
+        SPACEFAST_TEST_REST_ROUTE: "/wp/v2/types",
+      },
+    ]) {
+      const request = { ...spelling, SPACEFAST_TEST_SCRIPT: "index.php" };
+      expect(
+        run({
+          ...request,
+          SPACEFAST_TEST_METHOD: "POST",
+          SPACEFAST_TEST_ORIGIN: "https://evil.space.example",
+        }),
+      ).toEqual({ refused: [403, "rest_origin_denied"] });
+      expect(
+        run({
+          ...request,
+          SPACEFAST_TEST_ORIGIN: "https://evil.space.example",
+          SPACEFAST_TEST_FETCH_SITE: "same-site",
+          SPACEFAST_TEST_AUTHORIZATION: "Bearer junk",
+        }),
+      ).toEqual({ refused: [403, "rest_origin_denied"] });
+      expect(run({ ...request, SPACEFAST_TEST_FETCH_SITE: "same-site" })).toEqual({
+        refused: [403, "rest_origin_denied"],
+      });
+      expect(run({ ...request, SPACEFAST_TEST_FETCH_SITE: "cross-site" })).toEqual({
+        refused: [403, "rest_origin_denied"],
+      });
+      expect(run({ ...request, SPACEFAST_TEST_OVERRIDE: "DELETE" })).toEqual({
+        refused: [403, "rest_origin_denied"],
+      });
+      expect(
+        run({ ...request, SPACEFAST_TEST_QUERY_METHOD: "POST", SPACEFAST_TEST_OVERRIDE: "GET" }),
+      ).toEqual({
+        refused: [403, "rest_origin_denied"],
+      });
+      expect(
+        run({ ...request, SPACEFAST_TEST_QUERY_METHOD: "GET", SPACEFAST_TEST_OVERRIDE: "POST" }),
+      ).toEqual({
+        refused: [403, "rest_origin_denied"],
+      });
+      expect(
+        run({
+          ...request,
+          SPACEFAST_TEST_METHOD: "POST",
+          SPACEFAST_TEST_ORIGIN: "https://space.example",
+          SPACEFAST_TEST_FETCH_SITE: "same-origin",
+        }),
+      ).toEqual(handedOff);
+    }
+    // The docroot gate can outlive the selected engine after rollback.
+    rmSync(path.join(sharedRoot, "wordpress-rest.php"));
+    expect(
+      run({ SPACEFAST_TEST_URI: "/wp-json/wp/v2/types", SPACEFAST_TEST_SCRIPT: "index.php" }),
+    ).toEqual(handedOff);
+    // An older helper file may exist without the individual newer exports.
+    writeFileSync(path.join(sharedRoot, "wordpress-rest.php"), "<?php\n");
+    expect(
+      run({ SPACEFAST_TEST_URI: "/wp-json/wp/v2/types", SPACEFAST_TEST_SCRIPT: "index.php" }),
+    ).toEqual(handedOff);
+    // A platform hold still outranks a live session on an older engine.
     expect(run({ SPACEFAST_TEST_HOLD: "tombstone" })).toEqual({
       refused: [404, "content_admin_space_not_found"],
     });

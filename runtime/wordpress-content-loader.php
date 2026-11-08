@@ -42,6 +42,14 @@ declare(strict_types=1);
         $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseReal;
     }
 
+    $wordpressRest = $releaseReal . '/engine/shared/wordpress-rest.php';
+    if (is_file($wordpressRest)) {
+        require_once $wordpressRest;
+        if (function_exists('_stattic_wordpress_rest_install_hooks')) {
+            _stattic_wordpress_rest_install_hooks();
+        }
+    }
+
     $nativeProcess = $releaseReal . '/engine/shared/native-process.php';
     if (is_file($nativeProcess)) {
         require_once $nativeProcess;

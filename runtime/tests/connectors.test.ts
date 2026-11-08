@@ -414,6 +414,8 @@ test("a POST writes from the Space's own pages only, up to 64 KiB", async () => 
   // the origin check is what refuses them.
   const crossOrigin: Array<{ origin?: string; "sec-fetch-site": string }> = [
     { origin: "https://elsewhere.example", "sec-fetch-site": "" },
+    { origin, "sec-fetch-site": "same-site" },
+    { origin, "sec-fetch-site": "cross-site" },
     { "sec-fetch-site": "cross-site" },
     // A write proves its origin; one with no headers at all is refused.
     { "sec-fetch-site": "" },

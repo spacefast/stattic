@@ -364,6 +364,26 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             $deploymentPath = $path === '/'
                 ? _stattic_content_rest_access_path($path, $restSelectors)
                 : $path;
+            $isRestRequest = _stattic_content_rest_request_path($path, $restSelectors);
+            $wordpressRest = $releaseRoot . '/engine/shared/wordpress-rest.php';
+            if (is_file($wordpressRest)) require_once $wordpressRest;
+            $hasRestBoundary = function_exists('_stattic_wordpress_rest_origin_allowed');
+            $hasRestCookieBoundary = function_exists('_stattic_wordpress_rest_cookie_allowed');
+            // Defer a platform credential to verification below; its presence never admits a cookie.
+            $platformCredentialPresented = $isRestRequest && _stattic_platform_bearer_token_from_request() !== null;
+            $identityRestRequest = $isRestRequest && function_exists('_stattic_wordpress_identity_rest_route') && _stattic_wordpress_identity_rest_route(
+                substr(_stattic_content_rest_access_path($path, $restSelectors), strlen('/wp-json'))
+            );
+            $restOriginAllowed = !$isRestRequest || !$hasRestBoundary || _stattic_wordpress_rest_origin_allowed(
+                $host,
+                (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')
+            );
+            // Identity's registered app origins can only be checked after its
+            // plugin and scoped database load. Never project ambient WordPress
+            // credentials while deferring that check to the REST auth hook.
+            if (!$restOriginAllowed && !$identityRestRequest && !$platformCredentialPresented && $_COOKIE !== []) {
+                _stattic_problem_response(403, 'rest_origin_denied', 'Use this Space from its own origin.');
+            }
             if (_stattic_content_deployment_claims_path($privateRoot, $host, $deploymentPath, strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')))) {
                 require $releaseRoot . '/engine/init.php';
                 return;
@@ -372,7 +392,9 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
             $token = is_string($_COOKIE[$cookieName] ?? null)
                 ? $_COOKIE[$cookieName]
                 : '';
-            $session = _stattic_content_admin_verify_session($privateRoot, $token, $host);
+            $restCookieAllowed = !$isRestRequest || ($hasRestCookieBoundary
+                ? _stattic_wordpress_rest_cookie_allowed($host) : $restOriginAllowed && !$platformCredentialPresented);
+            $session = $restCookieAllowed ? _stattic_content_admin_verify_session($privateRoot, $token, $host) : null;
             if ($session !== null) {
                 $GLOBALS['SPACEFAST_CONTENT_ADMIN_USER_ID'] = $session['user_id'];
                 $GLOBALS['SPACEFAST_CONTENT_ADMIN_SESSION_EXPIRES_AT'] = $session['expires_at'];
@@ -431,17 +453,23 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
                 ) {
                     // Denials terminate inside, with the same answer this path
                     // would give a browser asking for the page.
-                    _stattic_access_enforce_v4($host, $accessPath, $accessPath);
+                    _stattic_access_enforce_v4($host, $accessPath, $accessPath, $isRestRequest);
+                }
+                if (!$restOriginAllowed && $platformCredentialPresented
+                    && (!function_exists('_stattic_current_session_identity')
+                        || _stattic_current_session_identity($target['serving'], $host) === null)) {
+                    _stattic_problem_response(403, 'rest_origin_denied', 'Use this Space from its own origin.');
                 }
                 // Admitted. Who WordPress runs as is a separate question from
                 // whether the request may proceed, and null is a normal answer:
                 // WordPress then serves REST unauthenticated, which on a public
                 // Space is exactly what it would do on its own.
-                $principal = _stattic_access_wordpress_principal(
-                    $target['serving'],
-                    $host,
-                    $accessPath
-                );
+                $principal = !$restCookieAllowed && !$platformCredentialPresented
+                    ? null : _stattic_access_wordpress_principal(
+                        $target['serving'],
+                        $host,
+                        $accessPath
+                    );
                 if ($principal !== null) {
                     $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $principal;
                     $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = $principal['wordpress_role'];

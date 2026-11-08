@@ -53,7 +53,10 @@ const [{ mintRuntimeBearerToken }, { runtimeJwks }] = await Promise.all([
 type TestGrant = {
   id: string;
   generation: number;
-  audience: { kind: "machine"; machineId: string } | { kind: "public" };
+  audience:
+    | { kind: "machine"; machineId: string }
+    | { kind: "public" }
+    | { kind: "external"; issuer: string; subject: string };
   resources: { include: string[]; exclude: string[] };
   capabilities: string[];
   constraints: object;
@@ -94,6 +97,16 @@ function accessConfig(
       source: { kind: "managed", reference: "test:wp-api" },
     },
   ];
+  grants.push({
+    id: "grt_wp_api_cookie_user",
+    generation: 1,
+    audience: { kind: "external", issuer: "spacefast-membership", subject: "mem_cookie_user" },
+    resources: { include: ["/**"], exclude: [] },
+    capabilities: ["page.view", "content.publish"],
+    constraints: {},
+    target: { kind: "live" },
+    source: { kind: "managed", reference: "test:wp-api-cookie" },
+  });
   if (publicGrant) {
     grants.push({
       id: "grt_wp_api_public",
@@ -169,6 +182,50 @@ async function machineToken({
       jti: `jti_${randomUUID()}`,
     })
   ).token;
+}
+
+function principalCookie(kind: "editor" | "access"): string {
+  const probe = Bun.spawnSync([
+    "php",
+    "-r",
+    `putenv('SPACEFAST_INSECURE_COOKIES=1');
+     require $argv[1] . '/engine/shared/context.php';
+     require $argv[1] . '/engine/shared/storage.php';
+     require $argv[1] . '/engine/shared/content-admin.php';
+     require $argv[1] . '/engine/shared/content-access.php';
+     require $argv[1] . '/engine/runtime/serve.php';
+     require $argv[1] . '/engine/runtime/access-rules.php';
+     _stattic_access_private_root($argv[2]);
+     if ($argv[5] === 'access') {
+       _sf_load_generated_config($argv[2]);
+       $serving = _stattic_content_access_target($argv[2], $argv[3])['serving'];
+       $GLOBALS['SPACEFAST_PAGE_SERVING'] = $serving;
+       $credential = _stattic_access_session_create($serving, [
+         'sub' => 'cookie-user', 'exp' => time() + 3600,
+         'claims' => ['spaceId' => $argv[4], 'sid' => hash('sha256', 'wp-api-cookie'),
+           'principal' => 'account:cookie-user',
+           'identity' => ['issuer' => 'https://api.spacefast.com/v1/auth', 'subject' => 'cookie-user'],
+           'authorities' => ['member:mem_cookie_user']],
+       ], $argv[3], 0, $serving['authorization']);
+       if ($credential === null) exit(1);
+       echo _stattic_session_cookie_name() . '=' . $credential;
+       exit;
+     }
+     $authorization = ['space_id' => $argv[4], 'access_generation' => 1];
+     _stattic_content_admin_apply_authorization($argv[2], $authorization);
+     $session = _stattic_content_admin_mint_session($argv[2], $argv[3], 42,
+       ['kind' => 'user', 'issuer' => 'spacefast', 'subject' => 'cookie-editor'],
+       $authorization, 'administrator', 'https://my.spacefast.test', ['surface' => 'wordpress'], 'https://' . $argv[3]);
+     if ($session === null) exit(1);
+     echo _stattic_content_admin_cookie_name() . '=' . $session['token'];`,
+    path.dirname(runtime.engineRoot),
+    runtime.storageRoot,
+    OPEN_HOST,
+    OPEN_SPACE,
+    kind,
+  ]);
+  expect(probe.exitCode, probe.stderr.toString()).toBe(0);
+  return probe.stdout.toString();
 }
 
 /** What the gate established, as WordPress would find it. */
@@ -492,11 +549,22 @@ afterAll(() => runtime?.stop());
 
 test("a Space credential reaches WordPress REST as the principal its Grants earn", async () => {
   const token = await machineToken();
+  const cookie = principalCookie("editor");
+  const editor = await wpContext(OPEN_HOST, "/wp-json/wp/v2/posts", {
+    cookie,
+    origin: `http://${OPEN_HOST}`,
+    "sec-fetch-site": "same-origin",
+  });
+  expect(editor.status).toBe(200);
+  expect(editor.context).toMatchObject({ role: "administrator", principal_kind: "user" });
   const admitted = await wpContext(OPEN_HOST, "/wp-json/wp/v2/posts", {
     "x-sf-authorization": `Bearer ${token}`,
+    cookie,
+    origin: `http://${OPEN_HOST}`,
+    "sec-fetch-site": "same-origin",
   });
 
-  expect(admitted.status).toBe(200);
+  expect(admitted.status, admitted.body).toBe(200);
   expect(admitted.context).toEqual({
     served_by: "wordpress",
     space_id: OPEN_SPACE,
@@ -517,6 +585,54 @@ test("a Space credential reaches WordPress REST as the principal its Grants earn
     "x-sf-authorization": `Bearer ${token}`,
   });
   expect(queryForm.context).toMatchObject({ served_by: "wordpress", role: "editor" });
+  const machineWrite = await get(runtime, OPEN_HOST, "/wp-json/wp/v2/posts", {
+    method: "POST",
+    headers: {
+      "x-sf-authorization": `Bearer ${token}`,
+      cookie,
+      origin: "https://sibling.test",
+      "sec-fetch-site": "same-site",
+    },
+  });
+  expect(machineWrite.status, await machineWrite.clone().text()).toBe(200);
+  expect(await machineWrite.json()).toMatchObject({
+    served_by: "wordpress",
+    role: "editor",
+    principal_kind: "service",
+    actor_id: MACHINE,
+  });
+  const accessCookie = principalCookie("access");
+  const accessUser = await wpContext(OPEN_HOST, "/wp-json/wp/v2/posts", {
+    cookie: accessCookie,
+    origin: `http://${OPEN_HOST}`,
+    "sec-fetch-site": "same-origin",
+  });
+  expect(accessUser.status, accessUser.body).toBe(200);
+  expect(accessUser.context).toMatchObject({
+    principal_kind: "user",
+    actor_id: "cookie-user",
+    role: "editor",
+  });
+  const deniedAccess = await wpContext(OPEN_HOST, "/wp-json/wp/v2/posts", {
+    cookie: accessCookie,
+    origin: "http://sibling.test",
+    "sec-fetch-site": "same-site",
+    authorization: "Bearer junk",
+  });
+  expect(deniedAccess.status).toBe(403);
+  expect(deniedAccess.context).toBeNull();
+  const machineWithAccess = await wpContext(OPEN_HOST, "/wp-json/wp/v2/posts", {
+    cookie: accessCookie,
+    origin: `http://${OPEN_HOST}`,
+    "sec-fetch-site": "same-origin",
+    "x-sf-authorization": `Bearer ${token}`,
+  });
+  expect(machineWithAccess.status, machineWithAccess.body).toBe(200);
+  expect(machineWithAccess.context).toMatchObject({
+    principal_kind: "service",
+    actor_id: MACHINE,
+    role: "editor",
+  });
 });
 
 test("REST without a Spacefast credential is WordPress's own unauthenticated answer", async () => {
@@ -565,6 +681,9 @@ test("an unusable credential is refused rather than downgraded", async () => {
   // a credential is that its failure is visible.
   const garbage = await wpContext(OPEN_HOST, "/wp-json/wp/v2/posts", {
     "x-sf-authorization": "Bearer not-a-real-credential",
+    cookie: principalCookie("editor"),
+    origin: "http://sibling.test",
+    "sec-fetch-site": "same-site",
   });
   expect(garbage.status).toBe(403);
   expect(garbage.context).toBeNull();

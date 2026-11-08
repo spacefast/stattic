@@ -126,6 +126,52 @@ test("serves and proves the chroot revision the site selected", async () => {
   });
   // The site's own release is not what serves, so it is not current.
   expect((await update("source-tree")).status).toBe(409);
+
+  // An updated docroot MU loader must boot a previous engine that predates
+  // REST hooks. Use the real channel selector, not a preselected global.
+  symlinkSync(
+    `sf-engine-${CHROOT_REVISION}`,
+    path.join(chrootRoot, "scripts/sf-engine-production-previous"),
+  );
+  const selectedEngine = path.join(chrootRoot, "scripts", `sf-engine-${CHROOT_REVISION}`);
+  const rest = path.join(selectedEngine, "engine/shared/wordpress-rest.php");
+  const kernel = path.join(selectedEngine, "engine/wordpress/content-kernel.php");
+  const restBytes = readFileSync(rest);
+  const kernelBytes = readFileSync(kernel);
+  const muPlugin = path.join(rt.root, "wp-content/mu-plugins/spacefast-content.php");
+  mkdirSync(path.dirname(muPlugin), { recursive: true });
+  copyFileSync(path.resolve(import.meta.dir, "../wordpress-content-loader.php"), muPlugin);
+  rmSync(rest);
+  writeFileSync(
+    kernel,
+    `<?php echo json_encode(['wordpress' => 'served', 'release' => $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'], 'source' => $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE']]);`,
+  );
+  try {
+    const boot = Bun.spawnSync({
+      cmd: [
+        "php",
+        "-d",
+        "auto_prepend_file=",
+        "-r",
+        `
+        class Atomic_Persistent_Data { public string $SPACEFAST_RUNTIME_ENGINE_SOURCE = 'chroot/production/previous'; }
+        define('SPACEFAST_RUNTIME_CHROOT_ROOT', $argv[1]);
+        require $argv[2];
+      `,
+        chrootRoot,
+        muPlugin,
+      ],
+    });
+    expect(boot.exitCode, boot.stderr.toString()).toBe(0);
+    expect(JSON.parse(boot.stdout.toString())).toEqual({
+      wordpress: "served",
+      release: selectedEngine,
+      source: "chroot",
+    });
+  } finally {
+    writeFileSync(rest, restBytes);
+    writeFileSync(kernel, kernelBytes);
+  }
 });
 
 test("falls back to the site's release when the chroot is unselected or cannot serve it", async () => {

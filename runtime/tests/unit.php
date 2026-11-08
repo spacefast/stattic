@@ -3692,6 +3692,8 @@ $loaderRoot = sys_get_temp_dir() . '/stattic-loader-unit-' . bin2hex(random_byte
 $loaderRelease = $loaderRoot . '/.stattic/releases/r1';
 mkdir($loaderRelease . '/wordpress/spacefast-identity', 0o777, true);
 mkdir($loaderRoot . '/wp-content/mu-plugins', 0o777, true);
+mkdir($loaderRelease . '/engine/shared', 0o777, true);
+file_put_contents($loaderRelease . '/engine/shared/wordpress-rest.php', '<?php function _stattic_wordpress_rest_install_hooks(): void {}');
 file_put_contents($loaderRoot . '/.stattic/active-release', 'releases/r1');
 file_put_contents(
     $loaderRelease . '/wordpress/spacefast-identity/spacefast-identity.php',

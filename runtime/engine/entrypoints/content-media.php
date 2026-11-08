@@ -10,6 +10,7 @@ require_once $engineRoot . '/shared/content-admin.php';
 require_once $engineRoot . '/shared/response.php';
 require_once $engineRoot . '/shared/safety.php';
 require_once $engineRoot . '/shared/storage.php';
+require_once $engineRoot . '/runtime/access-rules.php';
 
 const SPACEFAST_CONTENT_MEDIA_PATH_PREFIX = '/__spacefast/content-media/';
 
@@ -78,6 +79,20 @@ function _stattic_content_media_admin_session(
         : _stattic_content_admin_verify_session($privateRoot, $token, $requestHost);
 }
 
+function _stattic_content_media_admin_context(string $requestHost): bool
+{
+    $site = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));
+    if ($site === '') {
+        // No fetch metadata: an older browser or a non-browser client.
+        return !_stattic_private_cross_host_subresource($requestHost);
+    }
+    if ($site === 'same-origin' || $site === 'none') {
+        return true;
+    }
+    return strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_MODE'] ?? ''))) === 'navigate'
+        && strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_DEST'] ?? ''))) === 'document';
+}
+
 function _stattic_content_media_type(string $path): string
 {
     $finfo = function_exists('finfo_open') ? finfo_open(FILEINFO_MIME_TYPE) : false;
@@ -104,7 +119,13 @@ if (!is_dir($privateRoot)) {
 }
 
 $requestHost = _stattic_normalize_host_authority((string) ($_SERVER['HTTP_HOST'] ?? ''));
-$adminSession = _stattic_content_media_admin_session($privateRoot, $requestHost);
+// Sibling Spaces share a browser site, so the content-admin cookie reaches
+// their iframes and images. Only the Space's own pages and top-level
+// navigation ride it; anything else is a visitor request, so open media still
+// embeds and private media is refused.
+$adminSession = _stattic_content_media_admin_context($requestHost)
+    ? _stattic_content_media_admin_session($privateRoot, $requestHost)
+    : null;
 $target = null;
 if (is_array($adminSession)) {
     $spaceId = $adminSession['space_id'];
@@ -132,7 +153,6 @@ if (is_array($target)) {
 }
 if (is_array($target) && !$target['open']) {
     $requestPath = parse_url((string) ($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?: '/';
-    require_once $engineRoot . '/runtime/access-rules.php';
     _stattic_access_enforce_v4($requestHost, $requestPath, $requestPath);
 }
 
@@ -150,7 +170,6 @@ if (!is_array($adminSession)) {
         _stattic_content_media_refuse(503);
     }
     if ($privateMedia) {
-        require_once $engineRoot . '/runtime/access-rules.php';
         $requestPath = parse_url((string) ($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?: '/';
         _stattic_access_enforce_v4($requestHost, $requestPath, $requestPath);
         if (_stattic_access_wordpress_principal($target['serving'], $requestHost, $requestPath) === null) {

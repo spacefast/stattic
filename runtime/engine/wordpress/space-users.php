@@ -47,6 +47,7 @@ function spacefast_space_users_failure(string $kind, string $message, int $statu
 }
 
 require_once __DIR__ . '/../shared/space-users-parts.php';
+require_once __DIR__ . '/../shared/wordpress-rest.php';
 
 function spacefast_space_users_settings(): array
 {
@@ -149,17 +150,18 @@ function spacefast_space_users_install_hooks(): void
         // The Space's tables hold only its own accounts, and the app owns their roles. The
         // session cookie authenticates /zero/v1 too, from the app's own pages only; a first
         // Spacefast sign-in creates the account its platform identity then keeps.
-        add_filter('zero_identity_rest_cookie_auth', '__return_true');
+        add_filter('zero_identity_rest_cookie_auth', '_stattic_wordpress_cookie_allowed');
         add_filter('zero_identity_provider_account', 'spacefast_space_users_native_account', 10, 4);
         return;
     }
+    // Core's cookie checks run at 10 and 20 and can erase an earlier user ID.
     add_filter('determine_current_user', static function (mixed $current): mixed {
-        if (is_array($GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] ?? null)) return $current;
+        if (is_array($GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] ?? null) || !_stattic_wordpress_cookie_allowed()) return $current;
         $session = spacefast_space_users_live_session();
         if ($session === null) return $current;
         $GLOBALS['SPACEFAST_SPACE_USERS_WP_SESSION_USER'] = (int) $session['wp_user_id'];
         return (int) $session['wp_user_id'];
-    }, 2);
+    }, 30);
     add_filter('user_has_cap', static function (array $caps, array $required, array $args, mixed $user): array {
         if (!is_array($GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] ?? null)
             && isset($GLOBALS['SPACEFAST_SPACE_USERS_WP_SESSION_USER'])

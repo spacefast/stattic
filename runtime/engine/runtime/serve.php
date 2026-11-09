@@ -1370,7 +1370,17 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
             require_once __DIR__ . '/../shared/og-image.php';
             // Named by the URL the visitor loaded, which the route resolves
             // back through mounts and rewrites to this same document.
-            $previewHead = _stattic_og_image_rewrite_head($head, $context, (string) $context['client_path'], !empty($context['share_image']));
+            // The rewrite is a nicety: when its HTML parser cannot load (the
+            // toolkit PHAR decompresses into a temp file a full disk refuses),
+            // the page still serves with its head as published.
+            try {
+                $previewHead = _stattic_og_image_rewrite_head($head, $context, (string) $context['client_path'], !empty($context['share_image']));
+            } catch (Throwable $error) {
+                error_log('spacefast og_image_rewrite_skipped ' . json_encode([
+                    'error' => $error::class,
+                    'message' => substr($error->getMessage(), 0, 300),
+                ], JSON_UNESCAPED_SLASHES));
+            }
         }
         $sdkTag = _stattic_static_page_sdk_tag($serving, $tagPreviewToken, (string) $blobSha);
         // A page with no `<head` or `<html` is a fragment (an htmx or Turbo

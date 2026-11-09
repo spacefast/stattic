@@ -1,7 +1,8 @@
 use sha2::{Digest, Sha256};
 use stattic_runtime_core::{
-    finalize_site, read_site_finalize_input, write_site_finalize_error, write_site_finalize_output,
-    FinalizeError, RuntimeDiagnosticSeverity, SiteFinalizeInput, SITE_FINALIZE_INPUT_FORMAT,
+    finalize_site, read_site_finalize_input, site_finalize_error_envelope,
+    write_site_finalize_error, write_site_finalize_output, FinalizeError,
+    RuntimeDiagnosticSeverity, SiteFinalizeInput, SITE_FINALIZE_INPUT_FORMAT,
 };
 use std::env;
 use std::fs;
@@ -116,12 +117,24 @@ fn finalize_site_command(args: FinalizeArgs) -> Result<(), CliError> {
     })();
     if let Err(error) = result {
         if let Some(path) = output_path.as_deref() {
-            write_site_finalize_error(&error, path)?;
+            // The disk that failed the finalize usually fails this write too.
+            // The envelope then rides one marked stderr line, so the adapter
+            // still learns the real cause instead of a bare exit code.
+            if write_site_finalize_error(&error, path).is_err() {
+                eprintln!(
+                    "{FINALIZE_ERROR_STDERR_PREFIX}{}",
+                    site_finalize_error_envelope(&error)
+                );
+            }
         }
         return Err(error.into());
     }
     Ok(())
 }
+
+/// Marks the stderr line that carries the failure envelope when `--output`
+/// could not be written. `admin/finalize-rust.php` reads the same prefix.
+const FINALIZE_ERROR_STDERR_PREFIX: &str = "stattic-runtime-finalize-error: ";
 
 /// The one document the self-test finalizes: enough HTML for the decoration
 /// pass to have real work to do, small enough to stay well inside the five

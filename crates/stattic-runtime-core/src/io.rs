@@ -56,8 +56,18 @@ pub fn write_site_finalize_output(
     Ok(())
 }
 
-/// Writes the stable v2 failure envelope consumed by the PHP native adapter.
-pub fn write_site_finalize_error(error: &FinalizeError, path: &Path) -> Result<(), FinalizeError> {
+/// The site's disk or quota is exhausted (`ENOSPC`, `EDQUOT`). Only freeing
+/// space or raising the quota clears it, so it gets its own code instead of
+/// reading as a finalizer fault.
+pub fn is_storage_full(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded
+    )
+}
+
+/// The stable v2 failure envelope consumed by the PHP native adapter.
+pub fn site_finalize_error_envelope(error: &FinalizeError) -> serde_json::Value {
     let (code, message, details) = match error {
         FinalizeError::Invalid {
             code,
@@ -67,6 +77,11 @@ pub fn write_site_finalize_error(error: &FinalizeError, path: &Path) -> Result<(
             *code,
             message.clone(),
             details.clone().unwrap_or_else(|| serde_json::json!({})),
+        ),
+        FinalizeError::Io { path, source } if is_storage_full(source) => (
+            "runtime_storage_full",
+            "The site's disk is full.".to_string(),
+            serde_json::json!({"path":path.to_string_lossy(),"error":source.to_string()}),
         ),
         FinalizeError::Io { path, source } => (
             "runtime_finalizer_io_error",
@@ -79,15 +94,21 @@ pub fn write_site_finalize_error(error: &FinalizeError, path: &Path) -> Result<(
             serde_json::json!({"path":path.to_string_lossy()}),
         ),
     };
-    let output = serde_json::json!({
+    serde_json::json!({
         "format": "stattic.runtime.finalize.error.v2",
         "code": code,
         "message": message,
         "details": details,
-    });
-    let bytes = serde_json::to_vec(&output).map_err(|source| FinalizeError::Json {
-        path: path.to_path_buf(),
-        source,
+    })
+}
+
+/// Writes the failure envelope to `path`.
+pub fn write_site_finalize_error(error: &FinalizeError, path: &Path) -> Result<(), FinalizeError> {
+    let bytes = serde_json::to_vec(&site_finalize_error_envelope(error)).map_err(|source| {
+        FinalizeError::Json {
+            path: path.to_path_buf(),
+            source,
+        }
     })?;
     fs::write(path, bytes).map_err(|source| FinalizeError::Io {
         path: path.to_path_buf(),
@@ -111,7 +132,7 @@ mod tests {
             details: Some(json!({"missingPaths":["index.html"],"missingCount":1})),
         };
         write_site_finalize_error(&error, &path).unwrap();
-        let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(
             value,
             json!({
@@ -121,5 +142,26 @@ mod tests {
                 "details":{"missingPaths":["index.html"],"missingCount":1}
             })
         );
+
+        // A full disk (ENOSPC) or exhausted quota (EDQUOT) is the site's
+        // storage, not the finalizer: it gets its own code.
+        for errno in [libc::ENOSPC, libc::EDQUOT] {
+            let error = FinalizeError::Io {
+                path: PathBuf::from("/srv/htdocs/stage/index.html"),
+                source: std::io::Error::from_raw_os_error(errno),
+            };
+            write_site_finalize_error(&error, &path).unwrap();
+            let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(value["code"], "runtime_storage_full", "errno {errno}");
+            assert_eq!(value["message"], "The site's disk is full.");
+            assert_eq!(value["details"]["path"], "/srv/htdocs/stage/index.html");
+        }
+        let other = FinalizeError::Io {
+            path: PathBuf::from("/srv/htdocs/stage/index.html"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        write_site_finalize_error(&other, &path).unwrap();
+        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["code"], "runtime_finalizer_io_error");
     }
 }

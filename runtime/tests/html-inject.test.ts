@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import {
@@ -363,6 +364,46 @@ test("runtime splices static inject placements and the one SDK tag into served H
     `<meta property="og:image" content="${sharedRoute}">`,
   );
   expect((await get(rt, HOST, "/__spacefast/og-image.png?path=%2Fshared")).status).toBe(200);
+});
+
+test("a page still serves its stored head when the share-image parser cannot load", async () => {
+  // The toolkit PHAR decompresses into PHP's temp directory. A full disk
+  // refuses that write, which used to fail every HTML page with an empty 500.
+  const unwritable = mkdtempSync(path.join(os.tmpdir(), "stattic-full-temp-"));
+  chmodSync(unwritable, 0o500);
+  const full = await startRuntime({ phpIni: { sys_temp_dir: unwritable } });
+  try {
+    const page =
+      '<html><head><meta property="og:image" content="/share.png"></head><body>Shared</body></html>\n';
+    await deploy(full, {
+      spaceId: "spc_full_temp",
+      versionId: "ver_full_temp_1",
+      files: {
+        "index.html": page,
+        "share.png": {
+          content: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x2a]),
+          contentType: "image/png",
+        },
+      },
+      activate: {
+        route_name: "production",
+        version_id: "ver_full_temp_1",
+        config: publicAccessConfig({ mode: "website" }),
+        production_hostnames: ["full-temp.test"],
+        noindex_production_hostnames: [],
+        version_hostnames: [],
+      },
+    });
+    const response = await get(full, "full-temp.test", "/");
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain('<meta property="og:image" content="/share.png">');
+    expect(html).toContain("<body>Shared</body>");
+  } finally {
+    full.stop();
+    chmodSync(unwritable, 0o700);
+    rmSync(unwritable, { recursive: true, force: true });
+  }
 });
 
 test("platform_meta renders the space's meta into <head> and cache-busts local assets", async () => {

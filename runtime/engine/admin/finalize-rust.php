@@ -232,7 +232,10 @@ function _stattic_runtime_finalize_with_rust(
         );
     }
     if ($exitCode !== 0) {
-        $structuredError = _stattic_runtime_read_finalizer_output($outputPath);
+        // A full disk fails the output file too; the binary then repeats the
+        // envelope on one marked stderr line.
+        $structuredError = _stattic_runtime_read_finalizer_output($outputPath)
+            ?? _stattic_runtime_finalizer_stderr_envelope(is_string($stderr) ? $stderr : '');
         _stattic_runtime_restore_interrupted_version($versionRoot);
         unlink($outputPath);
         $safeReason = is_string($stderr)
@@ -309,6 +312,21 @@ function _stattic_runtime_restore_interrupted_version(string $versionRoot): void
     if (is_dir($failed)) {
         _stattic_runtime_rm_recursive($failed);
     }
+}
+
+// The stderr fallback `stattic-runtime finalize` prints when it cannot write
+// its --output file (crates/stattic-runtime-compiler/src/main.rs).
+const STATTIC_RUNTIME_FINALIZE_ERROR_STDERR_PREFIX = 'stattic-runtime-finalize-error: ';
+
+function _stattic_runtime_finalizer_stderr_envelope(string $stderr): ?array
+{
+    foreach (explode("\n", $stderr) as $line) {
+        if (str_starts_with($line, STATTIC_RUNTIME_FINALIZE_ERROR_STDERR_PREFIX)) {
+            $decoded = json_decode(substr($line, strlen(STATTIC_RUNTIME_FINALIZE_ERROR_STDERR_PREFIX)), true);
+            return is_array($decoded) ? $decoded : null;
+        }
+    }
+    return null;
 }
 
 function _stattic_runtime_read_finalizer_output(string $path): ?array

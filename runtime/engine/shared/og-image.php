@@ -209,6 +209,9 @@ function _stattic_og_image_walk(WP_HTML_Tag_Processor $processor, string $pageUr
 function _stattic_og_image_processor(string $head): WP_HTML_Tag_Processor
 {
     if (!class_exists('WP_HTML_Tag_Processor')) {
+        // The toolkit loader reports a missing PHAR with a class the static
+        // lane never loads, which would be a fatal instead of an exception.
+        require_once __DIR__ . '/../wordpress/content-error.php';
         require_once __DIR__ . '/../wordpress/content-markdown.php';
         spacefast_content_sync_require_toolkit();
     }

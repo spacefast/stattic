@@ -94,13 +94,28 @@ beforeAll(async () => {
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 if (existsSync(${JSON.stringify(failMarkerPath)})) {
-  const versionDir = readFileSync(${JSON.stringify(failMarkerPath)}, "utf8").trim();
+  const [versionDir, mode] = readFileSync(${JSON.stringify(failMarkerPath)}, "utf8").trim().split("\\n");
   writeFileSync(
     ${JSON.stringify(probePath)},
     JSON.stringify({ versionDirExists: existsSync(versionDir) }),
   );
   const outputIndex = process.argv.indexOf("--output");
   if (outputIndex < 0 || !process.argv[outputIndex + 1]) process.exit(3);
+  if (mode === "disk-full") {
+    // The real binary on a full disk: --output cannot be written either, so
+    // the envelope rides its one marked stderr line.
+    process.stderr.write(
+      "stattic-runtime-finalize-error: " +
+        JSON.stringify({
+          format: "stattic.runtime.finalize.error.v2",
+          code: "runtime_storage_full",
+          message: "The site's disk is full.",
+          details: { path: versionDir, error: "No space left on device (os error 28)" },
+        }) +
+        "\\nstattic-runtime: No space left on device (os error 28)\\n",
+    );
+    process.exit(2);
+  }
   writeFileSync(
     process.argv[outputIndex + 1],
     JSON.stringify({
@@ -337,6 +352,18 @@ test("a finalize failure moves an existing version aside and restores it", async
   mkdirSync(root, { recursive: true });
   const partialMarker = path.join(root, "partial-marker");
   writeFileSync(partialMarker, "prior partial finalize\n");
+
+  // A full disk cannot take the error file either: the stderr envelope still
+  // names the cause, and the version is restored the same way.
+  writeFileSync(failMarkerPath, `${root}\ndisk-full`);
+  try {
+    const full = await finalize(rt, spaceId, versionId, { upload_id: session.uploadId });
+    expect(full.status).toBe(422);
+    expect(await errorCode(full)).toBe("runtime_storage_full");
+  } finally {
+    rmSync(failMarkerPath, { force: true });
+  }
+  expect(readFileSync(partialMarker, "utf8")).toBe("prior partial finalize\n");
 
   // Force the binary to fail; it records whether the version dir was present
   // when it started.

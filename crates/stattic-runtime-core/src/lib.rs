@@ -43,7 +43,10 @@ pub use catalog::{read_version_catalog, CatalogDelta, CatalogDigests, FileCatalo
 pub use finalize::FinalizeError;
 pub use hash::stable_json_sha256;
 #[cfg(not(target_family = "wasm"))]
-pub use io::{read_site_finalize_input, write_site_finalize_error, write_site_finalize_output};
+pub use io::{
+    read_site_finalize_input, site_finalize_error_envelope, write_site_finalize_error,
+    write_site_finalize_output,
+};
 pub use model::*;
 #[cfg(not(target_family = "wasm"))]
 pub use site_finalize::finalize_site;

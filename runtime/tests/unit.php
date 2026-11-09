@@ -3961,38 +3961,6 @@ $_SERVER['REQUEST_METHOD'] = 'GET';
 $dynamicPayload = _stattic_html_insert_payload(['sdk' => ['config' => []], 'inject' => ['bodyEnd' => ['<div id="end"></div>', '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>']]]);
 check($dynamicPayload['sdk'] === $sdkTag && $dynamicPayload['bodyEnd'] === '<div id="end"></div>', 'a dynamic response carries the engine SDK tag, not the baked one');
 
-// Space Users parts: each sign-in method answers only while its part is on, in
-// every combination the two-part shape can store; the flat shape keeps both.
-require_once __DIR__ . '/../engine/shared/space-users-parts.php';
-$usersParts = static function (bool $zero, bool $access, string $google = 'disabled'): array {
-    $config = _stattic_runtime_users_config([
-        'zeroUsers' => ['enabled' => $zero, 'providers' => ['google' => $google === 'direct' ? ['mode' => 'direct', 'clientId' => 'own.apps.googleusercontent.com'] : ['mode' => 'disabled']]],
-        'signInWithSpacefast' => ['enabled' => $access, 'providers' => ['spacefast' => true, 'managedGoogle' => $google !== 'direct', 'wpcom' => true]],
-    ]);
-    if (!is_array($config)) throw new RuntimeException('two-part Users config did not normalise');
-    return $config;
-};
-foreach ([[false, false], [true, false], [false, true], [true, true]] as [$zeroOn, $accessOn]) {
-    $label = 'users parts zero=' . var_export($zeroOn, true) . ' access=' . var_export($accessOn, true);
-    $users = $usersParts($zeroOn, $accessOn);
-    check(_stattic_space_users_parts($users) === ['zeroUsers' => $zeroOn, 'signInWithSpacefast' => $accessOn], "$label: parts");
-    foreach (['email', 'passkey'] as $zeroMethod) {
-        check(_stattic_space_users_method_allowed($users, $zeroMethod) === $zeroOn, "$label: $zeroMethod follows Zero Users");
-    }
-    foreach (['spacefast', 'gravatar', 'google'] as $accessMethod) {
-        check(_stattic_space_users_method_allowed($users, $accessMethod) === $accessOn, "$label: $accessMethod (managed) follows Sign in with Spacefast");
-    }
-    // Direct Google is a Zero Users method: off with Zero Users even if Access is on.
-    $direct = $usersParts($zeroOn, $accessOn, 'direct');
-    check(($direct['providers']['google']['mode'] ?? null) === ($zeroOn ? 'direct' : 'disabled'), "$label: stored direct Google needs Zero Users");
-    // With Zero Users off, "google" can only mean Spacefast's client, which is not chosen here.
-    check(_stattic_space_users_method_part($direct, 'google') === ($zeroOn ? 'zeroUsers' : 'signInWithSpacefast'), "$label: Google's part follows the stored mode");
-    check(!$zeroOn ? ($direct['providers']['google']['mode'] ?? null) !== 'direct' : _stattic_space_users_method_allowed($direct, 'google'), "$label: direct Google is offered only with Zero Users");
-}
-$flatUsers = _stattic_runtime_users_config(['enabled' => true, 'providers' => ['google' => ['mode' => 'managed'], 'gravatar' => ['enabled' => true], 'spacefast' => ['enabled' => true]]]);
-check(_stattic_space_users_parts($flatUsers) === ['zeroUsers' => true, 'signInWithSpacefast' => true], 'flat Users settings keep both parts');
-check(_stattic_space_users_operation_method('sign-in/passkey/options') === 'passkey' && _stattic_space_users_operation_method('emails') === null, 'only sign-in operations name a method');
-
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");
     foreach ($failures as $failure) {

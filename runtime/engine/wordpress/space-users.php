@@ -46,7 +46,6 @@ function spacefast_space_users_failure(string $kind, string $message, int $statu
     return new $class($kind, $message, $status);
 }
 
-require_once __DIR__ . '/../shared/space-users-parts.php';
 require_once __DIR__ . '/../shared/wordpress-rest.php';
 
 function spacefast_space_users_settings(): array
@@ -111,14 +110,9 @@ function spacefast_space_users_install_hooks(): void
     add_filter('rest_pre_dispatch', static function (mixed $result, mixed $server, mixed $request) use ($namespace): mixed {
         $route = $request->get_route();
         if (!str_starts_with($route, $namespace)) return $result;
-        $settings = spacefast_space_users_settings();
-        // On a v2 binding identity mounts only while Users is on, so only the part gate applies.
-        if (!spacefast_space_users_scoped() && $settings['enabled'] !== true) {
+        // On a v2 binding identity mounts only while Users is on.
+        if (!spacefast_space_users_scoped() && spacefast_space_users_settings()['enabled'] !== true) {
             return spacefast_space_users_error(404, 'space_users_disabled', 'Users is not enabled for this Space.');
-        }
-        $method = _stattic_space_users_operation_method(substr($route, strlen($namespace)));
-        if ($method !== null && !_stattic_space_users_method_allowed($settings, $method)) {
-            return spacefast_space_users_error(403, 'space_users_provider_disabled', 'This sign-in method is not enabled for this Space.');
         }
         return $result;
     }, 1, 3);

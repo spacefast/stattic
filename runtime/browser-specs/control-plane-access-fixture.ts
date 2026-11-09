@@ -185,7 +185,7 @@ try {
           }
           await putRoute(runtime, seed.spaceId, "production", {
             version_id: versionId,
-            config: await runtimeRouteConfigForSpace(refreshedSpace, { targetBoxId: null }),
+            config: await runtimeRouteConfigForSpace(refreshedSpace),
           });
           return new Response(null, { status: 204 });
         })();
@@ -352,7 +352,7 @@ try {
 
   // Project the whole runtime route through production boundaries. Neither
   // authorization nor hostname intent is fixture-shaped.
-  const projectedRoute = await runtimeRouteConfigForSpace(space, { targetBoxId: null });
+  const projectedRoute = await runtimeRouteConfigForSpace(space);
   const versionId = createId("ver");
   const routeIntent = await runtimeRouteIntentForSpace({
     space,

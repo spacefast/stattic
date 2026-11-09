@@ -49,17 +49,6 @@ function _stattic_space_users_prepare(
         if ($route) _stattic_problem_refused(404, 'space_users_disabled', 'Users is not enabled for this Space.');
         return false;
     }
-    // Each sign-in method belongs to one part of app sign-in; a part that is off
-    // refuses its methods here, before WordPress loads.
-    require_once __DIR__ . '/../shared/space-users-parts.php';
-    $signIn = is_array($control) && $control['operation'] === 'auth_start'
-        ? (is_string($_GET['provider'] ?? null) ? $_GET['provider'] : 'spacefast')
-        : (str_starts_with($path, '/__zero/auth/api/') ? _stattic_space_users_operation_method(substr($path, strlen('/__zero/auth/api/'))) : null);
-    if ($signIn !== null && _stattic_space_users_method_part($serving['users'], $signIn) !== null
-        && !_stattic_space_users_method_allowed($serving['users'], $signIn)) {
-        _stattic_problem_refused(403, 'space_users_provider_disabled', 'This sign-in method is not enabled for this Space.');
-    }
-    if (!$hasSession) _stattic_space_users_access_only_entry($serving['users'], $path, $method, $providerConfiguration);
     require_once __DIR__ . '/content-page.php';
     require_once __DIR__ . '/identity-context.php';
     $spaceId = (string) ($serving['space_id'] ?? '');
@@ -96,11 +85,6 @@ function _stattic_space_users_prepare(
     }
     if ($hasSession) {
         _stattic_access_private_cache_flag(true);
-        // The sign-in page also shows for a session cookie that no longer signs
-        // anyone in, and for a fresh sign-in an OAuth client asked for.
-        if (isset($_GET['reauth']) || spacefast_space_users_live_session() === null) {
-            _stattic_space_users_access_only_entry($serving['users'], $path, $method, $providerConfiguration);
-        }
     }
     if ($route) _stattic_space_users_dispatch($path, $method, $host);
     return false;
@@ -108,9 +92,8 @@ function _stattic_space_users_prepare(
 
 /**
  * Select the Space's current initialized Zero v2 version for Users, or refuse
- * with a problem document. Versions built before Sign in with Spacefast have no
- * `runtime.users.access-shape.v1`-era identity code, so they are refused with a
- * republish instruction rather than crashing.
+ * with a problem document. Versions built before Space Users could bind to
+ * zero-identity are refused with a republish instruction rather than crashing.
  */
 function _stattic_space_users_zero_version(string $privateRoot, string $spaceId, array $serving): string
 {
@@ -135,40 +118,6 @@ function _stattic_space_users_zero_version(string $privateRoot, string $spaceId,
         _stattic_problem_refused(503, 'space_users_zero_version_unavailable', 'Users is not ready on this Space. Try again shortly.');
     }
     return $versionId;
-}
-
-/**
- * The hosted `/identity` sign-in page offers email codes and passkeys, which
- * are Zero Users' methods. With only Sign in with Spacefast on, a signed-out visitor
- * starts Sign in with Spacefast instead, returning where the page would
- * have (an OAuth authorize resume, or the account page). The multifactor step
- * (`?factor=`) still renders the page, and so does a signed-in visit to the
- * account page.
- */
-function _stattic_space_users_access_only_entry(array $users, string $path, string $method, ?array $providerConfiguration): void
-{
-    if (!in_array($path, ['/identity', '/identity/', '/identity/account'], true) || !in_array($method, ['GET', 'HEAD'], true) || isset($_GET['factor'])) return;
-    $provider = _stattic_space_users_access_only_provider($users, $providerConfiguration);
-    if ($provider === null) return;
-    require_once __DIR__ . '/access-rules.php';
-    $returnTo = isset($_GET['reauth']) ? '/identity/authorize?resume=1' : '/identity';
-    $requested = is_string($_GET['return_to'] ?? null) ? $_GET['return_to'] : '';
-    if (str_starts_with($requested, '/identity/authorize?') && _stattic_safe_return_path($requested) !== null) $returnTo = $requested;
-    header('Cache-Control: private, no-store');
-    header('Location: /__zero/auth/start?' . http_build_query(['provider' => $provider, 'returnTo' => $returnTo]), true, 303);
-    exit;
-}
-
-/** The Sign in with Spacefast method a signed-out `/identity` visit starts, or null while Zero Users serves the page. */
-function _stattic_space_users_access_only_provider(array $users, ?array $providerConfiguration): ?string
-{
-    $parts = _stattic_space_users_parts($users);
-    if ($parts['zeroUsers'] || !$parts['signInWithSpacefast']) return null;
-    $available = is_array($providerConfiguration['availability'] ?? null) ? $providerConfiguration['availability'] : [];
-    if (($users['providers']['spacefast']['enabled'] ?? false) === true) return 'spacefast';
-    if (($users['providers']['google']['mode'] ?? '') === 'managed' && ($available['google']['managed'] ?? false) === true) return 'google';
-    if (($users['providers']['gravatar']['enabled'] ?? false) === true && ($available['gravatar'] ?? false) === true) return 'gravatar';
-    return null;
 }
 
 function _stattic_space_users_dispatch(string $path, string $method, string $host): never

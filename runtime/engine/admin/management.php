@@ -1803,13 +1803,7 @@ function _stattic_runtime_repair_space(string $privateRoot, string $spaceId, arr
     ]);
 }
 
-/**
- * Space Users settings in the one form every engine reader uses: the original
- * flat shape. The control plane sends either that shape or the two-part
- * `zeroUsers` / `signInWithSpacefast` shape (runtime.users.sign-in-shape.v1); the
- * two-part shape also keeps whether each part is on, which the flat shape
- * cannot say, under `parts`. Null for anything malformed.
- */
+/** Space Users settings in their one flat shape, or null for anything malformed. */
 function _stattic_runtime_users_config(mixed $users): ?array
 {
     $isBool = static fn (mixed $value): bool => is_bool($value);
@@ -1819,28 +1813,6 @@ function _stattic_runtime_users_config(mixed $users): ?array
         return is_string($google['clientId'] ?? null) && $google['clientId'] !== '' ? ['mode' => 'direct', 'clientId' => $google['clientId']] : null;
     };
     if (!is_array($users)) return null;
-    if (array_key_exists('zeroUsers', $users)) {
-        $zero = $users['zeroUsers'] ?? null;
-        $access = $users['signInWithSpacefast'] ?? null;
-        $direct = is_array($zero) ? $google($zero['providers']['google'] ?? null, ['disabled', 'direct']) : null;
-        $providers = is_array($access) ? ($access['providers'] ?? null) : null;
-        if (!is_array($zero) || !$isBool($zero['enabled'] ?? null) || $direct === null || !is_array($access)
-            || !$isBool($access['enabled'] ?? null) || !is_array($providers)
-            || !$isBool($providers['spacefast'] ?? null) || !$isBool($providers['managedGoogle'] ?? null) || !$isBool($providers['wpcom'] ?? null)) {
-            return null;
-        }
-        $on = $access['enabled'];
-        return [
-            'enabled' => $zero['enabled'] || $on,
-            'providers' => [
-                // Direct Google is Zero Users': it is off with Zero Users, whatever is stored.
-                'google' => $direct['mode'] === 'direct' && $zero['enabled'] ? $direct : ['mode' => $on && $providers['managedGoogle'] ? 'managed' : 'disabled'],
-                'gravatar' => ['enabled' => $on && $providers['wpcom']],
-                'spacefast' => ['enabled' => $on && $providers['spacefast']],
-            ],
-            'parts' => ['zeroUsers' => $zero['enabled'], 'signInWithSpacefast' => $on],
-        ];
-    }
     $providers = $users['providers'] ?? null;
     $flatGoogle = is_array($providers) ? $google($providers['google'] ?? null, ['disabled', 'managed', 'direct']) : null;
     if (!$isBool($users['enabled'] ?? null) || $flatGoogle === null

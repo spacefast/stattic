@@ -146,7 +146,7 @@ test("deleted versions stay tombstoned across later deletes and a takedown resto
       files: { "index.html": `<h1>${id}</h1>\n` },
       activate: {
         route_name: "production",
-        config: await runtimeRouteConfigForSpace(space, { targetBoxId: RUNTIME_INSTANCE_ID }),
+        config: await runtimeRouteConfigForSpace(space),
         ...(await runtimeRouteIntentForSpace({
           space,
           defaultHostname: identity.hostname,
@@ -336,7 +336,7 @@ test("deleted versions stay tombstoned across later deletes and a takedown resto
     files: { "index.html": `<h1>${failedCopy}</h1>\n` },
     activate: {
       route_name: "production",
-      config: await runtimeRouteConfigForSpace(space, { targetBoxId: RUNTIME_INSTANCE_ID }),
+      config: await runtimeRouteConfigForSpace(space),
       production_hostnames: [],
       version_hostnames: [{ hostname: failedHost, version_id: failedCopy }],
     },

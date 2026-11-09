@@ -75,6 +75,8 @@
     "engine/shared/d1-broker.php",
     "engine/shared/egress.php",
     "engine/shared/engine-selection.php",
+    "engine/loader/request.php",
+    "engine/loader/wordpress.php",
     "engine/shared/errors.php",
     "engine/shared/page-css.generated.php",
     "engine/shared/finalizer-protocol.generated.php",
@@ -124,7 +126,6 @@
     "engine/wordpress/content-principals.php",
     "engine/wordpress/content-users.php",
     "engine/wordpress/content-storage.php",
-    "wordpress-content-loader.php",
     "wordpress/managed-theme/style.css",
     "wordpress/managed-theme/theme.json",
     "wordpress/managed-theme/templates/index.html",
@@ -213,7 +214,7 @@
       "path": "index.php"
     },
     {
-      "source": "wordpress-content-loader.php",
+      "source": "custom-redirects.php",
       "path": "wp-content/mu-plugins/spacefast-content.php"
     },
     {

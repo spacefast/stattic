@@ -505,7 +505,7 @@ function _stattic_content_rest_access_path(string $path, array $query = []): str
  * policy, the request's Space, and the constants that keep a WordPress install
  * from editing or updating itself. Both editor entries — the ticket redemption
  * at /__spacefast/content-admin.php and the session-bound /wp-admin lane in
- * custom-redirects.php — call this and nothing else, so the two can never
+ * loader/request.php — call this and nothing else, so the two can never
  * establish subtly different contexts.
  *
  * ONE frame-origin source, in priority order: the per-request origin the

@@ -1,44 +1,23 @@
 <?php
-/**
- * Plugin Name: Spacefast Content Loader
- * Description: Loads the active Spacefast content kernel release.
- * Version: 1
- */
 declare(strict_types=1);
 
-(static function (): void {
-    $publicRoot = dirname(__DIR__, 2);
-    $installRoot = $publicRoot . '/.stattic';
-    // A served request arrives with the release the prepend already resolved
-    // and verified; a CLI or cron load resolves it here the same way.
+// The WordPress half of the engine: what the thin loader, installed as the
+// mu-plugin wp-content/mu-plugins/spacefast-content.php, hands to from
+// whichever engine it chose. A served request arrives with the engine the
+// prepend already chose; a CLI or cron load chose it in the mu-plugin the same
+// way. $loader is the hand-off described in engine/loader/request.php.
+
+return static function (array $loader): void {
+    $installRoot = $loader['public_root'] . '/.stattic';
     $releaseReal = $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] ?? null;
     if (!is_string($releaseReal)) {
-        $pointer = is_file($installRoot . '/active-release')
-            ? file_get_contents($installRoot . '/active-release', false, null, 0, 256)
-            : false;
-        $target = is_string($pointer) ? trim($pointer) : '';
-        if (preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) !== 1) {
-            return;
-        }
-        $installReal = realpath($installRoot);
-        $releaseReal = realpath($installRoot . '/' . $target);
-        if (
-            !is_string($installReal)
-            || !is_string($releaseReal)
-            || !str_starts_with($releaseReal, $installReal . '/releases/')
-        ) {
-            return;
-        }
-        // The same choice the request prepend makes, from the same file.
-        $engineSource = $releaseReal . '/engine/shared/engine-selection.php';
-        if (is_file($engineSource)) {
-            require_once $engineSource;
-            $engine = _spacefast_runtime_engine_source($releaseReal);
-            $releaseReal = $engine['release_root'];
-            $GLOBALS['SPACEFAST_RUNTIME_NATIVE_BINARY'] = $engine['native_binary'];
-            $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] = $engine['source'];
-        }
-        $GLOBALS['SPACEFAST_RUNTIME_INSTALL_ROOT'] = $installReal;
+        $releaseReal = $loader['engine_root'];
+        $GLOBALS['SPACEFAST_RUNTIME_NATIVE_BINARY'] = $loader['native_binary'];
+        $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] = $loader['engine_source'];
+        $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE_REASON'] = $loader['engine_source_reason'];
+        $GLOBALS['SPACEFAST_RUNTIME_CHROOT_REVISION'] = $loader['chroot_revision'];
+        $GLOBALS['SPACEFAST_RUNTIME_LOADER_VERSION'] = $loader['loader_version'];
+        $GLOBALS['SPACEFAST_RUNTIME_INSTALL_ROOT'] = $loader['install_root'];
         $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseReal;
     }
 
@@ -123,4 +102,4 @@ declare(strict_types=1);
         && function_exists('_stattic_wordpress_page_resume_deferred_request')) {
         add_action('wp_loaded', '_stattic_wordpress_page_resume_deferred_request', PHP_INT_MAX);
     }
-})();
+};

@@ -78,7 +78,17 @@ async function startUpdateFixture(options?: {
   const aliases: Array<{ source: string; path: string }> = [];
   if (options?.visitorEngine) {
     mkdirSync(path.join(payload, "engine/runtime"), { recursive: true });
-    payloadFiles.push("custom-redirects.php", "engine/init.php", "engine/runtime/revision.php");
+    mkdirSync(path.join(payload, "engine/loader"), { recursive: true });
+    payloadFiles.push(
+      "custom-redirects.php",
+      "engine/loader/request.php",
+      "engine/init.php",
+      "engine/runtime/revision.php",
+    );
+    copyFileSync(
+      path.resolve(import.meta.dirname, "../engine/loader/request.php"),
+      path.join(payload, "engine/loader/request.php"),
+    );
     writeFileSync(
       path.join(payload, "engine/init.php"),
       [

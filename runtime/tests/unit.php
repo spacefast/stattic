@@ -3703,9 +3703,11 @@ file_put_contents(
     $loaderRelease . '/wordpress/spacefast-identity/spacefast-identity.php',
     "<?php\n\$GLOBALS['SPACEFAST_UNIT_IDENTITY_LOADED'] = true;\n"
 );
+mkdir($loaderRelease . '/engine/loader', 0o777, true);
+copy(__DIR__ . '/../engine/loader/wordpress.php', $loaderRelease . '/engine/loader/wordpress.php');
 copy(
-    __DIR__ . '/../wordpress-content-loader.php',
-    $loaderRoot . '/wp-content/mu-plugins/wordpress-content-loader.php'
+    __DIR__ . '/../custom-redirects.php',
+    $loaderRoot . '/wp-content/mu-plugins/spacefast-content.php'
 );
 $loaderProbe = $loaderRoot . '/probe.php';
 file_put_contents($loaderProbe, <<<'PHP'
@@ -3718,7 +3720,7 @@ $loaderOutput = [];
 $loaderStatus = 1;
 exec(
     escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($loaderProbe) . ' '
-        . escapeshellarg($loaderRoot . '/wp-content/mu-plugins/wordpress-content-loader.php') . ' 2>&1',
+        . escapeshellarg($loaderRoot . '/wp-content/mu-plugins/spacefast-content.php') . ' 2>&1',
     $loaderOutput,
     $loaderStatus
 );

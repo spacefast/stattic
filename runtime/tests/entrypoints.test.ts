@@ -23,6 +23,16 @@ import { startPhpServer, startRuntime, type PhpServer, type Runtime } from "./ha
 
 let rt: Runtime;
 
+// The fixture release's own loader body, which the site's thin loader hands
+// every request to.
+function installLoaderBody(engineRoot: string): void {
+  mkdirSync(path.join(engineRoot, "loader"), { recursive: true });
+  copyFileSync(
+    path.resolve(import.meta.dir, "../engine/loader/request.php"),
+    path.join(engineRoot, "loader/request.php"),
+  );
+}
+
 beforeAll(async () => {
   rt = await startRuntime();
 }, 30000);
@@ -37,6 +47,7 @@ test("wp.cloud config is decryptable before a clean route enters the runtime", (
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-wpcloud-config-"));
   try {
     const engineRoot = path.join(root, ".stattic/releases/test/engine");
+    installLoaderBody(engineRoot);
     mkdirSync(path.join(engineRoot, "shared"), { recursive: true });
     mkdirSync(path.join(engineRoot, "entrypoints"), { recursive: true });
     // The gate reads the real context.php: it needs the generated entrypoint
@@ -98,6 +109,7 @@ test("the content admin gate refuses a platform hold before it honors a session"
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "spacefast-content-admin-gate-")));
   try {
     const sharedRoot = path.join(root, ".stattic/releases/test/engine/shared");
+    installLoaderBody(path.dirname(sharedRoot));
     mkdirSync(sharedRoot, { recursive: true });
     writeFileSync(
       path.join(sharedRoot, "bootstrap-config.php"),
@@ -432,6 +444,7 @@ test("a CLI process with no request passes through custom-redirects unserved", (
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-cli-guard-"));
   try {
     const engineRoot = path.join(root, ".stattic/releases/test/engine");
+    installLoaderBody(engineRoot);
     mkdirSync(path.join(engineRoot, "shared"), { recursive: true });
     mkdirSync(path.join(engineRoot, "entrypoints"), { recursive: true });
     writeFileSync(
@@ -548,6 +561,7 @@ echo 'PASSED';
     }
 
     const engineRoot = path.join(root, ".stattic/releases/test/engine");
+    installLoaderBody(engineRoot);
     mkdirSync(engineRoot, { recursive: true });
     writeFileSync(path.join(root, ".stattic/publication.lock"), "");
     writeActiveReleasePointer(path.join(root, ".stattic"), "releases/test");

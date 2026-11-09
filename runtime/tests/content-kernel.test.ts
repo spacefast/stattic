@@ -5,7 +5,9 @@ import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dir, "../..");
 const kernel = path.join(repoRoot, "runtime/engine/wordpress/content-kernel.php");
-const contentLoader = path.join(repoRoot, "runtime/wordpress-content-loader.php");
+// The site carries the thin loader; each release carries its own body.
+const contentLoader = path.join(repoRoot, "runtime/custom-redirects.php");
+const contentLoaderBody = path.join(repoRoot, "runtime/engine/loader/wordpress.php");
 const accessRules = path.join(repoRoot, "runtime/engine/runtime/access-rules.php");
 
 // The engine release pointer is box state: one immutable engine serves the whole
@@ -24,7 +26,10 @@ test("the MU loader follows the engine pointer and selects one Space's immutable
     const releaseRoot = path.join(publicRoot, ".stattic/releases", release);
     mkdirSync(path.join(releaseRoot, "engine/wordpress"), { recursive: true });
     mkdirSync(path.join(releaseRoot, "engine/shared"), { recursive: true });
-    // release-a predates REST hooks. The newest docroot loader must still load it.
+    mkdirSync(path.join(releaseRoot, "engine/loader"), { recursive: true });
+    copyFileSync(contentLoaderBody, path.join(releaseRoot, "engine/loader/wordpress.php"));
+    // Neither release has the REST hook installer: release-a has no helper,
+    // release-b an older one. The current loader body must still load both.
     if (release === "release-b") {
       writeFileSync(
         path.join(releaseRoot, "engine/shared/wordpress-rest.php"),

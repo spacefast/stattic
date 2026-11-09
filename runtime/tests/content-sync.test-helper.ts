@@ -68,7 +68,7 @@ function releaseRoot(format: SyncFormat) {
   writeFileSync(path.join(root, ".stattic/active-release"), "releases/test-engine");
   const loader = path.join(root, "wp-content/mu-plugins/spacefast-content.php");
   mkdirSync(path.dirname(loader), { recursive: true });
-  copyFileSync(path.join(repoRoot, "runtime/wordpress-content-loader.php"), loader);
+  copyFileSync(path.join(repoRoot, "runtime/custom-redirects.php"), loader);
   // Core loads the page cache drop-in before any plugin, as wp-settings.php does,
   // and anything printed while booting (a notice, a plugin's stray echo) lands in
   // its buffer.

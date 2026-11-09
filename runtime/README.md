@@ -126,11 +126,14 @@ Requirements: PHP 8.5 with `sodium`, `curl`, and `zip` extensions, plus the bund
    in `.stattic/active-release`. The loader reads this small data file once per request, so an
    atomic rename becomes visible without depending on PHP OPcache or realpath-cache timing.
 2. Route ordinary requests through the installed `index.php`. Every installed public PHP
-   entrypoint is the same loader: it pins the active release once, then executes only that
-   release. WP.Cloud's `custom-redirects.php` loader returns for the canonical direct
-   `/__spacefast/*.php` entrypoints after its environment bootstrap finishes. The loader is
-   reinstalled whenever the payload's loader bytes differ from the installed ones
-   (`.stattic/loader-version` holds their sha256), so a loader fix reaches a synced box.
+   entrypoint, and the WordPress mu-plugin `spacefast-content.php`, is the same thin loader
+   (`custom-redirects.php`). It picks an engine once per request, then requires that engine's
+   own loader body (`engine/loader/request.php` or `engine/loader/wordpress.php`), which holds
+   the publication lock, the install journal, request classification and the engine requires.
+   WP.Cloud's `custom-redirects.php` returns for the canonical direct `/__spacefast/*.php`
+   entrypoints after its environment bootstrap finishes. The installer reinstalls the loader
+   whenever the payload's public bytes differ from the installed ones (`.stattic/loader-version`
+   holds their sha256).
 3. Deny direct web access to `.stattic/**` at the webserver level. The engine also
    denies it itself, defense in depth is still good practice.
 4. Provide configuration (see below).
@@ -145,14 +148,31 @@ shares one copy: `/scripts/sf-engine-<revision>/` with its binary at
 `sf-engine-<environment>-{latest,previous}` and `sf-bin-<environment>-{latest,previous}` links
 beside them. A site opts in when its WP Cloud persistent data names one of those channels in
 `SPACEFAST_RUNTIME_ENGINE_SOURCE`, for example `chroot/production/latest`. The control plane
-sets it through the WP Cloud API. The loaders, and the control plane's scheduled and SSH
-commands, still resolve the site's own release first and ask its
-`engine/shared/engine-selection.php` which engine to run. The site's install root keeps its storage and its publication lock either
-way, and a missing or incomplete chroot falls back to the site's release. Health and the
-engine-update receipt report `engine_source`. Health also reports `engine_source_reason`
-(`chroot`, `no_persistent_data`, `unselected`, `chroot_missing`, `chroot_engine_unsupported` or
-`chroot_binary_missing`) and the `chroot_revision` the selected channel resolved to, so a site
-that selects the chroot and still runs its own release says why.
+sets it through the WP Cloud API.
+
+The thin loader reads that selection itself, before any engine code runs. It resolves the
+channel link to its revision directory and requires the body from that path, never through the
+link, because FPM runs `opcache.validate_timestamps=Off` and only a path per revision keeps the
+compiled body in step with the disk. A move of `latest` therefore needs no work on the site; PHP
+picks it up when its realpath cache entry for the link expires. The
+control plane's scheduled and SSH commands run no loader; they resolve the site's own release and
+ask its `engine/shared/engine-selection.php`, which restates the same rule. The site's install
+root keeps its storage and its publication lock either way, and a missing or incomplete chroot
+falls back to the site's release. Health and the engine-update receipt report `engine_source`.
+Health also reports `engine_source_reason` (`chroot`, `no_persistent_data`, `unselected`,
+`chroot_missing`, `chroot_engine_unsupported`, `chroot_containment_missing` or
+`chroot_binary_missing`), the `chroot_revision` the selected channel resolved to, and the
+`loader_version` that handed the request over, so a site that selects the chroot and still runs
+its own release says why. A revision without loader bodies is `chroot_engine_unsupported`.
+
+The engine-update receipt for a chroot engine still requires every installed loader copy, and the
+static files the web server serves without PHP (`__spacefast/chunks`, the `spacefast-managed`
+theme and the `spacefast-identity` and `zero-dashboard` mu-plugin trees), to match that chroot
+revision byte for byte, as component staging does with the revision's lock. The loader does not
+change with the engine, so the receipt stays `current` across a chroot move that leaves those files
+alone. A move that changes them, including a change to the managed HTTPS apexes generated into the
+loader, needs the site's install. The loader passes its hand-off contract version to the body as
+`loader_version`, which health reports.
 
 ## Configuration
 
@@ -357,7 +377,7 @@ publishes its schema at `OPTIONS /wp-json/wp/v2/<collection>`.
 
 ```text
 htdocs/.stattic/active-release              atomic relative path to the active release
-htdocs/.stattic/loader-version              sha256 of the installed public loader payload
+htdocs/.stattic/loader-version              sha256 of the installed public payload (loader and static files)
 htdocs/.stattic/releases/<release>/         immutable managed engine, native binary, manifest
 htdocs/.stattic/storage
   runtime/uploads/                          staged upload sessions

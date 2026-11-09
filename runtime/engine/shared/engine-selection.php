@@ -1,11 +1,12 @@
 <?php
 declare(strict_types=1);
 
-// Which engine a site runs. The loaders resolve the site's own release first,
-// exactly as before, then ask here. One answer for every loader: the request
-// prepend (custom-redirects.php and its aliases) and the WordPress content
-// loader read this file from that site release, so the rule ships with the
-// engine instead of being restated in each copy.
+// Which engine a site runs, for the control plane's scheduled and SSH
+// commands (apps/control-plane/src/runtime/engine-files.ts), which run no
+// loader. Requests and WordPress ask the thin loader (runtime/custom-redirects.php)
+// instead, which restates this rule because it cannot read any engine before
+// choosing one. Keep the two in step; runtime/tests/engine-source.test.ts
+// runs both.
 //
 // A site runs its own release unless its WP Cloud persistent data names an
 // environment and channel of the Spacefast chroot in
@@ -65,12 +66,13 @@ function _spacefast_runtime_engine_source(string $siteReleaseRoot): array
     ) {
         return $site('chroot_missing');
     }
-    // An engine without this rule selects some other way, or not at all.
-    // Running it would put its loaders on the site at its next install, and
-    // the site would stop reading its channel: the site's own release serves
-    // instead, until the chroot carries an engine with this rule.
+    // An engine without this rule, or without the loader bodies the thin
+    // loader hands requests to, predates that loader: the site's own release
+    // serves instead, until the chroot carries an engine with both.
     if (
-        !is_file($engineReal . '/engine/shared/engine-selection.php')
+        !is_file($engineReal . '/engine/loader/request.php')
+        || !is_file($engineReal . '/engine/loader/wordpress.php')
+        || !is_file($engineReal . '/engine/shared/engine-selection.php')
         || !is_file($engineReal . '/engine/init.php')
     ) {
         return $site('chroot_engine_unsupported', $match[1]);

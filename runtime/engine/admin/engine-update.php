@@ -170,7 +170,19 @@ function _stattic_engine_path_has_link_parent(string $publicRoot, string $relati
     return false;
 }
 
-function _stattic_engine_public_payload_matches(string $releaseRoot, string $publicRoot, array $manifest, string $loaderIdentity): bool
+/**
+ * Whether the site's public files are this release's. With a tree identity
+ * (the site's own release) every alias and tree must be byte-identical to the
+ * release and the trees must be the ones published under that identity.
+ * Without one (a chroot revision, which the site never installed) the files
+ * must still carry this revision's bytes, wherever the installer published the
+ * trees. The thin loader copies included: their bytes are what the component
+ * stage checks against this revision's lock and what carries the managed HTTPS
+ * apexes, so only identical bytes keep the three in agreement. The loader does
+ * not change with the engine, so a chroot move still needs no site install
+ * unless the loader itself, or a static file, changed.
+ */
+function _stattic_engine_public_payload_matches(string $releaseRoot, string $publicRoot, array $manifest, ?string $loaderIdentity): bool
 {
     foreach ($manifest['aliases'] as $entry) {
         $target = $publicRoot . '/' . $entry['path'];
@@ -187,7 +199,7 @@ function _stattic_engine_public_payload_matches(string $releaseRoot, string $pub
     foreach ($manifest['trees'] as $tree) {
         $target = $publicRoot . '/' . $tree['path'];
         $link = is_link($target) ? readlink($target) : false;
-        $prefix = 'spacefast-tree-releases/' . basename($tree['path']) . '/' . $loaderIdentity . '-';
+        $prefix = 'spacefast-tree-releases/' . basename($tree['path']) . '/' . ($loaderIdentity === null ? '' : $loaderIdentity . '-');
         $store = dirname($target) . '/spacefast-tree-releases/' . basename($tree['path']);
         $resolvedTarget = realpath($target);
         $resolvedStore = realpath($store);
@@ -195,6 +207,7 @@ function _stattic_engine_public_payload_matches(string $releaseRoot, string $pub
             _stattic_engine_path_has_link_parent($publicRoot, $tree['path'])
             || !is_string($link)
             || !str_starts_with($link, $prefix)
+            || substr($link, strlen($prefix)) === ''
             || str_contains(substr($link, strlen($prefix)), '/')
             || is_link($store)
             || !is_string($resolvedTarget)
@@ -223,9 +236,10 @@ function _stattic_engine_serves_from_chroot(): bool
 // A chroot engine is an immutable revision directory the site never installed,
 // so it has no release authority, proof or payload marker to check. What makes
 // it current is that it IS the requested revision, its native binary is the
-// requested one, and the site's loaders are that revision's: the loaders run
-// before the engine on every request, so loaders from another revision would
-// make this box serve a mix.
+// requested one, and the site's public files (the thin loader copies and the
+// static files served without PHP) are this revision's. The loader carries no
+// engine logic and does not change with it, so a chroot move needs no work on
+// the site unless one of those files changed.
 function _stattic_engine_chroot_installation_proven(string $privateRoot, string $revision, string $nativeSha256): bool
 {
     $installRoot = realpath(dirname($privateRoot));
@@ -241,14 +255,12 @@ function _stattic_engine_chroot_installation_proven(string $privateRoot, string 
         }
     }
     $manifest = _stattic_engine_public_manifest($releaseRoot);
-    $loaderIdentity = is_array($manifest) ? _stattic_engine_loader_identity($releaseRoot, $manifest) : null;
     $actualNativeSha256 = is_file($native) ? hash_file('sha256', $native) : false;
     return is_array($manifest)
-        && is_string($loaderIdentity)
         && $revision === SPACEFAST_RUNTIME_ENGINE_REVISION
         && is_string($actualNativeSha256)
         && hash_equals($nativeSha256, $actualNativeSha256)
-        && _stattic_engine_public_payload_matches($releaseRoot, dirname($privateRoot, 2), $manifest, $loaderIdentity);
+        && _stattic_engine_public_payload_matches($releaseRoot, dirname($privateRoot, 2), $manifest, null);
 }
 
 function _stattic_engine_installation_proven(string $privateRoot, string $revision, string $nativeSha256): bool
@@ -311,8 +323,8 @@ function _stattic_engine_installation_proven(string $privateRoot, string $revisi
 }
 
 // The alias files are the ONLY engine bytes reinstalled under an unchanged
-// path: the loader copies (custom-redirects.php, index.php, the entrypoint
-// aliases) plus the resident installer. Releases get fresh directories opcache
+// path: the thin loader copies (custom-redirects.php, index.php, the
+// entrypoint aliases, the content mu-plugin) plus the resident installer. Releases get fresh directories opcache
 // has never seen. Absolute box paths, derived from the private root the route
 // already holds.
 //

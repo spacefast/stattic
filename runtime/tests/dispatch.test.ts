@@ -282,7 +282,12 @@ test("replay-guard storage failure answers 503 retryable, never a false 403 repl
     } finally {
         posix_setrlimit(POSIX_RLIMIT_FSIZE, $soft, $hard);
     }
-    echo $verdict;
+    // Only a full disk or quota is named as such; every other cause stays generic.
+    echo implode(',', [
+        $verdict,
+        _stattic_jwt_replay_storage_verdict('No space left on device'),
+        _stattic_jwt_replay_storage_verdict('Disk quota exceeded'),
+    ]);
   `,
       rt.engineRoot,
       rt.storageRoot,
@@ -298,7 +303,7 @@ test("replay-guard storage failure answers 503 retryable, never a false 403 repl
     exitCode,
     failure: exitCode === 0 ? null : { stdout, stderr },
   }).toEqual({ exitCode: 0, failure: null });
-  expect(stdout).toBe("unavailable");
+  expect(stdout).toBe("unavailable,storage_full,storage_full");
   expect(diagnostics(stderr)).toEqual([
     {
       phase: "claim",

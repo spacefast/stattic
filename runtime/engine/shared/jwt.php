@@ -567,7 +567,8 @@ function _stattic_jwt_replay_store(string $privateRoot): array
 }
 
 // Keep native paths and token identifiers out of the platform diagnostic.
-function _stattic_jwt_log_replay_storage_failure(string $phase, ?array $error): void
+// Returns the classified reason so the caller can name a full disk.
+function _stattic_jwt_log_replay_storage_failure(string $phase, ?array $error): string
 {
     $message = (string) ($error['message'] ?? '');
     $operation = 'unknown';
@@ -591,12 +592,14 @@ function _stattic_jwt_log_replay_storage_failure(string $phase, ?array $error): 
     error_log('spacefast runtime replay_guard_unavailable ' . json_encode([
         'phase' => $phase, 'operation' => $operation, 'reason' => $reason,
     ], JSON_UNESCAPED_SLASHES));
+    return $reason;
 }
 
-// Returns 'ok' (first to claim), 'replayed' (live marker exists), or
-// 'unavailable' (the write failed with no marker on disk). A replay verdict
-// requires evidence: reporting a storage outage as a replay would turn a full
-// disk into a permanent-looking auth failure, so callers answer retryable.
+// Returns 'ok' (first to claim), 'replayed' (live marker exists),
+// 'storage_full' (the disk or quota refused the marker), or 'unavailable' (any
+// other failed write with no marker on disk). A replay verdict requires
+// evidence: reporting a storage outage as a replay would turn a full disk into
+// a permanent-looking auth failure, so callers answer retryable.
 // `$namespace` keeps the visitor and management id spaces from colliding.
 function _stattic_jwt_consume_jti(string $privateRoot, string $namespace, string $jti, int $exp, int $now): string
 {
@@ -604,8 +607,9 @@ function _stattic_jwt_consume_jti(string $privateRoot, string $namespace, string
     // would hide a storage outage behind a generic runtime error.
     error_clear_last();
     if (!_stattic_runtime_mkdir_soft($privateRoot . '/runtime/jti')) {
-        _stattic_jwt_log_replay_storage_failure('directory', error_get_last());
-        return 'unavailable';
+        return _stattic_jwt_replay_storage_verdict(
+            _stattic_jwt_log_replay_storage_failure('directory', error_get_last()),
+        );
     }
     $store = _stattic_jwt_replay_store($privateRoot);
     _stattic_defer(static function () use ($store, $now): void {
@@ -635,10 +639,18 @@ function _stattic_jwt_consume_jti(string $privateRoot, string $namespace, string
     }
 
     if (!file_exists($path)) {
-        _stattic_jwt_log_replay_storage_failure('claim', $claimError);
-        return 'unavailable';
+        return _stattic_jwt_replay_storage_verdict(
+            _stattic_jwt_log_replay_storage_failure('claim', $claimError),
+        );
     }
     return 'replayed';
+}
+
+function _stattic_jwt_replay_storage_verdict(string $reason): string
+{
+    return in_array($reason, ['No space left on device', 'Disk quota exceeded'], true)
+        ? 'storage_full'
+        : 'unavailable';
 }
 
 function _stattic_jwt_reject_replayed_jti(string $privateRoot, string $audience, array $claims, int $now): void
@@ -649,8 +661,12 @@ function _stattic_jwt_reject_replayed_jti(string $privateRoot, string $audience,
     }
     $exp = isset($claims['exp']) ? (int) $claims['exp'] : $now;
     $status = _stattic_jwt_consume_jti($privateRoot, $audience, $jti, $exp, $now);
+    // Storage outage, not a replay: retryable, never a permanent auth failure.
+    // A full disk gets the same code the finalizer uses, so the alert says so.
+    if ($status === 'storage_full') {
+        _stattic_problem_response(503, 'runtime_storage_full', "The site's disk is full.");
+    }
     if ($status === 'unavailable') {
-        // Storage outage, not a replay: retryable, never a permanent auth failure.
         _stattic_problem_response(503, 'runtime_replay_guard_unavailable', 'Runtime token replay guard storage is unavailable.');
     }
     if ($status !== 'ok') {

@@ -184,8 +184,6 @@ function _stattic_service_broker_env(array $identity, array $config = []): array
     $env = [
         'SPACEFAST_SERVICE_USAGE_ROOT' => $privateRoot,
         'SPACEFAST_SERVICE_SPACE_ID' => $spaceId,
-        'SPACEFAST_SERVICE_USAGE_PHP' => _stattic_runtime_php_cli_binary(),
-        'SPACEFAST_SERVICE_USAGE_SCRIPT' => dirname(__DIR__) . '/runtime/usage.php',
     ];
     $versionId = (string) ($identity['versionId'] ?? '');
     $token = $spaceId !== '' && $versionId !== '' && $privateRoot !== ''

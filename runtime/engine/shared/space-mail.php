@@ -250,7 +250,7 @@ function _stattic_space_mail_send(array $payload, string $publicRoot, string $pr
     if (!_stattic_space_mail_bootstrap($publicRoot, $senderDomain)) {
         return false;
     }
-    require_once __DIR__ . '/retail-usage.php';
+    require_once __DIR__ . '/storage.php';
     require_once __DIR__ . '/context.php';
     $spaceId = $grant['space_id'];
     $limit = $grant['limit'];
@@ -258,7 +258,7 @@ function _stattic_space_mail_send(array $payload, string $publicRoot, string $pr
     $root = _stattic_space_root($privateRoot, $spaceId);
     _stattic_runtime_mkdir($root);
     return _stattic_lock_with($root . '/email-usage.lock', STATTIC_LOCK_WAIT, static fn (): bool => false,
-        static function () use ($privateRoot, $spaceId, $root, $limit, $recipients, $mail, $senderDomain): bool {
+        static function () use ($root, $limit, $recipients, $mail, $senderDomain): bool {
             $path = $root . '/email-usage.json';
             $day = gmdate('Y-m-d');
             $previous = is_file($path) ? json_decode((string) file_get_contents($path), true) : null;
@@ -266,13 +266,11 @@ function _stattic_space_mail_send(array $payload, string $publicRoot, string $pr
             if ($used + $recipients > $limit) {
                 return false;
             }
-            // Reserve before transport acceptance. An interrupted ambiguous
-            // send consumes allowance but never becomes a usage charge.
+            // Reserve before transport acceptance: an interrupted ambiguous
+            // send consumes allowance. wp.cloud's email meter is the usage.
             _stattic_runtime_write_json_atomic($path, ['day' => $day, 'recipients' => $used + $recipients]);
             $accepted = _stattic_space_mail_transport($mail, $senderDomain);
-            if ($accepted) {
-                _stattic_record_retail_usage($privateRoot, $spaceId, 'email_recipients', $recipients);
-            } else {
+            if (!$accepted) {
                 _stattic_runtime_write_json_atomic($path, ['day' => $day, 'recipients' => $used]);
             }
             return $accepted;

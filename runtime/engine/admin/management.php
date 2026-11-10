@@ -20,7 +20,6 @@ require_once __DIR__ . '/finalize-rust.php';
 require_once __DIR__ . '/upload.php';
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/jobs.php';
-require_once __DIR__ . '/cas.php';
 require_once __DIR__ . '/retention.php';
 require_once __DIR__ . '/zero-db.php';
 require_once __DIR__ . '/storage.php';

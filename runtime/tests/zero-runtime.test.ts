@@ -10,7 +10,6 @@ import {
   deploy,
   finalizeRaw,
   get,
-  journalRecords,
   postAccessCallback,
   publicAccessConfig,
   putRoute,
@@ -312,14 +311,6 @@ test("invokes a finalized Zero lookup action through a fresh runner process", as
     schemaHash: "sha256:test",
     visitorIp: "203.0.113.44",
   });
-  const receipts = journalRecords(rt).filter((event) => event.event === "retail.usage");
-  expect(receipts.find((event) => event.meter === "origin_invocations")).toMatchObject({
-    space_id: "spc_zero_runtime",
-    quantity: "1",
-  });
-  const cpu = receipts.find((event) => event.meter === "runtime_cpu_microseconds");
-  expect(cpu?.space_id).toBe("spc_zero_runtime");
-  expect(BigInt(String(cpu?.quantity))).toBeGreaterThan(0n);
 });
 
 test("an HTML endpoint response carries the one SDK tag, first in <head>", async () => {

@@ -219,9 +219,4 @@ test("a retired version keeps its tree and maintenance keeps every byte", async 
   const served = await get(rt, host, "/assets/live.txt");
   expect(served.status).toBe(200);
   expect(await served.text()).toBe("still routed");
-
-  const report = journalRecords(rt).find(
-    (e) => e.event === "space.disk.report" && e.spaceId === spaceId,
-  );
-  expect(Number(report?.inodes)).toBeGreaterThan(0);
 });

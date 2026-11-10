@@ -24,7 +24,6 @@ import {
   get,
   publicAccessConfig,
   putRoute,
-  journalRecords,
   type Runtime,
   RUNTIME_HTTP_API_BASE,
   RUNTIME_INSTANCE_ID,
@@ -669,11 +668,6 @@ test("mail needs a daily allowance, then sends through wp_mail and returns its a
     result: false,
   });
   expect(wpMailCaptures()).toHaveLength(before + 3);
-  expect(
-    journalRecords(rt)
-      .filter((event) => event.event === "retail.usage" && event.meter === "email_recipients")
-      .map((event) => event.quantity),
-  ).toEqual(["3", "1"]);
   await routeWithAllowance(4, null);
   expect(
     await (await relay(finalMessage, token, "services", "inv_mail_disabled")).json(),

@@ -171,8 +171,6 @@ function _stattic_zero_service_identity(array $envelope): array
 
 function _stattic_zero_run_process(string $payload, array $config, array $identity, int $timeoutMs = STATTIC_ZERO_RUNNER_TIMEOUT_MS): array
 {
-    require_once __DIR__ . '/../../shared/retail-usage.php';
-    $startedCpu = _stattic_retail_cpu_microseconds(getrusage()) + _stattic_retail_cpu_microseconds(getrusage(1));
     $result = _stattic_runtime_run_subprocess(
         [_stattic_runtime_native_binary(), 'invoke'],
         _stattic_zero_runner_base_env($config) + _stattic_service_broker_env($identity, $config),
@@ -185,11 +183,6 @@ function _stattic_zero_run_process(string $payload, array $config, array $identi
     if (!$result['spawned']) {
         _stattic_problem_refused(502, 'zero_runner_unavailable', 'Zero runner is unavailable.');
     }
-    $finishedCpu = _stattic_retail_cpu_microseconds(getrusage()) + _stattic_retail_cpu_microseconds(getrusage(1));
-    // The child has been reaped, so getrusage includes its real active CPU.
-    // Measure this invocation before any deferred platform work runs.
-    _stattic_record_retail_usage(_stattic_access_private_root(), (string) ($identity['spaceId'] ?? ''), 'runtime_cpu_microseconds', max(0, $finishedCpu - $startedCpu));
-    _stattic_record_retail_usage(_stattic_access_private_root(), (string) ($identity['spaceId'] ?? ''), 'origin_invocations', 1);
     $stdout = $result['stdout'];
     if ($result['exitCode'] !== 0 || !is_string($stdout) || $stdout === '') {
         _stattic_problem_refused(502, 'zero_runner_failed', _stattic_zero_debug_message('Zero runner failed. Exit code: ' . (string) $result['exitCode'] . '.', $result['stderr']));

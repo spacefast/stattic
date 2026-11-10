@@ -766,9 +766,9 @@ function _stattic_runtime_job_run_claimed(string $privateRoot, array $job, float
 
 /**
  * THE maintenance pass. The ORDER matters: reaping returns abandoned runs to the
- * queue before anything walks it, and the disk report runs last so it measures
- * what the pass left. No step deletes customer data or history; bytes leave the
- * box only through an explicit delete the control plane asks for.
+ * queue before anything walks it. No step deletes customer data or history;
+ * bytes leave the box only through an explicit delete the control plane asks
+ * for. Storage is measured by wp.cloud, not on the box.
  */
 function _stattic_runtime_job_housekeeping_edge_purge(string $privateRoot, array $_claims, float $deadline): bool
 {
@@ -782,7 +782,6 @@ function _stattic_runtime_job_maintenance_steps(): array
         'job_reap' => '_stattic_runtime_job_housekeeping_reap',
         'edge_purge' => '_stattic_runtime_job_housekeeping_edge_purge',
         'retention' => '_stattic_runtime_job_housekeeping_retention',
-        'disk_report' => '_stattic_runtime_job_housekeeping_disk_report',
     ];
 }
 
@@ -815,7 +814,6 @@ function _stattic_runtime_job_maintenance_tick(string $privateRoot, array $claim
     // Loaded here: the cron/CLI entry into the tick does not go through
     // management.php, which loads them for the API lane.
     require_once __DIR__ . '/retention.php';
-    require_once __DIR__ . '/cas.php';
 
     $ran = [];
     $skipped = [];

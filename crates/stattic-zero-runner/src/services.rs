@@ -24,7 +24,6 @@
 
 use std::cell::RefCell;
 use std::io::Read;
-use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -211,8 +210,6 @@ struct ServiceConfig {
     content_url: Option<String>,
     content_cookie: Option<String>,
     content_authorization: Option<String>,
-    usage_php: Option<String>,
-    usage_script: Option<String>,
 }
 
 impl ServiceConfig {
@@ -244,8 +241,6 @@ impl ServiceConfig {
             content_url: value("SPACEFAST_SERVICE_CONTENT_URL"),
             content_cookie: value("SPACEFAST_SERVICE_CONTENT_COOKIE"),
             content_authorization: value("SPACEFAST_SERVICE_CONTENT_AUTHORIZATION"),
-            usage_php: value("SPACEFAST_SERVICE_USAGE_PHP"),
-            usage_script: value("SPACEFAST_SERVICE_USAGE_SCRIPT"),
         }
     }
 }
@@ -654,34 +649,14 @@ fn spam_check(
     // Akismet answers with the literal words. Anything else means the call was
     // malformed or the key was refused, and guessing "not spam" there would
     // silently disable the check.
-    let result = match verdict {
+    match verdict {
         "true" => Ok(json!({ "spam": true, "discard": discard })),
         "false" => Ok(json!({ "spam": false, "discard": false })),
         _ => Err(BrokerRefusal::new(
             "service_upstream_refused",
             "The spam service returned an unexpected verdict.",
         )),
-    }?;
-    if let (Some(php), Some(script)) = (&config.usage_php, &config.usage_script) {
-        let status = Command::new(php)
-            .args(["-d", "auto_prepend_file=", script])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .status()
-            .map_err(|_| {
-                BrokerRefusal::new(
-                    "service_upstream_unavailable",
-                    "The spam usage receipt could not be recorded.",
-                )
-            })?;
-        if !status.success() {
-            return Err(BrokerRefusal::new(
-                "service_upstream_unavailable",
-                "The spam usage receipt could not be recorded.",
-            ));
-        }
     }
-    Ok(result)
 }
 
 fn spam_report(
@@ -1531,8 +1506,6 @@ mod tests {
             content_url: None,
             content_cookie: Some("__Host-spacefast_session=session".to_string()),
             content_authorization: Some("Bearer sfa_access_token".to_string()),
-            usage_php: None,
-            usage_script: None,
         };
         let request = content_request(&config, "https://space.example/__spacefast/content.php");
         let headers = request

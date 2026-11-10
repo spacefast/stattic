@@ -2572,17 +2572,6 @@ function _stattic_runtime_version_files_cursor_decode(string $cursor): ?string
     return $decoded !== '' ? $decoded : null;
 }
 
-// Sends the follow-up purges that are due on this box. A Space owns its box, so
-// that includes a hostname the Space no longer serves.
-function _stattic_runtime_settle_space_purge_route(string $privateRoot, string $spaceId, array $claims): void
-{
-    $settle = _stattic_runtime_purge_settle_drain($privateRoot, microtime(true) + 20);
-    _stattic_json_response(200, [
-        'space_id' => $spaceId,
-        'settle' => $settle,
-    ]);
-}
-
 function _stattic_runtime_purge_space_route(string $privateRoot, string $spaceId, array $claims): void
 {
     _stattic_json_response(200, [

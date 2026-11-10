@@ -45,7 +45,7 @@ const NOINDEX_ROBOTS = "User-agent: WordPress.com mShots\nAllow: /\n\nUser-agent
 // The composed policies, one name each (contracts §15/§16).
 const HTML_OPEN = "public, s-maxage=600, max-age=0, must-revalidate";
 const IMMUTABLE = "public, max-age=31536000, immutable";
-const REVALIDATE = "public, s-maxage=86400, max-age=0, must-revalidate";
+const REVALIDATE = "public, s-maxage=600, max-age=0, must-revalidate";
 // Synthetic URLs (404s, pattern-rule redirects) share the host-purged
 // shared window instead of a cache class.
 const EDGE_DEFAULT = "public, max-age=0, s-maxage=600, must-revalidate";

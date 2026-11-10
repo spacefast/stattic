@@ -14,12 +14,6 @@ require_once __DIR__ . '/http.php';
 // purge cannot address every query variant.
 const STATTIC_RUNTIME_PURGE_ATTEMPTS = 2;
 
-// Every purge is followed by a second one this long after its latest enqueue.
-// A request that read the old state before a mutation can finish after the
-// first purge and be stored as a fresh fill; by now every such request has
-// ended. The edge fills at its own speed, not the visitor's.
-const STATTIC_RUNTIME_PURGE_SETTLE_SECONDS = 60;
-
 // The site's local edge-cache API base and auth, from the platform env the FPM
 // prepend (/scripts/env.php) already defined. Null when either is absent: off
 // wp.cloud (dev, CI, the php -S harness) there is no edge to purge, and a purge
@@ -254,11 +248,6 @@ function _stattic_runtime_purge_store(string $privateRoot): array
     return _stattic_record_store($privateRoot . '/runtime/edge-purges');
 }
 
-function _stattic_runtime_purge_settle_store(string $privateRoot): array
-{
-    return _stattic_record_store($privateRoot . '/runtime/edge-purge-settles');
-}
-
 function _stattic_runtime_purge_read(array $store, string $hostname): ?array
 {
     $read = _stattic_record_store_read($store, $hostname);
@@ -273,14 +262,12 @@ function _stattic_runtime_purge_enqueue(string $privateRoot, array $hostnames, s
 {
     $store = _stattic_runtime_purge_store($privateRoot);
     _stattic_record_store_ensure($store);
-    $settles = _stattic_runtime_purge_settle_store($privateRoot);
-    _stattic_record_store_ensure($settles);
     foreach ($hostnames as $hostname) {
         _stattic_lock_with(
             _stattic_lock_stripe_path($store['root'], $hostname),
             STATTIC_LOCK_WAIT,
             static fn () => throw new RuntimeException('edge_purge_queue_busy'),
-            static function () use ($store, $settles, $hostname, $reason, $mutationLocks): void {
+            static function () use ($store, $hostname, $reason, $mutationLocks): void {
                 $previous = _stattic_runtime_purge_read($store, $hostname);
                 _stattic_record_store_put($store, $hostname, [
                     'generation' => bin2hex(random_bytes(16)),
@@ -293,18 +280,6 @@ function _stattic_runtime_purge_enqueue(string $privateRoot, array $hostnames, s
                     'attempts' => 0,
                     'next_attempt_at' => 0,
                 ]);
-                // A later mutation moves the follow-up after itself.
-                _stattic_lock_with(
-                    _stattic_lock_stripe_path($settles['root'], $hostname),
-                    STATTIC_LOCK_WAIT,
-                    static fn () => throw new RuntimeException('edge_purge_queue_busy'),
-                    static fn () => _stattic_record_store_put($settles, $hostname, [
-                        'generation' => bin2hex(random_bytes(16)),
-                        'reason' => $reason,
-                        'attempts' => 0,
-                        'due_at' => time() + STATTIC_RUNTIME_PURGE_SETTLE_SECONDS,
-                    ]),
-                );
             },
         );
     }
@@ -412,92 +387,6 @@ function _stattic_runtime_purge_drain(string $privateRoot, float $deadline, ?int
         $complete = $settled && $complete;
     }
     return $complete;
-}
-
-/**
- * Send every follow-up purge that is due. A hostname whose first purge is
- * still pending waits for it. A follow-up not yet due is not a failure.
- *
- * @return array{complete: bool, next_due_in: ?int}
- */
-function _stattic_runtime_purge_settle_drain(string $privateRoot, float $deadline, ?int $now = null): array
-{
-    $settles = _stattic_runtime_purge_settle_store($privateRoot);
-    if (!file_exists($settles['root'])) {
-        return ['complete' => true, 'next_due_in' => null];
-    }
-    if (!is_dir($settles['root']) || !is_readable($settles['root'])) {
-        throw new RuntimeException('edge_purge_queue_unavailable');
-    }
-    $endpoint = _stattic_runtime_edge_purge_endpoint();
-    $store = _stattic_runtime_purge_store($privateRoot);
-    $now ??= time();
-    $complete = true;
-    $nextDueAt = null;
-    $wait = static function (int $dueAt) use (&$nextDueAt): void {
-        $nextDueAt = $nextDueAt === null ? $dueAt : min($nextDueAt, $dueAt);
-    };
-    foreach (_stattic_record_store_ids($settles) as $hostname) {
-        if (microtime(true) >= $deadline) {
-            return ['complete' => false, 'next_due_in' => 0];
-        }
-        $record = _stattic_runtime_purge_read($settles, $hostname);
-        if ($record === null) {
-            continue;
-        }
-        if (!is_string($record['generation'] ?? null) || !is_string($record['reason'] ?? null)) {
-            throw new RuntimeException('edge_purge_record_invalid');
-        }
-        $dueAt = (int) ($record['due_at'] ?? 0);
-        if ($dueAt > $now) {
-            $wait($dueAt);
-            continue;
-        }
-        if ($endpoint === null) {
-            $complete = false;
-            continue;
-        }
-        if (_stattic_runtime_purge_read($store, $hostname) !== null) {
-            // The first purge has not landed yet; follow it, never precede it.
-            $wait($now + STATTIC_RUNTIME_PURGE_SETTLE_SECONDS);
-            continue;
-        }
-        $accepted = _stattic_runtime_edge_purge_host($endpoint, $hostname, $record['reason'] . '_settle', $deadline);
-        $settled = _stattic_lock_with(
-            _stattic_lock_stripe_path($settles['root'], $hostname),
-            STATTIC_LOCK_WAIT,
-            static fn () => throw new RuntimeException('edge_purge_queue_busy'),
-            static function () use ($settles, $hostname, $record, $accepted, $now, $privateRoot): ?int {
-                $current = _stattic_runtime_purge_read($settles, $hostname);
-                if (!is_array($current) || ($current['generation'] ?? null) !== $record['generation']) {
-                    // A newer mutation re-armed it; that one is still owed.
-                    return is_array($current) ? (int) ($current['due_at'] ?? $now) : null;
-                }
-                if ($accepted) {
-                    _stattic_record_store_delete($settles, $hostname);
-                    return null;
-                }
-                $attempts = ((int) ($record['attempts'] ?? 0)) + 1;
-                $retryAt = $now + min(300, 5 * (2 ** min(6, $attempts - 1)));
-                _stattic_record_store_put($settles, $hostname, [...$record, 'attempts' => $attempts, 'due_at' => $retryAt]);
-                _stattic_runtime_append_journal($privateRoot, [
-                    'event' => 'edge_purge_failed',
-                    'mode' => 'settle',
-                    'reason' => $record['reason'],
-                    'hostnames' => [$hostname],
-                    'attempts' => $attempts,
-                ]);
-                return $retryAt;
-            },
-        );
-        if ($settled !== null) {
-            $wait($settled);
-        }
-        if (!$accepted) {
-            $complete = false;
-        }
-    }
-    return ['complete' => $complete, 'next_due_in' => $nextDueAt === null ? null : max(0, $nextDueAt - $now)];
 }
 
 /** @return array{status:string, mode:string, urls?:int, hosts?:int} */

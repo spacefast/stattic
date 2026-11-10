@@ -252,7 +252,6 @@ function _stattic_runtime_admin_management_routes(): array
         ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/evidence/source$#', 'read_version_evidence', ['space_id' => 1, 'version_id' => 2], 'none', true, '_stattic_runtime_read_version_evidence_route'],
         ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/files$#', 'list_version_files', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_runtime_list_version_files_route'],
         ['POST', '#^/spaces/([^/]+)/purge$#', 'purge_space', ['space_id' => 1], 'none', false, '_stattic_runtime_purge_space_route'],
-        ['POST', '#^/spaces/([^/]+)/purge/settle$#', 'settle_space_purge', ['space_id' => 1], 'none', false, '_stattic_runtime_settle_space_purge_route'],
         ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/finalize$#', 'finalize_version', ['space_id' => 1, 'version_id' => 2], 'space', false, '_stattic_runtime_finalize_version'],
         ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/zero/migrate$#', 'apply_zero_migrations', ['space_id' => 1, 'version_id' => 2], 'space', false, '_stattic_runtime_apply_version_zero_migrations'],
         ['DELETE', '#^/spaces/([^/]+)/routes/([^/]+)$#', 'delete_route', ['space_id' => 1, 'route_name' => 2], 'space', false, '_stattic_runtime_delete_route'],

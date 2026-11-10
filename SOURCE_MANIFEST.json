@@ -1,7 +1,7 @@
 {
-  "revision": "5d00929ea8b02bed5139f4616de3b7caf217e530",
-  "sourceHash": "0fa42b81c0a1dea8f5fff3bafd8c1a838cffe97db5b754ac15d1a7ae1516c75a",
-  "manifestSha256": "042a5dd5aeb7c464542dc850f1ca0064a80abeb3667b4193884887a04763c36a",
+  "revision": "74d20f875ee020a459e0c22c08168169f8d7633c",
+  "sourceHash": "97649eb18b7062c3e5977c47c7adfe18820872a3eea8c2beff424d7d547a14d4",
+  "manifestSha256": "6a9ae98290379252e3c87a75ee76cad3689cc24e65be00690bb0d4c2fb5b8f1f",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "34ccb5c01f4c3423204ac720e5330ffffff0a5cd444b441b8a835abcae44e9e8"
+      "sha256": "a6efb2779a48474a00e2a41705fe9382d7f3fdd372d25124af5662529d916827"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "6acb5fc63751f01454cbc677ce8dc86619590cd0af42c0c5dc46fc6f6b06f004"
+      "sha256": "e692b8ecbdb934b6e2b11c38b63f962898e61355c8e5c657c21ee70190d5ff19"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -189,7 +189,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/protocol.rs",
-      "sha256": "67a9f4a3176b3233b1458df07adecfbafbb5ef39c0db842ad74d20414efaefbd"
+      "sha256": "c01edb40f7938d8b7a1f41deaa68784abe30f60919dfc7eb00efe224b6a5dc6d"
     },
     {
       "path": "crates/stattic-runtime-core/src/responses.rs",
@@ -13521,7 +13521,7 @@
     },
     {
       "path": "runtime/engine/admin/api.php",
-      "sha256": "65823e0c8e5b5d57405c9050cefc90ef686e8a4d80dd8a52b73a86efb73c8215"
+      "sha256": "8bd8cfe49d16da12b78d0edb77e1f153fc45d479584cb4256c3b64e8c30682ed"
     },
     {
       "path": "runtime/engine/admin/auth.php",
@@ -13553,7 +13553,7 @@
     },
     {
       "path": "runtime/engine/admin/jobs.php",
-      "sha256": "cf9c930f5b92fdaf876b12015b4caa80aca9e1871c907b994bcb7c89b64765d1"
+      "sha256": "b48f15b82f0d9891bb0e95583a223f68bc5dce50a0aa1b8a625d0615d4aae162"
     },
     {
       "path": "runtime/engine/admin/legacy-zero.php",
@@ -13561,7 +13561,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "4e3cf5403e7de63f97780426ddeb9f7e9cdfe16aed464af1d9a0df6f82975240"
+      "sha256": "f24bdb6f0dff3528c5a370104e0d0300e405f5c167a94089f2841caf703b7d7f"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -13737,7 +13737,7 @@
     },
     {
       "path": "runtime/engine/runtime/redirects.php",
-      "sha256": "0b6d350652a96da04e5b9b5e20763e113a873621ef718ff7730e62b3c3f7319a"
+      "sha256": "122cf0499dfb68db6959e8f115815493ff18fef9f4725b5830f92d96e6193e4b"
     },
     {
       "path": "runtime/engine/runtime/rules.php",
@@ -13753,7 +13753,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "70c12501fe395b0c104bb3f04beb2019889f31e9aa128ede8797be629a098593"
+      "sha256": "a5f0374728e0c56cc0ce457a16262735fe4281810645514ddc921aeb31749960"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-IEQBVZUQ.js",
@@ -13837,7 +13837,7 @@
     },
     {
       "path": "runtime/engine/shared/cache-policy.php",
-      "sha256": "f0f50b4806cfce0a598f0b122387d8a212f1dda6ff989fe414ba6f9cb791edc0"
+      "sha256": "7d4aa3e92b69872a71ce4d7824a3af737aed92dcbf1b0179258bbe99edcf3875"
     },
     {
       "path": "runtime/engine/shared/canonical-json.php",
@@ -13953,7 +13953,7 @@
     },
     {
       "path": "runtime/engine/shared/purge.php",
-      "sha256": "3f5a7407ac267912a6b4cee2d757c26ccb7ba058c420de9deee4383f0c683618"
+      "sha256": "d30e9f0456e979788ec7cb2ff788d362ed50b987767fafed7eef4954a25bd108"
     },
     {
       "path": "runtime/engine/shared/record-store.php",
@@ -14309,7 +14309,7 @@
     },
     {
       "path": "runtime/tests/edge-purge.test.ts",
-      "sha256": "701bcaa82ca846901fa33bab58479ad6b6397d42d35cdc22b08f234ebe7833f3"
+      "sha256": "829603897b6ba83755449a7b7c47080dd20e77ef5603c95ed2f11c3f74878b70"
     },
     {
       "path": "runtime/tests/engine-manifest-drift.test.ts",
@@ -14453,7 +14453,7 @@
     },
     {
       "path": "runtime/tests/headers.test.ts",
-      "sha256": "689a872436c8e344d7663134af1c71f31f5b2c484b221d265cac0d8a51a95a57"
+      "sha256": "ff196e34aa1814091859c2985aa9d770cc4ccb967f8e3bce22fcc91df9c907d7"
     },
     {
       "path": "runtime/tests/html-inject.test.ts",
@@ -14537,7 +14537,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "2479f7057a995385e97158235e32401f7cdc41d0a6f9a911ab4c1b5928a01aca"
+      "sha256": "8e1b00c155ac8ea729a632da1ffeef5dc421279976678fc965f1b310c03507a3"
     },
     {
       "path": "runtime/tests/run-ci.sh",

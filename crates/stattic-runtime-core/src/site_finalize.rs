@@ -607,7 +607,7 @@ fn run_finalize_pipeline(
         crate::zero_v2::compile(input, private_root, stage_root, files)
     })?;
     let mut diagnostics = Vec::new();
-    let substitution = timed(&mut telemetry.template_substitution_ms, || {
+    let mut substitution = timed(&mut telemetry.template_substitution_ms, || {
         let substitution = resolve_template_substitution(input, stage_root, &mut diagnostics)?;
         if zero_v2.is_some()
             && substitution
@@ -661,6 +661,26 @@ fn run_finalize_pipeline(
         .unwrap_or(&absent);
     let viewer = resolved_viewer(metadata, config);
     let assigned_hostnames = hostname_list(&input.body, "routing_assigned_hostnames");
+    let share_image_origin = input
+        .body
+        .get("system_variables")
+        .and_then(|variables| variables.get("SPACEFAST_LIVE_URL"))
+        .and_then(Value::as_str)
+        .and_then(|value| Url::parse(value).ok())
+        .filter(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.has_host()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+        });
+    if share_image_origin.is_some() {
+        substitution
+            .system_variable_dependencies
+            .insert("SPACEFAST_LIVE_URL".into());
+    }
     // Everything the pipeline produces lands in the CAS: the tables address
     // blobs, and a blob is the only place a byte lives.
     let blobs = blob_root(private_root, &input.space_id);
@@ -668,14 +688,15 @@ fn run_finalize_pipeline(
     // The previous version's catalog, read ONCE: it gates per-file adoption
     // here and feeds the publish delta at the end of the pipeline.
     let previous_catalog = previous_version_catalog(input, private_root)?;
-    let context_digest = pipeline_context_digest(config, serving, &viewer, metadata, files);
-    let adoptable = adoptable_paths(previous_catalog.as_ref(), &context_digest, files, &blobs);
     let html_context = HtmlPipelineContext {
         serving,
         metadata,
         viewer: &viewer,
         assigned_hostnames: &assigned_hostnames,
+        share_image_origin: share_image_origin.as_ref(),
     };
+    let context_digest = pipeline_context_digest(&html_context, files);
+    let adoptable = adoptable_paths(previous_catalog.as_ref(), &context_digest, files, &blobs);
     // Each channel starts from the same staged source, before the base pipeline
     // rewrites it. Declared-template limits apply before derived outputs exist.
     let variant_sources = prepare_template_variant_sources(
@@ -688,12 +709,7 @@ fn run_finalize_pipeline(
         materialize_html_pipeline(
             &stage_root.join("files"),
             files,
-            HtmlPipelineContext {
-                serving,
-                metadata,
-                viewer: &viewer,
-                assigned_hostnames: &assigned_hostnames,
-            },
+            html_context,
             &adoptable,
             &mut diagnostics,
         )
@@ -1347,12 +1363,21 @@ fn previous_version_catalog(
 /// pages are excluded from adoption separately because their frontmatter
 /// feeds decoration without necessarily reaching the rendered bytes.
 fn pipeline_context_digest(
-    config: &Map<String, Value>,
-    serving: &Map<String, Value>,
-    viewer: &Map<String, Value>,
-    metadata: &Map<String, Value>,
+    context: &HtmlPipelineContext<'_>,
     files: &BTreeMap<String, FileMeta>,
 ) -> String {
+    let HtmlPipelineContext {
+        serving,
+        metadata,
+        viewer,
+        share_image_origin,
+        ..
+    } = *context;
+    let absent = Map::new();
+    let config = serving
+        .get("config")
+        .and_then(Value::as_object)
+        .unwrap_or(&absent);
     let staged_sha = |path: &str| files.get(path).map(|meta| meta.sha256.clone());
     let meta = config.get("meta").and_then(Value::as_object);
     let asset_ref = |reference: Option<&Value>| -> Value {
@@ -1365,7 +1390,8 @@ fn pipeline_context_digest(
         "engine": env!("CARGO_PKG_VERSION"),
         "previewMetadata": 1,
         "providerIconAlias": 1,
-        "autoShareImage": 2,
+        "autoShareImage": 4,
+        "shareImageOrigin": share_image_origin.map(Url::as_str),
         "config": config,
         "siteThemeCss": serving.get("theme_css"),
         "viewer": viewer,
@@ -1485,12 +1511,6 @@ fn variant_needs_pipeline(
     if values.keys().any(|path| is_pipeline_source(path)) {
         return true;
     }
-    let absent = Map::new();
-    let config = context
-        .serving
-        .get("config")
-        .and_then(Value::as_object)
-        .unwrap_or(&absent);
     let mut changed = files.clone();
     for (path, content) in values {
         if let Some(meta) = files.get(path) {
@@ -1500,19 +1520,7 @@ fn variant_needs_pipeline(
             );
         }
     }
-    pipeline_context_digest(
-        config,
-        context.serving,
-        context.viewer,
-        context.metadata,
-        files,
-    ) != pipeline_context_digest(
-        config,
-        context.serving,
-        context.viewer,
-        context.metadata,
-        &changed,
-    )
+    pipeline_context_digest(context, files) != pipeline_context_digest(context, &changed)
 }
 
 fn link_variant_source(source: &Path, target: &Path) -> Result<()> {
@@ -1648,25 +1656,8 @@ fn compile_template_variant_files(
         }
         let mut route_files = base.sources.files.clone();
         apply_templates(values, &workspace, &mut route_files)?;
-        let absent = Map::new();
-        let config = context
-            .serving
-            .get("config")
-            .and_then(Value::as_object)
-            .unwrap_or(&absent);
-        let same_context = pipeline_context_digest(
-            config,
-            context.serving,
-            context.viewer,
-            context.metadata,
-            &route_files,
-        ) == pipeline_context_digest(
-            config,
-            context.serving,
-            context.viewer,
-            context.metadata,
-            &base.sources.files,
-        );
+        let same_context = pipeline_context_digest(context, &route_files)
+            == pipeline_context_digest(context, &base.sources.files);
         let adoption: BTreeMap<_, _> = base
             .sources
             .files
@@ -1697,12 +1688,7 @@ fn compile_template_variant_files(
         let pipeline = materialize_html_pipeline(
             &root,
             &mut route_files,
-            HtmlPipelineContext {
-                serving: context.serving,
-                metadata: context.metadata,
-                viewer: context.viewer,
-                assigned_hostnames: context.assigned_hostnames,
-            },
+            *context,
             &adoption,
             &mut channel_diagnostics,
         )?;
@@ -1769,7 +1755,7 @@ struct TemplateSubstitution {
     /// it can only be produced where substitution actually happens.
     variable_digests: BTreeMap<String, String>,
     /// The `SPACEFAST_*` platform names this version resolved.
-    system_variable_dependencies: Vec<String>,
+    system_variable_dependencies: BTreeSet<String>,
 }
 
 /// Resolves everything this version substitutes: declared templates, the
@@ -1885,7 +1871,7 @@ fn resolve_template_substitution(
             )
         }),
         variable_digests: prepared.dependencies,
-        system_variable_dependencies: prepared.system_dependencies,
+        system_variable_dependencies: prepared.system_dependencies.into_iter().collect(),
     })
 }
 
@@ -4467,6 +4453,7 @@ mod tests {
             metadata: &metadata,
             viewer: &viewer,
             assigned_hostnames: &[],
+            share_image_origin: None,
         };
         let js_routes = BTreeMap::from([(
             "prod".to_string(),
@@ -4512,6 +4499,7 @@ mod tests {
                 metadata: &metadata,
                 viewer: &viewer,
                 assigned_hostnames: &[],
+                share_image_origin: None,
             },
             &BTreeMap::new(),
             &mut diagnostics,
@@ -5417,7 +5405,7 @@ mod tests {
         assert_eq!(output.telemetry.as_ref().unwrap().skipped_files, 0);
         let body = String::from_utf8(served_body(&private, "v2", "index.html")).unwrap();
         assert!(
-            body.contains("<meta data-spacefast-auto-image=\"og:image\" property=\"og:image\""),
+            body.contains("<meta data-spacefast-auto-image=\"og:image\" property=\"og:image\" content=\"https://my.spacefast.com/app-icon-512x512.png\">"),
             "{body}"
         );
     }
@@ -5438,6 +5426,15 @@ mod tests {
             next_body: Value,
         }
         let scenarios = [
+            ContextFlip {
+                name: "the live URL selects the mShots capture",
+                first_files: vec![("index.html", page)],
+                next_files: vec![("index.html", page)],
+                first_meta: json!({"mode":"website","title":"Adopt"}),
+                next_meta: json!({"mode":"website","title":"Adopt"}),
+                first_body: json!({"serving":{"config":{"platform_meta":true}}, "system_variables":{"SPACEFAST_LIVE_URL":"https://first.example.test/"}}),
+                next_body: json!({"serving":{"config":{"platform_meta":true}}, "system_variables":{"SPACEFAST_LIVE_URL":"https://next.example.test/"}}),
+            },
             ContextFlip {
                 name: "site title feeds the generated favicon",
                 first_files: vec![("index.html", page)],
@@ -5524,6 +5521,21 @@ mod tests {
                 0,
                 "{name}"
             );
+            if next_body
+                .pointer("/system_variables/SPACEFAST_LIVE_URL")
+                .is_some()
+            {
+                let body = String::from_utf8(served_body(&private, "v2", "index.html")).unwrap();
+                assert!(body.contains("https://s0.wp.com/mshots/v1/https%3A%2F%2Fnext.example.test%2Findex.html?w=1200&amp;h=630"));
+                let metadata: Value = serde_json::from_slice(
+                    &fs::read(private.join("spaces/s/versions/v2/metadata.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    metadata["systemVariableDependencies"],
+                    json!(["SPACEFAST_LIVE_URL"])
+                );
+            }
             let first_icon = first_files
                 .iter()
                 .find(|(path, _)| *path == IMPLICIT_FAVICON_PATH);

@@ -181,9 +181,9 @@ function _stattic_html_head_anchor(string $html, bool $final, int $limit = STATT
 
 /**
  * Whether the Space set `superpowers.disable_all_injection`, which the route's
- * SDK section carries as `injection: false`. Then the runtime adds nothing of
- * its own to any page: no SDK tag, no share-image tag, no screenshot. A
- * section without the field comes from a control plane that projected one for
+ * SDK section carries as `injection: false`. Then the runtime adds no SDK
+ * tag or custom snippets. A section without the field comes from a control
+ * plane that projected one for
  * every Space and said nothing about the setting, so it keeps that engine's
  * behaviour.
  */
@@ -594,4 +594,48 @@ function _stattic_html_insert_journal_miss(array &$state): void
         ],
         false
     );
+}
+
+/** Normalize only platform-owned fallback tags, using today's anonymous access. */
+function _stattic_normalize_auto_share_image(string $html, bool $public, string $host, string $path): string
+{
+    $edits = [];
+    $state = [];
+    _stattic_html_lex($html, $state, false, static function (string $kind, string $name, string $token, int $offset) use (&$edits, $public, $host, $path): bool {
+        if (($kind === 'end' && $name === 'head') || ($kind === 'start' && $name === 'body')) {
+            return false;
+        }
+        if ($kind !== 'start' || $name !== 'meta') {
+            return true;
+        }
+        // Consume complete quoted values so marker-like text in another
+        // attribute cannot turn an authored tag into a platform fallback.
+        preg_match_all('~([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]*)))?~', substr($token, 5), $matches, PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL);
+        $attributes = [];
+        foreach ($matches as $match) {
+            $key = strtolower($match[1]);
+            if (!array_key_exists($key, $attributes)) {
+                $attributes[$key] = $match[2] ?? $match[3] ?? $match[4] ?? '';
+            }
+        }
+        $marker = $attributes['data-spacefast-auto-image'] ?? '';
+        if ($marker !== 'og:image' && $marker !== 'twitter:card') {
+            return true;
+        }
+        $replacement = '';
+        if ($public) {
+            if ($marker === 'og:image') {
+                $url = 'https://s0.wp.com/mshots/v1/' . rawurlencode('https://' . $host . $path) . '?w=1200&h=630';
+                $replacement = '<meta data-spacefast-auto-image="og:image" property="og:image" content="' . htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '">';
+            } else {
+                $replacement = '<meta name="twitter:card" content="summary_large_image" data-spacefast-auto-image="twitter:card">';
+            }
+        }
+        $edits[] = [$offset, strlen($token), $replacement];
+        return true;
+    });
+    foreach (array_reverse($edits) as [$offset, $length, $replacement]) {
+        $html = substr_replace($html, $replacement, $offset, $length);
+    }
+    return $html;
 }

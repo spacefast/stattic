@@ -68,14 +68,6 @@ const SPACEFAST_RUNTIME_ENTRYPOINT_PATHS = [
 ];
 // END GENERATED runtime entrypoints
 const STATTIC_SPACEFAST_SDK_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sdk.js';
-// `/__spacefast/og-image.<ext>?path=<page>`: a page's link-preview image (shared/og-image.php).
-const STATTIC_OG_IMAGE_PATH_PREFIX = STATTIC_RUNTIME_NAMESPACE_PATH . '/og-image.';
-
-function _stattic_og_image_route_requested(string $requestPath): bool
-{
-    return str_starts_with($requestPath, STATTIC_OG_IMAGE_PATH_PREFIX);
-}
-
 // The Space's own copy of Beacon's analytics tracker, which the SDK loads when
 // the Space has analytics on. The TS mirror is
 // RUNTIME_TRACKER_SCRIPT_PATH in packages/common/src/utils/runtime-paths.ts.

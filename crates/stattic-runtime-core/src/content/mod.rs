@@ -102,11 +102,13 @@ pub(crate) fn private_bound_sources(serving: &Map<String, Value>) -> BTreeSet<St
 }
 
 /// Site-wide configuration and origins used to render a version's HTML.
+#[derive(Clone, Copy)]
 pub struct HtmlPipelineContext<'a> {
     pub serving: &'a Map<String, Value>,
     pub metadata: &'a Map<String, Value>,
     pub viewer: &'a Map<String, Value>,
     pub assigned_hostnames: &'a [String],
+    pub share_image_origin: Option<&'a url::Url>,
 }
 
 /// Runs the content pipeline over the committed files, writing generated
@@ -124,6 +126,7 @@ pub fn materialize_html_pipeline(
         metadata,
         viewer,
         assigned_hostnames,
+        share_image_origin,
     } = context;
     let absent = Map::new();
     let config = serving
@@ -474,6 +477,7 @@ pub fn materialize_html_pipeline(
                 meta_tags: page_by_output.contains_key(&path) || platform_meta,
                 theme_available: files.contains_key(THEME_STYLESHEET_PATH),
                 path: &path,
+                share_image_origin,
             },
             diagnostics,
         )?;
@@ -524,10 +528,6 @@ const PREVIEW_IMAGE_META: [&str; 5] = [
 /// How much of an adopted page is read to find its preview tags. They live in
 /// `<head>`, and this keeps adoption from paying for whole documents.
 const PREVIEW_SCAN_BYTES: u64 = 64 * 1024;
-
-/// Marks the platform's share-image placeholders. The runtime's preview-image
-/// pass (`runtime/engine/shared/preview-images.php`) reads the same name.
-const AUTO_SHARE_IMAGE_ATTR: &str = "data-spacefast-auto-image";
 
 fn source_head(path: &Path) -> String {
     use std::io::Read as _;
@@ -909,6 +909,7 @@ struct HtmlDecorationContext<'a> {
     meta_tags: bool,
     theme_available: bool,
     path: &'a str,
+    share_image_origin: Option<&'a url::Url>,
 }
 
 fn cache_busted_local_asset(asset: &str, files: &BTreeMap<String, FileMeta>) -> String {
@@ -1063,6 +1064,21 @@ fn html_has_body(source: &str) -> bool {
     found.get()
 }
 
+/// mShots accepts one encoded URL and follows the file's canonical redirect.
+fn mshots_image_url(origin: &url::Url, path: &str) -> String {
+    const URL_COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+    let mut page_url = origin.clone();
+    page_url.set_path(&format!("/{}", path.replace('%', "%25")));
+    format!(
+        "https://s0.wp.com/mshots/v1/{}?w=1200&h=630",
+        percent_encoding::utf8_percent_encode(page_url.as_str(), URL_COMPONENT)
+    )
+}
+
 /// The decorated document, and whether it carries the bodyEnd snippets (false
 /// only for a document with no `<body>` while there were some to place).
 fn decorate_html(
@@ -1078,6 +1094,7 @@ fn decorate_html(
         meta_tags,
         theme_available,
         path,
+        share_image_origin,
     } = context;
     let html = if source.contains("<!-- spacefast:") {
         strip_generated_html_blocks(source)
@@ -1177,7 +1194,7 @@ fn decorate_html(
                 }
             }))
             // Unfurlers read preview images from wherever the tag sits, so an
-            // authored one anywhere in the document stands the screenshot down.
+            // authored one anywhere in the document stands the fallback down.
             .append_element_content_handler(element!("meta", {
                 let declares_preview_image = Rc::clone(&declares_preview_image);
                 move |element| {
@@ -1312,28 +1329,26 @@ fn decorate_html(
                 ));
             }
         }
-        // With no image anywhere, leave placeholders that the runtime fills
-        // with a screenshot once one is ready and only while the page is
-        // publicly readable. Both change without a republish. Until then the
-        // og:image is the brand's square fallback, written here so pages keep
-        // their stored bytes (and the X-Accel lane) on the default brand. They
-        // open the head because the runtime rewrites only the first 64 KiB.
-        let auto_image = image.is_none() && !declares_preview_image.get();
-        if auto_image {
+        // mShots captures the published file URL and follows its canonical
+        // redirects. Serving filters marked fallbacks by current public access.
+        let fallback =
+            (image.is_none() && !declares_preview_image.get()).then(|| match share_image_origin {
+                Some(origin) => (mshots_image_url(origin, path), "summary_large_image"),
+                None => (Brand::default().share_image_url, "summary"),
+            });
+        if let Some((image_url, _)) = &fallback {
             share_image.push(format!(
-                "<meta {AUTO_SHARE_IMAGE_ATTR}=\"og:image\" property=\"og:image\" content=\"{}\">",
-                escape_attr(&Brand::default().share_image_url)
+                "<meta data-spacefast-auto-image=\"og:image\" property=\"og:image\" content=\"{}\">",
+                escape_attr(image_url)
             ));
         }
         if !meta_names.borrow().contains("twitter:card")
-            && (title.is_some() || image.is_some() || auto_image)
+            && (title.is_some() || image.is_some() || fallback.is_some())
         {
             if image.is_some() {
                 head.push("<meta name=\"twitter:card\" content=\"summary_large_image\">".into());
-            } else if auto_image {
-                share_image.push(format!(
-                    "<meta name=\"twitter:card\" content=\"summary\" {AUTO_SHARE_IMAGE_ATTR}=\"twitter:card\">"
-                ));
+            } else if let Some((_, card)) = fallback {
+                share_image.push(format!("<meta name=\"twitter:card\" content=\"{card}\" data-spacefast-auto-image=\"twitter:card\">"));
             } else {
                 head.push("<meta name=\"twitter:card\" content=\"summary\">".into());
             }
@@ -1457,6 +1472,15 @@ mod tests {
     }
 
     fn run_pipeline(files: &[(&str, &[u8])], metadata: Value, serving: Value) -> PipelineRun {
+        run_pipeline_with_origin(files, metadata, serving, None)
+    }
+
+    fn run_pipeline_with_origin(
+        files: &[(&str, &[u8])],
+        metadata: Value,
+        serving: Value,
+        origin: Option<&url::Url>,
+    ) -> PipelineRun {
         let temp = tempdir().unwrap();
         let files_root = temp.path().join("files");
         let mut map = BTreeMap::new();
@@ -1478,6 +1502,7 @@ mod tests {
                 metadata: &metadata,
                 viewer: &viewer,
                 assigned_hostnames: &["local.example.test".to_string()],
+                share_image_origin: origin,
             },
             &BTreeMap::new(),
             &mut diagnostics,
@@ -1524,7 +1549,7 @@ mod tests {
         assert!(html.contains("<!-- spacefast:body-end -->"));
         assert_eq!(html.matches("twitter:title").count(), 1);
         assert!(html.contains("name=\"twitter:card\" content=\"summary_large_image\""));
-        assert!(!html.contains(AUTO_SHARE_IMAGE_ATTR));
+        assert_eq!(html.matches("property=\"og:image\"").count(), 1);
         assert!(html.contains(&format!(
             "property=\"og:image\" content=\"/cover.png?v={}\"",
             &crate::finalize::sha256(cover)[..12]
@@ -1951,7 +1976,7 @@ mod tests {
     }
 
     #[test]
-    fn share_image_placeholders_appear_only_without_a_declared_image() {
+    fn fallback_share_image_appears_only_without_a_declared_image() {
         let bare =
             br#"<html><head><meta charset="utf-8"><title>Bare</title></head><body></body></html>"#;
         let run = run_pipeline(
@@ -1961,8 +1986,7 @@ mod tests {
         );
         run.result.as_ref().unwrap();
         let once = read(&run, "index.html");
-        // They open the head, ahead of a long author head the runtime would
-        // not read past.
+        // Finalization owns the fallback metadata and is idempotent.
         assert!(once.starts_with(concat!(
             "<html><head><!-- spacefast:share-image -->\n",
             "<meta data-spacefast-auto-image=\"og:image\" property=\"og:image\" content=\"https://my.spacefast.com/app-icon-512x512.png\">\n",
@@ -1971,8 +1995,7 @@ mod tests {
         )));
         assert_eq!(once.matches("name=\"twitter:card\"").count(), 1);
         assert_eq!(once.matches("property=\"og:image\"").count(), 1);
-        // The fallback is off-site, so it never needs the public preview-image
-        // exemption.
+        // The fallback is off-site, so it is not a local preview image.
         assert!(run.result.as_ref().unwrap().preview_images.is_empty());
         let run = run_pipeline(
             &[("index.html", once.as_bytes())],
@@ -1995,18 +2018,42 @@ mod tests {
             );
             run.result.as_ref().unwrap();
             let html = read(&run, "index.html");
-            assert!(!html.contains(AUTO_SHARE_IMAGE_ATTR), "{html}");
+            assert!(!html.contains(&Brand::default().share_image_url), "{html}");
             assert!(html.contains("<meta name=\"twitter:card\" content=\"summary\">"));
         }
 
-        // Turning platform injection off injects no placeholder either.
+        let origin = url::Url::parse("https://live.example.test/").unwrap();
+        let captured = run_pipeline_with_origin(
+            &[("index.html", bare), ("docs/a b.html", bare),
+                ("docs/a%20b.html", bare),
+                ("docs/a#b?.html", bare),
+              ("authored.html", br#"<html><head><meta property="og:image" content="https://cdn.example.test/cover.png"></head><body></body></html>"#)],
+            json!({"mode":"website"}),
+            json!({"config":{"platform_meta":true}}),
+            Some(&origin),
+        );
+        captured.result.as_ref().unwrap();
+        let home = read(&captured, "index.html");
+        assert!(home.contains("content=\"https://s0.wp.com/mshots/v1/https%3A%2F%2Flive.example.test%2Findex.html?w=1200&amp;h=630\""));
+        assert!(home.contains("<meta name=\"twitter:card\" content=\"summary_large_image\" data-spacefast-auto-image=\"twitter:card\">"));
+        let nested = read(&captured, "docs/a b.html");
+        assert!(nested.contains("content=\"https://s0.wp.com/mshots/v1/https%3A%2F%2Flive.example.test%2Fdocs%2Fa%2520b.html?w=1200&amp;h=630\""));
+        let percent = read(&captured, "docs/a%20b.html");
+        assert!(percent.contains("content=\"https://s0.wp.com/mshots/v1/https%3A%2F%2Flive.example.test%2Fdocs%2Fa%252520b.html?w=1200&amp;h=630\""));
+        let delimiters = read(&captured, "docs/a#b?.html");
+        assert!(delimiters.contains("content=\"https://s0.wp.com/mshots/v1/https%3A%2F%2Flive.example.test%2Fdocs%2Fa%2523b%253F.html?w=1200&amp;h=630\""));
+        let authored = read(&captured, "authored.html");
+        assert!(authored.contains("content=\"https://cdn.example.test/cover.png\""));
+        assert_eq!(authored.matches("property=\"og:image\"").count(), 1);
+
+        // Turning platform injection off adds no fallback metadata.
         let run = run_pipeline(
             &[("index.html", bare)],
             json!({"mode":"website"}),
             json!({"config":{}}),
         );
         run.result.as_ref().unwrap();
-        assert!(!read(&run, "index.html").contains(AUTO_SHARE_IMAGE_ATTR));
+        assert!(!read(&run, "index.html").contains("property=\"og:image\""));
     }
 
     #[test]

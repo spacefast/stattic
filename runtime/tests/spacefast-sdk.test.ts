@@ -478,10 +478,6 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
     '<head><script defer src="/__spacefast/sdk.js?preview=preview-token" data-spacefast-sdk="v1"></script>',
   );
   expect(previewBody.match(/data-spacefast-sdk/g)?.length).toBe(1);
-  // The link preview is the public live page's, never the draft session's.
-  expect(previewBody).toContain(
-    `<meta property="og:image" content="http://${SITE}/__spacefast/og-image.jpg?path=%2F">`,
-  );
   expect(previewPage.headers.get("content-length")).toBe(String(Buffer.byteLength(previewBody)));
   // A preview page never revalidates against the live page's validator.
   const livePage = await get(runtime, SITE, "/");

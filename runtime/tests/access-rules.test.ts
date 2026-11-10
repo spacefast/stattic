@@ -42,12 +42,6 @@ import {
 
 let runtime: Runtime;
 let logoutServer: ReturnType<typeof Bun.serve>;
-// Stands in for the screenshot service on loopback; records the page URLs it
-// was asked to render.
-let screenshotServer: ReturnType<typeof Bun.serve>;
-const screenshotRequests: string[] = [];
-const SCREENSHOT_JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
-// Image fixtures carry real magic bytes: the share-image route sniffs them.
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]);
 const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x02]);
 let logoutOrigin = "http://127.0.0.1";
@@ -735,21 +729,11 @@ beforeAll(async () => {
     },
   });
   logoutOrigin = `http://${logoutServer.hostname}:${logoutServer.port}`;
-  screenshotServer = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(request) {
-      const target = new URL(request.url).pathname.split("/").at(-1) ?? "";
-      screenshotRequests.push(decodeURIComponent(target));
-      return new Response(SCREENSHOT_JPEG, { headers: { "content-type": "image/jpeg" } });
-    },
-  });
   runtime = await startRuntime({
     captureEdgePurges: true,
     env: {
       PHP_CLI_SERVER_WORKERS: "8",
       SPACEFAST_RUNTIME_TEST_ACCESS_SESSION_CLOCK: "1",
-      SPACEFAST_SHARE_SCREENSHOT_ENDPOINT: `http://127.0.0.1:${screenshotServer.port}/mshots/v1/`,
     },
   });
 
@@ -946,13 +930,6 @@ beforeAll(async () => {
       "trip/cover.jpg": { content: JPEG_BYTES, contentType: "image/jpeg" },
       "trip/relative.html":
         '<html><head><meta name="twitter:image" content="cover.jpg"></head><body>Relative preview</body></html>',
-      // HTML renamed to .png: no tag, and the route refuses it.
-      "fake/index.html":
-        '<html><head><meta property="og:image" content="/fake.png"></head><body>Fake</body></html>',
-      "fake.png": { content: "<html><script>alert(1)</script></html>", contentType: "image/png" },
-      "vector/index.html":
-        '<html><head><meta property="og:image" content="/logo.svg"></head><body>Vector</body></html>',
-      "logo.svg": { content: "<svg/>", contentType: "image/svg+xml" },
       _redirects: "/tour /trip/relative.html 200\n",
     },
     serving: { config: { meta: { image: "/og.png" } } },
@@ -968,7 +945,6 @@ beforeAll(async () => {
 afterAll(() => {
   runtime?.stop();
   logoutServer?.stop(true);
-  screenshotServer?.stop(true);
 });
 
 // ---------------------------------------------------------------------------
@@ -1036,126 +1012,56 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
     200,
   );
 
-  // A claimed private Space serves the image a page declares, on its live
-  // host, to an unfurler with no session: Slack, WhatsApp and Signal fetch a
-  // shared link's og:image in a separate cookieless request. It stays out of
-  // search indexes and keeps the shared lifetime main's preview-image
-  // exemption had; the route write an access change or a fence makes purges
-  // the live host.
-  const route = (ext: string, page: string) =>
-    `/__spacefast/og-image.${ext}?path=${encodeURIComponent(page)}`;
-  const unfurled = await get(runtime, PREVIEW_HOST, route("jpg", "/trip/"));
-  expect(unfurled.status).toBe(200);
-  expect(unfurled.headers.get("content-type")).toBe("image/jpeg");
-  expect(unfurled.headers.get("x-robots-tag")).toBe("noindex, nofollow");
-  expect(unfurled.headers.get("cache-control")).not.toContain("private");
-  expect(new Uint8Array(await unfurled.arrayBuffer())).toEqual(JPEG_BYTES);
-  // Nothing else is the exemption's: not the immutable version host, which
-  // caches where no fence purge reaches; not a page's screenshot; not a
-  // declared image under another extension. Each goes through the page's gate.
-  for (const [host, path] of [
-    [PREVIEW_VERSION_HOST, route("jpg", "/trip/")],
-    [PREVIEW_HOST, route("jpg", "/docs/")],
-    [PREVIEW_HOST, route("png", "/trip/")],
-  ] as const) {
-    const gated = await get(runtime, host, path);
-    expect(gated.status, `${host}${path}`).toBe(403);
-    expect(gated.headers.get("cache-control")).toBe("private, no-store");
-    expect(new Uint8Array(await gated.arrayBuffer())).not.toEqual(JPEG_BYTES);
+  // Declaring an image does not grant anonymous access to private bytes.
+  for (const host of [PREVIEW_HOST, PREVIEW_VERSION_HOST]) {
+    const image = await get(runtime, host, "/trip/cover.jpg?v=c778f02a");
+    expect(image.status, host).toBe(403);
+    expect(image.headers.get("cache-control")).toBe("private, no-store");
+    await image.arrayBuffer();
   }
-  // A platform hold outranks the owner's choice, and an unclaimed Space has
-  // no owner to choose.
-  for (const config of [
-    previewProjection({ accessFence: "ownership" }),
-    previewProjection({ spaceClaimed: false }),
-  ]) {
-    await putRoute(runtime, PREVIEW_SPACE, "production", { version_id: PREVIEW_VERSION, config });
-    try {
-      const held = await get(runtime, PREVIEW_HOST, route("jpg", "/trip/"));
-      expect(held.status).toBe(403);
-      expect(new Uint8Array(await held.arrayBuffer())).not.toEqual(JPEG_BYTES);
-    } finally {
-      await putRoute(runtime, PREVIEW_SPACE, "production", {
-        version_id: PREVIEW_VERSION,
-        config: previewProjection(),
-      });
-    }
-  }
-  // The files themselves stay private like any other.
-  for (const path of ["/og.png", "/trip/cover.jpg"]) {
-    const gated = await get(runtime, PREVIEW_HOST, path);
-    expect(gated.status).toBe(403);
-    await gated.arrayBuffer();
-  }
+  const imageHead = await get(runtime, PREVIEW_HOST, "/trip/cover.jpg", { method: "HEAD" });
+  expect(imageHead.status).toBe(403);
+  expect(imageHead.headers.get("cache-control")).toBe("private, no-store");
 
-  // A member sees each page's image named on the host they used, and the
-  // route returns the declared bytes: the same answer the unfurler above got,
-  // since the one image a link shows is the same for everyone who holds it.
   const previewMember = await openAuthorities(PREVIEW_HOST, ["member:mem_owner"]);
   const member = { headers: { cookie: previewMember } };
+  const memberImage = await get(runtime, PREVIEW_HOST, "/trip/cover.jpg", member);
+  expect(memberImage.status).toBe(200);
+  expect(memberImage.headers.get("cache-control")).toBe("private, no-store");
+  expect(new Uint8Array(await memberImage.arrayBuffer())).toEqual(JPEG_BYTES);
   const trip = await (await get(runtime, PREVIEW_HOST, "/trip/", member)).text();
   expect(trip).toContain(
-    `property="og:image" content="http://${PREVIEW_HOST}${route("jpg", "/trip/")}"`,
+    `property="og:image" content="https://${PREVIEW_HOST}/trip/cover.jpg?v=c778f02a"`,
   );
-  // External references are the author's.
   expect(trip).toContain('name="twitter:image" content="https://cdn.example.test/other.png"');
-  const tripImage = await get(runtime, PREVIEW_HOST, route("jpg", "/trip/"), member);
-  expect(tripImage.status).toBe(200);
-  expect(tripImage.headers.get("content-type")).toBe("image/jpeg");
-  expect(tripImage.headers.get("cache-control")).toBe(unfurled.headers.get("cache-control"));
-  expect(new Uint8Array(await tripImage.arrayBuffer())).toEqual(JPEG_BYTES);
-  // A rewrite serves another document under the URL the visitor loaded. The
-  // route names that URL and resolves it the way the page request did, so the
-  // image is the served document's: the same declared image, which an
-  // unfurler gets too, as it got that file on main.
   const tour = await (await get(runtime, PREVIEW_HOST, "/tour", member)).text();
-  expect(tour).toContain(
-    `name="twitter:image" content="http://${PREVIEW_HOST}${route("jpg", "/tour")}"`,
-  );
-  const tourImage = await get(runtime, PREVIEW_HOST, route("jpg", "/tour"), member);
-  expect(tourImage.status).toBe(200);
-  expect(new Uint8Array(await tourImage.arrayBuffer())).toEqual(JPEG_BYTES);
-  const tourUnfurled = await get(runtime, PREVIEW_HOST, route("jpg", "/tour"));
-  expect(tourUnfurled.status).toBe(200);
-  expect(new Uint8Array(await tourUnfurled.arrayBuffer())).toEqual(JPEG_BYTES);
+  expect(tour).toContain('name="twitter:image" content="/trip/cover.jpg"');
 
-  // A non-image renamed .png, and an SVG, get no tag and no route.
-  for (const [page, ext] of [
-    ["/fake/", "png"],
-    ["/vector/", "svg"],
-  ] as const) {
-    const html = await (await get(runtime, PREVIEW_HOST, page, member)).text();
-    expect(html).not.toContain('property="og:image"');
-    const refused = await get(runtime, PREVIEW_HOST, route(ext, page), member);
-    expect(refused.status).toBe(404);
-    // The refusal of a private page is private too.
-    expect(refused.headers.get("cache-control")).toBe("private, no-store");
-    expect(await refused.text()).not.toContain("<script>");
-  }
-  // A private page that declares no image gets no tag: its screenshot would be
-  // the gate, and the brand fallback names another origin.
-  const docs = await (await get(runtime, PREVIEW_HOST, "/docs/", member)).text();
-  expect(docs).not.toContain('property="og:image"');
-  const docsRoute = await get(runtime, PREVIEW_HOST, route("jpg", "/docs/"), member);
-  expect(docsRoute.status).toBe(404);
-  expect(docsRoute.headers.get("cache-control")).toBe("private, no-store");
-  await docsRoute.arrayBuffer();
-  // No tag this Space serves names another origin for a local image.
-  for (const html of [trip, tour, docs]) {
-    expect(html).not.toContain("s0.wp.com");
-    expect(html).not.toContain("app-icon-512x512");
-  }
-
-  // Once a Public Grant reaches the page, unfurlers read its image like the page.
+  // An explicit Public Grant admits the image under normal cache policy.
   try {
     await putRoute(runtime, PREVIEW_SPACE, "production", {
       version_id: PREVIEW_VERSION,
       config: previewProjection({ mode: "public" }),
     });
-    const publicImage = await get(runtime, PREVIEW_HOST, route("jpg", "/trip/"));
+    const publicImage = await get(runtime, PREVIEW_HOST, "/trip/cover.jpg");
     expect(publicImage.status).toBe(200);
+    expect(publicImage.headers.get("x-robots-tag")).toBeNull();
     expect(publicImage.headers.get("cache-control")).not.toContain("private");
     expect(new Uint8Array(await publicImage.arrayBuffer())).toEqual(JPEG_BYTES);
+    await putRoute(runtime, PREVIEW_SPACE, "production", {
+      version_id: PREVIEW_VERSION,
+      config: previewProjection({
+        mode: "public",
+        publicConstraints: { expiresAt: "2999-01-01T00:00:00.000Z" },
+      }),
+    });
+    const constrained = await get(runtime, PREVIEW_HOST, "/trip/cover.jpg");
+    expect(constrained.status).toBe(200);
+    expect(constrained.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(constrained.headers.get("cache-control")).toBe("private, no-store");
+    const constrainedHtml = await constrained.text();
+    expect(constrainedHtml).not.toContain("data-spacefast-auto-image=");
+    expect(constrainedHtml).not.toContain("s0.wp.com/mshots/");
   } finally {
     await putRoute(runtime, PREVIEW_SPACE, "production", {
       version_id: PREVIEW_VERSION,
@@ -2194,112 +2100,24 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
 });
 
 test("a scope exclusion cannot be widened by an alternate spelling of the same path", async () => {
-  // A public page with no image of its own advertises its screenshot on this
-  // host; the route proxies it, so the tag never names another origin.
-  const metaContents = (html: string, key: string) =>
-    html
-      .match(new RegExp(`<meta [^>]*(?:property|name)="${key}"[^>]*>`, "g"))
-      ?.map((tag) => tag.match(/content="([^"]*)"/)?.[1]);
-  const screenshotRoute = (page: string) =>
-    `http://${BOUNDARY_HOST}/__spacefast/og-image.jpg?path=${encodeURIComponent(page)}`;
   const home = await get(runtime, BOUNDARY_HOST, "/");
   expect(home.status).toBe(200);
-  const homeHtml = await home.text();
-  expect(metaContents(homeHtml, "og:image")).toEqual([screenshotRoute("/")]);
-  expect(metaContents(homeHtml, "twitter:card")).toEqual(["summary_large_image"]);
-  expect(homeHtml).not.toContain("data-spacefast-auto-image");
-  expect(homeHtml).not.toContain("s0.wp.com");
-  // Other consumers (show-and-tell, analytics inference) still read this.
   expect(home.headers.get("x-spacefast-share-image")).toBe("eligible");
-  const screenshot = await get(runtime, BOUNDARY_HOST, "/__spacefast/og-image.jpg?path=%2F");
-  expect(screenshot.status).toBe(200);
-  expect(screenshot.headers.get("content-type")).toBe("image/jpeg");
-  expect(new Uint8Array(await screenshot.arrayBuffer())).toEqual(SCREENSHOT_JPEG);
-  // The screenshot service saw the version-scoped page URL on this host.
-  expect(screenshotRequests.at(-1)).toBe(
-    `http://${BOUNDARY_HOST}/?v=${sha256(BOUNDARY_VERSION).slice(0, 12)}`,
-  );
-  // A rewritten URL is shared as itself: its tag, its route and its capture all
-  // name the URL the visitor loaded, and the route resolves it to the same
-  // document the page request served.
-  const welcome = await (await get(runtime, BOUNDARY_HOST, "/welcome")).text();
-  expect(metaContents(welcome, "og:image")).toEqual([screenshotRoute("/welcome")]);
-  const welcomeShot = await get(
-    runtime,
-    BOUNDARY_HOST,
-    "/__spacefast/og-image.jpg?path=%2Fwelcome",
-  );
-  expect(welcomeShot.status).toBe(200);
-  expect(new Uint8Array(await welcomeShot.arrayBuffer())).toEqual(SCREENSHOT_JPEG);
-  expect(screenshotRequests.at(-1)).toBe(
-    `http://${BOUNDARY_HOST}/welcome?v=${sha256(BOUNDARY_VERSION).slice(0, 12)}`,
-  );
-  // A control plane from before the share-image route still records rendered
-  // screenshots after every publish. The endpoint answers exactly as it did:
-  // it purges the live hosts once per changed record and refuses a malformed
-  // or superseded one. Serving no longer reads the record, so the tag stays
-  // the route on this host.
-  const capture = (requestPath: string) =>
-    `http://${BOUNDARY_HOST}${requestPath}?v=${sha256(BOUNDARY_VERSION).slice(0, 12)}`;
-  const putShareImages = (versionId: string, urls: string[]) =>
-    api(
-      runtime,
-      "PUT",
-      `${RUNTIME_HTTP_API_BASE}/spaces/${BOUNDARY_SPACE}/share-images`,
-      "update_share_images",
-      { space_id: BOUNDARY_SPACE },
-      { version_id: versionId, urls },
-    );
-  const purges = await edgePurgeCallsBy(runtime, async () => {
-    expect((await putShareImages(BOUNDARY_VERSION, [capture("/")])).status).toBe(200);
-  });
-  expect(purges.map(({ hostname, reason }) => [hostname, reason])).toEqual([
-    [BOUNDARY_HOST, "space_share_images_updated"],
-  ]);
-  expect(
-    await edgePurgeCallsBy(runtime, async () => {
-      expect((await putShareImages(BOUNDARY_VERSION, [capture("/")])).status).toBe(200);
-    }),
-  ).toEqual([]);
-  expect((await putShareImages(BOUNDARY_VERSION, ["javascript:alert(1)"])).status).toBe(422);
-  const stale = await putShareImages("ver_access_boundary_previous", [capture("/")]);
-  expect(stale.status).toBe(409);
-  expect(await errorCode(stale)).toBe("share_images_version_not_live");
-  expect(metaContents(await (await get(runtime, BOUNDARY_HOST, "/")).text(), "og:image")).toEqual([
-    screenshotRoute("/"),
-  ]);
+  expect(await home.text()).toContain('data-spacefast-auto-image="og:image"');
 
-  // A screenshot route only exists as JPEG.
-  const wrongExt = await get(runtime, BOUNDARY_HOST, "/__spacefast/og-image.png?path=%2F");
-  expect(wrongExt.status).toBe(404);
-  await wrongExt.arrayBuffer();
-  // A public page that declares an image under a scope anonymous visitors
-  // cannot read names no image and serves none: on main the advertised URL
-  // was the image path itself, behind that path's own gate. No screenshot
-  // stands in for it either.
+  // Publishing a page that names a protected image never grants access to
+  // that image, including an image reached through a rewrite.
   const gallery = await get(runtime, BOUNDARY_HOST, "/gallery/");
   expect(gallery.status).toBe(200);
-  const galleryHtml = await gallery.text();
-  expect(metaContents(galleryHtml, "og:image")).toBeUndefined();
-  // The same holds after the URL is mapped: the image is authorized at the
-  // path it is served from too, as the page itself is.
+  expect(await gallery.text()).toContain('property="og:image" content="/docs/pic.png"');
+  expect((await get(runtime, BOUNDARY_HOST, "/docs/pic.png")).status).toBe(403);
+  const cover = await get(runtime, BOUNDARY_HOST, "/cover/");
+  expect(cover.status).toBe(200);
+  expect(await cover.text()).toContain('property="og:image" content="/cover.png"');
   expect((await get(runtime, BOUNDARY_HOST, "/cover.png")).status).toBeGreaterThanOrEqual(400);
-  const cover = await (await get(runtime, BOUNDARY_HOST, "/cover/")).text();
-  expect(metaContents(cover, "og:image")).toBeUndefined();
-  for (const page of ["/gallery/", "/cover/"]) {
-    for (const ext of ["png", "jpg"]) {
-      const refused = await get(
-        runtime,
-        BOUNDARY_HOST,
-        `/__spacefast/og-image.${ext}?path=${encodeURIComponent(page)}`,
-      );
-      expect(refused.status, `${page} ${ext}`).toBe(404);
-      expect(new Uint8Array(await refused.arrayBuffer())).not.toEqual(PNG_BYTES);
-    }
-  }
 
-  // A Public Grant constrained by expiry admits an anonymous fetch, but the
-  // page is not public: no eligibility statement, no tag and no route.
+  // A constrained Public Grant admits this request without declaring the
+  // page publicly readable to screenshot and analytics consumers.
   await putRoute(runtime, BOUNDARY_SPACE, "production", {
     version_id: BOUNDARY_VERSION,
     config: boundaryProjection({ expiresAt: new Date(Date.now() + 60 * 60_000).toISOString() }),
@@ -2308,16 +2126,7 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
     const constrained = await get(runtime, BOUNDARY_HOST, "/");
     expect(constrained.status).toBe(200);
     expect(constrained.headers.get("x-spacefast-share-image")).toBeNull();
-    const constrainedHtml = await constrained.text();
-    expect(metaContents(constrainedHtml, "og:image")).toBeUndefined();
-    expect(constrainedHtml).not.toContain("app-icon-512x512");
-    const constrainedRoute = await get(
-      runtime,
-      BOUNDARY_HOST,
-      "/__spacefast/og-image.jpg?path=%2F",
-    );
-    expect(constrainedRoute.status).toBe(404);
-    await constrainedRoute.arrayBuffer();
+    await constrained.arrayBuffer();
   } finally {
     await putRoute(runtime, BOUNDARY_SPACE, "production", {
       version_id: BOUNDARY_VERSION,
@@ -2352,29 +2161,9 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
   expect(admitted.status).toBe(200);
   const docsHtml = await admitted.text();
   expect(docsHtml).toContain("<h1>docs</h1>");
-  // The owner reads a page anonymous visitors cannot: it declares no image,
-  // so it advertises none, and its route stays shut even to the owner.
-  expect(docsHtml).not.toContain('property="og:image"');
-  expect(docsHtml).not.toContain("app-icon-512x512");
+  expect(docsHtml).not.toContain("data-spacefast-auto-image=");
+  expect(docsHtml).not.toContain("s0.wp.com/mshots/");
   expect(admitted.headers.get("x-spacefast-share-image")).toBeNull();
-  const ownerRoute = await get(
-    runtime,
-    BOUNDARY_HOST,
-    "/__spacefast/og-image.jpg?path=%2Fdocs%2F",
-    {
-      headers: { cookie },
-    },
-  );
-  expect(ownerRoute.status).toBe(404);
-  await ownerRoute.arrayBuffer();
-  // An anonymous unfurler gets the page's gate, never the image.
-  const anonymousRoute = await get(
-    runtime,
-    BOUNDARY_HOST,
-    "/__spacefast/og-image.jpg?path=%2Fdocs%2F",
-  );
-  expect(anonymousRoute.status).toBe(403);
-  await anonymousRoute.arrayBuffer();
 });
 
 test("ambiguous path identities fail closed instead of being sanitized", async () => {

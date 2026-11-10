@@ -793,7 +793,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
                         || ($hasPages && _stattic_page_resolve($versionDir, $rule['destination']) !== null)
                     ));
                 }
-                _stattic_apply_redirects($contentRedirects, $serving, static fn (): bool => false, $requestHost, $requestPath, $requestMethod);
+                _stattic_apply_redirects($contentRedirects, $serving, static fn (): bool => false, $requestHost, $requestPath, $requestMethod, false, true);
             }
         }
     }

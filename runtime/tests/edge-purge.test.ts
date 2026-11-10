@@ -12,13 +12,15 @@ async function fixture() {
   let available = false;
   let duringDelivery: (() => Promise<void>) | undefined;
   const delivered: string[] = [];
+  const actions: string[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
-      await request.text();
+      const body = new URLSearchParams(await request.text());
       if (!available) return Response.json({ message: "Unavailable" }, { status: 503 });
       delivered.push(new URL(request.url).pathname);
+      actions.push(body.get("wp_action") ?? "");
       const concurrent = duringDelivery;
       duringDelivery = undefined;
       await concurrent?.();
@@ -62,6 +64,7 @@ async function fixture() {
       duringDelivery = callback;
     },
     delivered,
+    actions,
     run,
     spawn,
     async [Symbol.asyncDispose]() {
@@ -153,6 +156,80 @@ test("purge delivery waits for the serving mutation and housekeeping recovers a 
     writer.kill();
     await writer.exited;
   }
+});
+
+test("every purge is followed by a second one once in-flight fills have landed", async () => {
+  await using f = await fixture();
+  f.enableGateway();
+  // Drain `offset` seconds from the follow-up's due time, so the result does
+  // not depend on which second each PHP process started in.
+  const settle = (offset: number) =>
+    f.run(`
+      $record = _stattic_record_store_get(_stattic_runtime_purge_settle_store($root), 'settle.test');
+      $dueAt = is_array($record) ? (int) $record['due_at'] : time();
+      echo json_encode(_stattic_runtime_purge_settle_drain($root, microtime(true) + 20, $dueAt + ${offset}));
+    `);
+  const purge = (reason: string) =>
+    f.run(`_stattic_runtime_purge_dispatch($root, ['settle.test'], '${reason}');`);
+
+  expect((await purge("space_access_privatized")).exitCode).toBe(0);
+  expect(f.actions).toEqual(["spacefast:space_access_privatized"]);
+
+  // Not before the fills the first purge raced with have landed.
+  const early = await settle(-30);
+  expect(early.exitCode, early.stderr).toBe(0);
+  expect(JSON.parse(early.stdout)).toEqual({ complete: true, next_due_in: 30 });
+  expect(f.actions).toHaveLength(1);
+
+  // A later mutation replaces the follow-up with its own, sent under its reason.
+  expect((await purge("space_tombstones_updated")).exitCode).toBe(0);
+  expect(JSON.parse((await settle(-1)).stdout)).toEqual({ complete: true, next_due_in: 1 });
+  expect(f.actions).toHaveLength(2);
+
+  const due = await settle(0);
+  expect(due.exitCode, due.stderr).toBe(0);
+  expect(JSON.parse(due.stdout)).toEqual({ complete: true, next_due_in: null });
+  expect(f.actions).toEqual([
+    "spacefast:space_access_privatized",
+    "spacefast:space_tombstones_updated",
+    "spacefast:space_tombstones_updated_settle",
+  ]);
+  expect(f.delivered.at(-1)).toBe("/api/v1.0/edge-cache/123/purge/settle.test");
+  // Sent once.
+  expect(JSON.parse((await settle(3600)).stdout)).toEqual({ complete: true, next_due_in: null });
+  expect(f.actions).toHaveLength(3);
+});
+
+test("a follow-up purge waits for its first purge and housekeeping sends it", async () => {
+  await using f = await fixture();
+  const queued = await f.run(
+    `_stattic_runtime_purge_enqueue($root, ['first.test'], 'hostname_intent_updated');`,
+  );
+  expect(queued.exitCode, queued.stderr).toBe(0);
+  // The first purge has not landed, so the follow-up must not go ahead of it.
+  f.enableGateway();
+  const waiting = await f.run(
+    `echo json_encode(_stattic_runtime_purge_settle_drain($root, microtime(true) + 20, time() + 61));`,
+  );
+  expect(waiting.exitCode, waiting.stderr).toBe(0);
+  expect(JSON.parse(waiting.stdout).complete).toBe(true);
+  expect(f.actions).toEqual([]);
+
+  const tick = await f.run(`
+    $pass = _stattic_runtime_job_maintenance_tick($root, [], microtime(true) + 20);
+    echo json_encode(in_array('edge_purge', $pass['steps'], true));
+  `);
+  expect(tick.exitCode, tick.stderr).toBe(0);
+  expect(tick.stdout).toBe("true");
+  expect(f.actions).toEqual(["spacefast:hostname_intent_updated"]);
+  const later = await f.run(
+    `echo json_encode(_stattic_runtime_purge_settle_drain($root, microtime(true) + 20, time() + 61));`,
+  );
+  expect(JSON.parse(later.stdout)).toEqual({ complete: true, next_due_in: null });
+  expect(f.actions).toEqual([
+    "spacefast:hostname_intent_updated",
+    "spacefast:hostname_intent_updated_settle",
+  ]);
 });
 
 test("content redirect publication refuses a serving write when its purge cannot be persisted", async () => {

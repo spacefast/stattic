@@ -773,7 +773,11 @@ function _stattic_runtime_job_run_claimed(string $privateRoot, array $job, float
 function _stattic_runtime_job_housekeeping_edge_purge(string $privateRoot, array $_claims, float $deadline): bool
 {
     require_once __DIR__ . '/../shared/purge.php';
-    return _stattic_runtime_purge_drain($privateRoot, $deadline);
+    $drained = _stattic_runtime_purge_drain($privateRoot, $deadline);
+    // Follow-ups the control plane did not ask for are sent here. That can be
+    // hours away, so a response whose purge never reaches the control plane
+    // (a WordPress content redirect) keeps the short shared window instead.
+    return _stattic_runtime_purge_settle_drain($privateRoot, $deadline)['complete'] && $drained;
 }
 
 function _stattic_runtime_job_maintenance_steps(): array

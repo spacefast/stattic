@@ -956,6 +956,11 @@ test("SPA mode serves the shell for app routes, never for asset-looking paths", 
   const renamed = await get(rt, "spa.test", "/old-slug");
   expect(renamed.status).toBe(301);
   expect(renamed.headers.get("location")).toBe("/new-slug");
+  // Edited without a publish, so no control-plane ask follows its purge: the
+  // short shared window bounds a racing fill instead.
+  expect(renamed.headers.get("cache-control")).toBe(
+    "public, max-age=0, s-maxage=600, must-revalidate",
+  );
   const asset = await get(rt, "spa.test", "/main.js");
   expect(asset.status).toBe(200);
   expect(await asset.text()).toBe("void 0;\n");

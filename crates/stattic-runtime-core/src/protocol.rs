@@ -228,7 +228,7 @@ pub const RESPONSE_LANE_PHP: u64 = 1;
 ///   immutable (a cached year outlives every revocation), so it composes
 ///   down to `private, no-store`.
 /// - `html` and `no` — open: `public, s-maxage=600, max-age=0,
-///   must-revalidate`, paired with the `A8C-Edge-Cache: cache` opt-in the
+///   must-revalidate` for `html`, `s-maxage=86400` for `no`, paired with the `A8C-Edge-Cache: cache` opt-in the
 ///   engine adds at send time. Both classes are version-pinned content. A
 ///   durable whole-host purge retires the shared copy on mutation; the bounded
 ///   shared TTL covers an in-flight fill that lands after the purge. Browsers
@@ -236,8 +236,9 @@ pub const RESPONSE_LANE_PHP: u64 = 1;
 ///   positive shared TTL beside the opt-in (measured live,
 ///   e2e-tests/direct/wpcloud-behavior.test.ts). Protected:
 ///   `private, no-store`. The two classes stay distinct in the compiled
-///   tables — document-ness still steers other seams, e.g. the changelog
-///   delta — not because the composed policy differs.
+///   tables: `no` holds the edge longer because each edge miss is a PHP
+///   request, and document-ness still steers other seams, e.g. the changelog
+///   delta.
 pub const CACHE_CLASS_IMMUTABLE: &str = "imm";
 pub const CACHE_CLASS_HTML: &str = "html";
 pub const CACHE_CLASS_REVALIDATE: &str = "no";

@@ -13,6 +13,10 @@ function _sf_cache_control(string $cacheClass, bool $open): string
         STATTIC_RUNTIME_CACHE_CLASS_IMMUTABLE => 'public, max-age=31536000, immutable',
         // Durable purges retire shared copies promptly. A bounded lifetime
         // retires a stale response that filled after the purge completed.
+        // Unhashed assets hold the edge for a day: every edge miss is a PHP
+        // request, and a burst of them is what the provider answers with 429.
+        // HTML keeps the short window, so a missed purge never strands a page.
+        STATTIC_RUNTIME_CACHE_CLASS_REVALIDATE => 'public, s-maxage=86400, max-age=0, must-revalidate',
         default => 'public, s-maxage=600, max-age=0, must-revalidate',
     };
 }

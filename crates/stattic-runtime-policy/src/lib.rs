@@ -31,8 +31,7 @@
 pub mod brand;
 
 /// The provider edge owns these cache controls and response diagnostics.
-pub const PROVIDER_OWNED_RESPONSE_HEADER_PREFIXES: &[&str] =
-    &["a8c-", "x-nananana", "x-hacker", "host-header"];
+pub const PROVIDER_OWNED_RESPONSE_HEADER_PREFIXES: &[&str] = &["a8c-", "x-nananana", "host-header"];
 pub const PROVIDER_OWNED_RESPONSE_HEADERS: &[&str] =
     &["x-ac", "x-nc", "x-sc", "strict-transport-security"];
 

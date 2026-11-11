@@ -1,7 +1,7 @@
 {
-  "revision": "0f8e50d8829ac7bd2a7ccf2547db20cff325a6e3",
-  "sourceHash": "0fa42b81c0a1dea8f5fff3bafd8c1a838cffe97db5b754ac15d1a7ae1516c75a",
-  "manifestSha256": "8b965fa7a5a2020621c9b9daf9ea4f0e0c9049e275ee5267c236c7806cb25506",
+  "revision": "967a5e782636077953ebb26959deb0f73c145ee4",
+  "sourceHash": "a98a5857803483ec566ff0e7411aa76d942ce03cbf7213fda284a3f41a6e89f0",
+  "manifestSha256": "62d213f2e76dc00cc7b89998429dad9b2959b3aa6448d07bee2fb48b2cf3f951",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "7ae13507fb42e3f33c08743ba3023204bb3c2265423845f636ec5f16b2dbcc10"
+      "sha256": "5f8cfbde1ab72816720c7b38555157d8771834e96c5b7e97d5ebfa46cdecd4d1"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "48e1875abc8bef81c3f71c01186cda5e9726710d02374780caa8e78bf06d38c6"
+      "sha256": "3940cc3017e4f1654c01f7ed0875ea12c114172d550b0a96db61681205344ead"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -205,7 +205,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/routing/mod.rs",
-      "sha256": "f881470738075629a10b802117d04ea3e919d086fe263e95fb99bd9744f09207"
+      "sha256": "8851a80a6487099e18f08089a0bd43aa9c2393055f12e9bbf55a549ca56acc8c"
     },
     {
       "path": "crates/stattic-runtime-core/src/routing/placement.rs",
@@ -289,7 +289,7 @@
     },
     {
       "path": "crates/stattic-runtime-policy/src/lib.rs",
-      "sha256": "0ea1b8b0cfb3dc58bda35c516a08f1490ae013c9f9be92aae676eecf77b788c3"
+      "sha256": "74fbd22c77c54622a989413bf86113ff2cd4f36c5b78724ae7b8f1294804770d"
     },
     {
       "path": "crates/stattic-runtime-wasi/Cargo.toml",
@@ -13901,7 +13901,7 @@
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
-      "sha256": "714e3c4f4423f85aafce924321d235e9786e9d1e755dec3b5614235b72951a99"
+      "sha256": "e7995a313b468f8d9adad2159e58d002ca64ca9eb6a53076de6a6fc31b97d21e"
     },
     {
       "path": "runtime/engine/shared/functions-wire.generated.php",
@@ -13973,7 +13973,7 @@
     },
     {
       "path": "runtime/engine/shared/safety.php",
-      "sha256": "f3b84b4daf0c1102bafab24e7fdd6656f0002861b636245862dc2ed033d4736c"
+      "sha256": "58ad66f022e567491e080bc1837375bf3b6af668af4dea780763973ad1dd558f"
     },
     {
       "path": "runtime/engine/shared/security-telemetry.php",

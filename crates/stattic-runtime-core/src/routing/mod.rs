@@ -1566,7 +1566,7 @@ mod tests {
     fn managed_headers_fail_with_the_authored_location() {
         let result = compile_routing_files(&RoutingInput {
             headers:
-                "/feed\n  A8C-Edge-Cache: cache\n  !X-Ac\n  X-Hacker-Test: yes\n  cLeAr-SiTe-DaTa: cookies\n  !Clear-Site-Data\n  X-App-Result: ok"
+                "/feed\n  A8C-Edge-Cache: cache\n  !X-Ac\n  X-Nananana-Test: yes\n  cLeAr-SiTe-DaTa: cookies\n  !Clear-Site-Data\n  X-App-Result: ok"
                     .into(),
             ..RoutingInput::default()
         });

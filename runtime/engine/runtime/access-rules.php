@@ -3897,7 +3897,22 @@ function _stattic_access_exchange_headers(array $exchange, array $context, strin
     if ($agent !== '') {
         $headers[] = 'Spacefast-Visitor-User-Agent: ' . $agent;
     }
+    if (_stattic_is_anonymous_id($context['browser'] ?? null)) {
+        $headers[] = 'Spacefast-Visitor-Browser: ' . $context['browser'];
+    }
     return $headers;
+}
+
+// The exchange meters credential failures per browser, because the IP this
+// runtime sees is the provider's proxy and is shared by every visitor. The
+// browser is named by the pseudonym its visitor session already carries; it
+// authorizes nothing.
+function _stattic_access_browser_pseudonym(array $serving, string $requestHost): ?string
+{
+    $identity = _stattic_visitor_cookie_from_request() !== ''
+        ? _stattic_current_session_identity($serving, $requestHost)
+        : null;
+    return _stattic_collab_anonymous_id(_stattic_access_identity_record($identity) ?? []);
 }
 
 // Kept in a same-origin external resource so a normal `script-src 'self'`
@@ -4035,7 +4050,14 @@ function _stattic_access_handle_password(array $serving, string $requestHost, st
         _stattic_access_gate_after_post($serving, $requestHost, $returnPath, 'invalid-password');
     }
     $host = _stattic_canonicalize_host($requestHost);
-    $context = _stattic_access_context($serving, $requestHost, '/');
+    // A first attempt names its browser too. The name is kept only if the
+    // attempt fails, so a correct password never writes a second session cookie.
+    $presentedBrowser = _stattic_access_browser_pseudonym($serving, $requestHost);
+    $browser = $presentedBrowser ?? _stattic_collab_mint_anonymous_id();
+    $context = [
+        ..._stattic_access_context($serving, $requestHost, '/'),
+        'browser' => $browser,
+    ];
     $landingPath = parse_url($returnPath, PHP_URL_PATH);
     $result = _stattic_access_exchange_post(
         $lanes['exchange']['passwordUrl'],
@@ -4064,6 +4086,9 @@ function _stattic_access_handle_password(array $serving, string $requestHost, st
             _stattic_access_redirect($returnPath, 303);
         }
         _stattic_access_gate_after_post($serving, $requestHost, $returnPath, 'exchange-unavailable');
+    }
+    if ($presentedBrowser === null) {
+        _stattic_anonymous_session_write($serving, $requestHost, ['anonymousId' => $browser]);
     }
     _stattic_access_gate_email_verification(
         $serving,
@@ -4845,7 +4870,10 @@ function _stattic_access_exchange_link_token(array $serving, string $requestHost
         ['host' => $host, 'token' => $token],
         _stattic_access_exchange_headers(
             $exchange,
-            _stattic_access_context($serving, $requestHost, '/'),
+            [
+                ..._stattic_access_context($serving, $requestHost, '/'),
+                'browser' => _stattic_access_browser_pseudonym($serving, $requestHost),
+            ],
             'application/vnd.spacefast.access-handoff+json'
         )
     );

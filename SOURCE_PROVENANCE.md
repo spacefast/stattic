@@ -3,9 +3,9 @@
 The `main` branch is an automated, allowlisted source history of the Spacefast runtime.
 
 - Source repository: `spacefast/monorepo`
-- Source revision: `1e427ace5f1b61133443120dd05dc077e42cb1e6`
-- Runtime source hash: `06567ec988738587be365bd8b5e326a9e5114ab481641e4077ecd51471b11fe1`
-- Matching release tag: `runtime-1e427ace5f1b61133443120dd05dc077e42cb1e6`
+- Source revision: `232ecd3f26027703faf0159b54666865b7baacf0`
+- Runtime source hash: `b1d757a36ec63006fb77675b066dc5cb1e43b98e7ba6da145c13be47343c7b5c`
+- Matching release tag: `runtime-232ecd3f26027703faf0159b54666865b7baacf0`
 
 The private monorepo is the development authority. Every published source
 change appends an automated commit to this one-way public mirror. GitHub Actions

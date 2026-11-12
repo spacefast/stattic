@@ -955,17 +955,30 @@ test("the password lane verifies centrally and admits with zero visible redirect
 });
 
 test("a wrong password bounces back to the page with an allowlisted state", async () => {
-  const submitted = await get(runtime, LANES_HOST, "/__spacefast/access/password", {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      origin: `https://${LANES_HOST}`,
-    },
-    body: new URLSearchParams({ password: "wrong password", return: "/docs/" }),
-  });
+  const submitWrongPassword = (cookie = "") =>
+    get(runtime, LANES_HOST, "/__spacefast/access/password", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: `https://${LANES_HOST}`,
+        cookie,
+      },
+      body: new URLSearchParams({ password: "wrong password", return: "/docs/" }),
+    });
+  const passwordBrowser = () =>
+    exchangeRequests.findLast((entry) => entry.pathname === "/acquire/runtime-page/password")
+      ?.headers["spacefast-visitor-browser"];
+  const submitted = await submitWrongPassword();
   expect(submitted.status).toBe(303);
   expect(submitted.headers.get("location")).toBe("/docs/?sf_access=invalid-password");
-  expect(submitted.headers.get("set-cookie")).toBeNull();
+  // The exchange meters failures per browser, so the first attempt names one
+  // and the browser keeps that name for the next attempt. It authorizes nothing.
+  const browser = passwordBrowser();
+  expect(browser).toMatch(/^anon_[a-f0-9]{32}$/);
+  const cookie = (submitted.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  expect(cookie).toContain("=sfa1_");
+  await submitWrongPassword(cookie);
+  expect(passwordBrowser()).toBe(browser);
 
   const rendered = await get(runtime, LANES_HOST, "/docs/?sf_access=invalid-password");
   const html = await rendered.text();

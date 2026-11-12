@@ -51,9 +51,13 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_CONNECTORS_PATH_PREFIX, 'match' => 'prefix', 'admit' => '_stattic_connectors_route', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'connectors'],
     ...STATTIC_LEGACY_ZERO_CONNECTOR_PATHS,
     ...STATTIC_LEGACY_ZERO_CONTROL_PATHS,
-    // Unknown `/__zero/*` paths refuse exactly like unknown `/__spacefast/*`:
-    // the namespace is private-by-default on both spellings.
+    // Unknown `/__zero/*` and `/__first/*` paths refuse exactly like unknown
+    // `/__spacefast/*`: each namespace is private-by-default.
     ...STATTIC_LEGACY_ZERO_PRIVATE_PATHS,
+    // `destination`: First's `/__first/api/v1` is a public API other frontends
+    // call, so a proxy upstream or redirect may point into it. Tenant files and
+    // tenant routes still may not claim it.
+    ['path' => STATTIC_FIRST_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'destination' => true, 'stage' => null, 'handler' => null],
     ['path' => STATTIC_RUNTIME_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
     // An entry-stage row so the front door admits it and no tenant can publish

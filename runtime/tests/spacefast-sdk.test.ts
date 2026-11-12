@@ -2402,12 +2402,20 @@ test("a large tag module rides the blob store, not the overlay", async () => {
   expect(existsSync(path.join(blobs, bodySha.slice(0, 2), bodySha))).toBe(true);
 });
 
-test("only the SDK file is public under the Spacefast namespace", async () => {
+test("only named routes are public under the private platform namespaces", async () => {
   const runtime = await startRuntime();
   runtimes.push(runtime);
 
-  const response = await get(runtime, SITE, "/__spacefast/private.js");
-  expect(response.status).toBe(403);
+  // `/__first` has no handler yet, so it refuses like an unknown Zero path.
+  const denied = await Promise.all(
+    ["/__spacefast/private.js", "/__zero/unknown", "/__first/client.js"].map(async (path) => {
+      const response = await get(runtime, SITE, path);
+      return { path, status: response.status, body: await response.text() };
+    }),
+  );
+  for (const response of denied) expect(response.status, response.path).toBe(403);
+  // One uniform denial, so the response never says which namespace was guessed.
+  expect(new Set(denied.map((response) => response.body)).size).toBe(1);
 });
 
 // The reservation has to hold against a routing RULE, not only against a

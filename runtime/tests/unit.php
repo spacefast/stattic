@@ -2524,6 +2524,78 @@ check(_stattic_zero_legacy_control_path('/__zero/run') === '/__spacefast/zero/ru
 check(_stattic_zero_legacy_control_path('/__zero/auth/start') === '/__spacefast/zero/auth/gravatar/start', 'fold: auth start folds to the gravatar spelling');
 check(_stattic_zero_legacy_control_path('/api/run') === null, 'fold: ordinary paths never fold');
 
+// First's namespace is reserved before it has any handler: every path under it,
+// any case, refuses at the front door exactly like an unknown `/__zero/*` path,
+// and stays out of tenant reach. Whole-segment, like every namespace row.
+foreach (['/__first', '/__first/client.js', '/__first/run', '/__FIRST/anything'] as $firstPath) {
+    check(!_stattic_control_path_admits_visitor($firstPath), 'front door: First path refuses ' . $firstPath);
+    check(_stattic_control_path_namespace_is_private($firstPath), 'front door: First path is private ' . $firstPath);
+    check(_stattic_path_is_reserved($firstPath), 'front door: First path is reserved from tenant code ' . $firstPath);
+}
+check(!_stattic_path_is_reserved('/__firsthand/page'), 'front door: First reservation is whole-segment, not a string prefix');
+check(!_stattic_path_is_reserved('/assets/__first-client.js'), 'front door: First reservation reaches the root segment only');
+check(!_stattic_control_path_namespace_is_private('/assets/__first-client.js'), 'front door: a nested First lookalike is an ordinary path');
+check(!_stattic_functions_dispatchable('/__first/run', 'GET'), 'dispatch: refuses the First namespace');
+
+// The reservation keeps tenant files and routes out of `/__first`, but First's
+// public API is meant to be called from elsewhere, so a redirect or proxy may
+// point into it, on another host or on this Space. The control namespaces
+// `/__zero` and `/__spacefast` stay closed to destinations, as before.
+$hostRedirectCompiles = static fn (string $destination): bool => _stattic_runtime_compile_route(
+    sys_get_temp_dir() . '/sf-no-private-root',
+    'spc_destination',
+    ['hostname' => 'old.example', 'target' => ['type' => 'host_redirect', 'destination' => $destination, 'status' => 308]],
+) !== null;
+foreach (['https://example.com/__first/api', 'https://example.com/__FIRST', '/__first/api/v1', '/__first', '__first/api'] as $destination) {
+    check(_stattic_runtime_redirect_target_safe($destination, 'redirect'), 'destination: a redirect may target First ' . $destination);
+    check($hostRedirectCompiles($destination), 'destination: a host redirect route may target First ' . $destination);
+}
+check(_stattic_runtime_redirect_target_safe('https://example.com/__first/api/v1', 'proxy'), 'destination: a proxy rule may target First on another host');
+// Opening `/__first` to destinations lifts only the namespace rule: every other
+// file rule still judges the rest of the path.
+foreach (['/__first/.htaccess', '/__first/__spacefast/x', '/__first/a./b', '/__first/' . str_repeat('x', 1017)] as $destination) {
+    check(!_stattic_runtime_redirect_target_safe($destination, 'redirect'), 'destination: other path rules still hold under First ' . substr($destination, 0, 40));
+}
+check(_stattic_runtime_redirect_target_safe('/__first/' . str_repeat('x', 1016), 'redirect'), 'destination: the path length limit under First is the ordinary one');
+foreach (['/__zero/x', 'https://example.com/__zero/api', '/__spacefast/x', 'https://example.com/__spacefast/x', '/__sf/x', '/__span/x', '/__stattic/x'] as $destination) {
+    check(!_stattic_runtime_redirect_target_safe($destination, 'redirect'), 'destination: a redirect may not target ' . $destination);
+    check(!$hostRedirectCompiles($destination), 'destination: a host redirect route may not target ' . $destination);
+}
+// A refused proxy target renders the platform page and exits 0, so every proxy
+// target check, allowed or refused, runs in its own process: an in-process
+// refusal would end the suite early and report success.
+$proxyTargetProbe = <<<'PHP'
+define('STATTIC_RUNTIME_DISPATCH_CLI', true);
+require $argv[1];
+require_once $argv[2];
+require_once $argv[3];
+$parts = _stattic_assert_proxy_target_allowed($argv[4], STATTIC_EGRESS_SCOPE_OPEN);
+echo "allowed " . $parts['path'] . "\n";
+PHP;
+$proxyTargetProbeOutput = static function (string $upstream) use ($proxyTargetProbe): string {
+    $probeOutput = [];
+    exec(
+        escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($proxyTargetProbe) . ' '
+            . escapeshellarg(__DIR__ . '/../engine/shared/context.php') . ' '
+            . escapeshellarg(__DIR__ . '/../engine/shared/security-telemetry.php') . ' '
+            . escapeshellarg(__DIR__ . '/../engine/runtime/proxy.php') . ' '
+            . escapeshellarg($upstream) . ' 2>&1',
+        $probeOutput,
+    );
+    return implode("\n", $probeOutput);
+};
+check(
+    trim($proxyTargetProbeOutput('https://example.com/__first/api/v1')) === 'allowed /__first/api/v1',
+    'destination: the proxy lane relays to a First API upstream'
+);
+foreach (['https://example.com/__zero/x', 'https://example.com/__spacefast/x', 'https://example.com/__SF/redeem'] as $upstream) {
+    $probeText = $proxyTargetProbeOutput($upstream);
+    check(
+        str_contains($probeText, 'Proxy route cannot target runtime control paths.') && !str_contains($probeText, 'allowed'),
+        'destination: a proxy may not target ' . $upstream
+    );
+}
+
 // --- Operator journal: the 8 MiB cap bounds one file, the roll-aside keeps history ---
 
 $logRoot = _stattic_job_runner_unit_temp_private_root();

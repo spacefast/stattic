@@ -346,7 +346,11 @@ function _stattic_assert_proxy_target_allowed(string $target, string $egressScop
     }
     $path = (string) ($parts['path'] ?? '/');
     // Ordinary control namespaces belong to this Space, not the upstream host.
-    if (str_starts_with('/' . trim(strtolower($path), '/'), '/__') && _stattic_path_is_reserved($path)) {
+    if (
+        str_starts_with('/' . trim(strtolower($path), '/'), '/__')
+        && _stattic_path_is_reserved($path)
+        && !_stattic_control_path_is_destination($path)
+    ) {
         _stattic_security_outbound($target, _stattic_runtime_request_method(), false, null, 0);
         _stattic_render_platform_page('proxy-disabled', 403, [], "Proxy route cannot target runtime control paths.\n");
     }

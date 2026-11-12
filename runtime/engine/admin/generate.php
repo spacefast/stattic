@@ -1813,7 +1813,16 @@ function _stattic_runtime_redirect_target_safe(string $destination, string $acti
         return true;
     }
 
-    $violation = _stattic_static_upload_path_violation($validationPath);
+    // A namespace whose control row admits destinations (`/__first`) is
+    // reserved against tenant files only. Judge such a destination with its
+    // root segment swapped for an ordinary name of the same length, so every
+    // other file rule (length, `.htaccess`, nested `__spacefast`, malformed
+    // segments) still answers exactly as it would anywhere else.
+    $rootLength = strcspn($validationPath, '/');
+    $policyPath = _stattic_control_path_is_destination($path)
+        ? str_repeat('a', $rootLength) . substr($validationPath, $rootLength)
+        : $validationPath;
+    $violation = _stattic_static_upload_path_violation($policyPath);
     if (is_array($violation)) {
         $failureDetails = [
             'path' => $path,

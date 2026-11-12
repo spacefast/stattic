@@ -397,7 +397,6 @@ function _stattic_storage_handle(
         ($authenticated || $anonymousCommenter)
         && in_array($requestMethod, ['POST', 'DELETE'], true)
         && !isset($GLOBALS['SPACEFAST_STORAGE_FUNCTION_AUTH'])
-        && empty($GLOBALS['SPACEFAST_STORAGE_ACCESS_TOKEN'])
         && !(($auth['credentialSource'] ?? null) === 'platform-bearer'
             && _stattic_visitor_cookie_from_request() === '')
         && !_stattic_access_same_origin_post($requestHost)
@@ -721,7 +720,6 @@ function _stattic_storage_auth_context(array $serving, string $requestHost): arr
         return $functionAuth;
     }
     require_once __DIR__ . '/access-rules.php';
-    _stattic_storage_apply_access_token();
     $verified = _stattic_current_session_identity($serving, $requestHost);
     $principal = _stattic_access_identity_principal($verified);
     // Machine credentials carry authority without a browser principal. Keep
@@ -750,29 +748,6 @@ function _stattic_storage_auth_context(array $serving, string $requestHost): arr
             ? $verified['claims']['email']
             : null,
     ];
-}
-
-// The browser client carries the same signed session in `sf_token` that the
-// access layer reads from its cookie. Install it into the cookie slot before
-// grant evaluation so storage has no second permission model: the ordinary
-// path/target/constraint decision owns admission.
-function _stattic_storage_apply_access_token(): void
-{
-    require_once __DIR__ . '/access-rules.php';
-    $cookieName = _stattic_session_cookie_name();
-    if (is_string($_COOKIE[$cookieName] ?? null) && $_COOKIE[$cookieName] !== '') {
-        // A query parameter cannot exempt the ambient cookie used for auth.
-        return;
-    }
-    $token = $_GET['sf_token'] ?? null;
-    if (
-        is_string($token)
-        && strlen($token) <= 4096
-        && preg_match('/[\x00-\x20\x7f]/', $token) !== 1
-    ) {
-        $_COOKIE[$cookieName] = $token;
-        $GLOBALS['SPACEFAST_STORAGE_ACCESS_TOKEN'] = true;
-    }
 }
 
 function _stattic_storage_function_auth(

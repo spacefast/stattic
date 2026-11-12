@@ -918,9 +918,10 @@ test("visitor cookies require exact-origin writes while explicit storage credent
       path: "/storage",
       headers: machineHeaders,
     },
-    // A query parameter must not exempt the ambient cookie used for authentication.
+    // A session in the URL is not a credential: logs and history would keep
+    // it, so it neither authenticates nor exempts the ambient cookie.
     {
-      path: "/storage?sf_token=forged",
+      path: `/storage?sf_token=${encodeURIComponent(sessionToken)}`,
       headers: { origin: `https://${host}`, "sec-fetch-site": "same-site" },
     },
   ]) {
@@ -983,8 +984,19 @@ test("visitor cookies require exact-origin writes while explicit storage credent
     origin: "https://attacker.site.test",
     "sec-fetch-site": "same-site",
   };
+  const urlSession = await get(
+    strict,
+    host,
+    `/storage?sf_token=${encodeURIComponent(sessionToken)}`,
+    {
+      method: "POST",
+      headers: { ...siblingBrowserHeaders, "content-type": "text/plain" },
+      body: rejectedBody,
+    },
+  );
+  expect(urlSession.status).not.toBe(201);
+  expect(records()).toEqual(beforeSibling);
   for (const credential of [
-    { query: `?sf_token=${encodeURIComponent(sessionToken)}`, headers: siblingBrowserHeaders },
     { query: "", headers: machineHeaders },
     {
       query: "",

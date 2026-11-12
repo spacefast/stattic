@@ -1083,17 +1083,11 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
     expect(envelope.request.headers.authorization).toBe("Bearer customer-application-token");
     expect(envelope.request.headers["x-sf-authorization"]).toBeUndefined();
 
-    const sessionToken = sessionCookie.slice(sessionCookie.indexOf("=") + 1);
-    const storageUpload = await get(
-      idRuntime,
-      host,
-      `/storage?sf_token=${encodeURIComponent(sessionToken)}`,
-      {
-        method: "POST",
-        headers: { "content-type": "text/plain" },
-        body: "member-owned storage",
-      },
-    );
+    const storageUpload = await get(idRuntime, host, "/storage", {
+      method: "POST",
+      headers: { "content-type": "text/plain", cookie: sessionCookie, origin: `http://${host}` },
+      body: "member-owned storage",
+    });
     expect(storageUpload.status).toBe(201);
     expect(await storageUpload.json()).toMatchObject({
       contentType: "text/plain",

@@ -510,11 +510,6 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         }
     }
 
-    if ($storageRequest && !$storageContentEntry) {
-        require_once __DIR__ . '/storage.php';
-        _stattic_storage_apply_access_token();
-    }
-
     // ---- access ----------------------------------------------------------
     // The ONE protected-space enforcement call on the serve path; an open Space
     // loads no access code at all. BOTH paths are passed: a rewrite must not

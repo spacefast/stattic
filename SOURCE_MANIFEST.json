@@ -1,7 +1,7 @@
 {
-  "revision": "434c385a4ce807ea8341fc6eb54af6648819da21",
-  "sourceHash": "a98a5857803483ec566ff0e7411aa76d942ce03cbf7213fda284a3f41a6e89f0",
-  "manifestSha256": "6a648a070774517cd5317391c0b14598ec3eddc9a7db6dc6dc691f5456ae3e3e",
+  "revision": "1e427ace5f1b61133443120dd05dc077e42cb1e6",
+  "sourceHash": "06567ec988738587be365bd8b5e326a9e5114ab481641e4077ecd51471b11fe1",
+  "manifestSha256": "9346487a3811b3f12673a0fd244fd0d2a70d4de41bf987d93dce7b07555cc58c",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "e398351fb14d1b54f551d558ff1f200668bb4c1a0631ef753a6ec8110cba37e3"
+      "sha256": "87a15702311914ac30c1d834629f9c60769ac8552c6a41a03792630148be27a8"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "f760eda1bc747d29a8d6600500722bdc83e61bbe87ab42393c34955f03ec000d"
+      "sha256": "334aa97d3c049424ae7cde212157509b2caab2693391656f8f898431f83c296a"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13753,7 +13753,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "70c12501fe395b0c104bb3f04beb2019889f31e9aa128ede8797be629a098593"
+      "sha256": "7f9bfb14857a979b13e28261800a9d8df8aef28cd9bb2cb3c04c43ee53564889"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-IEQBVZUQ.js",
@@ -13777,7 +13777,7 @@
     },
     {
       "path": "runtime/engine/runtime/storage.php",
-      "sha256": "0277bd2162ae1e0522e66d398dbd8f3ea9ae79dd836d0e5ebf531184ccc757ba"
+      "sha256": "03143b75ca2ec5b7a395229cc4c31f59a5866bb8f3b4a2708181a6df706812e8"
     },
     {
       "path": "runtime/engine/runtime/tenant-prelude.php",
@@ -14593,7 +14593,7 @@
     },
     {
       "path": "runtime/tests/storage.test.ts",
-      "sha256": "59c1389f3b085898644d7b15d5583756ac88610120d4879fc18b996f9182bad8"
+      "sha256": "61cef3c662ca0bb3ccc779894f9c1e1b578118199942f4deaf6c5a3e7b9923d0"
     },
     {
       "path": "runtime/tests/subprocess-cli.php",
@@ -14653,7 +14653,7 @@
     },
     {
       "path": "runtime/tests/zero-runtime.test.ts",
-      "sha256": "5a733bf8bddb6b1eddc4b8131aa06beb46db482dd25e08096be8145da5b9e2b5"
+      "sha256": "f32858c1708e93d50c0bc9903b4d5c3bdba5e056c3140e80d0e3146f7a9090b8"
     },
     {
       "path": "runtime/tests/zero-rust-runner.test.ts",

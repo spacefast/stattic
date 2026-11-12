@@ -1,7 +1,7 @@
 {
-  "revision": "8af8e3aea7dcc1c5fb39b252585712d28c1f59c2",
-  "sourceHash": "3f24181b6c46a3994cb4217ac32f5d06a881c3cb34e635ac2d418534bee4b9d4",
-  "manifestSha256": "8cff77e621f31ffd57a19436a15242cb5df3ca4b8c996d7e89f18071c5b3a77b",
+  "revision": "2a5578dec566b772ba6f5af0f4c1e871bb06466b",
+  "sourceHash": "b1d757a36ec63006fb77675b066dc5cb1e43b98e7ba6da145c13be47343c7b5c",
+  "manifestSha256": "4f9bd15f3ac972dc9e35c8b20764e982b4acbb33658169f23c210f242a668a1a",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "1f4c5804a00d72ed851c150a010a6bf2fc726e0f0577bbe276b5359b324d5610"
+      "sha256": "8cfc0a726cf7c29e8b9041cfd425be33f728b05b399da1ba2377aa7fa5e0716e"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "1fdaa840d5194882cf6105aba94617a95b9cc184585a4909968f9251beca9a03"
+      "sha256": "46df68b0c8c4efb955453df880d45a14acc49e6f8d493fd7cba0ff11eccda94e"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13645,7 +13645,7 @@
     },
     {
       "path": "runtime/engine/legacy/zero-0.8/context.php",
-      "sha256": "02eda4fb7ff43233083efa92070a5f066127c15aff18bf4ad437ce1fdc356948"
+      "sha256": "22e670cf19a2a155bffeff67e8350cb96535c31102b76d12d056c65851c6ce5b"
     },
     {
       "path": "runtime/engine/legacy/zero-0.8/database-admin.php",
@@ -13769,7 +13769,7 @@
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
-      "sha256": "7f9da47503d1188adfbe69d79a5fa9d06d618d6c852cbd7a2fc806820ad8e313"
+      "sha256": "b1227dbb6a3d59cb2eb9a75d6a4243fa850906c293439977b00b27abc4715538"
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
@@ -13865,7 +13865,7 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "2506e2bb754d399714ef795d52d9914efdc03b265b099ae96c7fd82f45074fce"
+      "sha256": "8de4b9c0e548d89a4d8387afbab6ee79b99286548e75bfbebade504f942b6444"
     },
     {
       "path": "runtime/engine/shared/control-paths.php",

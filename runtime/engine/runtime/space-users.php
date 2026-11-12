@@ -40,7 +40,7 @@ function _stattic_space_users_prepare(
     string $privateRoot, array $serving, string $host, string $path, string $uri, string $method, ?array $providerConfiguration = null
 ): bool {
     $route = _stattic_space_users_route($path);
-    $control = STATTIC_ZERO_AUTH_CONTROL_ROUTES[trim($path, '/')] ?? null;
+    $control = STATTIC_ZERO_CONTROL_ROUTES[trim($path, '/')] ?? null;
     $start = is_array($control) && in_array($control['operation'], ['auth_start', 'auth_sign_out'], true);
     if (!$route && !$start) return false;
     require_once __DIR__ . '/../shared/zero-v2.php';

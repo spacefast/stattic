@@ -173,26 +173,6 @@ const STATTIC_ZERO_V2_CLIENT_TYPES_PATH = '/__zero/client.d.ts';
 // The Zero v2 Cast transport; it registers itself with every Zero client on the page.
 const STATTIC_ZERO_V2_REALTIME_PATH = '/__zero/realtime.js';
 
-// The canonical Zero control namespace, shared by Zero 0.8 and Zero v2.
-// `/__spacefast/zero/*` is served forever as an alias: frozen capsule clients
-// baked those paths at build time and a republish cannot be assumed.
-// Registration covers both prefixes; every emission uses the canonical one.
-const STATTIC_ZERO_CANONICAL_NAMESPACE_PATH = '/__zero';
-
-// The Zero realtime ticket mint, in both spellings. Zero v2's Cast transport
-// and Zero 0.8 capsule clients both reach it.
-const STATTIC_ZERO_REALTIME_TICKET_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/realtime-ticket';
-const STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH = STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/realtime-ticket';
-
-// The sign-in and sign-out routes under the Zero namespace. Zero 0.8 capsules
-// and Space Users both answer them. Keys are paths without slashes at either end.
-const STATTIC_ZERO_AUTH_CONTROL_ROUTES = [
-    '__zero/auth/start' => ['operation' => 'auth_start', 'methods' => ['GET', 'HEAD']],
-    '__zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD', 'POST']],
-    '__spacefast/zero/auth/gravatar/start' => ['operation' => 'auth_start', 'methods' => ['GET', 'HEAD']],
-    '__spacefast/zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD']],
-];
-
 // The ONE stable visitor URL of a public uploads-store object.
 const STATTIC_UPLOADS_PUBLIC_URL_PREFIX = '/__stattic/u/';
 

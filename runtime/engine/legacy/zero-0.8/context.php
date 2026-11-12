@@ -1,17 +1,29 @@
 <?php
 declare(strict_types=1);
 
+const STATTIC_ZERO_REALTIME_TICKET_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/realtime-ticket';
+
+// The canonical Zero control namespace. `/__spacefast/zero/*` is served forever
+// as an alias: frozen capsule clients baked those paths at build time and a
+// republish cannot be assumed. Registration covers both prefixes; every
+// emission (config JSON, invocation descriptors) uses the canonical one.
+const STATTIC_ZERO_CANONICAL_NAMESPACE_PATH = '/__zero';
+
+const STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH = STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/realtime-ticket';
+
 // The namespace is private-by-default: a Zero control route missing from this
-// table silently 403s at the front door (init.php). The sign-in rows are
-// shared with Space Users and live in shared/context.php.
+// table silently 403s at the front door (init.php).
 const STATTIC_ZERO_CONTROL_ROUTES = [
     '__zero/config' => ['operation' => 'config', 'methods' => ['GET', 'HEAD']],
     '__zero/run' => ['operation' => 'run', 'methods' => ['POST']],
+    '__zero/auth/start' => ['operation' => 'auth_start', 'methods' => ['GET', 'HEAD']],
+    '__zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD', 'POST']],
     '__zero/realtime/events' => ['operation' => 'realtime_events', 'methods' => ['GET', 'HEAD']],
     '__spacefast/zero/config' => ['operation' => 'config', 'methods' => ['GET', 'HEAD']],
     '__spacefast/zero/run' => ['operation' => 'run', 'methods' => ['POST']],
+    '__spacefast/zero/auth/gravatar/start' => ['operation' => 'auth_start', 'methods' => ['GET', 'HEAD']],
+    '__spacefast/zero/auth/sign-out' => ['operation' => 'auth_sign_out', 'methods' => ['GET', 'HEAD']],
     '__spacefast/zero/realtime/events' => ['operation' => 'realtime_events', 'methods' => ['GET', 'HEAD']],
-    ...STATTIC_ZERO_AUTH_CONTROL_ROUTES,
 ];
 
 function _stattic_control_path_is_zero_route(string $path): bool

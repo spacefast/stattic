@@ -327,9 +327,8 @@ try {
     throw new Error(`access page compilation failed: ${JSON.stringify(compileErrors)}`);
   }
 
-  // The share link a recipient is given: the destination URL with the durable
-  // token on it. The browser spec walks that URL shape, rehosted on this
-  // fixture's plain-HTTP origin.
+  // Mint a real share link and open its token on the canonical document path.
+  // This measures the credential hop without a separate directory-slash hop.
   const link = await createAccessShareLink({
     spaceId: seed.spaceId,
     name: "Browser share link fixture",
@@ -341,6 +340,7 @@ try {
     createdBy: seed.userId,
   });
   const linkUrl = new URL(link.url);
+  linkUrl.pathname = "/custom/";
   if (!linkUrl.searchParams.get("__")) {
     throw new Error("share link fixture produced no branded URL token");
   }

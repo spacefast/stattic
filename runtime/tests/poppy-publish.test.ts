@@ -11,7 +11,7 @@ import { startRuntime } from "./harness.ts";
 const API = "https://api.sf.localhost";
 const credentialsSchema = z.object({ access_token: z.string(), session_id: z.string() });
 
-test("a personal agent creates a Space, publishes through DPoP, and reads the real PHP runtime", async () => {
+test("a personal agent publishes through DPoP, reads the runtime, and receives tracked artifact refusals", async () => {
   await using cleanup = new AsyncDisposableStack();
   if (process.env.SPACEFAST_TEST_DATABASE_URL === undefined) {
     const { provisionTestDatabases, dropTestDatabases } =
@@ -49,10 +49,14 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     authTeams,
   } = await import("../../apps/control-plane/src/db/schema/auth.js");
   const {
+    activityEvents,
     channels,
     runtimeBoxes,
+    safetyReviewItems,
     spaceHostnames,
     spaces,
+    versions,
+    versionDiagnostics,
     spacefastTagSets,
     spacefastTagRevisions,
     spacefastTagReleases,
@@ -245,8 +249,11 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     const marker = `poppy-published-${randomUUID()}`;
     const html = `<!doctype html><html><head><title>Poppy publishing demo</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f5f8;color:#17213a;font:18px system-ui}main{max-width:700px;padding:64px;background:white;border-radius:20px;box-shadow:0 12px 50px #17213a12}small{color:#6752d5;font-weight:700}h1{font-size:48px;line-height:1.1;letter-spacing:-2px}p{line-height:1.7;color:#586277}code{font-size:12px;overflow-wrap:anywhere}</style></head><body><main><small>SPACEFAST × POPPY</small><h1>Published by a personal agent.</h1><p>Discovery → Sign in → Create a Space → Publish → Serve</p><p>This page was uploaded through the Spacefast API with a DPoP session token, finalized by the runtime worker, and served by the real PHP runtime.</p><code>${marker}</code></main></body></html>`;
     const form = new FormData();
+    const inertScript =
+      "debugger\n/document.cookie = 'x=y; domain=space.fast'/; function f() {} function g() {} /document.cookie = 'x=y; domain=space.fast'/;";
     form.set("spaceId", spaceId);
     form.set("files", new File([html], "index.html", { type: "text/html" }));
+    form.append("files", new File([inertScript], "inert.js", { type: "text/javascript" }));
     const publishUrl = `${API}/v1/publish`;
     const published = await app.request(publishUrl, {
       method: "POST",
@@ -274,6 +281,11 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     expect(served.status, await served.clone().text()).toBe(200);
     const servedHtml = await served.text();
     expect(servedHtml).toContain(marker);
+    const servedScript = await fetch(new URL("/inert.js", runtime.baseUrl), {
+      headers: { host: hostname.hostname },
+    });
+    expect(servedScript.status).toBe(200);
+    expect(await servedScript.text()).toBe(inertScript);
     expect(servedHtml).toContain('<meta name="baked-demo" content="saved">');
     const view = new Window({
       url: `https://${hostname.hostname}/`,
@@ -285,6 +297,8 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     });
     try {
       view.document.write(servedHtml);
+      view.eval(inertScript);
+      expect(view.document.cookie).toBe("");
       const sdk = view.document.querySelector('script[src*="/__spacefast/sdk.js"]');
       expect(sdk).not.toBeNull();
       const source = sdk?.getAttribute("src");
@@ -307,6 +321,71 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
     } finally {
       await view.happyDOM.close();
     }
+    const refusedForm = new FormData();
+    refusedForm.set("spaceId", spaceId);
+    refusedForm.set(
+      "files",
+      new File(
+        [
+          `${inertScript}\nconst ratio = {...function() {} / (document.cookie = 'private=value; domain=.SPACE.FAST') / 2};`,
+        ],
+        "app.js",
+        {
+          type: "text/javascript",
+        },
+      ),
+    );
+    const refused = await app.request(publishUrl, {
+      method: "POST",
+      headers: {
+        authorization: `DPoP ${signedIn.access_token}`,
+        dpop: await agent.proof(publishUrl, "POST", signedIn.access_token),
+      },
+      body: refusedForm,
+    });
+    expect(refused.status, await refused.clone().text()).toBe(422);
+    expect(refused.headers.get("content-type")).toContain("application/problem+json");
+    const problem = z
+      .object({
+        code: z.literal("shared_apex_cookie_write"),
+        pointer: z.literal("/files"),
+        details: z.object({
+          runtimeDetails: z.object({
+            path: z.literal("app.js"),
+            line: z.literal(3),
+            domain: z.literal("space.fast"),
+          }),
+        }),
+      })
+      .parse(await refused.json());
+    const review = await db.query.safetyReviewItems.findFirst({
+      where: eq(safetyReviewItems.spaceId, spaceId),
+    });
+    expect(review?.category).toBe("privacy_violation");
+    expect(review?.detailsJson).toMatchObject({
+      engine: "artifact_cookie_literal",
+      ...problem.details.runtimeDetails,
+    });
+    if (!review?.versionId) throw new Error("Refused publish has no review version");
+    const failed = await db.query.versions.findFirst({ where: eq(versions.id, review.versionId) });
+    expect(failed?.status).toBe("failed");
+    expect(failed?.failureCode).toBe(problem.code);
+    const events = await db.query.activityEvents.findMany({
+      where: eq(activityEvents.spaceId, spaceId),
+    });
+    expect(
+      events
+        .filter((event) => event.code === "version.failed")
+        .map((event) => event.detailsJson?.errorCode),
+    ).toEqual([problem.code]);
+    const diagnostic = await db.query.versionDiagnostics.findFirst({
+      where: eq(versionDiagnostics.versionId, review.versionId),
+    });
+    expect(diagnostic?.detailsJson).toMatchObject({
+      runtimeDetails: problem.details.runtimeDetails,
+    });
+    const unchanged = await db.query.channels.findFirst({ where: eq(channels.spaceId, spaceId) });
+    expect(unchanged?.versionId).toBe(receipt.data.version.id);
     // Roll back original source bytes after both the live content and tag settings move.
     const newer = new FormData();
     newer.set("spaceId", spaceId);
@@ -389,6 +468,7 @@ test("a personal agent creates a Space, publishes through DPoP, and reads the re
       .where(eq(authOAuthClientResources.clientId, agent.clientId));
     await db.delete(authOAuthClients).where(eq(authOAuthClients.clientId, agent.clientId));
     if (spaceId) {
+      await db.delete(safetyReviewItems).where(eq(safetyReviewItems.spaceId, spaceId));
       const tagSet = await db.query.spacefastTagSets.findFirst({
         where: eq(spacefastTagSets.scopeId, spaceId),
       });

@@ -97,7 +97,7 @@ async function pastePassword(page: Awaited<ReturnType<Browser["newPage"]>>, text
   });
   await page.evaluate((value) => navigator.clipboard.writeText(value), text);
   await page.locator('input[name="password"]').focus();
-  await page.keyboard.press("Control+V");
+  await page.keyboard.press("ControlOrMeta+V");
 }
 
 test("custom access page CSP permits its same-origin script and forms", async () => {
@@ -131,7 +131,7 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   await pastePassword(popup, " secret ");
   expect(await passwordInput.inputValue()).toBe("keep secret ");
   await trimButton.waitFor({ state: "visible" });
-  await passwordInput.press("Control+Z");
+  await passwordInput.press("ControlOrMeta+Z");
   expect(await passwordInput.inputValue()).toBe("keep");
   await trimButton.waitFor({ state: "hidden" });
 
@@ -152,7 +152,7 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   expect(await passwordInput.inputValue()).toBe(` ${PASSWORD} `);
   await trimButton.click();
   expect(await passwordInput.inputValue()).toBe(PASSWORD);
-  await passwordInput.press("Control+Z");
+  await passwordInput.press("ControlOrMeta+Z");
   expect(await passwordInput.inputValue()).toBe(` ${PASSWORD} `);
   await trimButton.click();
   expect(await passwordInput.inputValue()).toBe(PASSWORD);
@@ -473,29 +473,25 @@ test("a share link opens its clean page in one navigation, with no gate in betwe
     const opened = await page.goto(fixture.linkPageUrl);
     if (!opened) throw new Error("share link navigation returned no response");
     expect(opened.status()).toBe(200);
-    // The token is redeemed on the page request itself. Clean-URL
-    // canonicalization may add the directory slash but keeps the token, with no
-    // access interstitial and no second navigation.
-    const finalUrl = new URL(fixture.pageUrl);
-    finalUrl.search = new URL(fixture.linkPageUrl).search;
-    expect(page.url()).toBe(finalUrl.toString());
-    let firstRequest = opened.request();
-    for (;;) {
-      const redirectedFrom = firstRequest.redirectedFrom();
-      if (!redirectedFrom) break;
-      firstRequest = redirectedFrom;
-    }
+    // The token request sets the cookie and takes exactly one redirect to the
+    // clean page. Customer scripts never run with the token in location.search.
+    expect(page.url()).toBe(fixture.pageUrl);
+    const firstRequest = opened.request().redirectedFrom();
+    if (!firstRequest) throw new Error("share link did not redirect to its clean page");
+    expect(firstRequest.redirectedFrom()?.url() ?? null).toBeNull();
     expect(firstRequest.url()).toBe(fixture.linkPageUrl);
     const entryResponse = await firstRequest.response();
     if (!entryResponse) throw new Error("share link entry returned no response");
-    expect((await entryResponse.allHeaders())["cache-control"]).toBe("private, no-store");
+    expect(entryResponse.status()).toBe(302);
+    const entryHeaders = await entryResponse.allHeaders();
+    expect(entryHeaders.location).toBe(new URL(fixture.pageUrl).pathname);
+    expect(entryHeaders["cache-control"]).toBe("private, no-store");
+    expect(entryHeaders["set-cookie"]).toContain("spacefast_session");
     await page.getByText("custom home").waitFor();
     expect((await opened.allHeaders())["cache-control"]).toBe("private, no-store");
 
-    // The session cookie carries every later navigation, including pages the
-    // durable Link never named. The dev/test lane serves plain HTTP, so the
-    // cookie has its non-__Host- name here; production keeps
-    // __Host-spacefast_session.
+    // The next navigation carries only the cookie. This plain-HTTP fixture uses
+    // the dev cookie name; production keeps __Host-spacefast_session.
     expect(
       (await context.cookies(fixture.defaultPageUrl)).some((cookie) =>
         cookie.name.startsWith("spacefast_session"),
@@ -503,6 +499,9 @@ test("a share link opens its clean page in one navigation, with no gate in betwe
     ).toBe(true);
     const followed = await page.goto(fixture.pageUrl);
     expect(followed?.status()).toBe(200);
+    expect(followed?.request().redirectedFrom()?.url() ?? null).toBeNull();
+    expect(page.url()).toBe(fixture.pageUrl);
+    await page.getByText("custom home").waitFor();
   } finally {
     await context.close();
   }

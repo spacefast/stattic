@@ -394,8 +394,10 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     }
 
     // `?__=` is redeemed HERE, before the response table is read, and the request
-    // continues to the page it named. Zero visible hops: the identity this
-    // installs is what the enforcement below sees. The token declares its own
+    // continues to the page it named. A top-level browser navigation takes one
+    // hop to the clean URL once its cookie is set; every other caller gets the
+    // page in this response, and the identity installed here is what the
+    // enforcement below sees. The token declares its own
     // lane, see _stattic_access_query_token_classify.
     if (!$functionsMachineRoute && _stattic_access_query_token_present()) {
         require_once __DIR__ . '/access-rules.php';

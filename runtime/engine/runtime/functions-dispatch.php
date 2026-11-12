@@ -477,18 +477,26 @@ function _stattic_functions_cloudflare_reporting_group(stdClass $report): bool
 // cookies relay only host-only or scoped to the exact request host: a Space's
 // hostname shares its parent with sibling Spaces (space.fast, view.fast, a partner apex),
 // and the runtime cannot prove a custom domain's parent belongs to this Space.
-function _stattic_functions_relay_response_lane(string $requestHost = ''): array
+function _stattic_functions_relay_response_lane(string $requestHost = '', string $requestId = '', string $versionId = ''): array
 {
     return [
         'deny' => ['content-encoding', 'strict-transport-security'],
         'deny_prefixes' => [SPACEFAST_FUNCTIONS_DISPATCH_HEADER_PREFIX, 'cf-'],
         'allow_cookies' => true,
-        'filter_value' => static function (string $name, string $value) use ($requestHost): ?string {
+        'filter_value' => static function (string $name, string $value) use ($requestHost, $requestId, $versionId): ?string {
             $lowerValue = strtolower($value);
             // §16: a worker never steers the edge (A8C-*) or forges its verdict (x-ac).
+            if (in_array($name, ['set-cookie', 'set-cookie2'], true)
+                && _stattic_functions_cookie_domain_escapes_host($value, $requestHost)) {
+                _stattic_runtime_log_write([
+                    'level' => 'warn',
+                    'requestId' => $requestId,
+                    'message' => 'Function cookie with an overbroad Domain was stripped.',
+                    'metadata' => ['code' => 'functions_cookie_domain_stripped'],
+                ], $versionId);
+                return null;
+            }
             if (_stattic_platform_owns_header($name)
-                || (in_array($name, ['set-cookie', 'set-cookie2'], true)
-                    && _stattic_functions_cookie_domain_escapes_host($value, $requestHost))
                 || ($name === 'server' && trim($lowerValue) === 'cloudflare')) {
                 return null;
             }
@@ -626,7 +634,7 @@ function _stattic_functions_dispatch(
         'connect_timeout' => STATTIC_FUNCTIONS_DISPATCH_CONNECT_TIMEOUT_SECONDS,
         'timeout' => STATTIC_FUNCTIONS_DISPATCH_TIMEOUT_SECONDS,
         'sink' => 'output',
-        'on_headers' => static function (int $responseStatus, array $headerPairs) use (&$status, &$headersSent, $privateCache, $insertPayload, $requestHost, $assetsNonce, $spaceId, $versionId): void {
+        'on_headers' => static function (int $responseStatus, array $headerPairs) use (&$status, &$headersSent, $privateCache, $insertPayload, $requestHost, $requestId, $assetsNonce, $spaceId, $versionId): void {
             $status = $responseStatus;
             http_response_code($responseStatus);
             $headersSent = true;
@@ -639,7 +647,7 @@ function _stattic_functions_dispatch(
                 _stattic_relay_response_header_lines(
                     $headerPairs,
                     $cachePolicy,
-                    _stattic_functions_relay_response_lane($requestHost)
+                    _stattic_functions_relay_response_lane($requestHost, $requestId, $versionId)
                 )
             );
             _stattic_relay_send_response_headers($responseLines, $cachePolicy);

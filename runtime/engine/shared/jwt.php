@@ -435,6 +435,10 @@ function _stattic_jwt_issuer_fingerprint(array $issuer): string
     ], JSON_UNESCAPED_SLASHES));
 }
 
+// How far ahead of this box's clock a visitor token may start. Covers clock
+// skew between the minting control plane and the box, nothing more.
+const STATTIC_VISITOR_JWT_START_SKEW_SECONDS = 30;
+
 function _stattic_visitor_verify(string $token, array $options): ?array
 {
     $parsed = _stattic_jwt_parse_memo($token);
@@ -451,11 +455,15 @@ function _stattic_visitor_verify(string $token, array $options): ?array
         && (!is_int($claims['authorityExpiresAt']) || $claims['authorityExpiresAt'] <= $now)) {
         return null;
     }
+    // Expired means expired. Skew between the control plane and a box only
+    // delays a token's start, so `nbf` keeps a short allowance and `exp` none:
+    // every lifetime here is the mint's own, and a 60 s handoff must not
+    // admit for six minutes.
     $claimExp = isset($claims['exp']) ? (int) $claims['exp'] : null;
-    if ($claimExp === null || $claimExp < $now - 300) {
+    if ($claimExp === null || $claimExp <= $now) {
         return null;
     }
-    if (isset($claims['nbf']) && (int) $claims['nbf'] > $now + 300) {
+    if (isset($claims['nbf']) && (int) $claims['nbf'] > $now + STATTIC_VISITOR_JWT_START_SKEW_SECONDS) {
         return null;
     }
     // The audience names the Space, so a handoff keeps its identity across
@@ -528,7 +536,7 @@ function _stattic_visitor_verify(string $token, array $options): ?array
         }
         $iat = isset($claims['iat']) ? (int) $claims['iat'] : null;
         $iatMaxAge = (int) ($options['iatMaxAge'] ?? 300);
-        if ($iat === null || $iat < $now - $iatMaxAge || $iat > $now + 300) {
+        if ($iat === null || $iat < $now - $iatMaxAge || $iat > $now + STATTIC_VISITOR_JWT_START_SKEW_SECONDS) {
             return null;
         }
         $privateRoot = is_string($options['privateRoot'] ?? null) ? $options['privateRoot'] : '';

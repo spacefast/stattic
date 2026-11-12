@@ -265,7 +265,10 @@ function _stattic_runtime_finalize_with_rust(
             $status,
             $rustCode,
             $structuredValid ? $structuredError['message'] : 'The native runtime finalizer rejected the version.',
-            ['details' => _stattic_runtime_json_object($errorDetails)],
+            [
+                'details' => _stattic_runtime_json_object($errorDetails),
+                ...(is_string($errorDetails['pointer'] ?? null) ? ['pointer' => $errorDetails['pointer']] : []),
+            ],
         );
     }
     $output = _stattic_runtime_read_finalizer_output($outputPath);

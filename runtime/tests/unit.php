@@ -48,6 +48,31 @@ function check(bool $condition, string $label): void
     }
 }
 
+// Only positive Fetch Metadata identification opts token exchanges into a hop.
+$navigationServer = $_SERVER;
+foreach ([
+    ['navigate', 'document', true],
+    [null, null, false],
+    [null, 'document', false],
+    ['navigate', null, false],
+    ['navigate', 'iframe', false],
+    ['no-cors', 'image', false],
+    ['cors', 'document', false],
+] as [$mode, $destination, $expected]) {
+    unset($_SERVER['HTTP_SEC_FETCH_MODE'], $_SERVER['HTTP_SEC_FETCH_DEST']);
+    if ($mode !== null) {
+        $_SERVER['HTTP_SEC_FETCH_MODE'] = $mode;
+    }
+    if ($destination !== null) {
+        $_SERVER['HTTP_SEC_FETCH_DEST'] = $destination;
+    }
+    check(
+        _stattic_request_is_top_level_navigation() === $expected,
+        'token navigation: ' . ($mode ?? 'missing') . '/' . ($destination ?? 'missing')
+    );
+}
+$_SERVER = $navigationServer;
+
 // Direct mail argument mapping owns header validation independently of transport.
 $mailPayload = [
     'from' => ['email' => 'hello@example.com'],
@@ -2665,6 +2690,18 @@ $runtimeLogLastLine = static function () use ($runtimeLogPath): string {
     return array_last($lines) ?? '';
 };
 
+$cookieLogLane = _stattic_functions_relay_response_lane('site.view.fast', 'req_cookie', 'ver_cookie');
+$cookieLogLane['filter_value']('set-cookie', 'poison=sibling; Domain=view.fast; Path=/');
+$cookieLogRecord = $runtimeLogLast();
+check(
+    ($cookieLogRecord['requestId'] ?? null) === 'req_cookie'
+        && ($cookieLogRecord['versionId'] ?? null) === 'ver_cookie'
+        && ($cookieLogRecord['metadata'] ?? null) === ['code' => 'functions_cookie_domain_stripped']
+        && !str_contains((string) file_get_contents($runtimeLogPath), 'poison=sibling')
+        && !str_contains((string) file_get_contents($runtimeLogPath), 'view.fast'),
+    'dispatch log: stripped cookies carry request/version IDs without cookie values or domains'
+);
+
 _stattic_runtime_log_write(['level' => 'warn', 'message' => 'hello'], 'ver_writer');
 $writtenRecord = $runtimeLogLast();
 check(($writtenRecord['message'] ?? null) === 'hello', 'runtime log: the message survives the round trip through error_log');
@@ -2679,10 +2716,11 @@ check(($runtimeLogLast()['versionId'] ?? null) === 'ver_writer', 'runtime log: a
 
 // One record must be one line: the provider's shipper indexes by line, so a
 // newline in tenant output would arrive as two documents.
+$beforeMultilineCount = count($runtimeLogRecords());
 _stattic_runtime_log_write(['message' => "first\nsecond\r\nthird"], 'ver_writer');
 $multilineRecord = $runtimeLogLast();
 check(($multilineRecord['message'] ?? null) === "first\nsecond\r\nthird", 'runtime log: a multi-line message keeps its newlines in the record');
-check(count($runtimeLogRecords()) === 3, 'runtime log: a multi-line message is still exactly one log line');
+check(count($runtimeLogRecords()) === $beforeMultilineCount + 1, 'runtime log: a multi-line message is still exactly one log line');
 
 foreach ([
     ['LOG', 'info', 'log aliases to info'],

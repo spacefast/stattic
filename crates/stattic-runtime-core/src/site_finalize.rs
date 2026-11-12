@@ -630,6 +630,8 @@ fn run_finalize_pipeline(
         Ok::<_, FinalizeError>(substitution)
     })?;
     write_crons_artifact(stage_root, files, substitution.routing_config.as_ref())?;
+    let managed_apexes = hostname_list(&input.body, "managed_space_apexes");
+    crate::cookie_writes::validate_embedded_html(&input.body, &managed_apexes)?;
 
     let absent = Map::new();
     let mut serving = input
@@ -1172,6 +1174,7 @@ fn run_finalize_pipeline(
         generated_at: &input.generated_at,
         pipeline_context_digest: Some(context_digest),
     });
+    crate::cookie_writes::validate_cookie_writes(&blobs, &catalog, &managed_apexes)?;
     let delta = finalize_catalog_delta(
         previous_catalog.as_ref(),
         &catalog,
@@ -2571,6 +2574,127 @@ mod tests {
             }
             other => panic!("expected local capture diagnostic, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cookie_guard_checks_retained_files_before_publishing_an_immutable_version() {
+        let (_temp, private, initial) = finalize_fixture(
+            &[("app.js", b"document.cookie = 'x=y; domain=view.fast'")],
+            json!({"mode":"website"}),
+            json!({}),
+        );
+        initial.unwrap();
+        let mut next = fixture_input(
+            &private,
+            vec![],
+            json!({"mode":"website"}),
+            json!({"managed_space_apexes":["view.fast"]}),
+        );
+        next.version_id = "v2".into();
+        next.session =
+            json!({"manifest":[],"accepted":{},"retention":"all","reusable_version_id":"v"});
+        let error = finalize_site(next, false).unwrap_err();
+        match error {
+            FinalizeError::Invalid {
+                code,
+                details: Some(details),
+                ..
+            } => {
+                assert_eq!(code, "shared_apex_cookie_write");
+                assert_eq!(details["path"], "app.js");
+                assert_eq!(details["line"], 1);
+                assert_eq!(details["pointer"], "/files");
+            }
+            other => panic!("expected a structured cookie refusal, got {other:?}"),
+        }
+        assert!(!private.join("spaces/s/versions/v2").exists());
+        assert!(!private
+            .join("spaces/s/versions/.v2.rust-finalizing")
+            .exists());
+        assert!(private.join("spaces/s/versions/v/metadata.json").exists());
+
+        // A valid retained file beyond the best-effort scan budget remains publishable.
+        let large = vec![b'/'; 64 * 1024 * 1024 + 1];
+        let (_temp, private, initial) = finalize_fixture(
+            &[("large.js", &large)],
+            json!({"mode":"website"}),
+            json!({}),
+        );
+        initial.unwrap();
+        let mut next = fixture_input(
+            &private,
+            vec![],
+            json!({"mode":"website"}),
+            json!({"managed_space_apexes":["view.fast"]}),
+        );
+        next.version_id = "v2".into();
+        next.session =
+            json!({"manifest":[],"accepted":{},"retention":"all","reusable_version_id":"v"});
+        finalize_site(next, false).unwrap();
+        assert!(private.join("spaces/s/versions/v2/metadata.json").exists());
+    }
+
+    #[test]
+    fn cookie_guard_decodes_each_precompressed_text_companion() {
+        use std::io::Write;
+        let javascript = b"\x0bdocument.cookie = 'x=y; domain=space.fast'";
+        let html =
+            b"<svg><script><!--\0-->document.cookie = 'x=y; domain=space.fast'</script></svg>";
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(javascript).unwrap();
+        let gz = gz.finish().unwrap();
+        let mut br = brotli::CompressorWriter::new(Vec::new(), 4096, 3, 22);
+        br.write_all(html).unwrap();
+        let br = br.into_inner();
+        for (base, name, bytes) in [
+            ("app.js", "app.js.GZ", gz),
+            ("index.html", "index.html.br", br),
+        ] {
+            let (_temp, _private, output) = finalize_fixture(
+                &[(base, b"void 0;"), (name, &bytes)],
+                json!({"mode":"website"}),
+                json!({"managed_space_apexes":["space.fast"]}),
+            );
+            assert!(
+                matches!(
+                    output,
+                    Err(FinalizeError::Invalid {
+                        code: "shared_apex_cookie_write",
+                        ..
+                    })
+                ),
+                "{name}: {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_guard_checks_substituted_channel_output() {
+        let (_temp, _private, output) = finalize_fixture(
+            &[
+                (
+                    "app.js",
+                    b"document.cookie = 'x=y; domain={{ vars.DOMAIN }}'",
+                ),
+                ("sf.jsonc", br#"{"templates":["app.js"]}"#),
+            ],
+            json!({"mode":"website"}),
+            json!({
+                "managed_space_apexes":["view.fast"],
+                "variable_scopes":[{"kind":"space","values":{"DOMAIN":{"value":"own.example","channelValues":{"preview":"view.fast"}}}}],
+                "channels":[{"name":"preview","route_name":"preview"}]
+            }),
+        );
+        assert!(
+            matches!(
+                output,
+                Err(FinalizeError::Invalid {
+                    code: "shared_apex_cookie_write",
+                    ..
+                })
+            ),
+            "{output:?}"
+        );
     }
 
     fn finalized_readiness_target(private: &Path) -> Value {

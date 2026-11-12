@@ -94,7 +94,10 @@ const STATTIC_ACCESS_SESSION_ABSOLUTE_SECONDS = 2592000;
 const STATTIC_ACCESS_SESSION_CLAIM_TTL_SECONDS = 900;
 // How often that revalidation writes `lastSeenAt` back to the server record.
 const STATTIC_ACCESS_SESSION_TOUCH_INTERVAL_SECONDS = 21600;
-// Must match the visitor-token verifier's clock leeway.
+// How far in the future a stored authority entry's timestamps may sit and
+// still count for this request. A later entry is left out of the live set until
+// the clock reaches it; it is not deleted. Visitor-token expiry has its own rule
+// (shared/jwt.php) and does not follow this value.
 const STATTIC_ACCESS_SESSION_CLOCK_SKEW_SECONDS = 300;
 const STATTIC_ACCESS_BROWSER_STATE_COOKIE_PREFIX = '__Host-spacefast_access_state_';
 const STATTIC_ACCESS_BROWSER_STATE_DEV_COOKIE_PREFIX = 'spacefast_access_state_dev_';
@@ -4605,14 +4608,11 @@ function _stattic_access_verify_frame_session_token(
     // Expiry is decided BEFORE anything is installed. _stattic_frame_session_admits
     // and _stattic_frame_ancestor_origins are side effects the enforcement path
     // reads back on its own; priming them and then returning false would admit
-    // the request anyway. The shared visitor verifier deliberately tolerates a
-    // 300s clock skew on `exp`, so this is the only gate that closes a stale
-    // proof, and both copies of the lifetime have to agree.
+    // the request anyway. Both copies of the lifetime have to agree.
     $expiry = $claims['exp'] ?? null;
     if (
         !is_int($expiry)
         || ($frame['expiresAt'] ?? null) !== $expiry
-        || $expiry <= _stattic_access_session_now()
     ) {
         return false;
     }
@@ -5053,8 +5053,11 @@ function _stattic_platform_identity_token(
 
 // THE `?__=` lane, and the shape of the whole thing: whatever the token proves,
 // it proves it for the URL it is sitting on, and that URL answers with its own
-// content in this response. Nothing here redirects: a link an agent cannot
-// follow with one request is not a link.
+// content in this response for agents and fetchers. A successful exchange in a
+// top-level browser navigation sets its cookie, then redirects to the clean URL
+// before customer scripts can read the token. Only explicit Fetch Metadata
+// (navigate + document) opts into that hop; missing metadata keeps one-request
+// access. Embedded system previews retain their cookie-and-redirect exchange.
 //
 // Which lane runs is the token's own declaration (its prefix), never a guess at
 // its shape. A token naming no lane is refused by name rather than dropped on
@@ -5104,6 +5107,7 @@ function _stattic_access_apply_query_token(
                 $seconds,
                 true
             );
+            _stattic_access_redirect_query_token();
         }
         return;
     }
@@ -5118,47 +5122,49 @@ function _stattic_access_apply_query_token(
     );
     if ($verified && _stattic_system_view_admits($requestPath)) {
         // An embed proof is framed cross-site, where a Lax cookie is neither
-        // stored nor sent, so its echo is partitioned by the top-level site and
-        // lives exactly as long as the token it carries. A top-level reader
-        // (thumbnail fetcher, operator link) keeps the short same-site echo it
-        // has always had.
+        // stored nor sent, so its echo is partitioned by the top-level site.
+        // An embed, or a browser navigation that is about to lose the token
+        // from its address bar, keeps the echo as long as the token it
+        // carries, so a reload works for the token's whole life. Every reader
+        // keeps at least the short same-site echo: a token close to its end
+        // must still survive the redirect to the clean URL. The echo is only
+        // a carrier; each request re-verifies the JWT inside it.
         $embed = _stattic_system_view_embed();
         $expiresAt = _stattic_system_view_expiry();
+        $tokenLifetime = $expiresAt === null
+            || ($embed === null && !_stattic_request_is_top_level_navigation())
+            ? 0
+            : $expiresAt - time();
         _stattic_set_cookie(
             _stattic_system_view_cookie_name(),
             $token,
-            $embed === null || $expiresAt === null
-                ? STATTIC_SYSTEM_VIEW_COOKIE_SECONDS
-                : max(0, $expiresAt - time()),
+            max(STATTIC_SYSTEM_VIEW_COOKIE_SECONDS, $tokenLifetime),
             $embed !== null
         );
-        if ($embed !== null) {
-            _stattic_access_redirect_framed_preview();
-        }
+        _stattic_access_redirect_query_token($embed !== null);
     }
 }
 
-/**
- * The one hop this lane takes, and only for a framed preview.
- *
- * Everywhere else `?__=` deliberately does not redirect (see the contract above
- * this function): a link an agent cannot follow with one request is not a link,
- * and a thumbnail fetcher or an operator opening an ops URL is exactly that
- * caller. A framed preview is not. Its token is a working credential for the
- * whole private version, and the document it opens is the CUSTOMER'S page —
- * every script on it, including a third-party dependency the publisher pulled
- * in, can read `location.search`. Leaving the token there for its full life
- * would publish it to that page.
- *
- * So the exchange completes here: the cookie set on this response carries the
- * session from now on, and the browser is sent to the same URL without the
- * secret. The redirected request presents the cookie and nothing else.
- */
-function _stattic_access_redirect_framed_preview(): never
+function _stattic_request_is_top_level_navigation(): bool
 {
+    return strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_MODE'] ?? ''))) === 'navigate'
+        && strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_DEST'] ?? ''))) === 'document';
+}
+
+// Call only after this response sets the verified token's cookie. Customer
+// scripts must see the clean URL on top-level browser navigations and embedded
+// system previews. Everyone else keeps the content in this response.
+function _stattic_access_redirect_query_token(bool $framedPreview = false): void
+{
+    if (!$framedPreview && !_stattic_request_is_top_level_navigation()) {
+        return;
+    }
     _stattic_access_private_cache_flag(true);
+    // Keep the page's query bytes and path; sf_access_return is only flow state.
     _stattic_access_redirect(
-        _stattic_access_clean_return_path(),
+        _stattic_safe_return_path(_stattic_access_return_without_flow_params(
+            _stattic_runtime_effective_request_uri()
+        )) ?? '/',
         302,
         STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
         true
@@ -5184,8 +5190,9 @@ function _stattic_render_access_query_token_unrecognized(): never
 }
 
 // A customer share link (or a space key) on the URL it is meant to open: redeem
-// it server-to-server, set the session cookie on THIS response, and return so
-// the enforcement below serves the page the visitor actually asked for. The
+// it server-to-server and set the session cookie on THIS response. A top-level
+// browser navigation then drops the token; otherwise enforcement below serves
+// the page the visitor actually asked for in this response. The
 // link's own stored landing path is not consulted: the request path is the
 // landing path, which is what makes a deep link a deep link.
 //
@@ -5213,6 +5220,7 @@ function _stattic_access_redeem_query_link_token(
             // updates $_COOKIE too, so the enforcement below this call resolves
             // the identity this response just handed out.
             _stattic_access_set_session_cookie($credential);
+            _stattic_access_redirect_query_token();
         }
         return;
     }
@@ -5550,6 +5558,12 @@ function _stattic_access_handle_logout(string $requestHost): void
         _stattic_access_logout_unavailable();
     }
     _stattic_clear_cookie(_stattic_session_cookie_name());
+    // A system-view or frame proof is not a session, but it opens pages from
+    // this browser just the same, and a browser navigation keeps an operator's
+    // for as long as its token lives. Signing out drops both namespaces of each.
+    _stattic_clear_cookie(_stattic_system_view_cookie_name());
+    _stattic_clear_cookie(_stattic_system_view_cookie_name(), true);
+    _stattic_clear_cookie(_stattic_frame_session_cookie_name(), true);
     // Signing out here means staying out: no silent renewal on the next visit.
     _stattic_access_forget_returning_account();
     // The clearUrl is cross-origin: the return= param in this URL must not

@@ -436,7 +436,7 @@ function callbackToken(
   });
 }
 
-function runtimeBearerToken(host: string, authorities: string[]) {
+function runtimeBearerToken(host: string, authorities: string[], { expiresIn = 300 } = {}) {
   const now = Math.floor(Date.now() / 1000);
   return signEd25519Jwt(keyPair.privateKey, issuer.kid, {
     sub: authorities[0],
@@ -453,7 +453,7 @@ function runtimeBearerToken(host: string, authorities: string[]) {
     // governed by its explicit expiry, not handoff freshness.
     iat: now - 120,
     nbf: now - 120,
-    exp: now + 300,
+    exp: now + expiresIn,
     jti: randomUUID(),
   });
 }
@@ -1182,6 +1182,15 @@ test("a signed platform header admits directly without creating a browser cookie
     headers: bearerHeaders,
   });
   expect(secondBearerRequest.status).toBe(200);
+
+  // Expiry has no grace period: a bearer 30 seconds past `exp` is refused.
+  const expiredBearer = runtimeBearerToken(PRIVATE_HOST, ["member:mem_owner"], {
+    expiresIn: -30,
+  });
+  const expiredBearerRequest = await get(runtime, PRIVATE_HOST, "/docs/", {
+    headers: { "x-sf-authorization": `Bearer ${expiredBearer}` },
+  });
+  expect(expiredBearerRequest.status).toBe(403);
 });
 
 // ---------------------------------------------------------------------------
@@ -1496,11 +1505,18 @@ test("logout revokes only the presented session and fails closed when the record
 
   const callsBefore = collaborationLogoutCalls.length;
   // Signed out here means staying out: the returning-account marker goes with
-  // the session, so the overlay never signs this browser straight back in.
+  // the session, so the overlay never signs this browser straight back in, and
+  // so do the system-view (both namespaces) and frame proofs that open pages.
   const loggedOut = await logout(`${firstCookie}; ${RETURNING_MARKER}=1`);
   expect(loggedOut.status).toBe(303);
   const cleared = loggedOut.headers.getSetCookie().map((cookie) => cookie.split(";")[0]);
-  expect(cleared).toEqual([`${COOKIE_NAME}=`, `${RETURNING_MARKER}=`]);
+  expect(cleared).toEqual([
+    `${COOKIE_NAME}=`,
+    "spacefast_system_view_dev=",
+    "spacefast_system_view_dev=",
+    "spacefast_frame_dev=",
+    `${RETURNING_MARKER}=`,
+  ]);
   expect(loggedOut.headers.get("set-cookie")).toContain("Max-Age=0");
   const revokes = collaborationLogoutCalls.slice(callsBefore);
   expect(revokes).toHaveLength(1);

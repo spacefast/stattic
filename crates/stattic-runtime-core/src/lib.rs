@@ -1,6 +1,8 @@
 // Native-only modules: everything that touches the filesystem or the native
 // Zero runner (QuickJS/rlimit) is compiled out of the wasm32-wasip1 build.
 // The wasm surface is the pure prepare/transform dispatch in `prepare_abi`.
+#[cfg(not(target_family = "wasm"))]
+mod cookie_writes;
 mod hash;
 #[cfg(not(target_family = "wasm"))]
 mod io;

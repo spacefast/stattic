@@ -1775,9 +1775,38 @@ test("a returning account's silent start spends its marker and never prompts", a
   expect(sessionCookie(unredeemable)).toBe("");
 });
 
-// The shape of a share link: the page you want with the secret appended,
-// returned as the response. One request, 200, content. A link an agent cannot
-// follow with one request is not a link.
+test("a browser share-link navigation exchanges the token before serving the clean URL", async () => {
+  const opened = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/guide/?tag=a&tag=b&x.y=1&flag&__=${LINK_TOKEN}&page=2`,
+    {
+      headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+    },
+  );
+  expect(opened.status).toBe(302);
+  expect(opened.headers.get("location")).toBe("/docs/guide/?tag=a&tag=b&x.y=1&flag&page=2");
+  expect(opened.headers.get("cache-control")).toBe("private, no-store");
+  expect(opened.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(await opened.text()).toBe("");
+  const cookie = sessionCookie(opened);
+  expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
+  const followed = await get(runtime, LANES_HOST, opened.headers.get("location") ?? "", {
+    headers: { cookie },
+  });
+  expect(followed.status).toBe(200);
+  expect(await followed.text()).toContain(`guide of ${LANES_SPACE}`);
+  const withReturn = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/guide/?x%20y=1&flag&__=${LINK_TOKEN}&sf_access_return=%2Fadmin%2F`,
+    { headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" } },
+  );
+  expect(withReturn.status).toBe(302);
+  expect(withReturn.headers.get("location")).toBe("/docs/guide/?x%20y=1&flag");
+});
+
+// Clients without Fetch Metadata still receive the page in one request.
 test("a share token on the URL returns that page in the same response", async () => {
   const before = exchangeRequests.length;
   const opened = await get(runtime, LANES_HOST, `/docs/guide/?__=${LINK_TOKEN}`);
@@ -1811,6 +1840,13 @@ test("a share token on the URL returns that page in the same response", async ()
   const deep = await get(runtime, LANES_HOST, `/docs/?__=${LINK_TOKEN}`);
   expect(deep.status).toBe(200);
   expect(await deep.text()).toContain(`docs of ${LANES_SPACE}`);
+
+  const framed = await get(runtime, LANES_HOST, `/docs/?__=${LINK_TOKEN}`, {
+    headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe" },
+  });
+  expect(framed.status).toBe(200);
+  expect(framed.headers.get("location")).toBeNull();
+  expect(sessionCookie(framed)).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
 
   // A compiled canonical redirect happens after a successful exchange. It keeps
   // ordinary query state and the Link token, so a cookie-less agent following
@@ -2120,8 +2156,11 @@ test("an invalid access URL never serves customer content", async () => {
 // parameter were absent: the Space's own gate, no token error, no 500. A prober
 // learns nothing about whether the token ever existed.
 test("a share token that opens nothing serves the gate, not content", async () => {
-  const refused = await get(runtime, LANES_HOST, `/docs/?__=${LINK_PREFIX}neverMintedToken0000`);
+  const refused = await get(runtime, LANES_HOST, `/docs/?__=${LINK_PREFIX}neverMintedToken0000`, {
+    headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+  });
   expect(refused.status).toBe(403);
+  expect(refused.headers.get("location")).toBeNull();
   const body = await refused.text();
   expect(body).not.toContain(`docs of ${LANES_SPACE}`);
   expect(body).toContain("sf-access-password-input");
@@ -2145,6 +2184,61 @@ test("a system view token serves the page and its same-origin assets without a s
   // visitor session and creates no revocation record.
   const assetCookie = systemViewCookie(opened);
   expect(assetCookie).toStartWith("__Host-spacefast_system_view=");
+  // A fetcher keeps the token in its URL, so it gets the short echo.
+  expect(Number(/Max-Age=(\d+)/.exec(opened.headers.get("set-cookie") ?? "")?.[1])).toBe(
+    SYSTEM_VIEW_ECHO_SECONDS,
+  );
+  const navigation = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken()}`,
+    { headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" } },
+  );
+  expect(navigation.status).toBe(302);
+  expect(navigation.headers.get("location")).toBe("/docs/");
+  // A browser loses the token from its address bar, so its cookie lives as long
+  // as the token: reloading an operator link keeps working past the short echo.
+  const navigationCookie =
+    navigation.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith("__Host-spacefast_system_view=")) ?? "";
+  expect(Number(/Max-Age=(\d+)/.exec(navigationCookie)?.[1])).toBeGreaterThan(
+    SYSTEM_VIEW_ECHO_SECONDS,
+  );
+  expect(navigation.headers.get("cache-control")).toBe("private, no-store");
+  expect(navigation.headers.get("referrer-policy")).toBe("no-referrer");
+  const followed = await get(runtime, LANES_HOST, "/docs/", {
+    headers: { cookie: systemViewCookie(navigation) },
+  });
+  expect(followed.status).toBe(200);
+  expect(await followed.text()).toContain(`docs of ${LANES_SPACE}`);
+  // A token in its last seconds still gets the short echo, so the redirect to
+  // the clean URL lands on the page, not the gate.
+  const ending = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken({ exp: Math.floor(Date.now() / 1000) + 1 })}`,
+    { headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" } },
+  );
+  expect(ending.status).toBe(302);
+  const endingCookie =
+    ending.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith("__Host-spacefast_system_view=")) ?? "";
+  expect(Number(/Max-Age=(\d+)/.exec(endingCookie)?.[1])).toBe(SYSTEM_VIEW_ECHO_SECONDS);
+  // That cookie outlives the short echo, so signing out has to end it too.
+  const signedOut = await get(runtime, LANES_HOST, "/__spacefast/access/logout?return=/docs/", {
+    method: "POST",
+    headers: {
+      origin: `https://${LANES_HOST}`,
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/x-www-form-urlencoded",
+      cookie: systemViewCookie(navigation),
+    },
+    body: new URLSearchParams({ return: "/docs/" }),
+  });
+  expect(signedOut.status).toBe(303);
+  expect(systemViewCookie(signedOut)).toBe("__Host-spacefast_system_view=");
   expect(sessionCookie(opened)).toBe("");
   expect(sessionRecords(LANES_SPACE)).toEqual(recordsBefore);
   expect(opened.headers.get("cache-control")).toBe("private, no-store");
@@ -2199,8 +2293,11 @@ test("a system view token serves the page and its same-origin assets without a s
   // An absent scope is whole-space on purpose: a thumbnail fetcher names no
   // path. A present one is a hard boundary, including the space root.
   const scopedToken = systemViewToken({ scope: "/docs" });
-  const scoped = await get(runtime, LANES_HOST, `/docs/?__=${SYSTEM_VIEW_PREFIX}${scopedToken}`);
+  const scoped = await get(runtime, LANES_HOST, `/docs/?__=${SYSTEM_VIEW_PREFIX}${scopedToken}`, {
+    headers: { "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image" },
+  });
   expect(scoped.status).toBe(200);
+  expect(scoped.headers.get("location")).toBeNull();
   const scopedCookie = systemViewCookie(scoped);
   expect(
     (await get(runtime, LANES_HOST, iconPath, { headers: { cookie: scopedCookie } })).status,
@@ -2234,13 +2331,14 @@ test("an embed proof spends its token on one hop, then names its framer", async 
   const opened = await get(
     runtime,
     LANES_HOST,
-    `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken({ embed: EMBED_ORIGIN, exp: expiresAt })}`,
+    `/docs/?tag=a&tag=b&__=${SYSTEM_VIEW_PREFIX}${systemViewToken({ embed: EMBED_ORIGIN, exp: expiresAt })}&sf_access_return=%2Fadmin%2F`,
+    { headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe" } },
   );
   // The exchange completes in one hop. The framed document is the CUSTOMER'S
   // page, and a token left on `location.search` is a working credential for the
   // whole private version that every script on that page can read.
   expect(opened.status).toBe(302);
-  expect(opened.headers.get("location")).toBe("/docs/");
+  expect(opened.headers.get("location")).toBe("/docs/?tag=a&tag=b");
   expect(opened.headers.get("cache-control")).toBe("private, no-store");
   expect(opened.headers.get("referrer-policy")).toBe("no-referrer");
   // The echo cookie IS the token, so it dies with it instead of on the short
@@ -2333,6 +2431,19 @@ test("a private Frame proof is origin, target, revision, and Link-resource bound
   expect(opened.headers.get("content-security-policy")).toBe(`frame-ancestors ${FRAME_ORIGIN}`);
   const cookie = frameSessionCookie(opened);
   expect(cookie).toStartWith("__Host-spacefast_frame=");
+  const navigation = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/?__=${FRAME_SESSION_PREFIX}${frameSessionToken()}`,
+    { headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" } },
+  );
+  expect(navigation.status).toBe(302);
+  expect(navigation.headers.get("location")).toBe("/docs/");
+  const followed = await get(runtime, LANES_HOST, "/docs/", {
+    headers: { cookie: frameSessionCookie(navigation) },
+  });
+  expect(followed.status).toBe(200);
+  expect(await followed.text()).toContain(`docs of ${LANES_SPACE}`);
   expect(frameSessionSetCookie(opened)).toContain("; Secure; Partitioned");
   expect(frameSessionSetCookie(opened)).toContain("; SameSite=None;");
   expect(sessionCookie(opened)).toBe("");
@@ -2350,6 +2461,7 @@ test("a private Frame proof is origin, target, revision, and Link-resource bound
     runtime,
     LANES_HOST,
     `/docs/?__=${FRAME_SESSION_PREFIX}${frameSessionToken()}`,
+    { headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe" } },
   );
   expect(replayed.status).toBe(200);
   expect(replayed.headers.get("cache-control")).toBe("private, no-store");
@@ -2376,8 +2488,11 @@ test("a private Frame proof is origin, target, revision, and Link-resource bound
     ["an expired proof", frameSessionToken({ exp: Math.floor(Date.now() / 1000) - 1 })],
   ];
   for (const [reason, token] of refusals) {
-    const refused = await get(runtime, LANES_HOST, `/docs/?__=${FRAME_SESSION_PREFIX}${token}`);
+    const refused = await get(runtime, LANES_HOST, `/docs/?__=${FRAME_SESSION_PREFIX}${token}`, {
+      headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+    });
     expect(`${reason}: ${String(refused.status)}`).toBe(`${reason}: 403`);
+    expect(refused.headers.get("location")).toBeNull();
     expect(frameSessionCookie(refused)).toBe("");
   }
 });
@@ -2432,9 +2547,17 @@ const systemViewRefusals: Array<{ name: string; token: () => string }> = [
 ];
 
 test.each(systemViewRefusals)("a system view token $name opens nothing", async (entry) => {
-  const refused = await get(runtime, LANES_HOST, `/docs/?__=${SYSTEM_VIEW_PREFIX}${entry.token()}`);
+  const refused = await get(
+    runtime,
+    LANES_HOST,
+    `/docs/?__=${SYSTEM_VIEW_PREFIX}${entry.token()}`,
+    {
+      headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+    },
+  );
   // Exactly as if the parameter were absent: the gate, and no session.
   expect(refused.status).toBe(403);
+  expect(refused.headers.get("location")).toBeNull();
   expect(sessionCookie(refused)).toBe("");
   expect(refused.headers.get("cache-control")).toBe("private, no-store");
 });

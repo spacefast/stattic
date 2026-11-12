@@ -1,7 +1,7 @@
 {
-  "revision": "9a1052bbbb7542287a45b15d54962aba65d810a0",
-  "sourceHash": "baa7a7e45d966c5a36d8c86c130f6b3751c393508f6a7f63c4260c4bf5ba2e98",
-  "manifestSha256": "063afd13023731b1850b13c4bc78278c7bb5124fcf452443dc77335748e83fca",
+  "revision": "156b85a7854447555ecab3772c7f43fa9ca32720",
+  "sourceHash": "06ae0ad619f20bd6fe06965c3e81f1bbb7ef31f6616ec0e798f479d126a78345",
+  "manifestSha256": "48a16d3b44ed28c3ce4e35cb650aeb4440aefff3cc6181aa2687de4f34d33f92",
   "files": [
     {
       "path": ".gitignore",
@@ -9,7 +9,7 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "d8a506a1b01cd8b4fc94f59f781cab4da11e32d1f62764dbd281d3c48bd113cc"
+      "sha256": "4fbe129e76ad9c0af95132bec3c7cc04339e8fb67be439cedf89b77b37739e64"
     },
     {
       "path": "Cargo.toml",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "dfe49f81458a5068ecbf72c7b886c860b164c283be2a4d54a6249443fd67332c"
+      "sha256": "ee22bb2644689ff10dadfc81a604ca571e2e9084c74ef227a456f552029d9295"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "73a22da46496e5134be4a362de3a03e49da5df3d97acef476b86a14a443bdbee"
+      "sha256": "829c686149faaa04b1ef0a6fcdf7f97b31c6f69fedac39493f06ddc8e3696620"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -37,7 +37,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/Cargo.toml",
-      "sha256": "d4ec29818eaefbc9dbe1afa7b487e2566a85226a8ab6671fba9f426e14e67f2e"
+      "sha256": "6da9344f460aa057e1e8bb4737bb84940b1d449f1046250dd144157275c3195d"
     },
     {
       "path": "crates/stattic-runtime-core/src/access.rs",
@@ -120,6 +120,10 @@
       "sha256": "cdea8cfefe760303239a258089f3cc9df221e283d24f9511f062b59d4d4e0ca3"
     },
     {
+      "path": "crates/stattic-runtime-core/src/cookie_writes.rs",
+      "sha256": "236c1b2c8abba540de93c841ec6df068d4081158af3dc266f8794afb222c2037"
+    },
+    {
       "path": "crates/stattic-runtime-core/src/csp.rs",
       "sha256": "3180fc387d84f267b687d37a4a9d3e1c7f8de9c2b77255dd46edbeea8ce6c626"
     },
@@ -134,6 +138,10 @@
     {
       "path": "crates/stattic-runtime-core/src/hash.rs",
       "sha256": "6367250890865c6cc4b1866a05cc1c895723cf06eeadf3fc29284ecdc03bb108"
+    },
+    {
+      "path": "crates/stattic-runtime-core/src/html_scripts.rs",
+      "sha256": "ad2ad798cd0db4ec4cda302e68aca80bd9cc274369b6b6db0b6fe900b0700b4c"
     },
     {
       "path": "crates/stattic-runtime-core/src/io.rs",
@@ -165,7 +173,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/lib.rs",
-      "sha256": "17d0486af19443da5b695273e704f56add94fb4eb7cc8297a1f7798bcd6042b7"
+      "sha256": "723f2f8dfc473580b976d11e916433e62b61d1388db7b5d3e857f0dfb85ca82c"
     },
     {
       "path": "crates/stattic-runtime-core/src/metadata.rs",
@@ -225,7 +233,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "deb8d1ad9bca67675494d395b3f7657ffb93e2c6b476ca3f5fe65a8141e59a78"
+      "sha256": "8492a141c5173a248dba0cf173c9a3ab996ff7a9b2520b1f85955206a7ca82ee"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -13477,11 +13485,11 @@
     },
     {
       "path": "runtime/browser-specs/control-plane-access-fixture.ts",
-      "sha256": "738aca248e22344d7d1daad1435ba72e6aef3073a9cec46dd49f52e2f936a8d3"
+      "sha256": "0b319371444dfda9ec8b25fc6e70d5e5924e08b6c1b7a1b2ec74b4b80c1a025a"
     },
     {
       "path": "runtime/browser-specs/origin-null-access.test.ts",
-      "sha256": "f0557d78f556b36108ccd5aaafc8c104a168dc9acb70fd36638ac7abbcd678b7"
+      "sha256": "a79793d74d08aeaa7d1b8de59cdcf3af1700fe8004da7821f33b84b9c6add3f9"
     },
     {
       "path": "runtime/browser-specs/run-ci.sh",
@@ -13545,7 +13553,7 @@
     },
     {
       "path": "runtime/engine/admin/finalize-rust.php",
-      "sha256": "38d10c539243017c9fab40a192940bdc3801011268aecfe47a85f50d950dcbca"
+      "sha256": "3c05385574522df50b3c7a51641b5625c443471ade0f26ae6e41663bc4f8f7fa"
     },
     {
       "path": "runtime/engine/admin/generate.php",
@@ -13681,7 +13689,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "6710160dabf36534027b8eff1b0004d21b4a554f060e75c792905092ca9040ca"
+      "sha256": "a87125449440b0f760e0ffa5b5c403e53760ba66d897142550b4e0c8fee697c5"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -13705,7 +13713,7 @@
     },
     {
       "path": "runtime/engine/runtime/functions-dispatch.php",
-      "sha256": "cdae112c631e37c7cad74e68bea8a1956d0797bf9adabee6e3c8844e02ecce1c"
+      "sha256": "190cfe8b0f65ce16bcd59d79dcacc14f66e544cfb4890b03956f4985202c64fb"
     },
     {
       "path": "runtime/engine/runtime/functions-purge.php",
@@ -13753,7 +13761,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "7f9bfb14857a979b13e28261800a9d8df8aef28cd9bb2cb3c04c43ee53564889"
+      "sha256": "fc5666a8b9d9f1e8db5651ad8b30688ed0ebf8ae37600dd01ce16ea7d8ea2a51"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-IEQBVZUQ.js",
@@ -13917,7 +13925,7 @@
     },
     {
       "path": "runtime/engine/shared/jwt.php",
-      "sha256": "099d48bb325a6faa6b385a4f7c207e0236651f40a88d894e96f8c428f7387849"
+      "sha256": "3b2be50a273edfe761de261441ddaffb61a8baee72cec16c303a98749148d483"
     },
     {
       "path": "runtime/engine/shared/legacy-zero.php",
@@ -14145,7 +14153,7 @@
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "b40eba3cde4e7ab3259474d254fa547747505490b942ce9238c0f9386c62cc35"
+      "sha256": "a4a76a56a98949c2fab0af54552f9065a7a52e1c652966037709858e376193dd"
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
@@ -14153,7 +14161,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "6c6cec5ef03dadb5506fbe8a692fd71850122308df69b20cd571230cdb6ee2d1"
+      "sha256": "83b39cb93b6acc1dccdb614ecd10c144307aa4e457d1402f05b7b470e7b74f24"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",
@@ -14509,7 +14517,7 @@
     },
     {
       "path": "runtime/tests/poppy-publish.test.ts",
-      "sha256": "d003b17336a29d4060cfa1823abbbc5fc794fe3dd162442840e814c76e9104d4"
+      "sha256": "b7edefb9ce58d21465ae3e6593ad80a064f056b7cd6073117f1d9151d15ceba8"
     },
     {
       "path": "runtime/tests/prepare-ci.sh",
@@ -14609,7 +14617,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "0a17f4d143d0689b61f61651f2bbf2af73390a12f469f3e5e5657c82122ecd58"
+      "sha256": "4b99ab6e76f3fec579b3cc5d170e7d92caad0a43394a2561207c766afb6251d0"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

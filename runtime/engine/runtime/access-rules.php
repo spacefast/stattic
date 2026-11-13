@@ -3567,13 +3567,15 @@ function _stattic_access_lanes_fragment(
         );
         $markedScope = $requestedScope;
         $justRequested = $status === 'request-pending' || $status === 'request-confirm';
-        $requested = $justRequested
-            || (
-                $status !== 'request-failed'
-                && $markedScope !== null
-                && $currentScope !== null
-                && _stattic_scope_contains($markedScope, $currentScope)
-            );
+        $marked = $status !== 'request-failed'
+            && $markedScope !== null
+            && $currentScope !== null
+            && _stattic_scope_contains($markedScope, $currentScope);
+        // A refused account's page asks for an invite, so it keeps the open
+        // form: the marker cannot tell a confirmed request from an abandoned
+        // or denied one. With a verified hint, asking again as that account
+        // needs no confirmation email.
+        $requested = $justRequested || ($marked && $status !== 'no-grant');
         if ($requested) {
             if (!$justRequested) {
                 $scope = $markedScope ?? ($currentScope ?? '/');
@@ -3591,6 +3593,10 @@ function _stattic_access_lanes_fragment(
             // The open form has no summary to set it apart from a lane above it.
             if ($status === 'no-grant' && ($buttons !== '' || $lanes['password'])) {
                 $html .= '<div class="sf-access-or" aria-hidden="true">or</div>';
+            }
+            if ($marked && $status === 'no-grant') {
+                $html .= '<p class="sf-copy sf-access-requested">You&#039;ve asked from this browser before.'
+                    . ' Asking again updates your request or starts a new one.</p>';
             }
             $html .= _stattic_access_request_form(
                 $returnPath,

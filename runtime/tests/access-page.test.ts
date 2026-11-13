@@ -1425,6 +1425,28 @@ test("a no-grant bounce names the signed-in account and asks for no email", asyn
   ).text();
   expect(plain).toContain('type="email" name="email" required');
   expect(plain).not.toContain('name="account_hint"');
+  // An earlier request from this browser leaves only a marker, which cannot
+  // say whether that request was confirmed. The refused account keeps its
+  // open invite form instead of the email-confirmation copy.
+  const asked = await get(runtime, LANES_HOST, "/__spacefast/access/request", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${LANES_HOST}`,
+    },
+    body: new URLSearchParams({ email: "anne@example.com", return: "/docs/" }),
+  });
+  const askedHtml = await (
+    await page(accountHintToken(browserState), `${stateCookie}; ${sessionCookie(asked)}`)
+  ).text();
+  // The note belongs to the invite form, below the "or" that sets it apart
+  // from the SSO and password lanes above.
+  expect(askedHtml).toMatch(
+    /class="sf-access-or"[^]*You&#039;ve asked from this browser before\.[^]*name="account_hint"/,
+  );
+  expect(askedHtml).toContain('<input type="hidden" name="account_hint" value="');
+  expect(askedHtml).not.toContain("confirmation link");
+  expect(askedHtml).not.toContain("Request again</summary>");
   // It opens nothing and mints no session.
   expect(sessionCookie(hinted)).toBe("");
   const redeemed = await get(

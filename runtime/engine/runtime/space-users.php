@@ -314,10 +314,12 @@ function _stattic_space_users_admit_origin(string $method, string $host, string 
  * Same verdict as spacefast_space_users_auth(): a live, unrevoked session on an
  * active account whose WordPress user is this Space's app user, answering the
  * Space-scoped opaque subject. wordpress/space-users.php owns the WordPress
- * side; a change to either side changes both. Only the Zero 0.8 lanes ask; a
- * Zero v2 Space answers identity from WordPress (zero-identity on its tables).
+ * side; a change to either side changes both. A Zero v2 (First) Space keeps
+ * its accounts in its own tables under zero-identity, so `$zeroV2` reads those:
+ * the page lanes that ask before WordPress loads (connectors, the Functions
+ * relay) must see the same viewer WordPress does.
  */
-function _stattic_space_users_verify_session(string $privateRoot, string $spaceId, string $host, array $settings, string $cookie): ?array
+function _stattic_space_users_verify_session(string $privateRoot, string $spaceId, string $host, array $settings, string $cookie, bool $zeroV2 = false): ?array
 {
     if ($cookie === '' || strlen($cookie) > 512 || $spaceId === '') return null;
     require_once __DIR__ . '/../shared/artifacts.php';
@@ -338,7 +340,9 @@ function _stattic_space_users_verify_session(string $privateRoot, string $spaceI
     if (!$link instanceof mysqli) {
         _stattic_problem_refused(503, 'space_users_verifier_unavailable', 'Account verification is temporarily unavailable.');
     }
-    $auth = _stattic_space_users_lookup_session($link, $site, $spaceId, $cookie);
+    $auth = $zeroV2
+        ? _stattic_space_users_lookup_zero_session($link, $spaceId, $cookie)
+        : _stattic_space_users_lookup_session($link, $site, $spaceId, $cookie);
     _stattic_db_broker_bind($previousUrl, $previousSource);
     if ($auth === false) {
         _stattic_problem_refused(503, 'space_users_verifier_invalid', 'Account verification is temporarily unavailable.');
@@ -353,19 +357,7 @@ function _stattic_space_users_verify_session(string $privateRoot, string $spaceI
 function _stattic_space_users_lookup_session(mysqli $link, array $site, string $spaceId, string $secret): array|null|false
 {
     $p = $site['prefix'];
-    $one = static function (string $sql, string $types, array $params) use ($link): array|null|false {
-        $statement = $link->prepare($sql);
-        if (!$statement instanceof mysqli_stmt) {
-            // 1146: the identity tables do not exist yet, so no account can either.
-            return $link->errno === 1146 ? null : false;
-        }
-        if ($params !== [] && !$statement->bind_param($types, ...$params)) return false;
-        if (!$statement->execute()) return false;
-        $result = $statement->get_result();
-        $row = $result instanceof mysqli_result ? $result->fetch_assoc() : false;
-        $statement->close();
-        return is_array($row) ? $row : ($row === false ? false : null);
-    };
+    $one = _stattic_space_users_lookup_row($link);
     $key = $site['key'];
     $salt = $site['salt'];
     if ($key === '' || $salt === '') {
@@ -399,6 +391,61 @@ function _stattic_space_users_lookup_session(mysqli $link, array $site, string $
     );
     if ($user === false) return false;
     if ($user === null || (string) ($user['app_space'] ?? '') !== $spaceId || (int) ($user['is_member'] ?? 0) !== 1) return null;
+    return _stattic_space_users_lookup_identity($user);
+}
+
+/**
+ * The same verdict on a Zero v2 Space's own tables (`sfz_<hash>_`, the
+ * binding zero-v2-scope.php gives WordPress): the vendored zero-identity's
+ * session digest and tables, and spacefast_space_users_member()'s scoped rule,
+ * an identity account that is not a guest. The subject is the one
+ * spacefast_space_users_join() stored at sign-in.
+ *
+ * @return array|null|false null = no live session for this Space; false = the lookup itself failed
+ */
+function _stattic_space_users_lookup_zero_session(mysqli $link, string $spaceId, string $secret): array|null|false
+{
+    $p = 'sfz_' . substr(hash('sha256', $spaceId), 0, 24) . '_';
+    $one = _stattic_space_users_lookup_row($link);
+    $session = $one(
+        "SELECT s.wp_user_id FROM {$p}zero_identity_sessions s JOIN {$p}zero_identity_accounts a ON a.wp_user_id = s.wp_user_id"
+        . " WHERE s.secret_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND a.status = 'active' LIMIT 1",
+        'si', [hash('sha256', "zero-identity-session-v1\0" . $secret), time()]
+    );
+    if (!is_array($session)) return $session;
+    $userId = (int) $session['wp_user_id'];
+    $user = $one(
+        "SELECT u.display_name,"
+        . " EXISTS(SELECT 1 FROM {$p}usermeta m WHERE m.user_id = u.ID AND m.meta_key = '{$p}capabilities' AND m.meta_value LIKE '%\"zero_guest\"%') AS is_guest,"
+        . " (SELECT o.option_value FROM {$p}options o WHERE o.option_name = ? LIMIT 1) AS subject"
+        . " FROM {$p}users u WHERE u.ID = ? LIMIT 1",
+        'si', ['spacefast_app_subject_' . $userId . '_' . $spaceId, $userId]
+    );
+    if (!is_array($user)) return $user;
+    return (int) ($user['is_guest'] ?? 1) === 0 ? _stattic_space_users_lookup_identity($user) : null;
+}
+
+/** One row of a prepared lookup; null when absent or the tables don't exist yet, false on failure. */
+function _stattic_space_users_lookup_row(mysqli $link): Closure
+{
+    return static function (string $sql, string $types, array $params) use ($link): array|null|false {
+        $statement = $link->prepare($sql);
+        if (!$statement instanceof mysqli_stmt) {
+            // 1146: the identity tables do not exist yet, so no account can either.
+            return $link->errno === 1146 ? null : false;
+        }
+        if ($params !== [] && !$statement->bind_param($types, ...$params)) return false;
+        if (!$statement->execute()) return false;
+        $result = $statement->get_result();
+        $row = $result instanceof mysqli_result ? $result->fetch_assoc() : false;
+        $statement->close();
+        return is_array($row) ? $row : ($row === false ? false : null);
+    };
+}
+
+/** @param array{display_name?: mixed, subject?: mixed} $user */
+function _stattic_space_users_lookup_identity(array $user): ?array
+{
     $subject = (string) ($user['subject'] ?? '');
     if (preg_match('/\Ausr_[a-f0-9]{64}\z/', $subject) !== 1) return null;
     $displayName = (string) ($user['display_name'] ?? '');
@@ -425,10 +472,12 @@ function _stattic_space_users_request_auth(array $serving, string $host, bool $a
     if ($cookie === null || strlen($cookie) > 512) return null;
     $privateRoot = _stattic_access_private_root();
     require_once __DIR__ . '/../shared/admission.php';
+    require_once __DIR__ . '/../shared/zero-v2.php';
     if ($admitOrigin) _stattic_space_users_admit_origin(_stattic_runtime_request_method(), $host);
     _stattic_admission_acquire_once($privateRoot, $serving, 'space_users_verify');
     _stattic_access_private_cache_flag(true);
     return $GLOBALS['SPACEFAST_SPACE_USERS_AUTH'] = _stattic_space_users_verify_session(
-        $privateRoot, (string) $serving['space_id'], $host, $serving['users'], $cookie
+        $privateRoot, (string) $serving['space_id'], $host, $serving['users'], $cookie,
+        _stattic_zero_generation($serving) === 'v2'
     );
 }

@@ -13,6 +13,8 @@
 // so a suspended or taken-down Space cannot answer with its own bytes, which is
 // why they are tested against a Space that shipped documents of its own.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
 import type { RuntimePages } from "../../packages/common/src/contracts/pages.js";
 
@@ -291,6 +293,23 @@ test("CSAM stays byte-identical to undeployed for every negotiated representatio
       expect(await csam.text(), accept).toBe(await undeployed.text());
     }),
   );
+
+  // Health is the other public answer about a host: the same question asked
+  // of both must not tell them apart either, including while the takedown's
+  // purge is still pending. This harness has no edge gateway, so write the
+  // record a takedown leaves on wp.cloud.
+  const purges = path.join(rt.storageRoot, "runtime", "edge-purges");
+  mkdirSync(purges, { recursive: true });
+  writeFileSync(path.join(purges, `${host}.json`), JSON.stringify({ reason: "tombstone" }));
+  const [csamHealth, undeployedHealth] = await Promise.all(
+    [host, "never-deployed.test"].map(async (hostname) => {
+      const response = await get(rt, hostname, "/__spacefast/health.php?v=ver_pages_csam_1");
+      // SAFETY: health.php's documented JSON shape; the comparison is the assertion.
+      const body = (await response.json()) as { serving?: unknown };
+      return { status: response.status, serving: body.serving };
+    }),
+  );
+  expect(csamHealth).toEqual(undeployedHealth);
 });
 
 // The other de-branding lane: instead of compiling a replacement artifact per

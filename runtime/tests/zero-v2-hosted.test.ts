@@ -119,6 +119,23 @@ export default defineConfig({ tables: { customers, products, orders, items, comm
         return Response.json({ ok: true });
       },
     });
+    // The control plane's connector calls, standing in for the API: it records
+    // which viewer a page's call named and answers the role with data.
+    const connectorCalls: { role: string; tool: string; visitor: unknown }[] = [];
+    const connectorApi = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        const body = z
+          .object({ role: z.string(), tool: z.string(), visitor: z.unknown() })
+          .parse(await request.json());
+        connectorCalls.push(body);
+        return Response.json({
+          state: { role: body.role, code: "ok", message: "Connected." },
+          result: { deals: [] },
+        });
+      },
+    });
     // The box's php-fpm namespace has no `wp` or `php` to spawn; finalize and the
     // Users lane get the same, so the users copy below is proven in-process.
     const fpmBin = path.join(work, "fpm-bin");
@@ -201,6 +218,8 @@ export default defineConfig({ tables: { customers, products, orders, items, comm
           const response = await finalize(rt, spaceId, id, {
             upload_id: session.uploadId,
             ...authority,
+            // A role in its config: the runtime gets the version's credential.
+            connectors_token: `${id}.connectors-proof-token`,
             zero_v2: {
               variableValues: { APP_VALUE: `${spaceId}/${value}`, ZERO_PROOF_EMPTY: "" },
               realtime: {
@@ -656,6 +675,35 @@ add_action('rest_api_init', static function () {
         ),
         "/__zero/auth/user answers the same account's Space-scoped id",
       );
+      // A page on the First Space calls a connector role. The route is the
+      // engine's, not the app's, and names the signed-in Space user as the
+      // viewer, the same subject /__zero/auth/user answers; signed out, nobody.
+      // The box's API base names the account issuer every session is checked
+      // against, so the stand-in takes it over only for these calls.
+      const atomicData = path.join(rt.root, ".atomic-persistent-data.json");
+      const boxConfig = readFileSync(atomicData, "utf8");
+      writeFileSync(
+        atomicData,
+        JSON.stringify({
+          ...JSON.parse(boxConfig),
+          SPACEFAST_API_BASE_URL: `http://127.0.0.1:${connectorApi.port}`,
+        }),
+      );
+      const connectorCall = async (cookie: string) => {
+        connectorCalls.length = 0;
+        const response = await get(rt, host, "/__spacefast/connectors/crm/listDeals", {
+          headers: { cookie, "sec-fetch-site": "same-origin" },
+        });
+        assert.equal(response.status, 200, await response.clone().text());
+        assert.deepEqual(await response.json(), { data: { deals: [] }, state: "ok" });
+        assert.equal(connectorCalls.length, 1);
+        return connectorCalls[0]?.visitor;
+      };
+      assert.deepEqual(await connectorCall(ana), { subject: appUserBody.data.userId });
+      assert.equal(await connectorCall(""), null);
+      writeFileSync(atomicData, boxConfig);
+      const spaceClient = await get(rt, host, "/__spacefast/client.js");
+      assert.equal(spaceClient.status, 200);
       assert.equal((await me(host, "")) ?? null, null, "no cookie, no user");
       assert.equal(await me(otherHost, ana), null, "Space A's session is nobody on Space B");
       const bob = await signIn(otherHost, `bob-${otherSpace}@example.test`);
@@ -1668,6 +1716,7 @@ add_action('rest_api_init', static function (): void {
       );
     } finally {
       receiver.stop(true);
+      connectorApi.stop(true);
       rt.stop();
       db.stop();
       rmSync(work, { recursive: true, force: true });

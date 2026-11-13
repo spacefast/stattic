@@ -9,7 +9,7 @@
 // this owner runs the verifier directly instead of dispatching tenant code.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -30,6 +30,11 @@ const DATABASE = "users_verify";
 const AUTH_KEY = "unit-auth-key-" + "k".repeat(40);
 const AUTH_SALT = "unit-auth-salt-" + "s".repeat(40);
 const SUBJECT = `usr_${"a".repeat(64)}`;
+// A Zero v2 (First) Space keeps its accounts in its own tables, under the
+// binding zero-v2-scope.php gives WordPress.
+const V2_SPACE = "spc_users_verify_v2";
+const V2_PREFIX = `sfz_${createHash("sha256").update(V2_SPACE).digest("hex").slice(0, 24)}_`;
+const V2_SUBJECT = `usr_${"d".repeat(64)}`;
 
 const usersSettings = {
   enabled: true,
@@ -50,15 +55,22 @@ function sessionHash(secret: string): string {
     .digest("hex");
 }
 
+/** zero-identity's session digest: unkeyed, under its own label. */
+function zeroSessionHash(secret: string): string {
+  return createHash("sha256").update(`zero-identity-session-v1\0${secret}`).digest("hex");
+}
+
 function seedSession(input: {
   userId: number;
   secret: string;
   expiresAt: number;
   revoked?: boolean;
+  table?: string;
+  hash?: (secret: string) => string;
 }): void {
   mysql.exec(
-    `INSERT INTO wp_sfi_sessions (id, wp_user_id, secret_hash, csrf, created_at, expires_at, verified_at, revoked_at, label)` +
-      ` VALUES ('${randomBytes(16).toString("hex")}', ${input.userId}, '${sessionHash(input.secret)}', '${"c".repeat(64)}',` +
+    `INSERT INTO ${input.table ?? "wp_sfi_sessions"} (id, wp_user_id, secret_hash, csrf, created_at, expires_at, verified_at, revoked_at, label)` +
+      ` VALUES ('${randomBytes(16).toString("hex")}', ${input.userId}, '${(input.hash ?? sessionHash)(input.secret)}', '${"c".repeat(64)}',` +
       ` ${input.expiresAt - 60}, ${input.expiresAt}, ${input.expiresAt - 60}, ${input.revoked ? input.expiresAt - 30 : "NULL"}, 'test');`,
   );
 }
@@ -81,6 +93,16 @@ beforeAll(async () => {
       `INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (7, '_spacefast_app_user', '${SPACE}'), (7, '_spacefast_space_id', '${SPACE}'), (8, '_spacefast_app_user', '${OTHER_SPACE}'), (8, '_spacefast_space_id', '${OTHER_SPACE}'), (9, '_spacefast_app_user', '${SPACE}'), (9, '_spacefast_space_id', '${SPACE}');`,
       `INSERT INTO wp_options (option_name, option_value) VALUES ('spacefast_app_subject_7_${SPACE}', '${SUBJECT}'), ('spacefast_app_subject_8_${OTHER_SPACE}', 'usr_${"b".repeat(64)}'), ('spacefast_app_subject_9_${SPACE}', 'usr_${"c".repeat(64)}');`,
       "INSERT INTO wp_sfi_accounts VALUES (7, NULL, 'active', 1), (8, NULL, 'active', 1), (9, NULL, 'suspended', 1);",
+      // The v2 Space's own tables: 21 a member, 22 a guest an app signed in, 23 suspended.
+      `CREATE TABLE ${V2_PREFIX}users LIKE wp_users;`,
+      `CREATE TABLE ${V2_PREFIX}usermeta LIKE wp_usermeta;`,
+      `CREATE TABLE ${V2_PREFIX}options LIKE wp_options;`,
+      `CREATE TABLE ${V2_PREFIX}zero_identity_accounts LIKE wp_sfi_accounts;`,
+      `CREATE TABLE ${V2_PREFIX}zero_identity_sessions LIKE wp_sfi_sessions;`,
+      `INSERT INTO ${V2_PREFIX}users VALUES (21, 'Dana First'), (22, 'Guest First'), (23, 'Sam Suspended');`,
+      `INSERT INTO ${V2_PREFIX}usermeta (user_id, meta_key, meta_value) VALUES (21, '${V2_PREFIX}capabilities', 'a:1:{s:10:"subscriber";b:1;}'), (22, '${V2_PREFIX}capabilities', 'a:1:{s:10:"zero_guest";b:1;}');`,
+      `INSERT INTO ${V2_PREFIX}options (option_name, option_value) VALUES ('spacefast_app_subject_21_${V2_SPACE}', '${V2_SUBJECT}'), ('spacefast_app_subject_22_${V2_SPACE}', 'usr_${"e".repeat(64)}'), ('spacefast_app_subject_23_${V2_SPACE}', 'usr_${"f".repeat(64)}');`,
+      `INSERT INTO ${V2_PREFIX}zero_identity_accounts VALUES (21, NULL, 'active', 1), (22, NULL, 'active', 1), (23, NULL, 'suspended', 1);`,
     ].join(" "),
   );
   const url = new URL(mysql.url);
@@ -130,40 +152,6 @@ test("the verifier accepts only live Users sessions for this Space and an active
   seedSession({ userId: 8, secret: otherSpace, expiresAt: now + 3600 });
   seedSession({ userId: 9, secret: suspended, expiresAt: now + 3600 });
 
-  const verify = (cookie: string) => {
-    const url = new URL(mysql.url);
-    const result = spawnSync(
-      process.env.SPACEFAST_REAL_PHP ?? "php",
-      [
-        "-r",
-        "require $argv[1] . '/shared/context.php'; require $argv[1] . '/runtime/space-users.php'; " +
-          "$auth = _stattic_space_users_verify_session($argv[2], $argv[3], $argv[4], json_decode($argv[5], true), $argv[6]);" +
-          "if (class_exists('Spacefast\\\\Identity\\\\Plugin', false)) throw new RuntimeException('Session verification booted WordPress.');" +
-          "echo json_encode($auth, JSON_THROW_ON_ERROR);",
-        rt.engineRoot,
-        rt.storageRoot,
-        SPACE,
-        HOST,
-        JSON.stringify(usersSettings),
-        cookie,
-      ],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          DATABASE_URL: "",
-          SPACEFAST_ZERO_DATABASE_URL: "",
-          DB_HOST: `${url.hostname}:${url.port}`,
-          DB_NAME: DATABASE,
-          DB_USER: decodeURIComponent(url.username),
-          DB_PASSWORD: decodeURIComponent(url.password),
-        },
-      },
-    );
-    expect(result.status, result.stderr || result.stdout).toBe(0);
-    return JSON.parse(result.stdout);
-  };
-
   expect(verify(live)).toEqual({
     user: { id: SUBJECT, displayName: "Alice App" },
     userId: SUBJECT,
@@ -176,3 +164,85 @@ test("the verifier accepts only live Users sessions for this Space and an active
     expect(verify(cookie)).toBeNull();
   }
 });
+
+// The page lanes that ask before WordPress loads (connectors, the Functions
+// relay) must see a First Space's viewer the way WordPress does.
+test("on a Zero v2 Space the verifier reads the Space's own zero-identity sessions", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const v2Sessions = `${V2_PREFIX}zero_identity_sessions`;
+  const seed = (
+    userId: number,
+    secret: string,
+    extra: { revoked?: boolean; expired?: boolean } = {},
+  ) =>
+    seedSession({
+      userId,
+      secret,
+      expiresAt: extra.expired ? now - 1 : now + 3600,
+      revoked: extra.revoked,
+      table: v2Sessions,
+      hash: zeroSessionHash,
+    });
+  const live = "v2-live-" + randomBytes(8).toString("hex");
+  const revoked = "v2-revoked-" + randomBytes(8).toString("hex");
+  const expired = "v2-expired-" + randomBytes(8).toString("hex");
+  const guest = "v2-guest-" + randomBytes(8).toString("hex");
+  const suspended = "v2-suspended-" + randomBytes(8).toString("hex");
+  seed(21, live);
+  seed(21, revoked, { revoked: true });
+  seed(21, expired, { expired: true });
+  seed(22, guest);
+  seed(23, suspended);
+  // A site-table session for a different Space is nobody here, and the v2
+  // session is nobody on the site tables.
+  const siteSecret = "site-" + randomBytes(8).toString("hex");
+  seedSession({ userId: 7, secret: siteSecret, expiresAt: now + 3600 });
+
+  expect(verify(live, { space: V2_SPACE, zeroV2: true })).toEqual({
+    user: { id: V2_SUBJECT, displayName: "Dana First" },
+    userId: V2_SUBJECT,
+    displayName: "Dana First",
+    provider: "space-users",
+    isAuthenticated: true,
+    isGuest: false,
+  });
+  for (const cookie of [revoked, expired, guest, suspended, siteSecret]) {
+    expect(verify(cookie, { space: V2_SPACE, zeroV2: true })).toBeNull();
+  }
+  expect(verify(live)).toBeNull();
+});
+
+function verify(cookie: string, options: { space?: string; zeroV2?: boolean } = {}) {
+  const url = new URL(mysql.url);
+  const result = spawnSync(
+    process.env.SPACEFAST_REAL_PHP ?? "php",
+    [
+      "-r",
+      "require $argv[1] . '/shared/context.php'; require $argv[1] . '/runtime/space-users.php'; " +
+        "$auth = _stattic_space_users_verify_session($argv[2], $argv[3], $argv[4], json_decode($argv[5], true), $argv[6], $argv[7] === '1');" +
+        "if (class_exists('Spacefast\\\\Identity\\\\Plugin', false) || class_exists('Zero\\\\Identity\\\\Plugin', false)) throw new RuntimeException('Session verification booted WordPress.');" +
+        "echo json_encode($auth, JSON_THROW_ON_ERROR);",
+      rt.engineRoot,
+      rt.storageRoot,
+      options.space ?? SPACE,
+      HOST,
+      JSON.stringify(usersSettings),
+      cookie,
+      options.zeroV2 ? "1" : "0",
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DATABASE_URL: "",
+        SPACEFAST_ZERO_DATABASE_URL: "",
+        DB_HOST: `${url.hostname}:${url.port}`,
+        DB_NAME: DATABASE,
+        DB_USER: decodeURIComponent(url.username),
+        DB_PASSWORD: decodeURIComponent(url.password),
+      },
+    },
+  );
+  expect(result.status, result.stderr || result.stdout).toBe(0);
+  return JSON.parse(result.stdout);
+}

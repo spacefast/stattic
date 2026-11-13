@@ -75,7 +75,7 @@ test_args+=(--timeout 30000)
 # The access-page suite imports the API test environment; its process must exit
 # before another fixture can inherit that environment's Postgres DATABASE_URL.
 # The version-delete tombstone suite drives the API against PHP the same way.
-long_files=(tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/access-page.test.ts tests/version-delete-tombstones.test.ts)
+long_files=(tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/connectors-publish.test.ts tests/access-page.test.ts tests/version-delete-tombstones.test.ts)
 reports=()
 # Each process writes a JUnit report, the proof that the suite really ran.
 junit_dir="$(mktemp -d)"

@@ -8,8 +8,14 @@ function _stattic_zero_generation(array $authority): string
     return in_array($generation, ['none', 'legacy_0_8', 'v2'], true) ? $generation : 'none';
 }
 
-/** Cordon every selected version, including immutable hosts and mounted paths. */
-function _stattic_zero_generation_serve(string $versionRoot, array $serving): void
+/**
+ * The cordon's verdict for one selected version: null when it may serve, else
+ * the refusal the visitor gets. health.php asks the same question so readiness
+ * never accepts a version this refuses.
+ *
+ * @return array{0: int, 1: string, 2: string, 3: array<string, mixed>}|null
+ */
+function _stattic_zero_generation_refusal(string $versionRoot, array $serving): ?array
 {
     $generation = _stattic_zero_generation($serving);
     $legacy = is_file($versionRoot . '/zero/config.json')
@@ -19,12 +25,22 @@ function _stattic_zero_generation_serve(string $versionRoot, array $serving): vo
         || is_file($versionRoot . '/zero/endpoints-index.json')
         || is_file($versionRoot . '/zero/runs-index.json');
     if ($generation === 'v2' && $legacy) {
-        _stattic_problem_response(410, 'zero_legacy_retired', 'This Zero 0.8 version is retired. Open the Space live hostname.', [
+        return [410, 'zero_legacy_retired', 'This Zero 0.8 version is retired. Open the Space live hostname.', [
             'details' => ['live_hostname' => $serving['live_hostname'] ?? null],
-        ]);
+        ]];
     }
     if ($generation !== 'v2' && is_file($versionRoot . '/.zero-compiled/manifest.json')) {
-        _stattic_problem_response(409, 'zero_generation_locked', 'This Space has not activated Zero v2.');
+        return [409, 'zero_generation_locked', 'This Space has not activated Zero v2.', []];
+    }
+    return null;
+}
+
+/** Cordon every selected version, including immutable hosts and mounted paths. */
+function _stattic_zero_generation_serve(string $versionRoot, array $serving): void
+{
+    $refusal = _stattic_zero_generation_refusal($versionRoot, $serving);
+    if ($refusal !== null) {
+        _stattic_problem_response(...$refusal);
     }
 }
 

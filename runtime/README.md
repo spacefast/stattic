@@ -211,6 +211,7 @@ the hostname is not a credential.
 
 ```text
 GET  /__spacefast/health.php                              public-safe, no auth
+GET  /__spacefast/health.php?v={versionId}               also: does this hostname serve that version
 GET  /__spacefast/api.php?route=/state
 POST /__spacefast/api.php?route=/events/drain
 POST /__spacefast/api.php?route=/spaces/{spaceId}/versions

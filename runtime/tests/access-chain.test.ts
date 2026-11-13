@@ -1,13 +1,20 @@
 import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import { existsSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
+import { z } from "zod";
 
 import {
+  api,
   deploy,
   get,
   postAccessCallback,
   putRoute,
+  RUNTIME_HTTP_API_BASE,
   type Runtime,
   spaceOverlay,
+  spaceRoot,
   startRuntime,
 } from "./harness.ts";
 
@@ -21,6 +28,10 @@ const VERSION = "ver_chain_1";
 const GEN_HOST = "chain-gen.test";
 const GEN_SPACE = "spc_chain_gen";
 const GEN_VERSION = "ver_chain_gen_1";
+// Finalized but never promoted: only its immutable version host serves.
+const PREVIEW_HOST = "chain-preview--v1.test";
+const PREVIEW_SPACE = "spc_chain_preview";
+const PREVIEW_VERSION = "ver_chain_preview_1";
 const MEMBER = "member:mem_chain_owner";
 // Contracts §5/§6 (D121/D123): a protected Space collapses every compiled cache
 // class onto one policy. No cache may retain private bytes.
@@ -120,6 +131,19 @@ beforeAll(async () => {
       version_hostnames: [],
     },
   });
+  await deploy(runtime, { spaceId: PREVIEW_SPACE, versionId: PREVIEW_VERSION, files });
+  const intent = await api(
+    runtime,
+    "PUT",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${PREVIEW_SPACE}/hostname-intent`,
+    "update_hostname_intent",
+    { space_id: PREVIEW_SPACE },
+    {
+      production_hostnames: [],
+      version_hostnames: [{ hostname: PREVIEW_HOST, version_id: PREVIEW_VERSION }],
+    },
+  );
+  expect(intent.status).toBe(200);
 });
 
 afterAll(() => runtime?.stop());
@@ -238,4 +262,77 @@ test("a handoff minted outside the redeem freshness window is refused", async ()
   }
   const response = await postAccessCallback(runtime, HOST, stale);
   expect(response.status).toBe(403);
+});
+
+test("a never-live Space admits its owner to a version host once its Space config lands", async () => {
+  const redeem = async () =>
+    postAccessCallback(
+      runtime,
+      PREVIEW_HOST,
+      await mintCallbackToken({ host: PREVIEW_HOST, spaceId: PREVIEW_SPACE, generation: 2 }),
+      "/docs/",
+    );
+  // No production pointer means no issuer or keys: every handoff is refused.
+  expect((await redeem()).status).toBe(403);
+
+  // The owner Grant re-aimed at every version host: the shape a team Space's
+  // `all_versions` Grant takes. A `live` Grant never reaches a version host.
+  const versionHostConfig = (accessGeneration: number) => {
+    const config = accessConfig(accessGeneration, 0);
+    const authorization = z
+      .object({ grants: z.array(z.object({}).passthrough()) })
+      .passthrough()
+      .parse(config.authorization);
+    config.authorization = {
+      ...authorization,
+      grants: authorization.grants.map((grant) => ({
+        ...grant,
+        target: { kind: "all_versions" },
+      })),
+    };
+    return config;
+  };
+  const push = (accessGeneration: number) =>
+    api(
+      runtime,
+      "PUT",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${PREVIEW_SPACE}/config`,
+      "update_space_config",
+      { space_id: PREVIEW_SPACE },
+      { config: versionHostConfig(accessGeneration) },
+    );
+  expect((await push(2)).status).toBe(200);
+  expect(spaceOverlay(runtime, PREVIEW_SPACE)).toMatchObject({ access_gen: 2 });
+  // A body without a config never wipes the access a version host admits with.
+  const empty = await api(
+    runtime,
+    "PUT",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${PREVIEW_SPACE}/config`,
+    "update_space_config",
+    { space_id: PREVIEW_SPACE },
+    {},
+  );
+  expect(empty.status).toBe(422);
+  expect(spaceOverlay(runtime, PREVIEW_SPACE)).toMatchObject({ access_gen: 2 });
+  // A write that died after space-config.json landed left a retired policy
+  // document behind; the identical retry still finishes the cleanup.
+  const retiredPolicy = path.join(spaceRoot(runtime, PREVIEW_SPACE), "policy.json");
+  writeFileSync(retiredPolicy, "{}");
+  const retry = await push(2);
+  expect(await retry.json()).toMatchObject({ unchanged: true });
+  expect(existsSync(retiredPolicy)).toBe(false);
+  // A writer holding an older read (a finalize that started before an access
+  // change) leaves the newer config in place.
+  const stale = await push(1);
+  expect(stale.status).toBe(200);
+  expect(await stale.json()).toMatchObject({ unchanged: true });
+  expect(spaceOverlay(runtime, PREVIEW_SPACE)).toMatchObject({ access_gen: 2 });
+
+  const admitted = await redeem();
+  expect(admitted.status).toBe(303);
+  const cookie = (admitted.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const served = await get(runtime, PREVIEW_HOST, "/docs/", { headers: { cookie } });
+  expect(served.status).toBe(200);
+  expect(served.headers.get("cache-control")).toBe(PROTECTED);
+  expect(await served.text()).toBe("<h1>private docs</h1>\n");
 });

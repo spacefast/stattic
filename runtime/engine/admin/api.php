@@ -258,6 +258,7 @@ function _stattic_runtime_admin_management_routes(): array
         ['DELETE', '#^/spaces/([^/]+)/routes/([^/]+)$#', 'delete_route', ['space_id' => 1, 'route_name' => 2], 'space', false, '_stattic_runtime_delete_route'],
         ['PUT', '#^/spaces/([^/]+)/routes/([^/]+)$#', 'update_route', ['space_id' => 1, 'route_name' => 2], 'space', false, '_stattic_runtime_put_route'],
         ['PUT', '#^/spaces/([^/]+)/hostname-intent$#', 'update_hostname_intent', ['space_id' => 1], 'space', false, '_stattic_runtime_put_hostname_intent'],
+        ['PUT', '#^/spaces/([^/]+)/config$#', 'update_space_config', ['space_id' => 1], 'space', false, '_stattic_runtime_put_space_config'],
         ['PUT', '#^/spaces/([^/]+)/tombstones$#', 'update_tombstones', ['space_id' => 1], 'space', false, '_stattic_runtime_put_tombstones'],
         ['POST', '#^/spaces/([^/]+)/delete$#', 'delete_space', ['space_id' => 1], 'space', false, '_stattic_runtime_delete_space'],
         ['POST', '#^/spaces/([^/]+)/repair$#', 'repair_space', ['space_id' => 1], 'site', false, '_stattic_runtime_repair_space'],

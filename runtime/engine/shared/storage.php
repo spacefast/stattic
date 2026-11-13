@@ -303,7 +303,7 @@ function _stattic_runtime_directory_entries_strict(string $root): array
 }
 
 
-// The two per-space routing documents, strictly read and shape-checked. null =
+// The per-space routing documents, strictly read and shape-checked. null =
 // verifiably absent; a read failure or a wrong shape throws, because a purge
 // set or route index derived from either would drop live hostnames. $spaceId,
 // when given, must match the document's own.
@@ -312,6 +312,7 @@ function _stattic_runtime_space_routing_doc(string $spaceRoot, string $kind, ?st
     [$file, $key, $label] = match ($kind) {
         'intent' => ['hostname-intent.json', 'routes', 'hostname intent'],
         'tombstones' => ['tombstones.json', 'hostnames', 'tombstones'],
+        'config' => ['space-config.json', 'config', 'space config'],
     };
     $document = _stattic_runtime_read_json_strict($spaceRoot . '/' . $file);
     if (

@@ -1200,6 +1200,64 @@ function _stattic_runtime_delete_route(string $privateRoot, string $spaceId, str
     ]);
 }
 
+// The access config of a Space that has never been live. A route PUT carries
+// the same document on its pointer; this one exists because a version or branch
+// host can serve before any production pointer does, and without it the
+// overlay has no issuer, keys or exchange credential to admit anybody. Every
+// hostname the Space answers on is purged, so a cached gate page or a formerly
+// public copy cannot outlive the change.
+function _stattic_runtime_put_space_config(string $privateRoot, string $spaceId, array $claims): void
+{
+    $body = _stattic_json_body();
+    // An absent or empty config would wipe the issuer and Grants that version
+    // hosts admit with, so it is refused rather than stored.
+    if (!is_array($body['config'] ?? null) || $body['config'] === []) {
+        _stattic_problem_response(422, 'space_config_invalid', 'A Space config is required.');
+    }
+    $config = _stattic_runtime_route_config($body['config']);
+    $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
+    $previous = _stattic_runtime_space_routing_doc($spaceRoot, 'config', $spaceId);
+    // A production pointer owns the Space's access and entitlements once it
+    // exists; this document is then only kept for a later route deletion.
+    $productionOwned = is_file(_stattic_route_pointer_path($privateRoot, $spaceId, 'production'));
+    if ($previous !== null && $previous['config'] === $config) {
+        // A write that crashed after this file landed must still finish: the
+        // entitlements store and retired-policy cleanup are idempotent, and the
+        // index publishes the overlay, so the retry redoes both before answering.
+        if (!$productionOwned) {
+            _stattic_runtime_store_unified_access_from_config($privateRoot, $spaceId, $body['config']);
+        }
+        _stattic_runtime_update_route_index($privateRoot, $spaceId);
+        _stattic_json_response(200, ['space_id' => $spaceId, 'unchanged' => true]);
+    }
+    // Writers race (a finalize against an access sync). The access tuple only
+    // moves forward, so an older config never replaces a newer one.
+    // The writer's goal (the box holds at least this access) is already met.
+    if ($previous !== null && _stattic_runtime_space_config_access_tuple($config) < _stattic_runtime_space_config_access_tuple($previous['config'])) {
+        _stattic_runtime_update_route_index($privateRoot, $spaceId);
+        _stattic_json_response(200, ['space_id' => $spaceId, 'unchanged' => true]);
+    }
+    $hostnames = _stattic_runtime_space_sweep_hostnames($spaceRoot);
+    _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'space_config_updated');
+    _stattic_runtime_write_json_atomic($spaceRoot . '/space-config.json', [
+        'space_id' => $spaceId,
+        'config' => _stattic_runtime_json_object($config),
+        'updated_at' => gmdate('c'),
+    ]);
+    if (!$productionOwned) {
+        _stattic_runtime_store_unified_access_from_config($privateRoot, $spaceId, $body['config']);
+    }
+    _stattic_runtime_update_route_index($privateRoot, $spaceId);
+    _stattic_runtime_journal_management_diagnostic($privateRoot, $claims, [
+        'event' => 'space_config_updated',
+        'space_id' => $spaceId,
+    ]);
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_config_updated', $hostnames),
+    ]);
+}
+
 function _stattic_runtime_put_hostname_intent(string $privateRoot, string $spaceId, array $claims): void
 {
     $body = _stattic_json_body();

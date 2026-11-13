@@ -1457,6 +1457,22 @@ function _stattic_runtime_overlay_sdk_section(string $privateRoot, string $space
     return $section + ['body_sha256' => $sha, 'body_len' => strlen($body)];
 }
 
+function _stattic_runtime_stored_space_config(string $spaceRoot): array
+{
+    return (_stattic_runtime_space_routing_doc($spaceRoot, 'config') ?? ['config' => []])['config'];
+}
+
+// [access generation, session version] of a route config. Both only grow, so
+// comparing the tuples orders two configs of the same Space.
+function _stattic_runtime_space_config_access_tuple(array $config): array
+{
+    $authorization = is_array($config['authorization'] ?? null) ? $config['authorization'] : [];
+    return [
+        is_int($authorization['generation'] ?? null) ? $authorization['generation'] : 0,
+        is_int($authorization['sessionVersion'] ?? null) ? $authorization['sessionVersion'] : 0,
+    ];
+}
+
 // Everything access-shaped about a Space, in one artifact the serve path
 // includes after the host shard. Rebuilt from the Space's own state, so every
 // mutation that already calls _stattic_runtime_update_route_index refreshes it
@@ -1494,7 +1510,13 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
     }
     ksort($versions);
 
-    $config = is_array($production) && is_array($production['config'] ?? null) ? $production['config'] : [];
+    // Before its first promotion a Space has no production pointer, yet its
+    // version and branch hosts already serve and need the same issuer, keys
+    // and Grants. The Space-level config carries them until a pointer exists;
+    // after that the pointer's own config is the one access answer.
+    $config = is_array($production) && is_array($production['config'] ?? null)
+        ? $production['config']
+        : _stattic_runtime_stored_space_config($spaceRoot);
     // The route config and the live VERSION's compiled serving config are two
     // different documents, and reading a version-owned key off the route
     // pointer silently yields null forever. Anything finalize resolved (page

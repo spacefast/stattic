@@ -1482,3 +1482,162 @@ test("publication ownership rejects late commands after rollback and retries the
   expect(late.stderr).toContain("runtime_engine_publication_conflict");
   expect(readVisitor(a.publicRoot)).toEqual({ context: "a".repeat(40), module: "a".repeat(40) });
 });
+
+/**
+ * Stand the Spacefast chroot up beside the fixture, as a box has it at `/`:
+ * the installed release's engine under its revision, its binary under
+ * usr/local/bin, and the production `latest` channel link. The revision is the
+ * only thing that differs, so a visitor answering with it came from the chroot.
+ */
+function standUpChroot(fixture: UpdateFixture, revision: string): string {
+  const chrootRoot = path.join(fixture.root, "chroot");
+  const engine = path.join(chrootRoot, "scripts", `sf-engine-${revision}`);
+  cpSync(activeReleaseRoot(fixture.publicRoot), engine, {
+    recursive: true,
+    filter: (source) => path.basename(source) !== "bin",
+  });
+  writeFileSync(
+    path.join(engine, "engine/shared/context.php"),
+    `<?php\nconst SPACEFAST_RUNTIME_ENGINE_REVISION = '${revision}';\n`,
+  );
+  writeFileSync(
+    path.join(engine, "engine/runtime/revision.php"),
+    `<?php\nconst VISITOR_MODULE_REVISION = '${revision}';\n`,
+  );
+  writeFileSync(path.join(engine, "engine/loader/wordpress.php"), "<?php\n");
+  writeFileSync(path.join(engine, "engine/shared/engine-selection.php"), "<?php\n");
+  mkdirSync(path.join(engine, "engine/wordpress"), { recursive: true });
+  writeFileSync(
+    path.join(engine, "engine/wordpress/components.json"),
+    `${JSON.stringify({
+      components: [{ id: "runtime-engine", provides: ["runtime.security.tenant-containment.v1"] }],
+    })}\n`,
+  );
+  symlinkSync(
+    `sf-engine-${revision}`,
+    path.join(chrootRoot, "scripts", "sf-engine-production-latest"),
+  );
+  return chrootRoot;
+}
+
+function chrootBinary(chrootRoot: string, revision: string): string {
+  return path.join(chrootRoot, "usr/local/bin", `sf-bin-${revision}`, "stattic-runtime");
+}
+
+/** Run a PHP entry with the test provider prepend, which reads the site's persistent data. */
+function runWithPersistentData(
+  fixture: UpdateFixture,
+  chrootRoot: string,
+  args: string[],
+  env: Record<string, string> = {},
+) {
+  const run = Bun.spawnSync({
+    cmd: [
+      "php",
+      "-d",
+      `auto_prepend_file=${path.resolve(import.meta.dirname, "atomic-prepend.php")}`,
+      ...args,
+    ],
+    cwd: fixture.publicRoot,
+    env: { ...process.env, SPACEFAST_TEST_CHROOT_ROOT: chrootRoot, ...env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return { exitCode: run.exitCode, stdout: run.stdout.toString(), stderr: run.stderr.toString() };
+}
+
+test("retiring the own release leaves a chroot-served site with no engine copy, and only then", async () => {
+  const fixture = await startUpdateFixture({ revision: "own-release", visitorEngine: true });
+  expect((await runInstaller(fixture)).exitCode).toBe(0);
+  const installRoot = installRootOf(fixture.publicRoot);
+  const release = activeReleaseRoot(fixture.publicRoot);
+  const chrootRevision = "c".repeat(40);
+  const chrootRoot = standUpChroot(fixture, chrootRevision);
+  const retire = (commandId = crypto.randomUUID()) =>
+    runWithPersistentData(fixture, chrootRoot, [fixture.installerPath, "--retire-own-release"], {
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE: publicationNonce(fixture.publicRoot),
+      SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: commandId,
+      SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID: "installer-test-instance",
+    });
+  const visit = () =>
+    runWithPersistentData(fixture, chrootRoot, [path.join(fixture.publicRoot, "index.php")], {
+      REQUEST_METHOD: "GET",
+      REQUEST_URI: "/",
+    });
+  const persistentData = path.join(fixture.publicRoot, ".atomic-persistent-data.json");
+
+  // Refused while the loader would still fall back to the release: the site
+  // selects no channel, then its chroot lacks the revision's binary.
+  const unselected = retire();
+  expect(unselected.exitCode).toBe(1);
+  expect(unselected.stderr).toContain("runtime_engine_retire_chroot_unavailable:unselected");
+  writeFileSync(
+    persistentData,
+    `${JSON.stringify({ SPACEFAST_RUNTIME_ENGINE_SOURCE: "chroot/production/latest" })}\n`,
+  );
+  const binaryMissing = retire();
+  expect(binaryMissing.exitCode).toBe(1);
+  expect(binaryMissing.stderr).toContain(
+    "runtime_engine_retire_chroot_unavailable:chroot_binary_missing",
+  );
+  expect(readActiveReleaseTarget(installRoot)).toBe(
+    path.relative(installRoot, release).split(path.sep).join("/"),
+  );
+  expect(existsSync(release)).toBe(true);
+
+  mkdirSync(path.dirname(chrootBinary(chrootRoot, chrootRevision)), { recursive: true });
+  copyFileSync(path.join(release, "bin/stattic-runtime"), chrootBinary(chrootRoot, chrootRevision));
+  chmodSync(chrootBinary(chrootRoot, chrootRevision), 0o755);
+  const commandId = crypto.randomUUID();
+  const retired = retire(commandId);
+  expect(retired.exitCode, retired.stderr).toBe(0);
+  expect(JSON.parse(retired.stdout)).toEqual({
+    status: "retired",
+    chroot_revision: chrootRevision,
+    removed: [path.basename(release)],
+  });
+  expect(existsSync(path.join(installRoot, "active-release"))).toBe(false);
+  expect(readdirSync(path.join(installRoot, "releases"))).toEqual([]);
+  expect(readdirSync(path.join(installRoot, "release-authorities"))).toEqual([]);
+  // The loader copies and the site's data stay; the chroot serves.
+  expect(existsSync(path.join(fixture.publicRoot, "index.php"))).toBe(true);
+  expect(existsSync(path.join(installRoot, "storage"))).toBe(true);
+  const served = visit();
+  expect(served.exitCode, served.stderr).toBe(0);
+  expect(JSON.parse(served.stdout)).toEqual({ context: chrootRevision, module: chrootRevision });
+  // The proof names the retiring command and no release.
+  const proof = Bun.spawnSync({
+    cmd: ["php", "-d", "auto_prepend_file=", fixture.installerPath, "--proof"],
+    cwd: fixture.publicRoot,
+    stdin: new TextEncoder().encode(
+      JSON.stringify({ runtime_instance_id: "installer-test-instance" }),
+    ),
+    env: { ...process.env, SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance" },
+  });
+  expect(proof.exitCode, proof.stderr.toString()).toBe(0);
+  expect(JSON.parse(proof.stdout.toString())).toMatchObject({
+    publication: { command_id: commandId },
+    engine_revision: null,
+    in_progress: false,
+  });
+
+  // With no release there is nothing to fall back to.
+  rmSync(path.join(chrootRoot, "scripts", "sf-engine-production-latest"));
+  expect(visit().exitCode).toBe(1);
+  symlinkSync(
+    `sf-engine-${chrootRevision}`,
+    path.join(chrootRoot, "scripts", "sf-engine-production-latest"),
+  );
+
+  // Retiring again finds nothing; an install afterwards lays a release down.
+  const again = retire();
+  expect(again.exitCode, again.stderr).toBe(0);
+  expect(JSON.parse(again.stdout)).toMatchObject({ status: "absent", removed: [] });
+  const reinstall = await runInstaller(fixture);
+  expect(reinstall.exitCode, reinstall.stderr).toBe(0);
+  expect(readVisitor(fixture.publicRoot)).toEqual({
+    context: fixture.revision,
+    module: fixture.revision,
+  });
+});

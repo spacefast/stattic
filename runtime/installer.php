@@ -2934,7 +2934,155 @@ function validate_expected_md5(string $zipPath, string $expectedMd5): void
     }
 }
 
+/**
+ * The chroot revision the site's persistent data selects, by the thin loader's
+ * own rule (runtime/custom-redirects.php and engine/shared/engine-selection.php),
+ * or the loader's reason it would not serve it. Read as data: no chroot PHP runs.
+ *
+ * @return array{revision:?string,reason:string}
+ */
+function installer_selected_chroot(): array
+{
+    if (!class_exists('Atomic_Persistent_Data')) {
+        return ['revision' => null, 'reason' => 'no_persistent_data'];
+    }
+    $selection = (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE;
+    if (preg_match('#^chroot/(staging|production)/(latest|previous)$#D', is_string($selection) ? trim($selection) : '', $selected) !== 1) {
+        return ['revision' => null, 'reason' => 'unselected'];
+    }
+    $chrootRoot = defined('SPACEFAST_RUNTIME_CHROOT_ROOT') ? (string) SPACEFAST_RUNTIME_CHROOT_ROOT : '';
+    // The realpath cache too: the check under the publication lock must see a
+    // channel link that moved since the first check.
+    clearstatcache(true);
+    $scriptsReal = realpath($chrootRoot . '/scripts');
+    $engineReal = realpath($chrootRoot . '/scripts/sf-engine-' . $selected[1] . '-' . $selected[2]);
+    if (
+        !is_string($scriptsReal)
+        || !is_string($engineReal)
+        || dirname($engineReal) !== $scriptsReal
+        || preg_match('/^sf-engine-([0-9a-f]{40})$/D', basename($engineReal), $revision) !== 1
+    ) {
+        return ['revision' => null, 'reason' => 'chroot_missing'];
+    }
+    foreach (['engine/loader/request.php', 'engine/loader/wordpress.php', 'engine/shared/engine-selection.php', 'engine/init.php'] as $file) {
+        if (!is_file($engineReal . '/' . $file)) {
+            return ['revision' => $revision[1], 'reason' => 'chroot_engine_unsupported'];
+        }
+    }
+    $inventory = json_decode((string) @file_get_contents($engineReal . '/engine/wordpress/components.json'), true);
+    $contained = false;
+    foreach (is_array($inventory['components'] ?? null) ? $inventory['components'] : [] as $component) {
+        if (
+            is_array($component)
+            && ($component['id'] ?? null) === 'runtime-engine'
+            && is_array($component['provides'] ?? null)
+            && in_array('runtime.security.tenant-containment.v1', $component['provides'], true)
+        ) {
+            $contained = true;
+            break;
+        }
+    }
+    if (!$contained) {
+        return ['revision' => $revision[1], 'reason' => 'chroot_containment_missing'];
+    }
+    $binary = $chrootRoot . '/usr/local/bin/sf-bin-' . $revision[1] . '/stattic-runtime';
+    if (!is_file($binary) || !is_executable($binary)) {
+        return ['revision' => $revision[1], 'reason' => 'chroot_binary_missing'];
+    }
+    return ['revision' => $revision[1], 'reason' => 'chroot'];
+}
+
+/**
+ * Remove the site's own engine release from a site the chroot serves: the
+ * release directories, the active-release pointer and the release authorities.
+ * Everything the chroot path still reads stays: storage, config, the loader
+ * copies, the public trees and the loader marker. Without a release the thin
+ * loader and the control plane's commands have no fallback, so this refuses
+ * unless the selected chroot passes every check the loader makes, and checks
+ * again under the exclusive publication lock. The publication is reserved like
+ * an install's, so `--proof` shows which command retired it.
+ */
+function retire_own_release(): never
+{
+    [, $publicRoot] = installer_roots();
+    $installRoot = prepare_install_root($publicRoot);
+    $installerLock = acquire_installer_lock($installRoot);
+    assert_engine_publication_instance($publicRoot, installer_config_value('SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID'));
+    foreach (['install-transaction.json', 'rollback-failure.json'] as $blocked) {
+        if (file_exists($installRoot . '/' . $blocked) || is_link($installRoot . '/' . $blocked)) {
+            fail('runtime_engine_retire_transaction_pending');
+        }
+    }
+    $pointer = active_release_pointer_state($installRoot);
+    if (in_array($pointer['state'], ['unsupported', 'unknown'], true)) {
+        fail('runtime_engine_active_pointer_invalid');
+    }
+    $releasesRoot = $installRoot . '/releases';
+    if (is_link($releasesRoot) || (file_exists($releasesRoot) && !is_dir($releasesRoot))) {
+        fail('runtime_engine_releases_invalid');
+    }
+    $chroot = installer_selected_chroot();
+    if ($chroot['reason'] !== 'chroot') {
+        fail('runtime_engine_retire_chroot_unavailable:' . $chroot['reason']);
+    }
+    $publication = reserve_engine_publication($installRoot, hash('sha256', 'retire-own-release:' . $chroot['revision']));
+    $publicationLock = acquire_publication_lock($installRoot);
+    // The chroot can move under any check, so read it again under the lock.
+    $chroot = installer_selected_chroot();
+    if ($chroot['reason'] !== 'chroot') {
+        fail('runtime_engine_retire_chroot_unavailable:' . $chroot['reason']);
+    }
+    $releases = array_values(array_filter(
+        // Every layout's releases: installs name them release-*, older
+        // bootstraps did not.
+        glob($releasesRoot . '/*') ?: [],
+        static fn (string $release): bool => is_dir($release) && !is_link($release),
+    ));
+    $hadPointer = $pointer['state'] !== 'absent';
+    // The pointer goes first: from here on no reader can name a release.
+    if (($hadPointer && !unlink_if_present($installRoot . '/active-release')) || !sync_directory($installRoot)) {
+        fail('runtime_engine_retire_pointer_failed');
+    }
+    $proof = json_encode([
+        'format' => 'spacefast.runtime.active-release-proof.v1',
+        'publication' => $publication,
+        'release' => null,
+        'revision' => null,
+        'retired' => ['chroot_revision' => $chroot['revision']],
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    if (!is_string($proof) || !publish_regular_file($installRoot . '/active-release-proof.json', $proof . "\n", 0600)) {
+        fail('runtime_engine_retire_proof_failed');
+    }
+    flock($publicationLock, LOCK_UN);
+    fclose($publicationLock);
+    // Nothing names these any more: a failed removal leaves disk debt, not a
+    // fallback, and the next run removes what is left.
+    $removed = [];
+    $remaining = [];
+    foreach ($releases as $release) {
+        rrmdir($release);
+        if (file_exists($release) || is_link($release)) {
+            $remaining[] = basename($release);
+            continue;
+        }
+        $removed[] = basename($release);
+        clear_regular_state_file($installRoot . '/release-authorities/' . basename($release) . '.json');
+    }
+    flock($installerLock, LOCK_UN);
+    if ($remaining !== []) {
+        fwrite(STDERR, 'runtime_engine_retire_incomplete:' . implode(',', $remaining) . "\n");
+        exit(1);
+    }
+    echo json_encode([
+        'status' => $hadPointer || $removed !== [] ? 'retired' : 'absent',
+        'chroot_revision' => $chroot['revision'],
+        'removed' => $removed,
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+    exit(0);
+}
+
 if (($argv[1] ?? null) === '--proof') print_engine_publication_proof();
+if (($argv[1] ?? null) === '--retire-own-release') retire_own_release();
 
 [$privateRoot, $publicRoot] = installer_roots();
 $installRoot = prepare_install_root($publicRoot);

@@ -1,7 +1,7 @@
 {
-  "revision": "28db93bd8f435ed354111c382b2642f149f49248",
-  "sourceHash": "7e03e3ab6d04c063a4ad1c5d50105cb6285b8027704ee6e9a38e5b3afbe28299",
-  "manifestSha256": "5fccd38e19e6a49883bebbf162e7babe771202b1ec1dc97906ab4834442e34b4",
+  "revision": "22f23ac268bb11ce44a1c415ef64b466952c5b1d",
+  "sourceHash": "59727dccec63297ac97f9bbfef18ff963e5c0636cbf0c24b5799d5ed2360056b",
+  "manifestSha256": "afda98fdd398860f4250e5930d3c2384fe2e67d07e96959b029ea95a1bd86c37",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "ad7a40b5f3f371da0d53c2af0580f1a7d8973385fa95d11cdf46fedf8be4e4fa"
+      "sha256": "fa9a74cd0c36c6636f5cbb70b9f72daf16e2f959fbc358e8e26715e816884c80"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "f8702cd7ea6de5ed30d8347055c34cc8c6631029c1bae5cd03981c3a123bc1d1"
+      "sha256": "e2065ee6b0817366a1ef6f34605be45d087776a1de28b95e2668fde7bd8de1ab"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -14137,7 +14137,7 @@
     },
     {
       "path": "runtime/installer.php",
-      "sha256": "282aa00a8f3afa84cdf16fcf1f2cc1437cd0221d8e08914e899a392031a4a648"
+      "sha256": "8c32c479009dceca077691199cf07527ab56cbc52311ad0528a0dde4231ea11d"
     },
     {
       "path": "runtime/package.json",
@@ -14477,7 +14477,7 @@
     },
     {
       "path": "runtime/tests/installer-update.test.ts",
-      "sha256": "dceaac4ddbd84f6465e900a62acf95f046851ceed45660da0582babc06a3e156"
+      "sha256": "9fc4fe0bdccad8decb02bbb7ca2cd505b0fa2642fd752ef5693b33214598e247"
     },
     {
       "path": "runtime/tests/job-runner.test.ts",

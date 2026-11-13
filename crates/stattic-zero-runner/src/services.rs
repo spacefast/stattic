@@ -765,7 +765,7 @@ fn email_send(
     let Some(domain) = config.email_domain.as_deref() else {
         return Err(BrokerRefusal::new(
             "service_not_configured",
-            "Email is not configured for this Space's primary domain.",
+            "Email can't send yet. It needs the Transactional email beta and a custom primary domain with verified DKIM. The Space's Domains page, or GET /v1/spaces/{spaceId}/email, says which step is left.",
         ));
     };
     let from = payload

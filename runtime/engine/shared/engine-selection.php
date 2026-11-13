@@ -6,7 +6,8 @@ declare(strict_types=1);
 // loader. Requests and WordPress ask the thin loader (runtime/custom-redirects.php)
 // instead, which restates this rule because it cannot read any engine before
 // choosing one. Keep the two in step; runtime/tests/engine-source.test.ts
-// runs both.
+// runs both. A command on a site with no release of its own has no copy of this
+// file to trust, so the command bootstrap restates the chroot checks too.
 //
 // A site runs its own release unless its WP Cloud persistent data names an
 // environment and channel of the Spacefast chroot in

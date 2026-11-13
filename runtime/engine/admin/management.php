@@ -25,6 +25,7 @@ require_once __DIR__ . '/zero-db.php';
 require_once __DIR__ . '/storage.php';
 require_once __DIR__ . '/build-source.php';
 require_once __DIR__ . '/static-zip.php';
+require_once __DIR__ . '/generated-blob.php';
 require_once __DIR__ . '/engine-update.php';
 require_once __DIR__ . '/components.php';
 
@@ -451,6 +452,10 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
         }
     }
 
+    $session = _stattic_runtime_session_with_generated_files(
+        $session,
+        _stattic_runtime_generated_files($privateRoot, $spaceId, $body['generated_files'] ?? null),
+    );
     _stattic_runtime_publish_session_require_complete($session);
     require_once __DIR__ . '/../shared/zero-v2.php';
     $functionsFinalize = is_array($body['functions'] ?? null) ? $body['functions'] : null;

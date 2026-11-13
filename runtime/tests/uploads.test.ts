@@ -1050,6 +1050,123 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
   expect(finalizeEvents[0]?.upload_id).toBe(session.uploadId);
 });
 
+// A Functions worker the control plane compiled at finalize: the publisher
+// never uploaded it, so the engine takes it on its own route and finalize adds
+// it to the session as an uploaded file, on a first publish with no base and
+// with no change to how the publisher's own files were declared.
+test("finalize adds a generated Functions bundle the control plane wrote to the space store", async () => {
+  const bundle = JSON.stringify({
+    format: "bundle",
+    modules: { "worker.js": "export default {}" },
+  });
+  const digest = sha256(bundle);
+  const bundlePath = `__spacefast/functions/bundles/${digest}/bundle.json`;
+  const putGenerated = (body: string, sha = digest) =>
+    fetch(managementUrl(`/spaces/${SPACE}/generated-blobs?sha256=${sha}`), {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${managementToken("put_generated_blob", { space_id: SPACE })}`,
+        "content-type": "application/octet-stream",
+      },
+      body,
+    });
+
+  const mismatched = await putGenerated("other bytes");
+  expect(mismatched.status).toBe(422);
+  expect(await errorCode(mismatched)).toBe("upload_hash_mismatch");
+  expect(readBlob(rt, SPACE, digest)).toBeNull();
+
+  const files = { "index.html": "<h1>generated</h1>\n" };
+  const session = await createDeclaredSession(rt, SPACE, "ver_generated", files);
+  const generated = [{ path: bundlePath, sha256: digest, size: bundle.length }];
+
+  // An attempt that fails after naming a bundle leaves the session as the
+  // publisher made it, so the retry's different bundle is the only one.
+  const staleBundle = JSON.stringify({ format: "bundle", modules: { "worker.js": "stale" } });
+  const staleDigest = sha256(staleBundle);
+  expect((await putGenerated(staleBundle, staleDigest)).status).toBe(200);
+  const incomplete = await finalize(rt, SPACE, session.versionId, {
+    upload_id: session.uploadId,
+    generated_files: [
+      {
+        path: `__spacefast/functions/bundles/${staleDigest}/bundle.json`,
+        sha256: staleDigest,
+        size: staleBundle.length,
+      },
+    ],
+  });
+  expect(incomplete.status).toBe(409);
+  expect(await errorCode(incomplete)).toBe("version_upload_incomplete");
+  await uploadSessionBlobs(rt, session, files);
+
+  // Naming a bundle that was never written is refused before anything commits.
+  const unwritten = await finalize(rt, SPACE, session.versionId, {
+    upload_id: session.uploadId,
+    generated_files: generated,
+  });
+  expect(unwritten.status).toBe(409);
+  expect(await errorCode(unwritten)).toBe("generated_file_missing");
+
+  const stored = await putGenerated(bundle);
+  expect(stored.status).toBe(200);
+  expect(await stored.json()).toEqual({ sha256: digest, size: bundle.length });
+  expect(readBlob(rt, SPACE, digest)?.toString()).toBe(bundle);
+
+  // The lane only places the bundle at its own address, never a page.
+  const wrongPath = await finalize(rt, SPACE, session.versionId, {
+    upload_id: session.uploadId,
+    generated_files: [{ ...generated[0], path: "index.html" }],
+  });
+  expect(wrongPath.status).toBe(422);
+  expect(await errorCode(wrongPath)).toBe("generated_files_invalid");
+
+  const finalized = await apiJson<{ status: string }>(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions/${session.versionId}/finalize`,
+    "finalize_version",
+    { space_id: SPACE, version_id: session.versionId },
+    { upload_id: session.uploadId, generated_files: generated },
+  );
+  expect(finalized.status).toBe("ready");
+  // The version's catalog holds the bundle beside the uploaded page, which is
+  // what a later publish retains it from.
+  const catalogFiles = async (versionId: string) =>
+    (
+      await apiJson<{ files: Array<{ path: string; sha256: string; size: number }> }>(
+        rt,
+        "GET",
+        `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions/${versionId}/files?include_internal=1`,
+        "list_version_files",
+        { space_id: SPACE, version_id: versionId },
+      )
+    ).files.map(({ path, sha256, size }) => ({ path, sha256, size }));
+  expect(await catalogFiles(session.versionId)).toEqual([
+    { path: bundlePath, sha256: digest, size: bundle.length },
+    { path: "index.html", sha256: sha256(files["index.html"]), size: files["index.html"].length },
+  ]);
+
+  // A lazy session materialized by the finalize itself, retaining the page
+  // and uploading nothing, takes the same bundle.
+  const lazyVersionId = "ver_generated_lazy";
+  const lazyUploadId = "upl_generated_lazy";
+  const lazy = await finalize(rt, SPACE, lazyVersionId, {
+    upload_id: lazyUploadId,
+    session: {
+      upload_id: lazyUploadId,
+      space_id: SPACE,
+      version_id: lazyVersionId,
+      files: [],
+      retention: "list",
+      retained_files: manifestFor(files),
+      reusable_version_id: session.versionId,
+    },
+    generated_files: generated,
+  });
+  expect(lazy.status).toBe(200);
+  expect(await catalogFiles(lazyVersionId)).toEqual(await catalogFiles(session.versionId));
+});
+
 test("ingest sheds above four concurrent uploads per space", async () => {
   const files = { "a.txt": "a", "b.txt": "bb", "c.txt": "ccc" };
   const session = await createDeclaredSession(rt, ADMISSION_SPACE, "ver_adm", files);

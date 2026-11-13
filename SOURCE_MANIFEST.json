@@ -1,7 +1,7 @@
 {
-  "revision": "9c83d69a357d399ce537ca110e9d66c617302e5d",
-  "sourceHash": "e49ddfdfb6f9f87dec661cf43c1e67e4250be5ac8b691a4be41c7bad8cf1e1ee",
-  "manifestSha256": "bf0f148e757e82d14171caa61490d8e298cf382a4feffa4fb92369489f3b115c",
+  "revision": "556e67270627e5d8d9a91a1326f2158ce3cb5b99",
+  "sourceHash": "bae4296d3430eef0f91b6ed46ec5a1faa30d336488d4f1621bc32bb303b079d6",
+  "manifestSha256": "1dd9442a3b75bc5fc61d127580f8faed7908ead362f13adbd78791f3ea019878",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "f07b7ae2d7b3d0924f416db4ede9bd45d2914c0dbc31aef0beb2c5c7da45ab51"
+      "sha256": "b8b383debdfae1b55d0fca06bf11fd9925e896278d6e7b16348156986a5c8179"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "db1d78008f0a442b3de895320fff806e04ad103421e1f3e580b57d2db3acf52b"
+      "sha256": "7927df9b6cd7ea184494c3d519112c2278aa0331d4b413d154d7ec67641aa408"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13525,11 +13525,11 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "b9cf0ac90a19fea87b3acb5cf96dd08eb90bd222a158345b06f6499b5dfa3867"
+      "sha256": "e5acc67358ed085314c7145ec0916a995bd5bd68df0ac532eedd582ec03e138c"
     },
     {
       "path": "runtime/engine/admin/api.php",
-      "sha256": "1e0f04d186b60992da3dfa3ceef85e13f2ec75faea0a28afcf681a92a0251949"
+      "sha256": "a76ee7f007e76af4a04c154dab2052d41e327058e53bc6df8d8e0220d56b6f5d"
     },
     {
       "path": "runtime/engine/admin/auth.php",
@@ -13560,6 +13560,10 @@
       "sha256": "2e881b2b36a691790b6fc733a86ad548d5e5d6e2ca3b6f4600973a190c05460a"
     },
     {
+      "path": "runtime/engine/admin/generated-blob.php",
+      "sha256": "f7cbf27a0f0ae32253cbb26f61ccfcc3cf726b8cd28b6e563f3289f6128f5f40"
+    },
+    {
       "path": "runtime/engine/admin/jobs.php",
       "sha256": "cf9c930f5b92fdaf876b12015b4caa80aca9e1871c907b994bcb7c89b64765d1"
     },
@@ -13569,7 +13573,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "ce27af80cb6b8a0f50408f0d258d7a73d5ce9c0bb5dee9f5aa7b909b97cde440"
+      "sha256": "0fa63ab4a9227348f1673b8b091dbb667bfe337201497139736b175228701aef"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -14041,7 +14045,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "66db9617bc56214d6143b27ab4c85314c3eb00325c154a86d6343bfdc3a3e7d8"
+      "sha256": "cc19361d7f51f0054ff05ea192ef7e953764c26f799d586ebe407340335b624e"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -14625,7 +14629,7 @@
     },
     {
       "path": "runtime/tests/uploads.test.ts",
-      "sha256": "f568804f2099f16db325467f6d3a8a3c47cdc3b46d0ee7a18d2f5ddd052b08e2"
+      "sha256": "14aca5bc5861fa850b84e1a487f64d27c5344b76d88d1550b68897ff7769f539"
     },
     {
       "path": "runtime/tests/version-delete-tombstones.test.ts",

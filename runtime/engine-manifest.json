@@ -15,6 +15,7 @@
     "engine/admin/management.php",
     "engine/admin/retention.php",
     "engine/admin/static-zip.php",
+    "engine/admin/generated-blob.php",
     "engine/admin/upload-policy.php",
     "engine/admin/upload.php",
     "engine/admin/zero-db.php",

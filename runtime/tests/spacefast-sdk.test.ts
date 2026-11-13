@@ -650,11 +650,11 @@ test("sdk.js draws platform buttons on the live surface only", async () => {
     expect(view.document.getElementById("sf-remix")?.style.left).toBe("16px");
     expect(shadow?.querySelector("a")?.href).toBe(remixUrl);
     expect(shadow?.querySelector("a")?.getAttribute("aria-label")).toBe(
-      "Remix this site on Spacefast",
+      "Remix this space on Spacefast",
     );
     expect(shadow?.querySelector("a")?.target).toBe("_blank");
     expect(shadow?.querySelector("path")?.getAttribute("d")).toBe(SPACEFAST_MARK_PATH);
-    expect(shadow?.textContent).toContain("Remix this site");
+    expect(shadow?.textContent).toContain("Remix this space");
     expect(view.document.querySelectorAll("#sf-referral")).toHaveLength(1);
     expect(view.document.getElementById("sf-referral")?.style.right).toBe("16px");
     expect(referralShadow?.querySelector("a")?.href).toBe(referralUrl);

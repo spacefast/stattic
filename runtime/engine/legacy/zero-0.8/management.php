@@ -50,9 +50,6 @@ function _stattic_runtime_zero_config_artifact(array $zero): array
         'realtime' => is_array($zero['realtime'] ?? null) ? $zero['realtime'] : [],
         'inspect' => is_array($zero['inspect'] ?? null) ? $zero['inspect'] : [],
     ];
-    if (is_string($zero['connectors']['token'] ?? null) && $zero['connectors']['token'] !== '') {
-        $artifact['connectors'] = ['token' => $zero['connectors']['token']];
-    }
     if (in_array($zero['databaseUrlSource'] ?? null, ['application', 'provider'], true)) {
         // Only ever from the authenticated control-plane finalize request; never
         // inferred from tenant variable contents.

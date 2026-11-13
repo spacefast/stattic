@@ -475,12 +475,8 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     if ($functionsFinalize !== null) {
         _stattic_runtime_write_functions_config_artifact($versionRoot, $functionsFinalize);
     }
-    // A control plane from before the shared credential sends it inside the
-    // Zero or Functions config instead; both name the same one credential.
-    $connectorsToken = $body['connectors_token']
-        ?? $body['zero']['connectors']['token']
-        ?? $body['functions']['connectors']['token']
-        ?? null;
+    // The version's one connectors credential, for its pages, worker and capsule.
+    $connectorsToken = $body['connectors_token'] ?? null;
     if (is_string($connectorsToken) && $connectorsToken !== '') {
         _stattic_runtime_write_private_string($versionRoot . '/' . STATTIC_CONNECTORS_TOKEN_PATH, $connectorsToken);
     }

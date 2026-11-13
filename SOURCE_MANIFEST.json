@@ -1,7 +1,7 @@
 {
-  "revision": "d0ff973340d1813b521398bc823a74a17561e833",
-  "sourceHash": "59727dccec63297ac97f9bbfef18ff963e5c0636cbf0c24b5799d5ed2360056b",
-  "manifestSha256": "0ba4dc7c9a924d8783e3bff3dd23f79c609c957da9cbb4e0c24cf6658c15c5ac",
+  "revision": "656ad46f1dd33428d73cbd119f015ba8f4cfd70f",
+  "sourceHash": "1154ba60d020944cbbde37f90df30e129b12bc0de2e98753d40d8f7f55c3a888",
+  "manifestSha256": "b0902aa8da3b94a29e09295b85808dbfb9cd0746bb647a2fab5578472f859710",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "20259ca94ef480da8d8a39d56cda187eaf06657a71b29b0feecf8fd7fafcdb56"
+      "sha256": "b9e891551f5725c16d5ec19f47e6bf0a085a55c2b0e1f8021a836d46c878bbbc"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "45f2494f56efb33af63eb819ce893dcd278d6b12f1f55cbe7c8b2b58e37dcdf9"
+      "sha256": "ed07b573a437c34c8653a3ae36c75f82b758a5f37cc1170448f90c7337c65e6d"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13569,7 +13569,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "53be836ba4e0836ccf8684ef953ee56c341554fe6e9b37042929a85c078ed322"
+      "sha256": "ce27af80cb6b8a0f50408f0d258d7a73d5ce9c0bb5dee9f5aa7b909b97cde440"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -13649,7 +13649,7 @@
     },
     {
       "path": "runtime/engine/legacy/zero-0.8/connectors.php",
-      "sha256": "3a66ba551ace1d6da0783aa80d74b9f69d81cdfa1389a6aa17685a4167dcd93a"
+      "sha256": "3c9447960d37b71ae98021258eed87500f6f0ec8c3e6b538e6078ccc5a8498c1"
     },
     {
       "path": "runtime/engine/legacy/zero-0.8/context.php",
@@ -13665,7 +13665,7 @@
     },
     {
       "path": "runtime/engine/legacy/zero-0.8/management.php",
-      "sha256": "ccecfab59b4a026112d64ff80745b4b8ef6ff94317a921dd4c2ec6fffbefc59d"
+      "sha256": "4c7c0c3d5711d4d67ac4ceeced6263b9391ed5cba9fe0a770391d7210eb1bada"
     },
     {
       "path": "runtime/engine/legacy/zero-0.8/routes.php",
@@ -13697,7 +13697,7 @@
     },
     {
       "path": "runtime/engine/runtime/connectors.php",
-      "sha256": "d065c08643d8aeb813fcaee19277ed4b7b7972b8b35ba6bbd5d6af16fa0486ab"
+      "sha256": "2c61d6af680dc7e14b0a51a0e4e00be00eb917e95c86d5424a26dd011e9a3df7"
     },
     {
       "path": "runtime/engine/runtime/content-page.php",
@@ -13829,7 +13829,7 @@
     },
     {
       "path": "runtime/engine/shared/artifacts.php",
-      "sha256": "d38cae39aaa390d291b41006940e22c671b5b5c3953b695bad937f712fb100e3"
+      "sha256": "d3badad7c2542ca37a22436a194a05e7dc7ef91e1be35cadbf1292d9d88c1183"
     },
     {
       "path": "runtime/engine/shared/bootstrap-config.php",
@@ -14213,7 +14213,7 @@
     },
     {
       "path": "runtime/tests/connectors.test.ts",
-      "sha256": "0fc1ef595cfc5d3dbde0b72ffaa13143f3c26099b1960b93da3ba806f2455c7b"
+      "sha256": "ea9ad193e9a3391e971d784b6287bd4229e740b83dd410351061849ffba4755d"
     },
     {
       "path": "runtime/tests/content-access.test.ts",

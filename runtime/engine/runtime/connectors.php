@@ -270,10 +270,7 @@ function _stattic_connectors_serve(string $privateRoot, string $versionRoot, arr
     $state = is_array($answer['state'] ?? null) ? $answer['state'] : [];
     $code = is_string($state['code'] ?? null) ? $state['code'] : '';
     if ($code === 'ok') {
-        // A control plane older than shared reads answers only with `run.result`;
-        // drop the fallback once every control plane sends `result`.
-        $run = is_array($answer['run'] ?? null) ? $answer['run'] : [];
-        $result = $answer['result'] ?? $run['result'] ?? null;
+        $result = $answer['result'] ?? null;
         $body = ['data' => $result, 'state' => 'ok'];
         // A tool's result is Executor's `{ok: true, data, http?}`: the page gets
         // the provider's payload as `data`, and an HTTP tool's upstream status

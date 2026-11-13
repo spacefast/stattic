@@ -153,6 +153,9 @@ function _stattic_connectors_token(string $versionRoot): string
 {
     $path = $versionRoot . '/' . STATTIC_CONNECTORS_TOKEN_PATH;
     if (!is_file($path)) {
+        // old-engine-compat: a Zero 0.8 version finalized before S12 shipped
+        // may keep its credential only in `zero/config.json`. Delete under the
+        // fallback's own condition in S12, apps/control-plane/src/compat/old-engine.ts.
         return _stattic_legacy_zero_connectors_token($versionRoot);
     }
     $token = file_get_contents($path);

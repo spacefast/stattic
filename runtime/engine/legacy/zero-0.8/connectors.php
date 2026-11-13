@@ -2,9 +2,11 @@
 declare(strict_types=1);
 
 // Versions finalized before connector roles moved out of the Zero capsule keep
-// their credential in `zero/config.json`, and their bundled Zero 0.8 client
-// manages visitor accounts under `/__spacefast/zero/connectors/<role>`. These
-// keep those versions serving with no republish.
+// their credential in `zero/config.json`, and a deployed Zero 0.8 client may
+// manage visitor accounts under `/__spacefast/zero/connectors/<role>`. That
+// prefix is an alias: the same route, handler and operations as
+// `/__spacefast/connectors/<role>`. These keep those versions serving with no
+// republish.
 
 const STATTIC_LEGACY_ZERO_CONNECTOR_PATHS = [
     ['path' => STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/connectors/', 'match' => 'prefix', 'admit' => '_stattic_legacy_zero_connectors_route', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'connectors'],

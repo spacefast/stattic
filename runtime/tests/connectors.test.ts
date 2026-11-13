@@ -82,13 +82,15 @@ const controlPlane = Bun.serve({
       return Response.json({ data: null });
     }
     const role = body.role;
-    // By default it answers the way a control plane older than shared reads
-    // does: the result only on the run.
+    // By default it answers the way a run that succeeded does: the run and
+    // its result at the top level.
+    const result = { deals: [{ id: "deal_1", stage: "won" }] };
     return (
       answers[role]?.() ??
       Response.json({
         state: { role, code: "ok", message: "Connected." },
-        run: { status: "succeeded", result: { deals: [{ id: "deal_1", stage: "won" }] } },
+        run: { status: "succeeded", result },
+        result,
       })
     );
   },
@@ -335,6 +337,22 @@ test("a tool's result reaches the page as the provider's payload, with its HTTP 
     expect(await (await call("/__spacefast/connectors/crm/deals.list")).json()).toEqual({
       data: { deals: [] },
       http: { status: 200, headers: { link: '<https://api.example/deals?page=2>; rel="next"' } },
+      state: "ok",
+    });
+  } finally {
+    delete answers.crm;
+  }
+});
+
+test("an ok answer without a top-level result reads as null", async () => {
+  answers.crm = () =>
+    Response.json({
+      state: { role: "crm", code: "ok", message: "Connected." },
+      run: { status: "succeeded", result: { deals: [] } },
+    });
+  try {
+    expect(await (await call("/__spacefast/connectors/crm/deals.list")).json()).toEqual({
+      data: null,
       state: "ok",
     });
   } finally {
@@ -647,8 +665,8 @@ test("visitor accounts connect, complete and disconnect under the role's own pat
     405,
   );
 
-  // Legacy Zero 0.8: delete when no live version is Zero 0.8. A capsule built
-  // against that client opens and disconnects under the old prefix, and its
+  // Legacy Zero 0.8: the old prefix is an alias of this route, kept while a
+  // deployed 0.8 client may call it. It opens and disconnects there, and its
   // disconnect() is a DELETE on the bare role.
   const legacyConnect = await call("/__spacefast/zero/connectors/inbox/connect?return_to=%2Fa");
   expect(legacyConnect.status).toBe(302);
@@ -710,8 +728,8 @@ test("a version with no roles has no credential and answers every role as unknow
     expect(types.status).toBe(404);
     expect(await types.json()).toMatchObject({ code: "not_found" });
 
-    // Legacy Zero 0.8: delete when no live version is Zero 0.8. A version an
-    // older finalize wrote keeps its credential in the capsule config only.
+    // old-engine-compat (S12): a Zero 0.8 version an older finalize wrote
+    // keeps its credential in the capsule config only, and serves with it.
     const legacyRoot = versionRoot(rt, SPACE_ID, "ver_connectors_2");
     mkdirSync(path.join(legacyRoot, "zero"), { recursive: true });
     writeFileSync(
@@ -722,30 +740,25 @@ test("a version with no roles has no credential and answers every role as unknow
     expect(legacy.status, await legacy.clone().text()).toBe(200);
     expect(forwarded[0]?.authorization).toBe(`Bearer ${LEGACY_TOKEN}`);
 
-    // A control plane from before the shared credential sends a capsule's
-    // credential only in the Zero config; this engine keeps it beside the
-    // version and serves the roles with it.
-    const oldControlPlaneToken = "ver_connectors_3.zero-config-only-token";
+    // A finalize names the credential in one place, `connectors_token`. One
+    // inside the Zero config is not the version's credential.
     await deploy(rt, {
       spaceId: SPACE_ID,
       versionId: "ver_connectors_3",
       metadata: { mode: "website", title: "Connectors" },
-      files: { "index.html": "<h1>old control plane</h1>\n" },
-      finalize: { zero: { connectors: { token: oldControlPlaneToken } } },
+      files: { "index.html": "<h1>one location</h1>\n" },
+      finalize: { zero: { connectors: { token: "ver_connectors_3.zero-config-only-token" } } },
     });
     await putRoute(rt, SPACE_ID, "production", {
       version_id: "ver_connectors_3",
       config: routeConfig(),
     });
-    expect(
-      readFileSync(
-        path.join(versionRoot(rt, SPACE_ID, "ver_connectors_3"), "connectors/token"),
-        "utf8",
-      ),
-    ).toBe(oldControlPlaneToken);
-    const fromOldControlPlane = await call("/__spacefast/connectors/crm/deals.list");
-    expect(fromOldControlPlane.status, await fromOldControlPlane.clone().text()).toBe(200);
-    expect(forwarded[0]?.authorization).toBe(`Bearer ${oldControlPlaneToken}`);
+    expect(readdirSync(versionRoot(rt, SPACE_ID, "ver_connectors_3")).includes("connectors")).toBe(
+      false,
+    );
+    const unconfigured = await call("/__spacefast/connectors/crm/deals.list");
+    expect(unconfigured.status).toBe(404);
+    expect(forwarded).toEqual([]);
   } finally {
     await putRoute(rt, SPACE_ID, "production", { version_id: VERSION_ID, config: routeConfig() });
   }

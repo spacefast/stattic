@@ -77,6 +77,10 @@ test_args+=(--timeout 30000)
 # The version-delete tombstone suite drives the API against PHP the same way.
 long_files=(tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/access-page.test.ts tests/version-delete-tombstones.test.ts)
 reports=()
+# Each process writes a JUnit report, the proof that the suite really ran.
+junit_dir="$(mktemp -d)"
+trap 'rm -rf "$junit_dir"' EXIT
+junit_reports=()
 running=0
 status=0
 launch() {
@@ -90,7 +94,8 @@ launch() {
     fi
     running=$((running - 1))
   fi
-  local args=("${test_args[@]}" "$@")
+  local args=("${test_args[@]}" "$@" --reporter=junit "--reporter-outfile=$junit_dir/$name.xml")
+  junit_reports+=("$junit_dir/$name.xml")
   if [[ -n "${SPACEFAST_BUN_COVERAGE_DIR:-}" ]]; then
     local coverage="$SPACEFAST_BUN_COVERAGE_DIR/$name"
     mkdir -p "$coverage"
@@ -121,15 +126,19 @@ for ((; running > 0; running--)); do
     wait -n || status=1
   fi
 done
+# A process that selects no file writes no report, so the suite as a whole
+# must have run at least one test case.
+grep -qs '<testcase' "${junit_reports[@]}" || {
+  echo "runtime tests reported success without running a test" >&2
+  status=1
+}
 if [[ "${#reports[@]}" -gt 0 ]]; then
   # Bun writes no report for a shard whose files load no instrumented source
-  # (they only drive PHP). Test failures already fail through the exit status,
-  # so only an empty merged report fails here.
+  # (they only drive PHP).
   written=()
   for report in "${reports[@]}"; do
     [[ -s "$report" ]] && written+=("$report")
   done
-  [[ "${#written[@]}" -gt 0 ]] || status=1
   [[ "${#written[@]}" -eq 0 ]] || cat "${written[@]}" > "$SPACEFAST_BUN_COVERAGE_DIR/lcov.info"
   rm -f -- "${reports[@]}"
 fi

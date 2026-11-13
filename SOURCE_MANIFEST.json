@@ -1,7 +1,7 @@
 {
-  "revision": "a412c7dbf2f76b2615b00e806cd5924289748968",
+  "revision": "a27ec4a97ba5997c341f361feacd584a015b5bc4",
   "sourceHash": "57bf739468b7437ae6fec6929b526e6643a08c791acb872504f5045aa41ce5c3",
-  "manifestSha256": "3dba6210b9a238dcbf40868f9f5d3702ad6c785670d7e17483890cc0815ff8c3",
+  "manifestSha256": "00f1f3c6ba70aad77f9dd1e0eec67f197750b7fb39c19ab9241eab88fbfa0df1",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "44d206ef3f47363472d3f4d7903f8bbac2cfd828c90ae4999c7b71fac010c8cc"
+      "sha256": "d3b0eda3b37b67e17d273b3767d55f6eb446043e192da5f9ac01c3956f6c6a5d"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "507e1200072d97ae8500db8ff83d82fd7714069fb19c189c2b6526ea5931d69b"
+      "sha256": "3606bc74bc245328168cd6cba622f065e5a99237e91aa2eb207d679ffab8899a"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -14521,7 +14521,7 @@
     },
     {
       "path": "runtime/tests/prepare-ci.sh",
-      "sha256": "bf82f5fd0730a734ab11b636deffa6978560b59de0578a73c21719c43d48c39c"
+      "sha256": "2c77624dda9c775243be2ee3c7aaba6e63863ce673e2a4ea983af51e13a421e2"
     },
     {
       "path": "runtime/tests/prepare.sh",
@@ -14549,7 +14549,7 @@
     },
     {
       "path": "runtime/tests/run-ci.sh",
-      "sha256": "b31d7d59e5d35eef398533ba8e082883baee921c2a8558fbf4d8f9a948555fd0"
+      "sha256": "63e5bd42f65ab2f91b37a8daa4116d7067c826bfe6345116bb6cd53e4e7d6645"
     },
     {
       "path": "runtime/tests/run-context-browser.mjs",
@@ -14561,7 +14561,7 @@
     },
     {
       "path": "runtime/tests/run.sh",
-      "sha256": "c1393ab17e3dd4c588ff5557c2189c003ab07fd280a626c04959985b83dd9123"
+      "sha256": "e2cda85c38f5360f0bc8749f495aa8bf981d67015dd8e7d826da6f03552c1fd0"
     },
     {
       "path": "runtime/tests/sell-client-drift.test.ts",

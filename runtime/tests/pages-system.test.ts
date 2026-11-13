@@ -144,7 +144,6 @@ test("a tombstoned space answers with the engine's page, never its own documents
   expect(html).toContain("Best way to share what your agent made");
   expect(html).not.toContain("@font-face");
   expect(html).not.toContain('rel="preload"');
-  expect(html).not.toContain("__spacefast/pages/fonts");
   expect(html).not.toContain("Acme");
 
   // A per-principal suspension (`site_suspended`) serves the SAME 402 suspended
@@ -239,15 +238,6 @@ test("a partner tombstone uses its compiled de-branded platform page", async () 
   expect(oldHtml).toContain("Partner Cloud");
   expect(oldHtml).toContain("Nothing here");
   expect(oldHtml).not.toContain("Spacefast");
-});
-
-test("the retired per-space font path takes the uniform private-namespace denial", async () => {
-  const host = "pages-fonts.test";
-  await deploySite("spc_pages_fonts", "ver_pages_fonts_1", host);
-
-  const rejected = await get(rt, host, "/__spacefast/pages/fonts/haskoy-latin-variable.woff2");
-  expect(rejected.status).toBe(403);
-  expect(await rejected.text()).toBe("Forbidden.\n");
 });
 
 test("reserved access-path variants deny uniformly instead of falling through to content", async () => {

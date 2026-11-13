@@ -181,7 +181,9 @@ function _stattic_html_head_anchor(string $html, bool $final, int $limit = STATT
 
 /**
  * Whether the Space set `superpowers.disable_all_injection`, which the route's
- * SDK section carries as `injection: false`. Then the runtime adds no SDK
+ * SDK section carries as `injection: false`, or the served version's own
+ * `sf.jsonc` did, which its root's injection record carries as
+ * `platform: false`. Then the runtime adds no SDK
  * tag or custom snippets. A section without the field comes from a control
  * plane that projected one for
  * every Space and said nothing about the setting, so it keeps that engine's
@@ -189,6 +191,10 @@ function _stattic_html_head_anchor(string $html, bool $final, int $limit = STATT
  */
 function _stattic_platform_injection_disabled(array $serving): bool
 {
+    // The served version's own `sf.jsonc` opt-out, recorded on its root.
+    if (($serving['inject']['platform'] ?? null) === false) {
+        return true;
+    }
     $sdk = $serving['sdk'] ?? null;
     return is_array($sdk) && ($sdk['injection'] ?? null) === false;
 }

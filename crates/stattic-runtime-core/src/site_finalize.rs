@@ -1136,6 +1136,11 @@ fn run_finalize_pipeline(
     if !undecorated_blobs.is_empty() {
         injections.insert("undecorated".into(), json!(undecorated_blobs));
     }
+    // The version's own opt-out, which the Space-wide SDK section cannot
+    // carry: every host shares that section.
+    if config.get("platform_injection").and_then(Value::as_bool) == Some(false) {
+        injections.insert("platform".into(), json!(false));
+    }
     let injections = Value::Object(injections);
     let published = timed(&mut telemetry.response_tables_ms, || {
         publish_response_tables(

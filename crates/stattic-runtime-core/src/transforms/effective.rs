@@ -536,6 +536,14 @@ pub fn build_runtime_payload(input: RuntimePayloadInput) -> Value {
     if input.options.get("platformMeta").and_then(Value::as_bool) == Some(true) {
         payload.insert("platform_meta".into(), Value::Bool(true));
     }
+    if input
+        .options
+        .get("platformInjection")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        payload.insert("platform_injection".into(), Value::Bool(false));
+    }
     if let Some(sdk) = input.options.get("spacefastSdk").and_then(Value::as_object) {
         let mut lowered = Map::new();
         if let Some(value) = trimmed(sdk.get("castApiBase")) {

@@ -351,6 +351,33 @@ test("runtime splices static inject placements and the one SDK tag into served H
   expect(await (await get(rt, HOST, "/bare")).text()).toContain(`<head>${engineTag}`);
   const shared = await (await get(rt, HOST, "/shared")).text();
   expect(shared).toBe(String(storedShared));
+
+  // A version whose own `sf.jsonc` opted out gets no runtime tag, while the
+  // Space's SDK section, which every version shares, still says on. The same
+  // page and inputs otherwise, so the record is the only difference.
+  const fileOff = async (versionId: string, optOut: { platform_injection?: false }) => {
+    await deploy(rt, {
+      spaceId: "spc_html_inject",
+      versionId,
+      files: { "bare.html": "<html><head><title>File off</title></head><div>Off</div></html>" },
+      serving: {
+        config: {
+          index: false,
+          listing: false,
+          viewer: false,
+          fallback: null,
+          inject: { bodyEnd: [baked] },
+          ...optOut,
+        },
+      },
+      activate: { route_name: "production", ...route(versionId) },
+    });
+    return await (await get(rt, HOST, "/bare")).text();
+  };
+  expect(await fileOff("ver_html_inject_file_on", {})).toContain(`<head>${engineTag}`);
+  expect(await fileOff("ver_html_inject_file_off", { platform_injection: false })).not.toContain(
+    "data-spacefast-sdk",
+  );
 });
 
 test("static images and mShots metadata serve without PHP temporary files", async () => {

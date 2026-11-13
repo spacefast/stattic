@@ -1,7 +1,7 @@
 {
-  "revision": "02a46a409123f18f7e5b2c98e34c30e6e3f3bf63",
-  "sourceHash": "dd351df0f7cf9f39826a82e26a6c7c05e9cc994dfc49d952f8f83367e08c6ca6",
-  "manifestSha256": "c7524275797e2b61758126a7212c2571c3091c820ab01614d77c79a24cf0536a",
+  "revision": "a412c7dbf2f76b2615b00e806cd5924289748968",
+  "sourceHash": "57bf739468b7437ae6fec6929b526e6643a08c791acb872504f5045aa41ce5c3",
+  "manifestSha256": "3dba6210b9a238dcbf40868f9f5d3702ad6c785670d7e17483890cc0815ff8c3",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "970578c43c19f08a5c28969a4f515494aafe516b2f7e6b0245eceb8fb74c2483"
+      "sha256": "44d206ef3f47363472d3f4d7903f8bbac2cfd828c90ae4999c7b71fac010c8cc"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "d07869a4af811d659d305e2e16f0cc3cc1141c23fad63936a20018e35d84653a"
+      "sha256": "507e1200072d97ae8500db8ff83d82fd7714069fb19c189c2b6526ea5931d69b"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -233,7 +233,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "8492a141c5173a248dba0cf173c9a3ab996ff7a9b2520b1f85955206a7ca82ee"
+      "sha256": "b96e625e31612a378a0710c1b71e9dad8588245b13907cbd96f81983d053aa12"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -245,7 +245,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/transforms/effective.rs",
-      "sha256": "6993cef38394013f42c70a808a27aeb52affa1fa6e56d3c0e1fb34b09d215230"
+      "sha256": "c3760a972bdc04fc6528809682055d9842e65dfcf66355bf6eb283954f422dd6"
     },
     {
       "path": "crates/stattic-runtime-core/src/transforms/html.rs",
@@ -13917,7 +13917,7 @@
     },
     {
       "path": "runtime/engine/shared/html-insert.php",
-      "sha256": "8c3df4777c0690131325066a87ef4fdb1811487310d29f6419cdaa3dd708c112"
+      "sha256": "8553819b3e48edf020936c6413d956a5c8c00e857f58738febbe778073ea5aea"
     },
     {
       "path": "runtime/engine/shared/http.php",
@@ -14465,7 +14465,7 @@
     },
     {
       "path": "runtime/tests/html-inject.test.ts",
-      "sha256": "cd6c188c7faab0ca1481c522b0b543677a37067ab1fd9258c6bb1dfafd4a61c3"
+      "sha256": "d9e3a75ae0c7938714a60bf69a2b6a5464bcdada69812d82af77360670b82cfa"
     },
     {
       "path": "runtime/tests/installer-native.test.ts",

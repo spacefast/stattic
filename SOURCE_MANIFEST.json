@@ -1,7 +1,7 @@
 {
-  "revision": "556e67270627e5d8d9a91a1326f2158ce3cb5b99",
+  "revision": "d34fcc3b0feda0b21c4b112dcb762ea2b47e63d1",
   "sourceHash": "bae4296d3430eef0f91b6ed46ec5a1faa30d336488d4f1621bc32bb303b079d6",
-  "manifestSha256": "1dd9442a3b75bc5fc61d127580f8faed7908ead362f13adbd78791f3ea019878",
+  "manifestSha256": "706864b705d453c81775091df33c223bde15cc54967c23b66df9e28455f941fe",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "b8b383debdfae1b55d0fca06bf11fd9925e896278d6e7b16348156986a5c8179"
+      "sha256": "c2725a580c59056fa8e4ece7a6df477d39d87477e187cdce06c85ced10912c05"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "7927df9b6cd7ea184494c3d519112c2278aa0331d4b413d154d7ec67641aa408"
+      "sha256": "9c32a24f7270a1ec6381f0b5a592d0cdcdde530e459474a211f4b07acbe5d836"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -14689,7 +14689,7 @@
     },
     {
       "path": "runtime/tests/zero-v2-source.test.ts",
-      "sha256": "a42efa932e9ccb2926f6d9024e539836937742cc204831b4d63aeb6ec3bd17e9"
+      "sha256": "124faf85e4a3b5bd1f77f0985cdef2b2a3ac6c50c26bd675717ad9a481af8b7b"
     },
     {
       "path": "runtime/tests/zero-v2-worker.test.ts",
@@ -14697,7 +14697,7 @@
     },
     {
       "path": "runtime/tests/zero-wordpress.ts",
-      "sha256": "d9aa4cdbec7edfa0b29b81223e76ded8469ba83b1c357af9dca4c618b2759ef3"
+      "sha256": "19436578b738ced9344a5d610b45c6705d185f9645f3f120d9c653ca61503048"
     },
     {
       "path": "runtime/wordpress/managed-theme/style.css",

@@ -26,11 +26,40 @@ export async function installWordpress(
       throw new Error(`${cmd[0]} failed:\n${result.stdout}\n${result.stderr}`);
     return result.stdout.toString();
   }
+  // downloads.wordpress.org answers the odd request with a 502 or drops a body
+  // mid-transfer, so network failures and 5xx responses are retried. All
+  // downloads share one 60s deadline, started at the first download so image
+  // pulls do not spend it; the pinned digest below still checks whatever
+  // arrives, so a retry cannot hide a bad archive.
+  let downloadDeadline: number | undefined;
   async function download(url: string, target: string) {
     if (existsSync(target)) return;
-    const response = await fetch(url);
-    assert.equal(response.status, 200);
-    writeFileSync(target, new Uint8Array(await response.arrayBuffer()));
+    const deadline = (downloadDeadline ??= Date.now() + 60_000);
+    let failure = "deadline passed before the first attempt";
+    for (let attempt = 1; deadline - Date.now() > 1_000; attempt += 1) {
+      const signal = AbortSignal.timeout(Math.min(20_000, deadline - Date.now()));
+      let response: Response | undefined;
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- attempts are sequential retries
+        response = await fetch(url, { signal });
+        if (response.status === 200) {
+          // oxlint-disable-next-line no-await-in-loop -- the body read is part of the attempt
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          writeFileSync(target, bytes);
+          return;
+        }
+        failure = `HTTP ${response.status}`;
+      } catch (cause) {
+        failure = String(cause);
+      }
+      // Release the connection of a refused or broken response before moving on.
+      // oxlint-disable-next-line no-await-in-loop -- cleanup belongs to this attempt
+      await response?.body?.cancel().catch(() => {});
+      if (response && response.status < 500 && response.status !== 200) break;
+      // oxlint-disable-next-line no-await-in-loop -- backoff between sequential retries
+      await Bun.sleep(Math.min(attempt * 2_000, Math.max(0, deadline - Date.now())));
+    }
+    throw new Error(`${url}: ${failure}`);
   }
 
   const wordpressImage =

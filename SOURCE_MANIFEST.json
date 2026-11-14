@@ -1,7 +1,7 @@
 {
-  "revision": "762b39b22b5c4d8004c859e258670dd20d22bd40",
+  "revision": "3b84e071fd138cc0b8dca3cf20864b3d1788c920",
   "sourceHash": "aed64bdf3d6634c634f67de51774a4ad5e731f2e7881af7565ce7761c5fad1d7",
-  "manifestSha256": "9ba97b04136bdddbb0d76cf1828474801f56c40a8dcfbf2c7b33461535ad76a5",
+  "manifestSha256": "75be6ec8cb9133644c8547dc53a4eaf96092b8bbf70034533c2f4f6769cecf19",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "449be34cfabfb38f35509fa1601c953290bff1ddfb7793a9f6c0addc5719354c"
+      "sha256": "92d33047b235136872fa6b7ffde43afb8e6e1c47753ab5337af6c4d933f04bb5"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "674d71aff4353758360bac98d1ca58098aef6e4a171bcd84ed24cebdad5793bf"
+      "sha256": "bc66563b12e6539768815985d66ecde639dfb40ceb77e3a61b2ad5fdc4f4711c"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -14565,7 +14565,7 @@
     },
     {
       "path": "runtime/tests/run.sh",
-      "sha256": "ec8c894a46a4bedad03fe8b3f538ed0f42e80c36996a73bc920180741b73f8a4"
+      "sha256": "ef1de1d3b46f734bff43f108f65141703fbc5348a19a3ada95a62403c3c9f0b6"
     },
     {
       "path": "runtime/tests/sell-client-drift.test.ts",
@@ -14677,7 +14677,7 @@
     },
     {
       "path": "runtime/tests/zero-v2-hosted.test.ts",
-      "sha256": "c726eec5223eeebe399730d0a8b08e95301f945ba98bb491b6ff0afb3d9102f9"
+      "sha256": "c6a2644ede41c97474edb65991521d2e95fff379bd653d343a1b7ca6b68f911c"
     },
     {
       "path": "runtime/tests/zero-v2-realtime.test.ts",
@@ -14690,6 +14690,10 @@
     {
       "path": "runtime/tests/zero-v2-worker.test.ts",
       "sha256": "0079d28d75e9b8bc497b1077a80b8fe65c6fb11b06e04bd60714062168abed8f"
+    },
+    {
+      "path": "runtime/tests/zero-v2-write-seed.test.ts",
+      "sha256": "5089f15ee118861188151e7fd7117e548d12d490f1494ce400eeee4fcb52afdf"
     },
     {
       "path": "runtime/tests/zero-wordpress.ts",

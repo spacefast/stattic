@@ -70,6 +70,12 @@ export async function startMysqlContainer(input: {
       `${envPrefix}_DATABASE=${input.database}`,
       "-p",
       `127.0.0.1:${port}:3306`,
+      // Both images declare `VOLUME /var/lib/mysql`. Without this mount every
+      // container leaves an anonymous volume behind, because `docker rm -f`
+      // keeps it. A tmpfs data dir never becomes a volume, so no teardown path,
+      // including a killed test process, can leak one.
+      "--mount",
+      "type=tmpfs,destination=/var/lib/mysql",
       image,
     ],
     stdout: "pipe",
